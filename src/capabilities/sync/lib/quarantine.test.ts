@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EMPTY_QUARANTINE, QUARANTINE_CAP, quarantineFor, release, setAside } from './quarantine'
+import { EMPTY_QUARANTINE, QUARANTINE_CAP, SYNC_QUARANTINE_SETTING, quarantineFor, release, setAside } from './quarantine'
 
 /**
  * WI-20.25 — the pull side's quarantine: the books whose marks answer would
@@ -28,6 +28,22 @@ describe('the marks quarantine', () => {
     // The newest survive; the oldest went.
     expect(held.books[0]).toBe(`book:${10_000 - QUARANTINE_CAP}`)
     expect(held.books.at(-1)).toBe('book:9999')
+  })
+
+  it('reads a persisted list with one entry per book, newest kept, and counts what the cap drops', () => {
+    /* Two audit findings on the parser, one case: a duplicated id on disk
+     * meant two re-fetches and a repaired count of two for one book; and a
+     * list past the cap was trimmed silently, against the file's own
+     * "dropped and counted" rule. */
+    const parse = SYNC_QUARANTINE_SETTING.parse
+    expect(parse({ peerId: 'p', books: ['a', 'b', 'a'], dropped: 0 })).toEqual({ peerId: 'p', books: ['b', 'a'], dropped: 0 })
+    const many = Array.from({ length: QUARANTINE_CAP + 3 }, (_, i) => `book:${i}`)
+    const held = parse({ peerId: 'p', books: many, dropped: 2 })
+    expect(held?.books.length).toBe(QUARANTINE_CAP)
+    expect(held?.books[0]).toBe('book:3')
+    expect(held?.dropped).toBe(5)
+    // A count past the safe range is refused, not carried into arithmetic.
+    expect(parse({ peerId: 'p', books: [], dropped: Number.MAX_SAFE_INTEGER + 2 })).toBeUndefined()
   })
 
   it('belongs to one shelf: a list held for another peer is not this peer’s list', () => {

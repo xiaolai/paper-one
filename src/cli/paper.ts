@@ -17,9 +17,12 @@ import { EXIT, runCommand, type CliSinks, type OpenCaller } from './run'
  * second thing to install, supervise and debug for no gain.
  *
  * `--shelf <key>` is the other caller (WI-11.6): the identical command table
- * over the envelope. It is resolved HERE, before the command is parsed,
- * because it decides which caller to build rather than what to call — which
- * is why `args.ts` refuses it if one appears after the verb.
+ * over the envelope. It is resolved HERE — `runCommand` parses first and then
+ * asks `open` for a caller, and this is where the parsed `shelf` decides
+ * WHICH caller to build rather than what to call. (This note used to say
+ * "before the command is parsed", which was the intent, not the order.)
+ * `args.ts` refuses a `--shelf` that appears after the verb for the same
+ * reason: it is a global, not a service argument.
  *
  * Everything a command does lives in `run.ts`, which is pure but for the
  * caller and the two sinks. This file exists to build those three and to own
@@ -146,7 +149,12 @@ export async function paper({ argv, sinks, dataDir, remote, lockWaitMs }: PaperO
       try {
         journal = await openLocalJournal({ services: host.services })
       } catch (error) {
-        await host.close()
+        /* THE FIRST FAILURE IS THE ONE REPORTED. A `close()` that also
+         * failed used to REPLACE it — the reader saw "could not close the
+         * host" over the reason the journal would not open. */
+        await host.close().catch((also: unknown) => {
+          sinks.err(`paper: closing the host after that also failed — ${also instanceof Error ? also.message : String(also)}`)
+        })
         throw error
       }
     }
@@ -156,8 +164,14 @@ export async function paper({ argv, sinks, dataDir, remote, lockWaitMs }: PaperO
        * the dirty flag, and the flag must come down before the process can
        * exit, or the next app start reads a crash that did not happen. */
       close: async () => {
-        await journal?.close()
-        await host.close()
+        /* THE HOST CLOSES WHATEVER THE JOURNAL DID: a journal that would not
+         * close used to skip the host's own drain, leaving the write queue
+         * and the store unflushed on the way out. */
+        try {
+          await journal?.close()
+        } finally {
+          await host.close()
+        }
       },
     })
   }
@@ -188,7 +202,14 @@ export async function paper({ argv, sinks, dataDir, remote, lockWaitMs }: PaperO
   } finally {
     /* After the caller, which `runCommand` closes — draining the write queue
      * is the last write, and the lock must outlive the last byte rather than
-     * the last call. */
-    await (lock as DataLock | null)?.release()
+     * the last call. A release that FAILS is said and does not become the
+     * exit: `paper()` promises an exit code, and a rejection out of a
+     * `finally` replaced the code the command had earned with a stack. The
+     * lock file is named so a human can remove what this could not. */
+    try {
+      await (lock as DataLock | null)?.release()
+    } catch (error) {
+      sinks.err(`paper: could not release the library lock — ${plain(error instanceof Error ? error.message : String(error))}`)
+    }
   }
 }

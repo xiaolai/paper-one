@@ -433,3 +433,82 @@ describe('hiding a live code', () => {
     })
   })
 })
+
+describe('audit-fix round 1 — the pane and its in-flight requests', () => {
+  afterEach(cleanup)
+
+  it('disables Show code while the shelf is minting one, and never shows a superseded code', async () => {
+    let resolveFirst!: (offer: { code: string; expiresInMs: number }) => void
+    let calls = 0
+    const wire = fakeWire({
+      beginCode: () =>
+        new Promise((resolve) => {
+          calls += 1
+          if (calls === 1) resolveFirst = resolve
+          else resolve({ code: '222222', expiresInMs: 90_000 })
+        }),
+    })
+    render(<BrowsersPane wire={wire} />)
+    const button = await screen.findByRole('button', { name: 'Show code' })
+    fireEvent.click(button)
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+    expect(calls).toBe(1)
+    await act(async () => {
+      resolveFirst({ code: '111111', expiresInMs: 90_000 })
+    })
+    expect(await screen.findByText('111111')).toBeTruthy()
+  })
+
+  it('takes back a code that arrives after the pane is gone', async () => {
+    let issue!: (offer: { code: string; expiresInMs: number }) => void
+    const cancelled = vi.fn(async () => {})
+    const wire = fakeWire({
+      beginCode: () =>
+        new Promise((resolve) => {
+          issue = resolve
+        }),
+      cancelCode: cancelled,
+    })
+    const { unmount } = render(<BrowsersPane wire={wire} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Show code' }))
+    unmount()
+    const before = cancelled.mock.calls.length
+    await act(async () => {
+      issue({ code: '333333', expiresInMs: 90_000 })
+    })
+    /* The unmount cancellation fired at once; the late code is taken back
+       again — otherwise six live digits sit on the shelf with nothing
+       watching them. */
+    expect(cancelled.mock.calls.length).toBe(before + 1)
+  })
+
+  it('disables a row’s Revoke while its revocation is in flight', async () => {
+    let finish!: () => void
+    const wire = fakeWire(
+      {
+        revoke: () =>
+          new Promise<void>((resolve) => {
+            finish = resolve
+          }),
+      },
+      { browsers: [{ id: 1, connected: true, label: 'Safari on iPhone', createdMs: 1, lastSeenMs: 1, expiresAtMs: 2 } as Browser] },
+    )
+    render(<BrowsersPane wire={wire} />)
+    const button = await screen.findByRole('button', { name: 'Revoke' })
+    fireEvent.click(button)
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => {
+      finish()
+    })
+  })
+
+  it('retires the code on screen when every browser is signed out', async () => {
+    const wire = fakeWire({}, { browsers: [{ id: 1, connected: false, label: 'x', createdMs: 1, lastSeenMs: 1, expiresAtMs: 2 } as Browser] })
+    render(<BrowsersPane wire={wire} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Show code' }))
+    expect(await screen.findByText('100001')).toBeTruthy()
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out all…' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out all' }))
+    await waitFor(() => expect(screen.queryByText('100001')).toBeNull())
+  })
+})

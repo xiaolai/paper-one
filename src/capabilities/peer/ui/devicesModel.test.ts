@@ -535,3 +535,94 @@ describe('where Paper has to be running', () => {
     }
   })
 })
+
+describe('audit-fix round 1 — the devices model', () => {
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+  it('turning write off never adds a family the peer did not hold', () => {
+    /* `sync:push` alone used to become `sync:pull` + `blob:read`; `blob:read`
+       alone gained `sync:pull`. Each grant is demoted on its own. */
+    expect(grantsForWrite(['sync:push'], false)).toEqual([])
+    expect(grantsForWrite(['blob:read'], false)).toEqual(['blob:read'])
+    expect(grantsForWrite(['sync:pull', 'sync:push'], false)).toEqual(['sync:pull'])
+    expect(grantsForWrite(['blob:*'], false)).toEqual(['blob:read'])
+  })
+
+  it('names a grant it does not know beside the phrase for the ones it does', () => {
+    expect(describeGrants(['sync:pull', 'shelf:admin'])).toBe('Books, highlights, reading position — receive only, plus shelf:admin')
+    expect(describeGrants(['sync:pull'])).toBe('Books, highlights, reading position — receive only')
+  })
+
+  it('refuses to pair while a role change is waiting for a restart', async () => {
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-restart' })
+    const model = createDevicesModel({ port: createPeerPort(wire) })
+    await model.refresh()
+    await model.setRole('satchel')
+    expect(model.getSnapshot().roleNeedsRestart).toBe(true)
+    await model.beginPairing('Mine')
+    expect(model.getSnapshot().offer).toBeNull()
+    expect(model.getSnapshot().error).toMatch(/Restart Paper/)
+    await model.pairWithCode('paper://pair/anything')
+    expect(model.getSnapshot().sas).toBeNull()
+    expect(model.getSnapshot().error).toMatch(/Restart Paper/)
+  })
+
+  it('refuses a role change while a pairing is in flight', async () => {
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-offer' })
+    const model = createDevicesModel({ port: createPeerPort(wire) })
+    await model.refresh()
+    await model.beginPairing('Mine')
+    expect(model.getSnapshot().offer).not.toBeNull()
+    await model.setRole('satchel')
+    expect(model.getSnapshot().roleNeedsRestart).toBe(false)
+    expect(model.getSnapshot().error).toMatch(/pairing in progress/)
+  })
+
+  it('does no IPC and publishes nothing after disposal', async () => {
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-dead' })
+    const port = createPeerPort(wire)
+    const status = vi.spyOn(port, 'status')
+    const model = createDevicesModel({ port })
+    model.dispose()
+    await model.refresh()
+    expect(status).not.toHaveBeenCalled()
+  })
+
+  it('serialises grant edits for one peer, so the last toggle is what stands', async () => {
+    const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-g' })
+    const satchelWire = fakeWire({ role: 'satchel', endpointId: 'satchel-g' })
+    linkWires(shelfWire, satchelWire)
+    /* THE FIRST WRITE IS THE SLOW ONE. Unserialised, both toggles read the
+       same old list, the fast second write lands, then the slow first write
+       lands LAST and carries the intent the reader had already reversed. */
+    const raw = createPeerPort(shelfWire)
+    let writes = 0
+    const port: typeof raw = {
+      ...raw,
+      setGrants: async (id, grants) => {
+        writes += 1
+        if (writes % 2 === 1) await new Promise<void>((resolve) => setTimeout(resolve, 15))
+        return raw.setGrants(id, grants)
+      },
+    }
+    const shelf = createDevicesModel({ port })
+    const satchel = createDevicesModel({ port: createPeerPort(satchelWire) })
+    await shelf.beginPairing('Shelf')
+    await satchel.pairWithCode(shelf.getSnapshot().offer!.url)
+    await tick()
+    await shelf.confirmPairing(true)
+    await tick()
+    await tick()
+    const paired = shelf.getSnapshot().peers[0]!
+    /* Two toggles, not awaited between: off then on. Unserialised, both read
+       the same old list and the earlier intent could land last. */
+    const off = shelf.setPeerCanWrite(paired.id, false)
+    const on = shelf.setPeerCanWrite(paired.id, true)
+    await Promise.all([off, on])
+    expect(peerCanWrite(shelf.getSnapshot().peers[0]!.grants)).toBe(true)
+    const off2 = shelf.setPeerCanWrite(paired.id, true)
+    const on2 = shelf.setPeerCanWrite(paired.id, false)
+    await Promise.all([off2, on2])
+    expect(peerCanWrite(shelf.getSnapshot().peers[0]!.grants)).toBe(false)
+  })
+})

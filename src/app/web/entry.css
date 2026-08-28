@@ -57,7 +57,6 @@
 }
 
 .gate button {
-  font-size: var(--text-ui);
   padding: var(--space-12) var(--space-24);
   min-height: var(--control-lg);
   border: 1px solid var(--line-3);
@@ -80,6 +79,12 @@
   border: 1px solid var(--amber-line);
   border-radius: var(--radius-chip);
   padding: var(--space-8) var(--space-12);
+  /* THE INSETS, when the note is the topmost thing on screen — it can be,
+     above the shelf, while the bar's own clearance sits below it. `max`,
+     as `.web-bar` does: no notch, no change. */
+  padding-top: max(var(--space-8), env(safe-area-inset-top));
+  padding-left: max(var(--space-12), env(safe-area-inset-left));
+  padding-right: max(var(--space-12), env(safe-area-inset-right));
   margin: 0;
   line-height: 1.45;
 }
@@ -145,19 +150,6 @@
   background: var(--surface);
 }
 
-.web-bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--space-8);
-  padding: var(--space-8) var(--space-16);
-  /* `max`, NOT the inset alone: on a phone with no notch the inset is 0 and the
-     button would touch the edge of the glass. */
-  padding-top: max(var(--space-8), env(safe-area-inset-top));
-  padding-left: max(var(--space-16), env(safe-area-inset-left));
-  padding-right: max(var(--space-16), env(safe-area-inset-right));
-}
 
 /* THE POSITIONED ANCESTOR the shelf anchors to. `min-height: 0` because a flex
    child's default `min-height: auto` refuses to shrink below its content, and
@@ -185,6 +177,10 @@
   -webkit-overflow-scrolling: touch;
   padding: 0 var(--space-20) var(--space-24);
   padding-top: max(var(--space-8), env(safe-area-inset-top));
+  /* THE SIDES TOO. The top inset was honoured and the sides were fixed, so a
+     landscape notch or a rounded corner sat over Cards and You. */
+  padding-left: max(var(--space-20), env(safe-area-inset-left));
+  padding-right: max(var(--space-20), env(safe-area-inset-right));
 }
 
 .web-screen-title {

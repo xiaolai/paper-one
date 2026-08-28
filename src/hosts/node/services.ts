@@ -59,7 +59,11 @@ export const DATA_DIR_ENV = 'PAPER_DATA_DIR'
 export function defaultDataDir(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform): string {
   const named = env[DATA_DIR_ENV]
   if (named !== undefined && named !== '') return named
-  const home = env['HOME'] ?? homedir()
+  /* AN EMPTY `HOME` IS NO HOME. `?? homedir()` let `HOME=` through as the
+   * empty string, and every path below then resolved against the CURRENT
+   * DIRECTORY — a library opened wherever the shell happened to be. Same
+   * rule the `APPDATA` and `XDG_DATA_HOME` branches already apply. */
+  const home = env['HOME'] !== undefined && env['HOME'] !== '' ? env['HOME'] : homedir()
   if (platform === 'darwin') return join(home, 'Library', 'Application Support', APP_IDENTIFIER)
   if (platform === 'win32') {
     const roaming = env['APPDATA']
@@ -138,8 +142,17 @@ export async function openNodeServices({ dataDir, diagnostics, persist = true }:
     fs,
     shelf,
     close: async () => {
-      await services.drain()
-      await storage.flush()
+      /* THE STORE IS FLUSHED WHATEVER THE DRAIN DID. `drain()` flushes it
+       * itself on the way through, so on the ordinary path this second call
+       * is an idempotent repeat — kept deliberately as the belt for a drain
+       * that rejected BEFORE reaching it (a stuck index write, a queue that
+       * would not go idle), which used to leave the store's writes behind
+       * on exit. */
+      try {
+        await services.drain()
+      } finally {
+        await storage.flush()
+      }
     },
   }
 }

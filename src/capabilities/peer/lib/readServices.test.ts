@@ -461,23 +461,26 @@ describe('what an audit of the published surface found', () => {
   })
 
   it('pages by BYTES as well as rows, so one long highlight cannot burst a frame', async () => {
-    /* A mark's `text` is the passage the reader selected and nothing bounds
-     * it. Twenty of these are far past the byte budget and nowhere near the
-     * row budget — a row-only pager would have put them in one frame. */
-    const long = 'x'.repeat(64 * 1024)
+    /* A mark's `text` is bounded at `MAX_MARK_TEXT` (8 000) — at the table
+     * on the way in and, since round 1 of the audit, at the storage door on
+     * the way out, so a planted 64 KiB row is cut to the bound before it can
+     * be paged. At the bound, 120 marks are ~960 KB: well past `PAGE_BYTES`
+     * (512 KiB) and well under `PAGE_ROWS` (200) — a row-only pager would
+     * have put them in one frame. */
+    const long = 'x'.repeat(8_000)
     const shelf = serveTable({
       books: [seedBook('one')],
       files: {
         'books/one/marks.json': JSON.stringify(
-          Array.from({ length: 20 }, (_one, index) => markRow(`m${index}`, 'one', { text: long })),
+          Array.from({ length: 120 }, (_one, index) => markRow(`m${index}`, 'one', { text: long })),
         ),
       },
     })
     const seen: number[] = []
     for await (const page of shelf.client.stream('mark.list', { book: 'one' })) seen.push((page as unknown[]).length)
     expect(seen.length).toBeGreaterThan(1)
-    expect(Math.max(...seen)).toBeLessThan(20)
-    expect(seen.reduce((total, one) => total + one, 0)).toBe(20)
+    expect(Math.max(...seen)).toBeLessThan(120)
+    expect(seen.reduce((total, one) => total + one, 0)).toBe(120)
   })
 
   it('gives book.get the registers a shelf listing does not carry', async () => {

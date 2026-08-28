@@ -129,6 +129,12 @@ describe('positional and flag arguments', () => {
 })
 
 describe('what it refuses', () => {
+  it('refuses a list flag with nothing but separators in it, beside the usage', () => {
+    /* `--book ,` became `book: []`, which passed the required-field check
+     * and reached the handler — refused later, in the service's words. */
+    expect(error(['tag', 'add', 'sea', '--book', ','])).toContain('--book needs at least one value')
+  })
+
   it('refuses an unknown noun and names the closest', () => {
     expect(error(['bok', 'list'])).toContain('did you mean "book"')
   })

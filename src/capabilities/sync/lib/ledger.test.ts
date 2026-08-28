@@ -81,11 +81,22 @@ async function makeStack(
 ): Promise<Stack> {
   const storage = flatStorage()
   const clock = createClock({ deviceId, now: nextWall })
-  const journalQueue = writeQueue()
   /* Services FIRST: the journal's cards baseline reads the kernel's card
    * store (WI-10.4), so the store must exist before the journal opens. */
   const services = createKernelServices({ fs, storage, initialBooks: booksOn(fs) })
-  const journal = createJournal({ fs, queue: journalQueue, clock: () => clock.now(), cards: () => services.cards.stored() })
+  /* THE KERNEL'S OWN QUEUE AND LANES, as both compositions wire it — the
+   * world used to give the journal a private queue with the default raw
+   * lane, and the fence ordering under test here (`JournalOptions.lane`'s
+   * note) degraded to inline arming: the one seam the interleaving tests
+   * exist for was the one seam the world wired differently. */
+  const journalQueue = services.writes
+  const journal = createJournal({
+    fs,
+    queue: journalQueue,
+    lane: (book, what) => (what === 'cards' ? '' : services.library.lane(book)),
+    clock: () => clock.now(),
+    cards: () => services.cards.stored(),
+  })
   await journal.open()
   services.bindRecorder(journal)
   services.bindClock(() => clock.now())
@@ -655,6 +666,76 @@ describe('the star protocol over two real stacks (WI-C.2)', () => {
     expect(pushableOutbox(satchel.journal)).toEqual([])
   })
 
+  it('a local record edit interleaved with a remote record apply keeps the local edit pushable', async () => {
+    /* The cards case above passed from the day it was written — the cards
+     * lane IS the raw `''` — while the book case failed silently: the
+     * ledger's fence armed on the raw book id and the library writes on
+     * `books/<safeId>`, so the fence ordered nothing. The journal fixed the
+     * same defect once (`JournalOptions.lane`'s note) and the ledger's own
+     * fence had kept the pre-fix key; `applyRemote` now goes through
+     * `journal.markRemote`, which arms on the surface's real lane. */
+    const { shelf, satchel, session } = await makeWorld()
+    await shelf.services.library.add('book:fence', rec('Fence'))
+    await satchel.services.library.add('book:fence', rec('Fence'))
+    await session()
+
+    await shelf.services.library.tag('book:fence', 'FromShelf')
+
+    let openGate!: () => void
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    /* Held on the BOOK'S OWN LANE: the local edit below is queued behind the
+     * gate, unbegun, when the remote apply arms its fence — the exact window
+     * in which a raw-keyed fence arms on an empty lane and the local begin
+     * then consumes the remote expectation. */
+    void satchel.services.writes.append(satchel.services.library.lane('book:fence'), () => gate)
+
+    let localEdit: Promise<void> | null = null
+    const channel = await satchel.port.connect(shelf.wire.id)
+    const interleaved: SyncChannel = {
+      peerId: channel.peerId,
+      call: async (service, body) => {
+        const answer = await channel.call(service, body)
+        if (service === 'sync.pull' && localEdit === null) {
+          /* Enqueued between the shelf's answer and the satchel applying the
+           * row — the window in which the satchel's own edit and the remote
+           * apply are both in flight on one book's surface. NOT awaited: it
+           * interleaves on the queue. */
+          localEdit = satchel.services.library.tag('book:fence', 'FromSatchel')
+          setTimeout(openGate, 20)
+        }
+        return answer
+      },
+    }
+    await satchel.ledger.runSession(interleaved)
+    await localEdit
+    await channel.close()
+
+    // The remote apply journaled remote; the local edit stayed local and pushable.
+    /* ATTRIBUTION, EXACTLY — not mere presence. The raw-keyed fence armed
+     * before the gated local edit began, so the LOCAL tag consumed the remote
+     * expectation and journaled `remote` (unpushable) while the remote apply
+     * journaled `local` (an echo): both origins present, both swapped, and a
+     * containment assertion is blind to the swap. The gate makes the order
+     * deterministic: the local tag begins first. */
+    const afterAck = satchel.journal
+      .entries()
+      .filter((e) => e.kind === 'commit' && e.what === 'record' && e.book === 'book:fence')
+      .map((e) => e.origin)
+      .slice(1) // the setup add's own commit
+    // First-session pull, then this session's pair: the gated local tag
+    // begins first and is LOCAL; the remote apply follows and is REMOTE.
+    expect(afterAck).toEqual(['remote', 'local', 'remote'])
+    expect(pushableOutbox(satchel.journal).map((e) => `${e.book}/${e.what}`)).toContain('book:fence/record')
+
+    // And the next session carries the satchel's tag to the shelf.
+    await session()
+    const held = shelf.services.library.getSnapshot().find((one) => one.bookId === 'book:fence')
+    expect(held?.tags ?? []).toEqual(expect.arrayContaining(['FromShelf', 'FromSatchel']))
+    expect(pushableOutbox(satchel.journal)).toEqual([])
+  })
+
   it('a role mismatch is refused typed before any state moves', async () => {
     const { shelf, satchel } = await makeWorld()
     const rogue = createLedger({
@@ -1031,6 +1112,94 @@ describe('carried findings — removals, content facts, and covers', () => {
     await channel.close()
     expect(shelf.fs.store.get('books/book_c/cover.jpg')).toEqual(coverBytes)
   })
+
+  describe('audit-fix round 1 — what the mini audit found in the ledger', () => {
+    const pushHandlerOf = (stack: Stack) => stack.ledger.services().find((one) => one.name === 'sync.push')!
+    const pushTo = async (stack: Stack, group: Record<string, unknown>) => {
+      const push = pushHandlerOf(stack)
+      return push.handler(group as never, ({ peer: 'satchel-x' }) as unknown as Parameters<typeof push.handler>[1])
+    }
+
+    it('(#55) both devices hold bytes and the push carries no hash: refused unverifiable, never merged blind', async () => {
+      const { shelf } = await makeWorld()
+      await shelf.services.library.add('book:c', { ...rec('Content'), ext: 'epub', format: 'epub' })
+      await shelf.services.library.keepContent('book:c', 'content.epub', new Blob([new TextEncoder().encode('shelf bytes')]))
+      await shelf.services.library.refreshContent('book:c')
+      expect(shelf.services.library.getSnapshot().find((b) => b.bookId === 'book:c')?.hasContent).toBe(true)
+      const before = shelf.services.library.getSnapshot().find((b) => b.bookId === 'book:c')
+      /* The guard used to check identity only when the sender SENT a hash —
+       * so a claim of content with no hash, onto a shelf that has bytes,
+       * merged the record and acked it, and different files were treated as
+       * one. The contract in its own comment says this case is a retryable
+       * refusal; now it is. */
+      await expect(
+        pushTo(shelf, { book: 'book:c', revs: { record: 1 }, hasContent: true, record: toWire({ ...rec('Renamed'), ext: 'epub', format: 'epub' }) }),
+      ).rejects.toMatchObject({ code: 'unverifiable', retryable: true })
+      expect(shelf.services.library.getSnapshot().find((b) => b.bookId === 'book:c')?.title).toBe(before?.title)
+    })
+
+    it('(#56) a pulled row for a book this device removed does not re-add it, and the removal still pushes', async () => {
+      const { shelf, satchel, session } = await makeWorld()
+      await shelf.services.library.add('book:r', rec('Removed here'))
+      await session() // the satchel now holds book:r too
+      expect(satchel.services.library.getSnapshot().map((b) => b.bookId)).toContain('book:r')
+
+      /* The shelf edits the book — so its next page carries a row for it —
+       * and the satchel removes it locally BETWEEN the session's push phase
+       * (its outbox was empty then) and the pull's apply. The pull door used
+       * to hand the row straight to `library.add`, which treats a bare add on
+       * a removed book as a deliberate re-open: the removal was undone and a
+       * restore of intent was journaled, to be pushed back as a resurrection. */
+      await shelf.services.library.tag('book:r', 'Edited')
+      let removed = false
+      const channel = await satchel.port.connect(shelf.wire.id)
+      const interleaved: SyncChannel = {
+        peerId: channel.peerId,
+        call: async (service, body) => {
+          const answer = await channel.call(service, body)
+          if (service === 'sync.pull' && !removed) {
+            removed = true
+            await satchel.services.library.remove('book:r')
+          }
+          return answer
+        },
+      }
+      await satchel.ledger.runSession(interleaved)
+      await channel.close()
+
+      expect(satchel.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:r')
+      expect((await readPresence(satchel.fs))['book:r']?.state).toBe('removed')
+      // The outbox carries the removal and nothing that would resurrect it.
+      expect(pushableOutbox(satchel.journal).map((e) => `${e.book}/${e.what}`)).toEqual(['book:r/removed'])
+
+      // And the next session carries the removal to the shelf.
+      await session()
+      expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:r')
+      expect((await readPresence(shelf.fs))['book:r']?.state).toBe('removed')
+    })
+
+    it('(#328) a record revision whose file cannot be read is not offered — it stays in the outbox, unacked', async () => {
+      const { satchel, session } = await makeWorld()
+      await satchel.services.library.add('book:u', rec('Unreadable later'))
+      await session()
+      await satchel.services.library.tag('book:u', 'Edited') // a record rev in the outbox
+      expect(pushableOutbox(satchel.journal).map((e) => `${e.book}/${e.what}`)).toEqual(['book:u/record'])
+      /* The file goes away UNDER the outbox — a crash mid-rename, a folder
+       * moved by hand. `buildGroup` used to advertise the rev with no record
+       * behind it; the shelf acked what was advertised; the ack cleared the
+       * rev, and the edit was marked pushed with nothing ever sent. */
+      satchel.fs.store.delete('books/book_u/book.json')
+
+      const summary = await session()
+      expect(summary.pushed).toBe(0)
+      /* NOT OFFERED — not merely refused. The shelf's parser now refuses a
+       * rev with nothing behind it too (#59), which would keep the rev just
+       * as well; but a refusal is a diagnostic and a status line about a
+       * group the satchel should never have built. */
+      expect(summary.refused).toEqual([])
+      expect(pushableOutbox(satchel.journal).map((e) => `${e.book}/${e.what}`)).toEqual(['book:u/record'])
+    })
+  })
 })
 
 /**
@@ -1155,10 +1324,17 @@ describe('one refusal does not wedge a satchel (WI-20.25)', () => {
     const second = await tamperedSession(world, tamper, () => void (marksCalls += 1))
     expect(marksCalls).toBe(64)
     expect(second.pulledRows).toBe(0)
-    expect(second.quarantine).toEqual({ held: 64, dropped: 6, repaired: 0 })
+    /* WHAT THIS SESSION DROPPED, not the list's lifetime count: reporting
+     * the total made every session after one overflow read as a fresh
+     * degradation, forever (audit-fix #342). The six are still on record. */
+    expect(second.quarantine).toEqual({ held: 64, dropped: 0, repaired: 0 })
+    expect(satchel.services.settings.get(SYNC_QUARANTINE_SETTING).dropped).toBe(6)
     // And the reader is told, with the overflow.
+    const firstLine = describeSession(first, { shelf: 'Study iMac', title: () => null })
+    expect(firstLine).toMatch(/64 books/)
+    expect(firstLine).toMatch(/6 more/)
     const line = describeSession(second, { shelf: 'Study iMac', title: () => null })
     expect(line).toMatch(/64 books/)
-    expect(line).toMatch(/6 more/)
+    expect(line).not.toMatch(/more/)
   })
 })

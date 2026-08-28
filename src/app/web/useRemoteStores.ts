@@ -6,7 +6,7 @@ import type { ShelfLink } from './reconnect'
 import type { Card } from '../../kernel'
 
 /**
- * THE SHELF'S NOTES AND CARDS, for as long as one channel is open.
+ * THE SHELF'S NOTES AND CARDS, for as long as the LINK is open.
  *
  * ## Why this is its own module
  *
@@ -16,7 +16,14 @@ import type { Card } from '../../kernel'
  * subscription the deck reads through. Nothing here knows there are tabs, and
  * nothing about the tabs needs to know when a store is rebuilt.
  *
- * ## One store per channel, and why not per render
+ * ## One store per link, and why not per render
+ *
+ * The argument is the reconnecting `ShelfLink` (WI-20.30), which outlives
+ * every channel it opens — so the stores are built ONCE and told to re-read
+ * when a channel is back (below), not rebuilt per channel. This header used to
+ * say "per channel" and "null between channels" from the phase-18 design,
+ * where the argument was a single channel; a plain `ShelfChannel` still works
+ * here and simply never hears a reopen.
  *
  * `createRemoteMarks` reads EVERY mark on the shelf when it is built —
  * `mark.list` with no book, which is the fact that makes the cross-book notes
@@ -40,7 +47,7 @@ export interface RemoteStores {
   readonly cardRows: readonly Card[]
 }
 
-export function useRemoteStores(channel: ShelfChannel): RemoteStores {
+export function useRemoteStores(channel: ShelfChannel & Partial<Pick<ShelfLink, 'onOpened'>>): RemoteStores {
   const [marks, setMarks] = useState<MarksStore | null>(null)
   useEffect(() => {
     const store = createRemoteMarks(channel)
@@ -67,9 +74,12 @@ export function useRemoteStores(channel: ShelfChannel): RemoteStores {
      were at the drop, for the rest of the session. A bare channel has no
      `onOpened`; then there is nothing to hear. */
   useEffect(() => {
-    const link = channel as ShelfChannel & Partial<Pick<ShelfLink, 'onOpened'>>
-    if (link.onOpened === undefined) return
-    return link.onOpened(() => {
+    /* DECLARED, NOT CAST: the optional `onOpened` is part of the parameter's
+       type — the same shape `remotePositions` takes — so a caller passing a
+       link is checked, and a bare channel is honestly the case with nothing
+       to hear. The cast this replaced invented the capability at the call. */
+    if (typeof channel.onOpened !== 'function') return
+    return channel.onOpened(() => {
       marks?.refresh()
       cards?.refresh()
     })

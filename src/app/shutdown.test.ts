@@ -285,3 +285,31 @@ describe('arming in the background', () => {
   })
 })
 
+
+describe('a failing step does not take the rest with it', () => {
+  /**
+   * ONE SHARED `try` USED TO COVER ALL FOUR STEPS, so a flush that threw
+   * skipped drain, abort AND quiesce: the journal stayed open and the quit
+   * was released anyway — the flag-up exit this file exists to prevent,
+   * caused by a failure in the one step that has nothing to do with the
+   * journal. Each step now runs regardless, and the failure is still said.
+   */
+  it('closes the journal even when the flush throws, and names the step that failed', async () => {
+    const warned: string[] = []
+    const world = shell({
+      flush: () => {
+        throw new Error('a note refused to leave its editor')
+      },
+      diagnostics: {
+        warn: (_event: string, fields: { message?: string }) => void warned.push(fields.message ?? ''),
+        info: () => {},
+        error: () => {},
+      } as unknown as ShutdownDeps['diagnostics'],
+    })
+    await armShutdown(world.deps)
+    await world.quit()
+    expect(world.order).toEqual(['drain', 'abort', 'quiesce'])
+    expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
+    expect(warned).toEqual(['flush: a note refused to leave its editor'])
+  })
+})

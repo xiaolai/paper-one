@@ -184,8 +184,16 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
   }, [remote, bookId])
 
   /* WHAT IS PENDING GOES WHEN THE BOOK CLOSES — the desktop flushes its tick
-     on close for the same reason. */
-  useEffect(() => () => void remote?.flush(), [remote])
+     on close for the same reason. Caught, because this is a cleanup: a final
+     write that fails must be SAID somewhere, and an unhandled rejection on
+     unmount is said nowhere. */
+  useEffect(
+    () => () =>
+      void remote?.flush().catch((error: unknown) => {
+        console.error('paper: the final position write did not land', error)
+      }),
+    [remote],
+  )
 
   /* OPENING A BOOK IS READING IT, and the eviction order has to hear about it.
    *
@@ -322,7 +330,14 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
   /* THIS BOOK'S HIGHLIGHTS, drawn when the store has them. The store holds
    * every book's marks; the page wants this one's, as anchors. */
   useEffect(() => {
-    if (marks === null) return
+    if (marks === null) {
+      /* A STORE THAT WENT AWAY TAKES ITS HIGHLIGHTS WITH IT. Between
+       * channels the stores are null; leaving `drawn` standing painted the
+       * OLD store's anchors over a session the new store has not answered
+       * yet. */
+      setDrawn([])
+      return
+    }
     const mine = () =>
       /* `marks.all` is annotations only — bookmarks are split off at the
        * store's door — so every one here can be drawn. The anchor carries
@@ -363,6 +378,14 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
   const [stage, setStage] = useState(() => Math.min(window.innerWidth, 1200))
   /** The reading area, which is wider than the book — see `watchTaps`. */
   const stageEl = useRef<HTMLDivElement | null>(null)
+  /* ONE REF CALLBACK, not a new one per render: React detaches and
+   * reattaches a callback ref whose identity changed, calling it with `null`
+   * and then the node on EVERY commit — two `setStageBox` calls and an extra
+   * pass each time, for a stage that had not moved. */
+  const takeStage = useCallback((node: HTMLDivElement | null) => {
+    stageEl.current = node
+    setStageBox(node)
+  }, [])
 
   useEffect(() => {
     const onResize = () => setStage(Math.min(window.innerWidth, 1200))
@@ -537,6 +560,10 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
 
   const searchable = useMemo(
     () => ({
+      /* A CAST, CONFINED AND SAID: a ranged PDF's source is not a `File`,
+       * but `SearchPanel` provably reads `source` for PRESENCE only (its
+       * `searchable` gate) — the honest fix is widening `Book['source']` in
+       * the kernel's types, which is not this file's to change. */
       source: opening.kind === 'reading' ? (opening.source as File) : null,
       meta,
       error: problem,
@@ -606,7 +633,11 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
           aria-label="Tools"
           title="Tools"
           aria-expanded={tool !== null}
-          onClick={() => setTool((was) => (was === null ? 'contents' : null))}
+          /* CONTENTS ONLY WHEN THERE ARE CONTENTS. The tab itself is hidden
+             for a book with no TOC, so landing the sheet on `contents` there
+             opened a pane no tab names — a blank sheet during loading and
+             for TOC-less books. Search is the tab every book has. */
+          onClick={() => setTool((was) => (was === null ? (toc.length > 0 ? 'contents' : 'search') : null))}
         >
           <List size={ICON.control} strokeWidth={ICON.stroke} />
         </button>
@@ -628,17 +659,21 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
 
       <ProgressFooter fraction={fraction} visible={chrome && selection === null} />
 
-      {selection !== null && marks !== null && (
+      {/* THE BAR NEEDS A SELECTION, NOT A MARKS STORE. Gated on both, a
+          reconnect gap (stores are null between channels) took COPY away —
+          the one selection verb this read-only client actually owns. The
+          write verbs still require the store they write to. */}
+      {selection !== null && (
         <SelectionBar
           text={selection.text}
           tint={tint}
           onTint={setTint}
-          onHighlight={canWrite ? () => highlight('') : undefined}
+          onHighlight={canWrite && marks !== null ? () => highlight('') : undefined}
           /* A NOTE is a highlight with words. There is no note editor on this
              surface yet; the mark is made and the note is written in Notes,
              which is where the desktop writes them too. */
           onNote={
-            canWrite
+            canWrite && marks !== null
               ? () => {
                   highlight('')
                   setTool('notes')
@@ -728,13 +763,7 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
         </BottomSheet>
       )}
 
-      <div
-        className={styles.stage}
-        ref={(node) => {
-          stageEl.current = node
-          setStageBox(node)
-        }}
-      >
+      <div className={styles.stage} ref={takeStage}>
         <FoliateView
           /* NOT UNTIL THE PLACE IS DECIDED — see `start`. */
           file={opening.kind === 'reading' && start.decided ? opening.source : null}

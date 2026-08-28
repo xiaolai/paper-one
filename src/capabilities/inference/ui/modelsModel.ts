@@ -1,8 +1,8 @@
+import { messageOf } from '../lib/messageOf'
 import type { SettingsStore } from '../../../kernel'
 import { createGenerations } from '../../../kernel'
 import type { Controller, InferenceSnapshot, ReportFailure, RuntimeState } from '../lib/controller'
 import type { InferencePlugin } from '../lib/plugin'
-import { KEEP_LOADED_SETTING } from '../lib/settings'
 import { createVoiceTester, type AudioSink, type VoiceTest } from './voiceTest'
 
 export { TEST_VOICE_LINE, type VoiceTest } from './voiceTest'
@@ -27,7 +27,6 @@ export { TEST_VOICE_LINE, type VoiceTest } from './voiceTest'
  */
 
 export interface ModelsSnapshot extends InferenceSnapshot {
-  readonly keepLoaded: boolean
   readonly modelsDir: string | null
   readonly residentBytes: number | null
   readonly voiceTest: VoiceTest
@@ -42,7 +41,6 @@ export interface ModelsModel {
   install(model: string): Promise<boolean>
   cancelInstall(): void
   uninstall(model: string): Promise<boolean>
-  setKeepLoaded(value: boolean): void
   /**
    * Play a short line through an installed voice (WI-15.9).
    *
@@ -221,7 +219,6 @@ export interface ModelsModelOptions {
   readonly audio?: AudioSink
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 export function createModelsModel({ controller, plugin, settings, report, audio }: ModelsModelOptions): ModelsModel {
   const listeners = new Set<() => void>()
@@ -277,7 +274,6 @@ export function createModelsModel({ controller, plugin, settings, report, audio 
         const base = controller.getSnapshot()
         cached = {
           ...base,
-          keepLoaded: settings.get(KEEP_LOADED_SETTING),
           modelsDir,
           residentBytes,
           voiceTest: voice.state(),
@@ -318,7 +314,6 @@ export function createModelsModel({ controller, plugin, settings, report, audio 
       voice.stopIf(model)
       return controller.uninstall(model)
     },
-    setKeepLoaded: (value) => settings.set(KEEP_LOADED_SETTING, value),
 
     testVoice: async () => {
       const model = controller.getSnapshot().models.find((row) => row.modality === 'speech' && row.installed)

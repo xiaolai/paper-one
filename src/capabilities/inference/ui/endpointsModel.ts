@@ -1,3 +1,4 @@
+import { messageOf } from '../lib/messageOf'
 import { createGenerations } from '../../../kernel'
 import type { ReportFailure } from '../lib/controller'
 import type { Endpoint, InferencePlugin, KeyState } from '../lib/plugin'
@@ -103,7 +104,10 @@ export function validId(id: string): boolean {
 
 export function validBaseUrl(url: string): boolean {
   const scheme = 'https://'
-  if (!url.startsWith(scheme) || url.length > MAX_BASE_URL) return false
+  /* BYTES, NOT CODE UNITS: the crate bounds `url.len()`, which is UTF-8 bytes,
+     and `url.length` is UTF-16 units — a Unicode-heavy address passed here
+     and was refused there. */
+  if (!url.startsWith(scheme) || new TextEncoder().encode(url).length > MAX_BASE_URL) return false
   /* No whitespace or control characters anywhere: they cannot appear in a URL
      unescaped, and a header built from one would be split by them. */
   if (/[\s\p{Cc}]/u.test(url)) return false
@@ -114,7 +118,20 @@ export function validBaseUrl(url: string): boolean {
   const authority = rest.split(/[/?]/)[0] ?? ''
   /* There has to BE a host: an empty authority is `https://` wearing a URL's
      clothes, and it reaches the daemon as a registration that cannot resolve. */
-  return authority.length > 0 && /^[A-Za-z0-9.:-]+$/.test(authority) && /[A-Za-z0-9]/.test(authority)
+  if (!(authority.length > 0 && /^[A-Za-z0-9.:-]+$/.test(authority) && /[A-Za-z0-9]/.test(authority))) return false
+  /* AND IT HAS TO BE A HOST. The character class let `a:99999`, `a..b` and
+     `-host` through with the message promising a valid address; the platform
+     parser knows what a host and a port are, and refuses those. */
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  if (parsed.hostname === '' || parsed.username !== '' || parsed.password !== '') return false
+  const labels = parsed.hostname.replace(/^\[|\]$/g, '').split('.')
+  if (!parsed.hostname.startsWith('[') && labels.some((label) => label === '' || label.startsWith('-') || label.endsWith('-'))) return false
+  return true
 }
 
 /** Why this draft cannot be saved, in the reader's words, or null. */
@@ -193,7 +210,6 @@ export interface EndpointsModelOptions {
 
 const EMPTY: EndpointsSnapshot = { rows: [], loading: true, busy: false, failure: null }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 export function createEndpointsModel({ plugin, report }: EndpointsModelOptions): EndpointsModel {
   const listeners = new Set<() => void>()

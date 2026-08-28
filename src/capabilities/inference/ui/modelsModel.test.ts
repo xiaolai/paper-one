@@ -3,7 +3,6 @@ import { createKernelServices, scopeSettings } from '../../../kernel'
 import type { Controller, InferenceSnapshot, RuntimeState } from '../lib/controller'
 import type { ModelRow, ResourceUsage } from '../lib/plugin'
 import type { AudioSink } from './voiceTest'
-import { KEEP_LOADED_SETTING } from '../lib/settings'
 import {
   createModelsModel,
   downloadLine,
@@ -218,6 +217,7 @@ describe('the models store', () => {
     runtime: { kind: 'ready', version: '1.0' },
     models: [],
     installing: null,
+    removing: null,
     failure: null,
     ...over,
   })
@@ -313,17 +313,12 @@ describe('the models store', () => {
   it('folds the settings and the plugin readings into the controller snapshot', async () => {
     const { controller } = fakeController({ models: [model({ id: 'a', installed: true })] })
     const { settings } = wiring()
-    /* SEEDED AWAY FROM THE DEFAULT, so a store that hardcoded the field could
-       not pass by coincidence. */
-    settings.set(KEEP_LOADED_SETTING, true)
-
     const models = createModelsModel({ controller, plugin: fakePlugin(), settings })
     await models.refresh()
     const snap = models.getSnapshot()
     expect(snap.models).toHaveLength(1)
     expect(snap.modelsDir).toBe('/models')
     expect(snap.residentBytes).toBe(42)
-    expect(snap.keepLoaded).toBe(true)
     expect(snap.voiceTest).toBe('idle')
     models.dispose()
   })
@@ -398,12 +393,12 @@ describe('the models store', () => {
   })
 
   it('keeps one snapshot object until something changes', async () => {
-    const { controller } = fakeController()
+    const { controller, notify } = fakeController()
     const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     await models.refresh()
     const before = models.getSnapshot()
     expect(models.getSnapshot()).toBe(before)
-    models.setKeepLoaded(true)
+    notify()
     const after = models.getSnapshot()
     expect(after).not.toBe(before)
     expect(models.getSnapshot()).toBe(after)
@@ -515,14 +510,6 @@ describe('the models store', () => {
     models.dispose()
   })
 
-  it('writes keepLoaded through its OWN namespace, which the guard allows', () => {
-    const { settings } = wiring()
-    const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings })
-    models.setKeepLoaded(true)
-    expect(settings.get(KEEP_LOADED_SETTING)).toBe(true)
-    models.dispose()
-  })
 
   /* THE REGRESSION, NAMED. `getSnapshot` is what `useSyncExternalStore` calls
      on mount, and it reads settings through the scoped handle. Reading

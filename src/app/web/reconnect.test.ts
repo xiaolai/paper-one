@@ -246,3 +246,86 @@ describe('openLink', () => {
     link.close()
   })
 })
+
+describe('what the audit-fix round found', () => {
+  it('never waits past the cap, jitter included', () => {
+    /* The clamp used to run BEFORE the jitter, so the "longest wait" reached
+     * 37.5 s — a quarter past the constant's own promise. */
+    expect(retryDelay(20, () => 1)).toBe(MAX_DELAY_MS)
+    expect(retryDelay(20, () => 0)).toBe(MAX_DELAY_MS * 0.75)
+  })
+
+  it('does not announce a channel that died before the link could subscribe', async () => {
+    /* `channel.onClosed` answers SYNCHRONOUSLY for a socket that died between
+     * `connect` resolving and the subscription — its own contract. The link
+     * used to publish `open` on top of that answer: state said open, the
+     * channel was null, the stores were handed a dead channel, and a waiter
+     * resolved into a call that could only fail. */
+    const dead = fakeChannel('dead')
+    dead.drop('lost')
+    const live = fakeChannel('live')
+    let at = 0
+    const seen: string[] = []
+    const handed: string[] = []
+    const link = openLink({
+      connect: async () => (at++ === 0 ? dead : live),
+      random: () => 0.5,
+    })
+    link.subscribe(() => void seen.push(link.getSnapshot().kind))
+    link.onOpened((channel) => void handed.push((channel as unknown as { name: string }).name))
+    await flush()
+    expect(seen).not.toContain('open')
+    expect(handed).toEqual([])
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(link.getSnapshot().kind).toBe('open')
+    expect(handed).toEqual(['live'])
+  })
+
+  it('a listener that retries the moment the wait is announced does not double the attempts', async () => {
+    /* The wait used to be published BEFORE its timer existed, so a subscriber
+     * calling `retryNow()` synchronously could not cancel it: two attempts
+     * raced, and the timer's epoch bump cancelled the retry mid-connect. */
+    const script = connector([new Error('down'), 'back'])
+    const link = openLink({ connect: script.connect, random: () => 0.5, now: () => 0 })
+    link.subscribe(() => {
+      if (link.getSnapshot().kind === 'waiting') link.retryNow()
+    })
+    await flush()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(link.getSnapshot().kind).toBe('open')
+    expect(script.attempts()).toBe(2)
+  })
+
+  it('tells the subscribers it already had when it is closed', async () => {
+    /* `onClosed` answered a listener added AFTER the close; the ones present
+     * AT the close heard nothing — the underlying channel's callback is
+     * rightly ignored once the link has moved on, and the set was cleared. */
+    const link = openLink({ connect: connector(['a']).connect, random: () => 0.5 })
+    await flush()
+    const reasons: string[] = []
+    link.onClosed((reason) => void reasons.push(reason))
+    link.close()
+    expect(reasons).toEqual(['closed'])
+  })
+
+  it('a subscriber that throws does not end reconnection', async () => {
+    /* Listeners run inside the link's own state machine; unguarded, one throw
+     * unwound `schedule` before its timer armed and no attempt was ever timed
+     * again. */
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const script = connector(['a', 'b'])
+      const link = openLink({ connect: script.connect, random: () => 0.5 })
+      link.subscribe(() => {
+        throw new Error('a broken screen')
+      })
+      await flush()
+      script.opened[0]!.drop('lost')
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(link.getSnapshot().kind).toBe('open')
+      expect(script.attempts()).toBe(2)
+    } finally {
+      quiet.mockRestore()
+    }
+  })
+})

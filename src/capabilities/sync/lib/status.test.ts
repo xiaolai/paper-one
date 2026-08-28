@@ -162,3 +162,23 @@ describe('no string under peer/ or sync/ says Mac', () => {
     expect(offenders).toEqual([])
   })
 })
+
+describe('audit-fix round 1 — what the classifier got wrong', () => {
+  const names = { shelf: 'Study iMac', title: () => null }
+  it('an unknown code falls through to the disk-full tell instead of answering unknown first', () => {
+    expect(refusalKind({ code: 'ENOSPC', message: 'no space left on device' })).toBe('disk-full')
+  })
+  it('a refusal reason this build does not know is unknown — the peer was reached', () => {
+    expect(refusalKind({ kind: 'sessionRefused', message: 'some-new-reason' })).toBe('unknown')
+  })
+  it('the raw message never becomes the sentence', () => {
+    expect(describeRefusal({ kind: 'unknown', message: '/Users/x/Library/…/journal: EACCES' }, names)).toBe('Sync failed')
+  })
+  it('one dropped book is set aside in the singular', () => {
+    const line = describeSession({ refused: [], quarantine: { held: 1, dropped: 1, repaired: 0 } }, names)
+    expect(line).toMatch(/1 more was set aside unread/)
+  })
+  it('the tuple is the type: every kind in the list has a sentence, and the list is the whole type', () => {
+    for (const kind of REFUSAL_KINDS) expect(describeRefusal({ kind, message: '' }, names)).not.toBe('')
+  })
+})

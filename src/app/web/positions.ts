@@ -63,8 +63,12 @@ const KEEP = 500
 interface Stored {
   /** The CFI foliate reported. */
   readonly cfi: string
-  /** When it was written, for the eviction order. Not shown to anyone. */
+  /** When the POSITION was written — the stamp the shelf's is compared
+   *  against. Never moved by `touch`: see the note there. */
   readonly at: number
+  /** When the book was last OPENED, for the eviction order only. Absent in
+   *  rows written before the field existed; `at` stands in. */
+  readonly readAt?: number
 }
 
 export interface ReadingPositions {
@@ -137,7 +141,13 @@ function read(store: PositionStore): Record<string, Stored> {
        * it only orders eviction — but a missing or empty cfi would send a
        * reader to the start of the book while claiming to restore them. */
       if (typeof row['cfi'] !== 'string' || row['cfi'] === '') continue
-      out[bookId] = { cfi: row['cfi'], at: typeof row['at'] === 'number' ? row['at'] : 0 }
+      /* FINITE OR ZERO. `typeof` alone let a stored `1e400` through as
+       * `Infinity`, which beats every real stamp forever — in the eviction
+       * order AND in the shelf comparison. A timestamp that is not a real
+       * moment is treated like one that was never recorded. */
+      const stamp = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
+      const readAt = stamp(row['readAt'])
+      out[bookId] = { cfi: row['cfi'], at: stamp(row['at']), ...(readAt !== 0 ? { readAt } : {}) }
     }
     return out
   } catch {
@@ -162,10 +172,15 @@ export function readingPositions(
      * every write is O(n log n) on at most `KEEP` entries, which is nothing
      * beside the JSON round trip that follows it. */
     const entries = Object.entries(all)
+    /* EVICTION SORTS ON "LAST READ", which is `readAt` where one exists and
+     * the write stamp where none does — the two questions this store answers
+     * are kept in two fields, so recency can move without the position's own
+     * stamp moving with it. */
+    const recency = (one: Stored): number => one.readAt ?? one.at
     const kept =
       entries.length <= KEEP
         ? entries
-        : entries.sort(([, a], [, b]) => b.at - a.at).slice(0, KEEP)
+        : entries.sort(([, a], [, b]) => recency(b) - recency(a)).slice(0, KEEP)
     try {
       store.setItem(KEY, JSON.stringify(Object.fromEntries(kept)))
     } catch {
@@ -189,27 +204,28 @@ export function readingPositions(
        * nothing — so the previous one stands, which is the better answer. */
       if (cfi === null || cfi === '') return
       const all = read(store)
-      /* AN UNCHANGED CFI STILL REFRESHES `at`, and returning early did not.
-       *
-       * `at` is what eviction sorts on, so it has to mean "last read" and not
-       * "last MOVED". A reader who opens a favourite, reads a page, and comes
-       * back to the same place reports the same cfi — so the book they are
-       * actually reading kept the timestamp of the last time they turned a
-       * page in it, aged past the cap, and was evicted while open. The write is
-       * skipped only when neither field would change. */
-      if (all[bookId]?.cfi === cfi) return
-      write({ ...all, [bookId]: { cfi, at: now() } })
+      /* AN UNCHANGED CFI IS SKIPPED — recency is `touch`'s job now, in its
+       * own field. This comment used to claim the opposite ("still refreshes
+       * `at`") over a line that returned early: the refresh moved to `touch`
+       * and the prose did not move with it. */
+      const held = all[bookId]
+      if (held?.cfi === cfi) return
+      write({ ...all, [bookId]: { cfi, at: now(), readAt: now() } })
     },
 
     touch: (bookId) => {
-      /* RECENCY IS NOT THE SAME QUESTION AS POSITION, and `at` had to answer
-       * both. It orders eviction, so it has to mean "last read"; `set` only
-       * writes it when the cfi CHANGES, so it actually meant "last moved".
+      /* RECENCY IS NOT THE SAME QUESTION AS POSITION, and `at` must not
+       * answer both — it DID, and merely OPENING a book moved the stamp the
+       * shelf comparison trusts. The interleaving that made it a live
+       * defect: the desktop reads on to chapter 30 at 12:30; the phone is
+       * opened OFFLINE at 13:00 — no page turned — and `touch` stamped its
+       * old position 13:00; reopened online, "13:00 beats 12:30" made the
+       * STALE phone position the newer one, and the phone dragged the
+       * shelf's record back to where it was yesterday (WI-20.30's rule is
+       * newest WRITE wins, not newest glance).
        *
-       * A reader who opens a favourite, reads a page, and comes back to the
-       * same line reports the same cfi every time — so the book they had open
-       * kept the timestamp of the last page turn, aged past the cap, and was
-       * evicted while they were reading it.
+       * So recency lives in `readAt`, which only eviction reads. The
+       * position's own `at` moves when the position does.
        *
        * A separate verb rather than making `set` always write, deliberately.
        * `set` runs on every relocate the renderer raises, many of which report
@@ -219,7 +235,7 @@ export function readingPositions(
       const all = read(store)
       const held = all[bookId]
       if (held === undefined) return
-      write({ ...all, [bookId]: { cfi: held.cfi, at: now() } })
+      write({ ...all, [bookId]: { ...held, readAt: now() } })
     },
 
     forget: (bookId) => {

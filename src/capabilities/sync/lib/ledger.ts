@@ -156,6 +156,10 @@ export interface SyncSummary {
 interface SessionOutcome {
   readonly refused: SessionRefusal[]
   quarantine: Quarantine
+  /** `dropped` as the session found it, so the report says what THIS session
+   *  dropped: the list's count is lifetime, and reporting it whole made every
+   *  session after one overflow read as a degradation forever. */
+  readonly droppedBefore: number
   repaired: number
 }
 
@@ -385,8 +389,11 @@ export function createLedger({
     try {
       await fetchBlob(peer, folder, cover)
     } catch {
-      /* This session loses the jacket, not the content; the next push of
-       * the book offers it again. */
+      /* This session loses the jacket, not the content. NOTHING RE-ASKS:
+       * the group is acked and the cover is offered again only when the
+       * book's next push happens — an edit, a mark — which may be never. A
+       * persisted retry for a jacket is more machinery than a jacket is
+       * worth; the trade is recorded here rather than implied away. */
     }
   }
 
@@ -488,42 +495,35 @@ export function createLedger({
    * still-armed expectation.
    */
   const applyRemote = async (applies: readonly RemoteApply[]): Promise<void> => {
-    const armed: { book: string; what: JournalKeyRef['what']; ticket: number | null }[] = []
-    const fences: Promise<void>[] = []
-    const pending: Promise<unknown>[] = []
-    for (const apply of applies) {
-      for (const key of apply.keys) {
-        const slot = { book: key.book, what: key.what, ticket: null as number | null }
-        armed.push(slot)
-        fences.push(
-          services.writes.append(key.book, async () => {
-            slot.ticket = journal.expectRemote(key.book, key.what)
-          }),
-        )
+    /* THROUGH `journal.markRemote`, WHICH ARMS ON THE SURFACE'S OWN LANE.
+     * This helper used to carry its own fence — `services.writes.append(
+     * key.book, …)` — and the raw book id is a lane NOTHING ELSE USES: the
+     * kernel's writers queue on `library.lane(book)` (`books/<safeId>`,
+     * rename-following), so the fence armed on an empty lane while the local
+     * edit it was meant to order sat queued on another. The local begin then
+     * consumed the remote expectation — journaled `remote`, dropped from the
+     * outbox, never pushed — and the remote apply journaled `local`, an
+     * echo. The journal fixed this exact defect once (`JournalOptions.lane`'s
+     * note); this duplicate had kept the pre-fix key. The cards surface never
+     * showed it because its lane IS the raw `''`. */
+    const keys = applies.flatMap((one) => one.keys)
+    await journal.markRemote(keys, async () => {
+      const pending: Promise<unknown>[] = []
+      for (const apply of applies) {
+        /* `run` must ENQUEUE synchronously (see the module note) — but a
+         * synchronous THROW from it would escape before the settle below and
+         * leave the batch half-launched. */
+        try {
+          pending.push(apply.run())
+        } catch (thrown) {
+          pending.push(Promise.reject(thrown))
+        }
       }
-      /* `run` must ENQUEUE synchronously (see the module note) — but a
-       * synchronous THROW from it would escape before the try below and
-       * leave every armed fence loaded for the next local edit. */
-      try {
-        pending.push(apply.run())
-      } catch (thrown) {
-        pending.push(Promise.reject(thrown))
-      }
-    }
-    try {
       const outcomes = await Promise.allSettled(pending)
       const failed = outcomes.filter((one): one is PromiseRejectedResult => one.status === 'rejected')
       if (failed.length === 1) throw failed[0]!.reason
       if (failed.length > 1) throw new AggregateError(failed.map((one) => one.reason), `${failed.length} remote applies failed`)
-    } finally {
-      /* Every fence has RUN before its expectation is taken back — clearing
-       * a not-yet-armed one would leave the later arming loaded for the
-       * next local edit, which is the exact defect this helper closes. */
-      await Promise.allSettled(fences)
-      for (const slot of armed) {
-        if (slot.ticket !== null) journal.clearRemote(slot.book, slot.what, slot.ticket)
-      }
-    }
+    })
   }
 
   const applyIncomingRecord = async (book: string, incoming: BookRecord, restoreAt: Hlc | undefined): Promise<void> => {
@@ -631,6 +631,14 @@ export function createLedger({
     const held = group.book === '' ? null : await ownRecord(group.book)
     const row = group.book === '' ? undefined : rowOf(group.book)
     const ownHasContent = row?.hasContent === true
+    /* BOTH SIDES HOLD BYTES AND THE SENDER SENT NO HASH: identity cannot be
+     * established, which the contract above says is a retryable refusal —
+     * and the guard used to fall straight through it, merging blind and
+     * acking a record for bytes that may differ. A record we cannot read
+     * is the same case from this side. */
+    if (group.hasContent && ownHasContent && (group.contentHash === undefined || held === null)) {
+      throw refuse('unverifiable', `content for ${group.book} is on both devices and the push carries no hash to compare`, true)
+    }
     if (group.hasContent && ownHasContent && group.contentHash !== undefined && held !== null) {
       let heldHash = held.contentHash
       if (heldHash === undefined) {
@@ -828,7 +836,7 @@ export function createLedger({
     }
     const contentName = contentBlobName(record)
     const content = await facts(contentName)
-    const cover = (await facts('cover.jpg')) ?? (await facts('cover.webp'))
+    const cover = await coverFacts(folder)
     return {
       folder,
       name: content?.name ?? contentName,
@@ -900,16 +908,38 @@ export function createLedger({
         group.contentHash = facts.hash
         if (facts.size > 0) group.size = facts.size
       }
-      if (hashFile) {
-        try {
-          const cover = await hashFile(blobFolderOf(book), 'cover.jpg')
-          group.cover = { name: 'cover.jpg', size: cover.size, hash: cover.blake3 }
-        } catch {
-          /* No cover; nothing to offer. */
-        }
+      /* THE SAME PROBE `handleContent` USES — both names, jpg then webp. This
+       * asked for `cover.jpg` alone, so a legacy WebP jacket was never
+       * offered on a push while the content service happily served it. */
+      const cover = await coverFacts(blobFolderOf(book))
+      if (cover) group.cover = cover
+    }
+    /* A REVISION WITH NOTHING BEHIND IT IS NOT OFFERED. The shelf acks what
+     * is advertised and the ack clears the rev — so a record rev whose file
+     * could not be read, or a removed rev whose register says nothing,
+     * would have been cleared as "pushed" with its state never sent. Left
+     * in the outbox instead, visible, for a session that can carry it. A
+     * record or marks rev rides a removal or a restore without its payload:
+     * there the removal is the news. */
+    const intent = group.removed !== undefined || group.live !== undefined
+    if (revs.record !== undefined && group.record === undefined && !intent) delete revs.record
+    if (revs.removed !== undefined && !intent) delete revs.removed
+    return group
+  }
+
+  /** A jacket beside the bytes, whichever of the two names it carries — the
+   *  one probe for the push offer and the content answer (#329). */
+  const coverFacts = async (folder: string): Promise<{ name: string; size: number; hash: string } | null> => {
+    if (!hashFile) return null
+    for (const name of ['cover.jpg', 'cover.webp'] as const) {
+      try {
+        const hashed = await hashFile(folder, name)
+        return { name, size: hashed.size, hash: hashed.blake3 }
+      } catch {
+        /* Not this name; try the other. */
       }
     }
-    return group
+    return null
   }
 
   const applyAck = async (group: PushGroup, ack: PushAck): Promise<void> => {
@@ -947,6 +977,9 @@ export function createLedger({
     let pushed = 0
     for (const [book, revs] of outboxGroups()) {
       const group = await buildGroup(book, revs)
+      /* Every rev this group had was one it could not back (see
+       * `buildGroup`); nothing to offer this session. */
+      if (Object.keys(group.revs).length === 0) continue
       let answer: unknown
       try {
         answer = await channel.call(SYNC_SERVICES.push.name, group)
@@ -1033,8 +1066,24 @@ export function createLedger({
     }
     let marksPulled = 0
     let cardsApplied = false
+    /* A PULLED RECORD FOR A BOOK THIS DEVICE REMOVED does not re-add it.
+     * The push door judges a stale record against the register (WI-20.1);
+     * this door handed the row straight to `library.add`, which treats a
+     * bare add on a removed book as a deliberate re-open — restore, plus a
+     * `removed` rev of intent that would then push the resurrection back.
+     * The local removal is newer news than the shelf's row, and the outbox
+     * already carries it; the same in-lane check the marks apply makes. */
+    const removedHere = async (book: string): Promise<boolean> => fs !== null && (await readPresence(fs))[book]?.state === 'removed'
     const applies: RemoteApply[] = [
-      ...adds.map((row): RemoteApply => ({ keys: [{ book: row.book, what: 'record' }], run: () => library.add(row.book, row.record) })),
+      ...adds.map(
+        (row): RemoteApply => ({
+          keys: [{ book: row.book, what: 'record' }],
+          run: async () => {
+            if (await removedHere(row.book)) return
+            await library.add(row.book, row.record)
+          },
+        }),
+      ),
       ...(updates.length > 0
         ? [
             {
@@ -1201,9 +1250,11 @@ export function createLedger({
     const cursor = readCursor(channel.peerId)
     const since = cursor !== null && cursor.epoch === welcome.epoch ? cursor.since : 0
 
+    const startedWith = quarantineFor(settings.get(SYNC_QUARANTINE_SETTING), channel.peerId)
     const outcome: SessionOutcome = {
       refused: [],
-      quarantine: quarantineFor(settings.get(SYNC_QUARANTINE_SETTING), channel.peerId),
+      quarantine: startedWith,
+      droppedBefore: startedWith.dropped,
       repaired: 0,
     }
     const pushed = await pushAll(channel, outcome)
@@ -1218,7 +1269,11 @@ export function createLedger({
       pulledMarks: pulled.marksPulled,
       pulledCards: pulled.cardsApplied,
       refused: outcome.refused,
-      quarantine: { held: outcome.quarantine.books.length, dropped: outcome.quarantine.dropped, repaired: outcome.repaired },
+      quarantine: {
+        held: outcome.quarantine.books.length,
+        dropped: outcome.quarantine.dropped - outcome.droppedBefore,
+        repaired: outcome.repaired,
+      },
     }
   }
 

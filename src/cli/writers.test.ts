@@ -436,6 +436,19 @@ describe('two writers cannot interleave', () => {
     }
   })
 
+  it('treats a record whose pid could never have been written as held by somebody unnameable', async () => {
+    /* Corruption wearing a record's shape. A fractional or negative pid
+     * used to flow to `kill()`, which throws on it, and "the holder is gone"
+     * RECLAIMED the file — the permissive reading of junk. Junk lands on
+     * the held side, like every other unreadable lock. */
+    const dataDir = await library()
+    await writeFile(
+      join(dataDir, LOCK_FILE),
+      JSON.stringify({ pid: -1.5, host: (await import('node:os')).hostname(), at: 1, command: 'garbage', token: 't' }),
+    )
+    await expect(acquireDataLock(dataDir, { waitMs: 0, alive: () => false })).rejects.toBeInstanceOf(LockHeld)
+  })
+
   it('reclaims a lock whose holder is gone, on this host', async () => {
     const dataDir = await library()
     await writeFile(

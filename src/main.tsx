@@ -55,9 +55,6 @@ import { armShutdownInBackground } from './app/shutdown'
 import { bootShelf } from './app/boot'
 import { capabilities } from 'virtual:paper-composition'
 
-/** Bounded like `App`'s close handler, and under the shell's 5 s grace: a
- *  wedged queue must delay a quit, never prevent one. */
-
 installFatalHandlers()
 
 const host = document.getElementById('root')
@@ -116,14 +113,25 @@ async function boot(root: HTMLElement): Promise<void> {
     legacy:
       storage === null
         ? null
-        : () => ({
+        : () => {
             /* CHECKED, not asserted. `as []` told the compiler this was a list and
              * told the runtime nothing — so a store holding a valid JSON OBJECT
              * threw inside the migration and skipped every legacy book. Parsed
-             * separately, so a malformed marks value does not stop the rows. */
-            rows: asRows(readJson(storage.getItem('paper.library.v1'), [])),
-            marks: readJson(storage.getItem('paper.marks.v1'), []),
-          }),
+             * separately, so a malformed marks value does not stop the rows.
+             *
+             * AND A VALUE THAT WOULD NOT PARSE IS SAID, not silently emptied:
+             * a corrupt legacy blob used to make the library simply appear
+             * empty, with nothing anywhere explaining where the books went. */
+            const rawRows = storage.getItem('paper.library.v1')
+            const parsedRows = readJson(rawRows, null)
+            if (rawRows !== null && parsedRows === null) {
+              console.error('paper: the legacy library value exists but would not parse; migration sees no rows')
+            }
+            return {
+              rows: asRows(parsedRows ?? []),
+              marks: readJson(storage.getItem('paper.marks.v1'), []),
+            }
+          },
     migrate: (target, legacy) => timed('carry a legacy library across', () => migrateToFolders(target, legacy)),
     summarise: summariseMigration,
     finishPendingRemovals: (target) => timed('finish pending removals', () => finishPendingRemovals(target), (ids) => ({ finished: ids.length })),
@@ -212,13 +220,19 @@ async function boot(root: HTMLElement): Promise<void> {
    * (`device`, `shelf`, sizes) at CALL time, so building them here, before
    * any capability has started, is not too early: `peer.start` and
    * `sync.start` bind theirs on the way past. */
-  /* ARMED BEFORE THE SLOW PART, not after it.
+  /* ARMED BEFORE COMPOSITION, which is the window that matters — and said
+   * precisely, because the first spelling of this note overclaimed.
    *
    * This used to sit below `composeCapabilities`, so a quit arriving during
-   * storage loading, migration, the shelf scan or composition reached no
-   * handler at all: the shell deferred the exit, waited out its whole grace
-   * period, and quit anyway with the journal left dirty — the exact state the
-   * handshake exists to prevent, during the window most likely to be slow.
+   * composition reached no handler: the shell deferred the exit, waited out
+   * its whole grace period, and quit anyway with the journal left dirty —
+   * composition is where sync OPENS the journal, so that was the exact
+   * window the handshake exists for. Storage loading, migration and the
+   * shelf scan still run above this line unarmed, deliberately: the journal
+   * does not exist yet there, so a quit in that window costs the shell's
+   * grace period and nothing else — a slow quit, never a dirty flag — and
+   * arming earlier would mean late-binding `services` through a mutable
+   * reference in the one file no test can mount.
    *
    * Everything it needs already exists here: `lifetime` and `services` are
    * built above, and `quiesce()` resolves at once when no capability has
@@ -278,14 +292,6 @@ async function boot(root: HTMLElement): Promise<void> {
     diagnostics: services.diagnostics,
   })
 
-  const composition = await composeCapabilities(capabilities, kernelApi(services), lifetime.signal, {
-    services: buildServices({ services }),
-    /* The satchel side of the same table, declared: what this composition may
-     * CALL on a shelf, as opposed to what it answers. Derived, so it cannot
-     * name a service that does not exist. */
-    clients: serviceClients(),
-  })
-
   /* THE LIFETIME ENDS WITH THE PAGE, which nothing used to do.
    *
    * A reload builds a SECOND set of capabilities while the first is still
@@ -296,11 +302,26 @@ async function boot(root: HTMLElement): Promise<void> {
    * here runs each capability's teardown: sync unbinds the recorder at once, so
    * no further bracket reaches the old journal, and closes it behind the queue.
    *
+   * REGISTERED BEFORE COMPOSITION IS AWAITED, not after. Below the await, a
+   * reload landing MID-composition — the very window in which sync opens the
+   * journal — found no listener, so the half-started first set was never
+   * aborted and overlapped the reload's second set: the incident above,
+   * reachable through the one gap in its fix. Only `lifetime` is needed here,
+   * and it exists.
+   *
    * `pagehide`, not `beforeunload`: it fires on a reload and on a navigation,
    * it does not ask to block the unload, and it is the event the platform
    * actually guarantees here. Idempotent — `dispose()` and the abort listener
    * both no-op after the first. */
   window.addEventListener('pagehide', () => lifetime.abort(), { once: true })
+
+  const composition = await composeCapabilities(capabilities, kernelApi(services), lifetime.signal, {
+    services: buildServices({ services }),
+    /* The satchel side of the same table, declared: what this composition may
+     * CALL on a shelf, as opposed to what it answers. Derived, so it cannot
+     * name a service that does not exist. */
+    clients: serviceClients(),
+  })
 
   /* AND THE SAME TEARDOWN ON QUIT, which `pagehide` does not cover.
    *

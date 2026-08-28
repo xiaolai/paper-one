@@ -539,3 +539,11 @@ describe('installable', () => {
     expect(withRuntime('ready').installable).toBe(true)
   })
 })
+
+describe('audit-fix round 1 — the cache key', () => {
+  it('keys on the book title too, and survives a NUL inside the text', () => {
+    const context = { sentence: 'The counsel rose.', bookTitle: 'Bleak House' }
+    expect(glossKey('counsel', context)).not.toBe(glossKey('counsel', { ...context, bookTitle: 'Great Expectations' }))
+    expect(glossKey('a\u0000b', { sentence: 'c', bookTitle: '' })).not.toBe(glossKey('a', { sentence: 'b\u0000c', bookTitle: '' }))
+  })
+})

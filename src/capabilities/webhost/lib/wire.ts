@@ -179,10 +179,22 @@ export function tauriWire(): WebHostWire {
   }
 }
 
+/** What a fake starts holding — the only way to give it state, because an
+ *  override of `sessions()` or `browsers()` replaces the ACCESSOR and leaves
+ *  the fake's own revocation bookkeeping pointing at empty lists. Sockets name
+ *  the browser they belong to: the wire does not carry that (the plugin does
+ *  not tell the webview which credential a socket holds), and the fake needs
+ *  it to revoke the way the real plugin does — the credential AND every socket
+ *  it holds, never a socket that merely shares a number. */
+export interface FakeWireSeed {
+  readonly browsers?: readonly Browser[]
+  readonly sockets?: readonly { readonly id: number; readonly browser: number }[]
+}
+
 /** An in-memory wire, for driving the pane with no plugin and no app. */
-export function fakeWire(overrides: Partial<WebHostWire> = {}): WebHostWire {
-  let live: BrowserSession[] = []
-  let paired: Browser[] = []
+export function fakeWire(overrides: Partial<WebHostWire> = {}, seed: FakeWireSeed = {}): WebHostWire {
+  let sockets: { readonly id: number; readonly browser: number }[] = [...(seed.sockets ?? [])]
+  let paired: Browser[] = [...(seed.browsers ?? [])]
   let issued = 0
   return {
     status: async () => ({ pluginVersion: '0.0.0-fake', port: 27182, ready: true }),
@@ -192,23 +204,26 @@ export function fakeWire(overrides: Partial<WebHostWire> = {}): WebHostWire {
     address: async () => ({ kind: 'https', url: 'https://studio.tail1234.ts.net/' }),
     beginCode: async () => {
       issued += 1
-      return { code: String(100000 + issued).slice(0, 6), expiresInMs: 90_000 }
+      /* Wrapped within the six-digit range: `slice(0, 6)` of a growing number
+         stopped being unique after nine hundred thousand codes. */
+      return { code: String(100000 + (issued % 900000)), expiresInMs: 90_000 }
     },
     cancelCode: async () => {},
-    sessions: async () => live,
+    sessions: async () => sockets.map(({ id }) => ({ id })),
     browsers: async () => paired,
     revoke: async (id) => {
       /* BOTH LISTS, because that is what the real one does: the credential is
-         forgotten and every socket it holds is closed. A fake that dropped only
-         the socket would let a test pass over the exact gap this pair exists to
-         close. */
+         forgotten and every socket IT HOLDS is closed — by the browser it
+         belongs to, not by a socket id that happens to equal the durable id.
+         A fake that dropped only the socket would let a test pass over the
+         exact gap this pair exists to close. */
       paired = paired.filter((browser) => browser.id !== id)
-      live = live.filter((session) => session.id !== id)
+      sockets = sockets.filter((socket) => socket.browser !== id)
     },
     revokeAll: async () => {
       const count = paired.length
       paired = []
-      live = []
+      sockets = []
       return count
     },
     ...overrides,

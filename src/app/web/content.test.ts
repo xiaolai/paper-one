@@ -98,10 +98,16 @@ describe('readRange', () => {
      length this client supplied, so a negative one is a bug here — and arriving
      as a protocol error from the shelf would send the search to the wrong
      machine. */
-  it('refuses a negative offset or length locally', async () => {
+  it('refuses an offset or length that is not a byte count, locally', async () => {
+    /* Negatives were refused; `NaN`, `Infinity` and fractions were not, and
+     * each is a range pdf.js can compute from a length this side supplied —
+     * so each is this side's bug to report, before it reaches a shelf. */
     const { content, asked } = shelfOf({ one: 'x' })
-    await expect(content.readRange('one', -1, 4)).rejects.toThrow(/must not be negative/)
-    await expect(content.readRange('one', 0, -4)).rejects.toThrow(/must not be negative/)
+    await expect(content.readRange('one', -1, 4)).rejects.toThrow(/byte counts/)
+    await expect(content.readRange('one', 0, -4)).rejects.toThrow(/byte counts/)
+    await expect(content.readRange('one', Number.NaN, 4)).rejects.toThrow(/byte counts/)
+    await expect(content.readRange('one', 0, Number.POSITIVE_INFINITY)).rejects.toThrow(/byte counts/)
+    await expect(content.readRange('one', 1.5, 4)).rejects.toThrow(/byte counts/)
     expect(asked).toEqual([])
   })
 })

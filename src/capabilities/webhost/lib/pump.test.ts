@@ -560,3 +560,142 @@ describe('book.position through the pump', () => {
     vi.useRealTimers()
   })
 })
+
+describe('audit-fix round 1 — the pump', () => {
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+  it('binds the position write to the NEWEST locate by request order, not by which answered last', async () => {
+    /* Two locates in flight: the older answers last. The binding used to
+       follow completion order, re-pointing the write at a book the browser
+       had already left. */
+    const answers = new Map<string, () => void>()
+    const locate: ServiceContribution = {
+      name: 'content.locate',
+      grant: 'book:read',
+      handler: (req: unknown) =>
+        new Promise((resolve) => {
+          answers.set((req as { book: string }).book, () => resolve({ located: true }))
+        }),
+    }
+    const moved: string[] = []
+    const position: ServiceContribution = {
+      name: 'book.position',
+      grant: 'position:write',
+      handler: async (req: unknown) => {
+        moved.push((req as { book: string }).book)
+        return {}
+      },
+    }
+    const { wire, client } = browser()
+    const pump = servePipe({ wire, services: [locate, position], pollMs: 5, sessionsMs: 10 })
+    const older = client.call('content.locate', { book: 'book:old' })
+    const newer = client.call('content.locate', { book: 'book:new' })
+    await new Promise<void>((resolve) => setTimeout(resolve, 30))
+    answers.get('book:new')!()
+    await newer
+    answers.get('book:old')!()
+    await older
+    await client.call('book.position', { book: 'book:new', position: 'cfi', progress: 0.5 })
+    await expect(client.call('book.position', { book: 'book:old', position: 'cfi', progress: 0.5 })).rejects.toMatchObject({
+      error: { code: 'forbidden' },
+    })
+    expect(moved).toEqual(['book:new'])
+    pump.stop()
+  })
+
+  it('refuses an interval that is not a positive finite number', () => {
+    for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => servePipe({ wire: fakeWire(), services: [], pollMs: bad })).toThrow(/pollMs/)
+      expect(() => servePipe({ wire: fakeWire(), services: [], sessionsMs: bad })).toThrow(/sessionsMs/)
+    }
+  })
+
+  it('never has two reconciliations in flight, however slow the plugin answers', async () => {
+    /* `setInterval` fired the next pass while the previous `sessions()` was
+       still pending; two snapshots landing out of order could close a current
+       session or reopen a departed one. The next pass is armed only after the
+       last one settled. */
+    let inFlight = 0
+    let peak = 0
+    const wire = fakeWire({
+      sessions: async () => {
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        await new Promise<void>((resolve) => setTimeout(resolve, 30))
+        inFlight -= 1
+        return []
+      },
+    })
+    const pump = servePipe({ wire, services: [], sessionsMs: 5 })
+    await new Promise<void>((resolve) => setTimeout(resolve, 120))
+    pump.stop()
+    expect(peak).toBe(1)
+  })
+
+  it('a reporter that throws does not strand the session, and the loop reports the plugin failure once', async () => {
+    let asked = 0
+    const wire = fakeWire({
+      sessions: async () => [{ id: 7 }],
+      sessionRecv: async () => {
+        asked += 1
+        throw new Error('ipc gone')
+      },
+    })
+    const reported: unknown[] = []
+    const pump = servePipe({
+      wire,
+      services: [],
+      pollMs: 5,
+      sessionsMs: 1000,
+      onError: (thrown) => {
+        reported.push(thrown)
+        throw new Error('the reporter itself is broken')
+      },
+    })
+    await tick()
+    await tick()
+    await tick()
+    /* The session was opened, its drain failed, and the failure path CLOSED
+       it before reporting — so a throwing reporter cannot leave the record
+       in `live`, which is what used to make the failure permanent. */
+    expect(reported.map((one) => (one as Error).message)).toContain('ipc gone')
+    expect(pump.serving).toBe(0)
+    expect(asked).toBe(1)
+    pump.stop()
+  })
+})
+
+describe('a router that hung up on its own', () => {
+  it('lets go of the session, so the next reconciliation serves the browser afresh', async () => {
+    /* A browser that stops reading: writes queue on the router's outbound
+       chain until its budget overflows and the router disconnects — a decision
+       taken inside the envelope, which the pump could not hear until
+       `onDisconnect` existed (audit #61). Without it the dead connection kept
+       its record, the plugin went on reporting the socket, and every later
+       request drained into a router answered by nobody. A stalled `send`
+       models the browser; the tiny budget makes the overflow cheap; the
+       browser then starts reading again and asks once more. */
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const delivering = wire.send
+    wire.send = async () => new Promise<void>(() => {})
+    const pump = servePipe({ wire, services: [PING], pollMs: 5, sessionsMs: 10, maxOutboundBytes: 600 })
+    await tick()
+    expect(pump.serving).toBe(1)
+
+    for (let i = 0; i < 40; i++) void client.call('example.ping', { i }).catch(() => {})
+    await tick()
+
+    /* The browser reads again. The old connection is gone either way; only a
+       pump that heard the hang-up has let the record go, so that the next
+       reconciliation opens a fresh one and this call is answered. */
+    wire.send = delivering
+    await tick()
+    const again = client.call('example.ping', { again: true })
+    await tick()
+    expect(await again).toEqual({ echoed: { again: true } })
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+})

@@ -80,13 +80,19 @@ export function grantsForWrite(held: readonly string[], canWrite: boolean): stri
   const mine = (grant: string) => grant.startsWith('sync:') || grant.startsWith('blob:')
   const kept = held.filter((grant) => !mine(grant))
   if (canWrite) return [...kept, ...OWN_DEVICE_GRANTS]
-  /* TURNING IT OFF NEVER GRANTS ANYTHING. A peer holding no sync or blob
-     grant at all is not a read-write device being demoted — it is a device
-     with no access — and handing it `sync:pull` and `blob:read` from a
-     control whose entire stated effect is to take access away is the wrong
-     direction for a permission to move on its own. */
-  if (held.length === kept.length) return kept
-  return [...kept, ...READ_ONLY_GRANTS]
+  /* TURNING IT OFF NEVER GRANTS ANYTHING — EACH GRANT DEMOTED ON ITS OWN. The
+     first rule was "a peer holding any sync or blob grant gets the read-only
+     pair", and that GRANTED: a peer holding `sync:push` alone was handed
+     `blob:read` it never had, and one holding `blob:read` alone was handed
+     `sync:pull`. So: a wildcard becomes its family's read grant, a read
+     grant stays, `sync:push` goes, and no family the peer did not hold
+     appears. A peer with no sync or blob grant at all keeps having none. */
+  const reads = new Set<string>()
+  for (const grant of held) {
+    if (grant === 'sync:*' || grant === 'sync:pull') reads.add('sync:pull')
+    if (grant === 'blob:*' || grant === 'blob:read') reads.add('blob:read')
+  }
+  return [...kept, ...READ_ONLY_GRANTS.filter((grant) => reads.has(grant))]
 }
 
 /**
@@ -271,16 +277,21 @@ export function describeGrants(grants: readonly string[]): string {
   const parts: string[] = []
   if (has('sync:pull')) parts.push('Books, highlights, reading position')
   if (has('blob:read')) parts.push('book files')
+  /* EVERYTHING ELSE IS NAMED, NOT HIDDEN. A peer holding `sync:pull` and
+     `shelf:admin` read as "receive only" — the one grant that can empty a
+     trash, concealed by the phrase for the others. */
+  const known = new Set(['sync:*', 'sync:pull', 'sync:push', 'blob:*', 'blob:read'])
+  const other = grants.filter((held) => !known.has(held))
   if (!parts.length) return grants.length ? grants.join(', ') : 'Nothing yet'
   const sentence = parts.join(' and ')
-  return has('sync:push') ? `${sentence} — both ways` : `${sentence} — receive only`
+  const way = has('sync:push') ? `${sentence} — both ways` : `${sentence} — receive only`
+  return other.length ? `${way}, plus ${other.join(', ')}` : way
 }
 
 export interface DevicesSnapshot {
   /** False outside the app (no plugin) — the pane says so instead of lying. */
   readonly available: boolean
   readonly role: PeerRole | null
-  readonly endpointId: string | null
   readonly peers: readonly WirePeer[]
   /**
    * Whether `peers` has been read from the plugin yet.
@@ -351,7 +362,6 @@ export function createDevicesModel({
   let snapshot: DevicesSnapshot = {
     available: port !== null,
     role: null,
-    endpointId: null,
     peers: [],
     offer: null,
     pending: null,
@@ -407,7 +417,13 @@ export function createDevicesModel({
     offerTimer = null
     if (offer === null) return
     const left = offer.expiresAt - Date.now()
-    if (left <= 0) return
+    if (left <= 0) {
+      /* Expired IN FLIGHT — the backend answered an offer already past its
+         time. Cleared now, or the QR stood on screen with no timer to end
+         it. */
+      if (snapshot.offer === offer) publish({ offer: null })
+      return
+    }
     offerTimer = setTimeout(() => {
       offerTimer = null
       if (disposed) return
@@ -425,13 +441,15 @@ export function createDevicesModel({
   /* Attempts whose confirmation is already in flight — a second click on
    * the same attempt must not race the first and overwrite its outcome. */
   const confirming = new Set<string>()
+  /** Per peer, the grant edit in flight — see `setPeerCanWrite`. */
+  const grantEdits = new Map<string, Promise<void>>()
   const refresh = async (): Promise<void> => {
-    if (!port) return
+    if (!port || disposed) return
     const mine = ++refreshGeneration
     try {
       const [status, peers] = await Promise.all([port.status(), port.listPeers()])
-      if (mine !== refreshGeneration) return
-      publish({ role: status.role, endpointId: status.endpointId, peers, peersLoaded: true, error: null })
+      if (disposed || mine !== refreshGeneration) return
+      publish({ role: status.role, peers, peersLoaded: true, error: null })
     } catch (thrown) {
       if (mine !== refreshGeneration) return
       publish({ error: said(thrown) })
@@ -447,6 +465,13 @@ export function createDevicesModel({
     refresh,
     beginPairing: async (name) => {
       if (!port || disposed) return
+      /* NOT ACROSS A ROLE CHANGE THAT HAS NOT RESTARTED. The node still runs
+         the OLD role, so a pairing made now is made as that role — and the
+         restart then turns it into a pair with two of one side, durably. */
+      if (snapshot.roleNeedsRestart) {
+        publish({ error: 'Restart Paper to apply the role change before pairing' })
+        return
+      }
       /* Generation-tokened like refresh: two overlapping begins resolve in
        * either order, and only the NEWEST may publish its offer — the older
        * one's QR is already replaced on the backend. Beginning a NEW attempt
@@ -490,7 +515,7 @@ export function createDevicesModel({
       }
     },
     confirmPairing: async (accept) => {
-      if (!port) return
+      if (!port || disposed) return
       /* Bind the confirmation to the attempt the human is looking at, so a
        * pre-played QR that started a different attempt cannot be confirmed
        * by this click. CAPTURED FIRST and REQUIRED: with no pending attempt
@@ -522,6 +547,13 @@ export function createDevicesModel({
     },
     pairWithCode: async (uri) => {
       if (!port || disposed) return
+      /* NOT ACROSS A ROLE CHANGE THAT HAS NOT RESTARTED. The node still runs
+         the OLD role, so a pairing made now is made as that role — and the
+         restart then turns it into a pair with two of one side, durably. */
+      if (snapshot.roleNeedsRestart) {
+        publish({ error: 'Restart Paper to apply the role change before pairing' })
+        return
+      }
       /* Same ordering rule as beginPairing: only the newest attempt's SAS
        * may land. */
       const mine = ++beginGeneration
@@ -546,22 +578,33 @@ export function createDevicesModel({
     },
     setPeerCanWrite: async (id, canWrite) => {
       if (!port || disposed) return
-      try {
-        /* Read what the peer holds first: the toggle owns `sync:` and `blob:`
-           and must not be able to add or drop anything else — see
-           `grantsForWrite`. */
-        const held = (await port.listPeers()).find((one) => one.id === id)?.grants ?? []
-        /* Re-checked across the await: a disposal between the read and the
-           write must not start further IPC on a dead model. */
+      /* ONE EDIT AT A TIME PER PEER. The read-modify-write below, run twice
+         in overlap from two quick toggles, read the same old list twice and
+         the later write carried the earlier intent — write access left on
+         after the reader turned it off. Chained on the peer's own promise. */
+      const previous = grantEdits.get(id) ?? Promise.resolve()
+      const mine = previous.then(async () => {
         if (disposed) return
-        await port.setGrants(id, grantsForWrite(held, canWrite))
-        /* Re-read rather than assume: the plugin is the owner of the record,
-           and a grant list echoed back from here would be this pane's idea of
-           what it wrote rather than what the store holds. */
-        await refresh()
-      } catch (thrown) {
-        if (!disposed) publish({ error: said(thrown) })
-      }
+        try {
+          /* Read what the peer holds first: the toggle owns `sync:` and `blob:`
+             and must not be able to add or drop anything else — see
+             `grantsForWrite`. */
+          const held = (await port.listPeers()).find((one) => one.id === id)?.grants ?? []
+          /* Re-checked across the await: a disposal between the read and the
+             write must not start further IPC on a dead model. */
+          if (disposed) return
+          await port.setGrants(id, grantsForWrite(held, canWrite))
+          /* Re-read rather than assume: the plugin is the owner of the record,
+             and a grant list echoed back from here would be this pane's idea of
+             what it wrote rather than what the store holds. */
+          await refresh()
+        } catch (thrown) {
+          if (!disposed) publish({ error: said(thrown) })
+        }
+      })
+      grantEdits.set(id, mine)
+      await mine
+      if (grantEdits.get(id) === mine) grantEdits.delete(id)
     },
     setRole: async (role) => {
       if (!port || disposed) return
@@ -572,6 +615,13 @@ export function createDevicesModel({
          emptiness is trustworthy: before the first refresh the list is empty
          because nothing has been read, which is not the same answer. */
       if (!snapshot.peersLoaded || !roleIsSettable(snapshot.peers)) return
+      /* NOT WHILE A PAIRING IS IN FLIGHT: an offer on screen, a code being
+         joined or a SAS being read means a peer record can land after this
+         check, and the pair that results has two of one side. */
+      if (snapshot.offer !== null || snapshot.pending !== null) {
+        publish({ error: 'Finish or cancel the pairing in progress before changing sides' })
+        return
+      }
       /* CHOOSING WHAT IS ALREADY RUNNING IS NOT A CHANGE. Every successful
          write used to raise "restart to apply", including the one that put
          the device back where it started. */

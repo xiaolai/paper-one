@@ -30,8 +30,8 @@ function snapshotWith(runtime: RuntimeState, models: readonly ModelRow[] = [QWEN
     runtime,
     models,
     installing: null,
+    removing: null,
     failure: null,
-    keepLoaded: false,
     modelsDir: null,
     residentBytes: null,
     voiceTest: 'idle',
@@ -47,7 +47,6 @@ function fakeModel(snapshot: ModelsSnapshot): ModelsModel {
     install: async () => true,
     cancelInstall: () => {},
     uninstall: async () => true,
-    setKeepLoaded: () => {},
     testVoice: async () => {},
     stopVoice: () => {},
     dispose: () => {},
@@ -79,5 +78,17 @@ describe('the Local models pane', () => {
       <ModelsPane model={fakeModel(snapshotWith({ kind: 'absent', reason: 'not staged' }, [{ ...QWEN, installed: true }]))} />,
     )
     expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy()
+  })
+})
+
+describe('audit-fix round 1 — the pane', () => {
+  it('holds the controls while a removal is in flight, not only during an install', () => {
+    render(<ModelsPane model={fakeModel({ ...snapshotWith({ kind: 'installed' }, [{ ...QWEN, installed: true }]), removing: 'qwen' })} />)
+    const remove = screen.getByRole('button', { name: 'Remove' }) as HTMLButtonElement
+    expect(remove.disabled).toBe(true)
+  })
+  it('offers no control that nothing consumes', () => {
+    render(<ModelsPane model={fakeModel(snapshotWith({ kind: 'installed' }))} />)
+    expect(screen.queryByText('Keep model loaded')).toBeNull()
   })
 })

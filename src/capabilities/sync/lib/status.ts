@@ -55,45 +55,39 @@ export function createSyncStatus(): SyncStatusStore {
  * Why a session, or one book in it, was refused. Each has exactly one
  * sentence below, and `status.test.ts` holds that no two share one.
  */
-export type RefusalKind =
+/**
+ * ONE LIST. The union used to be spelled out beside this tuple, member for
+ * member, and the two could drift without a compile error; the type is
+ * derived from the tuple now, so adding a kind is one edit with its
+ * sentence in `describeRefusal` still required by the exhaustive switch.
+ */
+export const REFUSAL_KINDS = [
   /** No shelf is paired. */
-  | 'unpaired'
-  /** No route to the shelf: offline, a dial that timed out, a session lost mid-way. */
-  | 'unreachable'
-  /** The shelf no longer admits this device — revoked, or its grants withdrawn. */
-  | 'revoked'
-  /** Both devices hold the same role; neither can sync from the other. */
-  | 'role-mismatch'
-  /** A protocol, journal-format or sync-version skew between the two builds. */
-  | 'unsupported'
-  /** The shelf's journal is still building its baseline. */
-  | 'not-ready'
-  /** A book's bytes differ between the devices. */
-  | 'conflict'
-  /** A file that is there and will not read, on either side. */
-  | 'unreadable'
-  /** A book's content could not be verified or fetched. */
-  | 'content'
-  /** The other side answered something this build cannot understand. */
-  | 'broken-peer'
-  /** This device is out of space. */
-  | 'disk-full'
-  | 'unknown'
-
-export const REFUSAL_KINDS: readonly RefusalKind[] = [
   'unpaired',
+  /** No route to the shelf: offline, a dial that timed out, a session lost mid-way. */
   'unreachable',
+  /** The shelf no longer admits this device — revoked, or its grants withdrawn. */
   'revoked',
+  /** Both devices hold the same role; neither can sync from the other. */
   'role-mismatch',
+  /** A protocol, journal-format or sync-version skew between the two builds. */
   'unsupported',
+  /** The shelf's journal is still building its baseline. */
   'not-ready',
+  /** A book's bytes differ between the devices. */
   'conflict',
+  /** A file that is there and will not read, on either side. */
   'unreadable',
+  /** A book's content could not be verified or fetched. */
   'content',
+  /** The other side answered something this build cannot understand. */
   'broken-peer',
+  /** This device is out of space. */
   'disk-full',
   'unknown',
-]
+] as const
+
+export type RefusalKind = (typeof REFUSAL_KINDS)[number]
 
 /** One refusal, as the ledger records it in a session's summary. */
 export interface SessionRefusal {
@@ -178,21 +172,29 @@ const DISK_FULL = /no space left|enospc|quota(?:\s|_)?exceeded|disk full/i
  * plain `{code, retryable, message}` objects; the peer plugin's `{kind,
  * message}` objects, where a refused session carries its reason in the
  * message; and plain `Error`s from the filesystem or the ledger's own checks.
- * Anything else is `unknown` and its message is shown raw, which is still
- * better than the wrong sentence.
+ * Anything else is `unknown`; its message goes to the diagnostic, not the
+ * sentence.
  */
 export function refusalKind(thrown: unknown): RefusalKind {
   if (thrown instanceof ServiceCallError) return KIND_BY_CODE[thrown.error.code] ?? 'unknown'
   if (typeof thrown === 'object' && thrown !== null) {
     const value = thrown as { code?: unknown; kind?: unknown; message?: unknown; name?: unknown }
-    if (typeof value.code === 'string') return KIND_BY_CODE[value.code] ?? 'unknown'
     const message = typeof value.message === 'string' ? value.message : ''
+    /* A code we KNOW answers at once. One we do not — `ENOSPC` off the
+     * filesystem, say — used to answer `unknown` here, before the disk-full
+     * tell below ever ran; an unknown code falls through instead. */
+    if (typeof value.code === 'string') {
+      const known = KIND_BY_CODE[value.code]
+      if (known !== undefined) return known
+    }
     if (typeof value.kind === 'string') {
       if (value.kind === 'sessionRefused') {
         if (/revoked|unknown-peer/.test(message)) return 'revoked'
         if (/role-mismatch/.test(message)) return 'role-mismatch'
         if (/not-ready/.test(message)) return 'not-ready'
-        return 'unreachable'
+        /* The peer WAS reached — it refused. A reason this build does not
+         * know is `unknown`, never "isn't reachable", which is false. */
+        return 'unknown'
       }
       return KIND_BY_PLUGIN_KIND[value.kind] ?? 'unknown'
     }
@@ -244,7 +246,11 @@ export function describeRefusal(refusal: SessionRefusal, names: RefusalNames): s
     case 'disk-full':
       return 'This device is out of space, so nothing more could be saved'
     case 'unknown':
-      return refusal.message === '' ? 'Sync failed' : `Sync failed: ${refusal.message}`
+      /* The raw message goes to the diagnostic (`sync.session-failed`,
+       * `sync.push-refused`), never here — `SessionRefusal.message`'s own
+       * contract, which this line used to contradict with a path or a
+       * protocol internal in the status bar. */
+      return 'Sync failed'
   }
 }
 
@@ -268,7 +274,7 @@ export function describeSession(
   const { held, dropped } = outcome.quarantine
   if (held > 0 || dropped > 0) {
     const books = held === 1 ? '1 book' : `${held} books`
-    const overflow = dropped === 0 ? '' : `; ${dropped} more were set aside unread`
+    const overflow = dropped === 0 ? '' : dropped === 1 ? '; 1 more was set aside unread' : `; ${dropped} more were set aside unread`
     parts.push(`Highlights for ${books} couldn’t be read from ${shelfOr(names, 'your library')}${overflow}`)
   }
   return parts.length === 0 ? null : parts.join('. ')

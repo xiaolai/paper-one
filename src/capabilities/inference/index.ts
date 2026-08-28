@@ -1,3 +1,4 @@
+import { messageOf } from './lib/messageOf'
 import { createElement } from 'react'
 import { createRenderSlot, openSession, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
 import { createController, type Controller } from './lib/controller'
@@ -81,7 +82,6 @@ export interface InferencePort {
     onChunk: (text: string) => void,
     signal: AbortSignal,
   ): Promise<string>
-  /** One tool-free turn from an agent CLI. */
   /**
    * One tool-free agent turn.
    *
@@ -114,7 +114,7 @@ export function inferencePort(): InferencePort | null {
    * plugin wrapper, so every consumer gets it without having to remember. */
   const withCancel = async <T,>(
     prefix: string,
-    signal: AbortSignal | null,
+    signal: AbortSignal,
     run: (requestId: string) => Promise<T>,
   ): Promise<T> => {
     /* ⚠️ CHECKED BEFORE THE LISTENER IS ADDED. `addEventListener('abort')` does
@@ -123,22 +123,25 @@ export function inferencePort(): InferencePort | null {
      * started anyway. `generate` below makes that a real window rather than a
      * theoretical one: it awaits `ensureReady()` first, which is a process
      * launch, and a reader pressing Stop during it was ignored. */
-    signal?.throwIfAborted()
+    signal.throwIfAborted()
     const requestId = mintRequestId(prefix)
     const abort = (): void => cancelRequest(plugin, requestId, held.report)
-    signal?.addEventListener('abort', abort, { once: true })
+    signal.addEventListener('abort', abort, { once: true })
     try {
       return await run(requestId)
     } finally {
-      signal?.removeEventListener('abort', abort)
+      signal.removeEventListener('abort', abort)
     }
   }
 
   return {
     generate: async (model, system, question, onChunk, signal) => {
-      /* Before the start as well as after it: a launch is seconds, and a
-         reader who gave up in that window must not have a daemon started on
-         their behalf. `withCancel` checks again on the far side. */
+      /* Before the start as well as after it. The check here refuses to
+         BEGIN a launch for a reader who has already given up; a launch in
+         flight is not cancelled by an abort during it — the daemon is shared
+         by every later question, and stopping it for one reader's Stop would
+         cost the next question the seconds it just paid. `withCancel` checks
+         again on the far side, so the request itself never starts. */
       signal.throwIfAborted()
       if (!(await controller.ensureReady())) throw new Error('The runtime is not running')
       return withCancel('ask', signal, (id) => plugin.generate(id, model, system, question, onChunk))
@@ -189,12 +192,11 @@ export const inference: Capability = {
 
   start(api: CapabilityContext, signal: AbortSignal): Disposable {
     const plugin = inferencePlugin
-    const controller = createController(plugin, (event, fields) => api.diagnostics.warn(event, fields))
-    const gloss = createGlossProvider({
-      plugin,
-      controller,
-      report: (event, fields) => api.diagnostics.warn(event, fields),
-    })
+    /* ONE reporter, handed to everything that reports — it was built four
+       times, once per consumer. */
+    const report = (event: string, fields: Record<string, unknown>): void => api.diagnostics.warn(event, fields)
+    const controller = createController(plugin, report)
+    const gloss = createGlossProvider({ plugin, controller, report })
 
     const myLifetime = ++lifetime
     /* EVERYTHING THIS ACQUIRES, OWNED BY ONE THING — see `openSession`. The
@@ -220,11 +222,7 @@ export const inference: Capability = {
     })
     session.own('unbindWorkLine', () => unbindWorkLine.dispose())
 
-    const myRunning = {
-      plugin,
-      controller,
-      report: (event: string, fields: Record<string, unknown>) => api.diagnostics.warn(event, fields),
-    }
+    const myRunning = { plugin, controller, report }
     running = myRunning
     /* Ownership before clearing: an older stop firing after a restart must not
        strip the newer start's state — the rule sync's own stop follows. */
@@ -236,7 +234,7 @@ export const inference: Capability = {
       controller,
       plugin,
       settings: api.settings,
-      report: (event, fields) => api.diagnostics.warn(event, fields),
+      report,
     })
     /* ⚠️ THE MODEL IS DISPOSED TOO. Only the tests ever called this, so in the
        running app a settings subscription, an `Audio` element, a blob URL and
@@ -252,10 +250,7 @@ export const inference: Capability = {
        nothing under `src/` invoked them, so the keychain path, the
        provisioning and the per-start registration could never run in the app.
        An audit found it; the feature ledger had called it Shipped. */
-    const endpoints = createEndpointsModel({
-      plugin,
-      report: (event, fields) => api.diagnostics.warn(event, fields),
-    })
+    const endpoints = createEndpointsModel({ plugin, report })
     session.own('endpointsModel', () => endpoints.dispose())
     const showingEndpoints = endpointsSection.hold(endpoints)
     session.own('endpointsSection', () => showingEndpoints.dispose())
@@ -273,7 +268,11 @@ export const inference: Capability = {
      * OWNED LAST, so it is released FIRST — nothing else here depends on the
      * daemon, and the child process is the thing worth stopping soonest. */
     session.own('daemon', () => {
-      if (lifetime === myLifetime) void plugin.stop().catch(() => {})
+      /* Reported, not swallowed: a stop that fails is a daemon still running
+         after the capability that owned it is gone. */
+      if (lifetime === myLifetime) {
+        void plugin.stop().catch((thrown: unknown) => report('inference.stop-failed', { message: messageOf(thrown) }))
+      }
     })
 
     /* Read what is on disk, unawaited: `start` must not block the composition
@@ -305,8 +304,9 @@ export { DEPTHS, errorKind, reasonOf } from './lib/plugin'
  * reason: the reader's sentence for a `kind` has one home, and the kernel's
  * thread cannot reach it. */
 export { detailFor } from './lib/controller'
+export { messageOf } from './lib/messageOf'
 /* ⚠️ EXACTLY WHAT `companion` IMPORTS, AND NOTHING ELSE. This list carried
- * `InstallProgress`, `ModelRow` and `RouteKind` too, plus `KEEP_LOADED_SETTING`,
+ * `InstallProgress`, `ModelRow` and `RouteKind` too, plus the keep-loaded setting (since removed — see `ModelsPane`),
  * `useInference` and three controller types on their own lines — none of which
  * any module outside this directory imported. A capability barrel exists to
  * serve the capabilities that `require` this one, and `companion` is the only

@@ -174,6 +174,13 @@ export interface PeerWire {
   onPairingResult(fn: (event: PairingResult) => void): Unsubscribe
   onSessionOpen(fn: (event: SessionOpen) => void): Unsubscribe
   onSessionClosed(fn: (event: SessionClosed) => void): Unsubscribe
+  /**
+   * Resolves once every subscription made so far has attached; rejects with
+   * the first registration that failed. Optional: an in-memory wire attaches
+   * synchronously and needs none. The port awaits it before `connect` and
+   * `ready`, the two calls after which the plugin starts emitting.
+   */
+  whenListening?(): Promise<void>
   onSessionFrames(fn: (event: SessionFrames) => void): Unsubscribe
   onTransfer(fn: (event: TransferProgress) => void): Unsubscribe
 }
@@ -181,16 +188,47 @@ export interface PeerWire {
 const command = (name: string) => `plugin:peer|${name}`
 
 /**
+ * Every subscription made so far has ATTACHED — or one of them failed, and
+ * this rejects with that failure.
+ *
+ * `listen` registers asynchronously while the wire's subscriptions are
+ * synchronous, so a caller could subscribe, then `connect`, and have the
+ * plugin emit the session's first close or frames into a listener the
+ * event system had not attached yet — lost, and every symptom looks like
+ * the other device being silent. The port awaits this before the calls
+ * that make events happen. A failed registration used to be a console line
+ * and a caller that carried on without its events; it is the rejection
+ * here, at the call that would have depended on them.
+ */
+async function whenListening(): Promise<void> {
+  await Promise.allSettled([...attaching])
+  if (firstRegistrationFailure !== null) throw firstRegistrationFailure
+}
+
+/**
  * `listen` resolves its unlisten asynchronously; the wire's subscriptions are
  * synchronous. This adapter subscribes now, drops events after unsubscribe
  * (the race where an event lands between the two), and detaches when the
  * plugin's unlisten arrives.
  */
+/** Registrations still in flight, and the first that failed — what
+ *  `whenListening` answers with. See `PeerWire.whenListening`. */
+const attaching = new Set<Promise<unknown>>()
+let firstRegistrationFailure: unknown = null
+
 function subscription<T>(event: string, fn: (payload: T) => void): Unsubscribe {
   let live = true
   const pending = listen<T>(event, (received) => {
     if (live) fn(received.payload)
   })
+  attaching.add(pending)
+  void pending.then(
+    () => attaching.delete(pending),
+    (thrown: unknown) => {
+      attaching.delete(pending)
+      if (firstRegistrationFailure === null) firstRegistrationFailure = thrown
+    },
+  )
   /* A registration that FAILS must not sit as an unhandled rejection until
    * somebody unsubscribes — it is contained here, once, and unsubscribing
    * then finds nothing to detach.
@@ -247,6 +285,7 @@ export function tauriWire(): PeerWire {
     onPairingResult: (fn) => subscription('peer://pairing-result', fn),
     onSessionOpen: (fn) => subscription('peer://session-open', fn),
     onSessionClosed: (fn) => subscription('peer://session-closed', fn),
+    whenListening,
     onSessionFrames: (fn) => subscription('peer://session-frames', fn),
     onTransfer: (fn) => subscription('peer://transfer', fn),
   }

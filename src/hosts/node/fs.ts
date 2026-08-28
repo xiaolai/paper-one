@@ -2,11 +2,9 @@ import { constants } from 'node:fs'
 import { access, appendFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
-  CONTENT_EXTENSIONS,
-  folderOf,
-  /* THE PURE WALK, not a second copy of it — see the barrel's note. The TAURI
-     binding is deliberately not exported there; this walk is, because both
-     hosts must run the same one. */
+  /* THE PURE WALKS, not second copies of them — see the barrel's note. The
+     TAURI binding is deliberately not exported there; these walks are,
+     because both hosts must run the same ones. */
   sizePortOver,
   type FileSystem,
   type IndexFs,
@@ -291,6 +289,10 @@ export function nodeTextFs(root: string): FileSystem {
        * collision takes a suffix, and the loop is bounded: if a hundred
        * quarantines of one file have accumulated, something is wrong that a
        * hundred-and-first copy will not clarify. */
+      /* THE SOURCE IS VALIDATED BEFORE ANY PROBE. `at` is the traversal
+       * check; run last, a hostile `path` had 101 destination existence
+       * probes to itself before anything refused it. */
+      const source = at(path)
       const target = at(to)
       let destination = target
       /* ⚠️ THE LAST CANDIDATE WAS NEVER TESTED. The loop assigned
@@ -308,7 +310,14 @@ export function nodeTextFs(root: string): FileSystem {
         if (n > 0) destination = `${target}.${n}`
         try {
           await access(destination, constants.F_OK)
-        } catch {
+        } catch (cause) {
+          /* ONLY "NOT THERE" MEANS FREE. `access` can also refuse for
+           * permissions or I/O, and treating those as absence handed the
+           * POSIX `rename` below a destination it would silently replace —
+           * the one outcome this loop exists to prevent. An unreadable
+           * candidate is skipped like an occupied one. */
+          const code = (cause as { code?: string }).code
+          if (code !== 'ENOENT' && code !== 'ENOTDIR') continue
           found = true
           break
         }
@@ -320,7 +329,7 @@ export function nodeTextFs(root: string): FileSystem {
             'move the existing quarantines aside before this can continue.',
         )
       }
-      await rename(at(path), destination)
+      await rename(source, destination)
     },
   }
 }
@@ -335,8 +344,16 @@ async function syncDir(dir: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof open>>
   try {
     handle = await open(dir, 'r')
-  } catch {
-    return
+  } catch (cause) {
+    /* ONLY THE PLATFORM'S OWN REFUSALS ARE TOLERATED. Windows cannot open a
+     * directory as a file (`EPERM`/`EACCES`/`EISDIR`, engine-dependent), and
+     * that is what the header's "the rename is what it is there" covers. A
+     * blanket return also swallowed `EMFILE`, `ENFILE` and real I/O errors —
+     * reporting "durable" with the directory never opened, which is the
+     * silent-skip shape `writeAtomic`'s contract exists to refuse. */
+    const code = (cause as { code?: string }).code
+    if (code === 'EPERM' || code === 'EACCES' || code === 'EISDIR' || code === 'ENOTSUP' || code === 'EINVAL' || code === 'UNKNOWN') return
+    throw cause
   }
   try {
     await handle.sync()
@@ -363,8 +380,13 @@ async function syncDir(dir: string): Promise<void> {
  */
 export function nodeSizePort(root: string): SizePort {
   const bytesAt = async (path: string): Promise<number | null> => {
+    /* THE TRAVERSAL CHECK IS OUTSIDE THE CATCH. Inside it, a path that
+     * `under` refuses came back as `null` — "no bytes" — where every other
+     * host operation refuses out loud; a traversal is a caller defect, not a
+     * missing file. */
+    const full = under(root, path)
     try {
-      const info = await stat(under(root, path))
+      const info = await stat(full)
       return info.isFile() ? info.size : null
     } catch {
       return null
@@ -390,20 +412,12 @@ export function nodeSizePort(root: string): SizePort {
   })
   return {
     bytesAt,
-    contentBytes: async (bookId) => {
-      const folder = folderOf(bookId)
-      /* `CONTENT_EXTENSIONS` ORDER, and `content.locate` walks the same list
-       * to choose the `ext` it reports. A folder is not supposed to hold two
-       * content files, but it can — and when the two sides picked differently
-       * (this one by preference order, that one alphabetically) one answer
-       * named `azw3` and carried the epub's byte count. Two fields describing
-       * two files, in one answer about one book. */
-      for (const ext of CONTENT_EXTENSIONS) {
-        const size = await bytesAt(`${folder}/content.${ext}`)
-        if (size !== null) return size
-      }
-      return null
-    },
+    /* BOTH SHARED WALKS, not one. `contentBytes` was still a local copy of
+     * the `CONTENT_EXTENSIONS` loop `sizePortOver` already carries — the
+     * comment beside it claimed "a real difference" that no longer existed,
+     * which is exactly the drift the shared abstraction was bought to
+     * prevent (see the `libraryBytes` incident above). */
+    contentBytes: shared.contentBytes,
     libraryBytes: shared.libraryBytes,
   }
 }

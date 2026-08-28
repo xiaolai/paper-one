@@ -281,7 +281,7 @@ describe('the controller', () => {
    * establish that the ORIGINAL failure came back, only that something did.
    * Both halves now go where every other failure on this controller goes.
    */
-  it('reports a real install failure as degraded, resolves false, and says why', async () => {
+  it('reports a real install failure as the operation’s, resolves false, and says why', async () => {
     const events: { event: string; fields: Record<string, unknown> }[] = []
     const controller = createController(
       plugin({
@@ -292,11 +292,13 @@ describe('the controller', () => {
       (event, fields) => void events.push({ event, fields }),
     )
 
+    const runtimeBefore = controller.getSnapshot().runtime
     await expect(controller.install('qwen')).resolves.toBe(false)
-    expect(controller.getSnapshot().runtime).toEqual({
-      kind: 'degraded',
-      detail: 'The download did not verify — nothing was changed',
-    })
+    /* THE RUNTIME IS NOT THE THING THAT FAILED. This used to stamp `degraded`
+       on the runtime for a download whose bytes did not verify — the daemon
+       was fine, and the pane said it was not (audit-fix #289). `failure` is
+       the operation's field; the runtime stays what it was. */
+    expect(controller.getSnapshot().runtime).toEqual(runtimeBefore)
     /* THE READER IS TOLD. Before this the state changed and nothing on screen
        explained it, because the only channel was a rejection nobody caught. */
     expect(controller.getSnapshot().failure).toBe('The download did not verify — nothing was changed')
@@ -806,5 +808,85 @@ describe('reporting a failed refresh', () => {
     )
     await expect(controller.refresh()).resolves.toBeUndefined()
     controller.dispose()
+  })
+})
+
+describe('audit-fix round 1 — the controller', () => {
+  const ready: RuntimeStatus = { state: 'ready', port: 1, model: null } as unknown as RuntimeStatus
+  it('an older ensureReady that lands last does not overwrite the newer answer', async () => {
+    let answers: Array<(status: RuntimeStatus) => void> = []
+    const controller = createController(
+      plugin({
+        start: async () => 1,
+        status: () => new Promise<RuntimeStatus>((resolve) => void answers.push(resolve)),
+      }),
+    )
+    const first = controller.ensureReady()
+    const second = controller.ensureReady()
+    // Both have passed `start()` and are waiting on `status()` once the
+    // microtasks drain; the SECOND asked last and answers first, ready; the
+    // first then answers stopped.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(answers).toHaveLength(2)
+    answers[1]!(ready)
+    await second
+    answers[0]!({ state: 'stopped' } as unknown as RuntimeStatus)
+    await first
+    expect(controller.getSnapshot().runtime.kind).toBe('ready')
+  })
+
+  it('a finished install leaves the runtime as it was, and a failed one blames the operation', async () => {
+    const controller = createController(plugin({ installModel: async () => {} }))
+    await controller.refresh()
+    const before = controller.getSnapshot().runtime
+    await controller.install('qwen')
+    expect(controller.getSnapshot().runtime).toEqual(before)
+    const failing = createController(
+      plugin({
+        installModel: async () => {
+          throw { kind: 'digestMismatch', message: 'bad bytes' }
+        },
+      }),
+    )
+    await failing.refresh()
+    const was = failing.getSnapshot().runtime
+    await failing.install('qwen')
+    expect(failing.getSnapshot().failure).toMatch(/nothing was changed/)
+    expect(failing.getSnapshot().runtime).toEqual(was)
+  })
+
+  it('one removal at a time: a second Remove while the first runs is refused, not sent', async () => {
+    let finish!: () => void
+    let removals = 0
+    const controller = createController(
+      plugin({
+        removeModel: () =>
+          new Promise<void>((resolve) => {
+            removals += 1
+            finish = resolve
+          }),
+      }),
+    )
+    const first = controller.uninstall('qwen')
+    expect(controller.getSnapshot().removing).toBe('qwen')
+    expect(await controller.uninstall('qwen')).toBe(false)
+    expect(removals).toBe(1)
+    finish()
+    await first
+    expect(controller.getSnapshot().removing).toBeNull()
+  })
+
+  it('a reporter that throws does not turn an absorbed failure into a rejection', async () => {
+    const controller = createController(
+      plugin({
+        status: async () => {
+          throw new Error('daemon gone')
+        },
+      }),
+      () => {
+        throw new Error('the reporter is broken')
+      },
+    )
+    await expect(controller.refresh()).resolves.toBeUndefined()
   })
 })

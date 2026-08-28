@@ -46,8 +46,20 @@ export const SYNC_QUARANTINE_SETTING: Setting<Quarantine> = defineSetting('sync.
   const value = raw as Record<string, unknown>
   if (typeof value['peerId'] !== 'string') return undefined
   if (!Array.isArray(value['books']) || !value['books'].every((one) => typeof one === 'string')) return undefined
-  if (typeof value['dropped'] !== 'number' || !Number.isInteger(value['dropped']) || value['dropped'] < 0) return undefined
-  return { peerId: value['peerId'], books: [...(value['books'] as string[])].slice(-QUARANTINE_CAP), dropped: value['dropped'] }
+  if (typeof value['dropped'] !== 'number' || !Number.isSafeInteger(value['dropped']) || value['dropped'] < 0) return undefined
+  /* ONE ENTRY PER BOOK, newest kept — a duplicated id on disk meant two
+   * re-fetches and a repaired count of two for one book — and the cap
+   * applied WITH its count: a list past the cap was silently trimmed, which
+   * broke the file's own "dropped and counted" invariant. */
+  const seen = new Set<string>()
+  const books: string[] = []
+  for (const one of [...(value['books'] as string[])].reverse()) {
+    if (seen.has(one)) continue
+    seen.add(one)
+    books.unshift(one)
+  }
+  const over = Math.max(0, books.length - QUARANTINE_CAP)
+  return { peerId: value['peerId'], books: over > 0 ? books.slice(over) : books, dropped: value['dropped'] + over }
 })
 
 /** The list as it applies to ONE shelf: what was held for another peer is not

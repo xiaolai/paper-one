@@ -186,7 +186,12 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
    * what it expected — a caller debugging one is looking at a wire, and "the
    * book was corrupt" would send them to the shelf's disk instead.
    */
-  const collectOnce = async (bookId: string, from: number, body: Record<string, unknown>): Promise<Uint8Array[]> => {
+  const collectOnce = async (
+    bookId: string,
+    from: number,
+    body: Record<string, unknown>,
+    expect: string | undefined,
+  ): Promise<Uint8Array[]> => {
     const parts: Uint8Array[] = []
     let expected = from
     /* THE BACKSTOP for a shelf that could not measure the book — `fileOf`
@@ -194,7 +199,6 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
      * case where there is not. Counted as the bytes arrive, so it stops in the
      * middle rather than after. */
     let held = 0
-    const expect = hashes.get(bookId)
     for await (const page of channel.stream('content.read', {
       book: bookId,
       ...body,
@@ -215,16 +219,27 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
         if (chunk.bookId !== bookId) {
           throw new Error(`content.read: asked for ${bookId} and got a chunk of ${chunk.bookId}`)
         }
-        held += chunk.bytes.length
-        if (held > maxBytes) {
-          throw tooLarge(`${bookId}`, held, maxBytes)
-        }
         if (chunk.offset !== expected) {
           throw new Error(
             `content.read: ${bookId} is not contiguous — expected byte ${expected}, got ${chunk.offset}`,
           )
         }
         const bytes = bytesOf(chunk.bytes)
+        /* DECODED BYTES, not base64 characters. The count was taken off the
+         * wire string, which is four-thirds the payload, so a book was refused
+         * at three-quarters of the ceiling the ceiling names. */
+        held += bytes.length
+        if (held > maxBytes) {
+          throw tooLarge(`${bookId}`, held, maxBytes)
+        }
+        /* NO MORE THAN WAS ASKED. A range that keeps arriving past its
+         * `length` is a shelf disagreeing with the request; contiguity alone
+         * would assemble it, and pdf.js would be handed bytes for a range it
+         * never asked to read. */
+        const length = body['length']
+        if (typeof length === 'number' && held > length) {
+          throw new Error(`content.read: ${bookId} sent ${held} bytes for a range of ${length}`)
+        }
         parts.push(bytes)
         expected += bytes.length
       }
@@ -241,9 +256,16 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
    * link rather than hammering a socket that is gone.
    */
   const collect = async (bookId: string, from: number, body: Record<string, unknown>): Promise<Uint8Array[]> => {
+    /* THE HASH IS THE READ'S, captured once. Re-read from the map on each
+     * restart, a `locate` that ran while this read waited for its channel
+     * would have handed the restart the NEW book's hash — and a range read
+     * belonging to a document pdf.js opened against the OLD bytes would be
+     * served from the new ones. The read either finishes against the book it
+     * began with or is refused. */
+    const expect = hashes.get(bookId)
     for (let restarts = 0; ; restarts += 1) {
       try {
-        return await collectOnce(bookId, from, body)
+        return await collectOnce(bookId, from, body, expect)
       } catch (cause) {
         if (!isRetryable(cause) || restarts >= MAX_RESTARTS) throw cause
         await channel.whenOpen?.()
@@ -263,7 +285,10 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
     return {
       here: answer['here'] === true,
       ext: typeof answer['ext'] === 'string' ? answer['ext'] : null,
-      size: typeof answer['size'] === 'number' ? answer['size'] : null,
+      /* A BYTE COUNT OR NOTHING. This is handed to pdf.js as the document's
+       * length; a negative, fractional or non-finite number from a shelf that
+       * disagrees with itself is not a length the transport can work with. */
+      size: typeof answer['size'] === 'number' && Number.isSafeInteger(answer['size']) && answer['size'] >= 0 ? answer['size'] : null,
       contentHash,
     }
   }
@@ -277,8 +302,8 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
        * rather than as the caller's own mistake — and pdf.js asks for ranges
        * computed from a length this client supplied, so a bad one is this
        * side's bug to report. */
-      if (offset < 0 || length < 0) {
-        throw new Error(`content.read: offset and length must not be negative (${offset}, ${length})`)
+      if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0) {
+        throw new Error(`content.read: offset and length must be non-negative byte counts (${offset}, ${length})`)
       }
       if (length === 0) return new Uint8Array(0)
       return joined(await collect(bookId, offset, { offset, length }))

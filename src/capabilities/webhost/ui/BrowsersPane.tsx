@@ -85,7 +85,7 @@ function CopyButton({ value, label }: { readonly value: string; readonly label: 
  * browser reaching a plain-HTTP address takes the six digits, refuses to store
  * the credential, and returns to the code screen with nothing to say.
  */
-function AddressBlock({ address }: { readonly address: WebHostAddress | null }) {
+function AddressBlock({ address, port }: { readonly address: WebHostAddress | null; readonly port: number | null }) {
   if (address === null) return <div className={ui.hint}>Looking for an address…</div>
 
   switch (address.kind) {
@@ -167,8 +167,8 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
        * of its own to be in. */
       return (
         <div className={ui.hint}>
-          Not running — port 27182 was already in use when Paper started. Quit whatever holds it and
-          reopen Paper.
+          Not running — {port === null ? 'its port' : `port ${port}`} was already in use when Paper started. Quit
+          whatever holds it and reopen Paper.
         </div>
       )
   }
@@ -223,11 +223,30 @@ export interface BrowsersPaneProps {
   readonly pollMs?: number
 }
 
+/** One rendering of a failure, for the six places that used to spell it. */
+const messageOf = (thrown: unknown): string => (thrown instanceof Error ? thrown.message : String(thrown))
+
 export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
   const [address, setAddress] = useState<WebHostAddress | null>(null)
   const [offer, setOffer] = useState<CodeOffer | null>(null)
   const [remaining, setRemaining] = useState(0)
   const [browsers, setBrowsers] = useState<readonly Browser[]>([])
+  /* The port the plugin serves on, asked once — the `unavailable` sentence
+   * used to hard-code 27182, which is the Rust side's constant to change. */
+  const [port, setPort] = useState<number | null>(null)
+  /* Disables Show while the shelf is minting a code, so a second click cannot
+   * issue a second code whose answer may land before the first's — leaving
+   * the screen showing digits the shelf has already replaced. */
+  const [showing, setShowing] = useState(false)
+  /* Rows whose revocation is in flight: a second click on the same row used to
+   * start a second revocation, and its "no such browser" failure was shown
+   * over a first that had succeeded. */
+  const [revoking, setRevoking] = useState<ReadonlySet<number>>(() => new Set())
+  /* Set on unmount, read by anything that resolves after it. */
+  const disposed = useRef(false)
+  /* The newest request of each kind owns its answer — an older, slower one
+   * that lands last must not restore the state it saw. */
+  const requests = useRef({ show: 0, refresh: 0 })
   /* Disables Hide while the shelf is being asked, so a second click cannot
      start a second cancellation of the same code. */
   const [hiding, setHiding] = useState(false)
@@ -246,10 +265,30 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
    * one list that mattered for a security decision was the one that could not
    * express "this phone is still paired". */
   const refresh = useCallback(async () => {
+    const mine = ++requests.current.refresh
     try {
-      setBrowsers(await wire.browsers())
+      const next = await wire.browsers()
+      if (disposed.current || mine !== requests.current.refresh) return
+      setBrowsers(next)
     } catch (thrown) {
-      setProblem(thrown instanceof Error ? thrown.message : String(thrown))
+      if (disposed.current || mine !== requests.current.refresh) return
+      setProblem(messageOf(thrown))
+    }
+  }, [wire])
+
+  useEffect(() => {
+    let live = true
+    void wire
+      .status()
+      .then((status) => {
+        if (live) setPort(status.port)
+      })
+      .catch(() => {
+        /* The address effect below reports the plugin being unreachable; a
+           missing port number only softens one sentence. */
+      })
+    return () => {
+      live = false
     }
   }, [wire])
 
@@ -280,7 +319,7 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
         })
         .catch((thrown: unknown) => {
           if (!live) return
-          setProblem(thrown instanceof Error ? thrown.message : String(thrown))
+          setProblem(messageOf(thrown))
         })
     }
     ask()
@@ -322,15 +361,32 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
    * away means six digits nobody is watching are still good — the shelf cannot
    * know the screen is gone unless this says so. */
   useEffect(() => {
-    return () => void wire.cancelCode().catch(() => {})
+    return () => {
+      disposed.current = true
+      void wire.cancelCode().catch(() => {})
+    }
   }, [wire])
 
   const show = useCallback(async () => {
     setProblem(null)
+    setShowing(true)
+    const mine = ++requests.current.show
     try {
-      setOffer(await wire.beginCode())
+      const next = await wire.beginCode()
+      /* A CODE THAT ARRIVES AFTER THE PANE IS GONE IS TAKEN BACK. The unmount
+       * cancellation above fires at once; a `beginCode` still in flight then
+       * resolves with six digits the shelf holds live and nothing watches.
+       * The same for a code superseded by a later click. */
+      if (disposed.current || mine !== requests.current.show) {
+        void wire.cancelCode().catch(() => {})
+        return
+      }
+      setOffer(next)
     } catch (thrown) {
-      setProblem(thrown instanceof Error ? thrown.message : String(thrown))
+      if (disposed.current || mine !== requests.current.show) return
+      setProblem(messageOf(thrown))
+    } finally {
+      if (!disposed.current && mine === requests.current.show) setShowing(false)
     }
   }, [wire])
 
@@ -356,8 +412,7 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
       await wire.cancelCode()
       setOffer(null)
     } catch (thrown) {
-      const why = thrown instanceof Error ? thrown.message : String(thrown)
-      setProblem(`The code is still live — the shelf did not take it back: ${why}`)
+      setProblem(`The code is still live — the shelf did not take it back: ${messageOf(thrown)}`)
     } finally {
       setHiding(false)
     }
@@ -366,10 +421,19 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
   const revoke = useCallback(
     async (id: number) => {
       setProblem(null)
+      setRevoking((held) => new Set(held).add(id))
       try {
         await wire.revoke(id)
       } catch (thrown) {
-        setProblem(thrown instanceof Error ? thrown.message : String(thrown))
+        if (!disposed.current) setProblem(messageOf(thrown))
+      } finally {
+        if (!disposed.current) {
+          setRevoking((held) => {
+            const next = new Set(held)
+            next.delete(id)
+            return next
+          })
+        }
       }
       await refresh()
     },
@@ -387,8 +451,12 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
     setSignOutAll('busy')
     try {
       await wire.revokeAll()
+      /* The shelf retires the live code with everything else, so the digits
+       * on screen are dead: shown, they would count down over nothing. */
+      setOffer(null)
+      setRemaining(0)
     } catch (thrown) {
-      setProblem(thrown instanceof Error ? thrown.message : String(thrown))
+      setProblem(messageOf(thrown))
     } finally {
       setSignOutAll('idle')
     }
@@ -408,7 +476,7 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
         code. The books stay here — a browser reads them over the network and keeps none.
       </div>
 
-      <AddressBlock address={address} />
+      <AddressBlock address={address} port={port} />
 
       {offer === null ? (
         <div className={ui.actions}>
@@ -416,7 +484,7 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
             type="button"
             className={`${ui.button} ${ui.buttonPrimary}`}
             onClick={() => void show()}
-            disabled={unavailable}
+            disabled={unavailable || showing}
             data-disabled={unavailable ? 'true' : undefined}
           >
             Show code
@@ -479,6 +547,7 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
                 type="button"
                 className={`${ui.button} ${ui.buttonDanger}`}
                 onClick={() => void revoke(browser.id)}
+                disabled={revoking.has(browser.id)}
               >
                 Revoke
               </button>

@@ -108,13 +108,18 @@ export async function pdfRangeTransport(
        * is a count, so the conversion is here and stated. Off by one, this
        * drops the last byte of every range — which corrupts a cross-reference
        * table rather than raising, and presents as a PDF that "is broken". */
-      void content
-        .readRange(bookId, begin, end - begin)
-        .then((bytes) => {
+      /* TWO ARMS, NOT A CHAINED CATCH. A `.catch` after the `.then` also
+       * caught what `onDataRange` threw — a pdf.js listener's own defect —
+       * and reported it as the shelf's, ending the transport for a failure
+       * that was never a read's. The rejection arm below is the READ's only;
+       * a throw in delivery stays a loud, unattributed rejection, which is
+       * what it is. */
+      void content.readRange(bookId, begin, end - begin).then(
+        (bytes) => {
           if (this.stopped) return
           this.onDataRange(begin, bytes)
-        })
-        .catch((cause: unknown) => {
+        },
+        (cause: unknown) => {
           if (this.stopped) return
           /* LATCHED ONLY BY A FAILURE A RETRY CANNOT CHANGE (WI-20.30). A
            * dropped socket is retryable — the envelope says so now, and the
@@ -125,7 +130,8 @@ export async function pdfRangeTransport(
            * terminal and ends it as before; the reader is told either way. */
           if (!isRetryable(cause)) this.stopped = true
           options.onFailure(cause)
-        })
+        },
+      )
     }
 
     override abort(): void {

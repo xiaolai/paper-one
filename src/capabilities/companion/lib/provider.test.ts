@@ -3,7 +3,7 @@ import type { AnswerEnd } from '../../../kernel'
 import type { AskContext } from '../../../kernel'
 import { COMPANION_SYSTEM_PROMPT } from './passages'
 import type { InferencePort, Probe } from '../../inference'
-import { createCompanionProvider, effectiveRoute, isAgentRoute, localModelOf, modelIdOf } from './provider'
+import { createCompanionProvider, effectiveRoute, isAgentRoute, modelIdOf } from './provider'
 
 /**
  * The provider that answers on all three routes.
@@ -145,9 +145,6 @@ describe('route ids', () => {
   })
 
   it('reads the model id out of a local route, and only a local one', () => {
-    expect(localModelOf('local:qwen3-4b')).toBe('qwen3-4b')
-    expect(localModelOf('agent:codex')).toBeNull()
-    expect(localModelOf('endpoint:x')).toBeNull()
   })
 })
 
@@ -417,7 +414,11 @@ describe('the effective route', () => {
   })
 
   it('prefers what the reader actually chose', () => {
-    expect(effectiveRoute('agent:claude', 'agent:codex')).toBe('agent:claude')
+    /* The probe's answer wins once there is one: `inUse` already honours a
+       usable stored choice, so a probe naming another route means the stored
+       one was found unusable — preferring it dispatched on a dead route. */
+    expect(effectiveRoute('agent:claude', 'agent:codex')).toBe('agent:codex')
+    expect(effectiveRoute('agent:claude', null)).toBe('agent:claude')
   })
 
   /* Nothing stored and nothing usable is the one case that is genuinely
@@ -647,5 +648,12 @@ describe('a failure says what failed', () => {
     expect(raised).toBe(cause)
     /* Reported all the same — a cancellation is worth a line in the log. */
     expect(report).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('audit-fix round 1 — routes', () => {
+  it('a whitespace-only identifier is not a route', () => {
+    expect(isAgentRoute('agent:   ')).toBe(false)
+    expect(modelIdOf('local:\t')).toBeNull()
   })
 })

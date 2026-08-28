@@ -55,7 +55,12 @@ export const MAX_DELAY_MS = 30_000
  */
 export function retryDelay(attempt: number, random: () => number = Math.random): number {
   const raw = Math.min(MAX_DELAY_MS, BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1))
-  return raw * (0.75 + 0.5 * random())
+  /* THE CAP IS THE CAP, jitter included. Jittering after the clamp sent the
+   * late attempts to 37.5 s — a quarter past the "longest wait" the constant
+   * above promises — so the clamp is applied LAST. At the cap the jitter
+   * only reaches downward (22.5–30 s), which still spreads a houseful of
+   * phones; below it the band is the full quarter either way. */
+  return Math.min(MAX_DELAY_MS, raw * (0.75 + 0.5 * random()))
 }
 
 export type LinkState =
@@ -122,9 +127,27 @@ export function openLink(options: LinkOptions): ShelfLink {
   const closedListeners = new Set<(reason: ClosedReason) => void>()
   const waiters: { resolve: () => void; reject: (cause: unknown) => void }[] = []
 
+  /* A LISTENER THAT THROWS IS ITS OWN PROBLEM, said and contained. These run
+   * inside the link's own state machine — `schedule` publishes before its
+   * timer used to be able to arm, and `attemptOpen` publishes before waiters
+   * settle — so one throwing subscriber could end reconnection for good: the
+   * exception unwound `schedule` mid-flight and no attempt was ever timed
+   * again. The link owns no diagnostics (it outlives compositions), so the
+   * console is the honest channel here, as the web client's other last-resort
+   * reports already use. */
+  const guarded = (run: () => void): void => {
+    try {
+      run()
+    } catch (error) {
+      console.error('paper: a link listener threw', error)
+    }
+  }
+  const tell = <T>(fns: Iterable<(arg: T) => void>, arg: T): void => {
+    for (const fn of [...fns]) guarded(() => fn(arg))
+  }
   const publish = (next: LinkState) => {
     state = next
-    for (const fn of [...listeners]) fn()
+    for (const fn of [...listeners]) guarded(fn)
   }
   /* Read through a call, because TypeScript keeps a `let`'s narrowing across
    * an `await`, and `close()` runs in the gap. */
@@ -137,11 +160,16 @@ export function openLink(options: LinkOptions): ShelfLink {
 
   const schedule = (attempt: number, reason: ClosedReason | 'failed') => {
     const delay = retryDelay(attempt, random)
-    publish({ kind: 'waiting', attempt, retryAt: now() + delay, reason })
+    /* THE TIMER EXISTS BEFORE ANYBODY HEARS ABOUT THE WAIT. Published first,
+     * a subscriber reacting synchronously — a screen whose listener calls
+     * `retryNow()` — found `state.kind === 'waiting'` with no timer to clear:
+     * its attempt started, and the timer armed here afterwards started a
+     * SECOND one, whose epoch bump then cancelled the first mid-connect. */
     timer = setTimeout(() => {
       timer = undefined
       void attemptOpen(attempt + 1)
     }, delay)
+    publish({ kind: 'waiting', attempt, retryAt: now() + delay, reason })
   }
 
   const attemptOpen = async (attempt: number) => {
@@ -170,14 +198,23 @@ export function openLink(options: LinkOptions): ShelfLink {
        * link moved on, or was closed and closed it — is old news. */
       if (channel !== opened) return
       channel = null
-      for (const fn of [...closedListeners]) fn(reason)
+      tell(closedListeners, reason)
       if (closed()) return
       /* FROM ONE AGAIN. This channel was open, so the shelf was there a
        * moment ago; the first wait is the short one. */
       schedule(1, reason)
     })
+    /* A CHANNEL CAN BE DEAD ON SUBSCRIPTION. `channel.onClosed` invokes the
+     * callback SYNCHRONOUSLY for a socket that died between `connect`
+     * resolving and here — its own contract, so a late subscriber cannot wait
+     * forever on an event that already happened. That callback has then
+     * already nulled `channel` and scheduled the retry; publishing `open` on
+     * top of it would announce a channel that is gone, hand `openedListeners`
+     * a dead one, and resolve waiters into calls that can only fail. The
+     * scheduled attempt is in charge; this one bows out. */
+    if (channel !== opened) return
     publish({ kind: 'open', generation: current })
-    for (const fn of [...openedListeners]) fn(opened)
+    tell(openedListeners, opened)
     settleWaiters(null)
   }
 
@@ -208,6 +245,13 @@ export function openLink(options: LinkOptions): ShelfLink {
       const held = channel
       channel = null
       held?.close()
+      /* SUBSCRIBERS AT CLOSE TIME ARE TOLD, not merely later ones. `onClosed`
+       * already answers a listener added AFTER the close synchronously; the
+       * ones registered before it heard nothing at all — `held.close()` fires
+       * the underlying channel's callback, which the `channel !== opened`
+       * guard above rightly ignores, and the sets were cleared right after.
+       * Both roads now say `closed`. */
+      tell(closedListeners, 'closed')
       settleWaiters(noChannel('link', true))
       listeners.clear()
       openedListeners.clear()

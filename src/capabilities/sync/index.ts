@@ -75,6 +75,10 @@ let running: {
   /** The composition's (scoped) filesystem — carried here so an action that
    *  outlives a teardown cannot write through a NEWER runtime's handle. */
   readonly fs: KernelApi['services']['fs']
+  /** The kernel's queue and the book's lane on it — download-size bookkeeping
+   *  is ordered against eviction there (audit-fix #319). */
+  readonly writes: KernelApi['services']['writes']
+  readonly lane: (bookId: string) => string
 } | null = null
 let storageModel: StorageModel | null = null
 
@@ -173,7 +177,12 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
   try {
     return await task(channel)
   } finally {
-    await channel.close().catch(() => {})
+    /* Reported, not swallowed: a channel that would not close is a leaked
+     * session, and nothing else says so. The task's own result or error is
+     * what the caller sees either way. */
+    await channel.close().catch((thrown: unknown) => {
+      warn?.('sync.channel-close-failed', { message: thrown instanceof Error ? thrown.message : String(thrown) })
+    })
   }
 }
 
@@ -236,7 +245,10 @@ async function runDownload(bookId: string): Promise<void> {
         downloads.progress(bookId, received, total),
       )
       const fs = held.fs
-      if (fs) await recordDownloadSize(fs, bookId, size).catch(() => {})
+      /* ON THE BOOK'S LANE, so an eviction queued right behind the download
+       * cannot lose the race to this write and leave a size entry for bytes
+       * that are gone. `dropDownloadSize` queues on the same lane. */
+      if (fs) await held.writes.append(held.lane(bookId), () => recordDownloadSize(fs, bookId, size)).catch(() => {})
       /* The jacket, best-effort — a cover that will not come costs nothing. */
       await held.coverCache?.ensure(bookId).catch(() => {})
     })
@@ -254,10 +266,9 @@ async function removeDownloadAction(bookId: string): Promise<void> {
   if (!held) return
   await held.ledger.removeDownload(bookId)
   const fs = held.fs
-  if (fs) await dropDownloadSize(fs, bookId).catch(() => {})
+  if (fs) await held.writes.append(held.lane(bookId), () => dropDownloadSize(fs, bookId)).catch(() => {})
 }
 
-let servicesFs: KernelApi['services']['fs'] = null
 /* The journal HANDOFF: one journal's close must settle before the next
  * opens, or an overlapping restart's older close could delete the dirty
  * flag out from under the newer, live journal. */
@@ -546,7 +557,6 @@ export const sync: Capability = {
   async start(api: CapabilityContext, signal: AbortSignal): Promise<Disposable> {
     const services = api.services
     const settings = api.settings
-    servicesFs = services.fs
 
     /* Every torn-down resource has a slot below; `stop` reads them, so it can
      * run at ANY point — including a `start` that throws half-way — and undo
@@ -624,7 +634,6 @@ export const sync: Capability = {
        * a newer start's live runtime — the same rule peer's stop follows. */
       if (handlers === myHandlers) handlers = null
       if (running === myRunning) running = null
-      if (servicesFs === services.fs) servicesFs = null
       /* Restore the kernel's recorder and clock BEFORE the journal closes, so
        * no store write is ever delegated into a journal that is shutting down
        * — the whole point of an unbind-able bind. */
@@ -827,7 +836,7 @@ export const sync: Capability = {
          * (WI-10.2/10.5); the scoped fs cannot reach a book's folder. */
         removeBlob: (book, name) => services.removeBlob(book, name),
       })
-      myRunning = { port, ledger, shelfPeer, shelfName, titleOf, coverCache, fs }
+      myRunning = { port, ledger, shelfPeer, shelfName, titleOf, coverCache, fs, writes: services.writes, lane: services.library.lane }
       running = myRunning
       myStorageModel = createStorageModel({
         services,
@@ -903,12 +912,21 @@ export const sync: Capability = {
               })
             })
         }
-        unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', lastSyncAt: Date.now() }))
+        /* `detail: null` with the state: a degraded sentence left from before
+         * would otherwise stand under a green `ok`. */
+        unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', detail: null, lastSyncAt: Date.now() }))
       } else {
         const run = async (): Promise<void> => {
+          /* OWNED BY THIS RUNTIME: a session in flight through a teardown —
+           * or across a restart — used to go on writing `syncStatus`, a
+           * module slot, over the runtime that replaced it. The capture is
+           * the same rule `withShelf` follows; after the await, a run whose
+           * runtime is gone says nothing. */
+          const owner = running
           syncStatus.set({ state: 'syncing', detail: null })
           try {
             const summary = await withShelf((channel) => ledger.runSession(channel))
+            if (running !== owner) return
             /* A session that FINISHED with something refused is `ok` — the
                rest of the library moved — with the refusal in the detail, so
                the reader is told which book rather than shown a green line
@@ -931,6 +949,7 @@ export const sync: Capability = {
               kind: refusalKind(thrown),
               message: thrown instanceof Error ? thrown.message : String(thrown),
             })
+            if (running !== owner) return
             await degrade(thrown)
           }
         }
@@ -987,7 +1006,14 @@ export const sync: Capability = {
       const backfillTick = async (): Promise<void> => {
         await restThenBreathe(BACKFILL_REST_MS, BACKFILL_IDLE_CEILING_MS)
         if (stopped) return
-        const stamped = await backfill.runOnce().catch(() => 0)
+        /* A failure is NOT "nothing left to stamp": it used to read as zero —
+         * the completion signal — and one unexpected throw ended the backfill
+         * for the rest of the process with nothing anywhere saying so. Ended
+         * still (a retry policy is its own decision), but loudly. */
+        const stamped = await backfill.runOnce().catch((thrown: unknown) => {
+          api.diagnostics.warn('sync.backfill-failed', { message: thrown instanceof Error ? thrown.message : String(thrown) })
+          return 0
+        })
         if (!stopped && stamped > 0) void backfillTick()
       }
       backfillTimer = setTimeout(() => void backfillTick(), 0)
@@ -1118,13 +1144,25 @@ export async function openLocalJournal({ services }: LocalJournalOptions): Promi
     unbindClock.dispose()
     throw error
   }
-  const unbindRecorder = services.bindRecorder(journal)
+  let unbindRecorder: { dispose: () => void }
+  try {
+    unbindRecorder = services.bindRecorder(journal)
+  } catch (error) {
+    /* A bind that throws — the recorder is already bound — must not leave an
+     * open journal and a held clock behind it. */
+    await journal.close().catch(() => {})
+    unbindClock.dispose()
+    throw error
+  }
   return {
     close: async () => {
+      /* THE APP'S ORDER (`start`'s teardown): restore the kernel's recorder
+       * BEFORE the journal closes, so no store write is delegated into a
+       * journal that is draining. This did the opposite. */
+      unbindRecorder.dispose()
       try {
         await journal.close()
       } finally {
-        unbindRecorder.dispose()
         unbindClock.dispose()
       }
     },

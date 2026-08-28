@@ -104,7 +104,13 @@ export function usageOf(descriptor: ServiceDescriptor): string {
 
 /** Everything `paper` can do, by noun. */
 export function overview(): string {
-  const lines = ['paper <noun> <verb> [arguments] [--json]', '', 'Nouns:']
+  /* THE GLOBAL OPTIONS, from the one list the parser honours — the usage
+   * line named `[--json]` alone and left `--shelf <key>` for the reader to
+   * discover by reading source. */
+  const globals = GLOBAL_FLAGS.filter((flag) => flag !== '--help' && flag !== '-h')
+    .map((flag) => (flag === '--shelf' ? '[--shelf <key>]' : `[${flag}]`))
+    .join(' ')
+  const lines = [`paper <noun> <verb> [arguments] ${globals}`, '', 'Nouns:']
   for (const noun of SERVICE_NOUNS) {
     lines.push(`  ${noun.padEnd(8)} ${servicesOn(noun).map((one) => one.verb).join(' · ')}`)
   }
@@ -186,6 +192,11 @@ function coerce(field: ServiceField, raw: string): { value: unknown } | { error:
        * Empty segments are dropped: `--book a,,b` is two books. */
       {
         const parts = raw.split(',').map((one) => one.trim()).filter((one) => one !== '')
+        /* NOTHING BUT SEPARATORS IS NOT A LIST. `--book ,` became `book: []`,
+         * which satisfied the required-field check below and reached the
+         * handler as an empty list — refused there, later, in the service's
+         * words rather than beside the usage line where the typo is. */
+        if (parts.length === 0) return { error: `--${field.name} needs at least one value, not ${JSON.stringify(raw)}` }
         const bad = parts.find((one) => field.choices && !field.choices.includes(one))
         return bad === undefined ? { value: parts } : (outside(bad) as { error: string })
       }
@@ -321,7 +332,13 @@ function readBody(descriptor: ServiceDescriptor, words: readonly string[], json:
     }
     if (negated) {
       if (field.type !== 'boolean') {
-        return { kind: 'error', message: `--no-${name} is only for flags, and --${name} takes a ${field.type}` }
+        return {
+          kind: 'error',
+          message: `--no-${name} is only for flags, and --${name} takes a ${field.type}`,
+          /* WITH THE USAGE, like every other refusal of a service argument —
+           * this one alone sent the caller away without it. */
+          text: serviceHelp(descriptor),
+        }
       }
       body[name] = false
       continue

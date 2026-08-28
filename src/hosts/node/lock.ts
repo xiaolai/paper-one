@@ -162,7 +162,15 @@ export function ownStartedAt(now: number = Date.now()): number {
 export function processStartedAt(pid: number, now: number = Date.now()): number | null {
   if (process.platform === 'win32') return null
   try {
-    const out = execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    /* BOUNDED, because this runs inside the acquisition poll: a `ps` that
+     * hangs (a wedged process table has been seen) would otherwise stall the
+     * whole wait with no deadline of its own. A timeout answers null, and
+     * null refutes nothing — the safe direction. */
+    const out = execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    })
     const elapsed = parseElapsed(out.trim())
     return elapsed === null ? null : now - elapsed * 1000
   } catch {
@@ -183,7 +191,15 @@ async function readOwner(path: string): Promise<LockOwner | null> {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
     if (typeof parsed !== 'object' || parsed === null) return null
     const one = parsed as Record<string, unknown>
-    if (typeof one['pid'] !== 'number' || typeof one['host'] !== 'string') return null
+    /* A PID THAT COULD NOT HAVE BEEN WRITTEN IS NOT A RECORD. Every writer
+     * records its own `process.pid` — a positive integer — so a fractional,
+     * negative or non-finite value is corruption wearing a record's shape.
+     * Accepted, it flowed to `kill()`, which throws on such input, and the
+     * "gone holder" reading RECLAIMED the file — junk must land on the safe
+     * side instead: held by somebody unnameable, like every other unreadable
+     * lock. */
+    if (typeof one['pid'] !== 'number' || !Number.isSafeInteger(one['pid']) || one['pid'] <= 0) return null
+    if (typeof one['host'] !== 'string') return null
     return {
       pid: one['pid'],
       host: one['host'],
@@ -227,8 +243,14 @@ async function isEmpty(path: string): Promise<boolean> {
  */
 export async function acquireDataLock(dir: string, options: LockOptions = {}): Promise<DataLock> {
   const path = join(dir, LOCK_FILE)
-  const waitMs = options.waitMs ?? DEFAULT_WAIT_MS
-  const pollMs = options.pollMs ?? DEFAULT_POLL_MS
+  /* SANITISED, NOT TRUSTED. `waitMs: NaN` makes the deadline test below false
+   * forever, and `sleep(NaN)` resolves immediately — an infinite hot loop
+   * from one bad option. Non-finite or negative values take the default;
+   * zero stays zero (one attempt, no wait), which is a meaning callers use. */
+  const sane = (value: number | undefined, fallback: number): number =>
+    value !== undefined && Number.isFinite(value) && value >= 0 ? value : fallback
+  const waitMs = sane(options.waitMs, DEFAULT_WAIT_MS)
+  const pollMs = sane(options.pollMs, DEFAULT_POLL_MS)
   const now = options.now ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const alive = options.alive ?? livePid
@@ -343,7 +365,15 @@ export async function acquireDataLock(dir: string, options: LockOptions = {}): P
          *
          * If it declines, the file stays under its `.stale-<token>` name:
          * evidence, and named for the process that moved it, rather than
-         * deleted. */
+         * deleted.
+         *
+         * SAID PLAINLY, because it is the protocol's one residual: when the
+         * restore declines — a THIRD writer published into the gap — the
+         * second writer's live lock is the file left aside, and that writer
+         * still believes it holds. Three writers interleaved inside a
+         * few-syscalls window behind a crash, on a filesystem with no
+         * compare-and-swap to close it; `lock.rs` carries the identical
+         * residual, deliberately, because it is one protocol. */
         try {
           await link(aside, path)
           await rm(aside, { force: true }).catch(() => {})

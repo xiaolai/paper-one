@@ -168,3 +168,61 @@ describe('the port over two linked fake wires', () => {
     expect(peer).not.toBeNull()
   })
 })
+
+describe('audit-fix round 1 — the port and the wire’s listeners', () => {
+  it('does not dial until every listener has attached, and a registration that failed refuses the dial', async () => {
+    /* `listen` registers asynchronously while the wire's subscriptions are
+       synchronous; a session that opened into an unattached listener was a
+       peer that looked silent. */
+    const { shelf, satchel } = linkedWires()
+    const shelfPort = createPeerPort(shelf)
+    await shelfPort.serve([])
+    const order: string[] = []
+    let attach!: () => void
+    const attached = new Promise<void>((resolve) => {
+      attach = resolve
+    })
+    const slow: typeof satchel = Object.assign(Object.create(Object.getPrototypeOf(satchel)), satchel, {
+      whenListening: async () => {
+        order.push('whenListening')
+        await attached
+      },
+      connect: async (peerId: string, hello?: unknown) => {
+        order.push('connect')
+        return satchel.connect(peerId, hello)
+      },
+    })
+    const dialing = createPeerPort(slow).connect(shelf.id)
+    await new Promise<void>((resolve) => setTimeout(resolve, 5))
+    expect(order).toEqual(['whenListening'])
+    attach()
+    const channel = await dialing
+    expect(order).toEqual(['whenListening', 'connect'])
+    await channel.close()
+
+    const broken: typeof satchel = Object.assign(Object.create(Object.getPrototypeOf(satchel)), satchel, {
+      whenListening: async () => {
+        throw new Error('listen refused: event system gone')
+      },
+    })
+    await expect(createPeerPort(broken).connect(shelf.id)).rejects.toThrow(/listen refused/)
+  })
+
+  it('replays a close that happened during the dial to a listener registered afterwards', async () => {
+    const { shelf, satchel } = linkedWires()
+    await createPeerPort(shelf).serve([])
+    /* The peer closes the session the moment it is dialed — before the
+       caller has the channel, and before it could have subscribed. */
+    const flighty: typeof satchel = Object.assign(Object.create(Object.getPrototypeOf(satchel)), satchel, {
+      connect: async (peerId: string, hello?: unknown) => {
+        const id = await satchel.connect(peerId, hello)
+        await satchel.close(id)
+        return id
+      },
+    })
+    const channel = await createPeerPort(flighty).connect(shelf.id)
+    const reasons: string[] = []
+    channel.onClosed((reason) => reasons.push(reason))
+    expect(reasons).toHaveLength(1)
+  })
+})

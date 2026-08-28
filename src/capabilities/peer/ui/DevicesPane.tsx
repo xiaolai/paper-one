@@ -46,7 +46,19 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
      saying "Copied" about an invite the reader has not copied. */
   const [copiedFor, setCopiedFor] = useState<string | null>(null)
   const copied = copiedFor !== null && copiedFor === snapshot.offer?.url
-  const setCopied = (ok: boolean) => setCopiedFor(ok ? (snapshot.offer?.url ?? null) : null)
+  /* A failed copy is SAID — the reader was about to paste an empty clipboard
+     into the other device — and, like the success, it belongs to one offer. */
+  const [copyFailedFor, setCopyFailedFor] = useState<string | null>(null)
+  const copyFailed = copyFailedFor !== null && copyFailedFor === snapshot.offer?.url
+  const setCopied = (outcome: 'yes' | 'failed') => {
+    const url = snapshot.offer?.url ?? null
+    setCopiedFor(outcome === 'yes' ? url : null)
+    setCopyFailedFor(outcome === 'failed' ? url : null)
+  }
+  /* One role write at a time, and one grant edit per peer at a time — the
+     controls wait for their own write (audit-fix #310, #312). */
+  const [settingRole, setSettingRole] = useState(false)
+  const [updatingGrants, setUpdatingGrants] = useState<ReadonlySet<string>>(() => new Set())
 
   if (!snapshot.available) {
     /* INSIDE A SECTION, like every other state this pane can be in. The
@@ -74,7 +86,7 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
           Offered only while nothing is paired: changing sides afterwards means
           reconciling a whole library against a metadata-only one, which is a
           migration and not a toggle. Revoking every device offers it again. */}
-      {roleIsSettable(snapshot.peers) && (
+      {snapshot.peersLoaded && roleIsSettable(snapshot.peers) && (
         <>
           <div className={ui.row}>
             <span className={ui.grow}>Where do your books live?</span>
@@ -86,7 +98,13 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
                 type="button"
                 className={`${ui.button}${snapshot.role === choice.role ? ` ${ui.buttonPrimary}` : ''}`}
                 aria-pressed={snapshot.role === choice.role}
-                onClick={() => void model.setRole(choice.role)}
+                disabled={settingRole}
+                onClick={() => {
+                  /* One write at a time: two quick clicks used to start two
+                     durable writes whose completion order chose the role. */
+                  setSettingRole(true)
+                  void model.setRole(choice.role).finally(() => setSettingRole(false))
+                }}
               >
                 {choice.label}
               </button>
@@ -138,12 +156,14 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
               className={`${ui.button} ${ui.buttonPrimary}`}
               onClick={() => {
                 void navigator.clipboard.writeText(snapshot.offer!.url).then(
-                  () => setCopied(true),
-                  () => setCopied(false),
+                  () => setCopied('yes'),
+                  /* Said, not swallowed: the reader was about to paste an empty
+                     clipboard into the other device. */
+                  () => setCopied('failed'),
                 )
               }}
             >
-              {copied ? 'Copied' : 'Copy invite code'}
+              {copyFailed ? 'Couldn’t copy — select the code instead' : copied ? 'Copied' : 'Copy invite code'}
             </button>
             <button type="button" className={ui.button} onClick={() => void model.cancelPairing()}>
               Cancel
@@ -174,8 +194,13 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
             className={ui.row}
             onSubmit={(event) => {
               event.preventDefault()
-              if (code.trim()) void model.pairWithCode(code)
-              setCode('')
+              if (!code.trim()) return
+              /* Cleared only once the pairing has begun without an error: a
+                 long code the reader typed used to vanish on a failure, with
+                 no way to correct one character and try again. */
+              void model.pairWithCode(code).then(() => {
+                if (model.getSnapshot().error === null) setCode('')
+              })
             }}
           >
             <input
@@ -261,7 +286,18 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
                   type="checkbox"
                   className={ui.toggle}
                   checked={peerCanWrite(peer.grants)}
-                  onChange={(event) => void model.setPeerCanWrite(peer.id, event.target.checked)}
+                  disabled={updatingGrants.has(peer.id)}
+                  onChange={(event) => {
+                    const next = event.target.checked
+                    setUpdatingGrants((held: ReadonlySet<string>) => new Set(held).add(peer.id))
+                    void model.setPeerCanWrite(peer.id, next).finally(() =>
+                      setUpdatingGrants((held: ReadonlySet<string>) => {
+                        const rest = new Set(held)
+                        rest.delete(peer.id)
+                        return rest
+                      }),
+                    )
+                  }}
                 />
               </label>
             )}

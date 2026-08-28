@@ -469,3 +469,16 @@ describe('the endpoints store', () => {
     expect(after, 'a read landing after dispose notified a torn-down pane').toBe(0)
   })
 })
+
+describe('audit-fix round 1 — a base URL is a host, measured in bytes', () => {
+  it('refuses a malformed host the old character class let through', () => {
+    for (const bad of ['https://a:99999', 'https://a..b', 'https://-host', 'https://host-.example']) {
+      expect(validBaseUrl(bad), bad).toBe(false)
+    }
+    expect(validBaseUrl('https://api.example.com:8443/v1')).toBe(true)
+  })
+  it('bounds the length in UTF-8 bytes, as the crate does', () => {
+    const long = `https://${'é'.repeat(1200)}.example`
+    expect(validBaseUrl(long)).toBe(false)
+  })
+})

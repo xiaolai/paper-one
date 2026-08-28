@@ -1,5 +1,5 @@
 import type { AnswerEnd, AskContext, CompanionProvider } from '../../../kernel'
-import { detailFor, errorKind, type Depth, type InferencePort } from '../../inference'
+import { detailFor, errorKind, messageOf, type Depth, type InferencePort } from '../../inference'
 import {
   COMPANION_SYSTEM_PROMPT,
   buildAgentTurn,
@@ -77,7 +77,9 @@ export function parseRoute(route: string): ParsedRoute | null {
   const id = route.slice(at + 1)
   /* An empty identifier is not a route. `agent:` names no agent and
      `endpoint:` asks the daemon for a model called the empty string. */
-  if (id === '' || !ROUTE_KINDS.has(kind)) return null
+  /* Trimmed before the emptiness test: `local:   ` is no more a route than
+     `local:`, and it used to dispatch a model id of spaces. */
+  if (id.trim() === '' || !ROUTE_KINDS.has(kind)) return null
   return { kind: kind as RouteKindName, id }
 }
 
@@ -109,37 +111,6 @@ export interface CompanionProviderOptions {
   readonly report?: ((event: string, fields: Record<string, unknown>) => void) | undefined
 }
 
-/**
- * Whatever text a rejection carries, from either shape it arrives in.
- *
- * The twin of `glossProvider`'s: a plugin rejection is `{ kind, message }`, a
- * plain object, so `String(cause)` gives `[object Object]` and the `Error`
- * branch alone misses it. Private here because `companion` reaches
- * `inference` only through its barrel, and a six-line reader of the plugin's
- * shape is not worth a barrel export.
- */
-function messageOf(cause: unknown): string {
-  if (cause instanceof Error) return cause.message
-  if (typeof cause === 'object' && cause !== null) {
-    const { message } = cause as { message?: unknown }
-    if (typeof message === 'string') return message
-  }
-  return String(cause)
-}
-
-/**
- * The provider this capability binds.
- *
- * ⚠️ IT HAD A `lastPassages()` ACCESSOR AND NOTHING CALLED IT. Its contract
- * was "the most recent answer's table", which is provider-wide mutable state
- * shared by every concurrent ask — the exact shape of the defect that made two
- * overlapping questions resolve each other's citations, and the reason the
- * table each answer is numbered against is now held locally. Keeping a public
- * reader for the floating value would have invited the same bug back through
- * the front door, and no caller wanted it.
- */
-export type BoundCompanionProvider = CompanionProvider
-
 /** Whether a route id names an agent rather than the local runtime. */
 export function isAgentRoute(route: string): boolean {
   return parseRoute(route)?.kind === 'agent'
@@ -160,18 +131,18 @@ export function isAgentRoute(route: string): boolean {
  * asserted: the getter that got this wrong was an inline closure nothing could
  * reach.
  */
-export function effectiveRoute(stored: string, fallback: string | null): RouteId | null {
-  /* PARSED, NOT MERELY NON-EMPTY. A stored value is whatever a previous build
-     — or a hand-edited settings file — left there, and a shape this does not
-     recognise must fall back rather than be dispatched on. */
+export function effectiveRoute(stored: string, probed: string | null): RouteId | null {
+  /* THE PROBE'S ANSWER, ONCE THERE IS ONE. `probed` is the routes model's
+     `inUse`, which already honours the stored choice when it is usable and
+     names the fallback when it is not — so preferring the raw stored value
+     over it re-selected exactly the route the probe had found unusable, and
+     the Settings row said one thing while the provider dispatched another.
+     Before the probe answers, the stored choice stands. PARSED, NOT MERELY
+     NON-EMPTY: a stored value is whatever a previous build — or a hand-edited
+     settings file — left there. */
+  if (probed !== null && parseRoute(probed) !== null) return probed as RouteId
   if (stored !== '' && parseRoute(stored) !== null) return stored as RouteId
-  return fallback !== null && parseRoute(fallback) !== null ? (fallback as RouteId) : null
-}
-
-/** The model id inside a `local:` route. */
-export function localModelOf(route: string): string | null {
-  const parsed = parseRoute(route)
-  return parsed?.kind === 'local' ? parsed.id : null
+  return null
 }
 
 /**
@@ -212,7 +183,7 @@ export function createCompanionProvider({
   route,
   depth,
   report,
-}: CompanionProviderOptions): BoundCompanionProvider {
+}: CompanionProviderOptions): CompanionProvider {
   /**
    * What a failed answer raises — WI-20.18, and the mirror of `glossProvider`'s
    * catch, branch for branch.
@@ -235,7 +206,13 @@ export function createCompanionProvider({
    */
   const failure = (cause: unknown, chosen: string, signal: AbortSignal): unknown => {
     const kind = errorKind(cause)
-    report?.('companion.answer-failed', { kind, route: chosen, message: messageOf(cause) })
+    /* The reporter is a courtesy to the log; one that throws must not replace
+       the failure the reader is about to be shown. */
+    try {
+      report?.('companion.answer-failed', { kind, route: chosen, message: messageOf(cause) })
+    } catch (again) {
+      console.error('companion: the failure reporter itself threw', again)
+    }
     /* THE READER'S OWN ABORT, and only when it really was one. `cancelled`
        also arrives when the DAEMON cancels — it does so on stop — with a
        signal nobody aborted, and passing that through would show the reader
@@ -299,8 +276,11 @@ export function createCompanionProvider({
          cancellation contract held for a local model and silently did not for
          a subscription route — the one where abandoning an answer actually
          costs the reader something. */
+      /* Parsed ONCE: the agent test and the model-id read each reparsed the
+         route, and validation sat apart from dispatch. */
+      const parsed = parseRoute(chosen)
       const deltas = streamed<string>((push) =>
-        isAgentRoute(chosen)
+        parsed?.kind === 'agent'
           ? port.agentAsk(chosen, buildAgentTurn(prompt), depth(), push, signal)
           : port.generate(requireModelId(chosen), COMPANION_SYSTEM_PROMPT, prompt, push, signal),
       )

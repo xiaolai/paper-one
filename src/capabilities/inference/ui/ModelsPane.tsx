@@ -35,7 +35,10 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
   }, [model])
 
   const { runtime } = snapshot
-  const busy = snapshot.installing !== null
+  /* Any operation on the store — an install OR a removal — holds the
+     controls; `busy` tracked installs only, so a double-click on Remove
+     started a second removal the daemon refused. */
+  const busy = snapshot.installing !== null || snapshot.removing !== null
 
   return (
     <div className={ui.section}>
@@ -131,15 +134,11 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
         </div>
       ) : null}
 
-      <div className={ui.row}>
-        <span className={ui.grow}>Keep model loaded</span>
-        <input
-          type="checkbox"
-          className={ui.toggle}
-          checked={snapshot.keepLoaded}
-          onChange={(event) => model.setKeepLoaded(event.currentTarget.checked)}
-        />
-      </div>
+      {/* "KEEP MODEL LOADED" IS GONE, NOT HIDDEN. The checkbox persisted a
+          setting that nothing read — no spawn flag, no daemon config, no
+          unload policy consumed it — so it was a control that did nothing
+          and said otherwise. It comes back with its consumer, as a `<label>`
+          so the text toggles it and a screen reader can name it. */}
       <div className={ui.hint}>
         Off frees the memory a few minutes after you stop asking.
       </div>
