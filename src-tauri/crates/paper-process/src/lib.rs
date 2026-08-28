@@ -256,6 +256,25 @@ mod platform {
     }
 }
 
+/* ⚠️ **THERE ARE THREE `platform` MODULES AND EVERY PUBLIC FUNCTION NEEDS AN
+ARM IN ALL THREE.** `is_zombie` was added to macOS and Linux and not here,
+which no amount of building or testing on this project's own machines could
+catch — `cargo check` compiles one target, and the two that had the arm were
+the two anyone ran. It failed on the Windows CI leg, one step after the
+entire JS suite had gone green there for the first time.
+
+IT IS CHECKABLE FROM ANY OF THEM, in under a second, and `check` needs no
+linker for a crate with no native build script:
+
+    rustup target add x86_64-pc-windows-msvc x86_64-unknown-linux-gnu
+    cargo check -p paper-process --target x86_64-pc-windows-msvc
+    cargo check -p paper-process --target x86_64-unknown-linux-gnu
+
+Not in `pnpm verify`, deliberately: a fresh clone has neither target
+installed, and a gate that fails on a missing toolchain teaches people to
+skip it. The whole workspace cannot be cross-checked either way — `ring` and
+`aws-lc-sys` run native build scripts — but this crate has none, which is
+exactly why the platform arms live here. */
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod platform {
     // No lookup: the answer is "cannot say", and a caller must not read
@@ -265,6 +284,15 @@ mod platform {
         None
     }
     pub fn booted_at_ms() -> Option<u64> {
+        None
+    }
+    /* NEITHER THE CONCEPT NOR A WAY TO ASK. A zombie is a POSIX state — a
+    process that has exited and whose parent has not reaped it — and Windows
+    has no equivalent: a handle keeps the object, but the pid stops being
+    resolvable. `None` is "cannot say", and `alive` reads that as
+    unrefuted, which is the fail-closed direction the module note above and
+    `lock.rs` both take here. */
+    pub fn is_zombie(_pid: u32) -> Option<bool> {
         None
     }
 }
