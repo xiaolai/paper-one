@@ -222,10 +222,30 @@ describe('the reader agrees with unzip', () => {
     ['OEBPS/text/one.xhtml', '<p>one</p>\n'.repeat(40)],
     ['OEBPS/text/two.xhtml', '<p>two</p>\n'.repeat(40)],
   ]
-  const noUnzip = () => spawnSync('unzip', ['-v']).error !== undefined
   let book
+  let why = null
   beforeAll(() => {
     book = archive(writeDeflatedZip(BOOK))
+    /* ⚠️ **NOT EVERY `unzip` HAS THE WILDCARD THIS COMPARES AGAINST**, and
+       that is a finding rather than an inconvenience. Info-ZIP can be built
+       with `WILD_STOP_AT_DIR`, which makes `*` stop at `/` — the behaviour its
+       `-W` flag selects elsewhere — and the Windows build on GitHub's runners
+       is one of those. Asked for `*.css` against a book whose stylesheets are
+       under `OEBPS/styles/`, it matches NOTHING and exits 11, where the macOS
+       and Linux builds write both files.
+       So the tool this module replaces does not agree with ITSELF across
+       platforms, which is worth knowing: it is a second reason the replacement
+       was the right move, and it means "agrees with unzip" can only be checked
+       where unzip has the semantics being compared. Probed rather than keyed
+       to a platform name — a Linux box carrying a `WILD_STOP_AT_DIR` build
+       should skip too, and a Windows box carrying an ordinary one should
+       run. */
+    if (spawnSync('unzip', ['-v']).error !== undefined) {
+      why = 'unzip is not installed here'
+      return
+    }
+    const probe = spawnSync('unzip', ['-p', book, '*.css'], { maxBuffer: 1024 * 1024 })
+    if (probe.stdout.length === 0) why = "this unzip is built with WILD_STOP_AT_DIR — its `*` does not cross `/`"
   })
 
   it('answers exactly what `unzip -p` writes, for every shape of pattern', ({ skip }) => {
@@ -233,7 +253,7 @@ describe('the reader agrees with unzip', () => {
        not receive the test context in this version, so `{ skip }` came through
        undefined and the run-time skip could not be written. A loop keeps one
        collected name and still names the pattern set that disagreed. */
-    if (noUnzip()) skip('unzip is not installed here')
+    if (why !== null) skip(why)
     for (const patterns of [['*.css'], ['*.opf'], ['*.xhtml', '*.html', '*.htm'], ['*.nosuchthing'], ['mimetype', '*.css']]) {
       const theirs = spawnSync('unzip', ['-p', book, ...patterns], { maxBuffer: 64 * 1024 * 1024 })
       const mine = readMatching(book, patterns)
@@ -243,7 +263,7 @@ describe('the reader agrees with unzip', () => {
   })
 
   it('agrees on the case where unzip writes every member AND reports failure', ({ skip }) => {
-    if (noUnzip()) skip('unzip is not installed here')
+    if (why !== null) skip(why)
     /* The exit-11 trap, reproduced rather than described: two patterns, one of
        which matches nothing. `unzip` writes both stylesheets and exits 11, so
        a caller reading the STATUS concludes the book has no CSS. Reading the
@@ -263,7 +283,7 @@ describe('the reader agrees with unzip', () => {
      clean checkout — which is why it is an EXTRA case and not the basis of the
      ones above. */
   it('agrees with unzip on a real book, where the machine has one', ({ skip }) => {
-    if (noUnzip()) skip('unzip is not installed here')
+    if (why !== null) skip(why)
     const real = path.join(REPO_ROOT, 'public', 'sample.epub')
     if (!existsSync(real)) skip('no sample.epub in this checkout — it is gitignored')
     for (const patterns of [['*.css'], ['*.opf'], ['*.xhtml', '*.html', '*.htm']]) {

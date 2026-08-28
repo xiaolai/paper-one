@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { fileURLToPath } from 'node:url'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   CRUISE_TIMEOUT_MS,
   DEPCRUISE,
@@ -205,6 +206,23 @@ describe('the rule list and the case list', () => {
  * pinned here rather than left to the platform that already agrees.
  */
 describe('the cruiser is spawned in a way all three platforms can', () => {
+  /* REMOVED AFTERWARDS, AND NEVER FATALLY. Windows keeps a handle on a
+     directory while anything is using it and releases it on its own schedule,
+     so a removal racing a just-killed child fails `EPERM`. A leftover
+     temporary directory is free; a red gate over one is not. */
+  /* A directory nothing here deletes, so the child may hold it open freely. */
+  const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
+  const scratch = []
+  afterAll(() => {
+    for (const dir of scratch.splice(0)) {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        /* The OS will have it. */
+      }
+    }
+  })
+
   it('runs the package entry through node, never the .bin shim', () => {
     /* pnpm writes an EXTENSIONLESS shell script at `node_modules/.bin/depcruise`
        beside the `.CMD`. `existsSync` finds it and `spawn` cannot execute it on
@@ -232,9 +250,21 @@ describe('the cruiser is spawned in a way all three platforms can', () => {
     const never = path.join(dir, 'never-answers.mjs')
     writeFileSync(never, 'setTimeout(() => {}, 60_000)\n')
     const started = Date.now()
-    await expect(cruise(dir, { bin: never, timeoutMs: 200 })).rejects.toThrow(/did not answer within 200 ms/)
+    /* THE CHILD'S WORKING DIRECTORY IS THE REPOSITORY, NOT `dir`, and that is
+       load-bearing on Windows. `cruise` passes its root as the child's `cwd`,
+       and a process's current directory is an OPEN HANDLE there: killing the
+       child does not release it synchronously, so removing `dir` immediately
+       afterwards failed `EPERM` — `force: true` does not help, because the
+       directory is in use rather than read-only. On POSIX, unlinking a
+       directory a live process sits in is legal, which is why this passed on
+       both other legs and only appeared under the `scripts` project's own
+       concurrency, where the kill and the remove land closest together.
+       `dir` holds the fake binary and nothing holds `dir`. */
+    await expect(cruise(REPO_ROOT, { bin: never, timeoutMs: 200 })).rejects.toThrow(/did not answer within 200 ms/)
     expect(Date.now() - started).toBeLessThan(10_000)
-    rmSync(dir, { recursive: true, force: true })
+    /* AND THE REMOVAL IS DEFERRED AND FORGIVING. A temporary directory left
+       behind costs nothing; a red gate over one costs a run. */
+    scratch.push(dir)
   })
 
   it('keeps a real timeout far above what one cruise costs', () => {

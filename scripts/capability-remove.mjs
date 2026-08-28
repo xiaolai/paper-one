@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PLATFORMS, createFsProbe, parseManifest, validateManifest } from './lib/architecture.mjs'
@@ -278,42 +278,32 @@ function readOrThrow(root, rel) {
 /** Does git, from `root`, track anything under `rel`? False when `root` is
  *  not itself the top of a work tree (a copy under /tmp must never reach a
  *  parent repository's index). */
-/**
- * Whether two resolved paths name the same place.
- *
- * A STRING COMPARISON IS NOT ENOUGH ON WINDOWS, and this was `===`. `git
- * rev-parse --show-toplevel` answers in FORWARD slashes there, the caller
- * holds a path in backslashes, and a temporary directory is reached as
- * `C:\\Users\\RUNNER~1\\…` or `C:\\Users\\runneradmin\\…` depending on who
- * resolved it — three ways for two identical paths to compare unequal. The
- * comparison then said "this is not the same repository", `gitTracks` returned
- * false, and the removal would have deleted a TRACKED directory without the
- * `git rm --cached` it promises. Nothing on a Mac or a Linux box can see it:
- * there, the two strings are already identical.
- *
- * `path.resolve` settles the separator; the case fold is Windows's own rule
- * for its filesystem and is applied nowhere else, because on the other two a
- * differing case IS a different file.
- */
-function samePath(a, b) {
-  const norm = (one) => (process.platform === 'win32' ? path.resolve(one).toLowerCase() : path.resolve(one))
-  return norm(a) === norm(b)
-}
-
 export function gitTracks(root, rel) {
-  const top = spawnSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' })
+  /* ⚠️ **ASKED OF GIT, NOT ANSWERED BY COMPARING PATHS.** This used to take
+   * `rev-parse --show-toplevel` and compare it with `root`, which is a
+   * question about strings dressed as a question about repositories, and
+   * Windows spells one path at least three ways: `git` answers in forward
+   * slashes, the caller holds backslashes, and a temp directory is reached as
+   * `C:\\Users\\RUNNER~1\\…` or `C:\\Users\\runneradmin\\…` depending on who
+   * resolved it. Case-folding and `path.resolve` fixed two of those and the
+   * short name defeated the third, which is how this stayed red on a CI runner
+   * after it had gone green on a developer's Windows box.
+   *
+   * `--show-prefix` is the same question with no string comparison in it: it
+   * prints where the working directory sits BELOW the top level, so an empty
+   * answer means this directory IS the top level. Nothing to normalise,
+   * nothing to spell twice.
+   *
+   * What it protects is real: a false answer here deletes a TRACKED directory
+   * without the `git rm --cached` this promises, and a true one reaches into
+   * an enclosing repository that merely contains `root`. */
+  const prefix = spawnSync('git', ['-C', root, 'rev-parse', '--show-prefix'], { encoding: 'utf8' })
   /* A git that could not RUN is not an answer — treating it as "untracked"
    * would delete without the promised index handling. A non-zero exit is
    * the honest "not a repository" and stays false. */
-  if (top.error) throw new Error(`git could not run: ${top.error.message}`, { cause: top.error })
-  if (top.status !== 0) return false
-  let same = false
-  try {
-    same = samePath(realpathSync(top.stdout.trim()), realpathSync(root))
-  } catch {
-    return false
-  }
-  if (!same) return false
+  if (prefix.error) throw new Error(`git could not run: ${prefix.error.message}`, { cause: prefix.error })
+  if (prefix.status !== 0) return false
+  if (prefix.stdout.trim() !== '') return false
   const ls = spawnSync('git', ['-C', root, 'ls-files', '--error-unmatch', '--', rel], { encoding: 'utf8' })
   if (ls.error) throw new Error(`git could not run: ${ls.error.message}`, { cause: ls.error })
   return ls.status === 0
