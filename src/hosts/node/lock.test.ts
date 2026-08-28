@@ -250,7 +250,10 @@ describe('a zombie holder', () => {
        right on a zombie and wrong here; `null` rather than `false` for an
        absent pid matters because a caller reads `false` as alive, and
        reclaiming a running app's library is the worse of the two mistakes. */
-    expect(zombiePid(process.pid)).toBe(false)
+    /* Windows has neither the concept nor a `ps` to ask, so it cannot say —
+       which `livePid` reads as "not refuted", leaving the pid alive. The
+       module header's "WINDOWS IS FAIL-CLOSED ON A CRASH" is the same rule. */
+    expect(zombiePid(process.pid)).toBe(process.platform === 'win32' ? null : false)
     expect(zombiePid(0x7ffffff)).toBeNull()
   })
 

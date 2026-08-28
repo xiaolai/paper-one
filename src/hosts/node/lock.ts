@@ -149,6 +149,11 @@ const DEFAULT_POLL_MS = 50
  * this file already shells out to `ps` for `etime`.
  */
 export function zombiePid(pid: number): boolean | null {
+  /* NOT A CONCEPT WINDOWS HAS, and no `ps` to ask. Answered without spawning
+   * anything: a process that cannot exist is a failed spawn on every call, and
+   * `null` — cannot say — is already the right answer. The module header's
+   * "WINDOWS IS FAIL-CLOSED ON A CRASH" covers what that costs there. */
+  if (process.platform === 'win32') return null
   try {
     const out = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
       encoding: 'utf8',
