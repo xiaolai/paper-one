@@ -109,7 +109,15 @@ describe('the teardown order', () => {
     vi.useFakeTimers()
     try {
       /* A drain that never settles is the wedged queue this bound exists for. */
-      const world = shell({ drain: () => new Promise<void>(() => {}) })
+      const warned: string[] = []
+      const world = shell({
+        drain: () => new Promise<void>(() => {}),
+        diagnostics: {
+          warn: (_event: string, fields: { message?: string }) => void warned.push(fields.message ?? ''),
+          info: () => {},
+          error: () => {},
+        } as unknown as ShutdownDeps['diagnostics'],
+      })
       await armShutdown(world.deps)
       const answered = world.quit()
       /* Nothing has happened past the flush while the grace period runs. */
@@ -120,6 +128,10 @@ describe('the teardown order', () => {
       expect(world.order).toEqual(['flush', 'abort', 'quiesce'])
       expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
       expect(world.deps.signal.aborted).toBe(true)
+      /* AND IT IS SAID. The journal is closed under a queue still running and
+       * the shell is told the app finished cleanly — the one exit that cannot
+       * have written everything must not be the one that leaves no trace. */
+      expect(warned).toEqual([`drain: the write queue did not finish within ${world.deps.graceMs}ms — writes may have been lost`])
     } finally {
       vi.useRealTimers()
     }

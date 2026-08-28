@@ -523,6 +523,34 @@ describe('repeated quarantine', () => {
     /* And the second is beside it rather than on top of it. */
     expect(await readFile(join(root, 'paper.store.v1.json.corrupt.1'), 'utf8')).toBe('second damage')
   })
+
+  /**
+   * ⚠️ **AND THE FREE NAME WAS TAKEN BY LOOKING, NOT BY CLAIMING.**
+   *
+   * `access` then `rename` is a check followed by an overwrite: two writers
+   * over one library — a `paper` beside the running app, or two `paper` runs
+   * — both saw the same `.corrupt` free, and POSIX `rename` REPLACES its
+   * destination, so the second silently destroyed the first. `link` fails
+   * `EEXIST` instead, which is how one of these two ends up at `.1`.
+   *
+   * Both calls issue their probe before either answers — one event loop,
+   * two pending syscalls — so both genuinely believe the name is free. Which
+   * of them wins is not the point and is not asserted; that BOTH survive is.
+   */
+  it('does not let two writers racing for one name destroy each other’s copy', async () => {
+    const root = await freshRoot()
+    const fs = nodeTextFs(root)
+    await writeFile(join(root, 'one.json'), 'from one')
+    await writeFile(join(root, 'two.json'), 'from two')
+
+    await Promise.all([fs.quarantine?.('one.json', 'held.corrupt'), fs.quarantine?.('two.json', 'held.corrupt')])
+
+    const held = [
+      await readFile(join(root, 'held.corrupt'), 'utf8'),
+      await readFile(join(root, 'held.corrupt.1'), 'utf8'),
+    ].sort()
+    expect(held).toEqual(['from one', 'from two'])
+  })
 })
 
 /* A folder is not supposed to hold two content files, but it can. When

@@ -526,7 +526,14 @@ export function createLedger({
     })
   }
 
-  const applyIncomingRecord = async (book: string, incoming: BookRecord, restoreAt: Hlc | undefined): Promise<void> => {
+  const applyIncomingRecord = async (
+    book: string,
+    incoming: BookRecord,
+    restoreAt: Hlc | undefined,
+    /** Whether the presence register says this device removed the book —
+     *  READ BEFORE THE FENCE, by the caller. See `handlePush`. */
+    removedLocally: boolean,
+  ): Promise<void> => {
     if (rowOf(book)) {
       /* On the shelf: an ordinary edit, merged. */
       await library.update(book, foldRecord(incoming))
@@ -546,7 +553,7 @@ export function createLedger({
      * the record's own stamp says (a page turn at t3 is newer than a removal
      * at t2 and is still not a re-add). Dropped. Otherwise it is a book this
      * device has genuinely never seen: added. */
-    if (fs && (await readPresence(fs))[book]?.state === 'removed') return
+    if (removedLocally) return
     await library.add(book, incoming)
   }
 
@@ -674,19 +681,50 @@ export function createLedger({
      * trash, so it is skipped for a removed book with no restore intent, the
      * same rule the record follows. */
     const restoreAt = group.live?.at
-    const removedNow = async (): Promise<boolean> => fs !== null && (await readPresence(fs))[group.book]?.state === 'removed'
+    /**
+     * ⚠️ **READ BEFORE THE FENCE, NOT INSIDE IT.**
+     *
+     * Both applies below used to `await readPresence(fs)` as their first act
+     * — inside `run`, which `applyRemote` requires to ENQUEUE SYNCHRONOUSLY.
+     * That await is a hole in the lock scope §2.4 describes: the fence task
+     * had armed the journal's one-shot remote expectation and the apply had
+     * not yet queued behind it, so a local edit enqueued in the gap began
+     * first, CONSUMED the expectation, and was journaled `remote` — dropped
+     * from the outbox, never pushed, gone with no error anywhere. That is
+     * the exact defect `applyRemote`'s own note says the fence was written
+     * to remove, reintroduced by the presence check added beside it.
+     *
+     * Read once, here, and handed to both applies as a value. This is a
+     * check, not a lock: a removal that lands between this read and the
+     * apply is still possible, and closing THAT needs a kernel verb that
+     * tests presence and adds inside the book's own write lane. The
+     * ordering defect is the one that loses a reader's edit silently;
+     * the residual race re-adds a book a pull would have re-added anyway.
+     */
+    /* NOT GATED ON `rowOf`, which is the one part of the old condition that
+       can CHANGE between here and the apply: a row that goes away in the gap
+       would leave the decision reading a `removedLocally` that was never
+       computed. `restoreAt` is a value off the wire and cannot move, so it
+       still spares the read on a restore. */
+    const asksAboutPresence = restoreAt === undefined && (group.record !== undefined || (group.marks !== undefined && group.marks.length > 0))
+    const removedLocally = fs !== null && asksAboutPresence && (await readPresence(fs))[group.book]?.state === 'removed'
     const applies: RemoteApply[] = []
     if (group.record) {
       const incoming = group.record
-      applies.push({ keys: [{ book: group.book, what: 'record' }], run: () => applyIncomingRecord(group.book, incoming, restoreAt) })
+      applies.push({
+        keys: [{ book: group.book, what: 'record' }],
+        run: () => applyIncomingRecord(group.book, incoming, restoreAt, removedLocally),
+      })
     }
     if (group.marks && group.marks.length > 0) {
       const incoming = group.marks
       applies.push({
         keys: [{ book: group.book, what: 'marks' }],
-        run: async () => {
-          if (restoreAt === undefined && rowOf(group.book) === undefined && (await removedNow())) return
-          await marks.mergeRemote(group.book, incoming)
+        run: () => {
+          /* `rowOf` is re-read here because it is FREE and synchronous — the
+             row may have arrived from the record apply queued just above. */
+          if (restoreAt === undefined && rowOf(group.book) === undefined && removedLocally) return Promise.resolve()
+          return marks.mergeRemote(group.book, incoming)
         },
       })
     }
@@ -1075,18 +1113,29 @@ export function createLedger({
      * bare add on a removed book as a deliberate re-open — restore, plus a
      * `removed` rev of intent that would then push the resurrection back.
      * The local removal is newer news than the shelf's row, and the outbox
-     * already carries it; the same in-lane check the marks apply makes. */
-    const removedHere = async (book: string): Promise<boolean> => fs !== null && (await readPresence(fs))[book]?.state === 'removed'
+     * already carries it. */
+    /* ⚠️ **READ BEFORE THE FENCE, NOT INSIDE THE APPLY** — the same defect as
+     * the push door's, in the same shape, and `applyRemote` states the
+     * contract this broke: `run` must ENQUEUE SYNCHRONOUSLY. An `await` as
+     * its first act left the fence armed with nothing queued behind it, so a
+     * local edit enqueued in that gap began first and CONSUMED the remote
+     * expectation — journaled `remote`, dropped from the outbox, never
+     * pushed. One read for the whole page rather than one per row, which is
+     * also what it should always have been. */
+    const presence = fs !== null && adds.length > 0 ? await readPresence(fs) : {}
     const applies: RemoteApply[] = [
-      ...adds.map(
-        (row): RemoteApply => ({
-          keys: [{ book: row.book, what: 'record' }],
-          run: async () => {
-            if (await removedHere(row.book)) return
-            await library.add(row.book, row.record)
-          },
-        }),
-      ),
+      ...adds
+        /* A PULLED RECORD FOR A BOOK THIS DEVICE REMOVED is not applied at
+           all now, rather than applied into a `run` that decided to do
+           nothing — a fence armed for a key nothing writes is an expectation
+           `applyRemote` has to take back at the end. */
+        .filter((row) => presence[row.book]?.state !== 'removed')
+        .map(
+          (row): RemoteApply => ({
+            keys: [{ book: row.book, what: 'record' }],
+            run: () => library.add(row.book, row.record),
+          }),
+        ),
       ...(updates.length > 0
         ? [
             {

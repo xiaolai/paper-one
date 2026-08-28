@@ -277,6 +277,21 @@ export function createPeerPort(wire: PeerWire): PeerPort {
                   }),
                 )
                 connections.set(event.sessionId, conn)
+                /* THE ROUTER HANGS UP ON ITS OWN, and nothing here could see
+                 * it. A rejected write is handled above; the OUTBOUND BUDGET
+                 * overflowing is not — a peer that stopped reading fills it,
+                 * the router disconnects, and the native session stayed open
+                 * with every later frame drained into a connection answered
+                 * by nobody, so the peer's requests hung for ever and its
+                 * inbox went on being served. The webhost pump was caught by
+                 * the same defect in the 2026-08-28 audit (#61) and this is
+                 * the same remedy: the session goes the way the drain path
+                 * takes it. Identity-checked, so a session id the plugin has
+                 * since reused is left alone; `dropConnection` deletes before
+                 * it disconnects, so the teardown road does not re-enter. */
+                conn.onDisconnect(() => {
+                  if (connections.get(event.sessionId) === conn) dropConnection(event.sessionId, true)
+                })
                 /* Frames that landed before the connection existed are in the
                  * inbox and raised their one edge event already — drain now. */
                 await drainInto(

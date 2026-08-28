@@ -241,9 +241,16 @@ export function openLink(options: LinkOptions): ShelfLink {
       epoch += 1
       if (timer !== undefined) clearTimeout(timer)
       timer = undefined
-      publish({ kind: 'closed' })
+      /* THE CHANNEL IS GONE BEFORE ANYBODY HEARS THAT IT IS — the same rule
+       * `schedule` learned about its timer. `publish` runs its subscribers
+       * SYNCHRONOUSLY, and one of them reacting to `closed` by making a call
+       * found `channel` still set: the frame went out on a socket this line
+       * was in the middle of closing, and `noChannel`'s `forGood` would have
+       * said "reconnecting" for a link that never will. Nulled first, so
+       * every road out of `close()` refuses. */
       const held = channel
       channel = null
+      publish({ kind: 'closed' })
       held?.close()
       /* SUBSCRIBERS AT CLOSE TIME ARE TOLD, not merely later ones. `onClosed`
        * already answers a listener added AFTER the close synchronously; the

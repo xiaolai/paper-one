@@ -177,21 +177,43 @@ const watchTaps = useCallback(
      * unmatched release is ignored rather than believed.
      */
     let downAt: { id: number; x: number; y: number } | null = null
+    /**
+     * EVERY POINTER CURRENTLY DOWN ON THIS TARGET.
+     *
+     * ⚠️ **A SECOND FINGER WAS MERELY IGNORED, AND IGNORING IS NOT
+     * REFUSING.** The first pointer went on being tracked, so a pinch whose
+     * first finger happened to land near an edge turned the page the moment
+     * that finger came up — no `pointercancel` is guaranteed, and one never
+     * arrives when the second finger is the one the browser hands back. The
+     * gesture is MULTI-POINTER from the instant the second press lands, and a
+     * multi-pointer gesture is not a tap however it ends.
+     *
+     * A press is tracked only when it is the ONLY pointer down, which is also
+     * what keeps a third finger from starting a fresh gesture while two are
+     * still on the glass. Every removal path the single origin had —
+     * `pointerup`, `pointercancel`, `pointerleave` — clears this too, so a
+     * pointer whose end is never reported leaks here exactly as far as it
+     * leaked there and no further.
+     */
+    const down = new Set<number>()
     const onDown = (event: Event) => {
       const pointer = event as PointerEvent
-      /* THE FIRST POINTER WINS, until it is released or cancelled. A second
-         finger is a gesture the browser or foliate owns — a pinch, a
-         two-finger scroll — and letting its press OVERWRITE the first is how
-         the release of the first came to be measured from the second's
-         origin, which reads as a tap wherever the fingers happened to be.
-         `isPrimary` would say the same thing, and is `false` on every
-         synthesized event, so this asks the question the tracking can
-         actually answer. */
-      if (downAt !== null) return
+      down.add(pointer.pointerId)
+      /* A SECOND PRESS POISONS THE GESTURE rather than being dropped on the
+         floor. Overwriting the origin was the first version of this bug — the
+         first finger's release measured from the second's position — and
+         keeping the first was the second: the pinch turned the page.
+         `isPrimary` would answer a similar question, and is `false` on every
+         synthesized event, so this asks the one the tracking can answer. */
+      if (down.size > 1) {
+        downAt = null
+        return
+      }
       downAt = { id: pointer.pointerId, x: pointer.clientX, y: pointer.clientY }
     }
     const onCancel = (event: Event) => {
       const pointer = event as PointerEvent
+      down.delete(pointer.pointerId)
       if (downAt?.id === pointer.pointerId) downAt = null
     }
     const onUp = (event: Event) => {
@@ -202,6 +224,7 @@ const watchTaps = useCallback(
          pointer's `pointerup` used to clear it first, discarding the first
          pointer the note above says wins. */
       const from = downAt
+      down.delete(pointer.pointerId)
       if (from === null || from.id !== pointer.pointerId) return
       downAt = null
       const place = placeOf(pointer.clientX)
@@ -239,6 +262,7 @@ const watchTaps = useCallback(
        a `pointercancel`. A release outside cannot be a tap here anyway. */
     const onLeave = (event: Event) => {
       const pointer = event as PointerEvent
+      down.delete(pointer.pointerId)
       if (downAt?.id === pointer.pointerId) downAt = null
     }
     target.addEventListener('pointerdown', onDown, { passive: true })

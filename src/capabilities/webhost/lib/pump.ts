@@ -107,8 +107,22 @@ export interface Pump {
  * session opened: `content.locate` is how the thin client opens a book, so
  * the last book a session located is the one — and the only one — it may
  * move. A call naming any other is refused `forbidden` before the handler
- * runs. That bounds what a script with its own socket could do to the one
- * book it is running inside of, which it already knows about.
+ * runs.
+ *
+ * ⚠️ **WHAT THAT BOUND IS, EXACTLY.** It is ONE BOOK AT A TIME, not "the book
+ * the script is running inside of" — this comment used to claim the second,
+ * and the difference matters to anyone reasoning about the boundary. The
+ * binding is set by a request the CLIENT makes, and a book's script shares
+ * the session's credential: it can `book.list`, `content.locate` any id it
+ * finds, and then move that book's position, one after another. Nothing on
+ * this side can tell the reader's own locate from the script's, because they
+ * arrive on the same socket with the same cookie.
+ *
+ * So this is a blast-radius bound on ONE write — the last read page of a book
+ * — and the wall is upstream: the CSP that stops a book's script running at
+ * all, and `readingGrant`, which keeps every other write off this socket
+ * entirely. Widening that grant on the strength of "the session is bound to
+ * its book" would be leaning on a rail that is not there.
  */
 /** The one write's grant, by its spelling — `serviceTable.ts` declares it. */
 const POSITION_GRANT = 'position:write'

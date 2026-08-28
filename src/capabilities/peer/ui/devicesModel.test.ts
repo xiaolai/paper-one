@@ -427,6 +427,44 @@ describe('the role control, and what it refuses', () => {
     expect(satchel.getSnapshot().error).not.toMatch(/cancel/)
   })
 
+  /**
+   * ⚠️ **THE WINDOW BETWEEN A PAIRING LANDING AND THE LIST THAT PROVES IT.**
+   *
+   * `onPairingResult` clears `pending` and `sas` — the flags that mean "a
+   * peer record may still arrive" — and then refreshes ASYNCHRONOUSLY. In
+   * between, `peersLoaded` was still true over the list read before the
+   * pairing: empty. `roleIsSettable` reads emptiness as "nothing is paired",
+   * so the control was drawn and the write went through, on a device that had
+   * just finished pairing. The result is a durable pair with two of one side,
+   * which is what every other guard in this describe exists to refuse.
+   */
+  it('refuses while a pairing result is settling, before the peer list has been read again', async () => {
+    const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-settle' })
+    const satchelWire = fakeWire({ role: 'satchel', endpointId: 'satchel-settle' })
+    linkWires(shelfWire, satchelWire)
+    const shelf = createDevicesModel({ port: createPeerPort(shelfWire) })
+    const satchel = createDevicesModel({ port: createPeerPort(satchelWire) })
+    await satchel.refresh()
+    await shelf.beginPairing('My Mac')
+    await satchel.pairWithCode(shelf.getSnapshot().offer!.url)
+    await tick()
+
+    /* The reader's hand is on the control the moment the SAS disappears. */
+    let asked = false
+    satchel.subscribe(() => {
+      if (asked || satchel.getSnapshot().lastResult === null) return
+      asked = true
+      void satchel.setRole('shelf')
+    })
+
+    await shelf.confirmPairing(true)
+    await tick()
+    await tick()
+    expect(asked, 'no pairing result reached the joiner, so this proves nothing').toBe(true)
+    expect(satchelWire.pendingRole, 'a role change slipped through while the pairing was settling').toBeNull()
+    expect(satchel.getSnapshot().peers.length, 'the pairing did not actually land').toBe(1)
+  })
+
   it('reports the role the node is RUNNING, not the one just chosen', async () => {
     /* The plugin stores the choice for the next launch. The fake used to
        apply it at once, so this exact assertion would have PASSED against a

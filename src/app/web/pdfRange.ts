@@ -46,6 +46,17 @@ import { isRetryable, type RemoteContent } from './content'
  * would have undone that quietly. The type is a `import type`, which erases.
  */
 
+/**
+ * How many times ONE range is asked for, counting the first.
+ *
+ * Three rounds of `content.readRange`, each of which restarts the read up to
+ * `MAX_RESTARTS` times and waits for the link between attempts — so a shelf
+ * that comes back inside a couple of minutes finishes the page the reader is
+ * looking at, and one that does not ends the range rather than the process's
+ * idle time.
+ */
+export const MAX_RANGE_ATTEMPTS = 3
+
 export interface PdfRangeOptions {
   /**
    * Called when a range read rejects.
@@ -62,6 +73,20 @@ export interface PdfRangeOptions {
    * means.
    */
   readonly onFailure: (cause: unknown) => void
+  /**
+   * The `contentHash` `content.locate` answered for the book this document
+   * was opened against, or null when the shelf could not hash it.
+   *
+   * ⚠️ **REQUIRED, AND IT USED TO BE A MAP INSIDE `content.ts`.** A pdf.js
+   * document lives for as long as the reader has the book open and asks for
+   * ranges the whole time; a second `locate` for the same book — another
+   * component, a re-open, a re-import — rewrote that map, and every range
+   * this transport asked for afterwards carried the NEW hash. The shelf then
+   * served the new bytes into a document parsed from the old ones, which is
+   * a PDF assembled from two versions of a book with no check anywhere
+   * firing. The version belongs to the document, so the document holds it.
+   */
+  readonly contentHash: string | null
 }
 
 /**
@@ -92,6 +117,30 @@ export async function pdfRangeTransport(
     private stopped = false
 
     override requestDataRange(begin: number, end: number): void {
+      this.pull(begin, end, 0)
+    }
+
+    /**
+     * One range, asked for again while the failure is one a retry can change.
+     *
+     * ⚠️ **A RETRYABLE FAILURE USED TO END HERE, AND THE RANGE NEVER
+     * ARRIVED.** pdf.js makes ONE reader per `requestDataRange` and waits for
+     * `onDataRange(begin, …)`; it does not ask again, and its chunk manager
+     * remembers that the chunk was requested — so every later page that needs
+     * those bytes waits on the same promise nobody will resolve. Keeping the
+     * transport alive (below) let FUTURE ranges work and left THIS one dead
+     * for the life of the document: the reader was told the shelf had gone,
+     * the shelf came back, and the page they were on stayed blank for good.
+     *
+     * So the read is re-issued. `content.readRange` has already restarted it
+     * `MAX_RESTARTS` times, waiting for the link between each; these rounds
+     * are the outer bound on a shelf that keeps dropping — enough that a
+     * laptop waking up finishes the page it was on, and finite, so a shelf
+     * that is never coming back ends in the failure that ended it rather
+     * than in a loop. Every attempt reports, because a reader waiting on a
+     * page should not have to guess whether anything is still trying.
+     */
+    private pull(begin: number, end: number, attempt: number): void {
       /* ⚠️ **CHECKED BEFORE THE READ, AND IT USED TO BE CHECKED ONLY AFTER.**
        *
        * pdf.js does not stop asking the moment `abort()` returns: a render in
@@ -114,7 +163,7 @@ export async function pdfRangeTransport(
        * that was never a read's. The rejection arm below is the READ's only;
        * a throw in delivery stays a loud, unattributed rejection, which is
        * what it is. */
-      void content.readRange(bookId, begin, end - begin).then(
+      void content.readRange(bookId, begin, end - begin, options.contentHash).then(
         (bytes) => {
           if (this.stopped) return
           this.onDataRange(begin, bytes)
@@ -130,6 +179,7 @@ export async function pdfRangeTransport(
            * terminal and ends it as before; the reader is told either way. */
           if (!isRetryable(cause)) this.stopped = true
           options.onFailure(cause)
+          if (!this.stopped && attempt < MAX_RANGE_ATTEMPTS - 1) this.pull(begin, end, attempt + 1)
         },
       )
     }

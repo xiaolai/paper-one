@@ -70,7 +70,7 @@ describe('fileOf', () => {
 describe('readRange', () => {
   it('asks for the slice it was told to and returns exactly that', async () => {
     const { content, asked } = shelfOf({ one: 'call me ishmael' })
-    expect(text(await content.readRange('one', 5, 6))).toBe('me ish')
+    expect(text(await content.readRange('one', 5, 6, null))).toBe('me ish')
     expect(asked.at(-1)?.body).toEqual({ book: 'one', offset: 5, length: 6 })
   })
 
@@ -78,19 +78,19 @@ describe('readRange', () => {
      treated one as an error could not read the last page of any book. */
   it('answers fewer bytes at the end of the file, without raising', async () => {
     const { content } = shelfOf({ one: 'call me ishmael' })
-    expect(text(await content.readRange('one', 9, 999))).toBe('shmael')
+    expect(text(await content.readRange('one', 9, 999, null))).toBe('shmael')
   })
 
   it('answers nothing past the end', async () => {
     const { content } = shelfOf({ one: 'short' })
-    expect(await content.readRange('one', 500, 10)).toEqual(new Uint8Array(0))
+    expect(await content.readRange('one', 500, 10, null)).toEqual(new Uint8Array(0))
   })
 
   /* NOT SENT AT ALL. The shelf would refuse a zero-length read anyway, but a
      round trip to be told nothing is a round trip a phone paid for. */
   it('answers a zero length without asking the shelf', async () => {
     const { content, asked } = shelfOf({ one: 'x' })
-    expect(await content.readRange('one', 0, 0)).toEqual(new Uint8Array(0))
+    expect(await content.readRange('one', 0, 0, null)).toEqual(new Uint8Array(0))
     expect(asked).toEqual([])
   })
 
@@ -103,11 +103,11 @@ describe('readRange', () => {
      * each is a range pdf.js can compute from a length this side supplied —
      * so each is this side's bug to report, before it reaches a shelf. */
     const { content, asked } = shelfOf({ one: 'x' })
-    await expect(content.readRange('one', -1, 4)).rejects.toThrow(/byte counts/)
-    await expect(content.readRange('one', 0, -4)).rejects.toThrow(/byte counts/)
-    await expect(content.readRange('one', Number.NaN, 4)).rejects.toThrow(/byte counts/)
-    await expect(content.readRange('one', 0, Number.POSITIVE_INFINITY)).rejects.toThrow(/byte counts/)
-    await expect(content.readRange('one', 1.5, 4)).rejects.toThrow(/byte counts/)
+    await expect(content.readRange('one', -1, 4, null)).rejects.toThrow(/byte counts/)
+    await expect(content.readRange('one', 0, -4, null)).rejects.toThrow(/byte counts/)
+    await expect(content.readRange('one', Number.NaN, 4, null)).rejects.toThrow(/byte counts/)
+    await expect(content.readRange('one', 0, Number.POSITIVE_INFINITY, null)).rejects.toThrow(/byte counts/)
+    await expect(content.readRange('one', 1.5, 4, null)).rejects.toThrow(/byte counts/)
     expect(asked).toEqual([])
   })
 })
@@ -174,7 +174,7 @@ describe('how much of a book this will hold', () => {
   const SMALL = 64
 
   /** A shelf that claims a size without having to produce one. */
-  function claiming(size: number | null, bytes = 'ok') {
+  function claiming(size: number | null, bytes = 'ok', max = BOOK_MAX_BYTES) {
     const channel: ShelfChannel = {
       call: async () => ({ bookId: 'one', here: true, ext: 'epub', size }),
       stream: () => ({
@@ -185,7 +185,7 @@ describe('how much of a book this will hold', () => {
       close: () => {},
       onClosed: () => () => {},
     }
-    return remoteContent(channel)
+    return remoteContent(channel, max)
   }
 
   it('refuses a book the shelf says is too large, before reading a byte', async () => {
@@ -193,9 +193,27 @@ describe('how much of a book this will hold', () => {
     await expect(content.fileOf('one', 'Enormous.epub')).rejects.toThrow(/past the .* this can hold/)
   })
 
+  /* AT THE CEILING, NOT PAST IT — the comparison is `>` and the boundary is
+     where an off-by-one lives. The ceiling is the injectable one so the shelf
+     can honestly send as many bytes as it claims: `fileOf` now checks the
+     total against the stated size, and a fixture that claimed half a gigabyte
+     and sent two characters was a truncated book by its own account. */
   it('accepts one the shelf says fits', async () => {
-    const content = claiming(BOOK_MAX_BYTES)
+    const content = claiming(2, 'ok', 2)
     await expect(content.fileOf('one', 'Large.epub')).resolves.toBeInstanceOf(File)
+  })
+
+  /**
+   * ⚠️ **A STREAM THAT ENDED EARLY BECAME A TRUNCATED BOOK, SILENTLY.**
+   *
+   * The stated size bounded the read from above and was never looked at
+   * again. Every chunk that arrived was contiguous and in the right place —
+   * the missing ones are at the END, where there is nothing left to disagree
+   * with — so the file assembled cleanly and foliate reported a corrupt book.
+   */
+  it('refuses a book the shelf ended before the size it stated', async () => {
+    const content = claiming(9, 'ok')
+    await expect(content.fileOf('one', 'Short.epub')).rejects.toThrow(/is 9 bytes and the shelf sent 2/)
   })
 
   it('has a real ceiling, not an unreachable one', () => {
@@ -271,10 +289,10 @@ describe('an assembled book is checked, not trusted', () => {
      is not at zero, so the check has to begin from the offset requested. */
   it('checks a ranged read from the offset it asked for', async () => {
     const good = badShelf([[chunk(16, 'abcd')]])
-    expect(new TextDecoder().decode(await good.readRange('one', 16, 4))).toBe('abcd')
+    expect(new TextDecoder().decode(await good.readRange('one', 16, 4, null))).toBe('abcd')
 
     const wrong = badShelf([[chunk(0, 'abcd')]])
-    await expect(wrong.readRange('one', 16, 4)).rejects.toThrow(/expected byte 16/)
+    await expect(wrong.readRange('one', 16, 4, null)).rejects.toThrow(/expected byte 16/)
   })
 })
 
@@ -352,7 +370,7 @@ describe('a read that lost its channel', () => {
       { pages: [[chunkOf(4, 'ef')]], then: dropped() },
       { pages: [[chunkOf(4, 'ef')], [chunkOf(6, 'gh')]] },
     ])
-    expect(text(await content.readRange('one', 4, 4))).toBe('efgh')
+    expect(text(await content.readRange('one', 4, 4, null))).toBe('efgh')
     const reads = asked.filter((one) => one.service === 'content.read')
     expect(reads.map((one) => one.body['offset'])).toEqual([4, 4])
   })

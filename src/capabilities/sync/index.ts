@@ -208,9 +208,19 @@ async function refusalNames(): Promise<RefusalNames> {
  * shelf's own name and the book's title go where they belong.
  */
 async function degrade(thrown: unknown, book?: string): Promise<void> {
+  /* OWNED BY THE RUNTIME THAT WAS UP WHEN THIS FAILED. `refusalNames` asks
+   * the plugin for the shelf's name, which is IPC — and a teardown or a
+   * restart lands inside that await freely. The status is a module slot, so
+   * an old download's refusal used to arrive after the runtime it belonged
+   * to was gone and paint "your shelf isn't reachable" over a session that
+   * had just started successfully. The callers that capture their own owner
+   * check it before calling this; this is the check for the await INSIDE. */
+  const owner = running
   const message = thrown instanceof Error ? thrown.message : String((thrown as { message?: unknown })?.message ?? thrown)
   const refusal = { kind: refusalKind(thrown), message, ...(book === undefined ? {} : { book }) }
-  syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, await refusalNames()) })
+  const names = await refusalNames()
+  if (running !== owner) return
+  syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, names) })
 }
 
 /* IN FLIGHT, BY BOOK. The corner mark on the card and the Download item in
@@ -938,9 +948,17 @@ export const sync: Capability = {
             if (summary.quarantine.held > 0 || summary.quarantine.repaired > 0) {
               api.diagnostics.warn('sync.marks-quarantined', { ...summary.quarantine })
             }
+            /* THE NAMES FIRST, THEN THE OWNERSHIP CHECK. `refusalNames` is
+             * IPC and the check above ran before it — so a teardown or a
+             * restart landing inside that await let this session write its
+             * green line over the runtime that had replaced it. The rule is
+             * the same one `degrade` follows: whoever writes the module slot
+             * re-reads ownership on the near side of the last await. */
+            const names = await refusalNames()
+            if (running !== owner) return
             syncStatus.set({
               state: 'ok',
-              detail: describeSession(summary, await refusalNames()),
+              detail: describeSession(summary, names),
               lastSyncAt: Date.now(),
               lastSummary: { pushed: summary.pushed, pulledRows: summary.pulledRows },
             })

@@ -393,7 +393,18 @@ export function createDevicesModel({
       offs.push(port.onPairingPending((pending) => publish({ pending })))
       offs.push(
         port.onPairingResult((lastResult) => {
-          publish({ lastResult, pending: null, sas: null, offer: lastResult.ok ? null : snapshot.offer })
+          /* ⚠️ **THE PEER LIST IS UNKNOWN AGAIN UNTIL THE REFRESH LANDS.**
+             This cleared `pending` and `sas` — the two flags `setRole` reads
+             to mean "a pairing could still land a peer" — and then started an
+             asynchronous refresh. In between, `peersLoaded` was still true
+             over the OLD, empty list, so `roleIsSettable` said yes and the
+             role control was both drawn and answerable: a click there wrote
+             the durable role change the guard exists to refuse, and the pair
+             that had just formed had two of one side. `peersLoaded: false` is
+             the answer that already means "nothing has been read", which is
+             exactly the truth in this window — and it fails CLOSED if the
+             refresh itself fails. */
+          publish({ lastResult, pending: null, sas: null, offer: lastResult.ok ? null : snapshot.offer, peersLoaded: false })
           void refresh()
         }),
       )
@@ -549,7 +560,11 @@ export function createDevicesModel({
         /* Clear only what this click confirmed — a NEWER attempt that arrived
          * while the confirmation was in flight stays pending. */
         if (snapshot.pending === null || snapshot.pending.attemptId === pending.attemptId) {
-          publish({ pending: null, offer: null, error: null })
+          /* AND THE PEER LIST IS UNKNOWN UNTIL THE REFRESH BELOW — the same
+             window as `onPairingResult`, for the same reason: the flags that
+             say "a peer may still land" are being cleared here, and the list
+             that would show the one that just did has not been read yet. */
+          publish({ pending: null, offer: null, error: null, peersLoaded: false })
         }
         await refresh()
       } catch (thrown) {

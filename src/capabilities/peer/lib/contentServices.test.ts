@@ -158,26 +158,23 @@ describe('content.evict', () => {
   })
 
   /**
-   * A LANDING THAT ARRIVES WHILE AN EVICTION IS QUEUED MUST NOT SURVIVE IT.
+   * A FILE NO LISTING REPORTED MUST NOT SURVIVE THE EVICTION.
    *
-   * The folder is read OUTSIDE the book's lane, so a content file of a
-   * different extension landing between that read and the delete was absent
-   * from the list and outlived an evict that reported success. Offering the
-   * whole closed set costs an `exists` apiece and removes the window.
+   * A folder listing is a snapshot of a moment already past — a landing of a
+   * different extension arrives behind it, and a folder can refuse to be
+   * listed at all — so an eviction that deleted only what a listing named
+   * left the file on disk under an answer of `here: false`. The whole closed
+   * set is offered instead, and which of its names are really there is
+   * decided inside the book's lane, one `exists` apiece. The listing here
+   * cannot see `content.pdf` at all, which is the sharpest form of that.
    */
-  it('removes a file that landed after the folder was read', async () => {
+  it('removes a file the folder listing never reported', async () => {
     const shelf = withContent(['content.epub'])
+    shelf.fs.store.set('books/one/content.pdf', BYTES)
     const real = shelf.fs.readDir.bind(shelf.fs)
-    let once = false
-    shelf.fs.readDir = async (path: string) => {
-      const answer = await real(path)
-      if (!once && path === 'books/one') {
-        once = true
-        /* The landing happens after the enumeration and before the delete. */
-        shelf.fs.store.set('books/one/content.pdf', BYTES)
-      }
-      return answer
-    }
+    shelf.fs.readDir = async (path: string) =>
+      (await real(path)).filter((entry) => entry.name !== 'content.pdf')
+
     expect(await shelf.client.call('content.evict', { book: 'one' })).toMatchObject({ here: false })
     expect(shelf.fs.store.has('books/one/content.pdf')).toBe(false)
     expect(shelf.fs.store.has('books/one/content.epub')).toBe(false)

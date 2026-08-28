@@ -170,7 +170,22 @@ async function runTeardown(deps: ShutdownDeps): Promise<void> {
   }
   try {
     await step('flush', () => deps.flush())
-    await step('drain', () => Promise.race([deps.drain(), wait(deps.graceMs)]))
+    /* A DRAIN THAT RAN OUT OF TIME IS AN OUTCOME, NOT A SILENCE.
+     *
+     * The bound stays — a wedged queue delays a quit and must not prevent one
+     * — but the race used to resolve identically whichever side won, so the
+     * one shutdown that CANNOT have written everything looked exactly like
+     * the one that did: `abort` closes the journal underneath a queue still
+     * running, and the shell is then told the app finished cleanly. Nothing
+     * anywhere recorded that it had not. The queue cannot be cancelled from
+     * here and the journal's flag cannot be held up per capability, so what
+     * this can do is SAY so, in the same line the other failed steps use. */
+    await step('drain', async () => {
+      const finished = await Promise.race([deps.drain().then(() => true), wait(deps.graceMs).then(() => false)])
+      if (!finished) {
+        failures.push(`drain: the write queue did not finish within ${deps.graceMs}ms — writes may have been lost`)
+      }
+    })
     await step('abort', () => deps.abort())
     await step('quiesce', () => deps.quiesce())
     if (failures.length > 0) {

@@ -227,6 +227,46 @@ describe('audit-fix round 1 — the port and the wire’s listeners', () => {
   })
 })
 
+describe('a router that hung up on its own', () => {
+  /**
+   * ⚠️ **THE PORT COULD NOT HEAR THE ROUTER HANG UP.**
+   *
+   * The envelope disconnects a connection by itself in two cases the port
+   * does not raise: the outbound byte budget overflowing, and a `send` that
+   * fails in a way the port's own `.catch` never sees — a SYNCHRONOUS throw
+   * returns no promise for that `.catch` to attach to. The native session
+   * then stayed open with the router behind it dead: every later frame was
+   * drained into a connection answered by nobody, and the peer waited on a
+   * request that could never be refused. The webhost pump was caught by the
+   * same defect (the 2026-08-28 audit, #61); `onDisconnect` is what both
+   * sides now listen to.
+   */
+  it('closes the native session, so the peer is refused rather than left waiting', async () => {
+    const { shelf, satchel } = linkedWires()
+    await createPeerPort(shelf).serve([echo])
+    const channel = await createPeerPort(satchel).connect(shelf.id)
+    /* Shadowed on the instance rather than copied onto a stand-in: the wire's
+       readiness, sessions and listeners all have to stay the ones the ports
+       are already holding. */
+    ;(shelf as unknown as { send: () => never }).send = () => {
+      throw new Error('the session went away under the answer')
+    }
+
+    const closedOnShelf: number[] = []
+    shelf.onSessionClosed((event) => void closedOnShelf.push(event.sessionId))
+
+    const outcome = await Promise.race([
+      channel.call('sync.echo', { n: 1 }).then(
+        () => 'answered',
+        () => 'refused',
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 50)),
+    ])
+    expect(outcome, 'the peer was left waiting on a router that had already hung up').toBe('refused')
+    expect(closedOnShelf, 'the native session outlived the router it belonged to').toHaveLength(1)
+  })
+})
+
 describe('a serve() that fails part-way through its subscriptions', () => {
   it('rolls back the subscriptions it had already taken', async () => {
     /* THE LEAK THAT SURVIVED INSIDE ITS OWN FIX. The three registrations were

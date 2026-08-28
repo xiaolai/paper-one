@@ -49,9 +49,16 @@ import type { ShelfChannel } from './channel'
  * together, because neither the chunks nor the shelf's facts carried a hash.
  * So: the partial is discarded, the channel is waited for, and the whole read
  * — the whole file, or the whole RANGE — is asked for again. Every read
- * carries the `contentHash` `locate` learned, and the shelf refuses a book
- * that changed in between rather than serving it. Bounded, so a shelf that
- * keeps dropping mid-read ends in the failure that ended it and not in a loop.
+ * carries the `contentHash` its CALLER was told when it opened the book, and
+ * the shelf refuses a book that changed in between rather than serving it.
+ * Bounded, so a shelf that keeps dropping mid-read ends in the failure that
+ * ended it and not in a loop.
+ *
+ * The hash was kept HERE at first, in a map keyed on the book and rewritten
+ * by every `locate` — which protected one read's restarts and nothing longer:
+ * a pdf.js document outlives many locates, and re-pointing it at the newest
+ * hash is precisely how two versions of a book end up in one document. See
+ * `RemoteContent.readRange`.
  */
 
 /**
@@ -147,12 +154,22 @@ export interface RemoteContent {
   /** What the shelf says about this book's bytes, before asking for any. */
   locate(bookId: string): Promise<ContentFacts>
   /**
-   * `length` bytes from `offset`, or fewer at the end of the file.
+   * `length` bytes from `offset` of the version `expect` names, or fewer at
+   * the end of the file.
    *
    * A SHORT ANSWER IS NOT AN ERROR — see the header. A caller that treats one
    * as a failure cannot read the last page of any book.
+   *
+   * ⚠️ **`expect` IS THE CALLER'S, AND IT IS NOT OPTIONAL.** It used to come
+   * from a map inside this module, keyed on the book and rewritten by every
+   * `locate` — so a read belonging to a pdf.js document opened against the
+   * OLD bytes carried the hash of the NEW ones, and the shelf served them: a
+   * document with pages from two versions of a book, assembled without a
+   * single check firing. The version a reader is looking at is a fact about
+   * the CALLER's session, so the caller holds it. `null` is a real answer —
+   * the shelf could not hash the book — and sends no expectation.
    */
-  readRange(bookId: string, offset: number, length: number): Promise<Uint8Array>
+  readRange(bookId: string, offset: number, length: number, expect: string | null): Promise<Uint8Array>
   /** The whole book, as the `File` foliate opens. */
   fileOf(bookId: string, name: string): Promise<File>
 }
@@ -164,13 +181,6 @@ export interface RemoteContent {
  * ceiling stopped it, which is a slow way to prove a comparison.
  */
 export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES): RemoteContent {
-  /**
-   * The hash `locate` last learned for each book, sent back as `expect` on
-   * every read of it. Forgotten with the object, not persisted: a hash is a
-   * fact about one session's view of the shelf.
-   */
-  const hashes = new Map<string, string>()
-
   /**
    * Every chunk of one read, in order, CHECKED.
    *
@@ -255,17 +265,30 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
    * `whenOpen` is awaited before each restart, so the retries wait for the
    * link rather than hammering a socket that is gone.
    */
-  const collect = async (bookId: string, from: number, body: Record<string, unknown>): Promise<Uint8Array[]> => {
-    /* THE HASH IS THE READ'S, captured once. Re-read from the map on each
-     * restart, a `locate` that ran while this read waited for its channel
-     * would have handed the restart the NEW book's hash — and a range read
-     * belonging to a document pdf.js opened against the OLD bytes would be
-     * served from the new ones. The read either finishes against the book it
-     * began with or is refused. */
-    const expect = hashes.get(bookId)
+  const collect = async (
+    bookId: string,
+    from: number,
+    body: Record<string, unknown>,
+    /* THE HASH IS THE READ'S, and the CALLER'S — see `RemoteContent.readRange`.
+     * It was looked up per restart from a map this module kept, so a `locate`
+     * that ran while the read waited for its channel handed the restart the
+     * NEW book's hash and the shelf served the new bytes into a document
+     * opened against the old ones. The read either finishes against the book
+     * it began with or is refused.
+     *
+     * A NULL HASH STILL RESTARTS. A shelf that hashes nothing can vouch for
+     * nothing, so an unversioned read is best-effort by construction — and
+     * refusing to restart one would leave every reader of such a shelf with
+     * no recovery from a dropped socket at all, which is the failure this
+     * whole path exists to remove. What bounds the damage there is the size
+     * check in `fileOf` and the contiguity check above; neither can see a
+     * book that changed between one whole read and its replacement, and on a
+     * shelf with no hasher nothing can. */
+    expect: string | null,
+  ): Promise<Uint8Array[]> => {
     for (let restarts = 0; ; restarts += 1) {
       try {
-        return await collectOnce(bookId, from, body, expect)
+        return await collectOnce(bookId, from, body, expect ?? undefined)
       } catch (cause) {
         if (!isRetryable(cause) || restarts >= MAX_RESTARTS) throw cause
         await channel.whenOpen?.()
@@ -277,11 +300,6 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
   const locate = async (bookId: string) => {
     const answer = (await channel.call('content.locate', { book: bookId })) as Record<string, unknown>
     const contentHash = typeof answer['contentHash'] === 'string' && answer['contentHash'] !== '' ? answer['contentHash'] : null
-    /* REMEMBERED FOR EVERY READ THAT FOLLOWS, and forgotten when the shelf
-     * stops vouching: a book whose hash went to null is one this side may
-     * not claim to know. */
-    if (contentHash === null) hashes.delete(bookId)
-    else hashes.set(bookId, contentHash)
     return {
       here: answer['here'] === true,
       ext: typeof answer['ext'] === 'string' ? answer['ext'] : null,
@@ -296,7 +314,7 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
   return {
     locate,
 
-    readRange: async (bookId, offset, length) => {
+    readRange: async (bookId, offset, length, expect) => {
       /* REFUSED HERE rather than sent. The service would refuse a negative
        * anyway, but the failure would arrive as a protocol error from a shelf
        * rather than as the caller's own mistake — and pdf.js asks for ranges
@@ -306,7 +324,7 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
         throw new Error(`content.read: offset and length must be non-negative byte counts (${offset}, ${length})`)
       }
       if (length === 0) return new Uint8Array(0)
-      return joined(await collect(bookId, offset, { offset, length }))
+      return joined(await collect(bookId, offset, { offset, length }, expect))
     },
 
     fileOf: async (bookId, name) => {
@@ -326,7 +344,29 @@ export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES
       if (facts.size !== null && facts.size > maxBytes) {
         throw tooLarge(`${name}`, facts.size, maxBytes)
       }
-      const parts = await collect(bookId, 0, {})
+      /* THE VERSION THIS LOCATE SAW, not whatever a concurrent one has since
+       * learned — the same rule `readRange` states, applied to the one caller
+       * that locates for itself. */
+      const parts = await collect(bookId, 0, {}, facts.contentHash)
+      /* ⚠️ **AS MANY BYTES AS THE SHELF SAID, EXACTLY.**
+       *
+       * The stated size bounded the read from above and was then never looked
+       * at again, so a stream that ENDED EARLY — a shelf whose file is
+       * shorter than its record, a reader closed mid-answer — produced a
+       * `File` that was quietly truncated. Contiguity cannot catch it: every
+       * chunk that did arrive was in the right place, and the missing ones
+       * are at the end where there is nothing left to disagree with. A
+       * truncated EPUB is a book that will not open, and the reader is told
+       * the file is corrupt rather than that the read did not finish.
+       *
+       * Only when the shelf could measure it. `size: null` is a real answer,
+       * and the collector's running total is the only bound in that case. */
+      if (facts.size !== null) {
+        const held = parts.reduce((sum, part) => sum + part.length, 0)
+        if (held !== facts.size) {
+          throw new Error(`content.read: ${bookId} is ${facts.size} bytes and the shelf sent ${held}`)
+        }
+      }
       /* THE NAME THE BOOK ARRIVED WITH, not the vault's. Every parser Paper
        * uses routes on the EXTENSION, and foliate rejects a name with no
        * suffix as an unsupported type — the same reason `readOwnedBook` takes

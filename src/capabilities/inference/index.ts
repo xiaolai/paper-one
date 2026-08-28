@@ -53,7 +53,7 @@ const section = createRenderSlot<ModelsModel>()
 const endpointsSection = createRenderSlot<EndpointsModel>()
 
 /**
- * Which start is the current one.
+ * Every lifetime that still owns the one daemon.
  *
  * ⚠️ **AN OLD LIFETIME COULD STOP THE NEW ONE'S DAEMON.** `plugin.stop()` is
  * fire-and-forget and addresses the plugin-wide daemon, not this capability's
@@ -62,8 +62,18 @@ const endpointsSection = createRenderSlot<EndpointsModel>()
  * begun answering, cancelling its requests and killing its child process. The
  * ownership checks around `running` and the render slot do not cover it, because
  * the action they guard is scheduled and lands later.
+ *
+ * ⚠️ **AND A MONOTONIC "IS MINE THE NEWEST" TOKEN WAS THE WRONG SHAPE** — the
+ * same finding `createRenderSlot` records, in the field beside it. It answers
+ * about the LATEST start and says nothing about two LIVE ones: disposing the
+ * newer composition stopped a daemon the older one was still using, and the
+ * older one's own disposal then declined to stop it — its lifetime was no
+ * longer current — leaking the child process for the life of the app. A SET
+ * answers the question that actually decides this: is anybody left. The
+ * rapid-restart case is unchanged, because an outgoing lifetime that has
+ * already been replaced is not the last owner either.
  */
-let lifetime = 0
+const daemonOwners = new Set<object>()
 
 /**
  * The PORT — what `inference` offers the capabilities that `require` it.
@@ -198,7 +208,9 @@ export const inference: Capability = {
     const controller = createController(plugin, report)
     const gloss = createGlossProvider({ plugin, controller, report })
 
-    const myLifetime = ++lifetime
+    /** This start's claim on the shared daemon — see `daemonOwners`. */
+    const myClaim = {}
+    daemonOwners.add(myClaim)
     /* EVERYTHING THIS ACQUIRES, OWNED BY ONE THING — see `openSession`. The
      * `stopped` flag, the listener removal, the guarded-step loop and a
      * nullable `let` per resource were written out here, and the one resource
@@ -259,18 +271,26 @@ export const inference: Capability = {
      * that owns it. Best-effort and unawaited: `dispose` is synchronous and
      * Rust stops it again on app exit anyway.
      *
-     * ⚠️ ONLY IF NOTHING HAS STARTED SINCE. There is one daemon for the
+     * ⚠️ ONLY WHEN THE LAST OWNER LETS GO. There is one daemon for the
      * plugin, not one per lifetime, so an outgoing stop landing after an
      * incoming start killed the NEW capability's runtime and cancelled its
      * requests. An ownership check made where the stop is REGISTERED cannot
      * cover it: that check runs now and this action lands later.
      *
+     * ⚠️ WHAT THIS STILL DOES NOT COVER: the stop is asynchronous, and a
+     * lifetime that starts between this check and the moment the stop reaches
+     * the shared Rust state gets its daemon killed anyway. Closing that needs
+     * the stop to name the generation it means and the backend to refuse a
+     * mismatched one — one protocol across the language boundary, not a
+     * second check on this side.
+     *
      * OWNED LAST, so it is released FIRST — nothing else here depends on the
      * daemon, and the child process is the thing worth stopping soonest. */
     session.own('daemon', () => {
+      daemonOwners.delete(myClaim)
       /* Reported, not swallowed: a stop that fails is a daemon still running
          after the capability that owned it is gone. */
-      if (lifetime === myLifetime) {
+      if (daemonOwners.size === 0) {
         void plugin.stop().catch((thrown: unknown) => report('inference.stop-failed', { message: messageOf(thrown) }))
       }
     })

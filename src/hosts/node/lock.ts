@@ -83,19 +83,27 @@ export interface LockOwner {
 
 export interface DataLock {
   readonly owner: LockOwner
-  /** Idempotent, and safe to call after the lock was reclaimed by somebody
-   *  else — it removes the file only while this process still owns it. */
+  /** Idempotent — including CONCURRENTLY, which it was not: two calls in
+   *  flight both read this owner and the second could unlink a replacement.
+   *  Safe to call after the lock was reclaimed by somebody else too; it
+   *  removes the file only while this process still owns it. */
   release(): Promise<void>
 }
 
 /** Thrown when the lock is held and did not come free in time. */
 export class LockHeld extends Error {
   readonly owner: LockOwner | null
-  constructor(owner: LockOwner | null, path: string) {
+  /* THE FAILURE THAT ACTUALLY ENDED THE WAIT, when there was one. A
+   * reclamation that cannot rename — no permission on the directory, a
+   * Windows scanner holding the file — refuses through this class like every
+   * other unavailable lock, and without the cause the message would name a
+   * holder while the real reason sat one frame away, unreported. */
+  constructor(owner: LockOwner | null, path: string, cause?: unknown) {
     super(
       owner === null
         ? `another process holds ${path}`
         : `pid ${owner.pid} on ${owner.host} holds ${path} (${owner.command}, since ${new Date(owner.at).toISOString()})`,
+      cause === undefined ? undefined : { cause },
     )
     this.name = 'LockHeld'
     this.owner = owner
@@ -296,39 +304,93 @@ export async function acquireDataLock(dir: string, options: LockOptions = {}): P
   }
   const deadline = now() + waitMs
 
-  /** Still the process that wrote the record? See the module note. */
+  /**
+   * Still the process that wrote the record? See the module note.
+   *
+   * ⚠️ **THE START TIME DECIDES, AND A CLOCK STEP IS NOT A NEW PROCESS.**
+   * Both stamps used to refute independently, so a wall-clock correction —
+   * NTP, a laptop waking in another timezone — moved `bootedAt` out of
+   * tolerance and this answered "gone" about a process that was plainly
+   * running, which reclaims a live holder's lock and is the two-writer
+   * outcome the whole file exists to prevent.
+   *
+   * The distinction: a process's start time is kept ACROSS a clock step by
+   * both platforms (macOS keeps `p_starttime`; Linux derives it from
+   * `btime`), so a disagreement there is a different process. Two stamps
+   * shifted by the SAME amount are a clock, not a process — and a reused pid
+   * still fails, because a genuinely different process disagrees on start
+   * time by its own age, not by the clock's offset. `lock.rs` reached this
+   * rule first (its round-3 row 28); the two halves must agree or the CLI
+   * calls a running app stale where the app would not.
+   */
   const holds = (held: LockOwner): boolean => {
     if (!alive(held.pid)) return false
-    if (held.bootedAt !== undefined) {
-      const booted = bootedAt()
-      if (booted !== null && Math.abs(held.bootedAt - booted) > IDENTITY_TOLERANCE_MS) return false
-    }
-    if (held.startedAt !== undefined) {
-      const started = startedAt(held.pid)
-      if (started !== null && Math.abs(held.startedAt - started) > IDENTITY_TOLERANCE_MS) return false
-    }
+    const started = held.startedAt === undefined ? null : startedAt(held.pid)
+    const booted = held.bootedAt === undefined ? null : bootedAt()
+    const startedBy = started === null || held.startedAt === undefined ? null : held.startedAt - started
+    const bootedBy = booted === null || held.bootedAt === undefined ? null : held.bootedAt - booted
+    /* Both readable and shifted together: the clock moved under a record that
+     * is otherwise this process's. */
+    if (startedBy !== null && bootedBy !== null && Math.abs(startedBy - bootedBy) <= IDENTITY_TOLERANCE_MS) return true
+    if (startedBy !== null) return Math.abs(startedBy) <= IDENTITY_TOLERANCE_MS
+    if (bootedBy !== null) return Math.abs(bootedBy) <= IDENTITY_TOLERANCE_MS
     return true
   }
 
+  /**
+   * WAIT OUT A POLL, OR REFUSE — the one place the deadline is enforced.
+   *
+   * ⚠️ **THE RECLAMATION PATHS USED TO `continue` STRAIGHT PAST IT.** Both
+   * caught every `rename` failure and went round again with no deadline test
+   * and no sleep, so an error that does not clear — no write permission on
+   * the data directory, a file the OS will not move — was an infinite loop at
+   * a hundred per cent of a core, with `waitMs: 0` no protection at all. A
+   * failed reclamation is now an ordinary "did not come free": the wait
+   * bounds it, and the cause travels with the refusal so the reason is not
+   * lost. `ENOENT` alone is progress — the file went away, which is the race
+   * this protocol expects — and goes round at once.
+   */
+  const pause = async (held: LockOwner | null, cause?: unknown): Promise<void> => {
+    if (now() >= deadline) throw new LockHeld(held, path, cause)
+    await sleep(Math.min(pollMs, Math.max(0, deadline - now())))
+  }
+  const raced = (cause: unknown): boolean => (cause as { code?: string })?.code === 'ENOENT'
+
   for (;;) {
     if (await publish(path, mine)) {
+      /* ⚠️ **ONE RELEASE AT A TIME, AND ONLY ONCE.** `release` reads the
+       * record and then unlinks, and two calls in flight both read OUR token,
+       * the first unlinked, a new owner published in the gap, and the second
+       * deleted the NEW owner's file — this file's whole subject, caused by
+       * the function that is documented as idempotent. The in-flight promise
+       * makes a second caller join the first instead of racing it; the flag
+       * makes a third, later call a no-op. A FAILED release clears both, so
+       * it stays retryable — a process still running while a file with its
+       * pid in it sits there is a library nothing else may write. */
       let released = false
+      let releasing: Promise<void> | null = null
+      const letGo = async (): Promise<void> => {
+        /* Only while it is still OURS. A lock reclaimed as stale by
+         * somebody else belongs to them now, and removing it would drop
+         * their guard rather than ours. */
+        const held = await readOwner(path)
+        if (held !== null && held.token !== '' && held.token === mine.token) {
+          await rm(path, { force: true })
+        }
+        /* MARKED RELEASED ONLY ONCE IT IS. Set before the removal, a
+         * transient failure could not be retried: this process would go on
+         * running while a file with its pid in it sat there, and every
+         * later writer would wait for a holder that had already let go. */
+        released = true
+      }
       return {
         owner: mine,
-        release: async () => {
-          if (released) return
-          /* Only while it is still OURS. A lock reclaimed as stale by
-           * somebody else belongs to them now, and removing it would drop
-           * their guard rather than ours. */
-          const held = await readOwner(path)
-          if (held !== null && held.token !== '' && held.token === mine.token) {
-            await rm(path, { force: true })
-          }
-          /* MARKED RELEASED ONLY ONCE IT IS. Set before the removal, a
-           * transient failure could not be retried: this process would go on
-           * running while a file with its pid in it sat there, and every
-           * later writer would wait for a holder that had already let go. */
-          released = true
+        release: () => {
+          if (released) return Promise.resolve()
+          releasing ??= letGo().finally(() => {
+            releasing = null
+          })
+          return releasing
         },
       }
     }
@@ -341,7 +403,8 @@ export async function acquireDataLock(dir: string, options: LockOptions = {}): P
       const aside = `${path}.stale-${mine.token}`
       try {
         await rename(path, aside)
-      } catch {
+      } catch (cause) {
+        if (!raced(cause)) await pause(held, cause)
         continue
       }
       if (await isEmpty(aside)) {
@@ -371,7 +434,8 @@ export async function acquireDataLock(dir: string, options: LockOptions = {}): P
       const aside = `${path}.stale-${mine.token}`
       try {
         await rename(path, aside)
-      } catch {
+      } catch (cause) {
+        if (!raced(cause)) await pause(held, cause)
         continue
       }
       /* AND IT IS STILL THE ONE WE JUDGED STALE.
@@ -414,8 +478,7 @@ export async function acquireDataLock(dir: string, options: LockOptions = {}): P
       await rm(aside, { force: true }).catch(() => {})
       continue
     }
-    if (now() >= deadline) throw new LockHeld(held, path)
-    await sleep(Math.min(pollMs, Math.max(0, deadline - now())))
+    await pause(held)
   }
 }
 

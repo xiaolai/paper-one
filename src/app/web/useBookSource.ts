@@ -89,6 +89,11 @@ export function useBookSource(
           const range = await pdfRangeTransport(content, bookId, facts.size, {
             onFailure: (cause) =>
               problem.current(cause instanceof Error ? cause.message : String(cause)),
+            /* THE VERSION THIS OPEN SAW. Every range the document asks for,
+               for as long as the reader has it open, is read against the book
+               these facts describe — not against whatever a later `locate`
+               finds. See `PdfRangeOptions.contentHash`. */
+            contentHash: facts.contentHash,
           })
           if (!live) return
           setOpening({ kind: 'reading', source: { range, name: filename } })

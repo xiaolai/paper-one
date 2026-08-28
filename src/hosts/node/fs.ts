@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { access, appendFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { access, appendFile, link, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   /* THE PURE WALKS, not second copies of them — see the barrel's note. The
@@ -305,31 +305,63 @@ export function nodeTextFs(root: string): FileSystem {
        * `found` is what turns "the search ran out" into a refusal. A
        * hundred-and-first copy clarifies nothing; overwriting the hundredth
        * clarifies less. */
-      let found = false
-      for (let n = 0; n <= 100; n += 1) {
+      /* ⚠️ **THE NAME IS CLAIMED BY `link`, NOT BY LOOKING FIRST.**
+       *
+       * This asked `access` whether a candidate was free and then `rename`d
+       * onto it — and POSIX `rename` REPLACES its destination, so two
+       * quarantines racing (the app beside a `paper`, or two `paper` runs)
+       * both saw the same name free and the second silently destroyed the
+       * first: the one outcome this whole function exists to prevent, in the
+       * situation that produces it. `link` is atomic and fails `EEXIST` when
+       * the name is taken — the same primitive the advisory lock publishes
+       * with, and for the same reason. The source is unlinked only after a
+       * link succeeded, so a crash between the two leaves the file under BOTH
+       * names rather than under neither.
+       *
+       * `access` still runs first, because a fresh `.corrupt` is the ordinary
+       * case and `link` on an occupied name would otherwise raise once per
+       * candidate; the claim, not the look, is what decides. */
+      let linked = false
+      let last: unknown = null
+      for (let n = 0; n <= 100 && !linked; n += 1) {
         if (n > 0) destination = `${target}.${n}`
         try {
           await access(destination, constants.F_OK)
+          /* Taken. `ENOENT`/`ENOTDIR` below is the free one; anything else is
+           * a candidate this process cannot judge, and skipping it is the
+           * same safe direction. */
+          continue
         } catch (cause) {
-          /* ONLY "NOT THERE" MEANS FREE. `access` can also refuse for
-           * permissions or I/O, and treating those as absence handed the
-           * POSIX `rename` below a destination it would silently replace —
-           * the one outcome this loop exists to prevent. An unreadable
-           * candidate is skipped like an occupied one. */
           const code = (cause as { code?: string }).code
           if (code !== 'ENOENT' && code !== 'ENOTDIR') continue
-          found = true
-          break
+        }
+        try {
+          await link(source, destination)
+          linked = true
+        } catch (cause) {
+          last = cause
+          const code = (cause as { code?: string }).code
+          /* SOMEBODY ELSE GOT THERE FIRST — try the next name. Any other
+           * failure is this filesystem refusing hard links at all (a FAT
+           * volume, some network mounts), and the rename is the honest
+           * fallback: it is what this did before, race and all, and losing
+           * the quarantine entirely would be worse than racing for it. */
+          if (code !== 'EEXIST') {
+            await rename(source, destination)
+            return
+          }
         }
       }
-      if (!found) {
+      if (!linked) {
         throw new Error(
           `cannot quarantine ${path}: ${target} and .1 through .100 all exist. ` +
             'Something is producing corrupt files faster than they can be looked at; ' +
-            'move the existing quarantines aside before this can continue.',
+            'move the existing quarantines aside before this can continue.' +
+            (last === null ? '' : ` (last: ${last instanceof Error ? last.message : String(last)})`),
         )
       }
-      await rename(source, destination)
+      /* The copy is safe under its own name; this one is the caller's to lose. */
+      await rm(source, { force: true })
     },
   }
 }
@@ -340,26 +372,44 @@ export function nodeTextFs(root: string): FileSystem {
  * (`EINVAL`, `ENOTSUP`) and where a directory cannot be opened as a file
  * (Windows), as PostgreSQL and SQLite do: the rename is what it is there.
  */
+/** The one platform whose refusals below are a shape rather than a fault. */
+const windows = process.platform === 'win32'
+
 async function syncDir(dir: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof open>>
   try {
     handle = await open(dir, 'r')
   } catch (cause) {
     /* ONLY THE PLATFORM'S OWN REFUSALS ARE TOLERATED. Windows cannot open a
-     * directory as a file (`EPERM`/`EACCES`/`EISDIR`, engine-dependent), and
-     * that is what the header's "the rename is what it is there" covers. A
-     * blanket return also swallowed `EMFILE`, `ENFILE` and real I/O errors —
-     * reporting "durable" with the directory never opened, which is the
-     * silent-skip shape `writeAtomic`'s contract exists to refuse. */
+     * directory as a file (`EPERM`/`EACCES`/`EISDIR`/`UNKNOWN`,
+     * engine-dependent), and that is what the header's "the rename is what it
+     * is there" covers. A blanket return also swallowed `EMFILE`, `ENFILE` and
+     * real I/O errors — reporting "durable" with the directory never opened,
+     * which is the silent-skip shape `writeAtomic`'s contract exists to
+     * refuse.
+     *
+     * ⚠️ **AND THE WINDOWS CODES WERE SWALLOWED EVERYWHERE.** The comment
+     * justified them as one platform's limitation and the code applied them
+     * to all three: on POSIX, `open(dir, 'r')` does not fail with `EACCES`
+     * unless the process genuinely cannot read the directory it has just
+     * written into, which is a real fault and not a platform's shape. So the
+     * excuse is gated on the platform that needs it. `ENOTSUP` and `EINVAL`
+     * stay unconditional: those are a FILESYSTEM saying it does not do this,
+     * which any of the three can host. */
     const code = (cause as { code?: string }).code
-    if (code === 'EPERM' || code === 'EACCES' || code === 'EISDIR' || code === 'ENOTSUP' || code === 'EINVAL' || code === 'UNKNOWN') return
+    if (code === 'ENOTSUP' || code === 'EINVAL') return
+    if (windows && (code === 'EPERM' || code === 'EACCES' || code === 'EISDIR' || code === 'UNKNOWN')) return
     throw cause
   }
   try {
     await handle.sync()
   } catch (cause) {
+    /* Same split: a filesystem that does not implement `fsync` on a directory
+     * answers `EINVAL`/`ENOTSUP` anywhere, and `FlushFileBuffers` on a
+     * directory handle is the Windows-only refusal. */
     const code = (cause as { code?: string }).code
-    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EISDIR' && code !== 'EPERM') throw cause
+    const excused = code === 'EINVAL' || code === 'ENOTSUP' || (windows && (code === 'EISDIR' || code === 'EPERM' || code === 'UNKNOWN'))
+    if (!excused) throw cause
   } finally {
     await handle.close()
   }

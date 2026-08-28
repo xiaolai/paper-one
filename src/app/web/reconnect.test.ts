@@ -308,6 +308,32 @@ describe('what the audit-fix round found', () => {
     expect(reasons).toEqual(['closed'])
   })
 
+  /**
+   * ⚠️ **`closed` WAS ANNOUNCED WHILE THE CHANNEL WAS STILL LIVE.**
+   *
+   * `publish` runs its subscribers synchronously, and `close()` published the
+   * terminal state before it nulled the channel — so a screen reacting to
+   * "closed" by making one last call had its frame carried out on the socket
+   * this very line was about to close. The same shape as the timer in
+   * `schedule`: the invariant has to hold before anybody is told about it.
+   */
+  it('carries no call made by a subscriber hearing about the close', async () => {
+    const script = connector(['a'])
+    const link = openLink({ connect: script.connect, random: () => 0.5 })
+    await flush()
+    let refusal: unknown = null
+    link.subscribe(() => {
+      if (link.getSnapshot().kind !== 'closed') return
+      void link.call('book.list', {}).catch((thrown: unknown) => void (refusal = thrown))
+    })
+    link.close()
+    await flush()
+    expect(script.opened[0]!.calls).toEqual([])
+    expect(refusal).toBeInstanceOf(ServiceCallError)
+    /* AND IT IS FINAL, not "reconnecting" — there is no channel coming. */
+    expect((refusal as ServiceCallError).error.retryable).toBe(false)
+  })
+
   it('a subscriber that throws does not end reconnection', async () => {
     /* Listeners run inside the link's own state machine; unguarded, one throw
      * unwound `schedule` before its timer armed and no attempt was ever timed

@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { NOOP_DIAGNOSTICS, createKernelServices, scopeSettings, type SettingsStore } from '../../kernel'
 import { inference } from './index'
+import { inferencePlugin } from './lib/plugin'
 
 /**
  * ⚠️ THE `inferenceDownloadLine()` CASE THAT WAS HERE TESTED A DEAD EXPORT.
@@ -112,6 +113,32 @@ describe('starting and stopping the capability', () => {
 
     first.dispose()
     expect(models?.render(), 'the section still drew after every composition stopped').toBeNull()
+  })
+
+  /**
+   * ⚠️ THE SAME FINDING AGAIN, IN THE FIELD BESIDE THE RENDER SLOT.
+   *
+   * There is ONE daemon for the plugin, and which lifetime may stop it was a
+   * monotonic "is mine the newest" token. That answers about the latest start
+   * and says nothing about two LIVE ones: stopping the newer composition
+   * killed a child process the older one was still talking to, and the older
+   * one's own teardown then declined to stop it — its lifetime was no longer
+   * current — so the process outlived every owner it ever had.
+   */
+  it('stops the shared daemon only when the last live composition lets go', () => {
+    const stop = vi.spyOn(inferencePlugin, 'stop').mockResolvedValue(undefined)
+    try {
+      const first = started()
+      const second = started()
+
+      second.dispose()
+      expect(stop, 'the newer composition’s teardown stopped a daemon the older one is still using').not.toHaveBeenCalled()
+
+      first.dispose()
+      expect(stop, 'the last owner let go and the child process was left running').toHaveBeenCalledTimes(1)
+    } finally {
+      stop.mockRestore()
+    }
   })
 
   it('detaches everything it attached, the models model included', () => {

@@ -736,6 +736,85 @@ describe('the star protocol over two real stacks (WI-C.2)', () => {
     expect(pushableOutbox(satchel.journal)).toEqual([])
   })
 
+  /**
+   * ⚠️ **THE PRESENCE CHECK REOPENED THE HOLE THE FENCE WAS BUILT TO CLOSE.**
+   *
+   * `applyRemote` requires every `run` to ENQUEUE SYNCHRONOUSLY: the fence
+   * task arms the journal's one-shot remote expectation on the surface's own
+   * lane, and the apply is enqueued in the same synchronous block, so nothing
+   * can land between the two. The pull door's add then grew a check — "a
+   * record for a book this device REMOVED must not re-add it" — written as an
+   * `await readPresence(fs)` INSIDE `run`. That await is the gap: a local
+   * write enqueued in it begins first, consumes the remote expectation, and
+   * is journaled `remote` — dropped from the outbox and never pushed, while
+   * the remote apply behind it journals `local`, an echo. Both origins are
+   * present and both are wrong, which is why this asserts the SEQUENCE.
+   *
+   * The same import on two devices is the ordinary way to meet it: a book id
+   * is derived from the bytes, so importing one file on the phone while the
+   * shelf's row for it is being pulled is one book id, two writers, one lane.
+   */
+  it('a local add interleaved with a pulled add for the same book keeps the local edit pushable', async () => {
+    const { shelf, satchel } = await makeWorld()
+    /* Only on the shelf, so the satchel's pull treats it as an ADD. */
+    await shelf.services.library.add('book:both', rec('Both'))
+
+    let openGate!: () => void
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    void satchel.services.writes.append(satchel.services.library.lane('book:both'), () => gate)
+
+    /* THE WINDOW, ENTERED WHERE IT ACTUALLY IS. The presence register is read
+       once per pulled page, and the read is the only thing that moved: in the
+       old code it happened INSIDE the apply, after the fence had armed, and
+       now it happens before `applyRemote` is called at all. Hooking it puts
+       the local write exactly where each version leaves the gap — in the gap
+       for one, ahead of the fence for the other, which is the whole
+       difference under test. Fired BEFORE the read is served, so an absent
+       register (the ordinary case) still reaches it. */
+    let pulling = false
+    let localAdd: Promise<unknown> | null = null
+    const readFile = satchel.fs.readFile
+    satchel.fs.readFile = async (path: string) => {
+      if (path === 'sync/removed.json' && pulling && localAdd === null) {
+        localAdd = satchel.services.library.add('book:both', rec('Both, imported here'))
+        setTimeout(openGate, 20)
+      }
+      return readFile(path)
+    }
+
+    const channel = await satchel.port.connect(shelf.wire.id)
+    const interleaved: SyncChannel = {
+      peerId: channel.peerId,
+      call: async (service, body) => {
+        const answer = await channel.call(service, body)
+        /* Only the page's own apply may trip the hook: the satchel reads the
+           register on its push side too, long before any of this. */
+        if (service === 'sync.pull') pulling = true
+        return answer
+      },
+    }
+    try {
+      await satchel.ledger.runSession(interleaved)
+      await localAdd
+    } finally {
+      satchel.fs.readFile = readFile
+      await channel.close()
+    }
+    expect(localAdd, 'the pulled page read no presence register, so this proves nothing').not.toBeNull()
+
+    /* ATTRIBUTION, IN ORDER — not mere presence. The gated local add begins
+       first and is LOCAL; the pulled add follows and is REMOTE. Swap them and
+       the reader's own import is the thing that never leaves the phone. */
+    const origins = satchel.journal
+      .entries()
+      .filter((e) => e.kind === 'commit' && e.what === 'record' && e.book === 'book:both')
+      .map((e) => e.origin)
+    expect(origins).toEqual(['local', 'remote'])
+    expect(pushableOutbox(satchel.journal).map((e) => `${e.book}/${e.what}`)).toContain('book:both/record')
+  })
+
   it('a role mismatch is refused typed before any state moves', async () => {
     const { shelf, satchel } = await makeWorld()
     const rogue = createLedger({

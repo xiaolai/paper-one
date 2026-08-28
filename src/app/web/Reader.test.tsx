@@ -847,6 +847,33 @@ describe('Reader', () => {
     )
     expect(seen, "the second finger's release is not the first finger's tap").toEqual([])
 
+    /**
+     * ⚠️ **AND THE FIRST FINGER'S OWN RELEASE IS NOT A TAP EITHER.**
+     *
+     * The second press was merely IGNORED, which left the first still
+     * tracked: a pinch whose first finger happened to land near an edge
+     * turned the page the moment that finger came up. `pointercancel` is what
+     * would have saved it and the browser does not promise one — least of all
+     * when the finger it keeps is the second. Two pointers down means the
+     * gesture is a pinch, however it ends.
+     */
+    doc.body.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, clientX: 150, clientY: 100, bubbles: true }))
+    seen.length = 0
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 4, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 5, clientX: 150, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 4, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    expect(seen, 'a two-finger gesture must not turn the page, whichever finger lifts first').toEqual([])
+    /* Both fingers off the glass again, so what follows starts from nothing. */
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 5, clientX: 150, clientY: 100, bubbles: true }),
+    )
+
     /* `pointercancel` IS THE BROWSER TAKING THE GESTURE OVER, and no
        `pointerup` follows it — so an origin left behind waits to be paired with
        an unrelated release. */
