@@ -245,12 +245,15 @@ describe('promote', () => {
   })
 
   /* An interrupted run leaves `.staging` half-unpacked or `.previous`
-   * displaced and never removed. Both are swept before anything is staged,
-   * so a stale `.previous` cannot outlive the run that made it. */
+   * displaced and never removed. With a LIVE tree standing, both are swept
+   * before anything is staged, so a stale `.previous` cannot outlive the run
+   * that made it. */
   it('sweeps a stale .staging and .previous left by an interrupted run', () => {
     const { dir, done } = scratch()
     try {
       const current = path.join(dir, 'current')
+      mkdirSync(current)
+      writeFileSync(path.join(current, 'lemond'), 'live')
       mkdirSync(`${current}.staging`)
       writeFileSync(path.join(`${current}.staging`, 'half'), '')
       mkdirSync(`${current}.previous`)
@@ -260,6 +263,30 @@ describe('promote', () => {
 
       expect(existsSync(`${current}.staging`)).toBe(false)
       expect(existsSync(`${current}.previous`)).toBe(false)
+      expect(readFileSync(path.join(current, 'lemond'), 'utf8')).toBe('live')
+    } finally {
+      done()
+    }
+  })
+
+  /* The one window `promote` documents — a kill between its two renames —
+   * leaves `.previous` as the ONLY complete runtime and the live name empty.
+   * The sweep used to delete it there and bet on the network to replace it;
+   * it is restored by rename instead, and the stamp check then says staged. */
+  it('restores a .previous whose live tree a mid-promotion kill emptied, rather than deleting it', () => {
+    const { dir, done } = scratch()
+    try {
+      const current = path.join(dir, 'current')
+      mkdirSync(`${current}.previous`)
+      writeFileSync(path.join(`${current}.previous`, 'lemond'), 'displaced')
+      mkdirSync(`${current}.staging`)
+      writeFileSync(path.join(`${current}.staging`, 'half'), '')
+
+      sweepStale(current)
+
+      expect(readFileSync(path.join(current, 'lemond'), 'utf8')).toBe('displaced')
+      expect(existsSync(`${current}.previous`)).toBe(false)
+      expect(existsSync(`${current}.staging`)).toBe(false)
     } finally {
       done()
     }

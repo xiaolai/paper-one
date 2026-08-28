@@ -159,10 +159,12 @@ ignored = "1"
        exactly the point, and it has now caught three deliberate changes: the
        third was WI-20.32's `single-instance` and `window-state`, both
        `#![cfg(not(mobile))]` upstream and desktop-only here for the same
-       reason `lemond` started the list. */
+       reason `lemond` started the list. The fourth deliberate change was the
+       audit-fix round REMOVING the app's vestigial direct `axum`: app code
+       never referenced it, and the server crate under the webhost plugin
+       declares it with the identical feature set. */
     expect(dependenciesOfFeature('desktop', real)).toEqual(
       new Set([
-        'axum',
         'tauri-plugin-inference',
         'tauri-plugin-mcp-bridge',
         'tauri-plugin-persisted-scope',

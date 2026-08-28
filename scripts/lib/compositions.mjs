@@ -68,15 +68,34 @@ const CAPABILITY_MODULE = /^src\/capabilities\/([^/]+)(?:\/|$)/
  * a finding, not a style.
  *
  * Comments are stripped first, so a specifier quoted in prose (this file's
- * own comments say `../capabilities/<id>`) is not an import.
+ * own comments say `../capabilities/<id>`) is not an import. Template
+ * literals are blanked for the same reason — see `maskTemplates` — and
+ * type-only imports do not count: `import type` puts nothing in the bundle,
+ * so a composition wired only in types is a composition wired to nothing.
  */
+/**
+ * Blank a template literal's contents, keeping the backticks and every
+ * newline. The scanners below read code with REGEXES, and a template is the
+ * one string that spans lines — so an `export const capabilities = […]` or a
+ * whole fake composition QUOTED in one read as the real thing. The ordinary
+ * quoted strings stay: import specifiers live in them, and being
+ * line-bounded they cannot host the multi-line shapes the anchored regexes
+ * match. (An `${…}` holding a nested backtick would end the blanking early —
+ * none of the composition files has one, and the failure direction is a
+ * loud false finding, not a silent pass.)
+ */
+export function maskTemplates(code) {
+  return code.replace(/`(?:[^`\\]|\\[\s\S])*`/g, (tpl) => tpl.replace(/[^\n`]/g, ' '))
+}
+
 export function parseCompositionImports(source) {
-  const code = stripComments(source)
+  const code = maskTemplates(stripComments(source))
   const imports = []
   const dynamic = []
   const seen = new Set()
   const STATIC = /(?:^|\n)\s*(?:import|export)\b[^'"`;]*?\bfrom\s*['"]([^'"]+)['"]|(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g
   for (const m of code.matchAll(STATIC)) {
+    if (/^\s*(?:import|export)\s+type\b/.test(m[0].replace(/^\n/, ''))) continue
     const specifier = m[1] ?? m[2]
     const cap = capabilityDirOf(specifier)
     if (cap === null) continue
@@ -101,17 +120,20 @@ export function parseCompositionImports(source) {
  * array must list, so a name renamed at import is still matched by its binding.
  */
 export function capabilityBindings(source) {
-  const code = stripComments(source)
+  const code = maskTemplates(stripComments(source))
   const byDir = new Map()
-  const RE = /\bimport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g
+  const RE = /\bimport\s+(type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g
   for (const m of code.matchAll(RE)) {
-    const cap = capabilityDirOf(m[2])
+    /* `import type { sync }` binds a TYPE: nothing reaches the bundle, so it
+     * must not satisfy the wiring check a runtime import exists for. */
+    if (m[1] !== undefined) continue
+    const cap = capabilityDirOf(m[3])
     if (cap === null || cap.deep) continue
     /* EVERY binding, not the last: `import { capability, helper }` bound the
      * directory to `helper`, and the order check then demanded the wrong
      * identifier in the array. */
     const names = byDir.get(cap.dir) ?? new Set()
-    for (const raw of m[1].split(',')) {
+    for (const raw of m[2].split(',')) {
       const name = raw.trim()
       if (name === '') continue
       const as = /^[A-Za-z_$][\w$]*\s+as\s+([A-Za-z_$][\w$]*)$/.exec(name)
@@ -133,7 +155,7 @@ export function capabilityBindings(source) {
  * carries no `=`, so anchoring on `= [` skips it.
  */
 export function parseCompositionExport(source) {
-  const code = stripComments(source)
+  const code = maskTemplates(stripComments(source))
   const m = /export\s+const\s+capabilities\b[^=]*=\s*\[([^\]]*)\]/.exec(code)
   if (!m) {
     return { literal: false, ids: [], reason: '`export const capabilities` is not an array literal — a composition is a static list, not a computed one' }

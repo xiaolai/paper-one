@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { STEPS, parseArgs, runSteps, spawnStep } from './verify.mjs'
+import { STEPS, parseArgs, plainToken, runSteps, spawnStep } from './verify.mjs'
 
 /**
  * `pnpm verify` — the runner, not the gates it runs (each has its own
@@ -131,6 +131,25 @@ describe('parseArgs', () => {
     expect(parseArgs(['--from'])).toEqual({ error: '--from needs a step name' })
     expect(parseArgs(['--only', 'nope'])).toEqual({ error: 'no step named "nope"; see --list' })
     expect(parseArgs(['--wat'])).toEqual({ error: 'unknown argument "--wat"' })
+    /* A repeated selector used to win silently — the second `--only` replaced
+       the first with no word about it. */
+    expect(parseArgs(['--only', 'build', '--only', 'typecheck'])).toEqual({ error: '--only was given twice' })
+    expect(parseArgs(['--from', 'build', '--from', 'typecheck'])).toEqual({ error: '--from was given twice' })
+  })
+
+  it('holds the step table frozen all the way down, and its arguments plain tokens', () => {
+    for (const step of STEPS) {
+      expect(Object.isFrozen(step), `${step.name} is frozen`).toBe(true)
+      expect(Object.isFrozen(step.args), `${step.name}'s args are frozen`).toBe(true)
+      /* Every real argument must be what the Windows shell cannot misread —
+         the refusal in `spawnStep` only fires there, so this is the half a
+         macOS run can hold. */
+      for (const arg of step.args) expect(plainToken(arg), `${step.name}: ${arg}`).toBe(true)
+    }
+    expect(plainToken('capability-id')).toBe(true)
+    expect(plainToken('a;rm -rf /')).toBe(false)
+    expect(plainToken('x&y')).toBe(false)
+    expect(plainToken('$(boom)')).toBe(false)
   })
 
   /* `--until` IS THE JS HALF OF THE GATE ON A PLATFORM WHOSE CARGO HALF IS A

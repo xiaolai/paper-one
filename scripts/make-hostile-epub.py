@@ -31,7 +31,7 @@ Default output: /tmp/paper-hostile.epub
 
 from __future__ import annotations
 
-import sys
+import argparse
 import zipfile
 from pathlib import Path
 
@@ -101,6 +101,15 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
     <h1>Renderer isolation</h1>
     <p>If the script in this book ran, the paragraph below says so.</p>
     <p id="paper-isolation-verdict">SCRIPT DID NOT RUN</p>
+    <!-- THE FRAMING VECTOR NEEDS NO SCRIPT, so it is tested WITHOUT one:
+         static markup, so a `frame-src` regression is visible on the normal
+         path where CSP blocks the book's script entirely. A blob book
+         inherits the client's policy; while `frame-src` admitted `'self'`
+         this loaded the real client — module running, cookie on its socket —
+         under this page. The harness inspects this frame's browsing context
+         independently of any book JavaScript; the script below ALSO reports
+         it, for a run where the script is (wrongly) allowed. -->
+    <iframe id="paper-static-frame" src="/" aria-hidden="true" style="width:1px;height:1px"></iframe>
     <script><![CDATA[
       var reached = [];
       function probe(name, fn) {
@@ -113,11 +122,23 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
       probe('invoke', function () {
         var i = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
              || (parent.__TAURI__ && parent.__TAURI__.core && parent.__TAURI__.core.invoke);
+        // The EXISTENCE of `invoke` is the failure — a book must not reach the
+        // native bridge at all. The call is fired only to show it goes
+        // through, and its rejection is swallowed so a denied invoke does not
+        // surface as an unhandled rejection that reads like a crash.
         if (!i) return false;
-        i('plugin:fs|read_text_file', { path: '/etc/passwd' });
+        try { Promise.resolve(i('plugin:fs|read_text_file', { path: '/etc/passwd' })).catch(function () {}); } catch (e) {}
         return true;
       });
-      probe('parent.localStorage', function () { return !!parent.localStorage.length });
+      // parent.localStorage EXISTING is not a failure — the same-origin DOM
+      // exposes it by construction; only a CREDENTIAL found in it is. Kept as
+      // an INFORMATIONAL observation, apart from `reached`, so the verdict
+      // does not cry wolf over a benign same-origin fact.
+      var observed = [];
+      (function () {
+        try { if (parent.localStorage) observed.push('parent.localStorage reachable') } catch (e) {}
+      })();
+      var PROBE_TIMEOUT_MS = 3000;
 
       // The browser client's session credential, by every route a book has to
       // it. `paper_session` is the cookie's name — `SESSION_COOKIE` in
@@ -125,16 +146,27 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
       probe('document.cookie', function () { return /paper_session/.test(document.cookie) });
       probe('parent.document.cookie', function () { return /paper_session/.test(parent.document.cookie) });
       probe('credential in storage', function () {
-        var stores = [window.localStorage, window.sessionStorage, parent.localStorage, parent.sessionStorage];
+        // Each store in its OWN try: one inaccessible store used to abort the
+        // whole scan, so a later reachable store went unchecked — a false
+        // negative. An unreadable store is noted, not fatal.
+        var stores = [
+          ['window.localStorage', function () { return window.localStorage }],
+          ['window.sessionStorage', function () { return window.sessionStorage }],
+          ['parent.localStorage', function () { return parent.localStorage }],
+          ['parent.sessionStorage', function () { return parent.sessionStorage }],
+        ];
+        var hit = false;
         for (var s = 0; s < stores.length; s++) {
-          var store = stores[s];
-          if (!store) continue;
-          for (var i = 0; i < store.length; i++) {
-            var key = store.key(i);
-            if (/paper_session/.test(key) || /paper_session/.test(store.getItem(key) || '')) return true;
-          }
+          try {
+            var store = stores[s][1]();
+            if (!store) continue;
+            for (var i = 0; i < store.length; i++) {
+              var key = store.key(i);
+              if (/paper_session/.test(key) || /paper_session/.test(store.getItem(key) || '')) hit = true;
+            }
+          } catch (e) { observed.push(stores[s][0] + ' unreadable'); }
         }
-        return false;
+        return hit;
       });
 
       // ⚠️ READING THE CREDENTIAL WAS NEVER THE ONLY ROUTE, and for a while it
@@ -171,13 +203,23 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
         framed.style.width = '1px'; framed.style.height = '1px';
         framed.src = location.origin + '/';
         document.body.appendChild(framed);
-        setTimeout(framedFinish, 3000);
+        setTimeout(framedFinish, PROBE_TIMEOUT_MS);
       } catch (e) { settled() }
 
       try {
-        fetch('/api/auth/session', { credentials: 'include' })
-          .then(function (r) { if (r.status !== 401) reached.push('authenticated fetch (' + r.status + ')'); })
-          .catch(function () { /* blocked or refused counts as safe */ })
+        // Bounded, and settled in every arm: a fetch left pending used to keep
+        // `pending` above zero forever, so the final verdict never replaced
+        // the preliminary one. Only the endpoint's documented authenticated
+        // answer (a 200) is a hit; 401 is the safe expected refusal, and
+        // anything else is reported as a probe ANOMALY rather than a breach.
+        var fetchCtl = ('AbortController' in window) ? new AbortController() : null;
+        if (fetchCtl) setTimeout(function () { try { fetchCtl.abort() } catch (e) {} }, PROBE_TIMEOUT_MS);
+        fetch('/api/auth/session', { credentials: 'include', signal: fetchCtl && fetchCtl.signal })
+          .then(function (r) {
+            if (r.status === 200) reached.push('authenticated fetch (200)');
+            else if (r.status !== 401) observed.push('auth fetch returned ' + r.status);
+          })
+          .catch(function () { /* blocked, aborted or refused counts as safe */ })
           .then(settled, settled);
       } catch (e) { settled() }
 
@@ -195,17 +237,26 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
         sock.onopen = function () { finish(true) };
         sock.onerror = function () { finish(false) };
         sock.onclose = function () { finish(false) };
-        setTimeout(function () { finish(false) }, 3000);
+        setTimeout(function () { finish(false) }, PROBE_TIMEOUT_MS);
       } catch (e) { settled() }
 
       var el = document.getElementById('paper-isolation-verdict');
-      function show() {
+      // The verdict distinguishes a PENDING reading from a FINAL one, so a
+      // harness that reads the paragraph early cannot mistake the preliminary
+      // "reached nothing" for the settled result up to PROBE_TIMEOUT_MS later.
+      // A `data-state` attribute carries it machine-readably; `observed` (the
+      // benign facts) is separate from `reached` (the breaches).
+      function render(final) {
+        var state = final ? 'final' : 'pending';
+        el.setAttribute('data-state', state);
+        if (observed.length) el.setAttribute('data-observed', observed.join(', '));
         el.textContent = reached.length
           ? 'REACHED: ' + reached.join(', ')
-          : 'SCRIPT RAN, REACHED NOTHING';
+          : (final ? 'SCRIPT RAN, REACHED NOTHING' : 'SCRIPT RAN, PROBES PENDING');
       }
-      // Say what is known now, in case neither asynchronous probe ever settles.
-      show();
+      function show() { render(true); }
+      // Say what is known now — marked PENDING — in case a probe never settles.
+      render(false);
     ]]></script>
   </body>
 </html>
@@ -228,15 +279,36 @@ def build(output: Path) -> None:
 
 
 def main() -> None:
-    output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/tmp/paper-hostile.epub")
+    parser = argparse.ArgumentParser(
+        description="Build the hostile EPUB fixture that probes Paper's renderer isolation."
+    )
+    parser.add_argument(
+        "output",
+        nargs="?",
+        default="/tmp/paper-hostile.epub",
+        type=Path,
+        help="where to write the .epub (default: /tmp/paper-hostile.epub)",
+    )
+    output = parser.parse_args().output
     build(output)
     print(f"wrote {output}")
     print()
-    print("Open it in Paper, then read the verdict:")
-    print("  SCRIPT DID NOT RUN         -> the CSP blocked it. This is the pass.")
-    print("  SCRIPT RAN, REACHED NOTHING-> script ran but found no route out.")
-    print("  REACHED: ...               -> it names what it got to. See below.")
+    print("Open it in Paper, then read the verdict paragraph (data-state=final):")
+    print("  SCRIPT DID NOT RUN          -> the CSP blocked it. This is the pass.")
+    print("  SCRIPT RAN, PROBES PENDING  -> a non-final reading; wait for data-state=final.")
+    print("  SCRIPT RAN, REACHED NOTHING -> script ran but found no route out.")
+    print("  REACHED: ...                -> it names what it got to. See below.")
     print()
+    print("The static <iframe src=\"/\"> tests the framing vector WITHOUT script:")
+    print("inspect its browsing context directly — a loaded client there is a")
+    print("`frame-src` regression even when SCRIPT DID NOT RUN.")
+    print()
+    print("data-observed lists BENIGN facts (parent.localStorage reachable, an")
+    print("unreadable store) — not failures. Everything in a REACHED list is,")
+    print("and these two most of all — a shared book reading the session")
+    print("credential and speaking to the shelf as the reader:")
+    print("  document.cookie / parent.document.cookie -> HttpOnly was dropped")
+    print("  credential in storage                    -> it was moved to storage")
     print("ONE ENTRY IS NOT A FAILURE, and reading it as one would send you")
     print("hunting a hole that is not there. `parent.localStorage` fires when the")
     print("parent has ANY entry at all, and in the browser client it always will:")

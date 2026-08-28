@@ -38,11 +38,21 @@ export function committedNotices(root = REPO_ROOT) {
 }
 
 function main(argv) {
+  /* Anything that is not `--check` is refused, because the failure mode of
+   * tolerance here is a WRITE: `--chek` fell through to write mode and
+   * mutated the committed notice on what was meant to be a read. */
+  const unknown = argv.filter((arg) => arg !== '--check')
+  if (unknown.length > 0) {
+    process.stderr.write(`write-third-party-notices: unknown argument ${JSON.stringify(unknown[0])} (only --check is taken)\n`)
+    return 2
+  }
   const check = argv.includes('--check')
   const generated = currentNotices()
   if (!check) {
     writeFileSync(path.join(REPO_ROOT, NOTICES), generated)
-    process.stdout.write(`write-third-party-notices: ${NOTICES} (${generated.split('\n').length} lines)\n`)
+    /* `trimEnd` before counting: the generated text ends in a newline, and
+     * counting split parts read one line high (151 for a 150-line file). */
+    process.stdout.write(`write-third-party-notices: ${NOTICES} (${generated.trimEnd().split('\n').length} lines)\n`)
     return 0
   }
   const committed = committedNotices()

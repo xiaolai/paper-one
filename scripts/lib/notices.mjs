@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /**
  * The third-party notices document, rendered from what is INSTALLED.
@@ -80,18 +81,50 @@ export const BUNDLED_PLUGINS = ['tauri-plugin-single-instance', 'tauri-plugin-wi
  * lockfile the metadata call quietly rewrote is the corruption
  * `dev-docs/versioning.md` records.
  */
+/**
+ * A bundled crate's MIT text, VENDORED under `scripts/lib/licenses/` rather
+ * than read from `~/.cargo/registry/src/` — that directory exists only after
+ * a build has compiled the crate, and the notices test runs before any cargo
+ * step on a fresh CI machine. The vendored copy is byte-for-byte from the
+ * published crate; a conditional test compares it against the registry when
+ * one is present, so an upgrade cannot quietly keep the old text.
+ */
+export function crateLicenseFor(name, version, root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'licenses')) {
+  const at = path.join(root, `${name}-${version}-MIT.txt`)
+  try {
+    return readFileSync(at, 'utf8')
+  } catch (cause) {
+    throw new Error(`${name} ${version}: no vendored licence at ${at} — copy LICENSE_MIT from the published crate`, { cause })
+  }
+}
+
 export function readCrates(root, names = BUNDLED_PLUGINS, spawn = spawnSync) {
   const run = spawn(
     'cargo',
     ['metadata', '--format-version', '1', '--offline', '--locked', '--manifest-path', path.join(root, 'src-tauri', 'Cargo.toml')],
     { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
   )
-  if (run.status !== 0) throw new Error(`cargo metadata failed: ${run.stderr}`)
+  /* A spawn that never ran has `status: null` and its story in `run.error` —
+   * "cargo metadata failed: null" was the whole message when cargo was not
+   * on PATH. The real cause travels. */
+  if (run.error) throw new Error(`cargo metadata could not run: ${run.error.message}`, { cause: run.error })
+  if (run.status !== 0) throw new Error(`cargo metadata failed (exit ${run.status ?? `signal ${run.signal}`}): ${run.stderr}`)
   const packages = JSON.parse(run.stdout).packages
   return names.map((name) => {
-    const found = packages.find((one) => one.name === name)
-    if (!found) throw new Error(`${name} is not in the resolved workspace — is it still a dependency?`)
-    return { name, version: found.version, license: found.license ?? 'unknown' }
+    /* ALL matches, not the first: Cargo can resolve two versions of one
+     * crate, and `find()` silently reported whichever the resolver listed
+     * first — a notice naming the transitive copy while the lockfile check
+     * beside it stayed green. Ambiguity is an error, not a coin toss. */
+    const matches = packages.filter((one) => one.name === name)
+    if (matches.length === 0) throw new Error(`${name} is not in the resolved workspace — is it still a dependency?`)
+    if (matches.length > 1) {
+      throw new Error(`${name} resolves to ${matches.length} versions (${matches.map((one) => one.version).join(', ')}) — name the one the app ships`)
+    }
+    const found = matches[0]
+    /* `license` may be absent where `license-file` stands in for it (Cargo
+     * supports either); say which file rather than "unknown". */
+    const license = found.license ?? (found.license_file ? `see ${found.license_file}` : 'unknown')
+    return { name, version: found.version, license }
   })
 }
 
@@ -136,9 +169,12 @@ export function renderNotices(packages, crates = []) {
     lines.push('## Desktop platform plugins')
     lines.push('')
     lines.push('The desktop build takes these official Tauri plugins for what the platform')
-    lines.push('provides and the app must not hand-roll — one process per machine, and a')
-    lines.push('window that remembers itself. Recorded here as the dependency decision they')
-    lines.push('are; the Rust tree at large is MIT/Apache and is not enumerated.')
+    lines.push('provides and the app must not hand-roll — a single running instance, and a')
+    lines.push('window that remembers itself. Their MIT terms are reproduced under')
+    lines.push('Attributions below. This file enumerates the bundled fonts and these two')
+    lines.push('plugins only; the wider Rust dependency graph is not enumerated here, and')
+    lines.push('its crates carry a range of licences of their own (MIT and Apache-2.0')
+    lines.push('mostly, with MPL-2.0, BSD, ISC, Unicode-3.0 and Zlib among them).')
     lines.push('')
     lines.push('| Crate | Version | Licence |')
     lines.push('| --- | --- | --- |')
@@ -152,6 +188,19 @@ export function renderNotices(packages, crates = []) {
     lines.push('')
     lines.push('```')
     lines.push(copyrightFrom(one.text))
+    lines.push('```')
+    lines.push('')
+  }
+  /* Each plugin's MIT text WHOLE, one per crate — the two differ in their
+   * copyright line (The Tauri Programme in the Commons Conservancy vs Tauri
+   * Apps Contributors), so a shared body would misattribute one of them. A
+   * notice whose job is "the copyright notice travels with the copy" carried
+   * only SPDX identifiers for these two until the 2026-08-28 audit said so. */
+  for (const one of crates) {
+    lines.push(`### \`${one.name}\``)
+    lines.push('')
+    lines.push('```')
+    lines.push(crateLicenseFor(one.name, one.version).trimEnd())
     lines.push('```')
     lines.push('')
   }

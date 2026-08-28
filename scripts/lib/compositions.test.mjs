@@ -14,6 +14,7 @@ import {
   entriesByDir,
   formatFinding,
   manifestSet,
+  maskTemplates,
   parseCompositionImports,
   platformFromTauriEnv,
   registersPlugin,
@@ -75,6 +76,33 @@ describe('parseCompositionImports', () => {
       { specifier: '../capabilities/epsilon/lib/deep', dir: 'epsilon', deep: true },
     ])
     expect(dynamic).toEqual([])
+  })
+
+  it('counts no type-only import: a composition wired in types is wired to nothing', () => {
+    const source = [
+      "import type { sync } from '../capabilities/sync'",
+      "export type { PeerApi } from '../capabilities/peer'",
+      "import { real } from '../capabilities/real'",
+      'export const capabilities = [real]',
+    ].join('\n')
+    const { imports } = parseCompositionImports(source)
+    expect(imports).toEqual([{ specifier: '../capabilities/real', dir: 'real', deep: false }])
+  })
+
+  it('reads nothing out of a template literal — a fake composition quoted in one is prose, not wiring', () => {
+    const source = [
+      'const doc = `',
+      "  import { ghost } from '../capabilities/ghost'",
+      '  export const capabilities = [ghost]',
+      '`',
+      "import { real } from '../capabilities/real'",
+    ].join('\n')
+    const { imports } = parseCompositionImports(source)
+    expect(imports).toEqual([{ specifier: '../capabilities/real', dir: 'real', deep: false }])
+    /* The masker itself: contents blanked, backticks and newlines kept, and
+       the known positive beside it so a masker that blanks nothing fails. */
+    expect(maskTemplates('a `bc\ndef` g')).toBe('a `  \n   ` g')
+    expect(maskTemplates('no templates')).toBe('no templates')
   })
 
   it('reports a dynamic import of a capability, and ignores specifiers in comments and strings', () => {

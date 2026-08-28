@@ -120,7 +120,10 @@ export const STEPS = Object.freeze([
    * harness wait longer for a machine that is still oversubscribed: the number
    * would move, the race would not. */
   { name: 'cargo test --workspace', cmd: 'cargo', args: ['test', ...CARGO, '--workspace', '--all-targets', '--', '--test-threads=1'] },
-])
+  /* Frozen ALL THE WAY DOWN: `Object.freeze` on the array left every step
+   * object and args array mutable, so an importer could quietly rewrite what
+   * a "step" runs while the definition still read as frozen. */
+].map((step) => Object.freeze({ ...step, args: Object.freeze(step.args) })))
 
 /**
  * Run `steps` in order with `run(step)` → exit code (0 ok), writing headers
@@ -146,9 +149,31 @@ export function runSteps(steps, run, log = (line) => process.stdout.write(`${lin
   return 0
 }
 
+/** What cmd.exe cannot misread: word characters and the handful of
+ *  punctuation the real steps use. Exported so the refusal is testable on
+ *  the platforms whose spawn never consults a shell. */
+export const plainToken = (arg) => /^[\w@:./=-]+$/.test(arg)
+
 /** Run one step as a child process in `cwd`, inheriting the terminal (or
  *  discarding stdout for a `quiet` step, whose output is a JSON blob). */
 export function spawnStep(step, cwd = REPO_ROOT, extraEnv = undefined) {
+  /* THE SHELL MAKES EVERY ARGUMENT A PROMISE. On Windows the step runs
+   * through cmd.exe (a `.cmd` cannot be spawned without one since Node
+   * 20.12), and cmd.exe interprets metacharacters in arguments — so an
+   * argument that is not a plain token is a command injection waiting for a
+   * caller to pass one. `STEPS` is all plain tokens today, but `spawnStep` is
+   * exported and `verify-without` feeds it a capability id straight from
+   * argv. Refused HERE, at the one place the shell is decided, rather than
+   * trusted to every present and future caller — and only where the shell
+   * exists to misread anything: without one, arguments reach the child
+   * verbatim and the tests' `-e` payloads are legitimate. */
+  if (process.platform === 'win32') {
+    const unsafe = step.args.find((arg) => !plainToken(arg))
+    if (unsafe !== undefined) {
+      process.stderr.write(`verify: refusing to run ${step.name}: argument ${JSON.stringify(unsafe)} is not a plain token\n`)
+      return 126
+    }
+  }
   const result = spawnSync(step.cmd, step.args, {
     cwd,
     stdio: step.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit',
@@ -187,6 +212,13 @@ export function parseArgs(argv, steps = STEPS) {
       const value = argv[i + 1]
       if (value === undefined || value.startsWith('--')) return { error: `${arg} needs a step name` }
       if (!steps.some((s) => s.name === value)) return { error: `no step named ${JSON.stringify(value)}; see --list` }
+      /* A REPEATED SELECTOR USED TO WIN SILENTLY: `--only build --only
+         typecheck` ran only typecheck, and the reader's first selector
+         vanished without a word — the same shape as `--list` winning below,
+         refused for the same reason. */
+      if ((arg === '--from' && from !== undefined) || (arg === '--until' && until !== undefined) || (arg === '--only' && only !== undefined)) {
+        return { error: `${arg} was given twice` }
+      }
       if (arg === '--from') from = value
       else if (arg === '--until') until = value
       else only = value

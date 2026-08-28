@@ -35,7 +35,20 @@ MARKS = {
     '–': ('na', '&#8211;'),
     '-': ('na', '&#8211;'),
     'stub': ('stub', '&#9678;'),
+    # The glyph the ledger actually writes for a stub — the word above is the
+    # legacy spelling. It fell through the old na-fallback and rendered as
+    # "not applicable", which is a different claim.
+    '◍': ('stub', '&#9677;'),
 }
+
+# Tables the ledger keeps for the READER, not for this generator: drift logs,
+# not-done lists, the state legend. Named so a renamed inventory or matrix
+# header cannot be mistaken for one of them and silently dropped.
+INFORMATIONAL_HEADERS = (
+    ['row', 'was', 'is'],
+    ['row', 'what has not been done'],
+    ['state', 'meaning'],
+)
 
 
 def cells(row: str) -> list[str]:
@@ -81,10 +94,22 @@ def parse(md: str):
             blurb = ''
         elif line.startswith('|') and '---' not in line:
             header = [c.lower() for c in cells(line)]
+            # The row after a header must be the delimiter. Skipped blind, a
+            # missing delimiter silently ate the first data row instead.
+            if i + 1 >= len(lines) or not (lines[i + 1].startswith('|') and '---' in lines[i + 1]):
+                raise SystemExit(f"{SOURCE}: table '{' | '.join(header)}' has no delimiter row under its header")
             body: list[list[str]] = []
-            j = i + 2  # skip the delimiter row
+            j = i + 2  # past the validated delimiter
             while j < len(lines) and lines[j].startswith('|'):
-                body.append(cells(lines[j]))
+                r = cells(lines[j])
+                # Exactly the header's width: zip() would silently drop a
+                # surplus cell, and a short row would blame the wrong column.
+                if len(r) != len(header):
+                    raise SystemExit(
+                        f"{SOURCE}: row '{plain(r[0]) if r else ''}' has {len(r)} cells against "
+                        f"{len(header)} columns in '{' | '.join(header)}'"
+                    )
+                body.append(r)
                 j += 1
 
             if header[:2] == ['code', 'reader']:
@@ -112,6 +137,16 @@ def parse(md: str):
                     for r in body
                 ]
                 matrices.append((section, blurb, rows))
+            elif [c for c in header] not in [list(h) for h in INFORMATIONAL_HEADERS] and not any(
+                header[: len(h)] == list(h) for h in INFORMATIONAL_HEADERS
+            ):
+                # A table this parser does not recognise is either a renamed
+                # target table — which used to be DROPPED, whole — or a new
+                # informational one, which belongs in the list above.
+                raise SystemExit(
+                    f"{SOURCE}: unrecognised table header '{' | '.join(header)}' — a renamed target table "
+                    "would be silently dropped; name it in INFORMATIONAL_HEADERS if it is prose"
+                )
             i = j
             continue
         elif line.strip() and not line.startswith('#') and section and not blurb:
@@ -126,7 +161,11 @@ def parse(md: str):
 
 def mark_cell(value: str, extra: str = '') -> str:
     key = value.lower() if value.lower() == 'stub' else value
-    cls, glyph = MARKS.get(key, ('na', html.escape(value)))
+    if key not in MARKS:
+        # The fallback used to render any typo — and the ◍ stub glyph, for a
+        # while — as "not applicable", which is a claim, not an absence.
+        raise SystemExit(f"{SOURCE}: unknown matrix mark '{value}'. Allowed: {', '.join(MARKS)}")
+    cls, glyph = MARKS[key]
     return f'<td class="{extra}"><span class="m {cls}">{glyph}</span></td>'
 
 
@@ -147,9 +186,9 @@ def render_matrix(title: str, blurb: str, rows, comparators) -> str:
             mark_cell(values[code.lower()]) for code, _ in comparators
         )
         body.append(f'<tr><th scope="row">{html.escape(capability)}</th>{cs}</tr>')
+    lede = f'\n<p class="lede">{html.escape(blurb)}</p>' if blurb else ''
     return f"""<section class="block">
-<h3>{html.escape(title)}</h3>
-<p class="lede">{html.escape(blurb)}</p>
+<h3>{html.escape(title)}</h3>{lede}
 <div class="scroller"><table class="matrix">
 <thead><tr><th scope="col">Capability</th><th class="paper">Paper</th>{head}</tr></thead>
 <tbody>{''.join(body)}</tbody></table></div></section>"""

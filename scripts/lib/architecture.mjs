@@ -475,9 +475,10 @@ function validatePermissions(entry, at) {
   const findings = []
   /* The ACL namespace is the plugin name (Tauri strips its `tauri-plugin-`
    * crate prefix), falling back to the id. Every grant must live under it, so
-   * `capability:remove` can find them and a wrong `plugin` cannot hide one. */
-  const ns =
-    typeof entry.plugin === 'string' ? normalizePluginNamespace(entry.plugin) : typeof entry.id === 'string' ? entry.id : null
+   * `capability:remove` can find them and a wrong `plugin` cannot hide one.
+   * `namespaceOf` IS this rule — restated inline here it had already drifted
+   * once in spirit, which is what the single source exists to stop. */
+  const ns = namespaceOf(entry)
   permissions.forEach((item, k) => {
     if (typeof item !== 'string') {
       findings.push(finding('PERMISSIONS_SHAPE', [...p, k], `permission must be a string, got ${typeName(item)}`))

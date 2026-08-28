@@ -24,7 +24,9 @@ name: verify
 
 on:
   push:
-    branches: [main, ui-polish, kernel-carve]
+    # `main` only: `ui-polish` and `kernel-carve` were merged and deleted, and
+    # every other branch reaches CI through its pull request below.
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -47,8 +49,10 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          # rust-toolchain.toml at the repo root pins the channel; this action
-          # installs rustup and defers to it.
+          # rust-toolchain.toml at the repo root pins the channel to this same
+          # version; this input is not deferral — dtolnay/rust-toolchain
+          # installs exactly what it is given — so the two must move together,
+          # and `bump`-style changes to the toolchain touch both.
           toolchain: 1.97.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2

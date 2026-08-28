@@ -331,13 +331,22 @@ export function buildManifest(root, { platform, lemonade, llamacpp }) {
 }
 
 /**
- * Remove what an interrupted run may have left: a half-unpacked `.staging`
- * and a displaced `.previous`. Both are named for `dir`, both are ours, and
- * neither is the live tree.
+ * Recover, then remove, what an interrupted run may have left: a
+ * half-unpacked `.staging` and a displaced `.previous`. Both are named for
+ * `dir`, both are ours, and neither is the live tree — EXCEPT in the one
+ * window `promote` documents, a kill between its two renames, where
+ * `.previous` is the ONLY complete runtime and the live name is empty.
+ * Deleting it there destroyed a working installation and then bet on the
+ * network to replace it; restored by rename instead, which also means a
+ * recovered tree short-circuits at the stamp check rather than re-downloading.
  */
 export function sweepStale(dir) {
+  const previous = `${dir}.previous`
+  if (!existsSync(dir) && existsSync(previous)) {
+    renameSync(previous, dir)
+  }
   rmSync(`${dir}.staging`, { recursive: true, force: true })
-  rmSync(`${dir}.previous`, { recursive: true, force: true })
+  rmSync(previous, { recursive: true, force: true })
 }
 
 /**
@@ -370,7 +379,11 @@ export function promote(staging, dir) {
 async function fetchVerified(url, expected, label) {
   let bytes
   try {
-    const response = await fetch(url)
+    /* Bounded: an unresponsive connection used to hang every `predev` and
+       `prebuild` for as long as the kernel kept the socket. Five minutes is
+       generous for the ~40 MB worst case; a timeout lands in the same catch
+       as unreachable, which is the state it is. */
+    const response = await fetch(url, { signal: AbortSignal.timeout(300_000) })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     bytes = Buffer.from(await response.arrayBuffer())
   } catch (cause) {
@@ -399,8 +412,18 @@ async function fetchVerified(url, expected, label) {
 function unpack(archive, into) {
   mkdirSync(into, { recursive: true })
   if (archive.endsWith('.zip')) {
-    execFileSync('unzip', ['-q', '-o', archive, '-d', into], { stdio: 'inherit' })
-    const entries = readdirSync(into, { withFileTypes: true })
+    /* Windows has no `unzip`; its `tar` is bsdtar, which reads zip archives.
+       Not `tar` everywhere: Linux's GNU tar does not, and macOS and the
+       Ubuntu CI image both ship `unzip`. */
+    if (process.platform === 'win32') execFileSync('tar', ['-xf', archive, '-C', into], { stdio: 'inherit' })
+    else execFileSync('unzip', ['-q', '-o', archive, '-d', into], { stdio: 'inherit' })
+    /* The archive itself may sit INSIDE `into` (the runtime zip is written
+       to staging and unpacked over it), so the listing must not count it —
+       counted, a wrapped zip read as "two entries", the wrapper stayed, and
+       the executable check below failed on a tree that was actually fine. */
+    const entries = readdirSync(into, { withFileTypes: true }).filter(
+      (entry) => path.resolve(into, entry.name) !== path.resolve(archive),
+    )
     if (entries.length === 1 && entries[0].isDirectory()) {
       const wrapper = path.join(into, entries[0].name)
       for (const name of readdirSync(wrapper)) {
@@ -424,12 +447,16 @@ async function main() {
   const runtime = ARTIFACTS[key]
   const backend = BACKENDS[key]
   const dir = path.join(REPO_ROOT, VENDOR)
+  /* The sweep runs BEFORE the stamp check, for two reasons an interrupted
+     run taught: a kill inside `promote` leaves the only complete tree under
+     `.previous` (the sweep restores it, and the stamp check then says
+     staged); and a kill after promotion leaves a `.previous` the early
+     return would otherwise keep on disk forever. */
+  sweepStale(dir)
   if (isStaged(dir, key)) {
     console.log(`sync-inference-runtime: ${key} ${VERSION} + llama.cpp ${LLAMACPP_TAG} (${backend.backend}) already staged`)
     return
   }
-
-  sweepStale(dir)
   const runtimeBytes = await fetchVerified(`${RELEASE}/${runtime.asset}`, runtime.sha256, runtime.asset)
   if (runtimeBytes === null) return
   const backendBytes = await fetchVerified(`${LLAMACPP_RELEASE}/${backend.asset}`, backend.sha256, backend.asset)
@@ -455,7 +482,10 @@ async function main() {
   }
 
   const exe = path.join(staging, runtime.exe)
-  if (!existsSync(exe)) {
+  /* A regular file, not merely a name — the same bar the server below is
+     held to; a directory called `lemond` would otherwise stamp a runtime
+     nothing can spawn. */
+  if (!existsSync(exe) || !lstatSync(exe).isFile()) {
     console.error(`sync-inference-runtime: ${runtime.asset} unpacked without ${runtime.exe}`)
     process.exit(1)
   }

@@ -1,8 +1,8 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { BUNDLED_PACKAGES, BUNDLED_PLUGINS, copyrightFrom, licenseBodyFrom, readCrates, renderNotices } from './lib/notices.mjs'
+import { BUNDLED_PACKAGES, BUNDLED_PLUGINS, copyrightFrom, crateLicenseFor, licenseBodyFrom, readCrates, renderNotices } from './lib/notices.mjs'
 import { NOTICES, committedNotices, currentNotices } from './write-third-party-notices.mjs'
 
 /**
@@ -200,5 +200,57 @@ describe('readCrates and a cargo that misbehaves', () => {
     expect(readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toEqual([
       { name: 'tauri-plugin-window-state', version: '2.4.1', license: 'unknown' },
     ])
+  })
+
+  it('names the licence FILE when the crate uses license-file, which Cargo allows in place of an id', () => {
+    const spawn = metadata([{ name: 'tauri-plugin-window-state', version: '2.4.1', license: null, license_file: 'LICENCE.txt' }])
+    expect(readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toEqual([
+      { name: 'tauri-plugin-window-state', version: '2.4.1', license: 'see LICENCE.txt' },
+    ])
+  })
+
+  it('refuses a crate the resolver holds two versions of, rather than notifying whichever came first', () => {
+    const spawn = metadata([
+      { name: 'tauri-plugin-window-state', version: '2.4.1', license: 'MIT' },
+      { name: 'tauri-plugin-window-state', version: '2.3.0', license: 'MIT' },
+    ])
+    expect(() => readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toThrow(/2 versions \(2\.4\.1, 2\.3\.0\)/)
+  })
+
+  it('carries the spawn failure itself when cargo never ran, not "failed: null"', () => {
+    const spawn = () => ({ status: null, signal: null, stdout: '', stderr: '', error: new Error('spawn cargo ENOENT') })
+    expect(() => readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toThrow(/could not run: spawn cargo ENOENT/)
+  })
+})
+
+describe('the plugins’ licence text travels with the notice', () => {
+  it('carries each crate’s own copyright line and the MIT permission text', () => {
+    const committed = committedNotices() ?? ''
+    expect(committed).toContain('Copyright (c) 2017 - Present The Tauri Programme in the Commons Conservancy')
+    expect(committed).toContain('Copyright (c) 2017 - Present Tauri Apps Contributors')
+    /* Once per crate — the two MIT bodies are identical past the copyright
+       line, and each crate's section reproduces its own whole. */
+    expect(committed.match(/Permission is hereby granted, free of charge/g)?.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('vendors the text byte-for-byte from the published crate, when a registry is here to ask', (context) => {
+    /* `context.skip`, not `it.skipIf`: the ledger reads what vitest COLLECTS,
+       and a statically-skipped case vanishes from collection (WI-20.38). The
+       registry's src/ exists only once a build compiled the crate. */
+    const home = process.env.HOME ?? ''
+    const registry = path.join(home, '.cargo', 'registry', 'src')
+    if (!existsSync(registry)) return context.skip('no cargo registry checkout on this machine')
+    for (const { name, version } of [
+      { name: 'tauri-plugin-single-instance', version: '2.4.3' },
+      { name: 'tauri-plugin-window-state', version: '2.4.1' },
+    ]) {
+      const dirs = readdirSync(registry)
+        .map((one) => path.join(registry, one, `${name}-${version}`, 'LICENSE_MIT'))
+        .filter((one) => existsSync(one))
+      if (dirs.length === 0) return context.skip(`${name} ${version} is not checked out here`)
+      expect(readFileSync(dirs[0], 'utf8'), `${name}: vendored licence drifted from the published crate`).toBe(
+        crateLicenseFor(name, version),
+      )
+    }
   })
 })
