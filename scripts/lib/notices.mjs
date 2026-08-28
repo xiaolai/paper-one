@@ -1,7 +1,7 @@
-import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SHIPPED_TARGETS, readRustCrates, rustLicenseText } from './rustNotices.mjs'
 
 /**
  * The third-party notices document, rendered from what is INSTALLED.
@@ -146,24 +146,18 @@ export function licenseBodyFrom(license) {
 /**
  * The desktop's PLATFORM plugins — the table beside the fonts.
  *
- * Not a licence obligation, which is what the fonts table is: these are
- * MIT/Apache crates, and the Rust tree holds several hundred of those that
- * are not enumerated here. This is a RECORD OF A DEPENDENCY DECISION (phase
- * 20, D5): two official Tauri plugins taken for single-instance launch and a
- * remembered window, each a crate the app crate did not carry before, and
- * each named here with the version the lockfile pins so the decision and the
- * build it describes stay one thing. `lib.rs` must register every one of
- * them, and the notices gate holds that.
+ * Not what the fonts table is. The licence obligation on these two is
+ * discharged with every other crate's, under `Rust crates` — they are two rows
+ * of the five hundred and ninety-two `rust-crates.json` holds, and this table
+ * would be redundant if that were all it said. It is a RECORD OF A DEPENDENCY
+ * DECISION (phase 20, D5): two official Tauri plugins taken for a single
+ * running instance and a window that remembers itself, each a crate the app
+ * crate did not carry before, and each named here with the version the
+ * lockfile pins so the decision and the build it describes stay one thing.
+ * `lib.rs` must register every one of them, and the notices gate holds that.
  */
 export const BUNDLED_PLUGINS = ['tauri-plugin-single-instance', 'tauri-plugin-window-state']
 
-/**
- * Those crates as the resolved workspace has them — name, version and the
- * licence the crate declares — from `cargo metadata`, which is the one tool
- * that knows all three. `--offline --locked`: this runs inside a test, and a
- * lockfile the metadata call quietly rewrote is the corruption
- * `dev-docs/versioning.md` records.
- */
 /**
  * A bundled crate's MIT text, VENDORED under `scripts/lib/licenses/` rather
  * than read from `~/.cargo/registry/src/` — that directory exists only after
@@ -181,33 +175,92 @@ export function crateLicenseFor(name, version, root = LICENSES_DIR) {
   }
 }
 
-export function readCrates(root, names = BUNDLED_PLUGINS, spawn = spawnSync) {
-  const run = spawn(
-    'cargo',
-    ['metadata', '--format-version', '1', '--offline', '--locked', '--manifest-path', path.join(root, 'src-tauri', 'Cargo.toml')],
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
-  )
-  /* A spawn that never ran has `status: null` and its story in `run.error` —
-   * "cargo metadata failed: null" was the whole message when cargo was not
-   * on PATH. The real cause travels. */
-  if (run.error) throw new Error(`cargo metadata could not run: ${run.error.message}`, { cause: run.error })
-  if (run.status !== 0) throw new Error(`cargo metadata failed (exit ${run.status ?? `signal ${run.signal}`}): ${run.stderr}`)
-  const packages = JSON.parse(run.stdout).packages
-  return names.map((name) => {
-    /* ALL matches, not the first: Cargo can resolve two versions of one
-     * crate, and `find()` silently reported whichever the resolver listed
-     * first — a notice naming the transitive copy while the lockfile check
-     * beside it stayed green. Ambiguity is an error, not a coin toss. */
-    const matches = packages.filter((one) => one.name === name)
-    if (matches.length === 0) throw new Error(`${name} is not in the resolved workspace — is it still a dependency?`)
-    if (matches.length > 1) {
-      throw new Error(`${name} resolves to ${matches.length} versions (${matches.map((one) => one.version).join(', ')}) — name the one the app ships`)
+/**
+ * Every `[[package]]` in a `Cargo.lock`, as name → the versions locked for it.
+ *
+ * A hand-rolled scan of eight thousand lines of TOML, rather than a parser
+ * dependency, because the shape needed is two fields of one table array and
+ * `dependency hygiene` costs more than this loop does. A `[[package]]` opens a
+ * block; any other line starting `[` closes it.
+ *
+ * A block with a name and no version THROWS. Dropping it silently would make
+ * the crate look absent from the lockfile, and the caller would then report
+ * "is it still a dependency?" about a crate that is right there — a true-
+ * sounding message pointing at the wrong thing.
+ */
+export function lockedVersions(lock) {
+  const found = new Map()
+  let name
+  let version
+  let inPackage = false
+  const flush = () => {
+    if (name !== undefined) {
+      if (version === undefined) throw new Error(`Cargo.lock has a [[package]] named ${name} with no version — the lockfile is truncated`)
+      found.set(name, [...(found.get(name) ?? []), version])
     }
-    const found = matches[0]
-    /* `license` may be absent where `license-file` stands in for it (Cargo
-     * supports either); say which file rather than "unknown". */
-    const license = found.license ?? (found.license_file ? `see ${found.license_file}` : 'unknown')
-    return { name, version: found.version, license }
+    name = undefined
+    version = undefined
+  }
+  for (const line of lock.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '[[package]]') {
+      flush()
+      inPackage = true
+      continue
+    }
+    if (trimmed.startsWith('[')) {
+      flush()
+      inPackage = false
+      continue
+    }
+    if (!inPackage) continue
+    const match = /^(name|version) = "([^"]*)"$/.exec(trimmed)
+    if (match === null) continue
+    if (match[1] === 'name') name = match[2]
+    else version = match[2]
+  }
+  flush()
+  return found
+}
+
+/**
+ * Those crates as the lockfile pins them, with the licence the manifest
+ * records — AND NOT A SINGLE CARGO INVOCATION.
+ *
+ * ⚠️ THIS USED TO RUN `cargo metadata --offline --locked`, FROM INSIDE A TEST.
+ * `--offline` exits 101 when any package in the lockfile is missing from the
+ * local registry, and that is the shape of a fresh clone and of a CI runner
+ * restoring a `Swatinem/rust-cache` keyed on an older lockfile. This call sat
+ * in `test:coverage`, which runs BEFORE `verify.mjs`'s own cargo steps — so
+ * any pull request touching `Cargo.lock` could redden CI for a reason having
+ * nothing whatever to do with the change, at the step least likely to be
+ * suspected. Measured by holding `zbus-4.4.0` out of the registry.
+ *
+ * `Cargo.lock` is committed, is always present, and answers the version half
+ * exactly. The licence half comes from `rust-crates.json`, written where a
+ * registry exists by `scripts/refresh-rust-notices.mjs`. Cross-referencing the
+ * two is worth more than either alone: a plugin present in the lockfile and
+ * absent from the manifest means the manifest is stale, and this says so.
+ */
+export function readCrates(root, names = BUNDLED_PLUGINS, lock = undefined, declared = undefined) {
+  const versions = lockedVersions(lock ?? readFileSync(path.join(root, 'src-tauri', 'Cargo.lock'), 'utf8'))
+  const licenses = new Map((declared ?? readRustCrates()).map((one) => [`${one.name}@${one.version}`, one.license]))
+  return names.map((name) => {
+    /* ALL matches, not the first: Cargo can lock two versions of one crate,
+     * and `find()` silently reported whichever the resolver listed first — a
+     * notice naming the transitive copy while the lockfile check beside it
+     * stayed green. Ambiguity is an error, not a coin toss. */
+    const matches = versions.get(name) ?? []
+    if (matches.length === 0) throw new Error(`${name} is not in src-tauri/Cargo.lock — is it still a dependency?`)
+    if (matches.length > 1) {
+      throw new Error(`${name} resolves to ${matches.length} versions (${matches.join(', ')}) — name the one the app ships`)
+    }
+    const version = matches[0]
+    const license = licenses.get(`${name}@${version}`)
+    if (license === undefined) {
+      throw new Error(`${name} ${version} is in Cargo.lock and not in scripts/lib/rust-crates.json — run \`pnpm docs:rust-notices\``)
+    }
+    return { name, version, license }
   })
 }
 
@@ -319,6 +372,147 @@ function groupByText(packages, textOf = (one) => one.text.trimEnd()) {
 }
 
 /**
+ * The fence a licence text can be reproduced inside without escaping it.
+ *
+ * ⚠️ A LICENCE TEXT IS NOT MARKDOWN-INERT, and assuming it was broke this
+ * document the first time the Rust crates went into it. `aws-lc-sys` ships a
+ * licence whose body contains twenty-six lines beginning with three backticks
+ * — it is a markdown file, and it explains itself with code blocks. Inside a
+ * three-backtick fence the first of those ENDS the block, and the remainder of
+ * that licence, and the two hundred and ninety-six texts after it, render as
+ * prose. Nothing errors. The file is the right bytes and the wrong document.
+ *
+ * CommonMark closes a fence on a run at least as long as the one that opened
+ * it, so one backtick longer than the longest leading run is enough, and three
+ * is the floor so every text that needs nothing keeps the fence it had. Used
+ * for every block here, not only the Rust ones: the fonts and the JavaScript
+ * carry the same risk and would have hit it on the first licence that arrived
+ * as markdown.
+ */
+export function fenceFor(text) {
+  const runs = [...text.matchAll(/^ {0,3}(`+)/gm)].map((match) => match[1].length)
+  return '`'.repeat(Math.max(3, ...runs.map((run) => run + 1)))
+}
+
+/**
+ * A value put in a markdown table cell verbatim.
+ *
+ * A code span, because a crate's declared author is `Mads Marquart
+ * <mads@marquart.dk>` — angle brackets a markdown renderer reads as a tag, and
+ * an autolink where the contents look like an address. Inside a code span they
+ * are the characters they are, which is the whole requirement for a copyright
+ * holder's name.
+ *
+ * The fence is one backtick longer than the longest run in the value, which is
+ * CommonMark's own rule for embedding backticks, and the pipe is escaped
+ * because a pipe ends a cell no matter what encloses it. Neither has occurred
+ * in a crate's authors yet; a document that reproduces names must not be one
+ * character of somebody's name away from breaking.
+ */
+export function cell(value) {
+  const longest = Math.max(0, ...[...value.matchAll(/`+/g)].map((run) => run[0].length))
+  const fence = '`'.repeat(longest + 1)
+  const padding = value.startsWith('`') || value.endsWith('`') ? ' ' : ''
+  return `${fence}${padding}${value.replaceAll('|', '\\|')}${padding}${fence}`
+}
+
+/**
+ * The Rust half — several hundred crates, and the licences that make linking
+ * them into a redistributed binary conditional on this document existing.
+ *
+ * THE TABLE FIRST, THE TEXTS AFTER, and that order is the readability
+ * decision: the crate list is what a reader scans and the texts are what they
+ * consult, so a megabyte of licence body does not sit between the table and
+ * anything else. Each distinct text appears ONCE with the crates it covers
+ * named above it — 946 licence files across the union collapse to 321 texts,
+ * and reproducing them per crate would make a forty-megabyte file out of a
+ * one-megabyte one while hiding the part that differs.
+ *
+ * `crates` is `scripts/lib/rust-crates.json`; `textFor` reads one committed
+ * licence text. Both are parameters so the render can be exercised without the
+ * committed corpus, and so the corpus can be moved without touching this.
+ */
+function rustSection(crates, textFor) {
+  const lines = [
+    '## Rust crates',
+    '',
+    'The desktop binary statically links the Rust crates below. They are',
+    'overwhelmingly MIT and Apache-2.0, and both make permission to redistribute',
+    'conditional on the licence and the copyright notice travelling with the copy —',
+    'the same condition the typefaces’ OFL imposes, and the reason this section',
+    'exists.',
+    '',
+    'THE BASIS, so it can be checked rather than trusted. This is the NORMAL',
+    `dependency closure of the \`app\` binary, taken as the union of the ${SHIPPED_TARGETS.length} targets`,
+    `Paper ships (${SHIPPED_TARGETS.join(', ')}).`,
+    'Every licence file each crate ships is reproduced, and every NOTICE file with',
+    'it — Apache-2.0 §4(d) makes a NOTICE’s attribution text owed separately from',
+    'the licence itself. Where a crate offers a choice of terms, every alternative',
+    'it offers is reproduced rather than one of them elected on the reader’s behalf.',
+    '',
+    'Build-dependencies and dev-dependencies are excluded: they compile the build and',
+    'the tests, and neither is linked into a shipped binary. Paper’s own crates are',
+    'excluded because they are this repository’s, covered by its LICENSE. A crate',
+    'only one of those targets links is listed anyway — naming a crate a particular',
+    'copy does not contain costs a reader a line, and omitting one it does contain is',
+    'the thing the licence forbids.',
+    '',
+  ]
+  /* First-referenced order, so the numbering below follows the table above
+     rather than a hash's arbitrary one. */
+  const covering = new Map()
+  for (const one of crates) {
+    for (const sha of one.texts) {
+      const held = covering.get(sha)
+      if (held) held.push(one)
+      else covering.set(sha, [one])
+    }
+  }
+  const standard = crates.filter((one) => one.standard)
+  lines.push(`${crates.length} crates, ${covering.size} distinct licence and notice texts.`)
+  lines.push('')
+  lines.push('| Crate | Version | Licence |')
+  lines.push('| --- | --- | --- |')
+  for (const one of crates) lines.push(`| \`${one.name}\` | ${one.version} | ${one.license} |`)
+  lines.push('')
+  if (standard.length > 0) {
+    lines.push('### Crates that declare terms and publish no licence text')
+    lines.push('')
+    lines.push(`These ${standard.length} crates state an SPDX identifier in their manifest and ship no licence`)
+    lines.push('file of any kind. The standard text for each identifier they name is reproduced')
+    lines.push('below, taken verbatim from the SPDX licence list, and the copyright holders are')
+    lines.push('the crate’s own declared authors — the substitution `cargo-about` makes for')
+    lines.push('this case. Where a crate declares no authors either, this notice says so rather')
+    lines.push('than inventing one.')
+    lines.push('')
+    lines.push('| Crate | Version | Licence | Copyright holders |')
+    lines.push('| --- | --- | --- | --- |')
+    for (const one of standard) {
+      const holders = one.authors === undefined ? '*the crate declares none*' : one.authors.map(cell).join(', ')
+      lines.push(`| \`${one.name}\` | ${one.version} | ${one.license} | ${holders} |`)
+    }
+    lines.push('')
+  }
+  lines.push('### Licence and notice texts')
+  lines.push('')
+  let n = 0
+  for (const [sha, sharing] of covering) {
+    n++
+    lines.push(`#### Text ${n} of ${covering.size}`)
+    lines.push('')
+    lines.push(`Applies to ${sharing.length} crate${sharing.length === 1 ? '' : 's'}: ${sharing.map((one) => `\`${one.name}\` ${one.version}`).join(', ')}.`)
+    lines.push('')
+    const text = textFor(sha).trimEnd()
+    const fence = fenceFor(text)
+    lines.push(fence)
+    lines.push(text)
+    lines.push(fence)
+    lines.push('')
+  }
+  return lines
+}
+
+/**
  * The whole document.
  *
  * THE FONTS' licence TEXT is emitted once, not four times: all four packages
@@ -337,7 +531,7 @@ function groupByText(packages, textOf = (one) => one.text.trimEnd()) {
  * wrong about at least one of the five licences here, and being wrong about
  * where a copyright notice ends is the one defect this document cannot carry.
  */
-export function renderNotices(packages, libraries = [], crates = []) {
+export function renderNotices(packages, libraries = [], crates = [], rust = undefined) {
   const lines = [
     GENERATED_BY,
     '',
@@ -372,9 +566,10 @@ export function renderNotices(packages, libraries = [], crates = []) {
       lines.push('')
       lines.push(`${[...new Set(sharing.map((one) => one.license))].join(', ')}, reproduced whole:`)
       lines.push('')
-      lines.push('```')
+      const fence = fenceFor(text)
+      lines.push(fence)
       lines.push(text)
-      lines.push('```')
+      lines.push(fence)
       lines.push('')
     }
   }
@@ -385,11 +580,10 @@ export function renderNotices(packages, libraries = [], crates = []) {
     lines.push('The desktop build takes these official Tauri plugins for what the platform')
     lines.push('provides and the app must not hand-roll — a single running instance, and a')
     lines.push('window that remembers itself. Their MIT terms are reproduced under')
-    lines.push('Attributions below. This file enumerates the bundled typefaces, the')
-    lines.push('JavaScript above and these two plugins; the wider Rust dependency graph is')
-    lines.push('not enumerated here, and its crates carry a range of licences of their own')
-    lines.push('(MIT and Apache-2.0 mostly, with MPL-2.0, BSD, ISC, Unicode-3.0 and Zlib')
-    lines.push('among them).')
+    lines.push('Attributions below. They are two of the several hundred crates the desktop')
+    lines.push('binary links, called out here because taking them was a dependency decision')
+    lines.push('rather than a transitive consequence; the rest are accounted for under Rust')
+    lines.push('crates.')
     lines.push('')
     lines.push('| Crate | Version | Licence |')
     lines.push('| --- | --- | --- |')
@@ -401,9 +595,11 @@ export function renderNotices(packages, libraries = [], crates = []) {
   for (const one of packages) {
     lines.push(`### \`${one.name}\``)
     lines.push('')
-    lines.push('```')
-    lines.push(copyrightFrom(one.text))
-    lines.push('```')
+    const copyright = copyrightFrom(one.text)
+    const fence = fenceFor(copyright)
+    lines.push(fence)
+    lines.push(copyright)
+    lines.push(fence)
     lines.push('')
   }
   /* Each plugin's MIT text WHOLE, one per crate — the two differ in their
@@ -414,9 +610,11 @@ export function renderNotices(packages, libraries = [], crates = []) {
   for (const one of crates) {
     lines.push(`### \`${one.name}\``)
     lines.push('')
-    lines.push('```')
-    lines.push(crateLicenseFor(one.name, one.version).trimEnd())
-    lines.push('```')
+    const text = crateLicenseFor(one.name, one.version).trimEnd()
+    const fence = fenceFor(text)
+    lines.push(fence)
+    lines.push(text)
+    lines.push(fence)
     lines.push('')
   }
 
@@ -427,10 +625,17 @@ export function renderNotices(packages, libraries = [], crates = []) {
     lines.push('')
     lines.push(`Applies to: ${sharing.map((one) => `\`${one.name}\``).join(', ')}.`)
     lines.push('')
-    lines.push('```')
+    const fence = fenceFor(body)
+    lines.push(fence)
     lines.push(body)
-    lines.push('```')
+    lines.push(fence)
     lines.push('')
   }
+  /* LAST, and deliberately. This section is a megabyte against the rest of the
+     document's twenty-seven kilobytes; put anywhere earlier it buries every
+     part a human reads behind three hundred licence texts. The obligation is
+     that the terms be present, not that they be first. */
+  const rustCrates = rust?.crates ?? []
+  if (rustCrates.length > 0) lines.push(...rustSection(rustCrates, rust?.textFor ?? rustLicenseText))
   return `${lines.join('\n').trimEnd()}\n`
 }

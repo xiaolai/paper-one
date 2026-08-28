@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
 import { BUNDLED_LIBRARIES, BUNDLED_PACKAGES, BUNDLED_TRANSITIVE, readCrates, readPackage, renderNotices } from './lib/notices.mjs'
+import { readRustCrates } from './lib/rustNotices.mjs'
 
 /**
  * `pnpm docs:notices` — write `THIRD-PARTY-NOTICES.md` from what is installed.
@@ -33,6 +34,10 @@ export function currentNotices(root = REPO_ROOT) {
        until the walk in the notices test went looking. */
     [...BUNDLED_LIBRARIES, ...BUNDLED_TRANSITIVE].map((entry) => readPackage(root, entry)),
     readCrates(root),
+    /* The several hundred Rust crates the desktop binary links — read from
+       what `pnpm docs:rust-notices` committed, never from cargo. See
+       `readCrates` for what a cargo call inside this path cost. */
+    { crates: readRustCrates() },
   )
 }
 

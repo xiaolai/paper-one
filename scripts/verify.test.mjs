@@ -14,7 +14,7 @@ import { STEPS, needsShell, parseArgs, plainToken, runSteps, spawnStep } from '.
 const SCRIPT = fileURLToPath(new URL('./verify.mjs', import.meta.url))
 
 describe('the steps', () => {
-  it('are the plan\'s, in order: manifest, compositions, dead CSS, undefined CSS tokens, browser safety, inert directives, boundaries (and the test-project check and the test ledger), types, coverage, the desktop build, the browser build, the CLI bundle, then Cargo', () => {
+  it('are the plan\'s, in order: manifest, compositions, dead CSS, undefined CSS tokens, browser safety, inert directives, boundaries (and the test-project check and the test ledger), types, coverage, the desktop build, the browser build, the CLI bundle, Cargo, then the notice\'s Rust half', () => {
     /* THE CHEAP STATIC CHECKS COME FIRST, before the ones that spend a minute
        compiling — `css:check`, `css:tokens` and `directives:check` are a walk of
        `src` and answer in milliseconds, so failing there costs the reader
@@ -54,6 +54,7 @@ describe('the steps', () => {
       'cargo fmt --check',
       'cargo clippy -D warnings',
       'cargo test --workspace',
+      'docs:rust-notices --check',
     ])
     /* THE SELFTEST STEP IS GONE ON PURPOSE, and this pins it so putting it
        back is a deliberate act rather than a reflex. Its cases run under
@@ -80,6 +81,20 @@ describe('the steps', () => {
     /* The CLI's bundle is gitignored, so no other step here would notice it
      * stop compiling — and `bin/paper.mjs` is what `sync-scenario.sh` runs. */
     expect(STEPS.find((s) => s.name === 'build:cli').args).toEqual(['build:cli'])
+    /* THE NOTICE'S RUST HALF IS LAST, AFTER CARGO, and that position is the
+     * fix rather than an accident of ordering. Enumerating the crates the
+     * binary links needs `cargo metadata` over four targets and a populated
+     * registry; the notices test used to ask for it itself, with `--offline`,
+     * from inside `test:coverage` — eight steps before cargo runs at all.
+     * `--offline` exits 101 on a fresh clone and on a CI runner with a
+     * rust-cache keyed on an older lockfile, so a pull request touching
+     * `Cargo.lock` could redden the gate for a reason unrelated to it.
+     * Anything moving this step above `cargo test --workspace` reintroduces
+     * exactly that. */
+    expect(STEPS.map((s) => s.name).indexOf('docs:rust-notices --check')).toBeGreaterThan(
+      STEPS.map((s) => s.name).indexOf('cargo test --workspace'),
+    )
+    expect(STEPS.find((s) => s.name === 'docs:rust-notices --check').args).toEqual(['docs:rust-notices', '--check'])
   })
 })
 
@@ -156,7 +171,7 @@ describe('spawnStep', () => {
 describe('parseArgs', () => {
   it('selects steps with --from and --only, lists with --list, refuses the rest', () => {
     expect(parseArgs([]).steps.map((s) => s.name)).toEqual(STEPS.map((s) => s.name))
-    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:web', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace'])
+    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:web', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace', 'docs:rust-notices --check'])
     expect(parseArgs(['--only', 'boundaries']).steps.map((s) => s.name)).toEqual(['boundaries'])
     expect(parseArgs(['--from', 'build', '--only', 'cargo fmt --check']).steps.map((s) => s.name)).toEqual(['cargo fmt --check'])
     expect(parseArgs(['--list'])).toEqual({ list: true })

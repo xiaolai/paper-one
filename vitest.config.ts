@@ -236,15 +236,33 @@ const COVERAGE_EXCLUDE = [
  * are — 63 / 63 / 72 / 81 — which is higher than the 55 the plan guessed
  * before this phase's suites landed, and is used because a floor set below
  * the measurement is slack on the day it is written.
+ *
+ * ## WOUND ONCE MORE 2026-08-28, after three audit-fix rounds
+ *
+ * The rounds that followed added roughly six hundred tests, and the gates
+ * they were set against went slack again by a point and a half. Measured at
+ * 5 363 tests:
+ *   global            78.66 lines / 78.66 statements / 83.16 functions / 89.76 branches
+ *   src/kernel/ui     66.70 / 66.70 / 73.53 / 82.76
+ *   src/kernel/core   94.43 / 94.43 / 94.84 / 94.30
+ *   scripts/lib       99.59 / 99.59 / 100.00 / 96.23
+ *
+ * Every gate is its measurement minus one, to two decimals where the areas
+ * were whole points before — the rounding was never the rule, and a whole
+ * point is up to a point of slack the rule does not intend. Functions moves
+ * this time (82 → 82.16) because 83.16 − 1 is above the old gate rather than
+ * below it, which is the condition the note above set for touching it.
+ * `scripts/lib` branches goes 95 → 96: the Rust-notice generator arrived with
+ * its own tests and carried the area up.
  */
 const COVERAGE_THRESHOLDS = {
-  lines: 76.11,
-  statements: 76.11,
-  functions: 82,
-  branches: 88.14,
-  'src/kernel/core/**': { lines: 93, statements: 93, functions: 93, branches: 93 },
-  'src/kernel/ui/**': { lines: 63, statements: 63, functions: 72, branches: 81 },
-  'scripts/lib/**': { lines: 99, statements: 99, functions: 100, branches: 95 },
+  lines: 77.66,
+  statements: 77.66,
+  functions: 82.16,
+  branches: 88.76,
+  'src/kernel/core/**': { lines: 93.43, statements: 93.43, functions: 93.84, branches: 93.3 },
+  'src/kernel/ui/**': { lines: 65.7, statements: 65.7, functions: 72.53, branches: 81.76 },
+  'scripts/lib/**': { lines: 99.5, statements: 99.5, functions: 100, branches: 96 },
 }
 
 /**

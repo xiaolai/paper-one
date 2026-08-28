@@ -121,6 +121,30 @@ export const STEPS = Object.freeze([
    * harness wait longer for a machine that is still oversubscribed: the number
    * would move, the race would not. */
   { name: 'cargo test --workspace', cmd: 'cargo', args: ['test', ...CARGO, '--workspace', '--all-targets', '--', '--test-threads=1'] },
+  /* THE RUST HALF OF THE THIRD-PARTY NOTICE, and it is LAST for a reason.
+   *
+   * `THIRD-PARTY-NOTICES.md` has to enumerate the several hundred crates the
+   * desktop binary statically links — MIT and Apache-2.0 almost throughout,
+   * and both condition permission to redistribute on the licence travelling
+   * with the copy. Answering "which crates" needs `cargo metadata` over four
+   * target triples and a populated registry, which is exactly what the steps
+   * above have just guaranteed: by here, cargo has fetched, built and tested
+   * the whole workspace.
+   *
+   * ⚠️ IT CANNOT MOVE EARLIER, AND THE REASON IS THE DEFECT IT REPLACES. The
+   * notices test used to ask cargo itself, from inside `test:coverage` —
+   * step eleven, before any cargo step — with `--offline`, which exits 101
+   * when a lockfile package is missing from the local registry. A fresh
+   * clone has that shape, and so does a CI runner restoring a rust-cache
+   * keyed on an older lockfile, so a pull request touching `Cargo.lock`
+   * could redden the gate for a reason unrelated to the change. That call is
+   * gone; `check-third-party-notices.test.mjs` now reads `Cargo.lock` and a
+   * committed manifest, and this step is the one place a lockfile bump that
+   * adds a shipping crate is caught.
+   *
+   * It costs about four seconds on a machine whose registry holds all four
+   * targets, and a minute on one that has only ever built for its own. */
+  { name: 'docs:rust-notices --check', cmd: 'pnpm', args: ['docs:rust-notices', '--check'] },
   /* Frozen ALL THE WAY DOWN: `Object.freeze` on the array left every step
    * object and args array mutable, so an importer could quietly rewrite what
    * a "step" runs while the definition still read as frozen. */

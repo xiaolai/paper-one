@@ -9,14 +9,19 @@ import {
   BUNDLED_PLUGINS,
   BUNDLED_TRANSITIVE,
   NOT_BUNDLED,
+  cell,
   copyrightFrom,
   crateLicenseFor,
+  fenceFor,
   licenseBodyFrom,
+  lockedVersions,
   packageDirFor,
   readCrates,
   readPackage,
   renderNotices,
 } from './lib/notices.mjs'
+import { RUST_LICENSES_DIR, absentFromLock, readRustCrates, spdxIdsOf } from './lib/rustNotices.mjs'
+import { DELETED_ENV } from './verify-without.mjs'
 import { NOTICES, committedNotices, currentNotices } from './write-third-party-notices.mjs'
 
 /**
@@ -395,9 +400,16 @@ describe('the desktop platform plugins', () => {
 
   it('names each with the version the lockfile pins', () => {
     expect(crates.map((one) => one.name)).toEqual(BUNDLED_PLUGINS)
+    const declared = new Map(readRustCrates().map((one) => [`${one.name}@${one.version}`, one]))
     for (const one of crates) {
+      /* The parse checked against the file's own literal text: `lockedVersions`
+         reads eight thousand lines of TOML by hand, and a substring match on
+         the raw bytes is what says the parse and the file agree. */
       expect(lock, `${one.name} ${one.version} in Cargo.lock`).toContain(`name = "${one.name}"\nversion = "${one.version}"`)
-      expect(one.license).not.toBe('unknown')
+      /* And the same version in the crate manifest, so the two halves this
+         reads from cannot drift apart unnoticed. */
+      expect(declared.get(`${one.name}@${one.version}`)?.license, `${one.name} in rust-crates.json`).toBe(one.license)
+      expect(one.license).toMatch(/[A-Za-z]/)
     }
   })
 
@@ -424,6 +436,111 @@ describe('the bundle', () => {
     const resources = tauri.bundle?.resources ?? []
     const listed = Array.isArray(resources) ? resources : Object.keys(resources)
     expect(listed.some((one) => String(one).endsWith(NOTICES))).toBe(true)
+  })
+})
+
+/**
+ * THE RUST CRATES — item A of the phase-20 audit, and the largest thing the
+ * notice was ever wrong about.
+ *
+ * The desktop binary statically links five hundred and ninety-two third-party
+ * crates, overwhelmingly MIT and Apache-2.0. Both condition permission to
+ * redistribute on the licence and the copyright notice travelling with the
+ * copy — the same words the OFL uses about the typefaces, and the same words
+ * MIT uses about React. The notice named two of them, and said so in its own
+ * prose: "the wider Rust dependency graph is not enumerated here." A document
+ * that describes its own omission is still a document that has one.
+ *
+ * ⚠️ NOTHING HERE RUNS CARGO. `scripts/refresh-rust-notices.mjs` asks the
+ * registry and commits the answer; these three checks hold that answer against
+ * `src-tauri/Cargo.lock`, against the committed texts, and against the
+ * rendered notice — all of which are files, present in every clone. See
+ * `readCrates` above for what a cargo call in this file cost.
+ */
+describe('the Rust crates the binary links', () => {
+  const crates = readRustCrates()
+  const locked = lockedVersions(read('src-tauri/Cargo.lock'))
+
+  it('is the whole closure and not a sample, so the checks below are not vacuous', () => {
+    /* Four hundred is well under the measured 592 and well over any plausible
+       truncation. A manifest that quietly became a handful of crates would
+       pass every other assertion in this file. */
+    expect(crates.length).toBeGreaterThan(400)
+    expect(crates.some((one) => one.name === 'serde')).toBe(true)
+    for (const name of BUNDLED_PLUGINS) expect(crates.some((one) => one.name === name), name).toBe(true)
+  })
+
+  it('declares a licence and carries a text for every crate it names', () => {
+    for (const one of crates) {
+      expect(one.license, `${one.name} declares no licence`).toMatch(/[A-Za-z]/)
+      expect(one.texts.length, `${one.name} has no licence text`).toBeGreaterThan(0)
+    }
+  })
+
+  /**
+   * ⚠️ SKIPPED, AND ONLY, INSIDE A `pnpm verify:without` COPY.
+   *
+   * `capability:remove` prunes `Cargo.lock` with `cargo metadata --offline`,
+   * so cutting `peer` takes iroh and its whole subtree out of the lockfile
+   * — while `rust-crates.json`, which only `pnpm docs:rust-notices` rewrites,
+   * still names them. In that copy the notice is over-inclusive, which is the
+   * safe direction and not a defect of the removal. `verify-without` sets
+   * `PAPER_VERIFY_WITHOUT` to the id it cut, and nothing else does; on the real
+   * tree the variable is unset and this is a hard assertion.
+   *
+   * The comparison itself is `absentFromLock`, tested against a known positive
+   * beside its own module — a skip whose subject is never proved to fire is a
+   * skip that hides a check nobody has run.
+   */
+  it('names every crate at a version src-tauri/Cargo.lock actually pins', (context) => {
+    const absent = absentFromLock(crates, locked)
+    const cut = process.env[DELETED_ENV]
+    if (cut !== undefined && absent.length > 0) {
+      return context.skip(`${cut} was cut from this copy and its crates pruned from Cargo.lock; the manifest is regenerated by a separate command`)
+    }
+    expect(absent).toEqual([])
+  })
+
+  it('has a committed text for every sha it references, and none it references for nothing', () => {
+    const referenced = new Set(crates.flatMap((one) => one.texts))
+    for (const sha of referenced) {
+      expect(existsSync(path.join(RUST_LICENSES_DIR, `${sha}.txt`)), `${sha}.txt`).toBe(true)
+    }
+    const onDisk = readdirSync(RUST_LICENSES_DIR).filter((name) => name.endsWith('.txt')).map((name) => name.slice(0, -4))
+    expect([...onDisk].sort()).toEqual([...referenced].sort())
+  })
+
+  /* The fallback for a crate that declares terms and publishes none. Its
+     `standard` flag is RECORDED rather than inferred, because the vendored
+     Apache-2.0 text and a crate's own LICENSE-APACHE are routinely
+     byte-identical — so "did this crate ship its own text" cannot be
+     recovered from the shas afterwards. */
+  it('reproduces a standard text only where a crate ships none, and names the holders it has', () => {
+    const standard = crates.filter((one) => one.standard)
+    expect(standard.length).toBeGreaterThan(0)
+    for (const one of standard) {
+      expect(one.texts.length, one.name).toBe(new Set(spdxIdsOf(one.license)).size)
+      if (one.authors !== undefined) expect(one.authors.every((author) => author.length > 0), one.name).toBe(true)
+    }
+    /* And a crate that DOES ship its own text is never marked standard. */
+    expect(crates.find((one) => one.name === 'serde')?.standard).toBeUndefined()
+  })
+
+  it('is in the committed notice: every crate row, and the terms behind it', () => {
+    const committed = committedNotices() ?? ''
+    for (const one of crates) {
+      expect(committed, one.name).toContain(`| \`${one.name}\` | ${one.version} | ${one.license} |`)
+    }
+    expect(committed).toContain('## Rust crates')
+    /* The basis, stated in the document rather than only in the code that
+       produced it — a reader cannot check a closure they are not told about. */
+    expect(committed).toContain('aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu')
+    expect(committed).toContain(`${crates.length} crates,`)
+    /* The MPL's §3.2 and Apache §4 obligations are in the file, not merely
+       named: two of the licences whose text the fonts and the JavaScript
+       sections never carried. */
+    expect(committed).toContain('Mozilla Public License Version 2.0')
+    expect(committed).toContain('APPENDIX: How to apply the Apache License to your work')
   })
 })
 
@@ -473,51 +590,177 @@ describe('the renderer', () => {
     expect(text.endsWith('\n')).toBe(true)
     expect(text.endsWith('\n\n')).toBe(false)
   })
+
+  /**
+   * ⚠️ A LICENCE TEXT IS NOT MARKDOWN-INERT, and assuming it was broke this
+   * document the moment the Rust crates went in. `aws-lc-sys`'s licence body
+   * contains twenty-six lines beginning with three backticks; inside a
+   * three-backtick fence the third of them ENDS the block, and the rest of
+   * that licence — and the two hundred and ninety-six texts after it — render
+   * as prose. Nothing errors. The file is the right bytes and the wrong
+   * document.
+   */
+  it('opens a fence longer than anything inside the text it is reproducing', () => {
+    expect(fenceFor('nothing special')).toBe('```')
+    expect(fenceFor('a\n```\nb')).toBe('````')
+    /* Indented up to three spaces still closes a fence, per CommonMark. */
+    expect(fenceFor('a\n   ````\nb')).toBe('`````')
+    /* A backtick run that is not at the start of a line closes nothing. */
+    expect(fenceFor('see `x` for more')).toBe('```')
+  })
+
+  it('reproduces a text containing a fence without ending the block early', () => {
+    const withFence = { ...ONE, text: 'Copyright 2020 Somebody\n\nExample:\n\n```\ncode\n```\n\nend of terms' }
+    const rendered = renderNotices([withFence])
+    expect(rendered).toContain('````\nExample:')
+    expect(rendered).toContain('end of terms\n````')
+  })
+
+  /**
+   * A CRATE'S DECLARED AUTHOR IS `Mads Marquart <mads@marquart.dk>` — angle
+   * brackets a markdown renderer reads as a tag, in a table cell. A code span
+   * makes them the characters they are, which is the whole requirement for a
+   * copyright holder's name.
+   */
+  it('puts a copyright holder in a table cell verbatim, brackets, pipes and all', () => {
+    expect(cell('Mads Marquart <mads@marquart.dk>')).toBe('`Mads Marquart <mads@marquart.dk>`')
+    expect(cell('A | B')).toBe('`A \\| B`')
+    /* A backtick in a name takes a longer fence, and one at either end takes
+       the padding space CommonMark requires. */
+    expect(cell('a`b')).toBe('``a`b``')
+    expect(cell('`quoted`')).toBe('`` `quoted` ``')
+  })
+
+  /**
+   * THE RUST SECTION, driven with fakes — the committed corpus is asserted
+   * against elsewhere in this file; these are the shapes it does not have
+   * today and would silently render wrong when it does.
+   */
+  describe('the Rust crates section', () => {
+    const RUST = [
+      { name: 'a', version: '1.0.0', license: 'MIT', texts: ['aaaaaaaaaaaa'] },
+      { name: 'b', version: '2.0.0', license: 'MIT', texts: ['aaaaaaaaaaaa'] },
+      { name: 'c', version: '3.0.0', license: 'Zlib', texts: ['bbbbbbbbbbbb'], standard: true, authors: ['Someone <s@example.test>'] },
+    ]
+    const textFor = (sha) => (sha === 'aaaaaaaaaaaa' ? 'SHARED TERMS' : 'ZLIB TERMS')
+    const rendered = renderNotices([ONE], [], [], { crates: RUST, textFor })
+
+    it('emits a shared text once, with every crate it covers named above it', () => {
+      expect(rendered).toContain('Applies to 2 crates: `a` 1.0.0, `b` 2.0.0.')
+      expect(rendered.match(/SHARED TERMS/g)?.length).toBe(1)
+      expect(rendered).toContain('3 crates, 2 distinct licence and notice texts.')
+    })
+
+    it('says "1 crate" for a text one crate carries, rather than "1 crates"', () => {
+      expect(rendered).toContain('Applies to 1 crate: `c` 3.0.0.')
+    })
+
+    it('names the copyright holders of a crate that ships no licence text', () => {
+      expect(rendered).toContain('| `c` | 3.0.0 | Zlib | `Someone <s@example.test>` |')
+    })
+
+    it('says so in the table where a crate declares no authors either', () => {
+      const anonymous = renderNotices([ONE], [], [], { crates: [{ ...RUST[2], authors: undefined }], textFor })
+      expect(anonymous).toContain('| `c` | 3.0.0 | Zlib | *the crate declares none* |')
+    })
+
+    /* Every crate shipping its own text means no fallback table at all — a
+       heading with nothing under it would read as an omission. */
+    it('omits the no-licence-text table entirely when every crate ships one', () => {
+      const all = renderNotices([ONE], [], [], { crates: RUST.slice(0, 2), textFor })
+      expect(all).toContain('## Rust crates')
+      expect(all).not.toContain('Crates that declare terms and publish no licence text')
+    })
+
+    it('omits the whole section when there are no crates, rather than an empty heading', () => {
+      expect(renderNotices([ONE], [], [], { crates: [] })).not.toContain('## Rust crates')
+      expect(renderNotices([ONE])).not.toContain('## Rust crates')
+    })
+  })
 })
 
-describe('readCrates and a cargo that misbehaves', () => {
-  /* The three failure branches, each through the injected spawn — the real
-   * cargo is exercised by the cases above; these are the roads it can go
-   * wrong on, which a green metadata run never walks. */
-  const metadata = (packages) => () => ({ status: 0, stdout: JSON.stringify({ packages }), stderr: '' })
+/**
+ * `readCrates` ANSWERS FROM THE LOCKFILE NOW, AND NOTHING HERE SPAWNS CARGO.
+ *
+ * ⚠️ IT USED TO RUN `cargo metadata --offline --locked`, from inside this
+ * suite. `--offline` exits 101 when any package in the lockfile is missing
+ * from the local registry — the shape of a fresh clone, and the shape of a CI
+ * runner restoring a `Swatinem/rust-cache` keyed on an older lockfile
+ * (measured by holding `zbus-4.4.0` out of the registry). This file runs under
+ * `test:coverage`, which is step eleven of `pnpm verify` and comes BEFORE
+ * every cargo step, so a pull request touching `Cargo.lock` could redden CI
+ * for a reason having nothing to do with the change, at the step least likely
+ * to be suspected.
+ *
+ * `Cargo.lock` is committed and always present; the licence half comes from
+ * `scripts/lib/rust-crates.json`, written by `pnpm docs:rust-notices` where a
+ * registry exists. These drive both with values in hand.
+ */
+describe('readCrates and a lockfile it cannot answer from', () => {
+  const LOCK = [
+    '# This file is automatically @generated by Cargo.',
+    'version = 4',
+    '',
+    '[[package]]',
+    'name = "tauri-plugin-window-state"',
+    'version = "2.4.1"',
+    'source = "registry+https://github.com/rust-lang/crates.io-index"',
+    'dependencies = [',
+    ' "serde",',
+    ']',
+    '',
+    '[[package]]',
+    'name = "serde"',
+    'version = "1.0.230"',
+    '',
+    '[metadata]',
+    'name = "not-a-package"',
+    'version = "0.0.0"',
+  ].join('\n')
+  const DECLARED = [
+    { name: 'tauri-plugin-window-state', version: '2.4.1', license: 'Apache-2.0 OR MIT', texts: [] },
+    { name: 'serde', version: '1.0.230', license: 'MIT OR Apache-2.0', texts: [] },
+  ]
 
-  it('throws with cargo’s own words when metadata fails', () => {
-    const spawn = () => ({ status: 101, stdout: '', stderr: 'the lock file needs to be updated' })
-    expect(() => readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toThrow(/lock file needs to be updated/)
+  /* The `[metadata]` table at the end carries a `name` and a `version` too —
+     a scan that did not track which table it was in would report a package
+     called `not-a-package`. */
+  it('reads name and version out of every [[package]] and out of no other table', () => {
+    const found = lockedVersions(LOCK)
+    expect([...found.keys()].sort()).toEqual(['serde', 'tauri-plugin-window-state'])
+    expect(found.get('serde')).toEqual(['1.0.230'])
+  })
+
+  it('answers from the lockfile and the manifest together, without spawning anything', () => {
+    expect(readCrates('/nowhere', ['tauri-plugin-window-state'], LOCK, DECLARED)).toEqual([
+      { name: 'tauri-plugin-window-state', version: '2.4.1', license: 'Apache-2.0 OR MIT' },
+    ])
   })
 
   it('names the crate that is no longer a dependency, rather than writing a notice without it', () => {
-    const spawn = metadata([{ name: 'something-else', version: '1.0.0', license: 'MIT' }])
-    expect(() => readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toThrow(
-      /tauri-plugin-window-state is not in the resolved workspace/,
+    expect(() => readCrates('/nowhere', ['tauri-plugin-single-instance'], LOCK, DECLARED)).toThrow(
+      /tauri-plugin-single-instance is not in src-tauri\/Cargo.lock/,
     )
   })
 
-  it('says unknown for a crate that declares no licence, instead of undefined', () => {
-    const spawn = metadata([{ name: 'tauri-plugin-window-state', version: '2.4.1', license: null }])
-    expect(readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toEqual([
-      { name: 'tauri-plugin-window-state', version: '2.4.1', license: 'unknown' },
-    ])
-  })
-
-  it('names the licence FILE when the crate uses license-file, which Cargo allows in place of an id', () => {
-    const spawn = metadata([{ name: 'tauri-plugin-window-state', version: '2.4.1', license: null, license_file: 'LICENCE.txt' }])
-    expect(readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toEqual([
-      { name: 'tauri-plugin-window-state', version: '2.4.1', license: 'see LICENCE.txt' },
-    ])
-  })
-
   it('refuses a crate the resolver holds two versions of, rather than notifying whichever came first', () => {
-    const spawn = metadata([
-      { name: 'tauri-plugin-window-state', version: '2.4.1', license: 'MIT' },
-      { name: 'tauri-plugin-window-state', version: '2.3.0', license: 'MIT' },
-    ])
-    expect(() => readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toThrow(/2 versions \(2\.4\.1, 2\.3\.0\)/)
+    const twice = `${LOCK}\n\n[[package]]\nname = "serde"\nversion = "1.0.229"\n`
+    expect(() => readCrates('/nowhere', ['serde'], twice, DECLARED)).toThrow(/serde resolves to 2 versions \(1\.0\.230, 1\.0\.229\)/)
   })
 
-  it('carries the spawn failure itself when cargo never ran, not "failed: null"', () => {
-    const spawn = () => ({ status: null, signal: null, stdout: '', stderr: '', error: new Error('spawn cargo ENOENT') })
-    expect(() => readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toThrow(/could not run: spawn cargo ENOENT/)
+  /* The manifest is regenerated by a different command from the one that
+     bumps the lockfile, so this is the disagreement that actually happens. */
+  it('names the command to run when the lockfile has moved and the manifest has not', () => {
+    expect(() => readCrates('/nowhere', ['serde'], LOCK, [DECLARED[0]])).toThrow(
+      /serde 1\.0\.230 is in Cargo.lock and not in scripts\/lib\/rust-crates.json — run `pnpm docs:rust-notices`/,
+    )
+  })
+
+  /* Dropping a half-written block silently would make the crate look absent,
+     and the caller would then say "is it still a dependency?" about a crate
+     that is right there in the file. */
+  it('refuses a [[package]] with no version rather than reporting the crate absent', () => {
+    expect(() => lockedVersions('[[package]]\nname = "half-written"\n')).toThrow(/half-written with no version/)
   })
 })
 
