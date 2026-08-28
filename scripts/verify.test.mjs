@@ -133,6 +133,23 @@ describe('parseArgs', () => {
     expect(parseArgs(['--wat'])).toEqual({ error: 'unknown argument "--wat"' })
   })
 
+  /* `--until` IS THE JS HALF OF THE GATE ON A PLATFORM WHOSE CARGO HALF IS A
+     SEPARATE JOB — the Windows leg runs `pnpm verify --until build:cli` and
+     then `cargo check` (WI-20.38, D10). Inclusive, and narrowed after
+     `--from`, so a window that names two real steps in the wrong order is the
+     same refused-empty selection the other two flags already give. */
+  it('stops after a step with --until, inclusive, and refuses an empty window', () => {
+    expect(parseArgs(['--until', 'compositions:check']).steps.map((s) => s.name)).toEqual(['architecture:check', 'compositions:check'])
+    expect(parseArgs(['--until', 'build:cli']).steps.map((s) => s.name).at(-1)).toBe('build:cli')
+    expect(parseArgs(['--until', 'build:cli']).steps.map((s) => s.name)).not.toContain('cargo metadata --locked')
+    expect(parseArgs(['--from', 'build', '--until', 'build:web']).steps.map((s) => s.name)).toEqual(['build', 'build:web'])
+    expect(parseArgs(['--from', 'build:web', '--until', 'build'])).toEqual({
+      error: '--from "build:web" and --until "build" select no steps; --until and --only must name a step at or after --from',
+    })
+    expect(parseArgs(['--until'])).toEqual({ error: '--until needs a step name' })
+    expect(parseArgs(['--list', '--until', 'build'])).toEqual({ error: '--list cannot be combined with --from, --until or --only' })
+  })
+
   /* A GATE THAT VERIFIES NOTHING MUST NOT EXIT 0. Both selectors name real
      steps, so neither is rejected on its own; their intersection is empty and
      the run used to print "all 0 steps passed". Green having done nothing looks
@@ -146,8 +163,8 @@ describe('parseArgs', () => {
   /* `--list` used to win silently, so `--list --only build` printed the whole
      list and ran nothing while looking like a plan for the one step asked for. */
   it('refuses --list combined with a selector rather than ignoring it', () => {
-    expect(parseArgs(['--list', '--only', 'build'])).toEqual({ error: '--list cannot be combined with --from or --only' })
-    expect(parseArgs(['--from', 'build', '--list'])).toEqual({ error: '--list cannot be combined with --from or --only' })
+    expect(parseArgs(['--list', '--only', 'build'])).toEqual({ error: '--list cannot be combined with --from, --until or --only' })
+    expect(parseArgs(['--from', 'build', '--list'])).toEqual({ error: '--list cannot be combined with --from, --until or --only' })
   })
 })
 

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -59,6 +59,44 @@ describe('the built CLI', () => {
     expect(result.status).toBe(0)
     expect(existsSync(BUNDLE)).toBe(true)
     expect(statSync(BUNDLE).size).toBeGreaterThan(MIN_BYTES)
+  }, 180_000)
+
+  /* ONE FILE. `configFile: false` left Vite's default `publicDir`, so every
+   * build copied `public/` — the app's static assets and whatever private
+   * book a developer had dropped there to read — into `bin/` beside the
+   * bundle. Planted here, so the case is red against a build that copies and
+   * says which file crossed; and pre-planted in `bin/`, so the residue the
+   * old build left on every machine is proved gone rather than assumed. */
+  it('copies nothing from public/ into bin/, and removes what the old build left there', () => {
+    /* TWO PLANTS, because they prove two different things. `planted` is in
+     * `public/` only: if it turns up in `bin/`, this build copied it — and the
+     * residue sweep must NOT hide that, which is why the sweep is confined to
+     * what `bin/` held before the build. `residue` is in both, as the old
+     * build left every machine: it must be gone afterwards. */
+    const planted = 'paper-cli-selftest-planted.txt'
+    const residue = 'paper-cli-selftest-residue.txt'
+    const publicDir = path.join(REPO_ROOT, 'public')
+    const plants = [
+      path.join(publicDir, planted),
+      path.join(publicDir, residue),
+      path.join(REPO_ROOT, OUT_DIR, residue),
+    ]
+    for (const plant of plants) writeFileSync(plant, `${path.basename(plant)}: for the purposes of this test\n`)
+    try {
+      const result = spawnSync('node', [path.join(REPO_ROOT, 'scripts', 'build-cli.mjs')], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 180_000,
+      })
+      expect(result.status).toBe(0)
+      expect(existsSync(path.join(REPO_ROOT, OUT_DIR, planted)), 'a file this build copied out of public/').toBe(false)
+      expect(existsSync(path.join(REPO_ROOT, OUT_DIR, residue)), 'a copy the old build left in bin/').toBe(false)
+      const crossed = readdirSync(publicDir).filter((name) => existsSync(path.join(REPO_ROOT, OUT_DIR, name)))
+      expect(crossed, 'names present in both public/ and bin/').toEqual([])
+      expect(existsSync(BUNDLE)).toBe(true)
+    } finally {
+      for (const plant of plants) rmSync(plant, { force: true })
+    }
   }, 180_000)
 
   it('imports node: builtins and nothing else', () => {

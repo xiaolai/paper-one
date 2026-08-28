@@ -1,0 +1,56 @@
+# Desktop bundles, on a tag. A release artifact is a different event from a
+# green commit — `verify.yml` is the gate and never bundles; this builds what a
+# tag names and keeps it as a workflow artifact. (WI-20.38, D10)
+#
+# UBUNTU 22.04 ON PURPOSE. A Linux binary links the glibc it was built
+# against and runs on nothing older, so the bundling runner is the oldest
+# supported LTS, not the newest — the floor every surveyed Tauri app builds
+# on. The gate runs on 24.04 because a gate wants the current toolchain; a
+# bundle wants the widest audience.
+#
+# UNSIGNED, UNPUBLISHED. Nothing here has a signing identity or a release
+# token; the artifact is what a human downloads, checks, and publishes by
+# hand. When signing lands it lands here, beside the build that needs it.
+name: bundle
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: linux bundle (Ubuntu 22.04, the glibc floor)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      # Tauri 2's documented set for Ubuntu 22.04. `patchelf` is what the
+      # AppImage bundler uses to make the binary relocatable.
+      - name: Tauri system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      # `beforeBuildCommand` in tauri.conf.json runs `pnpm build && pnpm build:web`
+      # — the desktop bundle and the served browser client — so the bundle
+      # carries what the gate built, by the same commands.
+      - run: pnpm tauri build --bundles deb appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paper-linux-${{ github.ref_name }}
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error

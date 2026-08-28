@@ -28,18 +28,30 @@ import { makeDataDir, nodeIndexFs, nodeSizePort, nodeTextFs, under } from './fs'
  * were here, and one had no guard at all.
  *
  * The denial is verified by attempting the read. When it did not take, the
- * mode is put back and `false` is returned, and the caller SKIPS rather than
- * asserting — a test that cannot run should say so, not quietly succeed.
+ * mode is put back and the REASON is returned; `null` means denied. The
+ * caller hands that reason to the test context's `skip`, so the case is
+ * REPORTED as skipped — `↓ name [reason]` — rather than passing.
+ *
+ * THREE OF THESE WERE A BARE `return` (WI-20.38): the case ended early and
+ * was counted as a pass, on the only CI platform, forever. Not `it.skipIf`,
+ * and the reason is measured: `vitest list --json` — which `pnpm test:ledger`
+ * reads to know what exists — does NOT list a test skipped statically (probed
+ * against 3.2.7: `it.skipIf(true)` absent from the list, a `context.skip`
+ * case present). A name in the ledger that Windows or root cannot collect is
+ * read by that gate as a deletion, so the platform-conditional skip has to
+ * happen at RUN time, where the name is still collected everywhere.
  */
-async function denyAccess(path: string, kind: 'file' | 'directory' = 'file'): Promise<boolean> {
-  if (process.platform === 'win32' || process.getuid?.() === 0) return false
+async function denyAccess(path: string, kind: 'file' | 'directory' = 'file'): Promise<string | null> {
+  if (process.platform === 'win32') return 'Windows ignores the mode bits'
+  if (process.getuid?.() === 0) return 'root is exempt from the mode bits'
   await chmod(path, 0o000)
   const denied = await (kind === 'file' ? readFile(path) : readdir(path)).then(
     () => false,
     () => true,
   )
-  if (!denied) await chmod(path, kind === 'file' ? 0o644 : 0o755)
-  return denied
+  if (denied) return null
+  await chmod(path, kind === 'file' ? 0o644 : 0o755)
+  return `chmod 000 did not deny a ${kind} read on this filesystem`
 }
 
 const roots: string[] = []
@@ -204,7 +216,7 @@ describe('nodeIndexFs', () => {
     expect(text(await fs.readFile('sync/journal.jsonl'))).toBe('one\ntwo\n')
   })
 
-  it('does not read the file back in order to append to it', async () => {
+  it('does not read the file back in order to append to it', async ({ skip }) => {
     const root = await freshRoot()
     const fs = nodeIndexFs(root)
     await fs.mkdir('sync')
@@ -218,8 +230,9 @@ describe('nodeIndexFs', () => {
      * the same speed, so the margin was noise. This is the property itself.
      *
      * Skipped for root, who is exempt from the mode bits and would make it
-     * pass by not applying. */
-    if (process.getuid?.() === 0) return
+     * pass by not applying — and REPORTED as skipped, through the context,
+     * for the reason `denyAccess` gives above. */
+    if (process.getuid?.() === 0) skip('root is exempt from the mode bits')
     await chmod(join(root, 'sync/journal.jsonl'), 0o222)
     try {
       await expect(fs.appendFile?.('sync/journal.jsonl', bytes('two\n'))).resolves.toBeUndefined()
@@ -285,14 +298,18 @@ describe('nodeTextFs', () => {
     /* A DIRECTORY where the file belongs — EISDIR. */
     await nodeIndexFs(root).mkdir('paper.store.v1.json')
     await expect(fs.read('paper.store.v1.json')).rejects.toThrow()
+  })
 
-    /* AND A FILE THAT WILL NOT OPEN — EACCES. Skipped for root, who is
-     * exempt from the mode bits and would make this pass by not applying. */
+  /* AND A FILE THAT WILL NOT OPEN — EACCES. Its own case, not the tail of
+   * the one above: it is skipped where the mode bits do not apply, and a
+   * skip has to mean "this did not run", not "half of this ran". */
+  it('throws rather than answering null when the store will not open', async ({ skip }) => {
     const other = await freshRoot()
     const guarded = nodeTextFs(other)
     await guarded.write('paper.store.v1.json', '{"kept":true}')
     const at = join(other, 'paper.store.v1.json')
-    if (!(await denyAccess(at))) return
+    const undeniable = await denyAccess(at)
+    if (undeniable !== null) skip(undeniable)
     try {
       await expect(guarded.read('paper.store.v1.json')).rejects.toThrow()
     } finally {
@@ -433,7 +450,7 @@ describe('nodeSizePort', () => {
    * port is "nobody can say", and a number that is quietly short is worse
    * than no number — a reader would believe their library is smaller than it
    * is. */
-  it('answers null when any part of the walk could not be read', async () => {
+  it('answers null when any part of the walk could not be read', async ({ skip }) => {
     const root = await freshRoot()
     const fs = nodeIndexFs(root)
     await fs.mkdir('books/aaa')
@@ -442,7 +459,8 @@ describe('nodeSizePort', () => {
     /* UNGUARDED BEFORE: as root, or on Windows, the chmod changed nothing and
      * `libraryBytes()` answered a perfectly good number — so the assertion
      * below passed while proving the opposite of what it says. */
-    if (!(await denyAccess(join(root, 'books/locked'), 'directory'))) return
+    const undeniable = await denyAccess(join(root, 'books/locked'), 'directory')
+    if (undeniable !== null) skip(undeniable)
     try {
       expect(await nodeSizePort(root).libraryBytes()).toBeNull()
     } finally {

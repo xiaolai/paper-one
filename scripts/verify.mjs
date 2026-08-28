@@ -19,7 +19,10 @@ import { isProcessEntry } from './lib/entry.mjs'
  * bookkeeping, not a gate.
  *
  * `--list` prints the steps and exits; `--from <name>` starts at a step
- * (for re-running the tail after a fix); `--only <name>` runs one.
+ * (for re-running the tail after a fix); `--until <name>` stops after one
+ * (the JS half of the gate on a platform whose Cargo half is a separate
+ * job — see `.github/workflows/verify.yml`'s Windows leg); `--only <name>`
+ * runs one.
  */
 
 export const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -149,6 +152,12 @@ export function spawnStep(step, cwd = REPO_ROOT, extraEnv = undefined) {
   const result = spawnSync(step.cmd, step.args, {
     cwd,
     stdio: step.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit',
+    /* WINDOWS ONLY: `pnpm` there is `pnpm.cmd`, and since Node 20.12 a
+     * `.cmd` cannot be spawned without a shell (EINVAL, by design). Every
+     * argument in `STEPS` is a plain token — no spaces, no shell characters —
+     * so the shell has nothing to misread. Off everywhere else: a shell
+     * between this runner and the gate it runs is one more thing to trust. */
+    shell: process.platform === 'win32',
     /* `extraEnv` is how `verify:without` tells the gates inside its copy which
        capability it has just deleted — see `DELETED_ENV`. Nothing sets it on
        the real tree, which is exactly the distinction the gates need. */
@@ -168,16 +177,18 @@ export function spawnStep(step, cwd = REPO_ROOT, extraEnv = undefined) {
 /** `{ steps }` to run, or `{ error }`; `{ list: true }` for `--list`. */
 export function parseArgs(argv, steps = STEPS) {
   let from
+  let until
   let only
   let list = false
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--list') list = true
-    else if (arg === '--from' || arg === '--only') {
+    else if (arg === '--from' || arg === '--until' || arg === '--only') {
       const value = argv[i + 1]
       if (value === undefined || value.startsWith('--')) return { error: `${arg} needs a step name` }
       if (!steps.some((s) => s.name === value)) return { error: `no step named ${JSON.stringify(value)}; see --list` }
       if (arg === '--from') from = value
+      else if (arg === '--until') until = value
       else only = value
       i++
     } else return { error: `unknown argument ${JSON.stringify(arg)}` }
@@ -186,20 +197,28 @@ export function parseArgs(argv, steps = STEPS) {
      ran nothing, which reads as "here is what I am about to do" and is not. A
      selector the reader typed and this ignored is the shape worth refusing. */
   if (list) {
-    if (from !== undefined || only !== undefined) {
-      return { error: '--list cannot be combined with --from or --only' }
+    if (from !== undefined || until !== undefined || only !== undefined) {
+      return { error: '--list cannot be combined with --from, --until or --only' }
     }
     return { list: true }
   }
   let selected = [...steps]
   if (from !== undefined) selected = selected.slice(selected.findIndex((s) => s.name === from))
+  /* INCLUSIVE, and on the already-narrowed list, so `--from a --until b` with
+     b before a is the same empty selection `--from`/`--only` already refuse
+     below — a window that names two real steps and contains none is an
+     error, not a pass. */
+  if (until !== undefined) selected = selected.slice(0, selected.findIndex((s) => s.name === until) + 1)
   if (only !== undefined) selected = selected.filter((s) => s.name === only)
   /* AN EMPTY SELECTION IS AN ERROR, NOT A PASS. `--from build --only typecheck`
      names two real steps and intersects to nothing, and this used to print
      "all 0 steps passed" and exit 0 — a gate reporting success having verified
      literally nothing, which is the worst failure a gate has. */
   if (selected.length === 0) {
-    return { error: `--from ${JSON.stringify(from)} and --only ${JSON.stringify(only)} select no steps; --only must name a step at or after --from` }
+    const named = [from !== undefined && `--from ${JSON.stringify(from)}`, until !== undefined && `--until ${JSON.stringify(until)}`, only !== undefined && `--only ${JSON.stringify(only)}`]
+      .filter(Boolean)
+      .join(' and ')
+    return { error: `${named} select no steps; --until and --only must name a step at or after --from` }
   }
   return { steps: selected }
 }
@@ -207,7 +226,7 @@ export function parseArgs(argv, steps = STEPS) {
 function main(argv) {
   const args = parseArgs(argv)
   if (args.error !== undefined) {
-    process.stderr.write(`verify: ${args.error}\nusage: node scripts/verify.mjs [--list] [--from <step>] [--only <step>]\n`)
+    process.stderr.write(`verify: ${args.error}\nusage: node scripts/verify.mjs [--list] [--from <step>] [--until <step>] [--only <step>]\n`)
     return 2
   }
   if (args.list) {
