@@ -19,7 +19,7 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SOURCE = ROOT / 'docs' / 'feature-ledger.md'
+SOURCE = ROOT / 'dev-docs' / 'feature-ledger.md'
 OUTPUT = ROOT / 'dev-docs' / 'artifacts' / 'feature-ledger.html'
 
 # The states the ledger defines. A row carrying anything else is a typo that
