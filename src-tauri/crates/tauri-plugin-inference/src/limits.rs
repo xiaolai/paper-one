@@ -42,6 +42,15 @@ pub const MAX_AGENT_PROMPT: usize = 64 * 1024;
 pub const MAX_SPEECH_TEXT: usize = 4 * 1024;
 pub const MAX_REQUEST_ID: usize = 64;
 pub const MAX_ANSWER_BYTES: usize = 1024 * 1024;
+/// A manifest id is a short slug; anything past this is not a model name,
+/// it is an allocation. Applied wherever a caller-minted model string
+/// arrives, BEFORE it is copied into ids, errors or lock keys.
+pub const MAX_MODEL_ID: usize = 256;
+/// A reader-entered display name for a cloud endpoint row.
+pub const MAX_ENDPOINT_LABEL: usize = 256;
+/// A pasted API credential. Generous — some providers issue long tokens —
+/// but bounded before it reaches the blocking keychain write.
+pub const MAX_ENDPOINT_KEY: usize = 8 * 1024;
 /// The longest utterance the daemon may hand back.
 ///
 /// ⚠️ **THE SPEECH BODY WAS UNBOUNDED**, and it was hidden by a timeout rather

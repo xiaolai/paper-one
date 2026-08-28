@@ -256,8 +256,22 @@ impl EndpointStore {
         // endpoint list they can no longer edit.
         let tmp = self.path.with_extension("json.part");
         std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, &self.path)?;
-        Ok(())
+        /* Windows cannot `rename` over an existing file, so every update
+         * AFTER the first would fail there and strand the `.part`. The
+         * remove-then-rename fallback is not atomic — a crash between the
+         * two loses the old list — but the store's writes are serialised by
+         * the command layer's mutex and a second Paper by the data-root
+         * lock, and a lost list is re-creatable; a store that can never be
+         * updated is not. Unix stays on the atomic rename. */
+        match std::fs::rename(&tmp, &self.path) {
+            Ok(()) => Ok(()),
+            Err(_) if cfg!(windows) && self.path.exists() => {
+                std::fs::remove_file(&self.path)?;
+                std::fs::rename(&tmp, &self.path)?;
+                Ok(())
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Every endpoint, each saying whether a key is stored for it — or that
@@ -337,6 +351,13 @@ impl EndpointStore {
          * authenticate. One meaning, in one place. */
         if key.is_empty() {
             return self.clear_key(id);
+        }
+        /* THE ROW MUST EXIST. A key written for an id no row carries is an
+         * orphaned keychain credential: `list` cannot show it, the pane
+         * cannot remove it, and nothing ever spawns with it. Refused by the
+         * same sentence an unknown model gets, naming the id. */
+        if !self.read()?.endpoints.iter().any(|one| one.id == id) {
+            return Err(Error::ModelUnknown(id.to_owned()));
         }
         self.keychain.write(id, key)
     }

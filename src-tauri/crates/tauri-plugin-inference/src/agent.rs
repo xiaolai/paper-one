@@ -205,6 +205,20 @@ impl AgentProbe {
         }
     }
 
+    /// Installed, but a version this build does not support — either it
+    /// would not say what it is (`version: None`) or it said something too
+    /// old. One constructor, because the two return sites differed only in
+    /// that field and drifted as a pair.
+    pub fn unsupported(agent: Agent, path: String, version: Option<Version>) -> AgentProbe {
+        AgentProbe {
+            agent,
+            path: Some(path),
+            version,
+            auth: Some(AuthState::VersionUnsupported),
+            unusable: Some(VERSION_NOT_SUPPORTED),
+        }
+    }
+
     /// Whether this route can answer a question.
     pub fn usable(&self) -> bool {
         self.unusable.is_none()
@@ -260,6 +274,21 @@ fn which_in(path: Option<&std::ffi::OsStr>, home: Option<&Path>, exe: &str) -> O
     on_path
         .chain(system)
         .chain(under_home)
+        /* ABSOLUTE, before the stat. A relative `PATH` entry — `.`, or the
+         * empty entry a trailing colon leaves, which `split_paths` yields as
+         * `""` — would be probed against the process's current directory and
+         * later executed against a DIFFERENT one; the run contract below says
+         * "the program is an absolute path". Anchored here, once, so the
+         * path that passed the stat is the path that runs. */
+        .map(|dir| {
+            if dir.as_os_str().is_empty() || dir.is_relative() {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(&dir))
+                    .unwrap_or(dir)
+            } else {
+                dir
+            }
+        })
         .map(|dir| dir.join(exe))
         .find(|candidate| is_executable_file(candidate))
 }
@@ -345,23 +374,11 @@ pub async fn probe(agent: Agent) -> AgentProbe {
     let Some(version) = version else {
         // It is on PATH but would not say what it is. Not a crash, and not a
         // guess: an unusable route that says why.
-        return AgentProbe {
-            agent,
-            path: Some(path_text),
-            version: None,
-            auth: Some(AuthState::VersionUnsupported),
-            unusable: Some(VERSION_NOT_SUPPORTED),
-        };
+        return AgentProbe::unsupported(agent, path_text, None);
     };
 
     if version < agent.minimum_version() {
-        return AgentProbe {
-            agent,
-            path: Some(path_text),
-            version: Some(version),
-            auth: Some(AuthState::VersionUnsupported),
-            unusable: Some(VERSION_NOT_SUPPORTED),
-        };
+        return AgentProbe::unsupported(agent, path_text, Some(version));
     }
 
     let auth = match agent {
@@ -387,8 +404,24 @@ pub async fn probe(agent: Agent) -> AgentProbe {
 /// `codex login status` answers in PROSE. See [`read_codex_status`].
 async fn probe_codex_auth(path: &Path) -> AuthState {
     match run(path, &["login", "status"]).await {
-        Ok(out) => read_codex_status(&out.text()),
+        Ok(out) => guard_signed_in(read_codex_status(&out.text()), out.ok),
         Err(_) => AuthState::VersionUnsupported,
+    }
+}
+
+/// A SIGNED-IN answer must come from a run that SUCCEEDED.
+///
+/// The exit code cannot gate the whole parse — `codex login status` exits
+/// non-zero when signed out, which is an ordinary answer — but a CLI that
+/// printed a signed-in-shaped sentence on its way to failing (a wrapper
+/// script dying after banner output, a Store stub) must not mark the route
+/// usable on the strength of that sentence alone. Signed-out with any exit
+/// stands; signed-in without a clean exit is an answer this version's
+/// grammar does not cover.
+fn guard_signed_in(state: AuthState, ok: bool) -> AuthState {
+    match state {
+        AuthState::SignedIn { .. } if !ok => AuthState::VersionUnsupported,
+        other => other,
     }
 }
 
@@ -428,7 +461,11 @@ pub fn read_codex_status(text: &str) -> AuthState {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeAuth {
-    #[serde(default)]
+    /* NOT `#[serde(default)]`: with a default, `{}` — or a future object
+     * that renamed the field — parsed cleanly and read as SIGNED OUT, which
+     * is a claim about the account. The module's own rule is that a shape
+     * this version does not know reports "Version not supported" rather
+     * than guessing; a missing `loggedIn` is exactly that shape. */
     pub logged_in: bool,
     #[serde(default)]
     pub auth_method: Option<String>,
@@ -438,7 +475,7 @@ pub struct ClaudeAuth {
 
 async fn probe_claude_auth(path: &Path) -> AuthState {
     match run(path, &["auth", "status", "--json"]).await {
-        Ok(out) => read_claude_status(&out.stdout),
+        Ok(out) => guard_signed_in(read_claude_status(&out.stdout), out.ok),
         Err(_) => AuthState::VersionUnsupported,
     }
 }
@@ -626,6 +663,59 @@ mod tests {
     #[test]
     fn which_finds_nothing_for_a_name_that_does_not_exist() {
         assert!(which("paper-definitely-not-a-real-binary-xyzzy").is_none());
+    }
+
+    /// A missing `loggedIn` is an unknown shape, not a signed-out account.
+    #[test]
+    fn an_empty_status_object_is_an_unsupported_version_not_signed_out() {
+        assert!(matches!(
+            read_claude_status("{}"),
+            AuthState::VersionUnsupported
+        ));
+        assert!(matches!(
+            read_claude_status("null"),
+            AuthState::VersionUnsupported
+        ));
+        assert!(matches!(
+            read_claude_status(r#"{"authMethod":"api-key"}"#),
+            AuthState::VersionUnsupported
+        ));
+    }
+
+    /// A signed-in sentence from a run that FAILED does not mark the route
+    /// usable; a signed-out answer stands whatever the exit, because `codex
+    /// login status` exits non-zero when signed out.
+    #[test]
+    fn a_signed_in_answer_needs_a_clean_exit_and_a_signed_out_one_does_not() {
+        let signed_in = AuthState::SignedIn { plan: None };
+        assert!(matches!(
+            guard_signed_in(signed_in.clone(), false),
+            AuthState::VersionUnsupported
+        ));
+        assert!(matches!(
+            guard_signed_in(signed_in, true),
+            AuthState::SignedIn { .. }
+        ));
+        assert!(matches!(
+            guard_signed_in(AuthState::SignedOut, false),
+            AuthState::SignedOut
+        ));
+    }
+
+    /// A relative `PATH` entry — `.` or the empty string a trailing colon
+    /// leaves — must still yield an ABSOLUTE program path: the probe and the
+    /// later run may hold different current directories.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_path_entry_yields_an_absolute_candidate() {
+        let scratch = crate::testutil::ScratchDir::new("which-relative");
+        plant_cli(scratch.path(), "paper-relative-cli");
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(scratch.path()).unwrap();
+        let found = which_in(Some(std::ffi::OsStr::new(".")), None, "paper-relative-cli");
+        std::env::set_current_dir(old).unwrap();
+        let found = found.expect("found through the relative entry");
+        assert!(found.is_absolute(), "{}", found.display());
     }
 
     /// The resolver works on this platform, proven against a binary every

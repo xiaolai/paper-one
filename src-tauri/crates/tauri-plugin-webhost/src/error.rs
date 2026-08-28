@@ -22,8 +22,12 @@ pub enum Error {
     /// A revocation was APPLIED — the browser is cut off now — and could not
     /// be written to `webhost/sessions.json`, so after a restart the browser
     /// may be back. Distinct from a failure to revoke, which does not exist:
-    /// the in-memory half never fails. The pane has to say both halves, and
-    /// the message carries the disk's reason.
+    /// the in-memory half never fails. The pane has to say both halves.
+    ///
+    /// The wire carries the CODE alone — `Serialize` below drops the field —
+    /// so the disk's reason is logged where the variant is built
+    /// (`state.rs`), which is the only place it is ever seen. The field stays
+    /// because `Display` carries it into that log line.
     #[error("the change could not be saved: {0}")]
     Unsaved(String),
     /// A blocking task did not come back — it panicked, or the runtime is

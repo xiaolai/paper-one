@@ -20,6 +20,9 @@ rand = "0.10"
 # Constant-time comparison. The 6-digit code is a secret compared against
 # attacker-supplied input; `==` on bytes short-circuits and leaks position.
 subtle = "2"
+# One place a fallback has to say what it did with an unreadable file
+# (`Sessions::fresh_at`); already resolved in the tree via every other crate.
+log = "0.4"
 # THE SESSION FILE HOLDS `sha256(credential)`, never the credential (WI-20.29,
 # the phase-20 plan's D6). The same `sha2` the inference plugin already
 # resolves, so this is an edge in the graph and not a new crate.

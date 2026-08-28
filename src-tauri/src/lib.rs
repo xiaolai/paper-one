@@ -41,8 +41,14 @@ fn mcp_bridge_port() -> u16 {
     match std::env::var("PAPER_MCP_PORT") {
         Ok(value) => value
             .trim()
-            .parse()
-            .unwrap_or_else(|_| panic!("PAPER_MCP_PORT must be a port number, got {value:?}")),
+            .parse::<std::num::NonZeroU16>()
+            /* `NonZeroU16`: port 0 would bind an ephemeral port the MCP
+             * client — configured with the number it ASKED for — could
+             * never find. */
+            .unwrap_or_else(|_| {
+                panic!("PAPER_MCP_PORT must be a non-zero port number, got {value:?}")
+            })
+            .get(),
         Err(_) => MCP_BRIDGE_PORT,
     }
 }
@@ -112,11 +118,16 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 if let Some(window) = tray.app_handle().get_webview_window("main") {
                     let showing = window.is_visible().unwrap_or(false)
                         && window.is_focused().unwrap_or(false);
-                    if showing {
-                        let _ = window.hide();
+                    /* Logged, not discarded: a toggle whose `show` failed
+                     * reads as a tray that does nothing, and the log is the
+                     * only place that says which half failed. */
+                    let outcome = if showing {
+                        ("hide", window.hide())
                     } else {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                        ("show", window.show().and_then(|()| window.set_focus()))
+                    };
+                    if let (what, Err(cause)) = outcome {
+                        log::warn!("tray: could not {what} the window: {cause}");
                     }
                 }
             }
@@ -196,7 +207,15 @@ fn open_external(url: String) -> Result<(), String> {
     if trimmed.is_empty() || trimmed.len() > MAX_URL {
         return Err("that link cannot be opened".into());
     }
-    if trimmed.chars().any(char::is_control) {
+    /* The same rule as `externalTarget` in `externalLink.ts`: everything up
+     * to AND INCLUDING `U+0020`, plus DEL and the C1 controls. The first
+     * spelling here was `is_control` alone, which admits the space the doc
+     * above says cannot arrive — the two validators are twins and must
+     * refuse the same set. */
+    if trimmed
+        .chars()
+        .any(|c| c <= '\u{0020}' || c == '\u{007f}' || c.is_control())
+    {
         return Err("that link is malformed".into());
     }
     let lower = trimmed.to_ascii_lowercase();
@@ -220,10 +239,16 @@ fn open_external(url: String) -> Result<(), String> {
             c.arg("url.dll,FileProtocolHandler");
             c
         };
-        command
+        let mut child = command
             .arg(trimmed)
             .spawn()
             .map_err(|cause| format!("could not open that link: {cause}"))?;
+        /* Reaped, not dropped: on Unix a dropped child is a zombie until
+         * Paper exits, one per opened link. The launcher exits in
+         * milliseconds; a thread that waits for it costs nothing. */
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         Ok(())
     }
 
@@ -310,13 +335,26 @@ pub fn run() {
     {
         builder = builder.plugin(
             tauri_plugin_single_instance::Builder::new()
-                .callback(|app, argv, _cwd| {
+                .callback(|app, argv, cwd| {
                     if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
-                        let _ = window.unminimize();
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                        /* Logged, not ignored: a forwarded book that arrives
+                         * while the window could not be raised reads as a
+                         * launch that did nothing. */
+                        for (what, outcome) in [
+                            ("unminimize", window.unminimize()),
+                            ("show", window.show()),
+                            ("focus", window.set_focus()),
+                        ] {
+                            if let Err(cause) = outcome {
+                                log::warn!("second launch: could not {what} the window: {cause}");
+                            }
+                        }
                     }
-                    opened::deliver(app, opened::books_in_argv(argv));
+                    /* The newcomer's OWN cwd: `paper book.epub` typed in
+                     * ~/Books lands in THIS process, whose cwd is wherever
+                     * the first launch started. */
+                    let base = std::path::PathBuf::from(cwd);
+                    opened::deliver(app, opened::books_in_argv(argv, Some(&base)));
                 })
                 .dbus_id("one.paper.reader")
                 .build(),
@@ -501,7 +539,11 @@ pub fn run() {
             {
                 tauri::Manager::manage(app, opened::Opens::default());
                 opened::watch(app.handle());
-                opened::deliver(app.handle(), opened::books_in_argv(std::env::args()));
+                let cwd = std::env::current_dir().ok();
+                opened::deliver(
+                    app.handle(),
+                    opened::books_in_argv(std::env::args(), cwd.as_deref()),
+                );
             }
 
             /* Before anything can answer: a window close runs the teardown

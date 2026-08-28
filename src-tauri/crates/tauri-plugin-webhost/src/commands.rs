@@ -250,12 +250,22 @@ mod tests {
         let equals = text[start..].find('=').expect("an assignment") + start;
         let open = text[equals..].find('[').expect("a list") + equals;
         let close = text[open..].find(']').expect("a closed list") + open;
-        text[open..close]
+        let names: Vec<String> = text[open..close]
             .split('"')
             .skip(1)
             .step_by(2)
             .map(str::to_owned)
-            .collect()
+            .collect();
+        /* THE SET MUST NOT HIDE A DOUBLE. Collecting straight into a set
+         * folded an accidental duplicate away, and a list with the same
+         * command twice compared equal to one that had it once. */
+        let set: BTreeSet<String> = names.iter().cloned().collect();
+        assert_eq!(
+            set.len(),
+            names.len(),
+            "{marker}: a name appears more than once in {names:?}"
+        );
+        set
     }
 
     /// THE CHECK THE PEER PLUGIN NEVER HAD.

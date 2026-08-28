@@ -135,7 +135,21 @@ impl BlobTarget {
     /// The serve side reads through this name.
     pub fn checked_read(&self, root: &Path) -> Result<()> {
         self.checked(root)?;
-        refuse_symlink(&self.path, root)
+        refuse_symlink(&self.path, root)?;
+        /* "A real file" means exactly that: a directory, FIFO, socket or
+         * device under the content name would hang or garble the serve —
+         * hashing a FIFO blocks forever — and the promise above said file.
+         * Absent stays fine; absence has its own meaning to both callers. */
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(meta) if meta.is_file() => Ok(()),
+            Ok(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a regular file", self.path.display()),
+            )
+            .into()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// [`checked`](Self::checked), plus: neither the `.part` a fetch appends

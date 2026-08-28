@@ -3,9 +3,9 @@
 //! The root is `app_data_dir()` — `$APPDATA`, the same root the fs plugin's
 //! ACL scope is written against — except in debug builds, where
 //! `PAPER_TEST_DATA_DIR` overrides it, letting a test point a process at a
-//! scratch directory. The override is compiled out of release builds:
-//! `cfg!(debug_assertions)`, not a runtime check, so a release binary never
-//! consults the environment.
+//! scratch directory. The override is compiled out of release builds —
+//! `#[cfg(debug_assertions)]` on the function that reads it, so a release
+//! binary contains no code that consults the environment at all.
 //!
 //! THIS USED TO BE TWO COPIES, then nearly three. `tauri-plugin-peer` had it,
 //! `tauri-plugin-inference` had the same forty lines with a comment saying
@@ -55,7 +55,7 @@ impl fmt::Display for Error {
         match self {
             Error::NotAbsolute(p) => write!(
                 f,
-                "{TEST_DATA_DIR_ENV} must be absolute, got {}",
+                "the data root must be an absolute path, got {}",
                 p.display()
             ),
             Error::Io(e) => write!(f, "could not create the data root: {e}"),
@@ -64,7 +64,17 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    /// The chain survives the wrapper — diagnostics that stop at "could not
+    /// create the data root" with the `io::Error` swallowed are half a story.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::NotAbsolute(_) => None,
+            Error::Io(e) => Some(e),
+            Error::Tauri(e) => Some(e),
+        }
+    }
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -92,15 +102,15 @@ pub fn resolve(
     default: impl FnOnce() -> Result<PathBuf>,
 ) -> Result<PathBuf> {
     let root = match override_ {
-        Some(value) => {
-            let path = PathBuf::from(value);
-            if !path.is_absolute() {
-                return Err(Error::NotAbsolute(path));
-            }
-            path
-        }
+        Some(value) => PathBuf::from(value),
         None => default()?,
     };
+    /* BOTH branches: the documented invariant is about the root, not about
+     * where it came from. A relative default would be created against the
+     * process's working directory — a different library per launch dir. */
+    if !root.is_absolute() {
+        return Err(Error::NotAbsolute(root));
+    }
     std::fs::create_dir_all(&root).map_err(Error::Io)?;
     Ok(root)
 }

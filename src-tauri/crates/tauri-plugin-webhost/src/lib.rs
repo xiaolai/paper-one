@@ -91,11 +91,18 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                         Ok(sessions) => sessions,
                         Err(error) => {
                             log::error!(
-                                "webhost: cannot read {}: {error}. Starting with no browsers \
-                                 signed in; every phone will need a new code.",
+                                "webhost: cannot read {}: {error}. The file is moved aside and \
+                                 the set starts empty; every phone will need a new code, and \
+                                 the next sign-in WILL persist.",
                                 path.display()
                             );
-                            Sessions::new()
+                            /* ⚠️ NOT `Sessions::new()`: that discards the path,
+                             * so every credential issued after an unreadable
+                             * file was never written anywhere and vanished at
+                             * the next restart — silently, under a 90-day
+                             * cookie. Empty-but-persisted keeps the promise
+                             * `issue` makes. */
+                            Sessions::fresh_at(&path)
                         }
                     }
                 }
@@ -138,6 +145,11 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                                      {error}. The browser client is unavailable this run."
                                 );
                                 announce.set_bind_failed();
+                                /* AND NOTHING IS SERVED. Falling through ran
+                                 * the server anyway, behind a status that
+                                 * said failed — two answers, both believed
+                                 * somewhere. */
+                                return;
                             }
                         }
                         if let Err(error) =
@@ -145,6 +157,11 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                         {
                             log::error!("webhost: the server stopped: {error}");
                         }
+                        /* THE STATUS FOLLOWS THE SERVER. `serve` returning —
+                         * error or not — means there is no browser client any
+                         * more; a state left at `Bound` advertised a dead
+                         * port for the life of the run. */
+                        announce.set_bind_failed();
                     }
                     /* LOUD AND NOT FATAL. The reader still has an app; what
                      * they do not have is a browser client, and `status()`

@@ -201,7 +201,16 @@ impl DataLock {
     pub fn release(&self) {
         if let Some(held) = read_owner(&self.path) {
             if !held.token.is_empty() && held.token == self.owner.token {
-                let _ = fs::remove_file(&self.path);
+                /* Logged, not discarded: on a platform whose liveness check
+                 * cannot reclaim a dead holder (Windows fails closed), a
+                 * removal that silently failed leaves the library locked
+                 * until a human deletes a file the log never named. */
+                if let Err(cause) = fs::remove_file(&self.path) {
+                    log::warn!(
+                        "lock: could not remove {} on release: {cause}",
+                        self.path.display()
+                    );
+                }
             }
         }
     }
@@ -252,6 +261,10 @@ pub fn acquire_with(dir: &Path, command: &str, liveness: &Liveness) -> Result<Da
                 }
                 continue;
             }
+            /* Absent is not unreadable: the holder can release between our
+             * failed publish and this read, and refusing then would tell the
+             * caller a lock nobody holds cannot be read. Gone is a retry. */
+            None if !path.exists() => continue,
             None => return Err(Refused::Unreadable(path)),
         };
         if !(held.host == mine.host && !liveness.holds(&held)) {
@@ -308,9 +321,11 @@ fn is_empty(path: &Path) -> bool {
     fs::metadata(path).map(|m| m.len() == 0).unwrap_or(false)
 }
 
-/// Unique per acquisition within this process, and across processes by the
-/// pid: the point is that two locks taken by one process never carry the same
-/// token, which pid + time alone could not promise.
+/// Unique per acquisition WITHIN THIS PROCESS — the sequence number is what
+/// pid + time alone could not promise — and distinct across live processes on
+/// one host by the pid. Not a global claim: the token is only ever compared
+/// by its own writer (`release`) and used as a private temp-file suffix, and
+/// both live on one host.
 fn fresh_token() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -368,10 +383,31 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    fn scratch(name: &str) -> PathBuf {
+    /// A scratch directory that REMOVES ITSELF — tests used to leak one per
+    /// run into the system temp directory, recovery artifacts and all.
+    /// Derefs to `Path`, so call sites read as before.
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!("paper-lock-{name}-{}", fresh_token()));
         fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     /// A pid that runs and an OS with no opinion on identity — the check

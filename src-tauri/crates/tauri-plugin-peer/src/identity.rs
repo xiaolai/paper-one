@@ -26,7 +26,7 @@ use crate::error::{Error, Result};
 /// The subdirectory of the data root that holds device-private state.
 pub const PEER_DIR: &str = "peer";
 const KEY_FILE: &str = "identity.key";
-const KEY_LEN: u64 = 32;
+const KEY_LEN: usize = 32;
 
 /// The marker Time Machine reads: the on-disk form of Foundation's
 /// `NSURLIsExcludedFromBackupKey` (`CSBackupSetItemExcluded` without
@@ -46,6 +46,15 @@ pub fn key_path(root: &Path) -> PathBuf {
 /// Load the key, or generate and persist one if there is none.
 pub fn load_or_create(root: &Path) -> Result<SecretKey> {
     let path = key_path(root);
+    /* The exclusion goes on FIRST, before any key exists to back up: a
+     * freshly written key that predates the marker is one Time Machine pass
+     * away from being cloned, and a CORRUPT key used to return early past
+     * the marker entirely. On every load, not only at creation — every
+     * install that exists today wrote `peer/` before this marker did, and
+     * loading is what reaches them. */
+    let dir = root.join(PEER_DIR);
+    std::fs::create_dir_all(&dir)?;
+    exclude_from_backup(&dir);
     let key = match std::fs::metadata(&path) {
         Ok(meta) => load(&path, meta.len())?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -55,10 +64,6 @@ pub fn load_or_create(root: &Path) -> Result<SecretKey> {
         }
         Err(err) => return Err(err.into()),
     };
-    // On every load, not only at creation — the way the key's mode is
-    // re-asserted below: every install that exists today wrote `peer/`
-    // before this marker did, and loading is what reaches them.
-    exclude_from_backup(&root.join(PEER_DIR));
     Ok(key)
 }
 
@@ -109,14 +114,14 @@ fn exclude_from_backup(dir: &Path) {
 fn exclude_from_backup(_dir: &Path) {}
 
 fn load(path: &Path, len: u64) -> Result<SecretKey> {
-    if len != KEY_LEN {
+    if len != KEY_LEN as u64 {
         return Err(Error::IdentityCorrupt {
             path: path.to_path_buf(),
             len,
         });
     }
     let bytes = std::fs::read(path)?;
-    let bytes: [u8; 32] = bytes
+    let bytes: [u8; KEY_LEN] = bytes
         .as_slice()
         .try_into()
         .map_err(|_| Error::IdentityCorrupt {
@@ -131,9 +136,14 @@ fn write_new(path: &Path, key: &SecretKey) -> Result<()> {
     let dir = path.parent().expect("key path has a parent");
     std::fs::create_dir_all(dir)?;
     let tmp = path.with_extension("key.tmp");
-    {
+    /* A crash relic under the temp name is removed and the create is
+     * EXCLUSIVE — a truncating `create(true)` would follow a stale symlink
+     * and would reuse a stale file's looser mode, since `mode(0o600)`
+     * applies only to a file the open itself creates. */
+    let _ = std::fs::remove_file(&tmp);
+    let written = (|| -> Result<()> {
         let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -143,16 +153,31 @@ fn write_new(path: &Path, key: &SecretKey) -> Result<()> {
         use std::io::Write;
         file.write_all(&key.to_bytes())?;
         file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = written {
+        /* The temp holds PRIVATE KEY MATERIAL; a failure must not leave it. */
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
     }
-    // A leftover from an earlier crash could have been created before the
-    // mode was applied by a different process; the rename below replaces
-    // it, and the permissions are re-asserted on the final path.
     std::fs::rename(&tmp, path)?;
     tighten_permissions(path)?;
-    if let Ok(dir_file) = std::fs::File::open(dir) {
-        // Persist the rename. Directory fsync is Unix-only in effect; on
-        // Windows opening a directory as a file fails, hence the `if let`.
-        let _ = dir_file.sync_all();
+    /* Persist the rename. Best-effort ONLY where the platform cannot do it —
+     * Windows cannot open a directory as a file — but a Unix failure is
+     * LOGGED: the comment used to claim the rename was persisted while
+     * every failure vanished into an `if let`. */
+    match std::fs::File::open(dir) {
+        Ok(dir_file) => {
+            if let Err(err) = dir_file.sync_all() {
+                log::warn!("peer: could not persist the identity's directory entry: {err}");
+            }
+        }
+        Err(err) => {
+            #[cfg(unix)]
+            log::warn!("peer: could not open {} to sync it: {err}", dir.display());
+            #[cfg(not(unix))]
+            let _ = err;
+        }
     }
     Ok(())
 }

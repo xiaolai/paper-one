@@ -26,12 +26,15 @@ log = "0.4"
 # real handlers, the real extractors and the real headers without binding a
 # port. `tower` is already in this tree; only the `util` feature is new.
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 # `net` and `rt-multi-thread` are for `upgrade.rs`: an in-process `oneshot`
 # cannot perform a WebSocket handshake, and the handshake is where this surface
 # actually lives. A real listener needs a real reactor.
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
-# A REAL CLIENT for the real handshake. Already in this tree — axum's `ws`
-# feature resolves the same 0.28 — so this adds a dev edge, not a dependency.
-tokio-tungstenite = "0.28"
+# `test-util` is `start_paused` — the stale-permit pin waits out a timeout in
+# virtual time rather than real milliseconds.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time", "test-util"] }
+# A REAL CLIENT for the real handshake. The version FOLLOWS AXUM'S: 0.8.9
+# resolves tokio-tungstenite 0.29, and this pin said 0.28 under a comment
+# claiming they matched — so the workspace compiled BOTH, and the tests drove
+# the server with a different WebSocket implementation than it runs.
+tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }

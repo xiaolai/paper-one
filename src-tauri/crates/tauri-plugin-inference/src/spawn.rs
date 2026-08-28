@@ -3,7 +3,8 @@
 //! This module is pure: it turns a [`SpawnInputs`] into a [`SpawnPlan`] — a
 //! program, an argv, an environment and a `config.json` — and touches no
 //! filesystem and no process. That is what makes WI-15.0's acceptance
-//! ("each of the eight lines has a test that breaks when it is removed")
+//! ("each line of the configuration table has a test that breaks when it is
+//! removed" — the table has grown since it was eight)
 //! something a unit test can hold rather than something an integration run
 //! has to notice.
 //!
@@ -136,7 +137,6 @@ pub struct SpawnPlan {
     /// The `config.json` to write into `cache_dir` before launching.
     pub config: serde_json::Value,
     pub cache_dir: PathBuf,
-    pub models_dir: PathBuf,
     /// See [`SpawnInputs::record_path`].
     pub record_path: PathBuf,
     pub port: u16,
@@ -209,6 +209,14 @@ pub fn mint_token() -> String {
 
 /// Turn inputs into a launch. Pure.
 pub fn plan_spawn(inputs: &SpawnInputs) -> SpawnPlan {
+    /* The per-launch token invariant, ENFORCED rather than assumed:
+     * `mint_token` is 64 lowercase hex characters, and a plan built with an
+     * empty or hand-rolled key would authenticate nothing while looking
+     * configured. Loud here, where the plan is made, not at the question. */
+    assert!(
+        inputs.api_key.len() == 64 && inputs.api_key.chars().all(|c| c.is_ascii_hexdigit()),
+        "SpawnInputs.api_key is not a minted token — use mint_token()"
+    );
     let mut env = BTreeMap::new();
     env.insert(CACHE_DIR_ENV.to_owned(), path_string(&inputs.cache_dir));
     env.insert(API_KEY_ENV.to_owned(), inputs.api_key.clone());
@@ -297,7 +305,9 @@ pub fn plan_spawn(inputs: &SpawnInputs) -> SpawnPlan {
         env,
         config,
         cache_dir: inputs.cache_dir.clone(),
-        models_dir: inputs.models_dir.clone(),
+        // No `models_dir` on the PLAN: the path is already inside `config`,
+        // and the plan's copy was read by nothing — a second place for one
+        // fact to drift.
         record_path: inputs.record_path.clone(),
         port: inputs.port,
     }
@@ -327,7 +337,8 @@ mod tests {
             models_dir: PathBuf::from("/data/Paper/inference/models"),
             record_path: PathBuf::from("/data/Paper/inference/daemon.json"),
             port: 13399,
-            api_key: "deadbeef".to_owned(),
+            // A real minted shape — `plan_spawn` asserts the invariant now.
+            api_key: "deadbeef".repeat(8),
             cloud_keys: BTreeMap::new(),
         }
     }
@@ -466,8 +477,19 @@ mod tests {
         let plan = plan_spawn(&inputs());
         assert_eq!(
             plan.env.get(API_KEY_ENV).map(String::as_str),
-            Some("deadbeef")
+            Some("deadbeef".repeat(8).as_str())
         );
+    }
+
+    /// The invariant `plan_spawn` now asserts: a plan cannot be built around
+    /// a key that is not a minted token — empty, short, or non-hex all die
+    /// at construction, where the stack names the builder.
+    #[test]
+    #[should_panic(expected = "not a minted token")]
+    fn a_plan_with_an_unminted_key_dies_at_construction() {
+        let mut bad = inputs();
+        bad.api_key = "hunter2".to_owned();
+        let _ = plan_spawn(&bad);
     }
 
     #[test]
@@ -512,7 +534,11 @@ mod tests {
         let a = mint_token();
         let b = mint_token();
         assert_eq!(a.len(), 64, "32 bytes, hex");
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // LOWERCASE hex, as documented — `is_ascii_hexdigit` also took A–F,
+        // so the encoding contract was asserted by nothing.
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
         assert_ne!(a, b, "per launch, not per install");
     }
 

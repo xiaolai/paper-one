@@ -264,6 +264,11 @@ mod tests {
         // in the list, `Tauri` is not and is folded in by name below.
         let all = [
             Error::Io(std::io::Error::other("x")).kind(),
+            Error::FieldTooLarge {
+                field: "f",
+                limit: 1,
+            }
+            .kind(),
             Error::PathNotUnicode(PathBuf::new()).kind(),
             Error::RootNotAbsolute(PathBuf::new()).kind(),
             Error::RuntimeMissing(PathBuf::new()).kind(),

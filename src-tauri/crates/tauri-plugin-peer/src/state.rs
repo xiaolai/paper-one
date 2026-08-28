@@ -58,13 +58,18 @@ impl PeerState {
     }
 
     /// A task the node must not start before. Setup schedules the `.part`
-    /// sweep through this; a second call replaces the first, which is why
-    /// there is one caller.
+    /// sweep through this, ONCE — a second call would silently detach the
+    /// first barrier, so it is a programming error and says so.
     pub fn start_after(&self, task: JoinHandle<()>) {
-        *self
+        let replaced = self
             .before_start
             .lock()
-            .expect("before_start is never poisoned") = Some(task);
+            .expect("before_start is never poisoned")
+            .replace(task);
+        debug_assert!(replaced.is_none(), "start_after has ONE caller: setup");
+        if replaced.is_some() {
+            log::error!("peer: start_after called twice; the first barrier is detached");
+        }
     }
 
     async fn await_before_start(&self) {
@@ -75,12 +80,38 @@ impl PeerState {
             .lock()
             .expect("before_start is never poisoned")
             .take();
-        if let Some(task) = pending {
-            // A sweep that panicked is a logged failure, not a node that never
-            // starts.
-            if let Err(err) = task.await {
-                log::warn!("peer: the .part sweep did not finish: {err}");
+        let Some(task) = pending else { return };
+        /* CANCEL-SAFE: the first `node()` future can be dropped mid-await
+         * (a command torn down), and the take() above would then have
+         * DETACHED the barrier — the next caller would find `None` and start
+         * the node with the sweep still running. The guard puts an
+         * unfinished handle back on the way out, so a cancelled waiter
+         * leaves the barrier standing for the next one. */
+        struct PutBack<'a> {
+            slot: &'a Mutex<Option<JoinHandle<()>>>,
+            task: Option<JoinHandle<()>>,
+        }
+        impl Drop for PutBack<'_> {
+            fn drop(&mut self) {
+                /* Unconditionally: `tauri::async_runtime::JoinHandle` has no
+                 * `is_finished`, and re-awaiting a handle whose task already
+                 * completed just answers immediately — putting a finished one
+                 * back costs the next caller one no-op await. */
+                if let Some(task) = self.task.take() {
+                    *self.slot.lock().expect("before_start is never poisoned") = Some(task);
+                }
             }
+        }
+        let mut guard = PutBack {
+            slot: &self.before_start,
+            task: Some(task),
+        };
+        let outcome = guard.task.as_mut().expect("just set").await;
+        guard.task = None; // Completed: nothing to put back.
+                           // A sweep that panicked is a logged failure, not a node that never
+                           // starts.
+        if let Err(err) = outcome {
+            log::warn!("peer: the .part sweep did not finish: {err}");
         }
     }
 

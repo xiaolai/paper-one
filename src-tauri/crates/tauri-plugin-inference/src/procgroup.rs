@@ -152,18 +152,22 @@ pub async fn kill(child: &mut Child, _group: Option<u32>) -> io::Result<()> {
 /// `group` is the id captured by [`group_of`] at spawn, for the reason given
 /// there.
 #[cfg(unix)]
-pub fn kill_now(group: Option<u32>) {
+pub fn kill_now(group: Option<u32>) -> bool {
     if let Some(pid) = group {
-        // Errors are unreachable to a destructor and ESRCH is the outcome
-        // asked for, so there is nothing to do with the return value.
-        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+        // ESRCH is the outcome asked for — the group is already gone. Any
+        // other failure is reported to the caller, whose record of the group
+        // should outlive a kill that was never delivered.
+        let rc = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+        return rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
     }
+    true
 }
 
 #[cfg(windows)]
-pub fn kill_now(_group: Option<u32>) {
+pub fn kill_now(_group: Option<u32>) -> bool {
     // Nothing to do: the job object's own `Drop` terminates every process
     // still in it, and the owner holds one for exactly as long as the child.
+    true
 }
 
 /// A Windows Job Object holding the daemon's whole process tree.

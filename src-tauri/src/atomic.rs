@@ -103,6 +103,12 @@ fn kernel_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 /// Relative, non-empty, and made of plain components only: no root, no
 /// prefix, no `..`, no `.`. A webview command that wrote anywhere it was
 /// told would be a hole in the app; this refuses before touching the disk.
+///
+/// LEXICAL, deliberately. A symlink planted INSIDE the data directory could
+/// still carry a write elsewhere — but nothing the app or the webview can do
+/// creates one there (the fs plugin has no symlink operation), so the actor
+/// who plants it is the local user redirecting their own writes inside their
+/// own home, which no path check defends against.
 pub fn confined(root: &Path, relative: &str) -> Result<PathBuf, String> {
     if relative.is_empty() {
         return Err("write_atomic: the path is empty".into());
@@ -129,6 +135,13 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// so the rename itself is on disk. The temp name is private to this write
 /// — two processes over one library used to share `<name>.writing`, and the
 /// loser's bytes were published under the winner's rename.
+///
+/// The IMMEDIATE parent is what gets synced — D3's mechanism, and what
+/// PostgreSQL's `durable_rename` and SQLite do. An ANCESTOR directory this
+/// call just created (the first write into a new book folder) is not: a
+/// power loss in that window can lose the fresh folder and the file with
+/// it, which the next launch reads as a book that never landed — a clean
+/// absence, not a torn file.
 pub fn write_atomic_at(
     target: &Path,
     bytes: &[u8],
@@ -152,7 +165,25 @@ pub fn write_atomic_at(
         TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     let written = (|| {
-        let mut file = File::create(&temp)?;
+        /* `create_new`, never a truncating `create`: the name is unique to
+         * this live process, but a stale relic under it (pid reuse after a
+         * crash) could be anything — a truncating open follows a symlink.
+         * The relic is removed and the exclusive create retried once. */
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&temp)?;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temp)?
+            }
+            Err(e) => return Err(e),
+        };
         file.write_all(bytes)?;
         syncer.sync_file(&file, level)?;
         drop(file);
@@ -283,16 +314,29 @@ pub async fn write_atomic<R: Runtime>(
     let path = path_header(&request)?;
     let level = level_header(&request)?;
     let target = confined(&kernel_root(&app)?, &path)?;
-    let bytes: std::borrow::Cow<'_, [u8]> = match request.body() {
-        tauri::ipc::InvokeBody::Raw(data) => std::borrow::Cow::Borrowed(data),
-        tauri::ipc::InvokeBody::Json(serde_json::Value::Array(data)) => std::borrow::Cow::Owned(
-            data.iter()
-                .filter_map(|v| v.as_u64().map(|v| v as u8))
-                .collect(),
-        ),
+    let bytes: Vec<u8> = match request.body() {
+        tauri::ipc::InvokeBody::Raw(data) => data.clone(),
+        /* STRICT: every element must be an integer in 0..=255. The first
+         * draft `filter_map`ped with an unchecked `as u8` — a fractional or
+         * negative entry vanished and a 256 wrapped to 0, so a malformed
+         * caller was told its write succeeded with different bytes. */
+        tauri::ipc::InvokeBody::Json(serde_json::Value::Array(data)) => data
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .and_then(|n| u8::try_from(n).ok())
+                    .ok_or_else(|| format!("write_atomic: {v} is not a byte"))
+            })
+            .collect::<Result<_, _>>()?,
         _ => return Err("write_atomic: unexpected invoke body".into()),
     };
-    write_atomic_at(&target, &bytes, level, &Os).map_err(|e| format!("write_atomic: {path}: {e}"))
+    /* Off the async runtime: `F_FULLFSYNC` measures up to ~12 ms on this
+     * machine, and record writes run `WRITE_WIDTH` deep — parked on runtime
+     * workers they would starve unrelated IPC. */
+    tauri::async_runtime::spawn_blocking(move || write_atomic_at(&target, &bytes, level, &Os))
+        .await
+        .map_err(|e| format!("write_atomic: {path}: {e}"))?
+        .map_err(|e| format!("write_atomic: {path}: {e}"))
 }
 
 /// Sync a file the kernel wrote through the fs plugin — the sync journal's
@@ -304,7 +348,10 @@ pub async fn fsync_in_data_dir<R: Runtime>(
     level: Level,
 ) -> Result<(), String> {
     let target = confined(&kernel_root(&app)?, &path)?;
-    fsync_at(&target, level, &Os).map_err(|e| format!("fsync: {path}: {e}"))
+    tauri::async_runtime::spawn_blocking(move || fsync_at(&target, level, &Os))
+        .await
+        .map_err(|e| format!("fsync: {path}: {e}"))?
+        .map_err(|e| format!("fsync: {path}: {e}"))
 }
 
 #[cfg(test)]
@@ -313,14 +360,35 @@ mod tests {
     use std::cell::RefCell;
     use std::time::Instant;
 
-    fn scratch(name: &str) -> PathBuf {
+    /// A scratch directory that REMOVES ITSELF — ordinary runs used to leave
+    /// one per test in the system temp directory. Derefs to `Path`, so call
+    /// sites read as before.
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!(
             "paper-atomic-{name}-{}-{}",
             std::process::id(),
             TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     /// Records what a real write would sync, and in which order.
@@ -451,8 +519,16 @@ mod tests {
     #[ignore]
     fn fullfsync_latency_on_this_machine() {
         let home = std::env::var_os("HOME").expect("HOME");
-        let dir = PathBuf::from(home).join(".paper-atomic-latency");
-        fs::create_dir_all(&dir).unwrap();
+        /* A UNIQUE name, removed by the guard even on a panic. The first
+         * draft used a fixed `~/.paper-atomic-latency` and removed it
+         * recursively — which would have eaten a pre-existing directory of
+         * that name, and a panic left the fixed name behind. */
+        let dir = Scratch(PathBuf::from(home).join(format!(
+            ".paper-atomic-latency-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        )));
+        fs::create_dir_all(&*dir).unwrap();
         let body = vec![b'x'; 4 * 1024];
         for level in [Level::Full, Level::Barrier] {
             let target = dir.join(format!("{level:?}.json"));
@@ -471,6 +547,5 @@ mod tests {
                 body.len()
             );
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 }

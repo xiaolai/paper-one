@@ -143,6 +143,7 @@ pub async fn inference_install_model<R: Runtime>(
     progress: Channel<Progress>,
 ) -> Result<()> {
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
     /* Held for the whole download, so a second install of this model — or a
@@ -230,11 +231,16 @@ fn manifest_id_for(state: &InferenceState, loaded: &str) -> Option<String> {
         .models
         .iter()
         .find(|model| {
+            /* By FILE NAME, not by suffix: `ends_with` on the raw string let
+             * `/tmp/not-model.gguf` claim the manifest entry for
+             * `model.gguf`. The daemon reports a path; the path's last
+             * component either IS the artifact's file or it is not ours. */
             loaded == model.id
-                || model
-                    .artifacts
-                    .iter()
-                    .any(|artifact| loaded.ends_with(&artifact.file))
+                || model.artifacts.iter().any(|artifact| {
+                    std::path::Path::new(&loaded)
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy() == artifact.file)
+                })
         })
         .map(|model| model.id.clone())
 }
@@ -456,11 +462,18 @@ pub async fn inference_generate<R: Runtime>(
      * command surface bounds which verbs a webview can reach; it says nothing
      * about how much can be pushed through one. See `limits.rs`. */
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     limits::within("system prompt", &system, limits::MAX_SYSTEM)?;
     limits::within("question", &question, limits::MAX_QUESTION)?;
-    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+    /* REGISTERED BEFORE THE RESOLVE — the same rule the agent turn records.
+     * `resolve_model` does filesystem and keychain work; a Stop pressed in
+     * that window used to answer `RequestUnknown` and the generation then
+     * started anyway. The token exists first, and the resolve's outcome is
+     * checked against it. */
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
+    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+    cancel.check()?;
     /* ⚠️ THE DAEMON LOCK IS DROPPED BEFORE THE NETWORK WAIT. `state.daemon()`
      * hands back a mapped mutex guard, and holding it across a streamed
      * generation serialised every other daemon command behind this one — the
@@ -505,13 +518,16 @@ pub async fn inference_gloss<R: Runtime>(
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     limits::within("system prompt", &system, limits::MAX_SYSTEM)?;
     limits::within("question", &question, limits::MAX_QUESTION)?;
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     /* RESOLVED, like `inference_generate`. The first version of the closed
      * argument set covered only the generate path, which left two commands
      * forwarding a caller-supplied model straight to the daemon — the exact
-     * hole the header claims does not exist. An audit caught the omission. */
-    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+     * hole the header claims does not exist. An audit caught the omission.
+     * And registered BEFORE the resolve, for generate's reason. */
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
+    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+    cancel.check()?;
     /* Dropped before the wait, as in `inference_generate` — see there. */
     let request = {
         let daemon = state.daemon().await?;
@@ -617,13 +633,20 @@ pub async fn agent_sign_in(route: String) -> Result<()> {
         Agent::Claude => &["auth", "login"],
     };
     // Spawned and released: a login flow opens a browser and takes as long as
-    // the reader takes. Awaiting it would block the command for minutes.
-    tokio::process::Command::new(path)
+    // the reader takes. Awaiting it would block the command for minutes —
+    // but SOMETHING must wait, or the exited child sits as a zombie until
+    // Paper quits. A detached task is that something.
+    let mut child = tokio::process::Command::new(path)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
+    tokio::spawn(async move {
+        if let Err(err) = child.wait().await {
+            log::warn!("inference: the sign-in process could not be reaped: {err}");
+        }
+    });
     Ok(())
 }
 
@@ -648,6 +671,7 @@ pub async fn inference_add_endpoint<R: Runtime>(
     label: String,
     base_url: String,
 ) -> Result<()> {
+    limits::within("endpoint label", &label, limits::MAX_ENDPOINT_LABEL)?;
     /* ⚠️ ONE WRITER AT A TIME. `add` and `remove` read the list, edit it and
      * write it back through the same temporary path; nothing serialised them
      * and `#[tauri::command]`s run concurrently, so two at once lose an edit
@@ -688,6 +712,8 @@ pub async fn inference_set_endpoint_key<R: Runtime>(
     id: String,
     key: String,
 ) -> Result<()> {
+    // Bounded BEFORE the blocking keychain write gets to allocate for it.
+    limits::within("endpoint key", &key, limits::MAX_ENDPOINT_KEY)?;
     let _writing = state.endpoint_writes().lock().await;
     state
         .on_store(&app, move |store| store.set_key(&id, &key))
@@ -714,13 +740,16 @@ pub async fn inference_speak<R: Runtime>(
     voice: Option<String>,
 ) -> Result<Vec<u8>> {
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     limits::within("speech text", &text, limits::MAX_SPEECH_TEXT)?;
     /* SPEECH, and this is where the modality check earns itself: without it a
      * caller could name the text model here and the answering model in
-     * `inference_generate` could be a voice. */
-    let model = resolve_model(&app, &state, &model, probe::Modality::Speech).await?;
+     * `inference_generate` could be a voice. Registered BEFORE the resolve,
+     * for generate's reason. */
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
+    let model = resolve_model(&app, &state, &model, probe::Modality::Speech).await?;
+    cancel.check()?;
     let body = speech::body(&model, &text, voice.as_deref());
     /* Dropped before the wait, as in `inference_generate` — see there. */
     let request = {

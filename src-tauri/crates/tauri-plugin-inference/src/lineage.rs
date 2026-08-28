@@ -67,9 +67,12 @@ const POLL_EVERY: Duration = Duration::from_millis(100);
 pub struct GroupRecord {
     pub pgid: u32,
     pub leader_pid: u32,
-    /// In the platform's own unit — microseconds since the epoch on macOS,
-    /// clock ticks since boot on Linux. Only ever compared for equality with
-    /// a reading from the same kernel, never interpreted.
+    /// Epoch MILLISECONDS on every platform — `paper_process::started_at_ms`
+    /// is the one lookup, shared with the library lock, and both writers and
+    /// both readers go through it. (An earlier design kept the platform's own
+    /// unit; the shared crate ended that.) `0` when the lookup failed at
+    /// spawn — unknown, which `is_ours` treats as "decide by the members",
+    /// never as a time to equal. Only ever compared, never interpreted.
     pub leader_started_at: u64,
     pub exe: PathBuf,
     pub port: u16,
@@ -135,7 +138,19 @@ pub fn is_ours(record: &GroupRecord, procs: &dyn Processes) -> bool {
         return false;
     }
     if members.contains(&record.leader_pid) {
-        return procs.started_at(record.leader_pid) == Some(record.leader_started_at);
+        /* The recorded time can be UNKNOWN — `started_at` can fail at spawn,
+         * and the record carries 0 for it — and the LIVE lookup can fail when
+         * the leader exits between the membership snapshot and this call.
+         * Neither failure is evidence of a stranger: with a real recorded
+         * time and a real live one, they decide; otherwise fall through to
+         * the member rule below, which judges by what the group is RUNNING.
+         * Without this, a spawn-time lookup hiccup made its own orphan
+         * unrecoverable forever — the recovery rejected the honest record. */
+        if record.leader_started_at != 0 {
+            if let Some(live) = procs.started_at(record.leader_pid) {
+                return live == record.leader_started_at;
+            }
+        }
     }
     let tree = record.exe.parent();
     members.iter().any(|&pid| {
@@ -177,7 +192,22 @@ pub async fn recover(path: &Path, procs: &dyn Processes, grace: Duration) -> Rec
         }
     };
     let outcome = if is_ours(&record, procs) {
-        let forced = wind_down(&record, procs, grace).await;
+        let (forced, gone) = wind_down(&record, procs, grace).await;
+        if !gone {
+            /* The record is the ONLY key to this group. A kill that did not
+             * take — an EPERM, a member wedged in the kernel — must not end
+             * with the key thrown away and the group immortal; the next
+             * launch tries again with the same record. */
+            log::warn!(
+                "inference: the orphaned runtime group {} did not exit; keeping its record for the next launch",
+                record.pgid
+            );
+            return Recovery::Collected {
+                pgid: record.pgid,
+                port: record.port,
+                forced,
+            };
+        }
         Recovery::Collected {
             pgid: record.pgid,
             port: record.port,
@@ -186,12 +216,27 @@ pub async fn recover(path: &Path, procs: &dyn Processes, grace: Duration) -> Rec
     } else {
         Recovery::Stale
     };
-    let _ = std::fs::remove_file(path);
+    if let Err(err) = std::fs::remove_file(path) {
+        if err.kind() != io::ErrorKind::NotFound {
+            // A record that would not go will be read again next launch —
+            // said out loud, because acting twice on one record is exactly
+            // what the pgid-reuse hazard needs.
+            log::warn!(
+                "inference: the daemon record at {} could not be removed: {err}",
+                path.display()
+            );
+        }
+    }
     outcome
 }
 
-/// Ask the group to stop, wait, then insist. Answers whether it insisted.
-async fn wind_down(record: &GroupRecord, procs: &dyn Processes, grace: Duration) -> bool {
+/// Ask the group to stop, wait, then insist.
+///
+/// Answers `(forced, gone)` — whether it needed the second signal, and
+/// whether the group actually EMPTIED. The second answer is what `recover`
+/// keeps the record on: reporting a collection that did not happen was how
+/// a kill that failed threw away the only key to a live group.
+async fn wind_down(record: &GroupRecord, procs: &dyn Processes, grace: Duration) -> (bool, bool) {
     if let Err(err) = procs.signal_group(record.pgid, Signal::Terminate) {
         log::warn!(
             "inference: could not terminate the orphaned runtime group {}: {err}",
@@ -207,11 +252,20 @@ async fn wind_down(record: &GroupRecord, procs: &dyn Processes, grace: Duration)
                     record.pgid
                 );
             }
-            return true;
+            // SIGKILL is not synchronous: give the kernel a moment, then
+            // read the group back rather than assuming.
+            let confirm = tokio::time::Instant::now() + Duration::from_millis(250);
+            while tokio::time::Instant::now() < confirm {
+                if procs.members_of(record.pgid).is_empty() {
+                    return (true, true);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            return (true, procs.members_of(record.pgid).is_empty());
         }
         tokio::time::sleep(POLL_EVERY).await;
     }
-    false
+    (false, true)
 }
 
 /// The `Drop` half: holds the group id and the record's path for exactly as
@@ -244,8 +298,18 @@ impl GroupHold {
 
 impl Drop for GroupHold {
     fn drop(&mut self) {
-        crate::procgroup::kill_now(self.group);
-        let _ = std::fs::remove_file(&self.record);
+        /* The record goes ONLY when the kill was delivered (or the group was
+         * already gone). A killpg that failed outright — however unlikely
+         * from the parent — with the record then removed is a live group
+         * with no key; kept, the next launch recovers it. */
+        if crate::procgroup::kill_now(self.group) {
+            let _ = std::fs::remove_file(&self.record);
+        } else {
+            log::warn!(
+                "inference: the runtime group {:?} could not be signalled at drop; its record stays for the next launch",
+                self.group
+            );
+        }
     }
 }
 
@@ -292,25 +356,37 @@ impl Processes for OsProcesses {
         if needed <= 0 {
             return Vec::new();
         }
-        let capacity = needed as usize / std::mem::size_of::<libc::pid_t>() + 16;
-        let mut pids = vec![0 as libc::pid_t; capacity];
-        // SAFETY: the buffer's byte length is what the call is told.
-        let bytes = unsafe {
-            libc::proc_listpids(
-                PROC_PGRP_ONLY,
-                pgid,
-                pids.as_mut_ptr().cast(),
-                (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
-            )
-        };
-        if bytes <= 0 {
-            return Vec::new();
+        let mut capacity = needed as usize / std::mem::size_of::<libc::pid_t>() + 16;
+        loop {
+            let mut pids = vec![0 as libc::pid_t; capacity];
+            // SAFETY: the buffer's byte length is what the call is told.
+            let bytes = unsafe {
+                libc::proc_listpids(
+                    PROC_PGRP_ONLY,
+                    pgid,
+                    pids.as_mut_ptr().cast(),
+                    (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
+                )
+            };
+            if bytes <= 0 {
+                return Vec::new();
+            }
+            /* A buffer filled to its LAST slot may have been truncated — the
+             * headroom above absorbs ordinary growth between the sizing call
+             * and this one, but a fork storm can outrun any fixed allowance,
+             * and a truncated list can hide exactly the member an identity
+             * check needed. Full means retry bigger, not hope. */
+            if bytes as usize == pids.len() * std::mem::size_of::<libc::pid_t>() {
+                capacity *= 2;
+                continue;
+            }
+            pids.truncate(bytes as usize / std::mem::size_of::<libc::pid_t>());
+            return pids
+                .into_iter()
+                .filter(|&pid| pid > 0)
+                .map(|pid| pid as u32)
+                .collect();
         }
-        pids.truncate(bytes as usize / std::mem::size_of::<libc::pid_t>());
-        pids.into_iter()
-            .filter(|&pid| pid > 0)
-            .map(|pid| pid as u32)
-            .collect()
     }
 
     fn signal_group(&self, pgid: u32, signal: Signal) -> io::Result<()> {
@@ -539,6 +615,27 @@ mod tests {
         path
     }
 
+    /// The grandchild's pid, from the file its shell writes — BOUNDED. Two
+    /// tests carried this loop with no deadline each; a shell that never
+    /// wrote the file hung the suite with no diagnosis instead of failing it.
+    #[cfg(unix)]
+    async fn pid_from(pidfile: &Path) -> u32 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(text) = tokio::fs::read_to_string(pidfile).await {
+                if let Ok(pid) = text.trim().parse() {
+                    return pid;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the helper shell never wrote its pidfile at {}",
+                pidfile.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// The five keys, camelCase, and nothing left beside the file: a record
     /// half-written when Paper died would be read as "nothing to collect".
     #[test]
@@ -760,14 +857,7 @@ mod tests {
         let mut leader = cmd.spawn().expect("spawn");
         let pgid = leader.id().expect("pid before reap");
         let _ = leader.wait().await;
-        let grandchild: u32 = loop {
-            if let Ok(text) = tokio::fs::read_to_string(&pidfile).await {
-                if let Ok(pid) = text.trim().parse() {
-                    break pid;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
+        let grandchild: u32 = pid_from(&pidfile).await;
         assert_eq!(
             unsafe { libc::kill(grandchild as libc::pid_t, 0) },
             0,
@@ -817,14 +907,7 @@ mod tests {
         crate::procgroup::configure(&mut cmd);
         cmd.kill_on_drop(true);
         let leader = cmd.spawn().expect("spawn");
-        let grandchild: u32 = loop {
-            if let Ok(text) = tokio::fs::read_to_string(&pidfile).await {
-                if let Ok(pid) = text.trim().parse() {
-                    break pid;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
+        let grandchild: u32 = pid_from(&pidfile).await;
         let path = written(&dir, &record(leader.id().unwrap()));
         let hold = GroupHold::new(crate::procgroup::group_of(&leader), path.clone());
         assert!(path.exists());

@@ -233,7 +233,18 @@ impl InferenceState {
                 .read_timeout(std::time::Duration::from_secs(60))
                 .user_agent(concat!("Paper/", env!("CARGO_PKG_VERSION")))
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new())
+                .unwrap_or_else(|err| {
+                    /* Building fails only if the TLS backend cannot
+                     * initialise — practically never. The fallback keeps
+                     * downloads possible but LOSES the read timeout and the
+                     * user agent, so it does not get to happen silently:
+                     * behaviour changing exactly on the exceptional path is
+                     * how a stall on a broken network became undiagnosable. */
+                    log::warn!(
+                        "inference: the download client could not be built ({err}); using a bare client with no read timeout"
+                    );
+                    reqwest::Client::new()
+                })
         })
     }
 
@@ -244,17 +255,29 @@ impl InferenceState {
 
     /// Where the runtime is, without starting anything.
     pub async fn status<R: Runtime>(&self, app: &AppHandle<R>) -> RuntimeStatus {
-        if let Some(daemon) = self.daemon.lock().await.as_ref() {
+        /* The request is BUILT under the lock and SENT outside it. The
+         * health client's timeout is ten seconds, and a status probe that
+         * held the daemon mutex across a wedged check queued stop,
+         * reconfiguration and every request-builder behind a read-only
+         * question — the same trap `inference_resource_usage` already
+         * documents at its `health_request` call. */
+        let probe = self
+            .daemon
+            .lock()
+            .await
+            .as_ref()
+            .map(|daemon| (daemon.plan().port, daemon.health_request()));
+        if let Some((port, request)) = probe {
             /* A HELD DAEMON IS NOT A LIVE ONE. This reported `Ready` for
              * anything in the slot and turned a failed health check into an
              * EMPTY VERSION STRING — so a daemon that had crashed read as
              * running with an unknown version, and the settings row said so.
              * A health check that will not answer is the definition of not
              * ready. Found by audit. */
-            return match daemon.health().await {
+            return match crate::daemon::Daemon::read_health(request).await {
                 Ok(health) if health.status == "ok" => RuntimeStatus::Ready {
                     version: health.version,
-                    port: daemon.plan().port,
+                    port,
                 },
                 _ => RuntimeStatus::Stopped,
             };
@@ -419,6 +442,11 @@ impl InferenceState {
         }
     }
 
+    /// The endpoint ids the daemon refused. Empty when it has not started.
+    pub async fn unregistered(&self) -> BTreeSet<String> {
+        self.unregistered.lock().await.clone()
+    }
+
     /// Drop a running daemon so the next start picks up new endpoint config.
     ///
     /// ⚠️ **KEYS ARE INJECTED AT SPAWN AND PROVIDERS REGISTERED AT START.**
@@ -432,19 +460,37 @@ impl InferenceState {
     /// Stopping rather than restarting: `ensure_started` runs before every
     /// question, so the next use brings it back with the current
     /// configuration, and a settings command does not spend a process launch.
-    /// `stop` trips the in-flight tokens first, so a reader watching an answer
-    /// gets a cancellation rather than a stall — the same contract every other
-    /// daemon teardown has.
-    /// The endpoint ids the daemon refused. Empty when it has not started.
-    pub async fn unregistered(&self) -> BTreeSet<String> {
-        self.unregistered.lock().await.clone()
-    }
-
+    /// The teardown trips the in-flight tokens, so a reader watching an
+    /// answer gets a cancellation rather than a stall — the same contract
+    /// every other daemon teardown has.
     pub async fn reconfigure(&self) {
         self.reconfigured.fetch_add(1, Ordering::Relaxed);
-        let taken = self.daemon.lock().await.take();
+        self.take_down().await;
+    }
+
+    /// The one teardown, shared by [`Self::reconfigure`] and [`Self::stop`].
+    ///
+    /// The slot lock is HELD ACROSS the child's shutdown, deliberately. Both
+    /// callers used to `take()` and release before awaiting `Daemon::stop`,
+    /// and `ensure_started` could spawn a REPLACEMENT while the old teardown
+    /// still ran — whose `GroupHold` then removed the daemon record the new
+    /// daemon had just written, leaving the new group unrecoverable after a
+    /// kill. `ensure_started` already holds the same lock across the whole
+    /// start; teardown gets the same discipline. The tokens are tripped
+    /// AFTER the slot empties: a request arriving mid-teardown finds
+    /// `NotRunning` instead of registering against a process on its way out,
+    /// and before the process goes, so a watched answer still ends in a
+    /// cancellation rather than a stall.
+    ///
+    /// `unregistered` is cleared with the daemon it described: a repaired
+    /// endpoint must not stay refused on the strength of the LAST daemon's
+    /// registration failures.
+    async fn take_down(&self) {
+        let mut slot = self.daemon.lock().await;
+        let taken = slot.take();
+        self.unregistered.lock().await.clear();
+        self.requests.cancel_all();
         if let Some(daemon) = taken {
-            self.requests.cancel_all();
             daemon.stop().await;
         }
     }
@@ -466,14 +512,7 @@ impl InferenceState {
 
     /// Stop the daemon if it is running. Idempotent.
     pub async fn stop(&self) {
-        // Everything streaming from it is about to have nothing to stream
-        // from, so the tokens are tripped BEFORE the process goes — a reader
-        // watching an answer gets a cancellation rather than a stall.
-        self.requests.cancel_all();
-        let taken = self.daemon.lock().await.take();
-        if let Some(daemon) = taken {
-            daemon.stop().await;
-        }
+        self.take_down().await;
     }
 
     /// The app is exiting.
@@ -499,14 +538,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_free_port_is_not_zero_and_differs_between_calls() {
+    fn a_free_port_is_not_zero() {
         let a = free_port().unwrap();
         let b = free_port().unwrap();
         assert_ne!(a, 0);
         assert_ne!(b, 0);
-        // Not strictly guaranteed by the OS, but a same-port pair twice in a
-        // row would mean the bind is not actually reserving anything.
-        assert!(a != b || a != 0);
+        /* No cross-call inequality assertion: the OS genuinely may hand the
+         * same ephemeral port twice once the first listener closes, so
+         * `a != b` would be a flake — and the disjunction that stood here
+         * (`a != b || a != 0`) was satisfied by the line above already,
+         * asserting nothing. Distinctness is the OS's business; non-zero and
+         * bindable is this function's. */
     }
 
     #[test]

@@ -3,7 +3,7 @@
 <!--
   Merged into the generated Info.plist by tauri.conf.json's
   `bundle.macOS.infoPlist`. Tauri owns every other key in there; this file adds
-  only the one it has no setting for.
+  only what it has no setting for.
 
   CFBundleIconName points at the app icon inside Contents/Resources/Assets.car,
   which is how macOS 26 finds the layered icon and gives it the Liquid Glass
@@ -14,10 +14,144 @@
   Tauri's own CFBundleIconFile (icons/icon.icns) is left in place and is not
   redundant: macOS 26 prefers the catalogue, and everything older ignores
   CFBundleIconName entirely and falls back to the .icns.
+
+  THE TYPE DECLARATIONS are what make the fileAssociations in tauri.conf.json
+  hold on a CLEAN Mac. EPUB and PDF conform to UTIs the system itself declares
+  (org.idpf.epub-container, com.adobe.pdf) and need nothing. MOBI and AZW3
+  reference ANOTHER VENDOR's identifiers, which a machine without that
+  vendor's software has never heard of — so they are IMPORTED here: a
+  declaration of somebody else's type, keyed to the extension and MIME type,
+  which LaunchServices uses only when no owner is present. FB2, FBZ and CBZ
+  have no owner at all, so Paper EXPORTS identifiers of its own under its
+  bundle id; tauri.conf.json's contentTypes name these same strings.
 -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleIconName</key>
 	<string>Paper</string>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.mobipocket.mobi</string>
+			<key>UTTypeDescription</key>
+			<string>Mobipocket ebook</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>mobi</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/x-mobipocket-ebook</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.amazon.azw</string>
+			<key>UTTypeDescription</key>
+			<string>Kindle ebook</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>azw</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.amazon.azw3</string>
+			<key>UTTypeDescription</key>
+			<string>Kindle KF8 ebook</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>azw3</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/vnd.amazon.mobi8-ebook</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>one.paper.reader.fb2</string>
+			<key>UTTypeDescription</key>
+			<string>FictionBook document</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.xml</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>fb2</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/x-fictionbook+xml</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>one.paper.reader.fbz</string>
+			<key>UTTypeDescription</key>
+			<string>Zipped FictionBook document</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>fbz</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>one.paper.reader.cbz</string>
+			<key>UTTypeDescription</key>
+			<string>Comic book archive</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>cbz</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/vnd.comicbook+zip</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

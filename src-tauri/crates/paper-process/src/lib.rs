@@ -43,6 +43,13 @@ pub fn own_started_at_ms() -> Option<u64> {
 }
 
 /// Now, as the same epoch milliseconds the answers above use.
+///
+/// A clock BEFORE the epoch answers `0` rather than an error, deliberately:
+/// the callers are identity records and stamps, and on a machine whose clock
+/// is that broken, `0` makes every "is this holder newer" comparison read
+/// the record as ancient — the conservative direction (a lock is treated as
+/// stale-able, never as freshly held). An error type here would ripple
+/// through every record writer for a machine state nothing else survives.
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -163,10 +170,14 @@ mod tests {
             started <= now,
             "start {started} must not be in the future ({now})"
         );
-        // A test binary is seconds old, not days: the unit is milliseconds.
+        // The unit check: a start time in SECONDS or MICROSECONDS would land
+        // outside [boot, now] by three orders of magnitude. Bounding against
+        // the boot rather than a fixed "ten minutes" keeps the test honest
+        // under a debugger, a suspended laptop, or a slow runner — the
+        // process genuinely cannot have started before the machine did.
         assert!(
-            now - started < 10 * 60 * 1_000,
-            "start reads {started} against now {now}"
+            (booted..=now).contains(&started),
+            "start reads {started}, outside [boot {booted}, now {now}] — wrong unit?"
         );
     }
 
@@ -176,20 +187,35 @@ mod tests {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
         child.wait().unwrap();
+        /* A reused pid between the reap and this read would legitimately
+         * answer with the REPLACEMENT's start — the flake window is one
+         * statement wide and pid allocation on both platforms walks forward,
+         * so it is accepted rather than engineered around. If this ever
+         * fires, re-run before suspecting the code. */
         assert_eq!(started_at_ms(pid), None, "a pid that is gone has no start");
+    }
+
+    /// Kills its child even when an assertion panics — a `sleep 5` left
+    /// running until its timer is a straggler every earlier failure leaked.
+    struct Reaped(std::process::Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn a_live_child_started_no_earlier_than_its_parent() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("5")
-            .spawn()
-            .unwrap();
+        let child = Reaped(
+            std::process::Command::new("sleep")
+                .arg("5")
+                .spawn()
+                .unwrap(),
+        );
         let mine = own_started_at_ms().unwrap();
-        let theirs = started_at_ms(child.id()).expect("a live child has a start");
+        let theirs = started_at_ms(child.0.id()).expect("a live child has a start");
         assert!(theirs >= mine, "child {theirs} before parent {mine}");
-        let _ = child.kill();
-        let _ = child.wait();
     }
 }

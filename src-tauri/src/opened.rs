@@ -67,8 +67,13 @@ pub fn is_book(path: &Path) -> bool {
 }
 
 /// The books an `argv` names: everything after the program, that is not a
-/// flag, that is a book — `file://` URLs unwrapped.
-pub fn books_in_argv<I>(argv: I) -> Vec<PathBuf>
+/// flag, that is a book — `file://` URLs unwrapped, and a RELATIVE path
+/// resolved against `cwd`. The cwd matters because a second launch's argv is
+/// delivered to the FIRST process: `paper book.epub` from a shell in
+/// `~/Books` must not resolve against wherever the first instance happened
+/// to start — the single-instance callback carries the newcomer's cwd for
+/// exactly this.
+pub fn books_in_argv<I>(argv: I, cwd: Option<&Path>) -> Vec<PathBuf>
 where
     I: IntoIterator<Item = String>,
 {
@@ -84,6 +89,10 @@ where
              * draft of this let it through to the extension check. */
             Ok(url) if url.scheme().len() > 1 => None,
             _ => Some(PathBuf::from(arg)),
+        })
+        .map(|path| match (path.is_relative(), cwd) {
+            (true, Some(base)) => base.join(path),
+            _ => path,
         })
         .filter(|path| is_book(path))
         .collect()
@@ -129,6 +138,14 @@ impl Pending {
         self.ready = true;
         std::mem::take(&mut self.queued)
     }
+
+    /// An emission failed — the webview is gone. The paths go back on the
+    /// queue and `ready` is withdrawn, so the NEXT webview's `READY` is what
+    /// hands them over.
+    pub fn requeue(&mut self, paths: Vec<PathBuf>) {
+        self.ready = false;
+        self.queued.extend(paths);
+    }
 }
 
 /// The managed state: one queue for the app's lifetime.
@@ -138,14 +155,23 @@ pub struct Opens(pub Mutex<Pending>);
 /// Books a launch carried: into the scope, then to the webview — now, or
 /// when it says it is ready.
 pub fn deliver<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
+    /* A directory named `archive.epub` passes the extension check — the pure
+     * functions judge names, and only here is the filesystem at hand. It is
+     * dropped with a log rather than sent to a read that must fail: the
+     * module's contract says a directory is not an import. */
+    let (paths, not_files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| p.is_file());
+    for wrong in &not_files {
+        log::warn!("open: {} is not a file; not an import", wrong.display());
+    }
     if paths.is_empty() {
         return;
     }
-    allow_in_scope(app, &paths);
     /* `try_state`, not `state`: the queue is managed in `setup`, and a
      * `RunEvent::Opened` is delivered after setup on every launch measured —
      * but a panic here would take the app down over a file it could not
-     * open, which is the wrong size of failure for the wrong reason. */
+     * open, which is the wrong size of failure for the wrong reason. The
+     * queue is checked BEFORE the scope is widened: a request this drops
+     * must not leave a permission behind. */
     let Some(opens) = app.try_state::<Opens>() else {
         log::error!(
             "open: the queue does not exist yet; {} path(s) dropped",
@@ -153,6 +179,7 @@ pub fn deliver<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
         );
         return;
     };
+    allow_in_scope(app, &paths);
     let now = opens
         .0
         .lock()
@@ -161,7 +188,7 @@ pub fn deliver<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
     if now.is_empty() {
         log::info!("open: holding what the launch carried until the webview is listening");
     } else {
-        emit(app, now);
+        emit_or_requeue(app, now);
     }
 }
 
@@ -176,7 +203,7 @@ pub fn watch<R: Runtime>(app: &AppHandle<R>) {
                 "open: the webview is listening; handing over {} held path(s)",
                 held.len()
             );
-            emit(&handle, held);
+            emit_or_requeue(&handle, held);
         }
     });
 }
@@ -197,13 +224,27 @@ fn allow_in_scope<R: Runtime>(app: &AppHandle<R>, paths: &[PathBuf]) {
     }
 }
 
-fn emit<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
+fn emit_or_requeue<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
     let payload: Vec<String> = paths
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
     if let Err(cause) = app.emit(OPEN, payload) {
-        log::error!("open: could not hand the launch's files to the webview: {cause}");
+        /* Requeued, not dropped: an emit fails when the webview is gone, and
+         * the next webview announces itself with READY — at which point the
+         * held paths go out again. Losing the reader's double-clicked book
+         * over a transient emit failure is the silent failure this module is
+         * shaped around. */
+        log::error!(
+            "open: could not hand the launch's files to the webview: {cause}; holding them for the next READY"
+        );
+        if let Some(opens) = app.try_state::<Opens>() {
+            opens
+                .0
+                .lock()
+                .expect("the open queue is poisoned")
+                .requeue(paths);
+        }
     }
 }
 
@@ -217,15 +258,18 @@ mod tests {
 
     #[test]
     fn argv_yields_the_books_and_not_the_program_the_flags_or_the_rest() {
-        let found = books_in_argv(argv(&[
-            "/Applications/Paper.app/Contents/MacOS/Paper",
-            "--flag",
-            "-x",
-            "/Books/Moby-Dick.epub",
-            "/Books/notes.txt",
-            "/Books/Paper.PDF",
-            "/Books",
-        ]));
+        let found = books_in_argv(
+            argv(&[
+                "/Applications/Paper.app/Contents/MacOS/Paper",
+                "--flag",
+                "-x",
+                "/Books/Moby-Dick.epub",
+                "/Books/notes.txt",
+                "/Books/Paper.PDF",
+                "/Books",
+            ]),
+            None,
+        );
         assert_eq!(
             found,
             vec![
@@ -236,14 +280,25 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_path_resolves_against_the_launch_s_own_cwd() {
+        // A second launch's argv is handled in the FIRST process; the path
+        // must resolve where the reader typed it, not where Paper started.
+        let found = books_in_argv(argv(&["paper", "book.epub"]), Some(Path::new("/Books")));
+        assert_eq!(found, vec![PathBuf::from("/Books/book.epub")]);
+        // With no cwd to resolve against, the path is left as given.
+        let found = books_in_argv(argv(&["paper", "book.epub"]), None);
+        assert_eq!(found, vec![PathBuf::from("book.epub")]);
+    }
+
+    #[test]
     fn a_file_url_in_argv_is_unwrapped_to_its_path() {
-        let found = books_in_argv(argv(&["paper", "file:///Books/One%20Book.epub"]));
+        let found = books_in_argv(argv(&["paper", "file:///Books/One%20Book.epub"]), None);
         assert_eq!(found, vec![PathBuf::from("/Books/One Book.epub")]);
     }
 
     #[test]
     fn a_url_that_is_not_a_file_is_not_a_book() {
-        assert!(books_in_argv(argv(&["paper", "https://example.org/x.epub"])).is_empty());
+        assert!(books_in_argv(argv(&["paper", "https://example.org/x.epub"]), None).is_empty());
     }
 
     #[test]
@@ -277,6 +332,21 @@ mod tests {
             vec![PathBuf::from("/c.epub")]
         );
         assert!(pending.ready().is_empty());
+    }
+
+    /// A failed emission withdraws READY: the paths wait for the NEXT
+    /// webview instead of being lost to the one that just went away.
+    #[test]
+    fn a_requeued_delivery_waits_for_the_next_ready() {
+        let mut pending = Pending::default();
+        assert!(pending.ready().is_empty());
+        pending.requeue(vec![PathBuf::from("/a.epub")]);
+        // Not ready any more: a new offer queues rather than sends.
+        assert!(pending.offer(vec![PathBuf::from("/b.epub")]).is_empty());
+        assert_eq!(
+            pending.ready(),
+            vec![PathBuf::from("/a.epub"), PathBuf::from("/b.epub")]
+        );
     }
 
     /// One list of what a launch may carry, held to the one `formats.ts`

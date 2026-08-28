@@ -14,7 +14,10 @@ links = "tauri-plugin-webhost"
 tauri-plugin = { version = "2", features = ["build"] }
 
 [dependencies]
-tauri = { version = "2.11.3" }
+# `default-features = false`, matching the peer and inference plugins: the
+# defaults pull wry, compression and the platform shells, none of which a
+# plugin that only registers commands and spawns a listener touches.
+tauri = { version = "2.11.3", default-features = false }
 paper-webhost = { path = "../paper-webhost" }
 paper-webauth = { path = "../paper-webauth" }
 # Where `webhost/sessions.json` lives: ONE resolution of the data root, shared
@@ -38,5 +41,4 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "toki
 [dev-dependencies]
 # Drives the real router over the real embedded table, in-process.
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 tokio-test = "0.4"

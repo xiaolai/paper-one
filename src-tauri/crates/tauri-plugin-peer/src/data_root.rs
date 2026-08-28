@@ -42,6 +42,12 @@ pub fn data_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
 /// This is the lexical guard only. [`checked_target`] adds the symlink check,
 /// which needs the filesystem.
 pub fn guard_inside_root(root: &Path, path: &Path) -> Result<()> {
+    /* The ROOT is validated too: an empty or relative root has no components
+     * to disagree with, so `starts_with` on it would admit every absolute
+     * path — a guard that guards nothing looks exactly like one that works. */
+    if !root.is_absolute() {
+        return Err(Error::PathNotAbsolute(root.to_path_buf()));
+    }
     if !path.is_absolute() {
         return Err(Error::PathNotAbsolute(path.to_path_buf()));
     }
@@ -209,7 +215,14 @@ mod tests {
                 .unwrap_or("t")
                 .replace("::", "-")
         ));
-        let _ = std::fs::remove_dir_all(&dir);
+        /* A stale directory that CANNOT be removed must fail here, loudly —
+         * a test running over leftover state fails somewhere downstream with
+         * a message about the wrong thing. Absent is fine. */
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("could not clear stale scratch {}: {err}", dir.display()),
+        }
         dir
     }
 }

@@ -3,7 +3,6 @@ name = "tauri-plugin-inference"
 version = "0.1.0"
 description = "Paper's local inference runtime: a supervised lemond child, a per-launch bearer token, verified model artifacts, and agent probes, behind Tauri commands"
 authors = ["Paper"]
-license = ""
 edition = "2021"
 # The app crate and tauri-plugin-peer both say 1.91; the toolchain itself is
 # pinned by the root rust-toolchain.toml.
@@ -135,6 +134,10 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    # Console is used directly (`GenerateConsoleCtrlEvent` in procgroup.rs) and
+    # compiled only because tokio's `signal` feature happened to enable it —
+    # a dependency's feature choice is not this crate's to lean on.
+    "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }

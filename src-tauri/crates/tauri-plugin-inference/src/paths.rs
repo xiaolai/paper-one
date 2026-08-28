@@ -41,7 +41,11 @@ pub use paper_data_root::TEST_DATA_DIR_ENV;
 /// The subdirectory this plugin owns under the data root.
 pub const INFERENCE_DIR: &str = "inference";
 
-/// The four directories, resolved. Every one exists on return.
+/// The four directories, RESOLVED — not created. `under` is pure; `ensure`
+/// creates `base`, `models_dir` and `staging_dir`, and deliberately NOT
+/// `cache_dir`, which the daemon makes for itself (WI-15.0's acceptance is a
+/// start from a directory that did not exist). The old first sentence said
+/// "every one exists on return", which was true of neither function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     /// `<data root>/inference`
@@ -91,9 +95,16 @@ impl Layout {
     }
 
     /// Where a model's bytes land while they are still arriving.
+    ///
+    /// NESTED, not joined with a separator: `("a-b", "c")` and `("a", "b-c")`
+    /// flattened to the same `a-b-c`, so two distinct models' downloads could
+    /// overwrite or resume each other's partial bytes. Both halves are
+    /// validated single components, so the nesting cannot traverse.
     pub fn staging_path(&self, id: &str, file: &str) -> Result<PathBuf> {
-        let name = format!("{}-{}", safe_component(id)?, safe_component(file)?);
-        Ok(self.staging_dir.join(name))
+        Ok(self
+            .staging_dir
+            .join(safe_component(id)?)
+            .join(safe_component(file)?))
     }
 
     /// The daemon's process-group record — `lineage.rs`. Under `base` rather
@@ -141,10 +152,15 @@ pub fn data_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
 /// fallback to whatever else answers to the name.
 pub fn bundled_runtime<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     let exe = bundled_runtime_dir(app)?.join(runtime_exe_name());
-    if exe.is_file() {
-        Ok(exe)
-    } else {
-        Err(Error::RuntimeMissing(exe))
+    /* `metadata`, not `is_file`: `is_file()` folds EVERY failure — a
+     * permission refusal, an I/O error — into `false`, and the reader was
+     * then told the runtime is not installed when the truth was that Paper
+     * could not look. Only "not there" is `RuntimeMissing`. */
+    match std::fs::metadata(&exe) {
+        Ok(meta) if meta.is_file() => Ok(exe),
+        Ok(_) => Err(Error::RuntimeMissing(exe)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(Error::RuntimeMissing(exe)),
+        Err(err) => Err(Error::Io(err)),
     }
 }
 

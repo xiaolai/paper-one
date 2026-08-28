@@ -75,14 +75,34 @@ impl WebHostState {
         }
     }
 
+    /// The listener bound: `Pending` → `Bound(port)`, and ONLY that.
+    ///
+    /// `compare_exchange` from `Pending`, so a second report — or one landing
+    /// after a failure was already recorded — cannot resurrect a dead status.
+    /// A port of 0 would ENCODE `Pending` (the sentinel), and a listener never
+    /// reports 0 — `local_addr` answers with the port the kernel chose — so a
+    /// 0 here is a caller bug, recorded as a failure rather than stored as a
+    /// silent "still waiting".
     pub fn set_port(&self, port: u16) {
-        self.bind.store(u32::from(port), Ordering::SeqCst);
+        if port == 0 {
+            log::error!("webhost: a bound listener reported port 0; treating the bind as failed");
+            self.set_bind_failed();
+            return;
+        }
+        let _ = self.bind.compare_exchange(
+            BIND_PENDING,
+            u32::from(port),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
     }
 
-    /// The bind was refused. **CALL THIS ON EVERY FAILING PATH** — a bind that
-    /// neither succeeds nor is reported leaves the pane saying "looking for an
-    /// address" for the life of the run, which is the failure this type exists
-    /// to make impossible to ship silently.
+    /// No browser client this run. **CALL THIS ON EVERY FAILING PATH** — a bind
+    /// that neither succeeds nor is reported leaves the pane saying "looking
+    /// for an address" for the life of the run, which is the failure this type
+    /// exists to make impossible to ship silently. Legitimate from `Pending`
+    /// (the bind failed) AND from `Bound` (the server stopped later); `Failed`
+    /// is the one terminal state.
     pub fn set_bind_failed(&self) {
         self.bind.store(BIND_FAILED, Ordering::SeqCst);
     }
@@ -194,9 +214,13 @@ impl WebHostState {
         if let Some(browser) = revoked.applied {
             self.host.pipe.close_browser(browser, "revoked");
         }
-        revoked
-            .saved
-            .map_err(|error| Error::Unsaved(error.to_string()))
+        revoked.saved.map_err(|error| {
+            /* THE DISK'S REASON GOES TO THE LOG. The wire carries the stable
+             * code alone (`Serialize` on `Error`), so this is the one place
+             * the io error is ever seen. */
+            log::error!("webhost: a revocation was applied but could not be saved: {error}");
+            Error::Unsaved(error.to_string())
+        })
     }
 
     /// Sign out every browser. Returns how many. See `WebHost::revoke_all`
@@ -205,10 +229,13 @@ impl WebHostState {
     pub fn revoke_all(&self) -> Result<usize, Error> {
         let revoked = self.host.revoke_all();
         let count = revoked.applied.len();
-        revoked
-            .saved
-            .map(|()| count)
-            .map_err(|error| Error::Unsaved(error.to_string()))
+        revoked.saved.map(|()| count).map_err(|error| {
+            /* As in `revoke`: the wire gets the code, the log gets the cause. */
+            log::error!(
+                "webhost: every browser was signed out but the change could not be saved: {error}"
+            );
+            Error::Unsaved(error.to_string())
+        })
     }
 
     /// How long a send waits for the browser to make room before the browser
@@ -284,19 +311,13 @@ fn epoch_ms(at: SystemTime) -> u64 {
 mod tests {
     use super::*;
 
-    /// The three-state, on its own — no `WebHostState`, which needs a running
-    /// `WebHost`. The encoding is what could go wrong: one atomic carrying a
-    /// port and two sentinels.
-    fn cell() -> AtomicU32 {
-        AtomicU32::new(BIND_PENDING)
-    }
-
-    fn read(cell: &AtomicU32) -> Bind {
-        match cell.load(Ordering::SeqCst) {
-            BIND_PENDING => Bind::Pending,
-            BIND_FAILED => Bind::Failed,
-            port => Bind::Bound(port as u16),
-        }
+    /// The REAL type, not a re-implementation of its decoding. These tests
+    /// carried their own copy of the atomic's encode/decode and their own
+    /// `port()` fold, so a regression in `WebHostState::bind()` itself would
+    /// have left them green. `WebHost::new()` is an in-memory host; nothing
+    /// here binds anything.
+    fn state() -> WebHostState {
+        WebHostState::new(Arc::new(paper_webhost::WebHost::new()))
     }
 
     /// ⚠️ **PENDING IS NOT FAILED, AND THEY USED TO BE ONE VALUE.** The port
@@ -306,40 +327,22 @@ mod tests {
     /// reopen Paper", permanently, over a client that was about to work.
     #[test]
     fn a_bind_that_has_not_answered_is_not_a_bind_that_failed() {
-        let cell = cell();
-        assert_eq!(read(&cell), Bind::Pending);
-        assert_ne!(read(&cell), Bind::Failed);
+        let state = state();
+        assert_eq!(state.bind(), Bind::Pending);
+        assert_ne!(state.bind(), Bind::Failed);
     }
 
+    /// Ports a listener can actually report all read back as themselves —
+    /// the sentinels (`Pending` = 0, `Failed` above `u16`) cannot collide,
+    /// because a listener never reports 0: binding to 0 asks the kernel to
+    /// choose, and `local_addr` answers with the choice.
     #[test]
     fn a_bound_port_reads_back_as_itself() {
-        let cell = cell();
-        cell.store(u32::from(27182u16), Ordering::SeqCst);
-        assert_eq!(read(&cell), Bind::Bound(27182));
-    }
-
-    /// The sentinels cannot collide with a port a listener can report.
-    ///
-    /// `Failed` is above the whole `u16` range. `Pending` is 0, which is a
-    /// `u16` — and is safe for the reason the constant's own note gives: a
-    /// listener never REPORTS 0. Binding to port 0 asks the kernel to choose
-    /// one, and `local_addr` answers with the port it chose. So the range that
-    /// has to be clear is 1..=65535, and that is what this walks.
-    #[test]
-    fn the_sentinels_are_outside_the_range_of_a_port() {
-        assert!(BIND_FAILED > u32::from(u16::MAX));
         for port in [1u16, 80, 27182, u16::MAX] {
-            let raw = u32::from(port);
-            assert_ne!(raw, BIND_PENDING);
-            assert_ne!(raw, BIND_FAILED);
-            assert_eq!(
-                match raw {
-                    BIND_PENDING => Bind::Pending,
-                    BIND_FAILED => Bind::Failed,
-                    got => Bind::Bound(got as u16),
-                },
-                Bind::Bound(port)
-            );
+            let state = state();
+            state.set_port(port);
+            assert_eq!(state.bind(), Bind::Bound(port));
+            assert_eq!(state.port(), Some(port));
         }
     }
 
@@ -348,12 +351,42 @@ mod tests {
     /// answers are asserted here so the folding stays deliberate.
     #[test]
     fn port_is_none_for_both_ways_of_having_no_port() {
-        let port_of = |bind| match bind {
-            Bind::Bound(port) => Some(port),
-            Bind::Pending | Bind::Failed => None,
-        };
-        assert_eq!(port_of(Bind::Pending), None);
-        assert_eq!(port_of(Bind::Failed), None);
-        assert_eq!(port_of(Bind::Bound(27182)), Some(27182));
+        let pending = state();
+        assert_eq!(pending.port(), None);
+        let failed = state();
+        failed.set_bind_failed();
+        assert_eq!(failed.port(), None);
+        assert_eq!(failed.bind(), Bind::Failed);
+    }
+
+    /// `Failed` is terminal: a port report landing after a failure was
+    /// recorded must not resurrect the status — the one writer that follows a
+    /// failure is a bug, and believing it would advertise a dead client.
+    #[test]
+    fn a_failure_is_not_overwritten_by_a_late_port() {
+        let state = state();
+        state.set_bind_failed();
+        state.set_port(27182);
+        assert_eq!(state.bind(), Bind::Failed);
+    }
+
+    /// A reported port of 0 would ENCODE `Pending` — the pane would say
+    /// "looking for an address" forever. It is recorded as the failure it is.
+    #[test]
+    fn a_reported_port_of_zero_is_a_failure_not_a_silent_pending() {
+        let state = state();
+        state.set_port(0);
+        assert_eq!(state.bind(), Bind::Failed);
+    }
+
+    /// The server stopping AFTER a successful bind moves `Bound` → `Failed`;
+    /// a status left at `Bound` advertised a dead port for the life of the
+    /// run.
+    #[test]
+    fn a_server_that_stopped_moves_bound_to_failed() {
+        let state = state();
+        state.set_port(27182);
+        state.set_bind_failed();
+        assert_eq!(state.bind(), Bind::Failed);
     }
 }

@@ -3,7 +3,7 @@ name = "paper-data-root"
 version = "0.1.0"
 description = "Where Paper's data lives: one resolution of the storage root, shared by the app and every plugin that writes under it"
 authors = ["Paper"]
-license = ""
+license = "ISC"
 edition = "2021"
 # Matches the app crate and the plugins; the toolchain itself is pinned by
 # the root rust-toolchain.toml.

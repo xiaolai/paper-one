@@ -479,7 +479,16 @@ async fn serve_inner(
         let want = CHUNK.min((hash.size - sent) as usize);
         let n = file.read(&mut buf[..want]).await?;
         if n == 0 {
-            break;
+            /* The loop only runs while `sent < hash.size`, so EOF here is
+             * always PREMATURE — a file truncated mid-serve. The receiver's
+             * hash check would catch the short body anyway; this makes the
+             * server say so too, instead of reporting a serve it did not
+             * finish as done. */
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("the blob ended at {sent} of {} bytes", hash.size),
+            )
+            .into());
         }
         // Idle deadline on the write: a requester that stops reading stalls
         // this on flow control; drop it rather than hold the task forever.
@@ -655,7 +664,13 @@ async fn run(
         offset = 0;
     }
 
-    let (mut send, mut recv) = session.conn().open_bi().await?;
+    /* Deadlined like every other step of the transfer: a peer that grants no
+     * bidirectional-stream capacity would otherwise hold this — and the
+     * per-target claim behind it — pending forever, answering `TransferBusy`
+     * to every retry of the same book. */
+    let (mut send, mut recv) = timeout(HEADER_TIMEOUT, session.conn().open_bi())
+        .await
+        .map_err(|_| Error::Timeout("blob stream open"))??;
     write_json(
         &mut send,
         &BlobRequest {

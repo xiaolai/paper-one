@@ -226,6 +226,24 @@ impl RuntimeManifest {
                 "the server executable is not a file the manifest lists",
             ));
         }
+        /* The backend NAME becomes an environment variable
+         * (`LEMONADE_LLAMACPP_<NAME>_BIN`) and a JSON config key. The files
+         * are digest-verified; the name was not constrained at all, so a
+         * hand-edited manifest could smuggle whitespace, `=` or control
+         * bytes into the child's environment. A closed alphabet, checked
+         * where every other manifest invariant is. */
+        if raw.llamacpp.backend.is_empty()
+            || !raw
+                .llamacpp
+                .backend
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            return Err(refused(
+                &raw.llamacpp.backend,
+                "the backend name is not lowercase ascii",
+            ));
+        }
         Ok(RuntimeManifest {
             platform: raw.platform,
             lemonade: raw.lemonade,
@@ -292,34 +310,47 @@ impl RuntimeManifest {
             }
         }
 
-        let listed: BTreeSet<&str> = self.files.iter().map(|f| f.path.as_str()).collect();
-        let mut pending = vec![dir.to_path_buf()];
-        while let Some(folder) = pending.pop() {
-            for entry in std::fs::read_dir(&folder)? {
-                let entry = entry?;
-                let path = entry.path();
-                let kind = entry.file_type()?;
-                if kind.is_dir() {
-                    pending.push(path);
-                    continue;
+        let listed: BTreeSet<String> = self.files.iter().map(|f| f.path.clone()).collect();
+        let root = dir.to_path_buf();
+        /* OFF THE RUNTIME. The membership walk is `std::fs` end to end, and
+         * it runs inside `ensure_started`, which holds the daemon lock — a
+         * whole-tree scan on a cold or unhealthy disk stalled the async
+         * runtime and everything queued on that lock with it. The same rule
+         * `on_store` states for the endpoint store: blocking work goes to a
+         * blocking thread. (The per-file stats above are 70 tiny calls and
+         * the hashing already yields; the walk was the blocking chunk.) */
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut pending = vec![root.clone()];
+            while let Some(folder) = pending.pop() {
+                for entry in std::fs::read_dir(&folder)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    let kind = entry.file_type()?;
+                    if kind.is_dir() {
+                        pending.push(path);
+                        continue;
+                    }
+                    if kind.is_symlink() {
+                        return Err(refused(path, "is a symbolic link, which nothing staged"));
+                    }
+                    let relative = path
+                        .strip_prefix(&root)
+                        .map_err(|_| refused(&path, "is outside the runtime directory"))?;
+                    let name = relative.to_string_lossy().replace('\\', "/");
+                    if listed.contains(name.as_str()) {
+                        continue;
+                    }
+                    let bare = relative.to_string_lossy();
+                    if UNLISTED_BY_DESIGN.contains(&bare.as_ref()) {
+                        continue;
+                    }
+                    return Err(refused(path, "is not in the manifest"));
                 }
-                if kind.is_symlink() {
-                    return Err(refused(path, "is a symbolic link, which nothing staged"));
-                }
-                let relative = path
-                    .strip_prefix(dir)
-                    .map_err(|_| refused(&path, "is outside the runtime directory"))?;
-                let name = relative.to_string_lossy().replace('\\', "/");
-                if listed.contains(name.as_str()) {
-                    continue;
-                }
-                let bare = relative.to_string_lossy();
-                if UNLISTED_BY_DESIGN.contains(&bare.as_ref()) {
-                    continue;
-                }
-                return Err(refused(path, "is not in the manifest"));
             }
-        }
+            Ok(())
+        })
+        .await
+        .map_err(|join| Error::Io(std::io::Error::other(join.to_string())))??;
 
         Ok(VerifiedBackend {
             name: self.llamacpp.backend.clone(),

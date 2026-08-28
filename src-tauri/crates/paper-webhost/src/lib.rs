@@ -76,8 +76,13 @@ pub const SESSION_COOKIE: &str = "paper_session";
 /// How long the pump waits before re-offering a frame the inbox refused.
 ///
 /// Well under the webview's own 40 ms drain poll, so capacity is claimed
-/// promptly once it appears; far enough from zero that a full inbox costs a few
-/// wakeups a second rather than a spinning core. See `pump`.
+/// promptly once it appears. The honest arithmetic: while an inbox stays
+/// full this is up to 250 wakeups a second FOR THAT SESSION — not "a few",
+/// as this comment once claimed — each a mutex round and a refused push.
+/// Kept anyway, deliberately: the state is entered only while the webview is
+/// behind on draining, ends at its next 40 ms poll, and the alternative —
+/// a longer interval — buys idle cycles with latency on the one path a
+/// reader is actively waiting on. Sessions are bounded at 64.
 const RETRY: std::time::Duration = std::time::Duration::from_millis(4);
 
 /// WHEN a held frame is next offered, as a value rather than as a `sleep` call.
@@ -184,8 +189,12 @@ pub struct WebHost {
     pub sessions: Sessions,
     pub pipe: Pipe,
     /// See [`WebHost::pause_before_open`]. `None` in every build but a test's.
-    admit_gate: Mutex<Option<oneshot::Sender<()>>>,
-    admit_release: Mutex<Option<oneshot::Receiver<()>>>,
+    ///
+    /// ONE cell for BOTH halves. Stored separately, a handshake landing
+    /// between the two installs consumed the gate half alone and the `else`
+    /// in `admit_gate` discarded it — both test participants then waited
+    /// forever. One `Option` of the pair makes half-armed unrepresentable.
+    admit_seam: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     /// See [`WebHost::failed_upgrades`].
     failed_upgrades: AtomicUsize,
 }
@@ -204,8 +213,7 @@ impl WebHost {
             auth: DeviceAuth::new(),
             sessions,
             pipe: Pipe::new(),
-            admit_gate: Mutex::new(None),
-            admit_release: Mutex::new(None),
+            admit_seam: Mutex::new(None),
             failed_upgrades: AtomicUsize::new(0),
         }
     }
@@ -267,16 +275,14 @@ impl WebHost {
     pub fn pause_before_open(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (reached_tx, reached_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
-        *self.admit_gate.lock().expect("admit gate") = Some(reached_tx);
-        *self.admit_release.lock().expect("admit release") = Some(release_rx);
+        /* BOTH HALVES IN ONE STORE — see the field. */
+        *self.admit_seam.lock().expect("admit seam") = Some((reached_tx, release_rx));
         (reached_rx, release_tx)
     }
 
     /// Wait at the seam, if a test armed one. A no-op otherwise.
     async fn admit_gate(&self) {
-        let reached = self.admit_gate.lock().expect("admit gate").take();
-        let release = self.admit_release.lock().expect("admit release").take();
-        let (Some(reached), Some(release)) = (reached, release) else {
+        let Some((reached, release)) = self.admit_seam.lock().expect("admit seam").take() else {
             return;
         };
         let _ = reached.send(());
@@ -363,15 +369,18 @@ async fn policy_headers(request: Request<Body>, next: Next) -> Response {
 /// the cookie disappears from a browser the shelf still considers signed in.
 /// Neither shows up as an error.
 fn set_cookie(credential: &Credential) -> String {
-    format!(
-        "{SESSION_COOKIE}={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}",
-        credential.as_str(),
-        CREDENTIAL_TTL.as_secs()
-    )
+    cookie(credential.as_str(), CREDENTIAL_TTL.as_secs())
 }
 
 fn clear_cookie() -> String {
-    format!("{SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0")
+    cookie("", 0)
+}
+
+/// ONE spelling of the attributes. Set and clear each carried their own copy,
+/// and a policy change applied to one path is a policy change the other path
+/// silently lacks — the same drift `Max-Age` already had once with the TTL.
+fn cookie(value: &str, max_age_secs: u64) -> String {
+    format!("{SESSION_COOKIE}={value}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age_secs}")
 }
 
 /// The credential this request presented, if any.
@@ -379,12 +388,20 @@ fn clear_cookie() -> String {
 /// Hand-parsed rather than through a cookie crate: one name, no attributes to
 /// interpret on the way in, and a dependency avoided. Splits on `;` and takes
 /// the first exact name match.
+///
+/// EVERY `Cookie` header, not the first: HTTP/2 permits a client to split the
+/// cookie list across fields (RFC 9113 §8.2.3), and a valid session cookie in
+/// the second field is still the session cookie.
 fn presented(request_headers: &axum::http::HeaderMap) -> Option<Credential> {
-    let raw = request_headers.get(header::COOKIE)?.to_str().ok()?;
-    raw.split(';').find_map(|pair| {
-        let (name, value) = pair.split_once('=')?;
-        (name.trim() == SESSION_COOKIE).then(|| Credential::from_presented(value.trim()))
-    })
+    request_headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|raw| raw.to_str().ok())
+        .flat_map(|raw| raw.split(';'))
+        .find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            (name.trim() == SESSION_COOKIE).then(|| Credential::from_presented(value.trim()))
+        })
 }
 
 /// A request the browser itself says came from the page this shelf serves.
@@ -503,7 +520,7 @@ impl FromRequestParts<Arc<WebHost>> for Admitted {
         let expires_at = admission.expires_at();
         let session = state
             .sessions
-            .admit(admission)
+            .admit(admission, SystemTime::now())
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
         Ok(Self {
             session,
@@ -756,17 +773,16 @@ async fn pump(
      * connecting. The whole point of an absolute ceiling is that a browser
      * forgotten on a borrowed laptop stops working on its own, and it did not.
      *
-     * A `tokio::time::Sleep` from a wall-clock `SystemTime`: the deadline is
-     * a point, so the remaining duration is what carries across. Zero, not an
-     * error, when a credential is already past its ceiling — or when the
-     * clock went backwards, which reads as "already expired" and closes,
-     * the safe direction. */
-    let remaining = expires_at
-        .duration_since(SystemTime::now())
-        .unwrap_or(Duration::ZERO);
-    let expiry = tokio::time::sleep(tokio::time::Duration::from_secs_f64(
-        remaining.as_secs_f64().min(u32::MAX as f64),
-    ));
+     * THE DEADLINE IS WALL-CLOCK, AND IT IS RE-READ. The first shape converted
+     * `expires_at` to a monotonic duration ONCE, under a comment claiming a
+     * clock that went backwards "reads as already expired" — backwards makes
+     * the remaining duration LONGER, and the conversion never looked again.
+     * Worse than corrections: `Instant` on macOS stops while the machine
+     * sleeps, so a laptop closed for a month extended the credential by a
+     * month. `wall_clock_deadline` sleeps in bounded slices and re-asks
+     * `SystemTime::now()` at each, so the socket closes within one slice of
+     * the credential's real ceiling whatever the clocks did in between. */
+    let expiry = wall_clock_deadline(expires_at);
     tokio::pin!(expiry);
     /* THE FRAME THE INBOX REFUSED, HELD RATHER THAN DROPPED.
      *
@@ -832,16 +848,28 @@ async fn pump(
              * nothing about when it fires. */
             let deadline = retry_at.deadline(tokio::time::Instant::now());
             tokio::select! {
+                /* ⚠️ THE EXPIRY ARM IS IN THIS LOOP TOO. It was only in the
+                 * other one, so a browser that kept the inbox full — sustained
+                 * inbound backpressure — was never against the deadline at
+                 * all: an expired credential's socket stayed open for as long
+                 * as the browser kept pushing. The ceiling has to bind in
+                 * every state the loop has. */
+                () = expiry.as_mut() => {
+                    state.pipe.close(socket, "credential expired");
+                    break;
+                }
                 frame = outbound.recv() => {
                     let Some(frame) = frame else { break };
                     if state.pipe.closed_reason(socket).is_some() {
                         break;
                     }
-                    let len = frame.len();
-                    let sent = ws.send(Message::Binary(frame.into())).await;
-                    state.pipe.drained(socket, len);
-                    if sent.is_err() {
-                        break;
+                    match send_bounded(&mut ws, &state.pipe, socket, expiry.as_mut(), frame).await {
+                        SendEnd::Sent => {}
+                        SendEnd::Expired => {
+                            state.pipe.close(socket, "credential expired");
+                            break;
+                        }
+                        SendEnd::PeerGone | SendEnd::Revoked => break,
                     }
                 }
                 () = tokio::time::sleep_until(deadline) => {
@@ -885,16 +913,13 @@ async fn pump(
                 if state.pipe.closed_reason(socket).is_some() {
                     break;
                 }
-                /* THE BUDGET IS FREED HERE, because this is where the queue
-                 * actually shortens. `Pipe::send` counts bytes in; the channel
-                 * itself counts only messages, so without this call the byte
-                 * budget fills once and never empties, and every browser
-                 * eventually stops being sent anything. */
-                let len = frame.len();
-                let sent = ws.send(Message::Binary(frame.into())).await;
-                state.pipe.drained(socket, len);
-                if sent.is_err() {
-                    break;
+                match send_bounded(&mut ws, &state.pipe, socket, expiry.as_mut(), frame).await {
+                    SendEnd::Sent => {}
+                    SendEnd::Expired => {
+                        state.pipe.close(socket, "credential expired");
+                        break;
+                    }
+                    SendEnd::PeerGone | SendEnd::Revoked => break,
                 }
             }
             incoming = ws.recv() => {
@@ -927,6 +952,82 @@ async fn pump(
 
     state.pipe.close(socket, "socket ended");
     state.pipe.reap(socket);
+}
+
+/// How often an in-flight `ws.send` re-checks that its session still exists.
+///
+/// A revocation closes the pipe record and drops the outbound sender, but a
+/// send ALREADY AWAITING writes to a browser that has stopped reading; nothing
+/// interrupts it, and the pre-send `closed_reason` check is behind it. The
+/// poll bounds how long a cut-off browser can hold the pump: one interval,
+/// not forever. Coarse on purpose — it ticks only while a send is blocked,
+/// which a draining browser never is.
+const CLOSE_POLL: Duration = Duration::from_secs(5);
+
+/// Sleeps until `expires_at` — by the WALL clock, re-read in bounded slices.
+///
+/// One conversion to a monotonic duration is not the same thing: `Instant`
+/// stops during system sleep on macOS, and a clock correction moves the wall
+/// deadline while a monotonic sleep holds still. Re-asking `SystemTime::now()`
+/// at most a slice apart keeps the socket's ceiling within one slice of the
+/// credential's real one.
+async fn wall_clock_deadline(expires_at: SystemTime) {
+    const SLICE: Duration = Duration::from_secs(60);
+    loop {
+        let remaining = expires_at
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            return;
+        }
+        tokio::time::sleep(remaining.min(SLICE)).await;
+    }
+}
+
+/// How one frame's `ws.send` ended. `Sent` is the only continue.
+enum SendEnd {
+    Sent,
+    /// The socket refused the write — the peer is gone.
+    PeerGone,
+    /// The credential's ceiling passed while the write was blocked.
+    Expired,
+    /// The session was closed under the write — a revocation, most likely.
+    Revoked,
+}
+
+/// Send one frame, bounded by expiry and by the session still existing.
+///
+/// ⚠️ `ws.send(...).await` alone is non-interruptible: a browser that stops
+/// reading blocks the write at the socket buffer, and with the pump parked
+/// there neither the expiry arm nor the next `closed_reason` check ever ran —
+/// an expired or revoked credential kept its channel for as long as the peer
+/// cared to hold it. The frame is counted `drained` on every path: it left
+/// the queue, and the failing paths all close the socket next.
+async fn send_bounded<F: std::future::Future<Output = ()>>(
+    ws: &mut WebSocket,
+    pipe: &Pipe,
+    socket: WebSessionId,
+    mut expiry: std::pin::Pin<&mut F>,
+    frame: Vec<u8>,
+) -> SendEnd {
+    let len = frame.len();
+    let send = ws.send(Message::Binary(frame.into()));
+    tokio::pin!(send);
+    let outcome = loop {
+        tokio::select! {
+            sent = send.as_mut() => {
+                break if sent.is_ok() { SendEnd::Sent } else { SendEnd::PeerGone };
+            }
+            () = expiry.as_mut() => break SendEnd::Expired,
+            () = tokio::time::sleep(CLOSE_POLL) => {
+                if pipe.closed_reason(socket).is_some() {
+                    break SendEnd::Revoked;
+                }
+            }
+        }
+    };
+    pipe.drained(socket, len);
+    outcome
 }
 
 /// The device a browser is on, as the Browsers pane will name it — "Safari on
@@ -1258,7 +1359,10 @@ mod tests {
             .sessions
             .validate(&credential, SystemTime::now())
             .expect("valid");
-        let admitted = state.sessions.admit(admission).expect("admitted");
+        let admitted = state
+            .sessions
+            .admit(admission, SystemTime::now())
+            .expect("admitted");
         /* `_rx` is bound, not dropped: dropping the receiver closes the
          * channel, and a later `send` would then say `Gone` for a reason that
          * has nothing to do with what this test is about. */
@@ -1623,6 +1727,53 @@ mod tests {
         );
     }
 
+    /// THE EXPIRY DEADLINE IS WALL-CLOCK, and already-past means now.
+    ///
+    /// The slices are what keep it honest across suspend and clock
+    /// corrections; what a unit can check is the two ends — a ceiling in the
+    /// past completes at once, and a near one completes when the WALL clock
+    /// passes it, not before.
+    #[tokio::test]
+    async fn a_ceiling_already_past_expires_at_once() {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wall_clock_deadline(SystemTime::now() - Duration::from_secs(5)),
+        )
+        .await
+        .expect("a past ceiling must complete immediately");
+    }
+
+    #[tokio::test]
+    async fn a_near_ceiling_expires_when_the_wall_clock_passes_it() {
+        let begun = std::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wall_clock_deadline(SystemTime::now() + Duration::from_millis(120)),
+        )
+        .await
+        .expect("a near ceiling completes");
+        assert!(
+            begun.elapsed() >= Duration::from_millis(100),
+            "and not before the clock reached it ({:?})",
+            begun.elapsed()
+        );
+    }
+
+    /// EVERY `Cookie` HEADER IS READ. HTTP/2 permits the cookie list to be
+    /// split across fields (RFC 9113 §8.2.3); the parser took the first field
+    /// only, so a session cookie in the second was invisible.
+    #[test]
+    fn a_session_cookie_in_a_second_cookie_header_is_still_presented() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(header::COOKIE, HeaderValue::from_static("theme=dark"));
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("paper_session=abc123"),
+        );
+        let presented = presented(&headers).expect("found in the second field");
+        assert_eq!(presented.as_str(), "abc123");
+    }
+
     /// RE-READING THE RETRY DEADLINE MUST NOT MOVE IT.
     ///
     /// This is the whole difference between `sleep_until(deadline)` and
@@ -1832,7 +1983,10 @@ mod tests {
                 .sessions
                 .validate(&credential, SystemTime::now())
                 .expect("valid");
-            let admitted = state.sessions.admit(admission).expect("admitted");
+            let admitted = state
+                .sessions
+                .admit(admission, SystemTime::now())
+                .expect("admitted");
             let (tx, rx) = tokio::sync::mpsc::channel(crate::pipe::OUTBOUND_CAP);
             receivers.push(rx);
             sockets.push(state.pipe.open(admitted, tx).expect("a socket"));
@@ -1859,7 +2013,7 @@ mod tests {
             assert_eq!(state.pipe.closed_reason(socket).as_deref(), Some("revoked"));
         }
         assert_eq!(
-            state.sessions.admit(in_flight).err(),
+            state.sessions.admit(in_flight, SystemTime::now()).err(),
             Some(paper_webauth::sessions::Rejected::RevokedMeanwhile)
         );
         assert_eq!(

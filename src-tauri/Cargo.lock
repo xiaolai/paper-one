@@ -124,10 +124,8 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.1.1"
 dependencies = [
- "axum",
  "libc",
  "log",
- "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "paper-data-root",
  "paper-process",
@@ -4168,6 +4166,7 @@ dependencies = [
 name = "paper-webauth"
 version = "0.1.0"
 dependencies = [
+ "log",
  "rand 0.10.2",
  "serde",
  "serde_json",
@@ -4181,12 +4180,11 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
- "http-body-util",
  "log",
  "paper-webauth",
  "serde",
  "tokio",
- "tokio-tungstenite 0.28.0",
+ "tokio-tungstenite 0.29.0",
  "tower",
 ]
 
@@ -6142,7 +6140,6 @@ name = "tauri-plugin-webhost"
 version = "0.1.0"
 dependencies = [
  "axum",
- "http-body-util",
  "log",
  "paper-data-root",
  "paper-webauth",

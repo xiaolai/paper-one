@@ -97,7 +97,15 @@ impl ScratchDir {
             "tauri-plugin-inference-{label}-{}-{n}",
             std::process::id()
         ));
-        let _ = std::fs::remove_dir_all(&dir);
+        /* The guarantee is a FRESH directory. A removal that half-failed and
+         * left the directory standing would let `create_dir_all` succeed over
+         * yesterday's files, and a test would read state it never wrote. Only
+         * "was not there" is an acceptable failure. */
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("scratch dir {} could not be cleared: {e}", dir.display()),
+        }
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         Self(dir)
     }

@@ -281,3 +281,101 @@ pub async fn peer_hash_file<R: Runtime>(
     let root = data_root(&app)?;
     blobs::hash_file(&root, &folder, &name).await
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    fn read(rel: &str) -> String {
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/").to_owned() + rel)
+            .unwrap_or_else(|e| panic!("{rel}: {e}"))
+    }
+
+    /// Names between the quotes of a `= &["a", "b"]` list.
+    ///
+    /// The `=` is found FIRST and the `[` only after it — the webhost twin's
+    /// comment records why, and this port re-earned the lesson on its first
+    /// run: taking the first `[` past the marker reads `&[&str]`, the type
+    /// annotation, and returns an empty set.
+    fn quoted_after(source: &str, marker: &str) -> BTreeSet<String> {
+        let start = source.find(marker).unwrap_or_else(|| panic!("{marker}?"));
+        let equals = source[start..].find('=').expect("an assignment") + start;
+        let open = source[equals..].find('[').expect("a list") + equals;
+        let close = source[open..].find(']').expect("a closed list") + open;
+        source[open..close]
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The check this plugin never had, ported from
+    /// `tauri-plugin-webhost::commands::tests::lists_agree` — whose own
+    /// comment named this crate as the one without it. Four hand-kept lists
+    /// that must agree: a command missing from `build.rs` is unreachable
+    /// however correct the handler, one missing from `default.toml` is
+    /// refused at the ACL, one missing from `generate_handler!` never
+    /// registers — and all three fail at RUNTIME with an error that names
+    /// permissions rather than the omission. `peer_set_local_role` already
+    /// paid for this once: registered and hand-permissioned, absent from
+    /// `COMMANDS`, green until the next clean regeneration.
+    #[test]
+    fn lists_agree() {
+        let declared = quoted_after(&read("build.rs"), "const COMMANDS");
+
+        let lib = read("src/lib.rs");
+        let start = lib.find("generate_handler!").expect("a handler list");
+        let open = lib[start..].find('[').expect("a list") + start;
+        let close = lib[open..].find(']').expect("a closed list") + open;
+        let registered: BTreeSet<String> = lib[open + 1..close]
+            .split(',')
+            .map(|entry| {
+                entry
+                    .trim()
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|entry| !entry.is_empty())
+            .collect();
+
+        let acl: BTreeSet<String> =
+            quoted_after(&read("permissions/default.toml"), "permissions =")
+                .into_iter()
+                .filter_map(|grant| grant.strip_prefix("allow-").map(|n| n.replace('-', "_")))
+                .collect();
+
+        /* Every public fn in this file IS a command — `pub fn` and
+         * `pub async fn` both; `paper_data_root` carries no `peer_` prefix,
+         * so the collection is by visibility, not by name shape. */
+        let source = read("src/commands.rs");
+        let mut implemented: BTreeSet<String> = BTreeSet::new();
+        for marker in ["pub async fn ", "pub fn "] {
+            for (at, m) in source.match_indices(marker) {
+                let rest = &source[at + m.len()..];
+                let end = rest.find(['<', '(']).unwrap_or(rest.len());
+                let name = rest[..end].trim();
+                /* Identifiers only: this test lives in the file it reads, so
+                 * its own marker LITERALS match themselves — the quotes and
+                 * braces around them are what this filter drops. */
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    implemented.insert(name.to_owned());
+                }
+            }
+        }
+
+        assert!(
+            !declared.is_empty(),
+            "the COMMANDS parser found nothing, which would make this check pass on anything"
+        );
+        assert_eq!(declared, registered, "build.rs vs generate_handler!");
+        assert_eq!(declared, acl, "build.rs vs permissions/default.toml");
+        assert_eq!(
+            declared, implemented,
+            "build.rs vs the handlers in this file"
+        );
+    }
+}

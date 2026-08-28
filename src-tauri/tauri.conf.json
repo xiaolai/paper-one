@@ -81,6 +81,7 @@
       {
         "name": "FB2 Document",
         "ext": ["fb2"],
+        "contentTypes": ["one.paper.reader.fb2"],
         "description": "FB2 file",
         "mimeType": "application/x-fictionbook+xml",
         "role": "Viewer",
@@ -89,6 +90,7 @@
       {
         "name": "FB2 Archive",
         "ext": ["fbz"],
+        "contentTypes": ["one.paper.reader.fbz"],
         "description": "Zipped FB2 file",
         "mimeType": "application/x-zip-compressed-fb2",
         "role": "Viewer",
@@ -97,6 +99,7 @@
       {
         "name": "CBZ Archive",
         "ext": ["cbz"],
+        "contentTypes": ["one.paper.reader.cbz"],
         "description": "Comic book archive",
         "mimeType": "application/vnd.comicbook+zip",
         "role": "Viewer",

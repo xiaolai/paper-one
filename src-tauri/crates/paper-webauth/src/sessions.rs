@@ -298,8 +298,13 @@ fn ms(at: SystemTime) -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-fn from_ms(ms: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_millis(ms)
+/// `None` for a value past what this platform's `SystemTime` can hold.
+///
+/// `UNIX_EPOCH + Duration::from_millis(ms)` PANICS on overflow, and `ms` comes
+/// off disk: a corrupt or hand-edited timestamp must be the documented
+/// `InvalidData` refusal, not a crash at startup.
+fn from_ms(ms: u64) -> Option<SystemTime> {
+    UNIX_EPOCH.checked_add(Duration::from_millis(ms))
 }
 
 /// A label the file will hold: printable, and no longer than [`LABEL_MAX`].
@@ -309,12 +314,11 @@ fn from_ms(ms: u64) -> SystemTime {
 /// newline into a line of the pane or a log; the bound keeps the file from
 /// growing by whatever a client cares to send.
 fn clean_label(label: &str) -> String {
-    let cleaned: String = label
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(LABEL_MAX)
-        .collect();
-    let trimmed = cleaned.trim();
+    /* TRIM BEFORE BOUNDING. Truncating first let eighty leading spaces eat
+     * the whole budget, and a real device name after them became "A browser". */
+    let cleaned: String = label.chars().filter(|c| !c.is_control()).collect();
+    let bounded: String = cleaned.trim().chars().take(LABEL_MAX).collect();
+    let trimmed = bounded.trim_end();
     if trimmed.is_empty() {
         "A browser".to_owned()
     } else {
@@ -348,6 +352,33 @@ impl Sessions {
         })
     }
 
+    /// An EMPTY set that will persist at `path` — for a file this build could
+    /// not read.
+    ///
+    /// ⚠️ The fallback used to be [`Sessions::new`], which DISCARDS the path:
+    /// every credential issued after an unreadable file looked issued, was
+    /// never written anywhere — `save` no-ops with no store — and vanished at
+    /// the next restart, which is exactly the silent non-persistence
+    /// [`Sessions::issue`]'s own contract refuses. The unreadable file is
+    /// moved aside (best-effort, so the evidence survives) rather than left
+    /// to be overwritten by the first save.
+    pub fn fresh_at(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let aside = path.with_extension("json.unreadable");
+        if let Err(error) = std::fs::rename(&path, &aside) {
+            if error.kind() != io::ErrorKind::NotFound {
+                log::warn!(
+                    "webauth: could not move the unreadable session file aside: {error}. \
+                     The next sign-in will overwrite it."
+                );
+            }
+        }
+        Self {
+            inner: Mutex::new(Inner::default()),
+            store: Some(path),
+        }
+    }
+
     /// Issue a credential for an authorization that was earned.
     ///
     /// Takes [`crate::Granted`] by value rather than an `AttemptId` a caller
@@ -370,7 +401,13 @@ impl Sessions {
         let credential = Credential::fresh();
         let hash = credential.hash();
         let mut guard = self.inner.lock().expect("sessions mutex poisoned");
-        guard.next_id += 1;
+        /* CHECKED, because the counter can come off disk. A file naming
+         * `nextId: u64::MAX` parses; `+= 1` on it panics in a debug build and
+         * wraps — reusing a listed id — in a release one. */
+        guard.next_id = guard
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "session ids exhausted"))?;
         let id = SessionId(guard.next_id);
         guard.live.insert(
             hash.clone(),
@@ -440,7 +477,7 @@ impl Sessions {
     /// thing a per-credential check cannot see: `revoke_all` is a statement
     /// about the WHOLE SET, so an admission taken before it must fail even
     /// though its own credential is being removed in the same breath.
-    pub fn admit(&self, admission: Admission) -> Result<SessionId, Rejected> {
+    pub fn admit(&self, admission: Admission, now: SystemTime) -> Result<SessionId, Rejected> {
         let guard = self.inner.lock().expect("sessions mutex poisoned");
         /* THE RE-CHECK, which is the whole point of the two-phase shape. */
         let Some(session) = guard.live.get(&admission.hash) else {
@@ -448,6 +485,13 @@ impl Sessions {
         };
         if guard.generation != admission.generation {
             return Err(Rejected::RevokedMeanwhile);
+        }
+        /* EXPIRY TOO, not only revocation: the re-check exists because time
+         * passes between the two phases, and expiry is the other thing that
+         * happens with time. A descheduled handshake admitted after its
+         * deadline held a socket the pump would only cut at its own timer. */
+        if now >= session.expires_at {
+            return Err(Rejected::Expired);
         }
         Ok(session.id)
     }
@@ -467,7 +511,14 @@ impl Sessions {
          * browser, and bumping the generation as well failed every other
          * browser's too. */
         let applied = guard.live.remove(&credential.hash()).map(|s| s.id);
-        let saved = self.save(&guard);
+        /* NOTHING REMOVED, NOTHING WRITTEN. A save here would be a no-change
+         * rewrite whose failure would report "unsaved" about a revocation
+         * that never happened. */
+        let saved = if applied.is_some() {
+            self.save(&guard)
+        } else {
+            Ok(())
+        };
         Outcome { applied, saved }
     }
 
@@ -496,22 +547,6 @@ impl Sessions {
             .live
             .get(&credential.hash())
             .and_then(|s| s.attempt.clone())
-    }
-
-    /// Every credential this shelf has issued and not revoked, by session id.
-    ///
-    /// ⚠️ **THIS IS THE LIST A READER REVOKES FROM, and there was none.** The
-    /// Browsers pane enumerated live SOCKETS instead, which is a different set:
-    /// a browser that signed in and then closed its tab holds a credential good
-    /// for [`CREDENTIAL_TTL`] — ninety days — and has no socket, so it did not
-    /// appear, and there was no way to cut it off. It simply came back.
-    ///
-    /// Sorted, so the pane's order does not depend on hash iteration.
-    pub fn live_sessions(&self) -> Vec<SessionId> {
-        let guard = self.inner.lock().expect("sessions mutex poisoned");
-        let mut ids: Vec<SessionId> = guard.live.values().map(|s| s.id).collect();
-        ids.sort();
-        ids
     }
 
     /// What the pane shows: every unexpired credential, oldest first, with the
@@ -551,7 +586,12 @@ impl Sessions {
         let applied = found
             .and_then(|hash| guard.live.remove(&hash))
             .map(|s| s.id);
-        let saved = self.save(&guard);
+        /* As in `revoke`: no removal, no write, no phantom "unsaved". */
+        let saved = if applied.is_some() {
+            self.save(&guard)
+        } else {
+            Ok(())
+        };
         Outcome { applied, saved }
     }
 
@@ -617,12 +657,29 @@ fn load(path: &Path, now: SystemTime) -> io::Result<Option<Inner>> {
         generation: 0,
         live: HashMap::new(),
     };
+    let bad_stamp = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a session row's timestamp is outside what this platform can represent",
+        )
+    };
+    let mut ids_seen = std::collections::HashSet::new();
     for row in file.sessions {
-        let expires_at = from_ms(row.expires_at_ms);
+        let expires_at = from_ms(row.expires_at_ms).ok_or_else(bad_stamp)?;
         /* Past its ceiling: not read back. The next save drops it from the
          * file too. */
         if now >= expires_at {
             continue;
+        }
+        /* ONE ID, ONE ROW. Two rows sharing an id would make `revoke_by_id`
+         * remove whichever the map iterates first — a reader pressing "sign
+         * out" on one browser and cutting off another. A file like that was
+         * edited or corrupted, and the contract for both is the refusal. */
+        if !ids_seen.insert(row.id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("two session rows share id {}", row.id),
+            ));
         }
         /* IDS NEVER RUN BACKWARDS. A file whose rows outnumber its counter is
          * one somebody edited; the counter follows the rows rather than
@@ -634,8 +691,8 @@ fn load(path: &Path, now: SystemTime) -> io::Result<Option<Inner>> {
                 id: SessionId(row.id),
                 attempt: None,
                 label: clean_label(&row.label),
-                created: from_ms(row.created_ms),
-                last_seen: from_ms(row.last_seen_ms),
+                created: from_ms(row.created_ms).ok_or_else(bad_stamp)?,
+                last_seen: from_ms(row.last_seen_ms).ok_or_else(bad_stamp)?,
                 expires_at,
             },
         );
@@ -670,12 +727,33 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
     }
+    /* EVERY FALLIBLE STEP BEFORE THE RENAME. The mode was re-asserted on the
+     * FINAL path, after the rename — so a failure there returned `Err` with
+     * the new bytes already committed, and `issue`'s rollback then removed a
+     * session from memory that the file kept: a phantom row at the next load,
+     * carrying an id the rolled-back counter would hand out again. Tightening
+     * the TEMP file covers the same case it was there for — a leftover from a
+     * crash predates `mode(0o600)` — and leaves the rename as the last
+     * fallible act, which is what makes "save failed ⇒ disk unchanged" true. */
+    tighten_file(&tmp)?;
     std::fs::rename(&tmp, path)?;
-    tighten_file(path)?;
-    if let Ok(dir_file) = std::fs::File::open(dir) {
-        /* Persist the rename. Directory fsync is Unix-only in effect; on
-         * Windows opening a directory as a file fails, hence the `if let`. */
-        let _ = dir_file.sync_all();
+    /* Persist the rename. `EINVAL`/`ENOTSUP` mean the filesystem does not
+     * take a directory fsync — PostgreSQL and SQLite ignore exactly these —
+     * but any OTHER failure is a rename whose durability is unknown, and
+     * `saved: Ok(())` must not claim it. Windows cannot open a directory as
+     * a file at all, hence the platform split. */
+    #[cfg(unix)]
+    {
+        let dir_file = std::fs::File::open(dir)?;
+        if let Err(error) = dir_file.sync_all() {
+            /* `InvalidInput` is EINVAL, `Unsupported` is ENOTSUP. */
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+            ) {
+                return Err(error);
+            }
+        }
     }
     Ok(())
 }
@@ -751,7 +829,7 @@ mod tests {
         let (auth, sessions, now) = (DeviceAuth::new(), Sessions::new(), SystemTime::now());
         let credential = issue(&sessions, &auth, now);
         let admission = sessions.validate(&credential, now).expect("valid");
-        assert!(sessions.admit(admission).is_ok());
+        assert!(sessions.admit(admission, now).is_ok());
     }
 
     #[test]
@@ -798,7 +876,7 @@ mod tests {
         assert!(sessions.revoke(&credential).applied.is_some());
 
         assert_eq!(
-            sessions.admit(admission).err(),
+            sessions.admit(admission, now).err(),
             Some(Rejected::RevokedMeanwhile)
         );
     }
@@ -813,7 +891,7 @@ mod tests {
         let admission = sessions.validate(&mine, now).expect("valid");
         let _ = sessions.revoke_all();
         assert_eq!(
-            sessions.admit(admission).err(),
+            sessions.admit(admission, now).err(),
             Some(Rejected::RevokedMeanwhile)
         );
     }
@@ -833,7 +911,7 @@ mod tests {
             .validate(&spared, now)
             .expect("the other one survives");
         assert!(
-            sessions.admit(admission).is_ok(),
+            sessions.admit(admission, now).is_ok(),
             "one revocation must not log everyone out"
         );
     }
@@ -882,18 +960,18 @@ mod tests {
         let other = issue(&sessions, &auth, now);
 
         /* Nothing here has ever had a socket — that is the whole point. */
-        let listed = sessions.live_sessions();
+        let listed = sessions.records(now);
         assert_eq!(listed.len(), 2, "both credentials are listed");
 
         let id = sessions
             .validate(&away, now)
-            .and_then(|admission| sessions.admit(admission))
+            .and_then(|admission| sessions.admit(admission, now))
             .expect("live");
         let removed = sessions.revoke_by_id(id).applied;
         assert_eq!(removed, Some(id), "the right one, by its durable id");
 
         assert_eq!(sessions.validate(&away, now).err(), Some(Rejected::Unknown));
-        assert_eq!(sessions.live_sessions().len(), 1, "and only that one");
+        assert_eq!(sessions.records(now).len(), 1, "and only that one");
         assert!(
             sessions.validate(&other, now).is_ok(),
             "revoking one browser must not log the others out"
@@ -930,7 +1008,7 @@ mod tests {
         assert!(sessions.revoke(&theirs).applied.is_some());
 
         assert!(
-            sessions.admit(admission).is_ok(),
+            sessions.admit(admission, now).is_ok(),
             "another browser signing out is not a revocation of this one"
         );
     }
@@ -1016,7 +1094,7 @@ mod tests {
         let admission = reloaded
             .validate(&credential, now + Duration::from_secs(60))
             .expect("the browser is still signed in");
-        let id = reloaded.admit(admission).expect("and admits");
+        let id = reloaded.admit(admission, now).expect("and admits");
         assert_eq!(reloaded.live_count(), 1);
 
         /* AND IDS KEEP COUNTING. A fresh browser after the restart must not be
@@ -1025,7 +1103,7 @@ mod tests {
         let later = issue(&reloaded, &auth, now);
         let later_id = reloaded
             .validate(&later, now)
-            .and_then(|a| reloaded.admit(a))
+            .and_then(|a| reloaded.admit(a, now))
             .expect("live");
         assert!(later_id > id, "ids must continue past the reloaded ones");
         let _ = std::fs::remove_dir_all(dir);
@@ -1344,6 +1422,135 @@ mod tests {
             .err()
             .expect("a later version must be refused");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// THE RE-CHECK COVERS TIME AS WELL AS REVOCATION. `admit` re-asked about
+    /// the credential's existence and the set's generation, and not about its
+    /// deadline — so a handshake descheduled across the expiry admitted a
+    /// socket the pump would only cut at its own timer.
+    #[test]
+    fn an_admission_is_refused_after_the_deadline_even_mid_handshake() {
+        let (auth, sessions, now) = (DeviceAuth::new(), Sessions::new(), SystemTime::now());
+        let credential = issue(&sessions, &auth, now);
+        let admission = sessions.validate(&credential, now).expect("valid");
+        let past_the_ceiling = now + CREDENTIAL_TTL + Duration::from_secs(1);
+        assert_eq!(
+            sessions.admit(admission, past_the_ceiling).err(),
+            Some(Rejected::Expired)
+        );
+    }
+
+    /// ONE ID, ONE ROW. Two rows sharing an id would make `revoke_by_id`
+    /// remove whichever the map iterates first — sign out one browser, cut
+    /// off another. Such a file was edited or corrupted; the contract for
+    /// both is the refusal.
+    #[test]
+    fn a_file_with_two_rows_sharing_an_id_is_refused() {
+        let dir = scratch();
+        let path = dir.join("sessions.json");
+        let (auth, now) = (DeviceAuth::new(), SystemTime::now());
+        let sessions = Sessions::persisted_at(&path, now).expect("fresh");
+        issue(&sessions, &auth, now);
+        issue(&sessions, &auth, now);
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert!(text.contains("\"id\": 2"), "two rows were saved");
+        std::fs::write(&path, text.replace("\"id\": 2", "\"id\": 1")).expect("edited");
+        let error = Sessions::persisted_at(&path, now)
+            .err()
+            .expect("a duplicated id must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A COUNTER AT THE CEILING REFUSES rather than reusing an id. The
+    /// counter comes off disk, so `+= 1` on a file naming `u64::MAX` was a
+    /// panic in a debug build and a wrapped — reused — id in a release one.
+    #[test]
+    fn a_counter_at_the_ceiling_refuses_rather_than_reusing_an_id() {
+        let dir = scratch();
+        let path = dir.join("sessions.json");
+        std::fs::write(
+            &path,
+            format!(r#"{{"version":1,"nextId":{},"sessions":[]}}"#, u64::MAX),
+        )
+        .expect("written");
+        let sessions = Sessions::persisted_at(&path, SystemTime::now()).expect("reads");
+        let auth = DeviceAuth::new();
+        let error = sessions
+            .issue(granted(&auth), SystemTime::now(), "test")
+            .err()
+            .expect("exhausted ids must refuse, not wrap");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// TRIM BEFORE BOUNDING. Eighty leading spaces used to consume the whole
+    /// label budget, and a real device name after them became "A browser".
+    #[test]
+    fn a_leading_ocean_of_spaces_does_not_eat_the_label() {
+        let (auth, sessions, now) = (DeviceAuth::new(), Sessions::new(), SystemTime::now());
+        let spaces = " ".repeat(LABEL_MAX + 5);
+        sessions
+            .issue(granted(&auth), now, &format!("{spaces}Safari on iPhone"))
+            .expect("issues");
+        let records = sessions.records(now);
+        assert_eq!(records[0].label, "Safari on iPhone");
+    }
+
+    /// REVOKING NOTHING WRITES NOTHING. A no-change save whose disk failed
+    /// reported "unsaved" about a revocation that never happened — and here,
+    /// where the file has been deleted behind the set, a no-op revoke would
+    /// quietly recreate it.
+    #[test]
+    fn revoking_nothing_writes_nothing() {
+        let dir = scratch();
+        let path = dir.join("sessions.json");
+        let (auth, now) = (DeviceAuth::new(), SystemTime::now());
+        let sessions = Sessions::persisted_at(&path, now).expect("fresh");
+        let credential = issue(&sessions, &auth, now);
+        std::fs::remove_file(&path).expect("the file existed");
+
+        let missed = sessions.revoke_by_id(SessionId::from_u64(9999));
+        assert!(missed.applied.is_none());
+        missed.saved.expect("no change, no write, no failure");
+        assert!(!path.exists(), "a no-op revoke must not write the file");
+
+        /* The control: a revoke that DOES apply writes. */
+        let real = sessions.revoke(&credential);
+        assert!(real.applied.is_some());
+        real.saved.expect("an applied revoke saves");
+        assert!(path.exists(), "an applied revoke reaches the disk");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// AN UNREADABLE FILE STARTS EMPTY — AND STILL PERSISTS. The fallback
+    /// used to be `Sessions::new()`, which discards the path: every
+    /// credential issued afterwards looked issued, was written nowhere, and
+    /// vanished at the next restart, under a cookie promising ninety days.
+    #[test]
+    fn an_unreadable_file_starts_empty_but_still_persists() {
+        let dir = scratch();
+        let path = dir.join("sessions.json");
+        std::fs::write(&path, b"half a write").expect("junk written");
+
+        let sessions = Sessions::fresh_at(&path);
+        assert!(
+            !path.exists(),
+            "the unreadable file is moved aside, not left to be clobbered"
+        );
+        assert!(
+            path.with_extension("json.unreadable").exists(),
+            "and kept as evidence"
+        );
+
+        let (auth, now) = (DeviceAuth::new(), SystemTime::now());
+        let credential = issue(&sessions, &auth, now);
+        let reloaded = Sessions::persisted_at(&path, now).expect("the new file reads");
+        assert!(
+            reloaded.validate(&credential, now).is_ok(),
+            "a credential issued after the fallback survives a restart"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

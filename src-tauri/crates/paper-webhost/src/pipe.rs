@@ -303,9 +303,16 @@ impl Pipe {
          * an oversized frame arriving at a full inbox still closes rather than
          * being reported as backpressure and retried forever. */
         if frame.len() > MAX_FRAME {
-            session.closed = Some("frame too large".to_owned());
-            session.inbox.clear();
-            session.inbox_bytes = 0;
+            /* THROUGH `abandon`, not a hand-rolled half of it. The hand-rolled
+             * version cleared the inbox and left everything else: the outbound
+             * sender stayed live, the session's outbound bytes stayed counted
+             * in the host's total, and no waiter was woken — the same
+             * leak-by-partial-close `abandon`'s own note says it exists to
+             * end. */
+            let freed = abandon(session, "frame too large");
+            guard.outbound_bytes_total = guard.outbound_bytes_total.saturating_sub(freed);
+            drop(guard);
+            self.room.notify_waiters();
             return Push::TooLarge;
         }
         if session.inbox.len() >= INBOX_CAP
@@ -341,11 +348,15 @@ impl Pipe {
         if session.closed.is_some() {
             return Send::Gone;
         }
-        if total.saturating_add(frame.len()) > OUTBOUND_BYTE_CAP_GLOBAL {
-            return Send::Backpressure(frame);
-        }
+        /* THE SIZE CHECK COMES BEFORE EVERY BUDGET. An oversized frame at a
+         * full budget answered `Backpressure`, and `send_wait` then held and
+         * retried a frame that could never fit — out to its whole deadline —
+         * instead of refusing it as the protocol violation it is. */
         if frame.len() > MAX_FRAME {
             return Send::TooLarge;
+        }
+        if total.saturating_add(frame.len()) > OUTBOUND_BYTE_CAP_GLOBAL {
+            return Send::Backpressure(frame);
         }
         /* THE BYTE BUDGET, checked before the channel's slot count. A browser
          * that stops reading holds whatever is queued; 256 slots said nothing
@@ -509,18 +520,35 @@ impl Pipe {
             let Some(session) = guard.sessions.get(&id) else {
                 return Vec::new();
             };
+            Arc::clone(&session.arrived)
+        };
+        /* THE WAITER REGISTERS BEFORE IT LOOKS. `Notify` stores one permit;
+         * draining frames without consuming the permit their `push` stored
+         * left it behind, and the NEXT call — with an empty inbox — returned
+         * from it immediately: an empty answer the caller reads as a timeout,
+         * one spurious IPC round per leftover permit. `enable` consumes a
+         * stored permit up front, and the re-check under the lock below is
+         * what keeps a frame arriving in between from being missed. */
+        let notified = arrived.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        {
+            let guard = self.inner.lock().expect("pipe mutex poisoned");
+            let Some(session) = guard.sessions.get(&id) else {
+                return Vec::new();
+            };
             /* ALREADY WAITING FRAMES SHORT-CIRCUIT, so a busy session never
              * pays the wait at all. */
             if !session.inbox.is_empty() || session.closed.is_some() {
                 drop(guard);
                 return self.drain(id, max);
             }
-            Arc::clone(&session.arrived)
-        };
-        /* The timeout is what makes this a poll rather than a subscription: a
-         * session closed while we wait wakes nobody, and the caller has to come
-         * back and see that for itself. */
-        let _ = tokio::time::timeout(timeout, arrived.notified()).await;
+        }
+        /* The timeout is what makes this a poll rather than a subscription —
+         * and a close DOES wake a parked waiter (`abandon` notifies), so a
+         * revocation costs a wake, not a timeout. The caller sees the close
+         * on its next ask either way. */
+        let _ = tokio::time::timeout(timeout, notified).await;
         self.drain(id, max)
     }
 
@@ -670,7 +698,12 @@ mod tests {
         let admission = sessions
             .validate(&credential, SystemTime::now())
             .expect("valid");
-        (sessions.admit(admission).expect("admitted"), credential)
+        (
+            sessions
+                .admit(admission, SystemTime::now())
+                .expect("admitted"),
+            credential,
+        )
     }
 
     #[test]
@@ -1455,5 +1488,64 @@ mod tests {
         }
         let (id, _) = admitted(&sessions);
         assert_eq!(pipe.open(id, wire().0), Err(OpenRefused::TooManySessions));
+    }
+
+    /// AN OVERSIZED FRAME IS A PROTOCOL VIOLATION WHATEVER THE BUDGET SAYS.
+    ///
+    /// The size check sat AFTER the host-budget check, so an oversized frame
+    /// arriving while the host was full answered `Backpressure` — and
+    /// `send_wait` then held a frame that could never fit against its whole
+    /// deadline, instead of refusing it as `TooLarge` at once.
+    #[tokio::test]
+    async fn an_oversized_send_is_too_large_even_when_the_host_is_full() {
+        let (pipe, sessions) = (Pipe::new(), Sessions::new());
+        let chunk = vec![0u8; 1024 * 1024];
+        let mut wires = Vec::new();
+        while pipe.outbound_bytes_total() < OUTBOUND_BYTE_CAP_GLOBAL {
+            let (id, _) = admitted(&sessions);
+            let (sender, receiver) = wire();
+            wires.push(receiver);
+            let socket = pipe.open(id, sender).expect("open");
+            while pipe.outbound_bytes_total() < OUTBOUND_BYTE_CAP_GLOBAL
+                && pipe.send(socket, chunk.clone()) == Send::Sent
+            {}
+        }
+        let (id, _) = admitted(&sessions);
+        let (sender, _receiver) = wire();
+        let socket = pipe.open(id, sender).expect("open");
+        let oversized = vec![0u8; MAX_FRAME + 1];
+        assert_eq!(pipe.send(socket, oversized), Send::TooLarge);
+    }
+
+    /// DRAINING THROUGH THE WAIT CONSUMES THE PERMIT ITS PUSH STORED.
+    ///
+    /// `Notify` keeps one permit. The short-circuit drained waiting frames
+    /// WITHOUT consuming it, so the next call — inbox empty — returned from
+    /// the stale permit immediately: an empty answer the webview reads as a
+    /// timeout, one spurious IPC round per leftover permit.
+    #[tokio::test(start_paused = true)]
+    async fn draining_through_the_wait_leaves_no_stale_permit() {
+        let (pipe, sessions) = (Pipe::new(), Sessions::new());
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
+
+        pipe.push(socket, b"stored a permit".to_vec());
+        let frames = pipe
+            .wait_for_frames(socket, usize::MAX, std::time::Duration::from_secs(1))
+            .await;
+        assert_eq!(frames, vec![b"stored a permit".to_vec()]);
+
+        /* Nothing waiting now: the call must sit out its timeout, not return
+         * early from the permit the drained push left behind. Virtual time —
+         * the clock is paused, so a full wait costs nothing real. */
+        let before = tokio::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+        let empty = pipe.wait_for_frames(socket, usize::MAX, timeout).await;
+        assert!(empty.is_empty());
+        assert!(
+            before.elapsed() >= timeout,
+            "an empty inbox returned in {:?} — a stale permit answered for it",
+            before.elapsed()
+        );
     }
 }

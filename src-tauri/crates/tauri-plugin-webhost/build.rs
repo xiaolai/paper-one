@@ -64,7 +64,12 @@ fn embed_client() {
     let has_entry = entries
         .iter()
         .any(|(request, _)| request == "/index.web.html");
-    let release = std::env::var("PROFILE").as_deref() == Ok("release");
+    /* EVERY PROFILE THAT IS NOT `debug`, not `== "release"`: a custom
+     * distribution profile (`[profile.dist]`, say) inherits from release,
+     * reports its own name, and would have shipped an empty client past a
+     * guard that only knew one spelling. Dev builds are the one case the
+     * absent client is legitimate, and they are the one profile named. */
+    let release = std::env::var("PROFILE").as_deref() != Ok("debug");
     if release && !has_entry {
         panic!(
             "dist-web/ has no index.web.html, so this release would ship a browser client that \
@@ -139,13 +144,29 @@ fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String,
             let _ = collect(root, &path, out);
             continue;
         }
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue;
-        };
+        /* `expect`, not a silent `continue`: every path here was produced by
+         * walking `root`, so a prefix miss is an invariant violation — and a
+         * recovery branch for one hides the day a traversal change breaks it. */
+        let relative = path
+            .strip_prefix(root)
+            .expect("walked path must remain under dist-web");
         /* The REQUEST path, always with a forward slash — a Windows build
-         * would otherwise emit keys no browser can ever send. */
-        let request = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
-        out.push((request, path.to_string_lossy().into_owned()));
+         * would otherwise emit keys no browser can ever send. And `to_str`,
+         * not `to_string_lossy`: a lossy name would generate an
+         * `include_bytes!` path that names a DIFFERENT file, or none. Vite
+         * writes UTF-8 names; anything else in the tree is a build to stop. */
+        let utf8 = |p: &std::path::Path| -> String {
+            p.to_str()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} is not valid UTF-8; the browser client cannot serve it",
+                        p.display()
+                    )
+                })
+                .to_owned()
+        };
+        let request = format!("/{}", utf8(relative).replace('\\', "/"));
+        out.push((request, utf8(&path)));
     }
     true
 }

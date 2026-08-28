@@ -136,6 +136,10 @@ pub struct Daemon {
     /// The client for requests a MODEL answers — see `MODEL_SILENCE`.
     model_client: reqwest::Client,
     log: LogTail,
+    /// The pipe readers, kept so an error tail can WAIT for the last lines
+    /// — see [`Daemon::drain_readers`]. Dropping a handle detaches the task,
+    /// which is exactly what the drain does after its bounded wait.
+    readers: Vec<tokio::task::JoinHandle<()>>,
     /// The port its WebSocket chose for itself, once health has reported it.
     websocket_port: Option<u16>,
     #[cfg(windows)]
@@ -174,6 +178,17 @@ impl Daemon {
     /// and the daemon makes its own — creating it first would turn that test
     /// into one that proves nothing.
     pub async fn start(plan: SpawnPlan) -> Result<Daemon> {
+        /* THE PLAN CARRIES THE KEY, checked at the door. `request` and
+         * `model_request` index `env[API_KEY_ENV]`, and a plan without it
+         * would panic THERE — mid-question, far from whoever built the plan.
+         * Plans are built by `spawn.rs`, which always sets it; this turns a
+         * future construction bug into a loud failure at start, where the
+         * stack still names the culprit. */
+        assert!(
+            plan.env.contains_key(crate::spawn::API_KEY_ENV),
+            "SpawnPlan carries no {} — spawn.rs always sets it",
+            crate::spawn::API_KEY_ENV
+        );
         // The config file has to exist before the launch, and it lives inside
         // the cache directory — so this one directory is created, and only
         // this one. The daemon still populates everything under it.
@@ -215,6 +230,13 @@ impl Daemon {
             }
         })?;
 
+        /* ⚠️ The child RUNS before this assignment lands — a Windows process
+         * cannot be spawned pre-assigned to a Job Object without the
+         * suspended-thread dance (CREATE_SUSPENDED, assign, ResumeThread),
+         * which this crate does not attempt. In the microseconds between
+         * spawn and hold, a descendant could be spawned outside the job.
+         * Accepted: `lemond` loads its config before it forks anything, and
+         * the recovery record below covers the group by identity anyway. */
         #[cfg(windows)]
         let job = crate::procgroup::JobHandle::hold(&child)?;
 
@@ -244,11 +266,15 @@ impl Daemon {
         // Both pipes are drained. Not for the log alone: a child whose stdout
         // pipe fills up BLOCKS, and a daemon that stops making progress
         // because nobody is reading its chatter is a hang with no symptom.
+        // The handles are KEPT so an error path can wait for the tail —
+        // `try_wait` can observe the exit while the readers still hold the
+        // final, usually most useful, lines.
+        let mut readers = Vec::new();
         if let Some(out) = child.stdout.take() {
-            spawn_reader(out, log.clone());
+            readers.push(spawn_reader(out, log.clone()));
         }
         if let Some(err) = child.stderr.take() {
-            spawn_reader(err, log.clone());
+            readers.push(spawn_reader(err, log.clone()));
         }
 
         // No proxy, ever, on either client. A reader's `HTTP_PROXY` pointing
@@ -284,6 +310,7 @@ impl Daemon {
             client,
             model_client,
             log,
+            readers,
             websocket_port: None,
             #[cfg(windows)]
             _job: job,
@@ -309,6 +336,7 @@ impl Daemon {
             // out the full deadline to say so wastes thirty seconds of the
             // reader's time on a question already settled.
             if let Some(status) = self.child.try_wait()? {
+                self.drain_readers().await;
                 return Err(Error::RuntimeExited {
                     status: status.to_string(),
                     tail: self.log.text(),
@@ -320,19 +348,42 @@ impl Daemon {
              * happily, so "the route answered with valid JSON" was being read
              * as "the daemon is ready". A proxy, a captive portal or a
              * half-initialised server can all produce that. */
-            if let Ok(health) = self.health().await {
+            /* BOUNDED BY THE DEADLINE, not just checked against it. The
+             * health client's own timeout is ten seconds, so a request
+             * STARTED just before the deadline used to overshoot it by up to
+             * that much — `READY_TIMEOUT` read as a suggestion. `timeout_at`
+             * cuts the in-flight request at the line. */
+            if let Ok(Ok(health)) = tokio::time::timeout_at(deadline, self.health()).await {
                 if health.status == "ok" {
                     self.websocket_port = health.websocket_port;
                     return Ok(());
                 }
             }
             if tokio::time::Instant::now() >= deadline {
+                self.drain_readers().await;
                 return Err(Error::NotReady {
                     secs: READY_TIMEOUT.as_secs(),
                     tail: self.log.text(),
                 });
             }
-            tokio::time::sleep(POLL_EVERY).await;
+            tokio::time::sleep_until(std::cmp::min(
+                deadline,
+                tokio::time::Instant::now() + POLL_EVERY,
+            ))
+            .await;
+        }
+    }
+
+    /// Wait, briefly, for the pipe readers before quoting the tail.
+    ///
+    /// `try_wait` can observe the exit while the readers still hold the
+    /// child's LAST buffered lines — usually the diagnostic that says why.
+    /// Bounded, because a pipe inherited by a grandchild never reaches EOF;
+    /// a reader that is still going after the wait is detached by the drop,
+    /// exactly as it was when nothing held the handles at all.
+    async fn drain_readers(&mut self) {
+        for mut reader in self.readers.drain(..) {
+            let _ = tokio::time::timeout(Duration::from_millis(250), &mut reader).await;
         }
     }
 
@@ -596,7 +647,18 @@ async fn spawn_child(cmd: Command) -> std::io::Result<Child> {
             .spawn(move || {
                 for mut job in rx {
                     let _entered = job.runtime.enter();
-                    let _ = job.reply.send(job.cmd.spawn());
+                    /* An `Err` here means the caller was CANCELLED between
+                     * asking and the answer. Nobody will ever hold this
+                     * child: dropping it fires `kill_on_drop`, which kills
+                     * the LEADER only — a backend it had already forked
+                     * would keep the port and the model. Take the group down
+                     * whole, here, before the drop. */
+                    if let Err(Ok(mut child)) = job.reply.send(job.cmd.spawn()) {
+                        if let Some(pgid) = crate::procgroup::group_of(&child) {
+                            unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
+                        }
+                        let _ = child.start_kill();
+                    }
                 }
             })
             .expect("the inference keeper thread could not be started");
@@ -639,34 +701,68 @@ pub struct Health {
 }
 
 /// Drain one of the child's pipes into the tail, line by line.
-fn spawn_reader<R>(pipe: R, log: LogTail)
+/// One retained line is capped here; the bytes past it are still CONSUMED —
+/// the pipe must drain whatever the tail keeps — but dropped, with the line
+/// marked. `read_until` had no cap at all, so one unterminated line (a
+/// progress bar that never prints its newline, a looping backend) grew a
+/// buffer without bound inside Paper's own process.
+const LINE_CAP: usize = 64 * 1024;
+
+fn spawn_reader<R>(pipe: R, log: LogTail) -> tokio::task::JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        /* `read_until` OVER BYTES, not `lines()`. `lines()` yields
-         * `Err(InvalidData)` on a byte sequence that is not UTF-8 and the
-         * `while let Ok(..)` above ENDED THE LOOP there — leaving the pipe
-         * undrained, so the child blocked on its next write once the buffer
-         * filled and the daemon simply stopped. A backend that prints a raw
-         * byte in a progress bar is enough. The tail is diagnostics, so a
-         * lossy conversion is exactly right here. */
-        let mut reader = BufReader::new(pipe);
-        let mut buffer = Vec::new();
-        loop {
+        /* BYTES, not `lines()`. `lines()` yields `Err(InvalidData)` on a
+         * byte sequence that is not UTF-8 and the old loop ENDED there —
+         * leaving the pipe undrained, so the child blocked on its next write
+         * once the buffer filled and the daemon simply stopped. A backend
+         * that prints a raw byte in a progress bar is enough. The tail is
+         * diagnostics, so a lossy conversion is exactly right here. */
+        fn take_line(log: &LogTail, buffer: &mut Vec<u8>, truncated: &mut bool) {
+            while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+                buffer.pop();
+            }
+            let mut line = String::from_utf8_lossy(buffer).into_owned();
+            if *truncated {
+                line.push_str(" …[line truncated]");
+            }
+            log.push(line);
             buffer.clear();
-            match reader.read_until(b'\n', &mut buffer).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    while matches!(buffer.last(), Some(b'\n' | b'\r')) {
-                        buffer.pop();
-                    }
-                    log.push(String::from_utf8_lossy(&buffer).into_owned());
+            *truncated = false;
+        }
+        let mut reader = BufReader::new(pipe);
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        loop {
+            let (ended_line, consumed) = {
+                let chunk = match reader.fill_buf().await {
+                    Ok([]) => break,
+                    Ok(chunk) => chunk,
+                    Err(_) => break,
+                };
+                let (piece, ended, used) = match chunk.iter().position(|&b| b == b'\n') {
+                    Some(at) => (&chunk[..at], true, at + 1),
+                    None => (chunk, false, chunk.len()),
+                };
+                let room = LINE_CAP.saturating_sub(buffer.len());
+                let keep = piece.len().min(room);
+                buffer.extend_from_slice(&piece[..keep]);
+                if keep < piece.len() {
+                    truncated = true;
                 }
-                Err(_) => break,
+                (ended, used)
+            };
+            reader.consume(consumed);
+            if ended_line {
+                take_line(&log, &mut buffer, &mut truncated);
             }
         }
-    });
+        // The pipe closed mid-line: what it held is still the tail's business.
+        if !buffer.is_empty() || truncated {
+            take_line(&log, &mut buffer, &mut truncated);
+        }
+    })
 }
 
 /// A request the MODEL client built, and the only thing a model answer can be
@@ -876,18 +972,68 @@ mod tests {
         assert_eq!(good.status, "ok");
     }
 
-    /// The log tail must survive a byte sequence that is not UTF-8: `lines()`
+    /// The READER must survive a byte sequence that is not UTF-8: `lines()`
     /// ended the loop there, leaving the pipe undrained so the child blocked
-    /// on its next write and the daemon simply stopped.
-    #[test]
-    fn the_log_tail_takes_text_that_is_not_valid_utf8() {
+    /// on its next write and the daemon simply stopped. Driven through
+    /// `spawn_reader` itself over a real async pipe — the earlier version of
+    /// this test did the lossy conversion by hand and would have stayed green
+    /// had the reader gone back to `lines()`.
+    #[tokio::test]
+    async fn the_reader_takes_text_that_is_not_valid_utf8_and_reads_on() {
         let log = LogTail::default();
-        log.push(String::from_utf8_lossy(&[b'a', 0xFF, 0xFE, b'b']).into_owned());
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let handle = spawn_reader(reader, log.clone());
+        use tokio::io::AsyncWriteExt;
+        writer
+            .write_all(&[b'a', 0xFF, 0xFE, b'b', b'\n'])
+            .await
+            .unwrap();
+        writer.write_all(b"after\n").await.unwrap();
+        drop(writer);
+        handle.await.unwrap();
         let text = log.text();
         assert!(text.contains('a') && text.contains('b'));
         assert!(
             text.contains('\u{FFFD}'),
             "the bad bytes are replaced, not dropped"
+        );
+        assert!(text.contains("after"), "the loop went on past them");
+    }
+
+    /// One unterminated line cannot grow without bound: past the cap the
+    /// bytes are consumed — the pipe still drains — but dropped, and the
+    /// retained line says it was cut. A line closed by EOF instead of a
+    /// newline still reaches the tail.
+    #[tokio::test]
+    async fn an_endless_line_is_capped_and_marked_not_kept_whole() {
+        let log = LogTail::default();
+        let (mut writer, reader) = tokio::io::duplex(8 * 1024);
+        let handle = spawn_reader(reader, log.clone());
+        use tokio::io::AsyncWriteExt;
+        let flood = vec![b'x'; LINE_CAP + 100_000];
+        writer.write_all(&flood).await.unwrap();
+        writer.write_all(b"\ntail-line\n").await.unwrap();
+        writer.write_all(b"no-newline-at-eof").await.unwrap();
+        drop(writer);
+        handle.await.unwrap();
+        let text = log.text();
+        assert!(
+            text.contains("…[line truncated]"),
+            "{}",
+            &text[..200.min(text.len())]
+        );
+        assert!(
+            text.contains("tail-line"),
+            "the reader kept going past the flood"
+        );
+        assert!(
+            text.contains("no-newline-at-eof"),
+            "an EOF-closed line still lands"
+        );
+        let longest = log.text().lines().map(str::len).max().unwrap_or(0);
+        assert!(
+            longest <= LINE_CAP + 32,
+            "retained lines are bounded, got {longest}"
         );
     }
 
