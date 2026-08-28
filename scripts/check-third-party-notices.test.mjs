@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { BUNDLED_PACKAGES, copyrightFrom, licenseBodyFrom, renderNotices } from './lib/notices.mjs'
+import { BUNDLED_PACKAGES, BUNDLED_PLUGINS, copyrightFrom, licenseBodyFrom, readCrates, renderNotices } from './lib/notices.mjs'
 import { NOTICES, committedNotices, currentNotices } from './write-third-party-notices.mjs'
 
 /**
@@ -84,6 +84,38 @@ describe('what is bundled', () => {
 })
 
 /**
+ * THE SIBLING TABLE: the desktop's platform plugins, recorded as the
+ * dependency decision they are (phase 20, D5). Held to the two things that
+ * make the record true — the lockfile's version, and a registration in
+ * `lib.rs` — so a plugin dropped from the app cannot go on being listed, and
+ * one listed cannot be a crate the app merely depends on and never wires.
+ */
+describe('the desktop platform plugins', () => {
+  const lock = read('src-tauri/Cargo.lock')
+  const libRs = read('src-tauri/src/lib.rs')
+  const crates = readCrates(REPO_ROOT)
+
+  it('names each with the version the lockfile pins', () => {
+    expect(crates.map((one) => one.name)).toEqual(BUNDLED_PLUGINS)
+    for (const one of crates) {
+      expect(lock, `${one.name} ${one.version} in Cargo.lock`).toContain(`name = "${one.name}"\nversion = "${one.version}"`)
+      expect(one.license).not.toBe('unknown')
+    }
+  })
+
+  it('is registered in lib.rs, every one', () => {
+    for (const name of BUNDLED_PLUGINS) {
+      expect(libRs, `${name} is wired`).toContain(`${name.replaceAll('-', '_')}::Builder`)
+    }
+  })
+
+  it('is in the committed notice', () => {
+    const committed = committedNotices() ?? ''
+    for (const one of crates) expect(committed).toContain(`| \`${one.name}\` | ${one.version} | ${one.license} |`)
+  })
+})
+
+/**
  * AND IT HAS TO BE IN THE COPIES. A notice sitting in the repository is not a
  * notice on the build; the requirement is on what is redistributed.
  */
@@ -142,5 +174,31 @@ describe('the renderer', () => {
     const text = renderNotices([ONE])
     expect(text.endsWith('\n')).toBe(true)
     expect(text.endsWith('\n\n')).toBe(false)
+  })
+})
+
+describe('readCrates and a cargo that misbehaves', () => {
+  /* The three failure branches, each through the injected spawn — the real
+   * cargo is exercised by the cases above; these are the roads it can go
+   * wrong on, which a green metadata run never walks. */
+  const metadata = (packages) => () => ({ status: 0, stdout: JSON.stringify({ packages }), stderr: '' })
+
+  it('throws with cargo’s own words when metadata fails', () => {
+    const spawn = () => ({ status: 101, stdout: '', stderr: 'the lock file needs to be updated' })
+    expect(() => readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toThrow(/lock file needs to be updated/)
+  })
+
+  it('names the crate that is no longer a dependency, rather than writing a notice without it', () => {
+    const spawn = metadata([{ name: 'something-else', version: '1.0.0', license: 'MIT' }])
+    expect(() => readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toThrow(
+      /tauri-plugin-window-state is not in the resolved workspace/,
+    )
+  })
+
+  it('says unknown for a crate that declares no licence, instead of undefined', () => {
+    const spawn = metadata([{ name: 'tauri-plugin-window-state', version: '2.4.1', license: null }])
+    expect(readCrates('/nowhere', ['tauri-plugin-window-state'], spawn)).toEqual([
+      { name: 'tauri-plugin-window-state', version: '2.4.1', license: 'unknown' },
+    ])
   })
 })

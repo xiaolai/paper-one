@@ -455,9 +455,24 @@ export function registersPlugin(libRs, name) {
      * fixture — read as a real registration, and a plugin that was never
      * registered passed this gate. Blanked rather than removed so nothing
      * downstream depends on offsets. */
-    .replace(/r(#*)"[\s\S]*?"\1/g, (raw) => raw.replace(/[^\n]/g, ' '))
+    /* ⚠️ The `r` must stand alone (an optional `b` for byte strings aside):
+     * without the boundary, ANY identifier or string ending in `r` before a
+     * quote opened a phantom raw string — `"Quit Paper"` in the tray menu
+     * matched at `…r"`, and the mask blanked everything to the next quote,
+     * 250 lines of real registrations included. A masker that eats code it
+     * was meant to protect is the exact defect the raw-string pass above
+     * this one was written against, one layer down. */
+    .replace(/(?<![A-Za-z0-9_"])b?r(#*)"[\s\S]*?"\1/g, (raw) => raw.replace(/[^\n]/g, ' '))
     .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
-  return new RegExp(`\\.plugin\\(\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}::init\\(\\)\\s*\\)`).test(code)
+  /* Two registration shapes, both real. `NAME::init()` is what a generated
+   * plugin exports and what every crate in this workspace uses;
+   * `NAME::Builder::…` is the OFFICIAL plugins' documented form —
+   * `single_instance::Builder::new(cb)` and `window_state::Builder::default()`
+   * (WI-20.32) register that way, and matching only `init()` read both as
+   * unregistered. The builder chain spans lines and takes arguments, so the
+   * match is the OPENING of the call, not its close. */
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`\\.plugin\\(\\s*${escaped}::(?:init\\(\\)\\s*\\)|Builder\\b)`).test(code)
 }
 
 /**

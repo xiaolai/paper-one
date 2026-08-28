@@ -156,14 +156,19 @@ ignored = "1"
        gated only at the call site is still compiled. `tauri-plugin-webhost`
        joined on the same reasoning when the host became a capability. This set
        is a LEDGER — it fails when the desktop-only set changes, which is
-       exactly the point, and it has now caught two deliberate changes. */
+       exactly the point, and it has now caught three deliberate changes: the
+       third was WI-20.32's `single-instance` and `window-state`, both
+       `#![cfg(not(mobile))]` upstream and desktop-only here for the same
+       reason `lemond` started the list. */
     expect(dependenciesOfFeature('desktop', real)).toEqual(
       new Set([
         'axum',
         'tauri-plugin-inference',
         'tauri-plugin-mcp-bridge',
         'tauri-plugin-persisted-scope',
+        'tauri-plugin-single-instance',
         'tauri-plugin-webhost',
+        'tauri-plugin-window-state',
         'tauri',
       ]),
     )

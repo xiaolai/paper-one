@@ -12,7 +12,8 @@ import { createGenerations } from '../core/generations'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
 import { useImportRun } from './hooks/useImportRun'
 import { useArchives } from './hooks/useArchives'
-import { useWindowClose } from './hooks/useWindowClose'
+import { requestWindowClose, useWindowClose } from './hooks/useWindowClose'
+import { takeOpened, type OpenRequests } from './openedFiles'
 import { closePrepare } from './closeWindow'
 import { openExternal } from './openExternal'
 import { hasOpenLayer, useAppState } from './state'
@@ -118,6 +119,14 @@ export interface AppProps {
    * own queue and no more, which is right for a host with nothing composed.
    */
   beforeWindowClose?: () => Promise<unknown>
+  /**
+   * Books the launch carried — a double-click in the Finder, a path on the
+   * command line, a second launch the first absorbed — as the shell hands
+   * them over. Absent for a host with no shell (a browser tab). See
+   * `openedFiles.ts` for the queue and why the root, not this component,
+   * tells the shell when it may release it.
+   */
+  openRequests?: OpenRequests
 }
 
 /**
@@ -135,6 +144,7 @@ export function App({
   bootNotice: bootSaid = null,
   composition,
   beforeWindowClose,
+  openRequests,
 }: AppProps) {
   const platform = usePlatform()
   /* Probed once for the app's lifetime: which fonts this machine has cannot
@@ -722,6 +732,19 @@ export function App({
    * app does not intercept NAVIGATES the webview to it — the interface is
    * replaced by WebKit's PDF viewer with no error and no way back. */
   const { dragging } = useFileDrop(dropBooks)
+
+  /* Books the LAUNCH carried, through the picker's route with the path kept —
+   * a double-clicked book is one the shelf should be able to reopen. The
+   * subscription is the root's: it registers the shell listener and only then
+   * tells the shell it may release what it held (`openedFiles.ts`). */
+  useEffect(() => {
+    if (!openRequests) return
+    return openRequests.subscribe((paths) => {
+      void takeOpened(paths, { addAndOpen, notice: setImportNotice }).catch((cause: unknown) => {
+        console.error('Paper: could not open what the launch carried', cause)
+      })
+    })
+  }, [openRequests, addAndOpen])
 
   /**
    * Add a whole folder.
@@ -1502,6 +1525,7 @@ export function App({
          every repeat rule and every toggle lives there, where a test can put
          real keys through it instead of searching this file for a literal. */
       const action = resolveAccel(event, {
+        platform,
         screen: state.screen,
         pane: state.pane,
         hasSelection: marking.selection !== null,
@@ -1554,6 +1578,12 @@ export function App({
           return
         case 'jumpForward':
           jumps.forward()
+          return
+        /* THE WINDOW'S CLOSE, not an exit: `useWindowClose` intercepts it and
+           runs the teardown the quit handshake runs, so Ctrl+Q closes the
+           journal as ⌘Q and the red button do. */
+        case 'quit':
+          requestWindowClose()
           return
       }
     }

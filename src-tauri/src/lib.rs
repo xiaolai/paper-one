@@ -47,6 +47,12 @@ fn mcp_bridge_port() -> u16 {
     }
 }
 
+/// The tray menu's Quit item. Its own id, beside `shutdown::QUIT_ID` for the
+/// macOS application menu's, because the two menus are different objects and
+/// an id shared between them would be a coincidence the handlers rely on.
+#[cfg(feature = "desktop")]
+const TRAY_QUIT_ID: &str = "paper-tray-quit";
+
 /// Put the menu-bar icon up and make it toggle the window.
 ///
 /// The asset is named `tray-iconTemplate@2x.png` deliberately: macOS keys the
@@ -66,18 +72,35 @@ fn mcp_bridge_port() -> u16 {
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::{
         image::Image,
+        menu::{Menu, MenuItem},
         tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
         Manager,
     };
 
     let icon = Image::from_bytes(include_bytes!("../icons/tray-iconTemplate@2x.png"))?;
 
+    /* A WAY TO QUIT THAT IS NOT THE CLOSE BUTTON. macOS has the application
+     * menu; Windows and Linux have no menu bar here, so until this the only
+     * quit off macOS was closing the window. The item goes to `AppHandle::exit`
+     * — the same call the macOS Quit item makes — which the run loop reports as
+     * `ExitRequested` and defers for the shutdown handshake, so the journal is
+     * closed on this path exactly as on every other. Never `process::exit`. */
+    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit Paper", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quit])?;
+
     TrayIconBuilder::with_id("main")
         .icon(icon)
         .icon_as_template(true)
         .tooltip("Paper")
+        .menu(&menu)
+        .on_menu_event(|app, event| {
+            if event.id() == TRAY_QUIT_ID {
+                app.exit(0);
+            }
+        })
         // Left click is the direct action. Enabling a left-click menu as well
-        // would fire both, which reads as the window flickering.
+        // would fire both, which reads as the window flickering. The menu is
+        // on the right button.
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -266,7 +289,41 @@ fn nudge_traffic_lights(window: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    /* FIRST, before any other plugin and before `setup`. The plugin decides
+     * in its own setup whether this process is the second one; if it is, it
+     * hands its `argv` to the first and exits right there — so the newcomer
+     * never reaches the library lock below, never opens a second window, and
+     * the reader who double-clicked a book while Paper was running gets that
+     * book in the window they already have. Registered later, the lock would
+     * refuse the second process with a dialog first, which is the wrong
+     * answer to "open this file".
+     *
+     * The callback runs in the FIRST process: raise the window, then treat
+     * the newcomer's argv exactly as this process's own was treated at launch
+     * (`opened`). `dbus_id` names the Linux service; the plugin's default is
+     * the bundle identifier, which is also what we give it, spelled out here
+     * because the default is what Flathub objected to in other apps and the
+     * explicit form is what their review asks for. */
+    #[cfg(feature = "desktop")]
+    {
+        builder = builder.plugin(
+            tauri_plugin_single_instance::Builder::new()
+                .callback(|app, argv, _cwd| {
+                    if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                    opened::deliver(app, opened::books_in_argv(argv));
+                })
+                .dbus_id("one.paper.reader")
+                .build(),
+        );
+    }
+
+    builder = builder
         /* This application's own commands. Unlike a plugin's, they are not
         gated by the capability file — an app command is reachable from the
         webview the moment it is registered here, which is why `open_external`
@@ -309,6 +366,24 @@ pub fn run() {
     #[cfg(feature = "desktop")]
     {
         builder = builder.plugin(tauri_plugin_persisted_scope::init());
+    }
+
+    /* THE WINDOW REMEMBERS ITSELF. Size, position and whether it was
+     * maximised, restored on the window's ready event and saved on close —
+     * and only those three: `VISIBLE` would restore a hidden window hidden,
+     * `DECORATIONS` would fight the off-macOS branch in `setup` below, and
+     * `FULLSCREEN` on macOS restores into a Space the reader left. The
+     * sanitiser runs immediately before it, on the file it is about to read —
+     * see `window_state.rs` for the Windows sentinel that otherwise stops the
+     * app launching at all. */
+    #[cfg(feature = "desktop")]
+    {
+        use tauri_plugin_window_state::StateFlags;
+        builder = builder.plugin(window_state::init()).plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        );
     }
 
     /* The local inference runtime (crates/tauri-plugin-inference). Its
@@ -403,6 +478,32 @@ pub fn run() {
                 nudge_traffic_lights(&main);
             }
 
+            /* ONE TITLEBAR OFF macOS. The window config is one entry for
+             * every platform, and `titleBarStyle: Overlay` is a macOS setting
+             * — Windows and Linux read only `decorations: true`, drew the OS
+             * caption, and the app drew its own bar with its own buttons
+             * BENEATH it: two titlebars, and the close button hundreds of
+             * pixels from the corner. The window exists by the time `setup`
+             * runs, so the decorations come off here rather than in the
+             * config, where there is no per-platform switch. `TitleBar.tsx`
+             * already draws minimise, maximise and close for these platforms
+             * and marks itself a drag region; with the caption gone they are
+             * the window's controls rather than a copy of them. */
+            #[cfg(all(feature = "desktop", not(target_os = "macos")))]
+            if let Some(main) = tauri::Manager::get_webview_window(app, "main") {
+                main.set_decorations(false)?;
+            }
+
+            /* Books the launch carried — `argv` here, `RunEvent::Opened`
+             * on macOS below, the single-instance callback for a second
+             * launch. Held until the webview says it is listening. */
+            #[cfg(feature = "desktop")]
+            {
+                tauri::Manager::manage(app, opened::Opens::default());
+                opened::watch(app.handle());
+                opened::deliver(app.handle(), opened::books_in_argv(std::env::args()));
+            }
+
             /* Before anything can answer: a window close runs the teardown
              * and answers `paper://shutdown-done` BEFORE it destroys the
              * window, and the exit request only arrives after. */
@@ -462,6 +563,14 @@ pub fn run() {
                     held.release();
                 }
             }
+            /* macOS hands an app its files here — at launch, when the
+             * webview does not exist yet, and later, when the reader
+             * double-clicks a book with Paper already up. Both go through
+             * `opened`, which holds the first until the webview is listening. */
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                opened::deliver(app, opened::books_in_urls(urls.iter()));
+            }
             // ONLY the quit path is logged. A `match` over every RunEvent
             // was what established which event a macOS quit produces — the
             // answer was "none that can be deferred, unless the Quit item is
@@ -519,6 +628,14 @@ mod atomic;
 /// The library lock — see the module.
 #[cfg(feature = "desktop")]
 mod lock;
+
+/// Books a launch carried — see the module.
+#[cfg(feature = "desktop")]
+mod opened;
+
+/// The window-state file, made safe to read — see the module.
+#[cfg(feature = "desktop")]
+mod window_state;
 
 /// The quit handshake with the webview.
 mod shutdown {

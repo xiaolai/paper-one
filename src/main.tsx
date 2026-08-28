@@ -32,6 +32,8 @@ import { buildServices, composeCapabilities, flushBeforeClose, createKernelServi
 import {
   App,
   CLOSE_DRAIN_MS,
+  OPEN_FILES_EVENT,
+  OPEN_FILES_READY_EVENT,
   countingFs,
   inTauri,
   installFatalHandlers,
@@ -48,6 +50,7 @@ import {
   watchFs,
   tauriSizePort,
 } from './kernel/ui'
+import type { OpenRequests } from './kernel/ui'
 import { armShutdownInBackground } from './app/shutdown'
 import { bootShelf } from './app/boot'
 import { capabilities } from 'virtual:paper-composition'
@@ -312,6 +315,38 @@ async function boot(root: HTMLElement): Promise<void> {
    * bounded, so a teardown that hangs delays the quit rather than preventing
    * it. Failing to reach the shell is not fatal here: this is a best-effort
    * flush, and the unclean path still works exactly as it does today. */
+  /* BOOKS THE LAUNCH CARRIED. The shell holds what the Finder, the command
+   * line or a second launch handed it until the webview says it is listening
+   * — a file opened at launch is known to Rust before this module exists, and
+   * an event emitted then is emitted into nothing. So READY is sent HERE,
+   * after the listener is registered and never before, and the shell hands
+   * over what it held. StrictMode's mount/unmount/mount sends READY twice;
+   * the shell's queue answers the second with nothing, by design. Outside
+   * Tauri there is no shell and nothing to subscribe to. */
+  const openRequests: OpenRequests = {
+    subscribe: (handler) => {
+      if (!inTauri()) return () => {}
+      let stopped = false
+      let stop: (() => void) | null = null
+      void (async () => {
+        const { emit, listen } = await import('@tauri-apps/api/event')
+        const off = await listen<string[]>(OPEN_FILES_EVENT, (event) => handler(event.payload))
+        if (stopped) {
+          off()
+          return
+        }
+        stop = off
+        await emit(OPEN_FILES_READY_EVENT)
+      })().catch((cause: unknown) => {
+        console.error('Paper: could not listen for the files the launch carried', cause)
+      })
+      return () => {
+        stopped = true
+        stop?.()
+      }
+    },
+  }
+
   createRoot(root).render(
     <StrictMode>
       <App
@@ -321,6 +356,7 @@ async function boot(root: HTMLElement): Promise<void> {
         bootNotice={storeNotice}
         composition={composition}
         beforeWindowClose={teardown}
+        openRequests={openRequests}
       />
     </StrictMode>,
   )

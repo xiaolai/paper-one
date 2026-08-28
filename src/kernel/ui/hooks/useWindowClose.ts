@@ -4,6 +4,23 @@ import { isTauri } from '../platform'
 import { CLOSE_HOLD_MS, createCloseSequence } from '../closeWindow'
 
 /**
+ * Ask the window to close, the way the red button does.
+ *
+ * This is what Ctrl+Q means off macOS (`accel.ts`): the request lands in the
+ * interceptor below, which runs the teardown and destroys — so a quit by key
+ * closes the sync journal exactly as a quit by button does. Outside Tauri
+ * there is no window to close and nothing to do.
+ */
+export function requestWindowClose(): void {
+  if (!isTauri()) return
+  void getCurrentWindow()
+    .close()
+    .catch((cause: unknown) => {
+      console.error('Paper: window close failed', cause)
+    })
+}
+
+/**
  * Hold the window shut until everything written has landed.
  *
  * # Why this is not in `App`

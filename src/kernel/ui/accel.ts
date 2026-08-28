@@ -1,3 +1,4 @@
+import type { Platform } from '../core/metrics'
 import { PANE_SHORTCUTS } from './panes'
 import { paneFits, type KernelPaneId, type PaneId, type Screen } from './state'
 
@@ -34,9 +35,16 @@ export type AccelAction =
   | { readonly kind: 'closePane' }
   | { readonly kind: 'jumpBack' }
   | { readonly kind: 'jumpForward' }
+  /** Ctrl+Q, where there is no application menu to own it — see the map. */
+  | { readonly kind: 'quit' }
 
 /** What the accelerator map needs to know about the moment the key arrived. */
 export interface AccelContext {
+  /**
+   * Which chrome the window has. Only Ctrl+Q reads it: macOS has a menu whose
+   * Quit item owns ⌘Q, and the other two have nothing.
+   */
+  readonly platform: Platform
   readonly screen: Screen
   /** The open panel, so a digit for it closes rather than re-opens it. */
   readonly pane: PaneId | null
@@ -91,7 +99,7 @@ export function canKeepPlace(context: Pick<AccelContext, 'onReader' | 'canBookma
  * real gesture with a real result at each repeat, and the reducer clamps at the
  * end; a guard there would break something that works.
  */
-const TOGGLES = new Set(['k', '\\', 't', 'b'])
+const TOGGLES = new Set(['k', '\\', 't', 'b', 'q'])
 
 export function resolveAccel(
   event: { readonly key: string; readonly repeat: boolean },
@@ -135,6 +143,18 @@ export function resolveAccel(
       return context.canJumpBack ? { kind: 'jumpBack' } : null
     case ']':
       return context.canJumpForward ? { kind: 'jumpForward' } : null
+    /*
+     * Ctrl+Q, OFF macOS ONLY. macOS has an application menu whose Quit item
+     * owns ⌘Q (`lib.rs` `install_quit_item`), and AppKit takes the key before
+     * the webview sees it; Windows and Linux have no menu bar, so until this
+     * the only quit there was the window's close button. What the action does
+     * is CLOSE THE WINDOW — `useWindowClose` intercepts that and runs the
+     * teardown, the same one ⌘Q's handshake runs — never a bare exit, which
+     * would leave the sync journal's flag up exactly as the red button once
+     * did. On macOS the key is left to the platform, which already has it.
+     */
+    case 'q':
+      return context.platform === 'macos' ? null : { kind: 'quit' }
     /*
      * §09's reading sizes, on the combo every reader already knows.
      *

@@ -12,6 +12,18 @@ licences, whose terms require this notice to travel with every copy.
 | `@fontsource-variable/crimson-pro` | 5.3.0 | OFL-1.1 |
 | `@fontsource/ibm-plex-mono` | 5.3.0 | OFL-1.1 |
 
+## Desktop platform plugins
+
+The desktop build takes these official Tauri plugins for what the platform
+provides and the app must not hand-roll — one process per machine, and a
+window that remembers itself. Recorded here as the dependency decision they
+are; the Rust tree at large is MIT/Apache and is not enumerated.
+
+| Crate | Version | Licence |
+| --- | --- | --- |
+| `tauri-plugin-single-instance` | 2.4.3 | Apache-2.0 OR MIT |
+| `tauri-plugin-window-state` | 2.4.1 | Apache-2.0 OR MIT |
+
 ## Attributions
 
 ### `@fontsource-variable/literata`

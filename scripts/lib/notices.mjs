@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 
@@ -46,13 +47,52 @@ export const BUNDLED_PACKAGES = [
  * the one document where tidying the text is a defect.
  */
 export function copyrightFrom(license) {
-  return (license.split(/\n\s*\n/)[0] ?? '').trim()
+  /* No `?? ''` after the index: `split` on a string always yields at least
+   * one element, and a fallback for a case that cannot happen is a branch
+   * no test can reach. */
+  return license.split(/\n\s*\n/)[0].trim()
 }
 
 /** The licence body — everything after the copyright block. */
 export function licenseBodyFrom(license) {
   const parts = license.split(/\n\s*\n/)
   return parts.slice(1).join('\n\n').trim()
+}
+
+/**
+ * The desktop's PLATFORM plugins — the table beside the fonts.
+ *
+ * Not a licence obligation, which is what the fonts table is: these are
+ * MIT/Apache crates, and the Rust tree holds several hundred of those that
+ * are not enumerated here. This is a RECORD OF A DEPENDENCY DECISION (phase
+ * 20, D5): two official Tauri plugins taken for single-instance launch and a
+ * remembered window, each a crate the app crate did not carry before, and
+ * each named here with the version the lockfile pins so the decision and the
+ * build it describes stay one thing. `lib.rs` must register every one of
+ * them, and the notices gate holds that.
+ */
+export const BUNDLED_PLUGINS = ['tauri-plugin-single-instance', 'tauri-plugin-window-state']
+
+/**
+ * Those crates as the resolved workspace has them — name, version and the
+ * licence the crate declares — from `cargo metadata`, which is the one tool
+ * that knows all three. `--offline --locked`: this runs inside a test, and a
+ * lockfile the metadata call quietly rewrote is the corruption
+ * `dev-docs/versioning.md` records.
+ */
+export function readCrates(root, names = BUNDLED_PLUGINS, spawn = spawnSync) {
+  const run = spawn(
+    'cargo',
+    ['metadata', '--format-version', '1', '--offline', '--locked', '--manifest-path', path.join(root, 'src-tauri', 'Cargo.toml')],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+  )
+  if (run.status !== 0) throw new Error(`cargo metadata failed: ${run.stderr}`)
+  const packages = JSON.parse(run.stdout).packages
+  return names.map((name) => {
+    const found = packages.find((one) => one.name === name)
+    if (!found) throw new Error(`${name} is not in the resolved workspace — is it still a dependency?`)
+    return { name, version: found.version, license: found.license ?? 'unknown' }
+  })
 }
 
 /** One installed package's name, version, licence id and LICENSE text. */
@@ -77,7 +117,7 @@ export function readPackage(root, name) {
  * under its own heading, so the shared-text shortcut cannot silently drop a
  * term.
  */
-export function renderNotices(packages) {
+export function renderNotices(packages, crates = []) {
   const lines = [
     GENERATED_BY,
     '',
@@ -91,6 +131,20 @@ export function renderNotices(packages) {
   ]
   for (const one of packages) lines.push(`| \`${one.name}\` | ${one.version} | ${one.license} |`)
   lines.push('')
+  if (crates.length > 0) {
+    /* The sibling table. Recorded, not owed — see `BUNDLED_PLUGINS`. */
+    lines.push('## Desktop platform plugins')
+    lines.push('')
+    lines.push('The desktop build takes these official Tauri plugins for what the platform')
+    lines.push('provides and the app must not hand-roll — one process per machine, and a')
+    lines.push('window that remembers itself. Recorded here as the dependency decision they')
+    lines.push('are; the Rust tree at large is MIT/Apache and is not enumerated.')
+    lines.push('')
+    lines.push('| Crate | Version | Licence |')
+    lines.push('| --- | --- | --- |')
+    for (const one of crates) lines.push(`| \`${one.name}\` | ${one.version} | ${one.license} |`)
+    lines.push('')
+  }
   lines.push('## Attributions')
   lines.push('')
   for (const one of packages) {

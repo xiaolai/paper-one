@@ -436,6 +436,25 @@ describe('checkRustSurfaces', () => {
     expect(registersPlugin(multi, 'tauri_plugin_ghost')).toBe(false)
     /* …and a real registration beside one still counts. */
     expect(registersPlugin(`${multi}\n.plugin(tauri_plugin_ghost::init())`, 'tauri_plugin_ghost')).toBe(true)
+    /* The OFFICIAL plugins' builder form (WI-20.32): `single_instance` and
+     * `window-state` register as `.plugin(NAME::Builder::…)`, and the matcher
+     * read both as unregistered until it learned the shape. Known positives
+     * for both spellings, and the builder name alone — outside a `.plugin(` —
+     * still counts for nothing. */
+    expect(
+      registersPlugin('.plugin(tauri_plugin_ghost::Builder::new(|_, _, _| {}).build())', 'tauri_plugin_ghost'),
+    ).toBe(true)
+    expect(
+      registersPlugin('.plugin(\n  tauri_plugin_ghost::Builder::default()\n    .with_state_flags(f)\n    .build(),\n)', 'tauri_plugin_ghost'),
+    ).toBe(true)
+    expect(registersPlugin('let b = tauri_plugin_ghost::Builder::default();', 'tauri_plugin_ghost')).toBe(false)
+    /* A string that merely ENDS in `r` — "Quit Paper" — must not open a
+     * phantom raw string and blank the real registration after it. It did:
+     * the raw-string mask matched at `…r"`, and 250 lines of lib.rs
+     * disappeared from the check the day the tray menu got its label. */
+    expect(
+      registersPlugin('m(app, ID, "Quit Paper", true)?;\nlet s = "another";\n.plugin(tauri_plugin_ghost::init())', 'tauri_plugin_ghost'),
+    ).toBe(true)
   })
 
   it('ACL_UNREADABLE for a capability file that is not JSON or not an object, and goes on', () => {

@@ -210,6 +210,7 @@ describe('advertised combos are bound', () => {
    * pass for the wrong reason: absent, rather than declined.
    */
   const anything = {
+    platform: 'macos',
     screen: 'reader',
     pane: null,
     hasSelection: true,
@@ -219,6 +220,20 @@ describe('advertised combos are bound', () => {
     canJumpBack: true,
     canJumpForward: true,
   } as const
+
+  /**
+   * Ctrl+Q is a quit only where nothing else owns the key. macOS has an
+   * application menu whose Quit item takes ⌘Q before the webview sees it;
+   * Windows and Linux have no menu bar, so with decorations off the close
+   * button was the only quit — and a held key must not fire a close per
+   * repeat, on the rule every other toggle follows.
+   */
+  it('binds Ctrl+Q to quit off macOS, and leaves ⌘Q to the platform on it', () => {
+    expect(resolveAccel({ key: 'q', repeat: false }, { ...anything, platform: 'windows' })).toEqual({ kind: 'quit' })
+    expect(resolveAccel({ key: 'q', repeat: false }, { ...anything, platform: 'linux' })).toEqual({ kind: 'quit' })
+    expect(resolveAccel({ key: 'q', repeat: false }, anything)).toBeNull()
+    expect(resolveAccel({ key: 'q', repeat: true }, { ...anything, platform: 'windows' })).toBeNull()
+  })
 
   /**
    * What a printed combo requires the handler to bind.

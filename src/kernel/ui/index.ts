@@ -24,6 +24,10 @@ import './styles/capability.css'
 
 export { App } from './App'
 export type { AppProps } from './App'
+/* The shell's opened-files contract, for the root that listens for it and
+   says when it is listening — see `openedFiles.ts`. */
+export { OPEN_FILES_EVENT, OPEN_FILES_READY_EVENT } from './openedFiles'
+export type { OpenRequests } from './openedFiles'
 
 /* Boot: the store, the filesystem, the shelf, the migration and the sweep. */
 export { openAppStorage } from './appStorage'

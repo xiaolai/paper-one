@@ -59,6 +59,21 @@ tauri-plugin-persisted-scope = { version = "2", optional = true }
 # (see lib.rs); kept a normal dependency rather than a dev-dependency because
 # dev-dependencies do not apply to a binary's own debug profile.
 tauri-plugin-mcp-bridge = { version = "0.12", optional = true }
+# ONE PROCESS PER MACHINE, and the second one's files handed to the first.
+# A second launch on Windows or Linux was a second process over one journal;
+# on every platform a double-clicked book while the app was running went to a
+# new process that the library lock then refused. This is registered FIRST in
+# lib.rs, so the newcomer forwards its argv and exits before it reaches the
+# lock. `.dbus_id` is set there: Flathub has threatened to refuse Tauri apps
+# over the plugin's default D-Bus name. Both this and window-state are
+# `#![cfg(not(mobile))]` crates and MUST ride on `desktop` — listed plainly,
+# they break the iOS and Android builds. Measured on macOS: +7 crates between
+# them (+44 on Linux, all zbus).
+tauri-plugin-single-instance = { version = "2.4.3", optional = true }
+# The window's size, position and maximised state across a relaunch. Stored
+# and restored as PHYSICAL pixels since 2.x (plugins-workspace #1743); the
+# Retina doubling filed as #3521 is what `window_state.rs`'s live check is for.
+tauri-plugin-window-state = { version = "2.4.1", optional = true }
 # The peer transport, on every platform (crates/tauri-plugin-peer).
 tauri-plugin-peer = { path = "crates/tauri-plugin-peer" }
 # Where the data lives — for the library lock (`src/lock.rs`). A plain
@@ -136,6 +151,8 @@ default = ["desktop"]
 desktop = [
     "dep:tauri-plugin-mcp-bridge",
     "dep:tauri-plugin-persisted-scope",
+    "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-window-state",
     "dep:tauri-plugin-inference",
     "dep:axum",
     "dep:tauri-plugin-webhost",

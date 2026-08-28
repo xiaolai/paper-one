@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
-import { BUNDLED_PACKAGES, readPackage, renderNotices } from './lib/notices.mjs'
+import { BUNDLED_PACKAGES, readCrates, readPackage, renderNotices } from './lib/notices.mjs'
 
 /**
  * `pnpm docs:notices` — write `THIRD-PARTY-NOTICES.md` from what is installed.
@@ -21,7 +21,10 @@ export const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 export const NOTICES = 'THIRD-PARTY-NOTICES.md'
 
 export function currentNotices(root = REPO_ROOT) {
-  return renderNotices(BUNDLED_PACKAGES.map((name) => readPackage(root, name)))
+  return renderNotices(
+    BUNDLED_PACKAGES.map((name) => readPackage(root, name)),
+    readCrates(root),
+  )
 }
 
 /** What is committed, or null when nothing is. */
