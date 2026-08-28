@@ -9,6 +9,7 @@ import {
   compare,
   conditional,
   conditionalSuites,
+  machineLocal,
   parseArgs,
   readLedger,
   writeLedger,
@@ -177,6 +178,66 @@ describe('a suite that declares itself conditional', () => {
        it. `compare` stays about removals; this is its own question. */
     expect(compare([NAME], [NAME])).toEqual([])
     expect(conditional([NAME])).toHaveLength(1)
+  })
+})
+
+/**
+ * THE SAME FAILURE FROM THE OTHER SIDE, and the one neither conditional
+ * detector can see.
+ *
+ * A gated suite is ABSENT on other machines. This is worse and quieter: the
+ * test is collected everywhere, under a DIFFERENT STRING each time, so the
+ * gate reports one test as a deletion and an addition at once — and is green
+ * on exactly the machine that wrote the ledger, which is the machine someone
+ * checks before pushing. `main` went red on all three CI legs and stayed red
+ * through a merge for this.
+ *
+ * The string below is the incident's own shape — the whole `%o` dump, with
+ * the frames and the `stack:` key it really carried — under the home path a
+ * macOS CI runner produces rather than the one it was recorded with. Keeping
+ * the shape is what stops this test drifting from the thing it is about;
+ * changing the path is what stops a fixture re-committing somebody's home
+ * directory to a public repository, which is half of what went wrong.
+ */
+describe('a name that carries machine-local state', () => {
+  const INCIDENT =
+    "src/capabilities/sync/lib/status.test.ts > classifying what a session threw > DOMException{ stack: " +
+    "'QuotaExceededError: the quota has been exceeded\n    at new DOMException " +
+    "(node:internal/per_context/domexception:76:18)\n    at " +
+    "/Users/runner/paper-one/src/capabilities/sync/lib/status.test.ts:80:6' } → disk-full"
+
+  it('recognises the name that took the gate down', () => {
+    expect(machineLocal([INCIDENT, 'a > b > c'])).toEqual([INCIDENT])
+  })
+
+  it('says nothing about the three names that mention node_modules', () => {
+    /* MEASURED, not assumed: `node_modules` was the obvious signal and it is
+       the wrong one. Three real names in this repository say the word, and a
+       detector that cried at them would have been switched off within a week.
+       What no written title contains is an absolute path, a `file://`, a Node
+       internal frame, a Windows drive or a newline. */
+    expect(
+      machineLocal([
+        'scripts/check-test-projects.test.mjs > listTestFiles > tolerates a missing scan root and skips node_modules',
+        'scripts/verify-without.test.mjs > copyTree > copies everything but the excluded names and stale temp files, and links node_modules',
+        'scripts/verify-without.test.mjs > copyTree > does not link node_modules when the source has none',
+      ]),
+    ).toEqual([])
+  })
+
+  it('catches the other shapes a machine leaves behind', () => {
+    expect(machineLocal(['a > b > C:\\Users\\runner\\x'])).toHaveLength(1)
+    expect(machineLocal(['a > b > /home/runner/work/paper-one'])).toHaveLength(1)
+    expect(machineLocal(['a > b > file:///tmp/x.js'])).toHaveLength(1)
+    expect(machineLocal(['a > b > two\nlines'])).toHaveLength(1)
+  })
+
+  it('is a finding even where every name still matches', () => {
+    /* On the machine that wrote the ledger nothing is gone and nothing is
+       unrecorded, so this is the only signal there is — and that machine is
+       the one that can fix it in a line. */
+    expect(compare([INCIDENT], [INCIDENT])).toEqual([])
+    expect(machineLocal([INCIDENT])).toHaveLength(1)
   })
 })
 
@@ -367,6 +428,57 @@ describe('the CLI against a real project', () => {
     expect(wrote.stderr).toMatch(/titled by interpolation/)
     /* Nothing was written — a partial ledger would be worse than none. */
     expect(existsSync(path.join(root, 'tests/ledger.json'))).toBe(false)
+  })
+
+  /**
+   * AND A MACHINE-LOCAL NAME REFUSES TOO — but for the opposite reason to the
+   * conditional one above, which is why it is a separate path.
+   *
+   * A gated suite is dropped because a clean checkout does not collect it, so
+   * dropping yields the ledger that checkout would write. This name IS
+   * collected on the clean checkout — under a different string. Dropping it
+   * would quietly take a test that runs everywhere out of the ledger, and
+   * noticing a test go missing is the only thing the ledger does.
+   */
+  it('refuses to record a title that carries an absolute path', () => {
+    const root = project({
+      'a.test.mjs':
+        `import { describe, expect, it } from 'vitest'\n` +
+        `describe('s', () => {\n` +
+        `  it('thrown at /Users/runner/paper-one/a.test.ts:80:6', () => { expect(1).toBe(1) })\n` +
+        `  it('ordinary', () => { expect(1).toBe(1) })\n` +
+        `})\n`,
+    })
+    const wrote = runCli(root, ['--write'])
+    expect(wrote.status).toBe(2)
+    expect(wrote.stderr).toMatch(/MACHINE-LOCAL/)
+    expect(wrote.stderr).toMatch(/a written name/)
+    /* Not even the good name — a partial ledger would report the other as gone. */
+    expect(existsSync(path.join(root, 'tests/ledger.json'))).toBe(false)
+  })
+
+  /* AND IT IS A FINDING ON THE MACHINE THAT WROTE IT, where every name still
+     matches and nothing else in this gate would say a word. That is the whole
+     value: the incident was green here and red on all three CI legs. */
+  it('reports a machine-local name it inherited, though nothing is gone', () => {
+    const name = 's > thrown at /Users/runner/paper-one/a.test.ts:80:6'
+    const root = project({
+      'a.test.mjs':
+        `import { describe, expect, it } from 'vitest'\n` +
+        `describe('s', () => {\n` +
+        `  it('thrown at /Users/runner/paper-one/a.test.ts:80:6', () => { expect(1).toBe(1) })\n` +
+        `})\n`,
+    })
+    mkdirSync(path.join(root, 'tests'), { recursive: true })
+    writeFileSync(
+      path.join(root, 'tests/ledger.json'),
+      `${JSON.stringify({ note: 'hand-written', tests: [`a.test.mjs > ${name}`] }, null, 2)}\n`,
+    )
+    const checked = runCli(root)
+    expect(checked.status).toBe(1)
+    expect(checked.stdout).toContain('MACHINE-LOCAL')
+    expect(checked.stdout).toMatch(/0 gone/)
+    expect(checked.stdout).toMatch(/1 machine-local/)
   })
 })
 
