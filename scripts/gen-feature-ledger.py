@@ -15,7 +15,6 @@ becomes a second opinion.
 
 import html
 import pathlib
-import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -60,9 +59,78 @@ def cells(row: str) -> list[str]:
     that cell in the generated page: no error, no missing row, just a sentence
     that stops halfway. Exactly the failure this parser was written to prevent,
     reintroduced by the parser itself.
+
+    THEN THE CURE DID IT AGAIN, TWICE, and this is the third version. The
+    second was `re.split(r'(?<!\\)\\|', row.strip().strip('|'))`, and a
+    lookbehind that only asks "is the previous character a backslash" cannot
+    answer the question, because a backslash may itself be escaped:
+
+      - `| a | ends with \\||`  — `strip('|')` eats trailing pipes by the
+        CHARACTER, so it removed the escaped pipe's own `|` and left the
+        backslash dangling: `['a', 'ends with \\\\']`. Same silent truncation
+        as the original, now hiding inside the fix for it.
+      - `| path C:\\\\| next |`  — the `\\\\` is an escaped BACKSLASH and the
+        pipe after it is a real delimiter, but the lookbehind saw a backslash
+        and refused to split: one cell where the row has two.
+
+    So it is scanned rather than pattern-matched. A backslash consumes the
+    character after it, whatever that is; only a pipe reached outside an
+    escape pair delimits. The optional leading and trailing pipes GFM allows
+    are then dropped by what the scan saw, not by stripping characters off
+    the ends.
     """
-    parts = re.split(r'(?<!\\)\|', row.strip().strip('|'))
-    return [c.strip().replace('\\|', '|') for c in parts]
+    text = row.strip()
+    parts: list[str] = []
+    buf: list[str] = []
+    ends_on_delimiter = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == '\\' and i + 1 < len(text):
+            # The pair travels together; `_unescape` below decides what it means.
+            buf.append(char)
+            buf.append(text[i + 1])
+            i += 2
+            ends_on_delimiter = False
+        elif char == '|':
+            parts.append(''.join(buf))
+            buf = []
+            i += 1
+            ends_on_delimiter = True
+        else:
+            buf.append(char)
+            i += 1
+            ends_on_delimiter = False
+    parts.append(''.join(buf))
+
+    # GFM's optional outer pipes. Dropped only when the row really opened or
+    # closed with a DELIMITER — a row ending in an escaped pipe closes with a
+    # cell, and the empty string a blind `[1:-1]` would remove is that cell's.
+    if text.startswith('|'):
+        parts = parts[1:]
+    if ends_on_delimiter and parts:
+        parts = parts[:-1]
+    return [_unescape(c.strip()) for c in parts]
+
+
+def _unescape(cell: str) -> str:
+    """`\\|` → `|` and `\\\\` → `\\`, left to right, once each.
+
+    A chain of `.replace()` calls cannot do this: unescaping `\\|` first turns
+    `\\\\|` — a literal backslash then a delimiter that was already consumed —
+    into `\\|`, and the second pass then eats the backslash that was the
+    cell's own text.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(cell):
+        if cell[i] == '\\' and i + 1 < len(cell) and cell[i + 1] in '\\|':
+            out.append(cell[i + 1])
+            i += 2
+        else:
+            out.append(cell[i])
+            i += 1
+    return ''.join(out)
 
 
 def plain(text: str) -> str:

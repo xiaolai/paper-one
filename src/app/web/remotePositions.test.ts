@@ -106,6 +106,88 @@ describe('write', () => {
     expect(writes()).toEqual([{ book: 'one', position: 'epubcfi(/6/6)', progress: 0.3 }])
   })
 
+  /**
+   * ONE INSTANCE, MANY BOOKS. There is one of these per LINK, so the reader
+   * who puts a book down and opens another is still using it. The debounce
+   * was a single timer, restarted by any book's write, which made the wait
+   * "two seconds after the last turn of ANYTHING": book A's settled position
+   * was pushed back by every page turn in book B and went nowhere until B was
+   * closed. A book's own quiet is what sends it.
+   */
+  it('gives each book its own quiet — a turn in one does not push another’s settled place back', async () => {
+    const { channel, writes } = shelf({})
+    const remote = remotePositions(channel)
+    remote.write('one', 'epubcfi(/6/2)', 0.1)
+    await vi.advanceTimersByTimeAsync(WRITE_DEBOUNCE_MS - 1)
+    /* A different book, one tick before the first one settles. */
+    remote.write('two', 'epubcfi(/6/4)', 0.2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(writes()).toEqual([{ book: 'one', position: 'epubcfi(/6/2)', progress: 0.1 }])
+    await vi.advanceTimersByTimeAsync(WRITE_DEBOUNCE_MS)
+    expect(writes()).toEqual([
+      { book: 'one', position: 'epubcfi(/6/2)', progress: 0.1 },
+      { book: 'two', position: 'epubcfi(/6/4)', progress: 0.2 },
+    ])
+  })
+
+  /**
+   * FLUSH IS A PROMISE THE READER LEAVES ON. `Reader.tsx` awaits it from its
+   * unmount cleanup, so what it resolves over is what the reader is told
+   * landed. It used to skip a book whose write was already out — reading "in
+   * flight" as "handled" — and resolve without having attempted the newer
+   * place that arrived in between. The delivery's own tail did get to it, so
+   * nothing was lost while the tab stayed open; a tab that went away in that
+   * window lost the last page turn, silently.
+   */
+  it('waits for a delivery already out, rather than resolving over a newer place it never tried', async () => {
+    /* A shelf that HOLDS each call until this test lets it go. The shared
+       helper above answers within the same microtask, and against that a
+       flush which returns immediately and a flush which waits are
+       indistinguishable — the in-flight delivery's tail happens to run first
+       either way. The defect only shows over a call that takes time, which is
+       every real one. */
+    const sent: string[] = []
+    const holding: (() => void)[] = []
+    const channel: ShelfChannel = {
+      call: async (_service, body) => {
+        sent.push((body as { position: string }).position)
+        await new Promise<void>((resolve) => holding.push(resolve))
+        return { bookId: 'one' }
+      },
+      stream: () => {
+        throw new Error('no streams here')
+      },
+      close: () => {},
+      onClosed: () => () => {},
+    }
+    const land = async () => {
+      holding.shift()?.()
+      await vi.advanceTimersByTimeAsync(0)
+    }
+
+    const remote = remotePositions(channel)
+    remote.write('one', 'epubcfi(/6/2)', undefined)
+    const started = remote.flush()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sent).toEqual(['epubcfi(/6/2)'])
+
+    /* One more turn, and the book closes while the first write is still out. */
+    remote.write('one', 'epubcfi(/6/4)', undefined)
+    let closed = false
+    const closing = remote.flush().then(() => (closed = true))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(closed, 'flush resolved over a place it had not attempted').toBe(false)
+
+    await land()
+    expect(sent).toEqual(['epubcfi(/6/2)', 'epubcfi(/6/4)'])
+    expect(closed).toBe(false)
+
+    await land()
+    await closing
+    expect(closed).toBe(true)
+    await started
+  })
+
   it('keeps a write the link could not carry, and sends it when the link is back', async () => {
     const { channel, writes, fail, reopen } = shelf({})
     const remote = remotePositions(channel)

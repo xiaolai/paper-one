@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
-import { BUNDLED_PACKAGES, readCrates, readPackage, renderNotices } from './lib/notices.mjs'
+import { BUNDLED_LIBRARIES, BUNDLED_PACKAGES, readCrates, readPackage, renderNotices } from './lib/notices.mjs'
 
 /**
  * `pnpm docs:notices` — write `THIRD-PARTY-NOTICES.md` from what is installed.
@@ -12,9 +12,14 @@ import { BUNDLED_PACKAGES, readCrates, readPackage, renderNotices } from './lib/
  * travelling with the copies. Nothing carried them, so every shipped build
  * relied on terms it did not meet.
  *
+ * The same was true of every JavaScript dependency the bundle carries — React,
+ * pdf.js, foliate-js, Lucide and the Tauri API, under MIT, ISC and Apache-2.0,
+ * all of which say the same thing about the notice travelling with the copy.
+ * `BUNDLED_LIBRARIES` is that half; see `lib/notices.mjs`.
+ *
  * `--check` compares instead of writing and exits 1 on a difference, so an
- * upgraded or added font cannot quietly leave the notice describing a build
- * that no longer exists.
+ * upgraded or added dependency cannot quietly leave the notice describing a
+ * build that no longer exists.
  */
 
 export const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -23,6 +28,7 @@ export const NOTICES = 'THIRD-PARTY-NOTICES.md'
 export function currentNotices(root = REPO_ROOT) {
   return renderNotices(
     BUNDLED_PACKAGES.map((name) => readPackage(root, name)),
+    BUNDLED_LIBRARIES.map((entry) => readPackage(root, entry)),
     readCrates(root),
   )
 }

@@ -186,6 +186,33 @@ export function parseElapsed(text: string): number | null {
   return Number(days ?? 0) * 86_400 + Number(hours ?? 0) * 3_600 + Number(minutes) * 60 + Number(seconds)
 }
 
+/**
+ * The widest epoch millisecond `Date` will render — ECMA-262's time-value
+ * range. Outside it, and for NaN or an infinity, `toISOString()` throws.
+ */
+const MAX_STAMP_MS = 8_640_000_000_000_000
+
+/**
+ * A TIMESTAMP THAT COULD NOT HAVE BEEN WRITTEN IS NOT A TIMESTAMP — the same
+ * finding as the pid below, in the field beside it.
+ *
+ * `typeof x === 'number'` admits NaN, ±Infinity and 1e300, and `at` goes
+ * straight into `new Date(owner.at).toISOString()` in `LockHeld`'s message:
+ * a junk stamp made the refusal throw `RangeError: Invalid time value`
+ * instead of naming the holder, so a corrupt lock file crashed the writer
+ * that was trying to explain itself. `startedAt` and `bootedAt` were the
+ * other half: a NaN there made `Math.abs(NaN − now) > TOLERANCE` false, which
+ * silently disabled the identity check rather than skipping it.
+ *
+ * Null for anything unbelievable, and each caller decides what that means —
+ * `at` falls back to 0, the same as a record that never carried one, so the
+ * holder stays NAMEABLE; the two identity stamps are treated as absent,
+ * which is what a record written before WI-20.34 looks like anyway.
+ */
+function stampMs(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= MAX_STAMP_MS ? value : null
+}
+
 async function readOwner(path: string): Promise<LockOwner | null> {
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
@@ -200,18 +227,20 @@ async function readOwner(path: string): Promise<LockOwner | null> {
      * lock. */
     if (typeof one['pid'] !== 'number' || !Number.isSafeInteger(one['pid']) || one['pid'] <= 0) return null
     if (typeof one['host'] !== 'string') return null
+    const startedAt = stampMs(one['startedAt'])
+    const bootedAt = stampMs(one['bootedAt'])
     return {
       pid: one['pid'],
       host: one['host'],
-      at: typeof one['at'] === 'number' ? one['at'] : 0,
+      at: stampMs(one['at']) ?? 0,
       command: typeof one['command'] === 'string' ? one['command'] : '',
       /* A lock file written before tokens existed has none. Empty never
        * equals a real token, so such a file is never released by us — held
        * until its pid dies and it is reclaimed as stale, which is the safe
        * direction. */
       token: typeof one['token'] === 'string' ? one['token'] : '',
-      ...(typeof one['startedAt'] === 'number' ? { startedAt: one['startedAt'] } : {}),
-      ...(typeof one['bootedAt'] === 'number' ? { bootedAt: one['bootedAt'] } : {}),
+      ...(startedAt === null ? {} : { startedAt }),
+      ...(bootedAt === null ? {} : { bootedAt }),
     }
   } catch {
     /* Unreadable or not ours: treated as HELD by somebody unnameable rather

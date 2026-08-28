@@ -43,20 +43,57 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: pnpm install --frozen-lockfile
-      # THE TAG MUST NAME THE VERSION BEING BUILT. A `v0.2.0` tag on a 0.1.1
-      # tree would upload an artifact called `paper-linux-v0.2.0` holding a
-      # 0.1.1 binary — a mislabelled release. The tag reaches the shell only
-      # through an env var (never interpolated), and is compared to
-      # package.json, which `bump-version.sh` keeps in step with the other three.
-      - name: Tag matches package version
+      # THE TAG MUST NAME THE VERSION BEING BUILT, IN ALL FOUR PLACES IT IS
+      # WRITTEN. A `v0.2.0` tag on a 0.1.1 tree would upload an artifact called
+      # `paper-linux-v0.2.0` holding a 0.1.1 binary — a mislabelled release.
+      #
+      # FOUR FILES, NOT ONE. This checked `package.json` alone and called it
+      # enough because `bump-version.sh` keeps the other three in step — which
+      # is true of a version CUT BY THAT SCRIPT and says nothing about a tree
+      # where one file was edited by hand, or where the script died between its
+      # writes and its lockfile step. `tauri.conf.json` is the one a reader
+      # ever sees (it becomes the bundle's Info.plist), so a disagreement there
+      # is precisely the mislabelled release this gate exists to stop, and
+      # `package.json` cannot see it. Each file is read the way
+      # `scripts/bump-version.sh` reads it, so the gate and the writer cannot
+      # disagree about where the number lives — in particular `Cargo.lock`,
+      # which holds several `version = "0.1.0"` lines and exactly one that is
+      # this app, found by walking to the `[[package]]` block named `app`.
+      #
+      # ONLY ON A TAG. `workflow_dispatch` from a branch has no tag to check —
+      # `github.ref_name` is then the branch name, and this step refused every
+      # manual run.
+      #
+      # The tag reaches the shell only through an env var, never interpolated.
+      - name: Tag matches the version, in all four files
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           REF: ${{ github.ref_name }}
         run: |
-          version=$(node -p "require('./package.json').version")
-          if [ "$REF" != "v$version" ]; then
-            echo "tag $REF does not name package version $version (expected v$version)" >&2
+          set -euo pipefail
+          named="${REF#v}"
+          pkg=$(node -p "require('./package.json').version")
+          tauri=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cargo=$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p&&/^version *=/{gsub(/[" ]/,"");sub(/^version=/,"");print;exit}' src-tauri/Cargo.toml)
+          lock=$(awk '
+            /^\[\[package\]\]/{n=""}
+            /^name = /{gsub(/[",]/,"");sub(/^name = /,"");n=$0}
+            /^version = /{if(n=="app"){gsub(/[",]/,"");sub(/^version = /,"");print;exit}}
+          ' src-tauri/Cargo.lock)
+          fail=0
+          for pair in "package.json:$pkg" "src-tauri/tauri.conf.json:$tauri" \
+                      "src-tauri/Cargo.toml:$cargo" "src-tauri/Cargo.lock:$lock"; do
+            file="${pair%%:*}"; got="${pair##*:}"
+            if [ "$got" != "$named" ]; then
+              echo "$file says ${got:-<unreadable>}, tag $REF names $named" >&2
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "the tag and the version files disagree — cut versions with ./scripts/bump-version.sh" >&2
             exit 1
           fi
+          echo "tag $REF matches all four files at $named"
       # `beforeBuildCommand` in tauri.conf.json runs `pnpm build && pnpm build:web`
       # — the desktop bundle and the served browser client — so the bundle
       # carries what the gate built, by the same commands.

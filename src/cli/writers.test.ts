@@ -449,6 +449,43 @@ describe('two writers cannot interleave', () => {
     await expect(acquireDataLock(dataDir, { waitMs: 0, alive: () => false })).rejects.toBeInstanceOf(LockHeld)
   })
 
+  /**
+   * AND NEITHER IS A TIMESTAMP THAT COULD NOT HAVE BEEN WRITTEN. The pid was
+   * validated and the three stamps beside it were not, which left two halves
+   * of one defect:
+   *
+   *   - `at` went straight into `new Date(at).toISOString()` in `LockHeld`'s
+   *     message, so a record holding `1e400` — legal JSON, `Infinity` once
+   *     parsed — made the refusal throw `RangeError: Invalid time value`.
+   *     The writer trying to explain who held the library crashed instead.
+   *   - `startedAt` went into `Math.abs(startedAt − now) > TOLERANCE`, which
+   *     for an infinity is TRUE: the identity check declared a perfectly
+   *     live holder stale and RECLAIMED its lock. The permissive direction,
+   *     which is how two writers happen.
+   *
+   * Written as raw text rather than through `JSON.stringify`, because that
+   * turns a non-finite number into `null` and the file being described is
+   * one nothing in this repository wrote.
+   */
+  it('names the holder through an unrenderable stamp, and does not reclaim a live lock over one', async () => {
+    const dataDir = await library()
+    const host = (await import('node:os')).hostname()
+    const record = (fields: string) => `{"pid":${process.pid},"host":${JSON.stringify(host)},${fields}}`
+
+    await writeFile(join(dataDir, LOCK_FILE), record('"at":1e400,"command":"a crashed paper","token":"t"'))
+    const refused = await acquireDataLock(dataDir, { waitMs: 0, alive: () => true }).catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(LockHeld)
+    expect((refused as LockHeld).message).toContain(`pid ${process.pid} on ${host}`)
+    /* Read as a record that never carried a stamp, which is what one written
+     * before the field existed looks like — not as a reason to say nothing. */
+    expect((refused as LockHeld).message).toContain('1970-01-01T00:00:00.000Z')
+
+    await writeFile(join(dataDir, LOCK_FILE), record('"at":1,"command":"a live paper","token":"t","startedAt":1e400'))
+    await expect(
+      acquireDataLock(dataDir, { waitMs: 0, alive: () => true, startedAt: () => 2_000_000_000_000, bootedAt: () => null }),
+    ).rejects.toBeInstanceOf(LockHeld)
+  })
+
   it('reclaims a lock whose holder is gone, on this host', async () => {
     const dataDir = await library()
     await writeFile(

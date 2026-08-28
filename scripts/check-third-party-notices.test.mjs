@@ -1,8 +1,20 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { BUNDLED_PACKAGES, BUNDLED_PLUGINS, copyrightFrom, crateLicenseFor, licenseBodyFrom, readCrates, renderNotices } from './lib/notices.mjs'
+import {
+  BUNDLED_LIBRARIES,
+  BUNDLED_PACKAGES,
+  BUNDLED_PLUGINS,
+  NOT_BUNDLED,
+  copyrightFrom,
+  crateLicenseFor,
+  licenseBodyFrom,
+  readCrates,
+  readPackage,
+  renderNotices,
+} from './lib/notices.mjs'
 import { NOTICES, committedNotices, currentNotices } from './write-third-party-notices.mjs'
 
 /**
@@ -15,7 +27,15 @@ import { NOTICES, committedNotices, currentNotices } from './write-third-party-n
  * failure is exactly the kind nothing surfaces: no test fails, no build breaks,
  * and the app works perfectly.
  *
- * Three things are gated here, and each closes a different way for it to rot:
+ * AND THE FONTS WERE ONLY HALF OF IT. Every build also shipped React,
+ * react-dom, pdf.js, foliate-js, Lucide and three Tauri JavaScript packages —
+ * MIT, ISC and Apache-2.0, each of which conditions redistribution on the
+ * licence and the copyright notice travelling with the copy, in the same
+ * words the OFL uses. The notice named none of them for as long as it
+ * existed. The failure had exactly the shape described above: nothing broke,
+ * because nothing compared the notice against what the build contains.
+ *
+ * Four things are gated here, and each closes a different way for it to rot:
  *
  *   1. The committed notice IS what the installed packages say. An upgrade
  *      that changes a copyright line cannot leave the notice describing the
@@ -24,7 +44,12 @@ import { NOTICES, committedNotices, currentNotices } from './write-third-party-n
  *      font added to the app and not to the list would ship unnoticed; one
  *      removed from the app and left in the list would claim a licence
  *      obligation that no longer exists.
- *   3. The file is IN the bundle. A notice that exists only in the repository
+ *   3. The lists together ACCOUNT FOR every runtime dependency. This is the
+ *      one that would have caught the gap: `package.json`'s `dependencies` is
+ *      the closest thing there is to a statement of what ships, and a new one
+ *      must now be named in a table or excused in writing before the suite
+ *      goes green.
+ *   4. The file is IN the bundle. A notice that exists only in the repository
  *      satisfies nobody: the requirement is on the copies.
  */
 
@@ -80,6 +105,200 @@ describe('what is bundled', () => {
       }),
     )
     expect([...packages].sort()).toEqual([...BUNDLED_PACKAGES].sort())
+  })
+})
+
+/**
+ * EVERY RUNTIME DEPENDENCY IS ACCOUNTED FOR — the check the gap got past.
+ *
+ * `dependencies` is the closest thing this repository has to a declaration of
+ * what a build contains, and the two bundled lists are the claim about which
+ * of them carry an attribution obligation. A partition, not a subset: a
+ * dependency is either named in a table or excused in `NOT_BUNDLED` with a
+ * written reason. Adding one and shipping it unnamed is now a red suite
+ * rather than a quiet licence breach.
+ */
+describe('every runtime dependency is accounted for', () => {
+  const dependencies = Object.keys(JSON.parse(read('package.json')).dependencies ?? {})
+  const named = [...BUNDLED_PACKAGES, ...BUNDLED_LIBRARIES.map((one) => one.name)]
+
+  it('finds the dependencies it is checking, so this is not vacuous', () => {
+    expect(dependencies.length).toBeGreaterThan(0)
+    expect(named.length).toBe(dependencies.length - Object.keys(NOT_BUNDLED).length)
+  })
+
+  it('names each one, or says in writing why it ships nothing', () => {
+    expect([...named, ...Object.keys(NOT_BUNDLED)].sort()).toEqual([...dependencies].sort())
+    /* Once each. A name in both lists is a claim and its own denial. */
+    expect(new Set(named).size).toBe(named.length)
+    for (const [name, why] of Object.entries(NOT_BUNDLED)) {
+      expect(named, `${name} is both bundled and excused`).not.toContain(name)
+      expect(typeof why === 'string' && why.length > 0, `${name} needs a reason, not a blank`).toBe(true)
+    }
+  })
+
+  /**
+   * AND "BUNDLED" IS A FACT ABOUT THE SOURCE, not a label. A package listed
+   * here that nothing imports would claim an obligation Paper does not have.
+   *
+   * The detector is checked against a KNOWN NEGATIVE as well as the eight
+   * positives, because a regex that matches everything looks exactly like a
+   * clean result — `check-browser-safe` shipped two confident wrong answers
+   * for that reason. It reads whole files rather than line by line, for the
+   * other half of that finding: a newline-forbidding pattern misses every
+   * multi-line import, and `session.ts` has one.
+   */
+  describe('what the source actually imports', () => {
+    const sources = []
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir)) {
+        const at = path.join(dir, entry)
+        if (statSync(at).isDirectory()) walk(at)
+        /* Declaration files describe types and ship nothing; test files are
+           not the build. */
+        else if (/\.tsx?$/.test(entry) && !/\.d\.ts$/.test(entry) && !/\.test\.tsx?$/.test(entry)) {
+          sources.push(readFileSync(at, 'utf8'))
+        }
+      }
+    }
+    walk(path.join(REPO_ROOT, 'src'))
+    const source = sources.join('\n')
+    const imported = (name) =>
+      new RegExp(String.raw`(?:from|import)\s*\(?\s*['"]${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:/[^'"]*)?['"]`).test(source)
+
+    it('does not answer yes to a package nothing imports', () => {
+      expect(sources.length).toBeGreaterThan(0)
+      expect(imported('a-package-that-is-not-here')).toBe(false)
+      expect(imported('vitest')).toBe(false)
+    })
+
+    it('finds every bundled library in an import', () => {
+      for (const { name } of BUNDLED_LIBRARIES) expect(imported(name), `${name} is imported by src/`).toBe(true)
+    })
+  })
+})
+
+/**
+ * THE LIBRARIES' TERMS TRAVEL TOO, and each is a different licence with a
+ * different copyright holder — so this asserts the clause each obligation
+ * actually rests on, not merely that a name appears.
+ */
+describe('the JavaScript libraries', () => {
+  const committed = () => committedNotices() ?? ''
+
+  it('names every one, with the version installed and the terms it ships under', () => {
+    const text = committed()
+    for (const entry of BUNDLED_LIBRARIES) {
+      const one = readPackage(REPO_ROOT, entry)
+      expect(text, one.name).toContain(`| \`${one.name}\` | ${one.version} | ${one.license} |`)
+    }
+  })
+
+  it('carries each licence text, not merely its name', () => {
+    const text = committed()
+    /* MIT and ISC each say the notice must accompany the copy; Apache-2.0
+       says it in §4. Three licences, three distinct sentences. */
+    expect(text).toContain('Permission is hereby granted, free of charge')
+    expect(text).toContain('Permission to use, copy, modify, and/or distribute this software')
+    expect(text).toContain('Apache License')
+    expect(text).toContain('TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION')
+  })
+
+  it('keeps each MIT copyright line apart, rather than folding three holders into one', () => {
+    const text = committed()
+    /* Meta, John Factotum and the Tauri Apps Contributors all ship MIT here.
+       Grouping by the licence NAME would have printed whichever came first
+       and attributed the other two to it. */
+    expect(text).toContain('Copyright (c) Meta Platforms, Inc. and affiliates.')
+    expect(text).toContain('Copyright (c) 2022 John Factotum')
+    expect(text).toContain('Copyright (c) 2017 - Present Tauri Apps Contributors')
+    expect(text).toContain('Copyright (c) 2026 Lucide Icons and Contributors')
+  })
+
+  /**
+   * A GIT DEPENDENCY HAS NO VERSION. `foliate-js` is Paper's fork, and its
+   * manifest says `0.0.0` — a number that names nothing, in the one document
+   * whose job is to say exactly what was redistributed. The spec resolves it.
+   */
+  it('names the fork by the commit it is pinned to, not by 0.0.0', () => {
+    const spec = JSON.parse(read('package.json')).dependencies['foliate-js']
+    expect(spec).toMatch(/^github:/)
+    expect(committed()).toContain(`| \`foliate-js\` | ${spec} |`)
+    expect(committed()).not.toContain('| `foliate-js` | 0.0.0 |')
+  })
+
+  /**
+   * THE TWO PACKAGES THAT PUBLISH NO LICENCE TEXT. `@tauri-apps/plugin-dialog`
+   * and `@tauri-apps/plugin-fs` ship a `LICENSE.spdx` — metadata ABOUT the
+   * terms — and nothing else, so their MIT text is vendored from the crate
+   * half of the same plugin at the same version. Compared against the cargo
+   * registry when one is checked out, so the vendored copy cannot be a text
+   * somebody typed.
+   */
+  it('vendors the Tauri packages’ text from the crate half of the same release', (context) => {
+    const registry = path.join(process.env.HOME ?? '', '.cargo', 'registry', 'src')
+    if (!existsSync(registry)) return context.skip('no cargo registry checkout on this machine')
+    for (const [npm, crate] of [
+      ['@tauri-apps/plugin-dialog', 'tauri-plugin-dialog'],
+      ['@tauri-apps/plugin-fs', 'tauri-plugin-fs'],
+    ]) {
+      const { version, text } = readPackage(REPO_ROOT, BUNDLED_LIBRARIES.find((one) => one.name === npm))
+      const found = readdirSync(registry)
+        .map((one) => path.join(registry, one, `${crate}-${version}`, 'LICENSE_MIT'))
+        .filter((one) => existsSync(one))
+      if (found.length === 0) return context.skip(`${crate} ${version} is not checked out here`)
+      expect(readFileSync(found[0], 'utf8'), `${npm}: vendored licence drifted from ${crate} ${version}`).toBe(text)
+    }
+  })
+})
+
+/**
+ * AND IT FAILS LOUDLY. A notices generator that skips what it cannot read
+ * produces a document that looks complete and is not — which is the failure
+ * this whole file exists for, in its most deniable form.
+ */
+describe('readPackage on a package it cannot account for', () => {
+  const scratch = (build) => {
+    const root = mkdtempSync(path.join(tmpdir(), 'paper-notices-'))
+    writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: {} }))
+    try {
+      return build(root)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  const install = (root, name, manifest, files = {}) => {
+    const at = path.join(root, 'node_modules', name)
+    mkdirSync(at, { recursive: true })
+    writeFileSync(path.join(at, 'package.json'), JSON.stringify(manifest))
+    for (const [file, body] of Object.entries(files)) writeFileSync(path.join(at, file), body)
+    return at
+  }
+
+  it('says the package is not installed, rather than reporting undefined', () => {
+    scratch((root) => {
+      expect(() => readPackage(root, 'nowhere')).toThrow(/nowhere: not installed at/)
+    })
+  })
+
+  it('names the path it looked for a licence at, and how to point it elsewhere', () => {
+    scratch((root) => {
+      install(root, 'quiet', { version: '1.0.0', license: 'MIT' }, { 'LICENSE.spdx': 'SPDXVersion: SPDX-2.1\n' })
+      expect(() => readPackage(root, 'quiet')).toThrow(/quiet: no licence text at .*LICENSE/)
+      expect(() => readPackage(root, 'quiet')).toThrow(/vendor one under scripts\/lib\/licenses/)
+      /* And it is READ once pointed at the file the package really publishes. */
+      expect(readPackage(root, { name: 'quiet', file: 'LICENSE.spdx' }).text).toContain('SPDXVersion')
+    })
+  })
+
+  it('refuses a package that declares no licence at all', () => {
+    scratch((root) => {
+      install(root, 'silent', { version: '1.0.0' }, { LICENSE: 'some terms' })
+      expect(() => readPackage(root, 'silent')).toThrow(/silent: declares no licence/)
+      /* Unless the declaration is made here, which is a decision on record. */
+      expect(readPackage(root, { name: 'silent', license: 'MIT' }).license).toBe('MIT')
+    })
   })
 })
 
