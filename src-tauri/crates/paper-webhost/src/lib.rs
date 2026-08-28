@@ -117,16 +117,20 @@ impl RetryAt {
 /// `blob:` — the three that would each, on their own, let a book's JavaScript
 /// run in this origin.
 ///
-/// `frame-src data: blob:` — and NOT `'self'`. foliate puts the book in an
-/// iframe, and the book is a blob, so `blob:` is what a book needs. `'self'`
-/// used to be there too, and it was the one route a book had that needed no
-/// script at all: a `blob:` document inherits this policy, so an EPUB holding
-/// nothing but `<iframe src="/">` loaded the REAL CLIENT inside the book —
-/// its module executes under `script-src 'self'`, the browser attaches the
-/// cookie to its `/ws`, and the book's own markup sits over it: clickjacking,
-/// with every read the credential permits. Found in a refute round on
-/// 2026-08-27; measured in `scripts/csp-effect.mjs`'s third route. Nothing
-/// the client serves is legitimately framed by a book, so nothing is lost.
+/// `frame-src blob:` — NOT `'self'`, and not `data:` either. foliate puts the
+/// book in an iframe, and the book is a blob, so `blob:` is what a book needs
+/// and all it needs. `'self'` used to be there too, and it was the one route a
+/// book had that needed no script at all: a `blob:` document inherits this
+/// policy, so an EPUB holding nothing but `<iframe src="/">` loaded the REAL
+/// CLIENT inside the book — its module executes under `script-src 'self'`,
+/// the browser attaches the cookie to its `/ws`, and the book's own markup
+/// sits over it: clickjacking, with every read the credential permits. Found
+/// in a refute round on 2026-08-27; measured in `scripts/csp-effect.mjs`'s
+/// third route. Nothing the client serves is legitimately framed by a book,
+/// so nothing is lost. `data:` rode along from this policy's first draft with
+/// no consumer — nothing under `src/` and nothing in the pinned fork frames a
+/// `data:` URL — and a source no document of ours needs is one a book's markup
+/// may use, so it went the same way (WI-20.39's acceptance is `blob:` alone).
 ///
 /// `style-src`, `font-src` and `worker-src` take `blob:` for the same reason
 /// and on the same terms. foliate rewrites a book's stylesheets and embedded
@@ -168,7 +172,7 @@ pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      font-src 'self' data: blob:; \
      connect-src 'self'; \
      worker-src 'self' blob:; \
-     frame-src data: blob:; \
+     frame-src blob:; \
      object-src 'none'; \
      base-uri 'none'; \
      form-action 'none'; \

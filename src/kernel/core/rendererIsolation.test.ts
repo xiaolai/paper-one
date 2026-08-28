@@ -144,8 +144,14 @@ describe('the shipped Content Security Policy', () => {
        * route a book had that needed no script: a blob document inherits this
        * policy, so `<iframe src="/">` inside a book loaded the real client —
        * module running, cookie attached to its socket — under the book's own
-       * markup. Nothing Paper serves is legitimately framed by a book. */
-      expect(d['frame-src'], `${name}: a book must not be able to frame the client`).toEqual(['data:', 'blob:'])
+       * markup. Nothing Paper serves is legitimately framed by a book.
+       *
+       * AND ONLY `blob:`. `data:` sat beside it from the policy's first draft
+       * with no consumer — nothing under `src/` and nothing in the pinned
+       * fork frames a `data:` URL — and a frame source no document of ours
+       * needs is one a book's markup may use. The plan's acceptance for
+       * WI-20.39 is `["blob:"]`; this is that sentence, held. */
+      expect(d['frame-src'], `${name}: a book frames blob documents and nothing else`).toEqual(['blob:'])
       expect(d['img-src'], `${name}: book images are blobs`).toContain('blob:')
       expect(d['img-src'], `${name}: and sometimes data URLs`).toContain('data:')
       expect(d['worker-src'], `${name}: pdf.js runs in a worker`).toContain('blob:')

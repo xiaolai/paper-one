@@ -85,11 +85,11 @@ const STRICT = servedPolicy()
  *  script from a blob or inline, and `'self'` back in `frame-src` — the one
  *  route that needs no script at all. */
 const LOOSE = STRICT.replace("script-src 'self'", "script-src 'self' blob: 'unsafe-inline'").replace(
-  'frame-src data: blob:',
-  "frame-src 'self' data: blob:",
+  'frame-src blob:',
+  "frame-src 'self' blob:",
 )
 if (LOOSE === STRICT || !LOOSE.includes("frame-src 'self'")) {
-  console.error('csp-effect: the served policy has no `script-src \'self\'` or `frame-src data: blob:` to widen — refusing to run a probe that cannot fail.')
+  console.error('csp-effect: the served policy has no `script-src \'self\'` or `frame-src blob:` to widen — refusing to run a probe that cannot fail.')
   process.exit(2)
 }
 

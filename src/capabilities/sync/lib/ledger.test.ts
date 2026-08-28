@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   createKernelServices,
   parseRecord,
@@ -20,7 +20,7 @@ import { crashableFs, fsOver, type CrashableFs } from './journalFs.testkit'
 import { SYNC_CURSOR_SETTING, createLedger, type Ledger, type SyncChannel, type SyncSummary } from './ledger'
 import { SYNC_QUARANTINE_SETTING } from './quarantine'
 import { describeSession } from './status'
-import { SYNC_VERSION } from './protocol'
+import { SYNC_JOURNAL_FORMAT, SYNC_PROTO, SYNC_VERSION } from './protocol'
 import { canonicalJson, toWire } from './merge'
 import { PUSHABLE } from './protocol'
 
@@ -756,6 +756,177 @@ describe('carried findings — removals, content facts, and covers', () => {
 
     it('speaks [3, 3]: the version bump that makes `live` safe against an old shelf', () => {
       expect(SYNC_VERSION).toEqual([3, 3])
+    })
+
+    /* (i) THE BUMP IS THE WHOLE SAFETY OF `live.at` against a peer from before
+       it existed: a [2, 2] shelf ignores the stamp and mints a fresh clock for
+       a restore, a [2, 2] satchel never sends one. So each side refuses the
+       other's range at the hello — typed, because the status line reads the
+       code — and the sentence names both ranges, which is what a reader with
+       two builds will need. The refusal exists on both sides; these are the
+       cases that drive it, since a version pin alone proves only the number. */
+    it('(i) a hello speaking [2, 2] is refused by the shelf — typed, naming both ranges', async () => {
+      const { shelf } = await makeWorld()
+      const hello = shelf.ledger.services().find((one) => one.name === 'sync.hello')!
+      const older = {
+        proto: SYNC_PROTO,
+        journalFormat: SYNC_JOURNAL_FORMAT,
+        services: { sync: [2, 2] },
+        device: 'bbbbbbbbbbbbbbbb',
+        role: 'satchel',
+        clock: makeHlc(1, 0, 'bbbbbbbbbbbbbbbb'),
+      }
+      await expect(hello.handler(older as never, asCtx(hello.handler))).rejects.toMatchObject({
+        code: 'unsupported',
+        message: expect.stringMatching(/\[2, 2\].*\[3, 3\]/),
+      })
+    })
+
+    it('(i) a welcome speaking [2, 2] is refused by the satchel — typed, naming both ranges', async () => {
+      const { satchel } = await makeWorld()
+      const olderShelf: SyncChannel = {
+        peerId: 'old-shelf',
+        call: async (service) => {
+          if (service === 'sync.hello') {
+            return {
+              clock: makeHlc(1, 0, 'eeeeeeeeeeeeeeee'),
+              epoch: 'e-old',
+              hubSeq: 0,
+              journalFormat: SYNC_JOURNAL_FORMAT,
+              services: { sync: [2, 2] },
+            }
+          }
+          throw new Error(`the session went past a hello it should have refused: ${service}`)
+        },
+      }
+      await expect(satchel.ledger.runSession(olderShelf)).rejects.toMatchObject({
+        code: 'unsupported',
+        message: expect.stringMatching(/\[2, 2\].*\[3, 3\]/),
+      })
+    })
+
+    /* THE TENTH: the marks-only variant, which the finding calls the worse
+       one. A highlight made on a satchel that has not heard of the removal
+       arrives as `revs.marks` and the marks — no record, no restore intent.
+       Applied, `marks.mergeRemote` would `mkdir` `books/book_x/marks.json`
+       beside `trash/book_x/`: a ghost folder the shelf shows as a book with no
+       record. The guard skips it for a removed book with no `live`; the revs
+       are acked so the satchel stops offering them, and its pull carries the
+       removal. */
+    it('the tenth — a marks-only group for a removed book writes no ghost folder, and its revs are acked', async () => {
+      const { shelf } = await makeWorld()
+      await shelf.services.library.add('book:x', rec('Xenon'))
+      /* The detector against a known positive first: this is the folder a
+         ghost would appear under, so the empty assertions below mean
+         something. */
+      expect(shelf.fs.store.has('books/book_x/book.json')).toBe(true)
+      await shelf.services.library.remove('book:x')
+      const ghost = () => [...shelf.fs.store.keys()].filter((k) => k.startsWith('books/book_x/'))
+      expect(ghost()).toEqual([])
+      /* The store refuses a write for a folder that is not there too (it
+         checks before and after, and says so on the console) — so "no ghost"
+         alone would hold with the ledger's guard gone. The ledger's rule is
+         that a removed book with no restore intent is dropped BEFORE the store
+         is asked, the same rule the record follows; the spy is what makes that
+         the thing under test. */
+      const merge = vi.spyOn(shelf.services.marks, 'mergeRemote')
+      const ack = await pushTo(shelf, { book: 'book:x', revs: { marks: 1 }, hasContent: false, marks: [mark('m1', 'book:x', 'late')] })
+      expect(merge).not.toHaveBeenCalled()
+      merge.mockRestore()
+      expect(ghost()).toEqual([])
+      expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:x')
+      expect((await removedAt(shelf, 'book:x'))?.state).toBe('removed')
+      expect(ack).toMatchObject({ book: 'book:x', revs: { marks: 1 } })
+    })
+
+    it('the tenth, end to end — a satchel that marks a book the shelf removed ends with it removed too', async () => {
+      const { shelf, satchel, session } = await makeWorld()
+      await shelf.services.library.add('book:a', rec('Alpha'))
+      await session() // both hold it
+      await shelf.services.library.remove('book:a')
+      await satchel.services.marks.open('book:a')
+      await satchel.services.marks.add(mark('m1', 'book:a', 'unaware of the removal'))
+      await session() // the satchel pushes its mark, then pulls the removal
+      expect([...shelf.fs.store.keys()].filter((k) => k.startsWith('books/book_a/'))).toEqual([])
+      expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:a')
+      expect((await removedAt(shelf, 'book:a'))?.state).toBe('removed')
+      expect(satchel.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:a')
+      expect((await removedAt(satchel, 'book:a'))?.state).toBe('removed')
+      expect(pushableOutbox(satchel.journal)).toEqual([])
+    })
+
+    /* (h) THE FAILPOINT, swept rather than picked. Round 3's objection was
+       that a `removed` bracket begun AFTER observing the restore is lost to a
+       crash between the presence flip and the begin — the recorder has no
+       abort — while one begun unconditionally dirties every ordinary add. The
+       answer was a pre-check inside the lane: `add` reads the register first
+       and, only for a book it says is removed, runs the restore and the flip
+       INSIDE `recorded(…, 'removed', …)`, before the record's own bracket.
+       So the invariant is that at no crash point is the register live for the
+       book without a `removed` rev in the journal — the begin precedes the
+       flip, and a dangling begin is committed by launch recovery. The whole
+       add is run over a crashable fs and every op boundary is reopened under
+       every durability policy; a design that begins by observation fails
+       this under `all` at the boundary between the flip and the begin. The
+       removal's own rev is acked first, as a session would have, so the only
+       `removed` the outbox can hold is the re-add's. `book:y` is the control:
+       an ordinary add that must leave no phantom removal at any point. */
+    it('(h) at no crash point during a re-add is the register live without a removed rev in the journal', async () => {
+      const { shelf } = await makeWorld()
+      const whats = (journal: Journal, book: string) => pushableOutbox(journal).filter((e) => e.book === book).map((e) => e.what)
+      await shelf.services.library.add('book:x', rec('Xenon'))
+      await shelf.services.library.remove('book:x')
+      for (const entry of pushableOutbox(shelf.journal).filter((e) => e.book === 'book:x')) {
+        await shelf.journal.ack('book:x', entry.what as 'record' | 'removed', entry.rev)
+      }
+      expect(whats(shelf.journal, 'book:x')).toEqual([])
+      const start = shelf.fs.ops.length
+
+      await shelf.services.library.add('book:x', rec('Xenon')) // the re-add
+      await shelf.services.library.add('book:y', rec('Yttrium')) // the control
+
+      expect(whats(shelf.journal, 'book:x').sort()).toEqual(['record', 'removed'])
+      expect(whats(shelf.journal, 'book:y')).toEqual(['record'])
+      expect((await removedAt(shelf, 'book:x'))?.state).toBe('live')
+
+      /* THE ORDER ITSELF, read off the op log, because the sweep below cannot
+         tell the two designs apart on its own: the journal's unclean-shutdown
+         verify pass re-digests every key on open and commits a fresh rev for
+         a register that moved — a second net under the lost-begin case. The
+         pre-check is the first, and it is only a pre-check if the `removed`
+         begin reaches the journal BEFORE the register is written live. */
+      const ops = shelf.fs.ops.slice(start)
+      const beginAt = ops.findIndex(
+        (op) =>
+          op.kind === 'append' &&
+          op.path === 'sync/journal.jsonl' &&
+          new TextDecoder()
+            .decode(op.bytes)
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as { kind: string; what: string; book: string })
+            .some((e) => e.kind === 'begin' && e.what === 'removed' && e.book === 'book:x'),
+      )
+      const flipAt = ops.findIndex((op) => (op.kind === 'write' || op.kind === 'rename') && (op.to ?? op.path).endsWith('removed.json'))
+      expect(beginAt, 'the removed begin was never journaled').toBeGreaterThanOrEqual(0)
+      expect(flipAt, 'the register was never written').toBeGreaterThanOrEqual(0)
+      expect(beginAt, 'the removed bracket must be begun before the register goes live').toBeLessThan(flipAt)
+
+      let liveAt = 0
+      for (const policy of ['all', 'torn', 'none'] as const) {
+        for (let k = start; k < shelf.fs.ops.length; k++) {
+          const view = fsOver(shelf.fs.durableView(k, policy))
+          const reopened = await makeStack(fakeWire({ role: 'shelf', endpointId: `crash-${policy}-${k}` }), 'shelf', 'aaaaaaaaaaaaaaaa', view)
+          const where = `${policy} after op ${k}`
+          if ((await readPresence(reopened.fs))['book:x']?.state === 'live') {
+            liveAt += 1
+            expect(whats(reopened.journal, 'book:x'), `${where}: the register is live and the journal holds no removed rev`).toContain('removed')
+          }
+          expect(whats(reopened.journal, 'book:y'), `${where}: a phantom removal on an ordinary add`).not.toContain('removed')
+        }
+      }
+      /* The sweep must have SEEN the live state, or it proved nothing. */
+      expect(liveAt).toBeGreaterThan(0)
     })
   })
 
