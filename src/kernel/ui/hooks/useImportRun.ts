@@ -84,6 +84,12 @@ export interface Imports {
    * `work` returns the outcomes to summarise. Whatever it throws is passed to
    * `onFailure` — the two routes word that differently — and the lifecycle is
    * closed either way.
+   *
+   * SO IS A SHELF WRITE THAT REJECTS. The settle is part of the lifecycle and
+   * not part of the work, and it used to be the one failure that escaped:
+   * `onFailure` was never called, the bar never came down, and this promise
+   * rejected instead. It does not reject any more, for any reason a caller
+   * can produce — every ending goes out through `onFailure` or the notice.
    */
   run(
     work: (run: ImportRun) => Promise<readonly ImportOutcome[]>,
@@ -150,7 +156,28 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
          bytes are on disk either way, and leaving them recordless is the
          orphan this pipeline exists to avoid. */
       handed.flush()
-      const unsaved = await handed.settled()
+      /* ⚠️ AND THE SETTLE ITSELF CAN REJECT, WHICH IS STILL THIS LIFECYCLE'S
+         TO CLOSE. `settled()` is a chain of `shelve` calls, so one rejected
+         shelf write threw straight out of `run` — past `setProgress(null)`,
+         past `onFailure`, past everything below. The bar stayed on screen and
+         `busy` stayed true for the rest of the session: the folder route
+         refuses to start while busy, so it refused every later import, and the
+         drop route went on superseding a run that had already finished. A
+         terminal catch at the call site caught the rejection and said so; it
+         could not put the bar away, because the state lives in here.
+
+         FOLDED INTO THE SAME `failed` THE WORK USES, so a settle failure is
+         reported through `onFailure` exactly like a copy failure — one
+         sentence to the reader either way. The work's cause wins when both
+         fail, because it is the one that explains the other; the second is
+         logged rather than dropped. */
+      let unsaved = 0
+      try {
+        unsaved = await handed.settled()
+      } catch (cause) {
+        if (failed === null) failed = { cause }
+        else console.error('Paper: the import also failed to record what it copied', cause)
+      }
 
       /* ⚠️ CLEARED AFTER THE SHELF WRITES LAND, NOT BEFORE THEM. One route had
          this in a `finally` that ran before the settle, so the bar went away

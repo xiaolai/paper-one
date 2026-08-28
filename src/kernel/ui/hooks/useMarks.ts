@@ -100,8 +100,40 @@ export interface MarksView {
    * either: `all` is a value captured in the closure that called it, one React
    * commit behind the store. This asks the store and hands the rows straight
    * back, so there is no render in the path at all.
+   *
+   * ⚠️ **REJECTS WITH `MarksScanFailed` WHEN THE SCAN DID NOT LAND**, rather
+   * than resolving with the empty list a failed scan leaves behind. That is
+   * the second half of the same backup, and without it the first half only
+   * moved the empty archive one cause further along.
    */
   loadAllNow: () => Promise<readonly Mark[]>
+}
+
+/**
+ * The cross-book scan FAILED — what `loadAllNow` throws instead of answering
+ * with an empty library.
+ *
+ * `MarkStore.loadAll` catches the scan's failure, installs `[]` and resolves,
+ * because the Marginalia panel that calls it has to draw something either way;
+ * the difference between "nothing is kept" and "nothing could be read" lives
+ * in `MarkSnapshot.scanFailed`. The panel reads that flag and says which it
+ * was. Every OTHER caller read the empty list as an answer — and the export
+ * turned that answer into a file: `{"version":1,"books":[]}` written over the
+ * reader's only backup and reported as a success (the 2026-08-28 audit, #101).
+ *
+ * A REJECTION RATHER THAN A FLAG BESIDE THE ROWS, because a caller that
+ * forgets to read a flag writes the empty archive, and a caller that forgets
+ * to catch does not write anything at all. The failure mode of the omission
+ * is what decides the shape.
+ */
+export class MarksScanFailed extends Error {
+  constructor() {
+    /* NO `cause` TO CARRY, and no parameter pretending there might be:
+       `MarkStore.loadAll` catches the scan's failure and does not keep it.
+       This says which failure it is, which is what the callers branch on. */
+    super("the library's marks could not be read")
+    this.name = 'MarksScanFailed'
+  }
 }
 
 const SAVE_FAILED = "Paper: could not save that book's marks"
@@ -170,14 +202,16 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
         letGo(store.loadAll().finally(() => setScans((n) => n - 1)))
       },
       loadAllNow: async () => {
-        /* ⚠️ A FAILED SCAN STILL RESOLVES. `MarkStore.loadAll` catches the
-         * scan's failure, installs an empty list and resolves — so an export
-         * built on this can read a read failure as an empty library and write
-         * the empty backup the caller exists to prevent. Telling the two apart
-         * needs the store to surface the failure (its `loadAll` contract);
-         * until it does, the honest statement is here, not a claim. */
         await store.loadAll()
         const fresh = store.getSnapshot()
+        /* ⚠️ A FAILED SCAN STILL RESOLVES, so the flag is the only thing that
+         * tells it from an empty library — see `MarksScanFailed`. `loadAll`
+         * catches the scan's failure and installs `[]` on purpose, for the
+         * panel that has to draw something; this caller has to WRITE something,
+         * and an empty answer becoming a file on disk is the one outcome worth
+         * refusing. Read from the snapshot the scan just published rather than
+         * from the hook's `all`, which is a commit behind. */
+        if (fresh.scanFailed) throw new MarksScanFailed()
         /* BOTH CLASSES. They share a file and a store and are split at the
            snapshot; anything that wants the whole of what a reader left in
            their books has to put them back together. */

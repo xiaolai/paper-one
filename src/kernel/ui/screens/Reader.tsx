@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { Bookmark, ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
 import type { ExternalLinkDetail, LinkDetail } from 'foliate-js/view.js'
 import { comboFor } from '../panes'
@@ -34,6 +34,7 @@ import { hasOpenLayer } from '../state'
 import type { AppDispatch, AppState } from '../state'
 import type { Book } from '../hooks/useBook'
 import { useAvailableWidth, useElementWidth } from '../hooks/useAvailableWidth'
+import { useFadingHint } from '../hooks/useFadingHint'
 import { FoliateView } from '../reader/FoliateView'
 import type { PageIntent } from '../reader/wheelPaging'
 import { MarginMarks } from '../reader/MarginMarks'
@@ -53,6 +54,26 @@ import { pageFilter } from '../reader/fixedLayout'
  * has faded.
  */
 const RETURN_HINT_MS = 6000
+
+/**
+ * A jump the reader can undo — the chapter they left, and which leaving it
+ * this is.
+ *
+ * THE NONCE IS NOT DECORATION. The label is a chapter name, so two jumps out
+ * of one chapter carry the same string: React bails out of a `setState` to an
+ * identical value, so the prop never changes, so the fade timer never
+ * restarts and the second hint inherits the first one's deadline. Following
+ * two footnote links in one chapter is enough to see it — the second line can
+ * vanish the moment it appears. A counter the host bumps per jump makes every
+ * showing its own occasion, which is what the timer is about; the label is
+ * what the reader reads. See `useFadingHint`.
+ */
+export interface ReturnHint {
+  /** The chapter the reader just left, as they would name it themselves. */
+  readonly label: string
+  /** Which jump this is. Bumped by the host per hint, never reused. */
+  readonly nonce: number
+}
 
 export interface ReaderProps {
   state: AppState
@@ -133,8 +154,11 @@ export interface ReaderProps {
    * A jump is the only movement in this app that can be invisible: everything
    * else is something the reader did to the page in front of them, and a jump
    * replaces it. Without a word, nothing suggests the move is undoable.
+   *
+   * A `ReturnHint` rather than the bare label, so a second jump out of the
+   * same chapter is a second hint — see that type.
    */
-  returnTo?: string | null
+  returnTo?: ReturnHint | null
   /** Go back there. The same thing ⌘[ does. */
   onReturn?: () => void
   /** The line has faded on its own; forget it. */
@@ -251,22 +275,14 @@ export function Reader({
    * worked, offering to be undone. Sharing it would have made every successful
    * jump look like a failure and demanded a click to clear.
    *
-   * Restarts on each new jump, so jumping twice quickly leaves one line
-   * showing the most recent departure rather than two racing timers where the
-   * first clears the second's message.
+   * Restarts on each new jump — INCLUDING A SECOND JUMP OUT OF THE SAME
+   * CHAPTER, which is what the nonce is for — so jumping twice quickly leaves
+   * one line showing the most recent departure rather than two racing timers
+   * where the first clears the second's message. Both traps under the timing
+   * here are written up in `useFadingHint`, which owns them so they can be
+   * tested without mounting this screen.
    */
-  /* THE CALLBACK THROUGH A REF, so the timer is keyed on the JUMP and not on
-   * the callback's identity: an inline `onReturnDone` from the host is a new
-   * function every render, and every page turn re-rendered — so the hint's
-   * timer restarted on each and the line never cleared while the reader kept
-   * reading. */
-  const returnDone = useRef(onReturnDone)
-  returnDone.current = onReturnDone
-  useEffect(() => {
-    if (!returnTo) return
-    const timer = setTimeout(() => returnDone.current?.(), RETURN_HINT_MS)
-    return () => clearTimeout(timer)
-  }, [returnTo])
+  useFadingHint({ nonce: returnTo?.nonce ?? null, after: RETURN_HINT_MS, done: onReturnDone })
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
 
@@ -955,7 +971,7 @@ export function Reader({
                 {returnTo && onReturn && (
                   <div className={styles.returnHint} role="status">
                     <button type="button" className={styles.returnHintGo} onClick={onReturn}>
-                      ← Back to {returnTo}
+                      ← Back to {returnTo.label}
                     </button>
                     <span className={styles.returnHintKey}>{comboFor('⌘[', platform)}</span>
                   </div>

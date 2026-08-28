@@ -5,7 +5,7 @@ import { planImport } from '../../core/tagArchive'
 import { planImport as planMarksImport } from '../../core/marksArchive'
 import type { CardsView } from './useCards'
 import type { LibraryView } from './useLibrary'
-import type { MarksView } from './useMarks'
+import { MarksScanFailed, type MarksView } from './useMarks'
 
 /**
  * The reader's filing and their marginalia, out to a file and back.
@@ -130,6 +130,14 @@ const importTagsNow = useCallback(() => {
  *
  * `loadAllNow()` resolves with the rows rather than setting state and hoping
  * a re-render arrives first — see `MarksView.loadAllNow`.
+ *
+ * AND A FAILED SCAN IS THE SAME TRAP WEARING A DIFFERENT CAUSE. A scan that
+ * could not read the shelf leaves the same empty list behind as a shelf with
+ * nothing on it, so the fixed export would still have written the empty
+ * archive — over the reader's backup, reported as a success — for a disk that
+ * would not answer. `loadAllNow` rejects with `MarksScanFailed` for that case,
+ * and both handlers below refuse rather than write. The dialog is never even
+ * opened, because the scan is awaited first.
  */
 const exportMarksNow = useCallback(() => {
   void (async () => {
@@ -153,6 +161,16 @@ const exportMarksNow = useCallback(() => {
     const note = written.format === 'md' ? ' as Markdown, which cannot be imported back' : ''
     notice(`Exported ${parts.join(' and ')} from ${written.books} ${written.books === 1 ? 'book' : 'books'}${note}.`)
   })().catch((cause: unknown) => {
+    /* WHICH END FAILED decides the sentence, exactly as the tag import above.
+       "could not be written" over a scan failure sends the reader to look at
+       the disk they were about to write to, when the one that would not
+       answer is the one their books are on — and nothing was written at all,
+       which is the fact they most need. */
+    if (cause instanceof MarksScanFailed) {
+      console.error('Paper: could not read your marginalia to export it', cause)
+      notice('Your marks could not be read — nothing was exported.')
+      return
+    }
     console.error('Paper: could not export your marginalia', cause)
     notice('Those marks could not be written.')
   })
@@ -252,7 +270,16 @@ const importMarksNow = useCallback(() => {
     /* Everything after the parse settles individually above, so a rejection
      * REACHING here is the read/parse/scan half — the sentence is finally
      * true. A failed `loadAllNow` is caught here too, deliberately: importing
-     * against an unknown baseline would re-add every mark in the archive. */
+     * against an unknown baseline would re-add every mark in the archive.
+     *
+     * AND SAID AS ITS OWN CAUSE. It is the reader's own shelf that would not
+     * read, not the file they just chose, and "that file could not be read"
+     * sends them to replace an archive that is perfectly good. */
+    if (cause instanceof MarksScanFailed) {
+      console.error('Paper: could not read your marginalia to import against it', cause)
+      notice('Your marks could not be read — nothing was imported.')
+      return
+    }
     console.error('Paper: could not import that marginalia', cause)
     notice('That file could not be read.')
   })

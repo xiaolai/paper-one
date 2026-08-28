@@ -54,7 +54,7 @@ import { TrashSheet } from './overlays/TrashSheet'
 import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
 import { Library } from './screens/Library'
-import { Reader } from './screens/Reader'
+import { Reader, type ReturnHint } from './screens/Reader'
 import { TagEditor } from './screens/TagEditor'
 import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
@@ -878,9 +878,15 @@ export function App({
       )
     })().catch((cause: unknown) => {
       /* THE TERMINAL CATCH. `run` reports its own failures through
-       * `onFailure`, but its settle — the shelving handover — can still
-       * reject past that, and a detached IIFE turned it into an unhandled
-       * rejection with no notice anywhere. */
+       * `onFailure`, but its settle — the shelving handover — used to reject
+       * past that, and a detached IIFE turned it into an unhandled rejection
+       * with no notice anywhere.
+       *
+       * THE SETTLE IS HANDLED INSIDE `run` NOW, which is where it belonged:
+       * catching it here said the right sentence but left the progress bar up
+       * and `imports.busy` true forever, so this route refused every later
+       * import. This stays as the backstop it should always have been — a
+       * detached IIFE with no catch is a rejection nobody hears. */
       console.error('Paper: the folder import failed to settle', cause)
       setImportNotice('That folder could not be imported.')
     })
@@ -1254,8 +1260,21 @@ export function App({
    * Set only when a jump ACTUALLY happened: `jumpTo` returns false for a
    * refused one, and offering a way back from a jump that did not occur is a
    * worse lie than saying nothing.
+   *
+   * A LABEL AND A NONCE, not a label. Two jumps out of one chapter carry the
+   * same chapter name, React bails out of a `setState` to an identical value,
+   * and the reader's fade timer therefore never restarted — the second hint
+   * ran out on the first one's clock. See `ReturnHint`.
    */
-  const [returnTo, setReturnTo] = useState<string | null>(null)
+  const [returnTo, setReturnTo] = useState<ReturnHint | null>(null)
+  /* MINTED IN ONE PLACE, so the nonce cannot be forgotten by the third call
+     site. A ref rather than `n + 1` off the current hint: the hint is cleared
+     to null between jumps, so its own count is not there to read. */
+  const returnHints = useRef(0)
+  const raiseReturnHint = useCallback((label: string) => {
+    returnHints.current += 1
+    setReturnTo({ label, nonce: returnHints.current })
+  }, [])
   /* DECLARED ABOVE `goToJump`, which clears it when a cross-book open fails.
      A refused jump and a jump whose book would not open are the same lie to
      the reader, and only the first was being caught. */
@@ -1318,9 +1337,9 @@ export function App({
     (target: JumpTarget) => {
       /* Read BEFORE the jump — this is where the reader is leaving from. */
       const leaving = book.position.chapterLabel
-      if (jumps.jumpTo(target) && leaving) setReturnTo(leaving)
+      if (jumps.jumpTo(target) && leaving) raiseReturnHint(leaving)
     },
-    [jumps, book.position.chapterLabel],
+    [jumps, book.position.chapterLabel, raiseReturnHint],
   )
 
   /* Spent by using it, so the line does not linger over a place the reader has
@@ -1358,8 +1377,8 @@ export function App({
   const onBookLink = useCallback(() => {
     const leaving = book.position.chapterLabel
     jumps.record()
-    if (leaving) setReturnTo(leaving)
-  }, [jumps, book.position.chapterLabel])
+    if (leaving) raiseReturnHint(leaving)
+  }, [jumps, book.position.chapterLabel, raiseReturnHint])
 
   /**
    * A link whose scheme leaves the book.

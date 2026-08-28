@@ -277,6 +277,72 @@ describe('the import coordinator', () => {
     world.unmount()
   })
 
+  /**
+   * ⚠️ AND WHEN THE SETTLE ITSELF REJECTS, WHICH IS NOT THE WORK FAILING.
+   *
+   * `settled()` is the chain of shelf writes, and one rejected write used to
+   * throw straight out of `run` — past `setProgress(null)`, past `onFailure`,
+   * past everything. The bar stayed on screen and `busy` stayed true for the
+   * rest of the session: the folder route refuses to start while busy, so it
+   * refused every later import, and the drop route went on superseding a run
+   * that had already finished. A terminal catch was added at the call site and
+   * said the right sentence; it could not put the bar away, because the state
+   * is in here. This is the assertion that stops it coming back — `run` must
+   * not reject for anything a caller can produce.
+   */
+  it('closes the lifecycle when a shelf write rejects', async () => {
+    const onFailure = vi.fn()
+    const world = harness(async () => {
+      throw new Error('the disk is full')
+    })
+
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          run.shelve(kept('a'))
+          return [kept('a')]
+        },
+        { summarise: () => 'never', onFailure },
+      )
+    })
+
+    expect(onFailure, 'a rejected shelf write was never reported').toHaveBeenCalledTimes(1)
+    expect((onFailure.mock.calls[0]?.[0] as Error).message).toBe('the disk is full')
+    expect(world.notices, 'a failed import was summarised as a success').toEqual([])
+    expect(world.imports().progress, 'the bar was stranded by the settle').toBeNull()
+    expect(world.imports().busy, 'every later import would now be refused').toBe(false)
+    world.unmount()
+  })
+
+  /* WHEN BOTH FAIL, THE WORK'S CAUSE IS THE ONE REPORTED — it is the one that
+     explains the other — and the settle's is logged rather than dropped. */
+  it('reports the work’s failure over the settle’s, and loses neither', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onFailure = vi.fn()
+    const world = harness(async () => {
+      throw new Error('the disk is full')
+    })
+
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          run.shelve(kept('a'))
+          throw new Error('the walk failed')
+        },
+        { summarise: () => 'never', onFailure },
+      )
+    })
+
+    expect((onFailure.mock.calls[0]?.[0] as Error).message).toBe('the walk failed')
+    expect(
+      logged.mock.calls.some((call) => (call[1] as Error | undefined)?.message === 'the disk is full'),
+      'the settle’s cause was swallowed',
+    ).toBe(true)
+    expect(world.imports().busy).toBe(false)
+    logged.mockRestore()
+    world.unmount()
+  })
+
   it('carries the unsaved count into the summary', async () => {
     const world = harness(async (batch) => batch.length)
     await act(async () => {
