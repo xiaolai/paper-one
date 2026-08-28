@@ -192,9 +192,9 @@ export function App({ services, fs, shelfUnread = false, composition, beforeWind
     [fs],
   )
   const library = useLibrary(services.library)
-  /* Reading aloud follows the spine document: an utterance outlives a section,
-   * and would otherwise go on reading words that are no longer on screen. */
-  const speech = useSpeech(book.doc)
+  /* Reading aloud follows the spine document and turns its pages: the session
+   * is the paging — `next`, in reading order — and `doc` is what is read. */
+  const speech = useSpeech(book.doc, book)
 
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than

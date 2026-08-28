@@ -15,7 +15,14 @@
  * the user agent would be wrong on the engines that do support it.
  */
 
-import { blockAncestor } from './coordinates'
+import {
+  blockAncestor,
+  frameBoxInHost,
+  hostFromBookRect,
+  overlaps,
+  type HostRect,
+} from './coordinates'
+import type { SpokenBox } from './rulerBand'
 
 /** One text node's span within the collected string. */
 interface Segment {
@@ -171,11 +178,128 @@ function findSegment(segments: readonly Segment[], index: number): Segment | nul
   return null
 }
 
+/**
+ * The language a section's text is in, as the voice should be told it.
+ *
+ * `ensureLang` (session.ts) puts the book's `dc:language` on the root of every
+ * section that does not declare its own, for hyphenation — so by the time a
+ * document is spoken, the root's `lang` is the best answer there is. `xml:lang`
+ * is read too because `ensureLang` treats it as already declared and leaves
+ * `lang` alone, and an XHTML section written by hand often carries only that.
+ *
+ * Null rather than `''` when nothing is declared: an empty `lang` is not "no
+ * preference" to every engine — WebKit reads it as a language it has no voice
+ * for — and the only safe default is to leave the utterance's own alone.
+ */
+export function documentLang(doc: Document): string | null {
+  const html = doc.documentElement as HTMLElement | null
+  if (!html) return null
+  const declared = html.getAttribute('lang') || html.getAttribute('xml:lang') || ''
+  const trimmed = declared.trim()
+  return trimmed === '' ? null : trimmed
+}
+
+/**
+ * Which way this section's columns run — the same question `directionOf` in
+ * `session.ts` answers, asked here without importing the session: this module
+ * is loaded by a suite that runs without a DOM, and the session's import graph
+ * is the reader's. Computed first, so an author's stylesheet counts.
+ */
+function readingDirection(doc: Document): 'ltr' | 'rtl' {
+  const html = doc.documentElement as HTMLElement | null
+  if (!html) return 'ltr'
+  const computed = doc.defaultView?.getComputedStyle(html).direction
+  const declared = computed || html.getAttribute('dir') || doc.body?.getAttribute('dir')
+  return declared === 'rtl' ? 'rtl' : 'ltr'
+}
+
+/**
+ * Where a spoken word is relative to the page the reader can see.
+ *
+ * `ahead` and `behind` are in READING order, not screen order, and the
+ * difference is what stops the follow-along fighting the reader: a word ahead
+ * is turned to, because the voice has walked off the page and the page should
+ * follow it; a word behind means the reader flipped forward to look at
+ * something, and turning "to" the word would either mean going back — taking
+ * the page out from under them — or going forward, which is further from the
+ * word and, repeated per word, runs away through the chapter.
+ */
+export type WordPlace = 'visible' | 'ahead' | 'behind'
+
+/**
+ * The page decision, over two rects in one coordinate space.
+ *
+ * The vertical axis is asked first. In scrolled flow it is the only axis that
+ * moves, and in paginated flow every column shares the page's vertical band, so
+ * a word off the page vertically is never a column question — while a word off
+ * it horizontally is a column question that direction decides.
+ */
+export function placeOf(word: HostRect, page: HostRect, dir: 'ltr' | 'rtl'): WordPlace {
+  if (overlaps(word, page)) return 'visible'
+  if (word.top >= page.bottom) return 'ahead'
+  if (word.bottom <= page.top) return 'behind'
+  const forward = dir === 'rtl' ? word.right <= page.left : word.left >= page.right
+  return forward ? 'ahead' : 'behind'
+}
+
+/**
+ * The element the book's frame is clipped by — the view's host.
+ *
+ * `frameBoxInHost` needs the stage the frame is shown through, and the
+ * reader's other overlays are handed it as a prop. Speech has only the
+ * document, so it finds the stage from the frame: foliate mounts the iframe in
+ * the view element's shadow tree, and a shadow root's host is that element.
+ * Outside a shadow tree — a test's plain iframe — the frame's parent is the
+ * nearest thing to a stage there is.
+ */
+function stageOf(frame: Element): HTMLElement | null {
+  const root = frame.getRootNode() as Node & { host?: Element }
+  if (root.nodeType === Node.DOCUMENT_FRAGMENT_NODE && root.host instanceof HTMLElement) {
+    return root.host
+  }
+  return frame.parentElement
+}
+
+/**
+ * Measure a word against the page on screen.
+ *
+ * Null when the word has no box at all. When the PAGE cannot be measured — no
+ * frame, no stage, a frame not yet laid out — the word is reported `visible`:
+ * the highlight is still worth drawing, and "unmeasured" must never read as
+ * "turn". Every early frame of a section being attached is a zero-sized page,
+ * and a zero-sized page overlaps nothing: read as `ahead` it would turn a page
+ * the voice had not left.
+ */
+export function placeOfRange(
+  range: Range,
+  doc: Document,
+): { readonly box: SpokenBox; readonly place: WordPlace } | null {
+  const rect = range.getBoundingClientRect()
+  if (rect.width === 0 && rect.height === 0) return null
+  const box: SpokenBox = { top: rect.top, left: rect.left, width: rect.width, height: rect.height }
+
+  const frame = doc.defaultView?.frameElement
+  const stage = frame ? stageOf(frame) : null
+  if (!stage) return { box, place: 'visible' }
+  const page = frameBoxInHost(doc, stage)
+  const word = hostFromBookRect(rect, doc, stage)
+  if (!page || !word || page.width === 0 || page.height === 0) return { box, place: 'visible' }
+  return { box, place: placeOf(word, page, readingDirection(doc)) }
+}
+
+/** Why an utterance is over. `ended` is the only one worth continuing from. */
+export type DoneReason = 'ended' | 'empty' | 'error'
+
 export interface SpeakerCallbacks {
   /** A word began. Null when boundaries are not available on this engine. */
   onWord: (index: number, length: number) => void
-  /** Speech finished on its own, or was stopped. */
-  onDone: () => void
+  /**
+   * Speech finished, and why. `ended` is the text running out — a section
+   * read to its last word; `empty` is a section with nothing to read, reported
+   * synchronously from inside `speak`; `error` is the engine giving up. Not
+   * called for `stop()`, whose caller already knows.
+   */
+  onDone: (reason: DoneReason) => void
   /**
    * Called once if the engine turns out not to report word boundaries, so the
    * caller can drop the follow-along highlight rather than leaving a stale one
@@ -232,15 +356,19 @@ export class Speaker {
    * flag afterwards would overwrite the done it has already been told about,
    * leaving the Listen control stuck on with nothing playing.
    */
-  speak(text: string): boolean {
+  speak(text: string, lang: string | null): boolean {
     this.stop()
     const generation = ++this.#generation
     if (!text.trim()) {
-      this.#cb.onDone()
+      this.#cb.onDone('empty')
       return false
     }
 
     const utterance = new SpeechSynthesisUtterance(text)
+    /* Only when there is one. Assigning `''` is not a no-op on every engine —
+     * see `documentLang` — and the platform's own default is the one the
+     * reader chose in their system settings. */
+    if (lang) utterance.lang = lang
     this.#sawBoundary = false
 
     utterance.addEventListener('boundary', (event) => {
@@ -260,10 +388,12 @@ export class Speaker {
     /* Both guarded by generation. `cancel()` does not suppress the cancelled
      * utterance's end — it merely makes it late — so an unguarded handler
      * reports the OLD utterance finishing while the new one is speaking. */
-    utterance.addEventListener('end', () => this.#finish(generation))
+    utterance.addEventListener('end', () => this.#finish(generation, 'ended'))
     // An error is still an end as far as the caller is concerned: the controls
-    // must come back rather than staying stuck on "speaking".
-    utterance.addEventListener('error', () => this.#finish(generation))
+    // must come back rather than staying stuck on "speaking". It is named as
+    // one, though, so the caller does not read it as a section finished and
+    // go on to the next.
+    utterance.addEventListener('error', () => this.#finish(generation, 'error'))
 
     /* The grace period starts when the voice does, not when the utterance is
      * queued. A cold voice can take seconds to begin — a downloadable macOS
@@ -304,10 +434,10 @@ export class Speaker {
     this.#synth.cancel()
   }
 
-  #finish(generation: number): void {
+  #finish(generation: number, reason: DoneReason): void {
     if (generation !== this.#generation) return
     this.#clearGrace()
-    this.#cb.onDone()
+    this.#cb.onDone(reason)
   }
 
   #clearGrace(): void {
