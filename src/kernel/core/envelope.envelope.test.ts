@@ -161,6 +161,48 @@ describe('the codec', () => {
       refused({ size: 1n }, /bigint|cannot be serialised/)
     })
 
+    /**
+     * ⚠️ **THE BODY WAS ENCODED FROM ONE GRAPH AND VALIDATED AGAINST ANOTHER.**
+     *
+     * `JSON.stringify` ran, and then the check walked the LIVE object a second
+     * time — re-invoking every getter and every `toJSON`. Nothing obliges the
+     * second answer to match the first, and the direction that fails is the
+     * silent one: the first read is what went on the wire, so a value that
+     * behaves itself on the second reading shipped a `null` the peer took for
+     * "no value", past a check that had just approved a different graph.
+     *
+     * The read count is the assertion that keeps this fixed. A refusal alone
+     * would still pass with two walks in the wrong order.
+     */
+    it('judges the value it encoded, not what the body answers the second time', () => {
+      let reads = 0
+      const body = {
+        get ratio() {
+          reads += 1
+          return reads === 1 ? Infinity : 1
+        },
+      }
+      expect(() => encodeFrame(frame({ body }))).toThrow(/non-finite/)
+      expect(reads).toBe(1)
+    })
+
+    /* THE SAME DEFECT THROUGH `toJSON`, which is the likelier one in practice:
+       a `Date` is the common case, but anything may implement it, and what it
+       returns the first time is what the peer receives. */
+    it('takes what toJSON returned the first time, and calls it once', () => {
+      let calls = 0
+      const body = {
+        at: {
+          toJSON: () => {
+            calls += 1
+            return calls === 1 ? undefined : 'fine'
+          },
+        },
+      }
+      expect(() => encodeFrame(frame({ body }))).toThrow(/undefined/)
+      expect(calls).toBe(1)
+    })
+
     /* AND A CYCLE DOES NOT HANG. The walk assumes an acyclic graph — a visited
        set would also reject a shared subgraph, which is legitimate — so
        `JSON.stringify` runs first and proves it. Written the other way round

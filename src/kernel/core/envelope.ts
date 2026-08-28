@@ -221,18 +221,41 @@ export function parseFrame(value: unknown): Frame {
  */
 export function encodeFrame(frame: Frame): Uint8Array {
   const checked = parseFrame(frame)
-  /* ⚠️ **`JSON.stringify` RUNS FIRST, AND THE ORDER IS LOAD-BEARING.** It is
-   * what detects a CYCLE — properly, which a walk of my own would not: a plain
-   * visited-set also rejects a shared subgraph, which is legitimate and which
-   * `stringify` serialises happily. So the graph is proven acyclic here, and
-   * only then is it walked. Written the other way round, a body holding a
-   * reference to itself hangs the sender forever instead of refusing. */
+  /* ⚠️ **THE BODY IS CHECKED THROUGH `JSON.stringify` ITSELF, NOT BY A
+   * SECOND WALK OF THE SAME OBJECT.**
+   *
+   * This used to serialise the frame and then traverse the LIVE graph again to
+   * judge it — so a body was encoded from one traversal and validated against
+   * another. Every getter fired twice and every `toJSON` was called twice, and
+   * nothing obliges the second answer to match the first: a lazily built row, a
+   * `toJSON` reading a cursor, an accessor with a side effect all pass a check
+   * performed on a graph the bytes were never taken from. The failure is
+   * silent, and it is the wrong way round — what goes on the wire is what the
+   * FIRST pass saw, and what was proven encodable is what the second one did.
+   *
+   * The replacer is called exactly once per value `stringify` serialises, after
+   * the getter has run and after `toJSON` has replaced the value, and what it
+   * receives is precisely what is encoded. One walk, and it is the encoder's.
+   *
+   * It RECORDS rather than throws, for two reasons. The refusals keep their
+   * order — a payload over the cap is still `FrameTooLarge` — and `stringify`
+   * still gets to be the thing that detects a CYCLE, which a walk of my own
+   * could not do properly: a plain visited-set also rejects a shared subgraph,
+   * which is legitimate and which `stringify` serialises happily. */
+  let unencodable: string | null = null
+  const witness = (_key: string, value: unknown): unknown => {
+    if (unencodable === null) unencodable = unencodableReason(value)
+    return value
+  }
   let json: string
   try {
-    json = JSON.stringify(checked)
+    json = JSON.stringify(checked, witness)
   } catch (cause) {
-    /* A cycle, a bigint, or a `toJSON` that threw. `TypeError` naming neither
-       the frame nor the field is not something a caller can act on. */
+    /* THE WITNESS ANSWERS FIRST WHEN IT HAS ONE. A bigint reaches the replacer
+       and only then makes `stringify` throw — a `TypeError` naming neither the
+       frame nor the field, which is not something a caller can act on. What is
+       left is a cycle, or a `toJSON` that threw. */
+    if (unencodable !== null) throw new MalformedFrame(unencodable)
     throw new MalformedFrame(
       `frame body cannot be serialised as JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
     )
@@ -244,9 +267,7 @@ export function encodeFrame(frame: Frame): Uint8Array {
      makes "what encode accepts" and "what decode accepts" one rule rather than
      two that agree until they do not. */
   assertBoundedDepth(json, MAX_JSON_DEPTH + 1)
-  /* LAST, and bounded by both checks above: the graph is acyclic and its
-     serialised form is under the wire cap, so this walk terminates. */
-  assertEncodable(checked.body)
+  if (unencodable !== null) throw new MalformedFrame(unencodable)
   const out = new Uint8Array(HEADER_BYTES + payload.byteLength)
   new DataView(out.buffer).setUint32(0, payload.byteLength, false)
   out.set(payload, HEADER_BYTES)
@@ -300,7 +321,7 @@ function assertFiniteNumbers(root: unknown): void {
 }
 
 /**
- * Refuse a body JSON cannot carry unchanged.
+ * Why JSON cannot carry this value unchanged, or `null` when it can.
  *
  * `JSON.stringify` does not throw on any of these — it rewrites them, which is
  * the whole problem: a non-finite number becomes `null`, and `undefined`, a
@@ -309,49 +330,30 @@ function assertFiniteNumbers(root: unknown): void {
  * and what the peer receives, and none of them can be detected downstream:
  * `null` is a legitimate value and an absent key is a legitimate shape.
  *
- * `bigint` is included for consistency of message rather than of behaviour —
+ * `bigint` is here for the message rather than for the behaviour —
  * `JSON.stringify` does throw on it, with a `TypeError` naming neither the
- * frame nor the field.
+ * frame nor the field, so `encodeFrame` prefers this sentence to that one.
  *
- * Walked iteratively so a deep graph cannot overflow the stack, and it visits
- * exactly what `JSON.stringify` would: own enumerable properties and array
- * elements.
- *
- * ⚠️ **IT ASSUMES AN ACYCLIC GRAPH, AND ITS CALLER PROVES THAT** by running
- * `JSON.stringify` first. Detecting cycles here would need a visited set, which
- * also rejects a SHARED subgraph — legitimate, and something `stringify`
- * serialises without complaint. Called on a cyclic body directly, this does not
- * return.
+ * ONE VALUE, NOT A GRAPH, and deliberately so: it is `encodeFrame`'s replacer,
+ * called by `JSON.stringify` once per value it actually serialises. The
+ * traversal belongs to the encoder, so what is judged is what is encoded —
+ * getters and `toJSON` run exactly once, and there is no second pass to
+ * disagree with the first. See `encodeFrame` for the incident.
  */
-function assertEncodable(root: unknown): void {
-  const stack: unknown[] = [root]
-  while (stack.length > 0) {
-    const value = stack.pop()
-    switch (typeof value) {
-      case 'number':
-        if (!Number.isFinite(value)) throw new MalformedFrame('frame body has a non-finite number')
-        break
-      case 'undefined':
-        throw new MalformedFrame('frame body has an undefined value, which JSON drops silently')
-      case 'function':
-        throw new MalformedFrame('frame body has a function, which JSON drops silently')
-      case 'symbol':
-        throw new MalformedFrame('frame body has a symbol, which JSON drops silently')
-      case 'bigint':
-        throw new MalformedFrame('frame body has a bigint, which JSON cannot carry')
-      case 'object':
-        if (value === null) break
-        if (Array.isArray(value)) for (const element of value) stack.push(element)
-        /* `toJSON` REPLACES THE VALUE, and legitimately — a `Date` is the
-           common case. What it returns is what goes on the wire, so that is
-           what is checked. */
-        else if (typeof (value as { toJSON?: unknown }).toJSON === 'function') {
-          stack.push((value as { toJSON: () => unknown }).toJSON())
-        } else for (const nested of Object.values(value)) stack.push(nested)
-        break
-      default:
-        break
-    }
+function unencodableReason(value: unknown): string | null {
+  switch (typeof value) {
+    case 'number':
+      return Number.isFinite(value) ? null : 'frame body has a non-finite number'
+    case 'undefined':
+      return 'frame body has an undefined value, which JSON drops silently'
+    case 'function':
+      return 'frame body has a function, which JSON drops silently'
+    case 'symbol':
+      return 'frame body has a symbol, which JSON drops silently'
+    case 'bigint':
+      return 'frame body has a bigint, which JSON cannot carry'
+    default:
+      return null
   }
 }
 

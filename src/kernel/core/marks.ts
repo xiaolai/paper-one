@@ -877,9 +877,20 @@ function isMark(value: unknown): value is StoredMark {
   )
 }
 
-/** Context is optional on the way in, and always a string on the way out. */
+/**
+ * Context is optional on the way in, and always a string on the way out —
+ * CUT TO THE SAME BOUND `text` is cut to.
+ *
+ * The bound was applied to `text` and `note` here and to `prefix`/`suffix` in
+ * `marksArchive`, and this door had neither: a hand-edited file or a peer's
+ * `mergeRemote` could put a whole chapter in `prefix`, and every later answer
+ * carrying that mark was then too large for the transport — the exact failure
+ * the cut on `text` exists to prevent, wearing the field beside it. The service
+ * table refuses both at `MAX_MARK_TEXT` on the way in (`book.mark.add`), so
+ * that is the bound, and it is the same one on every door.
+ */
 function readContext(value: unknown): string {
-  return typeof value === 'string' ? value : ''
+  return typeof value === 'string' ? value.slice(0, MAX_MARK_TEXT) : ''
 }
 
 /**

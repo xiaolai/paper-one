@@ -185,7 +185,26 @@ export function bookAdd(env: ServiceEnvironment) {
       addedAt: Date.now(),
       ...(ext === undefined ? {} : { ext }),
     }
-    await env.services.library.add(bookId, record)
+    /* AND THE DECISION ITSELF IS MADE IN THE BOOK'S LANE — `AddGuard.fresh`.
+     *
+     * Everything above is a check-then-act across a lane boundary: the
+     * snapshot and the trash are read here, and the folder is written there.
+     * Between the two an aliasing `book.add` can publish its own optimistic
+     * row for this folder, or a removal can put the folder in the trash for
+     * `library.add` to silently restore and relabel — and `add` FOLDS rather
+     * than refusing, so both callers were told their book was added and two
+     * logical books ended up sharing one directory.
+     *
+     * The scans stay because they are the better MESSAGE: they name the
+     * occupant, and they fold case, which a path derived from the id cannot on
+     * a case-sensitive filesystem. They are the diagnosis; the lane is the
+     * decision. */
+    if ((await env.services.library.add(bookId, record, false, { fresh: true })) === 'folder-taken') {
+      throw refuse(
+        SERVICE_ERRORS.conflict,
+        `book ${bookId} was not added: its folder was taken while the add waited its turn`,
+      )
+    }
     return bookDetail(find(env, bookId))
   }
 }
@@ -306,7 +325,21 @@ export function bookRestore(env: ServiceEnvironment) {
      * was told their book was back while its record sat in the trash ageing
      * towards the sweep. An unreadable trash now REFUSES rather than
      * answering "there was nothing to restore". */
-    const outcome = await env.services.library.restore(bookId)
+    /* AND THE IDENTITY IS READ AGAIN IN THE BOOK'S LANE — `RestoreGuard`.
+     *
+     * The scan above is a check-then-act across a lane boundary: the trash is
+     * read here and the folder is emptied there, and a removal of an aliasing
+     * id lands in exactly the folder this restore is about to empty. The scan
+     * stays because it names the occupant and folds case; the lane is what
+     * cannot be raced. Both refuse with the same sentence, because a caller
+     * branching on the message must not be able to tell which one answered. */
+    const outcome = await env.services.library.restore(bookId, { onlyThisBook: true })
+    if (outcome.state === 'mismatch') {
+      throw refuse(
+        SERVICE_ERRORS.conflict,
+        `that folder holds ${outcome.bookId}, not ${bookId}; nothing was restored`,
+      )
+    }
     return {
       bookId,
       restored: outcome.state !== 'absent',

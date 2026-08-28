@@ -233,6 +233,36 @@ export type RestoreOutcome =
   /** There is no trash entry for this book. Nothing to do, and not a fault. */
   | { readonly state: 'absent' }
 
+/**
+ * Whose book the trash is holding under this id's folder, or `null` when it is
+ * holding none.
+ *
+ * ⚠️ **THE FOLDER IS NOT THE IDENTITY.** `folderOf` is many-to-one — every
+ * character outside `[A-Za-z0-9]` becomes `_` — so `book:a/b` and `book:a_b`
+ * are two books and one directory, and anything that decided by the PATH alone
+ * brought somebody else's book back relabelled as the caller's id, or wrote a
+ * fresh record over it.
+ *
+ * The rule is `listTrash`'s, and reading it off one folder rather than off a
+ * whole scan is the point: this is what a caller can afford INSIDE the book's
+ * write lane, where the answer cannot go stale between the asking and the act.
+ * The record's own `bookId` when there is a readable one, and the FOLDER NAME
+ * when there is not — which is the name every other trash caller addresses a
+ * recordless entry by, so the sheet that lists a trashed book and the verb that
+ * refuses to restore it cannot name it differently.
+ */
+export async function trashedIdentity(fs: TrashFs, bookId: string): Promise<string | null> {
+  const at = trashOf(bookId)
+  if (!(await fs.exists(at))) return null
+  let record: BookRecord | null = null
+  try {
+    record = parseRecord(new TextDecoder().decode(await fs.readFile(`${at}/book.json`)))
+  } catch {
+    record = null
+  }
+  return record?.bookId ?? at.slice(at.lastIndexOf('/') + 1)
+}
+
 export async function restoreBook(fs: TrashFs, bookId: string): Promise<RestoreOutcome> {
   if (!(await fs.exists(trashOf(bookId)))) return { state: 'absent' }
   const entries = await fs.readDir(trashOf(bookId))

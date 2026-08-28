@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   BOOKMARK_TEXT_MAX,
   MARKS_STORAGE_KEY,
+  MAX_MARK_TEXT,
   annotationsIn,
   bookIdFor,
   bookmarkFrom,
@@ -242,6 +243,19 @@ describe('parseMarks and the context fields', () => {
     const parsed = parseMarks(JSON.stringify([mark({ prefix: 'Call me ', suffix: '. Some' })]))
     expect(parsed[0]?.prefix).toBe('Call me ')
     expect(parsed[0]?.suffix).toBe('. Some')
+  })
+
+  /* THE SAME BOUND `text` AND `note` ARE CUT AT, on the two fields beside them.
+     `book.mark.add` refuses a prefix past `MAX_MARK_TEXT`, but a hand-edited
+     file and a peer's merge do not pass the table — and a mark carrying a
+     chapter in `prefix` made every later answer that included it too large for
+     the transport. Cut, not dropped: the reader's highlight survives. */
+  it('cuts an over-long context at the bound the service table refuses at', () => {
+    const long = 'x'.repeat(MAX_MARK_TEXT + 500)
+    const parsed = parseMarks(JSON.stringify([mark({ prefix: long, suffix: long })]))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.prefix).toHaveLength(MAX_MARK_TEXT)
+    expect(parsed[0]?.suffix).toHaveLength(MAX_MARK_TEXT)
   })
 })
 

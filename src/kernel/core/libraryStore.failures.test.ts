@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { BOOKS_DIR } from './bookFolder'
-import type { IndexFs, IndexedBook } from './bookIndex'
+import { INDEX_FILE, type IndexFs, type IndexedBook } from './bookIndex'
 import { fakeFs } from './indexFsFake.testkit'
 import { WRITE_WIDTH, createLibrary } from './libraryStore'
 import { writeQueue } from './writeQueue'
@@ -25,6 +25,12 @@ const seeded = (ids: readonly string[]): Record<string, string> =>
       [`${BOOKS_DIR}/${id}/content.epub`, 'B'],
     ]),
   )
+
+/** What `index.json` holds, or null when nothing has written one. */
+const indexOn = (fs: ReturnType<typeof fakeFs>): { books: IndexedBook[] } | null => {
+  const bytes = fs.store.get(INDEX_FILE)
+  return bytes ? (JSON.parse(new TextDecoder().decode(bytes)) as { books: IndexedBook[] }) : null
+}
 
 /** The fake fs, with writes under `refused` folders failing while the switch is on. */
 function world(ids: readonly string[], titles: Record<string, string> = {}) {
@@ -187,6 +193,144 @@ describe('what the disk write answered', () => {
     const after = library.getSnapshot().find((one) => one.bookId === 'book_a')!
     expect(after.tags).toEqual(['Sea'])
     expect(after.finished).toBe(true)
+  })
+
+  /**
+   * ⚠️ **A WRITE THAT ANSWERED NOTHING LEFT THE ROW ON THE SHELF AND IN THE
+   * INDEX.**
+   *
+   * `updateBook` answers `null` when the folder holds no `book.json` —
+   * present-but-unreadable throws, so `null` is genuinely absent — and the
+   * reconciliation only acted on a record, so the optimistic row stayed
+   * published and was then serialised. Folder membership does not change when
+   * a phantom is added to the cache, so `loadShelf` trusts it and an idle
+   * book's record is never re-read to contradict it: the lie outlived the
+   * session.
+   */
+  it('takes the row off the shelf when the write answered that nothing landed', async () => {
+    const fs = fakeFs({})
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [row('book_a', 'Moby-Dick')] })
+
+    await library.tag('book_a', 'Sea')
+
+    expect(library.getSnapshot()).toEqual([])
+    expect(indexOn(fs)?.books).toEqual([])
+  })
+
+  /* THE POSITION TICK TOO, whose index policy is `defer`. A row leaving the
+     shelf is structural, and leaving that correction to the throttle is how a
+     quit outruns it. */
+  it('writes the index at once when a position tick discovers its book is gone', async () => {
+    const fs = fakeFs({})
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [row('book_a')] })
+
+    await library.rememberPosition('book_a', 'epubcfi(/6/4!/4/2)', 0.25)
+
+    expect(library.getSnapshot()).toEqual([])
+    expect(indexOn(fs)?.books).toEqual([])
+  })
+})
+
+/**
+ * A REMOTE BATCH GETS THE SAME REPAIR AS `commit`, and used to get half of it
+ * (round 2, #79). It reconciled a row that landed and left one that did not
+ * exactly where the optimistic publish had put it — on the shelf, and then in
+ * the ONE index write the batch ends with.
+ */
+describe('applyRemoteRows and a row that did not land', () => {
+  it('drops a row whose folder holds no record, and writes the index without it', async () => {
+    const fs = fakeFs(seeded(['book_a']))
+    const library = createLibrary({
+      fs,
+      queue: writeQueue(),
+      initial: [row('book_a'), row('book_gone')],
+    })
+
+    await library.applyRemoteRows([
+      { bookId: 'book_a', change: (record) => ({ ...record, finished: true }) },
+      { bookId: 'book_gone', change: (record) => ({ ...record, finished: true }) },
+    ])
+
+    expect(library.getSnapshot().map((one) => one.bookId)).toEqual(['book_a'])
+    expect(indexOn(fs)?.books.map((one) => one.bookId)).toEqual(['book_a'])
+  })
+
+  it('drops a row whose write failed and whose folder cannot back it either', async () => {
+    /* PRESENT BUT UNREADABLE. `updateBook` throws rather than answering
+       `null` — the record is there and cannot be read — and the repair's own
+       read has nothing to correct the row from. That is `commit`'s case, and
+       this path used to leave the row published for the batch write. */
+    const fs = fakeFs(seeded(['book_a', 'book_broken']))
+    const wrapped: IndexFs = {
+      ...fs,
+      readFile: async (path) => {
+        if (path === `${BOOKS_DIR}/book_broken/book.json`) throw new Error('EIO')
+        return fs.readFile(path)
+      },
+    }
+    const library = createLibrary({
+      fs: wrapped,
+      queue: writeQueue(),
+      initial: [row('book_a'), row('book_broken')],
+    })
+
+    await expect(
+      library.applyRemoteRows([
+        { bookId: 'book_a', change: (record) => ({ ...record, finished: true }) },
+        { bookId: 'book_broken', change: (record) => ({ ...record, finished: true }) },
+      ]),
+    ).rejects.toThrow(/could not be read/)
+
+    expect(library.getSnapshot().map((one) => one.bookId)).toEqual(['book_a'])
+    expect(indexOn(fs)?.books.map((one) => one.bookId)).toEqual(['book_a'])
+  })
+
+  /**
+   * THE LAST RESORT, and only with a row that did not land. The corrected
+   * picture is what the batch index write carries; without it the cache on
+   * disk may hold a phantom another book's commit serialised, and `loadShelf`
+   * trusts a cache whose folder listing agrees. Leaving none to trust costs a
+   * rescan, which is the price of not knowing.
+   */
+  it('leaves no index to trust when the corrected picture could not be written', async () => {
+    const fs = fakeFs({ ...seeded(['book_a']), [INDEX_FILE]: '{"version":1,"books":[]}' })
+    const wrapped: IndexFs = {
+      ...fs,
+      writeFile: async (path, bytes) => {
+        if (path.startsWith(`${BOOKS_DIR}/book_a/`) || path.startsWith(INDEX_FILE)) {
+          throw new Error('disk full')
+        }
+        await fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({ fs: wrapped, queue: writeQueue(), initial: [row('book_a')] })
+
+    await expect(
+      library.applyRemoteRows([{ bookId: 'book_a', change: (record) => ({ ...record, finished: true }) }]),
+    ).rejects.toThrow('disk full')
+
+    expect(fs.store.has(INDEX_FILE)).toBe(false)
+  })
+
+  /* AND NOT OTHERWISE. Every row landed, so the shelf in memory is right and
+     the next write rewrites the cache — throwing away a good index over one
+     failed write would buy a full rescan for nothing. */
+  it('keeps the index when every row landed and only the index write failed', async () => {
+    const fs = fakeFs({ ...seeded(['book_a']), [INDEX_FILE]: '{"version":1,"books":[]}' })
+    const wrapped: IndexFs = {
+      ...fs,
+      writeFile: async (path, bytes) => {
+        if (path.startsWith(INDEX_FILE)) throw new Error('disk full')
+        await fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({ fs: wrapped, queue: writeQueue(), initial: [row('book_a')] })
+
+    await expect(
+      library.applyRemoteRows([{ bookId: 'book_a', change: (record) => ({ ...record, finished: true }) }]),
+    ).rejects.toThrow('disk full')
+
+    expect(fs.store.has(INDEX_FILE)).toBe(true)
   })
 })
 

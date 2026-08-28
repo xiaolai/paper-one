@@ -24,7 +24,16 @@ import {
   type IndexedBook,
 } from './bookIndex'
 import { keepCover } from './coverArt'
-import { TRASH_WINDOW_MS, expiredTrash, readStamp, rescueStrandedMarks, restoreBook, trashBook, type RestoreOutcome } from './bookTrash'
+import {
+  TRASH_WINDOW_MS,
+  expiredTrash,
+  readStamp,
+  rescueStrandedMarks,
+  restoreBook,
+  trashBook,
+  trashedIdentity,
+  type RestoreOutcome,
+} from './bookTrash'
 import { hlcOf, type Hlc } from './hlc'
 import { normalizeTag, tagKey } from './library'
 import { NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type MutationRecorder } from './ports'
@@ -166,7 +175,7 @@ export interface Library {
    * reader believing their book is whole while part of it ages towards the
    * sweep.
    */
-  restore(bookId: string): Promise<RestoreOutcome>
+  restore(bookId: string, guard?: RestoreGuard): Promise<RestoreAnswer>
   /**
    * A removal that arrived FROM ELSEWHERE, with its own stamp: the register
    * decides — last writer wins — and only a win moves the folder. ON THE
@@ -395,15 +404,66 @@ export interface Library {
 }
 
 /**
- * What an `add` that arrived from elsewhere is judged against: the stamp of
- * the state it carries. A register that says `removed` LATER than this is a
- * removal the sender had not heard, and the add is refused rather than
- * restoring the book — inside the lane, so nothing can interleave.
+ * What an add is judged against INSIDE THE BOOK'S LANE. Both fields exist
+ * because a decision made outside the lane is a decision about a folder
+ * somebody else may take before the write runs.
  */
 export interface AddGuard {
-  readonly asOf: Hlc
+  /**
+   * The stamp of the state an add that arrived FROM ELSEWHERE carries. A
+   * register that says `removed` LATER than this is a removal the sender had
+   * not heard, and the add is refused rather than restoring the book.
+   */
+  readonly asOf?: Hlc
+  /**
+   * This add CREATES the book: refuse if the folder is already spoken for.
+   *
+   * ⚠️ **`add` FOLDS, IT DOES NOT REFUSE** — that is its whole contract, and it
+   * is right for the shelf: a re-import merges a fresh parse into the record,
+   * and a re-add of a removed book restores it. `book.add` means something
+   * else, and it checked for itself: it read the shelf snapshot and scanned the
+   * trash, and only then called in here. Between the scan and the queued write
+   * a folder can be taken — by an aliasing `book.add` whose optimistic row this
+   * one then REPLACED, or by a removal that put the folder in the trash for the
+   * write to silently restore and relabel. Two logical books, one folder,
+   * success reported to both callers.
+   *
+   * So the decision is made where the act is: the FOLDER is read inside the
+   * lane, and the answer is `folder-taken`. The caller's own scan stays — it
+   * has the wider reach (it folds case, which an id-derived path cannot on a
+   * case-sensitive filesystem) and it names the occupant — but it is the
+   * diagnosis, not the decision.
+   */
+  readonly fresh?: true
 }
-export type AddOutcome = 'added' | 'removed-since'
+export type AddOutcome = 'added' | 'removed-since' | 'folder-taken'
+
+/** What a guarded restore is judged against — see `Library.restore`. */
+export interface RestoreGuard {
+  /**
+   * Bring the folder back only if the record in it names THIS book.
+   *
+   * The same hazard as `AddGuard.fresh` and the same answer: `folderOf` is
+   * many-to-one, so a restore that matched the path alone brought somebody
+   * else's book back relabelled. `book.restore` reads the trash and refuses
+   * that before it calls in here, but the folder can change hands between the
+   * two — a removal of an aliasing id lands in exactly the folder the restore
+   * is about to empty. Read in the lane, it cannot.
+   */
+  readonly onlyThisBook: true
+}
+
+/**
+ * What the STORE's restore answers: the trash primitive's outcome, plus the one
+ * answer only a guarded restore can give.
+ *
+ * `mismatch` is kept OUT of `RestoreOutcome` on purpose. That type is
+ * `restoreBook`'s contract — what moving files can result in — and this is a
+ * refusal made before anything moves, by a caller that asked for it.
+ */
+export type RestoreAnswer =
+  | RestoreOutcome
+  | { readonly state: 'mismatch'; readonly bookId: string }
 
 /** One archived book's tags to apply — what `tagMany` takes. */
 export interface TagEntry {
@@ -852,7 +912,7 @@ export function createLibrary({
     key: string,
     next: readonly IndexedBook[],
     what: 'record' | 'removed',
-    write: (target: IndexFs, live: string) => Promise<unknown>,
+    write: (target: IndexFs, live: string) => Promise<BookRecord | null | void>,
     hooks?: CommitHooks,
     index: IndexPolicy = 'now',
   ): Promise<void> => {
@@ -861,13 +921,27 @@ export function createLibrary({
     const target = fs
     const lane = laneFor(key)
     let refused = false
-    /* What the disk write actually produced. `updateBook` applies the change
-     * to what is ON DISK and answers the merged record — and discarding that
-     * answer meant a stale cached row (an index one write behind after a
-     * crash) stayed published, and was then SERIALISED into the index below:
-     * the write landed right and the cache wrote the lie back. A resolved
-     * value shaped like a record is reconciled before the index goes out. */
-    let landed: unknown
+    /* What the disk write actually produced, IN THREE ANSWERS.
+     *
+     * A RECORD is what landed. `updateBook` applies the change to what is ON
+     * DISK and answers the merged record — and discarding that answer meant a
+     * stale cached row (an index one write behind after a crash) stayed
+     * published, and was then SERIALISED into the index below: the write landed
+     * right and the cache wrote the lie back.
+     *
+     * `null` IS "NOTHING LANDED", and it used to be read as "no record to
+     * reconcile" — which left the optimistic row on the shelf and in the index
+     * over a write that never happened. `updateBook` answers it in exactly two
+     * situations and both mean the book is not on disk: the folder holds no
+     * `book.json` at all (present-but-unreadable THROWS, so this is genuinely
+     * absent), or a removal renamed the folder away mid-write and the shell it
+     * had recreated was undone. Predicting a change to a book that is gone is
+     * the phantom this whole file's repair path exists to keep out of
+     * `index.json`.
+     *
+     * `undefined` is a write that does not report a record — the removals — and
+     * leaves the row exactly as the caller published it. */
+    let landed: BookRecord | null | void
     return (
       queue
         /* APPEND, not replace. Each task here applies a CHANGE to what is on
@@ -896,9 +970,25 @@ export function createLibrary({
           }
           const live = resolveId(key)
           noteLanded(live)
-          if (typeof landed === 'object' && landed !== null && typeof (landed as { title?: unknown }).title === 'string') {
-            reconcile(live, landed as BookRecord)
+          if (landed === null) {
+            /* NOTHING LANDED, so nothing may claim it did — see `landed`. The
+             * queue is healthy (this is not a failed write, it is a write with
+             * no book to apply to), but the row predicted a change to a folder
+             * that holds no record, so it goes and the index is rewritten
+             * WITHOUT it. Leaving it published put the phantom on the screen
+             * and then serialised it: folder membership is unchanged, so
+             * `loadShelf` trusts that cache and an idle book's `book.json` is
+             * never re-read to contradict it. The lie outlived the session.
+             *
+             * `now` whatever the policy says: a row leaving the shelf is
+             * structural, and a position tick that discovers its book is gone
+             * must not leave the correction to a throttle a quit can outrun. */
+            if (books.some((one) => one.bookId === live)) {
+              publish(books.filter((one) => one.bookId !== live))
+            }
+            return writeIndexNow(target)
           }
+          if (landed) reconcile(live, landed)
           return index === 'defer' ? markDirty(target, live) : writeIndexNow(target)
         })
         .catch(async (cause: unknown) => {
@@ -1064,6 +1154,12 @@ export function createLibrary({
      * is given as the book's own account of itself, which is right for a
      * parse and destructive for a guess. */
     if (sparse && previous) {
+      /* A GUARD MUST NOT BE SKIPPED BY A SHORTCUT. This path answers before
+       * the lane, so `fresh` would silently not apply — and a row already
+       * holding the folder is precisely what it refuses. The same refusal, one
+       * step earlier; a guard that quietly does nothing on one route through
+       * its own function is a defect generator. */
+      if (guard?.fresh) return 'folder-taken'
       /* NOTHING TO THE SHELF, but the trash may still hold half of this book
        * from a restore that could not finish — and returning here was the only
        * path to `add` that never looked. A watched folder rescanning on every
@@ -1143,6 +1239,7 @@ export function createLibrary({
     const entry = asRow(merged, bookId, previous?.hasContent)
     const list = at === -1 ? [entry, ...books] : books.map((one, i) => (i === at ? entry : one))
     let refused = false
+    let taken = false
     /* THE PRESENCE FLIP IS NEWS THE WIRE NEEDS, AND IT IS RECORDED FIRST.
      *
      * A re-add of a removed book — the reader opening the file again, a
@@ -1163,9 +1260,17 @@ export function createLibrary({
      * removal the sender had not heard. */
     const hooks: CommitHooks = {
       before: async (target, live) => {
+        /* THE FOLDER, READ WHERE THE WRITE HAPPENS — see `AddGuard.fresh`. A
+         * record on disk is a book already here; a trash entry is one this
+         * add would silently restore and relabel. Either way the folder is
+         * spoken for, and the caller wanted a creation. */
+        if (guard?.fresh && ((await target.exists(recordPath(live))) || (await target.exists(trashOf(live))))) {
+          taken = true
+          return 'refuse'
+        }
         const held = (await readPresence(target))[live]
         if (held?.state !== 'removed') return 'go'
-        if (guard && held.at > guard.asOf) {
+        if (guard?.asOf !== undefined && held.at > guard.asOf) {
           refused = true
           return 'refuse'
         }
@@ -1178,8 +1283,24 @@ export function createLibrary({
         })
         return 'go'
       },
+      /* THE ROW AS IT WAS, not merely the absence of one.
+       *
+       * This only took the new row off the shelf and left a REPLACED row
+       * replaced: `list` puts `entry` where the matched book was, so a refusal
+       * left the other book's row wearing this add's title, id and tags over a
+       * record nothing had written. Reachable the moment two aliasing adds
+       * race — the second one matches the first's optimistic row by folder and
+       * is then refused in the lane. */
       retract: () => {
-        if (at === -1) publish(books.filter((one) => one.bookId !== bookId))
+        const where = books.findIndex((one) => one.bookId === bookId)
+        if (where === -1) return
+        if (!previous) {
+          publish(books.filter((one) => one.bookId !== bookId))
+          return
+        }
+        const back = [...books]
+        back[where] = previous
+        publish(back)
       },
     }
     await commit(bookId, list, 'record', async (target, live) => {
@@ -1270,7 +1391,7 @@ export function createLibrary({
        * the answer; `measureContent` deliberately does not write it itself. */
       await measureContent(target, live)
     }, hooks)
-    return refused ? 'removed-since' : 'added'
+    return refused ? 'removed-since' : taken ? 'folder-taken' : 'added'
   }
 
   /**
@@ -1465,18 +1586,37 @@ export function createLibrary({
     return won ? 'removed' : 'lost'
   }
 
-  const restore: Library['restore'] = async (bookId) => {
+  const restore: Library['restore'] = async (bookId, guard) => {
     if (!fs) return { state: 'absent' }
     const target = fs
-    let outcome: RestoreOutcome = { state: 'absent' }
-    await queue.append(laneFor(bookId), () =>
-      recorded(recorder, bookId, 'removed', async () => {
+    let outcome: RestoreAnswer = { state: 'absent' }
+    /* Whether anything actually moved, which is what decides the index write.
+     * A flag rather than a re-reading of `outcome`: neither of the two answers
+     * that are not a restore leaves anything to rewrite, and asking the union
+     * twice out here is how those two would drift apart. */
+    let moved = false
+    await queue.append(laneFor(bookId), async () => {
+      /* WHOSE BOOK THE FOLDER HOLDS, READ IN THE LANE — see `RestoreGuard`.
+       *
+       * BEFORE THE BRACKET, not inside it. The recorder has no abort, so a
+       * bracket begun and abandoned is recovered at the next open as a phantom
+       * local commit and PUSHED — the same reason `add` decides its presence
+       * flip before opening one. */
+      if (guard) {
+        const holder = await trashedIdentity(target, bookId)
+        if (holder !== null && holder !== bookId) {
+          outcome = { state: 'mismatch', bookId: holder }
+          return
+        }
+      }
+      await recorded(recorder, bookId, 'removed', async () => {
         /* THROWS ON A FAULT, and that is the point. This used to answer
          * `false` for an unreadable disk exactly as for an empty trash, so a
          * restore that could not even look reported "there was nothing to
          * restore" — and the caller had no way to tell, retry or say so. */
         outcome = await restoreBook(target, bookId)
         if (outcome.state === 'absent') return
+        moved = true
         /* The register hears about the return, with a stamp newer than the
          * removal's — the `live` half of the LWW pair (`presence.ts`). */
         await settlePresence(target, bookId, 'live', clock())
@@ -1489,9 +1629,9 @@ export function createLibrary({
         const row = asRow(record, bookId, hasContent ?? undefined)
         const at = books.findIndex((one) => one.bookId === bookId)
         publish(at === -1 ? [row, ...books] : books.map((one, i) => (i === at ? row : one)))
-      }),
-    )
-    if (outcome.state !== 'absent') await writeIndexNow(target)
+      })
+    })
+    if (moved) await writeIndexNow(target)
     return outcome
   }
 
@@ -2001,24 +2141,72 @@ export function createLibrary({
            * can be behind the disk the change was actually applied to. */
           const live = resolveId(row.bookId)
           const landed = await recorded(recorder, live, 'record', () => updateBook(target, live, row.change))
-          if (landed) reconcile(live, landed)
+          if (landed) {
+            reconcile(live, landed)
+          } else if (books.some((one) => one.bookId === live)) {
+            /* `null` IS "NOTHING LANDED" HERE TOO — `updateBook`'s only other
+             * answer, and what it says when the folder holds no record. It was
+             * read as "no record to reconcile", which left the optimistic row
+             * published for the batch write below to serialise: the same
+             * phantom `commit` refuses, and a remote row for a book this
+             * device no longer has is exactly how it arrives. */
+            publish(books.filter((one) => one.bookId !== live))
+          }
         })
         .catch(async (cause: unknown) => {
           /* A row whose write did not land must not stay published as if it
-           * had — the batch index write below would serialise the phantom
-           * and the cache-trust check would believe it every launch. Same
-           * repair as `commit`'s: say so first, then let the folder win. */
+           * had — the batch index write below would serialise the phantom and
+           * the cache-trust check would believe it every launch. Same repair
+           * as `commit`'s: say so FIRST, then let the folder win. The repair
+           * is a further read that may itself fail, and its failure must not
+           * be the only one heard; a repair that throws becomes this row's
+           * failure in the batch, and the cause it replaces was published
+           * here before it ran. */
           noteFailed(resolveId(row.bookId), 'record', cause, list)
           await queue.append(laneFor(row.bookId), async () => {
             const live = resolveId(row.bookId)
             const truth = await readBook(target, live)
-            if (truth) reconcile(live, truth)
+            if (truth) {
+              reconcile(live, truth)
+              return
+            }
+            /* NOTHING READABLE BACKS THE ROW — the write failed AND the folder
+             * holds no record to correct it from, so there is no state the row
+             * can honestly show; a scan would not shelve it either. It goes,
+             * and the index written below omits both the book and its folder
+             * claim, so a folder actually sitting there makes the next
+             * launch's listing DISAGREE and rescan rather than trust a cache
+             * this session could not confirm. `commit` has had this half of
+             * the repair since the phantom it describes; this path did not,
+             * and left the row on the shelf and in the batch index over a
+             * write that never happened. */
+            if (books.some((one) => one.bookId === live)) {
+              publish(books.filter((one) => one.bookId !== live))
+            }
           })
           throw cause
         }),
     )
-    // ONE index write for the batch, whatever happened to the rows.
-    await writeIndexNow(target)
+    try {
+      // ONE index write for the batch, whatever happened to the rows.
+      await writeIndexNow(target)
+    } catch (cause: unknown) {
+      /* THE CORRECTED PICTURE COULD NOT BE WRITTEN. With every row landed
+       * that is an ordinary failed index write and the caller hears it —
+       * the shelf in memory is right, and the next write rewrites the cache.
+       *
+       * With a row that did NOT land it is the last resort, and `commit`'s,
+       * for the same reason: the repair above corrected memory and this was
+       * the only thing that would have carried the correction to disk, while
+       * another book's commit may already have serialised the phantom into
+       * `index.json`. `loadShelf` trusts that index whenever the folder
+       * listing agrees, so the honest move is to leave no cache to trust. A
+       * rescan is the cost of not knowing, and `raiseGathered` below still
+       * tells the caller the batch failed. */
+      if (failures.length === 0) throw cause
+      console.error('Paper: could not save the shelf index after a failed row', cause)
+      await invalidateIndex(target).catch(() => {})
+    }
     raiseGathered(failures, 'rows could not be applied')
   }
 

@@ -112,8 +112,17 @@ async function serveOverTheWire(
      * case worth testing is a trash that HOLDS something. */
     fs: fakeFs({
       'books/b0000/content.epub': 'PK\u0003\u0004 pretend epub bytes',
-      'books/b0001/record.json': JSON.stringify({ title: 'Title 1', addedAt: 1 }),
-      'books/b0002/record.json': JSON.stringify({ title: 'Title 2', addedAt: 2 }),
+      /* ⚠️ **AND `book.json` IS THE RECORD'S NAME.** These were `record.json`,
+       * which is a file nothing in the tree reads — so `b0001` and `b0002` had
+       * folders and no records, and a `book.set` on one applied its change to
+       * nothing. It reported success because `commit` discarded what the write
+       * answered; `updateBook` returns `null` for a folder with no record, and
+       * the row is now taken off the shelf rather than left claiming the change
+       * landed (round 2, #77). `b0004` is here for the `--shelf` write, which
+       * needs a book a write can actually reach. */
+      'books/b0001/book.json': JSON.stringify({ title: 'Title 1', addedAt: 1 }),
+      'books/b0002/book.json': JSON.stringify({ title: 'Title 2', addedAt: 2 }),
+      'books/b0004/book.json': JSON.stringify({ title: 'Title 4', addedAt: 4 }),
       /* ⚠️ **A JACKET, BECAUSE `cover.read` WAS ONLY EVER ASKED ABOUT A BOOK
        * THAT HAS NONE.** An empty stream is a legitimate answer — most books
        * have no artwork — and it is also what a `cover.read` that is completely
