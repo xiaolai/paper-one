@@ -513,13 +513,45 @@ async function fetchVerified(url, expected, label) {
  * llama.cpp's Windows zips have no wrapper at all, which the same code
  * handles by finding nothing to flatten.
  */
+/**
+ * Windows's own `tar`, which is bsdtar and reads zip archives.
+ *
+ * Resolved through `SystemRoot` rather than trusted to PATH — see the note in
+ * `unpack`. Refused loudly if it is not there: an unpack that silently used a
+ * different tar would stage a runtime that is subtly not what the manifest
+ * hashes describe, and the failure would surface as a missing executable much
+ * later.
+ */
+export function bsdtar() {
+  const root = process.env['SystemRoot'] ?? 'C:\\Windows'
+  const at = path.join(root, 'System32', 'tar.exe')
+  if (!existsSync(at)) {
+    throw new Error(
+      `sync-inference-runtime: ${at} is missing, and plain \`tar\` on Windows may be Git's GNU tar, ` +
+        'which cannot read a zip and reads a drive letter as a remote host.',
+    )
+  }
+  return at
+}
+
 function unpack(archive, into) {
   mkdirSync(into, { recursive: true })
   if (archive.endsWith('.zip')) {
     /* Windows has no `unzip`; its `tar` is bsdtar, which reads zip archives.
        Not `tar` everywhere: Linux's GNU tar does not, and macOS and the
-       Ubuntu CI image both ship `unzip`. */
-    if (process.platform === 'win32') execFileSync('tar', ['-xf', archive, '-C', into], { stdio: 'inherit' })
+       Ubuntu CI image both ship `unzip`.
+
+       ⚠️ **BY ABSOLUTE PATH, BECAUSE `tar` ON WINDOWS IS NOT NECESSARILY THAT
+       ONE.** Git for Windows ships a GNU tar in its `usr\bin`, and where that
+       is earlier on PATH — which it is on `windows-latest` — plain `tar` is
+       GNU's. It cannot read a zip, and it fails in a way that names neither
+       problem: GNU tar reads `host:path` as a REMOTE archive, so a perfectly
+       ordinary `D:\a\paper-one\…` argument came back as
+       `tar: Cannot connect to D: resolve failed`, exit 128, from a build step
+       that had nothing to do with the network. Naming the binary settles which
+       `tar` this is; the check below makes a wrong one say so plainly instead
+       of failing four frames later. */
+    if (process.platform === 'win32') execFileSync(bsdtar(), ['-xf', archive, '-C', into], { stdio: 'inherit' })
     else execFileSync('unzip', ['-q', '-o', archive, '-d', into], { stdio: 'inherit' })
     /* The archive itself may sit INSIDE `into` (the runtime zip is written
        to staging and unpacked over it), so the listing must not count it —

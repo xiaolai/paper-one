@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PLATFORMS, createFsProbe, parseManifest, validateManifest } from './lib/architecture.mjs'
@@ -279,19 +279,31 @@ function readOrThrow(root, rel) {
  *  not itself the top of a work tree (a copy under /tmp must never reach a
  *  parent repository's index). */
 export function gitTracks(root, rel) {
-  const top = spawnSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' })
+  /* ⚠️ **ASKED OF GIT, NOT ANSWERED BY COMPARING PATHS.** This used to take
+   * `rev-parse --show-toplevel` and compare it with `root`, which is a
+   * question about strings dressed as a question about repositories, and
+   * Windows spells one path at least three ways: `git` answers in forward
+   * slashes, the caller holds backslashes, and a temp directory is reached as
+   * `C:\\Users\\RUNNER~1\\…` or `C:\\Users\\runneradmin\\…` depending on who
+   * resolved it. Case-folding and `path.resolve` fixed two of those and the
+   * short name defeated the third, which is how this stayed red on a CI runner
+   * after it had gone green on a developer's Windows box.
+   *
+   * `--show-prefix` is the same question with no string comparison in it: it
+   * prints where the working directory sits BELOW the top level, so an empty
+   * answer means this directory IS the top level. Nothing to normalise,
+   * nothing to spell twice.
+   *
+   * What it protects is real: a false answer here deletes a TRACKED directory
+   * without the `git rm --cached` this promises, and a true one reaches into
+   * an enclosing repository that merely contains `root`. */
+  const prefix = spawnSync('git', ['-C', root, 'rev-parse', '--show-prefix'], { encoding: 'utf8' })
   /* A git that could not RUN is not an answer — treating it as "untracked"
    * would delete without the promised index handling. A non-zero exit is
    * the honest "not a repository" and stays false. */
-  if (top.error) throw new Error(`git could not run: ${top.error.message}`, { cause: top.error })
-  if (top.status !== 0) return false
-  let same = false
-  try {
-    same = realpathSync(top.stdout.trim()) === realpathSync(root)
-  } catch {
-    return false
-  }
-  if (!same) return false
+  if (prefix.error) throw new Error(`git could not run: ${prefix.error.message}`, { cause: prefix.error })
+  if (prefix.status !== 0) return false
+  if (prefix.stdout.trim() !== '') return false
   const ls = spawnSync('git', ['-C', root, 'ls-files', '--error-unmatch', '--', rel], { encoding: 'utf8' })
   if (ls.error) throw new Error(`git could not run: ${ls.error.message}`, { cause: ls.error })
   return ls.status === 0
@@ -310,11 +322,44 @@ function gitRmCached(root, rel) {
  * that then fails `cargo fmt --check` would present the operation as
  * broken; `--no-rustfmt` skips this for a tree without a toolchain.
  */
+/**
+ * Whether `rustfmt` can actually run here — one answer, for the code and its tests.
+ *
+ * EXPORTED SO THERE IS ONLY ONE. The test beside this had its own copy of the
+ * question (`spawnSync('rustfmt', ['--version']).status === 0`) and chose which
+ * assertion to make from it, while `runRustfmt` decided the same thing from
+ * `result.error` alone. On any machine where the two agree — every Mac and
+ * Linux box this has run on — nothing shows. On `windows-latest`, where the
+ * rustup shim is present and the component is not, the probe said "unavailable"
+ * and the code said "refused", and the case failed on the difference between
+ * two spellings of one fact.
+ *
+ * A tool whose `--version` does not answer cannot format anything, whatever the
+ * reason, so this is the honest question in both places.
+ */
+export function rustfmtAvailable() {
+  const probe = spawnSync('rustfmt', ['--version'], { encoding: 'utf8' })
+  return probe.error === undefined && probe.status === 0
+}
+
 export function runRustfmt(text, libPath) {
   const dir = path.dirname(libPath)
   const tmp = path.join(dir, `.lib.rs.capability-remove.${process.pid}.rs`)
   writeFileSync(tmp, text)
   try {
+    /* ASKED WHETHER IT CAN RUN BEFORE BEING ASKED WHAT IT THINKS, because the
+       two answers were being confused for one another. `result.error` catches
+       only a MISSING binary, and `rustfmt` on a machine with rustup is never
+       missing — it is a shim, always present, which fails with a non-zero
+       status when the component is not installed for the active toolchain.
+       That took the second branch, so a reader with no rustfmt was told
+       "rustfmt refused the edited lib.rs" and shown a rustup message about
+       components: the tool blaming their code for its own absence.
+       `windows-latest` is exactly that machine — this repository's Windows CI
+       leg installs no `rustfmt` component, where the macOS and Linux legs do. */
+    if (!rustfmtAvailable()) {
+      throw new RemovalRefused('rustfmt is not available; install it (rustup component add rustfmt) or pass --no-rustfmt')
+    }
     const result = spawnSync('rustfmt', ['--edition', '2021', tmp], { encoding: 'utf8' })
     if (result.error) throw new RemovalRefused(`rustfmt is not available (${result.error.code}); install it or pass --no-rustfmt`)
     if (result.status !== 0) throw new RemovalRefused(`rustfmt refused the edited lib.rs:\n${result.stderr.trim()}`)

@@ -5,7 +5,16 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import { RemovalRefused } from './lib/removal.mjs'
-import { applyPlan, cargoPruneLock, describePlan, gitTracks, parseArgs, planRemoval, runRustfmt } from './capability-remove.mjs'
+import {
+  applyPlan,
+  cargoPruneLock,
+  describePlan,
+  gitTracks,
+  parseArgs,
+  planRemoval,
+  runRustfmt,
+  rustfmtAvailable,
+} from './capability-remove.mjs'
 
 /**
  * `pnpm capability:remove <id>` over fixture trees shaped like the real
@@ -157,7 +166,10 @@ function fixtureWithCrate(over = {}) {
   })
 }
 
-const rustfmtAvailable = spawnSync('rustfmt', ['--version'], { encoding: 'utf8' }).status === 0
+/* THE SAME QUESTION THE CODE ASKS, imported rather than re-spelled — see
+   `rustfmtAvailable` in `capability-remove.mjs`. This was its own copy, and on
+   `windows-latest` it disagreed with the code about the same binary. */
+const rustfmtIsHere = rustfmtAvailable()
 
 describe('removing example (no crate)', () => {
   it('empties the manifest, cuts the import from every composition, deletes the directory, leaves Rust alone', () => {
@@ -270,7 +282,7 @@ describe('removing peer (a crate)', () => {
 
   it('formats the edited lib.rs with rustfmt when it is available, and refuses when it is not', () => {
     const root = fixtureWithCrate()
-    if (rustfmtAvailable) {
+    if (rustfmtIsHere) {
       const plan = planRemoval(root, 'peer')
       const lib = plan.edits.find((e) => e.file === 'src-tauri/src/lib.rs')
       expect(lib.note).toBe('remove .plugin(tauri_plugin_peer::init()), rustfmt')
@@ -287,7 +299,7 @@ describe('removing peer (a crate)', () => {
   })
 
   it('runRustfmt refuses text rustfmt cannot parse, and cleans its temporary file up', () => {
-    if (!rustfmtAvailable) return expect(() => runRustfmt('fn main() {}', path.join(fixture(), 'src-tauri/src/lib.rs'))).toThrow(/rustfmt is not available/)
+    if (!rustfmtIsHere) return expect(() => runRustfmt('fn main() {}', path.join(fixture(), 'src-tauri/src/lib.rs'))).toThrow(/rustfmt is not available/)
     const root = fixture()
     expect(() => runRustfmt('fn broken( {', path.join(root, 'src-tauri/src/lib.rs'))).toThrow(/rustfmt refused/)
     expect(readdirSync(path.join(root, 'src-tauri/src'))).toEqual(['lib.rs'])

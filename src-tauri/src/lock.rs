@@ -413,14 +413,33 @@ fn hostname() -> String {
 /// Does `pid` still run? Signal 0 tests for existence without delivering
 /// anything; EPERM means it exists and is somebody else's — alive, and not
 /// ours to reclaim. Only ESRCH is "no such process".
+///
+/// ⚠️ **AND A ZOMBIE IS NOT RUNNING, WHICH `kill` WILL NOT TELL YOU.** Signal
+/// 0 SUCCEEDS for an unreaped process: it still holds its pid table entry.
+/// Worse for this file, it also still reports its ORIGINAL START TIME, so it
+/// passes `holds`'s identity check at line 154 as well — "the same process is
+/// still running" is exactly what the two guards conclude, and the truth is
+/// "the same process, dead, never reaped". Both guards, defeated by one
+/// state, which is why neither caught it.
+///
+/// Measured on 2026-08-29: Paper killed inside a container whose PID 1 was
+/// `sleep infinity` — no `wait()`, so every orphan becomes a permanent zombie
+/// — left its lock held for good. The next launch was refused, showed an
+/// unpainted window with the OS titlebar back (`set_decorations(false)` is
+/// below the lock and never ran), logged nothing, and stayed alive on a modal
+/// nobody could dismiss. `docker run` without `--init` is that PID 1, so CI is
+/// where this is met first; an ordinary desktop reaps orphans through systemd
+/// and cannot reproduce it.
+///
+/// A state that cannot be read counts as ALIVE — fail closed, like the rest of
+/// this module. Reclaiming on an unreadable answer is how a running app loses
+/// its library to a second one.
 #[cfg(unix)]
 fn alive(pid: u32) -> bool {
     // SAFETY: `kill` with signal 0 delivers nothing; it only checks.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
-    }
-    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    let exists = rc == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    exists && !paper_process::is_zombie(pid).unwrap_or(false)
 }
 
 /// No liveness check without `kill`: a lock that exists is held. Fail closed
@@ -471,6 +490,80 @@ mod tests {
             booted_at: || None,
         }
     }
+    /// A zombie is not alive, which `kill(pid, 0)` alone cannot say.
+    ///
+    /// THE COMPLEMENT `liveness_asks_the_kernel` CANNOT REACH. That case
+    /// spawns a child, WAITS for it, and asserts the reaped pid is not alive —
+    /// its message names the boundary, "a reaped child is not alive". A
+    /// `spawn` + `wait` pair cannot produce the unreaped case by construction,
+    /// so the hole sat behind a passing test.
+    ///
+    /// Here the child is never waited on. Rust's `Child` does not reap on
+    /// drop, so once it exits it stays a zombie of this test process for as
+    /// long as the test runs — the exact state a container PID 1 that never
+    /// calls `wait()` leaves behind, and the one that held a real lock for
+    /// good.
+    #[cfg(unix)]
+    #[test]
+    fn a_zombie_is_not_alive_though_the_kernel_still_answers_for_it() {
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        // Deliberately NOT waited on: dropping a `Child` does not reap it.
+        drop(child);
+        // It has to have exited before it can be a zombie.
+        let mut zombie = false;
+        for _ in 0..200 {
+            if paper_process::is_zombie(pid) == Some(true) {
+                zombie = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            zombie,
+            "the child never became a zombie, so this proves nothing"
+        );
+
+        /* THE TRAP, IN THREE ASSERTIONS. The kernel still answers for it, so
+        the liveness probe says alive... */
+        // SAFETY: signal 0 delivers nothing.
+        assert_eq!(
+            unsafe { libc::kill(pid as libc::pid_t, 0) },
+            0,
+            "kill(pid, 0) should still succeed for a zombie — that is the whole problem"
+        );
+
+        /* ...and the start time defeats `holds` on BOTH PLATFORMS, by opposite
+        routes. Asserted per platform rather than skipped, because each
+        shape is a fact worth being told about if it ever changes. */
+        #[cfg(target_os = "linux")]
+        assert!(
+            paper_process::started_at_ms(pid).is_some(),
+            "on Linux a zombie KEEPS its start time, so it passes holds()'s identity arm"
+        );
+        #[cfg(target_os = "macos")]
+        assert!(
+            paper_process::started_at_ms(pid).is_none(),
+            "on macOS a zombie LOSES its start time, so it passes holds()'s (None, Some(boot)) arm"
+        );
+
+        assert!(!alive(pid), "a zombie is dead, whatever kill says");
+
+        /* AND THE OTHER DIRECTION, which is what makes the reading TRUSTWORTHY
+        rather than merely correct once. On macOS `p_stat` is read at a
+        hand-computed offset into a `kinfo_proc` that `libc` does not
+        expose, and an offset that happened to be wrong could still call a
+        zombie a zombie by accident — landing on some other byte that
+        happens to equal `SZOMB`. It cannot also call a RUNNING process not
+        a zombie by the same accident. This process is running. */
+        assert_eq!(
+            paper_process::is_zombie(std::process::id()),
+            Some(false),
+            "a running process is not a zombie"
+        );
+        assert!(alive(std::process::id()), "and it is alive");
+    }
+
     fn dead() -> Liveness {
         Liveness {
             alive: |_| false,

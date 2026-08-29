@@ -1,8 +1,8 @@
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
+import { writeZip } from './lib/zip.mjs'
 import {
   COMPETING,
   analyseCss,
@@ -41,16 +41,15 @@ afterAll(() => {
 function library(books) {
   const root = mkdtempSync(join(tmpdir(), 'paper-corpus-'))
   roots.push(root)
-  for (const [name, members] of Object.entries(books)) {
+    /* BUILT IN PROCESS, not by shelling out to `zip`. The tool does not ship
+       with Windows, so every case here died with `spawnSync zip ENOENT` the
+       first time that leg ran a suite. `lib/zip.mjs` writes the archive from
+       the member map directly — which also means no staging directory, since
+       the only reason one existed was to give `zip -r` a tree to walk. */
+    for (const [name, members] of Object.entries(books)) {
     const dir = join(root, `book_${name}`)
-    const staging = join(dir, 'staging')
-    mkdirSync(staging, { recursive: true })
-    for (const [file, contents] of Object.entries(members)) {
-      const path = join(staging, file)
-      mkdirSync(join(path, '..'), { recursive: true })
-      writeFileSync(path, contents)
-    }
-    execFileSync('zip', ['-q', '-r', join(dir, 'content.epub'), '.'], { cwd: staging })
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'content.epub'), writeZip(Object.entries(members)))
   }
   return root
 }

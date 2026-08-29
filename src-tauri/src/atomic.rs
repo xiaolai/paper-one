@@ -275,12 +275,21 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Whether the filesystem simply does not do this, as against a real fault.
+///
+/// NOT A `matches!`, and the reason is that two of the three constants are THE
+/// SAME NUMBER on Linux: `ENOTSUP` and `EOPNOTSUPP` are both 95 there, and 45
+/// and 102 on macOS. As match arms the third is unreachable on Linux alone —
+/// an error under `-D warnings`, and one no macOS machine can see, so the
+/// whole suite stayed green through it until the Ubuntu leg first reached
+/// clippy. A disjunction says the same thing and does not care whether two of
+/// the values happen to coincide on the target being built.
 #[cfg(unix)]
 fn refuses_the_fcntl(err: &io::Error) -> bool {
-    matches!(
-        err.raw_os_error(),
-        Some(libc::EINVAL) | Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP)
-    )
+    let Some(code) = err.raw_os_error() else {
+        return false;
+    };
+    code == libc::EINVAL || code == libc::ENOTSUP || code == libc::EOPNOTSUPP
 }
 
 /// The path header, percent-decoded — `vaultFsTauri.ts` encodes it the way

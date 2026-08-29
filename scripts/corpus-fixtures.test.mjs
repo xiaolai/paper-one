@@ -1,8 +1,8 @@
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
+import { writeZip } from './lib/zip.mjs'
 import { FIXTURE_BOOKS, FIXTURE_SHAPES } from './fixtures/books.mjs'
 import { analyseCss, cjkDensity, report, scanLibrary } from './scan-corpus.mjs'
 
@@ -29,15 +29,14 @@ afterAll(() => {
 function fixtureLibrary() {
   const root = mkdtempSync(join(tmpdir(), 'paper-fixtures-'))
   roots.push(root)
-  for (const [shape, members] of Object.entries(FIXTURE_BOOKS)) {
-    const staging = join(root, `book_${shape}`, 'staging')
-    mkdirSync(staging, { recursive: true })
-    for (const [name, contents] of Object.entries(members)) {
-      writeFileSync(join(staging, name), contents)
-    }
-    execFileSync('zip', ['-q', '-r', join(root, `book_${shape}`, 'content.epub'), '.'], {
-      cwd: staging,
-    })
+    /* BUILT IN PROCESS, not by shelling out to `zip`. The tool does not ship
+       with Windows, so every case here died with `spawnSync zip ENOENT` the
+       first time that leg ran a suite. `lib/zip.mjs` writes the archive from
+       the member map directly — which also means no staging directory, since
+       the only reason one existed was to give `zip -r` a tree to walk. */
+    for (const [shape, members] of Object.entries(FIXTURE_BOOKS)) {
+    mkdirSync(join(root, `book_${shape}`), { recursive: true })
+    writeFileSync(join(root, `book_${shape}`, 'content.epub'), writeZip(Object.entries(members)))
   }
   return root
 }
@@ -97,10 +96,8 @@ describe('the detectors find every shape they were built for', () => {
     const dir = join(root, 'book_broken')
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'content.epub'), 'this is not a zip archive at all')
-    const good = join(root, 'book_fine', 'staging')
-    mkdirSync(good, { recursive: true })
-    writeFileSync(join(good, 'a.css'), 'p { font-size: 1rem }')
-    execFileSync('zip', ['-q', '-r', join(root, 'book_fine', 'content.epub'), '.'], { cwd: good })
+    mkdirSync(join(root, 'book_fine'), { recursive: true })
+    writeFileSync(join(root, 'book_fine', 'content.epub'), writeZip([['a.css', 'p { font-size: 1rem }']]))
 
     const totals = scanLibrary(root)
     expect(totals.scanned).toBe(2)

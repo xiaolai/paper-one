@@ -216,6 +216,49 @@ export function conditional(names) {
 }
 
 /**
+ * A name that only ONE MACHINE could ever have collected.
+ *
+ * THE THIRD WAY A LEDGER ENTRY CAN BE UNHOLDABLE, and the one neither
+ * detector above can see. `CONDITIONAL` and `conditionalNames` both ask
+ * whether a SUITE is gated; this asks whether the NAME ITSELF carries state
+ * from the machine that produced it. A gated suite is absent elsewhere; a
+ * machine-local name is PRESENT elsewhere under a different string — which
+ * this gate reports as one deletion and one addition, of the same test.
+ *
+ * THE INCIDENT. `status.test.ts` classified a `DOMException` in an `it.each`
+ * table titled `'%o → %s'`. Vitest renders `%o` of an error as
+ * `Error: <message>` only where `message` is an OWN property; Node's
+ * `DOMException` keeps `name` and `message` on the prototype and has `stack`
+ * as its only own one, so the title fell through to an object dump and became
+ * `DOMException{ stack: '… at /Users/<whoever>/… node_modules/.pnpm/…' }` —
+ * an absolute path, a Node internal frame and a pnpm version, none of which
+ * survive a different checkout.
+ *
+ * The ledger held the author's copy. `pnpm test:ledger` was GREEN on that one
+ * machine and red on all three CI legs at once, reporting the same test gone
+ * and unrecorded, and it stayed red across a merge because a green local run
+ * is the thing a person checks before pushing.
+ *
+ * REFUSED ON `--write`, NOT DROPPED — the opposite of a conditional name, and
+ * deliberately. Dropping a gated suite yields the ledger a clean checkout
+ * would write, which is the whole point there. Dropping this would delete a
+ * test that RUNS EVERYWHERE from the ledger, and the ledger's one job is to
+ * notice a test going missing. So the write stops and names the title, whose
+ * fix is one line in the test.
+ *
+ * The literal `node_modules` is deliberately NOT a signal: three test names
+ * in this repository say the word, and a detector that cried at them would be
+ * turned off. Absolute paths, `file://`, a Node internal frame, a Windows
+ * drive and a newline are what no written title contains.
+ */
+export const MACHINE_LOCAL = /\n|\/(?:Users|home|root)\/|file:\/\/|node:internal\/|[A-Za-z]:\\/
+
+/** The names whose text carries machine-local state — always a finding. */
+export function machineLocal(names) {
+  return names.filter((name) => MACHINE_LOCAL.test(name))
+}
+
+/**
  * The ledger's own header, written by this script so it survives every
  * regeneration — which is the only way a rule about the ledger stays with it.
  *
@@ -233,7 +276,10 @@ export const LEDGER_NOTE =
   'Regenerate with `pnpm test:ledger --write`. See scripts/check-test-ledger.mjs. ' +
   'Do not record a test whose suite is gated on something a fresh clone does not have ' +
   '(a `describe.skipIf` over an untracked file): it is not collected there, this gate reads ' +
-  'that as a deletion, and the run is red for everyone but the machine that wrote it.'
+  'that as a deletion, and the run is red for everyone but the machine that wrote it. ' +
+  'Nor a test whose NAME carries machine-local state — an absolute path from an `it.each` ' +
+  'title built by `%o` over a value that prints its own stack: it is collected everywhere ' +
+  'under a different string, which reads here as one deletion and one addition of one test.'
 
 export function writeLedger(root, tests) {
   /* DROPPED ON THE WAY IN, so a `--write` from a developer's machine produces
@@ -405,6 +451,12 @@ function toPosix(p) {
   return p.split(path.sep).join('/')
 }
 
+/** One line, capped — a machine-local name is a stack trace and would bury the report. */
+function brief(name) {
+  const line = name.split('\n')[0]
+  return line.length > 120 ? `${line.slice(0, 120)}…` : line
+}
+
 function main(argv) {
   const args = parseArgs(argv)
   if (args.error !== undefined) {
@@ -457,6 +509,25 @@ function main(argv) {
       )
       return 2
     }
+    /* REFUSED RATHER THAN DROPPED, and the asymmetry with the block above is
+       the point — see `MACHINE_LOCAL`. A gated suite is ABSENT on a clean
+       checkout, so dropping it produces the ledger that checkout would write.
+       A machine-local name is PRESENT on every checkout under a different
+       string; dropping it would take a test that runs everywhere out of the
+       ledger, and noticing a test go missing is the ledger's one job. */
+    const local = machineLocal(current)
+    if (local.length > 0) {
+      process.stderr.write(
+        `check-test-ledger: refusing to write ${local.length} MACHINE-LOCAL name(s):\n` +
+          local.map((name) => `  ${brief(name)}\n`).join('') +
+          '\nThese titles carry an absolute path, a Node internal frame or a newline, so each is\n' +
+          'a different string on another machine: this gate would read one test as a deletion\n' +
+          'AND an addition, and be green only where the ledger was written. Usually an\n' +
+          '`it.each` title built by `%o` over a value that prints its own stack. Give the test\n' +
+          'a written name.\n',
+      )
+      return 2
+    }
     const skipped = writeLedger(args.root, current)
     const kept = current.length - skipped
     const added = kept - (recorded.length - gone.length)
@@ -472,12 +543,24 @@ function main(argv) {
      reporting it only where it fails would leave the person who can fix it as
      the one person who never sees it. */
   const conditionals = [...new Set([...conditional(recorded), ...conditionalNames(args.root, recorded)])]
+  /* FROM BOTH SIDES. Recorded catches the ledger this machine inherited;
+     collected catches the title someone just wrote, on the machine that can
+     still fix it cheaply — where `gone` is 0 and nothing else would speak. */
+  const locals = [...new Set([...machineLocal(recorded), ...machineLocal(current)])]
   const lines = conditionals.map((name) => `CONDITIONAL ${name}`)
   if (conditionals.length > 0) {
     lines.push('')
     lines.push('These names say they are skipped unless a gitignored file is present,')
     lines.push('so a clean checkout reports them GONE. Re-run `pnpm test:ledger --write`,')
     lines.push('which now drops them, and commit the ledger.')
+    lines.push('')
+  }
+  lines.push(...locals.map((name) => `MACHINE-LOCAL ${brief(name)}`))
+  if (locals.length > 0) {
+    lines.push('')
+    lines.push('These names carry an absolute path, a Node internal frame or a newline, so they')
+    lines.push('are a different string on every checkout — collected everywhere, matching')
+    lines.push('nowhere. Give the test a written name, then `pnpm test:ledger --write`.')
     lines.push('')
   }
   lines.push(...gone.map((name) => `GONE ${name}`))
@@ -506,10 +589,11 @@ function main(argv) {
   }
   lines.push(
     `check-test-ledger: ${current.length} tests collected, ${recorded.length} recorded, ` +
-      `${gone.length} gone, ${unrecorded} unrecorded, ${conditionals.length} conditional`,
+      `${gone.length} gone, ${unrecorded} unrecorded, ${conditionals.length} conditional, ` +
+      `${locals.length} machine-local`,
   )
   process.stdout.write(`${lines.join('\n')}\n`)
-  return gone.length > 0 || conditionals.length > 0 ? 1 : 0
+  return gone.length > 0 || conditionals.length > 0 || locals.length > 0 ? 1 : 0
 }
 
 if (isProcessEntry(import.meta)) {

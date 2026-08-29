@@ -56,6 +56,32 @@ function proseOf(source) {
 
 
 
+/**
+ * An `it` whose body EXECUTES the script. POSIX only — named everywhere.
+ *
+ * `sync-scenario.sh` is a bash harness that drives two Macs over ssh, and
+ * eleven cases here run it to check what it does with its arguments. The
+ * Windows leg cannot: `spawnSync` of a shebang script is `EFTYPE` there, and
+ * under Git Bash the script exits 1 rather than the 2 it promises, before
+ * reaching the validation these cases are about. Neither is a defect in the
+ * script — nobody drives two Macs from Windows, and no argument here has ever
+ * been parsed by a shell this repository ships to.
+ *
+ * WHY A HELPER AND NOT `describe.skipIf`. A skipped suite is not COLLECTED, so
+ * `vitest list` omits it and `tests/ledger.json` — one file for all three
+ * platforms — would read eleven names as deleted on Windows and be red there
+ * for ever. Measured on the run that first got this far: 5 372 collected on a
+ * Mac holding the gitignored config, 5 369 on CI, the difference being exactly
+ * the three names the ledger already drops for that reason. So the name is
+ * registered on every platform and only the body is conditional, which is the
+ * shape `verify.test.mjs` already uses for its one Windows-only assertion.
+ *
+ * The cases that READ the script's text are not here. Reading is the same
+ * everywhere, and it is most of this file.
+ */
+const RUNS_A_SHELL_SCRIPT = process.platform !== 'win32'
+const itRuns = (name, body) => it(name, (...args) => (RUNS_A_SHELL_SCRIPT ? body(...args) : undefined))
+
 function run(args, { cwd = REPO_ROOT, script = SCRIPT, env } = {}) {
   const result = spawnSync('bash', [script, ...args], {
     cwd,
@@ -116,11 +142,16 @@ describe('the script itself', () => {
    * and a lost bit would have gone unnoticed until somebody followed the
    * documentation.
    */
-  it('is executable', () => {
+  it('is executable', ({ skip }) => {
+    /* Same as the bundle's: NTFS has no execute bit and Node reports 0o666 for
+       every file, so this asked Windows for something it does not have. Run
+       time, not `skipIf` — see `itRuns` above for why the name must still be
+       collected on every platform. */
+    if (process.platform === 'win32') skip('Windows has no execute bit')
     expect(statSync(SCRIPT).mode & 0o111).not.toBe(0)
   })
 
-  it('runs when invoked directly, not only through bash', () => {
+  itRuns('runs when invoked directly, not only through bash', () => {
     const result = spawnSync(SCRIPT, ['--help'], { cwd: REPO_ROOT, encoding: 'utf8', timeout: 10_000 })
     expect(result.error).toBeUndefined()
     expect(result.status).toBe(0)
@@ -159,25 +190,25 @@ describe('the script itself', () => {
 })
 
 describe('arguments', () => {
-  it('exits 2 with a usage line and no host', () => {
+  itRuns('exits 2 with a usage line and no host', () => {
     const result = run([])
     expect(result.code).toBe(2)
     expect(result.err).toContain('usage: scripts/sync-scenario.sh <user@host>')
   })
 
-  it('exits 0 for --help and prints what it does', () => {
+  itRuns('exits 0 for --help and prints what it does', () => {
     const result = run(['--help'])
     expect(result.code).toBe(0)
     expect(result.out).toContain("WI-8.6's scenario")
   })
 
-  it('exits 2 on an unknown option', () => {
+  itRuns('exits 2 on an unknown option', () => {
     const result = run(['--nonsense', 'user@host'])
     expect(result.code).toBe(2)
     expect(result.err).toContain("unknown option '--nonsense'")
   })
 
-  it('exits 2 on a second host', () => {
+  itRuns('exits 2 on a second host', () => {
     const result = run(['a@b', 'c@d'])
     expect(result.code).toBe(2)
     expect(result.err).toContain('exactly one')
@@ -195,7 +226,7 @@ describe('arguments', () => {
    *          non-convergence it never waited for.
    *   a very long number — overflows the comparison itself.
    */
-  it('exits 2 on a --timeout that is not usable seconds', () => {
+  itRuns('exits 2 on a --timeout that is not usable seconds', () => {
     for (const bad of ['soon', '', '-1', '1.5', '9s', '08', '007', '0', '999999999999999999999']) {
       const result = run(['--timeout', bad, 'a@b'])
       expect({ bad, code: result.code }).toEqual({ bad, code: 2 })
@@ -204,7 +235,7 @@ describe('arguments', () => {
     expect(run(['--timeout']).code).toBe(2)
   })
 
-  it('accepts an ordinary timeout, so the guard is not refusing everything', () => {
+  itRuns('accepts an ordinary timeout, so the guard is not refusing everything', () => {
     for (const good of ['1', '90', '99999']) {
       expect(validateOnly(['--timeout', good, 'a@b', '--dry-run']), good).not.toMatch(/--timeout/)
     }
@@ -213,7 +244,7 @@ describe('arguments', () => {
   /* THE HOST IS INTERPOLATED INTO A COMMAND. An allowlist is something one
    * can check by reading, which quoting through bash → ssh → a remote shell
    * is not — the same reasoning `second-instance.sh` records. */
-  it('refuses a host carrying anything a shell would read', () => {
+  itRuns('refuses a host carrying anything a shell would read', () => {
     for (const hostile of ['a;rm -rf /', 'a$(whoami)@b', 'a`id`@b', 'a b@c', 'a|b', "a'b@c"]) {
       const result = run([hostile])
       expect({ hostile, code: result.code }).toEqual({ hostile, code: 2 })
@@ -230,7 +261,7 @@ describe('arguments', () => {
    * with permitted characters, was accepted, and failed later inside ssh with
    * a message about something else entirely.
    */
-  it('refuses a host that is not a user@host, however it is spelled', () => {
+  itRuns('refuses a host that is not a user@host, however it is spelled', () => {
     for (const wrong of ['localhost', '@host', 'user@', 'a@b@c', '@', '.']) {
       const result = run([wrong])
       expect({ wrong, code: result.code }).toEqual({ wrong, code: 2 })
@@ -238,7 +269,7 @@ describe('arguments', () => {
     }
   })
 
-  it('accepts an ordinary user@host, so the guard is not refusing everything', () => {
+  itRuns('accepts an ordinary user@host, so the guard is not refusing everything', () => {
     for (const good of ['reader@desk.local', 'a@b', 'a.b-c@d.e-f']) {
       expect(validateOnly([good, '--dry-run']), good).not.toMatch(/must look like user@host/)
     }
@@ -575,7 +606,7 @@ describe('the preflight', () => {
    * `paper`, so carrying on would spend a round trip discovering a local
    * problem — and, in a harness meant to run unattended, would hang on a host
    * that does not resolve. */
-  it('fails locally when there is no built paper, without reaching for the remote', () => {
+  itRuns('fails locally when there is no built paper, without reaching for the remote', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'sync-scenario-'))
     try {
       mkdirSync(path.join(root, 'scripts'), { recursive: true })
