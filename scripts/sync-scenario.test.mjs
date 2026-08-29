@@ -428,10 +428,17 @@ describe('the predicates it converges on', () => {
   it('probes whether a CLI write reaches the journal, and cleans up after itself', () => {
     expect(text).toContain('probe_journaling')
     expect(text).toContain('did NOT reach the sync journal')
-    /* The probe writes a book; it must remove it whatever happens, or a
-     * refused preflight leaves litter in the reader's library. */
+    /* The probe writes a book; it must remove it, and the trash directory it
+     * leaves behind, or a refused preflight litters the reader's library.
+     *
+     * ⚠️ THIS ASSERTED THE LITERAL `wi_11_7_journal_probe`, which is to say it
+     * asserted the FIXED id that made the probe able to delete a book it had
+     * not created. A test that pins the defective value is how the defect
+     * survives a rewrite. The property is that the cleanup path is DERIVED
+     * from the probe's own id, whatever that id is. */
     expect(text).toContain('shelf book remove "$PROBE_BOOK"')
-    expect(text).toContain('wi_11_7_journal_probe')
+    expect(text).toMatch(/PROBE_TRASH="\$\{PROBE_BOOK\/\/-\/_\}"/)
+    expect(text).toContain('trash/$PROBE_TRASH')
   })
 
   /* THE PRECONDITION THAT COST TWO FULL RUNS before anyone checked it. Every
@@ -686,5 +693,36 @@ describe('what reaches the remote shell', () => {
     expect(opened, 'the satchel launch line moved').toHaveLength(1)
     expect(opened[0]).toContain('$SATCHEL_APP')
     expect(opened[0], 'the unchecked variable still reaches the remote shell').not.toContain('PAPER_SATCHEL_APP')
+  })
+})
+
+/**
+ * THE PROBE MUST NOT BE ABLE TO DELETE A BOOK IT DID NOT CREATE.
+ *
+ * It used the fixed id `wi-11-7-journal-probe`, which made it wrong three ways
+ * at once: it grepped the WHOLE append-only journal, so any earlier run's line
+ * made every later probe pass — including runs where the CLI write never
+ * journaled; it removed that id and deleted its trash unconditionally, so a
+ * live or trashed book holding it was destroyed by a diagnostic; and a run
+ * that died between the add and the remove left it behind to do it again.
+ */
+describe('the journaling probe owns what it deletes', () => {
+  const text = () => proseOf(readFileSync(SCRIPT, 'utf8'))
+
+  it('uses a per-run id rather than a fixed one', () => {
+    const assigned = text().match(/readonly PROBE_BOOK=.*/)?.[0] ?? ''
+    expect(assigned, 'PROBE_BOOK is a fixed literal again').toMatch(/\$\$|\$\(date/)
+  })
+
+  it('requires its own add to have succeeded before it removes anything', () => {
+    /* `|| true` on the add discarded the one fact that made the cleanup safe. */
+    const body = text()
+    expect(body).toMatch(/if shelf book add "\$PROBE_BOOK"/)
+    expect(body).toMatch(/created=yes/)
+    expect(body).toMatch(/if \[ "\$created" = yes \]/)
+  })
+
+  it('fails by name when it could not add its own book, instead of measuring nothing', () => {
+    expect(text()).toMatch(/could not add its own book/)
   })
 })

@@ -15,8 +15,13 @@ import '@fontsource-variable/literata'
 import '@fontsource/ibm-plex-mono/400.css'
 import '@fontsource/ibm-plex-mono/500.css'
 
-/* THE COMPOSITION ROOT. Two kernel entries and one composition, nothing
- * else: `./kernel` is the React-free public entry every capability sees too,
+/* THE COMPOSITION ROOT. Two kernel entries, one composition, and the two
+ * application helpers this file's own lifecycle needs — `app/shutdown` and
+ * `app/boot`, whose ORDER is tested where they live because it cannot be
+ * tested here. (This said "nothing else" while importing both, which is the
+ * kind of sentence a reader checks the imports against once and then stops
+ * trusting the rest of.) `./kernel` is the React-free public entry every
+ * capability sees too,
  * `./kernel/ui` is the UI entry only a composition root may import (it brings
  * the stylesheet with it), and `virtual:paper-composition` is THIS BUILD'S
  * platform composition — `src/app/composition.desktop.ts`, `.ios.ts` or
@@ -311,7 +316,12 @@ async function boot(root: HTMLElement): Promise<void> {
    * naming the real Tauri event module.
    *
    * THE REAL MODULE, not `window.__TAURI__`. The first version read the
-   * global, and `withGlobalTauri` is FALSE in this app — so it found nothing,
+   * global, which a RELEASE build does not expose — `tauri.conf.json` sets
+   * `withGlobalTauri: false`, and `tauri.dev.conf.json` sets it TRUE, so the
+   * global is there under `pnpm app` and gone in the shipped app. (This said
+   * "FALSE in this app", which is the half that is wrong in development and so
+   * the half that hides the bug from anyone reproducing it.) So it found
+   * nothing,
    * returned, and the quit handshake timed out for five seconds every time
    * while looking like it had been wired. A silent capability check written
    * into the fix for a silent failure. */
