@@ -726,3 +726,44 @@ describe('the journaling probe owns what it deletes', () => {
     expect(text()).toMatch(/could not add its own book/)
   })
 })
+
+/**
+ * TWO FLAGS THAT DID NOT MEAN WHAT THEY SAID.
+ *
+ * Both were audit findings, and both are the same shape: a contract stated in
+ * the usage line and contradicted by the code under it.
+ */
+describe('the flags keep their promises', () => {
+  const text = () => proseOf(readFileSync(SCRIPT, 'utf8'))
+
+  it('honours --dry-run BEFORE the probe that writes a book', () => {
+    /* `--dry-run` is documented "preflight only … change nothing" and was not
+       read until long after `probe_journaling` had quit the app, created a
+       book, removed it and deleted its trash. The run then printed "Nothing
+       was changed." over all of it. */
+    const body = text()
+    /* The probe must only be reachable through the guard, never bare. A bare
+       CALL is `probe_journaling` alone on a line — not the definition, which
+       is `probe_journaling() {` and also starts a line. */
+    expect(body, 'probe_journaling is still called unconditionally').not.toMatch(/^probe_journaling\s*$/m)
+    expect(body).toMatch(/if \[ "\$dry_run" -eq 1 \]; then\n\s*skip [\s\S]{0,240}else\n\s*probe_journaling/)
+  })
+
+  it('says which question a dry run did not answer', () => {
+    /* "Nothing was changed" is true again — and on its own it would imply the
+       preflight proved everything it normally proves. */
+    expect(text()).toMatch(/NOT proven here/)
+  })
+
+  it('checks every --clean removal instead of reporting success over all of them', () => {
+    /* Each command carried `|| true`, the log said "removed … from both sides"
+       unconditionally, and the exit was always 0 — while the app's advisory
+       lock refused every write, so the usual outcome was a no-op announcing a
+       cleanup. */
+    const body = text()
+    const block = body.slice(body.indexOf('if [ "$clean" -eq 1 ]'), body.indexOf('# --- the scenario'))
+    expect(block).not.toMatch(/(tag|book) remove[^\n]*\|\| true/)
+    expect(block, '--clean never exits non-zero').toMatch(/exit 1/)
+    expect(block, '--clean writes while the apps hold the lock').toMatch(/app_quit shelf/)
+  })
+})

@@ -747,7 +747,22 @@ probe_journaling() {
     fail 'a CLI write did NOT reach the sync journal, so nothing below can replicate. `paper` binds the journal only when no Paper process holds it — see WI-11.7 in dev-docs/plans/phase-11-service-api.md.'
   fi
 }
-probe_journaling
+
+# ⚠️ **NOT UNDER `--dry-run`, AND THAT FLAG WAS A LIE UNTIL NOW.** `--dry-run`
+# is documented as "preflight only: prove both ends answer, change nothing",
+# and it was not read until line ~833 — long after this probe had QUIT THE APP,
+# created a book, removed it and deleted its trash directory. The run then
+# printed "Nothing was changed." over all of it.
+#
+# The probe cannot be made read-only: proving a CLI write reaches the journal
+# requires a CLI write. So a dry run cannot have this answer, and the honest
+# thing is to say which question went unasked rather than to answer it by
+# mutating a library the flag promised not to touch.
+if [ "$dry_run" -eq 1 ]; then
+  skip 'whether a CLI write reaches the sync journal — the probe writes a book to find out, and --dry-run changes nothing'
+else
+  probe_journaling
+fi
 
 # THE SECOND PRECONDITION, and the one that cost this scenario two full runs
 # before anybody checked it: THE TWO MACHINES MUST ACTUALLY BE IN CONTACT.
@@ -818,21 +833,57 @@ if [ "$failures" -gt 0 ]; then
   exit 1
 fi
 
+# ⚠️ **THIS REPORTED SUCCESS WHATEVER HAPPENED, AND USUALLY NOTHING HAPPENED.**
+# Every command carried `|| true`, the log line said "removed … from both
+# sides" unconditionally, and the exit was always 0. Worse, these are WRITES,
+# and `paper` takes the same advisory lock the app holds — so with both apps
+# running, which is this script's own stated precondition, every one of them
+# was REFUSED. `--clean` was a no-op that announced a cleanup.
+#
+# The apps come down first, for the same reason `probe_journaling` takes them
+# down: a CLI write needs the library to itself. Each result is checked, the
+# log says which artefacts were actually removed, and a failure leaves a
+# non-zero exit so a caller cannot read "cleaned" off a status code that never
+# meant it. `book remove` on an id that is not there is NOT a failure — there
+# is nothing to remove, which is the desired end state.
 if [ "$clean" -eq 1 ]; then
   log ''
   log '## Clean'
-  shelf tag remove "$SCENARIO_TAG" >/dev/null 2>&1 || true
-  shelf tag remove "$SCENARIO_TAG_RENAMED" >/dev/null 2>&1 || true
-  shelf book remove "$SCENARIO_BOOK" >/dev/null 2>&1 || true
-  satchel book remove "$SCENARIO_BOOK" >/dev/null 2>&1 || true
-  log '  removed this scenario’s book and tags from both sides.'
+  app_quit shelf
+  app_quit satchel
+  clean_failures=0
+  clean_one() {
+    # $1 = human name, rest = command
+    local what said; what="$1"; shift
+    if said="$("$@" 2>&1)"; then
+      pass "removed $what"
+    elif printf '%s' "$said" | grep -qiE 'not found|no such|unknown (book|tag)'; then
+      skip "$what was not there"
+    else
+      clean_failures=$((clean_failures + 1))
+      fail "could not remove $what: $(printf '%s' "$said" | tr '\n' ' ' | cut -c1-160)"
+    fi
+  }
+  clean_one "the scenario tag on the shelf"        shelf tag remove "$SCENARIO_TAG"
+  clean_one "the renamed tag on the shelf"         shelf tag remove "$SCENARIO_TAG_RENAMED"
+  clean_one "the scenario book on the shelf"       shelf book remove "$SCENARIO_BOOK"
+  clean_one "the scenario book on the satchel"     satchel book remove "$SCENARIO_BOOK"
+  app_start shelf
+  app_start satchel
   log "Transcript: $out"
+  if [ "$clean_failures" -gt 0 ]; then
+    log ''
+    log "  $clean_failures artefact(s) could not be removed — this run did NOT clean up."
+    exit 1
+  fi
   exit 0
 fi
 
 if [ "$dry_run" -eq 1 ]; then
   log ''
-  log 'Dry run: both ends answer. Nothing was changed.'
+  log 'Dry run: both ends answer, and nothing was changed on either.'
+  log 'NOT proven here: that a CLI write reaches the sync journal — that probe'
+  log 'writes a book, so it is skipped above. Run without --dry-run for it.'
   log "Transcript: $out"
   exit 0
 fi
