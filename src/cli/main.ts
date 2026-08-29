@@ -1,4 +1,5 @@
 import { paper } from './paper'
+import { openShelf } from './shelfLink'
 
 /**
  * The bundled `paper` executable's first line (WI-11.4).
@@ -23,5 +24,23 @@ const code = await paper({
     out: (line) => process.stdout.write(`${line}\n`),
     err: (line) => process.stderr.write(`${line}\n`),
   },
+  /* THE REMOTE HALF, SUPPLIED HERE (WI-11.7). `paper()` has taken this seam
+   * since WI-11.6 and nothing ever filled it, so `--shelf` answered "this
+   * build cannot reach a remote shelf" — read for two phases as "no transport
+   * exists", when what did not exist was this line.
+   *
+   * The composition root is where it belongs: `openShelf` reaches the kernel's
+   * shelf channel and the environment, and `paper.ts`'s own note says the
+   * envelope may be composed by a root and nobody else.
+   *
+   * `process.env` and stderr are passed IN rather than read there, so the rest
+   * of `src/cli/` keeps the property this file exists for — that only this
+   * file touches the process. */
+  remote: (shelf) =>
+    openShelf({
+      key: shelf,
+      env: process.env,
+      note: (line) => process.stderr.write(`${line}\n`),
+    }),
 })
 process.exitCode = code

@@ -99,6 +99,14 @@ const KERNEL_METRICS = '^src/kernel/core/metrics\\.ts$'
  * It moved into the kernel in phase 18 because a second transport needed it —
  * nothing about it is peer-to-peer. */
 const KERNEL_ENVELOPE = '^src/kernel/core/envelope\\.ts$'
+/* The SHELF CHANNEL — the envelope over a WebSocket, and a leaf for the same
+ * reason the envelope is: its only import is the envelope, and it reads no
+ * platform. It moved out of `src/app/web/` in WI-11.7 when `paper --shelf`
+ * became a second caller that cannot import the browser client; the client
+ * keeps a re-export at the old path, and this is what lets that re-export
+ * reach the leaf DIRECTLY rather than dragging the kernel barrel into the web
+ * bundle to fetch one module. */
+const KERNEL_SHELF_CHANNEL = '^src/kernel/core/shelfChannel\\.ts$'
 
 /* THE BROWSER UI ENTRY (WI-19.4), which REPLACED a whole-directory reach.
  * This was `KERNEL_READER = '^src/kernel/ui/reader/'` — the client could import
@@ -450,6 +458,7 @@ module.exports = {
           KERNEL_STYLESHEETS,
           KERNEL_METRICS,
           KERNEL_ENVELOPE,
+          KERNEL_SHELF_CHANNEL,
           KERNEL_BROWSER_ENTRY,
           KERNEL_UI_TYPES,
         ],

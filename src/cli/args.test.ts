@@ -246,8 +246,8 @@ describe('what it refuses', () => {
     /* An empty `--shelf` is a caller who meant to name a shelf and did not.
      * Silently answering locally would be the wrong library's answer wearing
      * the right one's face. */
-    expect(error(['book', 'list', '--shelf'])).toContain('needs a shelf key')
-    expect(error(['--shelf', '--json', 'book', 'list'])).toContain('needs a shelf key')
+    expect(error(['book', 'list', '--shelf'])).toContain('needs a shelf address')
+    expect(error(['--shelf', '--json', 'book', 'list'])).toContain('needs a shelf address')
   })
 })
 

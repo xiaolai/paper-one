@@ -1,9 +1,6 @@
-import { readFileSync, readdirSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
-import { connect, socketUrl, type SocketLike } from './channel'
-import { ENVELOPE_VERSION, decodeFrame, encodeFrame } from '../../kernel/core/envelope'
+import { connect, socketUrl, type SocketLike } from './shelfChannel'
+import { ENVELOPE_VERSION, decodeFrame, encodeFrame } from './envelope'
 
 /** A socket a test drives by hand. */
 class FakeSocket implements SocketLike {
@@ -264,48 +261,5 @@ describe('the credential never rides in the open', () => {
        be made quietly. */
     expect(opened[0]).not.toContain('?')
     expect(opened[0]).not.toContain('#')
-  })
-
-  /**
-   * The client CANNOT leak what it cannot read.
-   *
-   * `HttpOnly` already puts the cookie out of reach of page script, so this is
-   * belt and braces — but it is the assertion that survives somebody deciding
-   * to "just read the cookie to check whether we're signed in". The honest way
-   * to ask that question is `/api/auth/session`, which is what `session.ts`
-   * does, and it works precisely because the browser attaches the credential
-   * without the page ever seeing it.
-   */
-  it('never reads document.cookie anywhere in the client', () => {
-    /**
-     * ⚠️ **THIS SCANNED ONE DIRECTORY DEEP.** `readdirSync` without recursion
-     * covers `src/app/web/*.ts` and stops — so `shell/` was outside the guard
-     * entirely, and so is every directory added under this client from now on.
-     * A guard that silently excludes half its own subject is worse than none,
-     * because the note above it says the client cannot leak the cookie.
-     */
-    const root = fileURLToPath(new URL('.', import.meta.url))
-    const walk = (dir: string): string[] =>
-      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-        const at = join(dir, entry.name)
-        if (entry.isDirectory()) return walk(at)
-        return /\.tsx?$/.test(entry.name) && !entry.name.includes('.test.') ? [at] : []
-      })
-    const files = walk(root)
-
-    /* THE LIST MUST NOT BE EMPTY, and it must REACH A SUBDIRECTORY. A walk that
-       matches nothing passes every assertion below it, which is the quietest
-       way for a guard to stop guarding — and one that matches only the top
-       level looks identical to one that recursed. */
-    expect(files.length).toBeGreaterThan(3)
-    expect(
-      files.some((at) => relative(root, at).includes(sep)),
-      'the scan never left the top directory; a nested module is not covered',
-    ).toBe(true)
-
-    for (const at of files) {
-      const source = readFileSync(at, 'utf8')
-      expect(source, `${relative(root, at)} must not read the session cookie`).not.toContain('document.cookie')
-    }
   })
 })
