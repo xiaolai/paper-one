@@ -126,7 +126,19 @@ async function boot(root: HTMLElement): Promise<void> {
    * matters: settings arrive with the services, and this has to be decided
    * before them — and a harness driving a release build over ssh can `touch`
    * a path, where it cannot open a settings pane. */
-  const diagnosticsOn = import.meta.env.DEV || (fs !== null && (await fs.exists(DIAGNOSTICS_SWITCH).catch(() => false)))
+  /* A FAILURE TO LOOK IS NOT A DECISION NOT TO. Swallowing this made a
+     permission error, an unreadable directory and a deliberate opt-out the
+     same observation — so a reader who created the switch and got no file had
+     nothing at all to explain it, which is the very complaint this whole
+     feature exists to answer. Still defaults to off; it just says why. */
+  const switchAsked =
+    fs === null
+      ? false
+      : await fs.exists(DIAGNOSTICS_SWITCH).catch((cause: unknown) => {
+          console.error(`Paper: could not read ${DIAGNOSTICS_SWITCH}; diagnostics stay off`, cause)
+          return false
+        })
+  const diagnosticsOn = import.meta.env.DEV || switchAsked
   const diagnosticLog = createDiagnosticLog()
   const diagnosticSpool =
     fs === null || !diagnosticsOn

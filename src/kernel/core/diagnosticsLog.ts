@@ -80,27 +80,105 @@ export interface DiagnosticLog {
  *  that rewriting the file whole is cheaper than deciding not to. */
 export const DEFAULT_CAPACITY = 2_000
 
+/** Past this a window is not a window. `new Array` throws past 2**32-1, and
+ *  anything near it defeats the bound this module exists for. */
+export const MAX_CAPACITY = 1_000_000
+
+/** The depth `redact` walks to; a snapshot need never freeze deeper. */
+const FREEZE_DEPTH = 8
+
 export interface DiagnosticLogOptions {
   readonly capacity?: number
 }
 
 export function createDiagnosticLog({ capacity = DEFAULT_CAPACITY }: DiagnosticLogOptions = {}): DiagnosticLog {
-  /* A capacity of zero would make `record` a no-op that still looks like a
-     log, which is the shape of every silent-drop defect this repository has
-     paid for. One is the floor: the last thing reported is always there. */
-  const size = Math.max(1, Math.floor(capacity))
-  let ring: DiagnosticEntry[] = []
+  /* FINITE, and checked as such. `Math.max(1, NaN)` is NaN — every comparison
+     against it is false, so nothing is ever evicted — and `Infinity` evicts
+     nothing either. Both turn "bounded by construction" into unbounded growth
+     in a module whose whole claim is the bound, so a value that is not a
+     finite positive number falls back rather than being coerced. */
+  const asked = Math.floor(capacity)
+  /* AND AN UPPER BOUND, because `new Array(size)` throws `RangeError` past
+     2**32-1 and merely allocating hundreds of megabytes short of that is no
+     better in a module whose point is a bound. Finiteness alone was not
+     enough. */
+  const size = Number.isFinite(asked) && asked >= 1 && asked <= MAX_CAPACITY ? asked : DEFAULT_CAPACITY
+
+  /* A REAL RING, with a write index. This was an array plus `slice`, which
+     copied up to `capacity` references on EVERY record once full — O(capacity)
+     steady state for a structure named after the one that is O(1). */
+  const slots: (DiagnosticEntry | undefined)[] = new Array<DiagnosticEntry | undefined>(size)
+  let next = 0
+  let held = 0
   let lost = 0
+
+  /* SNAPSHOT ON THE WAY IN. `fields` is a mutable `Record` and entries were
+     stored by reference, so a caller could rewrite what the window said long
+     after reporting it — and the file is a projection of the window. A shallow
+     copy of `fields` is enough: `redact` has already replaced every nested
+     value with a summarised one. */
+  /* Depth-bounded, failure-tolerant, and applied to what is STORED — see
+     `snapshot`. The bound matches the one `redact` walks to, so this can never
+     be the longer walk of the two. */
+  const freezeDeep = (value: unknown, depth = 0): void => {
+    if (depth > FREEZE_DEPTH || value === null || typeof value !== 'object') return
+    try {
+      Object.freeze(value)
+      for (const nested of Object.values(value as Record<string, unknown>)) freezeDeep(nested, depth + 1)
+    } catch {
+      /* An object that refuses to freeze is left as it is. */
+    }
+  }
+
+  const snapshot = (entry: DiagnosticEntry): DiagnosticEntry => {
+    /* ⚠️ **DEEP, AND THE NOTE HERE USED TO BE WRONG ABOUT WHY IT NEED NOT BE.**
+       It said `redact` "has already summarised" nested values, so a shallow
+       freeze was enough. It has not: `redact` bounds DEPTH but returns nested
+       plain objects and arrays intact, so `entries()[0].fields.nested.kind = …`
+       rewrote the window and the file through a value the log had handed out.
+       `createDiagnostics` freezes on its side too; this is the log keeping its
+       own promise rather than inheriting one from its only current caller.
+
+       AND THE SPREAD IS GUARDED, because `{ ...fields }` invokes getters: a
+       hostile field could throw out of `record`, which the reporting path
+       absorbs but a direct caller would not. */
+    let fields: Record<string, unknown>
+    try {
+      fields = { ...entry.fields }
+    } catch {
+      fields = { note: 'fields could not be read' }
+    }
+    const frozen: DiagnosticEntry = {
+      at: entry.at,
+      level: entry.level,
+      scope: entry.scope,
+      event: entry.event,
+      fields,
+    }
+    freezeDeep(frozen)
+    return frozen
+  }
+
+  const ordered = (): DiagnosticEntry[] => {
+    const out: DiagnosticEntry[] = []
+    const from = held < size ? 0 : next
+    for (let i = 0; i < held; i++) {
+      const entry = slots[(from + i) % size]
+      if (entry !== undefined) out.push(entry)
+    }
+    return out
+  }
 
   return {
     record: (entry) => {
-      ring.push(entry)
-      if (ring.length > size) {
-        lost += ring.length - size
-        ring = ring.slice(ring.length - size)
-      }
+      if (held === size) lost += 1
+      slots[next] = snapshot(entry)
+      next = (next + 1) % size
+      if (held < size) held += 1
     },
-    entries: () => ring,
+    /* A COPY, not the live structure. Returning the internal array let a
+       caller mutate history through the value it was handed to read. */
+    entries: () => ordered(),
     dropped: () => lost,
     /* ONE OBJECT PER LINE, and a line that will not stringify is REPLACED
        rather than dropped. `fields` has been through `redact`, which walks and
@@ -108,7 +186,7 @@ export function createDiagnosticLog({ capacity = DEFAULT_CAPACITY }: DiagnosticL
        single bad entry must not cost the whole window, which is the file the
        next person reads to find out what happened. */
     toJsonl: () =>
-      ring
+      ordered()
         .map((entry) => {
           try {
             return JSON.stringify(entry)
@@ -124,7 +202,9 @@ export function createDiagnosticLog({ capacity = DEFAULT_CAPACITY }: DiagnosticL
         })
         .join('\n'),
     clear: () => {
-      ring = []
+      slots.fill(undefined)
+      next = 0
+      held = 0
       lost = 0
     },
   }
@@ -185,55 +265,97 @@ export function createDiagnosticSpool({
   flushMs = DEFAULT_FLUSH_MS,
   timers = REAL_TIMERS,
 }: DiagnosticSpoolOptions): DiagnosticSpool {
-  let pending: unknown = null
-  let writing = false
-  let again = false
+  let handle: unknown = null
+  /* A FLAG, NOT A NULL HANDLE. `SpoolTimers.setTimeout` returns `unknown`, and
+     `null` is a legal value for it — a conforming timer that returned null
+     would make every cancellation a no-op and let debounces stack up. */
+  let armed = false
+  let inFlight: Promise<void> | null = null
+  let dirty = false
   let stopped = false
 
-  const put = async (): Promise<void> => {
-    if (writing) {
-      /* COALESCED, NOT QUEUED — the same rule the sync scheduler follows. The
-         file is the whole window every time, so a write that is waiting for
-         another is a write of bytes that are already stale. */
-      again = true
-      return
-    }
-    writing = true
-    try {
-      do {
-        again = false
+  const cancelPending = (): void => {
+    if (!armed) return
+    timers.clearTimeout(handle)
+    handle = null
+    armed = false
+  }
+
+  /* ONE WRITER, AND THE CATCH IS PER ITERATION. A failing write used to leave
+     the whole loop, discarding a `dirty` a concurrent caller had just set —
+     with the timer already cancelled, that write was lost with nothing left to
+     retry it. Catching inside the loop keeps the flag and takes another pass. */
+  const drain = async (): Promise<void> => {
+    while (dirty && !stopped) {
+      dirty = false
+      try {
         await write(log.toJsonl())
-      } while (again && !stopped)
-    } catch {
-      /* A lost projection, not a second failure. The window is still in
-         memory, and the next touch writes it. */
-    } finally {
-      writing = false
+      } catch {
+        /* A lost projection, not a second failure. The window is still in
+           memory, and the next touch or flush writes it. */
+      }
+    }
+  }
+
+  /* THE PROMISE IS SHARED, which is what makes `flush` mean anything. It used
+     to return early when a write was already running, so `flush()` resolved
+     BEFORE the bytes were on disk — and the one caller that needs it is the
+     shutdown handshake, whose entire purpose is not to lose the tail. Marking
+     the window dirty and awaiting the live drain guarantees the LATEST
+     snapshot has been written by the time it resolves. */
+  const kick = async (): Promise<void> => {
+    dirty = true
+    /* ⚠️ **LOOPED, BECAUSE AWAITING THE LIVE DRAIN ONCE IS NOT ENOUGH.** The
+       first fix shared `inFlight` and returned it, which closes the ordinary
+       case and leaves a completion race: `drain` can decide `dirty` is false
+       and resolve, and before its `finally` clears `inFlight` a waiting
+       `flush()` sets `dirty` again, sees a non-null `inFlight`, and awaits a
+       promise that is already finishing. It resolves with the window dirty and
+       nobody writing — which is the same lost tail, in a smaller window.
+       Re-checking after the await is what actually closes it: by then
+       `finally` has run, `inFlight` is null, and this starts the next drain. */
+    while (dirty && !stopped) {
+      if (inFlight === null) {
+        /* ⚠️ **STARTED ON A MICROTASK, so the slot is taken before any of
+           `drain` runs.** `inFlight = drain().finally(…)` looks like a lock and
+           is not one: an async function executes synchronously up to its first
+           `await`, so `drain` reaches `write()` while `inFlight` is STILL NULL.
+           A `write` that called back into `flush()` would find the slot empty,
+           start a second drain, and the two would overwrite each other's
+           `finally`. Deferring the body by one microtask makes the assignment
+           happen first, which is what the guard was supposed to mean. */
+        inFlight = Promise.resolve()
+          .then(drain)
+          .finally(() => {
+            inFlight = null
+          })
+      }
+      await inFlight
     }
   }
 
   return {
     touch: () => {
       if (stopped) return
-      if (pending !== null) timers.clearTimeout(pending)
-      pending = timers.setTimeout(() => {
-        pending = null
-        void put()
+      cancelPending()
+      handle = timers.setTimeout(() => {
+        armed = false
+        handle = null
+        void kick()
       }, flushMs)
+      armed = true
     },
     flush: async () => {
-      if (pending !== null) {
-        timers.clearTimeout(pending)
-        pending = null
-      }
-      await put()
+      cancelPending()
+      /* NO-OP ONCE STOPPED, so "stops writing" means every path and not just
+         the timer. The composition root flushes and never stops, so a shutdown
+         still gets its tail; a stopped spool is one whose owner has gone. */
+      if (stopped) return
+      await kick()
     },
     stop: () => {
       stopped = true
-      if (pending !== null) {
-        timers.clearTimeout(pending)
-        pending = null
-      }
+      cancelPending()
     },
   }
 }

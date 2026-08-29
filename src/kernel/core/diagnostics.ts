@@ -193,9 +193,48 @@ export function createDiagnostics({
    * guard missing at several of them; one guard at the factory covers every
    * caller, present and future, and a sink that fails is simply a diagnostic
    * that was lost — which is what a diagnostic is allowed to be. */
-  const quietly = (write: () => void): void => {
+  /* DEEP, because a shallow freeze protects the wrong layer. `redact` bounds
+     DEPTH but still returns objects and arrays, and the sink runs before the
+     recorder — so a sink could reach one level in and change what the recorder
+     was about to be handed, which is exactly the drift that redacting once
+     exists to prevent. The walk is bounded by `MAX_DEPTH` above it, and a
+     value that will not freeze is skipped rather than allowed to throw: this
+     runs on the path that must never raise.
+
+     ⚠️ **ONE RESIDUAL, NAMED RATHER THAN CLOSED. `Object.freeze` DOES NOT
+     MAKE A `Date` IMMUTABLE** — its value lives in an internal slot, so
+     `setTime()` still works on a frozen one. `redact` returns a fresh copy of
+     a Date, and the sink runs before the recorder, so a sink that mutated a
+     Date field would change what the recorder is then handed. Not closed here
+     for a reason: the fix is for `redact` to return an ISO string instead, and
+     that is a change to what every existing caller and its test see, decided
+     on its own merits rather than at the end of an audit round. The exposure
+     is a sink that calls a Date setter; the two sinks that exist are the
+     console and this log. */
+  const deepFreeze = (value: unknown, depth = 0): void => {
+    if (depth > MAX_DEPTH || value === null || typeof value !== 'object') return
     try {
-      write()
+      Object.freeze(value)
+      for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested, depth + 1)
+    } catch {
+      /* An exotic object that refuses to freeze is left as it is. */
+    }
+  }
+
+  const quietly = (write: () => void | PromiseLike<void>): void => {
+    try {
+      const answered = write()
+      /* AND A REJECTED PROMISE IS A THROW THAT ARRIVES LATE. TypeScript lets an
+         `async` function satisfy a callback typed `void`, so a sink or recorder
+         that is async turns a caught failure into an UNHANDLED rejection —
+         which is the second failure this guard exists to prevent, only harder
+         to trace back. Attached, never awaited: `Diagnostics` is synchronous
+         and must stay so. */
+      if (answered !== undefined && typeof (answered as PromiseLike<void>).then === 'function') {
+        void (answered as PromiseLike<void>).then(undefined, () => {
+          /* A lost diagnostic, as above. */
+        })
+      }
     } catch {
       /* A lost diagnostic, not a second failure. */
     }
@@ -208,7 +247,33 @@ export function createDiagnostics({
        own so a failing recorder cannot cost the console its line — the same
        rule the sink already has, for the same reason. */
     const report = (level: 'info' | 'warn' | 'error', event: string, fields: Record<string, unknown>): void => {
-      const safe = redact(fields)
+      /* ⚠️ **REDACTION IS GUARDED TOO, and it was not.** `redact` walks the
+         value it is given — `Object.entries`, property reads, prototype checks
+         — so a getter that throws, a hostile proxy, or an `Error` subclass with
+         an accessor for `name` makes REDACTION ITSELF throw, out of `info`,
+         `warn` or `error`, past the `quietly` that only ever wrapped the sink
+         call. A diagnostic is written from a catch block more often than not,
+         so that is precisely the second failure this file promises never to
+         cause. It was introduced when the two readers were factored into one
+         `report`; before that, `redact` sat inside the guard by accident of
+         being an argument.
+
+         An event whose FIELDS cannot be read is still an event worth
+         reporting, so this substitutes a marker rather than dropping the
+         line. */
+      let safe: Record<string, unknown>
+      try {
+        safe = redact(fields)
+      } catch {
+        safe = { note: 'fields could not be redacted' }
+      }
+      /* FROZEN, so the sink cannot rewrite what the recorder is about to be
+         given. The two readers are handed one object on purpose — redacting
+         twice is how they come to disagree — and that only holds if neither
+         can change it. SHALLOW: `redact` summarises nested values but does
+         return objects, so a nested value is still shared. The log takes its
+         own copy on the way in, which is the second line of that defence. */
+      deepFreeze(safe)
       quietly(() => sink[level](line(event), safe))
       if (record !== undefined) quietly(() => record({ at: now(), level, scope: name, event, fields: safe }))
     }
