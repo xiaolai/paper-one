@@ -15,11 +15,51 @@
 # WHAT THIS SCRIPT DOES NOT DO, said plainly because a harness that implied
 # otherwise would draw the wrong conclusion the way WI-8.6's first run did:
 # IT DOES NOT SYNC. Replication is the app's; `paper` has no transport of its
-# own (`src/cli/remote.ts` says why). So the app must be RUNNING AND FRONTMOST
-# on both machines — sync is foreground-only on all platforms, and WI-8.6
-# measured a satchel behind a Terminal window failing to fire its 5 s debounce
-# for 60 s — and this script mutates one side and waits for the other to
-# agree. A step that times out is reported as a NAMED FAILURE, never as a pass.
+# own (`src/cli/remote.ts` says why). So the app must be RUNNING AND ITS WINDOW
+# UNHIDDEN on both machines — sync is foreground-only on all platforms — and
+# this script mutates one side and waits for the other to agree. A step that
+# times out is reported as a NAMED FAILURE, never as a pass.
+#
+# ⚠️ **NOT "FRONTMOST", AND THE DIFFERENCE DECIDES WHETHER A HUMAN HAS TO SIT
+# AT EACH MACHINE.** This said FRONTMOST for three runs, which reads as "keep
+# clicking on both apps", and it is stronger than what the webview actually
+# requires. The criterion is `document.visibilityState`, and focus does not
+# affect it. Measured 2026-08-29 against a 1 s heartbeat in the running app:
+#
+#   focused, on screen ........ visible, largest gap 1 005 ms over 47 s
+#   UNFOCUSED, on screen ...... visible, largest gap 1 005 ms over 47 s
+#   minimised ................. hidden,  ONE gap of 37 165 ms
+#
+# So a hidden webview does not slow down, it STOPS — 37 s of a 1 s interval
+# with no tick at all — and an unfocused one is not affected in the slightest.
+# Leave both windows open and walk away; do not leave either minimised, and do
+# not let either screen lock.
+#
+# THREE STATES, AND THEY ARE NOT ONE. `minimised`, `display asleep` and
+# `screen locked` are different conditions, this script's preflight only reads
+# the third, and only the first has been measured:
+#
+#   minimised ......... MEASURED to suspend: one 37 165 ms gap
+#   display asleep .... UNMEASURED. Distinct from a lock, and reached SOONER on
+#                       a machine whose `displaysleep` is shorter than its
+#                       `screenLock` — so a run can die of this while the
+#                       preflight's lock check is still saying yes
+#   screen locked ..... refused by preflight [4]/[5]; WI-8.6 attributes six
+#                       convergence timeouts to it
+#   occluded .......... UNRESOLVED, see below
+#
+# So `caffeinate -d` on both machines is worth more than it looks: it removes
+# the one state that is neither measured nor checked.
+#
+# AND THE OCCLUSION CASE IS UNRESOLVED, stated rather than smoothed over.
+# WI-8.6 measured a satchel BEHIND A TERMINAL WINDOW failing to fire its 5 s
+# debounce for 60 s. An attempt to reproduce that on 2026-08-29 — another app's
+# window maximised over Paper's — kept `visibilityState` at `visible` and
+# ticked for 129 s with no gap, so either that window never truly occluded
+# Paper or macOS's occlusion detection needs more than overlap. One of those
+# measurements reaches a case the other does not, and until that is settled the
+# conservative reading holds: keep the windows UNOBSCURED, not merely
+# unminimised.
 #
 # WHAT IT MUTATES: one book it creates itself (`SCENARIO_BOOK`), one mark on
 # it, and one tag. Everything is prefixed `wi-11-7-` so a failed run leaves
@@ -407,10 +447,15 @@ log "- shelf:  this machine, $REPO_ROOT"
 log "- satchel: $remote:\$HOME/$REMOTE_CHECKOUT"
 log "- timeout per convergence: ${timeout_s}s"
 log ''
-log 'THE APPS MUST BE RUNNING AND FRONTMOST ON BOTH MACHINES. This script does'
-log 'not sync; it mutates one side and waits for the other to agree. Sync is'
-log 'foreground-only, and WI-8.6 measured an occluded satchel failing to fire'
-log 'its debounce for 60 seconds.'
+log 'THE APPS MUST BE RUNNING WITH THEIR WINDOWS UNHIDDEN ON BOTH MACHINES.'
+log 'This script does not sync; it mutates one side and waits for the other to'
+log 'agree. Sync is foreground-only: a hidden webview STOPS its timers rather'
+log 'than slowing them — measured at 37 s of a 1 s heartbeat with no tick.'
+log 'Focus is NOT required, and an unfocused window is unaffected; leave both'
+log 'open and unobscured and walk away. Do not minimise either, and run both'
+log 'under `caffeinate -d`: a display asleep is a separate state from a locked'
+log 'screen, it is NOT checked below, and on a machine whose display sleeps'
+log 'sooner than it locks it is what will end the run.'
 log ''
 log '## Preflight'
 
