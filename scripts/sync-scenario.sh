@@ -338,13 +338,37 @@ readonly APP_SETTLE_S="${PAPER_APP_SETTLE_S:-14}"
 # stays representative of what a reader's machine actually does.
 readonly QUIT_VIA_MENU='tell application "System Events" to tell process "Paper" to click menu item "Quit Paper" of menu 1 of menu bar item 2 of menu bar 1'
 
+# ⚠️ **A FORCE-KILL IS NOT A QUIT, AND THIS REPORTED THEM THE SAME.** Both
+# helpers suppressed every failure and returned 0 unconditionally — the same
+# always-success shape `--clean` had. It matters more here than there: the
+# graceful path is the app's shutdown handshake, which closes the sync journal;
+# `pkill` is the DIRTY shutdown the comment above `QUIT_VIA_MENU` exists to
+# avoid, and it is exactly what happens when Accessibility permission is
+# missing and the AppleScript silently does nothing. The run then proceeded
+# over a journal left dirty, having said nothing.
+#
+# It still force-kills — a machine that will not quit its app must not wedge
+# the run — but it SAYS SO, so a transcript records which shutdown each side
+# got and a reader diagnosing a convergence failure can see it.
 app_quit() {
+  local forced=no
   case "$1" in
     shelf) osascript -e "$QUIT_VIA_MENU" >/dev/null 2>&1 || true; sleep 8
-           pgrep -f "$APP_PROCESS" >/dev/null 2>&1 && { pkill -f "$APP_PROCESS" || true; sleep 3; } ;;
-    satchel) remote_sh \
-               "osascript -e '$QUIT_VIA_MENU' >/dev/null 2>&1 || true; sleep 8; pgrep -f '$APP_PROCESS' >/dev/null 2>&1 && { pkill -f '$APP_PROCESS' || true; sleep 3; }; true" ;;
+           if pgrep -f "$APP_PROCESS" >/dev/null 2>&1; then
+             forced=yes
+             pkill -f "$APP_PROCESS" || true
+             sleep 3
+           fi ;;
+    satchel) if remote_sh \
+               "osascript -e '$QUIT_VIA_MENU' >/dev/null 2>&1 || true; sleep 8; if pgrep -f '$APP_PROCESS' >/dev/null 2>&1; then pkill -f '$APP_PROCESS' || true; sleep 3; exit 9; fi; exit 0"; then
+               forced=no
+             else
+               [ "$?" -eq 9 ] && forced=yes
+             fi ;;
   esac
+  if [ "$forced" = yes ]; then
+    log "  note  the $1's app did not quit through its menu and was force-killed — its journal may be left dirty"
+  fi
   return 0
 }
 
@@ -353,6 +377,11 @@ app_quit() {
 # release builds entirely (`role.rs`) — so a satchel must be a debug build
 # launched with it. Deploying a release build to the satchel once silently
 # demoted it, and pairing then failed with `expected Satchel, got Shelf`.
+# AND A LAUNCH THAT FAILED WAS TREATED AS HEALTHY. `open` was `|| true`d and
+# the result never checked, so a satchel whose app never came up looked exactly
+# like one that did — and every convergence step after it then timed out
+# against a machine running nothing, which is six minutes to learn what one
+# `pgrep` answers.
 app_start() {
   case "$1" in
     shelf) open -a "${PAPER_SHELF_APP:-Paper}" >/dev/null 2>&1 || true ;;
@@ -360,6 +389,15 @@ app_start() {
                "open --env PAPER_ROLE=satchel -a \"\$HOME/$SATCHEL_APP\" >/dev/null 2>&1 || true" ;;
   esac
   sleep "$APP_SETTLE_S"
+  local up=no
+  case "$1" in
+    shelf) pgrep -f "$APP_PROCESS" >/dev/null 2>&1 && up=yes ;;
+    satchel) remote_sh "pgrep -f '$APP_PROCESS' >/dev/null 2>&1" && up=yes ;;
+  esac
+  if [ "$up" != yes ]; then
+    log "  note  the $1's app is NOT running after a launch attempt — every step below will time out against it"
+    return 1
+  fi
   return 0
 }
 
