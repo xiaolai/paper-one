@@ -22,24 +22,45 @@
 #
 # ⚠️ **NOT "FRONTMOST", AND THE DIFFERENCE DECIDES WHETHER A HUMAN HAS TO SIT
 # AT EACH MACHINE.** This said FRONTMOST for three runs, which reads as "keep
-# clicking on both apps", and it is stronger than what the webview actually
-# requires. The criterion is `document.visibilityState`, and focus does not
-# affect it. Measured 2026-08-29 against a 1 s heartbeat in the running app:
+# clicking on both apps", and it is stronger than what the webview requires.
+# The criterion is `document.visibilityState`, and focus does not affect it.
+# Measured 2026-08-29 against a 1 s heartbeat in the running app:
 #
 #   focused, on screen ........ visible, largest gap 1 005 ms over 47 s
 #   UNFOCUSED, on screen ...... visible, largest gap 1 005 ms over 47 s
-#   minimised ................. hidden,  ONE gap of 37 165 ms
 #
-# So a hidden webview does not slow down, it STOPS — 37 s of a 1 s interval
-# with no tick at all — and an unfocused one is not affected in the slightest.
-# Leave both windows open and walk away; do not leave either minimised, and do
-# not let either screen lock.
+# So an unfocused window is not affected in the slightest. Leave both open and
+# walk away rather than nursing them.
+#
+# ⚠️ **AND A HIDDEN WEBVIEW IS THROTTLED, NOT STOPPED — WHICH IS THE OPPOSITE
+# OF WHAT THIS COMMENT SAID FOR ONE COMMIT.** A first measurement showed a
+# minimised window taking a single 37 165 ms gap with no tick at all, and that
+# was written here as fact. It DID NOT REPRODUCE. Three further runs, one of
+# them four minutes long and with no contact of any kind:
+#
+#   minimised, 45 s ........... hidden, 23 ticks, largest gap 2 016 ms
+#   minimised, 40 s ........... hidden, 22 ticks, largest gap 2 044 ms
+#   minimised, 4 min .......... hidden, 116 ticks, 109 gaps near 2 s,
+#                               four excursions, largest 5 271 ms
+#
+# A 5 s commit debounce absorbs a 2 s throttle without noticing. So the claim
+# that sync CANNOT run behind a hidden window is NOT established by anything
+# measured here, and the one observation that supported it stands alone and
+# unexplained — display sleep and a just-launched app are both candidates and
+# neither was ruled out.
+#
+# WHAT THIS MEANS FOR A FAILING RUN: do not reach for "the window was hidden"
+# as the explanation. WI-8.6 recorded a satchel failing to fire its debounce
+# for 60 s, and 60 s is far past a 2 s throttle — so whatever that was, these
+# measurements do not account for it, and the cause is still open.
 #
 # THREE STATES, AND THEY ARE NOT ONE. `minimised`, `display asleep` and
 # `screen locked` are different conditions, this script's preflight only reads
 # the third, and only the first has been measured:
 #
-#   minimised ......... MEASURED to suspend: one 37 165 ms gap
+#   minimised ......... MEASURED as throttled to ~2 s, not suspended, over
+#                       four minutes. One earlier 37 165 ms observation did
+#                       not reproduce and is unexplained
 #   display asleep .... UNMEASURED. Distinct from a lock, and reached SOONER on
 #                       a machine whose `displaysleep` is shorter than its
 #                       `screenLock` — so a run can die of this while the
@@ -449,9 +470,9 @@ log "- timeout per convergence: ${timeout_s}s"
 log ''
 log 'THE APPS MUST BE RUNNING WITH THEIR WINDOWS UNHIDDEN ON BOTH MACHINES.'
 log 'This script does not sync; it mutates one side and waits for the other to'
-log 'agree. Sync is foreground-only: a hidden webview STOPS its timers rather'
-log 'than slowing them — measured at 37 s of a 1 s heartbeat with no tick.'
-log 'Focus is NOT required, and an unfocused window is unaffected; leave both'
+log 'agree. A hidden webview is THROTTLED to about 2 s — measured over four'
+log 'minutes — which a 5 s debounce absorbs; an earlier claim that it stops'
+log 'outright did not reproduce. Focus is NOT required; leave both'
 log 'open and unobscured and walk away. Do not minimise either, and run both'
 log 'under `caffeinate -d`: a display asleep is a separate state from a locked'
 log 'screen, it is NOT checked below, and on a machine whose display sleeps'
