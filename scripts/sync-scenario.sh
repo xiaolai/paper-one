@@ -145,6 +145,19 @@ readonly REMOTE_PATH="${PAPER_REMOTE_PATH:-/opt/homebrew/opt/node@24/bin:/opt/ho
 # Both overrides are interpolated into shell source that runs on the REMOTE, so
 # both are validated against an allowlist rather than quoted through bash → ssh
 # → the remote shell. Same reasoning, same allowlist, as `second-instance.sh`.
+# ⚠️ **THE SAME RULE FOR THE APP PATH, WHICH DID NOT HAVE ONE.**
+# `PAPER_SATCHEL_APP` is interpolated into a string that is handed to a REMOTE
+# SHELL (`open -a "$HOME/$PAPER_SATCHEL_APP"`, line ~347). A value containing a
+# quote, a `;` or a `$(…)` ran as a command on the far machine — arbitrary
+# execution from an environment variable, in a harness whose whole job is to be
+# pointed at somebody else's Mac. `REMOTE_CHECKOUT` next to it was already
+# validated; this was not, and the two travel to the same shell.
+readonly SATCHEL_APP="${PAPER_SATCHEL_APP:-Applications/Paper.app}"
+case "$SATCHEL_APP" in
+  ''|/*|*..*) echo "PAPER_SATCHEL_APP must be a relative path with no '..': '$SATCHEL_APP'" >&2; exit 2 ;;
+  *[!A-Za-z0-9._/\ -]*) echo "PAPER_SATCHEL_APP may use only A-Za-z0-9._/- and spaces : '$SATCHEL_APP'" >&2; exit 2 ;;
+esac
+
 case "$REMOTE_CHECKOUT" in
   ''|/*|*..*) echo "PAPER_REMOTE_CHECKOUT must be a relative path with no '..': '$REMOTE_CHECKOUT'" >&2; exit 2 ;;
   *[!A-Za-z0-9._/-]*) echo "PAPER_REMOTE_CHECKOUT may use only A-Za-z0-9._/- : '$REMOTE_CHECKOUT'" >&2; exit 2 ;;
@@ -257,7 +270,7 @@ satchel() {
   for one in "$@"; do
     joined="$joined '${one//\'/\'\\\'\'}'"
   done
-  ssh -o BatchMode=yes "$remote" \
+  remote_sh \
     "export PATH=\"$REMOTE_PATH\"; cd \"\$HOME/$REMOTE_CHECKOUT\" && ./bin/paper.mjs$joined"
 }
 
@@ -329,7 +342,7 @@ app_quit() {
   case "$1" in
     shelf) osascript -e "$QUIT_VIA_MENU" >/dev/null 2>&1 || true; sleep 8
            pgrep -f "$APP_PROCESS" >/dev/null 2>&1 && { pkill -f "$APP_PROCESS" || true; sleep 3; } ;;
-    satchel) ssh -o BatchMode=yes "$remote" \
+    satchel) remote_sh \
                "osascript -e '$QUIT_VIA_MENU' >/dev/null 2>&1 || true; sleep 8; pgrep -f '$APP_PROCESS' >/dev/null 2>&1 && { pkill -f '$APP_PROCESS' || true; sleep 3; }; true" ;;
   esac
   return 0
@@ -343,8 +356,8 @@ app_quit() {
 app_start() {
   case "$1" in
     shelf) open -a "${PAPER_SHELF_APP:-Paper}" >/dev/null 2>&1 || true ;;
-    satchel) ssh -o BatchMode=yes "$remote" \
-               "open --env PAPER_ROLE=satchel -a \"\$HOME/${PAPER_SATCHEL_APP:-Applications/Paper.app}\" >/dev/null 2>&1 || true" ;;
+    satchel) remote_sh \
+               "open --env PAPER_ROLE=satchel -a \"\$HOME/$SATCHEL_APP\" >/dev/null 2>&1 || true" ;;
   esac
   sleep "$APP_SETTLE_S"
   return 0
@@ -381,6 +394,23 @@ mutate() {
   fi
   fail "$what — the command failed: ${said:-<no output>}"
   return 1
+}
+
+# Every ssh this script makes, with a deadline on it.
+#
+# ⚠️ **AN UNBOUNDED SSH DEFEATS `--timeout` ENTIRELY.** `converge` checks its
+# deadline BETWEEN calls, so a single ssh that hangs — a sleeping Mac, a
+# half-open TCP connection, a wedged sshd — blocks past the timeout for as long
+# as the kernel keeps the socket, and the run neither converges nor gives up.
+# Seven call sites had no bound at all. One helper, so the next one cannot be
+# added without one.
+#
+# `BatchMode` refuses a password prompt (an ssh waiting on a human is the same
+# hang wearing a different hat); `ConnectTimeout` bounds the dial;
+# `ServerAlive*` bounds a connection that opened and then stopped answering,
+# which is the sleeping-laptop case and the one a connect timeout cannot see.
+remote_sh() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 "$remote" "$@"
 }
 
 # Wait until `$2` (a shell snippet) succeeds, or give up by name.
@@ -445,7 +475,7 @@ diagnostics_tail() {
       # why a step timed out — so an ssh that hangs here costs the operator the
       # explanation as well as the run. The rest of this script's ssh calls
       # share the same gap (audited 2026-08-29); this is the one it added.
-      said="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 "$remote" "tail -n 12 \"\$HOME/$DIAGNOSTICS\" 2>/dev/null || true")"
+      said="$(remote_sh "tail -n 12 \"\$HOME/$DIAGNOSTICS\" 2>/dev/null || true")"
     fi
     log ''
     if [ -z "$said" ]; then
@@ -630,7 +660,7 @@ screen_lock_state() {
     else
       echo unknown
     fi'
-  if [ "$1" = local ]; then sh -c "$probe"; else ssh -o BatchMode=yes "$remote" "$probe"; fi
+  if [ "$1" = local ]; then sh -c "$probe"; else remote_sh "$probe"; fi
 }
 
 for side in local remote; do
@@ -750,7 +780,7 @@ if pgrep -f "$APP_PROCESS" >/dev/null 2>&1; then
 else
   fail 'Paper is NOT running on this machine — nothing will replicate, and every step below would time out'
 fi
-if ssh -o BatchMode=yes "$remote" "pgrep -f '$APP_PROCESS' >/dev/null 2>&1"; then
+if remote_sh "pgrep -f '$APP_PROCESS' >/dev/null 2>&1"; then
   pass 'Paper is running on the satchel'
 else
   fail "Paper is NOT running on $remote — nothing will replicate, and every step below would time out"
@@ -862,7 +892,7 @@ log '## The hub edits, then goes quiet'
 # header). Hard-coding it here states that rather than assuming it.
 readonly JOURNAL='Library/Application Support/one.paper.reader/sync/journal.jsonl'
 shelf_journal_size() { wc -c < "$HOME/$JOURNAL" 2>/dev/null || echo missing; }
-satchel_journal_size() { ssh -o BatchMode=yes "$remote" "wc -c < \"\$HOME/$JOURNAL\" 2>/dev/null || echo missing"; }
+satchel_journal_size() { remote_sh "wc -c < \"\$HOME/$JOURNAL\" 2>/dev/null || echo missing"; }
 
 first_shelf="$(shelf_journal_size | tr -d ' ')"
 first_satchel="$(satchel_journal_size | tr -d ' ')"
