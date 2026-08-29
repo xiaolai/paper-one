@@ -669,17 +669,19 @@ export function runCli(files) {
 
 /** Every case, a few at a time, results in case order.
  *
- *  Bounded because each case is an IN-PROCESS cruise — `runCase` awaits
- *  `checkBoundaries(root)` — and all of them at once are CPU-bound enough to
- *  starve the event loop they share. The count is `CASES.length`; do not
- *  write it here, because the last two numbers written into this comment both
- *  went stale.
+ *  Bounded because each case SPAWNS A CHILD PROCESS — `runCase` awaits
+ *  `checkBoundaries(root)`, which calls `cruise`, which spawns
+ *  `process.execPath` against dependency-cruiser — and enough of them at once
+ *  saturate the machine. The count is `CASES.length`; do not write it here,
+ *  because the last two numbers written into this comment both went stale.
  *
- *  IT WAS A CHILD PROCESS PER CASE, and this comment went on saying so long
- *  after it stopped being true. A survey of this gate's flakiness read it,
- *  concluded every case `spawnSync`s, and prescribed a fix for a mechanism
- *  that is not there — the only blocking calls are `runCli`'s four. A stale
- *  comment about concurrency is not a cosmetic defect. */
+ *  ⚠️ **THIS SAID "IN-PROCESS", AND BEING WRONG COST A REAL INVESTIGATION.**
+ *  The note here claimed the child-process-per-case era had ended and that
+ *  "the only blocking calls are `runCli`'s four", so a survey of this gate's
+ *  own flakiness read it, believed it, and went looking elsewhere. `cruise`
+ *  has spawned throughout — `scripts/check-boundaries.mjs` line ~111. The
+ *  previous version of this paragraph said a stale comment about concurrency
+ *  is not a cosmetic defect, while being the example of one. */
 export async function runAll(cases, width = defaultWidth()) {
   const results = new Array(cases.length)
   let next = 0
@@ -705,6 +707,20 @@ export async function runAll(cases, width = defaultWidth()) {
 
 /** The cap both consumers get unless one asks for another. */
 export function defaultWidth() {
+  /* THE BUDGET IS NOT THIS FUNCTION'S TO SPEND WHEN VITEST IS RUNNING.
+   *
+   * Six was chosen for work that shares one event loop. Each case is a
+   * CPU-bound CHILD PROCESS — measured 2026-08-29 at 2.9 s each, 64 s for the
+   * set — and under Vitest the pool has already committed `maxWorkers`
+   * processes (`cpus − 2`, so 8 of 10 here). Six more makes fourteen on ten
+   * cores, and the one that loses is Vitest's MAIN thread, which must answer
+   * `onTaskUpdate` inside birpc's 60 s. This file holds that state for longer
+   * than the deadline, which is the `[vitest-worker]: Timeout calling
+   * "onTaskUpdate"` the gate has been failing on with every test passing.
+   *
+   * Standalone, six is still right: nothing else is running and these cases
+   * are the whole job. The number is about what is FREE, and only one of the
+   * two situations has six cores free. */
   return Math.max(1, Math.min(6, availableParallelism()))
 }
 
