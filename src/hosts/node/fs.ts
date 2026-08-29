@@ -188,16 +188,31 @@ export function nodeIndexFs(root: string): IndexFs {
       }
       await syncDir(dir)
     },
-    /* The sync journal's barrier, over a real descriptor: `fsync(2)` on a
-     * read handle — enough to flush, and it needs no permission a barrier
-     * does not. A directory is synced the same way. */
+    /* The sync journal's barrier, over a real descriptor. A directory is
+     * synced the same way.
+     *
+     * ⚠️ **THE HANDLE IS OPENED FOR WRITING ON WINDOWS, AND MUST BE.** This
+     * said "`fsync(2)` on a read handle — enough to flush, and it needs no
+     * permission a barrier does not", which is true of `fsync(2)` and false
+     * of what Windows runs. Node's `handle.sync()` is `FlushFileBuffers`
+     * there, and that requires a handle with WRITE access: on an `'r'` handle
+     * it fails `EPERM`, every time, on every file. Nothing on a Mac or a
+     * Linux box can see it — `fsync(2)` on an `O_RDONLY` descriptor is
+     * perfectly legal — and it took every write the CLI makes down with it,
+     * which is why a dozen `src/cli/` cases answered exit 1 with
+     * `paper: EPERM: operation not permitted` the first time the Windows leg
+     * ran them.
+     *
+     * `'r+'` is read-write without truncation, so it is the same barrier on
+     * both: POSIX does not care which of the two it gets, and Windows only
+     * works with this one. */
     fsync: async (path, _level) => {
       const target = at(path)
       if ((await stat(target)).isDirectory()) {
         await syncDir(target)
         return
       }
-      const handle = await open(target, 'r')
+      const handle = await open(target, windows ? 'r+' : 'r')
       try {
         await handle.sync()
       } finally {

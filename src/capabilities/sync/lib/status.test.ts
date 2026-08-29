@@ -77,7 +77,6 @@ describe('classifying what a session threw', () => {
     [{ kind: 'blobInterrupted', message: 'short read' }, 'content'],
     [new Error('not paired with a shelf'), 'unpaired'],
     [new Error('No space left on device (os error 28)'), 'disk-full'],
-    [new DOMException('the quota has been exceeded', 'QuotaExceededError'), 'disk-full'],
     [new Error('sync.push answered an ack that does not match the pushed group'), 'broken-peer'],
     [new Error('something else entirely'), 'unknown'],
     ['a string', 'unknown'],
@@ -85,6 +84,23 @@ describe('classifying what a session threw', () => {
   ]
   it.each(cases)('%o → %s', (thrown, kind) => {
     expect(refusalKind(thrown)).toBe(kind)
+  })
+
+  /* NOT IN THE TABLE ABOVE, and the reason is the LEDGER rather than the
+   * assertion. `it.each` builds each test's NAME from its row, and `%o` of a
+   * `DOMException` is the one value here whose formatting is machine-local:
+   * Vitest prints `Error: <message>` only where `message` is an own property,
+   * and Node's `DOMException` keeps `name` and `message` on the prototype with
+   * `stack` as its only own one — so the name fell through to a plain object
+   * dump and came out as `DOMException{ stack: '… at /Users/<whoever>/…' }`.
+   *
+   * That is a different string on every machine. `tests/ledger.json` recorded
+   * the one this machine produces, no other checkout could collect it, and all
+   * three CI legs read it as a deletion — red on `main` with no code behind
+   * it, green only where it was written. A written title cannot do that, and
+   * `machineLocal` in `scripts/check-test-ledger.mjs` now refuses the shape. */
+  it('reads a quota DOMException as a full disk', () => {
+    expect(refusalKind(new DOMException('the quota has been exceeded', 'QuotaExceededError'))).toBe('disk-full')
   })
 })
 

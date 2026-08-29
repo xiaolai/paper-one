@@ -99,6 +99,13 @@ where
 }
 
 /// The books the URLs of a macOS `RunEvent::Opened` name.
+///
+/// GATED, not merely documented as macOS-only. `RunEvent::Opened` is a macOS
+/// event and its one caller in `lib.rs` sits under
+/// `cfg(all(feature = "desktop", target_os = "macos"))`, so on every other
+/// target this has no caller at all — dead code, which `-D warnings` makes an
+/// error. Invisible on macOS, where the caller is compiled in.
+#[cfg(target_os = "macos")]
 pub fn books_in_urls<'a, I>(urls: I) -> Vec<PathBuf>
 where
     I: IntoIterator<Item = &'a tauri::Url>,
@@ -301,6 +308,8 @@ mod tests {
         assert!(books_in_argv(argv(&["paper", "https://example.org/x.epub"]), None).is_empty());
     }
 
+    /// macOS only, because the function it covers is — see `books_in_urls`.
+    #[cfg(target_os = "macos")]
     #[test]
     fn opened_urls_yield_their_file_paths_and_only_the_books() {
         let urls = [

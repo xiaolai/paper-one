@@ -66,7 +66,19 @@ describe('defaultDataDir', () => {
     expect(defaultDataDir({ HOME: '/Users/x' }, 'darwin')).toBe(`/Users/x/Library/Application Support/${APP_IDENTIFIER}`)
     expect(defaultDataDir({ HOME: '/home/x' }, 'linux')).toBe(`/home/x/.local/share/${APP_IDENTIFIER}`)
     expect(defaultDataDir({ HOME: '/home/x', XDG_DATA_HOME: '/xdg' }, 'linux')).toBe(`/xdg/${APP_IDENTIFIER}`)
-    expect(defaultDataDir({ HOME: 'C:\\Users\\x', APPDATA: 'C:\\Roaming' }, 'win32')).toBe(join('C:\\Roaming', APP_IDENTIFIER))
+    /* SPELLED OUT, not built with `join`. The assertion used the HOST's
+     * separator, so on a Mac it expected `C:\Roaming/one.paper.reader` — a
+     * Windows drive with a POSIX separator, which is a path on neither system
+     * — and agreed with a `defaultDataDir` that had the same bug. Two wrongs
+     * that matched each other everywhere except on Windows, where nothing had
+     * run. The answer for a named platform does not depend on the platform
+     * asking, so the expectation should not either. */
+    expect(defaultDataDir({ HOME: 'C:\\Users\\x', APPDATA: 'C:\\Roaming' }, 'win32')).toBe(
+      `C:\\Roaming\\${APP_IDENTIFIER}`,
+    )
+    expect(defaultDataDir({ HOME: 'C:\\Users\\x' }, 'win32')).toBe(
+      `C:\\Users\\x\\AppData\\Roaming\\${APP_IDENTIFIER}`,
+    )
   })
 
   it('lets the environment name another, so a harness can point at a fixture', () => {

@@ -279,7 +279,18 @@ describe('the plugin', () => {
 
 describe('a real build', () => {
   it('`pnpm build:ios` prints its assert-bundle line and exits 0', () => {
-    const result = spawnSync('pnpm', ['build:ios'], { cwd: REPO_ROOT, encoding: 'utf8', timeout: 300_000, env: { ...process.env, TAURI_ENV_PLATFORM: undefined } })
+    /* PNPM IS A `.cmd` ON WINDOWS, and since the fix for CVE-2024-27980 Node
+       will not spawn one without a shell — `spawnSync('pnpm', …)` there is
+       `ENOENT`, which is how this case died the first time that leg ran. The
+       command is a fixed literal with no argument from anywhere, so the shell
+       has nothing to mis-quote; it is passed as ONE STRING rather than a
+       command plus args, because that pairing with `shell: true` is what
+       Node's DEP0190 warns about. */
+    const opts = { cwd: REPO_ROOT, encoding: 'utf8', timeout: 300_000, env: { ...process.env, TAURI_ENV_PLATFORM: undefined } }
+    const result =
+      process.platform === 'win32'
+        ? spawnSync('pnpm build:ios', { ...opts, shell: true })
+        : spawnSync('pnpm', ['build:ios'], opts)
     if (result.error) throw result.error
     const out = `${result.stdout}\n${result.stderr}`
     expect(out).toContain(`${PLUGIN_NAME}: TAURI_ENV_PLATFORM="ios" → ios → src/app/composition.ios.ts`)

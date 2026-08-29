@@ -464,6 +464,25 @@ pub fn run() {
         // `peer:default` in capabilities/default.json.
         .plugin(tauri_plugin_peer::init())
         .setup(|app| {
+            /* ⚠️ **THE LOGGER FIRST, AND THAT ORDER IS THE WHOLE POINT.** This
+             * sat BELOW the lock block, which is the only place in `setup`
+             * that can refuse to start — and `tauri_plugin_log` is the only
+             * logger anywhere in this tree. So `log::error!("lock: …")` was
+             * emitted with nothing attached to record it, and the one message
+             * that says why Paper would not open went nowhere, on every
+             * platform, every time. Measured on a Linux box: five lines in the
+             * log against 193 on a clean start, no error among them, and a
+             * window that never painted.
+             *
+             * Anything that can refuse must be registered after this. */
+            if cfg!(debug_assertions) {
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            }
+
             /* ONE PROCESS OWNS THE LIBRARY, and this is where it is decided —
              * before the webview boots, before the journal opens. The same
              * file, record and protocol as `paper`'s advisory lock, so the CLI
@@ -488,6 +507,16 @@ pub fn run() {
                     Err(refused) => {
                         let (title, body) = lock::refusal_text(&refused, &root);
                         log::error!("lock: {refused}");
+                        /* AND TO STDERR, WHICH IS THE ONLY CHANNEL THAT ALWAYS
+                         * ARRIVES. The dialog below is right for a reader at a
+                         * desk and useless anywhere else: `blocking_show()`
+                         * waits for a press that never comes on a headless
+                         * machine, a CI runner or a box reached over ssh, so
+                         * the process sits there holding an undismissable
+                         * modal — alive, silent, showing an unpainted window.
+                         * A release build has no logger at all, which makes
+                         * this the only record of the refusal there. */
+                        eprintln!("Paper: {title} — {body}");
                         app.dialog()
                             .message(body)
                             .title(title)
@@ -496,14 +525,6 @@ pub fn run() {
                         std::process::exit(1);
                     }
                 }
-            }
-
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
             }
 
             #[cfg(feature = "desktop")]

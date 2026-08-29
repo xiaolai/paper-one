@@ -326,10 +326,17 @@ describe('nodeTextFs', () => {
     expect(names).toEqual(['paper.store.v1.json'])
   })
 
-  it('leaves the previous bytes intact when the write fails, and clears the temporary', async () => {
+  it('leaves the previous bytes intact when the write fails, and clears the temporary', async ({ skip }) => {
     const root = await freshRoot()
     const fs = nodeTextFs(root)
     await fs.write('paper.store.v1.json', '{"kept":true}')
+    /* GUARDED LIKE ITS NEIGHBOURS. The `chmod` below is how the write is made
+     * to fail, and on Windows — and as root — it changes nothing, so the write
+     * SUCCEEDED and the case failed on `rejects`. Same shape as the two other
+     * mode-bit cases here, and `denyAccess` is where the reason is written
+     * once. */
+    const undeniable = await denyAccess(root, 'directory')
+    if (undeniable !== null) skip(undeniable)
     /* THE DIRECTORY IS MADE UNWRITABLE, so the temporary cannot be created at
      * all. This used to squat the temp path with a directory of the same
      * name — which worked only while every write shared one `.writing`
