@@ -300,6 +300,24 @@ export default mergeConfig(
     test: {
       passWithNoTests: true,
       maxWorkers: MAX_WORKERS,
+      /**
+       * A PASSING TEST'S CONSOLE OUTPUT IS MAIN-THREAD WORK, and this suite
+       * makes a lot of it.
+       *
+       * Every `console.*` inside a test is an `onUserConsoleLog` RPC to the
+       * main thread, which then formats it and writes it to a terminal — the
+       * same thread that must answer `onTaskUpdate` within birpc's 60 s, and
+       * the same starvation the worker cap above exists for. Measured on one
+       * `pnpm verify` run: 163 forwarded lines, 122 of them from
+       * `session.test.ts` alone, which exercises error paths on purpose and
+       * reports them on purpose.
+       *
+       * `passed-only` keeps every line of a FAILING test — the output a
+       * failure is diagnosed from is untouched — and drops the output of tests
+       * that passed, which nobody reads and which no gate asserts. Nothing is
+       * silenced that was ever a signal.
+       */
+      silent: 'passed-only',
       // 15s, not the 5s default: v8 coverage instrumentation makes tests 3–5×
       // slower, and a handful of compute-heavy ones (large-buffer hashing in
       // marks, a deep requires-graph in the architecture validator) can exceed

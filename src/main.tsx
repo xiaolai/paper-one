@@ -15,8 +15,13 @@ import '@fontsource-variable/literata'
 import '@fontsource/ibm-plex-mono/400.css'
 import '@fontsource/ibm-plex-mono/500.css'
 
-/* THE COMPOSITION ROOT. Two kernel entries and one composition, nothing
- * else: `./kernel` is the React-free public entry every capability sees too,
+/* THE COMPOSITION ROOT. Two kernel entries, one composition, and the two
+ * application helpers this file's own lifecycle needs — `app/shutdown` and
+ * `app/boot`, whose ORDER is tested where they live because it cannot be
+ * tested here. (This said "nothing else" while importing both, which is the
+ * kind of sentence a reader checks the imports against once and then stops
+ * trusting the rest of.) `./kernel` is the React-free public entry every
+ * capability sees too,
  * `./kernel/ui` is the UI entry only a composition root may import (it brings
  * the stylesheet with it), and `virtual:paper-composition` is THIS BUILD'S
  * platform composition — `src/app/composition.desktop.ts`, `.ios.ts` or
@@ -28,7 +33,20 @@ import '@fontsource/ibm-plex-mono/500.css'
  * dependency-cruiser the specifier maps to the desktop file
  * (`tsconfig.base.json` `paths`): all three export the same shape.
  * `.dependency-cruiser.cjs` holds this file to exactly these imports. */
-import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, finishPendingRemovals, kernelApi, serviceClients } from './kernel'
+import {
+  buildServices,
+  composeCapabilities,
+  createDiagnosticLog,
+  createDiagnosticSpool,
+  createDiagnostics,
+  createKernelServices,
+  DIAGNOSTICS_FILE,
+  DIAGNOSTICS_SWITCH,
+  finishPendingRemovals,
+  flushBeforeClose,
+  kernelApi,
+  serviceClients,
+} from './kernel'
 import {
   App,
   CLOSE_DRAIN_MS,
@@ -98,6 +116,45 @@ async function boot(root: HTMLElement): Promise<void> {
    * `countingFs` is the identity function in a build. */
   const fs = inTauri() ? countingFs(libraryFs) : null
 
+  /* WHAT THE APP CAN STILL BE ASKED ABOUT AFTERWARDS — see
+     `core/diagnosticsLog.ts` for why this is worth a module.
+   *
+   * The console was the only sink, so Paper's own account of a failure was
+   * reachable by a person with devtools open and by nobody else. That is what
+   * cost `scripts/sync-scenario.sh` three runs: the satchel wrote
+   * `sync.session-failed` with the refusal kind and the message, over an ssh
+   * connection, into a console nobody could read from the other end.
+   *
+   * ON IN DEV, AND IN A RELEASE ONLY IF ASKED. A file of a reader's own
+   * diagnostics is a thing to opt into, not a thing to find. The switch is
+   * the PRESENCE OF A FILE rather than a setting, for one reason that
+   * matters: settings arrive with the services, and this has to be decided
+   * before them — and a harness driving a release build over ssh can `touch`
+   * a path, where it cannot open a settings pane. */
+  /* A FAILURE TO LOOK IS NOT A DECISION NOT TO. Swallowing this made a
+     permission error, an unreadable directory and a deliberate opt-out the
+     same observation — so a reader who created the switch and got no file had
+     nothing at all to explain it, which is the very complaint this whole
+     feature exists to answer. Still defaults to off; it just says why. */
+  const switchAsked =
+    fs === null
+      ? false
+      : await fs.exists(DIAGNOSTICS_SWITCH).catch((cause: unknown) => {
+          console.error(`Paper: could not read ${DIAGNOSTICS_SWITCH}; diagnostics stay off`, cause)
+          return false
+        })
+  const diagnosticsOn = import.meta.env.DEV || switchAsked
+  const diagnosticLog = createDiagnosticLog()
+  const diagnosticSpool =
+    fs === null || !diagnosticsOn
+      ? null
+      : createDiagnosticSpool({
+          log: diagnosticLog,
+          write: async (jsonl) => {
+            await fs.writeFile(DIAGNOSTICS_FILE, new TextEncoder().encode(jsonl))
+          },
+        })
+
   /* THE SHELF'S BOOT ORDER — carry a phase-3 library across, finish the
    * removals a crash left half done, then read the shelf — lives in
    * `app/boot.ts`, where its order is tested. Timing wraps each step here,
@@ -166,7 +223,21 @@ async function boot(root: HTMLElement): Promise<void> {
      * from a library with none. `shelf.status` reported `books: 0` to a peer
      * asking whether this device was healthy. */
     shelfRead: !shelfUnread,
-    diagnostics: defaultDiagnostics(),
+    /* `record` TEES THE SAME REDACTED FIELDS the console line gets — redaction
+       happens once, above both, so the file cannot come to carry something the
+       console would not. `enabled` still decides everything: turned off, this
+       is `NOOP_DIAGNOSTICS` and nothing is recorded either. */
+    diagnostics: createDiagnostics({
+      enabled: diagnosticsOn,
+      ...(diagnosticSpool === null
+        ? {}
+        : {
+            record: (entry) => {
+              diagnosticLog.record(entry)
+              diagnosticSpool.touch()
+            },
+          }),
+    }),
   })
 
   /* THE TRASH IS EMPTIED AT BOOT, ON EACH BOOK'S LANE. Not on a timer and
@@ -245,7 +316,12 @@ async function boot(root: HTMLElement): Promise<void> {
    * naming the real Tauri event module.
    *
    * THE REAL MODULE, not `window.__TAURI__`. The first version read the
-   * global, and `withGlobalTauri` is FALSE in this app — so it found nothing,
+   * global, which a RELEASE build does not expose — `tauri.conf.json` sets
+   * `withGlobalTauri: false`, and `tauri.dev.conf.json` sets it TRUE, so the
+   * global is there under `pnpm app` and gone in the shipped app. (This said
+   * "FALSE in this app", which is the half that is wrong in development and so
+   * the half that hides the bug from anyone reproducing it.) So it found
+   * nothing,
    * returned, and the quit handshake timed out for five seconds every time
    * while looking like it had been wired. A silent capability check written
    * into the fix for a silent failure. */
@@ -261,7 +337,14 @@ async function boot(root: HTMLElement): Promise<void> {
       const { emit } = await import('@tauri-apps/api/event')
       await emit(event)
     },
-    flush: flushBeforeClose,
+    /* THE SPOOL'S TAIL GOES WITH THE FLUSH, because the diagnostics worth
+       having are the ones written just before the app stopped — and the spool
+       is debounced, so without this the last two seconds are exactly what a
+       crash-adjacent shutdown would drop. */
+    flush: async () => {
+      await flushBeforeClose()
+      await diagnosticSpool?.flush()
+    },
     drain: () => services.drain(),
     abort: () => lifetime.abort(),
     /* EVERY CAPABILITY'S ASYNC TAIL, read from the STATIC composition list

@@ -15,11 +15,93 @@
 # WHAT THIS SCRIPT DOES NOT DO, said plainly because a harness that implied
 # otherwise would draw the wrong conclusion the way WI-8.6's first run did:
 # IT DOES NOT SYNC. Replication is the app's; `paper` has no transport of its
-# own (`src/cli/remote.ts` says why). So the app must be RUNNING AND FRONTMOST
-# on both machines — sync is foreground-only on all platforms, and WI-8.6
-# measured a satchel behind a Terminal window failing to fire its 5 s debounce
-# for 60 s — and this script mutates one side and waits for the other to
-# agree. A step that times out is reported as a NAMED FAILURE, never as a pass.
+# own (`src/cli/remote.ts` says why). So the app must be RUNNING AND ITS WINDOW
+# UNHIDDEN on both machines — sync is foreground-only on all platforms — and
+# this script mutates one side and waits for the other to agree. A step that
+# times out is reported as a NAMED FAILURE, never as a pass.
+#
+# ⚠️ **NOT "FRONTMOST", AND THE DIFFERENCE DECIDES WHETHER A HUMAN HAS TO SIT
+# AT EACH MACHINE.** This said FRONTMOST for three runs, which reads as "keep
+# clicking on both apps", and it is stronger than what the webview requires.
+# The criterion is `document.visibilityState`, and focus does not affect it.
+# Measured 2026-08-29 against a 1 s heartbeat in the running app:
+#
+#   focused, on screen ........ visible, largest gap 1 005 ms over 47 s
+#   UNFOCUSED, on screen ...... visible, largest gap 1 005 ms over 47 s
+#
+# So an unfocused window is not affected in the slightest. Leave both open and
+# walk away rather than nursing them.
+#
+# ⚠️ **AND A HIDDEN WEBVIEW IS THROTTLED, NOT STOPPED — WHICH IS THE OPPOSITE
+# OF WHAT THIS COMMENT SAID FOR ONE COMMIT.** A first measurement showed a
+# minimised window taking a single 37 165 ms gap with no tick at all, and that
+# was written here as fact. It DID NOT REPRODUCE. Three further runs, one of
+# them four minutes long and with no contact of any kind:
+#
+#   minimised, 45 s ........... hidden, 23 ticks, largest gap 2 016 ms
+#   minimised, 40 s ........... hidden, 22 ticks, largest gap 2 044 ms
+#   minimised, 4 min .......... hidden, 116 ticks, 109 gaps near 2 s,
+#                               four excursions, largest 5 271 ms
+#
+# A 5 s commit debounce absorbs a 2 s throttle without noticing. So the claim
+# that sync CANNOT run behind a hidden window is NOT established by anything
+# measured here, and the one observation that supported it stands alone and
+# unexplained — display sleep and a just-launched app are both candidates and
+# neither was ruled out.
+#
+# AND THE DEBOUNCE ITSELF WAS MEASURED, which is the claim that matters:
+#
+#   a 5 s setTimeout ARMED WHILE THE WINDOW WAS HIDDEN fired 106 ms late,
+#   and fired while the window was STILL HIDDEN
+#
+# That is the exact mechanism "sync is foreground-only" is about, and it works.
+# `lib/scheduler.ts` agrees on the other side: `visibility` there is a TRIGGER
+# and never a gate — neither `kick` nor `armDebounce` consults it, so nothing
+# in Paper's own code declines to sync while hidden either.
+#
+# ⚠️ **SO WI-8.6'S EXPLANATION DOES NOT HOLD, AND ITS AUTHOR SAID AS MUCH.**
+# That run recorded a satchel — `visibilityState: "hidden"`, `isMinimized():
+# false`, occluded behind the Terminal this harness activates — failing to
+# fire its debounce for 60 s, and reasoned that "WebKit suspends timers in a
+# hidden page … is a sufficient explanation". It is marked **UNVERIFIED** in
+# the same paragraph, with "do that at the machine before concluding
+# anything", and nobody did. A sufficient-sounding explanation became the
+# reason this harness demands a human at two keyboards.
+#
+# WHAT THIS MEANS FOR A FAILING RUN: do not reach for "the window was hidden".
+# Sixty seconds is two orders past a 2 s throttle, the debounce fires hidden,
+# and the scheduler does not gate on visibility. Whatever WI-8.6 hit is still
+# unidentified — `onLocalCommit` never firing, or a push that failed quietly,
+# are both better places to look than the window. A manual "Sync now" worked
+# in that same run within 5 s, which points at the trigger and not the run.
+#
+# THREE STATES, AND THEY ARE NOT ONE. `minimised`, `display asleep` and
+# `screen locked` are different conditions, this script's preflight only reads
+# the third, and only the first has been measured:
+#
+#   minimised ......... MEASURED as throttled to ~2 s, not suspended, over
+#                       four minutes. One earlier 37 165 ms observation did
+#                       not reproduce and is unexplained
+#   display asleep .... UNMEASURED. Distinct from a lock, and reached SOONER on
+#                       a machine whose `displaysleep` is shorter than its
+#                       `screenLock` — so a run can die of this while the
+#                       preflight's lock check is still saying yes
+#   screen locked ..... refused by preflight [4]/[5]; WI-8.6 attributes six
+#                       convergence timeouts to it
+#   occluded .......... UNRESOLVED, see below
+#
+# So `caffeinate -d` on both machines is worth more than it looks: it removes
+# the one state that is neither measured nor checked.
+#
+# AND THE OCCLUSION CASE IS UNRESOLVED, stated rather than smoothed over.
+# WI-8.6 measured a satchel BEHIND A TERMINAL WINDOW failing to fire its 5 s
+# debounce for 60 s. An attempt to reproduce that on 2026-08-29 — another app's
+# window maximised over Paper's — kept `visibilityState` at `visible` and
+# ticked for 129 s with no gap, so either that window never truly occluded
+# Paper or macOS's occlusion detection needs more than overlap. One of those
+# measurements reaches a case the other does not, and until that is settled the
+# conservative reading holds: keep the windows UNOBSCURED, not merely
+# unminimised.
 #
 # WHAT IT MUTATES: one book it creates itself (`SCENARIO_BOOK`), one mark on
 # it, and one tag. Everything is prefixed `wi-11-7-` so a failed run leaves
@@ -63,6 +145,19 @@ readonly REMOTE_PATH="${PAPER_REMOTE_PATH:-/opt/homebrew/opt/node@24/bin:/opt/ho
 # Both overrides are interpolated into shell source that runs on the REMOTE, so
 # both are validated against an allowlist rather than quoted through bash → ssh
 # → the remote shell. Same reasoning, same allowlist, as `second-instance.sh`.
+# ⚠️ **THE SAME RULE FOR THE APP PATH, WHICH DID NOT HAVE ONE.**
+# `PAPER_SATCHEL_APP` is interpolated into a string that is handed to a REMOTE
+# SHELL (`open -a "$HOME/$PAPER_SATCHEL_APP"`, line ~347). A value containing a
+# quote, a `;` or a `$(…)` ran as a command on the far machine — arbitrary
+# execution from an environment variable, in a harness whose whole job is to be
+# pointed at somebody else's Mac. `REMOTE_CHECKOUT` next to it was already
+# validated; this was not, and the two travel to the same shell.
+readonly SATCHEL_APP="${PAPER_SATCHEL_APP:-Applications/Paper.app}"
+case "$SATCHEL_APP" in
+  ''|/*|*..*) echo "PAPER_SATCHEL_APP must be a relative path with no '..': '$SATCHEL_APP'" >&2; exit 2 ;;
+  *[!A-Za-z0-9._/\ -]*) echo "PAPER_SATCHEL_APP may use only A-Za-z0-9._/- and spaces : '$SATCHEL_APP'" >&2; exit 2 ;;
+esac
+
 case "$REMOTE_CHECKOUT" in
   ''|/*|*..*) echo "PAPER_REMOTE_CHECKOUT must be a relative path with no '..': '$REMOTE_CHECKOUT'" >&2; exit 2 ;;
   *[!A-Za-z0-9._/-]*) echo "PAPER_REMOTE_CHECKOUT may use only A-Za-z0-9._/- : '$REMOTE_CHECKOUT'" >&2; exit 2 ;;
@@ -175,7 +270,7 @@ satchel() {
   for one in "$@"; do
     joined="$joined '${one//\'/\'\\\'\'}'"
   done
-  ssh -o BatchMode=yes "$remote" \
+  remote_sh \
     "export PATH=\"$REMOTE_PATH\"; cd \"\$HOME/$REMOTE_CHECKOUT\" && ./bin/paper.mjs$joined"
 }
 
@@ -243,13 +338,37 @@ readonly APP_SETTLE_S="${PAPER_APP_SETTLE_S:-14}"
 # stays representative of what a reader's machine actually does.
 readonly QUIT_VIA_MENU='tell application "System Events" to tell process "Paper" to click menu item "Quit Paper" of menu 1 of menu bar item 2 of menu bar 1'
 
+# ⚠️ **A FORCE-KILL IS NOT A QUIT, AND THIS REPORTED THEM THE SAME.** Both
+# helpers suppressed every failure and returned 0 unconditionally — the same
+# always-success shape `--clean` had. It matters more here than there: the
+# graceful path is the app's shutdown handshake, which closes the sync journal;
+# `pkill` is the DIRTY shutdown the comment above `QUIT_VIA_MENU` exists to
+# avoid, and it is exactly what happens when Accessibility permission is
+# missing and the AppleScript silently does nothing. The run then proceeded
+# over a journal left dirty, having said nothing.
+#
+# It still force-kills — a machine that will not quit its app must not wedge
+# the run — but it SAYS SO, so a transcript records which shutdown each side
+# got and a reader diagnosing a convergence failure can see it.
 app_quit() {
+  local forced=no
   case "$1" in
     shelf) osascript -e "$QUIT_VIA_MENU" >/dev/null 2>&1 || true; sleep 8
-           pgrep -f "$APP_PROCESS" >/dev/null 2>&1 && { pkill -f "$APP_PROCESS" || true; sleep 3; } ;;
-    satchel) ssh -o BatchMode=yes "$remote" \
-               "osascript -e '$QUIT_VIA_MENU' >/dev/null 2>&1 || true; sleep 8; pgrep -f '$APP_PROCESS' >/dev/null 2>&1 && { pkill -f '$APP_PROCESS' || true; sleep 3; }; true" ;;
+           if pgrep -f "$APP_PROCESS" >/dev/null 2>&1; then
+             forced=yes
+             pkill -f "$APP_PROCESS" || true
+             sleep 3
+           fi ;;
+    satchel) if remote_sh \
+               "osascript -e '$QUIT_VIA_MENU' >/dev/null 2>&1 || true; sleep 8; if pgrep -f '$APP_PROCESS' >/dev/null 2>&1; then pkill -f '$APP_PROCESS' || true; sleep 3; exit 9; fi; exit 0"; then
+               forced=no
+             else
+               [ "$?" -eq 9 ] && forced=yes
+             fi ;;
   esac
+  if [ "$forced" = yes ]; then
+    log "  note  the $1's app did not quit through its menu and was force-killed — its journal may be left dirty"
+  fi
   return 0
 }
 
@@ -258,13 +377,27 @@ app_quit() {
 # release builds entirely (`role.rs`) — so a satchel must be a debug build
 # launched with it. Deploying a release build to the satchel once silently
 # demoted it, and pairing then failed with `expected Satchel, got Shelf`.
+# AND A LAUNCH THAT FAILED WAS TREATED AS HEALTHY. `open` was `|| true`d and
+# the result never checked, so a satchel whose app never came up looked exactly
+# like one that did — and every convergence step after it then timed out
+# against a machine running nothing, which is six minutes to learn what one
+# `pgrep` answers.
 app_start() {
   case "$1" in
     shelf) open -a "${PAPER_SHELF_APP:-Paper}" >/dev/null 2>&1 || true ;;
-    satchel) ssh -o BatchMode=yes "$remote" \
-               "open --env PAPER_ROLE=satchel -a \"\$HOME/${PAPER_SATCHEL_APP:-Applications/Paper.app}\" >/dev/null 2>&1 || true" ;;
+    satchel) remote_sh \
+               "open --env PAPER_ROLE=satchel -a \"\$HOME/$SATCHEL_APP\" >/dev/null 2>&1 || true" ;;
   esac
   sleep "$APP_SETTLE_S"
+  local up=no
+  case "$1" in
+    shelf) pgrep -f "$APP_PROCESS" >/dev/null 2>&1 && up=yes ;;
+    satchel) remote_sh "pgrep -f '$APP_PROCESS' >/dev/null 2>&1" && up=yes ;;
+  esac
+  if [ "$up" != yes ]; then
+    log "  note  the $1's app is NOT running after a launch attempt — every step below will time out against it"
+    return 1
+  fi
   return 0
 }
 
@@ -301,6 +434,23 @@ mutate() {
   return 1
 }
 
+# Every ssh this script makes, with a deadline on it.
+#
+# ⚠️ **AN UNBOUNDED SSH DEFEATS `--timeout` ENTIRELY.** `converge` checks its
+# deadline BETWEEN calls, so a single ssh that hangs — a sleeping Mac, a
+# half-open TCP connection, a wedged sshd — blocks past the timeout for as long
+# as the kernel keeps the socket, and the run neither converges nor gives up.
+# Seven call sites had no bound at all. One helper, so the next one cannot be
+# added without one.
+#
+# `BatchMode` refuses a password prompt (an ssh waiting on a human is the same
+# hang wearing a different hat); `ConnectTimeout` bounds the dial;
+# `ServerAlive*` bounds a connection that opened and then stopped answering,
+# which is the sleeping-laptop case and the one a connect timeout cannot see.
+remote_sh() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 "$remote" "$@"
+}
+
 # Wait until `$2` (a shell snippet) succeeds, or give up by name.
 #
 # POLLED rather than watched, because there is nothing to watch: the app's
@@ -322,7 +472,62 @@ converge() {
   # Trimmed to one line: the far side's answer can be a whole JSON row, and a
   # transcript is easier to read than it is to widen.
   fail "$what — did not converge in ${timeout_s}s; last answer: $(printf '%s' "${last:-<none>}" | tr '\n' ' ' | cut -c1-200)"
+  # AND ASK BOTH APPS WHY, which is the half this harness never had. See
+  # `diagnostics_tail`.
+  diagnostics_tail
   return 1
+}
+
+# The apps' own account of the failure, from both machines.
+#
+# ⚠️ **THIS IS THE HALF THAT COST THREE RUNS.** A convergence timeout says the
+# two libraries disagreed; it has never said WHY, and the app knew all along.
+# A refused session writes `sync.session-failed` with the refusal kind and the
+# message the moment it happens — and until 2026-08-29 it wrote it to the
+# webview's console, on the far end of an ssh connection, where nothing here
+# could read it. WI-8.6 could not, guessed instead, wrote "WebKit suspends
+# timers in a hidden page … is a sufficient explanation", marked its own guess
+# UNVERIFIED, and that guess shaped this harness's preconditions for weeks.
+#
+# `DIAGNOSTICS_FILE` in `src/kernel/core/diagnosticsLog.ts` is the same name on
+# both sides — declared once there, read here, for the reason `serviceTable.ts`
+# exists. It is a bounded window rewritten whole, so a `tail` of it is the last
+# thing each app had to say.
+#
+# ON IN A DEV BUILD. A release build writes it only if `DIAGNOSTICS_SWITCH`
+# exists, which is a path this script could create over ssh — deliberately not
+# done automatically, because turning on a reader's diagnostics is their
+# choice and this script is a guest on both machines.
+readonly DIAGNOSTICS='Library/Application Support/one.paper.reader/diagnostics.jsonl'
+diagnostics_tail() {
+  # `said`, NOT `out`: `out` is the transcript file this script's own `log`
+  # appends to, and shadowing it here would send every line below into a
+  # variable instead of the transcript.
+  local where side said
+  for side in shelf satchel; do
+    where=$([ "$side" = shelf ] && echo 'this machine' || echo "$remote")
+    if [ "$side" = shelf ]; then
+      said="$(tail -n 12 "$HOME/$DIAGNOSTICS" 2>/dev/null || true)"
+    else
+      # BOUNDED. This runs on the FAILURE path — the one that exists to say
+      # why a step timed out — so an ssh that hangs here costs the operator the
+      # explanation as well as the run. The rest of this script's ssh calls
+      # share the same gap (audited 2026-08-29); this is the one it added.
+      said="$(remote_sh "tail -n 12 \"\$HOME/$DIAGNOSTICS\" 2>/dev/null || true")"
+    fi
+    log ''
+    if [ -z "$said" ]; then
+      log "  no diagnostics on $where. A dev build writes them; a release build"
+      log "  only when a \`diagnostics.on\` file sits beside \`diagnostics.jsonl\`"
+      log "  in the app's data directory."
+    else
+      log "  what Paper on $where last reported:"
+      log ''
+      log '```json'
+      log "$said"
+      log '```'
+    fi
+  done
 }
 
 # --- the predicates each step converges on -------------------------------
@@ -407,10 +612,15 @@ log "- shelf:  this machine, $REPO_ROOT"
 log "- satchel: $remote:\$HOME/$REMOTE_CHECKOUT"
 log "- timeout per convergence: ${timeout_s}s"
 log ''
-log 'THE APPS MUST BE RUNNING AND FRONTMOST ON BOTH MACHINES. This script does'
-log 'not sync; it mutates one side and waits for the other to agree. Sync is'
-log 'foreground-only, and WI-8.6 measured an occluded satchel failing to fire'
-log 'its debounce for 60 seconds.'
+log 'THE APPS MUST BE RUNNING WITH THEIR WINDOWS UNHIDDEN ON BOTH MACHINES.'
+log 'This script does not sync; it mutates one side and waits for the other to'
+log 'agree. A hidden webview is THROTTLED to about 2 s — measured over four'
+log 'minutes — which a 5 s debounce absorbs; an earlier claim that it stops'
+log 'outright did not reproduce. Focus is NOT required; leave both'
+log 'open and unobscured and walk away. Do not minimise either, and run both'
+log 'under `caffeinate -d`: a display asleep is a separate state from a locked'
+log 'screen, it is NOT checked below, and on a machine whose display sleeps'
+log 'sooner than it locks it is what will end the run.'
 log ''
 log '## Preflight'
 
@@ -488,7 +698,7 @@ screen_lock_state() {
     else
       echo unknown
     fi'
-  if [ "$1" = local ]; then sh -c "$probe"; else ssh -o BatchMode=yes "$remote" "$probe"; fi
+  if [ "$1" = local ]; then sh -c "$probe"; else remote_sh "$probe"; fi
 }
 
 for side in local remote; do
@@ -521,7 +731,24 @@ readonly SYNC_DIR_LOCAL="$HOME/Library/Application Support/one.paper.reader/sync
 readonly JOURNAL_FILE="$SYNC_DIR_LOCAL/journal.jsonl"
 readonly DIRTY_FILE="$SYNC_DIR_LOCAL/journal.dirty"
 readonly PEERS_FILE="$HOME/Library/Application Support/one.paper.reader/peer/peers.json"
-readonly PROBE_BOOK='wi-11-7-journal-probe'
+# ⚠️ **UNIQUE PER RUN, AND THAT IS THREE FIXES IN ONE.** This was the fixed id
+# `wi-11-7-journal-probe`, which made the probe wrong in three ways at once:
+#
+#   - `grep -c "$PROBE_BOOK" "$JOURNAL_FILE"` searched the WHOLE append-only
+#     journal, so once ANY earlier run had written that id every later probe
+#     passed — including runs where the CLI write never journaled at all. The
+#     check reported on history rather than on what just happened.
+#   - the cleanup removed that id and deleted its trash directory
+#     UNCONDITIONALLY, so if a live or trashed book already held it, a
+#     diagnostic probe destroyed a reader's book it had not created.
+#   - a run that crashed between the add and the remove left the id behind to
+#     do it again next time.
+#
+# A per-run id cannot collide with a reader's library, cannot match an earlier
+# run's journal line, and is safe to remove because nothing else can have
+# written it. `$$` and the clock are enough — this is a probe, not a key.
+readonly PROBE_BOOK="wi-11-7-journal-probe-$$-$(date +%s)"
+readonly PROBE_TRASH="${PROBE_BOOK//-/_}"
 
 # THE FIRST PRECONDITION: a CLI write must reach the journal, or nothing it
 # does can replicate. `paper` binds the sync journal at `bindRecorder` now
@@ -538,19 +765,42 @@ probe_journaling() {
   app_quit shelf
   local before=0 after=0 seen=0
   [ -f "$JOURNAL_FILE" ] && before=$(wc -c < "$JOURNAL_FILE" | tr -d ' ')
-  shelf book add "$PROBE_BOOK" 'journal probe' >/dev/null 2>&1 || true
+  # OWNERSHIP BEFORE CLEANUP. The add's status was discarded with `|| true`,
+  # so the probe went on to remove an id it might never have created and to
+  # report on a journal line somebody else had written.
+  local created=no
+  if shelf book add "$PROBE_BOOK" 'journal probe' >/dev/null 2>&1; then created=yes; fi
   [ -f "$JOURNAL_FILE" ] && after=$(wc -c < "$JOURNAL_FILE" | tr -d ' ')
   [ -f "$JOURNAL_FILE" ] && seen=$(grep -c "$PROBE_BOOK" "$JOURNAL_FILE" 2>/dev/null || echo 0)
-  shelf book remove "$PROBE_BOOK" >/dev/null 2>&1 || true
-  rm -rf "$HOME/Library/Application Support/one.paper.reader/trash/wi_11_7_journal_probe"
+  if [ "$created" = yes ]; then
+    shelf book remove "$PROBE_BOOK" >/dev/null 2>&1 || true
+    rm -rf "$HOME/Library/Application Support/one.paper.reader/trash/$PROBE_TRASH"
+  fi
   app_start shelf
-  if [ "$seen" -gt 0 ]; then
+  if [ "$created" != yes ]; then
+    fail 'the journal probe could not add its own book, so nothing was measured. `paper book add` failed while no Paper process held the library — run it by hand to see why.'
+  elif [ "$seen" -gt 0 ]; then
     pass "a CLI write reaches the sync journal ($before -> $after bytes), so it can replicate"
   else
     fail 'a CLI write did NOT reach the sync journal, so nothing below can replicate. `paper` binds the journal only when no Paper process holds it — see WI-11.7 in dev-docs/plans/phase-11-service-api.md.'
   fi
 }
-probe_journaling
+
+# ⚠️ **NOT UNDER `--dry-run`, AND THAT FLAG WAS A LIE UNTIL NOW.** `--dry-run`
+# is documented as "preflight only: prove both ends answer, change nothing",
+# and it was not read until line ~833 — long after this probe had QUIT THE APP,
+# created a book, removed it and deleted its trash directory. The run then
+# printed "Nothing was changed." over all of it.
+#
+# The probe cannot be made read-only: proving a CLI write reaches the journal
+# requires a CLI write. So a dry run cannot have this answer, and the honest
+# thing is to say which question went unasked rather than to answer it by
+# mutating a library the flag promised not to touch.
+if [ "$dry_run" -eq 1 ]; then
+  skip 'whether a CLI write reaches the sync journal — the probe writes a book to find out, and --dry-run changes nothing'
+else
+  probe_journaling
+fi
 
 # THE SECOND PRECONDITION, and the one that cost this scenario two full runs
 # before anybody checked it: THE TWO MACHINES MUST ACTUALLY BE IN CONTACT.
@@ -608,7 +858,7 @@ if pgrep -f "$APP_PROCESS" >/dev/null 2>&1; then
 else
   fail 'Paper is NOT running on this machine — nothing will replicate, and every step below would time out'
 fi
-if ssh -o BatchMode=yes "$remote" "pgrep -f '$APP_PROCESS' >/dev/null 2>&1"; then
+if remote_sh "pgrep -f '$APP_PROCESS' >/dev/null 2>&1"; then
   pass 'Paper is running on the satchel'
 else
   fail "Paper is NOT running on $remote — nothing will replicate, and every step below would time out"
@@ -621,21 +871,57 @@ if [ "$failures" -gt 0 ]; then
   exit 1
 fi
 
+# ⚠️ **THIS REPORTED SUCCESS WHATEVER HAPPENED, AND USUALLY NOTHING HAPPENED.**
+# Every command carried `|| true`, the log line said "removed … from both
+# sides" unconditionally, and the exit was always 0. Worse, these are WRITES,
+# and `paper` takes the same advisory lock the app holds — so with both apps
+# running, which is this script's own stated precondition, every one of them
+# was REFUSED. `--clean` was a no-op that announced a cleanup.
+#
+# The apps come down first, for the same reason `probe_journaling` takes them
+# down: a CLI write needs the library to itself. Each result is checked, the
+# log says which artefacts were actually removed, and a failure leaves a
+# non-zero exit so a caller cannot read "cleaned" off a status code that never
+# meant it. `book remove` on an id that is not there is NOT a failure — there
+# is nothing to remove, which is the desired end state.
 if [ "$clean" -eq 1 ]; then
   log ''
   log '## Clean'
-  shelf tag remove "$SCENARIO_TAG" >/dev/null 2>&1 || true
-  shelf tag remove "$SCENARIO_TAG_RENAMED" >/dev/null 2>&1 || true
-  shelf book remove "$SCENARIO_BOOK" >/dev/null 2>&1 || true
-  satchel book remove "$SCENARIO_BOOK" >/dev/null 2>&1 || true
-  log '  removed this scenario’s book and tags from both sides.'
+  app_quit shelf
+  app_quit satchel
+  clean_failures=0
+  clean_one() {
+    # $1 = human name, rest = command
+    local what said; what="$1"; shift
+    if said="$("$@" 2>&1)"; then
+      pass "removed $what"
+    elif printf '%s' "$said" | grep -qiE 'not found|no such|unknown (book|tag)'; then
+      skip "$what was not there"
+    else
+      clean_failures=$((clean_failures + 1))
+      fail "could not remove $what: $(printf '%s' "$said" | tr '\n' ' ' | cut -c1-160)"
+    fi
+  }
+  clean_one "the scenario tag on the shelf"        shelf tag remove "$SCENARIO_TAG"
+  clean_one "the renamed tag on the shelf"         shelf tag remove "$SCENARIO_TAG_RENAMED"
+  clean_one "the scenario book on the shelf"       shelf book remove "$SCENARIO_BOOK"
+  clean_one "the scenario book on the satchel"     satchel book remove "$SCENARIO_BOOK"
+  app_start shelf
+  app_start satchel
   log "Transcript: $out"
+  if [ "$clean_failures" -gt 0 ]; then
+    log ''
+    log "  $clean_failures artefact(s) could not be removed — this run did NOT clean up."
+    exit 1
+  fi
   exit 0
 fi
 
 if [ "$dry_run" -eq 1 ]; then
   log ''
-  log 'Dry run: both ends answer. Nothing was changed.'
+  log 'Dry run: both ends answer, and nothing was changed on either.'
+  log 'NOT proven here: that a CLI write reaches the sync journal — that probe'
+  log 'writes a book, so it is skipped above. Run without --dry-run for it.'
   log "Transcript: $out"
   exit 0
 fi
@@ -720,7 +1006,7 @@ log '## The hub edits, then goes quiet'
 # header). Hard-coding it here states that rather than assuming it.
 readonly JOURNAL='Library/Application Support/one.paper.reader/sync/journal.jsonl'
 shelf_journal_size() { wc -c < "$HOME/$JOURNAL" 2>/dev/null || echo missing; }
-satchel_journal_size() { ssh -o BatchMode=yes "$remote" "wc -c < \"\$HOME/$JOURNAL\" 2>/dev/null || echo missing"; }
+satchel_journal_size() { remote_sh "wc -c < \"\$HOME/$JOURNAL\" 2>/dev/null || echo missing"; }
 
 first_shelf="$(shelf_journal_size | tr -d ' ')"
 first_satchel="$(satchel_journal_size | tr -d ' ')"
