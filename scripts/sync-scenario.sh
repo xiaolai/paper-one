@@ -404,7 +404,58 @@ converge() {
   # Trimmed to one line: the far side's answer can be a whole JSON row, and a
   # transcript is easier to read than it is to widen.
   fail "$what — did not converge in ${timeout_s}s; last answer: $(printf '%s' "${last:-<none>}" | tr '\n' ' ' | cut -c1-200)"
+  # AND ASK BOTH APPS WHY, which is the half this harness never had. See
+  # `diagnostics_tail`.
+  diagnostics_tail
   return 1
+}
+
+# The apps' own account of the failure, from both machines.
+#
+# ⚠️ **THIS IS THE HALF THAT COST THREE RUNS.** A convergence timeout says the
+# two libraries disagreed; it has never said WHY, and the app knew all along.
+# A refused session writes `sync.session-failed` with the refusal kind and the
+# message the moment it happens — and until 2026-08-29 it wrote it to the
+# webview's console, on the far end of an ssh connection, where nothing here
+# could read it. WI-8.6 could not, guessed instead, wrote "WebKit suspends
+# timers in a hidden page … is a sufficient explanation", marked its own guess
+# UNVERIFIED, and that guess shaped this harness's preconditions for weeks.
+#
+# `DIAGNOSTICS_FILE` in `src/kernel/core/diagnosticsLog.ts` is the same name on
+# both sides — declared once there, read here, for the reason `serviceTable.ts`
+# exists. It is a bounded window rewritten whole, so a `tail` of it is the last
+# thing each app had to say.
+#
+# ON IN A DEV BUILD. A release build writes it only if `DIAGNOSTICS_SWITCH`
+# exists, which is a path this script could create over ssh — deliberately not
+# done automatically, because turning on a reader's diagnostics is their
+# choice and this script is a guest on both machines.
+readonly DIAGNOSTICS='Library/Application Support/one.paper.reader/diagnostics.jsonl'
+diagnostics_tail() {
+  # `said`, NOT `out`: `out` is the transcript file this script's own `log`
+  # appends to, and shadowing it here would send every line below into a
+  # variable instead of the transcript.
+  local where side said
+  for side in shelf satchel; do
+    where=$([ "$side" = shelf ] && echo 'this machine' || echo "$remote")
+    if [ "$side" = shelf ]; then
+      said="$(tail -n 12 "$HOME/$DIAGNOSTICS" 2>/dev/null || true)"
+    else
+      said="$(ssh -o BatchMode=yes "$remote" "tail -n 12 \"\$HOME/$DIAGNOSTICS\" 2>/dev/null || true")"
+    fi
+    log ''
+    if [ -z "$said" ]; then
+      log "  no diagnostics on $where. A dev build writes them; a release build"
+      log "  only when a \`diagnostics.on\` file sits beside \`diagnostics.jsonl\`"
+      log "  in the app's data directory."
+    else
+      log "  what Paper on $where last reported:"
+      log ''
+      log '```json'
+      log "$said"
+      log '```'
+    fi
+  done
 }
 
 # --- the predicates each step converges on -------------------------------
