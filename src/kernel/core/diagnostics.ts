@@ -1,3 +1,4 @@
+import type { DiagnosticEntry } from './diagnosticsLog'
 import type { Diagnostics } from './ports'
 import { NOOP_DIAGNOSTICS } from './ports'
 
@@ -151,6 +152,21 @@ export interface DiagnosticsOptions {
   readonly enabled?: boolean
   /** The top scope. `kernel` unless said otherwise. */
   readonly scope?: string
+  /**
+   * A second reader of every report, STRUCTURED — see `diagnosticsLog.ts`.
+   *
+   * The `sink` receives a formatted line because the console is a place a
+   * person reads. This receives the scope, event and fields apart, because a
+   * pane wants to filter by capability and a file wants to be greppable by
+   * event. Both get the SAME redacted fields: redaction happens once, above
+   * both, and neither can be given anything the other was not.
+   *
+   * Absent by default. A composition root that wants a window of what
+   * happened passes one; nothing else changes.
+   */
+  readonly record?: (entry: DiagnosticEntry) => void
+  /** Injectable so a test can assert the stamp rather than tolerate it. */
+  readonly now?: () => number
 }
 
 /**
@@ -164,6 +180,8 @@ export function createDiagnostics({
   sink = console,
   enabled = true,
   scope = 'kernel',
+  record,
+  now = Date.now,
 }: DiagnosticsOptions = {}): Diagnostics {
   if (!enabled) return NOOP_DIAGNOSTICS
   /* THE SINK IS GUARDED HERE, ONCE. A diagnostic is written from a catch
@@ -184,11 +202,21 @@ export function createDiagnostics({
   }
   const at = (name: string): Diagnostics => {
     const line = (event: string) => `[paper:${name}] ${event}`
+    /* REDACTED ONCE, FOR BOTH. Calling `redact` per reader would let the two
+       drift the moment one of them is given a different argument, and the
+       file is the reader where that mistake lasts. `record` is guarded on its
+       own so a failing recorder cannot cost the console its line — the same
+       rule the sink already has, for the same reason. */
+    const report = (level: 'info' | 'warn' | 'error', event: string, fields: Record<string, unknown>): void => {
+      const safe = redact(fields)
+      quietly(() => sink[level](line(event), safe))
+      if (record !== undefined) quietly(() => record({ at: now(), level, scope: name, event, fields: safe }))
+    }
     return {
       child: (child) => at(`${name}.${child}`),
-      info: (event, fields = {}) => quietly(() => sink.info(line(event), redact(fields))),
-      warn: (event, fields = {}) => quietly(() => sink.warn(line(event), redact(fields))),
-      error: (event, fields = {}) => quietly(() => sink.error(line(event), redact(fields))),
+      info: (event, fields = {}) => report('info', event, fields),
+      warn: (event, fields = {}) => report('warn', event, fields),
+      error: (event, fields = {}) => report('error', event, fields),
     }
   }
   return at(scope)

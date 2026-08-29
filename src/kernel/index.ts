@@ -146,6 +146,15 @@ export type {
 } from './core/ports'
 export { createDiagnostics, defaultDiagnostics, redact } from './core/diagnostics'
 export type { DiagnosticsOptions, Sink } from './core/diagnostics'
+export {
+  createDiagnosticLog,
+  createDiagnosticSpool,
+  DEFAULT_CAPACITY,
+  DEFAULT_FLUSH_MS,
+  DIAGNOSTICS_FILE,
+  DIAGNOSTICS_SWITCH,
+} from './core/diagnosticsLog'
+export type { DiagnosticEntry, DiagnosticLog, DiagnosticSpool } from './core/diagnosticsLog'
 export { CAPABILITY_UI, type CapabilityUiClass } from './core/capabilityUi'
 /* EVERYTHING A CAPABILITY'S `start` ACQUIRED — see `core/capabilitySession.ts`. */
 export { openSession } from './core/capabilitySession'
