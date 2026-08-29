@@ -54,6 +54,16 @@ export const REDACTED = '[redacted]'
 /** How deep a nested value is walked before it is summarised. */
 const MAX_DEPTH = 8
 
+/** How many entries of one container are kept before the rest are counted.
+ *  Depth was bounded and width was not, so one wide object could be walked,
+ *  formatted and written in full on an error path. */
+const MAX_ENTRIES = 100
+
+/** How long one string may be. Generous — a real error message survives — and
+ *  far below a paragraph of a book or an envelope body, which are the two of
+ *  the plan's four forbidden things that arrive as free-form text. */
+const MAX_STRING = 512
+
 /** `authToken` → `auth`, `token`; `peer_id` → `peer`, `id`; `Body` → `body`;
  *  and the acronym boundary too: `APIKey` → `api`, `key` — without the
  *  acronym-to-word split, every ALL-CAPS-led compound sailed past the list. */
@@ -99,15 +109,53 @@ export function redact(fields: Record<string, unknown>): Record<string, unknown>
 
 function redactObject(fields: Record<string, unknown>, depth: number): Record<string, unknown> {
   const out: Record<string, unknown> = {}
+  let kept = 0
   for (const [key, value] of Object.entries(fields)) {
-    out[key] = isRedactedKey(key) ? REDACTED : redactValue(value, depth + 1)
+    /* WIDTH, NOT ONLY DEPTH. `MAX_DEPTH` bounded how far down this walks and
+       nothing bounded how wide: a diagnostic carrying a ten-thousand-entry
+       object was traversed, formatted and written in full, on an error path,
+       by the thread that must also answer the test runner's RPC. */
+    if (kept >= MAX_ENTRIES) {
+      out['…'] = `[${Object.keys(fields).length - kept} more]`
+      break
+    }
+    kept += 1
+    const safe = isRedactedKey(key) ? REDACTED : redactValue(value, depth + 1)
+    /* ⚠️ `out[key] = …` INVOKES THE PROTOTYPE SETTER FOR `__proto__`. The
+       field then vanishes as an own property — so it is neither redacted nor
+       reported — and the output object's prototype changes, which every later
+       reader inherits. Defined rather than assigned, so the key is data. */
+    if (key === '__proto__') {
+      Object.defineProperty(out, key, { value: safe, enumerable: true, writable: true, configurable: true })
+    } else {
+      out[key] = safe
+    }
   }
   return out
 }
 
 function redactValue(value: unknown, depth: number): unknown {
+  /* ⚠️ **A FREE-FORM STRING IS THE HOLE THE KEY-NAME RULE CANNOT SEE.** This
+     file redacts by KEY, and the four things the plan says must never enter a
+     log are secrets, peer identities, book text and envelope bodies. Two of
+     those four are LONG, and they arrive under ordinary keys: callers pass
+     `message: thrown.message`, and `sync.session-failed` is one of them — so a
+     paragraph of a book, or a whole envelope, reaches the log under a key no
+     list will ever contain.
+     Truncation does not close the hole for a SHORT secret riding a free-form
+     key; nothing but a per-event schema would, and that is a change to every
+     call site. It does bound the two long ones, and it bounds the cost of the
+     wide ones, which is the part that can be fixed here without redesigning
+     what every caller passes. The limit is generous enough that a real error
+     message survives intact. */
+  if (typeof value === 'string' && value.length > MAX_STRING) {
+    return `${value.slice(0, MAX_STRING)}… [${value.length - MAX_STRING} more chars]`
+  }
   if (Array.isArray(value)) {
     if (depth > MAX_DEPTH) return '[deep]'
+    if (value.length > MAX_ENTRIES) {
+      return [...value.slice(0, MAX_ENTRIES).map((one) => redactValue(one, depth + 1)), `[${value.length - MAX_ENTRIES} more]`]
+    }
     return value.map((one) => redactValue(one, depth + 1))
   }
   /* An Error's message and stack are unbounded, caller-shaped text — the very
@@ -240,7 +288,12 @@ export function createDiagnostics({
     }
   }
   const at = (name: string): Diagnostics => {
-    const line = (event: string) => `[paper:${name}] ${event}`
+    /* CONTROL CHARACTERS OUT OF THE LINE. `scope` and `event` are
+       interpolated into a line whose whole purpose is to be filtered on, and a
+       newline in either forges a second line that looks like a real one — and
+       hides the rest of the true one from a `grep` on the scope. */
+    const plain = (text: string) => text.replace(/[\u0000-\u001f\u007f]/g, '?')
+    const line = (event: string) => `[paper:${plain(name)}] ${plain(event)}`
     /* REDACTED ONCE, FOR BOTH. Calling `redact` per reader would let the two
        drift the moment one of them is given a different argument, and the
        file is the reader where that mistake lasts. `record` is guarded on its

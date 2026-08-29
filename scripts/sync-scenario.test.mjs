@@ -647,3 +647,44 @@ describe('the preflight', () => {
     }
   })
 })
+
+/**
+ * TWO CLASSES AN AUDIT FOUND, each pinned so it cannot come back quietly.
+ *
+ * Both are about what this script hands to a shell on somebody else's Mac.
+ */
+describe('what reaches the remote shell', () => {
+  it('routes every ssh through the one helper that bounds it', () => {
+    /* `converge` checks its deadline BETWEEN calls, so a single ssh that hangs
+       — a sleeping Mac, a half-open socket, a wedged sshd — blocks past
+       `--timeout` for as long as the kernel keeps the connection, and the run
+       neither converges nor gives up. Seven call sites had no bound at all.
+       Counting them here is what stops an eighth being added without one. */
+    const text = proseOf(readFileSync(SCRIPT, 'utf8'))
+    const calls = text.match(/\bssh\s+-o\b/g) ?? []
+    expect(calls, 'an ssh outside remote_sh — give it the helper, not its own flags').toHaveLength(1)
+    expect(text).toContain('remote_sh() {')
+    for (const flag of ['BatchMode=yes', 'ConnectTimeout=', 'ServerAliveInterval=', 'ServerAliveCountMax=']) {
+      expect(text, `remote_sh lost ${flag}`).toContain(flag)
+    }
+  })
+
+  it('validates the satchel app path before it is interpolated into a remote command', () => {
+    /* `open -a "$HOME/$SATCHEL_APP"` is handed to a remote shell. A value with
+       a quote, a `;` or a `$(…)` ran as a command on the far machine —
+       arbitrary execution out of an environment variable, in a harness pointed
+       at somebody else's Mac. `REMOTE_CHECKOUT` beside it was already
+       validated and this was not. */
+    const text = proseOf(readFileSync(SCRIPT, 'utf8'))
+    expect(text).toContain('readonly SATCHEL_APP=')
+    expect(text).toMatch(/case "\$SATCHEL_APP" in/)
+    /* THE PROPERTY, not the spelling: the command handed to the remote shell
+       must interpolate the CHECKED value. The raw variable may still be named
+       in the validator's own error messages, which is where a reader who set
+       it badly needs to see it. */
+    const opened = text.split('\n').filter((line) => line.includes('open --env PAPER_ROLE=satchel'))
+    expect(opened, 'the satchel launch line moved').toHaveLength(1)
+    expect(opened[0]).toContain('$SATCHEL_APP')
+    expect(opened[0], 'the unchecked variable still reaches the remote shell').not.toContain('PAPER_SATCHEL_APP')
+  })
+})

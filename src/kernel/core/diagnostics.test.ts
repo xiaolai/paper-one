@@ -156,3 +156,69 @@ describe('a sink that throws', () => {
     expect(() => diagnostics.child('sync').warn('push', {})).not.toThrow()
   })
 })
+
+/**
+ * THE FOUR THE KEY-NAME RULE COULD NOT SEE, each one an audit finding.
+ *
+ * `redact` decides by KEY. That covers a secret in a field called `token` and
+ * nothing about the shape of what arrives, so depth was bounded while width
+ * and length were not, one key was interpreted rather than stored, and the
+ * line the scope is filtered on could be forged from inside a field.
+ */
+describe('what a shape can do that a key name cannot', () => {
+  it('stores __proto__ as data instead of letting it set a prototype', () => {
+    /* `out[key] = value` invokes the prototype setter: the field vanishes as
+       an own property — neither redacted nor reported — and the object's
+       prototype changes for every later reader. */
+    const out = redact(JSON.parse('{"__proto__": {"polluted": true}, "kept": 1}') as Record<string, unknown>)
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype)
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined()
+    expect(Object.prototype.hasOwnProperty.call(out, '__proto__')).toBe(true)
+    expect(out['kept']).toBe(1)
+  })
+
+  it('bounds a wide object, and says how much it left out', () => {
+    /* Depth was bounded and width was not, so one wide object was walked,
+       formatted and written in full on an error path. */
+    const wide: Record<string, unknown> = {}
+    for (let i = 0; i < 500; i++) wide[`k${i}`] = i
+    const out = redact(wide)
+    expect(Object.keys(out).length).toBeLessThan(200)
+    expect(String(out['…'])).toMatch(/more/)
+  })
+
+  it('bounds a wide array the same way', () => {
+    const out = redact({ list: Array.from({ length: 500 }, (_, i) => i) })
+    const list = out['list'] as unknown[]
+    expect(list.length).toBeLessThan(200)
+    expect(String(list[list.length - 1])).toMatch(/more/)
+  })
+
+  it('truncates a free-form string, which is where book text arrives', () => {
+    /* Callers pass `message: thrown.message`, and `sync.session-failed` is one
+       of them — so a paragraph of a book reaches the log under a key no list
+       of names will ever contain. */
+    const out = redact({ message: 'x'.repeat(5_000) })
+    const said = String(out['message'])
+    expect(said.length).toBeLessThan(700)
+    expect(said).toMatch(/more chars/)
+  })
+
+  it('leaves an ordinary message intact', () => {
+    /* The bound has to be generous or it would cost every real diagnostic its
+       meaning, which is a worse trade than the one it is making. */
+    const message = 'sync.push answered an ack that does not match the pushed group'
+    expect(redact({ message })['message']).toBe(message)
+  })
+
+  it('cannot be made to forge a log line from inside a scope or an event', () => {
+    /* The line exists to be filtered on. A newline in either half forges a
+       second line that looks real, and hides the rest of the true one from a
+       grep on the scope. */
+    const out = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    createDiagnostics({ sink: out, scope: 'kernel\n[paper:peer] forged' }).info('e\nalso-forged', {})
+    const written = String(out.info.mock.calls[0]?.[0])
+    expect(written).not.toContain('\n')
+    expect(written.startsWith('[paper:kernel?')).toBe(true)
+  })
+})
