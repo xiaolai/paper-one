@@ -664,6 +664,7 @@
     "scripts/sync-scenario.test.mjs > every predicate is defined AND used > calls each convergence predicate from somewhere",
     "scripts/sync-scenario.test.mjs > the flags keep their promises > checks every --clean removal instead of reporting success over all of them",
     "scripts/sync-scenario.test.mjs > the flags keep their promises > honours --dry-run BEFORE the probe that writes a book",
+    "scripts/sync-scenario.test.mjs > the flags keep their promises > says when an app was force-killed rather than quit, and when one never started",
     "scripts/sync-scenario.test.mjs > the flags keep their promises > says which question a dry run did not answer",
     "scripts/sync-scenario.test.mjs > the journaling probe owns what it deletes > fails by name when it could not add its own book, instead of measuring nothing",
     "scripts/sync-scenario.test.mjs > the journaling probe owns what it deletes > requires its own add to have succeeded before it removes anything",

@@ -755,6 +755,21 @@ describe('the flags keep their promises', () => {
     expect(text()).toMatch(/NOT proven here/)
   })
 
+  it('says when an app was force-killed rather than quit, and when one never started', () => {
+    /* THE SAME ALWAYS-SUCCESS SHAPE `--clean` had, and it matters more here.
+       The graceful path is the app's shutdown handshake, which closes the sync
+       journal; `pkill` is the DIRTY shutdown the `QUIT_VIA_MENU` comment
+       exists to avoid, and it is what happens when Accessibility permission is
+       missing and the AppleScript silently does nothing. Both helpers returned
+       0 unconditionally, so a run proceeded over a dirty journal, or against a
+       machine running nothing, having said neither. */
+    const body = text()
+    expect(body).toMatch(/force-killed/)
+    expect(body).toMatch(/is NOT running after a launch attempt/)
+    /* `app_start` must be able to report failure at all. */
+    expect(body).toMatch(/app_start\(\) \{[\s\S]*?return 1[\s\S]*?\n\}/)
+  })
+
   it('checks every --clean removal instead of reporting success over all of them', () => {
     /* Each command carried `|| true`, the log said "removed … from both sides"
        unconditionally, and the exit was always 0 — while the app's advisory
