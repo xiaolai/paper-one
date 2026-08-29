@@ -441,7 +441,11 @@ diagnostics_tail() {
     if [ "$side" = shelf ]; then
       said="$(tail -n 12 "$HOME/$DIAGNOSTICS" 2>/dev/null || true)"
     else
-      said="$(ssh -o BatchMode=yes "$remote" "tail -n 12 \"\$HOME/$DIAGNOSTICS\" 2>/dev/null || true")"
+      # BOUNDED. This runs on the FAILURE path — the one that exists to say
+      # why a step timed out — so an ssh that hangs here costs the operator the
+      # explanation as well as the run. The rest of this script's ssh calls
+      # share the same gap (audited 2026-08-29); this is the one it added.
+      said="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 "$remote" "tail -n 12 \"\$HOME/$DIAGNOSTICS\" 2>/dev/null || true")"
     fi
     log ''
     if [ -z "$said" ]; then
