@@ -693,7 +693,24 @@ readonly SYNC_DIR_LOCAL="$HOME/Library/Application Support/one.paper.reader/sync
 readonly JOURNAL_FILE="$SYNC_DIR_LOCAL/journal.jsonl"
 readonly DIRTY_FILE="$SYNC_DIR_LOCAL/journal.dirty"
 readonly PEERS_FILE="$HOME/Library/Application Support/one.paper.reader/peer/peers.json"
-readonly PROBE_BOOK='wi-11-7-journal-probe'
+# ⚠️ **UNIQUE PER RUN, AND THAT IS THREE FIXES IN ONE.** This was the fixed id
+# `wi-11-7-journal-probe`, which made the probe wrong in three ways at once:
+#
+#   - `grep -c "$PROBE_BOOK" "$JOURNAL_FILE"` searched the WHOLE append-only
+#     journal, so once ANY earlier run had written that id every later probe
+#     passed — including runs where the CLI write never journaled at all. The
+#     check reported on history rather than on what just happened.
+#   - the cleanup removed that id and deleted its trash directory
+#     UNCONDITIONALLY, so if a live or trashed book already held it, a
+#     diagnostic probe destroyed a reader's book it had not created.
+#   - a run that crashed between the add and the remove left the id behind to
+#     do it again next time.
+#
+# A per-run id cannot collide with a reader's library, cannot match an earlier
+# run's journal line, and is safe to remove because nothing else can have
+# written it. `$$` and the clock are enough — this is a probe, not a key.
+readonly PROBE_BOOK="wi-11-7-journal-probe-$$-$(date +%s)"
+readonly PROBE_TRASH="${PROBE_BOOK//-/_}"
 
 # THE FIRST PRECONDITION: a CLI write must reach the journal, or nothing it
 # does can replicate. `paper` binds the sync journal at `bindRecorder` now
@@ -710,13 +727,21 @@ probe_journaling() {
   app_quit shelf
   local before=0 after=0 seen=0
   [ -f "$JOURNAL_FILE" ] && before=$(wc -c < "$JOURNAL_FILE" | tr -d ' ')
-  shelf book add "$PROBE_BOOK" 'journal probe' >/dev/null 2>&1 || true
+  # OWNERSHIP BEFORE CLEANUP. The add's status was discarded with `|| true`,
+  # so the probe went on to remove an id it might never have created and to
+  # report on a journal line somebody else had written.
+  local created=no
+  if shelf book add "$PROBE_BOOK" 'journal probe' >/dev/null 2>&1; then created=yes; fi
   [ -f "$JOURNAL_FILE" ] && after=$(wc -c < "$JOURNAL_FILE" | tr -d ' ')
   [ -f "$JOURNAL_FILE" ] && seen=$(grep -c "$PROBE_BOOK" "$JOURNAL_FILE" 2>/dev/null || echo 0)
-  shelf book remove "$PROBE_BOOK" >/dev/null 2>&1 || true
-  rm -rf "$HOME/Library/Application Support/one.paper.reader/trash/wi_11_7_journal_probe"
+  if [ "$created" = yes ]; then
+    shelf book remove "$PROBE_BOOK" >/dev/null 2>&1 || true
+    rm -rf "$HOME/Library/Application Support/one.paper.reader/trash/$PROBE_TRASH"
+  fi
   app_start shelf
-  if [ "$seen" -gt 0 ]; then
+  if [ "$created" != yes ]; then
+    fail 'the journal probe could not add its own book, so nothing was measured. `paper book add` failed while no Paper process held the library — run it by hand to see why.'
+  elif [ "$seen" -gt 0 ]; then
     pass "a CLI write reaches the sync journal ($before -> $after bytes), so it can replicate"
   else
     fail 'a CLI write did NOT reach the sync journal, so nothing below can replicate. `paper` binds the journal only when no Paper process holds it — see WI-11.7 in dev-docs/plans/phase-11-service-api.md.'
