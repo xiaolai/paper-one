@@ -49,10 +49,31 @@
 # unexplained — display sleep and a just-launched app are both candidates and
 # neither was ruled out.
 #
-# WHAT THIS MEANS FOR A FAILING RUN: do not reach for "the window was hidden"
-# as the explanation. WI-8.6 recorded a satchel failing to fire its debounce
-# for 60 s, and 60 s is far past a 2 s throttle — so whatever that was, these
-# measurements do not account for it, and the cause is still open.
+# AND THE DEBOUNCE ITSELF WAS MEASURED, which is the claim that matters:
+#
+#   a 5 s setTimeout ARMED WHILE THE WINDOW WAS HIDDEN fired 106 ms late,
+#   and fired while the window was STILL HIDDEN
+#
+# That is the exact mechanism "sync is foreground-only" is about, and it works.
+# `lib/scheduler.ts` agrees on the other side: `visibility` there is a TRIGGER
+# and never a gate — neither `kick` nor `armDebounce` consults it, so nothing
+# in Paper's own code declines to sync while hidden either.
+#
+# ⚠️ **SO WI-8.6'S EXPLANATION DOES NOT HOLD, AND ITS AUTHOR SAID AS MUCH.**
+# That run recorded a satchel — `visibilityState: "hidden"`, `isMinimized():
+# false`, occluded behind the Terminal this harness activates — failing to
+# fire its debounce for 60 s, and reasoned that "WebKit suspends timers in a
+# hidden page … is a sufficient explanation". It is marked **UNVERIFIED** in
+# the same paragraph, with "do that at the machine before concluding
+# anything", and nobody did. A sufficient-sounding explanation became the
+# reason this harness demands a human at two keyboards.
+#
+# WHAT THIS MEANS FOR A FAILING RUN: do not reach for "the window was hidden".
+# Sixty seconds is two orders past a 2 s throttle, the debounce fires hidden,
+# and the scheduler does not gate on visibility. Whatever WI-8.6 hit is still
+# unidentified — `onLocalCommit` never firing, or a push that failed quietly,
+# are both better places to look than the window. A manual "Sync now" worked
+# in that same run within 5 s, which points at the trigger and not the run.
 #
 # THREE STATES, AND THEY ARE NOT ONE. `minimised`, `display asleep` and
 # `screen locked` are different conditions, this script's preflight only reads
