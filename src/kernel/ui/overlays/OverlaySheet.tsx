@@ -21,7 +21,7 @@ export interface OverlaySheetProps {
    * ⚠️ **DEFAULTS TO THE SHEET'S OWN PARENT, WHICH IS NOT ALWAYS THE PAGE.**
    * Inerting "the sheet's siblings" is right when the sheet is rendered
    * directly into the layer that holds the page — which is how the desktop
-   * mounts it. `app/web/shell/BottomSheet` wraps this in a full-viewport
+   * mounts it. `app/shell/BottomSheet` wraps this in a full-viewport
    * positioned host, because the sheet positions against its parent and needs
    * one; so the sheet's only siblings became the scrim, which is excluded, and
    * NOTHING behind the `aria-modal` dialog was ever made inert. The dialog

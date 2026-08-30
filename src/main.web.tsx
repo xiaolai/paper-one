@@ -39,9 +39,10 @@ import { asIndexedBook, createRemoteBooks, type RemoteBooks } from './app/web/bo
 import { remoteContent, type RemoteContent } from './app/web/content'
 import { remoteCovers } from './app/web/covers'
 import { useRemoteStores } from './app/web/useRemoteStores'
-import { YouScreen } from './app/web/shell/YouScreen'
-import { TabBar, type Tab } from './app/web/shell/TabBar'
-import { ContinueStrip } from './app/web/shell/ContinueStrip'
+import { SettingsScreen } from './app/web/SettingsScreen'
+import { TabBar, type Tab } from './app/shell/TabBar'
+import { ContinueStrip } from './app/shell/ContinueStrip'
+import styles from './app/shell/shell.module.css'
 import { Reader } from './app/web/Reader'
 import { capabilities } from 'virtual:paper-composition'
 /* DIRECTLY, not through `./kernel`. The barrel re-exports modules that import
@@ -362,12 +363,12 @@ function ShelfList({
      on refreshing over a socket that has closed. */
   const { marks, cards, cardRows } = useRemoteStores(link)
 
-  /* THE READER'S PREFERENCES, for the You tab. One store, like `positions`. */
+  /* THE READER'S PREFERENCES, for the Settings tab. One store, like `positions`. */
   const prefs = useRef<ReturnType<typeof browserSettings> | null>(null)
   prefs.current ??= browserSettings()
   const prefsStore = prefs.current
   /* The PERSISTENCE flag and the faces moved with the panel that reads them —
-     see `YouScreen`. NO SUBSCRIPTION here: the shelf renders nothing from a
+     see `SettingsScreen`. NO SUBSCRIPTION here: the shelf renders nothing from a
      preference, and "needs the store to exist" is what the ref above already
      provides — the `useSyncExternalStore` this note used to defend was a
      whole-`ShelfList` re-render on every preference change, bought for
@@ -394,7 +395,7 @@ function ShelfList({
   }
 
   return (
-    <div className="web-shell">
+    <div className={styles.shell}>
       {/* STALE IS SAID, NOT HIDDEN. The books on screen are real and no longer
           current; a reader deciding whether to trust a progress figure needs to
           know which. */}
@@ -429,11 +430,11 @@ function ShelfList({
       )}
 
       {tab === 'library' && (
-        <div className="web-stage">
+        <div className={styles.stage}>
           {/* CONTINUE — the three most recently opened, as covers with a
               progress rule, above the full list. From the mockup. */}
           <ContinueStrip books={shelf} onOpen={open} coverFor={covers} />
-          <div className="web-stage-list">
+          <div className={styles.stageList}>
             <Library
               books={shelf}
               platform="web"
@@ -472,8 +473,8 @@ function ShelfList({
       )}
 
       {tab === 'cards' && (
-        <div className="web-stage web-screen">
-          <h1 className="web-screen-title">Cards</h1>
+        <div className={`${styles.stage} ${styles.screen}`}>
+          <h1 className={styles.screenTitle}>Cards</h1>
           {cards !== null && (
             <Cards
               /* NO `discard`: `card.remove` is `card:write` and this session
@@ -487,7 +488,7 @@ function ShelfList({
         </div>
       )}
 
-      {tab === 'you' && <YouScreen settings={prefsStore} onSignOut={onSignOut} />}
+      {tab === 'settings' && <SettingsScreen settings={prefsStore} onSignOut={onSignOut} />}
 
       <TabBar active={tab} onSelect={setTab} hasBook={reading !== null} />
     </div>

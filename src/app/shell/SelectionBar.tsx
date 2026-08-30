@@ -1,6 +1,6 @@
 import { Copy, Highlighter, MessageSquareText } from 'lucide-react'
-import { ICON } from '../../../kernel/core/metrics'
-import type { MarkTint } from '../../../kernel'
+import { ICON } from '../../kernel/core/metrics'
+import type { MarkTint } from '../../kernel'
 import styles from './SelectionBar.module.css'
 
 /**

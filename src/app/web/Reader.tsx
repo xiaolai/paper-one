@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 /* THE TOOLS SHEET'S FOUR TABS — the mockup's "desktop side pane, as a sheet":
  * highlighter, search, list, settings. */
 import { Highlighter, List, Search as SearchIcon, Type } from 'lucide-react'
-import { BottomSheet } from './shell/BottomSheet'
-import { ProgressFooter } from './shell/ProgressFooter'
-import { SelectionBar } from './shell/SelectionBar'
+import { BottomSheet } from '../shell/BottomSheet'
+import { ProgressFooter } from '../shell/ProgressFooter'
+import { SelectionBar } from '../shell/SelectionBar'
 import {
   Contents,
   FoliateView,
@@ -18,7 +18,7 @@ import { WEB_SETTINGS, browserSettings } from './settings'
 import { useBookSource } from './useBookSource'
 import { useTapToTurn } from './useTapToTurn'
 import { useMarking } from './useMarking'
-import { ReadingSettings } from './shell/ReadingSettings'
+import { ReadingSettings } from './ReadingSettings'
 import type { BookMeta, FootnoteRender, SearchHit } from '../../kernel/ui/browser'
 import { externalTarget } from '../../kernel'
 import type { TocItem } from 'foliate-js/view.js'
@@ -279,7 +279,7 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
   const prefsStore = prefs.current
   const settings = useSyncExternalStore(prefsStore.subscribe, prefsStore.getSnapshot)
   /* THE PERSISTENCE FLAG AND THE FACES MOVED with the panel that reads them —
-     see `ReadingSettings`, which the You tab mounts too. This subscription
+     see `ReadingSettings`, which the Settings tab mounts too. This subscription
      stays: the reading surface itself renders from these values. */
   /* READ THROUGH `get`, not out of the snapshot. The snapshot is a bag of
    * unknowns by key; `get` is what applies each setting's own validator, so a

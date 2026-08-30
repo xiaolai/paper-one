@@ -51,11 +51,24 @@ const path = require('node:path')
 const NATIVE_COMPOSITION_ROOTS = [
   '^src/app/composition\\.(desktop|ios|android)\\.ts$',
   '^src/main\\.tsx$',
+  /* The MOBILE shell's root. A third entry rather than a branch inside
+     `main.tsx`, for the reason the browser root is a fourth: the shells share
+     a launch sequence, not a component tree, and the desktop tree must not
+     enter a mobile bundle. */
+  '^src/main\\.mobile\\.tsx$',
+  /* THE SHARED LAUNCH SEQUENCE, which is part of the root rather than a module
+     the root calls. It reaches the kernel's public entry and its boot entry
+     exactly as a root does, and it exists only because BOTH native roots run
+     it — see the header of `src/app/bootApp.ts`. It is held to the narrow door
+     by `native-boot-not-desktop-ui-entry` below. */
+  '^src/app/bootApp\\.ts$',
 ]
 const WEB_COMPOSITION_ROOTS = ['^src/app/composition\\.web\\.ts$', '^src/main\\.web\\.tsx$']
 
 const COMPOSITION_ROOTS = [
   '^src/app/composition\\.(desktop|ios|android|web)\\.ts$',
+  '^src/main\\.mobile\\.tsx$',
+  '^src/app/bootApp\\.ts$',
   '^src/main\\.tsx$',
   /* The BROWSER client's root (phase 18). A second root rather than a branch
    * inside `main.tsx`: that file arms a shutdown handshake with the Rust
@@ -141,12 +154,81 @@ const KERNEL_UI_TYPES = '^src/kernel/core/uiTypes\\.ts$'
  * job is to render it. */
 const WEB_CLIENT = '^src/app/web/'
 
+/** THE SHARED MOBILE SHELL.
+ *
+ * `src/app/shell/` is the phone furniture from the mobile design — the tab bar,
+ * the bottom sheet, the Continue strip, the selection bar, the progress footer.
+ * It began inside the browser client, which is where the design was first
+ * built; the NATIVE mobile shell mounts the same pieces, so it moved up one
+ * level rather than being copied.
+ *
+ * ⚠️ **IT MAY NOT NAME A UI DOOR, and that is the whole reason it has a rule.**
+ * The kernel's UI entries are per-platform on purpose — `ui/browser.ts` for a
+ * browser, `ui/index.ts` for a native build — and a component mounted by BOTH
+ * roots that imported one of them would pick a platform on the other's behalf
+ * and drag that barrel's whole re-export set into the wrong bundle. So it takes
+ * the public entry, the design system's geometry, and the browser-safe LEAVES
+ * it renders, exactly as the browser client takes `envelope.ts` and
+ * `shelfChannel.ts`.
+ *
+ * What is NOT here is as load-bearing: `ReadingSettings` and `YouScreen` were
+ * moved BACK to `src/app/web/` during this split, because both reach the
+ * browser's own settings store and one of them takes an `onSignOut` a native
+ * app has no use for. A shared directory is for what is genuinely shared. */
+const SHARED_SHELL = '^src/app/shell/'
+
+/** THE NATIVE MOBILE CLIENT.
+ *
+ * `src/app/mobile/` is to iOS and Android what `src/app/web/` is to a browser:
+ * the shell that composes the kernel's surfaces for one audience. It reaches
+ * the kernel through ENTRIES — the public one and `ui/mobile.ts` — plus the
+ * design-system leaves, exactly as the browser client does. */
+const MOBILE_CLIENT = '^src/app/mobile/'
+
+/** The two kernel COMPONENTS the shared shell renders.
+ *
+ * Both are browser-safe leaves that the two doors each re-export; naming the
+ * leaves is what lets one component serve both clients. Narrow on purpose — a
+ * prefix here would re-open the directory allowance that
+ * `web-client-kernel-allowlist` was removed for. */
+/* `.tsx?` rather than `.tsx`: both are React components in the real tree, but
+   the selftest lays out its fixture entirely in `.ts` so that resolution is
+   never the variable under test. An exact `.tsx` here passed the real cruise
+   and failed the selftest's clean tree — the pattern would have been pinned to
+   a file extension rather than to a module. */
+const KERNEL_OVERLAY_SHEET = '^src/kernel/ui/overlays/OverlaySheet\\.tsx?$'
+const KERNEL_BOOK_COVER = '^src/kernel/ui/screens/BookCover\\.tsx?$'
+const KERNEL_COVER_ART = '^src/kernel/core/coverArt\\.ts$'
+
 /** The kernel's two entries: the React-free public one every capability may
  *  import, and the UI one only a composition root may. */
 const KERNEL_PUBLIC_ENTRY = '^src/kernel/index\\.ts$'
 /** The kernel's TEST-ONLY entry — see `kernel-testkit-in-tests-only`. */
 const KERNEL_TESTKIT_ENTRY = '^src/kernel/testkit\\.ts$'
 const KERNEL_UI_ENTRY = '^src/kernel/ui/index\\.ts$'
+
+/** The kernel's NATIVE BOOT entry.
+ *
+ * `src/kernel/ui/boot.ts` is the third door: the launch surface — the store,
+ * the filesystem, the shelf, the migration, the measurements — with no React
+ * component in it. `src/kernel/ui/index.ts` re-exports it, so the desktop root
+ * still has one import and the list has one home.
+ *
+ * It exists because `bootApp.ts` and the mobile root need `loadShelf` and its
+ * neighbours WITHOUT `App`. A barrel retains everything it names, so reaching
+ * them through the UI entry would put the entire desktop pane tree into a
+ * mobile bundle that renders none of it — the defect `browser.ts` was created
+ * for, and the one AGENTS.md records at 0.5% of function coverage. */
+const KERNEL_BOOT_ENTRY = '^src/kernel/ui/boot\\.ts$'
+
+/** The kernel's MOBILE UI entry.
+ *
+ * The fourth door. `ui/index.ts` is the desktop shell's and names `App`;
+ * `ui/browser.ts` grows for what a BROWSER mounts; this one grows for what a
+ * PHONE mounts, and the two sets are not the same. Like the browser's, it
+ * grows one export at a time, in the change that mounts it — a barrel's
+ * re-exports evaluate with the barrel. */
+const KERNEL_MOBILE_ENTRY = '^src/kernel/ui/mobile\\.ts$'
 
 /** The kernel's storage adapters: the only modules that touch the fs plugin.
  *
@@ -279,8 +361,11 @@ module.exports = {
       comment:
         'Outside the kernel, the only kernel module that may be imported is its public entry, ' +
         'src/kernel/index.ts — for a capability, a test under src/app/, anything. The composition ' +
-        'roots are judged by composition-root-kernel-entries instead, which adds the UI entry.',
-      from: { path: '^src/', pathNot: ['^src/kernel/', WEB_CLIENT, ...COMPOSITION_ROOTS] },
+        'roots are judged by composition-root-kernel-entries instead, which adds the UI entry, and ' +
+        'the shared mobile shell by shared-shell-kernel-entries, which adds the two leaf components ' +
+        'it renders. Both of those rules are NARROWER than this one, not looser: each names its ' +
+        'permitted modules exactly.',
+      from: { path: '^src/', pathNot: ['^src/kernel/', WEB_CLIENT, MOBILE_CLIENT, SHARED_SHELL, ...COMPOSITION_ROOTS] },
       to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_TESTKIT_ENTRY] },
     },
     {
@@ -304,7 +389,7 @@ module.exports = {
         'entry is its platform\'s, and the two rules below draw that line; this one refuses ' +
         'everything else under src/kernel/.',
       from: { path: COMPOSITION_ROOTS },
-      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_BROWSER_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
+      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_BOOT_ENTRY, KERNEL_MOBILE_ENTRY, KERNEL_BROWSER_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
     },
     {
       name: 'native-root-not-browser-ui-entry',
@@ -317,6 +402,20 @@ module.exports = {
         'and the rule above could not tell them apart: it allowed both to every root.',
       from: { path: NATIVE_COMPOSITION_ROOTS },
       to: { path: KERNEL_BROWSER_ENTRY },
+    },
+    {
+      name: 'native-boot-not-desktop-ui-entry',
+      severity: 'error',
+      comment:
+        'The shared launch sequence (src/app/bootApp.ts) and the MOBILE root (src/main.mobile.tsx) ' +
+        'may not import src/kernel/ui/index.ts. That barrel names App, and a barrel retains ' +
+        'everything it names — so reaching it for loadShelf or openAppStorage would load the entire ' +
+        'desktop pane tree, titlebar and palette into a bundle that renders none of them. They take ' +
+        'src/kernel/ui/boot.ts instead, which is the same list with no component in it and which ' +
+        'index.ts re-exports so the desktop root still has one door. src/main.tsx is deliberately ' +
+        'NOT in this rule: rendering App is exactly its job.',
+      from: { path: ['^src/app/bootApp\\.ts$', '^src/main\\.mobile\\.tsx$'] },
+      to: { path: KERNEL_UI_ENTRY },
     },
     {
       name: 'web-root-not-native-ui-entry',
@@ -390,14 +489,27 @@ module.exports = {
         'capability-requires-declared judges only direct capability-to-capability edges. And the rule ' +
         'covers every module, not just capabilities, so a capability cannot launder the edge through ' +
         'a shared intermediary either — and one PLATFORM root cannot import another, which would ' +
-        'braid two platforms\' capability graphs. Only the two entries that choose a root — ' +
-        'src/main.tsx and src/main.web.tsx — and tests are exempt.',
+        'braid two platforms\' capability graphs. Only the modules that CHOOSE a root — ' +
+        'src/app/bootApp.ts for the native shells, src/main.web.tsx for the browser one — and tests ' +
+        'are exempt. src/main.tsx stays exempt as well, though it no longer imports a composition at ' +
+        'all: the choosing moved to bootApp.ts with the rest of the launch sequence.',
       from: {
         path: '^src/',
-        /* Both entries choose a root, and neither may be reached FROM one —
-         * `src/main.web.tsx` is the browser client's, exempt for exactly the
-         * reason `src/main.tsx` is. */
-        pathNot: ['^src/main\\.tsx$', '^src/main\\.web\\.tsx$', '\\.(test|testkit)\\.tsx?$'],
+        /* The choosers, and none of them may be reached FROM a root.
+         *
+         * `bootApp.ts` is where `virtual:paper-composition` is imported now —
+         * the native shells share one launch sequence, so the choice moved
+         * there with it. `main.web.tsx` is the browser client's chooser, exempt
+         * for exactly the reason the native one is. `main.tsx` keeps its
+         * exemption because it remains an ENTRY the rule's target names; it
+         * simply has no composition edge left to exempt. */
+        pathNot: [
+          '^src/app/bootApp\\.ts$',
+          '^src/main\\.tsx$',
+          '^src/main\\.mobile\\.tsx$',
+          '^src/main\\.web\\.tsx$',
+          '\\.(test|testkit)\\.tsx?$',
+        ],
       },
       /* ⚠️ BOTH ENTRIES TOO, not only the composition files. The comment above
        * states the invariant as "nothing may import src/main.tsx", and the
@@ -409,7 +521,14 @@ module.exports = {
         path: [
           '^src/app/composition\\.(desktop|ios|android|web)\\.ts$',
           '^src/main\\.tsx$',
+          '^src/main\\.mobile\\.tsx$',
           '^src/main\\.web\\.tsx$',
+          /* AND THE SHARED SEQUENCE, which imports every composed capability's
+             index through the virtual specifier exactly as a root does. Left
+             out, it would be the laundering intermediary this rule's comment
+             describes — reachable by anything under src/, and handing on the
+             whole composition. */
+          '^src/app/bootApp\\.ts$',
         ],
       },
     },
@@ -436,6 +555,55 @@ module.exports = {
         'cannot let it through.',
       from: { pathNot: FS_ADAPTERS },
       to: { path: '(^|/)@tauri-apps/plugin-fs(/|$)' },
+    },
+    {
+      name: 'mobile-client-kernel-entries',
+      severity: 'error',
+      comment:
+        'The native mobile client (src/app/mobile/) reaches the kernel through ENTRIES, the same way ' +
+        'the browser client does: the public entry, and src/kernel/ui/mobile.ts for the React ' +
+        'surfaces it mounts — plus the design-system stylesheets, metrics.ts and uiTypes.ts, which ' +
+        'are leaves with no runtime dependencies of their own. It may NOT take ui/index.ts, whose ' +
+        'barrel names App and would bring the desktop pane tree, titlebar and palette into a phone ' +
+        'bundle that draws none of them; nor ui/browser.ts, which lists what a BROWSER mounts. ' +
+        'Three shells, three doors, and each one grows for its own audience.',
+      from: { path: MOBILE_CLIENT },
+      to: {
+        path: '^src/kernel/',
+        pathNot: [
+          KERNEL_PUBLIC_ENTRY,
+          KERNEL_STYLESHEETS,
+          KERNEL_METRICS,
+          KERNEL_UI_TYPES,
+          KERNEL_MOBILE_ENTRY,
+        ],
+      },
+    },
+    {
+      name: 'shared-shell-kernel-entries',
+      severity: 'error',
+      comment:
+        'The shared mobile shell (src/app/shell/) reaches the kernel through the public entry, the ' +
+        'design-system stylesheets and metrics.ts, and the browser-safe leaves it renders — ' +
+        'OverlaySheet, BookCover and coverArt.ts. It may NOT name a UI door. The doors are ' +
+        'per-platform (ui/browser.ts for a browser, ui/index.ts for a native build) and this ' +
+        'directory is mounted by BOTH roots, so importing one would pick a platform on the other ' +
+        "root's behalf and pull that barrel's whole re-export set into the wrong bundle. Naming the " +
+        'leaves is what lets one component serve both clients — the same shape as the permitted ' +
+        'leaves in web-client-kernel-entries.',
+      from: { path: SHARED_SHELL },
+      to: {
+        path: '^src/kernel/',
+        pathNot: [
+          KERNEL_PUBLIC_ENTRY,
+          KERNEL_STYLESHEETS,
+          KERNEL_METRICS,
+          KERNEL_UI_TYPES,
+          KERNEL_OVERLAY_SHEET,
+          KERNEL_BOOK_COVER,
+          KERNEL_COVER_ART,
+        ],
+      },
     },
     {
       name: 'web-client-kernel-entries',

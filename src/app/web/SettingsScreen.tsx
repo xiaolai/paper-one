@@ -1,8 +1,13 @@
 import { ReadingSettings } from './ReadingSettings'
-import type { SettingsStore } from '../../../kernel'
+import type { SettingsStore } from '../../kernel'
+import styles from '../shell/shell.module.css'
 
 /**
- * THE **YOU** TAB — this device's reading preferences, and the way off it.
+ * THE **SETTINGS** TAB — this device's reading preferences, and the way off it.
+ *
+ * The mockup called this tab You, with a person icon. It was renamed to say
+ * what it opens; `shell/TabBar.tsx` carries the reasoning, and the list there
+ * is the only one, so both clients moved together.
  *
  * ## Why this is its own component
  *
@@ -15,7 +20,7 @@ import type { SettingsStore } from '../../../kernel'
  * same store, and two copies of one wiring is one of them keeping a rule the
  * other drops.
  */
-export function YouScreen({
+export function SettingsScreen({
   settings,
   onSignOut,
 }: {
@@ -23,11 +28,12 @@ export function YouScreen({
   readonly onSignOut: () => void
 }) {
   return (
-    <div className="web-stage web-screen">
-      <h1 className="web-screen-title">You</h1>
+    <div className={`${styles.stage} ${styles.screen}`}>
+      <h1 className={styles.screenTitle}>Settings</h1>
       <ReadingSettings settings={settings} />
-      {/* DISCONNECT lives under You — it is about this device, which is what
-          the tab is for. */}
+      {/* DISCONNECT lives here — it is about this device, which is what the
+          tab is for. Still true under the new name: signing this browser out
+          is a thing you set about it, not a preference about reading. */}
       <button type="button" className="shelf-signout web-signout" onClick={onSignOut}>
         Disconnect this browser
       </button>

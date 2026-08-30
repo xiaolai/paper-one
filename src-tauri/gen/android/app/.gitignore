@@ -1,0 +1,17 @@
+/src/main/**/generated
+/src/main/jniLibs/**/*.so
+/src/main/assets/tauri.conf.json
+/tauri.build.gradle.kts
+/proguard-tauri.pro
+/tauri.properties
+# Build products of `tauri android build`/`dev`. `src/main/assets/` is where the
+# frontend dist and every `bundle > resources` entry are copied for packaging —
+# a copy of built output, not authored content.
+#
+# ⚠️ 70 MB of it reached a commit before this line existed: `bundle.resources`
+# in `tauri.conf.json` stages `vendor/inference/current/` as `runtime/`, so an
+# Android build copied the DESKTOP macOS inference runtime — `lemond`, and the
+# llama.cpp Metal `.dylib`s — into the app. The Apple template has ignored its
+# own `assets/` since somebody hit the same thing there; this one shipped
+# without the equivalent.
+/src/main/assets/

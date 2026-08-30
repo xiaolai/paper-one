@@ -1,10 +1,10 @@
 import { useMemo, useSyncExternalStore } from 'react'
-import { Settings, offeredFaces, presentFaces } from '../../../kernel/ui/browser'
+import { Settings, offeredFaces, presentFaces } from '../../kernel/ui/browser'
 /* `metrics` DIRECTLY, as `main.web.tsx` reaches it: the browser barrel grows
    one export at a time, in the change that mounts it. */
-import { readingStep, stepIndexForSize } from '../../../kernel/core/metrics'
-import { WEB_SETTINGS } from '../settings'
-import type { SettingsStore } from '../../../kernel'
+import { readingStep, stepIndexForSize } from '../../kernel/core/metrics'
+import { WEB_SETTINGS } from './settings'
+import type { SettingsStore } from '../../kernel'
 
 /**
  * THE READING PANEL, wired to this browser's settings store.
@@ -63,7 +63,14 @@ export function ReadingSettings({ settings }: { readonly settings: SettingsStore
            next render and the control does nothing you can see. */
         settings.set(WEB_SETTINGS.themeFollowsOs, false)
       }}
-      onFollowOs={() => settings.set(WEB_SETTINGS.themeFollowsOs, !themeFollowsOs)}
+      /* ⚠️ **TAKES THE VALUE IT IS GIVEN.** This read
+         `() => set(themeFollowsOs, !themeFollowsOs)`, ignoring the argument and
+         negating a value captured at render. `Settings` declares
+         `onFollowOs: (follows: boolean) => void` and passes the toggle's own
+         next state, so the two agreed only for as long as the captured value
+         and the control's state agreed — and the callback was a lie about its
+         own signature either way. Both wrappers had it; both are fixed. */
+      onFollowOs={(next) => settings.set(WEB_SETTINGS.themeFollowsOs, next)}
       onTypeface={(next) => settings.set(WEB_SETTINGS.typeface, next)}
       onStepIdx={(next) => settings.set(WEB_SETTINGS.textSize, readingStep(next).size)}
       onSpacing={(key, idx) =>

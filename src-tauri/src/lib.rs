@@ -314,6 +314,30 @@ fn nudge_traffic_lights(window: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    /* ⚠️ **BEFORE ANYTHING BUILDS AN HTTPS CLIENT, AND MOBILE HAD NOTHING.**
+     *
+     * `reqwest` is `rustls-no-provider` here, so rustls does not choose a
+     * provider for itself: the process installs one or every `Client::new`
+     * panics. On desktop the local inference plugin supplies it; that plugin is
+     * `optional` precisely so it is not compiled for iOS and Android — and
+     * nothing took over the job it was also doing. iroh builds a client for its
+     * relays on every platform, so the app panicked at launch on both mobile
+     * targets, every time.
+     *
+     * Found by RUNNING it on the iOS simulator on 2026-08-30, the first time
+     * this app had ever been launched on a phone. `mobile.yml` builds an
+     * unsigned archive and an apk and launches neither, so a startup panic was
+     * exactly the shape of defect it could not see.
+     *
+     * The result is DISCARDED on purpose: `install_default` fails when a
+     * provider is already installed, which is a race this cannot lose — the
+     * only thing that matters is that one is in place, not whose it is. `ring`
+     * rather than `aws-lc-rs` is `Cargo.toml`'s note, and `mobile.yml` fails
+     * the build if the other one enters the tree.
+     */
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut builder = tauri::Builder::default();
 
     /* FIRST, before any other plugin and before `setup`. The plugin decides

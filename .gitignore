@@ -64,6 +64,11 @@ dist/
 # The browser client's bundle, built by `pnpm build:web` and embedded into
 # the shelf by tauri-plugin-webhost's build script.
 dist-web/
+# The phone's bundle, built by `pnpm build:ios` / `pnpm build:android` and
+# pointed at by `tauri.ios.conf.json` / `tauri.android.conf.json`. A separate
+# directory for the reason the other two are: all three default to `dist/`, so
+# sharing one leaves it holding whichever build went last.
+dist-mobile/
 *.tsbuildinfo
 .DS_Store
 

@@ -15,7 +15,7 @@ import {
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ICON } from '../../core/metrics'
 import type { Platform } from '../../core/metrics'
-import { isTauri } from '../platform'
+import { inTauri } from '../inTauri'
 import { PANE_TITLES, comboFor } from '../panes'
 import type { AppDispatch, AppState, KernelPaneId } from '../state'
 import type { Speech } from '../reader/useSpeech'
@@ -96,7 +96,7 @@ export function TitleBar({
   /* Windows and Linux draw their own window controls, so they need real
    * handlers — without them the buttons were decoration that swallowed the
    * click. macOS never reaches this: AppKit draws the traffic lights. */
-  const appWindow = isTauri() ? getCurrentWindow() : null
+  const appWindow = inTauri() ? getCurrentWindow() : null
   /* Each reports its own failure. These are async IPC calls into the window
    * manager and their promises were discarded, so a rejected minimise or close
    * — the window already gone, the IPC refused — surfaced as an unhandled
@@ -130,7 +130,7 @@ export function TitleBar({
           ? /* Inside Tauri, AppKit paints the real traffic lights over this
              * zone, so drawing our own would double them. They are rendered
              * only in a plain browser, where the design still needs checking. */
-            !isTauri() &&
+            !inTauri() &&
             LIGHTS.map((fill) => (
               <span key={fill} className={styles.light} style={{ background: fill }} />
             ))

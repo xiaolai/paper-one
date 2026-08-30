@@ -95,7 +95,7 @@ export { useAppPalette } from './hooks/useAppPalette'
 
 /* THE SHEET PRIMITIVE. A browser sheet needs exactly the two behaviours this
  * gets right — focus in and back out, in the right order, and inert siblings —
- * and only its desktop geometry wrong. `app/web/shell/BottomSheet` overrides
+ * and only its desktop geometry wrong. `app/shell/BottomSheet` overrides
  * the geometry by attribute and reuses the rest. */
 export { OverlaySheet } from './overlays/OverlaySheet'
 

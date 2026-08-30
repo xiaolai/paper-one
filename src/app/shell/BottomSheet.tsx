@@ -1,6 +1,13 @@
 import type { ReactNode } from 'react'
 import { useRef } from 'react'
-import { OverlaySheet } from '../../../kernel/ui/browser'
+/* THE LEAF, NOT A DOOR. This sheet is mounted by BOTH clients — the browser
+   one and the native mobile shell — and the kernel's UI doors are per-platform
+   by design (`ui/browser.ts` for a browser, `ui/index.ts` for a native build).
+   Naming either here would make a shared component pick a platform, and would
+   drag that door's whole barrel into the other client's bundle. `OverlaySheet`
+   is a browser-safe leaf, so it is reached the way `envelope.ts` and
+   `shelfChannel.ts` are — directly, under `shared-shell-kernel-entries`. */
+import { OverlaySheet } from '../../kernel/ui/overlays/OverlaySheet'
 import styles from './BottomSheet.module.css'
 
 /**

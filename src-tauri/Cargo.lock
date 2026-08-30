@@ -130,6 +130,7 @@ dependencies = [
  "paper-data-root",
  "paper-process",
  "percent-encoding",
+ "rustls",
  "serde",
  "serde_json",
  "tauri",

@@ -805,6 +805,29 @@ export function App({
    * a double-clicked book is one the shelf should be able to reopen. The
    * subscription is the root's: it registers the shell listener and only then
    * tells the shell it may release what it held (`openedFiles.ts`). */
+  /* ⚠️ **THE HANDLER RIDES IN A REF, so the subscription below depends on the
+   * STABLE `openRequests` and nothing else.**
+   *
+   * `addAndOpen` is a `useCallback` over `[openBook, fs, imports]`, and
+   * `imports` changes identity while an import runs. With it in the effect's
+   * dependencies, the effect tore down and rebuilt on every one of those
+   * ticks, and each rebuild cost two things the comments here already say
+   * matter:
+   *
+   *   - the native listener was removed and re-registered, and `openedFiles.ts`
+   *     answers only the FIRST readiness — so a book double-clicked in that
+   *     window reached no listener at all and was silently dropped;
+   *   - `chain` is a local, so the "one launch at a time" ordering restarted
+   *     from resolved, which is exactly the concurrency the paragraph below
+   *     exists to prevent.
+   *
+   * Subscribing once per `openRequests` — that is, once for the window's
+   * lifetime — is what the comment above already describes as the intent. */
+  const openLaunched = useRef(addAndOpen)
+  useEffect(() => {
+    openLaunched.current = addAndOpen
+  }, [addAndOpen])
+
   useEffect(() => {
     if (!openRequests) return
     /* IN ORDER, one launch at a time. Two deliveries close together — the
@@ -815,12 +838,17 @@ export function App({
     let chain: Promise<void> = Promise.resolve()
     return openRequests.subscribe((paths) => {
       chain = chain
-        .then(() => takeOpened(paths, { addAndOpen, notice: setImportNotice }))
+        .then(() =>
+          takeOpened(paths, {
+            addAndOpen: (books, note) => openLaunched.current(books, note),
+            notice: setImportNotice,
+          }),
+        )
         .catch((cause: unknown) => {
           console.error('Paper: could not open what the launch carried', cause)
         })
     })
-  }, [openRequests, addAndOpen])
+  }, [openRequests])
 
   /**
    * Add a whole folder.

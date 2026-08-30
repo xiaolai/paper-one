@@ -76,10 +76,23 @@ describe('a suppression whose tool is declared', () => {
 describe('the CLI', () => {
   it('exits 0 on this repository and names what it looked for', () => {
     const run = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' })
+    /* ⚠️ **WHETHER IT RAN AT ALL, BEFORE WHAT IT SAID.** `spawnSync` reports a
+       failure to START in `error` and leaves `stdout` an empty string — so
+       asserting on the output first turns "the process never ran" into
+       `expected '' to contain 'check-inert-directives: 0 inert'`, which reads
+       as the script printing the wrong thing.
+       That is exactly how this failed once inside `test:coverage`: nine vitest
+       workers each spawning node on a ten-core machine under external load,
+       and a fork that could not be had. The script itself was fine — 0.25 s,
+       exit 0, and it walks only `src` and `scripts` — but the message sent the
+       diagnosis at the script for as long as it took to run it by hand.
+       Same rule as `codesign` and `actool` elsewhere in this repo: read the
+       status of the thing you care about, and read it first. */
+    expect(run.error, `the script never ran: ${run.error?.message ?? ''}`).toBeUndefined()
+    expect(run.status, `exited ${run.status} — stderr: ${run.stderr}`).toBe(0)
     expect(run.stdout).toContain('check-inert-directives: 0 inert')
     /* Says which linters it found, so "0 inert" cannot be read as "checked" by
        a reader who does not know whether it looked at anything. */
     expect(run.stdout).toMatch(/linters declared: (none|\w)/)
-    expect(run.status).toBe(0)
   })
 })

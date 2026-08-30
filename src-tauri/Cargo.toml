@@ -130,6 +130,41 @@ tauri-plugin-webhost = { path = "crates/tauri-plugin-webhost", optional = true }
 # The library lock (`src/lock.rs`): liveness by `kill(pid, 0)` and the host
 # name by `gethostname`, both Unix. Already in the tree through tauri; this
 # names the dependency rather than reaching it by accident.
+# ⚠️ **A CRYPTO PROVIDER, BECAUSE MOBILE HAS NONE AND PANICS WITHOUT ONE.**
+#
+# ⚠️ NAMES NO PATH CRATE, deliberately — see the note further up this file:
+# `capability:remove` cuts a crate by purging its NAME from here, so a crate
+# named in prose is a crate the cut would maim. The first version of this
+# comment named two of them and `capability-remove`'s own test said so.
+#
+# `reqwest` is configured `rustls-no-provider` across this workspace, which
+# turns off rustls's automatic provider selection: the PROCESS must install one
+# before anything builds a `Client`. On desktop the local inference plugin
+# brings that provider — which is exactly what its own note above says is being
+# kept out of the mobile build — so gating that plugin off left iOS and Android
+# with no provider at all. iroh still builds a client for its relays, so the app
+# panicked on the FIRST LAUNCH, every launch:
+#
+#   No rustls crypto provider is configured. When using the
+#   `rustls-no-provider` feature you must install a crypto provider before
+#   building a Client.
+#
+# Measured on the iOS simulator, 2026-08-30 — the first time this app had ever
+# been RUN on a phone. CI builds an unsigned archive and an apk and never
+# launches either, so a startup panic was invisible to it.
+#
+# `ring`, never `aws-lc-rs`: the same choice the peer plugin makes for iroh and
+# for the same reason — aws-lc-rs needs a C/asm build with an NDK-configured
+# clang, and `mobile.yml` fails the build if it appears in the tree at all.
+# `default-features = false` is what states that, since rustls's defaults
+# include the other one.
+#
+# MOBILE ONLY, deliberately. Installing a provider is process-global and
+# first-call-wins, so doing it on desktop would quietly move desktop TLS onto
+# ring — a behaviour change on a platform that has no problem.
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

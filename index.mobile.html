@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- `viewport-fit=cover` so the reader reaches the edges of a notched
+         phone; the safe-area insets are then read in CSS, and the element that
+         touches the glass owns its inset once — see `shell.module.css`.
+         Without this the insets are all zero and the app is letterboxed inside
+         the safe area, which looks like a layout bug and is a meta tag.
+         `user-scalable=no` is deliberately NOT set: pinch-zoom is an
+         accessibility affordance and a reading app is the last place to take
+         it away. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#FBFBFA" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#17191B" media="(prefers-color-scheme: dark)" />
+
+    <!-- NO PAINT HINT HERE, unlike `index.html`. That script reads
+         localStorage before the bundle loads to avoid a frame of the wrong
+         background; on a phone the launch screen covers exactly that frame, so
+         it would buy nothing and cost an inline script. -->
+    <title>Paper</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.mobile.tsx"></script>
+  </body>
+</html>
