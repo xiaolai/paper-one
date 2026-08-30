@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDiagnosticLog, type DiagnosticEntry } from '../../core/diagnosticsLog'
+import type { CopyOutcome } from '../clipboard'
 import { DevPane } from './DevPane'
 
 /**
@@ -71,6 +72,28 @@ describe('the entries', () => {
 
   /* NEWEST FIRST, because a reader opens this panel after something went
      wrong, and what went wrong is the last thing that happened. */
+  /* ⚠️ **ENTRIES SHARING A MILLISECOND USED TO COME OUT OLDEST-FIRST.** The
+     panel sorted by timestamp, and `Array.sort` is stable — so equal times kept
+     insertion order, which is the exact opposite of this panel's one ordering
+     claim. Boot writes several per millisecond (`composition.started`, then a
+     `started` per capability), so it is the first screen a reader sees. */
+  it('are newest first even when they share a millisecond', () => {
+    render(
+      <DevPane
+        recording
+        log={logOf([
+          { at: 5_000, event: 'first' },
+          { at: 5_000, event: 'second' },
+          { at: 5_000, event: 'third' },
+        ])}
+      />,
+    )
+
+    const rows = screen.getAllByRole('listitem').map(textOf)
+    expect(rows[0]).toContain('third')
+    expect(rows[2]).toContain('first')
+  })
+
   it('are newest first', () => {
     render(<DevPane recording log={logOf(entries)} />)
 
@@ -158,9 +181,85 @@ describe('the window', () => {
   })
 })
 
+/**
+ * ⚠️ **`JSON.stringify` IS NOT TOTAL, AND THIS WAS AN UNGUARDED CALL IN A
+ * RENDER.** `fields` is `Record<string, unknown>` from every caller in the app;
+ * redaction bounds depth, width and string length and promises nothing about
+ * JSON-serialisability. One `report()` carrying a bigint would have taken down
+ * the panel a reader opens BECAUSE something is already wrong.
+ */
+describe('fields it cannot serialise', () => {
+  /* ⚠️ **THE VALUE IS SHOWN, not merely survived.** Asserting only that the
+     render did not throw passes against a `catch` that swallows the whole field
+     set — which is the degraded path, not the fix. A bigint is a perfectly
+     ordinary thing to report (a byte count, a file size) and the reader should
+     see it. */
+  it('renders the value of a field JSON cannot serialise', () => {
+    render(<DevPane recording log={logOf([{ event: 'odd', fields: { size: 10n } }])} />)
+
+    const row = textOf(screen.getAllByRole('listitem')[0]!)
+    expect(row).toContain('odd')
+    expect(row).toContain('10n')
+    expect(row, 'the fields must not have degraded').not.toContain('could not be rendered')
+  })
+
+  it('renders an entry whose fields hold a cycle, and says so', () => {
+    const cyclic: Record<string, unknown> = { name: 'loop' }
+    cyclic.self = cyclic
+
+    expect(() =>
+      render(<DevPane recording log={logOf([{ event: 'looped', fields: cyclic }])} />),
+    ).not.toThrow()
+
+    const row = textOf(screen.getAllByRole('listitem')[0]!)
+    /* The row survives — its time, scope and event are what a reader scans for
+       — and only the fields degrade. */
+    expect(row).toContain('looped')
+    expect(row).toContain('could not be rendered')
+  })
+})
+
+/**
+ * ⚠️ **THE DATE APPEARS ONLY WHEN IT DISTINGUISHES SOMETHING.** It was omitted
+ * outright under the reasoning that nobody reads a pane across midnight — and a
+ * machine left running for days is precisely the case this panel exists for.
+ */
+describe('the time', () => {
+  /* ⚠️ THE DAY IS THE READER'S OWN, so the fixtures are built by arithmetic on
+     `Date.now()` rather than from UTC literals: two instants either side of
+     midnight UTC are the SAME local day in most of the world, and a fixture
+     that assumed otherwise failed against correct code here. */
+  const DAY = 24 * 60 * 60 * 1000
+
+  it('is a bare clock while the window is one day', () => {
+    const now = Date.now()
+    render(<DevPane recording log={logOf([{ at: now - 1000, event: 'a' }, { at: now, event: 'b' }])} />)
+
+    expect(textOf(screen.getAllByRole('listitem')[0]!)).toMatch(/\d\d:\d\d:\d\d\.\d\d\d/)
+    expect(textOf(screen.getAllByRole('listitem')[0]!)).not.toMatch(/\d\d-\d\d \d\d:/)
+  })
+
+  it('carries the date once the window spans one', () => {
+    const now = Date.now()
+    render(
+      <DevPane
+        recording
+        log={logOf([
+          { at: now - DAY, event: 'yesterday' },
+          { at: now, event: 'today' },
+        ])}
+      />,
+    )
+
+    expect(textOf(screen.getAllByRole('listitem')[0]!)).toMatch(/\d\d-\d\d \d\d:\d\d/)
+  })
+})
+
 describe('the actions', () => {
   it('hand the window to the caller as JSON Lines, which is the file’s format', () => {
-    const onCopy = vi.fn()
+    /* TYPED AS THE PROP IS, so `mock.calls` carries the argument's type rather
+       than the empty tuple an inferred zero-arg fake would give. */
+    const onCopy = vi.fn(async (_jsonl: string): Promise<CopyOutcome> => 'copied')
     const log = logOf([{ scope: 'boot', event: 'started' }])
     render(<DevPane recording log={log} onCopy={onCopy} />)
 
@@ -168,6 +267,36 @@ describe('the actions', () => {
 
     expect(onCopy).toHaveBeenCalledWith(log.toJsonl())
     expect(onCopy.mock.calls[0]![0]).toContain('started')
+  })
+
+  /* ⚠️ **A REFUSED CLIPBOARD USED TO BE SILENT**, and the rejection unhandled:
+     the handler was `void onCopy(...)` against a function typed as returning
+     nothing. The reader pressed a button, nothing happened, and the failure
+     reached the global fatal handler. */
+  const OUTCOMES: readonly [CopyOutcome, RegExp][] = [
+    ['copied', /copied/i],
+    ['refused', /refused/i],
+    ['absent', /no clipboard/i],
+  ]
+  it.each(OUTCOMES)('say when the copy came back %s', async (outcome, said) => {
+    render(
+      <DevPane recording log={logOf([{ event: 'one' }])} onCopy={async () => outcome} />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /copy/i }))
+    expect(await screen.findByRole('button', { name: said })).toBeTruthy()
+  })
+
+  /* THE FILE IS A PROJECTION OF THE WINDOW, rewritten whole — so clearing one
+     without the other leaves a harness reading `diagnostics.jsonl` over ssh
+     reading entries the app has thrown away. */
+  it('tell the caller to rewrite the file when the window is cleared', () => {
+    const onCleared = vi.fn()
+    render(<DevPane recording log={logOf([{ event: 'one' }])} onCleared={onCleared} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+
+    expect(onCleared).toHaveBeenCalledTimes(1)
   })
 
   it('offer no copy where the caller gave nowhere to copy to', () => {

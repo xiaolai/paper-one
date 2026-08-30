@@ -38,6 +38,52 @@ const rootHolding = (body) => {
   return root
 }
 
+/**
+ * ⚠️ **AN EXPLICIT TIMEOUT FOR THE WHOLE FILE, BECAUSE THE GLOBAL ONE IS FOR A
+ * DIFFERENT COST.**
+ *
+ * `vitest.config.ts` raised `testTimeout` to 15s and says exactly why: v8
+ * coverage instrumentation makes compute-heavy tests 3–5× slower. The cases
+ * here are a different shape — several spawn TWO cold vitest collections
+ * through `runCli`, and a cold node + vitest start is seconds of process
+ * startup that no assertion is about and that instrumentation does not touch.
+ * The margin was always thin (~23s for one block on an idle machine) and it
+ * tipped the first time the suite grew.
+ *
+ * ⚠️ **AT FILE SCOPE, AND THE FIRST FIX PUT IT ON ONE `describe`.** Two blocks
+ * spawn `runCli`, the timeout went on the one that had failed, and the very
+ * next run failed in the other. Two instances of one shape is a class: the
+ * property belongs to the FILE — everything in it drives a subprocess — so it
+ * is stated once, where a third block cannot be added without it.
+ *
+ * NOT A THRESHOLD LOOSENED TO BUY GREEN: the failure is a timeout, never a
+ * wrong answer, and `runCli`'s own `spawnSync` guard stays at 120s — so a
+ * genuinely hung CLI is still caught there, by the bound chosen for it.
+ */
+/**
+ * ⚠️ **AN EXPLICIT TIMEOUT FOR THE BLOCKS THAT SPAWN A SUBPROCESS.**
+ *
+ * `vitest.config.ts` raised `testTimeout` to 15s and says exactly why: v8
+ * coverage instrumentation makes compute-heavy tests 3–5× slower. The two
+ * blocks that use `runCli` are a different shape — each case spawns one or two
+ * COLD vitest collections, and a cold node + vitest start is seconds of process
+ * startup that no assertion is about and that instrumentation does not touch.
+ * The margin was always thin and it tipped the first time the suite grew.
+ *
+ * ⚠️ **TWO CORRECTIONS ON THE WAY TO THIS LINE.** The first fix put the timeout
+ * on ONE of the two blocks — the one that had failed — and the next run failed
+ * in the other. The second used `vi.setConfig({ testTimeout })` in a
+ * `beforeAll` to cover the whole file, which does NOT apply to tests already
+ * collected: the run still reported "timed out in 15000ms", and the file passed
+ * in isolation for an unrelated reason (an idle machine), which is what made a
+ * broken fix look like a working one.
+ *
+ * NOT A THRESHOLD LOOSENED TO BUY GREEN: the failure is a timeout, never a
+ * wrong answer, and `runCli`'s own `spawnSync` guard stays at 120s — so a
+ * genuinely hung CLI is still caught there, by the bound chosen for it.
+ */
+const SUBPROCESS_TIMEOUT = 90_000
+
 describe('what counts as gone', () => {
   /* The incident, in one line: twelve names left, thirteen arrived, the total
    * rose, and every other gate stayed green. A guard that compared COUNTS
@@ -480,7 +526,8 @@ describe('the CLI against a real project', () => {
     expect(checked.stdout).toMatch(/0 gone/)
     expect(checked.stdout).toMatch(/1 machine-local/)
   })
-})
+  /* ⚠️ **SEE `SUBPROCESS_TIMEOUT`.** */
+}, SUBPROCESS_TIMEOUT)
 
 describe('finding a conditional suite in a source file', () => {
   /**
@@ -638,4 +685,5 @@ describe('tests that are not in the ledger', () => {
     expect(checked.stdout).toContain('> two')
     expect(checked.stdout).toContain('1 gone, 3 unrecorded')
   })
-})
+  /* ⚠️ **SEE `SUBPROCESS_TIMEOUT`.** */
+}, SUBPROCESS_TIMEOUT)

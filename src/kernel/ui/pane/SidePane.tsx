@@ -33,6 +33,7 @@ import { Marginalia } from './Marginalia'
 import { SearchPanel } from './SearchPanel'
 import { DevPane } from './DevPane'
 import type { DiagnosticLog } from '../../core/diagnosticsLog'
+import type { CopyOutcome } from '../clipboard'
 import { Settings } from './Settings'
 import styles from './SidePane.module.css'
 
@@ -121,18 +122,25 @@ export interface SidePaneProps {
   platform: Platform
   cards: CardsView
   /**
-   * The developer surfaces, or absent where there are none.
+   * What the developer surfaces need, when they are drawn.
    *
-   * ABSENT IS OFF, and `App` supplies this only while `state.developer` holds —
-   * so a host that never turns developer options on cannot draw the band or the
-   * panel by accident, and the two cannot come to disagree about whether they
-   * are showing.
+   * ⚠️ **IT DOES NOT SAY WHETHER THEY ARE DRAWN, AND IT USED TO.** This was
+   * optional with "absent is off" written on it, while the RAIL read
+   * `state.developer` — two sources for one fact, so a caller could pass the
+   * object with the flag off and get a Developer panel the rail refuses to
+   * show, or the reverse. The contract was asserted in a comment and enforced
+   * nowhere, which is the shape of every invariant this file has lost before.
+   *
+   * `state.developer` is the one answer now. This is DATA — where the log is,
+   * whether anything is recording, how to reach a clipboard — and it is passed
+   * unconditionally, because a host that has it always has it.
    */
   developer?:
     | {
         readonly log?: DiagnosticLog | undefined
         readonly recording: boolean
-        readonly onCopy?: ((jsonl: string) => void) | undefined
+        readonly onCopy?: ((jsonl: string) => Promise<CopyOutcome>) | undefined
+        readonly onCleared?: (() => void) | undefined
       }
     | undefined
   /**
@@ -293,7 +301,9 @@ export function SidePane({
    * so a rail of n contributed panes cost n² on every keystroke anywhere. */
   const rail = useMemo(
     () => [
-      ...railFor(state.screen, audience).map(({ id, label, Icon }) => ({ id, label, Icon })),
+      /* SPREAD, not mapped through an identity: `railFor` already returns
+         `{ id, label, Icon }`, so the map only rebuilt equal objects. */
+      ...railFor(state.screen, audience),
       ...contributed
         .filter((entry) => paneFits(state.screen, entry.id, audience))
         .map(({ id, label }) => ({ id, label, Icon: Puzzle })),
@@ -383,23 +393,32 @@ export function SidePane({
             panel navigated on its own and the ledger's promise was a row. */}
         {pane === 'search' && <SearchPanel book={book} {...goToProps} />}
 
+        {/* NO `developer &&` GUARD. The pane can only be `dev` when `paneFits`
+            said so, and that reads `state.developer` — the same one answer the
+            rail reads. A second guard here would be the second source of truth
+            this prop was just relieved of. */}
         {pane === 'dev' && (
           <DevPane
             log={developer?.log}
             recording={developer?.recording ?? false}
             {...(developer?.onCopy ? { onCopy: developer.onCopy } : {})}
+            {...(developer?.onCleared ? { onCleared: developer.onCleared } : {})}
           />
         )}
 
         {pane === 'settings' && (
           <Settings
-            {...(developer
+            /* GATED ON `state.developer`, the same fact the rail and the pane
+               read — not on whether the host handed over the diagnostics
+               wiring, which is a different question and used to be conflated
+               with this one. */
+            {...(state.developer
               ? {
                   developer: {
                     hidden: state.hiddenPanes,
                     onSetHidden: (target: string, hidden: boolean) =>
                       dispatch({ type: 'setPaneHidden', pane: target, hidden }),
-                    recording: developer.recording,
+                    recording: developer?.recording ?? false,
                   },
                 }
               : {})}

@@ -22,6 +22,7 @@ import {
 import { bookAccent } from '../../core/bookAccent'
 import { citation, type Source } from '../../core/citation'
 import { decideLookUp, lookUpPress } from '../lookUp'
+import { writeClipboard } from '../clipboard'
 import { NO_GLOSS, type GlossProvider } from '../../core/gloss'
 import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../core/ports'
 import { askGloss, useGloss } from '../hooks/useGloss'
@@ -495,15 +496,15 @@ export function Reader({
    * popup's two, and the note popover's copy.
    */
   const copyText = useCallback((text: string) => {
-    const clipboard = navigator.clipboard
-    if (text && clipboard) {
-      void clipboard.writeText(text).catch((cause: unknown) => {
-        console.error('Paper: could not copy', cause)
-        setNotice('That could not be copied to the clipboard.')
-      })
-    } else if (text) {
-      setNotice('This device has no clipboard available.')
-    }
+    /* THE THREE OUTCOMES COME FROM `writeClipboard` NOW, and the sentences stay
+       here — see that module for why the split falls where it does. This body
+       WAS the careful version; the Developer panel's later copy had lost every
+       lesson in it, which is what made one path worth having. */
+    if (!text) return
+    void writeClipboard(text).then((outcome) => {
+      if (outcome === 'refused') setNotice('That could not be copied to the clipboard.')
+      else if (outcome === 'absent') setNotice('This device has no clipboard available.')
+    })
   }, [])
 
   /** Copy a passage, and take the selection down with it — the popup's way. */

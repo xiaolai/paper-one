@@ -419,6 +419,29 @@ describe('the pane follows the screen', () => {
       expect(hidden.pane).toBe('toc')
     })
 
+    /* ⚠️ **A PANE REMEMBERED FOR THE OTHER SCREEN SURVIVES.** Both actions
+       re-resolved `lastPane` through `paneFits`, which also asks about the
+       CURRENT screen — so toggling developer options while reading replaced a
+       `library` remembered for the shelf with the reader's default, erasing a
+       perfectly good memory for a screen they were not on. Only OFFERED-ness
+       may touch it; `goScreen` never rewrites it for the same reason. */
+    it('leave a pane remembered for the other screen alone', () => {
+      const reading = at({ screen: 'reader', pane: 'toc', lastPane: 'library' })
+      expect(reducer(reading, { type: 'toggleDeveloper' }).lastPane).toBe('library')
+      const hidden = reducer(
+        { ...reading, developer: true },
+        { type: 'setPaneHidden', pane: 'cards', hidden: true },
+      )
+      expect(hidden.lastPane).toBe('library')
+    })
+
+    /* But a remembered pane that is no longer OFFERED does go, or the next
+       ⌘\\ reopens something the reader cannot be shown. */
+    it('replace a remembered pane the reader is no longer offered', () => {
+      const on = at({ screen: 'reader', pane: 'toc', lastPane: 'cards', developer: true })
+      expect(reducer(on, { type: 'toggleDeveloper' }).lastPane).toBe('toc')
+    })
+
     /* Ticking twice is not two entries — the list is a set. */
     it('do not record the same panel twice', () => {
       const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })

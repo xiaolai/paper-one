@@ -9,6 +9,7 @@ import { DEFAULT_STEP_IDX, applyMetrics } from '../core/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
 import { createGenerations } from '../core/generations'
+import { writeClipboard } from './clipboard'
 import type { DiagnosticLog } from '../core/diagnosticsLog'
 import { createOpenRollback } from './openRollback'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
@@ -88,6 +89,14 @@ export interface AppProps {
    */
   diagnosticLog?: DiagnosticLog | undefined
   /**
+   * Told after the Developer panel clears the window, so the file can catch up.
+   *
+   * `diagnostics.jsonl` is a PROJECTION of the window, rewritten whole — so a
+   * clear that did not reach the spool left the file holding entries the app no
+   * longer has, and a harness reading it over ssh read the past.
+   */
+  onDiagnosticsCleared?: (() => void) | undefined
+  /**
    * The kernel's services — the shelf, the marks, the cards, the settings —
    * built ONCE by the composition root (`main.tsx`) over the store and the
    * filesystem it resolved before the first render, and handed in rather than
@@ -161,6 +170,7 @@ export function App({
   beforeWindowClose,
   openRequests,
   diagnosticLog,
+  onDiagnosticsCleared,
 }: AppProps) {
   const platform = usePlatform()
   /* Probed once for the app's lifetime: which fonts this machine has cannot
@@ -1730,6 +1740,13 @@ export function App({
     state.switcherOpen,
     state.tagsOpen,
     state.stepIdx,
+    /* ⚠️ THE DIGITS READ THESE, AND THEY WERE MISSING — the same defect the
+       tint note below records, on the day developer options landed. The handler
+       went on closing over the visibility rules as they were when the effect
+       last ran, so ⌘4 stayed dead for a whole render after Cards was revealed,
+       and stayed live after it was hidden. */
+    state.developer,
+    state.hiddenPanes,
     /* ⌘D MARKS IN THE COLOUR THE BAR IS SHOWING, and these were missing — so
        the handler went on closing over whichever tint was current when the
        effect last ran. Change the colour in the mark palette, select a new
@@ -1903,15 +1920,17 @@ export function App({
                can have developer options on and an empty log, and the panel has
                to say which of the two it is looking at rather than drawing an
                empty list. */
-            {...(state.developer
-              ? {
-                  developer: {
-                    ...(diagnosticLog ? { log: diagnosticLog } : {}),
-                    recording: diagnosticLog !== undefined,
-                    onCopy: (jsonl: string) => void navigator.clipboard?.writeText(jsonl),
-                  },
-                }
-              : {})}
+            developer={{
+              ...(diagnosticLog ? { log: diagnosticLog } : {}),
+              /* NOT `state.developer`. Whether anything is RECORDING is decided
+                 at boot by a file; whether the surfaces are DRAWN is
+                 `state.developer`, which `paneFits` and the band both read.
+                 Passing this unconditionally is what stops the two becoming two
+                 answers to one question — see `SidePaneProps.developer`. */
+              recording: diagnosticLog !== undefined,
+              onCopy: writeClipboard,
+              ...(onDiagnosticsCleared ? { onCleared: onDiagnosticsCleared } : {}),
+            }}
             contributed={composition.panes}
           />
         }

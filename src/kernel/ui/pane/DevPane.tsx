@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { DiagnosticEntry, DiagnosticLog } from '../../core/diagnosticsLog'
+import type { CopyOutcome } from '../clipboard'
 import styles from './SidePane.module.css'
 
 /**
@@ -54,8 +55,20 @@ import styles from './SidePane.module.css'
  * change nothing until the next launch.
  */
 
-/** Newest first, which is where a failure is. */
-const NEWEST_FIRST = (a: DiagnosticEntry, b: DiagnosticEntry) => b.at - a.at
+/**
+ * Newest first, which is where a failure is.
+ *
+ * ⚠️ **REVERSED, AND IT USED TO SORT BY TIMESTAMP.** `Array.sort` is stable, so
+ * entries sharing a millisecond kept their relative order — which is
+ * OLDEST-first, the exact opposite of this panel's one ordering claim. Boot
+ * writes several per millisecond (`composition.started`, then a `started` per
+ * capability), so the case is not rare; it is the first screen a reader sees.
+ *
+ * The log's contract is already insertion order, oldest first, so reversing it
+ * is both correct and cheaper than a comparator — and it does the right thing
+ * across a clock that steps backwards, which a timestamp sort cannot.
+ */
+const newestFirst = (entries: readonly DiagnosticEntry[]): DiagnosticEntry[] => [...entries].reverse()
 
 /** The levels, in the order a reader narrows by: everything, then the trouble. */
 const LEVELS = ['all', 'warn', 'error'] as const
@@ -70,12 +83,63 @@ function keeps(entry: DiagnosticEntry, level: LevelFilter, scope: string): boole
   return scope === '' || entry.scope === scope || entry.scope.startsWith(`${scope}.`)
 }
 
+/**
+ * The first segment of a compound scope — `sync` for `sync.push`.
+ *
+ * `split` always yields at least one element, so the `?? entry.scope` this
+ * replaces was unreachable: `noUncheckedIndexedAccess` types it as possibly
+ * undefined and the runtime never produces that. A fallback that cannot fire
+ * reads as a case somebody thought about.
+ */
+function topScope(scope: string): string {
+  return scope.slice(0, scope.indexOf('.') === -1 ? scope.length : scope.indexOf('.'))
+}
+
+/**
+ * The fields, as text, whatever they turn out to be.
+ *
+ * ⚠️ **`JSON.stringify` IS NOT TOTAL, AND THIS WAS AN UNGUARDED CALL IN A
+ * RENDER.** A `bigint` throws `TypeError`; so does a cycle. `Diagnostics`
+ * redacts before anything reaches the log, but redaction is about SECRETS — it
+ * bounds depth, width and string length and does not promise the result is
+ * JSON-serialisable, and `fields` is `Record<string, unknown>` from every
+ * caller in the app. One `report()` with a `bigint` in it would have taken the
+ * whole panel down, on the surface a reader opens BECAUSE something is already
+ * wrong. Found by audit.
+ */
+function fieldsText(fields: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(fields, (_key, value) => (typeof value === 'bigint' ? `${value}n` : value), 1) ?? ''
+  } catch {
+    /* A cycle, or a `toJSON` that threw. The entry is still worth showing —
+       its time, scope and event are what a reader is scanning for — so the
+       fields degrade to a note rather than taking the row with them. */
+    return '[fields could not be rendered]'
+  }
+}
+
 /** `14:22:31.004` — the time of day, which is what a reader is correlating
- *  against. The date is in the file; nobody reads a pane across midnight. */
-function at(ms: number): string {
+ *  against. See `at`, which adds the date when the window spans one. */
+function at(ms: number, withDate: boolean): string {
   const when = new Date(ms)
   const two = (n: number) => String(n).padStart(2, '0')
-  return `${two(when.getHours())}:${two(when.getMinutes())}:${two(when.getSeconds())}.${String(when.getMilliseconds()).padStart(3, '0')}`
+  const clock = `${two(when.getHours())}:${two(when.getMinutes())}:${two(when.getSeconds())}.${String(when.getMilliseconds()).padStart(3, '0')}`
+  /* ⚠️ **THE DATE APPEARS WHEN THE WINDOW SPANS ONE**, and it used to be
+   * omitted outright under the reasoning that "nobody reads a pane across
+   * midnight". A machine left running for days is precisely the case this panel
+   * exists for — `sync-scenario.sh` drives two of them — so `03:14:07` with no
+   * date is ambiguous exactly when the log is most worth reading. Shown only
+   * when it distinguishes something, so an ordinary session keeps the short
+   * form the eye can scan. */
+  return withDate ? `${two(when.getMonth() + 1)}-${two(when.getDate())} ${clock}` : clock
+}
+
+/** Whether the window covers more than one local day — see `at`. */
+function spansDays(entries: readonly DiagnosticEntry[]): boolean {
+  if (entries.length < 2) return false
+  const day = (ms: number) => new Date(ms).toDateString()
+  const first = day(entries[0]!.at)
+  return entries.some((entry) => day(entry.at) !== first)
 }
 
 export interface DevPaneProps {
@@ -83,11 +147,31 @@ export interface DevPaneProps {
   readonly log?: DiagnosticLog | undefined
   /** Whether recording is on at all, which is decided at boot. */
   readonly recording: boolean
-  /** Put the window on the clipboard as JSON Lines — the file's own format. */
-  readonly onCopy?: ((jsonl: string) => void) | undefined
+  /**
+   * Put the window on the clipboard as JSON Lines — the file's own format.
+   *
+   * ⚠️ **IT REPORTS, AND IT USED TO BE FIRE-AND-FORGET.** Typed as returning
+   * nothing and called without a `catch`, a refused clipboard was an unhandled
+   * rejection reaching the global fatal handler and a button that appeared to
+   * work. `writeClipboard` answers with an outcome; this awaits it.
+   */
+  readonly onCopy?: ((jsonl: string) => Promise<CopyOutcome>) | undefined
+  /**
+   * Told after the window is cleared, so the file can catch up.
+   *
+   * ⚠️ **CLEARING EMPTIED MEMORY AND LEFT THE FILE.** `diagnostics.jsonl` is a
+   * PROJECTION of the window — rewritten whole, which is the property that
+   * makes it need no rotation — so a clear that did not tell the spool left the
+   * file holding entries the app no longer has, until the next report happened
+   * to rewrite it. A harness reading that file over ssh would have read the
+   * past.
+   */
+  readonly onCleared?: (() => void) | undefined
 }
 
-export function DevPane({ log, recording, onCopy }: DevPaneProps) {
+export function DevPane({ log, recording, onCopy, onCleared }: DevPaneProps) {
+  /** What the copy button last did. Cleared when the reader asks again. */
+  const [copied, setCopied] = useState<CopyOutcome | null>(null)
   const [level, setLevel] = useState<LevelFilter>('all')
   const [scope, setScope] = useState('')
   /* A NONCE, not a subscription. The log has no `subscribe` — it is written
@@ -96,23 +180,24 @@ export function DevPane({ log, recording, onCopy }: DevPaneProps) {
      reader asks for a fresh read; nothing here moves under them. */
   const [nonce, setNonce] = useState(0)
 
-  const entries = useMemo(() => {
+  /* ONE SNAPSHOT, not two reads of the same log a nonce apart: the entries and
+     the dropped count describe the same moment and are drawn together. */
+  const { entries, dropped } = useMemo(() => {
     void nonce
-    return log ? [...log.entries()].sort(NEWEST_FIRST) : []
-  }, [log, nonce])
-  const dropped = useMemo(() => {
-    void nonce
-    return log?.dropped() ?? 0
+    return log
+      ? { entries: newestFirst(log.entries()), dropped: log.dropped() }
+      : { entries: [] as DiagnosticEntry[], dropped: 0 }
   }, [log, nonce])
 
   /* The scopes actually present, so the filter offers what is there rather
      than a list somebody keeps. Top level only — `sync.push` files under
      `sync`, which is what the prefix match above makes true. */
   const scopes = useMemo(
-    () => [...new Set(entries.map((entry) => entry.scope.split('.')[0] ?? entry.scope))].sort(),
+    () => [...new Set(entries.map((entry) => topScope(entry.scope)))].sort(),
     [entries],
   )
   const shown = entries.filter((entry) => keeps(entry, level, scope))
+  const dated = spansDays(entries)
 
   if (!recording) {
     return (
@@ -162,8 +247,21 @@ export function DevPane({ log, recording, onCopy }: DevPaneProps) {
           Refresh
         </button>
         {onCopy && log && (
-          <button type="button" className={styles.devButton} onClick={() => onCopy(log.toJsonl())}>
-            Copy as JSONL
+          <button
+            type="button"
+            className={styles.devButton}
+            onClick={() => {
+              setCopied(null)
+              void onCopy(log.toJsonl()).then(setCopied)
+            }}
+          >
+            {copied === 'copied'
+              ? 'Copied'
+              : copied === 'refused'
+                ? 'Clipboard refused'
+                : copied === 'absent'
+                  ? 'No clipboard here'
+                  : 'Copy as JSONL'}
           </button>
         )}
         <button
@@ -171,6 +269,9 @@ export function DevPane({ log, recording, onCopy }: DevPaneProps) {
           className={styles.devButton}
           onClick={() => {
             log?.clear()
+            /* THE FILE IS A PROJECTION OF THE WINDOW, so emptying one without
+               the other leaves the reader's own harness reading the past. */
+            onCleared?.()
             setNonce((n) => n + 1)
           }}
         >
@@ -210,12 +311,12 @@ export function DevPane({ log, recording, onCopy }: DevPaneProps) {
               data-level={entry.level}
             >
               <div className={styles.devEntryHead}>
-                <span className={styles.devTime}>{at(entry.at)}</span>
+                <span className={styles.devTime}>{at(entry.at, dated)}</span>
                 <span className={styles.devScopeTag}>{entry.scope}</span>
                 <span className={styles.devEvent}>{entry.event}</span>
               </div>
               {Object.keys(entry.fields).length > 0 && (
-                <pre className={styles.devFields}>{JSON.stringify(entry.fields, null, 1)}</pre>
+                <pre className={styles.devFields}>{fieldsText(entry.fields)}</pre>
               )}
             </li>
           ))}

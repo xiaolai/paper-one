@@ -229,14 +229,22 @@ async function boot(root: HTMLElement): Promise<void> {
        is `NOOP_DIAGNOSTICS` and nothing is recorded either. */
     diagnostics: createDiagnostics({
       enabled: diagnosticsOn,
-      ...(diagnosticSpool === null
-        ? {}
-        : {
+      /* ⚠️ **THE RECORDER FOLLOWS `enabled`, NOT THE SPOOL — AND IT USED TO
+         FOLLOW THE SPOOL.** `diagnosticSpool` is null wherever there is no
+         filesystem, so a dev build outside Tauri had `diagnosticsOn` true, no
+         recorder installed, and a Developer panel reporting that diagnostics
+         were being recorded over a window that could never fill. The two are
+         different questions: whether anything is WRITTEN DOWN in memory, and
+         whether it is also projected to a FILE. Only the second needs a disk.
+         Found by audit. */
+      ...(diagnosticsOn
+        ? {
             record: (entry) => {
               diagnosticLog.record(entry)
-              diagnosticSpool.touch()
+              diagnosticSpool?.touch()
             },
-          }),
+          }
+        : {}),
     }),
   })
 
@@ -460,6 +468,10 @@ async function boot(root: HTMLElement): Promise<void> {
            records nothing", and it can only tell them apart if absence means
            the second. `diagnosticsOn` is the same flag the sink reads. */
         {...(diagnosticsOn ? { diagnosticLog } : {})}
+        /* THE FILE IS A PROJECTION OF THE WINDOW — see `diagnosticsLog.ts` — so
+           clearing one must rewrite the other, or a harness reading
+           `diagnostics.jsonl` over ssh reads entries the app has thrown away. */
+        {...(diagnosticSpool ? { onDiagnosticsCleared: () => diagnosticSpool.touch() } : {})}
         fs={fs}
         shelfUnread={shelfUnread}
         bootNotice={storeNotice}

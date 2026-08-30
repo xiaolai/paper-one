@@ -412,28 +412,19 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
      * the rail no longer draws and the reducer can no longer reach, which is
      * the state `paneFor` exists to make unreachable. Turning them ON needs the
      * same call for the same reason in reverse: nothing else re-asks. */
-    case 'toggleDeveloper': {
-      const next = { ...state, developer: !state.developer }
-      return {
-        ...next,
-        pane: state.pane === null ? null : paneFor(next.screen, state.pane, audienceOf(next, contributed)),
-        lastPane: paneFor(next.screen, next.lastPane, audienceOf(next, contributed)),
-      }
-    }
+    case 'toggleDeveloper':
+      return afterVisibilityChange({ ...state, developer: !state.developer }, contributed)
 
-    case 'setPaneHidden': {
-      const hiddenPanes = action.hidden
-        ? [...new Set([...state.hiddenPanes, action.pane])]
-        : state.hiddenPanes.filter((one) => one !== action.pane)
-      const next = { ...state, hiddenPanes }
-      /* Same rule as above: hiding the panel you are looking at must move you
-       * off it rather than leave a title over nothing. */
-      return {
-        ...next,
-        pane: state.pane === null ? null : paneFor(next.screen, state.pane, audienceOf(next, contributed)),
-        lastPane: paneFor(next.screen, next.lastPane, audienceOf(next, contributed)),
-      }
-    }
+    case 'setPaneHidden':
+      return afterVisibilityChange(
+        {
+          ...state,
+          hiddenPanes: action.hidden
+            ? [...new Set([...state.hiddenPanes, action.pane])]
+            : state.hiddenPanes.filter((one) => one !== action.pane),
+        },
+        contributed,
+      )
 
     case 'setSide':
       return { ...state, side: action.side }
@@ -686,6 +677,35 @@ export function defaultPaneFor(screen: Screen): PaneId {
  * holds the second question, and conflating them is how a reader ends up with a
  * pane that closes itself whenever they change screen.
  */
+/**
+ * What must be re-resolved when a panel's VISIBILITY changes.
+ *
+ * ONE HELPER FOR BOTH ACTIONS, because they were two copies carrying the same
+ * defect — which is how a defect gets fixed once and survives.
+ *
+ * ⚠️ **`lastPane` IS TESTED FOR OFFERED-NESS, NOT FOR FIT**, and the two copies
+ * both used fit. `paneFits` also asks about the SCREEN, so toggling developer
+ * options while reading replaced a `library` remembered for the shelf with the
+ * reader's default — erasing a perfectly good memory for a screen the reader
+ * was not even on. The remembered panel is a cross-screen value; the only
+ * reason a visibility change may touch it is that the panel is no longer
+ * offered to this reader at all. `goScreen` never rewrites it for the same
+ * reason.
+ *
+ * The OPEN pane is the other way round: it is on this screen by definition, so
+ * it goes through `paneFor` and lands on the screen's default when it must.
+ */
+function afterVisibilityChange(next: AppState, contributed: ContributedPanes): AppState {
+  const audience = audienceOf(next, contributed)
+  return {
+    ...next,
+    pane: next.pane === null ? null : paneFor(next.screen, next.pane, audience),
+    lastPane: paneOffered(next.lastPane, next.developer, next.hiddenPanes)
+      ? next.lastPane
+      : defaultPaneFor(next.screen),
+  }
+}
+
 /** The audience a state describes, so the reducer's four calls cannot differ. */
 function audienceOf(state: AppState, contributed: ContributedPanes): PaneAudience {
   return { contributed, developer: state.developer, hiddenPanes: state.hiddenPanes }
@@ -754,6 +774,18 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
      * four indices are listed rather than the object that holds them. */
   }, [
     settings,
+    /* ⚠️ **OMITTED AT FIRST, EXACTLY AS THE FIFTEEN BELOW WERE.** This effect
+       lists every preference by name, so a new one that is not added here is a
+       setting the reader can change and never save — the defect `readingStyle`
+       records two paragraphs down, repeated on the day developer options landed.
+       It is the whole point of persisting the flag: without these two lines
+       ⌘⌃⌥D worked and did not survive a relaunch.
+
+       `hiddenPanes` is safe as an identity: `setPaneHidden` builds a new array
+       only when the list actually changes, so this cannot re-run on a page turn
+       the way a freshly-built `spacing` wrapper would. */
+    prefs.developer,
+    prefs.hiddenPanes,
     prefs.theme,
     prefs.themeFollowsOs,
     prefs.typeface,

@@ -5,6 +5,7 @@ import {
   CapabilityError,
   KERNEL_DEFAULT_PANE,
   composeCapabilities,
+  paneOffered,
   createKernelServices,
   kernelApi,
   registrationOrder,
@@ -1095,7 +1096,22 @@ describe('resolvePaneId — a persisted lastPane naming an absent pane', () => {
 
   it('falls back to the kernel default for a contributed id nobody composed', () => {
     expect(resolvePaneId('companion-old:pane', known)).toBe(KERNEL_DEFAULT_PANE)
-    expect(resolvePaneId('gone:pane', [])).toBe('companion')
+    /* ⚠️ **THE CONSTANT, NOT THE NAME IT HAPPENS TO HOLD.** This spelled
+       `'companion'`, which pinned the value rather than the behaviour — and
+       when Companion became unfinished and the default moved to Contents, this
+       was the only thing that noticed, in the coverage lane, a step after
+       everything else was green. */
+    expect(resolvePaneId('gone:pane', [])).toBe(KERNEL_DEFAULT_PANE)
+  })
+
+  /* ⚠️ **AND THE DEFAULT MUST BE A PANEL EVERY READER IS OFFERED.** It was
+     `companion`, which `UNFINISHED_PANE_IDS` now hides from anyone who has not
+     turned developer options on — so an unknown stored id resolved to a panel
+     the rail refuses to draw. `ui/state.ts`'s `defaultPaneFor` answers the same
+     question for the reducer and was moved; this one was missed, which is what
+     two defaults for one decision does. */
+  it('defaults to a panel that is not hidden from ordinary readers', () => {
+    expect(paneOffered(KERNEL_DEFAULT_PANE, false)).toBe(true)
   })
 
   it('keeps a contributed id the composition has, and every kernel id', () => {

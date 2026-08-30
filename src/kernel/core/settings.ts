@@ -155,13 +155,86 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
    * may be composed again, and forgetting it here would make removing and
    * re-adding a capability a reset of its preferences. `get` ignores what it
    * is not asked for, which is the only sense in which they are ignored. */
+  /* ⚠️ **AN ENVELOPE FROM THE FUTURE IS NOT THIS BUILD'S TO MIGRATE.** The
+   * test was `version === SETTINGS_VERSION`, so ANY other number — including a
+   * higher one — went through the BACKWARD migration and was then written back
+   * as version 1. A reader who ran a newer Paper and then an older one had
+   * their settings file rewritten into a shape the newer build no longer
+   * understands, silently, on the first preference they changed. Found by
+   * audit. */
+  const fromTheFuture = found !== null && found.version > SETTINGS_VERSION
   let values: Readonly<Record<string, unknown>> =
-    found && found.version === SETTINGS_VERSION ? found.values : migrate(found)
+    found && found.version === SETTINGS_VERSION
+      ? found.values
+      : fromTheFuture
+        ? /* READ, BUT NOT REWRITTEN. The values are almost certainly a superset
+             of this build's — every setting is `<namespace>.<name>` and `get`
+             ignores what it was not asked for — so the reader keeps their theme
+             and their type size rather than being reset. What must not happen
+             is this build claiming the file. */
+          (found.values as Readonly<Record<string, unknown>>)
+        : migrate(found)
   const listeners = new Set<() => void>()
 
   /* WHETHER THE NEXT LAUNCH WILL SEE ANY OF THIS. No storage at all is the
-   * plain case; a storage that has REFUSED a write is the earned one. */
-  let persistent = storage !== null
+   * plain case; a storage that has REFUSED a write is the earned one — and a
+   * file written by a NEWER build is the third: refusing to write it is the
+   * only way to leave it intact, and "these settings are not being saved" is
+   * already the sentence the panel draws for exactly this state. */
+  let persistent = storage !== null && !fromTheFuture
+
+  /**
+   * Tell every subscriber, and let none of them stop the others.
+   *
+   * ⚠️ **A THROWING SUBSCRIBER USED TO ESCAPE, AND TAKE THE WRITE WITH IT.**
+   * `set` promises in capitals never to throw, and the loop broke that three
+   * ways at once: the exception left `set` through a caller with nobody to
+   * catch it, every listener after the thrower went untold, and `persist` never
+   * ran — so the value was in memory, half the UI knew, and the disk never
+   * heard. The same class `controller.ts`'s `set` was fixed for one round
+   * earlier.
+   *
+   * ⚠️ **AND THERE ARE TWO CALLERS, WHICH IS WHY THIS IS A FUNCTION.** The
+   * first fix isolated the loop in `set` and left the identical loop in
+   * `persist`'s catch — the one that publishes `persistent = false`, which is
+   * the single most important thing this store ever tells anybody, and the path
+   * where a subscriber is most likely to be doing something unusual. One
+   * notifier, two callers, and no third copy to forget. Found by the verify
+   * pass on the fix for the first.
+   */
+  const notify = (): void => {
+    for (const listener of [...listeners]) {
+      try {
+        listener()
+      } catch (thrown) {
+        console.error('Paper: a settings subscriber threw while being notified', thrown)
+      }
+    }
+  }
+
+  /**
+   * Whether a write would change anything, without ever throwing.
+   *
+   * ⚠️ **`JSON.stringify` IS NOT TOTAL**, and the comparison it replaces was
+   * unguarded inside a method that promises never to throw: a cyclic value
+   * throws `TypeError`, and so does a `bigint` or a `toJSON` that fails. The
+   * settings this app defines are all JSON-safe, so the hole was reachable only
+   * through a capability's own setting — which is exactly the caller this store
+   * cannot vouch for.
+   *
+   * A DIFFERENCE IT CANNOT PROVE IS A DIFFERENCE. Falling back to "changed"
+   * costs one redundant write and a notification; falling back to "unchanged"
+   * would silently drop a real preference, which is the worse of the two by a
+   * wide margin.
+   */
+  const unchanged = (current: unknown, value: unknown): boolean => {
+    if (Object.is(current, value)) return true
+    try {
+      return JSON.stringify(current) === JSON.stringify(value)
+    } catch {
+      return false
+    }
+  }
 
   const persist = () => {
     if (!storage || !persistent) return
@@ -190,7 +263,7 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
        * an answer that will not have changed. */
       persistent = false
       console.error('Paper: settings will not be saved on this device', cause)
-      for (const listener of [...listeners]) listener()
+      notify()
     }
   }
 
@@ -225,13 +298,12 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
        * nothing still paid a write, on the one path that is already the
        * slowest. */
       const current = setting.key in values ? values[setting.key] : setting.fallback
-      const same = Object.is(current, value) || JSON.stringify(current) === JSON.stringify(value)
-      if (same) return
+      if (unchanged(current, value)) return
       values = { ...values, [setting.key]: value }
       // Listeners first: what is held in memory is the truth the UI shows,
       // whether or not the disk then takes it. Then the write, whose failure
       // becomes `persistent` rather than an exception out of an event handler.
-      for (const listener of [...listeners]) listener()
+      notify()
       persist()
     },
     get persistent() {

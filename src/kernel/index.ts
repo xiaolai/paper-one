@@ -333,7 +333,16 @@ export {
 export type { Annotation, Bookmark, Mark, MarkKind, MarkStorage, MarkStyle, MarkTint, NewMark } from './core/marks'
 export { CARD_KINDS, CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
 export type { Card, CardKind, NewCard } from './core/cards'
-export { KERNEL_PANE_IDS, isContributedPaneId, isKernelPaneId } from './core/uiTypes'
+/* `paneOffered` and its list are the rule for whether a reader may see a panel
+   at all — `composition.contract.test.ts` holds `KERNEL_DEFAULT_PANE` to it, so
+   the kernel's fallback cannot drift back onto a panel nobody is shown. */
+export {
+  KERNEL_PANE_IDS,
+  UNFINISHED_PANE_IDS,
+  isContributedPaneId,
+  isKernelPaneId,
+  paneOffered,
+} from './core/uiTypes'
 export type { ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side, Theme, Typeface } from './core/uiTypes'
 
 

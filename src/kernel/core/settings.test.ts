@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BRIGHTNESS, CONTRAST, LEGACY_READING_SIZES, READING_STEPS, SPACING, stepIndexForSize } from './metrics'
 import { initialState, preferencesOf } from '../ui/state'
+import { defineSetting } from './ports'
 import {
   KERNEL_SETTINGS,
   SETTINGS_STORAGE_KEY,
@@ -43,6 +44,15 @@ const readingBack = (raw: unknown): KernelPreferences => {
       migrate: carryLegacySettings,
     }),
   )
+}
+
+/** A `MarkStorage` over a Map, for the cases that read it back. */
+function fakeStorage() {
+  const map = new Map<string, string>()
+  return {
+    getItem: (key: string) => map.get(key) ?? null,
+    setItem: (key: string, value: string) => void map.set(key, value),
+  }
 }
 
 /** The envelope a build of this version writes. */
@@ -471,5 +481,97 @@ describe('a storage that will not take a write', () => {
     store.set(KERNEL_SETTINGS.side, 'left')
     store.set(KERNEL_SETTINGS.typeface, 'sans')
     expect(disk.writes, 'one attempt, then it knows').toBe(1)
+  })
+})
+
+/**
+ * The three ways `set` and the reader could lose data, all found by one audit.
+ */
+describe('what the store promises never to do', () => {
+  /* ⚠️ **`set` PROMISES NEVER TO THROW**, and a throwing subscriber broke it
+     twice over: the exception left `set` through a caller with nobody to catch
+     it, later listeners went untold, and the disk write below never ran. The
+     same class `controller.ts` was fixed for one round earlier. */
+  it('does not let a throwing subscriber escape set, silence its peers, or stop the write', () => {
+    const storage = fakeStorage()
+    const store = createSettingsStore({ storage })
+    let told = 0
+    store.subscribe(() => {
+      throw new Error('a subscriber that throws')
+    })
+    store.subscribe(() => {
+      told += 1
+    })
+
+    expect(() => store.set(KERNEL_SETTINGS.themeFollowsOs, false)).not.toThrow()
+    expect(told, 'the subscriber after the thrower').toBe(1)
+    expect(store.get(KERNEL_SETTINGS.themeFollowsOs)).toBe(false)
+    // And it reached the disk, which the escaping throw used to prevent.
+    expect(createSettingsStore({ storage }).get(KERNEL_SETTINGS.themeFollowsOs)).toBe(false)
+  })
+
+  /* ⚠️ **AND ON THE REFUSED-WRITE PATH TOO**, which the first fix missed:
+     `persist`'s catch publishes `persistent = false` through its OWN loop, and
+     that is the single most important thing this store ever tells anybody. A
+     throwing subscriber there escaped `set` and stopped the rest of the UI
+     learning that nothing is being saved. One notifier, two callers. */
+  it('does not let a throwing subscriber escape the refused-write path either', () => {
+    const store = createSettingsStore({
+      storage: {
+        getItem: () => null,
+        setItem: () => {
+          throw new Error('quota')
+        },
+      },
+    })
+    let told = 0
+    store.subscribe(() => {
+      throw new Error('a subscriber that throws')
+    })
+    store.subscribe(() => {
+      told += 1
+    })
+
+    expect(() => store.set(KERNEL_SETTINGS.themeFollowsOs, false)).not.toThrow()
+    expect(store.persistent, 'the refusal is recorded').toBe(false)
+    /* Twice: once for the value, once for `persistent` going false. What
+       matters is that the subscriber after the thrower heard both. */
+    expect(told).toBe(2)
+  })
+
+  /* ⚠️ **`JSON.stringify` IS NOT TOTAL.** The unchanged-check was an unguarded
+     call inside the same never-throws method: a cyclic value throws, and so
+     does a `bigint`. A difference it cannot prove must read as a difference —
+     one redundant write is cheaper than a dropped preference. */
+  it('does not throw comparing a value JSON cannot serialise', () => {
+    const store = createSettingsStore({ storage: fakeStorage() })
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const setting = defineSetting<unknown>('test.cyclic', null, (raw: unknown) => raw)
+
+    expect(() => store.set(setting, cyclic)).not.toThrow()
+    expect(store.get(setting)).toBe(cyclic)
+  })
+
+  /* ⚠️ **AN ENVELOPE FROM THE FUTURE IS NOT THIS BUILD'S TO REWRITE.** Any
+     version but this one went through the BACKWARD migration and was written
+     back as version 1 — so running a newer Paper and then an older one
+     destroyed the newer file on the first preference the reader changed. */
+  it('reads a newer envelope without claiming it', () => {
+    const storage = fakeStorage()
+    const written = JSON.stringify({
+      version: SETTINGS_VERSION + 1,
+      values: { 'kernel.theme': 'sage', 'kernel.somethingNewer': 42 },
+    })
+    storage.setItem(SETTINGS_STORAGE_KEY, written)
+    const store = createSettingsStore({ storage })
+
+    // The reader keeps what this build understands …
+    expect(store.get(KERNEL_SETTINGS.theme)).toBe('sage')
+    // … and is told plainly that nothing will be saved.
+    expect(store.persistent).toBe(false)
+
+    store.set(KERNEL_SETTINGS.theme, 'night')
+    expect(storage.getItem(SETTINGS_STORAGE_KEY), 'the newer file must be intact').toBe(written)
   })
 })

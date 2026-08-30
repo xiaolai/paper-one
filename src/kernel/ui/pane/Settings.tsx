@@ -82,6 +82,15 @@ const GROUP = {
   blocks: 'blocks',
   figures: 'figures',
   page: 'page',
+  /* ⚠️ **NO COLON, AND THESE WERE `developer:unfinished`.** A colon is the
+     CONTRIBUTED-pane and contributed-section convention — `<capability>:<name>`
+     — and these ids share one open/closed list with the sections a capability
+     contributes, so a capability named `developer` would have collided with
+     them and toggled the wrong group. They were also bare literals written
+     twice each at the call site, where a half-finished rename silently breaks
+     toggling rather than failing to compile. */
+  developerPanels: 'developerPanels',
+  developerDiagnostics: 'developerDiagnostics',
 } as const
 
 /**
@@ -865,8 +874,8 @@ export function Settings({
         <PaneBand title="Developer">
           <PaneGroup
             title="Unfinished panels"
-            open={groupOpen('developer:unfinished')}
-            onToggle={() => toggleGroup('developer:unfinished')}
+            open={groupOpen(GROUP.developerPanels)}
+            onToggle={() => toggleGroup(GROUP.developerPanels)}
           >
             <p className={styles.groupHint}>
               These panels are drawn but do not yet answer what they promise. They are hidden from
@@ -889,8 +898,8 @@ export function Settings({
 
           <PaneGroup
             title="Diagnostics"
-            open={groupOpen('developer:diagnostics')}
-            onToggle={() => toggleGroup('developer:diagnostics')}
+            open={groupOpen(GROUP.developerDiagnostics)}
+            onToggle={() => toggleGroup(GROUP.developerDiagnostics)}
           >
             {/* ⚠️ **RECORDING IS DECIDED BEFORE THIS PANEL EXISTS.** It is a
                 FILE (`diagnostics.on`) rather than a setting, because the

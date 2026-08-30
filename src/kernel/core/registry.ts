@@ -276,7 +276,23 @@ export function scopeStorage(storage: KernelServices['storage'], capId: string):
 /* ------------------------------------------------------------- pane ids */
 
 /** The pane the kernel opens on when nothing better is known: `ui/state.ts`'s initial. */
-export const KERNEL_DEFAULT_PANE: PaneId = 'companion'
+/**
+ * ⚠️ **`toc`, AND IT WAS `companion` — A SECOND DEFAULT NOBODY REMEMBERED.**
+ *
+ * `defaultPaneFor` in `ui/state.ts` answers the same question for the reducer
+ * and was moved off Companion the day Companion became unfinished; this one was
+ * not, so `resolvePaneId` still resolved an unknown stored id to a panel most
+ * readers are not shown. Two defaults for one decision is how half a change
+ * lands — see `UNFINISHED_PANE_IDS`, which is the list that made Companion
+ * unfinished, and `defaultPaneFor`, which carries the reasoning for Contents.
+ *
+ * It stays HERE rather than importing that function: `registry.ts` is core and
+ * React-free, `defaultPaneFor` takes a screen this resolver does not have, and
+ * an import for one constant would tie the capability registry to the reducer's
+ * screen model. What keeps the two honest is `registry.test.ts` beside
+ * `state.test.ts`, both asserting the panel is one every reader is offered.
+ */
+export const KERNEL_DEFAULT_PANE: PaneId = 'toc'
 
 /**
  * A pane id from anywhere — a remembered `lastPane`, a URL, a message —
