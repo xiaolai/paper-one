@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createController, detailFor, type ControllerPlugin, type InferenceSnapshot } from './controller'
+import {
+  createController,
+  detailFor,
+  glossModel,
+  type ControllerPlugin,
+  type InferenceSnapshot,
+} from './controller'
 import type { InstallProgress, ModelRow, RuntimeStatus } from './plugin'
 
 const MODEL: ModelRow = {
@@ -68,6 +74,135 @@ describe('detailFor', () => {
     expect(detailFor({ kind: 'agentUnsupportedVersion' })).toBe('That agent’s version is not supported')
     expect(detailFor({ kind: 'agentMalformed' })).toBe('That agent’s answer could not be read')
     expect(detailFor({ kind: 'keychain' })).toBe('The keychain refused')
+  })
+
+  /* ⚠️ **THE GLOSS'S OWN, AND IT USED NOT TO EXIST AS A KIND AT ALL.**
+   * `generate::stream` decoded `finish_reason` and dropped it, so a definition
+   * cut off at `MAX_GLOSS_TOKENS` came back as a finished one and was drawn in
+   * amber. `inference_gloss` refuses it now, and a refusal that landed on the
+   * default would tell the reader "Something went wrong" about a model that had
+   * simply been asked for less than it wanted to say. */
+  it('has a sentence for an answer the model was cut off in', () => {
+    expect(detailFor({ kind: 'answerTruncated' })).toBe('The answer was cut off before it finished')
+  })
+})
+
+/**
+ * ⚠️ **WHICH MODEL DEFINES THE READER'S WORDS USED TO BE ARRAY ORDER.**
+ *
+ * `snapshot.models.find(…)` answered with whichever row `models.manifest.json`
+ * happened to leave first — deterministic by accident, and silently different
+ * after a reorder that had nothing to do with the gloss. The cache is keyed on
+ * the model, so such a reorder would also have dropped every remembered
+ * definition with nothing anywhere saying why.
+ */
+/**
+ * The two contracts an audit found unenforced.
+ */
+describe('what a badly-behaved subscriber cannot do', () => {
+  /* ⚠️ **`install` AND `uninstall` PROMISE TO RESOLVE, IN CAPITALS**, because
+     their only callers are `void model.install(id)` in the pane — a rejection
+     there is an unhandled promise and a reader told nothing. Both call `set`
+     BEFORE their `try`, so a throwing listener rejected them, left the install
+     slot owned and stuck the state on "installing" with nothing able to clear
+     it. */
+  it('cannot make install reject', async () => {
+    const controller = createController(plugin())
+    controller.subscribe(() => {
+      throw new Error('a subscriber that throws')
+    })
+
+    await expect(controller.install('qwen')).resolves.toBe(true)
+  })
+
+  it('cannot make uninstall reject', async () => {
+    const controller = createController(plugin())
+    controller.subscribe(() => {
+      throw new Error('a subscriber that throws')
+    })
+
+    await expect(controller.uninstall('qwen')).resolves.toBe(true)
+  })
+
+  /* AND EVERY OTHER SUBSCRIBER IS STILL TOLD. A throw used to abandon the loop,
+     so half the listeners saw an update and half did not — which is worse than
+     either all or none, because it is invisible. */
+  it('does not stop the subscribers after it from being told', async () => {
+    const controller = createController(plugin())
+    let told = 0
+    controller.subscribe(() => {
+      throw new Error('a subscriber that throws')
+    })
+    controller.subscribe(() => {
+      told += 1
+    })
+
+    await controller.refresh()
+
+    expect(told).toBeGreaterThan(0)
+  })
+})
+
+describe('glossModel', () => {
+  const row = (over: Partial<ModelRow> & { id: string }): ModelRow => ({
+    ...MODEL,
+    installed: true,
+    ...over,
+  })
+
+  it('has nothing to answer with when nothing is installed', () => {
+    expect(glossModel([])).toBeNull()
+    expect(glossModel([row({ id: 'a', installed: false })])).toBeNull()
+  })
+
+  it('never answers with a voice', () => {
+    expect(glossModel([row({ id: 'kokoro', modality: 'speech' })])).toBeNull()
+  })
+
+  /* SMALLEST FIRST, for the feature's own reason: a gloss is wanted in
+     milliseconds, and bytes are the best proxy this layer has for both the
+     first load and every generation after it. */
+  it('takes the smallest installed text model', () => {
+    expect(
+      glossModel([row({ id: 'big', bytes: 9_000 }), row({ id: 'small', bytes: 1_000 })]),
+    ).toBe('small')
+  })
+
+  /* ⚠️ THE CASE THE OLD CODE GOT WRONG. Same rows, reversed: `.find()` answered
+     `big` for one order and `small` for the other. */
+  it('answers the same whatever order the manifest lists them in', () => {
+    const big = row({ id: 'big', bytes: 9_000 })
+    const small = row({ id: 'small', bytes: 1_000 })
+    expect(glossModel([big, small])).toBe(glossModel([small, big]))
+  })
+
+  /* A TOTAL ORDER, so two models of identical size do not put the array back in
+     charge of the answer. */
+  it('breaks a tie by id rather than by position', () => {
+    const a = row({ id: 'aaa', bytes: 1_000 })
+    const b = row({ id: 'bbb', bytes: 1_000 })
+    expect(glossModel([b, a])).toBe('aaa')
+    expect(glossModel([a, b])).toBe('aaa')
+  })
+
+  /* An uninstalled row is not a candidate however small — the gloss cannot run
+     artifacts that are not on disk, and `resolve_model` refuses it anyway. */
+  it('ignores a smaller model that is not installed', () => {
+    expect(
+      glossModel([
+        row({ id: 'tiny', bytes: 10, installed: false }),
+        row({ id: 'real', bytes: 1_000 }),
+      ]),
+    ).toBe('real')
+  })
+
+  /* IT DOES NOT REORDER THE CALLER'S ARRAY. `snapshot.models` is handed to the
+     pane by reference, and a sort here would shuffle the Local models list
+     under the reader as a side effect of a lookup. */
+  it('leaves the array it was given alone', () => {
+    const models = [row({ id: 'big', bytes: 9_000 }), row({ id: 'small', bytes: 1_000 })]
+    glossModel(models)
+    expect(models.map((m) => m.id)).toEqual(['big', 'small'])
   })
 })
 

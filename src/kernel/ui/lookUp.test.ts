@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { decideLookUp, isLookUpTerm, lookUpPress } from './lookUp'
+import { decideLookUp, lookUpPress, termVerdict } from './lookUp'
 
 /**
  * ⚠️ **THIS FILE USED TO PIN A NO-REGRESSION RULE THAT NO LONGER APPLIES.**
@@ -68,15 +68,27 @@ describe('decideLookUp', () => {
   })
 })
 
-describe('isLookUpTerm', () => {
+/**
+ * ⚠️ **THREE ANSWERS, AND IT USED TO BE A BOOLEAN CALLED `isLookUpTerm`.**
+ *
+ * The two false cases are not one fact — an empty selection has nothing to say
+ * about it, an over-long one has a sentence the reader can act on — and
+ * collapsing them into `false` is what made SILENCE the only answer either
+ * could get. `lookUpPress` read the boolean and `return`ed. The cases below are
+ * the same cases; what changed is that the caller can now tell them apart, and
+ * `useGloss.test.ts` asserts what the reader is told for each.
+ */
+describe('termVerdict', () => {
   it('accepts a headword and a short phrase', () => {
-    expect(isLookUpTerm('counsel')).toBe(true)
-    expect(isLookUpTerm('kept his own counsel')).toBe(true)
+    expect(termVerdict('counsel')).toBe('ok')
+    expect(termVerdict('kept his own counsel')).toBe('ok')
   })
 
-  it('refuses an empty or whitespace-only selection', () => {
-    expect(isLookUpTerm('')).toBe(false)
-    expect(isLookUpTerm('   \n ')).toBe(false)
+  /* NOT `too-long`, and the difference is the whole reason this is not a
+   * boolean: there is no passage to refuse and nothing to say about one. */
+  it('answers empty for an empty or whitespace-only selection', () => {
+    expect(termVerdict('')).toBe('empty')
+    expect(termVerdict('   \n ')).toBe('empty')
   })
 
   /* Past 120 characters the reader has plainly not asked for a definition of a
@@ -84,12 +96,12 @@ describe('isLookUpTerm', () => {
    * a `dict://` lookup found nothing; the reason changed and the number did
    * not. */
   it('refuses a selection past the point the feature could work', () => {
-    expect(isLookUpTerm('a'.repeat(120))).toBe(true)
-    expect(isLookUpTerm('a'.repeat(121))).toBe(false)
+    expect(termVerdict('a'.repeat(120))).toBe('ok')
+    expect(termVerdict('a'.repeat(121))).toBe('too-long')
   })
 
   it('measures the collapsed length, so line breaks do not disqualify a phrase', () => {
-    expect(isLookUpTerm(`kept his\n\n   own counsel`)).toBe(true)
+    expect(termVerdict(`kept his\n\n   own counsel`)).toBe('ok')
   })
 
   /* COUNTED IN CODE POINTS. `String.length` is UTF-16 units, so an astral
@@ -97,29 +109,42 @@ describe('isLookUpTerm', () => {
    * 240. There is no longer a Rust half to disagree with, but the bound is on a
    * TERM and a term of CJK extension characters is a term. */
   it('counts code points, not UTF-16 units', () => {
-    expect(isLookUpTerm('𠮷'.repeat(120))).toBe(true)
-    expect(isLookUpTerm('𠮷'.repeat(121))).toBe(false)
+    expect(termVerdict('𠮷'.repeat(120))).toBe('ok')
+    expect(termVerdict('𠮷'.repeat(121))).toBe('too-long')
+  })
+
+  /* A closed set, counted, so a fourth answer cannot arrive untested. */
+  it('has no fourth answer', () => {
+    const seen = new Set(['counsel', '', 'a'.repeat(121)].map(termVerdict))
+    expect(seen).toEqual(new Set(['ok', 'empty', 'too-long']))
   })
 })
 
 /**
  * THE WIRING, RUN RATHER THAN READ.
  *
- * These three decisions lived inside `Reader.tsx`, which takes sixteen props
- * and renders foliate — so the only assertion anybody could write was
+ * This decision lived inside `Reader.tsx`, which takes sixteen props and
+ * renders foliate — so the only assertion anybody could write was
  * `useGloss.test.ts` scanning the file for a call. A source scan cannot tell a
  * working wiring from a plausible-looking one: it survives the action being
- * compared against a value it can never hold, and it survives the guard being
- * dropped. Both of those are cases below.
+ * compared against a value it can never hold, which is a case below.
+ *
+ * ⚠️ **THE TERM BOUND USED TO BE HERE AND IS NOW `useGloss.ask`'s**, along with
+ * the cases that pinned it. It did not move for tidiness: this file's own
+ * comment called the old behaviour "does nothing for a chapter", and doing
+ * nothing was the bug — a drawn button, an accepted press, and no state, no
+ * message and no diagnostic anywhere. A refusal the reader can read is a
+ * STATE, and states are the hook's. See `useGloss.test.ts`, where those cases
+ * now assert what the reader is told rather than that nothing happened.
  */
 describe('lookUpPress', () => {
   it('draws no control where there is nothing to look up with', () => {
-    expect(lookUpPress('none', () => 'counsel', () => {})).toBeNull()
+    expect(lookUpPress('none', () => {})).toBeNull()
   })
 
   it('acts for a real term', () => {
     const run = vi.fn()
-    lookUpPress('gloss', () => 'counsel', run)?.()
+    lookUpPress('gloss', run)?.()
     expect(run).toHaveBeenCalledTimes(1)
   })
 
@@ -127,30 +152,15 @@ describe('lookUpPress', () => {
      decides an unavailable provider shows it, so this must not branch. */
   it('acts the same way when the press will only offer an install', () => {
     const run = vi.fn()
-    lookUpPress('install', () => 'counsel', run)?.()
+    lookUpPress('install', run)?.()
     expect(run).toHaveBeenCalledTimes(1)
   })
 
-  /* THE GUARD, which a source scan cannot see at all. A reader can select a
-     whole chapter, and a chapter is not a term. */
-  it.each([['an empty selection', ''], ['whitespace only', '  \n '], ['a chapter', 'a'.repeat(121)]])(
-    'does nothing for %s',
-    (_name, term) => {
-      const run = vi.fn()
-      lookUpPress('gloss', () => term, run)?.()
-      expect(run).not.toHaveBeenCalled()
-    },
-  )
-
-  /* THE TERM IS READ AT PRESS TIME, not at render. The button is created once
-     and pressed later, and the selection moves underneath it — reading it
-     early would define whatever was selected when the popup first appeared. */
-  it('reads the selection when pressed, not when created', () => {
-    let selected = 'first'
-    const seen: string[] = []
-    const press = lookUpPress('gloss', () => selected, () => void seen.push(selected))
-    selected = 'second'
-    press?.()
-    expect(seen).toEqual(['second'])
+  /* NOT A COPY OF THE HANDLER. `lookUpPress` hands back the caller's own
+     function, so there is nothing left here that could read the selection at
+     the wrong moment, drop a press, or drift from what `Reader` passes. */
+  it('hands back the caller’s own handler rather than a wrapper', () => {
+    const run = vi.fn()
+    expect(lookUpPress('gloss', run)).toBe(run)
   })
 })

@@ -125,12 +125,25 @@ pub async fn inference_models<R: Runtime>(
 /// The registry is reused rather than a second map introduced: the guard's
 /// `Drop` already releases on every exit path, including a cancellation and a
 /// panic, which is the property that makes this safe to hold across an await.
-/// The `model:` prefix cannot collide with a minted request id — those are
-/// `<kind>-<n>` — and the busy error names the model rather than the key.
+/// ⚠️ **ITS OWN REGISTRY, AND IT USED TO SHARE THE REQUEST ONE.** This said
+/// "the `model:` prefix cannot collide with a minted request id — those are
+/// `<kind>-<n>`", which is a fact about the ids PAPER mints and not about the
+/// ones this command surface ACCEPTS: `request_id` arrives from the webview
+/// bounded only by `MAX_REQUEST_ID`, and this crate's whole premise is that the
+/// webview is untrusted. A caller passing `model:<id>` as its own request id
+/// held that model's install and removal for as long as it kept the request
+/// open, and an install in progress made a lookup under the same string answer
+/// "already running". Two namespaces in one map is one namespace — see
+/// `InferenceState::model_locks`.
+///
+/// The registry TYPE is still reused rather than a bespoke lock: the guard's
+/// `Drop` already releases on every exit path, including a cancellation and a
+/// panic, which is the property that makes this safe to hold across an await.
+/// The busy error names the model rather than the key.
 fn lock_model(state: &InferenceState, model: &str) -> Result<crate::requests::Guard> {
     state
-        .requests()
-        .begin(&format!("model:{model}"))
+        .model_locks()
+        .begin(model)
         .map_err(|_| Error::RequestBusy(model.to_owned()))
 }
 
@@ -502,12 +515,17 @@ pub async fn inference_generate<R: Runtime>(
      * generating into nothing, which on a loaded machine is a GPU spent on an
      * answer nobody will read. */
     let sink = cancel.clone();
-    generate::stream(request, &cancel, move |text| {
+    /* THE TEXT, not the whole `Answer`. A generation STREAMS, so a reader
+     * watching it arrive sees it stop — see `Error::AnswerTruncated` for why
+     * that is the difference between this command and the gloss, and not a
+     * looser rule here. */
+    Ok(generate::stream(request, &cancel, move |text| {
         if chunks.send(text).is_err() {
             sink.trip();
         }
     })
-    .await
+    .await?
+    .text)
 }
 
 /// Define a term in the sentence it sits in (WI-15.13).
@@ -544,12 +562,49 @@ pub async fn inference_gloss<R: Runtime>(
         let daemon = state.daemon().await?;
         daemon
             .model_request(reqwest::Method::POST, generate::CHAT_ROUTE)
+            /* ⚠️ ITS OWN CEILING, because `MODEL_CEILING` is ten minutes and
+             * every word of its reasoning is about a 1024-token generation.
+             * A reader has stopped reading to wait for this one. See
+             * `daemon::GLOSS_CEILING`. */
+            .deadline(crate::daemon::GLOSS_CEILING)
             .json(&chat_request(model, system, question, MAX_GLOSS_TOKENS))
     };
     // Streamed on the wire, delivered whole: the daemon's non-streaming path
     // holds the whole answer before replying, and cancelling that is a
     // request nobody is reading rather than a generation that stopped.
-    generate::stream(request, &cancel, |_| {}).await
+    let answer = generate::stream(request, &cancel, |_| {}).await?;
+    /* ⚠️ **A CUT-OFF DEFINITION IS NOT A DEFINITION**, and this command used to
+     * return one as though it were. `MAX_GLOSS_TOKENS` is Paper's own bound, so
+     * hitting it is an ordinary outcome rather than a daemon misbehaving — and
+     * because the gloss is delivered WHOLE rather than streamed, nobody watches
+     * it stop: `glossProvider` cached the fragment and the strip drew it in
+     * amber, which is the mark that says "this is the definition". The reasoning
+     * is `generate::stream`'s own, applied to the bound it did not cover:
+     * *half an answer presented as a whole one is the shape this crate refuses
+     * everywhere else.*
+     *
+     * Refused rather than trimmed to the last full sentence: a model that ran
+     * past 160 tokens ignored a six-line prompt asking for one or two, so its
+     * first 160 are not a gloss that happens to be long. */
+    /* ⚠️ **AND `length` WAS NOT THE ONLY WAY NOT TO FINISH**, which the first
+     * version of this check missed: it refused `length` and accepted
+     * everything else, including a stream that ended saying NOTHING — a daemon
+     * killed mid-answer, a body that stopped without `[DONE]`. `generate.rs`'s
+     * own doc for `Answer::finish` says that case is "a daemon that went away
+     * mid-answer", and returning it as a definition is the same defect this
+     * check exists to close, arriving by the other door. Found by audit.
+     *
+     * So the test is POSITIVE — only an explicit `stop` is a finished answer —
+     * which is the fail-closed direction: a backend that stops reporting
+     * `finish_reason` breaks the gloss loudly instead of quietly shipping
+     * fragments in amber. */
+    if !answer.complete() {
+        return Err(Error::AnswerTruncated {
+            finish: answer.finish_label(),
+            limit: MAX_GLOSS_TOKENS,
+        });
+    }
+    Ok(answer.text)
 }
 
 /* ──────────────────────────────── the agents ────────────────────────────── */

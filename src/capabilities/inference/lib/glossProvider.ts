@@ -15,9 +15,11 @@ import { cancelRequest, errorKind, mintRequestId, type InferencePlugin } from '.
  * # The cache, and why it is keyed the way it is
  *
  * A reader re-reading a chapter looks the same word up twice, and the second
- * time should cost nothing. The key is the term AND the sentence, because the
- * whole point of the feature is the sense that is on this page — the same
- * word in two sentences is two different glosses and must not share an entry.
+ * time should cost nothing. The key is THE QUESTION — the exact string the
+ * model is sent — because the whole point of the feature is the sense that is
+ * on this page: the same word in two sentences is two different glosses and
+ * must not share an entry. A key computed beside the request rather than being
+ * it is how two different questions came to share one; see `glossQuestion`.
  *
  * It is dropped when the model changes, because **a gloss is an answer from a
  * particular model and not a fact**. Keeping it across a model swap would
@@ -52,27 +54,53 @@ export const GLOSS_SYSTEM_PROMPT = [
   'If the sentence does not make the sense clear, say so plainly in one sentence.',
 ].join(' ')
 
-/** The user turn: the sentence, then the term. */
-export function glossQuestion(term: string, context: GlossContext): string {
-  return [
-    `Book: ${context.bookTitle}`,
-    `Sentence: ${context.sentence}`,
-    `Define, in this sentence: ${term}`,
-  ].join('\n')
+/**
+ * Whitespace collapsed to single spaces, and the edges trimmed.
+ *
+ * APPLIED TO WHAT IS SENT, not to a copy of it kept for the cache — which is
+ * the whole of the fix below. A selection differing only in a line break is
+ * genuinely the same question, so it should be normalised once, on the way to
+ * the model, and the key falls out of that rather than being computed beside it.
+ *
+ * It also makes `glossQuestion` INJECTIVE, which the key depends on: no field
+ * can contain a newline afterwards, so the three-line question cannot be
+ * confused with a different one whose title happened to contain
+ * `\nSentence: `.
+ */
+function squeezed(text: string): string {
+  return text.trim().replace(/\s+/g, ' ')
 }
 
 /**
- * A cache key. The term and the sentence, normalised for whitespace and case
- * so that a selection differing only in a line break is a hit rather than a
- * second request.
+ * The user turn: the sentence, then the term.
+ *
+ * ⚠️ **THIS IS ALSO THE CACHE KEY**, and that is a correctness property rather
+ * than a saving. There used to be a separate `glossKey`, and a key computed
+ * beside a request can disagree with it — this one did, in two directions:
+ *
+ * - **It LOWERCASED the term and the sentence.** The question does not, so
+ *   `March` and `march` in one sentence are two different questions with one
+ *   cache entry: select the verb after the month and you were served the
+ *   month's definition. `Polish`/`polish`, `Bank`/`bank`, and every proper noun
+ *   that is also a common word have the same shape.
+ * - **It normalised whitespace the request did not.** Two windows differing
+ *   only in a line break were one entry AND two different questions, so which
+ *   one the model saw depended on which was asked first.
+ *
+ * A cache is only correct when its key is its request. So there is one string
+ * now and it is both: two identical questions share an answer, and nothing else
+ * does. That also settles the audit's "two books with the same title collide" —
+ * same title, same sentence, same term IS the same question, and serving one
+ * answer for it is the cache working rather than a collision. The book's
+ * identity is deliberately not in it: the model never sees an id, so an id
+ * could only ever split entries that ought to be shared.
  */
-export function glossKey(term: string, context: GlossContext): string {
-  const flatten = (text: string): string => text.trim().replace(/\s+/g, ' ').toLowerCase()
-  /* THE TITLE IS PART OF THE QUESTION (`glossQuestion` sends it, and the
-     model reads the sense from it), so it is part of the key — one term in
-     two books used to share one cached definition. An encoded tuple rather
-     than a NUL-joined string: a NUL inside either text collided. */
-  return JSON.stringify([flatten(term), flatten(context.sentence), context.bookTitle ?? ''])
+export function glossQuestion(term: string, context: GlossContext): string {
+  return [
+    `Book: ${squeezed(context.bookTitle)}`,
+    `Sentence: ${squeezed(context.sentence)}`,
+    `Define, in this sentence: ${squeezed(term)}`,
+  ].join('\n')
 }
 
 export interface GlossProviderOptions {
@@ -83,9 +111,17 @@ export interface GlossProviderOptions {
 }
 
 export interface BoundGlossProvider extends GlossProvider {
-  /** Drop the cache — the model changed, so the answers are another model's. */
-  clearCache(): void
-  /** How many entries are held. For a test and a diagnostic. */
+  /**
+   * How many entries are held. For a test and a diagnostic.
+   *
+   * ⚠️ **`clearCache()` STOOD BESIDE THIS AND NOTHING CALLED IT.** Its comment
+   * said "drop the cache — the model changed", which is a job `gloss` does for
+   * itself against `cachedFor` on the way in; the method was a second way to do
+   * it that no composition root, no teardown and no pane ever reached, kept
+   * alive by one test asserting that it worked. A public method with one test
+   * and no caller is not a spare handle, it is a second answer waiting to
+   * disagree with the first.
+   */
   cacheSize(): number
 }
 
@@ -142,8 +178,11 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
          used to succeed from the cache and reject from the model, so what
          `useGloss` saw depended on whether the word had been asked before. */
       signal.throwIfAborted()
-      const key = glossKey(term, context)
-      const hit = cache.get(key)
+      /* THE REQUEST IS THE KEY — see `glossQuestion`. Built once and used for
+       * both, so there is no second expression that could normalise
+       * differently from the one that reaches the model. */
+      const question = glossQuestion(term, context)
+      const hit = cache.get(question)
       if (hit !== undefined) return hit
 
       /* THE READINESS WAIT RACES THE ABORT. A cold start can take seconds —
@@ -186,7 +225,7 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
       try {
         const answer = (
           await plugin
-            .gloss(requestId, model, GLOSS_SYSTEM_PROMPT, glossQuestion(term, context))
+            .gloss(requestId, model, GLOSS_SYSTEM_PROMPT, question)
             .catch((cause: unknown) => {
               /* ⚠️ **THE READER READS THIS, AND THEY USED TO READ NOTHING.**
                *
@@ -288,23 +327,32 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
          * still RETURNED to the caller who asked for it; it is only not
          * remembered for a model that did not produce it. Found by audit. */
         if (cachedFor === model) {
-          cache.set(key, answer)
+          cache.set(question, answer)
         }
         while (cache.size > CACHE_LIMIT) {
           const oldest = cache.keys().next().value
           if (oldest === undefined) break
           cache.delete(oldest)
         }
+        /* ⚠️ **CANCELLED IS CANCELLED AT THE END TOO, AND IT ONLY WAS AT THE
+         * START.** The check on the way in exists because "a lookup the reader
+         * abandoned used to succeed from the cache and reject from the model";
+         * an abort landing while the plugin call SETTLED had the same shape
+         * from the other side — the provider resolved, and only `useGloss`
+         * dropping the answer hid it. A port that rejects on abort must do so
+         * whenever the abort happened. Found by audit.
+         *
+         * AFTER the cache write, deliberately: the answer is a correct one for
+         * this question and was already paid for, so the reader's next lookup
+         * of the same word should still be free. What must not happen is
+         * RESOLVING a call the caller cancelled. */
+        signal.throwIfAborted()
         return answer
       } finally {
         signal.removeEventListener('abort', abort)
       }
     },
 
-    clearCache: () => {
-      cache.clear()
-      cachedFor = null
-    },
     cacheSize: () => cache.size,
   }
 }

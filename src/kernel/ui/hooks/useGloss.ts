@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GlossProvider } from '../../core/gloss'
 import type { Diagnostics } from '../../core/ports'
-import { sentenceAt } from '../reader/wordSnap/sentenceAt'
+import { termVerdict } from '../lookUp'
+import { localeAt, sentenceAt } from '../reader/wordSnap/sentenceAt'
+import { sentenceOf } from '../reader/wordSnap/sentenceOf'
 
 /**
  * One gloss at a time, for the word the reader is looking at.
@@ -11,16 +13,26 @@ import { sentenceAt } from '../reader/wordSnap/sentenceAt'
  * arriving beside a word is an appearance and not a download: streaming it
  * would be jitter, not progress.
  *
- * Four non-idle shapes since the system-dictionary hand-off went: `asking`,
- * `ready`, `failed`, and `unavailable` — the last for a press that cannot
- * reach a model at all, which used to be impossible because Dictionary.app
- * was always behind the gesture.
+ * Five non-idle shapes since the system-dictionary hand-off went: `asking`,
+ * `ready`, `failed`, `unavailable` and `tooLong`. The last two are both
+ * presses that never reach a model, and both used to be impossible or silent:
+ * `unavailable` because Dictionary.app was always behind the gesture, and
+ * `tooLong` because `lookUpPress` simply `return`ed.
  *
  * # It replaces rather than queues
  *
  * A reader looking up a second word has stopped caring about the first, so a
  * new request aborts the one in flight. Queueing would show them an answer
  * about a word they have moved on from, which is worse than showing nothing.
+ *
+ * # It does not outlive the passage it describes
+ *
+ * A gloss is anchored to a word on a page, and every neighbouring surface is
+ * taken down when that page stops being shown — `SelectionTools` on a page
+ * turn and on leaving the reader, `FootnotePopover` on both. This one was
+ * not: it had exactly one route out, the strip's own × button, so an amber
+ * definition survived a page turn, a chapter change, a different book, and a
+ * trip to the library and back. See `GlossAnchor`.
  */
 
 export type GlossState =
@@ -45,7 +57,37 @@ export type GlossState =
    * `GlossStrip`, which takes the action as a prop and draws nothing when
    * there is none.
    */
-  | { readonly kind: 'unavailable'; readonly term: string }
+  /**
+   * ⚠️ **`installable` IS READ AT THE PRESS AND CARRIED**, because the two
+   * facts are answered a render apart. `decideLookUp` reads the provider when
+   * the button is DRAWN; this state is reached when it is PRESSED, and
+   * availability can drop in between — uninstalling the only text model is the
+   * ordinary way. `Reader` passed `onInstall` to the strip unconditionally on
+   * the argument that `unavailable` "can only be reached when `decideLookUp`
+   * answered `install`", which is false for exactly that window: the strip
+   * then offered **Install one** with no runtime to install into, which is the
+   * WI-20.21 failure `GlossProvider.installable` exists to prevent. Answered
+   * at the moment of use, like `available` beside it, so there is no snapshot
+   * left for anything to go stale against.
+   */
+  | { readonly kind: 'unavailable'; readonly term: string; readonly installable: boolean }
+  /**
+   * Asked with a passage rather than a term.
+   *
+   * ⚠️ **THIS USED TO BE A SILENT `return` TOO**, in `lookUpPress`, and it
+   * outlived the fix for its twin above by a whole phase. A reader who
+   * selected more than `MAX_TERM` code points and pressed Look up got no
+   * definition, no message and no diagnostic — a live button that did nothing,
+   * indistinguishable from a broken feature.
+   *
+   * IT CARRIES NO TERM, and that is deliberate rather than an omission. The
+   * term here is a paragraph: naming it back is what `.glossFailedSaid` and
+   * `.glossAbsentSaid` had to be made shrinkable for, and neither of them
+   * ellipsizes. The sentence needs no name — the reader is looking at what
+   * they selected — and quoting a chapter into a one-line strip says nothing
+   * the reader does not already know.
+   */
+  | { readonly kind: 'tooLong' }
 
 export interface Gloss {
   readonly state: GlossState
@@ -66,16 +108,44 @@ export interface Gloss {
    * document walk (and its §F4 diagnostic) off a path that cannot reach a
    * model. There is no longer a snapshot for anything to go stale against.
    *
-   * `fallbackTerm` is what the `unavailable` message names, because the thunk
-   * that would have produced the sentence-spelled term is exactly what did not
-   * run.
+   * `fallbackTerm` is what the `unavailable` message names, and what the term
+   * bound is measured against, because the thunk that would have produced the
+   * sentence-spelled term is exactly what did not run. The raw selection is
+   * the right thing to measure either way: it is what the READER chose, and a
+   * walk that trimmed ruby out of a paragraph would not make that paragraph a
+   * term.
    */
   ask(request: () => GlossRequest, fallbackTerm: string, bookTitle: string): void
   /** Put it away — the reader moved on. */
   dismiss(): void
 }
 
-export function useGloss(provider: GlossProvider): Gloss {
+/**
+ * Where the gloss is anchored, or `null` when there is nowhere.
+ *
+ * An OPAQUE KEY, and the hook never reads inside it: a change means "the
+ * passage this gloss describes has stopped being shown", and `null` means the
+ * reader is not looking at a book at all. Both take the gloss down.
+ *
+ * ⚠️ **IT IS DELIBERATELY NOT THE READING POSITION**, and that is measured
+ * rather than assumed. The strip is a flex child of the reader's column beside
+ * `.stage`, which is `flex: 1` — so the strip APPEARING shrinks the stage,
+ * foliate re-paginates, and a relocate lands with a new fraction and possibly a
+ * new CFI. An anchor keyed on either would then dismiss the gloss that had just
+ * caused the reflow, grow the stage back, and relocate again: a flicker loop,
+ * driven by the fix. The spine item and the chapter cannot be moved by a
+ * reflow, so they are what `Reader` builds the key from.
+ *
+ * That leaves ONE case uncovered and it is stated rather than glossed over: a
+ * jump to a different place in the SAME chapter (a mark in this chapter, a
+ * backlink within it) does not change the key, so the strip survives it. The
+ * page turn — every route of it — is covered by `Reader` calling `dismiss()` at
+ * `onPageIntent`, on the line `clearSelection()` is already on and for the
+ * identical reason.
+ */
+export type GlossAnchor = string | null
+
+export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): Gloss {
   const [state, setState] = useState<GlossState>({ kind: 'idle' })
   const abort = useRef<AbortController | null>(null)
 
@@ -113,8 +183,52 @@ export function useGloss(provider: GlossProvider): Gloss {
     setState((current) => (current.kind === 'unavailable' ? { kind: 'idle' } : current))
   }, [provider.available])
 
+  /*
+   * ⚠️ **A GLOSS DOES NOT OUTLIVE THE PASSAGE IT DESCRIBES.**
+   *
+   * `dismiss` had exactly one caller — the strip's own × — so an amber
+   * definition survived a page turn, a chapter change, opening another book,
+   * and going to the library and back. Every surface beside it is taken down
+   * on those events with the reasoning written out (`SelectionTools` on the
+   * page intent and on `inert`, `FootnotePopover` on both); this one got none
+   * of it, and it is the one drawing MACHINE-WRITTEN text in the reader's own
+   * page, attributed to a word that is no longer there.
+   *
+   * The in-flight request goes with it, which is the other half: a gloss
+   * requested just before a page turn used to land on the next page and
+   * render. `dismiss` aborts, so the daemon is told too.
+   *
+   * HERE RATHER THAN IN `Reader`, so the rule can be RUN. `Reader` takes
+   * sixteen props and renders foliate — nothing in it can be mounted cheaply,
+   * which is the whole reason `lookUpPress` and `askGloss` were extracted —
+   * and a rule left there could only ever be checked by reading the file back.
+   */
+  useEffect(() => {
+    dismiss()
+  }, [anchor, dismiss])
+
   const ask = useCallback(
     (request: () => GlossRequest, fallbackTerm: string, bookTitle: string) => {
+      /* NOT A TERM, AND SAID SO. `lookUpPress` used to hold this bound and
+       * `return` on it: a live button, an accepted press, and nothing at all.
+       * It is decided HERE because the answer to it is a state, and states are
+       * this hook's — see `termVerdict` for why the two false cases had to
+       * come apart before either could be answered.
+       *
+       * FIRST, ahead of `available`, because it is a fact about what the
+       * READER chose and is true whether or not a model exists. "Paper needs a
+       * language model to define <a chapter>" is the wrong sentence twice
+       * over. An EMPTY selection is the one thing that genuinely has nothing
+       * to say — there is no passage to refuse and no message to write about
+       * it — so it leaves the state alone rather than inventing a report. */
+      const verdict = termVerdict(fallbackTerm)
+      if (verdict === 'empty') return
+      if (verdict === 'too-long') {
+        abort.current?.abort()
+        abort.current = null
+        setState({ kind: 'tooLong' })
+        return
+      }
       /* THE ONLY READ OF `available` ON THIS PATH. Said, not swallowed — see
        * `unavailable` above. The request in flight still goes, because a
        * reader who asked a second question has stopped caring about the first
@@ -122,7 +236,8 @@ export function useGloss(provider: GlossProvider): Gloss {
       if (!provider.available) {
         abort.current?.abort()
         abort.current = null
-        setState({ kind: 'unavailable', term: fallbackTerm })
+        /* READ HERE, not at the draw — see `unavailable`. */
+        setState({ kind: 'unavailable', term: fallbackTerm, installable: provider.installable })
         return
       }
       /* BUILT ONLY NOW, past the one check that decides. */
@@ -300,8 +415,19 @@ export function glossRequest(
   }
   return {
     term: selection.text,
-    sentence: sentenceAround(selection.prefix, selection.text, selection.suffix),
+    /* THE LOCALE COMES FROM THE RANGE, not from the walk that did not happen.
+     * It is one climb of the ancestor chain, and `localeAt` is total — a
+     * document torn down between the selection and the press answers
+     * `undefined`, which means the host's, rather than losing the lookup. */
+    sentence: sentenceAround(selection.prefix, selection.text, selection.suffix, {
+      locale: localeAt(selection.range),
+    }),
   }
+}
+
+export interface SentenceAroundOptions {
+  /** The document's own, from `localeAt`. `undefined` means the host's. */
+  readonly locale?: string | undefined
 }
 
 /**
@@ -310,32 +436,65 @@ export function glossRequest(
  * THE FALLBACK, since WI-16.4 — `glossRequest` reaches this only when
  * `sentenceAt` could not vouch for a sentence, which is the first and last
  * sentence of every block, a selection spanning two of them, a `<br>` in the
- * middle of one, and a fixed-layout book. Kept exactly as it was, because
- * "no worse than today" is the rule and rewriting it would break that claim.
+ * middle of one, and a fixed-layout book.
  *
- * **Two defects in it are measured and not fixed here.** It is a NO-OP on
- * Chinese — the split is `/(?<=[.!?。！？])\s+/`, and although the lookbehind
- * lists the CJK terminators the pattern still requires `\s+` after them, which
- * Chinese does not write; `'他说。然后'.split(…).pop()` returns the whole string.
- * And an abbreviation before the term erases the entire prefix:
- * `'He met Mr. '.split(…).pop()` is `''`. Both are reasons to prefer
- * `sentenceAt`, not reasons to patch a fallback whose value is that it is
- * unchanged.
+ * ⚠️ **IT CARRIED A SECOND SEGMENTATION POLICY, AND BOTH OF ITS DEFECTS WERE
+ * MEASURED.** The split was `/(?<=[.!?。！？])\s+/`, and phase 16 recorded what
+ * that costs while deliberately leaving it alone — *"no worse than today"* was
+ * that phase's rule, and rewriting the fallback would have broken the claim it
+ * was making about the walk:
  *
- * `prefix` and `suffix` are the selection's own context, which the session
- * already carries for mark anchoring — so this needs no second walk of the
- * document.
+ * - **A NO-OP on Chinese.** The lookbehind lists the CJK terminators, but the
+ *   pattern still requires `\s+` after them and Chinese does not write one, so
+ *   `'他说。然后'.split(…).pop()` returns the whole string. Every Chinese lookup
+ *   that reached the fallback sent the raw 32-character window.
+ * - **An abbreviation erased the whole prefix**: `'He met Mr. '.split(…).pop()`
+ *   is `''`, so the model was told the term began the sentence.
+ *
+ * ⚠️ **AND IT LANDED HARDEST WHERE IT WAS ALWAYS USED.** A fixed-layout book —
+ * a PDF, or an EPUB declaring `pre-paginated` — skips `sentenceAt` entirely
+ * (WI-16.5 measured why: a run is one visual LINE in a PDF and one WORD in the
+ * pre-paginated EPUB sampled). So for a Chinese PDF the two defects were not an
+ * edge case, they were the whole feature.
+ *
+ * The fix is not a better regex. `sentenceOf` already holds THE segmentation
+ * policy — `Intl.Segmenter`, which splits `。` correctly under every locale tag
+ * (measured, including the `lang="en"` that `makePdf` stamps on a generated
+ * page), plus the bounded merge that keeps `Mr.` with the name after it. What
+ * this needed from it was the segmentation without §C1's completeness gate,
+ * because a 32-character window is cut mid-sentence by construction and the
+ * gate would decline every time. That is `requireComplete: false`, and one
+ * policy with two tolerances is the point: a second copy is what was wrong.
+ *
+ * STILL NO SECOND WALK. `prefix` and `suffix` are the selection's own context,
+ * which the session already carries for mark anchoring; only the LOCALE is read
+ * from the document, by one climb of the ancestor chain.
+ *
+ * Never worse than the window it was given: when `sentenceOf` cannot answer at
+ * all, the squeezed window is returned, which is what the regex produced on
+ * every input it failed on.
  */
-export function sentenceAround(prefix: string, term: string, suffix: string): string {
-  /* Backwards to the last terminator before the term, forwards to the first
-   * after it. `[.!?。！？]` covers the CJK terminators too, which matters here:
-   * this codebase carries CJK typography throughout and the model was chosen
-   * for it. */
-  const before = prefix.split(/(?<=[.!?。！？])\s+/).pop() ?? prefix
-  const after = suffix.split(/(?<=[.!?。！？])/)[0] ?? suffix
-  const sentence = `${before}${term}${after}`.trim().replace(/\s+/g, ' ')
-  /* A selection with no context either side is its own sentence — better than
-   * an empty string, which would ask the model to define a word in a vacuum
-   * and get back the dictionary answer this feature exists to improve on. */
-  return sentence === '' ? term : sentence
+export function sentenceAround(
+  prefix: string,
+  term: string,
+  suffix: string,
+  options: SentenceAroundOptions = {},
+): string {
+  const raw = `${prefix}${term}${suffix}`
+  const found = sentenceOf(raw, prefix.length, prefix.length + term.length, {
+    locale: options.locale,
+    /* THE ONE CALLER THAT PASSES THIS. See `SentenceOptions.requireComplete`:
+     * declining is a real answer for `sentenceAt`, which has this function
+     * behind it, and no answer at all here, which has nothing. */
+    requireComplete: false,
+  })
+  if (found.ok) return found.sentence
+  /* Everything `sentenceOf` refuses outright — an empty window, a term that
+   * squeezes to nothing, a run past its bound — lands here, which is the
+   * window as the regex would have left it. A selection with no context either
+   * side is its own sentence: better than an empty string, which would ask the
+   * model to define a word in a vacuum and get back the dictionary answer this
+   * feature exists to improve on. */
+  const squeezed = raw.trim().replace(/\s+/g, ' ')
+  return squeezed === '' ? term : squeezed
 }

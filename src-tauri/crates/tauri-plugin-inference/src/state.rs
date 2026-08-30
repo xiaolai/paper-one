@@ -65,6 +65,8 @@ pub struct InferenceState {
     /// holding it spans a process launch and a health poll.
     daemon: Mutex<Option<Daemon>>,
     requests: Registry,
+    /// Artifact locks, kept APART from `requests` — see `commands::lock_model`.
+    model_locks: Registry,
     layout: OnceLock<Layout>,
     endpoints: OnceLock<EndpointStore>,
     /// Serialises every read-modify-write of the endpoint list.
@@ -218,9 +220,27 @@ impl InferenceState {
         self.reconfigured.load(Ordering::Relaxed)
     }
 
-    /// The in-flight request registry.
+    /// The in-flight request registry. Every key in it is CALLER-MINTED.
     pub fn requests(&self) -> &Registry {
         &self.requests
+    }
+
+    /// The artifact locks — one per model id, held across an install or a
+    /// removal.
+    ///
+    /// ⚠️ **A SECOND REGISTRY, AND IT USED TO BE THE ONE ABOVE.** `lock_model`
+    /// took `requests().begin("model:{id}")`, and its comment argued the prefix
+    /// "cannot collide with a minted request id — those are `<kind>-<n>`". That
+    /// is true of the ids PAPER mints and says nothing about the ones the
+    /// command surface accepts: `request_id` is a caller-supplied string
+    /// bounded only by `MAX_REQUEST_ID`, from a webview this crate treats as
+    /// untrusted by construction. So a caller could hold `model:<id>` as its
+    /// own request id and block that model's install and removal for as long as
+    /// it liked — or collide with one in progress and be told its lookup was
+    /// busy. Two namespaces in one map is one namespace; separating them is
+    /// what makes the comment's claim true rather than aspirational.
+    pub fn model_locks(&self) -> &Registry {
+        &self.model_locks
     }
 
     /// The client for model artifacts. TLS; see the module header.

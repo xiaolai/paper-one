@@ -1,7 +1,7 @@
 import { createGenerations } from '../../../kernel'
 import { messageOf } from './messageOf'
 import type { InferencePlugin, InstallProgress, ModelRow, RuntimeStatus } from './plugin'
-import { errorKind, isCancelled, mintRequestId } from './plugin'
+import { cancelRequest, errorKind, isCancelled, mintRequestId } from './plugin'
 
 /**
  * The runtime's state machine — `absent → installing → installed → starting →
@@ -91,7 +91,12 @@ export interface Controller extends InferenceStore {
   uninstall(model: string): Promise<boolean>
   /** Start the daemon if it is not up. Answers false when it could not. */
   ensureReady(): Promise<boolean>
-  /** The id of an installed text model, or null — what `gloss` answers with. */
+  /**
+   * The id of the installed text model that answers a gloss, or null.
+   *
+   * The RULE is `glossModel`, which is pure and stated there; this is the live
+   * reading of it against the current snapshot.
+   */
   textModel(): string | null
   dispose(): void
 }
@@ -112,8 +117,12 @@ const INITIAL: InferenceSnapshot = {
  * can act on.
  */
 export function detailFor(error: unknown): string {
-  const kind = typeof error === 'object' && error !== null ? (error as { kind?: unknown }).kind : null
-  switch (kind) {
+  /* ⚠️ `errorKind`, NOT A SECOND COPY OF ITS BODY. This re-implemented the
+   * shape inspection inline while importing the canonical helper three lines
+   * up — `plugin.ts` calls `errorKind` "the one place that reads the shape",
+   * and this was the second. The two agreed, which is exactly how a third
+   * would have been written. Found by audit. */
+  switch (errorKind(error)) {
     case 'runtimeMissing':
       return 'The runtime is not installed'
     /* WI-20.24: the staged runtime is checked file by file against its
@@ -161,6 +170,13 @@ export function detailFor(error: unknown): string {
       return 'The runtime refused the request'
     case 'runtimeMalformed':
       return 'The runtime’s answer could not be read'
+    /* THE GLOSS'S OWN, and the only caller that can raise it: `inference_gloss`
+     * refuses an answer the model was cut off in the middle of, because it is
+     * delivered whole and would otherwise be drawn in amber as a finished
+     * definition. Worded for the reader — what happened, not the token bound,
+     * which is in the crate's own message for whoever reads the log. */
+    case 'answerTruncated':
+      return 'The answer was cut off before it finished'
     case 'cancelled':
       return 'The runtime stopped before it answered'
     /* ── REACHABLE FROM THE COMPANION, and added because they were not ──
@@ -185,6 +201,57 @@ export function detailFor(error: unknown): string {
     default:
       return 'Something went wrong'
   }
+}
+
+/**
+ * Which installed model answers a gloss.
+ *
+ * ⚠️ **THIS USED TO BE `.find()`, AND ARRAY ORDER IS NOT A RULE ANYBODY CHOSE.**
+ * `snapshot.models` arrives in `models.manifest.json` order, so the answer to
+ * "which model defines the reader's words" was whichever row a manifest edit
+ * happened to leave first — deterministic, but by accident, and silently
+ * different after a reorder that had nothing to do with the gloss. The cache is
+ * keyed on the model and dropped when it changes (`cachedFor`), so a reorder
+ * would also have thrown away every remembered definition with nothing anywhere
+ * saying why.
+ *
+ * **SMALLEST FIRST, and the reason is the feature's own.** `core/gloss.ts`:
+ * a gloss *"is wanted in milliseconds because a reader has stopped reading to
+ * wait for it"* — it is one or two sentences a reader makes dozens of times a
+ * chapter, not an answer they settle in to read. Bytes are the best proxy this
+ * layer has for both halves of that latency: a smaller GGUF loads faster on the
+ * first lookup after a launch and generates faster on every one after. Ties go
+ * to the lower id, so the order is total and nothing is left to the array.
+ *
+ * **WHY THERE IS NO PICKER.** `models.manifest.json` holds exactly one text
+ * model (`qwen3-4b-instruct-2507-q4-k-m`) and one speech model, counted
+ * 2026-08-30, and a reader cannot add a local model outside the manifest —
+ * `inference_models` reads it and `install::is_installed` resolves against it.
+ * A settings row offering one choice is a control that cannot act, which §07
+ * forbids for the same reason it forbids a dead button. The rule being stated
+ * and total is what makes a picker a small change if a second text model ever
+ * lands; guessing at one now would ship the UI and none of the reason.
+ *
+ * **WHY A CLOUD ENDPOINT IS NOT A CANDIDATE.** `resolve_model` accepts one for
+ * `Modality::Text`, so the daemon would answer — this reads `models`, which is
+ * the manifest's rows, and endpoints are deliberately not among them. F8's
+ * argument against reaching an agent is about COST PER LOOKUP rather than about
+ * agents: *"seconds, and a subscription turn spent, for a gesture a reader
+ * makes dozens of times a chapter."* A metered endpoint is the same bill in a
+ * different envelope, and silently spending a reader's credit dozens of times a
+ * chapter is not a default anybody chose. Letting them choose it deliberately
+ * is a spend decision and a picker, which is the paragraph above.
+ */
+export function glossModel(models: readonly ModelRow[]): string | null {
+  const usable = models.filter((model) => model.modality === 'text' && model.installed)
+  /* `reduce`, not `sort`: this must not reorder the caller's array, and the
+   * snapshot's `models` is handed to the pane by reference. */
+  const best = usable.reduce<ModelRow | null>((chosen, model) => {
+    if (chosen === null) return model
+    if (model.bytes !== chosen.bytes) return model.bytes < chosen.bytes ? model : chosen
+    return model.id < chosen.id ? model : chosen
+  }, null)
+  return best?.id ?? null
 }
 
 /**
@@ -263,7 +330,25 @@ export function createController(plugin: ControllerPlugin, reportTo?: ReportFail
   const set = (next: Partial<InferenceSnapshot>): void => {
     if (disposed) return
     snapshot = { ...snapshot, ...next }
-    for (const listener of [...listeners]) listener()
+    /* ⚠️ **A THROWING SUBSCRIBER USED TO ESCAPE THIS**, and it broke two
+     * contracts at once. `install` and `uninstall` promise in capitals to
+     * resolve rather than reject — their only callers are `void
+     * model.install(id)` in the pane — and both call `set` BEFORE their `try`,
+     * so a listener that threw rejected the promise, left the install slot
+     * owned and stuck the state on "installing" with nothing able to clear it.
+     * It also stopped every later listener from being told, so half the
+     * subscribers saw the update and half did not.
+     *
+     * The same lesson `report` above already learned: a reporter that can turn
+     * a recovery into a rejection has broken the recovery. A subscriber is the
+     * same shape. Found by audit. */
+    for (const listener of [...listeners]) {
+      try {
+        listener()
+      } catch (thrown) {
+        console.error('inference controller: a subscriber threw while being notified', thrown)
+      }
+    }
   }
 
   /**
@@ -417,10 +502,14 @@ export function createController(plugin: ControllerPlugin, reportTo?: ReportFail
      * press and this landing — and is not worth showing. Anything else is a
      * cancel that did not happen, which the reader is about to notice, so it is
      * reported rather than swallowed. */
-    void plugin.cancel(requestId).catch((cause: unknown) => {
-      if (errorKind(cause) === 'requestUnknown') return
-      report('inference.cancel-failed', { message: messageOf(cause) })
-    })
+    /* ⚠️ **THROUGH `cancelRequest`, AND THIS USED TO BE A THIRD COPY OF IT.**
+     * That helper exists because the same `.catch(() => {})` was written twice
+     * and fixing one copy left the other broken — its own header calls two call
+     * sites of one shape "a class, not two bugs". This was the third site,
+     * written out by hand, and it had already drifted: it reported neither the
+     * `requestId` nor the `kind`, so its log line named a failed cancel without
+     * saying which request or why. Found by audit. */
+    cancelRequest(plugin, requestId, report)
   }
 
   return {
@@ -483,7 +572,7 @@ export function createController(plugin: ControllerPlugin, reportTo?: ReportFail
         return false
       }
     },
-    textModel: () => snapshot.models.find((m) => m.modality === 'text' && m.installed)?.id ?? null,
+    textModel: () => glossModel(snapshot.models),
     dispose: () => {
       disposed = true
       /* Release the slot and retire every refresh in flight, so a late settle
