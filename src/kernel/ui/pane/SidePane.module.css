@@ -1526,3 +1526,40 @@
   display: flex;
   gap: var(--space-2);
 }
+
+/* A BAND OF GROUPS, under one caption — `PaneBand`.
+ *
+ * The Settings panel reached thirteen headings in one column, so `Figures` sat
+ * beside `Local models`. The band splits that scan without adding a click; the
+ * comment in `PaneBand.tsx` carries the argument.
+ *
+ * The rule is drawn on the SECTION rather than as a `<hr>` so the first band
+ * can suppress it with one attribute, and so nothing draws a line below the
+ * last group in a panel — a trailing rule reads as a heading whose contents
+ * failed to render. */
+.band[data-ruled='true'] {
+  margin-block-start: var(--space-16);
+  border-block-start: 1px solid var(--line);
+}
+
+/* QUIETER THAN A GROUP HEADING, and shaped unlike one.
+ *
+ * `.groupTitle` is uppercase, semibold and `--muted`; this sits above several
+ * of them, so matching that weight would make the band compete with its own
+ * contents for the same glance. It is the same caption size and tracking — the
+ * pane has one caption voice — at the panel's lightest ink, with the space
+ * above doing the separating that weight would otherwise have to. */
+.bandTitle {
+  margin: 0;
+  padding: var(--space-12) var(--space-10) var(--space-2);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-regular);
+  letter-spacing: var(--track-caps-wide);
+  text-transform: uppercase;
+  color: var(--muted);
+  /* `--opacity-quiet`, from the scale — a literal here is what the token guard
+     in `tokens.test.ts` exists to refuse, and it caught this one. The band
+     caption wants to sit under the group headings it labels without competing
+     with them, and "quiet" is the name the scale already gives that. */
+  opacity: var(--opacity-quiet);
+}

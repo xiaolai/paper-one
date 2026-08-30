@@ -397,3 +397,72 @@ describe('when the settings are not being saved', () => {
     expect(spy.onTheme).toHaveBeenCalledWith('night')
   })
 })
+
+/**
+ * THE TWO BANDS, AND WHICH SIDE EACH HEADING FALLS ON.
+ *
+ * The panel reached thirteen top-level headings in one 400px column — seven
+ * the kernel writes and up to six contributed — so `Figures` sat beside
+ * `Local models`. Those answer different questions, and a reader after the
+ * second read past five groups of typography to reach it.
+ *
+ * Asserted through the DOM rather than by reading the source, because what
+ * matters is which band a heading ENDS UP IN. A source scan would pass on a
+ * `</PaneBand>` in the wrong place, which is the one mistake this arrangement
+ * makes easy to introduce and impossible to see in a diff.
+ */
+describe('the two bands', () => {
+  /** A contributed section, shaped like a capability's. */
+  const section = (id: string, title: string) => ({ id, title, render: () => null })
+
+  function bandOf(heading: string, container: HTMLElement): string | null {
+    const found = [...container.querySelectorAll('button')].find((b) => b.textContent?.startsWith(heading))
+    const band = found?.closest('section')
+    return band?.querySelector('h3')?.textContent ?? null
+  }
+
+  it('puts the kernel groups under Reading and the contributed ones under The app', () => {
+    const { props } = full({
+      sections: [section('peer:devices', 'Devices'), section('inference:models', 'Local models')],
+    })
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    for (const heading of ['Appearance', 'Text', 'Spacing', 'Paragraphs', 'Blocks', 'Figures', 'Page']) {
+      expect(bandOf(heading, container), `${heading} belongs to Reading`).toBe('Reading')
+    }
+    for (const heading of ['Devices', 'Local models']) {
+      expect(bandOf(heading, container), `${heading} belongs to The app`).toBe('The app')
+    }
+  })
+
+  it('captions each band with a real heading, so the split is structure and not a drawn line', () => {
+    const { props } = full()
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    const bands = [...container.querySelectorAll('section')]
+    expect(bands.map((one) => one.querySelector('h3')?.textContent)).toEqual(['Reading', 'The app'])
+    /* Named by its own caption — a section labelled by nothing is a landmark
+       that announces itself as "section" and helps no one. */
+    for (const band of bands) {
+      const id = band.getAttribute('aria-labelledby')
+      expect(id, 'every band names its caption').toBeTruthy()
+      expect(band.querySelector(`h3#${CSS.escape(id ?? '')}`)).not.toBeNull()
+    }
+  })
+
+  /* NO CHEVRON ON A CAPTION. Every group heading in this pane carries one and
+     every group heading opens something; a caption that looked the same but
+     did nothing is the exact defect `PaneGroup` was built to end. */
+  it('gives the band captions no disclosure, because they disclose nothing', () => {
+    const { props } = full()
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    const captions = [...container.querySelectorAll('h3')]
+    /* NOT VACUOUS. With no captions at all every assertion below it holds and
+       the test reports green — which is exactly what it did against the panel
+       before the bands existed, while the two tests above it failed. A loop
+       over an empty list is the quietest way for a guard to stop guarding. */
+    expect(captions.length, 'there are band captions to check').toBe(2)
+    for (const caption of captions) {
+      expect(caption.querySelector('svg'), 'a band caption draws no chevron').toBeNull()
+      expect(caption.closest('button'), 'a band caption is not a button').toBeNull()
+    }
+  })
+})

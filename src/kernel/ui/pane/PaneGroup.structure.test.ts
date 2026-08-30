@@ -32,9 +32,20 @@ const HERE = fileURLToPath(new URL('.', import.meta.url))
 /** The fifteen, from the type rather than from a list kept in step by hand. */
 const READING_STYLE_KEYS = Object.keys(DEFAULT_READING_STYLE)
 
+/**
+ * The heading MECHANISMS — the files allowed to reach the heading classes,
+ * because building the heading is what they are for.
+ *
+ * This was `name !== 'PaneGroup.tsx'`, a hand-kept exclusion of one, which
+ * read as "except that file" rather than "except a mechanism". `PaneBand`
+ * arrived and had to be added by hand; naming the category is what stops the
+ * third one being added to a list nobody notices is a list.
+ */
+const MECHANISMS = ['PaneGroup.tsx', 'PaneBand.tsx']
+
 /** Every panel in the side pane, by file — not a list to keep in step. */
 const PANELS = readdirSync(HERE).filter(
-  (name) => name.endsWith('.tsx') && name !== 'PaneGroup.tsx',
+  (name) => name.endsWith('.tsx') && !MECHANISMS.includes(name),
 )
 
 /**
@@ -60,6 +71,23 @@ describe.each(PANELS)('%s', (panel) => {
   it('draws its group headings through PaneGroup and nowhere else', () => {
     expect(MARKUP).not.toMatch(/styles\.groupTitle\b/)
     expect(MARKUP).not.toMatch(/styles\.groupTitleRow\b/)
+  })
+
+  /**
+   * AND ITS BAND CAPTIONS THROUGH `PaneBand`.
+   *
+   * A band caption is deliberately a SECOND kind of heading — quieter, and
+   * carrying no chevron, because it labels groups rather than opening
+   * anything. That is precisely the shape this whole file exists to keep
+   * scarce: the pane once drew three kinds of heading and a reader could not
+   * tell by looking which of them did something.
+   *
+   * So the second kind is allowed exactly once, in the component that owns it.
+   * Hand-rolled anywhere else it becomes the fourth spelling.
+   */
+  it('draws its band captions through PaneBand and nowhere else', () => {
+    expect(MARKUP).not.toMatch(/styles\.bandTitle\b/)
+    expect(MARKUP).not.toMatch(/styles\.band\b/)
   })
 
   /* And does not rebuild the disclosure by hand, which is how the Subjects

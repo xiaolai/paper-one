@@ -39,6 +39,7 @@ import {
   SIDES,
   TABLE_FITS,
 } from '../../core/uiTypes'
+import { PaneBand } from './PaneBand'
 import { PaneGroup } from './PaneGroup'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
@@ -373,6 +374,11 @@ export function Settings({
           </span>
         </div>
       )}
+      {/* TWO BANDS, NOT THIRTEEN HEADINGS. `PaneBand` carries the argument;
+          the short version is that `Figures` and `Local models` are not the
+          same kind of question and were siblings. Unruled here — the panel's
+          own title is already the edge above it. */}
+      <PaneBand title="Reading" ruled={false}>
       <PaneGroup
         title="Appearance"
         open={groupOpen(GROUP.appearance)}
@@ -788,6 +794,8 @@ export function Settings({
       )}
       </PaneGroup>
 
+      </PaneBand>
+
       {/* The contributed sections — a capability's own settings surface,
           under its own title, in composition order (WI-C.5).
 
@@ -803,6 +811,7 @@ export function Settings({
           a render, so a closed group never mounts the pane — which is what
           stops the Storage section reading the disk on every shelf write for
           a surface nobody has opened. */}
+      <PaneBand title="The app">
       {sections.map((section) => (
         <PaneGroup
           key={section.id}
@@ -814,11 +823,17 @@ export function Settings({
         </PaneGroup>
       ))}
 
+      {/* INSIDE THE BAND, not after it. These name a capability that failed to
+          start, so they belong with the capabilities' own sections — floating
+          below the last band they read as a footnote to whatever happened to be
+          printed above them, which is how the five unheaded rows that became
+          the Page group went unnoticed. */}
       {(missing ?? []).map((one) => (
         <div key={one.id} className={styles.capabilityMissing}>
           <span>{one.id} is not running — its settings are unavailable until the app is restarted.</span>
         </div>
       ))}
+      </PaneBand>
     </div>
   )
 }
