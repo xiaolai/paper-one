@@ -15,3 +15,9 @@
 # own `assets/` since somebody hit the same thing there; this one shipped
 # without the equivalent.
 /src/main/assets/
+
+# Compiled Rust for each Android ABI. The template above ignores `**/*.so`
+# inside this directory; the directory itself is safer, because everything the
+# NDK leaves here is compiler output and the next thing it leaves may not end
+# in `.so` — a stripped variant, a versioned suffix, a `.a`.
+/src/main/jniLibs/

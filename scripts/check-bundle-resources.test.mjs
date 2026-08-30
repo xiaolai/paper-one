@@ -76,12 +76,8 @@ describe('the inference runtime is a desktop resource', () => {
     expect(conf('tauri.conf.json').bundle?.resources?.['../THIRD-PARTY-NOTICES.md']).toBe('THIRD-PARTY-NOTICES.md')
   })
 
-  /* AND THE BUILD OUTPUT IS IGNORED, which is the half that reached a commit.
-     Checked through git so a rule that exists but does not match still fails. */
-  it('the Android build assets are gitignored', async () => {
-    const { execFileSync } = await import('node:child_process')
-    const probe = 'src-tauri/gen/android/app/src/main/assets/runtime/lemond'
-    const out = execFileSync('git', ['check-ignore', '-v', probe], { cwd: REPO, encoding: 'utf8' })
-    expect(out, 'nothing ignores the Android build assets').toContain('assets')
-  })
+  /* THE OTHER HALF — that the build output those resources produce is
+     gitignored — lives in `check-build-artifacts.test.mjs`, which holds every
+     build path in the repository rather than this one directory. Asserted
+     there and not here, so there is one list to keep. */
 })
