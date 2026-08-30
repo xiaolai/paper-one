@@ -29,15 +29,32 @@ import { describe, expect, it } from 'vitest'
  *
  * So the roots are NAMED, each one is asserted to exist and to contribute
  * files, and a root that stops matching fails loudly rather than shrinking.
+ *
+ * ## And a THIRD time, which is why the root is now `src/app`
+ *
+ * The named root was `src/app/web`, and the phone furniture the client mounts
+ * — the tab bar, the bottom sheet, the Continue strip — moved OUT of it to
+ * `src/app/shell/` when the native mobile shell came to mount the same pieces.
+ * The guard did not shrink noisily; it simply stopped covering five modules
+ * that still render inside a session-bearing origin. What caught it was the
+ * recursion assertion below, on its way to being vacuous: `src/app/web/` had
+ * become flat, so the one root with subdirectories in it no longer had any.
+ *
+ * Naming the PARENT fixes the mechanism rather than the instance. `src/app` is
+ * a strict superset of both, it stays nested whatever moves between its
+ * children, and a directory relocated inside it cannot narrow the scan again.
+ * The extra files it sweeps — the composition roots, `bootApp.ts`, `boot.ts`,
+ * `shutdown.ts` — are ones that must not read the cookie either.
  */
 
 const REPO = fileURLToPath(new URL('../../../', import.meta.url))
 
 /**
- * Everything this guard covers. The browser client whole, plus the transport
- * it uses — which is no longer inside it.
+ * Everything this guard covers. Every application shell — the browser client,
+ * the shared mobile furniture it mounts, and the composition roots beside them
+ * — plus the transport they use, which is not inside any of them.
  */
-const ROOTS = ['src/app/web', 'src/kernel/core/shelfChannel.ts']
+const ROOTS = ['src/app', 'src/kernel/core/shelfChannel.ts']
 
 function sources(at: string): string[] {
   const full = join(REPO, at)
@@ -55,14 +72,30 @@ describe('the session cookie', () => {
     expect(sources(root).length, `${root} contributed no files to the scan`).toBeGreaterThan(0)
   })
 
-  /* A WALK THAT NEVER RECURSED looks exactly like one that did. The client is
-     the root with subdirectories in it, so it is the one that can prove it. */
-  it('reaches below the top of the browser client', () => {
-    const root = join(REPO, 'src/app/web')
+  /* A WALK THAT NEVER RECURSED looks exactly like one that did.
+     ⚠️ **DERIVED FROM `ROOTS`, NOT FROM A REPEATED LITERAL.** The first version
+     of this assertion scanned `src/app` by name, so narrowing `ROOTS` back to
+     `src/app/web` left it green over a scan that no longer covered the shell —
+     the check and the thing it checks have to be the same value or the check
+     is decoration. Caught by mutation, which is the only way this shows up. */
+  it('reaches below the top of a named root', () => {
+    const nested = ROOTS.filter((root) => statSync(join(REPO, root)).isDirectory()).some((root) =>
+      sources(root).some((at) => relative(join(REPO, root), at).includes(sep)),
+    )
+    expect(nested, 'the scan never left a root\'s top directory; a nested module is not covered').toBe(true)
+  })
+
+  /* AND IT REACHES THE SHELL SPECIFICALLY. The check above proves the walk
+     descends somewhere; this proves it descends into the directory whose
+     departure from `src/app/web/` narrowed this guard a third time. Named, so
+     moving it again fails here rather than quietly halving the scan. */
+  it('covers the shared mobile shell, which the client mounts', () => {
+    const covered = ROOTS.flatMap(sources).map((at) => relative(REPO, at))
+    const inShell = covered.filter((at) => at.startsWith(join('src', 'app', 'shell') + sep))
     expect(
-      sources('src/app/web').some((at) => relative(root, at).includes(sep)),
-      'the scan never left the top directory; a nested module is not covered',
-    ).toBe(true)
+      inShell.length,
+      'src/app/shell contributed no files; the furniture the client mounts is unscanned',
+    ).toBeGreaterThan(0)
   })
 
   it('is never read by page script, anywhere either root covers', () => {

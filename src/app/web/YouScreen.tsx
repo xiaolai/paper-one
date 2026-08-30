@@ -1,5 +1,5 @@
 import { ReadingSettings } from './ReadingSettings'
-import type { SettingsStore } from '../../../kernel'
+import type { SettingsStore } from '../../kernel'
 
 /**
  * THE **YOU** TAB — this device's reading preferences, and the way off it.

@@ -154,6 +154,44 @@ const KERNEL_UI_TYPES = '^src/kernel/core/uiTypes\\.ts$'
  * job is to render it. */
 const WEB_CLIENT = '^src/app/web/'
 
+/** THE SHARED MOBILE SHELL.
+ *
+ * `src/app/shell/` is the phone furniture from the mobile design — the tab bar,
+ * the bottom sheet, the Continue strip, the selection bar, the progress footer.
+ * It began inside the browser client, which is where the design was first
+ * built; the NATIVE mobile shell mounts the same pieces, so it moved up one
+ * level rather than being copied.
+ *
+ * ⚠️ **IT MAY NOT NAME A UI DOOR, and that is the whole reason it has a rule.**
+ * The kernel's UI entries are per-platform on purpose — `ui/browser.ts` for a
+ * browser, `ui/index.ts` for a native build — and a component mounted by BOTH
+ * roots that imported one of them would pick a platform on the other's behalf
+ * and drag that barrel's whole re-export set into the wrong bundle. So it takes
+ * the public entry, the design system's geometry, and the browser-safe LEAVES
+ * it renders, exactly as the browser client takes `envelope.ts` and
+ * `shelfChannel.ts`.
+ *
+ * What is NOT here is as load-bearing: `ReadingSettings` and `YouScreen` were
+ * moved BACK to `src/app/web/` during this split, because both reach the
+ * browser's own settings store and one of them takes an `onSignOut` a native
+ * app has no use for. A shared directory is for what is genuinely shared. */
+const SHARED_SHELL = '^src/app/shell/'
+
+/** The two kernel COMPONENTS the shared shell renders.
+ *
+ * Both are browser-safe leaves that the two doors each re-export; naming the
+ * leaves is what lets one component serve both clients. Narrow on purpose — a
+ * prefix here would re-open the directory allowance that
+ * `web-client-kernel-allowlist` was removed for. */
+/* `.tsx?` rather than `.tsx`: both are React components in the real tree, but
+   the selftest lays out its fixture entirely in `.ts` so that resolution is
+   never the variable under test. An exact `.tsx` here passed the real cruise
+   and failed the selftest's clean tree — the pattern would have been pinned to
+   a file extension rather than to a module. */
+const KERNEL_OVERLAY_SHEET = '^src/kernel/ui/overlays/OverlaySheet\\.tsx?$'
+const KERNEL_BOOK_COVER = '^src/kernel/ui/screens/BookCover\\.tsx?$'
+const KERNEL_COVER_ART = '^src/kernel/core/coverArt\\.ts$'
+
 /** The kernel's two entries: the React-free public one every capability may
  *  import, and the UI one only a composition root may. */
 const KERNEL_PUBLIC_ENTRY = '^src/kernel/index\\.ts$'
@@ -306,8 +344,11 @@ module.exports = {
       comment:
         'Outside the kernel, the only kernel module that may be imported is its public entry, ' +
         'src/kernel/index.ts — for a capability, a test under src/app/, anything. The composition ' +
-        'roots are judged by composition-root-kernel-entries instead, which adds the UI entry.',
-      from: { path: '^src/', pathNot: ['^src/kernel/', WEB_CLIENT, ...COMPOSITION_ROOTS] },
+        'roots are judged by composition-root-kernel-entries instead, which adds the UI entry, and ' +
+        'the shared mobile shell by shared-shell-kernel-entries, which adds the two leaf components ' +
+        'it renders. Both of those rules are NARROWER than this one, not looser: each names its ' +
+        'permitted modules exactly.',
+      from: { path: '^src/', pathNot: ['^src/kernel/', WEB_CLIENT, SHARED_SHELL, ...COMPOSITION_ROOTS] },
       to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_TESTKIT_ENTRY] },
     },
     {
@@ -497,6 +538,32 @@ module.exports = {
         'cannot let it through.',
       from: { pathNot: FS_ADAPTERS },
       to: { path: '(^|/)@tauri-apps/plugin-fs(/|$)' },
+    },
+    {
+      name: 'shared-shell-kernel-entries',
+      severity: 'error',
+      comment:
+        'The shared mobile shell (src/app/shell/) reaches the kernel through the public entry, the ' +
+        'design-system stylesheets and metrics.ts, and the browser-safe leaves it renders — ' +
+        'OverlaySheet, BookCover and coverArt.ts. It may NOT name a UI door. The doors are ' +
+        'per-platform (ui/browser.ts for a browser, ui/index.ts for a native build) and this ' +
+        'directory is mounted by BOTH roots, so importing one would pick a platform on the other ' +
+        "root's behalf and pull that barrel's whole re-export set into the wrong bundle. Naming the " +
+        'leaves is what lets one component serve both clients — the same shape as the permitted ' +
+        'leaves in web-client-kernel-entries.',
+      from: { path: SHARED_SHELL },
+      to: {
+        path: '^src/kernel/',
+        pathNot: [
+          KERNEL_PUBLIC_ENTRY,
+          KERNEL_STYLESHEETS,
+          KERNEL_METRICS,
+          KERNEL_UI_TYPES,
+          KERNEL_OVERLAY_SHEET,
+          KERNEL_BOOK_COVER,
+          KERNEL_COVER_ART,
+        ],
+      },
     },
     {
       name: 'web-client-kernel-entries',

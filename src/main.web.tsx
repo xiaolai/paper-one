@@ -39,9 +39,9 @@ import { asIndexedBook, createRemoteBooks, type RemoteBooks } from './app/web/bo
 import { remoteContent, type RemoteContent } from './app/web/content'
 import { remoteCovers } from './app/web/covers'
 import { useRemoteStores } from './app/web/useRemoteStores'
-import { YouScreen } from './app/web/shell/YouScreen'
-import { TabBar, type Tab } from './app/web/shell/TabBar'
-import { ContinueStrip } from './app/web/shell/ContinueStrip'
+import { YouScreen } from './app/web/YouScreen'
+import { TabBar, type Tab } from './app/shell/TabBar'
+import { ContinueStrip } from './app/shell/ContinueStrip'
 import { Reader } from './app/web/Reader'
 import { capabilities } from 'virtual:paper-composition'
 /* DIRECTLY, not through `./kernel`. The barrel re-exports modules that import

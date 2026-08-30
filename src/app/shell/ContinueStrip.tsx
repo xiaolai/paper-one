@@ -1,6 +1,9 @@
 import { useMemo } from 'react'
-import type { IndexedBook } from '../../../kernel'
-import { BookCover, type CoverSource } from '../../../kernel/ui/browser'
+import type { IndexedBook } from '../../kernel'
+/* THE LEAVES, NOT A DOOR — see `BottomSheet.tsx` for why a shared component
+   may not name one platform's UI entry. */
+import { BookCover } from '../../kernel/ui/screens/BookCover'
+import type { CoverSource } from '../../kernel/core/coverArt'
 import styles from './ContinueStrip.module.css'
 
 /**

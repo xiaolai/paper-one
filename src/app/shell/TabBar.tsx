@@ -1,5 +1,5 @@
 import { BookOpen, CircleUser, Layers, LibraryBig } from 'lucide-react'
-import { ICON } from '../../../kernel/core/metrics'
+import { ICON } from '../../kernel/core/metrics'
 import styles from './TabBar.module.css'
 
 /**

@@ -151,6 +151,20 @@ export const LEGAL_TREE = {
     "import { composition } from './composition.desktop.ts'\n" +
     'export const booted = { kernelThing, loadShelf, composition }\n',
   'src/main.mobile.tsx': "import { booted } from './app/bootApp.ts'\nvoid booted\n",
+  /* THE SHARED MOBILE SHELL, and the two leaves it renders.
+   *
+   * `src/app/shell/` is mounted by BOTH clients, so it may not name either
+   * platform's UI door — it takes the public entry, `metrics.ts` and the
+   * browser-safe leaves instead. Pinned here so that a
+   * `shared-shell-kernel-entries` which stops matching fails on the CLEAN tree
+   * rather than by pulling a barrel into the wrong bundle much later. */
+  'src/kernel/core/metrics.ts': 'export const ICON = { prominent: 19 }\n',
+  'src/kernel/ui/overlays/OverlaySheet.ts': 'export const OverlaySheet = () => null\n',
+  'src/app/shell/TabBar.ts':
+    "import { kernelThing } from '../../kernel/index.ts'\n" +
+    "import { ICON } from '../../kernel/core/metrics.ts'\n" +
+    "import { OverlaySheet } from '../../kernel/ui/overlays/OverlaySheet.ts'\n" +
+    'export const TabBar = { kernelThing, ICON, OverlaySheet }\n',
 }
 
 /**
@@ -466,6 +480,45 @@ export const CASES = [
     from: 'src/main.tsx',
     to: 'src/kernel/ui/browser.ts',
     expect: ['native-root-not-browser-ui-entry'],
+  },
+  /* THE SHARED SHELL MAY NOT NAME A DOOR. This is the edge the rule exists
+     for: one directory, two roots, and a barrel that would follow whichever
+     door it named into the other root's bundle. */
+  {
+    name: 'the shared mobile shell -> the BROWSER ui entry',
+    files: {
+      'src/app/shell/TabBar.ts':
+        LEGAL_TREE['src/app/shell/TabBar.ts'] +
+        "import { App as B } from '../../kernel/ui/browser.ts'\nvoid B\n",
+    },
+    from: 'src/app/shell/TabBar.ts',
+    to: 'src/kernel/ui/browser.ts',
+    expect: ['shared-shell-kernel-entries'],
+  },
+  {
+    name: 'the shared mobile shell -> the NATIVE ui entry',
+    files: {
+      'src/app/shell/TabBar.ts':
+        LEGAL_TREE['src/app/shell/TabBar.ts'] +
+        "import { App } from '../../kernel/ui/index.ts'\nvoid App\n",
+    },
+    from: 'src/app/shell/TabBar.ts',
+    to: 'src/kernel/ui/index.ts',
+    expect: ['shared-shell-kernel-entries'],
+  },
+  /* AND THE ALLOWANCE DOES NOT REACH PAST THE LEAVES IT NAMES — a prefix here
+     would re-open the directory exemption that web-client-kernel-allowlist was
+     removed for. */
+  {
+    name: "the shared mobile shell -> a kernel internal it does not render",
+    files: {
+      'src/app/shell/TabBar.ts':
+        LEGAL_TREE['src/app/shell/TabBar.ts'] +
+        "import { other } from '../../kernel/core/other.ts'\nvoid other\n",
+    },
+    from: 'src/app/shell/TabBar.ts',
+    to: 'src/kernel/core/other.ts',
+    expect: ['shared-shell-kernel-entries'],
   },
   /* THE NARROW BOOT DOOR, both ways. The sequence and the mobile shell share
      one reason to be refused the desktop barrel, so both are cased: a rule
