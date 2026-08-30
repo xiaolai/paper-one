@@ -55,8 +55,16 @@ interface ResourceData {
 const DOCUMENT_TYPES = new Set(['application/xhtml+xml', 'text/html', 'image/svg+xml'])
 
 /**
- * Refuse every script resource this book asks its loader for, and strip the
- * ones a document CARRIES before the loader turns it into a URL.
+ * Refuse every script resource this book asks its loader for, strip the ones a
+ * document CARRIES before the loader turns it into a URL, and strip the OTHER
+ * document the book makes — the one `section.createDocument()` parses, which is
+ * what search reads.
+ *
+ * THREE THINGS, and the third is not a security measure. It is what keeps a
+ * CFI valid: see `stripSectionDocuments`. A reader who takes this comment for
+ * the whole contract and removes the wrapper gets a green suite and a search
+ * that navigates to the wrong paragraph, which is why it is named up here
+ * rather than left to the function it lives in.
  *
  * Takes any object, because the fork's `Book` type declares no
  * `transformTarget` and an all-optional parameter type is one TypeScript
