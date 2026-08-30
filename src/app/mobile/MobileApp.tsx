@@ -192,9 +192,9 @@ export function MobileApp({
           />
         </div>
       )}
-      {tab === 'you' && (
+      {tab === 'settings' && (
         <div className={`${styles.stage} ${styles.screen}`}>
-          <h1 className={styles.screenTitle}>You</h1>
+          <h1 className={styles.screenTitle}>Settings</h1>
           <ReadingSettings
             settings={settings}
             sections={composition.settings}

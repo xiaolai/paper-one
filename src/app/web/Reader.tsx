@@ -279,7 +279,7 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
   const prefsStore = prefs.current
   const settings = useSyncExternalStore(prefsStore.subscribe, prefsStore.getSnapshot)
   /* THE PERSISTENCE FLAG AND THE FACES MOVED with the panel that reads them —
-     see `ReadingSettings`, which the You tab mounts too. This subscription
+     see `ReadingSettings`, which the Settings tab mounts too. This subscription
      stays: the reading surface itself renders from these values. */
   /* READ THROUGH `get`, not out of the snapshot. The snapshot is a bag of
    * unknowns by key; `get` is what applies each setting's own validator, so a

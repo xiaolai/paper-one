@@ -69,10 +69,10 @@ describe('the phone shell', () => {
     mount()
     const bar = screen.getByRole('navigation', { name: 'Sections' })
     const labels = [...bar.querySelectorAll('button')].map((b) => b.textContent)
-    expect(labels).toEqual(['Library', 'Reading', 'Cards', 'You'])
+    expect(labels).toEqual(['Library', 'Reading', 'Cards', 'Settings'])
   })
 
-  it.each(['Cards', 'You'])('renders the %s screen when its tab is pressed', (tab) => {
+  it.each(['Cards', 'Settings'])('renders the %s screen when its tab is pressed', (tab) => {
     mount()
     fireEvent.click(screen.getByRole('button', { name: tab }))
     /* THE HEADING, not just the absence of a throw — a screen that rendered

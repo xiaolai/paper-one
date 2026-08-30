@@ -39,7 +39,7 @@ import { asIndexedBook, createRemoteBooks, type RemoteBooks } from './app/web/bo
 import { remoteContent, type RemoteContent } from './app/web/content'
 import { remoteCovers } from './app/web/covers'
 import { useRemoteStores } from './app/web/useRemoteStores'
-import { YouScreen } from './app/web/YouScreen'
+import { SettingsScreen } from './app/web/SettingsScreen'
 import { TabBar, type Tab } from './app/shell/TabBar'
 import { ContinueStrip } from './app/shell/ContinueStrip'
 import styles from './app/shell/shell.module.css'
@@ -363,12 +363,12 @@ function ShelfList({
      on refreshing over a socket that has closed. */
   const { marks, cards, cardRows } = useRemoteStores(link)
 
-  /* THE READER'S PREFERENCES, for the You tab. One store, like `positions`. */
+  /* THE READER'S PREFERENCES, for the Settings tab. One store, like `positions`. */
   const prefs = useRef<ReturnType<typeof browserSettings> | null>(null)
   prefs.current ??= browserSettings()
   const prefsStore = prefs.current
   /* The PERSISTENCE flag and the faces moved with the panel that reads them —
-     see `YouScreen`. NO SUBSCRIPTION here: the shelf renders nothing from a
+     see `SettingsScreen`. NO SUBSCRIPTION here: the shelf renders nothing from a
      preference, and "needs the store to exist" is what the ref above already
      provides — the `useSyncExternalStore` this note used to defend was a
      whole-`ShelfList` re-render on every preference change, bought for
@@ -488,7 +488,7 @@ function ShelfList({
         </div>
       )}
 
-      {tab === 'you' && <YouScreen settings={prefsStore} onSignOut={onSignOut} />}
+      {tab === 'settings' && <SettingsScreen settings={prefsStore} onSignOut={onSignOut} />}
 
       <TabBar active={tab} onSelect={setTab} hasBook={reading !== null} />
     </div>
