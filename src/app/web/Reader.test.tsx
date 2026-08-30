@@ -452,8 +452,19 @@ describe('Reader', () => {
       />,
     )
     await waitFor(() => expect(captured['onToc']).toBeTypeOf('function'))
-    ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
-    ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    /* ⚠️ **INSIDE `act`, LIKE EVERY OTHER CALLBACK THIS FILE DRIVES.** These two
+       were bare, and a React state update dispatched outside `act` is SCHEDULED
+       rather than flushed. Nothing below forced it: the `findByRole('Tools')`
+       that follows resolves on its first check, because Tools is part of the
+       chrome and does not depend on the table of contents at all. So whether
+       the entry had rendered by the assertion was a race — one this suite won
+       every time it ran alone and lost under `test:coverage`, where the
+       instrumentation is enough to change the scheduling. It failed twice
+       before it was read as a mechanism rather than as load. */
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
 
     /* ONE SHEET, WITH TABS. The chrome carries a single control — Tools —
        and Contents, Search and Notes are tabs at the sheet's foot. Switching a
@@ -686,14 +697,19 @@ describe('Reader', () => {
     expect(screen.queryByRole('button', { name: 'Contents' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Tools' }))
 
-    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
-    ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [
-      { label: 'Chapter One', href: 'c1.xhtml' },
-      { label: 'Chapter Two', href: 'c2.xhtml' },
-    ])
-    ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, {
-      cfi: 'epubcfi(/6/2)',
-      chapterHref: 'c1.xhtml',
+    /* THE SAME RACE, and the same fix — see the note on the other case that
+       drives these callbacks. Three updates here, so batching them in one
+       `act` is also closer to what one relocation actually is. */
+    act(() => {
+      ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [
+        { label: 'Chapter One', href: 'c1.xhtml' },
+        { label: 'Chapter Two', href: 'c2.xhtml' },
+      ])
+      ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, {
+        cfi: 'epubcfi(/6/2)',
+        chapterHref: 'c1.xhtml',
+      })
     })
 
     /* The reader's chrome has ONE control — Tools — and Contents is the first
