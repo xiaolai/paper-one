@@ -62,26 +62,41 @@ describe('sha256', () => {
 })
 
 describe('the bundle wiring', () => {
-  /* The staged path and the path Tauri copies from must agree, and neither
-   * can name a platform: `tauri.conf.json` cannot interpolate the host, so a
-   * per-platform directory here would silently ship nothing off macOS. */
-  it('stages where tauri.conf.json copies from, platform-neutrally', () => {
-    const conf = JSON.parse(readFileSync(path.join(REPO_ROOT, 'src-tauri', 'tauri.conf.json'), 'utf8'))
+  /* ⚠️ **THE RUNTIME IS A DESKTOP RESOURCE, and it moved out of the base
+   * config.** It used to sit in `tauri.conf.json`, which every platform merges
+   * — so an Android build copied 70 MB of macOS `.dylib`s into the APK, for a
+   * platform that cannot load them and does not compose the capability that
+   * would use them. It is declared in `tauri.{macos,windows,linux}.conf.json`
+   * now; `scripts/check-bundle-resources.test.mjs` is where that arrangement is
+   * held together, including the measured fact that Tauri MERGES `resources`
+   * and so a mobile config cannot subtract an entry the base declares.
+   *
+   * The path still cannot name a platform: `tauri.conf.json` cannot interpolate
+   * the host, so a per-platform directory would silently ship nothing off
+   * macOS. That rule is unchanged and applies to each of the three files. */
+  const DESKTOP_CONFS = ['tauri.macos.conf.json', 'tauri.windows.conf.json', 'tauri.linux.conf.json']
+
+  it.each(DESKTOP_CONFS)('%s stages where the script copies to, platform-neutrally', (name) => {
+    const conf = JSON.parse(readFileSync(path.join(REPO_ROOT, 'src-tauri', name), 'utf8'))
     const resources = conf.bundle?.resources ?? {}
     const from = Object.keys(resources).find((key) => key.includes('inference'))
-    expect(from, 'tauri.conf.json must copy the staged runtime').toBeTruthy()
+    expect(from, `${name} must copy the staged runtime`).toBeTruthy()
     expect(from).toContain(VENDOR.split(path.sep).join('/'))
+    /* The plugin resolves `resource_dir()/runtime/lemond`, so the bundle has to
+       put it under `runtime/` for that to be true. */
     expect(resources[from]).toBe('runtime/')
     for (const key of Object.keys(ARTIFACTS)) {
       expect(from, 'the bundle path must not name a platform').not.toContain(key)
     }
   })
 
-  /* The plugin resolves `resource_dir()/runtime/lemond`; the bundle must put
-   * it under `runtime/` for that to be true. */
-  it('lands the runtime where the plugin resolves it', () => {
+  /* AND NOT IN THE BASE, which is the half that was wrong. Stated here as well
+     as in `check-bundle-resources.test.mjs` because this file is where somebody
+     changing the staging will look. */
+  it('is not in the base config, which a phone also merges', () => {
     const conf = JSON.parse(readFileSync(path.join(REPO_ROOT, 'src-tauri', 'tauri.conf.json'), 'utf8'))
-    expect(Object.values(conf.bundle.resources)).toContain('runtime/')
+    const resources = conf.bundle?.resources ?? {}
+    expect(Object.keys(resources).find((key) => key.includes('inference'))).toBeUndefined()
   })
 
   /* Compiled artifacts are staged, not committed — the `vendor/pdfjs/`
@@ -166,7 +181,30 @@ describe('the tar that reads a zip', () => {
  * nobody has run yet.
  */
 describe('the directory the bundle declares', () => {
-  const config = JSON.parse(readFileSync(join(REPO_ROOT, 'src-tauri/tauri.conf.json'), 'utf8'))
+  /* EVERY CONFIG, not just the base. Tauri merges `tauri.<platform>.conf.json`
+     into `tauri.conf.json`, and the inference runtime moved into the three
+     DESKTOP ones so a phone would stop carrying it — so the set of declared
+     resources is now the union, and a check reading only the base would have
+     gone quiet about the very entry it exists for. Read as a list rather than
+     named, which is the property the header calls the CLASS. */
+  const CONFIGS = [
+    'tauri.conf.json',
+    'tauri.macos.conf.json',
+    'tauri.windows.conf.json',
+    'tauri.linux.conf.json',
+    'tauri.ios.conf.json',
+    'tauri.android.conf.json',
+  ]
+  const config = {
+    bundle: {
+      resources: Object.assign(
+        {},
+        ...CONFIGS.map(
+          (name) => JSON.parse(readFileSync(join(REPO_ROOT, 'src-tauri', name), 'utf8')).bundle?.resources ?? {},
+        ),
+      ),
+    },
+  }
 
   /* TRAILING SEPARATORS STRIPPED ON BOTH SIDES. `tauri.conf.json` writes the
      directory resource with a trailing slash — that is how Tauri tells a
