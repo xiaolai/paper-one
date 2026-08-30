@@ -222,6 +222,24 @@ export function sentenceOf(
   /* Before any work, not after it — see `MAX_RUN_CHARS`. */
   if (raw.length > MAX_RUN_CHARS) return { ok: false, gap: 'too-long' }
 
+  /* ⚠️ **THE OFFSETS ARE CHECKED, AND THEY USED TO BE TRUSTED.** `squeeze`
+   * clamps whatever it is given — a `termEnd` past the end of `raw` resolves to
+   * `text.length` — so an out-of-range pair did not fail, it silently described
+   * a DIFFERENT term. Under §C1 that mostly ended as a `run-end` gap and was
+   * invisible; with `requireComplete: false` the gate is gone, so the same
+   * mistake now returns a confident sentence spanning every segment from the
+   * term to the end of the run. A caller that computed its offsets wrongly must
+   * be told, not answered. Found by audit. */
+  if (
+    !Number.isInteger(termStart) ||
+    !Number.isInteger(termEnd) ||
+    termStart < 0 ||
+    termEnd > raw.length ||
+    termStart >= termEnd
+  ) {
+    return { ok: false, gap: 'no-term' }
+  }
+
   const squeezed = squeeze(raw, termStart, termEnd)
   const { text } = squeezed
   if (text === '') return { ok: false, gap: 'empty' }
@@ -355,9 +373,20 @@ function segmentsOf(text: string, locale: string | undefined): Span[] {
  * because a title before a name is much the commoner shape and the cost of the
  * miss is one sentence too long rather than one cut in half.
  */
-const TITLE = /(?:^|[\s("'‘“])(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr)\.\s*$/
+/* ⚠️ **THE TRAILING CLASS IS SPACES, NOT `\s`, AND IT USED TO BE `\s*`.**
+ * After `squeeze` the only whitespace left in the text is a single space —
+ * everything collapsible became one — EXCEPT U+2028 and U+2029, which are
+ * preserved deliberately because CSS does not collapse them and the reader sees
+ * a line break there. `\s` matches those, so `Main St.\u2028Beta two.` — two
+ * segments ICU correctly split at the separator — was merged back into one
+ * sentence by the abbreviation pass. The normaliser goes to some length to keep
+ * that boundary and this threw it away. Found by audit.
+ *
+ * The LEADING class stays `\s`: a separator before `Mr.` is a word boundary
+ * like any other, and matching it there merges nothing. */
+const TITLE = /(?:^|[\s("'‘“])(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr)\. *$/
 /** `J.` in `Mr. J. R. Smith` — one capital and a stop, never a whole word. */
-const INITIAL = /(?:^|[\s("'‘“])\p{Lu}\.\s*$/u
+const INITIAL = /(?:^|[\s("'‘“])\p{Lu}\. *$/u
 
 function endsInAbbreviation(segment: string): boolean {
   return TITLE.test(segment) || INITIAL.test(segment)

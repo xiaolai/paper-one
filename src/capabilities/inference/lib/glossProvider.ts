@@ -334,6 +334,19 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
           if (oldest === undefined) break
           cache.delete(oldest)
         }
+        /* ⚠️ **CANCELLED IS CANCELLED AT THE END TOO, AND IT ONLY WAS AT THE
+         * START.** The check on the way in exists because "a lookup the reader
+         * abandoned used to succeed from the cache and reject from the model";
+         * an abort landing while the plugin call SETTLED had the same shape
+         * from the other side — the provider resolved, and only `useGloss`
+         * dropping the answer hid it. A port that rejects on abort must do so
+         * whenever the abort happened. Found by audit.
+         *
+         * AFTER the cache write, deliberately: the answer is a correct one for
+         * this question and was already paid for, so the reader's next lookup
+         * of the same word should still be free. What must not happen is
+         * RESOLVING a call the caller cancelled. */
+        signal.throwIfAborted()
         return answer
       } finally {
         signal.removeEventListener('abort', abort)

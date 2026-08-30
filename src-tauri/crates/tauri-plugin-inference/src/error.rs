@@ -155,8 +155,17 @@ pub enum Error {
     /// It names the bound, because the maintainer's half of this is "the model
     /// ignored a six-line prompt asking for two sentences" and the number is
     /// what says how far.
-    #[error("the model was cut off at {limit} tokens rather than finishing")]
-    AnswerTruncated { limit: u32 },
+    /// ⚠️ **IT NAMES WHY, AND IT USED TO ASSUME.** The first version carried
+    /// only the limit and said "cut off at {limit} tokens", because the check
+    /// behind it tested for `length`. The check is positive now — only an
+    /// explicit `stop` is a finished answer — so this variant also covers a
+    /// stream that ended saying nothing, and "cut off at 160 tokens" would have
+    /// been a confident wrong sentence for a daemon that died mid-answer.
+    /// `finish` is what separates "the model ignored a six-line prompt" from
+    /// "the runtime went away", which are different problems with different
+    /// fixes. Bounded at construction — see `Answer::finish_label`.
+    #[error("the model did not finish ({finish}); the bound is {limit} tokens")]
+    AnswerTruncated { finish: String, limit: u32 },
 
     // ── agents (WI-15.6, WI-15.7, WI-15.10) ─────────────────────────────
     /// The agent CLI is not on `PATH`.
@@ -351,7 +360,11 @@ mod tests {
             Error::RequestUnknown(String::new()).kind(),
             Error::RequestBusy(String::new()).kind(),
             Error::Cancelled.kind(),
-            Error::AnswerTruncated { limit: 0 }.kind(),
+            Error::AnswerTruncated {
+                finish: String::new(),
+                limit: 0,
+            }
+            .kind(),
             Error::AgentMissing("codex").kind(),
             Error::AgentUnsupportedVersion {
                 agent: "codex",

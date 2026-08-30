@@ -1,7 +1,7 @@
 import { createGenerations } from '../../../kernel'
 import { messageOf } from './messageOf'
 import type { InferencePlugin, InstallProgress, ModelRow, RuntimeStatus } from './plugin'
-import { errorKind, isCancelled, mintRequestId } from './plugin'
+import { cancelRequest, errorKind, isCancelled, mintRequestId } from './plugin'
 
 /**
  * The runtime's state machine — `absent → installing → installed → starting →
@@ -117,8 +117,12 @@ const INITIAL: InferenceSnapshot = {
  * can act on.
  */
 export function detailFor(error: unknown): string {
-  const kind = typeof error === 'object' && error !== null ? (error as { kind?: unknown }).kind : null
-  switch (kind) {
+  /* ⚠️ `errorKind`, NOT A SECOND COPY OF ITS BODY. This re-implemented the
+   * shape inspection inline while importing the canonical helper three lines
+   * up — `plugin.ts` calls `errorKind` "the one place that reads the shape",
+   * and this was the second. The two agreed, which is exactly how a third
+   * would have been written. Found by audit. */
+  switch (errorKind(error)) {
     case 'runtimeMissing':
       return 'The runtime is not installed'
     /* WI-20.24: the staged runtime is checked file by file against its
@@ -326,7 +330,25 @@ export function createController(plugin: ControllerPlugin, reportTo?: ReportFail
   const set = (next: Partial<InferenceSnapshot>): void => {
     if (disposed) return
     snapshot = { ...snapshot, ...next }
-    for (const listener of [...listeners]) listener()
+    /* ⚠️ **A THROWING SUBSCRIBER USED TO ESCAPE THIS**, and it broke two
+     * contracts at once. `install` and `uninstall` promise in capitals to
+     * resolve rather than reject — their only callers are `void
+     * model.install(id)` in the pane — and both call `set` BEFORE their `try`,
+     * so a listener that threw rejected the promise, left the install slot
+     * owned and stuck the state on "installing" with nothing able to clear it.
+     * It also stopped every later listener from being told, so half the
+     * subscribers saw the update and half did not.
+     *
+     * The same lesson `report` above already learned: a reporter that can turn
+     * a recovery into a rejection has broken the recovery. A subscriber is the
+     * same shape. Found by audit. */
+    for (const listener of [...listeners]) {
+      try {
+        listener()
+      } catch (thrown) {
+        console.error('inference controller: a subscriber threw while being notified', thrown)
+      }
+    }
   }
 
   /**
@@ -480,10 +502,14 @@ export function createController(plugin: ControllerPlugin, reportTo?: ReportFail
      * press and this landing — and is not worth showing. Anything else is a
      * cancel that did not happen, which the reader is about to notice, so it is
      * reported rather than swallowed. */
-    void plugin.cancel(requestId).catch((cause: unknown) => {
-      if (errorKind(cause) === 'requestUnknown') return
-      report('inference.cancel-failed', { message: messageOf(cause) })
-    })
+    /* ⚠️ **THROUGH `cancelRequest`, AND THIS USED TO BE A THIRD COPY OF IT.**
+     * That helper exists because the same `.catch(() => {})` was written twice
+     * and fixing one copy left the other broken — its own header calls two call
+     * sites of one shape "a class, not two bugs". This was the third site,
+     * written out by hand, and it had already drifted: it reported neither the
+     * `requestId` nor the `kind`, so its log line named a failed cancel without
+     * saying which request or why. Found by audit. */
+    cancelRequest(plugin, requestId, report)
   }
 
   return {

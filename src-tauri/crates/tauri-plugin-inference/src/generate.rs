@@ -77,12 +77,21 @@ struct Delta {
     content: Option<String>,
 }
 
-/// The `finish_reason` a model gives when it hit the token bound rather than
-/// finishing what it had to say.
+/// The one `finish_reason` that means the model said what it had to say.
 ///
 /// The OpenAI streaming vocabulary, which `lemond` speaks: `stop` is the model
-/// deciding it is done, `length` is `max_tokens` cutting it off mid-thought.
-pub const FINISH_LENGTH: &str = "length";
+/// deciding it is done, `length` is `max_tokens` cutting it off mid-thought,
+/// and there are others (`content_filter`, `tool_calls`) plus whatever a future
+/// backend invents.
+///
+/// ⚠️ **ONLY THE SUCCESSFUL VALUE HAS A NAME, AND `length` USED TO HAVE ONE
+/// TOO.** That constant existed to spell what `Answer::truncated` compared
+/// against; the moment the test became POSITIVE — only `stop` is a finished
+/// answer — nothing in the crate read it, and clippy said so. Naming one member
+/// of an open set this code deliberately does not enumerate would suggest the
+/// set is closed. `inference_gloss` tests for THIS, which is the fail-closed
+/// direction; see `Answer::complete`.
+pub const FINISH_STOP: &str = "stop";
 
 /// What one SSE line meant.
 ///
@@ -102,7 +111,7 @@ pub const FINISH_LENGTH: &str = "length";
 pub struct Event {
     /// Text to append to the answer.
     pub delta: Option<String>,
-    /// Why the model stopped, when this chunk said so — see [`FINISH_LENGTH`].
+    /// Why the model stopped, when this chunk said so — see [`FINISH_STOP`].
     pub finish: Option<String>,
     /// The `[DONE]` sentinel: the stream is over.
     pub done: bool,
@@ -122,7 +131,17 @@ impl Event {
 /// Pure, and separately tested, because this is where a streaming bug is
 /// cheapest to catch and most expensive to find later.
 pub fn parse_line(line: &str) -> Event {
-    let line = line.trim_end_matches('\r');
+    /* ⚠️ **BOTH ENDINGS, AND IT USED TO STRIP ONLY THE `\r`.** `stream` drains
+     * `..=newline`, so every line it hands over KEEPS its `\n` — which meant
+     * `"data: [DONE]\n"` never equalled `"[DONE]"` and `Event::done` was never
+     * true for a real stream. The early return on the sentinel has therefore
+     * been dead since it was written; answers survived only because the body
+     * ends anyway and the loop falls out at EOF. A server that held the body
+     * open after `[DONE]` would have hung every request to its deadline.
+     *
+     * A delta line hid it: `serde_json` tolerates the trailing newline, so the
+     * text came through and only the sentinel was affected. Found by audit. */
+    let line = line.trim_end_matches('\n').trim_end_matches('\r');
     let Some(payload) = line.strip_prefix(DATA_PREFIX) else {
         // Blank lines separate events; `:` starts a comment. Neither is data.
         return Event::ignored();
@@ -182,10 +201,62 @@ pub struct Answer {
 }
 
 impl Answer {
-    /// Whether the model was cut off by the token bound rather than finishing.
-    pub fn truncated(&self) -> bool {
-        self.finish.as_deref() == Some(FINISH_LENGTH)
+    /// Whether the model said what it had to say.
+    ///
+    /// ⚠️ **A POSITIVE TEST, AND IT USED TO BE `truncated()`** — `finish ==
+    /// Some("length")`. That accepted every other way of not finishing,
+    /// including the one this type's own doc calls out: `None`, "a daemon that
+    /// went away mid-answer". A caller asking "may I present this as a whole
+    /// answer?" must get `false` for everything it does not positively
+    /// recognise, or the next unrecognised reason ships fragments again.
+    pub fn complete(&self) -> bool {
+        self.finish.as_deref() == Some(FINISH_STOP)
     }
+
+    /// Why it stopped, for the maintainer's half of an error.
+    ///
+    /// BOUNDED, because the value comes off the wire from a separate process
+    /// and this crosses IPC into a webview. `length` and `stop` are four and
+    /// six bytes; anything long enough to be cut here is not a finish reason.
+    pub fn finish_label(&self) -> String {
+        match self.finish.as_deref() {
+            None => "the stream ended without saying".to_owned(),
+            Some(reason) => reason.chars().take(32).collect(),
+        }
+    }
+}
+
+/// Fold one parsed frame into the answer, bounded.
+///
+/// ONE PLACE, because there are two callers — the framed-line loop and the
+/// EOF tail — and the tail used to be a hand-copied version of the loop's body
+/// with the byte check left out.
+fn apply(answer: &mut Answer, event: Event, on_delta: &mut impl FnMut(String)) -> Result<()> {
+    /* THE REASON IS TAKEN BEFORE THE TEXT, and from every chunk that carries
+     * one, because a chunk may hold both and because the last one to say wins
+     * — a server that re-states it must not be able to unsay it by sending a
+     * bare delta afterwards. */
+    if event.finish.is_some() {
+        answer.finish = event.finish;
+    }
+    let Some(text) = event.delta else {
+        return Ok(());
+    };
+    /* BOUNDED, because the writer is a separate process. The request asks for
+     * `MAX_ANSWER_TOKENS`, but nothing on this side enforces that a daemon
+     * honours it — a wedged or hostile one streaming without end would grow
+     * this `String` until the app died. Refused by name rather than truncated:
+     * half an answer presented as a whole one is the shape this crate refuses
+     * everywhere else. */
+    if answer.text.len() + text.len() > crate::limits::MAX_ANSWER_BYTES {
+        return Err(Error::FieldTooLarge {
+            field: "the answer",
+            limit: crate::limits::MAX_ANSWER_BYTES,
+        });
+    }
+    answer.text.push_str(&text);
+    on_delta(text);
+    Ok(())
 }
 
 /// Stream an answer, handing each text delta to `on_delta`.
@@ -242,33 +313,34 @@ pub async fn stream(
         while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = buffer.drain(..=newline).collect();
             let event = parse_line(&String::from_utf8_lossy(&line));
-            /* THE REASON IS TAKEN BEFORE THE TEXT, and from every chunk that
-             * carries one, because a chunk may hold both and because the last
-             * one to say wins — a server that re-states it must not be able to
-             * unsay it by sending a bare delta afterwards. */
-            if event.finish.is_some() {
-                answer.finish = event.finish;
-            }
-            if let Some(text) = event.delta {
-                /* BOUNDED, because the writer is a separate process. The
-                 * request asks for `MAX_ANSWER_TOKENS`, but nothing on
-                 * this side enforces that a daemon honours it — a wedged
-                 * or hostile one streaming without end would grow this
-                 * `String` until the app died. Refused by name rather
-                 * than truncated: half an answer presented as a whole one
-                 * is the shape this crate refuses everywhere else. */
-                if answer.text.len() + text.len() > crate::limits::MAX_ANSWER_BYTES {
-                    return Err(Error::FieldTooLarge {
-                        field: "the answer",
-                        limit: crate::limits::MAX_ANSWER_BYTES,
-                    });
-                }
-                answer.text.push_str(&text);
-                on_delta(text);
-            }
-            if event.done {
+            let done = event.done;
+            apply(&mut answer, event, &mut on_delta)?;
+            if done {
                 return Ok(answer);
             }
+        }
+        /* ⚠️ **THE LINE BUFFER IS BOUNDED TOO, AND IT USED NOT TO BE.** The
+         * bound in `apply` is on the ANSWER; this one is on an unterminated
+         * FRAME, and they are not the same guard. A daemon that streams without
+         * ever sending a newline never reaches the loop above, so `answer`
+         * stays empty and this `Vec` grows until the app dies — the exact
+         * failure the answer bound exists to prevent, one buffer earlier. Same
+         * threat model, stated in the same place: the writer is a separate
+         * process and nothing on this side makes it well-behaved.
+         *
+         * ⚠️ **AFTER THE DRAIN, AND THE FIRST VERSION CHECKED BEFORE IT.**
+         * `buffer` holds the retained tail PLUS everything that just arrived,
+         * so checking on the way in measured two frames and rejected a
+         * perfectly legal one: a tail of `MAX - 10` completed by an 11-byte
+         * chunk carrying its last bytes and the start of the next frame read as
+         * `MAX + 1`. What is left HERE is one frame that has not ended, which is
+         * the only thing this bound is about. Found by the verify pass, on the
+         * fix for the finding above. */
+        if buffer.len() > crate::limits::MAX_ANSWER_BYTES {
+            return Err(Error::FieldTooLarge {
+                field: "one answer frame",
+                limit: crate::limits::MAX_ANSWER_BYTES,
+            });
         }
     }
     /* THE LAST LINE, when the body ended without a trailing newline.
@@ -277,14 +349,14 @@ pub async fn stream(
      * buffer and it was silently dropped — losing the final token of an answer
      * the reader watched arrive, or the `[DONE]` that says it finished. */
     if !buffer.is_empty() {
-        let event = parse_line(&String::from_utf8_lossy(&buffer));
-        if event.finish.is_some() {
-            answer.finish = event.finish;
-        }
-        if let Some(text) = event.delta {
-            answer.text.push_str(&text);
-            on_delta(text);
-        }
+        /* THE SAME `apply`, AND IT USED TO BE A SECOND COPY that omitted the
+         * byte bound — so an unterminated final delta walked straight past the
+         * limit the function advertises. One path, one bound. Found by audit. */
+        apply(
+            &mut answer,
+            parse_line(&String::from_utf8_lossy(&buffer)),
+            &mut on_delta,
+        )?;
     }
     /* The body ended without `[DONE]`. Everything received is still a real
      * answer; a truncated stream is the daemon's problem to report, and
@@ -370,7 +442,7 @@ mod tests {
     #[test]
     fn the_token_bound_is_reported_as_length() {
         let line = r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}"#;
-        assert_eq!(parse_line(line).finish.as_deref(), Some(FINISH_LENGTH));
+        assert_eq!(parse_line(line).finish.as_deref(), Some("length"));
     }
 
     /// ⚠️ **A CHUNK MAY CARRY BOTH**, which is why `Event` is a record and not
@@ -382,7 +454,7 @@ mod tests {
             r#"data: {"choices":[{"index":0,"delta":{"content":"cut"},"finish_reason":"length"}]}"#;
         let event = parse_line(line);
         assert_eq!(event.delta.as_deref(), Some("cut"));
-        assert_eq!(event.finish.as_deref(), Some(FINISH_LENGTH));
+        assert_eq!(event.finish.as_deref(), Some("length"));
     }
 
     /// A future upstream that adds fields must not break the parse.
@@ -395,6 +467,12 @@ mod tests {
     /// The corruption an audit caught: decoding each network chunk on its own
     /// turns a multibyte character split across a boundary into replacement
     /// characters. Certain for the CJK text this model was chosen for.
+    ///
+    /// ⚠️ THIS CASE ONLY SHOWS THAT THE NAIVE DECODE CORRUPTS. It hands
+    /// `parse_line` an already-assembled line, so it exercises none of
+    /// `stream`'s buffering — see
+    /// `a_character_split_across_network_chunks_survives_the_stream`, which
+    /// drives the real path with a real split.
     #[test]
     fn a_character_split_across_chunks_survives() {
         let line = r#"data: {"choices":[{"delta":{"content":"\u6d77"}}]}"#;
@@ -463,6 +541,25 @@ mod tests {
     /// under test is how `stream` reads an ANSWER; `chat_request` has its own
     /// test for what it sends.
     fn serving(body: String) -> String {
+        serving_parts(vec![body.into_bytes()], 0)
+    }
+
+    /// The same, writing `parts` one at a time and then holding the socket open
+    /// for `hold_ms` before closing.
+    ///
+    /// TWO THINGS NO SINGLE-WRITE SERVER CAN TEST. Segmented writes put a
+    /// multibyte character across a network chunk boundary, which is the
+    /// corruption the byte buffer exists to prevent — and the test that claimed
+    /// to cover it called `parse_line` on already-assembled input, so it
+    /// exercised none of the buffering. Holding the socket open is what makes
+    /// `[DONE]` load-bearing: with the body closed straight after, a stream
+    /// that ignores the sentinel still finishes at EOF and looks identical.
+    /* BYTES, NOT `String`. A part is a NETWORK chunk, and the whole point of
+    the split test is that one lands mid-character — which `String` cannot
+    hold. The first version took `Vec<String>` and the harness itself replaced
+    the broken character before it ever reached the socket, so the test failed
+    against correct code. Exactly the corruption under test, one layer up. */
+    fn serving_parts(parts: Vec<Vec<u8>>, hold_ms: u64) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let address = listener.local_addr().expect("an address");
@@ -473,9 +570,29 @@ mod tests {
             let head =
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
             socket.write_all(head.as_bytes()).expect("a head");
-            socket.write_all(body.as_bytes()).expect("a body");
+            for part in parts {
+                socket.write_all(&part).expect("a body part");
+                let _ = socket.flush();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(hold_ms));
         });
         format!("http://{address}/api/v1/chat/completions")
+    }
+
+    async fn answered_parts(parts: Vec<Vec<u8>>, hold_ms: u64) -> Answer {
+        let registry = crate::requests::Registry::default();
+        let guard = registry.begin("gloss").expect("a fresh request");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a client");
+        let request = crate::daemon::ModelRequest::from_builder_for_test(
+            client.get(serving_parts(parts, hold_ms)),
+        );
+        stream(request, &guard.cancel(), |_| {})
+            .await
+            .expect("an answer")
     }
 
     async fn answered(body: String) -> Answer {
@@ -506,7 +623,7 @@ mod tests {
         .await;
 
         assert_eq!(answer.text, "a meeting between");
-        assert!(answer.truncated());
+        assert!(!answer.complete());
     }
 
     /// The ordinary end, and the non-vacuity of the case above: a reader must
@@ -522,7 +639,7 @@ mod tests {
 
         assert_eq!(answer.text, "a meeting.");
         assert_eq!(answer.finish.as_deref(), Some("stop"));
-        assert!(!answer.truncated());
+        assert!(answer.complete());
     }
 
     /// A body that ends without saying. NOT read as `stop`: a stream that stops
@@ -535,7 +652,10 @@ mod tests {
 
         assert_eq!(answer.text, "half");
         assert_eq!(answer.finish, None);
-        assert!(!answer.truncated());
+        /* ⚠️ AND IT IS NOT COMPLETE. This asserted `!truncated()` and read as
+         * "fine" — which is exactly how a daemon that went away mid-answer used
+         * to reach the reader as a finished definition. */
+        assert!(!answer.complete());
     }
 
     /// A server that combines the last token with the reason, which is within
@@ -550,7 +670,141 @@ mod tests {
         .await;
 
         assert_eq!(answer.text, "cut");
-        assert!(answer.truncated());
+        assert!(!answer.complete());
+    }
+
+    /// ⚠️ **THE SENTINEL NEVER MATCHED A REAL LINE.** `stream` drains `..=
+    /// newline`, so every line it parses keeps its `\n`, and `"data: [DONE]\n"`
+    /// did not equal `"[DONE]"`. Answers survived only because the body ends
+    /// anyway; the early return was dead code from the day it was written.
+    #[test]
+    fn the_sentinel_is_recognised_with_the_newline_it_arrives_with() {
+        for line in [
+            "data: [DONE]",
+            "data: [DONE]\n",
+            "data: [DONE]\r\n",
+            "data:[DONE]\r\n",
+        ] {
+            assert!(parse_line(line).done, "{line:?}");
+        }
+    }
+
+    /// The half a closed connection cannot show: the server sends `[DONE]` and
+    /// then HOLDS the body open. A stream that ignores the sentinel waits here
+    /// until its deadline, so this fails by timing out rather than by asserting.
+    #[tokio::test]
+    async fn a_held_open_body_ends_at_the_sentinel() {
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            answered_parts(
+                vec![
+                    sse(r#"{"choices":[{"delta":{"content":"a meeting."}}]}"#).into_bytes(),
+                    sse(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#).into_bytes(),
+                    sse("[DONE]").into_bytes(),
+                ],
+                60_000,
+            ),
+        )
+        .await
+        .expect("the sentinel must end the stream without waiting for EOF");
+
+        assert_eq!(answer.text, "a meeting.");
+        assert!(answer.complete());
+    }
+
+    /// ⚠️ **DRIVEN THROUGH `stream`, AND THE TEST FOR THIS USED TO CALL
+    /// `parse_line`.** The corruption is a multibyte character split across a
+    /// NETWORK chunk boundary, which only the byte buffer can prevent — and a
+    /// test that hands `parse_line` an assembled line exercises none of it.
+    #[tokio::test]
+    async fn a_character_split_across_network_chunks_survives_the_stream() {
+        let line = sse(r#"{"choices":[{"delta":{"content":"海海海"}}]}"#);
+        let bytes = line.as_bytes();
+        // Cut inside the first 海 — three bytes in UTF-8.
+        let cut = line.find('海').expect("the character") + 1;
+        let answer = answered_parts(vec![bytes[..cut].to_vec(), bytes[cut..].to_vec()], 0).await;
+
+        assert_eq!(answer.text, "海海海");
+        assert!(
+            !answer.text.contains('\u{FFFD}'),
+            "no replacement characters"
+        );
+    }
+
+    /// Only `stop` is a finished answer. Everything else — including a stream
+    /// that said nothing at all — is not, which is the fail-closed direction.
+    #[test]
+    fn only_an_explicit_stop_is_a_complete_answer() {
+        let with = |finish: Option<&str>| Answer {
+            text: "x".to_owned(),
+            finish: finish.map(str::to_owned),
+        };
+        assert!(with(Some(FINISH_STOP)).complete());
+        assert!(!with(Some("length")).complete());
+        assert!(!with(None).complete());
+        assert!(!with(Some("content_filter")).complete());
+        assert!(!with(Some("a reason this build has never heard of")).complete());
+    }
+
+    /// The maintainer's half, and it must not carry an unbounded string across
+    /// IPC just because a daemon sent one.
+    #[test]
+    fn the_finish_label_names_the_reason_and_is_bounded() {
+        let label = |finish: Option<&str>| {
+            Answer {
+                text: String::new(),
+                finish: finish.map(str::to_owned),
+            }
+            .finish_label()
+        };
+        assert_eq!(label(Some("length")), "length");
+        assert!(label(None).contains("without saying"));
+        assert_eq!(label(Some(&"x".repeat(500))).chars().count(), 32);
+    }
+
+    /// ⚠️ **THE FRAME BUFFER IS BOUNDED, AND IT USED NOT TO BE.** A daemon that
+    /// streams without ever sending a newline never reaches the line loop, so
+    /// the answer bound never applies and the buffer grows unopposed.
+    #[tokio::test]
+    async fn a_frame_that_never_ends_is_refused_rather_than_buffered() {
+        let registry = crate::requests::Registry::default();
+        let guard = registry.begin("gloss").expect("a fresh request");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a client");
+        // No newline anywhere, and past the bound.
+        let flood = "data: ".to_owned() + &"x".repeat(crate::limits::MAX_ANSWER_BYTES + 1);
+        let request = crate::daemon::ModelRequest::from_builder_for_test(
+            client.get(serving_parts(vec![flood.into_bytes()], 0)),
+        );
+        let refused = stream(request, &guard.cancel(), |_| {})
+            .await
+            .expect_err("an unterminated frame past the bound must be refused");
+        assert_eq!(refused.kind(), "fieldTooLarge");
+    }
+
+    /// ⚠️ **THE REGRESSION THE VERIFY PASS CAUGHT.** The frame bound was
+    /// checked as bytes ARRIVED rather than on what was left after complete
+    /// lines were taken out, so `buffer` was measured holding a finished frame
+    /// plus the start of the next one — and a legal stream near the bound was
+    /// refused. Nothing here exceeds the limit in a single frame.
+    #[tokio::test]
+    async fn a_frame_that_ends_near_the_bound_is_not_refused_for_its_neighbour() {
+        let max = crate::limits::MAX_ANSWER_BYTES;
+        /* A COMMENT frame, so this tests the buffer and not the answer bound:
+        `parse_line` ignores a line with no `data:` prefix, so none of these
+        bytes reach `answer`. */
+        let mut first = b":".to_vec();
+        first.extend(std::iter::repeat_n(b'x', max - 10));
+        // Split so the newline arrives with the next frame's opening bytes.
+        let mut second = b"\n".to_vec();
+        second.extend_from_slice(sse(r#"{"choices":[{"delta":{"content":"ok"}}]}"#).as_bytes());
+        second.extend_from_slice(sse("[DONE]").as_bytes());
+
+        let answer = answered_parts(vec![first, second], 0).await;
+
+        assert_eq!(answer.text, "ok");
     }
 
     /// The request Paper sends is one turn: a system prompt and a question,

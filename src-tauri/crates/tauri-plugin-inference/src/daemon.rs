@@ -531,7 +531,7 @@ impl Daemon {
             // progress to reset it. See `MODEL_CEILING`.
             .timeout(MODEL_CEILING)
             .bearer_auth(&self.plan.env[crate::spawn::API_KEY_ENV]);
-        ModelRequest(built)
+        ModelRequest(built, MODEL_CEILING)
     }
 
     // (see `ModelRequest` below for why `model_request` returns a newtype)
@@ -879,29 +879,38 @@ where
 ///
 /// `post_json` and `get_json` stay on the control plane deliberately — health
 /// and endpoint registration are exactly what that deadline is for.
-pub struct ModelRequest(reqwest::RequestBuilder);
+pub struct ModelRequest(reqwest::RequestBuilder, Duration);
 
 impl ModelRequest {
     /// Attach the JSON body, staying a `ModelRequest`.
     pub fn json<T: serde::Serialize + ?Sized>(self, value: &T) -> Self {
-        ModelRequest(self.0.json(value))
+        ModelRequest(self.0.json(value), self.1)
     }
 
     /// Bring the deadline in below [`MODEL_CEILING`], for a caller whose work
     /// is smaller than the generation that number was reasoned about.
     ///
-    /// TIGHTEN ONLY, and the name says so rather than the type: reqwest's
-    /// `timeout` is last-call-wins, so a `deadline` past the ceiling would
-    /// quietly raise it and the one bound on a model request would then be
-    /// whatever the last caller asked for. There is exactly one caller —
-    /// `inference_gloss` with [`GLOSS_CEILING`] — and the assertion below is
-    /// what keeps a second one from being the one that widens it.
+    /// ⚠️ **TIGHTEN ONLY, ENFORCED BY THE TYPE — AND IT USED TO BE ENFORCED BY
+    /// A COMMENT.** The first version wrote `self.0.timeout(within.min(
+    /// MODEL_CEILING))` behind a `debug_assert!` and claimed the name carried
+    /// the rule. reqwest's `timeout` is last-call-wins, so
+    /// `.deadline(90s).deadline(300s)` passed the assertion — both are under
+    /// the ceiling — and left the request at FIVE MINUTES. The invariant held
+    /// only for a single call, which is the one case that needs no invariant.
+    /// Found by audit.
+    ///
+    /// The effective deadline is carried on the value now, so every call can
+    /// only ever narrow what the last one left. A widening call is a no-op
+    /// rather than a silent win.
     pub fn deadline(self, within: Duration) -> Self {
-        debug_assert!(
-            within <= MODEL_CEILING,
-            "a request deadline may tighten the ceiling, never raise it"
-        );
-        ModelRequest(self.0.timeout(within.min(MODEL_CEILING)))
+        let effective = within.min(self.1);
+        ModelRequest(self.0.timeout(effective), effective)
+    }
+
+    /// The deadline this request will actually run under. For a test.
+    #[cfg(test)]
+    pub(crate) fn effective_deadline(&self) -> Duration {
+        self.1
     }
 
     /// Hand the builder to whatever reads the answer.
@@ -924,12 +933,50 @@ impl ModelRequest {
     /// test for no gain.
     #[cfg(test)]
     pub(crate) fn from_builder_for_test(builder: reqwest::RequestBuilder) -> Self {
-        ModelRequest(builder)
+        ModelRequest(builder, MODEL_CEILING)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// ⚠️ **TIGHTEN ONLY, AND A `debug_assert!` DID NOT ENFORCE IT.** reqwest's
+    /// `timeout` is last-call-wins, so two calls both under the ceiling left the
+    /// request at whichever came second — the assertion passed and the deadline
+    /// widened. The rule is on the value now.
+    #[test]
+    fn a_deadline_can_only_ever_narrow() {
+        use std::time::Duration;
+        let request = || {
+            super::ModelRequest::from_builder_for_test(
+                reqwest::Client::new().get("http://127.0.0.1:1/"),
+            )
+        };
+        // It starts at the ceiling.
+        assert_eq!(request().effective_deadline(), super::MODEL_CEILING);
+        // One call tightens.
+        assert_eq!(
+            request()
+                .deadline(super::GLOSS_CEILING)
+                .effective_deadline(),
+            super::GLOSS_CEILING
+        );
+        // A second, wider call does NOT widen — this is the case that used to.
+        assert_eq!(
+            request()
+                .deadline(super::GLOSS_CEILING)
+                .deadline(Duration::from_secs(300))
+                .effective_deadline(),
+            super::GLOSS_CEILING
+        );
+        // And nothing can exceed the ceiling from the start.
+        assert_eq!(
+            request()
+                .deadline(Duration::from_secs(9_999))
+                .effective_deadline(),
+            super::MODEL_CEILING
+        );
+    }
+
     use super::*;
 
     /// The three commands a model answers really do go through the model

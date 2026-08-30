@@ -125,12 +125,25 @@ pub async fn inference_models<R: Runtime>(
 /// The registry is reused rather than a second map introduced: the guard's
 /// `Drop` already releases on every exit path, including a cancellation and a
 /// panic, which is the property that makes this safe to hold across an await.
-/// The `model:` prefix cannot collide with a minted request id — those are
-/// `<kind>-<n>` — and the busy error names the model rather than the key.
+/// ⚠️ **ITS OWN REGISTRY, AND IT USED TO SHARE THE REQUEST ONE.** This said
+/// "the `model:` prefix cannot collide with a minted request id — those are
+/// `<kind>-<n>`", which is a fact about the ids PAPER mints and not about the
+/// ones this command surface ACCEPTS: `request_id` arrives from the webview
+/// bounded only by `MAX_REQUEST_ID`, and this crate's whole premise is that the
+/// webview is untrusted. A caller passing `model:<id>` as its own request id
+/// held that model's install and removal for as long as it kept the request
+/// open, and an install in progress made a lookup under the same string answer
+/// "already running". Two namespaces in one map is one namespace — see
+/// `InferenceState::model_locks`.
+///
+/// The registry TYPE is still reused rather than a bespoke lock: the guard's
+/// `Drop` already releases on every exit path, including a cancellation and a
+/// panic, which is the property that makes this safe to hold across an await.
+/// The busy error names the model rather than the key.
 fn lock_model(state: &InferenceState, model: &str) -> Result<crate::requests::Guard> {
     state
-        .requests()
-        .begin(&format!("model:{model}"))
+        .model_locks()
+        .begin(model)
         .map_err(|_| Error::RequestBusy(model.to_owned()))
 }
 
@@ -573,8 +586,21 @@ pub async fn inference_gloss<R: Runtime>(
      * Refused rather than trimmed to the last full sentence: a model that ran
      * past 160 tokens ignored a six-line prompt asking for one or two, so its
      * first 160 are not a gloss that happens to be long. */
-    if answer.truncated() {
+    /* ⚠️ **AND `length` WAS NOT THE ONLY WAY NOT TO FINISH**, which the first
+     * version of this check missed: it refused `length` and accepted
+     * everything else, including a stream that ended saying NOTHING — a daemon
+     * killed mid-answer, a body that stopped without `[DONE]`. `generate.rs`'s
+     * own doc for `Answer::finish` says that case is "a daemon that went away
+     * mid-answer", and returning it as a definition is the same defect this
+     * check exists to close, arriving by the other door. Found by audit.
+     *
+     * So the test is POSITIVE — only an explicit `stop` is a finished answer —
+     * which is the fail-closed direction: a backend that stops reporting
+     * `finish_reason` breaks the gloss loudly instead of quietly shipping
+     * fragments in amber. */
+    if !answer.complete() {
         return Err(Error::AnswerTruncated {
+            finish: answer.finish_label(),
             limit: MAX_GLOSS_TOKENS,
         });
     }

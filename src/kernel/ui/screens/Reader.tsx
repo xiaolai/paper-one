@@ -303,16 +303,26 @@ export function Reader({
      the way to the library: `inert` already clears the selection for the
      identical reason, and the gloss was the one surface it did not reach.
 
-     THE SPINE ITEM AND THE CHAPTER, and deliberately not the fraction or the
-     CFI: the strip is a flex child above `.stage` (`flex: 1`), so its own
-     appearance shrinks the stage and makes foliate relocate. An anchor either
-     of those could move would dismiss the gloss that caused the reflow and
-     loop. Neither of these can be moved by a re-pagination. */
+     THE SPINE ITEM, THE CHAPTER AND THE TURN COUNT — and deliberately not the
+     fraction or the CFI: the strip is a flex child above `.stage` (`flex: 1`),
+     so its own appearance shrinks the stage and makes foliate relocate. An
+     anchor either of those could move would dismiss the gloss that caused the
+     reflow and loop. None of these three can be moved by a re-pagination.
+
+     ⚠️ `book.navigation` IS THE ONE THAT COVERS THE KEYBOARD, and it is here
+     because the first version of this claimed `onPageIntent` covered "every
+     route" of a page turn. It does not: `App`'s key handler calls
+     `book[verb]()` directly for the arrows, the paging keys and Space, and
+     never reaches this screen's intent handler at all. So a keyboard turn left
+     an amber definition on the new page — the exact defect the anchor was added
+     to fix, surviving through the one route nobody checked. Found by audit.
+     `useBook` counts the turns instead, which is the only place BOTH routes
+     pass through. */
   const gloss = useGloss(
     glossProvider,
     inert
       ? null
-      : `${book.generation}|${book.position.sectionIndex ?? ''}|${book.position.chapterHref}`,
+      : `${book.generation}|${book.position.sectionIndex ?? ''}|${book.position.chapterHref}|${book.navigation}`,
   )
   const lookUpAction = decideLookUp(
     glossProvider.available,
@@ -596,20 +606,13 @@ export function Reader({
        * cheaper side of the trade by a wide margin. */
       clearSelection()
 
-      /* AND THE GLOSS, for the same sentence one line up. It is the same fact
-       * about the same passage — a definition anchored to a word on the page
-       * being left — and it had no teardown at all: the strip's × was its only
-       * route out, so an amber definition rode the page turn onto the next
-       * page and stayed there. The in-flight request goes too; `dismiss`
-       * aborts, which cancels it at the daemon rather than letting a model
-       * finish generating for a page nobody is on.
-       *
-       * HERE RATHER THAN IN THE ANCHOR, and `GlossAnchor` says why: a key that
-       * could see a page turn within a chapter would also see the reflow the
-       * strip's own appearance causes, and dismiss itself in a loop. This is
-       * an INTENT — the reader asked — so it cannot be raised by a
-       * re-pagination. */
-      gloss.dismiss()
+      /* ⚠️ NO `gloss.dismiss()` HERE, AND THERE WAS ONE. It covered this route
+       * and only this route, while `App`'s key handler turns pages without ever
+       * calling it — so the teardown fired for a wheel gesture and not for the
+       * arrow key beside it. `book.navigation` counts turns where both routes
+       * meet and feeds the gloss anchor; a second copy here would be the same
+       * decision in two places, and the copy that was missing a route is
+       * exactly how this was wrong the first time. */
 
       /* Four intents, two pairs, because the axes mean different things. A
        * horizontal gesture named a SIDE and foliate resolves which page that is
@@ -624,10 +627,9 @@ export function Reader({
     },
     /* `clearSelection` is what the body calls; `selection` and `setSelection`
        were what an earlier body read, and had outlived it in this list.
-       `gloss.dismiss` and NOT `gloss`: the hook returns a fresh object every
-       render, so naming the object would rebuild this callback on every gloss
-       state change. The method is memoised with no deps and never moves. */
-    [state, book, paneVisible, clearSelection, gloss.dismiss],
+       The gloss is no longer named at all — its teardown moved to the anchor,
+       which sees the keyboard route this callback cannot. */
+    [state, book, paneVisible, clearSelection],
   )
 
   /**

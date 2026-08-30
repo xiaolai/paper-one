@@ -409,6 +409,12 @@ export function localeAt(range: Range): string | undefined {
   try {
     const node = range.startContainer
     if (node.nodeType !== TEXT_NODE) return undefined
+    /* §E5, THE SAME GUARD `extract` APPLIES, and it was missing here. A
+     * snapshot's range may have been re-rendered since the reader made it — on
+     * a PDF that is what a zoom does — and reading `lang` off a detached tree
+     * describes a page that no longer exists. The host's locale is the honest
+     * answer for a range that is no longer in the document. Found by audit. */
+    if (!connectedRange(range)) return undefined
     const root = walkRoot(node)
     return root ? localeFor(node as Text, root) : undefined
   } catch {

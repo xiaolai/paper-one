@@ -354,8 +354,29 @@ describe('the gloss provider', () => {
         return 'Guarded.'
       }) as never,
     })
-    await provider.gloss('counsel', context, controllerAbort.signal)
+    /* ⚠️ **IT REJECTS, AND IT USED TO RESOLVE.** This awaited the call bare and
+       asserted only that the cancel went out — so the provider handing back an
+       answer for a lookup the reader had abandoned passed unremarked, and only
+       `useGloss` dropping it kept that invisible. The port's contract is that a
+       cancelled lookup rejects; the check on the way IN already held it and the
+       tail did not. */
+    await expect(provider.gloss('counsel', context, controllerAbort.signal)).rejects.toThrow()
     expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
+  /* AND THE ANSWER IS STILL REMEMBERED. It is a correct answer to that exact
+     question and was already paid for, so the reader's next lookup of the same
+     word is free — what must not happen is the call RESOLVING. */
+  it('still caches an answer whose caller went away', async () => {
+    const controllerAbort = new AbortController()
+    const { provider } = harness({
+      gloss: vi.fn(async () => {
+        controllerAbort.abort()
+        return 'Guarded.'
+      }) as never,
+    })
+    await expect(provider.gloss('counsel', context, controllerAbort.signal)).rejects.toThrow()
+    expect(provider.cacheSize()).toBe(1)
   })
 
   it('does not start when the signal is already aborted', async () => {

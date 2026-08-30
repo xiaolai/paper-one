@@ -96,6 +96,53 @@ describe('detailFor', () => {
  * the model, so such a reorder would also have dropped every remembered
  * definition with nothing anywhere saying why.
  */
+/**
+ * The two contracts an audit found unenforced.
+ */
+describe('what a badly-behaved subscriber cannot do', () => {
+  /* ⚠️ **`install` AND `uninstall` PROMISE TO RESOLVE, IN CAPITALS**, because
+     their only callers are `void model.install(id)` in the pane — a rejection
+     there is an unhandled promise and a reader told nothing. Both call `set`
+     BEFORE their `try`, so a throwing listener rejected them, left the install
+     slot owned and stuck the state on "installing" with nothing able to clear
+     it. */
+  it('cannot make install reject', async () => {
+    const controller = createController(plugin())
+    controller.subscribe(() => {
+      throw new Error('a subscriber that throws')
+    })
+
+    await expect(controller.install('qwen')).resolves.toBe(true)
+  })
+
+  it('cannot make uninstall reject', async () => {
+    const controller = createController(plugin())
+    controller.subscribe(() => {
+      throw new Error('a subscriber that throws')
+    })
+
+    await expect(controller.uninstall('qwen')).resolves.toBe(true)
+  })
+
+  /* AND EVERY OTHER SUBSCRIBER IS STILL TOLD. A throw used to abandon the loop,
+     so half the listeners saw an update and half did not — which is worse than
+     either all or none, because it is invisible. */
+  it('does not stop the subscribers after it from being told', async () => {
+    const controller = createController(plugin())
+    let told = 0
+    controller.subscribe(() => {
+      throw new Error('a subscriber that throws')
+    })
+    controller.subscribe(() => {
+      told += 1
+    })
+
+    await controller.refresh()
+
+    expect(told).toBeGreaterThan(0)
+  })
+})
+
 describe('glossModel', () => {
   const row = (over: Partial<ModelRow> & { id: string }): ModelRow => ({
     ...MODEL,
