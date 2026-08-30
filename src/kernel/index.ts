@@ -387,3 +387,13 @@ export type {
   ServiceError,
   Timers,
 } from './core/envelope'
+
+/* THE SHELF CHANNEL — that same envelope over a WebSocket.
+ *
+ * The transport half of what the block above frames. It moved out of
+ * `src/app/web/` in WI-11.7 for the reason the envelope moved out of `peer`:
+ * a second caller appeared that could not reach where it lived. Here the
+ * caller is `paper --shelf`, which imports through this entry and nothing
+ * else of the kernel; the browser client keeps a re-export at its old path. */
+export { connect as connectToShelf, socketUrl } from './core/shelfChannel'
+export type { ClosedReason, ConnectOptions, ShelfChannel, SocketLike } from './core/shelfChannel'

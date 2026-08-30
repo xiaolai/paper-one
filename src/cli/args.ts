@@ -34,7 +34,7 @@ export type Parsed =
       readonly descriptor: ServiceDescriptor
       readonly body: Record<string, unknown>
       readonly json: boolean
-      /** `--shelf <key>`, when one was given. Decides which CALLER to build. */
+      /** `--shelf <url>`, when one was given. Decides which CALLER to build. */
       readonly shelf?: string
     }
   | { readonly kind: 'help'; readonly text: string }
@@ -105,10 +105,10 @@ export function usageOf(descriptor: ServiceDescriptor): string {
 /** Everything `paper` can do, by noun. */
 export function overview(): string {
   /* THE GLOBAL OPTIONS, from the one list the parser honours — the usage
-   * line named `[--json]` alone and left `--shelf <key>` for the reader to
+   * line named `[--json]` alone and left `--shelf <url>` for the reader to
    * discover by reading source. */
   const globals = GLOBAL_FLAGS.filter((flag) => flag !== '--help' && flag !== '-h')
-    .map((flag) => (flag === '--shelf' ? '[--shelf <key>]' : `[${flag}]`))
+    .map((flag) => (flag === '--shelf' ? '[--shelf <url>]' : `[${flag}]`))
     .join(' ')
   const lines = [`paper <noun> <verb> [arguments] ${globals}`, '', 'Nouns:']
   for (const noun of SERVICE_NOUNS) {
@@ -207,7 +207,7 @@ function coerce(field: ServiceField, raw: string): { value: unknown } | { error:
  * Parse `argv` — everything after the program name.
  *
  * Global flags are taken out first wherever they appear, so `paper --json book
- * list` and `paper book list --json` are the same command. `--shelf <key>` is
+ * list` and `paper book list --json` are the same command. `--shelf <url>` is
  * one of them: it decides which CALLER to build rather than what to call, and
  * the entry reads it off this result.
  *
@@ -252,7 +252,12 @@ export function parseArgs(argv: readonly string[]): Parsed {
        * shelf and did not, and silently answering from the local library would
        * be the wrong library's answer wearing the right one's face. */
       if (value === undefined || value.startsWith('--')) {
-        return { kind: 'error', message: '--shelf needs a shelf key' }
+        /* NAMED AS A URL, because that is what it is. It said "shelf key"
+         * while `--shelf` reached nothing, and a key is what a reader then
+         * invents — `--shelf studio` — which `shelfAddress` refuses for a
+         * reason that reads as pedantry unless the flag asked for an address
+         * in the first place. */
+        return { kind: 'error', message: '--shelf needs a shelf address, like https://shelf.example' }
       }
       shelf = value
       i++

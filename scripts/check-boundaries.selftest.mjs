@@ -124,8 +124,15 @@ export const LEGAL_TREE = {
    * `envelope.ts` is a permitted leaf; `other.ts` is not, and is what the
    * refusal case below reaches for. */
   'src/kernel/core/envelope.ts': 'export const encodeFrame = () => new Uint8Array()\n',
+  /* The SECOND permitted leaf (WI-11.7). The transport moved here out of
+     `src/app/web/`, and the client's old path is now a re-export that must be
+     able to reach it — pinned so that a `web-client-kernel-entries` which
+     stops matching this fails on the CLEAN tree rather than silently in the
+     web build. */
+  'src/kernel/core/shelfChannel.ts':
+    "import { encodeFrame } from './envelope.ts'\nexport const connect = encodeFrame\n",
   'src/app/web/channel.ts':
-    "import { encodeFrame } from '../../kernel/core/envelope.ts'\nexport const channel = encodeFrame\n",
+    "import { connect } from '../../kernel/core/shelfChannel.ts'\nexport const channel = connect\n",
   'src/main.web.tsx':
     "import { channel } from './app/web/channel.ts'\nvoid channel\n",
 }

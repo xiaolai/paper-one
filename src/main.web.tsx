@@ -32,7 +32,7 @@ import './app/web/entry.css'
 
 import { PairScreen } from './app/web/PairScreen'
 import { checkSession, type SessionState } from './app/web/session'
-import { connect } from './app/web/channel'
+import { connect, socketUrl } from './app/web/channel'
 import { openLink, type LinkState, type ShelfLink } from './app/web/reconnect'
 import { remotePositions, type RemotePositions } from './app/web/remotePositions'
 import { asIndexedBook, createRemoteBooks, type RemoteBooks } from './app/web/books'
@@ -135,7 +135,11 @@ function Shelf({ onSignOut }: { readonly onSignOut: () => void }) {
    * because it opens a socket and StrictMode renders twice. */
   const [link, setLink] = useState<ShelfLink | null>(null)
   useEffect(() => {
-    const opened = openLink({ connect })
+    /* THE URL IS READ HERE, in the browser's own root, because `connect` no
+     * longer defaults to `window.location`. The transport moved into the
+     * kernel (WI-11.7) where there is no `window` to read — and a composition
+     * root is where a platform fact belongs anyway. */
+    const opened = openLink({ connect: () => connect({ url: socketUrl(window.location) }) })
     setLink(opened)
     return () => opened.close()
   }, [])

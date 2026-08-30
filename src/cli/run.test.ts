@@ -391,7 +391,7 @@ describe('paper(), the process entry', () => {
         sinks: { out: () => {}, err: (line) => err.push(line) },
       })
       expect(code).toBe(EXIT.usage)
-      expect(err.join('\n')).toContain('needs a shelf key')
+      expect(err.join('\n')).toContain('needs a shelf address')
     }
   })
 

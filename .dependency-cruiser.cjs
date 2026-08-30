@@ -99,6 +99,14 @@ const KERNEL_METRICS = '^src/kernel/core/metrics\\.ts$'
  * It moved into the kernel in phase 18 because a second transport needed it —
  * nothing about it is peer-to-peer. */
 const KERNEL_ENVELOPE = '^src/kernel/core/envelope\\.ts$'
+/* The SHELF CHANNEL — the envelope over a WebSocket, and a leaf for the same
+ * reason the envelope is: its only import is the envelope, and it reads no
+ * platform. It moved out of `src/app/web/` in WI-11.7 when `paper --shelf`
+ * became a second caller that cannot import the browser client; the client
+ * keeps a re-export at the old path, and this is what lets that re-export
+ * reach the leaf DIRECTLY rather than dragging the kernel barrel into the web
+ * bundle to fetch one module. */
+const KERNEL_SHELF_CHANNEL = '^src/kernel/core/shelfChannel\\.ts$'
 
 /* THE BROWSER UI ENTRY (WI-19.4), which REPLACED a whole-directory reach.
  * This was `KERNEL_READER = '^src/kernel/ui/reader/'` — the client could import
@@ -435,8 +443,9 @@ module.exports = {
       comment:
         'The browser client (src/app/web/) reaches the kernel through ENTRIES, the same way a ' +
         'composition root does: the public entry, and src/kernel/ui/browser.ts for the React ' +
-        'surfaces it mounts — plus the design-system stylesheets, metrics.ts, envelope.ts and ' +
-        'uiTypes.ts, which are leaves with no runtime dependencies of their own. This replaced ' +
+        'surfaces it mounts — plus the design-system stylesheets, metrics.ts, envelope.ts, ' +
+        'shelfChannel.ts and uiTypes.ts, which are leaves with no runtime dependencies of their ' +
+        'own. This replaced ' +
         'web-client-kernel-allowlist, an EXEMPTION that existed only because the public entry was ' +
         'not Tauri-free; it listed five modules, one of them the whole ui/reader/ directory. ' +
         'WI-19.1 removed the cause (one export, tauriSizePort), so the exemption became a door. ' +
@@ -450,6 +459,7 @@ module.exports = {
           KERNEL_STYLESHEETS,
           KERNEL_METRICS,
           KERNEL_ENVELOPE,
+          KERNEL_SHELF_CHANNEL,
           KERNEL_BROWSER_ENTRY,
           KERNEL_UI_TYPES,
         ],
