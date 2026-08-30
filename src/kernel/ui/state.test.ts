@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { BUNDLED_FACES, faceById } from '../core/typefaces'
 import { createSettingsStore, readKernelPreferences } from '../core/settings'
-import { bootState, initialState, paneFits, preferencesOf, reducer, screenFor, type AppState } from './state'
+import { bootState, defaultPaneFor, initialState, paneFits, preferencesOf, reducer, screenFor, type AppState } from './state'
+import { paneOffered } from '../core/uiTypes'
 
 /**
  * The reducer's reading-size case.
@@ -449,6 +450,38 @@ describe('the pane follows the screen', () => {
       const twice = reducer(once, { type: 'setPaneHidden', pane: 'cards', hidden: true })
       expect(twice.hiddenPanes).toEqual(['cards'])
     })
+  })
+
+  /**
+   * ⚠️ **NO DEFAULT, FROM ANY SOURCE, MAY NAME A PANEL THE READER IS NOT SHOWN.**
+   *
+   * This is the assertion the two-defaults defect was missing. `defaultPaneFor`
+   * here and `KERNEL_DEFAULT_PANE` in `core/registry.ts` both answer "which
+   * panel when the wanted one is gone"; Companion became unfinished, one of
+   * them moved, and the other did not — so `resolvePaneId` went on resolving an
+   * unknown stored id to a panel the rail refuses to draw. Nothing failed,
+   * because nothing asked.
+   *
+   * Both halves are guarded now: the constant in `composition.contract.test.ts`,
+   * and every screen's answer here. Derived from `SCREENS` rather than listed,
+   * so a third screen cannot arrive without one.
+   */
+  it('never defaults to a panel an ordinary reader is not offered', () => {
+    for (const screen of ['reader', 'library'] as const) {
+      const fallback = defaultPaneFor(screen)
+      expect(paneOffered(fallback, false), `${screen} falls back to ${fallback}`).toBe(true)
+      /* AND IT MUST FIT THE SCREEN IT IS THE DEFAULT FOR, which is the other
+         half of the same requirement: a fallback that fits nowhere is how every
+         path through the reducer lands on a panel that is not there. */
+      expect(paneFits(screen, fallback), `${fallback} fits ${screen}`).toBe(true)
+    }
+  })
+
+  /* NON-VACUITY: the check must be able to fail. An unfinished panel is exactly
+     what it is guarding against, so it has to answer false for one. */
+  it('would notice a default that is not offered', () => {
+    expect(paneOffered('companion', false)).toBe(false)
+    expect(paneOffered('cards', false)).toBe(false)
   })
 
   it('does not carry the Library panel into the first book opened from the shelf', () => {
