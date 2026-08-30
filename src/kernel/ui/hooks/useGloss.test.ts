@@ -744,6 +744,89 @@ describe('when the passage stops being shown', () => {
   })
 })
 
+/**
+ * ⚠️ **THE FALLBACK'S OWN SEGMENTATION, WHICH USED TO BE A SECOND POLICY AND
+ * WAS MEASURED WRONG TWICE.**
+ *
+ * `/(?<=[.!?。！？])\s+/` is a NO-OP on Chinese — the lookbehind lists the CJK
+ * terminators but the pattern still demands a space after them, and Chinese
+ * does not write one — and an abbreviation before the term erased the entire
+ * prefix. Phase 16 measured both and deliberately left them, because its own
+ * claim was that the fallback was unchanged. It goes through `sentenceOf` now,
+ * with §C1's gate off: one policy, two tolerances.
+ *
+ * These cases are the exact strings phase 16 recorded as broken.
+ */
+describe('the fallback sentence', () => {
+  /* THE ONE THAT MATTERED MOST. A fixed-layout book never reaches the walk
+     (WI-16.5), so for a Chinese PDF this was not an edge case — it was the
+     whole feature, sending the raw 32-character window every time. */
+  it('splits Chinese, which the regex could not', () => {
+    expect(sentenceAround('他说。然后走了。今天的', '天气', '很好。明天呢？')).toBe('今天的天气很好。')
+  })
+
+  /* `'He met Mr. '.split(…).pop()` was `''`, so the model was told the term
+     began the sentence. `sentenceOf`'s bounded merge keeps the title with the
+     name after it. */
+  it('keeps the prefix across an abbreviation, which the regex erased', () => {
+    expect(sentenceAround('He met Mr. ', 'Smith', ' at noon. Then left.')).toBe(
+      'He met Mr. Smith at noon.',
+    )
+  })
+
+  it('takes the sentence the term sits in out of an ordinary window', () => {
+    expect(sentenceAround('First one. The old man ', 'loved', ' him. Last one.')).toBe(
+      'The old man loved him.',
+    )
+  })
+
+  /* NO WORSE THAN THE WINDOW IT WAS GIVEN, and this is the defect the WALK was
+     built to fix rather than one this can. `markContext` stores 32 characters a
+     side for RE-ANCHORING, so the window starts mid-word — `"ght the boy"`, cut
+     out of `taught` — and no segmenter can put back a head that was never
+     there. The head is kept exactly as the regex kept it. */
+  it('cannot recover a window that was already cut mid-word', () => {
+    expect(sentenceAround('ght the boy to fish and the boy ', 'loved', ' him. Last one.')).toBe(
+      'ght the boy to fish and the boy loved him.',
+    )
+  })
+
+  /* And with genuinely no boundary anywhere, the whole window — which is what
+     the regex produced on every input it failed on. */
+  it('returns the whole window when it holds no boundary at all', () => {
+    expect(sentenceAround('the boy to fish and the boy ', 'loved', ' him and the sea')).toBe(
+      'the boy to fish and the boy loved him and the sea',
+    )
+  })
+
+  /* A selection with no context either side is its own sentence — better than
+     an empty string, which would ask the model to define a word in a vacuum. */
+  it('is its own sentence with no context either side', () => {
+    expect(sentenceAround('', 'gam', '')).toBe('gam')
+    expect(sentenceAround('  ', '  ', '  ')).toBe('  ')
+  })
+
+  /* §C1 IS OFF HERE AND ONLY HERE. The window is cut mid-sentence by
+     construction, so `sentenceAt`'s rule — a boundary at the run's edge is not
+     evidence of a sentence ending — would decline every single call and leave
+     this with nothing to answer. Non-vacuity for `requireComplete`: with the
+     gate on, this input has no interior boundary before the term and would be
+     refused. */
+  it('answers where the walk would decline', () => {
+    expect(sentenceAround('old man ', 'loved', ' him. Last')).toBe('old man loved him.')
+  })
+
+  /* THE LOCALE IS A NICETY, NOT A REQUIREMENT, and that is measured: ICU
+     segments `。` the same under every locale tag, so a Chinese PDF stamped
+     `lang="en"` by `makePdf` still splits correctly. What the locale changes is
+     the Latin abbreviation merge, which is gated by script. */
+  it('splits Chinese under an English locale, which is what a PDF declares', () => {
+    expect(
+      sentenceAround('他说。然后走了。今天的', '天气', '很好。明天呢？', { locale: 'en' }),
+    ).toBe('今天的天气很好。')
+  })
+})
+
 describe('what the lookup path costs', () => {
   /*
    * §E3. The walk is on the GESTURE and nowhere else. `publish()` runs on every

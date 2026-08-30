@@ -392,6 +392,31 @@ function factsOf(el: Element, view: View, facts: Map<Element, ElementFacts>): El
 }
 
 /**
+ * The locale for a live range, for a caller that is not doing the walk.
+ *
+ * `sentenceAround` — the fallback — needs the same locale this module resolves,
+ * and needs it without flattening anything: it is answering from
+ * `markContext`'s stored window, not from the document. This is the ancestor
+ * climb alone, which is cheap and is on the GESTURE like everything else here.
+ *
+ * TOTAL, and `undefined` is a real answer meaning "use the host's". A locale is
+ * a nicety on this path — ICU segments `。` the same under every locale
+ * tag, measured, so a Chinese PDF stamped `lang="en"` by `makePdf` still splits
+ * correctly — and losing the reader's lookup to a torn-down document while
+ * fetching a nicety would be the §E6 mistake in a new place.
+ */
+export function localeAt(range: Range): string | undefined {
+  try {
+    const node = range.startContainer
+    if (node.nodeType !== TEXT_NODE) return undefined
+    const root = walkRoot(node)
+    return root ? localeFor(node as Text, root) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * The locale to segment in: the nearest ancestor `lang`, else the host's.
  *
  * What `:lang()` does, and the only rule that survives a mixed-language book —

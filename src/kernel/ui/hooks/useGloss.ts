@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GlossProvider } from '../../core/gloss'
 import type { Diagnostics } from '../../core/ports'
 import { termVerdict } from '../lookUp'
-import { sentenceAt } from '../reader/wordSnap/sentenceAt'
+import { localeAt, sentenceAt } from '../reader/wordSnap/sentenceAt'
+import { sentenceOf } from '../reader/wordSnap/sentenceOf'
 
 /**
  * One gloss at a time, for the word the reader is looking at.
@@ -414,8 +415,19 @@ export function glossRequest(
   }
   return {
     term: selection.text,
-    sentence: sentenceAround(selection.prefix, selection.text, selection.suffix),
+    /* THE LOCALE COMES FROM THE RANGE, not from the walk that did not happen.
+     * It is one climb of the ancestor chain, and `localeAt` is total — a
+     * document torn down between the selection and the press answers
+     * `undefined`, which means the host's, rather than losing the lookup. */
+    sentence: sentenceAround(selection.prefix, selection.text, selection.suffix, {
+      locale: localeAt(selection.range),
+    }),
   }
+}
+
+export interface SentenceAroundOptions {
+  /** The document's own, from `localeAt`. `undefined` means the host's. */
+  readonly locale?: string | undefined
 }
 
 /**
@@ -424,32 +436,65 @@ export function glossRequest(
  * THE FALLBACK, since WI-16.4 — `glossRequest` reaches this only when
  * `sentenceAt` could not vouch for a sentence, which is the first and last
  * sentence of every block, a selection spanning two of them, a `<br>` in the
- * middle of one, and a fixed-layout book. Kept exactly as it was, because
- * "no worse than today" is the rule and rewriting it would break that claim.
+ * middle of one, and a fixed-layout book.
  *
- * **Two defects in it are measured and not fixed here.** It is a NO-OP on
- * Chinese — the split is `/(?<=[.!?。！？])\s+/`, and although the lookbehind
- * lists the CJK terminators the pattern still requires `\s+` after them, which
- * Chinese does not write; `'他说。然后'.split(…).pop()` returns the whole string.
- * And an abbreviation before the term erases the entire prefix:
- * `'He met Mr. '.split(…).pop()` is `''`. Both are reasons to prefer
- * `sentenceAt`, not reasons to patch a fallback whose value is that it is
- * unchanged.
+ * ⚠️ **IT CARRIED A SECOND SEGMENTATION POLICY, AND BOTH OF ITS DEFECTS WERE
+ * MEASURED.** The split was `/(?<=[.!?。！？])\s+/`, and phase 16 recorded what
+ * that costs while deliberately leaving it alone — *"no worse than today"* was
+ * that phase's rule, and rewriting the fallback would have broken the claim it
+ * was making about the walk:
  *
- * `prefix` and `suffix` are the selection's own context, which the session
- * already carries for mark anchoring — so this needs no second walk of the
- * document.
+ * - **A NO-OP on Chinese.** The lookbehind lists the CJK terminators, but the
+ *   pattern still requires `\s+` after them and Chinese does not write one, so
+ *   `'他说。然后'.split(…).pop()` returns the whole string. Every Chinese lookup
+ *   that reached the fallback sent the raw 32-character window.
+ * - **An abbreviation erased the whole prefix**: `'He met Mr. '.split(…).pop()`
+ *   is `''`, so the model was told the term began the sentence.
+ *
+ * ⚠️ **AND IT LANDED HARDEST WHERE IT WAS ALWAYS USED.** A fixed-layout book —
+ * a PDF, or an EPUB declaring `pre-paginated` — skips `sentenceAt` entirely
+ * (WI-16.5 measured why: a run is one visual LINE in a PDF and one WORD in the
+ * pre-paginated EPUB sampled). So for a Chinese PDF the two defects were not an
+ * edge case, they were the whole feature.
+ *
+ * The fix is not a better regex. `sentenceOf` already holds THE segmentation
+ * policy — `Intl.Segmenter`, which splits `。` correctly under every locale tag
+ * (measured, including the `lang="en"` that `makePdf` stamps on a generated
+ * page), plus the bounded merge that keeps `Mr.` with the name after it. What
+ * this needed from it was the segmentation without §C1's completeness gate,
+ * because a 32-character window is cut mid-sentence by construction and the
+ * gate would decline every time. That is `requireComplete: false`, and one
+ * policy with two tolerances is the point: a second copy is what was wrong.
+ *
+ * STILL NO SECOND WALK. `prefix` and `suffix` are the selection's own context,
+ * which the session already carries for mark anchoring; only the LOCALE is read
+ * from the document, by one climb of the ancestor chain.
+ *
+ * Never worse than the window it was given: when `sentenceOf` cannot answer at
+ * all, the squeezed window is returned, which is what the regex produced on
+ * every input it failed on.
  */
-export function sentenceAround(prefix: string, term: string, suffix: string): string {
-  /* Backwards to the last terminator before the term, forwards to the first
-   * after it. `[.!?。！？]` covers the CJK terminators too, which matters here:
-   * this codebase carries CJK typography throughout and the model was chosen
-   * for it. */
-  const before = prefix.split(/(?<=[.!?。！？])\s+/).pop() ?? prefix
-  const after = suffix.split(/(?<=[.!?。！？])/)[0] ?? suffix
-  const sentence = `${before}${term}${after}`.trim().replace(/\s+/g, ' ')
-  /* A selection with no context either side is its own sentence — better than
-   * an empty string, which would ask the model to define a word in a vacuum
-   * and get back the dictionary answer this feature exists to improve on. */
-  return sentence === '' ? term : sentence
+export function sentenceAround(
+  prefix: string,
+  term: string,
+  suffix: string,
+  options: SentenceAroundOptions = {},
+): string {
+  const raw = `${prefix}${term}${suffix}`
+  const found = sentenceOf(raw, prefix.length, prefix.length + term.length, {
+    locale: options.locale,
+    /* THE ONE CALLER THAT PASSES THIS. See `SentenceOptions.requireComplete`:
+     * declining is a real answer for `sentenceAt`, which has this function
+     * behind it, and no answer at all here, which has nothing. */
+    requireComplete: false,
+  })
+  if (found.ok) return found.sentence
+  /* Everything `sentenceOf` refuses outright — an empty window, a term that
+   * squeezes to nothing, a run past its bound — lands here, which is the
+   * window as the regex would have left it. A selection with no context either
+   * side is its own sentence: better than an empty string, which would ask the
+   * model to define a word in a vacuum and get back the dictionary answer this
+   * feature exists to improve on. */
+  const squeezed = raw.trim().replace(/\s+/g, ' ')
+  return squeezed === '' ? term : squeezed
 }

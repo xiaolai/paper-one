@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createController, detailFor, type ControllerPlugin, type InferenceSnapshot } from './controller'
+import {
+  createController,
+  detailFor,
+  glossModel,
+  type ControllerPlugin,
+  type InferenceSnapshot,
+} from './controller'
 import type { InstallProgress, ModelRow, RuntimeStatus } from './plugin'
 
 const MODEL: ModelRow = {
@@ -78,6 +84,78 @@ describe('detailFor', () => {
    * simply been asked for less than it wanted to say. */
   it('has a sentence for an answer the model was cut off in', () => {
     expect(detailFor({ kind: 'answerTruncated' })).toBe('The answer was cut off before it finished')
+  })
+})
+
+/**
+ * ⚠️ **WHICH MODEL DEFINES THE READER'S WORDS USED TO BE ARRAY ORDER.**
+ *
+ * `snapshot.models.find(…)` answered with whichever row `models.manifest.json`
+ * happened to leave first — deterministic by accident, and silently different
+ * after a reorder that had nothing to do with the gloss. The cache is keyed on
+ * the model, so such a reorder would also have dropped every remembered
+ * definition with nothing anywhere saying why.
+ */
+describe('glossModel', () => {
+  const row = (over: Partial<ModelRow> & { id: string }): ModelRow => ({
+    ...MODEL,
+    installed: true,
+    ...over,
+  })
+
+  it('has nothing to answer with when nothing is installed', () => {
+    expect(glossModel([])).toBeNull()
+    expect(glossModel([row({ id: 'a', installed: false })])).toBeNull()
+  })
+
+  it('never answers with a voice', () => {
+    expect(glossModel([row({ id: 'kokoro', modality: 'speech' })])).toBeNull()
+  })
+
+  /* SMALLEST FIRST, for the feature's own reason: a gloss is wanted in
+     milliseconds, and bytes are the best proxy this layer has for both the
+     first load and every generation after it. */
+  it('takes the smallest installed text model', () => {
+    expect(
+      glossModel([row({ id: 'big', bytes: 9_000 }), row({ id: 'small', bytes: 1_000 })]),
+    ).toBe('small')
+  })
+
+  /* ⚠️ THE CASE THE OLD CODE GOT WRONG. Same rows, reversed: `.find()` answered
+     `big` for one order and `small` for the other. */
+  it('answers the same whatever order the manifest lists them in', () => {
+    const big = row({ id: 'big', bytes: 9_000 })
+    const small = row({ id: 'small', bytes: 1_000 })
+    expect(glossModel([big, small])).toBe(glossModel([small, big]))
+  })
+
+  /* A TOTAL ORDER, so two models of identical size do not put the array back in
+     charge of the answer. */
+  it('breaks a tie by id rather than by position', () => {
+    const a = row({ id: 'aaa', bytes: 1_000 })
+    const b = row({ id: 'bbb', bytes: 1_000 })
+    expect(glossModel([b, a])).toBe('aaa')
+    expect(glossModel([a, b])).toBe('aaa')
+  })
+
+  /* An uninstalled row is not a candidate however small — the gloss cannot run
+     artifacts that are not on disk, and `resolve_model` refuses it anyway. */
+  it('ignores a smaller model that is not installed', () => {
+    expect(
+      glossModel([
+        row({ id: 'tiny', bytes: 10, installed: false }),
+        row({ id: 'real', bytes: 1_000 }),
+      ]),
+    ).toBe('real')
+  })
+
+  /* IT DOES NOT REORDER THE CALLER'S ARRAY. `snapshot.models` is handed to the
+     pane by reference, and a sort here would shuffle the Local models list
+     under the reader as a side effect of a lookup. */
+  it('leaves the array it was given alone', () => {
+    const models = [row({ id: 'big', bytes: 9_000 }), row({ id: 'small', bytes: 1_000 })]
+    glossModel(models)
+    expect(models.map((m) => m.id)).toEqual(['big', 'small'])
   })
 })
 

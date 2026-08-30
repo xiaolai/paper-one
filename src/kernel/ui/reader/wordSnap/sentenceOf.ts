@@ -63,6 +63,12 @@
  * a wrong sentence handed to a model reads exactly like a right one. The
  * caller's fallback is what shipped before this existed, so declining is never
  * a regression — see `SentenceGap`, which is counted rather than shown.
+ *
+ * ⚠️ **AND THE FALLBACK NOW COMES THROUGH HERE TOO**, with the gate off. It has
+ * nowhere to decline TO, so the rule above is not available to it; what it
+ * needs from this module is the SEGMENTATION, which is the half it used to
+ * carry a second, worse copy of. See `SentenceOptions.requireComplete` for the
+ * two defects that copy was measured to have.
  */
 
 /** SOFT HYPHEN. Invisible, inside words, and not the model's to read either —
@@ -159,6 +165,30 @@ export interface SentenceOptions {
    *  it omits — `exactOptionalPropertyTypes` tells the two apart. */
   readonly locale?: string | undefined
   readonly maxSentenceChars?: number | undefined
+  /**
+   * Whether a boundary at the run's edge disqualifies the sentence (§C1).
+   *
+   * TRUE by default, which is the walk's rule and the one this module was
+   * written around: nothing in a run can tell `</p>` from `<br>` from a budget
+   * cut, a wrong sentence handed to a model reads exactly like a right one, and
+   * `sentenceAt` has somewhere to fall back to.
+   *
+   * ⚠️ **FALSE IS FOR THE CALLER THAT HAS NOWHERE TO FALL BACK TO**, and there
+   * is exactly one: `sentenceAround`, the fallback itself. Its run is
+   * `markContext`'s 32 characters a side, which is cut mid-sentence by
+   * construction — so §C1 would decline every single time and the caller would
+   * have to invent a second segmentation to answer with. That second
+   * segmentation is what this option exists to delete: it was a regex,
+   * `/(?<=[.!?。！？])\s+/`, and it was measured wrong twice over — a NO-OP on
+   * Chinese, which does not write a space after `。`, and it erased the whole
+   * prefix at an abbreviation (`'He met Mr. '.split(…).pop()` is `''`).
+   *
+   * So the gate becomes an option rather than the policy forking. Declining is
+   * a real answer for a caller that has one; for a caller that does not, a
+   * fragment segmented CORRECTLY is strictly better than the whole window, and
+   * the whole window is what it sent before.
+   */
+  readonly requireComplete?: boolean | undefined
 }
 
 /** Half-open, into the normalised text. */
@@ -210,9 +240,13 @@ export function sentenceOf(
   const span: Span = { start: first.start, end: last.end }
 
   /* §C1, and it depends on no `flatten` flag at all. A boundary at the run's
-   * edge is the run ending, which is not the same fact as a sentence ending. */
-  if (span.start <= 0) return { ok: false, gap: 'run-start' }
-  if (span.end >= text.length) return { ok: false, gap: 'run-end' }
+   * edge is the run ending, which is not the same fact as a sentence ending.
+   * Skipped only for the caller with nothing behind it — see
+   * `requireComplete`, which is the whole argument. */
+  if (options.requireComplete ?? true) {
+    if (span.start <= 0) return { ok: false, gap: 'run-start' }
+    if (span.end >= text.length) return { ok: false, gap: 'run-end' }
+  }
 
   const sentence = text.slice(span.start, span.end).trim()
   if (sentence === '') return { ok: false, gap: 'empty' }

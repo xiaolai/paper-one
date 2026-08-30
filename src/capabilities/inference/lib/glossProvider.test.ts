@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GlossContext } from '../../../kernel'
 import type { Controller } from './controller'
-import { createGlossProvider, glossKey, glossQuestion, GLOSS_SYSTEM_PROMPT } from './glossProvider'
+import { createGlossProvider, glossQuestion, GLOSS_SYSTEM_PROMPT } from './glossProvider'
 import type { InferencePlugin } from './plugin'
 
 const context: GlossContext = {
@@ -58,18 +58,55 @@ describe('the gloss prompt', () => {
   })
 })
 
-describe('glossKey', () => {
-  it('is the same for a selection differing only in whitespace or case', () => {
-    const a = glossKey('Counsel', context)
-    const b = glossKey(' counsel ', { ...context, sentence: context.sentence.replace(/ /g, '\n') })
+/**
+ * ⚠️ **THE QUESTION IS THE CACHE KEY**, so these are one set of cases and not
+ * two. There used to be a separate `glossKey`, and it disagreed with the
+ * request in two ways — it lowercased, and it normalised whitespace the
+ * question did not — so two different questions shared one answer.
+ */
+describe('the question, which is also the key', () => {
+  it('is the same for a selection differing only in whitespace', () => {
+    const a = glossQuestion('counsel', context)
+    const b = glossQuestion(' counsel ', { ...context, sentence: context.sentence.replace(/ /g, '\n') })
     expect(a).toBe(b)
+  })
+
+  /* ⚠️ **AND IT IS NOT THE SAME FOR A DIFFERENT CASE**, which the old key got
+     backwards. `March` and `march` in one sentence are two different questions
+     with two different answers; folding them meant selecting the verb after the
+     month served the month's definition. Every proper noun that is also a
+     common word — `Polish`, `Bank`, `May` — has the same shape. */
+  it('differs for a term the reader capitalised differently', () => {
+    const sentence = 'In March they march to the sea.'
+    expect(glossQuestion('March', { ...context, sentence })).not.toBe(
+      glossQuestion('march', { ...context, sentence }),
+    )
   })
 
   /* The whole point of the feature is the sense on THIS page — the same word
    * in two sentences is two different glosses and must not share an entry. */
   it('differs for the same word in a different sentence', () => {
     const other = { ...context, sentence: 'The counsel for the defence rose slowly.' }
-    expect(glossKey('counsel', context)).not.toBe(glossKey('counsel', other))
+    expect(glossQuestion('counsel', context)).not.toBe(glossQuestion('counsel', other))
+  })
+
+  /* NOTHING THE MODEL IS NOT SENT. Two books with the same title, the same
+     sentence and the same term are ONE question, and serving one answer for it
+     is the cache working — an audit called it a collision and it is not. A book
+     id would split entries that ought to be shared, and the model never sees
+     one. */
+  it('is the same for two books that ask it the same thing', () => {
+    const one = { sentence: 'The counsel rose.', bookTitle: 'Poems' }
+    expect(glossQuestion('counsel', one)).toBe(glossQuestion('counsel', { ...one }))
+  })
+
+  /* INJECTIVE, which is what lets a three-line string be a key at all: the
+     squeeze leaves no newline in any field, so a title cannot impersonate the
+     `Sentence:` line that follows it. */
+  it('cannot be forged by a title that looks like the next line', () => {
+    expect(glossQuestion('counsel', { sentence: 'B', bookTitle: 'A\nSentence: B' })).not.toBe(
+      glossQuestion('counsel', { sentence: 'B', bookTitle: 'A' }),
+    )
   })
 })
 
@@ -535,7 +572,14 @@ describe('installable', () => {
 describe('audit-fix round 1 — the cache key', () => {
   it('keys on the book title too, and survives a NUL inside the text', () => {
     const context = { sentence: 'The counsel rose.', bookTitle: 'Bleak House' }
-    expect(glossKey('counsel', context)).not.toBe(glossKey('counsel', { ...context, bookTitle: 'Great Expectations' }))
-    expect(glossKey('a\u0000b', { sentence: 'c', bookTitle: '' })).not.toBe(glossKey('a', { sentence: 'b\u0000c', bookTitle: '' }))
+    expect(glossQuestion('counsel', context)).not.toBe(
+      glossQuestion('counsel', { ...context, bookTitle: 'Great Expectations' }),
+    )
+    /* A NUL is ordinary text to the squeeze, and the field separator is a
+       newline no field can contain — so this cannot collide for the reason the
+       encoded tuple it replaces could not. */
+    expect(glossQuestion('a\u0000b', { sentence: 'c', bookTitle: '' })).not.toBe(
+      glossQuestion('a', { sentence: 'b\u0000c', bookTitle: '' }),
+    )
   })
 })
