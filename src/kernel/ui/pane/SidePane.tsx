@@ -8,6 +8,7 @@ import {
   Search,
   Settings as SettingsIcon,
   Sparkles,
+  Wrench,
 } from 'lucide-react'
 import type { IndexedBook } from '../../core/bookIndex'
 import type { JumpTarget } from '../hooks/useJumps'
@@ -15,7 +16,7 @@ import type { PaneContribution, SettingsSection } from '../../core/capability'
 import type { AskPassage, CompanionProvider } from '../../core/companion'
 import { ICON, type Platform } from '../../core/metrics'
 import { PANE_TITLES, renderContribution, shownPane } from '../panes'
-import { defaultPaneFor, paneFits, setReadingStyle, type AppDispatch, type AppState, type KernelPaneId } from '../state'
+import { defaultPaneFor, paneFits, setReadingStyle, type AppDispatch, type AppState, type KernelPaneId, type PaneAudience } from '../state'
 import type { Book } from '../hooks/useBook'
 import type { Annotation } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
@@ -30,6 +31,8 @@ import type { TagPrefsStore } from '../hooks/useTagPrefs'
 import { Cards } from './Cards'
 import { Marginalia } from './Marginalia'
 import { SearchPanel } from './SearchPanel'
+import { DevPane } from './DevPane'
+import type { DiagnosticLog } from '../../core/diagnosticsLog'
 import { Settings } from './Settings'
 import styles from './SidePane.module.css'
 
@@ -72,6 +75,10 @@ const RAIL_ENTRIES = [
   { id: 'search', Icon: Search },
   { id: 'library', Icon: LibraryBig },
   { id: 'settings', Icon: SettingsIcon },
+  /* LAST, and below Settings deliberately: it is the only panel most readers
+     will never see, and putting it anywhere else would push a rail everyone
+     knows down by one for the few who turn it on. */
+  { id: 'dev', Icon: Wrench },
 ] as const satisfies readonly { id: KernelPaneId; Icon: typeof Search }[]
 
 /** Fails to compile if the rail and the registry stop agreeing on membership. */
@@ -96,7 +103,8 @@ const RAIL = RAIL_ENTRIES.map(({ id, Icon }) => ({
  * present and inert is a worse answer than one that is absent: the reader
  * clicks it, gets an apology, and learns nothing about when it will work.
  */
-const railFor = (screen: AppState['screen']) => RAIL.filter((tab) => paneFits(screen, tab.id))
+const railFor = (screen: AppState['screen'], audience: PaneAudience) =>
+  RAIL.filter((tab) => paneFits(screen, tab.id, audience))
 
 /** The companion's passages when the host supplies none — one function, not a
  *  fresh `() => []` per render that re-rendered the pane for nothing. */
@@ -112,6 +120,21 @@ export interface SidePaneProps {
   /** Which keyboard this reader has — the Marginalia panel teaches ⌘B/Ctrl+B. */
   platform: Platform
   cards: CardsView
+  /**
+   * The developer surfaces, or absent where there are none.
+   *
+   * ABSENT IS OFF, and `App` supplies this only while `state.developer` holds —
+   * so a host that never turns developer options on cannot draw the band or the
+   * panel by accident, and the two cannot come to disagree about whether they
+   * are showing.
+   */
+  developer?:
+    | {
+        readonly log?: DiagnosticLog | undefined
+        readonly recording: boolean
+        readonly onCopy?: ((jsonl: string) => void) | undefined
+      }
+    | undefined
   /**
    * Navigate somewhere non-linear. A string is the OPEN book — a CFI or an
    * href, which foliate resolves either way — and a `Place` names the book as
@@ -221,6 +244,7 @@ export function SidePane({
   library,
   settings,
   contributed,
+  developer,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -237,9 +261,18 @@ export function SidePane({
    * RESOLVED against the composition after that, not trusted: a remembered
    * pane id that belongs to no composed capability shows the screen's default
    * rather than a title over nothing — see `shownPane`. */
+  /* WHO IS LOOKING, as one value — the screen fit and the developer's own
+     answer travel together through `paneFits`, and building it once here is
+     what stops the rail, the fallback and the contributed list asking three
+     slightly different questions. */
+  const audience: PaneAudience = {
+    contributed,
+    developer: state.developer,
+    hiddenPanes: state.hiddenPanes,
+  }
   const fallback = defaultPaneFor(state.screen)
   const wanted =
-    state.pane ?? (paneFits(state.screen, state.lastPane, contributed) ? state.lastPane : fallback)
+    state.pane ?? (paneFits(state.screen, state.lastPane, audience) ? state.lastPane : fallback)
   const shown = shownPane(wanted, contributed, fallback)
   const pane = shown.id
 
@@ -260,12 +293,12 @@ export function SidePane({
    * so a rail of n contributed panes cost n² on every keystroke anywhere. */
   const rail = useMemo(
     () => [
-      ...railFor(state.screen).map(({ id, label, Icon }) => ({ id, label, Icon })),
+      ...railFor(state.screen, audience).map(({ id, label, Icon }) => ({ id, label, Icon })),
       ...contributed
-        .filter((entry) => paneFits(state.screen, entry.id, contributed))
+        .filter((entry) => paneFits(state.screen, entry.id, audience))
         .map(({ id, label }) => ({ id, label, Icon: Puzzle })),
     ],
-    [state.screen, contributed],
+    [state.screen, contributed, state.developer, state.hiddenPanes],
   )
 
   return (
@@ -350,8 +383,26 @@ export function SidePane({
             panel navigated on its own and the ledger's promise was a row. */}
         {pane === 'search' && <SearchPanel book={book} {...goToProps} />}
 
+        {pane === 'dev' && (
+          <DevPane
+            log={developer?.log}
+            recording={developer?.recording ?? false}
+            {...(developer?.onCopy ? { onCopy: developer.onCopy } : {})}
+          />
+        )}
+
         {pane === 'settings' && (
           <Settings
+            {...(developer
+              ? {
+                  developer: {
+                    hidden: state.hiddenPanes,
+                    onSetHidden: (target: string, hidden: boolean) =>
+                      dispatch({ type: 'setPaneHidden', pane: target, hidden }),
+                    recording: developer.recording,
+                  },
+                }
+              : {})}
             offered={settings.offered}
             sections={settings.sections}
             missing={settings.missing}

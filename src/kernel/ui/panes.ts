@@ -1,7 +1,7 @@
 import { isValidElement, type ReactNode } from 'react'
 import type { PaneContribution, PaneRenderer } from '../core/capability'
 import { resolvePaneId } from '../core/registry'
-import { paneFits, type KernelPaneId, type PaneId, type Screen, type Theme } from './state'
+import { paneFits, type KernelPaneId, type PaneAudience, type PaneId, type Screen, type Theme } from './state'
 import type { Platform } from '../core/metrics'
 
 /**
@@ -41,6 +41,11 @@ export const PANES: readonly PaneEntry[] = [
   { id: 'companion', label: 'Companion' },
   { id: 'library', label: 'Library' },
   { id: 'settings', label: 'Settings' },
+  /* NO COMBO. ⌘5 is free, and leaving it that way is deliberate: a reader who
+     has never turned developer options on would find a digit in the middle of
+     the ramp that does nothing, and one who has does not need a shortcut to a
+     panel they opened on purpose. */
+  { id: 'dev', label: 'Developer' },
 ]
 
 /**
@@ -52,8 +57,8 @@ export const PANES: readonly PaneEntry[] = [
  * say, because that is where the ids are declared and the reducer needs the
  * same answer; asking here as well is how two lists of one thing begin.
  */
-export function panesFor(screen: Screen): readonly PaneEntry[] {
-  return PANES.filter((pane) => paneFits(screen, pane.id))
+export function panesFor(screen: Screen, audience: PaneAudience = {}): readonly PaneEntry[] {
+  return PANES.filter((pane) => paneFits(screen, pane.id, audience))
 }
 
 /**

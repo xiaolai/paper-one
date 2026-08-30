@@ -50,11 +50,44 @@ describe('buildCommands', () => {
      * version named four of the five panels that carry a digit and had already
      * drifted — it did not include Bookmarks, and nothing compared it with
      * `PANES`. A second copy of a registry is a second opinion about it. */
-    const commands = buildCommands(context({ screen: 'reader' }).ctx)
+    /* DEVELOPER OPTIONS ON, because one of the five digits is Cards and Cards
+       is unfinished — see `UNFINISHED_PANE_IDS`. The claim being made here is
+       that a panel the palette OFFERS carries the digit the keyboard BINDS, and
+       a panel nobody is offered has neither. The other half of that pairing —
+       the digit going dead with the panel — is the case below. */
+    const commands = buildCommands(context({ screen: 'reader', developer: true }).ctx)
     for (const { combo, pane } of PANE_SHORTCUTS) {
       expect(find(commands, `pane:${pane}`)?.combo, `pane:${pane}`).toBe(combo)
     }
     expect(find(commands, 'pane:toggle')?.combo).toBe('⌘\\')
+  })
+
+  /**
+   * ⚠️ **AN UNFINISHED PANEL IS NOT IN THE PALETTE EITHER.**
+   *
+   * The rail, the palette and the digits all read `paneFits`, which is the
+   * point of folding `paneOffered` into it: a reader who has not turned
+   * developer options on cannot reach Cards or Companion by any of the three,
+   * and there is no fourth route that was forgotten.
+   */
+  it('does not offer the unfinished panels until developer options are on', () => {
+    const plain = buildCommands(context({ screen: 'reader' }).ctx)
+    expect(find(plain, 'pane:cards')).toBeUndefined()
+    expect(find(plain, 'pane:companion')).toBeUndefined()
+    expect(find(plain, 'pane:dev')).toBeUndefined()
+
+    const developer = buildCommands(context({ screen: 'reader', developer: true }).ctx)
+    expect(find(developer, 'pane:cards')).toBeDefined()
+    expect(find(developer, 'pane:companion')).toBeDefined()
+    expect(find(developer, 'pane:dev')).toBeDefined()
+  })
+
+  it('drops one that developer options hid', () => {
+    const commands = buildCommands(
+      context({ screen: 'reader', developer: true, hiddenPanes: ['cards'] }).ctx,
+    )
+    expect(find(commands, 'pane:cards')).toBeUndefined()
+    expect(find(commands, 'pane:companion')).toBeDefined()
   })
 
   /**
@@ -73,8 +106,11 @@ describe('buildCommands', () => {
 
     // The cross-book ones stay: they are why the library has a pane at all.
     expect(find(library, 'pane:marginalia')).toBeDefined()
-    expect(find(library, 'pane:cards')).toBeDefined()
     expect(find(library, 'pane:settings')).toBeDefined()
+    /* Cards is cross-book too, and unfinished — so on the shelf it is a
+       question of the SCREEN once the reader has asked to see it at all. */
+    const shown = buildCommands(context({ screen: 'library', developer: true }).ctx)
+    expect(find(shown, 'pane:cards')).toBeDefined()
   })
 
   it('offers all of them in a book', () => {
@@ -367,17 +403,108 @@ describe('advertised combos are bound', () => {
      everywhere was the hole: deleting the digit branch entirely left the suite
      green, because the only other test of it asserted that the PANELS render. */
   it('binds every panel digit the rail advertises, and toggles the open one', () => {
+    /* DEVELOPER OPTIONS ON, because ⌘4 is Cards and Cards is unfinished. What
+       is being checked here is that an OFFERED panel's digit works; that a
+       panel nobody is offered has a dead digit is the case below, and the two
+       together are the whole rule. */
+    const offered = { ...anything, developer: true }
     for (const { digit, pane } of PANE_SHORTCUTS) {
-      expect(resolveAccel({ key: digit, repeat: false }, anything), `⌘${digit}`).toEqual({
+      expect(resolveAccel({ key: digit, repeat: false }, offered), `⌘${digit}`).toEqual({
         kind: 'openPane',
         pane,
       })
       /* The same key on the panel it opened closes it — the palette row for an
          open panel says "Close" and carries this combo. */
-      expect(resolveAccel({ key: digit, repeat: false }, { ...anything, pane })).toEqual({
+      expect(resolveAccel({ key: digit, repeat: false }, { ...offered, pane })).toEqual({
         kind: 'closePane',
       })
     }
+  })
+
+  /**
+   * ⚠️ **A DIGIT FOR A PANEL NOBODY IS OFFERED IS DEAD**, the same way a digit
+   * for a panel this screen has not got is dead. A key that opens something the
+   * rail does not draw is the mirror of a rail button that opens nothing.
+   */
+  it('leaves an unfinished panel’s digit unbound until developer options are on', () => {
+    const cards = PANE_SHORTCUTS.find(({ pane }) => pane === 'cards')
+    expect(cards, 'Cards no longer carries a digit — this check needs rewriting').toBeDefined()
+    expect(resolveAccel({ key: cards!.digit, repeat: false }, anything)).toBeNull()
+    expect(
+      resolveAccel({ key: cards!.digit, repeat: false }, { ...anything, developer: true }),
+    ).toEqual({ kind: 'openPane', pane: 'cards' })
+    /* And hidden inside developer options, it goes dead again. */
+    expect(
+      resolveAccel(
+        { key: cards!.digit, repeat: false },
+        { ...anything, developer: true, hiddenPanes: ['cards'] },
+      ),
+    ).toBeNull()
+  })
+
+  /**
+   * ⌘⌃⌥D, the only way into developer options.
+   */
+  describe('the developer chord', () => {
+    /* ⚠️ **THE EXACT EVENT A REAL PRESS PRODUCES**, measured in the running app
+       on 2026-08-30 rather than assumed: `{ key: 'd', code: 'KeyD' }` with all
+       three modifiers down. The first version of this binding guessed that
+       macOS would rewrite the character under Option — ⌥D alone is `∂` — and
+       matched a set of three spellings on that reasoning. With Command held the
+       unmodified character is reported, so the guess happened to work and its
+       stated reason was false. `code` is what the binding reads now. */
+    it('is bound with all three modifiers', () => {
+      expect(
+        resolveAccel({ key: 'd', code: 'KeyD', repeat: false, ctrlKey: true, altKey: true }, anything),
+      ).toEqual({ kind: 'toggleDeveloper' })
+    })
+
+    /* THE PHYSICAL KEY, so nothing a modifier or a layout does to the character
+       can unbind it — Caps Lock, AltGr on a Windows layout, or an Option that
+       does rewrite it in some combination this app has not measured. */
+    it('does not care what the character came out as', () => {
+      for (const key of ['d', 'D', '∂']) {
+        expect(
+          resolveAccel({ key, code: 'KeyD', repeat: false, ctrlKey: true, altKey: true }, anything),
+          key,
+        ).toEqual({ kind: 'toggleDeveloper' })
+      }
+    })
+
+    /* And a different physical key with the same modifiers is not the chord,
+       which is what stops `code` being a looser test than `key` rather than a
+       different one. */
+    it('is not bound on another key', () => {
+      expect(
+        resolveAccel({ key: 'e', code: 'KeyE', repeat: false, ctrlKey: true, altKey: true }, anything),
+      ).toBeNull()
+    })
+
+    /* ⚠️ **⌘D STILL MARKS THE SELECTION.** `d` was already bound, and nothing
+       else in the map reads `ctrlKey` or `altKey` — so without an exclusive
+       match ahead of the switch, the four-key chord marked a passage instead. */
+    it('does not take ⌘D away from marking', () => {
+      expect(resolveAccel({ key: 'd', repeat: false }, anything)).toEqual({ kind: 'markSelection' })
+    })
+
+    /* Two of the three modifiers is not the chord. */
+    it('needs both Control and Option', () => {
+      expect(
+        resolveAccel({ key: 'd', code: 'KeyD', repeat: false, ctrlKey: true }, anything),
+      ).toEqual({ kind: 'markSelection' })
+      expect(
+        resolveAccel({ key: 'd', code: 'KeyD', repeat: false, altKey: true }, anything),
+      ).toEqual({ kind: 'markSelection' })
+    })
+
+    /* A REPEAT IS THE SAME PRESS. Holding it would flicker developer options
+       on and off for as long as the key is down — the rule `REPEATABLE` states,
+       arriving on a new binding. */
+    it('does not fire again while the key is held', () => {
+      expect(
+        resolveAccel({ key: 'd', code: 'KeyD', repeat: true, ctrlKey: true, altKey: true }, anything),
+      ).toBeNull()
+    })
   })
 
   /* A DIGIT FOR A PANEL THIS SCREEN DOES NOT HAVE does nothing, rather than

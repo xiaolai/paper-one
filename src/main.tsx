@@ -455,6 +455,11 @@ async function boot(root: HTMLElement): Promise<void> {
     <StrictMode>
       <App
         services={services}
+        /* ONLY WHEN SOMETHING IS ACTUALLY RECORDING. The Developer panel draws
+           a different surface for "nothing to show" than for "this build
+           records nothing", and it can only tell them apart if absence means
+           the second. `diagnosticsOn` is the same flag the sink reads. */
+        {...(diagnosticsOn ? { diagnosticLog } : {})}
         fs={fs}
         shelfUnread={shelfUnread}
         bootNotice={storeNotice}

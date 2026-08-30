@@ -140,7 +140,10 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
    * three that cannot open there — and a palette entry that does something
    * other than what it says is worse than one that is missing, because the
    * reader has already decided before they press return. */
-  for (const pane of panesFor(state.screen)) {
+  for (const pane of panesFor(state.screen, {
+    developer: state.developer,
+    hiddenPanes: state.hiddenPanes,
+  })) {
     const open = state.pane === pane.id
     commands.push({
       id: `pane:${pane.id}`,

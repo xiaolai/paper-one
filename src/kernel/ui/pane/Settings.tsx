@@ -10,7 +10,7 @@ import {
   SPACING,
   readingStep,
 } from '../../core/metrics'
-import { THEMES, renderContribution } from '../panes'
+import { PANE_TITLES, THEMES, renderContribution } from '../panes'
 import type { Face } from '../../core/typefaces'
 import { FacePicker } from './FacePicker'
 import type {
@@ -38,6 +38,7 @@ import {
   SEPARATIONS,
   SIDES,
   TABLE_FITS,
+  UNFINISHED_PANE_IDS,
 } from '../../core/uiTypes'
 import { PaneBand } from './PaneBand'
 import { PaneGroup } from './PaneGroup'
@@ -134,6 +135,22 @@ export interface SettingsProps {
    * ids and uniqueness; `renderContribution` narrows each opaque renderer.
    */
   sections: readonly SettingsSection[]
+  /**
+   * Developer options, and the unfinished panels they govern.
+   *
+   * ABSENT IS OFF. The whole band disappears with it — there is no greyed-out
+   * heading and no "turn this on" row, because the only way in is ⌘⌃⌥D and a
+   * row advertising a chord is the discoverability this feature exists not to
+   * have. See `KERNEL_SETTINGS.developer`.
+   */
+  developer?:
+    | {
+        readonly hidden: readonly string[]
+        readonly onSetHidden: (pane: string, hidden: boolean) => void
+        /** Whether the app is recording diagnostics at all — see `DevPane`. */
+        readonly recording: boolean
+      }
+    | undefined
   /**
    * Capabilities that did not compose — `Composition.failures`.
    *
@@ -343,6 +360,7 @@ export function Settings({
   contrast = 0,
   onContrast,
   onTypeface,
+  developer,
 }: SettingsProps) {
   const step = readingStep(stepIdx)
   const [faceMenuOpen, setFaceMenuOpen] = useState(false)
@@ -834,6 +852,61 @@ export function Settings({
         </div>
       ))}
       </PaneBand>
+
+      {/* ⚠️ **THE BAND EXISTS ONLY WHILE DEVELOPER OPTIONS ARE ON**, and there
+          is deliberately no control here that turns them on. ⌘⌃⌥D is the way
+          in; a row offering it would put the chord — and the panels behind it —
+          in front of every reader who ever opens Settings, which is exactly
+          what a switch nobody can find is for.
+
+          LAST, below The app, because it is a band about the app's own
+          construction rather than about reading or about a capability. */}
+      {developer && (
+        <PaneBand title="Developer">
+          <PaneGroup
+            title="Unfinished panels"
+            open={groupOpen('developer:unfinished')}
+            onToggle={() => toggleGroup('developer:unfinished')}
+          >
+            <p className={styles.groupHint}>
+              These panels are drawn but do not yet answer what they promise. They are hidden from
+              every reader who has not turned developer options on.
+            </p>
+            {/* `ToggleRow` WITH THE SHELF'S OWN WORDS — `SHOWN_HIDDEN`, the
+                labels the scrollbar row uses. The question here is the same
+                one ("is this drawn?") and answering it with On/Off would give
+                the reader two vocabularies for one idea. */}
+            {UNFINISHED_PANE_IDS.map((id) => (
+              <ToggleRow
+                key={id}
+                label={PANE_TITLES[id]}
+                on={!developer.hidden.includes(id)}
+                onChange={(on) => developer.onSetHidden(id, !on)}
+                labels={SHOWN_HIDDEN}
+              />
+            ))}
+          </PaneGroup>
+
+          <PaneGroup
+            title="Diagnostics"
+            open={groupOpen('developer:diagnostics')}
+            onToggle={() => toggleGroup('developer:diagnostics')}
+          >
+            {/* ⚠️ **RECORDING IS DECIDED BEFORE THIS PANEL EXISTS.** It is a
+                FILE (`diagnostics.on`) rather than a setting, because the
+                decision is made at boot before the services that hold settings
+                are built — see `diagnosticsLog.ts`. So this reports rather than
+                offers: a switch here would appear to work and change nothing
+                until the next launch, which is worse than saying so. */}
+            <p className={styles.groupHint}>
+              {developer.recording
+                ? 'Diagnostics are being recorded. The Developer panel shows the window.'
+                : 'Diagnostics are not being recorded on this build. Create a file named ' +
+                  'diagnostics.on in the data directory and relaunch to turn them on.'}
+            </p>
+          </PaneGroup>
+        </PaneBand>
+      )}
     </div>
   )
 }

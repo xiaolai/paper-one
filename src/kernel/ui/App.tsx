@@ -9,6 +9,7 @@ import { DEFAULT_STEP_IDX, applyMetrics } from '../core/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
 import { createGenerations } from '../core/generations'
+import type { DiagnosticLog } from '../core/diagnosticsLog'
 import { createOpenRollback } from './openRollback'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
 import { useImportRun } from './hooks/useImportRun'
@@ -73,6 +74,19 @@ import { useSpeech } from './reader/useSpeech'
 const desktopCovers = (bookId: string) => coverIn(tauriVaultFs, bookId)
 
 export interface AppProps {
+  /**
+   * The window of diagnostics this run has recorded, for the Developer panel.
+   *
+   * HANDED IN, NOT BUILT HERE, for `services`' own reason one paragraph down:
+   * `main.tsx` creates the log before the first render because the boot steps
+   * write to it, and a second one built here would show an empty window beside
+   * a file that has the answers.
+   *
+   * Optional, and absent is a real state rather than a missing wire: a build
+   * with diagnostics off records nothing, and the panel says so instead of
+   * drawing an empty list that looks like a quiet run.
+   */
+  diagnosticLog?: DiagnosticLog | undefined
   /**
    * The kernel's services — the shelf, the marks, the cards, the settings —
    * built ONCE by the composition root (`main.tsx`) over the store and the
@@ -146,6 +160,7 @@ export function App({
   composition,
   beforeWindowClose,
   openRequests,
+  diagnosticLog,
 }: AppProps) {
   const platform = usePlatform()
   /* Probed once for the app's lifetime: which fonts this machine has cannot
@@ -1640,11 +1655,20 @@ export function App({
         hasBook: readingBook !== null,
         canJumpBack: jumps.canBack,
         canJumpForward: jumps.canForward,
+        /* THE DIGITS READ THIS. An unfinished panel's digit has to be as dead
+           as a digit for a panel this screen has not got — see `AccelContext`. */
+        developer: state.developer,
+        hiddenPanes: state.hiddenPanes,
       })
       if (!action) return
       event.preventDefault()
 
       switch (action.kind) {
+        /* ⌘⌃⌥D. The only way in, and the only way out — see
+           `KERNEL_SETTINGS.developer`. */
+        case 'toggleDeveloper':
+          dispatch({ type: 'toggleDeveloper' })
+          return
         case 'togglePalette':
           dispatch({ type: 'toggleLayer', layer: 'paletteOpen' })
           return
@@ -1869,6 +1893,25 @@ export function App({
               missing: composition.failures,
               persistent: settingsPersistent,
             }}
+            /* ⚠️ **SUPPLIED ONLY WHILE DEVELOPER OPTIONS ARE ON**, so the band
+               and the panel cannot come to disagree about whether they are
+               showing: absence is the off state, in one place, rather than a
+               boolean each surface reads for itself.
+
+               `recording` is not the same question as `developer`. Recording is
+               decided at boot by a FILE — see `diagnosticsLog.ts` — so a reader
+               can have developer options on and an empty log, and the panel has
+               to say which of the two it is looking at rather than drawing an
+               empty list. */
+            {...(state.developer
+              ? {
+                  developer: {
+                    ...(diagnosticLog ? { log: diagnosticLog } : {}),
+                    recording: diagnosticLog !== undefined,
+                    onCopy: (jsonl: string) => void navigator.clipboard?.writeText(jsonl),
+                  },
+                }
+              : {})}
             contributed={composition.panes}
           />
         }

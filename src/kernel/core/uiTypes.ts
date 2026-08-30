@@ -76,8 +76,50 @@ export const KERNEL_PANE_IDS = [
   'search',
   'library',
   'settings',
+  'dev',
 ] as const
 export type KernelPaneId = (typeof KERNEL_PANE_IDS)[number]
+
+/**
+ * The panels that are not finished, and are not shown to a reader who has not
+ * asked for them.
+ *
+ * A LIST RATHER THAN A FLAG ON EACH, because the question "what is unfinished"
+ * is asked in four places — the pane rail, the command palette, the accelerator
+ * map and the Developer settings band — and four copies of it would drift the
+ * way §11's three copies of the pane ids drifted before `panes.ts` existed.
+ *
+ * `companion` is a whole capability with a settings section and a model behind
+ * it; `cards` is the kernel's own and has a study surface with no scheduler
+ * under it yet. Both draw a panel a reader can open and neither answers what
+ * the panel promises, which is the property this list names — not "new", not
+ * "experimental", but *the reader would be right to expect more than this*.
+ *
+ * ⚠️ **REMOVING AN ID FROM HERE IS HOW A FEATURE SHIPS.** It is the only edit
+ * required: the rail, the palette, the digit and the band all read this.
+ */
+export const UNFINISHED_PANE_IDS: readonly KernelPaneId[] = ['companion', 'cards']
+
+/**
+ * Whether a panel is one the reader may see right now.
+ *
+ * TOTAL AND PURE, so the four surfaces that ask cannot answer differently. A
+ * finished panel is always visible; an unfinished one needs developer mode AND
+ * not to have been hidden inside it.
+ *
+ * `hidden` is consulted ONLY under developer mode, which is what makes the
+ * stored value harmless: a reader who never opens developer options cannot end
+ * up with a list that means anything, and one who turns it off gets the plain
+ * app back whatever they ticked while it was on.
+ */
+export function paneOffered(
+  pane: PaneId,
+  developer: boolean,
+  hidden: readonly string[] = [],
+): boolean {
+  if (!(UNFINISHED_PANE_IDS as readonly string[]).includes(pane)) return pane !== 'dev' || developer
+  return developer && !hidden.includes(pane)
+}
 
 /**
  * A pane a capability contributes: `<capability>:<name>`. The colon is what

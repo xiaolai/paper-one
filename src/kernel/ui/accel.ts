@@ -23,6 +23,16 @@ import { paneFits, type KernelPaneId, type PaneId, type Screen } from './state'
  * shelf does what an unbound key does.
  */
 export type AccelAction =
+  /**
+   * ⌘⌃⌥D — developer options on or off.
+   *
+   * FOUR KEYS ON PURPOSE. This is the only way in: nothing in Settings turns
+   * it on, because a switch a reader can find is a switch a reader will find,
+   * and what it reveals is a set of panels that do not yet answer what they
+   * promise. On Windows and Linux the accelerator is already Ctrl, so the same
+   * binding reads as Ctrl+Alt+D there — see `bind`.
+   */
+  | { readonly kind: 'toggleDeveloper' }
   | { readonly kind: 'togglePalette' }
   | { readonly kind: 'togglePane' }
   | { readonly kind: 'toggleScreen' }
@@ -70,6 +80,17 @@ export interface AccelContext {
    */
   readonly canJumpBack: boolean
   readonly canJumpForward: boolean
+  /**
+   * Whether developer options are on, and which panels are hidden inside them.
+   *
+   * HERE BECAUSE THE DIGITS READ `paneFits`, and an unfinished panel does not
+   * fit for a reader who has not asked for it — so ⌘4 must be dead while Cards
+   * is hidden, exactly as it is dead on a screen the panel does not belong to.
+   * A key that opens a panel the rail does not draw is the same defect as a
+   * rail button that opens nothing.
+   */
+  readonly developer?: boolean
+  readonly hiddenPanes?: readonly string[]
 }
 
 /**
@@ -108,8 +129,19 @@ export function canKeepPlace(context: Pick<AccelContext, 'onReader' | 'canBookma
  */
 const REPEATABLE: ReadonlySet<AccelAction['kind']> = new Set(['stepBy', 'jumpBack', 'jumpForward'])
 
+/** The physical key ⌘⌃⌥D is on — see `bind`, which explains why this is a
+ *  `code` and not a `key`. */
+const DEVELOPER_CODE = 'KeyD'
+
 export function resolveAccel(
-  event: { readonly key: string; readonly repeat: boolean; readonly shiftKey?: boolean },
+  event: {
+    readonly key: string
+    readonly repeat: boolean
+    readonly shiftKey?: boolean
+    readonly ctrlKey?: boolean
+    readonly altKey?: boolean
+    readonly code?: string
+  },
   context: AccelContext,
 ): AccelAction | null {
   const action = bind(event, context)
@@ -118,7 +150,13 @@ export function resolveAccel(
 }
 
 function bind(
-  event: { readonly key: string; readonly shiftKey?: boolean },
+  event: {
+    readonly key: string
+    readonly shiftKey?: boolean
+    readonly ctrlKey?: boolean
+    readonly altKey?: boolean
+    readonly code?: string
+  },
   context: AccelContext,
 ): AccelAction | null {
   /* CAPS LOCK IS NOT SHIFT. With it latched, `key` for ⌘B is 'B', and every
@@ -127,6 +165,32 @@ function bind(
    * shifted spellings the size steps bind ('+', '_') are unaffected: they
    * arrive with shift down and pass through as themselves. */
   const key = event.key.length === 1 && event.shiftKey !== true ? event.key.toLowerCase() : event.key
+
+  /* ⚠️ **BEFORE THE SWITCH, AND IT HAS TO BE.** `d` is already bound — ⌘D marks
+   * the selection — and nothing below reads `ctrlKey` or `altKey`, so ⌘⌃⌥D
+   * would fall through and mark instead. Matched here, exclusively, so the
+   * four-key chord means one thing and the two-key one still means what it did.
+   *
+   * ⚠️ **`code`, NOT `key`, AND THE FIRST VERSION GUESSED AT `key`.** It
+   * compared against a set spelling the character three ways — `d`, `D`, and
+   * `∂` — under a comment asserting that "macOS applies Option to the CHARACTER
+   * before the event is dispatched, so the `key` is `∂`". That is true of ⌥D
+   * alone and FALSE of this chord: measured in the running app on 2026-08-30,
+   * a real ⌘⌃⌥D arrives as `{ key: 'd', code: 'KeyD', metaKey, ctrlKey,
+   * altKey }` — with Command held, the unmodified character is what is
+   * reported. The guess happened to work, which is the worst way for a guess to
+   * survive; the comment explaining it was wrong.
+   *
+   * `code` is the physical key and is unaffected by every modifier, by Caps
+   * Lock, and by whatever AltGr does on a Windows layout — none of which this
+   * map can otherwise reason about. It is a second idiom in a file that
+   * compares `key` everywhere else, and that is the trade: the rest of the map
+   * binds single keys under one modifier, where `key` is exactly right, and
+   * this is the only chord that stacks three. */
+  if (event.ctrlKey === true && event.altKey === true && event.code === DEVELOPER_CODE) {
+    return { kind: 'toggleDeveloper' }
+  }
+
   const digit = PANE_SHORTCUTS.find((entry) => entry.digit === key)
 
   switch (key) {
@@ -203,7 +267,15 @@ function bind(
      failing, which is right for a palette entry the reader chose by name — and
      wrong for a digit: pressing ⌘1 for Contents on the library and being given
      Marginalia is a key that does something else, silently. */
-  if (!digit || !paneFits(context.screen, digit.pane)) return null
+  if (
+    !digit ||
+    !paneFits(context.screen, digit.pane, {
+      developer: context.developer ?? false,
+      hiddenPanes: context.hiddenPanes ?? [],
+    })
+  ) {
+    return null
+  }
   /* A TOGGLE, exactly as the palette row behaves — the row for an open panel
      says "Close" and carries this combo, so the combo has to close it too.
      Returning `openPane` unconditionally made the shortcut re-open a panel its

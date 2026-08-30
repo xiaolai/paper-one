@@ -1563,3 +1563,147 @@
      with them, and "quiet" is the name the scale already gives that. */
   opacity: var(--opacity-quiet);
 }
+
+/* ── THE DEVELOPER PANEL ─────────────────────────────────────────────────
+ *
+ * The system log, and nothing about it is decorative. Every rule here exists
+ * to make a wall of structured lines scannable: a reader opens this because
+ * something went wrong and they are looking for the one line that says what.
+ *
+ * It borrows `.filterBar` and `.filter` from Marginalia rather than growing a
+ * second pill row — the question is the same shape ("narrow this list") and two
+ * vocabularies for one idea is how a panel stops being learnable. */
+.devPanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: var(--space-8);
+  padding: var(--space-12);
+}
+
+/* MONOSPACE, and this is the one place in the pane that earns it: a scope and
+   an event are identifiers, and identifiers are compared column by column. */
+.devScope {
+  height: var(--control-sm);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-small);
+  padding: 0 var(--space-8);
+}
+
+.devActions {
+  display: flex;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+}
+
+/* QUIET BY DEFAULT — §07's rule for a surface whose actions are all secondary.
+   Nothing here is the thing the panel is for; the panel is for the list. */
+.devButton {
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  font-family: inherit;
+  font-size: var(--text-small);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.devButton:hover {
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+/* The window moved. Said rather than swallowed — see the component. */
+.devDropped {
+  margin: 0;
+  font-size: var(--text-micro);
+  color: var(--muted);
+  opacity: var(--opacity-quiet);
+}
+
+.devLog {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ONE RULE BETWEEN ENTRIES, not a card each: a card per line turns thirty
+   entries into thirty boxes and the eye stops finding the text. */
+.devEntry {
+  padding: var(--space-6) 0;
+  border-top: 1px solid var(--line-3);
+}
+
+.devEntry:first-child {
+  border-top: none;
+}
+
+/* ⚠️ LEVEL IS CARRIED ON THE LEFT EDGE, not on the text. A warning whose words
+   are amber reads as amber TEXT — the provenance meaning `marks.ts` reserves
+   amber for — and an error in red would say the same thing about book content
+   one panel over. A rule in the gutter colours the entry without colouring what
+   it says. */
+.devEntry[data-level='warn'] {
+  box-shadow: inset 2px 0 0 var(--amber);
+  padding-left: var(--space-8);
+}
+
+.devEntry[data-level='error'] {
+  box-shadow: inset 2px 0 0 var(--mark-rule);
+  padding-left: var(--space-8);
+}
+
+.devEntryHead {
+  display: flex;
+  gap: var(--space-8);
+  align-items: baseline;
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-micro);
+}
+
+.devTime {
+  flex: 0 0 auto;
+  color: var(--muted);
+  opacity: var(--opacity-quiet);
+}
+
+.devScopeTag {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+/* THE EVENT IS THE LINE. It is what a reader is scanning for, so it takes the
+   ink while the time and the scope stay quiet beside it. */
+.devEvent {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+/* The fields, folded small. Already redacted upstream — `createDiagnostics`
+   strips secrets, peer identities, book text and envelope bodies before any
+   sink sees them — which is why this can render them at all. */
+.devFields {
+  margin: var(--space-4) 0 0;
+  padding: var(--space-6) var(--space-8);
+  border-radius: var(--radius-chip);
+  background: var(--wash);
+  color: var(--muted);
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-micro);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

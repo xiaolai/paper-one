@@ -4,7 +4,7 @@ import { BRIGHTNESS, CONTRAST, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPA
 import type { SettingsStore } from '../core/ports'
 import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
 import type { PaneContribution } from '../core/capability'
-import { isContributedPaneId, type Align, type PageLayout, type PaneId, type ReadingStyle, type ReadingStyleKey, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
+import { isContributedPaneId, paneOffered, type Align, type PageLayout, type PaneId, type ReadingStyle, type ReadingStyleKey, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
 
 /**
  * Application state.
@@ -82,6 +82,17 @@ const NO_CONTRIBUTED: ContributedPanes = []
 
 export interface AppState {
   readonly screen: Screen
+  /**
+   * Whether developer options are on — ⌘⌃⌥D, and nothing else.
+   *
+   * MIRRORED INTO STATE like every other durable preference, because the
+   * reducer needs it: `paneFor` has to know, on every screen change, whether a
+   * remembered panel is one this reader may still be shown. Reading the store
+   * from inside the reducer would make it impure.
+   */
+  readonly developer: boolean
+  /** Unfinished panels hidden while developer options are on — see `paneOffered`. */
+  readonly hiddenPanes: readonly string[]
   readonly theme: Theme
   /** §05: the system follows the OS by default, with an override in Settings. */
   readonly themeFollowsOs: boolean
@@ -211,6 +222,8 @@ export const initialState: AppState = {
    * what it wants.
    */
   screen: 'library',
+  developer: false,
+  hiddenPanes: [],
   theme: DEFAULT_THEME,
   themeFollowsOs: true,
   /* The screen's own panel — `paneFits('library', 'library')` holds, so the
@@ -256,6 +269,10 @@ export type Action =
   | { type: 'openPane'; pane: PaneId }
   | { type: 'togglePane' }
   | { type: 'closePane' }
+  /** ⌘⌃⌥D. See `AppState.developer`. */
+  | { type: 'toggleDeveloper' }
+  /** One unfinished panel shown or hidden, from the Developer band. */
+  | { type: 'setPaneHidden'; pane: string; hidden: boolean }
   | { type: 'setSide'; side: Side }
   | { type: 'toggleLayer'; layer: Layer }
   | { type: 'closeLayer'; layer: Layer }
@@ -335,7 +352,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
        * pane open" — so asking it about a null pane would have opened one on
        * every screen change, which is the same conflation as a pane that shuts
        * itself, arriving from the other side. */
-      const pane = state.pane === null ? null : paneFor(action.screen, state.lastPane, contributed)
+      const pane = state.pane === null ? null : paneFor(action.screen, state.lastPane, audienceOf(state, contributed))
       return {
         ...state,
         screen: action.screen,
@@ -376,7 +393,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
        * the pane, so it opens on what the screen does offer. */
       return {
         ...state,
-        pane: paneFor(state.screen, action.pane, contributed),
+        pane: paneFor(state.screen, action.pane, audienceOf(state, contributed)),
         lastPane: action.pane,
         paletteOpen: false,
       }
@@ -384,10 +401,39 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
     case 'togglePane':
       return state.pane
         ? { ...state, pane: null }
-        : { ...state, pane: paneFor(state.screen, state.lastPane, contributed) }
+        : { ...state, pane: paneFor(state.screen, state.lastPane, audienceOf(state, contributed)) }
 
     case 'closePane':
       return { ...state, pane: null }
+
+    /* ⚠️ **THE OPEN PANEL IS RE-RESOLVED, AND IT HAS TO BE.** Turning developer
+     * options OFF takes the unfinished panels away — including, quite possibly,
+     * the one on screen. Leaving `pane` alone would show a title over a panel
+     * the rail no longer draws and the reducer can no longer reach, which is
+     * the state `paneFor` exists to make unreachable. Turning them ON needs the
+     * same call for the same reason in reverse: nothing else re-asks. */
+    case 'toggleDeveloper': {
+      const next = { ...state, developer: !state.developer }
+      return {
+        ...next,
+        pane: state.pane === null ? null : paneFor(next.screen, state.pane, audienceOf(next, contributed)),
+        lastPane: paneFor(next.screen, next.lastPane, audienceOf(next, contributed)),
+      }
+    }
+
+    case 'setPaneHidden': {
+      const hiddenPanes = action.hidden
+        ? [...new Set([...state.hiddenPanes, action.pane])]
+        : state.hiddenPanes.filter((one) => one !== action.pane)
+      const next = { ...state, hiddenPanes }
+      /* Same rule as above: hiding the panel you are looking at must move you
+       * off it rather than leave a title over nothing. */
+      return {
+        ...next,
+        pane: state.pane === null ? null : paneFor(next.screen, state.pane, audienceOf(next, contributed)),
+        lastPane: paneFor(next.screen, next.lastPane, audienceOf(next, contributed)),
+      }
+    }
 
     case 'setSide':
       return { ...state, side: action.side }
@@ -585,10 +631,27 @@ const SHELF_ONLY: readonly PaneId[] = ['library']
  * fits nowhere, so every path through the reducer lands on a panel that
  * exists. The kernel's own answer is the two lists above.
  */
-export function paneFits(screen: Screen, pane: PaneId, contributed: ContributedPanes = NO_CONTRIBUTED): boolean {
+export interface PaneAudience {
+  readonly contributed?: ContributedPanes
+  /** See `AppState.developer`. Absent reads as off, which is the safe default. */
+  readonly developer?: boolean
+  readonly hiddenPanes?: readonly string[]
+}
+
+export function paneFits(screen: Screen, pane: PaneId, audience: PaneAudience = {}): boolean {
+  const contributed = audience.contributed ?? NO_CONTRIBUTED
   if (isContributedPaneId(pane)) {
     return contributed.some((entry) => entry.id === pane && entry.screens.includes(screen))
   }
+  /* ⚠️ **TWO FACTS, ONE QUESTION, AND DELIBERATELY NOT TWO FUNCTIONS.** This
+   * asks "has this panel anything to show here", and a panel the reader has not
+   * asked to be shown has nothing — so `paneOffered` is folded in rather than
+   * left for each caller to remember. There are five callers (the rail, the
+   * palette, the digit accelerators, the reducer's `paneFor`, and the pane's
+   * own fallback), and §11's pane ids drifted across exactly three copies
+   * before `panes.ts` existed. A sixth caller gets the whole rule or none of
+   * it. */
+  if (!paneOffered(pane, audience.developer ?? false, audience.hiddenPanes ?? [])) return false
   return screen === 'reader' ? !SHELF_ONLY.includes(pane) : !BOOK_ONLY.includes(pane)
 }
 
@@ -602,7 +665,18 @@ export function paneFits(screen: Screen, pane: PaneId, contributed: ContributedP
  * hold things about this shelf, and now there is a panel that does.
  */
 export function defaultPaneFor(screen: Screen): PaneId {
-  return screen === 'reader' ? 'companion' : 'library'
+  /* ⚠️ **CONTENTS, AND IT USED TO BE COMPANION.** The reader's fallback panel
+   * cannot be one that most readers are not shown: `companion` is in
+   * `UNFINISHED_PANE_IDS`, so with developer options off it fits nowhere, and a
+   * default that fits nowhere is how every path through the reducer lands on a
+   * panel that does not exist.
+   *
+   * Contents is the honest replacement rather than the nearest one. The rule
+   * this function states is "the panel about what this screen IS", and in the
+   * reader that is the book's own structure — the panel a reader opens to find
+   * where they are. Companion held the slot because it was the surface being
+   * built at the time. */
+  return screen === 'reader' ? 'toc' : 'library'
 }
 
 /**
@@ -612,8 +686,13 @@ export function defaultPaneFor(screen: Screen): PaneId {
  * holds the second question, and conflating them is how a reader ends up with a
  * pane that closes itself whenever they change screen.
  */
-function paneFor(screen: Screen, wanted: PaneId | null, contributed: ContributedPanes): PaneId {
-  if (wanted && paneFits(screen, wanted, contributed)) return wanted
+/** The audience a state describes, so the reducer's four calls cannot differ. */
+function audienceOf(state: AppState, contributed: ContributedPanes): PaneAudience {
+  return { contributed, developer: state.developer, hiddenPanes: state.hiddenPanes }
+}
+
+function paneFor(screen: Screen, wanted: PaneId | null, audience: PaneAudience): PaneId {
+  if (wanted && paneFits(screen, wanted, audience)) return wanted
   return defaultPaneFor(screen)
 }
 
@@ -708,6 +787,8 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
 /** The durable half of the state, in the shape the settings store takes. */
 export function preferencesOf(state: AppState): KernelPreferences {
   return {
+    developer: state.developer,
+    hiddenPanes: state.hiddenPanes,
     theme: state.theme,
     themeFollowsOs: state.themeFollowsOs,
     typeface: state.typeface,
@@ -756,12 +837,21 @@ export function bootState(
    * null came back — which happened to be wanted, by an accident of routing
    * rather than a statement of it. Said directly: a null seed boots closed;
    * anything else boots to that panel where it fits, or the screen's default. */
-  const pane = initialState.pane === null ? null : paneFor(screen, initialState.pane, contributed)
   /* THE PREFERENCES GO ON FIRST, then the things a launch decides. Screen and
      pane are session facts and are not persisted — see `KERNEL_SETTINGS` — so a
      stored file cannot put the reader back into a panel they closed, and the
-     order here is what guarantees it rather than trusting the file's shape. */
+     order here is what guarantees it rather than trusting the file's shape.
+     ⚠️ AND THEY ARE READ BEFORE THE PANE IS CHOSEN, which they used not to be:
+     whether a remembered panel may be shown at all depends on `developer`, and
+     that is a stored preference. Choosing the pane first asked the question
+     with the answer still on disk. */
   const prefs = { ...preferencesOf(initialState), ...remembered }
+  const audience = {
+    contributed,
+    developer: prefs.developer,
+    hiddenPanes: prefs.hiddenPanes,
+  }
+  const pane = initialState.pane === null ? null : paneFor(screen, initialState.pane, audience)
   /* THE SAME RULE THE REDUCER KEEPS: paginated flow has no ruler (§06). Two
    * stored values can disagree — the layout written after the ruler — and a
    * launch must not start in a state no sequence of actions can reach. */

@@ -259,6 +259,17 @@ const oneOf =
 const boolean = (raw: unknown): boolean | undefined => (typeof raw === 'boolean' ? raw : undefined)
 
 /**
+ * A list of strings, with anything that is not one dropped.
+ *
+ * NOT rejected wholesale: this stores pane ids a reader ticked, and a single
+ * junk entry from a hand-edited file should cost that entry rather than the
+ * whole list. A non-array IS rejected, because that is a value of the wrong
+ * shape rather than a list with a bad member.
+ */
+const stringList = (raw: unknown): readonly string[] | undefined =>
+  Array.isArray(raw) ? raw.filter((one): one is string => typeof one === 'string') : undefined
+
+/**
  * An index into one of §09's scales, CLAMPED to it rather than rejected.
  *
  * These are positions on a ramp, and a file written by a build with a longer
@@ -330,6 +341,33 @@ const readingStyle = (raw: unknown): ReadingStyle | undefined => {
  * fields they mirror; keys carry the `kernel.` namespace.
  */
 export const KERNEL_SETTINGS = {
+  /**
+   * Developer options, off until somebody asks for them by name.
+   *
+   * ⌘⌃⌥D is the only way in — there is no control anywhere that turns this on,
+   * because a switch a reader can find is a switch a reader will find. What it
+   * reveals is the unfinished panels (`UNFINISHED_PANE_IDS`) and the Developer
+   * panel itself.
+   *
+   * PERSISTED, like every other preference. Re-entering a four-key chord on
+   * every launch is a thing nobody would do twice, and the state is not a
+   * secret — it is a preference about what this reader wants to be shown.
+   */
+  developer: defineSetting<boolean>('kernel.developer', false, boolean),
+  /**
+   * Which unfinished panels to keep hidden WHILE developer options are on.
+   *
+   * Consulted only under `developer`, which is what makes it harmless: a
+   * reader who never opens developer options cannot end up with a list that
+   * means anything, and turning the master switch off gives the plain app back
+   * whatever was ticked while it was on. See `paneOffered`, which is the one
+   * function that reads both.
+   *
+   * Empty by default, so turning developer options on shows everything — the
+   * switches are there to take a panel away while you work on another, not to
+   * make you go and find each one.
+   */
+  hiddenPanes: defineSetting<readonly string[]>('kernel.hiddenPanes', [], stringList),
   theme: defineSetting<Theme>('kernel.theme', 'paper', oneOf(THEME_IDS)),
   themeFollowsOs: defineSetting<boolean>('kernel.themeFollowsOs', true, boolean),
   /* A string, validated only as a non-empty one: the registry of faces is the
@@ -425,6 +463,8 @@ function readTextSize(store: SettingsStore): number {
 
 export function readKernelPreferences(store: SettingsStore): KernelPreferences {
   return {
+    developer: store.get(KERNEL_SETTINGS.developer),
+    hiddenPanes: store.get(KERNEL_SETTINGS.hiddenPanes),
     theme: store.get(KERNEL_SETTINGS.theme),
     themeFollowsOs: store.get(KERNEL_SETTINGS.themeFollowsOs),
     typeface: store.get(KERNEL_SETTINGS.typeface),
