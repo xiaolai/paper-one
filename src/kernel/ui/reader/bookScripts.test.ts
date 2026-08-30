@@ -73,6 +73,35 @@ async function open(file: File) {
   return { book, section: book.sections[0] as Loadable }
 }
 
+/**
+ * A chapter whose script sits BETWEEN two paragraphs, which is the shape that
+ * makes the divergence visible.
+ *
+ * `SCRIPTED_CHAPTER`'s scripts are in `<head>` and after the prose, so removing
+ * them moves nothing the reader ever anchors to. A script before a paragraph
+ * moves that paragraph, and everything after it.
+ */
+const SCRIPT_BEFORE_PROSE = `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head>
+<body><p>before</p><script>window.top.ran = true</script><p>needle</p><p>after</p></body></html>`
+
+/**
+ * The child-index path from the document to a node — WHAT A CFI ENCODES.
+ *
+ * An EPUB CFI is a walk of child indices, so two documents address a passage
+ * with the same CFI exactly when its path is the same in both. Asserting the
+ * path is therefore asserting the CFI, without needing a live `View` to mint
+ * one: `view.getCFI` wants a renderer, and the divergence is a property of the
+ * two documents rather than of anything rendered.
+ */
+function indexPath(node: Node): number[] {
+  const path: number[] = []
+  for (let step: Node | null = node; step?.parentNode; step = step.parentNode) {
+    path.unshift(Array.prototype.indexOf.call(step.parentNode.childNodes, step))
+  }
+  return path
+}
+
 describe('refuseBookScripts, through the fork’s own loader', () => {
   it('control: with nothing refusing it, the fork mints a URL for the book’s script and points the element at it', async () => {
     const minted = mintedUrls()
@@ -179,5 +208,77 @@ describe('stripScripts', () => {
     expect(doc.getElementsByTagNameNS('*', 'script')).toHaveLength(0)
     expect(doc.querySelector(`[onclick]`)).toBeNull()
     expect(doc.documentElement.textContent).toContain('Call me Ishmael.')
+  })
+})
+
+/**
+ * The two documents one book produces, and why they have to agree.
+ *
+ * `view.search()` builds its hits — and their CFIs — from the section's own
+ * `createDocument()`, which the fork parses from the RAW chapter. The reader's
+ * iframe parses what the loader served, which `refuseBookScripts` has stripped.
+ * Remove an element and every later sibling index shifts, so the same CFI
+ * addresses different words in the two documents. It does not throw; it lands
+ * on the wrong passage, which is `markContext.ts`'s stated hazard arriving from
+ * inside one build rather than across two.
+ */
+describe('the document search reads and the document the reader renders', () => {
+  it('address the same passage by the same path', async () => {
+    const blobs = mintedBlobs()
+    const { book, section } = await open(epubFixture({ chapter: SCRIPT_BEFORE_PROSE }))
+    refuseBookScripts(book)
+
+    /* What the reader's iframe parses: the loader's serialized chapter. */
+    await section.load()
+    const chapter = blobs.find((b) => b.type === 'application/xhtml+xml')
+    expect(chapter).toBeDefined()
+    const rendered = new DOMParser().parseFromString(await chapter!.text(), 'application/xhtml+xml')
+
+    /* What `view.search()` indexes. */
+    const searched = await section.createDocument()
+
+    const needle = (doc: Document): number[] => {
+      const found = Array.from(doc.querySelectorAll('p')).find((p) => p.textContent === 'needle')
+      expect(found, 'the fixture lost its needle').toBeDefined()
+      return indexPath(found!)
+    }
+
+    expect(needle(searched)).toEqual(needle(rendered))
+  })
+
+  it('survives being destructured off the section and called with no receiver', async () => {
+    /* The fork calls the method BOTH WAYS: as a property on its per-section
+       path (view.js:502, :526 — the second is search's) and destructured and
+       unbound on its whole-book path, `for (const [index, { createDocument }]
+       of sections.entries())` then `await createDocument()` (view.js:532-534).
+       This covers the second convention.
+
+       IT CANNOT FAIL FROM A BINDING MISTAKE, and that is worth writing down
+       because the obvious rationale for this test is wrong. Rewriting the
+       wrapper as a `function` that forwards `this` was tried here: all twelve
+       tests still passed. The fork's own `createDocument` does not read
+       `this` — which is exactly why it can be destructured and called with no
+       receiver in the first place — so forwarding `undefined` is harmless.
+       What this pins is that the unbound PATH yields a stripped document at
+       all, not how the wrapper binds. */
+    const { book, section } = await open(epubFixture({ chapter: SCRIPT_BEFORE_PROSE }))
+    refuseBookScripts(book)
+    const { createDocument } = section
+    const doc = await createDocument()
+    expect(doc.getElementsByTagNameNS('*', 'script')).toHaveLength(0)
+    expect(doc.querySelector('body')?.childNodes.length).toBe(3)
+  })
+
+  it('agree about how many children the body has', async () => {
+    const blobs = mintedBlobs()
+    const { book, section } = await open(epubFixture({ chapter: SCRIPT_BEFORE_PROSE }))
+    refuseBookScripts(book)
+    await section.load()
+    const chapter = blobs.find((b) => b.type === 'application/xhtml+xml')
+    const rendered = new DOMParser().parseFromString(await chapter!.text(), 'application/xhtml+xml')
+    const searched = await section.createDocument()
+    expect(searched.querySelector('body')?.childNodes.length).toBe(
+      rendered.querySelector('body')?.childNodes.length,
+    )
   })
 })

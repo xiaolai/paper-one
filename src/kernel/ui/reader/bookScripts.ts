@@ -74,6 +74,7 @@ const DOCUMENT_TYPES = new Set(['application/xhtml+xml', 'text/html', 'image/svg
  * stays for the backends whose documents never pass through a loader.
  */
 export function refuseBookScripts(book: object): void {
+  stripSectionDocuments(book)
   const gate = (book as { readonly transformTarget?: unknown }).transformTarget as
     | Pick<EventTarget, 'addEventListener'>
     | null
@@ -89,6 +90,57 @@ export function refuseBookScripts(book: object): void {
     if (typeof detail.data !== 'string') return
     detail.data = stripSerialized(detail.data, detail.type)
   })
+}
+
+/** Books already wrapped, so a second `refuseBookScripts` does not nest one. */
+const WRAPPED = new WeakSet<object>()
+
+/**
+ * ONE BOOK PRODUCES TWO DOCUMENTS, AND THE CFI IS ONLY VALID IF THEY AGREE.
+ *
+ * The `data` listener above strips what the LOADER serialises, which is what
+ * the reader's iframe parses. It is not the only document a book makes:
+ * `section.createDocument()` parses the RAW chapter, and that is what
+ * `view.search()` builds its hits — and their CFIs — from.
+ *
+ * A CFI is a walk of child indices. Remove an element from one document and
+ * every later sibling index shifts, so a CFI minted against the unstripped
+ * document addresses DIFFERENT NODES in the stripped one. It does not throw.
+ * It lands on the wrong passage — `markContext.ts`'s stated hazard, arriving
+ * from inside a single build rather than across two. Measured on a chapter
+ * whose script sits between two paragraphs: the second paragraph is the body's
+ * child 2 in one document and child 1 in the other, so a search hit navigated
+ * to the paragraph before the one it found.
+ *
+ * So the same strip runs on both. This is not a second security measure —
+ * the loader path is what stands behind the CSP and that has not changed —
+ * it is what makes the two documents ADDRESS THE SAME TEXT.
+ *
+ * Wrapping the section rather than patching the fork, because the fork is
+ * pinned by commit (`package.json`) and a rebase onto upstream must not
+ * silently drop this; a wrapper lives with the reason it exists and fails
+ * loudly in `bookScripts.test.ts` if the fork stops routing search through
+ * `createDocument`. `stripScripts` answers 0 and touches nothing on a document
+ * with no scripts, so wrapping costs one query per section.
+ */
+function stripSectionDocuments(book: object): void {
+  if (WRAPPED.has(book)) return
+  const sections = (book as { readonly sections?: unknown }).sections
+  /* A backend with no sections — PDF, CBZ — has no chapter documents to make
+   * and no scripts in them. The same structural check the gate above uses. */
+  if (!Array.isArray(sections)) return
+  WRAPPED.add(book)
+  for (const section of sections) {
+    if (typeof section !== 'object' || section === null) continue
+    const holder = section as { createDocument?: (...args: unknown[]) => Promise<Document> }
+    const original = holder.createDocument
+    if (typeof original !== 'function') continue
+    holder.createDocument = async (...args: unknown[]): Promise<Document> => {
+      const doc = await original.apply(holder, args)
+      stripScripts(doc)
+      return doc
+    }
+  }
 }
 
 /**
