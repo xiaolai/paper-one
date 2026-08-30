@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { refuseBookScripts, stripScripts } from './bookScripts'
 import { epubFixture } from './epubFixture.testkit'
 
@@ -50,11 +50,13 @@ function mintedBlobs(): Blob[] {
 function mintedUrls() {
   const minted: string[] = []
   const url = URL as unknown as { createObjectURL?: (b: Blob) => string; revokeObjectURL?: (u: string) => void }
-  const createObjectURL = vi.fn((blob: Blob) => {
+  /* A plain function, not `vi.fn`: no test inspects the spy's call record, so
+     the mock metadata was collected and thrown away. What is observed is
+     `minted`. */
+  url.createObjectURL = (blob: Blob) => {
     minted.push(blob.type)
     return `blob:fake/${minted.length}`
-  })
-  url.createObjectURL = createObjectURL
+  }
   url.revokeObjectURL = () => {}
   return minted
 }
@@ -103,27 +105,54 @@ function indexPath(node: Node): number[] {
 }
 
 describe('refuseBookScripts, through the fork’s own loader', () => {
-  it('control: with nothing refusing it, the fork mints a URL for the book’s script and points the element at it', async () => {
+  it('control: with nothing refusing it, the fork mints a URL for the book’s script', async () => {
     const minted = mintedUrls()
     const { section } = await open(scriptedBook())
     await section.load()
     expect(minted).toContain('application/javascript')
   })
 
-  it('refuses the script resource: never fetched, never a URL, and the element left pointing at nothing', async () => {
+  it('refuses the script resource: never fetched, never given a URL', async () => {
     const minted = mintedUrls()
     const { book, section } = await open(scriptedBook())
     refuseBookScripts(book)
     const url = await section.load()
     expect(url).toMatch(/^blob:/)
     expect(minted).not.toContain('application/javascript')
-    /* The loader sets `src` to what `loadHref` answered, which for a refused
-       item is null — a string no engine will fetch. */
+    /* What is OBSERVED here is the minting, which is the loader boundary this
+       test can see. The element's rewritten `src` is NOT asserted anywhere,
+       and cannot be from the served chapter either — the strip removes the
+       whole `<script>`, so there is no element left to carry one. */
     expect(minted).toContain('application/xhtml+xml')
   })
 
   it('is a no-op for a backend that has no loader to refuse', () => {
     expect(() => refuseBookScripts({})).not.toThrow()
+  })
+
+  it('strips a document type carrying a charset, and one spelled in capitals', () => {
+    /* A MIME type is case-insensitive and may carry parameters, so
+       `text/html; charset=utf-8` and `Text/Html` are both the type this has to
+       strip. Matching the set byte-for-byte let them through — and since the
+       `createDocument` wrapper strips UNCONDITIONALLY, a missed loader strip
+       does not merely leave a script in place: it puts the scripts back on the
+       rendered side only, and the CFI divergence returns inverted. */
+    for (const type of ['application/xhtml+xml; charset=utf-8', 'Text/Html', 'TEXT/HTML; charset=UTF-8']) {
+      const gate = new EventTarget()
+      refuseBookScripts({ transformTarget: gate })
+      const detail = { type, data: SCRIPT_BEFORE_PROSE }
+      gate.dispatchEvent(new CustomEvent('data', { detail }))
+      expect(detail.data, `${type} was not stripped`).not.toContain('<script')
+      expect(detail.data, `${type} lost its prose`).toContain('needle')
+    }
+  })
+
+  it('leaves a type it does not serialise as documents alone', () => {
+    const gate = new EventTarget()
+    refuseBookScripts({ transformTarget: gate })
+    const detail = { type: 'text/css', data: 'p { content: "<script>" }' }
+    gate.dispatchEvent(new CustomEvent('data', { detail }))
+    expect(detail.data).toBe('p { content: "<script>" }')
   })
 
   it('strips the served chapter BEFORE its URL exists — nothing left to run at parse time', async () => {
@@ -161,6 +190,7 @@ describe('refuseBookScripts, through the fork’s own loader', () => {
     refuseBookScripts(book)
     await section.load()
     const chapter = blobs.find((b) => b.type === 'application/xhtml+xml')
+    expect(chapter, 'the loader minted no chapter to inspect').toBeDefined()
     const served = await chapter!.text()
     expect(served).not.toContain('<script')
   })
@@ -188,13 +218,19 @@ describe('stripScripts', () => {
   })
 
   it('is case-blind about the handler name, and does not take an attribute that merely starts with on', () => {
+    /* PARSED AS XHTML, and the choice is the whole test. HTML parsing
+       lower-cases attribute names, so `OnClick` reached `stripScripts` already
+       spelled `onclick` and the `i` flag on its regex was never exercised —
+       MEASURED: with `/^on[a-z]/` in place of `/^on[a-z]/i`, every test in this
+       file still passed. XML preserves case, so the flag is load-bearing here.
+       `hasAttribute` is case-sensitive in XML, hence the original spelling. */
     const doc = new DOMParser().parseFromString(
       '<html xmlns="http://www.w3.org/1999/xhtml"><body><p OnClick="1" on="keep" data-on="keep">Hi</p></body></html>',
-      'text/html',
+      'application/xhtml+xml',
     )
     stripScripts(doc)
     const p = doc.querySelector('p')!
-    expect(p.hasAttribute('onclick')).toBe(false)
+    expect(p.hasAttribute('OnClick')).toBe(false)
     expect(p.getAttribute('on')).toBe('keep')
     expect(p.getAttribute('data-on')).toBe('keep')
   })
@@ -275,6 +311,7 @@ describe('the document search reads and the document the reader renders', () => 
     refuseBookScripts(book)
     await section.load()
     const chapter = blobs.find((b) => b.type === 'application/xhtml+xml')
+    expect(chapter, 'the loader minted no chapter to inspect').toBeDefined()
     const rendered = new DOMParser().parseFromString(await chapter!.text(), 'application/xhtml+xml')
     const searched = await section.createDocument()
     expect(searched.querySelector('body')?.childNodes.length).toBe(

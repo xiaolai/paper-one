@@ -74,26 +74,63 @@ const DOCUMENT_TYPES = new Set(['application/xhtml+xml', 'text/html', 'image/svg
  * stays for the backends whose documents never pass through a loader.
  */
 export function refuseBookScripts(book: object): void {
-  stripSectionDocuments(book)
+  /* IDEMPOTENT, and marked only once everything is installed. A second call
+   * used to add a second pair of anonymous listeners — each parsing and
+   * re-serialising every document again — while the section wrapper was
+   * separately guarded, so the two halves disagreed about what "already done"
+   * meant. Marking at the END rather than the start is what leaves a book that
+   * threw part-way retryable; a retry re-wraps sections, which costs a second
+   * `stripScripts` pass that answers 0. */
+  if (INSTALLED.has(book)) return
+  const wrapped = stripSectionDocuments(book)
   const gate = (book as { readonly transformTarget?: unknown }).transformTarget as
     | Pick<EventTarget, 'addEventListener'>
     | null
     | undefined
-  if (typeof gate?.addEventListener !== 'function') return
-  gate.addEventListener('load', (event) => {
-    const detail = (event as CustomEvent<ResourceLoad | undefined>).detail
-    if (detail?.isScript === true) detail.allow = false
-  })
-  gate.addEventListener('data', (event) => {
-    const detail = (event as CustomEvent<ResourceData | undefined>).detail
-    if (!detail || typeof detail.type !== 'string' || !DOCUMENT_TYPES.has(detail.type)) return
-    if (typeof detail.data !== 'string') return
-    detail.data = stripSerialized(detail.data, detail.type)
-  })
+  const hasGate = typeof gate?.addEventListener === 'function'
+  if (hasGate) {
+    gate.addEventListener('load', (event) => {
+      const detail = (event as CustomEvent<ResourceLoad | undefined>).detail
+      if (detail?.isScript === true) detail.allow = false
+    })
+    gate.addEventListener('data', (event) => {
+      const detail = (event as CustomEvent<ResourceData | undefined>).detail
+      if (!detail || typeof detail.type !== 'string') return
+      const type = mimeEssence(detail.type)
+      if (!DOCUMENT_TYPES.has(type)) return
+      if (typeof detail.data !== 'string') return
+      detail.data = stripSerialized(detail.data, type)
+    })
+  }
+  /* ⚠️ MARKED ONLY IF SOMETHING WAS ACTUALLY INSTALLED. Marking unconditionally
+   * made a book with neither sections nor a loader — the shape
+   * `refuseBookScripts({})` passes — permanently refuse a later, real
+   * installation. A no-op call has to stay a no-op rather than become a latch. */
+  if (wrapped > 0 || hasGate) INSTALLED.add(book)
 }
 
-/** Books already wrapped, so a second `refuseBookScripts` does not nest one. */
-const WRAPPED = new WeakSet<object>()
+/**
+ * A media type's essence: no parameters, lower case.
+ *
+ * ⚠️ THE SET WAS MATCHED BYTE-FOR-BYTE, and a MIME type is neither
+ * case-sensitive nor parameter-free. `text/html; charset=utf-8` and `Text/Html`
+ * are both a document this has to strip, and both walked past the check.
+ *
+ * That is worse than a missed strip, because `stripSectionDocuments` below
+ * strips UNCONDITIONALLY. A document the loader skipped keeps its scripts on
+ * the RENDERED side while the searched copy has them removed — so the CFI
+ * divergence this module exists to close comes back inverted, pointing the
+ * other way. Normalising here is what keeps the two paths agreeing.
+ *
+ * The essence is also what `stripSerialized` compares against to choose its
+ * serialiser, so a capitalised `Text/Html` now picks the HTML branch too.
+ */
+function mimeEssence(type: string): string {
+  return type.split(';', 1)[0]!.trim().toLowerCase()
+}
+
+/** Books already fully installed, so a second call does nothing at all. */
+const INSTALLED = new WeakSet<object>()
 
 /**
  * ONE BOOK PRODUCES TWO DOCUMENTS, AND THE CFI IS ONLY VALID IF THEY AGREE.
@@ -123,13 +160,12 @@ const WRAPPED = new WeakSet<object>()
  * `createDocument`. `stripScripts` answers 0 and touches nothing on a document
  * with no scripts, so wrapping costs one query per section.
  */
-function stripSectionDocuments(book: object): void {
-  if (WRAPPED.has(book)) return
+function stripSectionDocuments(book: object): number {
   const sections = (book as { readonly sections?: unknown }).sections
   /* A backend with no sections — PDF, CBZ — has no chapter documents to make
    * and no scripts in them. The same structural check the gate above uses. */
-  if (!Array.isArray(sections)) return
-  WRAPPED.add(book)
+  if (!Array.isArray(sections)) return 0
+  let wrapped = 0
   for (const section of sections) {
     if (typeof section !== 'object' || section === null) continue
     const holder = section as { createDocument?: (...args: unknown[]) => Promise<Document> }
@@ -140,7 +176,9 @@ function stripSectionDocuments(book: object): void {
       stripScripts(doc)
       return doc
     }
+    wrapped += 1
   }
+  return wrapped
 }
 
 /**
@@ -153,9 +191,17 @@ function stripSerialized(text: string, type: string): string {
   const doc = new DOMParser().parseFromString(text, type as DOMParserSupportedType)
   if (doc.getElementsByTagName('parsererror').length > 0) return text
   if (stripScripts(doc) === 0) return text
-  return type === 'text/html'
-    ? (doc.documentElement?.outerHTML ?? text)
-    : new XMLSerializer().serializeToString(doc)
+  if (type !== 'text/html') return new XMLSerializer().serializeToString(doc)
+  const root = doc.documentElement
+  if (!root) return text
+  /* THE DOCTYPE IS NOT PART OF `documentElement`, so serialising the root alone
+   * dropped it. A chapter that arrived standards-mode came back without its
+   * `<!DOCTYPE html>` and rendered in quirks mode — different box model,
+   * different line boxes, for a document whose only change was that a script
+   * went. `XMLSerializer` carries it on the other branch; this puts it back on
+   * this one. Only the name is reproduced, which is all `<!DOCTYPE html>` is;
+   * a legacy public/system identifier would itself trigger quirks mode. */
+  return `${doc.doctype ? `<!DOCTYPE ${doc.doctype.name}>\n` : ''}${root.outerHTML}`
 }
 
 /**
