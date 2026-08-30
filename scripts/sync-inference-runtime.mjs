@@ -376,6 +376,45 @@ export function sweepStale(dir) {
  * another machine is one `tauri.conf.json` would copy into this bundle
  * regardless of whether anything in it can run here.
  */
+/**
+ * Leave the vendor directory PRESENT but empty, saying why.
+ *
+ * ⚠️ **`tauri.conf.json` REQUIRES THIS PATH, AND THREE EXITS USED TO LEAVE IT
+ * ABSENT.** `bundle.resources` maps `../vendor/inference/current/` to
+ * `runtime/`, and Tauri refuses to build when a declared resource does not
+ * exist — `resource path `..\vendor\inference\current` doesn't exist`, which
+ * names a path and not a cause. So every message in this file promising that
+ * "the companion's local route will report Absent" was describing an app that
+ * could not be built at all: the runtime being unavailable turned a graceful
+ * degradation into a hard bundle failure.
+ *
+ * MEASURED ON WINDOWS, 2026-08-30, the first time this repository was ever
+ * bundled for that platform. It is not a Windows defect — the same thing
+ * happens on any host where the fetch fails, and on any platform with no
+ * published artifact. It survived because CI's Windows leg is `cargo check`,
+ * which never bundles, and because the macOS fetch had always succeeded.
+ *
+ * The Rust side already handles an empty tree exactly as intended:
+ * `paths::bundled_runtime` looks for `runtime/lemond[.exe]` and answers
+ * `RuntimeMissing`, which is the `Absent` those messages promise. What was
+ * missing was the DIRECTORY, not the contents.
+ *
+ * The marker is for whoever opens the bundle and wonders where the runtime
+ * went. Its name is deliberately not `.version`: `isStaged` reads that stamp,
+ * and a marker mistaken for one would claim a runtime that is not there.
+ */
+export function leaveEmpty(dir, why) {
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(
+    path.join(dir, 'RUNTIME-ABSENT.txt'),
+    `No local inference runtime was staged for this build.\n\n${why}\n\n` +
+      'The app runs normally; Settings → Local models reports the runtime as\n' +
+      'not installed, and the gloss and the companion\u2019s local route are\n' +
+      'unavailable. Re-run `pnpm run runtime:sync` on a machine that can reach\n' +
+      'the release assets and rebuild to include it.\n',
+  )
+}
+
 export function discardStale(dir, key) {
   if (!existsSync(dir)) return false
   if (key !== null && isStaged(dir, key)) return false
@@ -594,6 +633,10 @@ async function main() {
       if (discardStale(dir, key)) {
         console.log('sync-inference-runtime: removed a runtime staged for another host')
       }
+      /* PRESENT BUT EMPTY, or the bundle cannot be built at all — see
+         `leaveEmpty`. This message promised a degraded app and delivered a
+         failed build until 2026-08-30. */
+      leaveEmpty(dir, `No runtime is published for ${process.platform}-${process.arch}.`)
       console.log(
         `sync-inference-runtime: no runtime published for ${process.platform}-${process.arch} — the companion's local route will report Absent`,
       )
@@ -628,6 +671,9 @@ async function stage(dir, key, runtime, backend) {
         `sync-inference-runtime: removed the tree staged for an older pin — ${key} ${VERSION} could not be fetched, so the companion's local route will report Absent`,
       )
     }
+    /* AFTER `discardStale`, which removes the directory whole — see
+       `leaveEmpty` for why it has to exist even with nothing in it. */
+    leaveEmpty(dir, `${key} ${VERSION} could not be fetched.`)
     return
   }
 

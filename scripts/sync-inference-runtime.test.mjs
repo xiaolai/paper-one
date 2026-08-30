@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import path, { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { artifactKey, ARTIFACTS, bsdtar, sha256, VENDOR, VERSION } from './sync-inference-runtime.mjs'
+import { artifactKey, ARTIFACTS, bsdtar, isStaged, leaveEmpty, sha256, VENDOR, VERSION } from './sync-inference-runtime.mjs'
+import { existsSync } from 'node:fs'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
@@ -140,6 +141,85 @@ describe('the tar that reads a zip', () => {
       if (was === undefined) delete process.env['SystemRoot']
       else process.env['SystemRoot'] = was
       rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+/**
+ * ⚠️ **THE BUNDLE REQUIRES THIS DIRECTORY, AND THE SCRIPT USED NOT TO MAKE IT.**
+ *
+ * `tauri.conf.json` maps `../vendor/inference/current/` into the bundle as
+ * `runtime/`, and Tauri refuses to build when a declared resource is missing.
+ * Three of this script's exits returned without creating it while printing that
+ * "the companion's local route will report Absent" — so on any host where the
+ * runtime cannot be staged, the app did not degrade, it failed to build:
+ *
+ *     resource path `..\vendor\inference\current` doesn't exist
+ *
+ * Found on 2026-08-30, the first time this repository was ever bundled for
+ * Windows. It had survived because the Windows CI leg is `cargo check`, which
+ * never bundles, and because the macOS fetch had always succeeded.
+ *
+ * The first case below is the CLASS: it reads the resource list out of
+ * `tauri.conf.json` rather than naming the path, so a second declared resource
+ * that nothing guarantees fails here rather than in a bundler on a machine
+ * nobody has run yet.
+ */
+describe('the directory the bundle declares', () => {
+  const config = JSON.parse(readFileSync(join(REPO_ROOT, 'src-tauri/tauri.conf.json'), 'utf8'))
+
+  /* TRAILING SEPARATORS STRIPPED ON BOTH SIDES. `tauri.conf.json` writes the
+     directory resource with a trailing slash — that is how Tauri tells a
+     directory from a file — and `path.normalize` keeps it, so a bare compare
+     against `VENDOR` missed. */
+  const tidy = (one) => path.normalize(one).replace(/[\\/]+$/, '')
+  /** Every `bundle.resources` key, as a repo-relative path. */
+  const declared = Object.keys(config.bundle?.resources ?? {}).map((one) =>
+    tidy(path.join('src-tauri', one)),
+  )
+
+  it('is declared by tauri.conf.json, so this test is not vacuous', () => {
+    expect(declared.length).toBeGreaterThan(0)
+    expect(declared).toContain(tidy(VENDOR))
+  })
+
+  /* The other declared resource is a checked-in file; the vendor tree is the
+     one nothing checks in, which is why it needs a guarantee rather than a
+     hope. */
+  it('names a path that exists, or one this script promises to create', () => {
+    for (const one of declared) {
+      const guaranteed = tidy(one) === tidy(VENDOR)
+      expect(
+        existsSync(join(REPO_ROOT, one)) || guaranteed,
+        `${one} is bundled but nothing guarantees it exists`,
+      ).toBe(true)
+    }
+  })
+
+  it('is created, with a reason, when there is nothing to stage', () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'paper-vendor-')), 'current')
+    try {
+      leaveEmpty(dir, 'A reason a reader can act on.')
+
+      expect(existsSync(dir), 'the bundler needs the directory itself').toBe(true)
+      const marker = readFileSync(join(dir, 'RUNTIME-ABSENT.txt'), 'utf8')
+      expect(marker).toContain('A reason a reader can act on.')
+      expect(marker, 'it must say the app still runs').toMatch(/runs normally/i)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  /* ⚠️ AND IT MUST NOT LOOK STAGED. `isStaged` reads a `.version` stamp; a
+     marker mistaken for one would claim a runtime that is not there, which is
+     the failure this whole path exists to avoid, inverted. */
+  it('does not make an empty tree look like a staged one', () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'paper-vendor-')), 'current')
+    try {
+      leaveEmpty(dir, 'nothing staged')
+      expect(isStaged(dir, 'darwin-arm64')).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
