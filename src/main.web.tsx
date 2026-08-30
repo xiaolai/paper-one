@@ -42,6 +42,7 @@ import { useRemoteStores } from './app/web/useRemoteStores'
 import { YouScreen } from './app/web/YouScreen'
 import { TabBar, type Tab } from './app/shell/TabBar'
 import { ContinueStrip } from './app/shell/ContinueStrip'
+import styles from './app/shell/shell.module.css'
 import { Reader } from './app/web/Reader'
 import { capabilities } from 'virtual:paper-composition'
 /* DIRECTLY, not through `./kernel`. The barrel re-exports modules that import
@@ -394,7 +395,7 @@ function ShelfList({
   }
 
   return (
-    <div className="web-shell">
+    <div className={styles.shell}>
       {/* STALE IS SAID, NOT HIDDEN. The books on screen are real and no longer
           current; a reader deciding whether to trust a progress figure needs to
           know which. */}
@@ -429,11 +430,11 @@ function ShelfList({
       )}
 
       {tab === 'library' && (
-        <div className="web-stage">
+        <div className={styles.stage}>
           {/* CONTINUE — the three most recently opened, as covers with a
               progress rule, above the full list. From the mockup. */}
           <ContinueStrip books={shelf} onOpen={open} coverFor={covers} />
-          <div className="web-stage-list">
+          <div className={styles.stageList}>
             <Library
               books={shelf}
               platform="web"
@@ -472,8 +473,8 @@ function ShelfList({
       )}
 
       {tab === 'cards' && (
-        <div className="web-stage web-screen">
-          <h1 className="web-screen-title">Cards</h1>
+        <div className={`${styles.stage} ${styles.screen}`}>
+          <h1 className={styles.screenTitle}>Cards</h1>
           {cards !== null && (
             <Cards
               /* NO `discard`: `card.remove` is `card:write` and this session

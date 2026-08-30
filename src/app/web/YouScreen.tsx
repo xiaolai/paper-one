@@ -1,5 +1,6 @@
 import { ReadingSettings } from './ReadingSettings'
 import type { SettingsStore } from '../../kernel'
+import styles from '../shell/shell.module.css'
 
 /**
  * THE **YOU** TAB — this device's reading preferences, and the way off it.
@@ -23,8 +24,8 @@ export function YouScreen({
   readonly onSignOut: () => void
 }) {
   return (
-    <div className="web-stage web-screen">
-      <h1 className="web-screen-title">You</h1>
+    <div className={`${styles.stage} ${styles.screen}`}>
+      <h1 className={styles.screenTitle}>You</h1>
       <ReadingSettings settings={settings} />
       {/* DISCONNECT lives under You — it is about this device, which is what
           the tab is for. */}

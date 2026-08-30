@@ -190,6 +190,79 @@ function timingLog(): Plugin {
   }
 }
 
+/**
+ * SERVE THE PHONE'S ENTRY AT THE ROOT, in dev.
+ *
+ * A build selects its entry through `rollupOptions.input`, but the dev server
+ * has no such list: it serves whatever the request asks for, and the Tauri
+ * webview asks for `/`. That resolves to `index.html` — the DESKTOP entry — so
+ * without this, `tauri ios dev` builds an iOS app with the right capabilities
+ * and shows the desktop shell inside it. Exactly the bug the separate entry
+ * exists to fix, reappearing in dev only, which is the worse half: the built
+ * app would be right and the one being worked on would be wrong.
+ *
+ * A REWRITE RATHER THAN A REDIRECT. The URL stays `/`, so Vite's HTML
+ * transform, the HMR client and every relative asset resolve as they do for
+ * any other entry; a 302 to `/index.mobile.html` would work and would put the
+ * filename in the address the app runs under, which is what a reload then
+ * carries around.
+ *
+ * ## And the BUILD has the mirror image of the same problem
+ *
+ * Vite names an HTML output after its input, so `index.mobile.html` builds to
+ * `dist-mobile/index.mobile.html`. Tauri serves `frontendDist` as a static
+ * directory and loads `index.html` from its root — there is no server in
+ * between to map one to the other. The browser client gets away with the same
+ * shape only because `paper-webhost` has an explicit `ENTRY` constant pointing
+ * at `/index.web.html`; a phone has nothing to point.
+ *
+ * So the emitted file is renamed here. ⚠️ **The failure it prevents is silent
+ * and reads as unrelated**: the app builds, installs and launches to a blank
+ * white webview, because `tauri://localhost/` 404s and nothing logs it.
+ *
+ * Guarded by MOBILE on both hooks rather than by `apply`, since one is a serve
+ * hook and the other a build hook — on any other platform this plugin is
+ * inert.
+ */
+function mobileEntry(): Plugin {
+  return {
+    name: 'paper:mobile-entry',
+    /* AFTER VITE'S OWN HTML PLUGIN. `vite:build-html` emits the document in
+       its `generateBundle`, so a hook at normal order runs BEFORE the file it
+       means to rename exists — the assertion below caught exactly that, with
+       an input list containing every font and no HTML at all. */
+    enforce: 'post',
+    generateBundle(_options, bundle) {
+      if (!MOBILE) return
+      const built = bundle[MOBILE_HTML]
+      /* NOT A WARNING. A missing entry here means the input moved and the
+         bundle has no `index.html` at all, which is exactly the blank window
+         this hook exists to prevent — and a warning scrolls past. */
+      if (!built) {
+        throw new Error(
+          `paper:mobile-entry: ${MOBILE_HTML} is not in the bundle, so nothing can be renamed to index.html — ` +
+            `the mobile app would launch to a blank webview. Inputs: ${Object.keys(bundle).join(', ')}`,
+        )
+      }
+      built.fileName = 'index.html'
+      delete bundle[MOBILE_HTML]
+      bundle['index.html'] = built
+    },
+    configureServer(server) {
+      if (!MOBILE) return
+      server.middlewares.use((req, _res, next) => {
+        /* THE BARE ROOT ONLY. A query string is kept (`?platform=ios` pins the
+           chrome for a design check), and any other path — an asset, a module,
+           the HMR socket — is left alone. */
+        if (req.url === '/' || req.url?.startsWith('/?')) {
+          req.url = `/${MOBILE_HTML}` + (req.url.length > 1 ? req.url.slice(1) : '')
+        }
+        next()
+      })
+    },
+  }
+}
+
 // Tauri drives the dev server, so the port is fixed and failures must be loud
 // rather than silently hopping to 14202 — a moved port shows up as a white window.
 //
@@ -198,6 +271,15 @@ function timingLog(): Plugin {
 // whichever bound first won and the second silently attached to the wrong app.
 // `devUrl` in `src-tauri/tauri.conf.json` must move with it or the window loads
 // nothing, with no error to say why — the same pairing the MCP bridge port has.
+/** Is this build for a phone? `ios`, and `android`/`androideabi` for the ABI
+ *  variant the Tauri CLI sets on some Android targets — the same three values
+ *  `platformFromTauriEnv` folds into two platforms. */
+const MOBILE = ['ios', 'android', 'androideabi'].includes(process.env.TAURI_ENV_PLATFORM ?? '')
+
+/** The phone's HTML entry, named once — the dev-server rewrite and the build's
+ *  rename have to agree about it, and two spellings is how they stop agreeing. */
+const MOBILE_HTML = 'index.mobile.html'
+
 const host = process.env.TAURI_DEV_HOST
 
 export default defineConfig({
@@ -209,7 +291,7 @@ export default defineConfig({
   //
   // `timingLog()` is dev-only (`apply: 'serve'`) and puts the launch timings
   // `kernel/ui/devTiming` sends over the HMR socket into THIS terminal.
-  plugins: [paperComposition(), react(), pdfjsAssets(), foliatePdfStub(), timingLog()],
+  plugins: [paperComposition(), react(), pdfjsAssets(), foliatePdfStub(), timingLog(), mobileEntry()],
 
   // foliate-js ships as unbundled ESM source whose modules import each other by
   // relative path. Pre-bundling it rewrites those specifiers and breaks the
@@ -275,6 +357,29 @@ export default defineConfig({
       ? {
           outDir: 'dist-web',
           rollupOptions: { input: 'index.web.html' },
+        }
+      : {}),
+    /* THE PHONE'S ENTRY, selected the same way and for the same reason.
+     *
+     * `index.html` -> `src/main.tsx` mounts `App`, the DESKTOP shell: a
+     * titlebar with traffic lights, a side pane, a command palette. Building
+     * that for iOS and Android is what the mobile build did until this branch —
+     * the platform picked the right CAPABILITIES all along (`composition.ios.ts`
+     * is `[peer, sync]`) and then rendered the wrong shell over them.
+     *
+     * `index.mobile.html` -> `src/main.mobile.tsx` mounts the mobile design's
+     * shell instead, over the same launch sequence. Selected HERE rather than
+     * by a branch inside either file, so the desktop pane tree is not in the
+     * phone's module graph at all.
+     *
+     * A SEPARATE OUTPUT DIRECTORY, for the reason spelled out above `dist-web`:
+     * all three builds would otherwise default to `dist/`, and running one
+     * after another leaves that directory holding whichever went last. The
+     * per-platform Tauri configs point at this one. */
+    ...(MOBILE
+      ? {
+          outDir: 'dist-mobile',
+          rollupOptions: { input: MOBILE_HTML },
         }
       : {}),
     // The webview is known at build time: WebKit on macOS/Linux, WebView2 on

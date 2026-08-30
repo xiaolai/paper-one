@@ -1,0 +1,7 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "build": {
+    "frontendDist": "../dist-mobile",
+    "beforeBuildCommand": "pnpm build:ios"
+  }
+}

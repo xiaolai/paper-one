@@ -177,6 +177,14 @@ const WEB_CLIENT = '^src/app/web/'
  * app has no use for. A shared directory is for what is genuinely shared. */
 const SHARED_SHELL = '^src/app/shell/'
 
+/** THE NATIVE MOBILE CLIENT.
+ *
+ * `src/app/mobile/` is to iOS and Android what `src/app/web/` is to a browser:
+ * the shell that composes the kernel's surfaces for one audience. It reaches
+ * the kernel through ENTRIES — the public one and `ui/mobile.ts` — plus the
+ * design-system leaves, exactly as the browser client does. */
+const MOBILE_CLIENT = '^src/app/mobile/'
+
 /** The two kernel COMPONENTS the shared shell renders.
  *
  * Both are browser-safe leaves that the two doors each re-export; naming the
@@ -212,6 +220,15 @@ const KERNEL_UI_ENTRY = '^src/kernel/ui/index\\.ts$'
  * mobile bundle that renders none of it — the defect `browser.ts` was created
  * for, and the one AGENTS.md records at 0.5% of function coverage. */
 const KERNEL_BOOT_ENTRY = '^src/kernel/ui/boot\\.ts$'
+
+/** The kernel's MOBILE UI entry.
+ *
+ * The fourth door. `ui/index.ts` is the desktop shell's and names `App`;
+ * `ui/browser.ts` grows for what a BROWSER mounts; this one grows for what a
+ * PHONE mounts, and the two sets are not the same. Like the browser's, it
+ * grows one export at a time, in the change that mounts it — a barrel's
+ * re-exports evaluate with the barrel. */
+const KERNEL_MOBILE_ENTRY = '^src/kernel/ui/mobile\\.ts$'
 
 /** The kernel's storage adapters: the only modules that touch the fs plugin.
  *
@@ -348,7 +365,7 @@ module.exports = {
         'the shared mobile shell by shared-shell-kernel-entries, which adds the two leaf components ' +
         'it renders. Both of those rules are NARROWER than this one, not looser: each names its ' +
         'permitted modules exactly.',
-      from: { path: '^src/', pathNot: ['^src/kernel/', WEB_CLIENT, SHARED_SHELL, ...COMPOSITION_ROOTS] },
+      from: { path: '^src/', pathNot: ['^src/kernel/', WEB_CLIENT, MOBILE_CLIENT, SHARED_SHELL, ...COMPOSITION_ROOTS] },
       to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_TESTKIT_ENTRY] },
     },
     {
@@ -372,7 +389,7 @@ module.exports = {
         'entry is its platform\'s, and the two rules below draw that line; this one refuses ' +
         'everything else under src/kernel/.',
       from: { path: COMPOSITION_ROOTS },
-      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_BOOT_ENTRY, KERNEL_BROWSER_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
+      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_BOOT_ENTRY, KERNEL_MOBILE_ENTRY, KERNEL_BROWSER_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
     },
     {
       name: 'native-root-not-browser-ui-entry',
@@ -538,6 +555,29 @@ module.exports = {
         'cannot let it through.',
       from: { pathNot: FS_ADAPTERS },
       to: { path: '(^|/)@tauri-apps/plugin-fs(/|$)' },
+    },
+    {
+      name: 'mobile-client-kernel-entries',
+      severity: 'error',
+      comment:
+        'The native mobile client (src/app/mobile/) reaches the kernel through ENTRIES, the same way ' +
+        'the browser client does: the public entry, and src/kernel/ui/mobile.ts for the React ' +
+        'surfaces it mounts — plus the design-system stylesheets, metrics.ts and uiTypes.ts, which ' +
+        'are leaves with no runtime dependencies of their own. It may NOT take ui/index.ts, whose ' +
+        'barrel names App and would bring the desktop pane tree, titlebar and palette into a phone ' +
+        'bundle that draws none of them; nor ui/browser.ts, which lists what a BROWSER mounts. ' +
+        'Three shells, three doors, and each one grows for its own audience.',
+      from: { path: MOBILE_CLIENT },
+      to: {
+        path: '^src/kernel/',
+        pathNot: [
+          KERNEL_PUBLIC_ENTRY,
+          KERNEL_STYLESHEETS,
+          KERNEL_METRICS,
+          KERNEL_UI_TYPES,
+          KERNEL_MOBILE_ENTRY,
+        ],
+      },
     },
     {
       name: 'shared-shell-kernel-entries',

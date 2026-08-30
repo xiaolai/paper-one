@@ -165,6 +165,18 @@ export const LEGAL_TREE = {
     "import { ICON } from '../../kernel/core/metrics.ts'\n" +
     "import { OverlaySheet } from '../../kernel/ui/overlays/OverlaySheet.ts'\n" +
     'export const TabBar = { kernelThing, ICON, OverlaySheet }\n',
+  /* THE NATIVE MOBILE CLIENT, and its own door.
+   *
+   * `src/app/mobile/` is to a phone what `src/app/web/` is to a browser, and it
+   * reaches the kernel the same way: the public entry plus ONE UI entry, which
+   * for it is `ui/mobile.ts`. Pinned here so the allowance fails on the CLEAN
+   * tree if `mobile-client-kernel-entries` ever stops matching. */
+  'src/kernel/ui/mobile.ts': "export { App as Shelf } from './App.ts'\n",
+  'src/app/mobile/MobileApp.ts':
+    "import { kernelThing } from '../../kernel/index.ts'\n" +
+    "import { Shelf } from '../../kernel/ui/mobile.ts'\n" +
+    "import { TabBar } from '../shell/TabBar.ts'\n" +
+    'export const MobileApp = { kernelThing, Shelf, TabBar }\n',
 }
 
 /**
@@ -480,6 +492,43 @@ export const CASES = [
     from: 'src/main.tsx',
     to: 'src/kernel/ui/browser.ts',
     expect: ['native-root-not-browser-ui-entry'],
+  },
+  /* THE MOBILE CLIENT TAKES ITS OWN DOOR AND NO OTHER. Three shells, three
+     doors: `ui/index.ts` names `App` and the desktop pane tree, `ui/browser.ts`
+     lists what a BROWSER mounts, and neither belongs in a phone bundle. */
+  {
+    name: 'the mobile client -> the DESKTOP ui entry',
+    files: {
+      'src/app/mobile/MobileApp.ts':
+        LEGAL_TREE['src/app/mobile/MobileApp.ts'] +
+        "import { App } from '../../kernel/ui/index.ts'\nvoid App\n",
+    },
+    from: 'src/app/mobile/MobileApp.ts',
+    to: 'src/kernel/ui/index.ts',
+    expect: ['mobile-client-kernel-entries'],
+  },
+  {
+    name: 'the mobile client -> the BROWSER ui entry',
+    files: {
+      'src/app/mobile/MobileApp.ts':
+        LEGAL_TREE['src/app/mobile/MobileApp.ts'] +
+        "import { App as B } from '../../kernel/ui/browser.ts'\nvoid B\n",
+    },
+    from: 'src/app/mobile/MobileApp.ts',
+    to: 'src/kernel/ui/browser.ts',
+    expect: ['mobile-client-kernel-entries'],
+  },
+  /* AND THE ALLOWANCE DOES NOT REACH PAST THE DOOR IT NAMES. */
+  {
+    name: 'the mobile client -> a kernel internal',
+    files: {
+      'src/app/mobile/MobileApp.ts':
+        LEGAL_TREE['src/app/mobile/MobileApp.ts'] +
+        "import { other } from '../../kernel/core/other.ts'\nvoid other\n",
+    },
+    from: 'src/app/mobile/MobileApp.ts',
+    to: 'src/kernel/core/other.ts',
+    expect: ['mobile-client-kernel-entries'],
   },
   /* THE SHARED SHELL MAY NOT NAME A DOOR. This is the edge the rule exists
      for: one directory, two roots, and a barrel that would follow whichever
