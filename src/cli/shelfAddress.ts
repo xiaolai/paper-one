@@ -30,9 +30,6 @@ import { socketUrl } from '../kernel'
  * is the address `PAPER_CLIENT_ORIGIN` already defaults to.
  */
 
-/** Where the shelf's plugin binds. `tauri-plugin-webhost::WEBHOST_PORT`. */
-export const WEBHOST_PORT = 27182
-
 export interface ShelfAddress {
   /** Canonical `scheme://host[:port]`, default ports dropped, host lower-cased. */
   readonly origin: string
@@ -84,8 +81,15 @@ export function shelfAddress(key: string): Resolved {
   } catch {
     /* NOT "invalid URL". The overwhelmingly likely mistake is a bare hostname,
      * and saying so is the difference between fixing it in one go and guessing
-     * at a spelling. */
-    return fail(`--shelf needs a full address with a scheme, like https://shelf.example — not ${JSON.stringify(raw)}`)
+     * at a spelling.
+     *
+     * ⚠️ AND IT DOES NOT ECHO THE INPUT. It used to end `— not ${raw}`, which
+     * runs BEFORE the userinfo check below: `https://user:hunter2@[` does not
+     * parse, so it took this branch and put the password on stderr. The
+     * userinfo guard further down cannot help — nothing has parsed yet, so
+     * there is no `username` to inspect. The only safe version of a message on
+     * this path is one that quotes nothing. */
+    return fail('--shelf needs a full address with a scheme, like https://shelf.example')
   }
 
   /* USERINFO IS REFUSED BEFORE ANYTHING IS REPORTED, and the message names no

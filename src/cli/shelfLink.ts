@@ -62,6 +62,18 @@ export interface ShelfLinkOptions {
   readonly timeoutMs?: number
 }
 
+/** RFC 6265 `cookie-name`: an RFC 7230 token. */
+const COOKIE_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+/**
+ * RFC 6265 `cookie-octet`: `%x21 / %x23-2B / %x2D-3A / %x3C-5B / %x5D-7E` —
+ * printable ASCII less space, `"`, `,`, `;` and backslash.
+ *
+ * In ESCAPES, spelled as the RFC spells them. Written as literal ranges this
+ * is a line nobody can check against the specification, and the two control
+ * characters already caught in this branch both entered exactly that way.
+ */
+const COOKIE_VALUE = /^[\u0021\u0023-\u002b\u002d-\u003a\u003c-\u005b\u005d-\u007e]*$/
+
 /**
  * The `Cookie` header value from a pairing response's `Set-Cookie`.
  *
@@ -73,13 +85,44 @@ export interface ShelfLinkOptions {
  * `getSetCookie()` rather than `get()` because a response may carry several
  * and `get()` folds them into one comma-joined string that cannot be split
  * again safely — an `Expires` attribute contains a comma of its own.
+ *
+ * ## EXACTLY ONE, and it has to be well formed
+ *
+ * This used to join every cookie it found. Being name-agnostic is right; being
+ * COUNT-agnostic is not. The shelf issues one, so anything else on that
+ * response is somebody else's — a proxy's, a portal's — and joining them
+ * forwarded all of it to `/api/auth/session`, to the socket handshake, and
+ * onto the reader's terminal as a credential to keep.
+ *
+ * Refusing more than one keeps the name unspelled and still takes only what
+ * the shelf issued.
+ *
+ * The shape is checked too, because this value becomes a `Cookie` REQUEST
+ * HEADER: a control character in it is header injection, and neither the
+ * check nor the refusal can be written against a name we deliberately do not
+ * know.
  */
+
 export function cookieFrom(headers: Headers): string | null {
   const pairs = headers
     .getSetCookie()
     .map((raw) => raw.split(';', 1)[0]?.trim() ?? '')
-    .filter((pair) => pair.length > 0 && pair.includes('='))
-  return pairs.length === 0 ? null : pairs.join('; ')
+    .filter((pair) => pair.length > 0)
+  if (pairs.length !== 1) return null
+  return wellFormedCookie(pairs[0] as string) ? (pairs[0] as string) : null
+}
+
+/** Whether `pair` is one `name=value` this is willing to put in a header. */
+export function wellFormedCookie(pair: string): boolean {
+  const at = pair.indexOf('=')
+  if (at <= 0) return false
+  const value = pair.slice(at + 1)
+  return COOKIE_NAME.test(pair.slice(0, at)) && COOKIE_VALUE.test(unquoted(value))
+}
+
+/** A cookie value may be wrapped in double quotes; the quotes are not the value. */
+function unquoted(value: string): string {
+  return value.length >= 2 && value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value
 }
 
 /** A refusal the CLI prints as one line and exits on. */
@@ -142,12 +185,14 @@ async function pair(
  *
  * This is the authoritative answer, and it costs one request.
  */
-async function check(
+/** What the shelf says about a credential. An OUTAGE still throws. */
+type SessionState = 'live' | 'refused'
+
+async function sessionState(
   address: ShelfAddress,
   cookie: string,
   call: typeof globalThis.fetch,
-  justPaired: boolean,
-): Promise<void> {
+): Promise<SessionState> {
   let response: Response
   try {
     response = await call(address.session, {
@@ -156,26 +201,19 @@ async function check(
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
     })
   } catch (error) {
-    /* AN OUTAGE IS NOT A REVOCATION. Said plainly, because the two repairs are
-     * opposite: wait, versus pair again. */
+    /* AN OUTAGE IS NOT A REVOCATION. Raised rather than returned, because the
+     * two repairs are opposite — wait, versus pair again — and a caller that
+     * had to tell them apart from a return value would get it wrong once. */
     refuse(`could not reach ${address.origin}: ${error instanceof Error ? error.message : String(error)}`)
   }
-  if (response.status === 401) {
-    /* THE SAME 401 MEANS TWO DIFFERENT THINGS, and only the caller knows
-     * which. On a credential that arrived from the environment it is an
-     * expiry or a revocation, and pairing again is the repair. One request
-     * after a successful pairing it cannot be either — it means what came back
-     * from `/api/auth/submit` was not a session cookie at all, which is what a
-     * proxy or a captive portal answering 204 with a cookie of its own looks
-     * like. Telling a reader to pair again would loop them forever. */
-    refuse(
-      justPaired
-        ? `${address.origin} issued a credential it then would not accept — that is not the shelf answering`
-        : `${address.origin} does not accept this credential — it may have been revoked or expired. ` +
-            `Set ${CODE_VAR} to the six digits the shelf is showing to get a new one.`,
-    )
-  }
+  /* A 401 IS RETURNED, NOT RAISED. It means two different things depending on
+   * where the credential came from, and this function does not know: from the
+   * environment it is an expiry the caller may be able to repair with a code;
+   * one request after pairing it means what `/api/auth/submit` returned was
+   * never a session at all. The caller has that context; this does not. */
+  if (response.status === 401) return 'refused'
   if (!response.ok) refuse(`${address.origin} answered HTTP ${response.status} for the session check`)
+  return 'live'
 }
 
 /**
@@ -210,26 +248,76 @@ export async function openShelf(options: ShelfLinkOptions): Promise<ServiceCalle
 
   const existing = options.env[COOKIE_VAR]
   const code = options.env[CODE_VAR]
-  let cookie: string
+  let cookie: string | null = null
   let justPaired = false
+
   if (existing !== undefined && existing !== '') {
-    cookie = existing
-  } else if (code !== undefined && code !== '') {
-    cookie = await pair(address, code, call)
-    justPaired = true
-    /* REPORTED, NEVER STORED — and to stderr, so `paper book list --json |
-     * jq` is unaffected. Keeping it is the reader's decision to make with
-     * whatever they already trust with credentials. */
-    note(`paper: paired with ${address.origin}. To reuse this session:`)
-    note(`  export ${COOKIE_VAR}='${cookie}'`)
-  } else {
-    refuse(
-      `no credential for ${address.origin}. Set ${COOKIE_VAR} to a session you already have, ` +
-        `or ${CODE_VAR} to the six digits the shelf is showing.`,
-    )
+    /* A CREDENTIAL WITH NO STATED AUDIENCE IS THE FOOTGUN. `PAPER_CLIENT_*` is
+     * shared with `shot-client.mjs`, which points at a local shelf by default,
+     * so an exported cookie would otherwise be handed to whatever `--shelf`
+     * names next — over the network, to a host with no business seeing it.
+     * Optional binding does not close that: the reader who needed it most is
+     * the one who never set it. Pairing is exempt because `--shelf` named the
+     * shelf explicitly in the same command, and the code is single-use. */
+    if (declared === undefined || declared === '') {
+      refuse(
+        `${COOKIE_VAR} is set but ${ORIGIN_VAR} is not, so there is nothing saying which shelf that ` +
+          `credential belongs to. Set ${ORIGIN_VAR}=${address.origin} to send it here.`,
+      )
+    }
+    if (!wellFormedCookie(existing)) {
+      refuse(`${COOKIE_VAR} is not a well-formed cookie; it cannot be sent as a header`)
+    }
+    if ((await sessionState(address, existing, call)) === 'live') {
+      cookie = existing
+    } else if (code !== undefined && code !== '') {
+      /* THE ADVICE HAS TO BE FOLLOWABLE. The refusal below tells a reader to
+       * set the code — and the cookie used to take precedence unconditionally,
+       * so doing exactly that changed nothing and produced the same 401. When
+       * both are present and the cookie is dead, the code is what they meant. */
+      note(`paper: ${COOKIE_VAR} was refused by ${address.origin}; pairing with ${CODE_VAR} instead`)
+    } else {
+      refuse(
+        `${address.origin} does not accept ${COOKIE_VAR} — it may have been revoked or expired. ` +
+          `Set ${CODE_VAR} to the six digits the shelf is showing and run this again.`,
+      )
+    }
   }
 
-  await check(address, cookie, call, justPaired)
+  if (cookie === null) {
+    if (code === undefined || code === '') {
+      refuse(
+        `no credential for ${address.origin}. Set ${COOKIE_VAR} (with ${ORIGIN_VAR}) to a session you ` +
+          `already have, or ${CODE_VAR} to the six digits the shelf is showing.`,
+      )
+    }
+    const minted = await pair(address, code, call)
+    /* VERIFIED BEFORE IT IS ANNOUNCED. This used to print the credential the
+     * moment `/api/auth/submit` answered, so a cookie the shelf then refused
+     * had already been offered to the reader as one to keep and re-export. */
+    if ((await sessionState(address, minted, call)) === 'refused') {
+      refuse(`${address.origin} issued a credential it then would not accept — that is not the shelf answering`)
+    }
+    cookie = minted
+    justPaired = true
+  }
+
+  if (justPaired) {
+    /* PRINTED AS VALUES, NOT AS A COMMAND TO PASTE.
+     *
+     * This emitted `export ${COOKIE_VAR}='<cookie>'`. An apostrophe is a legal
+     * `cookie-octet`, so a value containing one closes the quote and the rest
+     * of the line is whatever the shell makes of it — the same defect that put
+     * an environment dump in a commit message on a public repo. Naming the
+     * variables and their values leaves the reader to set them, which is the
+     * one form that cannot be executed by accident.
+     *
+     * stderr, so `paper book list --json | jq` is unaffected. Both variables,
+     * because a cookie without its origin is refused above. */
+    note(`paper: paired with ${address.origin}. This credential is not stored — to reuse it, set:`)
+    note(`paper:   ${ORIGIN_VAR} = ${address.origin}`)
+    note(`paper:   ${COOKIE_VAR} = ${cookie}`)
+  }
 
   const channel = await connectToShelf({
     url: address.socket,

@@ -443,8 +443,9 @@ module.exports = {
       comment:
         'The browser client (src/app/web/) reaches the kernel through ENTRIES, the same way a ' +
         'composition root does: the public entry, and src/kernel/ui/browser.ts for the React ' +
-        'surfaces it mounts — plus the design-system stylesheets, metrics.ts, envelope.ts and ' +
-        'uiTypes.ts, which are leaves with no runtime dependencies of their own. This replaced ' +
+        'surfaces it mounts — plus the design-system stylesheets, metrics.ts, envelope.ts, ' +
+        'shelfChannel.ts and uiTypes.ts, which are leaves with no runtime dependencies of their ' +
+        'own. This replaced ' +
         'web-client-kernel-allowlist, an EXEMPTION that existed only because the public entry was ' +
         'not Tauri-free; it listed five modules, one of them the whole ui/reader/ directory. ' +
         'WI-19.1 removed the cause (one export, tauriSizePort), so the exemption became a door. ' +

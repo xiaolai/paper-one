@@ -83,7 +83,7 @@ describe('with a credential already in the environment', () => {
     const opened: string[] = []
     const caller = await openShelf({
       key: SHELF,
-      env: { [COOKIE_VAR]: 'paper_session=abc123' },
+      env: { [COOKIE_VAR]: 'paper_session=abc123', [ORIGIN_VAR]: SHELF },
       fetch: call,
       open: (cookie) => (url) => {
         opened.push(`${url} | ${cookie}`)
@@ -101,7 +101,11 @@ describe('with a credential already in the environment', () => {
 
   it('says the credential was refused, not that the shelf is unreachable', async () => {
     const { call } = fakeFetch({ [SESSION]: unauthorised })
-    const message = await refusal({ key: SHELF, env: { [COOKIE_VAR]: 'paper_session=stale' }, fetch: call })
+    const message = await refusal({
+      key: SHELF,
+      env: { [COOKIE_VAR]: 'paper_session=stale', [ORIGIN_VAR]: SHELF },
+      fetch: call,
+    })
     expect(message).toContain('revoked or expired')
     expect(message).toContain(CODE_VAR)
   })
@@ -112,7 +116,11 @@ describe('with a credential already in the environment', () => {
     const call = (async () => {
       throw new Error('connect ECONNREFUSED')
     }) as typeof globalThis.fetch
-    const message = await refusal({ key: SHELF, env: { [COOKIE_VAR]: 'paper_session=abc' }, fetch: call })
+    const message = await refusal({
+      key: SHELF,
+      env: { [COOKIE_VAR]: 'paper_session=abc', [ORIGIN_VAR]: SHELF },
+      fetch: call,
+    })
     expect(message).toContain('could not reach')
     expect(message).not.toContain('revoked')
   })
@@ -133,7 +141,14 @@ describe('with only the six digits', () => {
     expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ code: '123456' })
     /* THE CREDENTIAL GOES TO THE NOTE SINK — stderr — and never to stdout,
        which carries the command's answer and may be piped into `jq`. */
-    expect(notes.join('\n')).toContain(`export ${COOKIE_VAR}='paper_session=abc123'`)
+    const said = notes.join('\n')
+    expect(said).toContain(`${COOKIE_VAR} = paper_session=abc123`)
+    expect(said).toContain(`${ORIGIN_VAR} = ${SHELF}`)
+    /* NOT A COMMAND TO PASTE. An apostrophe is a legal cookie-octet, so a
+       quoted `export` line is a shell injection waiting for the one credential
+       that contains one. */
+    expect(said).not.toContain('export ')
+    expect(said).not.toContain("'")
   })
 
   it('refuses to follow a redirect on the pairing request', async () => {
@@ -214,6 +229,85 @@ describe('a credential minted for one shelf', () => {
       fetch: call,
       open: () => fakeSocket,
     })
+  })
+})
+
+/**
+ * THE AUDIT'S OWN FINDINGS, EACH WITH THE TEST THAT WOULD CATCH IT AGAIN.
+ *
+ * Every one of these passed before the fix and describes something that failed
+ * quietly: a credential sent to the wrong host, a shell line that executes,
+ * a proxy's cookie carried as a session, advice that could not be followed.
+ */
+describe('what the audit found', () => {
+  it('refuses a credential with no stated audience, rather than sending it wherever --shelf points', async () => {
+    const { call, calls } = fakeFetch({})
+    const message = await refusal({ key: SHELF, env: { [COOKIE_VAR]: 'paper_session=abc' }, fetch: call })
+    expect(message).toContain(ORIGIN_VAR)
+    /* REFUSED BEFORE THE REQUEST. Binding that leaks first is not binding. */
+    expect(calls).toEqual([])
+  })
+
+  it('refuses a cookie it could not put in a header', async () => {
+    const { call, calls } = fakeFetch({})
+    for (const bad of ['paper_session=has space', 'paper_session=has;semi', 'no-equals-sign', '=novalue']) {
+      expect(await refusal({ key: SHELF, env: { [COOKIE_VAR]: bad, [ORIGIN_VAR]: SHELF }, fetch: call })).toContain(
+        'well-formed',
+      )
+    }
+    expect(calls).toEqual([])
+  })
+
+  /* THE SHELF ISSUES ONE. Anything else on that response belongs to a proxy or
+     a portal, and joining them forwarded all of it to the socket and onto the
+     reader's terminal as a credential to keep. */
+  it('refuses a pairing response that sets more than one cookie', async () => {
+    const { call } = fakeFetch({
+      [SUBMIT]: () =>
+        new Response(null, {
+          status: 204,
+          headers: [
+            ['set-cookie', 'paper_session=abc; HttpOnly'],
+            ['set-cookie', 'portal=xyz; Path=/'],
+          ],
+        }),
+    })
+    expect(await refusal({ key: SHELF, env: { [CODE_VAR]: '123456' }, fetch: call })).toContain('issued no credential')
+  })
+
+  it('pairs with the code when the stored cookie is refused, because that is what the advice says to do', async () => {
+    const { call, calls } = fakeFetch({
+      [SESSION]: (() => {
+        let n = 0
+        return () => (n++ === 0 ? unauthorised() : live())
+      })(),
+      [SUBMIT]: paired,
+    })
+    const notes: string[] = []
+    await openShelf({
+      key: SHELF,
+      env: { [COOKIE_VAR]: 'paper_session=stale', [ORIGIN_VAR]: SHELF, [CODE_VAR]: '123456' },
+      fetch: call,
+      open: () => fakeSocket,
+      note: (line) => notes.push(line),
+    })
+    /* stale checked, refused, then paired, then the new one checked. */
+    expect(calls.map((one) => one.url)).toEqual([SESSION, SUBMIT, SESSION])
+    expect(notes.join('\n')).toContain('was refused')
+  })
+
+  it('announces nothing when the credential it just minted does not verify', async () => {
+    const { call } = fakeFetch({
+      [SUBMIT]: () => new Response(null, { status: 204, headers: { 'set-cookie': 'paper_session=bogus; Path=/' } }),
+      [SESSION]: unauthorised,
+    })
+    const notes: string[] = []
+    const message = await refusal({ key: SHELF, env: { [CODE_VAR]: '123456' }, fetch: call, note: (l) => notes.push(l) })
+    expect(message).toContain('not the shelf answering')
+    /* THE CREDENTIAL MUST NOT HAVE BEEN OFFERED. It used to be printed the
+       moment `/api/auth/submit` answered, so one the shelf then refused had
+       already been handed over as a session to keep. */
+    expect(notes.join('\n')).not.toContain('bogus')
   })
 })
 

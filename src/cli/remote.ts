@@ -43,10 +43,12 @@ import type { ServiceCaller } from './caller'
  * touches `call`, `stream` and `close`, never `peerId` or `sessionId`, so the
  * two lies `channel.ts` refuses to tell are not asked for.
  *
- * What is genuinely missing is not a transport. It is a CREDENTIAL LIFECYCLE
- * for a client with no cookie jar — six digits to `/api/auth/submit`, a
- * `Set-Cookie` to keep somewhere a CLI may keep one — and a MEANING FOR
- * `--shelf <key>`, which today resolves to nothing at all. Both are decisions.
+ * Both of those are now built, in `shelfLink.ts`: the credential comes from
+ * the environment (`PAPER_CLIENT_COOKIE`, or `PAPER_CLIENT_CODE` to mint one)
+ * and `--shelf` takes an exact origin. What this adapter still cannot change
+ * is the GRANT: the shelf's web session is read-only plus `book.position`, so
+ * a write arrives here as the envelope's `forbidden` and is unwrapped like any
+ * other refusal. That is the shelf's answer, not a hole in this file.
  */
 
 /** How the CLI's refusals are spelled when the transport, not a service,
