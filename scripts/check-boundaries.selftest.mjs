@@ -135,6 +135,22 @@ export const LEGAL_TREE = {
     "import { connect } from '../../kernel/core/shelfChannel.ts'\nexport const channel = connect\n",
   'src/main.web.tsx':
     "import { channel } from './app/web/channel.ts'\nvoid channel\n",
+  /* THE FOURTH ROOT (mobile), and the sequence the two native shells share.
+   *
+   * `bootApp.ts` is a composition root in its own right: it is what imports
+   * the platform composition now, and it reaches the kernel through the public
+   * entry and the NARROW boot door — never `ui/index.ts`, which names `App`
+   * and would drag the desktop pane tree into a mobile bundle. Both edges are
+   * pinned here so that a `native-boot-not-desktop-ui-entry` which stops
+   * matching fails on the CLEAN tree rather than silently in the mobile build.
+   */
+  'src/kernel/ui/boot.ts': 'export const loadShelf = () => []\n',
+  'src/app/bootApp.ts':
+    "import { kernelThing } from '../kernel/index.ts'\n" +
+    "import { loadShelf } from '../kernel/ui/boot.ts'\n" +
+    "import { composition } from './composition.desktop.ts'\n" +
+    'export const booted = { kernelThing, loadShelf, composition }\n',
+  'src/main.mobile.tsx': "import { booted } from './app/bootApp.ts'\nvoid booted\n",
 }
 
 /**
@@ -450,6 +466,39 @@ export const CASES = [
     from: 'src/main.tsx',
     to: 'src/kernel/ui/browser.ts',
     expect: ['native-root-not-browser-ui-entry'],
+  },
+  /* THE NARROW BOOT DOOR, both ways. The sequence and the mobile shell share
+     one reason to be refused the desktop barrel, so both are cased: a rule
+     written for one of them and quietly missing the other is exactly how the
+     desktop tree would reach a mobile bundle anyway. */
+  {
+    name: 'the shared launch sequence -> the DESKTOP ui entry',
+    files: {
+      'src/app/bootApp.ts':
+        LEGAL_TREE['src/app/bootApp.ts'] + "import { App } from '../kernel/ui/index.ts'\nvoid App\n",
+    },
+    from: 'src/app/bootApp.ts',
+    to: 'src/kernel/ui/index.ts',
+    expect: ['native-boot-not-desktop-ui-entry'],
+  },
+  {
+    name: 'the MOBILE composition root -> the DESKTOP ui entry',
+    files: {
+      'src/main.mobile.tsx':
+        LEGAL_TREE['src/main.mobile.tsx'] + "import { App } from './kernel/ui/index.ts'\nvoid App\n",
+    },
+    from: 'src/main.mobile.tsx',
+    to: 'src/kernel/ui/index.ts',
+    expect: ['native-boot-not-desktop-ui-entry'],
+  },
+  /* AND THE DESKTOP ROOT KEEPS IT, so the rule above is about which door a
+     caller takes rather than about the door being shut. */
+  {
+    name: 'the desktop composition root -> the DESKTOP ui entry (allowed)',
+    files: {},
+    from: 'src/main.tsx',
+    to: 'src/kernel/ui/index.ts',
+    expect: [],
   },
   {
     name: 'the browser composition root -> the NATIVE ui entry',
