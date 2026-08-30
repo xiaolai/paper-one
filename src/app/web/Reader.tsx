@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-/* THE TOOLS SHEET'S FIVE TABS — the mockup's "desktop side pane, as a sheet":
- * highlighter, search, list, chart, settings. Stats is absent on this client
- * (nothing measures reading time here), so four. */
+/* THE TOOLS SHEET'S FOUR TABS — the mockup's "desktop side pane, as a sheet":
+ * highlighter, search, list, settings. */
 import { Highlighter, List, Search as SearchIcon, Type } from 'lucide-react'
 import { BottomSheet } from './shell/BottomSheet'
 import { ProgressFooter } from './shell/ProgressFooter'
@@ -78,8 +77,7 @@ import styles from './Reader.module.css'
  *
  * What is genuinely absent: the RULER, reading aloud, and every mark MUTATION
  * — a browser session holds a read grant, so `canWrite` is false and the
- * highlight, note and delete controls are not drawn. Stats too: nothing here
- * measures reading time.
+ * highlight, note and delete controls are not drawn.
  */
 
 export interface ReaderProps {

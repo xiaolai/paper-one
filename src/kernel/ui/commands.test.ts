@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { buildCommands, filterCommands, score, type Command } from './commands'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
-import { PANE_SHORTCUTS, panesFor } from './panes'
+import { PANES, PANE_SHORTCUTS, panesFor } from './panes'
 import { resolveAccel, resolvePageKey } from './accel'
 import { initialState, paneFits, type AppState } from './state'
 
@@ -440,10 +440,24 @@ describe('advertised combos are bound', () => {
 })
 
 describe('PANE_SHORTCUTS', () => {
-  it('binds §11\'s ⌘1…5 to contents, marginalia, search, cards and stats', () => {
-    /* FIVE, AND THE NAME SAYS FIVE. It said six and named a Bookmarks panel,
-     * left behind when bookmarks moved into Marginalia — a test whose report
-     * described a panel the app does not have, printed on every green run.
+  it('binds §11\'s ⌘1…4 to contents, marginalia, search and cards', () => {
+    /* FOUR, AND THE NAME SAYS FOUR — THE SECOND TIME THIS NAME OUTLIVED A PANEL.
+     *
+     * It said six once, naming a Bookmarks panel left behind when bookmarks
+     * moved into Marginalia: a test whose report described a panel the app does
+     * not have, printed on every green run. That was fixed, and the comment
+     * saying so is the paragraph you are reading.
+     *
+     * Then the Reading pane went (WI-12.5) and the name said five, naming
+     * `stats` — the same defect, in the same sentence, surviving the fix for
+     * itself. `test:ledger` records a title without reading it, and an
+     * assertion about the rows cannot see the words above it, so nothing was
+     * capable of catching either round.
+     *
+     * The test below now READS ITS OWN TITLE and holds it to the rows. That is
+     * the only thing here that could have caught this, and the second instance
+     * is what makes it worth writing rather than a third comment promising to
+     * be careful.
      *
      * THE DIGITS ARE NOT THE RAIL'S ORDER. They are the order the panels were
      * published in, and a digit belongs to a panel rather than to a position —
@@ -456,6 +470,25 @@ describe('PANE_SHORTCUTS', () => {
       ['3', 'search'],
       ['4', 'cards'],
     ])
+
+    /* THE TITLE, HELD TO THE ROWS.
+     *
+     * Twice now this name has described a panel the app does not have, and both
+     * times every check below it passed. A name is what a reader of a green run
+     * sees; nothing else in the suite is read as often or checked as little.
+     *
+     * The range and the list both come from `PANE_SHORTCUTS`, so a panel added
+     * or removed fails HERE, in the test that names it, rather than in whatever
+     * reads the report months later. */
+    const title = expect.getState().currentTestName ?? ''
+    const labelOf = (id: string) => PANES.find((pane) => pane.id === id)?.label.toLowerCase() ?? id
+    expect(title, 'the title must state the range the rows actually cover').toContain(
+      `⌘1…${PANE_SHORTCUTS.length}`,
+    )
+    const listed = (title.split(' to ')[1] ?? '').split(/,\s*|\s+and\s+/).filter(Boolean)
+    expect(listed, 'the title must name each bound panel, and no other').toEqual(
+      PANE_SHORTCUTS.map((one) => labelOf(one.pane)),
+    )
   })
 
   it('binds every digit to a panel that actually renders', () => {

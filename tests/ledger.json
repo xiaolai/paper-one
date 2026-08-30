@@ -3740,7 +3740,7 @@
     "src/kernel/ui/closeWindow.test.ts > the close sequence > still closes when the preparation throws rather than rejects",
     "src/kernel/ui/closeWindow.test.ts > the close sequence > still closes, and still resolves, when the reporter itself throws at every turn",
     "src/kernel/ui/commands.test.ts > PANE_SHORTCUTS > binds every digit to a panel that actually renders",
-    "src/kernel/ui/commands.test.ts > PANE_SHORTCUTS > binds §11's ⌘1…5 to contents, marginalia, search, cards and stats",
+    "src/kernel/ui/commands.test.ts > PANE_SHORTCUTS > binds §11's ⌘1…4 to contents, marginalia, search and cards",
     "src/kernel/ui/commands.test.ts > advertised combos are bound > advertises every reading-size key it binds, so none is a secret",
     "src/kernel/ui/commands.test.ts > advertised combos are bound > binds Ctrl+Q to quit off macOS, and leaves ⌘Q to the platform on it",
     "src/kernel/ui/commands.test.ts > advertised combos are bound > binds every combo the palette prints",
