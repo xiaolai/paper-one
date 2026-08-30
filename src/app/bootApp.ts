@@ -65,6 +65,23 @@ import { bootShelf } from './boot'
 import { capabilities } from 'virtual:paper-composition'
 
 /**
+ * The shell's event channel, loaded once and lazily.
+ *
+ * `@tauri-apps/api/event` was imported inline at three separate call sites —
+ * the shutdown listener, the shutdown emitter, and the opened-files bridge.
+ * Three copies of one decision about WHEN the module is pulled in, and the
+ * import is deliberately lazy (it is what keeps `@tauri-apps` off the critical
+ * path of a launch that may not need it), so the laziness is the thing that
+ * had to stay identical in all three and had nothing holding it there.
+ *
+ * The module cache makes the second and third calls free, so this is one
+ * import in practice as well as in the source.
+ */
+async function shellEvents(): Promise<typeof import('@tauri-apps/api/event')> {
+  return import('@tauri-apps/api/event')
+}
+
+/**
  * Everything a native shell needs to render its first frame, and nothing about
  * how it renders it.
  *
@@ -155,9 +172,12 @@ export async function bootApp(): Promise<BootedApp> {
           return false
         })
   const diagnosticsOn = import.meta.env.DEV || switchAsked
-  const diagnosticLog = createDiagnosticLog()
+  /* BUILT ONLY IF SOMETHING WILL WRITE TO IT. With diagnostics off, nothing
+     records and this was returned as `null` anyway — so the ring it allocates
+     was unreachable state from the moment it existed. */
+  const diagnosticLog = diagnosticsOn ? createDiagnosticLog() : null
   const diagnosticSpool =
-    fs === null || !diagnosticsOn
+    fs === null || diagnosticLog === null
       ? null
       : createDiagnosticSpool({
           log: diagnosticLog,
@@ -195,9 +215,21 @@ export async function bootApp(): Promise<BootedApp> {
             if (rawRows !== null && parsedRows === null) {
               console.error('paper: the legacy library value exists but would not parse; migration sees no rows')
             }
+            /* THE SAME SENTENCE FOR THE MARKS, which had none. The paragraph
+               above says a value that would not parse is SAID rather than
+               silently emptied, and then the very next line emptied one
+               silently: a corrupt marks blob migrated the books and dropped
+               every highlight and note on them, and the migration STAMPS, so
+               the next launch treated those books as already carried across.
+               Nothing anywhere said where the annotations went. */
+            const rawMarks = storage.getItem('paper.marks.v1')
+            const parsedMarks = readJson(rawMarks, null)
+            if (rawMarks !== null && parsedMarks === null) {
+              console.error('paper: the legacy marks value exists but would not parse; migration carries no marks')
+            }
             return {
               rows: asRows(parsedRows ?? []),
-              marks: readJson(storage.getItem('paper.marks.v1'), []),
+              marks: parsedMarks ?? [],
             }
           },
     migrate: (target, legacy) => timed('carry a legacy library across', () => migrateToFolders(target, legacy)),
@@ -215,8 +247,14 @@ export async function bootApp(): Promise<BootedApp> {
     },
   })
 
-  moment('everything before the first render', { ms: Math.round(performance.now() - bootFrom) })
-  reportFs('filesystem, up to the first render')
+  /* NAMED FOR WHAT IT ACTUALLY COVERS. This said "everything before the first
+     render" and was taken here — before the services are built, before the
+     capabilities compose, and before the shutdown handshake is armed, all of
+     which also precede the render and all of which do I/O. The number was
+     right and the label was not, which is worse than no label: it made the
+     phases below it invisible to the one measurement anyone reads. */
+  moment('the store and the shelf', { ms: Math.round(performance.now() - bootFrom) })
+  reportFs('filesystem, up to the shelf')
 
   /* THE KERNEL'S SERVICES, built once, here — the composition root — over the
    * store and the shelf resolved above, and handed to the UI. The hooks are
@@ -240,15 +278,18 @@ export async function bootApp(): Promise<BootedApp> {
        is `NOOP_DIAGNOSTICS` and nothing is recorded either. */
     diagnostics: createDiagnostics({
       enabled: diagnosticsOn,
-      /* ⚠️ **THE RECORDER FOLLOWS `enabled`, NOT THE SPOOL — AND IT USED TO
+      /* ⚠️ **THE RECORDER FOLLOWS THE WINDOW, NOT THE SPOOL — AND IT USED TO
          FOLLOW THE SPOOL.** `diagnosticSpool` is null wherever there is no
          filesystem, so a dev build outside Tauri had `diagnosticsOn` true, no
          recorder installed, and a Developer panel reporting that diagnostics
          were being recorded over a window that could never fill. The two are
          different questions: whether anything is WRITTEN DOWN in memory, and
          whether it is also projected to a FILE. Only the second needs a disk.
-         Found by audit. */
-      ...(diagnosticsOn
+         Found by audit.
+         Keyed on `diagnosticLog` rather than on `diagnosticsOn`: the log is
+         now built only when diagnostics are on, so the two say the same thing
+         — and this way the compiler is the one enforcing it. */
+      ...(diagnosticLog
         ? {
             record: (entry) => {
               diagnosticLog.record(entry)
@@ -349,11 +390,11 @@ export async function bootApp(): Promise<BootedApp> {
      button — the only quit on Windows and Linux — closes the journal too. */
   const teardown = armShutdownInBackground({
     listen: async (event, handler) => {
-      const { listen } = await import('@tauri-apps/api/event')
+      const { listen } = await shellEvents()
       return listen(event, () => handler())
     },
     emit: async (event) => {
-      const { emit } = await import('@tauri-apps/api/event')
+      const { emit } = await shellEvents()
       await emit(event)
     },
     /* THE SPOOL'S TAIL GOES WITH THE FLUSH, because the diagnostics worth
@@ -452,7 +493,7 @@ export async function bootApp(): Promise<BootedApp> {
       let stopped = false
       let stop: (() => void) | null = null
       void (async () => {
-        const { emit, listen } = await import('@tauri-apps/api/event')
+        const { emit, listen } = await shellEvents()
         const off = await listen<string[]>(OPEN_FILES_EVENT, (event) => handler(event.payload))
         if (stopped) {
           off()

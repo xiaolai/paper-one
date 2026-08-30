@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { isTauri } from '../platform'
+import { inTauri } from '../inTauri'
 import { CLOSE_HOLD_MS, createCloseSequence } from '../closeWindow'
 
 /**
@@ -12,7 +12,7 @@ import { CLOSE_HOLD_MS, createCloseSequence } from '../closeWindow'
  * there is no window to close and nothing to do.
  */
 export function requestWindowClose(): void {
-  if (!isTauri()) return
+  if (!inTauri()) return
   void getCurrentWindow()
     .close()
     .catch((cause: unknown) => {
@@ -51,7 +51,7 @@ export function requestWindowClose(): void {
  */
 export function useWindowClose(prepare: () => Promise<unknown>): void {
   useEffect(() => {
-    if (!isTauri()) return
+    if (!inTauri()) return
     /* The registration is ASYNC and the cleanup is not: torn down before the
      * promise resolved — which StrictMode's mount/unmount/mount does on every
      * launch in dev — `stop` was still undefined, the cleanup removed nothing,

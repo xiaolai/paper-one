@@ -51,19 +51,86 @@ function isPlatform(value: string | null): value is Platform {
  * The query parameter persists into localStorage so a reload keeps it; pass
  * `?platform=auto` to clear.
  */
-function override(): Platform | null {
-  const requested = new URLSearchParams(window.location.search).get('platform')
-  if (requested === 'auto') {
-    window.localStorage.removeItem(OVERRIDE_KEY)
+/**
+ * `localStorage`, or nothing.
+ *
+ * ⚠️ **EVERY ACCESS WAS BARE, AND THIS ONE CANNOT AFFORD TO THROW.** Reading or
+ * writing `localStorage` raises in a browser where storage is disabled, in
+ * Safari's private mode past its quota, and behind some enterprise policies.
+ * `resolvePlatform` runs as a `useState` initialiser — inside render — so a
+ * throw there does not degrade the chrome, it takes the whole app down before
+ * anything is drawn. The rest of this file already refuses to let an OPTIONAL
+ * system preference kill a render (`match()` above); a design-review
+ * convenience has even less claim to.
+ */
+function store(): Storage | null {
+  try {
+    return window.localStorage
+  } catch {
     return null
   }
-  if (isPlatform(requested)) {
-    window.localStorage.setItem(OVERRIDE_KEY, requested)
-    return requested
+}
+
+/**
+ * What was written down last time, or null if it cannot be read.
+ *
+ * ⚠️ **THE READ NEEDS ITS OWN GUARD, not just the reach for the object.**
+ * `store()` catches a `window.localStorage` that throws on ACCESS, which is
+ * what a disabled-storage browser does — but `getItem` can throw on its own
+ * behind some enterprise policies and in a corrupted profile, and that throw
+ * lands in `resolvePlatform`, which runs inside a `useState` initialiser. The
+ * first version of this fix guarded only the access, and an independent verify
+ * pass caught the half.
+ */
+function remembered(): string | null {
+  try {
+    return store()?.getItem(OVERRIDE_KEY) ?? null
+  } catch {
+    return null
   }
-  const stored = window.localStorage.getItem(OVERRIDE_KEY)
+}
+
+/**
+ * The pinned override, if one was asked for or remembered.
+ *
+ * PURE — it only reads. The WRITE that used to live here happens once at module
+ * load (`rememberOverride` below), because this is called from a `useState`
+ * initialiser and from `useMemo`: React may run a render calculation twice or
+ * throw its result away, and a function that persists on the way past is not
+ * one you can call during render.
+ */
+function override(): Platform | null {
+  const requested = new URLSearchParams(window.location.search).get('platform')
+  if (requested === 'auto') return null
+  if (isPlatform(requested)) return requested
+  const stored = remembered()
   return isPlatform(stored) ? stored : null
 }
+
+/**
+ * Persist what the URL asked for, once, at module load.
+ *
+ * The comment above `override` says the override is read from the URL that
+ * loaded the page — so the moment to write it down is when that page loads,
+ * not on whichever render happens to ask first. Failing to persist is not
+ * fatal: the query parameter still governs THIS load through `override()`, and
+ * only the survive-a-reload part is lost.
+ */
+function rememberOverride(): void {
+  const requested = new URLSearchParams(window.location.search).get('platform')
+  const keep = store()
+  if (keep === null) return
+  try {
+    if (requested === 'auto') keep.removeItem(OVERRIDE_KEY)
+    else if (isPlatform(requested)) keep.setItem(OVERRIDE_KEY, requested)
+  } catch {
+    /* A full or refused store still leaves the override honoured for this
+       load. Nothing to report: the reader asked for a chrome, not for it to
+       be remembered. */
+  }
+}
+
+rememberOverride()
 
 export function resolvePlatform(): Platform {
   return override() ?? detect()
@@ -74,11 +141,6 @@ export function usePlatform(): Platform {
   // and the override is read from the URL that loaded it.
   const [platform] = useState<Platform>(resolvePlatform)
   return platform
-}
-
-/** True when running inside the Tauri webview rather than a plain browser. */
-export function isTauri(): boolean {
-  return '__TAURI_INTERNALS__' in window
 }
 
 const DARK = '(prefers-color-scheme: dark)'
@@ -109,22 +171,37 @@ function match(query: string): MediaQueryList | null {
  * it again in every application is the thing the system preference exists to
  * stop. There is no UI for it, and no way to switch it on from inside Paper.
  */
-export function usePrefersReducedMotion(): boolean {
-  const query = '(prefers-reduced-motion: reduce)'
-  const [reduce, setReduce] = useState(() => match(query)?.matches ?? false)
+/**
+ * Whether a media query matches now, and whenever it changes.
+ *
+ * ⚠️ **ONE HOOK, BECAUSE TWO COPIES HAD ALREADY DRIFTED.** This was written out
+ * twice — once for reduced motion, once for the colour scheme — and only the
+ * first copy re-read after subscribing. The second therefore had exactly the
+ * bug the first one carries a paragraph explaining: the lazy initialiser runs
+ * during render, the subscription lands after commit, and a change in between
+ * is missed by both — and, since nothing else ever reads it, missed for the
+ * rest of the session. A reader who flipped their Mac to dark while the window
+ * was opening got a light book until they flipped it again.
+ *
+ * `match` returns null where there is no `matchMedia` (jsdom has none), and the
+ * honest answer where the question cannot be asked is the fallback.
+ */
+function useMediaQuery(query: string, fallback = false): boolean {
+  const [matches, setMatches] = useState(() => match(query)?.matches ?? fallback)
   useEffect(() => {
     const media = match(query)
     if (media === null) return
-    const onChange = (e: MediaQueryListEvent) => setReduce(e.matches)
+    const onChange = (e: MediaQueryListEvent) => setMatches(e.matches)
     media.addEventListener('change', onChange)
-    /* Re-read after subscribing, not only before. The lazy initialiser runs
-     * during render and the subscription lands after commit; a preference that
-     * changed in between would be missed by both, and — since nothing else ever
-     * reads it — missed for the rest of the session. */
-    setReduce(media.matches)
+    /* Re-read after subscribing, not only before — see the note above. */
+    setMatches(media.matches)
     return () => media.removeEventListener('change', onChange)
-  }, [])
-  return reduce
+  }, [query])
+  return matches
+}
+
+export function usePrefersReducedMotion(): boolean {
+  return useMediaQuery('(prefers-reduced-motion: reduce)')
 }
 
 /**
@@ -132,13 +209,5 @@ export function usePrefersReducedMotion(): boolean {
  * default, with an explicit override in Settings.
  */
 export function usePrefersDark(): boolean {
-  const [dark, setDark] = useState(() => match(DARK)?.matches ?? false)
-  useEffect(() => {
-    const query = match(DARK)
-    if (query === null) return
-    const onChange = (e: MediaQueryListEvent) => setDark(e.matches)
-    query.addEventListener('change', onChange)
-    return () => query.removeEventListener('change', onChange)
-  }, [])
-  return dark
+  return useMediaQuery(DARK)
 }

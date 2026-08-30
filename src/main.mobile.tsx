@@ -62,7 +62,16 @@ async function main(root: HTMLElement): Promise<void> {
 
   createRoot(root).render(
     <StrictMode>
-      <MobileApp services={booted.services} shelfUnread={booted.shelfUnread} composition={booted.composition} />
+      <MobileApp
+        services={booted.services}
+        shelfUnread={booted.shelfUnread}
+        composition={booted.composition}
+        /* WHAT OPENING THE STORE HAD TO SAY. The desktop root has always
+           forwarded this; mobile dropped it, so a phone whose store was
+           damaged and moved aside drew an ordinary empty library with nothing
+           anywhere explaining where the books went. */
+        bootNotice={booted.bootNotice}
+      />
     </StrictMode>,
   )
 

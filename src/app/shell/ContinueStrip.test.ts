@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { continueReading } from './MobileApp'
+import { recentlyOpened } from './ContinueStrip'
 import type { IndexedBook } from '../../kernel'
 
 /**
@@ -8,8 +8,14 @@ import type { IndexedBook } from '../../kernel'
  * The strip is the mockup's own: "Continue", three covers, most recent first.
  * Three of the four rules below are about what it LEAVES OUT, which is where a
  * strip like this goes wrong — a shelf sorted by recency and sliced is the
- * obvious implementation and it offers books you have finished, books you have
- * never opened, and books whose progress is zero.
+ * obvious implementation and it offers books you have finished and books you
+ * have never opened.
+ *
+ * These cases were written against a second selection in the mobile shell
+ * (`continueReading`), which filtered before handing books to a component that
+ * filtered again by a different rule. There is one policy now and it lives
+ * beside the component; the cases moved with it, and they cover BOTH clients
+ * because both mount this strip.
  */
 
 /* `exactOptionalPropertyTypes` is on, so `Partial<IndexedBook>` refuses an
@@ -27,31 +33,43 @@ describe('what the Continue strip offers', () => {
       book('newest', { openedAt: 300 }),
       book('middle', { openedAt: 200 }),
     ]
-    expect(continueReading(shelf).map((b) => b.bookId)).toEqual(['newest', 'middle', 'old'])
+    expect(recentlyOpened(shelf).map((b) => b.bookId)).toEqual(['newest', 'middle', 'old'])
   })
 
   it('offers three, because the mockup does', () => {
     const shelf = Array.from({ length: 9 }, (_, i) => book(`b${i}`, { openedAt: i }))
-    expect(continueReading(shelf)).toHaveLength(3)
+    expect(recentlyOpened(shelf)).toHaveLength(3)
   })
 
   /* A STRIP CALLED CONTINUE THAT OFFERS A FINISHED BOOK IS OFFERING THE WRONG
      VERB. The shelf below it is where a finished book is found again. */
   it('leaves out a book that is finished', () => {
     const shelf = [book('done', { finished: true }), book('reading')]
-    expect(continueReading(shelf).map((b) => b.bookId)).toEqual(['reading'])
+    expect(recentlyOpened(shelf).map((b) => b.bookId)).toEqual(['reading'])
   })
 
-  /* NEVER STARTED IS NOT "CONTINUE" EITHER, and both spellings of it occur: a
-     book added and never opened has no `openedAt`, and one opened at the cover
-     and closed again has `openedAt` with no progress. */
-  const unstarted: readonly { why: string; over: Overrides }[] = [
-    { why: 'never opened', over: { openedAt: undefined } },
-    { why: 'opened but not started', over: { progress: 0 } },
-    { why: 'has no progress recorded at all', over: { progress: undefined } },
-  ]
-  it.each(unstarted)('leaves out a book $why', ({ over }) => {
-    expect(continueReading([book('candidate', over), book('reading')]).map((b) => b.bookId)).toEqual(['reading'])
+  /* NEVER OPENED IS NOT "CONTINUE" EITHER. `openedAt` is the signal the strip
+     keys on, and a book added and never opened is not something to continue.
+
+     ⚠️ **`progress` IS DELIBERATELY NOT PART OF THIS.** The removed
+     `continueReading` also required `progress > 0`, and two cases here asserted
+     that. They are gone with the rule rather than kept green some other way:
+     a book you opened and closed at the cover IS the book you put down, and
+     the strip's own header states `openedAt` as the signal. The stricter rule
+     was the newer of the two and had no reason written down. */
+  it.each([
+    { why: 'was never opened', over: { openedAt: undefined } },
+    { why: 'has openedAt zero', over: { openedAt: 0 } },
+  ] as readonly { why: string; over: Overrides }[])('leaves out a book that $why', ({ over }) => {
+    expect(recentlyOpened([book('candidate', over), book('reading')]).map((b) => b.bookId)).toEqual(['reading'])
+  })
+
+  /* AND A BOOK OPENED BUT NOT PROGRESSED IS STILL OFFERED, which is the other
+     half of the rule above stated as behaviour rather than as an omission. */
+  it('keeps a book that was opened but has no progress yet', () => {
+    expect(recentlyOpened([book('just-opened', { progress: 0, openedAt: 5 })]).map((b) => b.bookId)).toEqual([
+      'just-opened',
+    ])
   })
 
   /* ⚠️ **DOES NOT REORDER THE CALLER'S ARRAY.** `library.books` is the shelf's
@@ -64,11 +82,11 @@ describe('what the Continue strip offers', () => {
   it('does not sort the shelf it was given', () => {
     const shelf = [book('a', { openedAt: 1 }), book('b', { openedAt: 9 })]
     const order = shelf.map((b) => b.bookId)
-    continueReading(shelf)
+    recentlyOpened(shelf)
     expect(shelf.map((b) => b.bookId)).toEqual(order)
   })
 
   it('is empty for an empty shelf', () => {
-    expect(continueReading([])).toEqual([])
+    expect(recentlyOpened([])).toEqual([])
   })
 })

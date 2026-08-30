@@ -1,4 +1,4 @@
-import { useMemo, useState, useSyncExternalStore } from 'react'
+import { useState, useSyncExternalStore } from 'react'
 import {
   Cards,
   Library,
@@ -10,12 +10,7 @@ import {
   useLibrary,
   usePrefersDark,
 } from '../../kernel/ui/mobile'
-import {
-  KERNEL_SETTINGS,
-  type Composition,
-  type IndexedBook,
-  type KernelServices,
-} from '../../kernel'
+import { KERNEL_SETTINGS, type Composition, type KernelServices } from '../../kernel'
 import { TabBar, type Tab } from '../shell/TabBar'
 import { ContinueStrip } from '../shell/ContinueStrip'
 import { ReadingSettings } from './ReadingSettings'
@@ -54,8 +49,10 @@ export interface MobileAppProps {
   readonly services: KernelServices
   /** The shelf could not be READ, which is not the same as having no books. */
   readonly shelfUnread: boolean
-  /** What composed, so the settings screen can draw what capabilities contribute. */
+  /** What composed: the settings sections, book actions and statuses it contributes. */
   readonly composition: Composition
+  /** What opening the store had to say, or null. Drawn by the shelf. */
+  readonly bootNotice?: string | null
 }
 
 /**
@@ -69,49 +66,17 @@ export interface MobileAppProps {
  */
 const deviceCovers = (bookId: string) => coverIn(tauriVaultFs, bookId)
 
-/** How many books the Continue strip offers. Three, from the mockup. */
-const CONTINUE = 3
-
-/**
- * The books to offer picking up again: most recently read first, and only ones
- * actually started.
- *
- * `finished` books are excluded rather than sorted last. A strip called
- * Continue that offers a book you have finished is offering the wrong verb,
- * and the shelf below is where a finished book is found again.
- */
-export function continueReading(
-  books: readonly IndexedBook[],
-  limit = CONTINUE,
-): readonly IndexedBook[] {
-  return books
-    .filter(
-      (book) =>
-        book.finished !== true &&
-        (book.progress ?? 0) > 0 &&
-        book.openedAt !== undefined,
-    )
-    /* SAFE TO SORT IN PLACE, because `.filter` above already returned a new
-       array — `library.books` is the shelf's own snapshot, and reordering it
-       would silently re-sort the Library screen below the strip. This had a
-       redundant `.slice()` here guarding against that, and a comment claiming
-       the slice was what made it safe; mutation testing removed the slice and
-       every case still passed, which is how the comment was found to be
-       describing the wrong mechanism. */
-    .sort((a, b) => (b.openedAt ?? 0) - (a.openedAt ?? 0))
-    .slice(0, limit)
-}
-
 export function MobileApp({
   services,
   shelfUnread,
   composition,
+  bootNotice = null,
 }: MobileAppProps) {
   const [tab, setTab] = useState<Tab>('library')
   const [query, setQuery] = useState('')
   const library = useLibrary(services.library)
   const cards = useCards(services.cards)
-  const platform = useMemo(resolvePlatform, [])
+  const [platform] = useState(resolvePlatform)
 
   /* THE SETTINGS ARE READ THROUGH THE STORE, NOT COPIED INTO STATE. The store
      is already an external store with a snapshot; a second copy here would be
@@ -134,26 +99,21 @@ export function MobileApp({
     settings.get(KERNEL_SETTINGS.contrast),
   )
 
-  const recent = useMemo(() => continueReading(library.books), [library.books])
-
-  /* NOTHING OPENS A BOOK YET, and the tab bar is told so rather than being
-     given a handler that does nothing. `TabBar` already redirects Reading to
-     Library when there is no book to return to — a tab that opens an empty
-     reader is a tab that does nothing — so the reader landing is what turns
-     that tab on, in the change that mounts it. */
-  const reading = null
+  /* THE BOOT NOTICE IS THE SHELF'S TO DRAW — a damaged store moved aside, a
+     disk that would not open. `Library` already renders it over the empty
+     state and takes the dismissal; mobile was dropping it on the floor, so a
+     phone whose store failed to open showed an ordinary empty library and no
+     reason at all. */
+  const [notice, setNotice] = useState<string | null>(bootNotice)
 
   return (
     <div className={styles.shell} ref={setHost} data-theme={theme}>
       {tab === 'library' && (
         <div className={styles.stage}>
-          {recent.length > 0 && (
-            <ContinueStrip
-              books={recent}
-              onOpen={() => {}}
-              coverFor={deviceCovers}
-            />
-          )}
+          {/* THE WHOLE SHELF, not a pre-selected slice — `recentlyOpened`
+              inside the strip is the one selection, and it draws nothing when
+              nothing qualifies. */}
+          <ContinueStrip books={library.books} onOpen={() => {}} coverFor={deviceCovers} />
           {/* THE SHELF GETS A POSITIONED BOX OF ITS OWN, which the Continue
               strip does not sit inside — `Library` is `position: absolute;
               inset: 0`, so without this it covers the strip above it. */}
@@ -166,6 +126,12 @@ export function MobileApp({
               onOpen={() => {}}
               libraryQuery={query}
               onQueryChange={setQuery}
+              /* THE PHONE DESIGN IS A LIST. `Library` defaults to `grid`, which
+                 is the desktop's answer; the mockup's Library is rows with a
+                 thumb, a title, an author and a format badge. */
+              defaultLayout="list"
+              bootNotice={notice}
+              onDismissBootNotice={() => setNotice(null)}
               /* NOTHING IMPORTS OR ENRICHES ON A PHONE YET — the honest values
                  rather than a spinner that never turns. `onAddBooks` is absent
                  for the same reason: the screen draws no control it cannot
@@ -173,8 +139,13 @@ export function MobileApp({
               importing={null}
               enriching={0}
               importNotice={null}
-              bookActions={[]}
-              bookStatuses={[]}
+              /* WHAT THE CAPABILITIES CONTRIBUTE, not two empty lists. `sync`
+                 contributes Download and Evict and the transfer statuses, and
+                 it IS in the mobile composition — so passing `[]` took the
+                 remedy away from exactly the metadata-only books that need it,
+                 and hid every transfer's progress. */
+              bookActions={composition.bookActions}
+              bookStatuses={composition.bookStatuses}
             />
           </div>
         </div>
@@ -201,7 +172,12 @@ export function MobileApp({
           />
         </div>
       )}
-      <TabBar active={tab} onSelect={setTab} hasBook={reading !== null} />
+      {/* NO BOOK TO RETURN TO YET. `TabBar` redirects Reading to Library while
+          this is false — a tab that opens an empty reader is a tab that does
+          nothing — so mounting the reader is what turns it on. Written as the
+          constant it is, rather than as a `reading` variable that is always
+          null and only exists to be compared against. */}
+      <TabBar active={tab} onSelect={setTab} hasBook={false} />
     </div>
   )
 }

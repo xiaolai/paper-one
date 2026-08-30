@@ -8,7 +8,13 @@
  */
 import type { Plugin } from 'vite'
 
-export type Platform = 'desktop' | 'ios' | 'android'
+/* ⚠️ `'web'` WAS MISSING, and this file is hand-kept — see the header. The real
+   `platformFromTauriEnv` has returned `'web'` since the browser client landed
+   (`pnpm build:web` sets `TAURI_ENV_PLATFORM=web` by hand), so anything reading
+   `selectPlatform()` through these types was told a value it can actually
+   return does not exist. `scripts/lib/compositions.mjs`'s own `PLATFORMS` is
+   the list this must match. */
+export type Platform = 'desktop' | 'ios' | 'android' | 'web'
 
 export const VIRTUAL_ID: 'virtual:paper-composition'
 export const PLUGIN_NAME: 'paper:composition'

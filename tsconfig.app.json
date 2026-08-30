@@ -8,13 +8,25 @@
     "outDir": ".types/app",
     "tsBuildInfoFile": ".types/app.tsbuildinfo"
   },
+  // ⚠️ **EVERY HTML ENTRY'S SCRIPT BELONGS HERE, AND THIS LIST HAS BEEN WRONG
+  // TWICE.**
+  //
   // `src/main.web.tsx` IS THE BROWSER CLIENT'S COMPOSITION ROOT and was absent
   // from this list, so `pnpm typecheck` never saw it — not its session and
   // channel wiring, not its ACL list, not its tab composition. A second entry
   // is easy to add to the bundler and easy to forget here, and the two failures
   // look nothing alike: the build kept working, and the types were simply never
   // checked. It went in with a real error in it.
-  "files": ["src/main.tsx", "src/main.web.tsx", "src/vite-env.d.ts"],
+  //
+  // Then `src/main.mobile.tsx` went in the same way, and the note above — which
+  // says precisely this — did not stop it: a comment is not a gate. Measured
+  // rather than reasoned: a `const x: number = 'nope'` appended to the mobile
+  // entry passed `pnpm typecheck` clean.
+  //
+  // `scripts/check-html-entries.test.mjs` now DERIVES the expected list from
+  // the `index*.html` files themselves, so a fourth entry fails there rather
+  // than shipping unchecked. Do not hand-maintain this against the bundler.
+  "files": ["src/main.tsx", "src/main.mobile.tsx", "src/main.web.tsx", "src/vite-env.d.ts"],
   "include": ["src/app/**/*"],
   "exclude": ["src/app/**/*.test.ts", "src/app/**/*.test.tsx"],
   "references": [{ "path": "./tsconfig.kernel.json" }, { "path": "./tsconfig.capabilities.json" }]
