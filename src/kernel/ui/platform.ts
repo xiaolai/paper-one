@@ -9,17 +9,37 @@ import type { Platform } from '../core/metrics'
  * Windows and Linux keep a real 44px titlebar row with drawn window buttons.
  * Only that choice depends on the platform, so a user-agent sniff is enough
  * and avoids pulling in the OS plugin, its capability grant and its async
- * boot path for a single three-way branch.
+ * boot path for a single branch.
+ *
+ * ⚠️ **THE MOBILE TESTS COME FIRST, AND THAT ORDER IS THE FIX.** This function
+ * used to read `/Mac|iPhone|iPad|iPod/ -> 'macos'` — one alternation covering
+ * a desktop and three handsets — so the iOS build reported itself as macOS and
+ * drew a 52px overlay titlebar with three traffic lights on an iPhone. Nothing
+ * downstream was wrong; they were all answering the question they were asked.
+ *
+ * iPadOS 13 and later report a DESKTOP user agent — `Macintosh; Intel Mac OS
+ * X` — so the string alone genuinely cannot tell an iPad from a Mac, which is
+ * why the old alternation looked reasonable. `maxTouchPoints` is the
+ * discriminator Apple left behind: an iPad reports 5, a Mac reports 0 or 1.
+ * It is checked BEFORE the Mac branch because the Mac branch would otherwise
+ * claim every iPad.
  */
 function detect(): Platform {
   const ua = navigator.userAgent
-  if (/Mac|iPhone|iPad|iPod/.test(ua)) return 'macos'
+  if (/Android/.test(ua)) return 'android'
+  if (/iPhone|iPod|iPad/.test(ua)) return 'ios'
+  if (/Mac/.test(ua)) return navigator.maxTouchPoints > 1 ? 'ios' : 'macos'
   if (/Win/.test(ua)) return 'windows'
   return 'linux'
 }
 
 const OVERRIDE_KEY = 'paper.platform-override'
-const PLATFORMS: readonly Platform[] = ['macos', 'windows', 'linux']
+/* THE OVERRIDE ACCEPTS THE MOBILE ONES TOO, so `?platform=ios` pins the phone
+   chrome in the desktop dev server and the mobile shell can be checked against
+   the design without a simulator. `web` stays out: it is what the browser
+   client resolves to on its own, and pinning it inside a Tauri window would
+   claim there is no titlebar when there is one. */
+const PLATFORMS: readonly Platform[] = ['macos', 'windows', 'linux', 'ios', 'android']
 
 function isPlatform(value: string | null): value is Platform {
   return value !== null && (PLATFORMS as readonly string[]).includes(value)

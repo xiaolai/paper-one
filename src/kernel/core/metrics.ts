@@ -25,7 +25,7 @@ import type { Align, ReadingStyle, Theme, Typeface } from './uiTypes'
  * It has no window, so its titlebar and system zone are zero. Anything else
  * keyed by platform should ask whether a browser has one before answering.
  */
-export type Platform = 'macos' | 'windows' | 'linux' | 'web'
+export type Platform = 'macos' | 'windows' | 'linux' | 'web' | 'ios' | 'android'
 
 /** §03 baseline grid. The reading line box, and the unit prose spacing, the
  *  ruler band and scroll snapping are all multiples of. */
@@ -109,6 +109,14 @@ export const TITLEBAR_H: Record<Platform, number> = {
    * rather than 44: a reserved band with nothing in it would push the reading
    * surface down the screen for a decoration that does not exist. */
   web: 0,
+  /* NEITHER HAS A WINDOW AT ALL. The status bar is the OS's, drawn above the
+   * webview and reached through `env(safe-area-inset-top)` rather than through
+   * a reserved band here — a phone's chrome is an inset, not a titlebar. Both
+   * were reported as `macos` until the platform type learned about them, so
+   * the mobile build drew a 52px overlay titlebar and three traffic lights on
+   * an iPhone. */
+  ios: 0,
+  android: 0,
 }
 
 /**
@@ -130,6 +138,12 @@ export const SYS_ZONE_W: Record<Platform, number> = {
   /* No window controls to reserve for — the browser draws its own chrome
    * outside the page entirely. */
   web: 0,
+  /* Nor here: a phone has no window controls to reserve a corner for. The
+   * Dynamic Island and the notch ARE intrusions into the top of the screen,
+   * but they are horizontal ones the safe-area insets already describe, and a
+   * system zone is a WIDTH set aside at one end of the titlebar row. */
+  ios: 0,
+  android: 0,
 }
 
 /** §03 pane tab bar, matching the aside tabs. */
