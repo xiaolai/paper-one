@@ -135,7 +135,7 @@ describe('the gloss strip', () => {
    * route back."
    */
   describe('and the lookup with nothing to answer it', () => {
-    const absent = { kind: 'unavailable', term: 'gam' } as const
+    const absent = { kind: 'unavailable', term: 'gam', installable: true } as const
 
     /* Same doctrine as the failure, and it matters more here: this text is
        about Paper, not about the word, so amber would be the app labelling its
@@ -178,17 +178,33 @@ describe('the gloss strip', () => {
     })
 
     /*
-     * AND IT OFFERS NOTHING WHERE THERE IS NOWHERE TO GO. Unreachable in the
-     * app — `decideLookUp` answers `none` without an install route, so the
-     * button is never drawn and this state is never entered — but asserted
-     * because "unreachable" is a claim about a caller, and this component is
-     * the kernel's and can be mounted by anyone.
+     * AND IT OFFERS NOTHING WHERE THERE IS NOWHERE TO GO. The sentence still
+     * renders — saying "Paper needs a language model" on a browser client is
+     * TRUE; offering to install one there would not be.
      *
-     * The sentence still renders. Saying "Paper needs a language model" on a
-     * browser client is TRUE; offering to install one there would not be.
+     * ⚠️ **THIS COMMENT USED TO CALL THE CASE UNREACHABLE IN THE APP**, on the
+     * grounds that `decideLookUp` answers `none` without an install route so
+     * the state is never entered. It is reachable: `decideLookUp` reads the
+     * provider when the button is DRAWN and `useGloss.ask` reads it when the
+     * button is PRESSED, and a model uninstalled in between arrives here from a
+     * button drawn as `gloss`. Hence the second case below, which is that
+     * window and is the one that used to offer a 2.5 GB download into a runtime
+     * that is not there (WI-20.21).
      */
     it('offers no install where the caller gave no way to install', () => {
       render(<GlossStrip state={absent} onDismiss={() => {}} />)
+
+      expect(textOf(screen.getByRole('status'))).toMatch(/language model/i)
+      expect(screen.queryByRole('button', { name: /install/i })).toBeNull()
+    })
+
+    /* THE OTHER HALF, and the one that is not about the caller at all: this
+       screen HAS somewhere to send the reader, and the build has nothing to
+       install into. Both have to be true before an offer is honest. */
+    it('offers no install where the build has nothing to install into', () => {
+      render(
+        <GlossStrip state={{ ...absent, installable: false }} onDismiss={() => {}} onInstall={() => {}} />,
+      )
 
       expect(textOf(screen.getByRole('status'))).toMatch(/language model/i)
       expect(screen.queryByRole('button', { name: /install/i })).toBeNull()
@@ -209,14 +225,72 @@ describe('the gloss strip', () => {
     })
   })
 
-  /* All four states carry the same control, from one definition — written
-   * four times, its label or glyph would drift apart for no reason anyone
+  /**
+   * A PASSAGE RATHER THAN A TERM.
+   *
+   * ⚠️ **THE STATE THIS DESCRIBES USED TO BE NOTHING AT ALL.** `lookUpPress`
+   * held the term bound and `return`ed on it, so a reader who selected more
+   * than 120 code points and pressed Look up got no definition, no message and
+   * no diagnostic — a live button that did nothing, which is exactly what the
+   * deleted `lookUpTauri.ts` warned about and what `unavailable` above was
+   * added to remove for the other half of the same question.
+   */
+  describe('and the lookup that was never sent', () => {
+    const long = { kind: 'tooLong' } as const
+
+    it('is actually visible', () => {
+      render(<GlossStrip state={long} onDismiss={() => {}} />)
+
+      expect(isVisible(screen.getByRole('status'))).toBe(true)
+    })
+
+    /* NOT amber, for `.glossFailed`'s reason: this is Paper speaking about
+       itself, and nothing here is a definition of anything. */
+    it('is not the companion box, because it is not a definition', () => {
+      render(<GlossStrip state={long} onDismiss={() => {}} />)
+
+      expect(screen.getByRole('status').getAttribute('data-kind')).not.toBe('companion')
+    })
+
+    /* SAYS WHAT TO DO. Nothing failed and no model is missing, so it must
+       borrow neither of the other two sentences. */
+    it('says what was wrong with the gesture and what to do instead', () => {
+      render(<GlossStrip state={long} onDismiss={() => {}} />)
+
+      const strip = screen.getByRole('status')
+      expect(textOf(strip)).toMatch(/too long/i)
+      expect(textOf(strip)).toMatch(/word or a short phrase/i)
+      expect(textOf(strip)).not.toMatch(/couldn.t define/i)
+      expect(textOf(strip)).not.toMatch(/language model/i)
+    })
+
+    /* IT NAMES NO TERM, and that is the point rather than an omission: the
+       term here is a paragraph, and neither `.glossFailedSaid` nor
+       `.glossAbsentSaid` ellipsizes. There is nowhere for it to go. */
+    it('does not quote the passage back', () => {
+      render(<GlossStrip state={long} onDismiss={() => {}} />)
+
+      expect(textOf(screen.getByRole('status')).length).toBeLessThan(120)
+    })
+
+    /* NO INSTALL OFFER. Nothing about this is fixed by downloading a model,
+       and the state carries no `installable` for a caller to misread. */
+    it('offers no install, whatever the caller passes', () => {
+      render(<GlossStrip state={long} onDismiss={() => {}} onInstall={() => {}} />)
+
+      expect(screen.queryByRole('button', { name: /install/i })).toBeNull()
+    })
+  })
+
+  /* All five states carry the same control, from one definition — written
+   * five times, its label or glyph would drift apart for no reason anyone
    * could name. */
   it.each([
     ['ready', { kind: 'ready', term: 'gam', text: 'A meeting.' } as const],
     ['asking', { kind: 'asking', term: 'gam' } as const],
     ['failed', { kind: 'failed', term: 'gam', reason: 'No model.' } as const],
-    ['unavailable', { kind: 'unavailable', term: 'gam' } as const],
+    ['unavailable', { kind: 'unavailable', term: 'gam', installable: true } as const],
+    ['tooLong', { kind: 'tooLong' } as const],
   ])('is dismissed from the %s state by one control', (_name, state) => {
     const onDismiss = vi.fn()
     render(<GlossStrip state={state} onDismiss={onDismiss} />)

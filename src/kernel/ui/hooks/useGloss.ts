@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GlossProvider } from '../../core/gloss'
 import type { Diagnostics } from '../../core/ports'
+import { termVerdict } from '../lookUp'
 import { sentenceAt } from '../reader/wordSnap/sentenceAt'
 
 /**
@@ -11,16 +12,26 @@ import { sentenceAt } from '../reader/wordSnap/sentenceAt'
  * arriving beside a word is an appearance and not a download: streaming it
  * would be jitter, not progress.
  *
- * Four non-idle shapes since the system-dictionary hand-off went: `asking`,
- * `ready`, `failed`, and `unavailable` — the last for a press that cannot
- * reach a model at all, which used to be impossible because Dictionary.app
- * was always behind the gesture.
+ * Five non-idle shapes since the system-dictionary hand-off went: `asking`,
+ * `ready`, `failed`, `unavailable` and `tooLong`. The last two are both
+ * presses that never reach a model, and both used to be impossible or silent:
+ * `unavailable` because Dictionary.app was always behind the gesture, and
+ * `tooLong` because `lookUpPress` simply `return`ed.
  *
  * # It replaces rather than queues
  *
  * A reader looking up a second word has stopped caring about the first, so a
  * new request aborts the one in flight. Queueing would show them an answer
  * about a word they have moved on from, which is worse than showing nothing.
+ *
+ * # It does not outlive the passage it describes
+ *
+ * A gloss is anchored to a word on a page, and every neighbouring surface is
+ * taken down when that page stops being shown — `SelectionTools` on a page
+ * turn and on leaving the reader, `FootnotePopover` on both. This one was
+ * not: it had exactly one route out, the strip's own × button, so an amber
+ * definition survived a page turn, a chapter change, a different book, and a
+ * trip to the library and back. See `GlossAnchor`.
  */
 
 export type GlossState =
@@ -45,7 +56,37 @@ export type GlossState =
    * `GlossStrip`, which takes the action as a prop and draws nothing when
    * there is none.
    */
-  | { readonly kind: 'unavailable'; readonly term: string }
+  /**
+   * ⚠️ **`installable` IS READ AT THE PRESS AND CARRIED**, because the two
+   * facts are answered a render apart. `decideLookUp` reads the provider when
+   * the button is DRAWN; this state is reached when it is PRESSED, and
+   * availability can drop in between — uninstalling the only text model is the
+   * ordinary way. `Reader` passed `onInstall` to the strip unconditionally on
+   * the argument that `unavailable` "can only be reached when `decideLookUp`
+   * answered `install`", which is false for exactly that window: the strip
+   * then offered **Install one** with no runtime to install into, which is the
+   * WI-20.21 failure `GlossProvider.installable` exists to prevent. Answered
+   * at the moment of use, like `available` beside it, so there is no snapshot
+   * left for anything to go stale against.
+   */
+  | { readonly kind: 'unavailable'; readonly term: string; readonly installable: boolean }
+  /**
+   * Asked with a passage rather than a term.
+   *
+   * ⚠️ **THIS USED TO BE A SILENT `return` TOO**, in `lookUpPress`, and it
+   * outlived the fix for its twin above by a whole phase. A reader who
+   * selected more than `MAX_TERM` code points and pressed Look up got no
+   * definition, no message and no diagnostic — a live button that did nothing,
+   * indistinguishable from a broken feature.
+   *
+   * IT CARRIES NO TERM, and that is deliberate rather than an omission. The
+   * term here is a paragraph: naming it back is what `.glossFailedSaid` and
+   * `.glossAbsentSaid` had to be made shrinkable for, and neither of them
+   * ellipsizes. The sentence needs no name — the reader is looking at what
+   * they selected — and quoting a chapter into a one-line strip says nothing
+   * the reader does not already know.
+   */
+  | { readonly kind: 'tooLong' }
 
 export interface Gloss {
   readonly state: GlossState
@@ -66,16 +107,44 @@ export interface Gloss {
    * document walk (and its §F4 diagnostic) off a path that cannot reach a
    * model. There is no longer a snapshot for anything to go stale against.
    *
-   * `fallbackTerm` is what the `unavailable` message names, because the thunk
-   * that would have produced the sentence-spelled term is exactly what did not
-   * run.
+   * `fallbackTerm` is what the `unavailable` message names, and what the term
+   * bound is measured against, because the thunk that would have produced the
+   * sentence-spelled term is exactly what did not run. The raw selection is
+   * the right thing to measure either way: it is what the READER chose, and a
+   * walk that trimmed ruby out of a paragraph would not make that paragraph a
+   * term.
    */
   ask(request: () => GlossRequest, fallbackTerm: string, bookTitle: string): void
   /** Put it away — the reader moved on. */
   dismiss(): void
 }
 
-export function useGloss(provider: GlossProvider): Gloss {
+/**
+ * Where the gloss is anchored, or `null` when there is nowhere.
+ *
+ * An OPAQUE KEY, and the hook never reads inside it: a change means "the
+ * passage this gloss describes has stopped being shown", and `null` means the
+ * reader is not looking at a book at all. Both take the gloss down.
+ *
+ * ⚠️ **IT IS DELIBERATELY NOT THE READING POSITION**, and that is measured
+ * rather than assumed. The strip is a flex child of the reader's column beside
+ * `.stage`, which is `flex: 1` — so the strip APPEARING shrinks the stage,
+ * foliate re-paginates, and a relocate lands with a new fraction and possibly a
+ * new CFI. An anchor keyed on either would then dismiss the gloss that had just
+ * caused the reflow, grow the stage back, and relocate again: a flicker loop,
+ * driven by the fix. The spine item and the chapter cannot be moved by a
+ * reflow, so they are what `Reader` builds the key from.
+ *
+ * That leaves ONE case uncovered and it is stated rather than glossed over: a
+ * jump to a different place in the SAME chapter (a mark in this chapter, a
+ * backlink within it) does not change the key, so the strip survives it. The
+ * page turn — every route of it — is covered by `Reader` calling `dismiss()` at
+ * `onPageIntent`, on the line `clearSelection()` is already on and for the
+ * identical reason.
+ */
+export type GlossAnchor = string | null
+
+export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): Gloss {
   const [state, setState] = useState<GlossState>({ kind: 'idle' })
   const abort = useRef<AbortController | null>(null)
 
@@ -113,8 +182,52 @@ export function useGloss(provider: GlossProvider): Gloss {
     setState((current) => (current.kind === 'unavailable' ? { kind: 'idle' } : current))
   }, [provider.available])
 
+  /*
+   * ⚠️ **A GLOSS DOES NOT OUTLIVE THE PASSAGE IT DESCRIBES.**
+   *
+   * `dismiss` had exactly one caller — the strip's own × — so an amber
+   * definition survived a page turn, a chapter change, opening another book,
+   * and going to the library and back. Every surface beside it is taken down
+   * on those events with the reasoning written out (`SelectionTools` on the
+   * page intent and on `inert`, `FootnotePopover` on both); this one got none
+   * of it, and it is the one drawing MACHINE-WRITTEN text in the reader's own
+   * page, attributed to a word that is no longer there.
+   *
+   * The in-flight request goes with it, which is the other half: a gloss
+   * requested just before a page turn used to land on the next page and
+   * render. `dismiss` aborts, so the daemon is told too.
+   *
+   * HERE RATHER THAN IN `Reader`, so the rule can be RUN. `Reader` takes
+   * sixteen props and renders foliate — nothing in it can be mounted cheaply,
+   * which is the whole reason `lookUpPress` and `askGloss` were extracted —
+   * and a rule left there could only ever be checked by reading the file back.
+   */
+  useEffect(() => {
+    dismiss()
+  }, [anchor, dismiss])
+
   const ask = useCallback(
     (request: () => GlossRequest, fallbackTerm: string, bookTitle: string) => {
+      /* NOT A TERM, AND SAID SO. `lookUpPress` used to hold this bound and
+       * `return` on it: a live button, an accepted press, and nothing at all.
+       * It is decided HERE because the answer to it is a state, and states are
+       * this hook's — see `termVerdict` for why the two false cases had to
+       * come apart before either could be answered.
+       *
+       * FIRST, ahead of `available`, because it is a fact about what the
+       * READER chose and is true whether or not a model exists. "Paper needs a
+       * language model to define <a chapter>" is the wrong sentence twice
+       * over. An EMPTY selection is the one thing that genuinely has nothing
+       * to say — there is no passage to refuse and no message to write about
+       * it — so it leaves the state alone rather than inventing a report. */
+      const verdict = termVerdict(fallbackTerm)
+      if (verdict === 'empty') return
+      if (verdict === 'too-long') {
+        abort.current?.abort()
+        abort.current = null
+        setState({ kind: 'tooLong' })
+        return
+      }
       /* THE ONLY READ OF `available` ON THIS PATH. Said, not swallowed — see
        * `unavailable` above. The request in flight still goes, because a
        * reader who asked a second question has stopped caring about the first
@@ -122,7 +235,8 @@ export function useGloss(provider: GlossProvider): Gloss {
       if (!provider.available) {
         abort.current?.abort()
         abort.current = null
-        setState({ kind: 'unavailable', term: fallbackTerm })
+        /* READ HERE, not at the draw — see `unavailable`. */
+        setState({ kind: 'unavailable', term: fallbackTerm, installable: provider.installable })
         return
       }
       /* BUILT ONLY NOW, past the one check that decides. */

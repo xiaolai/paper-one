@@ -69,6 +69,16 @@ describe('detailFor', () => {
     expect(detailFor({ kind: 'agentMalformed' })).toBe('That agent’s answer could not be read')
     expect(detailFor({ kind: 'keychain' })).toBe('The keychain refused')
   })
+
+  /* ⚠️ **THE GLOSS'S OWN, AND IT USED NOT TO EXIST AS A KIND AT ALL.**
+   * `generate::stream` decoded `finish_reason` and dropped it, so a definition
+   * cut off at `MAX_GLOSS_TOKENS` came back as a finished one and was drawn in
+   * amber. `inference_gloss` refuses it now, and a refusal that landed on the
+   * default would tell the reader "Something went wrong" about a model that had
+   * simply been asked for less than it wanted to say. */
+  it('has a sentence for an answer the model was cut off in', () => {
+    expect(detailFor({ kind: 'answerTruncated' })).toBe('The answer was cut off before it finished')
+  })
 })
 
 describe('the controller', () => {

@@ -161,6 +161,13 @@ export function detailFor(error: unknown): string {
       return 'The runtime refused the request'
     case 'runtimeMalformed':
       return 'The runtime’s answer could not be read'
+    /* THE GLOSS'S OWN, and the only caller that can raise it: `inference_gloss`
+     * refuses an answer the model was cut off in the middle of, because it is
+     * delivered whole and would otherwise be drawn in amber as a finished
+     * definition. Worded for the reader — what happened, not the token bound,
+     * which is in the crate's own message for whoever reads the log. */
+    case 'answerTruncated':
+      return 'The answer was cut off before it finished'
     case 'cancelled':
       return 'The runtime stopped before it answered'
     /* ── REACHABLE FROM THE COMPANION, and added because they were not ──

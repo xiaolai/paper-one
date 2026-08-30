@@ -482,14 +482,6 @@ describe('the gloss provider', () => {
     })
   })
 
-  it('clears its cache on request', async () => {
-    const { provider } = harness()
-    await provider.gloss('counsel', context, signal())
-    expect(provider.cacheSize()).toBe(1)
-    provider.clearCache()
-    expect(provider.cacheSize()).toBe(0)
-  })
-
   /* ── WI-15.13's LOAD-BEARING ACCEPTANCE ────────────────────────────────
    * "no selection can reach an agent, checked by a test that binds an agent
    * to `ask` and asserts `gloss` never sees it."

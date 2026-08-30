@@ -71,8 +71,11 @@ export function glossKey(term: string, context: GlossContext): string {
   /* THE TITLE IS PART OF THE QUESTION (`glossQuestion` sends it, and the
      model reads the sense from it), so it is part of the key — one term in
      two books used to share one cached definition. An encoded tuple rather
-     than a NUL-joined string: a NUL inside either text collided. */
-  return JSON.stringify([flatten(term), flatten(context.sentence), context.bookTitle ?? ''])
+     than a NUL-joined string: a NUL inside either text collided.
+
+     Not `bookTitle ?? ''`: the field is a required `string` on `GlossContext`,
+     so the coalesce was dead and read as though the type allowed a null. */
+  return JSON.stringify([flatten(term), flatten(context.sentence), context.bookTitle])
 }
 
 export interface GlossProviderOptions {
@@ -83,9 +86,17 @@ export interface GlossProviderOptions {
 }
 
 export interface BoundGlossProvider extends GlossProvider {
-  /** Drop the cache — the model changed, so the answers are another model's. */
-  clearCache(): void
-  /** How many entries are held. For a test and a diagnostic. */
+  /**
+   * How many entries are held. For a test and a diagnostic.
+   *
+   * ⚠️ **`clearCache()` STOOD BESIDE THIS AND NOTHING CALLED IT.** Its comment
+   * said "drop the cache — the model changed", which is a job `gloss` does for
+   * itself against `cachedFor` on the way in; the method was a second way to do
+   * it that no composition root, no teardown and no pane ever reached, kept
+   * alive by one test asserting that it worked. A public method with one test
+   * and no caller is not a spare handle, it is a second answer waiting to
+   * disagree with the first.
+   */
   cacheSize(): number
 }
 
@@ -301,10 +312,6 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
       }
     },
 
-    clearCache: () => {
-      cache.clear()
-      cachedFor = null
-    },
     cacheSize: () => cache.size,
   }
 }

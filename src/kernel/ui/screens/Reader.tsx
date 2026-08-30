@@ -297,7 +297,23 @@ export function Reader({
      and the two can differ — the same distinction `onSystemLookUp` used to
      carry against `hasDictionary`. Drawing a control that cannot act is what
      both halves exist to prevent, so they are answered together. */
-  const gloss = useGloss(glossProvider)
+  /* WHERE THE GLOSS IS ANCHORED — see `GlossAnchor`, which owns the rule and
+     the measurement behind the two fields it is built from. `null` while the
+     reader is not looking at this book, which is what takes the strip down on
+     the way to the library: `inert` already clears the selection for the
+     identical reason, and the gloss was the one surface it did not reach.
+
+     THE SPINE ITEM AND THE CHAPTER, and deliberately not the fraction or the
+     CFI: the strip is a flex child above `.stage` (`flex: 1`), so its own
+     appearance shrinks the stage and makes foliate relocate. An anchor either
+     of those could move would dismiss the gloss that caused the reflow and
+     loop. Neither of these can be moved by a re-pagination. */
+  const gloss = useGloss(
+    glossProvider,
+    inert
+      ? null
+      : `${book.generation}|${book.position.sectionIndex ?? ''}|${book.position.chapterHref}`,
+  )
   const lookUpAction = decideLookUp(
     glossProvider.available,
     glossProvider.installable && onInstallGloss !== undefined,
@@ -580,6 +596,21 @@ export function Reader({
        * cheaper side of the trade by a wide margin. */
       clearSelection()
 
+      /* AND THE GLOSS, for the same sentence one line up. It is the same fact
+       * about the same passage — a definition anchored to a word on the page
+       * being left — and it had no teardown at all: the strip's × was its only
+       * route out, so an amber definition rode the page turn onto the next
+       * page and stayed there. The in-flight request goes too; `dismiss`
+       * aborts, which cancels it at the daemon rather than letting a model
+       * finish generating for a page nobody is on.
+       *
+       * HERE RATHER THAN IN THE ANCHOR, and `GlossAnchor` says why: a key that
+       * could see a page turn within a chapter would also see the reflow the
+       * strip's own appearance causes, and dismiss itself in a loop. This is
+       * an INTENT — the reader asked — so it cannot be raised by a
+       * re-pagination. */
+      gloss.dismiss()
+
       /* Four intents, two pairs, because the axes mean different things. A
        * horizontal gesture named a SIDE and foliate resolves which page that is
        * from the book's own direction; a vertical one named a DIRECTION OF
@@ -592,8 +623,11 @@ export function Reader({
       else book.prev()
     },
     /* `clearSelection` is what the body calls; `selection` and `setSelection`
-       were what an earlier body read, and had outlived it in this list. */
-    [state, book, paneVisible, clearSelection],
+       were what an earlier body read, and had outlived it in this list.
+       `gloss.dismiss` and NOT `gloss`: the hook returns a fresh object every
+       render, so naming the object would rebuild this callback on every gloss
+       state change. The method is memoised with no deps and never moves. */
+    [state, book, paneVisible, clearSelection, gloss.dismiss],
   )
 
   /**
@@ -938,8 +972,14 @@ export function Reader({
                          rather than returning silently — so branching here
                          would be a second copy of a decision the hook has to
                          make anyway, and the two would eventually disagree
-                         about which states are reachable. */
-                      lookUpPress(lookUpAction, () => selection?.text ?? '', lookUpGloss)
+                         about which states are reachable.
+
+                         ⚠️ THE TERM THUNK IS GONE for that same rule, one case
+                         later: `lookUpPress` used to take the selection's text
+                         and drop the press when it was too long, silently. The
+                         bound is `useGloss.ask`'s now, where a refusal can be
+                         a state the reader reads rather than nothing at all. */
+                      lookUpPress(lookUpAction, lookUpGloss)
                     }
                     onRemove={() => {
                       if (selected) unmark(selected)
@@ -954,10 +994,18 @@ export function Reader({
                     out of this file's source — see `GlossStrip`, where the
                     whole argument lives.
 
-                    `onInstall` is passed unconditionally: the strip reads it
-                    only in the `unavailable` state, which `useGloss` can only
-                    reach when the provider is unavailable, which is the same
-                    condition that made `decideLookUp` answer `install`. */}
+                    `onInstall` is passed unconditionally, and it is no longer
+                    the only thing gating the offer. This used to argue that the
+                    strip "reads it only in the `unavailable` state, which
+                    `useGloss` can only reach when the provider is unavailable,
+                    which is the same condition that made `decideLookUp` answer
+                    `install`" — untrue in the window between the draw and the
+                    press, where a model uninstalled in between reaches
+                    `unavailable` from a button drawn as `gloss`, with nothing
+                    to install into. `GlossState.unavailable` now carries
+                    `installable` read at the press, and the strip needs both.
+                    What this prop still answers is the other half: whether this
+                    SCREEN was given anywhere to send the reader. */}
                 <GlossStrip
                   state={gloss.state}
                   onDismiss={() => gloss.dismiss()}

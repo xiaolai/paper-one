@@ -384,8 +384,12 @@ describe('with no model installed', () => {
     available: false,
     /* TRUE, because the case worth pinning is the desktop one: `inference` is
        composed, the Local models pane exists, and only the download is
-       missing. The hook does not read this field — the reader UI does — and
-       that is itself worth being explicit about. */
+       missing.
+       ⚠️ THIS USED TO SAY "the hook does not read this field — the reader UI
+       does". It does now, and that is the fix: the reader UI reads it when the
+       BUTTON IS DRAWN and this state is reached when it is PRESSED, so a model
+       uninstalled in between offered a download into a runtime that was not
+       there. See the `installable` case below. */
     installable: true,
     async gloss() {
       throw new Error('the hook must not call a provider that says it cannot answer')
@@ -399,7 +403,7 @@ describe('with no model installed', () => {
       result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
     })
 
-    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam' })
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installable: true })
   })
 
   /* NOT `failed`, and the distinction is the reader's not the maintainer's:
@@ -464,7 +468,7 @@ describe('with no model installed', () => {
        is "did not walk" rather than "did nothing at all" — which is the
        failure this whole state exists to end. It names the RAW selection,
        because the sentence-spelled term is what the skipped walk produces. */
-    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'two' })
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'two', installable: true })
   })
 
   /* And it is dismissable, like every other thing the strip shows. A state the
@@ -480,6 +484,263 @@ describe('with no model installed', () => {
     })
 
     expect(result.current.state).toEqual({ kind: 'idle' })
+  })
+})
+
+/**
+ * ⚠️ **THE OTHER PRESS THAT USED TO DO NOTHING**, and it outlived the fix for
+ * its twin above by a whole phase.
+ *
+ * `lookUpPress` held the term bound and `return`ed on a term it refused: the
+ * button was drawn, the press was accepted, and there was no state, no message
+ * and no diagnostic. A reader who selected a paragraph could not tell a refusal
+ * from a broken feature. The bound now lives in `ask`, where the answer to it
+ * can be something the reader reads.
+ */
+describe('with a passage rather than a term', () => {
+  const model: GlossProvider = {
+    available: true,
+    installable: true,
+    async gloss() {
+      throw new Error('a passage must not reach the provider')
+    },
+  }
+
+  it('says so, rather than returning silently', () => {
+    const { result } = renderHook(() => useGloss(model))
+
+    act(() => {
+      result.current.ask(
+        () => ({ term: 'x', sentence: 'x' }),
+        'a'.repeat(121),
+        'Moby-Dick',
+      )
+    })
+
+    expect(result.current.state).toEqual({ kind: 'tooLong' })
+  })
+
+  /* THE WALK NEVER RUNS. `request` is the thunk that flattens the document —
+     the whole reason it is deferred — and a passage that will not be sent must
+     not pay for one, nor file a `gloss.sentence` sample for a lookup that did
+     not happen (§F4). */
+  it('does not build the request it is not going to send', () => {
+    const { result } = renderHook(() => useGloss(model))
+    const request = vi.fn(() => ({ term: 'x', sentence: 'x' }))
+
+    act(() => {
+      result.current.ask(request, 'a'.repeat(121), 'Moby-Dick')
+    })
+
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  /* AHEAD OF `available`, because it is a fact about what the READER chose and
+     is true whether or not a model exists. "Paper needs a language model to
+     define <a chapter>" is the wrong sentence twice over. */
+  it('is decided before the model is, so the message is about the gesture', () => {
+    const nothingInstalled: GlossProvider = {
+      available: false,
+      installable: true,
+      async gloss() {
+        throw new Error('unreachable')
+      },
+    }
+    const { result } = renderHook(() => useGloss(nothingInstalled))
+
+    act(() => {
+      result.current.ask(() => ({ term: 'x', sentence: 'x' }), 'a'.repeat(121), 'Moby-Dick')
+    })
+
+    expect(result.current.state.kind).toBe('tooLong')
+  })
+
+  /* AN EMPTY SELECTION IS THE ONE THING WITH NOTHING TO SAY, which is why
+     `termVerdict` has three answers rather than two: there is no passage to
+     refuse and no message to write about one, so the state is left alone
+     rather than a report being invented for it. */
+  it('leaves the state alone for an empty selection', () => {
+    const { result } = renderHook(() => useGloss(model))
+
+    act(() => {
+      result.current.ask(() => ({ term: 'x', sentence: 'x' }), '   \n ', 'Moby-Dick')
+    })
+
+    expect(result.current.state).toEqual({ kind: 'idle' })
+  })
+
+  /* IT REPLACES AN ANSWER ON SCREEN. A reader looking at a definition who then
+     selects a paragraph and presses Look up must not be left reading the
+     previous word's gloss as though it answered the new gesture. */
+  it('replaces a definition already on screen', async () => {
+    const { result } = renderHook(() => useGloss(model))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby')
+    })
+    act(() => {
+      result.current.ask(() => ({ term: 'x', sentence: 'x' }), 'a'.repeat(121), 'Moby')
+    })
+
+    expect(result.current.state).toEqual({ kind: 'tooLong' })
+  })
+})
+
+/**
+ * ⚠️ **`installable` IS READ AT THE PRESS, AND IT USED TO BE READ ONLY AT THE
+ * DRAW.**
+ *
+ * `decideLookUp` asks the provider when the button is created; this state is
+ * reached when the button is pressed. A model uninstalled between the two
+ * arrives here from a button drawn as `gloss`, and `Reader` passed the strip
+ * `onInstall` unconditionally on the argument that it could not — so the strip
+ * offered a 2.5 GB download into a runtime that is not there, which is the
+ * WI-20.21 failure `GlossProvider.installable` exists to prevent.
+ */
+describe('what an unavailable press records about installing', () => {
+  function providerWith(installable: boolean): GlossProvider {
+    return {
+      available: false,
+      installable,
+      async gloss() {
+        throw new Error('unreachable')
+      },
+    }
+  }
+
+  it.each([true, false])('carries the provider’s answer of %s', (installable) => {
+    const { result } = renderHook(() => useGloss(providerWith(installable)))
+
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+    })
+
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installable })
+  })
+
+  /* THE WINDOW ITSELF: the button was drawn while a model was installed, and
+     the press lands after it is gone and the runtime with it. Read at the draw,
+     this would have said `true`. */
+  it('reads it at the press, not at the render that drew the button', () => {
+    const live = { available: true, installable: true }
+    const provider: GlossProvider = {
+      get available() {
+        return live.available
+      },
+      get installable() {
+        return live.installable
+      },
+      async gloss() {
+        throw new Error('unreachable')
+      },
+    }
+    const { result } = renderHook(() => useGloss(provider))
+
+    live.available = false
+    live.installable = false
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+    })
+
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installable: false })
+  })
+})
+
+/**
+ * ⚠️ **A GLOSS DOES NOT OUTLIVE THE PASSAGE IT DESCRIBES**, and it used to.
+ *
+ * `dismiss` had exactly one caller — the strip's own × — so an amber definition
+ * survived a page turn, a chapter change, opening another book and a trip to
+ * the library. Every surface beside it is taken down on those events with the
+ * reasoning written out; this one, the one drawing MACHINE-WRITTEN text in the
+ * reader's own page, had no teardown at all.
+ *
+ * Driven here rather than in `Reader`, which takes sixteen props and renders
+ * foliate — the same argument that put `lookUpPress` and `askGloss` in files of
+ * their own.
+ */
+describe('when the passage stops being shown', () => {
+  const model: GlossProvider = {
+    available: true,
+    installable: true,
+    async gloss() {
+      return 'a meeting between whaling ships'
+    },
+  }
+
+  it('takes the definition down when the anchor moves', async () => {
+    const { result, rerender } = renderHook(({ at }: { at: string | null }) => useGloss(model, at), {
+      initialProps: { at: 'book-1|3|ch3.xhtml' },
+    })
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+    })
+    expect(result.current.state.kind).toBe('ready')
+
+    rerender({ at: 'book-1|4|ch4.xhtml' })
+
+    expect(result.current.state).toEqual({ kind: 'idle' })
+  })
+
+  /* `null` IS "NOWHERE", which is what `Reader` passes while `inert` — the
+     reader is under the library and the book is not on screen. `inert` already
+     clears the selection for this reason and the gloss was what it did not
+     reach. */
+  it('takes it down when there is no anchor at all', async () => {
+    const { result, rerender } = renderHook(({ at }: { at: string | null }) => useGloss(model, at), {
+      initialProps: { at: 'book-1|3|ch3.xhtml' as string | null },
+    })
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+    })
+
+    rerender({ at: null })
+
+    expect(result.current.state).toEqual({ kind: 'idle' })
+  })
+
+  /* AND THE REQUEST IN FLIGHT GOES WITH IT. A gloss asked for just before a
+     page turn used to land on the next page and render; worse, the daemon kept
+     generating for a reader who had gone. `dismiss` aborts, which is what
+     `glossProvider` turns into a cancel. */
+  it('aborts a lookup still in flight', () => {
+    let signalled: AbortSignal | null = null
+    const slow: GlossProvider = {
+      available: true,
+      installable: true,
+      gloss(_term, _context, signal) {
+        signalled = signal
+        return new Promise<string>(() => {})
+      },
+    }
+    const { result, rerender } = renderHook(({ at }: { at: string | null }) => useGloss(slow, at), {
+      initialProps: { at: 'book-1|3|ch3.xhtml' },
+    })
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+    })
+    expect(result.current.state.kind).toBe('asking')
+
+    rerender({ at: 'book-2|0|ch1.xhtml' })
+
+    expect(signalled).not.toBeNull()
+    expect((signalled as unknown as AbortSignal).aborted).toBe(true)
+  })
+
+  /* NON-VACUITY. A hook that dismissed on every render would pass all three
+     above and destroy the feature — the gloss would never survive its own
+     arrival. An unchanged anchor must leave it standing. */
+  it('leaves it standing while the anchor holds', async () => {
+    const { result, rerender } = renderHook(({ at }: { at: string | null }) => useGloss(model, at), {
+      initialProps: { at: 'book-1|3|ch3.xhtml' },
+    })
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+    })
+
+    rerender({ at: 'book-1|3|ch3.xhtml' })
+
+    expect(result.current.state).toMatchObject({ kind: 'ready', term: 'gam' })
   })
 })
 
@@ -516,11 +777,14 @@ describe('what the lookup path costs', () => {
      *
      * ⚠️ IT USED TO CARRY MORE WEIGHT THAN THIS. The scan was also the only
      * thing standing behind `Reader`'s lookup DECISION — whether a control is
-     * drawn, whether the term is worth sending, what to run. Those moved to
-     * `lookUpPress` in `ui/lookUp.ts`, where `lookUp.test.ts` RUNS all three
-     * including the two a scan could never see: an action compared against a
-     * value it cannot hold, and the `isLookUpTerm` guard dropped. What is left
-     * here is the narrow claim that the reader still calls the handler. */
+     * drawn, whether the term is worth sending, what to run. Whether a control
+     * is drawn moved to `lookUpPress` in `ui/lookUp.ts`, where `lookUp.test.ts`
+     * RUNS it including the case a scan could never see: an action compared
+     * against a value it cannot hold. Whether the term is worth sending moved
+     * HERE, to `ask` — see "with a passage rather than a term" — because the
+     * answer to a refusal is a state, and a guard that only `return`ed was the
+     * silence this whole file exists to keep out. What is left in this case is
+     * the narrow claim that the reader still calls the handler. */
     expect(reader).toContain('askGloss(gloss, selection')
   })
 })

@@ -35,7 +35,7 @@
  *
  * MODULE-PRIVATE, and it was exported until an audit noticed why: the export
  * existed for `lookUpTauri.ts`, which imported it rather than restating it so
- * the two bounds could not disagree. That file is deleted. `isLookUpTerm` is
+ * the two bounds could not disagree. That file is deleted. `termVerdict` is
  * now the only reader, and a constant nobody outside can name is a constant
  * nobody outside can drift from.
  */
@@ -65,7 +65,23 @@ export function decideLookUp(gloss: boolean, installable: boolean): LookUpAction
 }
 
 /**
- * Whether a term is short enough to be worth looking up at all.
+ * Whether a selection is a term worth looking up — and WHICH WAY it is not.
+ *
+ * ⚠️ **IT USED TO BE A BOOLEAN, AND THE FALSE BRANCH WAS SILENCE.** `lookUpPress`
+ * read `isLookUpTerm` and `return`ed on false: the button was drawn, the press
+ * was accepted, and nothing happened at all. That is the exact failure the
+ * deleted `lookUpTauri.ts` warned about in its own header — *a lookup that
+ * silently did nothing is the failure this path is easiest to get wrong in* —
+ * and the one `useGloss`'s `unavailable` state was added to remove for the
+ * other half of the same question. A reader who selected a paragraph got no
+ * definition, no message, and no way to tell a refusal from a broken feature.
+ *
+ * A boolean could not be fixed in place, because the two false cases are not
+ * one fact: an EMPTY selection has nothing to say about it, and an OVER-LONG
+ * one has a sentence the reader can act on. Collapsing them is what made
+ * silence the only answer either could get. So a closed set of three, and the
+ * caller decides what each one means — `useGloss.ask` turns `too-long` into a
+ * state the reader can read.
  *
  * ⚠️ **COUNTED IN CODE POINTS, AND IT USED TO BE CODE UNITS.** `String.length`
  * is UTF-16 units, so an emoji or a CJK extension character counts twice; the
@@ -80,9 +96,12 @@ export function decideLookUp(gloss: boolean, installable: boolean): LookUpAction
  * point, and a bound on a *term* that miscounts CJK is wrong on its own terms
  * in a codebase whose model was chosen for Chinese.
  */
-export function isLookUpTerm(term: string): boolean {
+export type TermVerdict = 'ok' | 'empty' | 'too-long'
+
+export function termVerdict(term: string): TermVerdict {
   const trimmed = term.trim().replace(/\s+/g, ' ')
-  return trimmed !== '' && Array.from(trimmed).length <= MAX_TERM
+  if (trimmed === '') return 'empty'
+  return Array.from(trimmed).length <= MAX_TERM ? 'ok' : 'too-long'
 }
 
 /**
@@ -95,31 +114,26 @@ export function isLookUpTerm(term: string): boolean {
  * and the only assertion anybody could write was `useGloss.test.ts` grepping
  * the file for the string `askGloss(gloss, selection`. A source scan cannot
  * tell a working wiring from a plausible-looking one — it would survive
- * `lookUpAction` being compared against a value it can never hold, or the
- * `isLookUpTerm` guard being dropped.
+ * `lookUpAction` being compared against a value it can never hold.
  *
- * All three decisions are here now: whether a control is drawn at all, whether
- * this selection is worth sending, and what to do when it is.
+ * ⚠️ **IT USED TO HOLD THE TERM BOUND TOO, AND THAT WAS THE BUG.** The handler
+ * took a `term` thunk and `return`ed on a term `isLookUpTerm` refused — a press
+ * that did nothing, said nothing and left nothing behind. The bound has not
+ * moved because it was in the wrong file; it moved because **the answer to a
+ * refused term is a state the reader can read**, and states live in
+ * `useGloss`. Deciding there is what closed the silence; keeping a second copy
+ * of the decision here is what would reopen it. See `termVerdict`.
  *
- * `term` is a THUNK because the selection changes under the handler — the
- * button is created at render and pressed later, and reading the text at
- * creation would define whatever was selected when the popup first appeared.
+ * So ONE decision is left, and it is the one that genuinely belongs to the
+ * button: whether a control is drawn at all.
  *
  * THE SELECTION IS NOT CONSUMED. A lookup is a question about the passage, not
  * something done to it — and the reader's next act is usually to mark the word
  * they have just understood, which a consumed selection would make them select
  * again.
  */
-export function lookUpPress(
-  action: LookUpAction,
-  term: () => string,
-  run: () => void,
-): (() => void) | null {
+export function lookUpPress(action: LookUpAction, run: () => void): (() => void) | null {
   /* NOT a disabled button: a control that cannot act is the app describing a
    * feature it does not have — see `decideLookUp` for when that happens. */
-  if (action === 'none') return null
-  return () => {
-    if (!isLookUpTerm(term())) return
-    run()
-  }
+  return action === 'none' ? null : run
 }

@@ -502,12 +502,17 @@ pub async fn inference_generate<R: Runtime>(
      * generating into nothing, which on a loaded machine is a GPU spent on an
      * answer nobody will read. */
     let sink = cancel.clone();
-    generate::stream(request, &cancel, move |text| {
+    /* THE TEXT, not the whole `Answer`. A generation STREAMS, so a reader
+     * watching it arrive sees it stop — see `Error::AnswerTruncated` for why
+     * that is the difference between this command and the gloss, and not a
+     * looser rule here. */
+    Ok(generate::stream(request, &cancel, move |text| {
         if chunks.send(text).is_err() {
             sink.trip();
         }
     })
-    .await
+    .await?
+    .text)
 }
 
 /// Define a term in the sentence it sits in (WI-15.13).
@@ -544,12 +549,36 @@ pub async fn inference_gloss<R: Runtime>(
         let daemon = state.daemon().await?;
         daemon
             .model_request(reqwest::Method::POST, generate::CHAT_ROUTE)
+            /* ⚠️ ITS OWN CEILING, because `MODEL_CEILING` is ten minutes and
+             * every word of its reasoning is about a 1024-token generation.
+             * A reader has stopped reading to wait for this one. See
+             * `daemon::GLOSS_CEILING`. */
+            .deadline(crate::daemon::GLOSS_CEILING)
             .json(&chat_request(model, system, question, MAX_GLOSS_TOKENS))
     };
     // Streamed on the wire, delivered whole: the daemon's non-streaming path
     // holds the whole answer before replying, and cancelling that is a
     // request nobody is reading rather than a generation that stopped.
-    generate::stream(request, &cancel, |_| {}).await
+    let answer = generate::stream(request, &cancel, |_| {}).await?;
+    /* ⚠️ **A CUT-OFF DEFINITION IS NOT A DEFINITION**, and this command used to
+     * return one as though it were. `MAX_GLOSS_TOKENS` is Paper's own bound, so
+     * hitting it is an ordinary outcome rather than a daemon misbehaving — and
+     * because the gloss is delivered WHOLE rather than streamed, nobody watches
+     * it stop: `glossProvider` cached the fragment and the strip drew it in
+     * amber, which is the mark that says "this is the definition". The reasoning
+     * is `generate::stream`'s own, applied to the bound it did not cover:
+     * *half an answer presented as a whole one is the shape this crate refuses
+     * everywhere else.*
+     *
+     * Refused rather than trimmed to the last full sentence: a model that ran
+     * past 160 tokens ignored a six-line prompt asking for one or two, so its
+     * first 160 are not a gloss that happens to be long. */
+    if answer.truncated() {
+        return Err(Error::AnswerTruncated {
+            limit: MAX_GLOSS_TOKENS,
+        });
+    }
+    Ok(answer.text)
 }
 
 /* ──────────────────────────────── the agents ────────────────────────────── */

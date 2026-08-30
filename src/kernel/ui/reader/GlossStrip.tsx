@@ -38,21 +38,29 @@ import styles from './GlossStrip.module.css'
  * definition, and moving it would make every lookup jump between two places on
  * its way to an answer.
  *
- * ## `unavailable` is a fourth state, and it is not a failure
+ * ## `unavailable` and `tooLong` are not failures
  *
  * With the Dictionary.app hand-off deleted, a reader on a fresh desktop can
  * press the dictionary button with nothing installed to answer it. That is not
  * an error and must not be dressed as one — nothing went wrong, there is simply
- * a download between them and the feature.
+ * a download between them and the feature. `tooLong` is the same shape from the
+ * other side: nothing went wrong there either, the reader selected a passage
+ * rather than a term, and Paper declined before sending anything.
  *
- * It borrows the failure's quiet grey rather than the definition's amber, for
- * the reason above, and it carries **an action**: §07's rule is about controls
- * that cannot act, and phase 17's decision turns on the observation that a
- * control which starts an install can. `onInstall` absent draws the sentence
- * and no button — a host with no models pane says what is true and offers
- * nothing it cannot do. In the app that combination is unreachable, because
- * `decideLookUp` answers `none` and the button is never drawn; it is handled
- * here anyway rather than left to an assumption about a caller.
+ * Both borrow the failure's quiet grey rather than the definition's amber, for
+ * the reason above, and `unavailable` carries **an action**: §07's rule is about
+ * controls that cannot act, and phase 17's decision turns on the observation
+ * that a control which starts an install can.
+ *
+ * ⚠️ **THE OFFER IS GATED ON TWO FACTS, AND IT USED TO BE ONE.** This said the
+ * `onInstall`-absent combination "is unreachable in the app, because
+ * `decideLookUp` answers `none` and the button is never drawn". That was wrong
+ * in the window it did not consider: `decideLookUp` reads the provider at the
+ * DRAW and `useGloss.ask` reads it at the PRESS, so a model uninstalled between
+ * the two reaches `unavailable` from a button drawn as `gloss` — with
+ * `installable` false, and an **Install one** offered into a runtime that is
+ * not there. That is exactly WI-20.21. The state now carries the answer read at
+ * the press and this draws the button only when both agree.
  *
  * ## And it is dismissed, not consumed
  *
@@ -72,13 +80,37 @@ export interface GlossStripProps {
 export function GlossStrip({ state, onDismiss, onInstall }: GlossStripProps) {
   if (state.kind === 'idle') return null
 
+  /* NOT A TERM, so nothing here names one — see `GlossState.tooLong`. It
+     takes `.glossAbsent`'s geometry for `.glossAbsent`'s own stated reason:
+     the reader's eye should learn ONE position for "the lookup produced no
+     definition, here is why", and a third shape would teach them only that
+     the strip moves. */
+  if (state.kind === 'tooLong') {
+    return (
+      <div className={styles.glossRefused} role="status">
+        <span className={styles.glossRefusedSaid}>
+          That passage is too long to look up — select a word or a short phrase.
+        </span>
+        <Dismiss onDismiss={onDismiss} />
+      </div>
+    )
+  }
+
   if (state.kind === 'unavailable') {
     return (
       <div className={styles.glossAbsent} role="status">
         <span className={styles.glossAbsentSaid}>
           Paper needs a language model to define “{state.term}”.
         </span>
-        {onInstall && (
+        {/* ⚠️ **BOTH HALVES, AND IT USED TO BE ONE.** `onInstall` says whether
+            this SCREEN was given somewhere to send the reader; `state
+            .installable` says whether the build has anywhere worth sending
+            them, read at the press rather than at the draw. `Reader` passed
+            the first unconditionally on the argument that the second could
+            not be false here, which is untrue in the window between the two —
+            and offering a download into a runtime that is not there is the
+            WI-20.21 failure `GlossProvider.installable` exists to prevent. */}
+        {state.installable && onInstall && (
           <button type="button" className={styles.glossInstall} onClick={onInstall}>
             Install one
           </button>

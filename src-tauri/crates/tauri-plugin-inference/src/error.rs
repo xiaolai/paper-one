@@ -133,6 +133,31 @@ pub enum Error {
     #[error("{field} is larger than this build accepts ({limit} bytes)")]
     FieldTooLarge { field: &'static str, limit: usize },
 
+    /// The model was cut off by `max_tokens` rather than finishing.
+    ///
+    /// ⚠️ **REFUSED, NOT RETURNED**, and this variant exists because it used to
+    /// be returned. `generate::stream` decoded `finish_reason` off the wire and
+    /// dropped it, so `inference_gloss` handed a definition cut off mid-sentence
+    /// back as a whole one — cached by `glossProvider` and drawn in amber, which
+    /// is the provenance mark that says "this is the definition". The rule is
+    /// already written in `generate::stream`, one bound over: *half an answer
+    /// presented as a whole one is the shape this crate refuses everywhere
+    /// else.*
+    ///
+    /// ONLY THE GLOSS RAISES IT, and that is a distinction the crate already
+    /// makes rather than a special case. `inference_generate` STREAMS — the
+    /// reader watches it arrive and can see it stop — while the gloss is
+    /// delivered whole precisely so that nobody watches it (WI-15.13: two
+    /// sentences streamed into a popover beside a word is jitter, not progress).
+    /// An answer nobody watched stop is the only one that can be mistaken for a
+    /// complete one.
+    ///
+    /// It names the bound, because the maintainer's half of this is "the model
+    /// ignored a six-line prompt asking for two sentences" and the number is
+    /// what says how far.
+    #[error("the model was cut off at {limit} tokens rather than finishing")]
+    AnswerTruncated { limit: u32 },
+
     // ── agents (WI-15.6, WI-15.7, WI-15.10) ─────────────────────────────
     /// The agent CLI is not on `PATH`.
     #[error("{0} is not installed")]
@@ -193,6 +218,7 @@ impl Error {
             Error::RequestBusy(_) => "requestBusy",
             Error::Cancelled => "cancelled",
             Error::FieldTooLarge { .. } => "fieldTooLarge",
+            Error::AnswerTruncated { .. } => "answerTruncated",
             Error::AgentMissing(_) => "agentMissing",
             Error::AgentUnsupportedVersion { .. } => "agentUnsupportedVersion",
             Error::AgentSignedOut(_) => "agentSignedOut",
@@ -325,6 +351,7 @@ mod tests {
             Error::RequestUnknown(String::new()).kind(),
             Error::RequestBusy(String::new()).kind(),
             Error::Cancelled.kind(),
+            Error::AnswerTruncated { limit: 0 }.kind(),
             Error::AgentMissing("codex").kind(),
             Error::AgentUnsupportedVersion {
                 agent: "codex",

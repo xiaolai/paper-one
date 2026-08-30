@@ -487,7 +487,14 @@ export function SelectionTools({
                 className={styles.tool}
                 onClick={onLookUp}
                 title="Look up"
-                aria-label="Look this up in the dictionary"
+                /* ⚠️ IT SAID "Look this up in the dictionary", and there is no
+                   dictionary: the Dictionary.app hand-off, the mode cycle, the
+                   `kernel.lookUp` setting and the Rust `look_up` command were
+                   all deleted together. This is the only label a screen-reader
+                   user hears, so it was the last place still naming the deleted
+                   feature — and the one place where naming it could not be
+                   checked by looking at the screen. */
+                aria-label="Look up"
               >
                 <BookA size={ICON.control} strokeWidth={ICON.stroke} />
               </button>
