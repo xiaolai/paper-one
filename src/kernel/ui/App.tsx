@@ -1984,6 +1984,20 @@ export function App({
           libraryCount={library.books.length}
           saveFailure={library.saveFailure}
           onDismissSaveFailure={library.dismissSaveFailure}
+          /* WHAT AN IMPORT JUST DID, on the screen it was started from
+             (WI-21.2). `marks:import` is in the palette while reading and only
+             `Library` rendered this, so an import begun here reported into a
+             surface the reader could not see — and Stage 1 refuses a
+             name-matched book's marks, which is precisely the outcome that
+             must not be silent.
+
+             GATED ON THE SCREEN rather than passed through. The reader stays
+             mounted UNDER the library (see the note beside it), so passing it
+             unconditionally would put the same sentence in the tree twice —
+             invisible behind the shelf, and read out loud by a screen reader.
+             `Library` renders it for its own screen. */
+          importNotice={state.screen === 'reader' ? importNotice : null}
+          onDismissImportNotice={() => setImportNotice(null)}
           shelfUnread={shelfUnread}
           onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
           state={state}

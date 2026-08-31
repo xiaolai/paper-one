@@ -57,9 +57,37 @@ export interface ArchivedMarkBook {
   readonly bookId: string
   readonly title: string
   readonly author: string
+  /**
+   * BLAKE3 of the bytes this book's marks were made against — `contentHash`,
+   * full and hex. Absent when the exporting library did not have one.
+   *
+   * ⚠️ **THE FOURTH WAY TO NAME THE BOOK, AND THE ONLY EXACT ONE.** `bookId`
+   * reads as exact and is not: `contentId` hashes a size prefix, the first and
+   * last 64 KiB and sixteen interior probes, so above 64 MiB two equal-sized
+   * files differing only in a gap share ONE id (`marks.test.ts` proves it on
+   * real blobs; 20 of 1 959 books measured here are over the limit). An id
+   * match was therefore evidence and not proof, and it is the evidence
+   * `planImport` used to let anchors through.
+   *
+   * This is the proof, where it exists. `contentHash` is BLAKE3 of the WHOLE
+   * file, computed by the peer plugin — never in TypeScript, per the field's
+   * own rule — so two libraries that both carry one can settle the question
+   * outright. Two that do not fall back to the id match, which is where they
+   * already were.
+   *
+   * NO VERSION BUMP, deliberately. The field is additive and ignorable: a build
+   * that predates it reads the archive exactly as it reads one today. Bumping
+   * would make every older build REFUSE a reader's backup outright — a worse
+   * failure than the one being guarded, and this is a recovery format whose
+   * whole value is being readable on the day it is needed.
+   */
+  readonly contentHash?: string
   readonly marks: readonly ArchivedMark[]
   readonly cards: readonly ArchivedCard[]
 }
+
+/** A BLAKE3 hash as `contentHash` carries it: 64 lowercase hex digits. */
+const CONTENT_HASH = /^[0-9a-f]{64}$/
 
 /**
  * One mark, as a document a reader can open in a text editor.
@@ -144,6 +172,23 @@ export interface MarksImportPlan {
    * archive's equivalent.
    */
   readonly unmatched: readonly UnmatchedBook[]
+  /**
+   * Books found on this shelf BY NAME, whose marks cannot be placed in the
+   * edition the reader actually has (WI-21.1, WI-21.2).
+   *
+   * ⚠️ **A DIFFERENT SENTENCE FROM `unmatched`, and the difference is the
+   * point.** *"This book is not on your shelf"* and *"we found your book but
+   * cannot place these marks in this edition"* are two different things to be
+   * told, and one list for both would make the second unsayable.
+   *
+   * A CFI addresses a path through ONE package's spine and DOM. In a different
+   * build of the same work that path is still VALID and points somewhere else
+   * — it does not throw, it highlights the wrong sentence — so a name match is
+   * exactly the case where the anchor must not be trusted. Storing it was the
+   * shipped behaviour and it silently put the reader's marginalia on the wrong
+   * passages.
+   */
+  readonly unimportable: readonly UnimportableBook[]
   readonly booksTouched: number
   readonly marksAdded: number
   /**
@@ -160,7 +205,54 @@ export interface MarksImportPlan {
 
 export interface BookImport {
   readonly bookId: string
+  /**
+   * Marks from archive rows that matched this shelf book BY ID.
+   *
+   * ⚠️ **ONLY ID-MATCHED ROWS ARE HERE, and that is a contract rather than a
+   * consequence.** `bookId` is derived from the file's own bytes, so an id
+   * match is evidence the anchors in these rows were written against THESE
+   * bytes. Name-matched rows go to `unimportable`.
+   *
+   * ⚠️ **AND "THESE BYTES" IS EXACT ONLY BELOW 64 MiB.** `contentId` hashes a
+   * size prefix, the first and last 64 KiB and sixteen interior probes
+   * (`marks.ts`), so two equal-sized larger files differing only in a gap share
+   * one id — proved on real blobs in `marks.test.ts`, and 20 of the 1 959 books
+   * measured on 2026-08-31 are over the limit. So an id match on a large book
+   * is strong evidence and not a proof, and this comment said "resolve to the
+   * passages they name" until an audit read it against the measurement.
+   *
+   * It is not tightened here because it cannot be: distinguishing the case
+   * needs a full digest the archive does not carry, which is a `MarksArchive`
+   * format change and phase 21 Stage 2's problem (its cache key has the same
+   * requirement — *"different bytes invalidate"* — and the same gap). What is
+   * fixed here is the far larger hole: a NAME match, which is not evidence
+   * about bytes at all.
+   *
+   * The first draft of WI-21.1 put a `matchedBy` scalar on this interface and
+   * the audit refused it: `planImport` merges id-matched and name-matched rows
+   * into one group before duplicate checking, mark folding and card-body
+   * dedup, and folding READS the foreign anchors while doing it. A scalar per
+   * group cannot express a mixed group — `'id'` lets foreign CFIs through,
+   * `'name'` rejects the exact rows too, and any first-wins rule makes safety
+   * depend on the order the rows happen to sit in the file. Partitioning makes
+   * the unsafe case unrepresentable instead of merely detected.
+   */
   readonly marks: readonly ArchivedMark[]
+  /**
+   * Cards from both match kinds — id-matched first, keeping their anchors, then
+   * name-matched with `localAnchor` dropped.
+   *
+   * CARDS ARE EXEMPT FROM THE REFUSAL because `Card.cfi` is already
+   * `string | null` (`cards.ts`) and the Cards pane already gates navigation on
+   * it, so a passage card imports usefully with no anchor. A mark has no such
+   * state: `isMark` rejects an empty `cfi` because *"nothing to resolve, so the
+   * mark can never be drawn"*.
+   *
+   * ⚠️ **ID-MATCHED FIRST IS LOAD-BEARING**, not tidiness. Body dedup keeps the
+   * first card of a repeated body, so with the two kinds interleaved a
+   * name-matched card could win the dedup and discard an exact card's usable
+   * anchor — deciding the outcome by where the rows sat in the file.
+   */
   readonly cards: readonly ArchivedCard[]
 }
 
@@ -169,6 +261,20 @@ export interface UnmatchedBook {
   readonly author: string
   readonly marks: number
   readonly cards: number
+}
+
+/**
+ * A book matched by name, and how much of it could not come across.
+ *
+ * NAMED, NOT COUNTED, for `UnmatchedBook`'s reason: "14 marks not imported"
+ * tells the reader a number, and the title tells them whether the book it
+ * happened to is one they care about.
+ */
+export interface UnimportableBook {
+  readonly title: string
+  readonly author: string
+  /** Marks refused because their anchors belong to another build. */
+  readonly marks: number
 }
 
 /**
@@ -258,6 +364,10 @@ export function exportMarks(
       bookId: book.bookId,
       title: book.title,
       author: book.author,
+      /* WRITTEN WHEN THIS LIBRARY HAS ONE. It is what lets a re-import prove,
+         rather than assume, that the anchors below belong to the bytes on the
+         other shelf — see `ArchivedMarkBook.contentHash`. */
+      ...(book.contentHash ? { contentHash: book.contentHash } : {}),
       marks: bookMarks,
       cards: bookCards,
     })
@@ -383,7 +493,20 @@ export function parseArchive(raw: string): MarksArchive | null {
     const title = str(row['title'], 1000)
     // Unnameable by either route is not a row, it is noise.
     if (!bookId && !title) continue
-    books.push({ bookId, title, author: str(row['author'], 1000), marks, cards })
+    /* VALIDATED TO THE SHAPE, not merely read as a string. A digest is compared
+       for EQUALITY and nothing else, so a malformed one cannot cause a wrong
+       match — but it can cause a wrong MISmatch, refusing anchors that were
+       fine. Dropped, the row falls back to the id match, which is where it was
+       before this field existed. */
+    const contentHash = str(row['contentHash'], 64)
+    books.push({
+      bookId,
+      title,
+      author: str(row['author'], 1000),
+      ...(CONTENT_HASH.test(contentHash) ? { contentHash } : {}),
+      marks,
+      cards,
+    })
   }
   return { version: 1, books }
 }
@@ -436,6 +559,7 @@ export function planImport(
 
   const additions: BookImport[] = []
   const unmatched: UnmatchedBook[] = []
+  const unimportable: UnimportableBook[] = []
   let marksAdded = 0
   let cardsAdded = 0
   let duplicates = 0
@@ -445,12 +569,41 @@ export function planImport(
    * judged. Two archive rows for one book — an export merged from two
    * devices, a title matched and an id matched — used to be planned
    * independently: duplicates across the pair survived, and the book took
-   * two concurrent `addMany` calls. */
-  const grouped = new Map<string, { marks: ArchivedMark[]; cards: ArchivedCard[] }>()
+   * two concurrent `addMany` calls.
+   *
+   * ⚠️ **AND PARTITIONED BY HOW THEY MATCHED, before any of the judging runs**
+   * (WI-21.1). An id match says the anchors were written against these exact
+   * bytes; a name match says only that two books share a title and an author,
+   * and a CFI carried across that gap resolves to the wrong words WITHOUT
+   * erroring. The two kinds were merged here, so `exact` and `name` rows
+   * folded against each other, deduped against each other, and — because
+   * folding reads the anchors — a foreign CFI could displace a good one purely
+   * by sitting earlier in the file. Partitioning is what makes that
+   * unrepresentable rather than something a later check has to notice. */
+  interface Partitioned {
+    readonly book: IndexedBook
+    readonly exact: { marks: ArchivedMark[]; cards: ArchivedCard[] }
+    readonly name: { marks: ArchivedMark[]; cards: ArchivedCard[] }
+  }
+  const grouped = new Map<string, Partitioned>()
   for (const row of archive.books) {
-    const match =
-      (row.bookId ? byId.get(row.bookId) : undefined) ??
-      (row.title ? (byName.get(nameKey(row.title, row.author)) ?? undefined) : undefined)
+    const byIdMatch = row.bookId ? byId.get(row.bookId) : undefined
+    const named = row.title ? (byName.get(nameKey(row.title, row.author)) ?? undefined) : undefined
+    const match = byIdMatch ?? named
+    /* ⚠️ **AN ID MATCH IS DEMOTED WHEN THE FULL DIGESTS DISAGREE.** `bookId` is
+     * SAMPLED above 64 MiB — the same id can name two different files — so an
+     * id match is evidence, not proof, and it was the evidence that let anchors
+     * through. Where both sides carry a `contentHash` (BLAKE3 of the whole
+     * file) the question is settled outright, and a disagreement means these
+     * bytes are not the bytes the marks were made against: the anchors are
+     * foreign and belong on the `name` side with every other foreign anchor.
+     *
+     * ONLY A DISAGREEMENT DEMOTES. A missing hash on either side proves
+     * nothing, and refusing on absence would break every import on a build
+     * that never computes one — `contentHash` is stamped by sync's backfill,
+     * so a build composed without `sync` has none at all. Absent leaves the
+     * id match exactly where it was. */
+    const exact = byIdMatch && !digestsDisagree(row, byIdMatch) ? byIdMatch : undefined
     if (!match) {
       unmatched.push({
         title: row.title,
@@ -460,19 +613,45 @@ export function planImport(
       })
       continue
     }
-    const into = grouped.get(match.bookId) ?? { marks: [], cards: [] }
+    const into =
+      grouped.get(match.bookId) ??
+      ({ book: match, exact: { marks: [], cards: [] }, name: { marks: [], cards: [] } } satisfies Partitioned)
+    const side = exact ? into.exact : into.name
     /* APPENDED IN A LOOP, NOT SPREAD. `push(...rows)` passes every row as an
      * ARGUMENT, and `ARCHIVE_MAX_ROWS` permits 200 000 of them — far past the
      * engine's argument limit, where the spread throws `RangeError: Maximum
      * call stack size exceeded` before the plan is built. Measured on this
      * runtime at exactly that count. The same trap `base64Of` names in
      * `services/content.ts`, on a bound this file sets itself. */
-    for (const one of row.marks) into.marks.push(one)
-    for (const one of row.cards) into.cards.push(one)
+    for (const one of row.marks) side.marks.push(one)
+    for (const one of row.cards) side.cards.push(one)
     grouped.set(match.bookId, into)
   }
 
-  for (const [bookId, row] of grouped) {
+  for (const [bookId, group] of grouped) {
+    /* THE ONLY MARKS THAT GO ANY FURTHER. Everything below — the duplicate
+     * check, the fold, the counts — reads anchors, and only an id match
+     * vouches for one. */
+    const row = {
+      marks: group.exact.marks,
+      /* ID-MATCHED CARDS FIRST, THEN NAME-MATCHED WITH THE ANCHOR DROPPED.
+       * Both halves matter and they are different guarantees: the order stops
+       * a name-matched card winning body dedup and taking an exact card's
+       * usable anchor with it, and `localAnchor: null` stops a foreign CFI
+       * being stored at all. `Card.cfi` is nullable, so this is a card that
+       * imports and simply cannot be navigated to. */
+      cards: [...group.exact.cards, ...group.name.cards.map(unanchored)],
+    }
+    if (group.name.marks.length > 0) {
+      /* THE SHELF BOOK'S OWN TITLE, not the archive row's. The reader is being
+       * told which book on THEIR shelf did not get its marks, and the archive
+       * row's title is the other build's spelling of it. */
+      unimportable.push({
+        title: group.book.title,
+        author: group.book.author,
+        marks: group.name.marks.length,
+      })
+    }
     const mine = haveMarks.get(bookId) ?? []
     /* SAME CLASS, then overlap — the rule `upsertOverlapping` applies, and
      * this filter did not. A bookmark anchors to the visible PAGE, so its CFI
@@ -528,6 +707,7 @@ export function planImport(
   return {
     additions,
     unmatched,
+    unimportable,
     booksTouched: additions.length,
     marksAdded,
     cardsAdded,
@@ -535,6 +715,26 @@ export function planImport(
     folded,
   }
 }
+
+/**
+ * The same card with no anchor — a name-matched card's CFI, dropped.
+ *
+ * A FRESH ROW rather than a mutation: `ArchivedCard` is readonly all the way
+ * down and the archive it came from is the caller's, which `planImport` must
+ * be able to be handed twice and answer the same way both times.
+ */
+const unanchored = (card: ArchivedCard): ArchivedCard => ({ ...card, localAnchor: null })
+
+/**
+ * Do the archive row and the shelf book PROVE they hold different bytes?
+ *
+ * Three states, and only one of them is an answer: both hashes present and
+ * equal (the same file), both present and different (different files), or at
+ * least one absent (nothing is known). This returns true for the middle one
+ * alone — the other two are "do not demote", for opposite reasons.
+ */
+const digestsDisagree = (row: ArchivedMarkBook, book: IndexedBook): boolean =>
+  row.contentHash !== undefined && book.contentHash !== undefined && row.contentHash !== book.contentHash
 
 /**
  * One passage rule for both places that ask — is this archived mark the same

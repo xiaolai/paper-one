@@ -283,3 +283,87 @@ describe('marginalia after a failed scan', () => {
     logged.mockRestore()
   })
 })
+
+/**
+ * A book found by name, whose marks cannot be placed in the edition on this
+ * shelf (WI-21.2).
+ *
+ * ⚠️ **THE SHIPPED BEHAVIOUR WROTE A FOREIGN BUILD'S CFI INTO THE READER'S OWN
+ * MARK STORE.** A CFI is a path through ONE package's spine and DOM; in another
+ * build of the same work that path is still valid and addresses different
+ * words. It does not throw — it highlights the wrong sentence, which is worse
+ * than failing, and the reader has no way to tell.
+ *
+ * Stage 1 refuses those marks. That is a real regression for a reader importing
+ * across two builds, so the ONE thing that must not fail is saying so.
+ */
+describe('a book found by name, and marks that cannot be placed', () => {
+  afterEach(cleanup)
+
+  const archivedMark = () => ({
+    text: 'Call me Ishmael',
+    prefix: '',
+    suffix: '',
+    note: '',
+    kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
+    chapter: 'Loomings',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    localAnchor: { cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:15)', sectionIndex: 1 },
+  })
+
+  function mount() {
+    /* The shelf holds a DIFFERENT DOWNLOAD of the book the archive was written
+       from: same title, same author, different bytes, so a different id. */
+    const books = [{ bookId: 'local-copy', title: 'Moby-Dick', author: 'Herman Melville' }] as unknown as IndexedBook[]
+    const addMany = vi.fn(async () => {})
+    const makeMany = vi.fn(async () => {})
+    const marks = { loadAllNow: vi.fn(async () => []), addMany } as unknown as MarksView
+    const cards = { all: [], makeMany } as unknown as CardsView
+    const library = { books } as unknown as LibraryView
+    const notice = vi.fn()
+    vi.mocked(importMarksFromFile).mockResolvedValue({
+      path: 'marks.json',
+      archive: {
+        version: 1,
+        books: [
+          {
+            bookId: 'from-elsewhere',
+            title: 'Moby-Dick',
+            author: 'Herman Melville',
+            marks: [archivedMark()],
+            cards: [],
+          },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof importMarksFromFile>>)
+    const hook = renderHook(() => useArchives({ library, marks, cards, notice }))
+    return { notice, hook, addMany, makeMany }
+  }
+
+  const run = async (hook: ReturnType<typeof renderHook>, notice: ReturnType<typeof vi.fn>) => {
+    await act(async () => {
+      ;(hook.result.current as { importMarks?: () => void }).importMarks?.()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+    })
+  }
+
+  it('never hands a foreign anchor to the store', async () => {
+    /* THE ACCEPTANCE CRITERION, at the only place it can be checked end to end:
+       what `addMany` was actually called with. */
+    const { notice, hook, addMany } = mount()
+    await run(hook, notice)
+    expect(addMany).not.toHaveBeenCalled()
+  })
+
+  it('names the book, and does not call it missing', async () => {
+    /* "Not on this shelf" would send the reader looking for a book that is
+       right there. The two lists exist so the two sentences can differ. */
+    const { notice, hook } = mount()
+    await run(hook, notice)
+    const said = notice.mock.calls.at(-1)?.[0] as string
+    expect(said).toContain('Not placed — a different edition here: Moby-Dick.')
+    expect(said).not.toContain('Not on this shelf')
+  })
+})

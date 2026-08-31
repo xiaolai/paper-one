@@ -215,6 +215,16 @@ const importMarksNow = useCallback(() => {
      * read fine and LANDED most of its books — the reader retries the whole
      * file or gives up, both wrong. Each book's write settles on its own;
      * what failed is counted and said beside what landed. */
+    /* ⚠️ **`mark.localAnchor.cfi` IS READ UNCONDITIONALLY HERE, AND THAT IS
+     * SAFE ONLY BECAUSE `BookImport.marks` HOLDS ID-MATCHED ROWS** (WI-21.1).
+     * `planImport` partitions each shelf book's archive rows by how they
+     * matched and puts nothing else in that list, so every anchor reaching
+     * `addMany` was written against these exact bytes. The invariant is
+     * enforced there and invisible here, which is why it is written down: a
+     * change that let name-matched rows back into `.marks` would put a foreign
+     * CFI into the reader's own store from this line, silently. `unimportable`
+     * is where those rows go, and `cards` carries the name-matched half with
+     * `localAnchor` already nulled. */
     const settled = await Promise.allSettled([
       ...plan.additions.map((one) =>
         marks.addMany(
@@ -280,23 +290,36 @@ const importMarksNow = useCallback(() => {
        another library matches nothing here, and an import that reports only
        its successes leaves the reader believing it worked. Three titles fit
        in a sentence; past that the count carries the rest. */
+    const nameThem = (books: readonly { readonly title: string }[]): string => {
+      const named = books.slice(0, 3).map((one) => one.title || 'an untitled book').join(', ')
+      return `${named}${books.length > 3 ? ` and ${books.length - 3} more` : ''}`
+    }
     const missing = plan.unmatched
-    const named = missing.slice(0, 3).map((one) => one.title || 'an untitled book').join(', ')
-    const rest = missing.length > 3 ? ` and ${missing.length - 3} more` : ''
-    const missed = missing.length > 0 ? ` Not on this shelf: ${named}${rest}.` : ''
+    const missed = missing.length > 0 ? ` Not on this shelf: ${nameThem(missing)}.` : ''
+    /* ⚠️ **A DIFFERENT SENTENCE FROM "not on this shelf" (WI-21.2).** These
+     * books WERE found — by title and author — and it is the marks that could
+     * not come across: their anchors were written against another build of the
+     * work, where the same path addresses different words. Told as one list the
+     * reader would go looking for a book that is right there.
+     *
+     * NAMED, NOT COUNTED, for the same reason `unmatched` is: a reader who
+     * loses the marks on a book they were not reading shrugs, and one who loses
+     * them on the book they were reading needs to know it was that book. */
+    const stranded = plan.unimportable
+    const unplaced = stranded.length > 0 ? ` Not placed — a different edition here: ${nameThem(stranded)}.` : ''
     const already = plan.duplicates > 0 ? ` ${plan.duplicates} already here.` : ''
     /* SAID, NOT SWALLOWED: two archived marks that overlapped each other were
        kept as one, and the reader who exported both deserves to hear it. */
     const folded = plan.folded > 0 ? ` ${plan.folded} overlapping ${plan.folded === 1 ? 'mark' : 'marks'} kept as one.` : ''
     notice(
       plan.marksAdded === 0 && plan.cardsAdded === 0
-        ? `Nothing to add.${already}${folded}${missed}`
+        ? `Nothing to add.${already}${folded}${missed}${unplaced}`
         : marksAdded === 0 && cardsAdded === 0
           ? /* Everything the plan had was refused. Saying so first is the
                whole point: the qualifier used to trail a claim that
                contradicted it. */
-            `Nothing was saved.${lostWrites}${already}${folded}${missed}`
-          : `Added ${marksAdded} ${marksAdded === 1 ? 'mark' : 'marks'} and ${cardsAdded} ${cardsAdded === 1 ? 'card' : 'cards'} across ${booksTouched} ${booksTouched === 1 ? 'book' : 'books'}.${lostWrites}${already}${folded}${missed}`,
+            `Nothing was saved.${lostWrites}${already}${folded}${missed}${unplaced}`
+          : `Added ${marksAdded} ${marksAdded === 1 ? 'mark' : 'marks'} and ${cardsAdded} ${cardsAdded === 1 ? 'card' : 'cards'} across ${booksTouched} ${booksTouched === 1 ? 'book' : 'books'}.${lostWrites}${already}${folded}${missed}${unplaced}`,
     )
   })().catch((cause: unknown) => {
     /* Everything after the parse settles individually above, so a rejection

@@ -115,6 +115,25 @@ export interface ReaderProps {
   saveFailure?: SaveFailureView | null
   onDismissSaveFailure?: () => void
   /**
+   * What an archive import just did, said where the reader can see it
+   * (WI-21.2).
+   *
+   * ⚠️ **THE NOTICE WAS INVISIBLE FROM HERE, AND THE IMPORT IS OFFERED HERE.**
+   * `marks:import` is in the palette on the reader screen (`commands.ts`), and
+   * only the conditionally mounted `Library` rendered `importNotice` — so a
+   * reader could import while reading, lose every name-matched mark, and see no
+   * explanation at all. Stage 1 makes that loss deliberate, which makes saying
+   * so mandatory rather than nice.
+   *
+   * Drawn at the FOOT OF THE COLUMN, outside the `book.source` branch — see
+   * the render. Inside it, the notice appeared only when a book was open and
+   * not in error, so an import begun from the reader's empty state reported
+   * into nothing. `App` gates it on the screen, so the shelf and the reader
+   * never announce the same sentence twice.
+   */
+  importNotice?: string | null
+  onDismissImportNotice?: () => void
+  /**
    * Where a lookup says whether it found a real sentence (WI-16.4, §F4).
    *
    * OBSERVABILITY, NOT UI. After §16 some lookups use the sentence the term
@@ -229,6 +248,8 @@ export function Reader({
   onInstallGloss,
   saveFailure = null,
   onDismissSaveFailure,
+  importNotice = null,
+  onDismissImportNotice,
   diagnostics = NOOP_DIAGNOSTICS,
   marks,
   marking,
@@ -1167,6 +1188,37 @@ export function Reader({
               <Plus size={ICON.control} strokeWidth={ICON.stroke} />
               Add books
             </button>
+          </div>
+        )}
+
+        {/* WHAT AN IMPORT JUST DID (WI-21.2), said on the screen it was started
+            from. `marks:import` is offered in the palette while reading, and
+            until this the only surface that rendered the result was the
+            Library — so a reader who imported an archive from a different build
+            of the book lost every name-matched mark with no explanation
+            anywhere. Stage 1 makes that refusal deliberate, and a deliberate
+            loss has to be said out loud.
+
+            ⚠️ **OUTSIDE THE `book.source` TERNARY, and that is the whole
+            point.** Placed inside the open-book branch it rendered only when a
+            book was open and not in error — so an import begun from the
+            reader's EMPTY STATE, or with a book that would not open, reported
+            into nothing and reproduced the exact defect this was written to
+            remove, one branch narrower. The palette does not care which of the
+            three the screen is showing.
+
+            AT THE FOOT OF THE COLUMN, which is also where `Library` puts this
+            same sentence — its own note says "THE IMPORT LINE IS IN THE STATUS
+            BAR, at the foot" — so the two screens now report one event in one
+            place rather than in two. */}
+        {importNotice && (
+          <div className={styles.notice} role="status">
+            <span>{importNotice}</span>
+            {onDismissImportNotice && (
+              <button type="button" className={styles.noticeDismiss} onClick={onDismissImportNotice}>
+                Dismiss
+              </button>
+            )}
           </div>
         )}
       </div>
