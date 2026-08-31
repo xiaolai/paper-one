@@ -118,6 +118,30 @@ done
 
 readonly SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10)
 
+# The same options plus a deadline on a connection that OPENED and then stopped
+# answering — which is every ssh here that runs a command or copies a tree.
+#
+# ⚠️ **`ConnectTimeout` ALONE DOES NOT BOUND A HANG, and this script had only
+# that.** It bounds the DIAL. A laptop that sleeps mid-command, a half-open TCP
+# connection, a wedged sshd — the socket is already established, so the connect
+# timeout has nothing left to time out, and the kernel will hold the socket for
+# as long as it likes. `sync-scenario.sh` learned this and wrote it down beside
+# its own `remote_sh`; the lesson did not reach here, and these two use the same
+# transport.
+#
+# ⚠️ **MEASURED, NOT THEORETICAL: three `sync-scenario.sh` runs were found
+# wedged on `ssh reader@desk.local` after TWO DAYS**, each blocking a `--dry-run`
+# that could never finish. Those particular processes predated `remote_sh`, but
+# every command call in THIS script was still shaped the same way.
+#
+# A SEPARATE ARRAY RATHER THAN A WIDER `SSH_OPTS`, and that is not stylistic:
+# the tunnel below sets `ServerAliveInterval=30` deliberately, and ssh takes the
+# FIRST value for a repeated `-o`. Folding 5 into the shared array would silently
+# retune the long-lived forward from "drop after 90s of silence" to "drop after
+# 15s", so a brief network blip would take the tunnel down. The tunnel keeps its
+# own numbers; commands get these.
+readonly SSH_CMD_OPTS=("${SSH_OPTS[@]}" -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
+
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 fail() { echo "REFUSING: $*" >&2; exit 1; }
 
@@ -157,7 +181,7 @@ close_tunnel() {
 #
 # Returns 0 when nothing is left listening, 1 when it could not be confirmed.
 remote_stop() {
-  ssh "${SSH_OPTS[@]}" "$remote" "
+  ssh "${SSH_CMD_OPTS[@]}" "$remote" "
     checkout=\"\$HOME/$REMOTE_CHECKOUT\"
 
     pid=\$(lsof -nP -iTCP:$BRIDGE_PORT_REMOTE -sTCP:LISTEN -t 2>/dev/null | head -1 || true)
@@ -201,7 +225,7 @@ if [ "$stop" -eq 1 ]; then
   # harness leaves an instance running and tells you it did not.
   if remote_stop; then
     close_tunnel
-    ssh "${SSH_OPTS[@]}" "$remote" "rm -f \"$LAUNCH_FILE\"" 2>/dev/null || true
+    ssh "${SSH_CMD_OPTS[@]}" "$remote" "rm -f \"$LAUNCH_FILE\"" 2>/dev/null || true
     echo "satchel stopped, tunnel closed"
     exit 0
   fi
@@ -217,7 +241,7 @@ fi
 say "Preflight: $remote"
 
 # One round trip, so a machine that is asleep costs one timeout and not six.
-preflight="$(ssh "${SSH_OPTS[@]}" "$remote" "
+preflight="$(ssh "${SSH_CMD_OPTS[@]}" "$remote" "
   export PATH=\"$REMOTE_PATH\"
   printf 'console_user=%s\n' \"\$(stat -f%Su /dev/console 2>/dev/null)\"
   printf 'ssh_user=%s\n' \"\$(id -un)\"
@@ -303,7 +327,7 @@ fi
 
 if [ "$sync" -eq 1 ]; then
   say "Syncing the working tree"
-  ssh "${SSH_OPTS[@]}" "$remote" "mkdir -p \"\$HOME/$REMOTE_CHECKOUT\""
+  ssh "${SSH_CMD_OPTS[@]}" "$remote" "mkdir -p \"\$HOME/$REMOTE_CHECKOUT\""
 
   # Build outputs are excluded, not copied: `src-tauri/target` alone is several
   # GB and the remote's own is warm. --delete so a file removed here cannot
@@ -317,10 +341,10 @@ if [ "$sync" -eq 1 ]; then
     --exclude '.git/' \
     --exclude 'node_modules/' --exclude 'src-tauri/target/' --exclude 'dist/' \
     --exclude 'coverage/' --exclude '.types/' --exclude '*.tsbuildinfo' \
-    -e "ssh ${SSH_OPTS[*]}" \
+    -e "ssh ${SSH_CMD_OPTS[*]}" \
     "$REPO_ROOT/" "$remote:$REMOTE_CHECKOUT/"
 
-  ssh "${SSH_OPTS[@]}" "$remote" "
+  ssh "${SSH_CMD_OPTS[@]}" "$remote" "
     export PATH=\"$REMOTE_PATH\"
     cd \"\$HOME/$REMOTE_CHECKOUT\" && pnpm install --frozen-lockfile
   " >/dev/null
@@ -349,7 +373,7 @@ cleanup() {
     close_tunnel
     # The launch file too — leaving it behind is how the next run's operator
     # finds a script nobody remembers writing.
-    ssh "${SSH_OPTS[@]}" "$remote" "rm -f \"$LAUNCH_FILE\"" 2>/dev/null || true
+    ssh "${SSH_CMD_OPTS[@]}" "$remote" "rm -f \"$LAUNCH_FILE\"" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -376,9 +400,9 @@ printf '%s\n' \
   "export PATH=\"$REMOTE_PATH\"" \
   "cd \"\$HOME/$REMOTE_CHECKOUT\" || exit 1" \
   'PAPER_ROLE=satchel exec pnpm app' \
-  | ssh "${SSH_OPTS[@]}" "$remote" "cat > \"$LAUNCH_FILE\" && chmod +x \"$LAUNCH_FILE\""
+  | ssh "${SSH_CMD_OPTS[@]}" "$remote" "cat > \"$LAUNCH_FILE\" && chmod +x \"$LAUNCH_FILE\""
 
-ssh "${SSH_OPTS[@]}" "$remote" \
+ssh "${SSH_CMD_OPTS[@]}" "$remote" \
   'osascript -e "tell application \"Terminal\" to do script \"$HOME/.paper-satchel-launch.sh\"" -e "tell application \"Terminal\" to activate"' \
   >/dev/null
 
@@ -408,7 +432,7 @@ while :; do
   # whatever was printed before a non-zero exit, so a probe that emitted `ours`
   # and then died would have been read as a clean match — the same
   # partial-output-looks-like-success shape this script exists to avoid.
-  if ! owner="$(ssh "${SSH_OPTS[@]}" "$remote" "
+  if ! owner="$(ssh "${SSH_CMD_OPTS[@]}" "$remote" "
     checkout=\"\$HOME/$REMOTE_CHECKOUT\"
     pid=\$(lsof -nP -iTCP:$BRIDGE_PORT_REMOTE -sTCP:LISTEN -t 2>/dev/null | head -1 || true)
     [ -n \"\$pid\" ] || exit 0
