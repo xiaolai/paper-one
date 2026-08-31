@@ -48,8 +48,22 @@ function watched(id: string, seen: { comparisons: number }): Mark {
   } as unknown as Mark
 }
 
-/** An environment holding these marks, whose `loadAll` runs `during`. */
-function shelfOf(marks: readonly Mark[], during: () => void) {
+/**
+ * An environment holding these marks, whose `loadAll` runs `during`.
+ *
+ * ⚠️ **THE SNAPSHOT MUST NAME EVERY CLASS THE STORE PUBLISHES.** This double is
+ * cast `as unknown as ServiceEnvironment`, so TypeScript does not hold it to
+ * `MarkSnapshot` — when `allUnplaced` arrived (WI-21.7) and `markList` began
+ * reading it, the omission surfaced as a `TypeError` from spreading
+ * `undefined` rather than as a compile error. Left partial, a double like this
+ * teaches the handler to be defensive about a shape the real store always
+ * supplies in full.
+ */
+function shelfOf(
+  marks: readonly Mark[],
+  during: () => void,
+  classes: { unplaced?: readonly Mark[]; bookmarks?: readonly Mark[] } = {},
+) {
   let loads = 0
   const env = {
     services: {
@@ -58,7 +72,11 @@ function shelfOf(marks: readonly Mark[], during: () => void) {
           loads += 1
           during()
         },
-        getSnapshot: () => ({ all: marks, allBookmarks: [] }),
+        getSnapshot: () => ({
+          all: marks,
+          allUnplaced: classes.unplaced ?? [],
+          allBookmarks: classes.bookmarks ?? [],
+        }),
         forBook: async () => marks,
       },
     },

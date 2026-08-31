@@ -229,6 +229,20 @@ export interface MarkRow {
   readonly style: MarkRowStyle
   readonly chapter: string
   readonly createdAt: number
+  /**
+   * Why this mark has no anchor here, when it has none (WI-21.7).
+   *
+   * ⚠️ **WITHOUT IT THE ROW IS UNREADABLE AT THE OTHER END.** `cfi: ''` alone
+   * is what a mark that LOST its anchor looks like, and every parser refuses
+   * that — `app/web/marks.ts` included, deliberately. So an unplaced mark
+   * projected without this field is not merely missing an explanation; it is
+   * dropped on arrival, and the browser client shows a reader nothing where
+   * their own quote and note should be.
+   *
+   * Optional, because most marks are placed and a row that carries no anchor
+   * problem should not carry a field about one.
+   */
+  readonly unplaced?: { readonly reason: 'foreign-build'; readonly fromBook: string }
 }
 
 export function markRow(mark: Mark): MarkRow {
@@ -246,6 +260,10 @@ export function markRow(mark: Mark): MarkRow {
     style: mark.style,
     chapter: mark.chapter,
     createdAt: mark.createdAt,
+    /* SPREAD, not assigned — `exactOptionalPropertyTypes` is on, so an explicit
+       `undefined` is not the same as an absent key, and a placed mark must not
+       carry the field at all. */
+    ...(mark.unplaced ? { unplaced: mark.unplaced } : {}),
   }
 }
 

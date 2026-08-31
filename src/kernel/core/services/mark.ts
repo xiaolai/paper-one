@@ -61,13 +61,23 @@ export function markList(env: ServiceEnvironment) {
          * What CAN be abandoned is everything after it, which is why the signal
          * is read again below rather than only at the top. */
         await env.services.marks.loadAll()
-        /* BOTH HALVES. The snapshot splits annotations from bookmarks at the
-         * one door every subscriber reads through — `all` is annotations
-         * only — and they are the same record with a different `kind`. A
-         * `mark.list` that read `all` alone would answer "every mark" while
-         * silently omitting every bookmark on the shelf. */
+        /* ALL THREE CLASSES. The snapshot splits annotations from bookmarks
+         * from unplaced marks at the one door every subscriber reads through —
+         * `all` is placed annotations only — and they are the same record with
+         * a different `kind` or an `unplaced` beside it. A `mark.list` that
+         * read `all` alone would answer "every mark" while silently omitting
+         * every bookmark on the shelf.
+         *
+         * ⚠️ **THIS SENTENCE SAID "BOTH HALVES" AND THE LIST HAD TWO OF THREE**
+         * (WI-21.7). `allUnplaced` arrived after it was written, so the comment
+         * stayed true-sounding and the code stopped being complete: an imported
+         * mark was stored, listed in the desktop's Marginalia, exported and
+         * synced, and invisible to `paper mark list` and to the browser client.
+         * The per-book branch below never had the bug — `forBook` reads the
+         * file, which holds all three — so the omission showed only on the
+         * whole-shelf call. */
         const snapshot = env.services.marks.getSnapshot()
-        marks = [...snapshot.all, ...snapshot.allBookmarks]
+        marks = [...snapshot.all, ...snapshot.allUnplaced, ...snapshot.allBookmarks]
       } else {
         knownBook(env, bookId)
         marks = liveMarks(await env.services.marks.forBook(bookId))
@@ -211,9 +221,15 @@ export function markRemove(env: ServiceEnvironment) {
  * is none at all, and the write that just succeeded proves the store knew the
  * mark, so in practice the snapshot answers.
  *
- * Both halves of the snapshot are searched: `all` is annotations and
- * `allBookmarks` is the rest, and a bookmark's note is as editable as a
- * highlight's.
+ * All THREE classes of the snapshot are searched: `all` is placed annotations,
+ * `allBookmarks` is the places, `allUnplaced` is the marks with no anchor here
+ * — and a bookmark's note is as editable as a highlight's, as is an unplaced
+ * mark's. Nothing about writing a note needs an anchor.
+ *
+ * ⚠️ **THIS SAID "BOTH HALVES" AND SEARCHED TWO OF THREE** (WI-21.7). An
+ * unplaced mark was reported `notFound` by `mark.set`, so a reader could see
+ * their imported note in the desktop panel and be told it does not exist when
+ * they tried to edit it over the wire.
  */
 /**
  * The mark with this id, using `bookId` as a HINT about where to look first.
@@ -231,11 +247,11 @@ async function locate(env: ServiceEnvironment, id: string, bookId: string | unde
     if (inBook) return inBook
   }
   const held = env.services.marks.getSnapshot()
-  const known = [...held.all, ...held.allBookmarks].find((one) => one.id === id)
+  const known = [...held.all, ...held.allUnplaced, ...held.allBookmarks].find((one) => one.id === id)
   if (known) return known
   await env.services.marks.loadAll()
   const loaded = env.services.marks.getSnapshot()
-  const anywhere = [...loaded.all, ...loaded.allBookmarks].find((one) => one.id === id)
+  const anywhere = [...loaded.all, ...loaded.allUnplaced, ...loaded.allBookmarks].find((one) => one.id === id)
   if (!anywhere) throw refuse(SERVICE_ERRORS.notFound, `no mark ${id}`)
   return anywhere
 }

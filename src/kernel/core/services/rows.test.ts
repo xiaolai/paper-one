@@ -237,6 +237,50 @@ describe('markRow', () => {
   })
 
   /**
+   * ⚠️ **A ROW WITH `cfi: ''` AND NO REASON IS DROPPED ON ARRIVAL.**
+   *
+   * `MarkRow` carried no discriminator, so an unplaced mark projected as a
+   * plain empty anchor — and every parser refuses that, deliberately, because
+   * it is also what a mark that LOST its anchor looks like. The browser client
+   * already reads `unplaced` and already does the three-way split; it was never
+   * sent one. So an imported mark was stored, listed in the desktop panel,
+   * exported and synced, and simply absent over the wire, with nothing
+   * reporting a drop.
+   */
+  describe('an unplaced mark', () => {
+    const STRANDED: Mark = {
+      ...MARK,
+      cfi: '',
+      unplaced: { reason: 'foreign-build', fromBook: 'book:elsewhere' },
+    }
+
+    it('carries its reason across the wire', () => {
+      expect(markRow(STRANDED).unplaced).toEqual({ reason: 'foreign-build', fromBook: 'book:elsewhere' })
+      expect(markRow(STRANDED).cfi, 'the empty anchor is the truth and must not be invented').toBe('')
+    })
+
+    it('keeps everything the reader made', () => {
+      /* The anchor is the ONE field that cannot cross. The quote, the note and
+         the colour are the whole point of sending the row at all. */
+      expect(markRow(STRANDED)).toMatchObject({
+        text: MARK.text,
+        prefix: MARK.prefix,
+        suffix: MARK.suffix,
+        note: MARK.note,
+        tint: MARK.tint,
+        chapter: MARK.chapter,
+      })
+    })
+
+    it('is ABSENT from a placed row, not present-and-undefined', () => {
+      /* `exactOptionalPropertyTypes` is on and the key-set assertion above is
+         exact, so an unconditional `unplaced: mark.unplaced` would both fail
+         that test and put a meaningless key on every mark on the shelf. */
+      expect('unplaced' in markRow(MARK)).toBe(false)
+    })
+  })
+
+  /**
    * ⚠️ **A NON-NULL `tagClock` USED TO BE THE STORE'S OWN OBJECT.**
    *
    * `bookDetail` was only ever tested with the clock absent, so nothing noticed

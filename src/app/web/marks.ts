@@ -205,6 +205,19 @@ export function parseMarks(answer: unknown): readonly Mark[] {
     }
     if (
       cfi === null ||
+      /* ⚠️ **AND EMPTY IS NOT A CFI.** `str` returns `''` unchanged, so the
+         null test above never fired for an anchorless row and one arrived here
+         WITHOUT the discriminator — which `resplit` then files under
+         `allUnplaced` on `isPlaced` alone. The reader is shown a mark that
+         lost its anchor as though it came from another edition, with the
+         panel's explanation missing because there is no `unplaced` to read.
+         The comment on the branch above already says anything unexplained
+         "falls through to the refusal below"; it did not.
+         This is the kernel's own rule — `isMark` admits an empty cfi only
+         beside an `unplaced` — restated at the wire, where the JSON is
+         somebody else's. Unreachable until WI-21.7 put anchorless rows on the
+         wire at all, which is exactly why it needs pinning now. */
+      cfi === '' ||
       sectionIndex === null ||
       text === null ||
       note === null ||
