@@ -225,6 +225,13 @@ const importMarksNow = useCallback(() => {
      * CFI into the reader's own store from this line, silently. `unplacedBooks`
      * is where those rows go, and `cards` carries the name-matched half with
      * `localAnchor` already nulled. */
+    /* ⚠️ **NAMED ONCE, BECAUSE THE OUTCOMES BELOW ARE SLICED BY POSITION.**
+     * These writes sit BETWEEN the per-book writes and the cards write, so
+     * every index into `settled` depends on how many there are. Recomputing
+     * the filter at the read end is how `cardsFailed` came to read
+     * `settled[plan.additions.length]` — the first UNPLACED write — and report
+     * the card write's fate from a row that is not it. */
+    const unplacedWrites = plan.additions.filter((one) => one.unplaced.length > 0)
     const settled = await Promise.allSettled([
       ...plan.additions.map((one) =>
         marks.addMany(
@@ -254,27 +261,25 @@ const importMarksNow = useCallback(() => {
        * `isMark` accepts an empty anchor in — see the field. `sectionIndex: 0`
        * is a placeholder and means nothing; the class the store puts these in
        * is what keeps them away from the painter, not the number. */
-      ...plan.additions
-        .filter((one) => one.unplaced.length > 0)
-        .map((one) =>
-          marks.addMany(
-            one.bookId,
-            one.unplaced.map(({ mark, fromBook }) => ({
-              bookId: one.bookId,
-              cfi: '',
-              sectionIndex: 0,
-              text: mark.text,
-              prefix: mark.prefix,
-              suffix: mark.suffix,
-              note: mark.note,
-              kind: mark.kind,
-              tint: mark.tint,
-              style: mark.style,
-              chapter: mark.chapter,
-              unplaced: { reason: 'foreign-build' as const, fromBook },
-            })),
-          ),
+      ...unplacedWrites.map((one) =>
+        marks.addMany(
+          one.bookId,
+          one.unplaced.map(({ mark, fromBook }) => ({
+            bookId: one.bookId,
+            cfi: '',
+            sectionIndex: 0,
+            text: mark.text,
+            prefix: mark.prefix,
+            suffix: mark.suffix,
+            note: mark.note,
+            kind: mark.kind,
+            tint: mark.tint,
+            style: mark.style,
+            chapter: mark.chapter,
+            unplaced: { reason: 'foreign-build' as const, fromBook },
+          })),
         ),
+      ),
       cards.makeMany(
         plan.additions.flatMap((one) =>
           one.cards.map((card) => ({
@@ -291,9 +296,27 @@ const importMarksNow = useCallback(() => {
     for (const outcome of settled) {
       if (outcome.status === 'rejected') console.error('Paper: an import write failed', outcome.reason)
     }
+    /* THE THREE GROUPS, SLICED IN THE ORDER THEY WERE QUEUED — see
+     * `unplacedWrites`. Each boundary is derived from the list that produced
+     * it, so adding a fourth group moves every index by construction rather
+     * than by somebody remembering to. */
     const bookOutcomes = settled.slice(0, plan.additions.length)
-    const failedBooks = bookOutcomes.filter((outcome) => outcome.status === 'rejected').length
-    const cardsFailed = settled[plan.additions.length]?.status === 'rejected'
+    const unplacedOutcomes = settled.slice(
+      plan.additions.length,
+      plan.additions.length + unplacedWrites.length,
+    )
+    const cardsFailed = settled[plan.additions.length + unplacedWrites.length]?.status === 'rejected'
+    /* ⚠️ **A BOOK IS COUNTED ONCE**, however many of its writes failed. A
+     * name-matched book has two, and counting rejections rather than books
+     * told the reader "2 books could not be saved" about one book. */
+    const failedBookIds = new Set<string>()
+    for (const [at, one] of plan.additions.entries()) {
+      if (bookOutcomes[at]?.status === 'rejected') failedBookIds.add(one.bookId)
+    }
+    for (const [at, one] of unplacedWrites.entries()) {
+      if (unplacedOutcomes[at]?.status === 'rejected') failedBookIds.add(one.bookId)
+    }
+    const failedBooks = failedBookIds.size
     /* ⚠️ WHAT LANDED, NOT WHAT WAS PLANNED. The sentence took its three
      * numbers from the plan and appended the failures as a qualifier, so an
      * import whose every write was refused still read "Added 812 marks and 40
@@ -341,9 +364,19 @@ const importMarksNow = useCallback(() => {
      * loses the marks on a book they were not reading shrugs, and one who loses
      * them on the book they were reading needs to know it was that book. */
     const stranded = plan.unplacedBooks
-    const kept = plan.unplacedAdded
+    /* ⚠️ **WHAT LANDED, for the same reason `marksAdded` is** — this read
+     * `plan.unplacedAdded`, the number PLANNED, so a refused write still
+     * promised the reader their marks were kept. */
+    const kept = unplacedWrites.reduce(
+      (sum, one, at) => (unplacedOutcomes[at]?.status === 'fulfilled' ? sum + one.unplaced.length : sum),
+      0,
+    )
+    /* GATED ON WHAT WAS KEPT, not on what was stranded. The two differ exactly
+     * when the write was refused, and "0 marks kept without a place" is not a
+     * smaller version of this sentence — it is the sentence denying itself.
+     * `lostWrites` is what reports that case, and it does it in words. */
     const unplaced =
-      stranded.length > 0
+      kept > 0
         ? ` ${kept} ${kept === 1 ? 'mark' : 'marks'} kept without a place — another edition here: ${nameThem(stranded)}.`
         : ''
     const already = plan.duplicates > 0 ? ` ${plan.duplicates} already here.` : ''
@@ -353,12 +386,27 @@ const importMarksNow = useCallback(() => {
     notice(
       plan.marksAdded === 0 && plan.cardsAdded === 0 && plan.unplacedAdded === 0
         ? `Nothing to add.${already}${folded}${missed}${unplaced}`
-        : marksAdded === 0 && cardsAdded === 0
+        : marksAdded === 0 && cardsAdded === 0 && kept === 0
           ? /* Everything the plan had was refused. Saying so first is the
                whole point: the qualifier used to trail a claim that
-               contradicted it. */
+               contradicted it.
+
+               ⚠️ **AND `kept` COUNTS TOWARDS "SOMETHING WAS SAVED"** (WI-21.7).
+               An unplaced mark IS saved — stored, listed, exported, synced —
+               so a name-matched import with no id-matched rows took this
+               branch and read "Nothing was saved. 3 marks kept without a
+               place", which is the self-contradiction the comment above says
+               this branch exists to prevent, arriving through the third class.
+               MEASURED against a real import, on the reader's screen. */
             `Nothing was saved.${lostWrites}${already}${folded}${missed}${unplaced}`
-          : `Added ${marksAdded} ${marksAdded === 1 ? 'mark' : 'marks'} and ${cardsAdded} ${cardsAdded === 1 ? 'card' : 'cards'} across ${booksTouched} ${booksTouched === 1 ? 'book' : 'books'}.${lostWrites}${already}${folded}${missed}${unplaced}`,
+          : marksAdded === 0 && cardsAdded === 0
+            ? /* KEPT, AND NOTHING PLACED — `kept > 0`, since the branch above
+                 took the case where it is zero. The unplaced sentence is the
+                 whole of what happened, so it leads instead of trailing:
+                 "Added 0 marks and 0 cards across 0 books" is not a truer
+                 opening than "Nothing was saved" was, only a longer one. */
+              `${unplaced.trim()}${lostWrites}${already}${folded}${missed}`
+            : `Added ${marksAdded} ${marksAdded === 1 ? 'mark' : 'marks'} and ${cardsAdded} ${cardsAdded === 1 ? 'card' : 'cards'} across ${booksTouched} ${booksTouched === 1 ? 'book' : 'books'}.${lostWrites}${already}${folded}${missed}${unplaced}`,
     )
   })().catch((cause: unknown) => {
     /* Everything after the parse settles individually above, so a rejection

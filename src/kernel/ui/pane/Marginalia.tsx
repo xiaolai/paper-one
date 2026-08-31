@@ -302,6 +302,16 @@ function PlaceRow({
            book"; it is now "a book still on the shelf", and a place in a book
            Paper no longer holds is the case that stays disabled. */
         disabled={!reachable || !onGoTo}
+        /* SAYS WHY, exactly as the mark row does. ⚠️ A place row can be
+           unplaced too — an imported bookmark is an unplaced mark of the
+           bookmark class — and this row was disabled with NO explanation at
+           all, so the reader saw the book open in front of them and a control
+           that silently did nothing. MEASURED: `title` and `aria-description`
+           both null on the bookmark row of a name-matched import, while the
+           annotation beside it explained itself. The reason the mark row gives
+           for carrying this is the same one, and it is why the two rows share
+           the sentence rather than each wording its own. */
+        {...(bookmark.unplaced ? { title: UNPLACED_TITLE, 'aria-description': UNPLACED_TITLE } : {})}
         onClick={() => onGoTo?.({ bookId: bookmark.bookId, cfi: bookmark.cfi })}
       >
         <span className={styles.placeChapter}>{chapter}</span>

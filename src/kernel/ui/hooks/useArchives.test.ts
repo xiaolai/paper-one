@@ -393,4 +393,56 @@ describe('a book found by name, and marks that cannot be placed', () => {
     expect(said).toContain('1 mark kept without a place — another edition here: Moby-Dick.')
     expect(said).not.toContain('Not on this shelf')
   })
+
+  /**
+   * ⚠️ **THE WHOLE SENTENCE, NOT A SUBSTRING OF IT.**
+   *
+   * The assertion above is `toContain`, and it passed for a notice that read
+   * *"Nothing was saved. 1 mark kept without a place…"* — a sentence that
+   * denies its own second half. MEASURED on the reader's screen against a real
+   * import: three marks stored on disk, and the reader told nothing was.
+   *
+   * `marksAdded` counts PLACED rows, so a name-matched import scored zero on
+   * every term of the "was anything saved" test while saving three marks. An
+   * unplaced mark is saved — stored, listed, exported and synced — and the
+   * count that decides this sentence has to include it.
+   */
+  it('does not open by denying the marks it just kept', async () => {
+    const { notice, hook } = mount()
+    await run(hook, notice)
+    const said = notice.mock.calls.at(-1)?.[0] as string
+    expect(said).not.toContain('Nothing was saved')
+    expect(said).not.toContain('Nothing to add')
+    expect(said, 'a count of placed rows is not the whole of what was saved').not.toContain('Added 0 marks')
+    expect(said).toBe('1 mark kept without a place — another edition here: Moby-Dick.')
+  })
+
+  it('reports what LANDED, not what was planned, when the unplaced write fails', async () => {
+    /* The rule `marksAdded` already follows, applied to the third class: a
+       refused write must not promise the reader their marks were kept. */
+    const { notice, hook, addMany } = mount()
+    addMany.mockRejectedValue(new Error('disk full'))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await run(hook, notice)
+    const said = notice.mock.calls.at(-1)?.[0] as string
+    expect(said).toContain('Nothing was saved.')
+    expect(said, 'a refused write still claimed the marks were kept').not.toContain('kept without a place')
+    expect(said).toContain('1 book could not be saved.')
+    logged.mockRestore()
+  })
+
+  it('reads the CARDS outcome for the cards, not the unplaced write beside it', async () => {
+    /* ⚠️ The unplaced writes are queued BETWEEN the per-book writes and the
+       cards write, so `settled[plan.additions.length]` — which is what this
+       read — is the first UNPLACED write, not the cards. With the unplaced
+       write fulfilled and the cards write refused, the old arithmetic reported
+       the cards as fine and never looked at their result at all. */
+    const { notice, hook, makeMany } = mount()
+    makeMany.mockRejectedValue(new Error('cards refused'))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await run(hook, notice)
+    const said = notice.mock.calls.at(-1)?.[0] as string
+    expect(said, 'a failed card write was reported as a success').toContain('the cards could not be saved.')
+    logged.mockRestore()
+  })
 })
