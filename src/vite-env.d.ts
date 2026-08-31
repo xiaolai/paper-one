@@ -59,6 +59,39 @@ declare module 'foliate-js/epubcfi.js' {
    * back from input that is not a valid range.
    */
   export function collapse(cfi: string, toEnd?: boolean): string
+
+  /* ---- WI-21.S's spike (`ui/reader/reanchor.ts`) needs three more, and only
+   * the spike does. Declared narrowly, and the header's rule above still
+   * holds: this is the smallest surface a caller has actually needed, not
+   * foliate's whole CFI module. ---- */
+
+  /**
+   * A live range as the DOCUMENT-LOCAL half of a CFI — no spine step, no
+   * `epubcfi(...)` wrapper: `/4/2,/1:0,/1:15`.
+   *
+   * `view.getCFI(index, range)` joins this to the section's own step with the
+   * `!` indirection; a caller without a `View` composes it by hand, which is
+   * exactly what `cfiFor` does and why it is written out there.
+   */
+  export function fromRange(range: Range, filter?: (node: Node) => number): string
+
+  /**
+   * A CFI's parsed parts. Opaque on purpose — nothing outside foliate should
+   * read the shape, and every consumer here hands it straight to `toRange`.
+   */
+  export type CfiParts = unknown
+
+  /** Parse a CFI string into the parts `toRange` consumes. Throws on garbage. */
+  export function parse(cfi: string): CfiParts
+
+  /**
+   * The range a CFI addresses in a document.
+   *
+   * ⚠️ **THE PARTS MUST BE THE DOCUMENT-LOCAL HALF**, past the `!`. Handed a
+   * full CFI's parts, it walks the spine steps as if they were element steps
+   * of the section document and lands nowhere the caller meant.
+   */
+  export function toRange(doc: Document, parts: CfiParts, filter?: (node: Node) => number): Range
 }
 
 declare module 'foliate-js/view.js' {
