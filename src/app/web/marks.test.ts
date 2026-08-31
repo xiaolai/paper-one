@@ -264,3 +264,51 @@ describe('createRemoteMarks', () => {
     expect(woke).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * ⚠️ **THE SHELF NEVER SENT ONE UNTIL WI-21.7's WIRE FIX**, so this parser's
+ * unplaced branch had never been exercised against a real row.
+ *
+ * `cfi: ''` is what BOTH a mark with no anchor and a mark that LOST its anchor
+ * look like, and the refusal below is right about the second. The discriminator
+ * is the only thing that tells them apart, which is why a row carrying an empty
+ * anchor and nothing else must still be refused.
+ */
+describe('a mark the shelf says has no place', () => {
+  const STRANDED = { reason: 'foreign-build', fromBook: 'book:elsewhere' }
+
+  it('is admitted, with its quote and note, when it says why', () => {
+    const marks = parseMarks([row({ cfi: '', sectionIndex: 0, note: 'the reader wrote this', unplaced: STRANDED })])
+    expect(marks).toHaveLength(1)
+    expect(marks[0]?.unplaced).toEqual(STRANDED)
+    expect(marks[0]?.cfi).toBe('')
+    expect(marks[0]?.note).toBe('the reader wrote this')
+    expect(marks[0]?.text).toBe('the whale')
+  })
+
+  it('is still refused when the empty anchor is not explained', () => {
+    /* The pre-existing rule, and it must survive: an anchorless row with no
+       reason is a mark that lost its place, not one that never had one. */
+    expect(parseMarks([row({ cfi: '', sectionIndex: 0 })])).toEqual([])
+  })
+
+  it.each([
+    ['a reason this build does not know', { reason: 'future-reason', fromBook: 'book:elsewhere' }],
+    ['no fromBook', { reason: 'foreign-build' }],
+    ['not an object', 'foreign-build'],
+    ['true', true],
+  ])('is refused when the reason is unreadable — %s', (_why, bad) => {
+    expect(parseMarks([row({ cfi: '', sectionIndex: 0, unplaced: bad })])).toEqual([])
+  })
+
+  it('reaches the pane through allUnplaced, not through all', async () => {
+    /* The three-way split is what puts it in the panel and keeps it away from
+       the painter. A row landing in `all` would be handed to the overlay. */
+    const view = createRemoteMarks(
+      shelfOf([row({ cfi: '', sectionIndex: 0, unplaced: STRANDED })]) as unknown as ShelfChannel,
+    )
+    await vi.waitFor(() => expect(view.allUnplaced).toHaveLength(1))
+    expect(view.all, 'an anchorless mark was offered to the drawable list').toHaveLength(0)
+    expect(view.allBookmarks).toHaveLength(0)
+  })
+})

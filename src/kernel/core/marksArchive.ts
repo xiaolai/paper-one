@@ -146,6 +146,21 @@ export interface ArchivedMark {
    * `localAnchor` so nobody carries it somewhere it cannot mean anything.
    */
   readonly localAnchor: { readonly cfi: string; readonly sectionIndex: number }
+  /**
+   * Set when this mark HAD NO PLACE in the library that exported it (WI-21.7).
+   *
+   * ⚠️ **WITHOUT IT A BACKUP SILENTLY LOSES EVERY UNPLACED MARK.** `localAnchor`
+   * is written unconditionally from `mark.cfi`, which for an unplaced mark is
+   * `''` — the ABSENCE of an anchor. Re-imported with no discriminator beside
+   * it, the row is stored as `cfi: ''` with nothing explaining it, and `isMark`
+   * drops it on the very next load: *"A row with an empty cfi and no reason is
+   * still dropped."* The mark survives the export, survives the import, and is
+   * gone by the time the reader looks — which is the file they reach for
+   * exactly when everything else has failed.
+   *
+   * Optional, so an archive written before this field parses unchanged.
+   */
+  readonly unplaced?: { readonly reason: 'foreign-build'; readonly fromBook: string }
 }
 
 /** One card. Same rules: what the reader made, none of the ledger's stamps. */
@@ -374,6 +389,8 @@ export function exportMarks(
       chapter: mark.chapter,
       createdAt: iso(mark.createdAt),
       localAnchor: { cfi: mark.cfi, sectionIndex: mark.sectionIndex },
+      /* CARRIED, so the row can say why its anchor is empty — see the field. */
+      ...(mark.unplaced ? { unplaced: mark.unplaced } : {}),
     }
     const list = marksByBook.get(mark.bookId)
     if (list) list.push(row)
@@ -421,6 +438,56 @@ const str = (value: unknown, max = 100_000): string =>
 const oneOf = <T extends string>(value: unknown, allowed: ReadonlySet<string>, fallback: T): T =>
   typeof value === 'string' && allowed.has(value) ? (value as T) : fallback
 
+/**
+ * The archive row's `unplaced`, as the book it came from — or null.
+ *
+ * ⚠️ **`reason` IS CHECKED AGAINST THE ONE VALUE THAT EXISTS**, exactly as
+ * `readUnplaced` does for the stored shape and for its reason: a row read off a
+ * file the reader may have edited is untrusted, and a future reason arriving in
+ * an old build must read as "placed" rather than as a reason this build cannot
+ * act on. `fromBook` is provenance and never an anchor, so an empty one is
+ * simply not an unplaced row.
+ */
+/**
+ * Absent, a book id, or present-and-unreadable — and the third is NOT the first.
+ *
+ * ⚠️ **COLLAPSING "UNREADABLE" INTO "ABSENT" PUTS A FOREIGN CFI BACK IN THE
+ * STORE.** This returned one `null` for both and `parseMark` then omitted
+ * `unplaced`, so a row saying `{"reason":"future-reason"}` beside a stale
+ * anchor was read as a PLACED mark and imported at that anchor on an id match —
+ * the whole of what Stage 1 exists to prevent, arriving through the field added
+ * to carry its fix.
+ *
+ * ⚠️ **AND UNREADABLE IS NOT "THROW THE MARK AWAY" EITHER**, which is what the
+ * first correction did. The dangerous half of this row is its ANCHOR, and that
+ * half is refusable on its own: keeping the mark unplaced distrusts the anchor
+ * exactly as much while preserving the quote, the note, the colour and the
+ * chapter. Deleting them buys no safety, and a v1 archive is explicitly allowed
+ * to grow additively — a future `reason` this build has never heard of is the
+ * ordinary case here, not a hostile one.
+ *
+ * So the REASON is narrowed to the one this build can express and the mark
+ * survives. The same trade `parseRecord` makes when it clamps a future
+ * `metaSchema` rather than refusing the record.
+ */
+type ArchivedUnplaced =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'from'; readonly fromBook: string }
+  /** Unplaced for a reason this build cannot name — provenance falls back to
+   *  the archive row's own book, which is where the mark came from. */
+  | { readonly kind: 'unknown' }
+
+function readArchivedUnplaced(value: unknown): ArchivedUnplaced {
+  if (value === undefined || value === null) return { kind: 'absent' }
+  if (typeof value !== 'object') return { kind: 'unknown' }
+  const row = value as Record<string, unknown>
+  if (row['reason'] !== 'foreign-build') return { kind: 'unknown' }
+  /* The cap matches `readUnplaced`'s 200 rather than a generic bound, so a
+   * value does not change between import, reload and re-export. */
+  const fromBook = str(row['fromBook'], 200)
+  return fromBook === '' ? { kind: 'unknown' } : { kind: 'from', fromBook }
+}
+
 function parseMark(raw: unknown): ArchivedMark | null {
   if (typeof raw !== 'object' || raw === null) return null
   const row = raw as Record<string, unknown>
@@ -440,7 +507,17 @@ function parseMark(raw: unknown): ArchivedMark | null {
      writes one with blank text when the page had none. Read before `kind`
      was consulted, this dropped every such bookmark from its own export. A
      bookmark needs an anchor to be a place; without one it is noise too. */
-  if (!text && !note && !(isBookmarkKind(kind) && cfi)) return null
+  /* AN UNPLACED ROW IS NOT NOISE EVEN WITH NO ANCHOR, which is what the test
+     below would otherwise make of an unplaced bookmark: it has no cfi by
+     definition, and `exportMarks` writes a bookmark's text blank when the page
+     had none. Read before the test rather than after it — the same ordering
+     mistake `kind` records, which dropped every bookmark from its own export. */
+  const unplaced = readArchivedUnplaced(row['unplaced'])
+  /* KEPT AND UNPLACED, never silently placed — see `readArchivedUnplaced`. The
+     empty `fromBook` is filled in from the archive row's own book by the
+     grouping, which is the only place that knows it. */
+  const unplacedFromBook = unplaced.kind === 'absent' ? null : unplaced.kind === 'from' ? unplaced.fromBook : ''
+  if (!text && !note && !(isBookmarkKind(kind) && (cfi || unplacedFromBook !== null))) return null
   const sectionIndex = anchorRow['sectionIndex']
   return {
     text,
@@ -459,6 +536,10 @@ function parseMark(raw: unknown): ArchivedMark | null {
       sectionIndex:
         typeof sectionIndex === 'number' && Number.isInteger(sectionIndex) && sectionIndex >= 0 ? sectionIndex : 0,
     },
+    /* VALIDATED, not cast — the same treatment `kind`, `tint` and `style` get,
+       and for the same reason: this comes off a file the reader may have
+       edited. An unreadable or absent value simply means "placed". */
+    ...(unplacedFromBook !== null ? { unplaced: { reason: 'foreign-build' as const, fromBook: unplacedFromBook } } : {}),
   }
 }
 
@@ -668,8 +749,25 @@ export function planImport(
      * `UnplacedImport`. A group can gather rows from several archive entries,
      * so rolled up to the group the provenance would name whichever came
      * first. */
-    if (exact) for (const one of row.marks) into.exact.marks.push(one)
-    else for (const one of row.marks) into.name.marks.push({ mark: one, fromBook: row.bookId })
+    /* ⚠️ **A ROW THAT SAYS IT HAS NO PLACE HAS NONE, however the BOOK
+     * matched.** An id match vouches for the anchors of marks that HAVE one;
+     * it cannot conjure one for a mark exported without it. Sent down the
+     * exact side, such a row reaches `useArchives`, which reads
+     * `mark.localAnchor.cfi` unconditionally — writing `cfi: ''` with no
+     * discriminator, which the next load drops. That is the backup-and-restore
+     * path, so the loss lands on the file the reader reaches for last.
+     *
+     * ITS OWN `fromBook` TRAVELS, not this archive's `bookId`: the mark was
+     * stranded from some earlier build, and re-exporting it does not make the
+     * exporting library its origin. */
+    for (const one of row.marks) {
+      /* `|| row.bookId` FILLS IN THE PROVENANCE A ROW WITH AN UNREADABLE
+       * REASON CANNOT SUPPLY — see `readArchivedUnplaced`. This is the only
+       * place that knows which archive entry the mark was under. */
+      if (one.unplaced) into.name.marks.push({ mark: one, fromBook: one.unplaced.fromBook || row.bookId })
+      else if (exact) into.exact.marks.push(one)
+      else into.name.marks.push({ mark: one, fromBook: row.bookId })
+    }
     for (const one of row.cards) side.cards.push(one)
     grouped.set(match.bookId, into)
   }
@@ -762,10 +860,31 @@ export function planImport(
      * book whose archive rows are ALL name-matched — which is the whole
      * cross-build case — would `continue` here and the marks would be dropped
      * on the floor after all the work of deciding to keep them. */
-    if (kept.length === 0 && freshCards.length === 0 && row.unplaced.length === 0) continue
-    additions.push({ bookId, marks: kept, unplaced: row.unplaced, cards: freshCards })
+    /* ⚠️ **AND THE UNPLACED ONES ARE DEDUPED TOO** — they went through neither
+     * test above, so re-importing one archive stored the same anchorless mark
+     * again on every run.
+     *
+     * It used to be hidden by a defect: every unplaced mark carries `cfi: ''`,
+     * so `upsertMark` read them all as one anchor and the store collapsed the
+     * repeats — while collapsing the reader's DISTINCT marks with them. Fixing
+     * that (see `upsertMark`) is what made this one observable, and the header
+     * comment above already promised the rule this restores: *"Marks with no
+     * usable anchor fall back to the quote, which is the only other thing that
+     * identifies a passage."* `samePassage` has always implemented that
+     * fallback; only `row.marks` was ever passed through it.
+     *
+     * ⚠️ A bookmark whose text is empty cannot be recognised this way and will
+     * repeat. That is the same limit the placed path has had all along, stated
+     * rather than silently inherited. */
+    const freshUnplaced = row.unplaced.filter((incoming) => {
+      const already = mine.some((have) => sameStrandedPassage(incoming.mark, have))
+      if (already) duplicates += 1
+      return !already
+    })
+    if (kept.length === 0 && freshCards.length === 0 && freshUnplaced.length === 0) continue
+    additions.push({ bookId, marks: kept, unplaced: freshUnplaced, cards: freshCards })
     marksAdded += kept.length
-    unplacedAdded += row.unplaced.length
+    unplacedAdded += freshUnplaced.length
     cardsAdded += freshCards.length
   }
 
@@ -818,6 +937,39 @@ const samePassage = (
   (a.localAnchor.cfi && b.cfi
     ? a.localAnchor.sectionIndex === b.sectionIndex && cfiOverlaps(a.localAnchor.cfi, b.cfi)
     : a.text !== '' && a.text === b.text)
+
+/**
+ * Is this stranded archive row the passage that shelf mark already is?
+ *
+ * ⚠️ **IT MUST NOT READ `localAnchor`, AND `samePassage` DOES.** These rows are
+ * name-matched or self-declared unplaced: their CFI belongs to another build,
+ * where the same path addresses different words. `samePassage` compares
+ * anchors whenever BOTH sides have one — so handing it a stranded row put a
+ * foreign CFI back into a decision about the reader's own marks, which is the
+ * single thing Stage 1 exists to prevent. It decided identity two ways and
+ * both were wrong: a coincidental cross-build overlap discarded an unrelated
+ * quote as a duplicate, and the same quote with different foreign CFIs was
+ * kept as new.
+ *
+ * **CONTEXT, NOT THE QUOTE ALONE** — `ArchivedMark.prefix`/`suffix` exist for
+ * exactly this and the field says so: *"The quote alone is not enough to
+ * re-find it either: 'the whale' occurs hundreds of times."* Comparing text
+ * alone made every occurrence of a repeated phrase one passage, so importing
+ * the second occurrence dropped it as already held.
+ *
+ * ⚠️ **A BLANK BOOKMARK CANNOT BE RECOGNISED THIS WAY AND WILL REPEAT.** An
+ * unplaced bookmark has no anchor by definition and `exportMarks` writes a
+ * bookmark's text blank when the page had none, leaving nothing that
+ * identifies it — and `createdAt` cannot stand in, because the import mints a
+ * fresh one rather than carrying the archive's. Stated rather than papered
+ * over with a rule that would fold two genuinely different places into one.
+ */
+const sameStrandedPassage = (a: ArchivedMark, b: Mark): boolean =>
+  isBookmarkKind(a.kind) === isBookmarkKind(b.kind) &&
+  a.text !== '' &&
+  a.text === b.text &&
+  a.prefix === b.prefix &&
+  a.suffix === b.suffix
 
 /* Parsed, not compared as text: ISO 8601 strings from ONE clock order
  * lexically, but an archive from elsewhere may carry offsets, and "later"

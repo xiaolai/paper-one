@@ -343,3 +343,79 @@ describe('upsertOverlapping keeps bookmarks and annotations off each other', () 
     expect(liveMarks(upsertOverlapping([first], again)).map((row) => row.id)).toEqual(['b2'])
   })
 })
+
+/**
+ * ⚠️ **THE OVERLAP RULE TOMBSTONES ON ITS OWN**, before `upsertMark` sees the
+ * pair — so `upsertMark`'s both-placed guard does not cover this path, and a
+ * fix that stopped there left the hole open on the route production actually
+ * takes (`MarkStore.add` and `addMany` both call this wrapper, not `upsertMark`).
+ *
+ * Reachable through the TYPE rather than through the import: `isMark` admits
+ * `unplaced` beside a non-empty cfi, and `isPlaced` calls that unplaced.
+ */
+describe('an unplaced mark is superseded by nobody, and supersedes nobody', () => {
+  const UNPLACED = { reason: 'foreign-build' as const, fromBook: 'book:elsewhere' }
+
+  it('does not tombstone an unplaced row that overlaps by anchor', () => {
+    const stranded = mark({ id: 'stranded', unplaced: UNPLACED, note: 'the reader wrote this' })
+    const placed = mark({ id: 'placed', createdAt: 2000 })
+
+    const next = upsertOverlapping([stranded], placed)
+
+    expect(next.find((one) => one.id === 'stranded')?.deletedAt).toBeUndefined()
+    expect(liveMarks(next).map((one) => one.id)).toEqual(['stranded', 'placed'])
+  })
+
+  it('an unplaced incoming mark does not tombstone a placed one it overlaps', () => {
+    const placed = mark({ id: 'placed', note: 'the reader wrote this too' })
+    const stranded = mark({ id: 'stranded', unplaced: UNPLACED, createdAt: 2000 })
+
+    const next = upsertOverlapping([placed], stranded)
+
+    expect(next.find((one) => one.id === 'placed')?.deletedAt).toBeUndefined()
+    expect(liveMarks(next)).toHaveLength(2)
+  })
+
+  it('does not tombstone one unplaced row with another', () => {
+    /* ⚠️ A predicate of `isPlaced(candidate) === isPlaced(mark)` passes every
+       other test here and fails this one — it would make two unplaced rows
+       "both unplaced, therefore comparable" and collapse them, which is the
+       original defect wearing the guard's clothes. */
+    const first = mark({ id: 'first', unplaced: UNPLACED, note: 'a note' })
+    const second = mark({ id: 'second', unplaced: UNPLACED, createdAt: 2000 })
+
+    const next = upsertOverlapping([first], second)
+
+    expect(liveMarks(next).map((one) => one.id)).toEqual(['first', 'second'])
+  })
+
+  it('an unplaced row sorting first does not shield the placed one behind it', () => {
+    /* `findMark` returns the FIRST in `compareMarks` order, so a filter applied
+       to the ANSWER rather than to the candidates would let the unplaced row
+       win the search and then be rejected — leaving the placed duplicate it
+       was standing in front of un-superseded, which is the defect the panel's
+       own `findMark` comment records for `sameClass`. */
+    /* ⚠️ OVERLAPPING BUT NOT BYTE-IDENTICAL, which is what makes this test
+       able to fail. With equal CFIs `upsertMark`'s own byte rule tombstones
+       `held` anyway and the wrong implementation passes — measured. Only a
+       distinct-but-overlapping anchor isolates the overlap path. */
+    const stranded = mark({ id: 'stranded', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:20)', unplaced: UNPLACED })
+    const held = mark({ id: 'held', cfi: 'epubcfi(/6/4!/4/2,/1:2,/1:18)' })
+    const again = mark({ id: 'again', createdAt: 3000 })
+
+    const next = upsertOverlapping([stranded, held], again)
+
+    expect(next.find((one) => one.id === 'held')?.deletedAt, 'the placed duplicate survived').toBeDefined()
+    expect(next.find((one) => one.id === 'stranded')?.deletedAt).toBeUndefined()
+  })
+
+  it('still supersedes when BOTH are placed, which is the rule being narrowed', () => {
+    const held = mark({ id: 'held' })
+    const again = mark({ id: 'again', createdAt: 2000 })
+
+    const next = upsertOverlapping([held], again)
+
+    expect(next.find((one) => one.id === 'held')?.deletedAt).toBeDefined()
+    expect(liveMarks(next).map((one) => one.id)).toEqual(['again'])
+  })
+})

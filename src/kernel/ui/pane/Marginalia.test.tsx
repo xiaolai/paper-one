@@ -371,3 +371,49 @@ describe('a cross-book scan that failed', () => {
     expect(screen.getByText(/Nothing kept yet/)).not.toBeNull()
   })
 })
+
+/**
+ * A control that does nothing must say why — on BOTH row types.
+ *
+ * ⚠️ **THE PLACE ROW WAS DISABLED IN SILENCE.** An imported bookmark is an
+ * unplaced mark of the bookmark class, and `PlaceRow` is its own row rather
+ * than a variant of the annotation row — so the sentence the annotation row
+ * carries never reached it. MEASURED in the running app on a name-matched
+ * import: `title` and `aria-description` both null on the bookmark row, while
+ * the annotation beside it explained itself. The reader sees the book open in
+ * front of them and a control that silently refuses.
+ */
+describe('an unplaced row explains its disabled jump', () => {
+  const UNPLACED = { reason: 'foreign-build' as const, fromBook: 'book:elsewhere' }
+  const said = 'From another edition of this book — Paper has not found this passage here yet.'
+
+  it('on a mark row', () => {
+    draw({
+      allUnplaced: [ANNOTATION({ id: 'u1', cfi: '', text: 'driving off the spleen', unplaced: UNPLACED })],
+    })
+    const row = rowFor('driving off the spleen')
+    expect(row.hasAttribute('disabled')).toBe(true)
+    expect(row.getAttribute('title')).toBe(said)
+    expect(row.getAttribute('aria-description')).toBe(said)
+  })
+
+  it('on a place row', () => {
+    draw({
+      allBookmarks: [BOOKMARK({ id: 'u2', cfi: '', text: 'Call me Ishmael', unplaced: UNPLACED })],
+    })
+    const row = rowFor('Loomings')
+    expect(row.hasAttribute('disabled')).toBe(true)
+    expect(row.getAttribute('title'), 'a place row was disabled with no reason given').toBe(said)
+    expect(row.getAttribute('aria-description')).toBe(said)
+  })
+
+  it('and a PLACED bookmark from the open book carries no such excuse', () => {
+    /* The narrowing must not put the sentence on rows that work — a control
+       that explains why it is disabled while being enabled reads as a defect
+       of its own. */
+    draw({ allBookmarks: [BOOKMARK({ id: 'b9', text: 'Call me Ishmael' })] })
+    const row = rowFor('Loomings')
+    expect(row.hasAttribute('disabled')).toBe(false)
+    expect(row.getAttribute('title')).toBeNull()
+  })
+})

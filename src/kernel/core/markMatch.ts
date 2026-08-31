@@ -1,6 +1,6 @@
 import { collapse } from 'foliate-js/epubcfi.js'
 import type { Hlc } from './hlc'
-import { compareCfi, compareMarks, removeMark, sameClass, upsertMark, type Mark } from './marks'
+import { compareCfi, compareMarks, isPlaced, removeMark, sameClass, upsertMark, type Mark } from './marks'
 
 /**
  * Which mark a selection is on.
@@ -151,9 +151,23 @@ export function findMark<T extends Mark>(marks: readonly T[], passage: Passage):
  * highlight that actually should have been superseded.
  */
 export function upsertOverlapping(marks: readonly Mark[], mark: Mark, at?: Hlc): Mark[] {
-  const superseded = findMark(
-    marks.filter((candidate) => sameClass(candidate, mark)),
-    mark,
-  )
+  /* ⚠️ **AND ONLY BETWEEN PLACED MARKS**, the rule `upsertMark` states in full.
+   * It is repeated here rather than left to the call underneath because THIS
+   * function tombstones on its own — `removeMark` below runs before
+   * `upsertMark` ever sees the pair, so a guard only in there is a guard the
+   * overlap path walks straight past.
+   *
+   * Not reachable through the import, which writes `cfi: ''`, and `cfiOverlaps`
+   * answers false for that. It is reachable through the TYPE: `isMark` admits
+   * `unplaced` beside a non-empty cfi (`cfi !== '' || unplaced !== undefined`),
+   * and `isPlaced` calls that unplaced — so an unplaced row carrying a stale
+   * anchor would be superseded by overlap while being invisible to the byte
+   * rule. The two rules say the same thing now instead of nearly the same. */
+  const superseded = isPlaced(mark)
+    ? findMark(
+        marks.filter((candidate) => sameClass(candidate, mark) && isPlaced(candidate)),
+        mark,
+      )
+    : null
   return upsertMark(superseded === null ? marks : removeMark(marks, superseded.id, at), mark, at)
 }
