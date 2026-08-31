@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { identityParts } from '../src/kernel/core/marks.ts'
+import {
+  FULL_HASH_LIMIT as KERNEL_LIMIT,
+  INTERIOR_PROBES as KERNEL_PROBES,
+  SAMPLE_BYTES as KERNEL_SAMPLE,
+  identityParts,
+  identityWindows as kernelWindows,
+} from '../src/kernel/core/contentIdentity.ts'
 import { fold } from '../src/kernel/core/tags.ts'
 import {
   FULL_HASH_LIMIT,
@@ -44,30 +50,36 @@ function library(books) {
   return root
 }
 
-/** What `identityParts` sampled, as `[start, end)` pairs. */
-function kernelWindows(size) {
-  const parts = identityParts({
-    size,
-    slice: (start, end) => ({ start, end: end ?? size }),
-  })
-  /* The first part is the size prefix, a string. Below the limit the second is
-     the blob itself, which stands for the whole range. */
-  const rest = parts.slice(1)
-  if (rest.length === 1 && rest[0].start === undefined) return [[0, size]]
-  return rest.map((probe) => [probe.start, Math.min(probe.end, size)])
-}
-
-describe('the sampling rule, held to the kernel’s', () => {
+describe('the sampling rule', () => {
   /**
-   * ⚠️ **THIS IS A SECOND COPY OF A RULE, AND A SECOND COPY DRIFTS.**
+   * ⚠️ **THE PARITY TESTS THAT WERE HERE ARE GONE, AND THAT IS THE POINT.**
    *
-   * `contentId` takes a `Blob`; this script reads by descriptor, because
-   * sampling 64 KiB windows out of a 500 MB scan is the whole reason it can run
-   * over two thousand books. So the arithmetic is written twice, and only this
-   * stops the two answering different questions — which would make every number
-   * the script prints a measurement of the script.
+   * This file used to assert, window for window, that the script's own copy of
+   * the sampling arithmetic agreed with the kernel's — a test bought to manage a
+   * duplication that was defended on the false premise that a `.mjs` cannot
+   * import a `.ts`. The script imports `core/contentIdentity.ts` now, so the
+   * two cannot disagree and a test that they agree is a test of `===`.
+   *
+   * A tautology dressed as a guard is worse than no guard: it reports green for
+   * a property nothing could break, and it takes up the space where a real
+   * check would go. What is left below are the two claims that still have
+   * content — that the script reads the SAME function the app does, and that
+   * the geometry's two shapes agree with each other.
    */
-  it('samples exactly the windows identityParts does, at every size that matters', () => {
+  it('reads its geometry from the kernel, not from a copy', () => {
+    /* The one assertion that would fail if somebody reintroduced a local
+       constant: these are the kernel's own objects, by identity of value with
+       the module the app hashes through. */
+    expect(FULL_HASH_LIMIT).toBe(KERNEL_LIMIT)
+    expect(SAMPLE_BYTES).toBe(KERNEL_SAMPLE)
+    expect(INTERIOR_PROBES).toBe(KERNEL_PROBES)
+    expect(identityWindows).toBe(kernelWindows)
+  })
+
+  it('keeps the offsets and the blob slices two shapes of one geometry', () => {
+    /* `identityParts` derives its sampled slices FROM `identityWindows`, so
+       this checks the derivation rather than a second implementation — which
+       is what a future edit could actually break by splitting them again. */
     for (const size of [
       0,
       1,
@@ -78,16 +90,16 @@ describe('the sampling rule, held to the kernel’s', () => {
       65 * 1024 * 1024,
       500 * 1024 * 1024,
     ]) {
-      expect(identityWindows(size), `size ${size}`).toEqual(kernelWindows(size))
+      const parts = identityParts({ size, slice: (from, to) => [from, to ?? size] })
+      /* The size prefix leads, so two files cannot agree by sampling alone. */
+      expect(parts[0], `size ${size}`).toBe(`${size}:`)
+      if (size <= FULL_HASH_LIMIT) {
+        /* The whole blob ITSELF, not a slice of it. */
+        expect(parts).toHaveLength(2)
+        continue
+      }
+      expect(parts.slice(1), `size ${size}`).toEqual(identityWindows(size).map(([from, to]) => [from, to]))
     }
-  })
-
-  it('carries the kernel’s own constants, not a second guess at them', () => {
-    /* Named rather than derived: if `marks.ts` moves one of these, the parity
-       test above fails and this says which number to change. */
-    expect(SAMPLE_BYTES).toBe(64 * 1024)
-    expect(INTERIOR_PROBES).toBe(16)
-    expect(FULL_HASH_LIMIT).toBe(64 * 1024 * 1024)
   })
 
   it('counts nothing unsampled below the limit, and something above it', () => {
@@ -247,7 +259,7 @@ describe('the analysis', () => {
     expect(totals.worksWithSeveralCopies).toBe(0)
   })
 
-  it('folds the title and the author with the KERNEL’s fold, not a lookalike', () => {
+  it('folds the title and the author case-insensitively and accent-SENSITIVELY', () => {
     /* ⚠️ **THE SECOND DUPLICATED RULE, and it had no parity test.** The window
        arithmetic above is held to `identityParts`; the name key was not held to
        anything, so this script could group works differently from

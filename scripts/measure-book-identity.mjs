@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { fold } from '../src/kernel/core/tags.ts'
 
 /**
  * `node scripts/measure-book-identity.mjs` — does the `file:` key mean what the
@@ -36,41 +37,35 @@ import { join } from 'node:path'
  * The report says so in its own footer rather than leaving it to be
  * rediscovered.
  *
- * ## The sampling is reimplemented here, and held to the kernel's
+ * ## The sampling rule is the kernel's, imported
  *
  * The kernel's `contentId` takes a `Blob`; this reads files by descriptor,
  * because sampling 64 KiB windows out of a 500 MB scan is the entire point of
- * being able to run it over two thousand books. That is a second copy of a rule,
- * and a second copy of a rule drifts — so `measure-book-identity.test.mjs`
- * asserts window for window that it agrees with `identityParts`.
+ * being able to run it over two thousand books. Both derive their windows from
+ * ONE function — `core/contentIdentity.identityWindows` — so there is nothing
+ * left to drift. See the note beside the import for the copy that used to be
+ * here and the false premise that kept it.
  */
 
 /** Where the app keeps books. Overridable, because a corpus is an argument. */
 const DEFAULT_LIB = join(homedir(), 'Library/Application Support/one.paper.reader/books')
 
-/* THE KERNEL'S CONSTANTS, spelled out because this file cannot import a `.ts`
- * module — and held to them by the parity test rather than by hope. See
- * `marks.ts`: `FULL_HASH_LIMIT`, `SAMPLE_BYTES`, `INTERIOR_PROBES`. */
-export const FULL_HASH_LIMIT = 64 * 1024 * 1024
-export const SAMPLE_BYTES = 64 * 1024
-export const INTERIOR_PROBES = 16
-
-/**
- * The byte ranges identity is computed over, as `[start, end)` pairs.
+/*
+ * ⚠️ **IMPORTED FROM THE KERNEL, NOT RESTATED — and this file used to restate
+ * them.** The three constants and the window arithmetic lived here in a second
+ * copy, held to the kernel's by a parity test, on the stated grounds that a
+ * `.mjs` cannot import a `.ts`. **That was never true and was never tested.**
+ * Node 24 strips TypeScript types natively; what it will not do is fill in a
+ * missing extension, and `marks.ts` imports `./hlc` without one. So the fix was
+ * a leaf module that imports nothing — `core/contentIdentity.ts` — which loads
+ * from here perfectly.
  *
- * The same arithmetic `identityParts` performs, in offsets rather than in
- * `Blob.slice` calls, so it can be compared with the kernel's answer directly.
+ * The duplication is gone rather than measured. Its parity test caught a real
+ * divergence in the SIBLING rule it happened to cover (the name fold), which is
+ * an argument for deleting duplication, not for testing it.
  */
-export function identityWindows(size) {
-  if (size <= FULL_HASH_LIMIT) return [[0, size]]
-  const windows = [[0, Math.min(SAMPLE_BYTES, size)]]
-  for (let i = 1; i <= INTERIOR_PROBES; i++) {
-    const at = Math.floor((size * i) / (INTERIOR_PROBES + 1))
-    windows.push([at, Math.min(at + SAMPLE_BYTES, size)])
-  }
-  windows.push([Math.max(0, size - SAMPLE_BYTES), size])
-  return windows
-}
+export { FULL_HASH_LIMIT, INTERIOR_PROBES, SAMPLE_BYTES, identityWindows } from '../src/kernel/core/contentIdentity.ts'
+import { FULL_HASH_LIMIT, identityWindows } from '../src/kernel/core/contentIdentity.ts'
 
 /** How much of a file identity does NOT look at. Zero below the limit. */
 export function unsampledBytes(size) {
@@ -144,27 +139,18 @@ export function fullDigest(path) {
   return hash.digest('hex')
 }
 
-/**
- * The folded form title and author are compared under — `tags.ts`'s `fold`,
- * character for character.
+/*
+ * The kernel's own `fold`, imported. `tags.ts` is a leaf with no imports at all,
+ * so there was never anything stopping this.
  *
- * ⚠️ **THIS WAS A LOOKALIKE AND IT DIVERGED**, which is the whole reason the
- * parity test beside it now exists. The first version was
- * `NFKD → strip combining marks → trim → squeeze → lowercase`: a plausible
- * "normalise a title" rule that STRIPS ACCENTS, so it folded `Éloge` and
- * `Eloge` into one work where `marksArchive` keeps them apart. The measurement
- * would have reported a work with two copies that the app does not group at
- * all — a wrong answer to the second question with the first one untouched,
- * which is the hardest kind to notice.
- *
- * The kernel's rule is a CASE FOLD and nothing else: NFC before the case
- * mapping (because mapping can change which decompositions apply), then
- * `lower → upper → lower` to catch the pairs a single `toLowerCase` misses, then
- * NFC again because case mapping can denormalise what it produced. No trim and
- * no squeeze — `nameKey` does not trim either.
+ * ⚠️ **THE COPY THAT WAS HERE WAS WRONG, and that is why the duplication is
+ * worth naming rather than shrugging at.** It was
+ * `NFKD -> strip combining marks -> trim -> squeeze -> lowercase`: a plausible
+ * "normalise a title" rule that STRIPS ACCENTS, where the kernel's is a case
+ * fold that does not. It grouped `Éloge` with `Eloge` as one work while
+ * `marksArchive` keeps them apart — a wrong answer to this script's second
+ * question with the first one untouched, which is the hardest kind to see.
  */
-const fold = (text) => text.normalize('NFC').toLowerCase().toUpperCase().toLowerCase().normalize('NFC')
-
 /** How a book is looked up by name. A structured tuple, never a joined string. */
 export const nameKey = (title, author) => JSON.stringify([fold(title), fold(author)])
 

@@ -20,6 +20,7 @@
  */
 
 import { compare } from 'foliate-js/epubcfi.js'
+import { identityParts } from './contentIdentity'
 import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
 
 /**
@@ -262,62 +263,18 @@ export const MARKS_STORAGE_KEY = 'paper.marks.v1'
  * content arrived by, which is the property every later feature needs and the
  * reason the prefix is no longer named after a source.
  */
-const SAMPLE_BYTES = 64 * 1024
-
-/**
- * Below this, the whole file is hashed and identity is EXACT.
+/* THE SAMPLING GEOMETRY MOVED TO `contentIdentity.ts`, and the move is not
+ * tidying: that module imports NOTHING, which is what lets a plain `.mjs`
+ * load it. Node strips TypeScript types but will not fill in a missing
+ * extension, and this file's `./hlc` import is enough to make it unloadable
+ * from a script — so `scripts/measure-book-identity.mjs` carried a second copy
+ * of these numbers, held to this one by a parity test, on the false premise
+ * that a `.mjs` cannot import a `.ts`. It can. The leaf split is the same
+ * remedy `vaultFsTauri.ts` is, for the same shape of problem.
  *
- * Set high on purpose. Sampling cannot be made reliable by adding probes: with
- * any fixed set of windows there are gaps between them, and a change that lands
- * in a gap is invisible however many probes there are. That is not a theory —
- * eight evenly spaced probes were tried first, and a four-kilobyte difference at
- * the exact midpoint of a nine-megabyte file fell cleanly between probes four
- * and five and produced identical ids.
- *
- * So the answer is not better sampling, it is not sampling. 64MB covers
- * essentially every EPUB and most PDFs outright; only scanned books exceed it.
- *
- * The cost is bounded and lands where it can be afforded. This runs on the open
- * path and races the parse — the saved reading position is keyed by this id and
- * read once the book is parsed — but a file large enough to be slow to hash is
- * far slower to parse, so the margin widens with size rather than narrowing.
- */
-const FULL_HASH_LIMIT = 64 * 1024 * 1024
-
-/**
- * Probes through a file too large to hash whole.
- *
- * Above the limit identity is APPROXIMATE and this is the trade being made: a
- * change confined to a gap between probes leaves the id unchanged, and two such
- * books are one book to every mark, card and position. It is strictly better
- * than the ends-only scheme it replaces, and it is not exact. For real books of
- * this size — scans, mostly — two differing files that also share a byte length,
- * both ends and all sixteen probes is not a case that occurs by accident.
- */
-const INTERIOR_PROBES = 16
-
-/**
- * The parts of a blob that identity is computed over.
- *
- * Exported for the tests, which assert the SHAPE of the sampling rather than
- * allocating a file large enough to trigger it — reading `size` and `slice` is
- * all this does, so a stand-in with those two members exercises it honestly.
- */
-export function identityParts(blob: Blob): BlobPart[] {
-  // The size leads, so two files cannot agree by sampling alone.
-  const parts: BlobPart[] = [`${blob.size}:`]
-  if (blob.size <= FULL_HASH_LIMIT) {
-    parts.push(blob)
-    return parts
-  }
-  parts.push(blob.slice(0, SAMPLE_BYTES))
-  for (let i = 1; i <= INTERIOR_PROBES; i++) {
-    const at = Math.floor((blob.size * i) / (INTERIOR_PROBES + 1))
-    parts.push(blob.slice(at, at + SAMPLE_BYTES))
-  }
-  parts.push(blob.slice(Math.max(0, blob.size - SAMPLE_BYTES)))
-  return parts
-}
+ * RE-EXPORTED rather than re-declared, so every existing caller and test keeps
+ * importing `identityParts` from here and the public surface does not move. */
+export { FULL_HASH_LIMIT, INTERIOR_PROBES, SAMPLE_BYTES, identityParts, identityWindows } from './contentIdentity'
 
 /** The content id of a blob, whatever route it arrived by. */
 export async function contentId(blob: Blob): Promise<string> {
