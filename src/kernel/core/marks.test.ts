@@ -391,6 +391,58 @@ describe('upsertMark', () => {
     const b = mark({ id: 'm2', bookId: 'book-b' })
     expect(upsertMark([a], b)).toHaveLength(2)
   })
+
+  /**
+   * ⚠️ **THE EMPTY CFI IS NOT AN ANCHOR TWO MARKS CAN SHARE.**
+   *
+   * Found by driving a real name-matched import: three marks crossed from
+   * another build, all three were stored with `cfi: ''`, and two of them left
+   * the store as one. Each `addMany` row superseded the row before it, so the
+   * import kept exactly ONE annotation however many arrived — and the one it
+   * destroyed was the only one carrying the reader's note. The notice said
+   * "3 marks kept without a place" while it happened.
+   *
+   * A bookmark survived alongside, which is `sameClass` doing its job and is
+   * why the failure looked like a partial success rather than an obvious bug.
+   */
+  const unplacedMark = (over: Partial<Mark> = {}): Mark =>
+    mark({ cfi: '', unplaced: { reason: 'foreign-build', fromBook: 'book:elsewhere' }, ...over })
+
+  it('does NOT supersede one unplaced mark with another — they share no anchor', () => {
+    const first = unplacedMark({ id: 'm1', text: 'driving off the spleen', note: 'a note' })
+    const second = unplacedMark({ id: 'm2', text: 'a damp, drizzly November' })
+
+    const live = liveMarks(upsertMark([first], second))
+
+    expect(live.map((one) => one.id)).toEqual(['m1', 'm2'])
+    expect(live.find((one) => one.id === 'm1')?.note).toBe('a note')
+  })
+
+  it('keeps every unplaced mark of a whole import, not just the last', () => {
+    /* The shape `addMany` applies: reduce over the batch, each row upserted
+     * onto the result of the last. Three in, three out. */
+    const batch = [
+      unplacedMark({ id: 'm1', text: 'one' }),
+      unplacedMark({ id: 'm2', text: 'two' }),
+      unplacedMark({ id: 'm3', text: 'three' }),
+    ]
+    const stored = batch.reduce<readonly Mark[]>((sofar, one) => upsertMark(sofar, one), [])
+    expect(liveMarks(stored).map((one) => one.id)).toEqual(['m1', 'm2', 'm3'])
+  })
+
+  it('still supersedes a PLACED mark at the same anchor, unplaced rows beside it or not', () => {
+    /* The rule this narrows must keep working, and an unplaced row in the
+     * same file must not shield the placed one from being replaced. */
+    const stranded = unplacedMark({ id: 'stranded' })
+    const held = mark({ id: 'held' })
+    const again = mark({ id: 'again', createdAt: 2000 })
+
+    const next = upsertMark([stranded, held], again)
+
+    expect(next.find((one) => one.id === 'held')?.deletedAt).toBeDefined()
+    expect(next.find((one) => one.id === 'stranded')?.deletedAt).toBeUndefined()
+    expect(next.find((one) => one.id === 'again')?.deletedAt).toBeUndefined()
+  })
 })
 
 describe('upsertMark is idempotent by id', () => {

@@ -481,6 +481,333 @@ describe('what the audit found in the archive (round 1)', () => {
     expect(plan.duplicates).toBe(1)
     expect(plan.unplacedBooks).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
   })
+
+  /**
+   * ⚠️ **RE-IMPORTING ONE ARCHIVE MUST NOT DOUBLE THE MARKS IT ALREADY GAVE.**
+   *
+   * The unplaced rows went through NEITHER duplicate test — not the one against
+   * the shelf's own marks, not the fold within the file — so every run of the
+   * same archive stored another copy of every anchorless mark.
+   *
+   * It was invisible while `upsertMark` read every `cfi: ''` as one anchor: the
+   * store collapsed the repeats on the way in, and collapsed the reader's
+   * DISTINCT marks with them. Fixing that is what made this observable, which
+   * is why the two changes belong in one pass — the accidental deduplication
+   * was the only thing standing between this defect and the reader.
+   *
+   * The header comment on `planImport` already promised the rule: anchorless
+   * marks fall back to the quote. `samePassage` implements it; only `row.marks`
+   * was ever handed to it.
+   */
+  it('does not import the same unplaced mark twice', () => {
+    const doc = exportMarks([BOOK({ bookId: 'elsewhere' })], [MARK({ bookId: 'elsewhere' })], [])
+    /* The shelf already holds what the first import stored: the same quote,
+       anchorless, explained. */
+    const held = MARK({
+      id: 'held',
+      bookId: 'moby',
+      cfi: '',
+      unplaced: { reason: 'foreign-build', fromBook: 'elsewhere' },
+    })
+
+    const plan = planImport(doc, [BOOK()], [held], [])
+
+    expect(plan.unplacedAdded, 'the same anchorless mark was imported again').toBe(0)
+    expect(plan.duplicates).toBe(1)
+    expect(plan.additions).toHaveLength(0)
+  })
+
+  /**
+   * ⚠️ **THE DUPLICATE CHECK FOR A STRANDED ROW MUST NOT READ ITS ANCHOR.**
+   *
+   * `samePassage` compares CFIs whenever both sides have one, and a stranded
+   * row's CFI belongs to ANOTHER build — where the same path addresses
+   * different words. Routed through it, a coincidental cross-build overlap
+   * threw away an unrelated quote and note as "already here". That is Stage 1's
+   * defect wearing the duplicate check's clothes.
+   */
+  it('does not let a foreign anchor decide that two different passages are one', () => {
+    const doc = exportMarks(
+      [BOOK({ bookId: 'elsewhere' })],
+      [MARK({ bookId: 'elsewhere', text: 'a damp, drizzly November', note: 'the reader wrote this' })],
+      [],
+    )
+    /* A DIFFERENT passage on the shelf that happens to sit at the CFI the
+       foreign build used — the coincidence the anchor comparison cannot tell
+       from a match. */
+    const held = MARK({ id: 'held', bookId: 'moby', text: 'Call me Ishmael' })
+
+    const plan = planImport(doc, [BOOK()], [held], [])
+
+    expect(plan.unplacedAdded, 'an unrelated mark was discarded on a foreign anchor').toBe(1)
+    expect(plan.duplicates).toBe(0)
+  })
+
+  /**
+   * ⚠️ **THE QUOTE ALONE IS NOT A PASSAGE**, which is what `prefix`/`suffix`
+   * are for and what their own field comment says: *"'the whale' occurs
+   * hundreds of times."* Comparing text alone folds every occurrence into one,
+   * so importing the second occurrence drops it as already held.
+   */
+  it('tells two occurrences of one quote apart by their context', () => {
+    const doc = exportMarks(
+      [BOOK({ bookId: 'elsewhere' })],
+      [MARK({ bookId: 'elsewhere', text: 'the whale', prefix: 'chasing ', suffix: ' northward' })],
+      [],
+    )
+    const held = MARK({
+      id: 'held',
+      bookId: 'moby',
+      cfi: '',
+      text: 'the whale',
+      prefix: 'harpooned ', 
+      suffix: ' at dawn',
+      unplaced: { reason: 'foreign-build', fromBook: 'elsewhere' },
+    })
+
+    const plan = planImport(doc, [BOOK()], [held], [])
+
+    expect(plan.unplacedAdded, 'a different occurrence of one quote was dropped').toBe(1)
+    expect(plan.duplicates).toBe(0)
+  })
+
+  it.each([
+    ['the prefix alone', { prefix: 'a different run-up ' }],
+    ['the suffix alone', { suffix: ' a different tail' }],
+  ])('tells passages apart on %s, so neither field can be the only one compared', (_why, over) => {
+    const doc = exportMarks([BOOK({ bookId: 'elsewhere' })], [MARK({ bookId: 'elsewhere', ...over })], [])
+    const held = MARK({
+      id: 'held',
+      bookId: 'moby',
+      cfi: '',
+      unplaced: { reason: 'foreign-build', fromBook: 'elsewhere' },
+    })
+    const plan = planImport(doc, [BOOK()], [held], [])
+    expect(plan.unplacedAdded).toBe(1)
+    expect(plan.duplicates).toBe(0)
+  })
+
+  it('does not call a bookmark the same passage as a highlight that quotes it', () => {
+    /* The class test, which a predicate comparing only text and context would
+       drop — and `upsertOverlapping`'s own comment records what that costs:
+       "bookmarking a page tombstoned a highlight the reader had made on it". */
+    const doc = exportMarks(
+      [BOOK({ bookId: 'elsewhere' })],
+      [MARK({ bookId: 'elsewhere', kind: 'bookmark' })],
+      [],
+    )
+    const held = MARK({
+      id: 'held',
+      bookId: 'moby',
+      cfi: '',
+      kind: 'highlight',
+      unplaced: { reason: 'foreign-build', fromBook: 'elsewhere' },
+    })
+    const plan = planImport(doc, [BOOK()], [held], [])
+    expect(plan.unplacedAdded, 'a bookmark was folded into a highlight').toBe(1)
+    expect(plan.duplicates).toBe(0)
+  })
+
+  it('recognises the duplicate even when the note and colour differ', () => {
+    /* Payload, not identity. A predicate that compared note or tint would let
+       the same passage in twice on a re-import after the reader edited it. */
+    const doc = exportMarks(
+      [BOOK({ bookId: 'elsewhere' })],
+      [MARK({ bookId: 'elsewhere', note: 'rewritten since', tint: 'purple' })],
+      [],
+    )
+    const held = MARK({
+      id: 'held',
+      bookId: 'moby',
+      cfi: '',
+      note: 'the original note',
+      tint: 'green',
+      unplaced: { reason: 'foreign-build', fromBook: 'elsewhere' },
+    })
+    const plan = planImport(doc, [BOOK()], [held], [])
+    expect(plan.unplacedAdded).toBe(0)
+    expect(plan.duplicates).toBe(1)
+  })
+
+  it('recognises the duplicate against a PLACED shelf mark too, not only an unplaced one', () => {
+    /* The shelf row this is compared against is ordinary marginalia — the
+       reader's own mark on their own build. A predicate that only deduplicated
+       against rows already carrying `unplaced` would pass every other case
+       here and let this one through. */
+    const doc = exportMarks([BOOK({ bookId: 'elsewhere' })], [MARK({ bookId: 'elsewhere' })], [])
+    const held = MARK({ id: 'held', bookId: 'moby' })
+    const plan = planImport(doc, [BOOK()], [held], [])
+    expect(plan.unplacedAdded).toBe(0)
+    expect(plan.duplicates).toBe(1)
+  })
+
+  it('still imports an unplaced mark whose quote the shelf does not hold', () => {
+    /* The narrowing must not become a refusal: a DIFFERENT passage from the
+       same foreign build still comes across. */
+    const doc = exportMarks(
+      [BOOK({ bookId: 'elsewhere' })],
+      [MARK({ bookId: 'elsewhere', text: 'a damp, drizzly November' })],
+      [],
+    )
+    const held = MARK({
+      id: 'held',
+      bookId: 'moby',
+      cfi: '',
+      unplaced: { reason: 'foreign-build', fromBook: 'elsewhere' },
+    })
+
+    const plan = planImport(doc, [BOOK()], [held], [])
+
+    expect(plan.unplacedAdded).toBe(1)
+    expect(plan.duplicates).toBe(0)
+  })
+})
+
+/**
+ * ⚠️ **AN UNPLACED MARK MUST SURVIVE ITS OWN BACKUP.**
+ *
+ * `exportMarks` writes `localAnchor` from `mark.cfi` unconditionally, and an
+ * unplaced mark's cfi is `''` — the ABSENCE of an anchor. Without the
+ * discriminator travelling beside it, restoring the backup stores `cfi: ''`
+ * with nothing explaining it, and `isMark` drops the row on the NEXT load:
+ * the mark exports, imports, and is gone before the reader looks.
+ *
+ * This is the restore path — the file reached for when everything else has
+ * failed — so the loss lands at the worst possible moment and reports nothing.
+ */
+describe('an unplaced mark through export and back', () => {
+  const STRANDED = (over: Partial<Mark> = {}): Mark =>
+    MARK({
+      cfi: '',
+      sectionIndex: 0,
+      unplaced: { reason: 'foreign-build', fromBook: 'the-other-build' },
+      ...over,
+    })
+
+  it('carries its reason into the archive', () => {
+    const doc = exportMarks([BOOK()], [STRANDED()], [])
+    expect(doc.books[0]?.marks[0]?.unplaced).toEqual({
+      reason: 'foreign-build',
+      fromBook: 'the-other-build',
+    })
+  })
+
+  it('survives a parse, rather than reading as a mark with a real anchor', () => {
+    const doc = exportMarks([BOOK()], [STRANDED()], [])
+    const reparsed = parseArchive(JSON.stringify(doc))
+    expect(reparsed?.books[0]?.marks[0]?.unplaced).toEqual({
+      reason: 'foreign-build',
+      fromBook: 'the-other-build',
+    })
+  })
+
+  it('restores into an EMPTY library as unplaced, never as an anchored mark', () => {
+    /* The id matches — this is the same library restoring its own backup —
+       and the row still has no place, because it never had one. */
+    const doc = exportMarks([BOOK()], [STRANDED()], [])
+    const plan = planImport(doc, [BOOK()], [], [])
+
+    expect(plan.marksAdded, 'an anchorless row was imported as a placed mark').toBe(0)
+    expect(plan.unplacedAdded).toBe(1)
+    expect(anchorsIn(plan)).toEqual([])
+    /* ITS OWN origin, not the library that re-exported it. */
+    expect(plan.additions[0]?.unplaced[0]?.fromBook).toBe('the-other-build')
+  })
+
+  it('keeps an unplaced BOOKMARK, which has neither anchor nor text', () => {
+    /* The row-is-noise test drops anything with no quote, no note and no
+       anchor. A bookmark has no quote by construction and an unplaced one has
+       no anchor either, so it is exactly the row that test would eat. */
+    const doc = exportMarks([BOOK()], [STRANDED({ kind: 'bookmark', text: '', note: '' })], [])
+    const reparsed = parseArchive(JSON.stringify(doc))
+    expect(reparsed?.books[0]?.marks, 'an unplaced bookmark was read as noise').toHaveLength(1)
+  })
+
+  /**
+   * ⚠️ **PRESENT-AND-UNREADABLE IS NOT ABSENT — AND NOT "DELETE THE MARK".**
+   *
+   * Read as ABSENT, a row saying `{"reason":"future-reason"}` beside a stale
+   * foreign anchor becomes a PLACED mark and is imported at that anchor on an
+   * id match — the exact Stage 1 defect, arriving through the field added to
+   * carry its fix.
+   *
+   * Read as HOSTILE, the whole mark is dropped, and that was the first
+   * correction's mistake: the dangerous half of the row is its anchor, and
+   * refusing the anchor alone distrusts it exactly as much while keeping the
+   * reader's quote and note. A v1 archive may grow additively, so a reason
+   * this build has never heard of is the ORDINARY case, not an attack.
+   */
+  it.each([
+    ['a reason this build does not know', { reason: 'future-reason', fromBook: 'elsewhere' }],
+    ['no fromBook at all', { reason: 'foreign-build' }],
+    ['an empty fromBook', { reason: 'foreign-build', fromBook: '' }],
+    ['a non-object', 'foreign-build'],
+    ['a non-string fromBook', { reason: 'foreign-build', fromBook: 42 }],
+  ])('keeps a row whose unplaced is present but unreadable, as UNPLACED — %s', (_why, bad) => {
+    const doc = exportMarks([BOOK()], [MARK(), MARK({ id: 'sibling', text: 'a second passage' })], [])
+    const raw = JSON.parse(JSON.stringify(doc))
+    raw.books[0].marks[0].unplaced = bad
+    raw.books[0].marks[0].localAnchor = { cfi: 'epubcfi(/6/9!/4/2,/1:0,/1:9)', sectionIndex: 3 }
+
+    const reparsed = parseArchive(JSON.stringify(raw))
+
+    /* NOT `?? []` — optional chaining over a null archive would satisfy an
+       emptiness assertion, so a parser that rejected the WHOLE file would pass.
+       The sibling is here to prove the file still parsed. */
+    const marks = reparsed!.books[0]!.marks
+    expect(marks, 'the readable sibling was lost with it').toHaveLength(2)
+    expect(marks[0]?.unplaced, 'an unreadable discriminator was read as "placed"').toBeDefined()
+
+    /* And the anchor it carried never becomes one. The SIBLING's anchor is
+       legitimately stored — asserting "no anchors at all" would have been an
+       assertion about the fixture, not about the row under test. */
+    const plan = planImport(reparsed!, [BOOK()], [], [])
+    expect(anchorsIn(plan), 'a stale foreign anchor reached the store').not.toContain(
+      'epubcfi(/6/9!/4/2,/1:0,/1:9)',
+    )
+    expect(plan.unplacedAdded).toBe(1)
+    expect(plan.marksAdded, 'the readable sibling should still import placed').toBe(1)
+  })
+
+  it('falls back to the archive row s own book when the reason carries no provenance', () => {
+    const doc = exportMarks([BOOK({ bookId: 'the-exporting-library' })], [MARK({ bookId: 'the-exporting-library' })], [])
+    const raw = JSON.parse(JSON.stringify(doc))
+    raw.books[0].marks[0].unplaced = { reason: 'future-reason' }
+
+    const plan = planImport(parseArchive(JSON.stringify(raw))!, [BOOK({ bookId: 'the-exporting-library' })], [], [])
+
+    expect(plan.additions[0]?.unplaced[0]?.fromBook).toBe('the-exporting-library')
+  })
+
+  it('caps fromBook where the store caps it, KEEPING THE FRONT of the value', () => {
+    /* Distinguishable halves, and the exact prefix asserted: 400 identical
+       characters with only a length check passes for a parser that kept the
+       LAST 200, or any arbitrary window, while silently changing provenance. */
+    const fromBook = 'A'.repeat(200) + 'B'.repeat(200)
+    const doc = exportMarks([BOOK()], [STRANDED({ unplaced: { reason: 'foreign-build', fromBook } })], [])
+    const got = parseArchive(JSON.stringify(doc))?.books[0]?.marks[0]?.unplaced?.fromBook
+    expect(got).toBe('A'.repeat(200))
+  })
+
+  it('keeps an unplaced mark unplaced even when it carries a STALE anchor', () => {
+    /* `isMark` admits `unplaced` beside a non-empty cfi, so this shape is
+       representable — and it is the one where reading the discriminator
+       wrongly puts a foreign CFI in the store. */
+    const doc = exportMarks([BOOK()], [STRANDED({ cfi: 'epubcfi(/6/9!/4/2,/1:0,/1:9)' })], [])
+    const plan = planImport(doc, [BOOK()], [], [])
+    expect(plan.marksAdded).toBe(0)
+    expect(anchorsIn(plan), 'a stale foreign anchor reached the store').toEqual([])
+    expect(plan.unplacedAdded).toBe(1)
+  })
+
+  it('reads an archive written before the field as placed', () => {
+    /* Optional, so an older file parses unchanged rather than becoming a
+       library of marks that all claim to be from somewhere else. */
+    const doc = exportMarks([BOOK()], [MARK()], [])
+    const text = JSON.stringify(doc)
+    expect(text).not.toContain('unplaced')
+    expect(parseArchive(text)?.books[0]?.marks[0]?.unplaced).toBeUndefined()
+  })
 })
 
 describe('the full content digest, where both sides have one', () => {

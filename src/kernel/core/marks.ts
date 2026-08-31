@@ -620,6 +620,20 @@ export function marginMarks(marks: readonly Annotation[]): Annotation[] {
  * AND ONLY WITHIN A CLASS — see `sameClass`. A bookmark shares an anchor with
  * whatever the reader had highlighted on that page as a matter of course, and
  * without this the two take turns deleting each other.
+ *
+ * ⚠️ **AND ONLY BETWEEN PLACED MARKS — see `isPlaced`.** `cfi` is the anchor,
+ * and `''` is the ABSENCE of one, not a location two marks can share. Reading
+ * the empty string as an anchor made every unplaced mark supersede the last:
+ * a name-matched import of N annotations kept exactly ONE, each row tombstoning
+ * its predecessor inside the same `addMany` batch, with the survivor decided by
+ * whatever order `planImport` happened to emit. MEASURED against a real import
+ * — three marks in, one highlight and one bookmark left, and the only one
+ * carrying the reader's note was the one destroyed. The notice said "3 marks
+ * kept without a place" while it happened.
+ *
+ * `cfiOverlaps` already answers false for an empty CFI, so `upsertOverlapping`
+ * found nothing to supersede and this rule underneath it did the damage anyway.
+ * The two agree now.
  */
 export function upsertMark(marks: readonly Mark[], mark: Mark, at: Hlc = hlcOf(Date.now())): Mark[] {
   const kept = marks
@@ -637,6 +651,11 @@ export function upsertMark(marks: readonly Mark[], mark: Mark, at: Hlc = hlcOf(D
     .filter((existing) => existing.id !== mark.id)
     .map((existing) =>
       existing.bookId === mark.bookId &&
+      /* BOTH SIDES, not just the incoming one: "same anchor" is a claim about
+       * a pair, and an unplaced row on either side means there is no anchor to
+       * be the same. */
+      isPlaced(existing) &&
+      isPlaced(mark) &&
       existing.cfi === mark.cfi &&
       existing.deletedAt === undefined &&
       sameClass(existing, mark)
