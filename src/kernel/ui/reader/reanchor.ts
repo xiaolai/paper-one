@@ -47,14 +47,33 @@ import { fromRange } from 'foliate-js/epubcfi.js'
  * survivable, and it is the piece the plan called *"the offset mapping `flatten`
  * cannot do"*.
  *
- * ## What it still does not solve
+ * ## The limit route B was supposed to have, and does not
  *
- * ⚠️ **IT ONLY REACHES SECTIONS THAT HAVE BEEN RENDERED.** `renderer.getContents()`
- * is the only way past foliate's closed shadow roots, and it answers for the
- * sections currently laid out. A mark in chapter 40 of a book opened at chapter 1
- * has no document to be anchored in. That is route B's unsolved piece, it is
- * unchanged by this spike, and it is the reason Stage 2 is still a decision
- * rather than a plan.
+ * ⚠️ **"IT ONLY REACHES RENDERED SECTIONS" IS FALSE, and this header said it
+ * until somebody pushed on it.** The reasoning was
+ * `renderer.getContents()`-shaped: that is the only way past foliate's closed
+ * shadow roots, so a mark in chapter 40 of a book opened at chapter 1 has no
+ * document to be anchored in.
+ *
+ * **Anchoring does not need the live document.** A CFI is a PATH, not a node
+ * reference — it is valid in any document with the same structure — and
+ * `book.sections[i].createDocument()` parses any section, opened or not.
+ * `refuseBookScripts` wraps every one of them, so the script strip is applied
+ * there too: that is exactly what WI-21.P1 fixed, and `bookScripts.test.ts`'s
+ * *"address the same passage by the same path"* is the assertion. Nothing else
+ * mutates the rendered body — `setStyles` writes to the head, the loader sets a
+ * `lang` attribute — and neither shifts a child index.
+ *
+ * Measured: a cold section costs **3.46 ms** end to end (1.70 parse, 1.76
+ * index and search) on the corpus's 22 904-character chapter. Forty unopened
+ * sections is ~139 ms — a one-off when an archive is imported, not a cost on
+ * the reading path.
+ *
+ * ⚠️ The claim was copied from the plan into this header without being checked,
+ * which is the second time in this phase a stated impossibility turned out to
+ * be an untested premise. Both times the premise was true of ONE thing and had
+ * been generalised: `getContents()` really is the only way to the LIVE document,
+ * and `marks.ts` really is unloadable from a `.mjs`.
  */
 
 /** `Node.TEXT_NODE` and `Node.ELEMENT_NODE`, spelled as the numbers they are —

@@ -198,6 +198,72 @@ describe('the CFI the spike derives', () => {
   })
 })
 
+describe('a section the reader has never opened', () => {
+  /**
+   * ⚠️ **ROUTE B'S "UNSOLVED PIECE" WAS NOT A PIECE, AND I COPIED THE CLAIM
+   * WITHOUT CHECKING IT.**
+   *
+   * The plan says route B *"only reaches RENDERED sections"*, because
+   * `renderer.getContents()` is the only way past foliate's closed shadow
+   * roots. That is true of the LIVE document — and anchoring does not need the
+   * live document. A CFI is a PATH, not a node reference: it is valid in any
+   * document with the same structure.
+   *
+   * `book.sections[i].createDocument()` parses any section, opened or not, and
+   * `refuseBookScripts` wraps every one of them so the strip is applied there
+   * too — which is precisely what WI-21.P1 fixed, and what
+   * `bookScripts.test.ts`'s *"address the same passage by the same path"*
+   * asserts. Nothing else mutates the rendered body: `setStyles` writes to the
+   * head and the loader sets a `lang` ATTRIBUTE, and neither shifts a child
+   * index.
+   *
+   * So a mark in chapter 40 of a book opened at chapter 1 CAN be anchored. This
+   * suite was in fact already proving it and did not say so: `docOf` parses a
+   * fresh document exactly as `createDocument()` does, and never touched a
+   * renderer.
+   */
+  const createDocument = async (build: BuildId, sectionIndex: number): Promise<Document> =>
+    /* The shape foliate hands back — async, a freshly parsed document, no
+       renderer anywhere near it. */
+    docOf(build, sectionIndex)
+
+  it('anchors a passage in a section that was never laid out', async () => {
+    const passage = CORPUS_PASSAGES.find((one) => one.covers === 'past-flatten-bound')!
+    const onto: BuildId = 'standard-ebooks'
+    const target = passage.places[onto]
+    const cold = await createDocument(onto, target.sectionIndex)
+    const found = reanchor(cold.body, asArchived(passage, 'gutenberg'))
+    expect(found).not.toBeNull()
+    expect(canonicalise(found!.range.toString())).toBe(canonicalise(target.quote))
+  })
+
+  it('anchors every passage in every section of every build, cold', async () => {
+    /* The whole spine, not one chapter — the case a reader importing an
+       archive actually presents, where nothing has been opened yet. */
+    for (const passage of CORPUS_PASSAGES) {
+      for (const onto of BUILD_IDS) {
+        const target = passage.places[onto]
+        const cold = await createDocument(onto, target.sectionIndex)
+        const found = reanchor(cold.body, asArchived(passage, 'gutenberg'))
+        expect(found, `${passage.id} in ${onto} §${target.sectionIndex}`).not.toBeNull()
+        expect(canonicalise(found!.range.toString())).toBe(canonicalise(target.quote))
+      }
+    }
+  })
+
+  it('derives a CFI from the cold document that resolves in it', async () => {
+    /* The claim that matters: the anchor produced without a renderer is a real
+       anchor. Round-tripped through foliate's own parser, as the rendered case
+       is. */
+    const passage = CORPUS_PASSAGES.find((one) => one.covers === 'spine-index-differs')!
+    const target = passage.places.commercial
+    const cold = await createDocument('commercial', target.sectionIndex)
+    const found = reanchor(cold.body, asArchived(passage, 'gutenberg'))!
+    const local = cfiFor(target.sectionIndex, found.range).replace(/^epubcfi\(\/6\/\d+!/u, 'epubcfi(')
+    expect(toRange(cold, parse(local)).toString()).toBe(found.range.toString())
+  })
+})
+
 describe('what it costs', () => {
   it('resolves a whole 22 000-character section well inside a frame', () => {
     /* ⚠️ **NOT AN ACCEPTANCE CRITERION.** The plan is explicit that a
@@ -217,6 +283,27 @@ describe('what it costs', () => {
     }
     const each = (performance.now() - started) / runs
     expect(each, `one resolution over a 22k section took ${each.toFixed(1)}ms`).toBeLessThan(250)
+  })
+
+  it('parses and resolves a COLD section inside a frame', () => {
+    /* The cost of reaching a section nobody has opened — the parse plus the
+       walk plus the search — because that is the whole cost of route B once
+       `createDocument()` removes the rendered-only limit. Measured at 3.46 ms
+       for a 22 904-character section, so forty unopened sections are ~139 ms:
+       a one-off at import time, not a cost on the reading path.
+
+       The bound is loose for `what it costs`'s stated reason — it fails on an
+       approach that became quadratic, and on nothing else. */
+    const xhtml = `<html><body>${CORPUS_BUILDS.gutenberg.sections[2]!.xhtml}</body></html>`
+    const passage = CORPUS_PASSAGES.find((one) => one.covers === 'past-flatten-bound')!
+    const started = performance.now()
+    const runs = 10
+    for (let i = 0; i < runs; i += 1) {
+      const cold = new DOMParser().parseFromString(xhtml, 'text/html')
+      expect(reanchor(cold.body, asArchived(passage, 'standard-ebooks'))).not.toBeNull()
+    }
+    const each = (performance.now() - started) / runs
+    expect(each, `one cold section took ${each.toFixed(1)}ms`).toBeLessThan(250)
   })
 
   it('indexes every build’s every section without a bound', () => {
