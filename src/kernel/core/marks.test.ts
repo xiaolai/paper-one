@@ -10,6 +10,7 @@ import {
   openingLine,
   compareCfi,
   compareMarks,
+  contentId,
   identityParts,
   liveMarks,
   loadMarks,
@@ -213,6 +214,54 @@ describe('bookIdFor', () => {
     const interior = slices.filter((s) => s.start > 0 && s.end < size)
     expect(interior.length).toBeGreaterThanOrEqual(8)
     expect(interior.some((s) => s.start > size * 0.4 && s.start < size * 0.6)).toBe(true)
+  })
+
+  /**
+   * ⚠️ **TWO DIFFERENT FILES, ONE ID — MEASURED, NOT REASONED ABOUT** (WI-21.4).
+   *
+   * The test above pins WHERE the sampling looks and says plainly that it
+   * "does not — and cannot — assert that an arbitrary change is caught". This
+   * one asserts the other half: that a change landing in a gap is genuinely
+   * invisible, on real blobs, through the real `contentId`.
+   *
+   * **It is correct-by-design behaviour and it exists so that the "Exact" label
+   * cannot be re-asserted by someone reading the key table too quickly.** The
+   * phase-21 design's own key table said `file:<bookId>` was exact, and it is
+   * not: above 64 MiB it is sampled, and a `file:` match was very nearly
+   * allowed to authorise painting a foreign CFI without checking the text.
+   * A comment can be skimmed past; a failing test cannot.
+   *
+   * Built from repeats of one 64 KiB chunk so only that chunk is ever held in
+   * JavaScript memory — the blobs are large, the working set is not.
+   */
+  it('gives two different 65 MiB files the same id when they differ only in a gap', async () => {
+    const CHUNK = 64 * 1024
+    const chunks = Math.ceil((65 * 1024 * 1024) / CHUNK)
+    const ordinary = new Uint8Array(CHUNK).fill(0x41)
+    const different = new Uint8Array(CHUNK).fill(0x42)
+    /* Chunk 15, at byte 983 040 — after the leading 64 KiB window and well
+       before the first interior probe, which for a blob this size lands at
+       ~4 009 261. Nothing samples it. */
+    const inAGap = 15
+    const build = (odd: number | null) =>
+      new Blob(Array.from({ length: chunks }, (_, at) => (at === odd ? different : ordinary)))
+
+    const a = build(null)
+    const b = build(inAGap)
+    expect(a.size).toBe(b.size)
+    expect(a.size).toBeGreaterThan(64 * 1024 * 1024)
+    /* The files really are different — asserted, because a test that compared
+       two identical blobs would pass while proving nothing at all. */
+    expect(new Uint8Array(await a.slice(inAGap * CHUNK, inAGap * CHUNK + 1).arrayBuffer())[0]).not.toBe(
+      new Uint8Array(await b.slice(inAGap * CHUNK, inAGap * CHUNK + 1).arrayBuffer())[0],
+    )
+
+    expect(await contentId(a)).toBe(await contentId(b))
+
+    /* AND THE INSTRUMENT IS PROVED TO WORK: the same difference inside the
+       leading window DOES change the id. Without this, a `contentId` that
+       ignored its input entirely would pass the assertion above. */
+    expect(await contentId(build(0))).not.toBe(await contentId(a))
   })
 })
 
