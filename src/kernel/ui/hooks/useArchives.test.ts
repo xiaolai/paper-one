@@ -317,7 +317,7 @@ describe('a book found by name, and marks that cannot be placed', () => {
     /* The shelf holds a DIFFERENT DOWNLOAD of the book the archive was written
        from: same title, same author, different bytes, so a different id. */
     const books = [{ bookId: 'local-copy', title: 'Moby-Dick', author: 'Herman Melville' }] as unknown as IndexedBook[]
-    const addMany = vi.fn(async () => {})
+    const addMany = vi.fn(async (_bookId: string, _rows: unknown[]) => {})
     const makeMany = vi.fn(async () => {})
     const marks = { loadAllNow: vi.fn(async () => []), addMany } as unknown as MarksView
     const cards = { all: [], makeMany } as unknown as CardsView
@@ -350,11 +350,35 @@ describe('a book found by name, and marks that cannot be placed', () => {
   }
 
   it('never hands a foreign anchor to the store', async () => {
-    /* THE ACCEPTANCE CRITERION, at the only place it can be checked end to end:
-       what `addMany` was actually called with. */
+    /* ⚠️ THE ACCEPTANCE CRITERION, at the only place it can be checked end to
+       end: what `addMany` was actually called with.
+     *
+     * `addMany` IS called now (WI-21.7) — Stage 1 refused these marks and this
+     * assertion was `not.toHaveBeenCalled()`. What must stay true, and is the
+     * whole of Stage 1, is that no CFI from the other build goes with them. So
+     * the check moved from "was it called" to "what did it carry", which is the
+     * stronger question and the one that survives the capability coming back. */
     const { notice, hook, addMany } = mount()
     await run(hook, notice)
-    expect(addMany).not.toHaveBeenCalled()
+    expect(addMany).toHaveBeenCalled()
+    const written = addMany.mock.calls.flatMap((call) => call[1] as { cfi: string; unplaced?: unknown }[])
+    expect(written).toHaveLength(1)
+    for (const row of written) {
+      expect(row.cfi, 'a foreign anchor reached the store').toBe('')
+      expect(row.unplaced).toEqual({ reason: 'foreign-build', fromBook: 'from-elsewhere' })
+    }
+  })
+
+  it('keeps the quote, the note and the colour, which is what the reader made', async () => {
+    /* The point of keeping the mark at all. The anchor is the ONE field that
+       cannot cross; everything the reader actually wrote does. */
+    const { notice, hook, addMany } = mount()
+    await run(hook, notice)
+    const row = (addMany.mock.calls.flatMap((call) => call[1] as Record<string, unknown>[]))[0]!
+    expect(row['text']).toBe('Call me Ishmael')
+    expect(row['chapter']).toBe('Loomings')
+    expect(row['tint']).toBe('yellow')
+    expect(row['sectionIndex'], 'a placeholder, and it must not be negative').toBe(0)
   })
 
   it('names the book, and does not call it missing', async () => {
@@ -363,7 +387,10 @@ describe('a book found by name, and marks that cannot be placed', () => {
     const { notice, hook } = mount()
     await run(hook, notice)
     const said = notice.mock.calls.at(-1)?.[0] as string
-    expect(said).toContain('Not placed — a different edition here: Moby-Dick.')
+    /* THE SENTENCE CHANGED WITH THE BEHAVIOUR. It said "Not placed", which was
+       the honest word for throwing the marks away; they are kept now, so it
+       says what is true — the reader has them and cannot yet be taken to them. */
+    expect(said).toContain('1 mark kept without a place — another edition here: Moby-Dick.')
     expect(said).not.toContain('Not on this shelf')
   })
 })

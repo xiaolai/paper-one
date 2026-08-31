@@ -84,7 +84,7 @@ const marks = (): MarksView =>
     all: [],
     current: [],
     bookmarks: [],
-    allBookmarks: [],
+    allBookmarks: [], allUnplaced: [],
     persistent: true,
     ready: true,
     unreadable: false,

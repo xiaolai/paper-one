@@ -196,7 +196,7 @@ describe('planImport', () => {
     expect(plan.unmatched).toEqual([])
   })
 
-  it('finds the book by folded title and author, and refuses its marks rather than misplacing them', () => {
+  it('finds the book by folded title and author, and keeps its marks WITHOUT a place', () => {
     /* THE BOOK IS STILL FOUND. Matching a WORK across two downloads of it is
        what the name key is for, and that half is unchanged.
      *
@@ -208,12 +208,22 @@ describe('planImport', () => {
      * existed, which is exactly why the anchor could travel unnoticed. */
     const doc = exportMarks([BOOK({ bookId: 'from-elsewhere' })], [MARK({ bookId: 'from-elsewhere' })], [])
     const plan = planImport(doc, [BOOK({ bookId: 'local-copy' })], [], [])
-    expect(plan.additions).toEqual([])
-    expect(plan.marksAdded).toBe(0)
     expect(plan.unmatched, 'the book WAS found — this is not "not on your shelf"').toEqual([])
-    expect(plan.unimportable).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
-    /* THE ASSERTION THIS TEST HAS ALWAYS BEEN MISSING: not one anchor from the
-       foreign build reaches the plan by any route. */
+    /* PLACED: none. The anchor cannot cross and never does. */
+    expect(plan.marksAdded).toBe(0)
+    /* KEPT: all of them (WI-21.7). Stage 1 threw these away for want of a
+       state to put them in; there is one now, so the reader keeps their quote,
+       their context, their note and their colour — everything except the one
+       field that is meaningless here. */
+    expect(plan.unplacedAdded).toBe(1)
+    expect(plan.additions[0]?.unplaced.map((one) => one.mark.text)).toEqual(['Call me Ishmael'])
+    /* AND THE PROVENANCE, which is the archive row's own id and never a path
+       into this library. */
+    expect(plan.additions[0]?.unplaced[0]?.fromBook).toBe('from-elsewhere')
+    expect(plan.unplacedBooks).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
+    /* ⚠️ THE ASSERTION THIS TEST HAS ALWAYS BEEN MISSING, and the one thing
+       WI-21.7 must not weaken: not one anchor from the foreign build reaches
+       the plan by any route. Keeping the marks is not keeping their CFIs. */
     expect(anchorsIn(plan)).toEqual([])
   })
 
@@ -469,7 +479,7 @@ describe('what the audit found in the archive (round 1)', () => {
        duplicate rather than let through. */
     expect(plan.cardsAdded).toBe(1)
     expect(plan.duplicates).toBe(1)
-    expect(plan.unimportable).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
+    expect(plan.unplacedBooks).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
   })
 })
 
@@ -496,7 +506,7 @@ describe('the full content digest, where both sides have one', () => {
     const plan = planImport(doc, [BOOK({ contentHash: HASH_B })], [], [])
     expect(plan.marksAdded).toBe(0)
     expect(anchorsIn(plan)).toEqual([])
-    expect(plan.unimportable).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
+    expect(plan.unplacedBooks).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
   })
 
   it('keeps the anchors when the digests agree', () => {
@@ -590,7 +600,7 @@ describe('provenance per row (WI-21.1)', () => {
       const plan = planImport(MIXED(order), [BOOK()], [], [])
       expect(anchorsIn(plan), order).toEqual(['epubcfi(/6/4!/4/2,/1:0,/1:9)'])
       expect(plan.additions[0]?.marks.map((one) => one.text), order).toEqual(['exact'])
-      expect(plan.unimportable, order).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
+      expect(plan.unplacedBooks, order).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
     }
   })
 
@@ -628,7 +638,7 @@ describe('provenance per row (WI-21.1)', () => {
     const plan = planImport(doc, [BOOK()], [], [])
     expect(plan.marksAdded).toBe(2)
     expect(plan.cardsAdded).toBe(1)
-    expect(plan.unimportable).toEqual([])
+    expect(plan.unplacedBooks).toEqual([])
     expect(anchorsIn(plan)).toEqual([
       'epubcfi(/6/4!/4/2,/1:0,/1:15)',
       'epubcfi(/6/6!/4/2,/1:0,/1:5)',
@@ -638,7 +648,7 @@ describe('provenance per row (WI-21.1)', () => {
 
   it('says "not on this shelf" and "cannot be placed" as two different lists', () => {
     /* One list for both would make the second sentence unsayable, which is the
-       whole reason `unimportable` is not folded into `unmatched`. */
+       whole reason `unplacedBooks` is not folded into `unmatched`. */
     const doc = exportMarks(
       [BOOK({ bookId: 'elsewhere' }), BOOK({ bookId: 'gone', title: 'Ulysses', author: 'James Joyce' })],
       [MARK({ bookId: 'elsewhere' }), MARK({ id: 'm2', bookId: 'gone' })],
@@ -646,6 +656,6 @@ describe('provenance per row (WI-21.1)', () => {
     )
     const plan = planImport(doc, [BOOK()], [], [])
     expect(plan.unmatched).toEqual([{ title: 'Ulysses', author: 'James Joyce', marks: 1, cards: 0 }])
-    expect(plan.unimportable).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
+    expect(plan.unplacedBooks).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
   })
 })

@@ -4,6 +4,8 @@ import { hlcOf, type Hlc } from './hlc'
 import { upsertOverlapping } from './markMatch'
 import {
   annotationsIn,
+  placedIn,
+  unplacedIn,
   bookmarksIn,
   isBookmark,
   liveMarks,
@@ -51,6 +53,8 @@ import type { WriteQueue } from './writeQueue'
  *  identity. Two constants because the two are differently typed now. */
 const EMPTY: readonly Annotation[] = []
 const NO_BOOKMARKS: readonly Bookmark[] = []
+/** The third class's empty list — see `project`. Almost every book has none. */
+const NO_UNPLACED: readonly Annotation[] = []
 
 export interface MarkSnapshot {
   /** Every LIVE ANNOTATION, across every book — what the Marginalia panel browses.
@@ -76,6 +80,20 @@ export interface MarkSnapshot {
    * PER BOOK, for the surfaces that ask "is THIS place kept" — the ribbon and
    * the footer toggle. `allBookmarks` is the cross-book list beside it.
    */
+  /**
+   * The open book's LIVE ANNOTATIONS THAT HAVE NO ANCHOR HERE (WI-21.7).
+   *
+   * THE THIRD CLASS, and it exists for `bookmarks`' reason: an unplaced mark
+   * shares the file, the queue, the tombstones and the merge with every other
+   * annotation, and shares none of the DRAWING consumers. Marginalia lists it
+   * and search finds its text — so it cannot be dropped from the store — while
+   * nothing paints it, because it has nowhere to be painted.
+   *
+   * Keeping it out of `current` is what makes "the painter is never handed an
+   * anchorless mark" true by construction rather than by every painter
+   * remembering to check.
+   */
+  readonly unplaced: readonly Annotation[]
   readonly bookmarks: readonly Bookmark[]
   /**
    * Every LIVE BOOKMARK, across every book — the other half of what Marginalia
@@ -89,6 +107,9 @@ export interface MarkSnapshot {
    * filtering the whole library on every page turn.
    */
   readonly allBookmarks: readonly Bookmark[]
+  /** Every LIVE UNPLACED annotation, across every book — Marginalia's, and
+   *  what a re-anchoring pass reads to know what is waiting for a home. */
+  readonly allUnplaced: readonly Annotation[]
   /** Which book `current` and `bookmarks` are for. */
   readonly bookId: string | null
   /**
@@ -303,7 +324,9 @@ export function createMarkStore({
   let snapshot: MarkSnapshot = {
     all: EMPTY,
     allBookmarks: NO_BOOKMARKS,
+    allUnplaced: NO_UNPLACED,
     current: EMPTY,
+    unplaced: NO_UNPLACED,
     bookmarks: NO_BOOKMARKS,
     bookId: null,
     ready: false,
@@ -326,7 +349,10 @@ export function createMarkStore({
    */
   interface Projection {
     source: readonly Mark[]
+    /** PLACED annotations — what can be painted. See `project`. */
     annotations: readonly Annotation[]
+    /** Annotations with no anchor in this library. */
+    unplaced: readonly Annotation[]
     bookmarks: readonly Bookmark[]
   }
   let cache: Projection | null = null
@@ -358,9 +384,23 @@ export function createMarkStore({
     if (prior && prior.source === held) return prior
     const live = liveMarks(held)
     const places = place(live)
+    const annotations = annotationsIn(live)
+    /* ⚠️ **A THIRD CLASS AT THE SAME DOOR** (WI-21.7), and for the reason
+     * `MarkSnapshot.bookmarks` gives for the second: an unplaced mark shares
+     * the file, the queue, the tombstones and the merge with every other
+     * annotation, and shares NONE of the drawing consumers. Nothing paints one,
+     * the margin reserves no column for one, and a selection never resolves to
+     * one — while Marginalia lists it and search finds its text, which is why
+     * it cannot simply be filtered out of `annotationsIn`.
+     *
+     * Split here rather than at four call sites, so those four are true by
+     * construction rather than by each remembering. */
+    const placed = placedIn(annotations)
+    const unplaced = placed === annotations ? NO_UNPLACED : unplacedIn(annotations)
     return {
       source: held,
-      annotations: annotationsIn(live),
+      annotations: placed,
+      unplaced,
       /* One shared empty list when there are none: a sort cannot return its
        * input by identity, and most books have no bookmarks at all. */
       bookmarks: places.length > 0 ? places : NO_BOOKMARKS,
@@ -381,7 +421,9 @@ export function createMarkStore({
     snapshot = {
       all: allCache.annotations,
       allBookmarks: allCache.bookmarks,
+      allUnplaced: allCache.unplaced,
       current: cache.annotations,
+      unplaced: cache.unplaced,
       bookmarks: cache.bookmarks,
       bookId: openId,
       ready,

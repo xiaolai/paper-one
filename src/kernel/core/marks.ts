@@ -209,6 +209,27 @@ export interface Mark {
   /** TOC label at the time of marking, for "Ch. 1" in the Marginalia list. */
   readonly chapter: string
   readonly createdAt: number
+  /**
+   * Present when this mark has NO ANCHOR IN THIS LIBRARY (WI-21.7).
+   *
+   * ⚠️ **THE ONE STATE THAT MAKES AN EMPTY `cfi` LEGAL, and it is a discriminator
+   * rather than a flag for that reason.** `isMark` refuses an empty `cfi`
+   * because *"nothing to resolve, so the mark can never be drawn — it sits in
+   * the Marginalia list forever pointing at nothing"*, and that reasoning is
+   * still exactly right. What it forbids is an anchorless mark that nobody
+   * MEANT: this says the anchorlessness is deliberate, says where the mark came
+   * from, and puts the mark in a class the painter is never handed.
+   *
+   * Stage 1 had no such state, so a name-matched import had to refuse the marks
+   * outright — the plan's one user-visible regression. This is what lets them
+   * come across, be read, be searched, and be re-anchored later.
+   *
+   * `sectionIndex` on an unplaced mark is 0 and means nothing. It is not −1:
+   * `isMark` refuses a negative index for a real reason (it matches no section
+   * and would make the mark undrawable BY ACCIDENT), and safety that depends on
+   * an out-of-range number is the shape this field exists to replace.
+   */
+  readonly unplaced?: UnplacedMark
   /* ---- The ledger's stamps (phase 6). Optional: a mark written before the
    * ledger has neither, and `markStamp` reads its `createdAt` instead. ---- */
   /** When the mark was last EDITED — a note written, a row merged. */
@@ -431,6 +452,46 @@ export function isAnnotation(mark: Mark): mark is Annotation {
  */
 export function sameClass(a: Mark, b: Mark): boolean {
   return isBookmark(a) === isBookmark(b)
+}
+
+/**
+ * Why a mark has no anchor here, and what could be used to find one.
+ *
+ * PROVENANCE, NEVER AN ANCHOR. `fromBook` is the archive row's own `bookId` —
+ * a foreign library's content id, meaningless as a path into this one — and it
+ * is carried so a re-anchoring pass can say which import a mark arrived on, and
+ * so a reader can be told. Nothing may resolve it.
+ */
+export interface UnplacedMark {
+  /** Why it could not be placed. One value today; a union so a second reason
+   *  has to be admitted here rather than overloading this one. */
+  readonly reason: 'foreign-build'
+  /** The `bookId` of the archive row it came from. Provenance only. */
+  readonly fromBook: string
+}
+
+/** Whether a mark has an anchor in THIS library. */
+export const isPlaced = (mark: Mark): boolean => mark.unplaced === undefined && mark.cfi !== ''
+
+/**
+ * The marks that can actually be drawn — placed annotations, nothing else.
+ *
+ * ⚠️ **THE FILTER THE OVERLAY NEEDS AND `annotationsIn` IS NOT.** An unplaced
+ * mark IS about a passage: Marginalia lists it, search finds its text, the
+ * reader can read their own note on it. It simply has nowhere to be painted.
+ * Splitting on "is it an annotation" would either hide it from the list or
+ * offer it to the painter, and both are wrong.
+ *
+ * Returns its input by identity when there is nothing to drop, the convention
+ * every store's change-detection relies on.
+ */
+export function placedIn<T extends Mark>(marks: readonly T[]): readonly T[] {
+  return marks.every(isPlaced) ? marks : marks.filter(isPlaced)
+}
+
+/** The annotations with no anchor here — Marginalia's, and the resolver's. */
+export function unplacedIn(marks: readonly Annotation[]): readonly Annotation[] {
+  return marks.every((mark) => !isPlaced(mark)) ? marks : marks.filter((mark) => !isPlaced(mark))
 }
 
 /**
@@ -793,6 +854,7 @@ type StoredMark = Omit<Mark, 'prefix' | 'suffix' | 'updatedAt' | 'deletedAt' | '
   readonly deletedAt?: unknown
   readonly tint?: unknown
   readonly style?: unknown
+  readonly unplaced?: unknown
 }
 
 function isMark(value: unknown): value is StoredMark {
@@ -820,7 +882,12 @@ function isMark(value: unknown): value is StoredMark {
     typeof m['bookId'] === 'string' &&
     m['bookId'] !== '' &&
     typeof m['cfi'] === 'string' &&
-    m['cfi'] !== '' &&
+    /* ⚠️ EMPTY ONLY WITH AN EXPLICIT `unplaced` BESIDE IT (WI-21.7). The
+       original refusal is unchanged in spirit — an anchorless mark nobody
+       meant still corrupts the list — and what is admitted is the mark that
+       SAYS it has no anchor here and why. A row with an empty cfi and no
+       reason is still dropped. */
+    (m['cfi'] !== '' || readUnplaced(m['unplaced']) !== undefined) &&
     typeof m['sectionIndex'] === 'number' &&
     Number.isInteger(m['sectionIndex']) &&
     m['sectionIndex'] >= 0 &&
@@ -851,6 +918,23 @@ function isMark(value: unknown): value is StoredMark {
  * table refuses both at `MAX_MARK_TEXT` on the way in (`book.mark.add`), so
  * that is the bound, and it is the same one on every door.
  */
+/**
+ * The `unplaced` record a stored row carries, or undefined.
+ *
+ * VALIDATED, not cast. This is the only thing standing between "an empty cfi
+ * that was meant" and "an empty cfi that is corruption", so a row claiming
+ * `unplaced: true`, or `unplaced: {}`, or a reason nothing understands, is not
+ * an unplaced mark and its empty cfi is refused as it always was.
+ */
+function readUnplaced(value: unknown): UnplacedMark | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const row = value as Record<string, unknown>
+  if (row['reason'] !== 'foreign-build') return undefined
+  const fromBook = row['fromBook']
+  if (typeof fromBook !== 'string' || fromBook === '') return undefined
+  return { reason: 'foreign-build', fromBook: fromBook.slice(0, 200) }
+}
+
 function readContext(value: unknown): string {
   return typeof value === 'string' ? value.slice(0, MAX_MARK_TEXT) : ''
 }
@@ -972,6 +1056,13 @@ export function validMarks(parsed: unknown): Mark[] {
         tint: readTint(row.tint),
         note: noteForKind(rest.note.slice(0, MAX_MARK_NOTE), row.kind),
         style: styleForKind(readStyle(row.style), row.kind),
+        /* RE-VALIDATED HERE TOO, not spread through by `...rest`. `isMark`
+           read this to decide whether the empty cfi was legal; the projection
+           has to write the CHECKED value, or a row could pass the gate on a
+           well-formed `unplaced` and then be stored with whatever the file
+           actually held. Absent for every placed mark, which is all of them
+           until an archive brings one across. */
+        ...(readUnplaced(row.unplaced) !== undefined ? { unplaced: readUnplaced(row.unplaced)! } : {}),
         ...(updated !== undefined ? { updatedAt: updated } : {}),
         ...(tombstone !== undefined ? { deletedAt: tombstone } : {}),
       }

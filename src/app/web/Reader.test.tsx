@@ -421,7 +421,7 @@ describe('Reader', () => {
           createdAt: 1,
         },
       ],
-      allBookmarks: [],
+      allBookmarks: [], allUnplaced: [],
       persistent: true,
       remove: (m: { id: string; bookId: string }) => removed.push(m),
       setNote: () => {},

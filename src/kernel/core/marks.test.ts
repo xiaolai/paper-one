@@ -11,6 +11,9 @@ import {
   compareCfi,
   compareMarks,
   contentId,
+  isPlaced,
+  placedIn,
+  unplacedIn,
   identityParts,
   liveMarks,
   loadMarks,
@@ -809,5 +812,95 @@ describe('bookmarkFrom', () => {
     const stored = parseMarks(JSON.stringify([{ ...bookmarkFrom(draft), id: 'b', createdAt: 5 }]))
     expect(stored).toHaveLength(1)
     expect(stored[0]?.kind).toBe('bookmark')
+  })
+})
+
+/**
+ * A mark with no anchor in this library (WI-21.7).
+ *
+ * ⚠️ **`isMark` REFUSED AN EMPTY `cfi` AND THE REASONING WAS RIGHT** — *"nothing
+ * to resolve, so the mark can never be drawn — it sits in the Marginalia list
+ * forever pointing at nothing"*. What it forbade was an anchorless mark NOBODY
+ * MEANT. `unplaced` is the mark that says its anchorlessness is deliberate and
+ * where it came from, and the store keeps such marks in a class the painter is
+ * never handed.
+ *
+ * This is what let Stage 1's regression be undone: a name-matched import can
+ * keep the reader's quote, context, note and colour instead of losing all four,
+ * without a single foreign CFI being stored.
+ */
+describe('an unplaced mark', () => {
+  const UNPLACED = { reason: 'foreign-build' as const, fromBook: 'book:elsewhere' }
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: 'u1',
+    bookId: 'book:here',
+    cfi: '',
+    sectionIndex: 0,
+    text: 'Call me Ishmael',
+    note: 'the first line',
+    kind: 'highlight',
+    chapter: 'Loomings',
+    createdAt: 1000,
+    unplaced: UNPLACED,
+    ...over,
+  })
+
+  it('survives a load, which an empty cfi alone never did', () => {
+    const [mark] = parseMarks(JSON.stringify([row()]))!
+    expect(mark, 'the row was dropped').toBeDefined()
+    expect(mark!.cfi).toBe('')
+    expect(mark!.unplaced).toEqual(UNPLACED)
+    expect(mark!.text).toBe('Call me Ishmael')
+    expect(mark!.note).toBe('the first line')
+  })
+
+  it('is still refused when the empty anchor is not explained', () => {
+    /* THE ORIGINAL GUARD, UNCHANGED. A row with an empty cfi and no reason is
+       corruption, and admitting it would put a mark in the list pointing at
+       nothing — which is exactly what the refusal was written for. */
+    for (const bad of [undefined, true, {}, { reason: 'because' }, { reason: 'foreign-build' }, { reason: 'foreign-build', fromBook: '' }]) {
+      expect(parseMarks(JSON.stringify([row({ unplaced: bad })])), JSON.stringify(bad)).toEqual([])
+    }
+  })
+
+  it('re-validates the record rather than spreading the file through', () => {
+    /* `isMark` reads this to decide the empty cfi is legal; the projection has
+       to write the CHECKED value or a row could pass the gate on a well-formed
+       record and be stored with whatever the file held beside it. */
+    const [mark] = parseMarks(JSON.stringify([row({ unplaced: { ...UNPLACED, extra: 'ignored' } })]))!
+    expect(mark!.unplaced).toEqual(UNPLACED)
+  })
+
+  it('is not placed, and a mark with an anchor is', () => {
+    const [unplacedMark] = parseMarks(JSON.stringify([row()]))!
+    expect(isPlaced(unplacedMark!)).toBe(false)
+    expect(isPlaced(mark())).toBe(true)
+  })
+
+  it('is kept out of the drawable list and into the other one', () => {
+    /* ⚠️ THE SPLIT THE PAINTER DEPENDS ON. `annotationsIn` cannot do this job:
+       an unplaced mark IS about a passage, so Marginalia lists it and search
+       finds its text. Only `placedIn` answers "can this be drawn". */
+    const [unplacedMark] = parseMarks(JSON.stringify([row()]))!
+    const both = [mark(), unplacedMark!]
+    expect(placedIn(both).map((one) => one.id)).toEqual([mark().id])
+    expect(unplacedIn(annotationsIn(both)).map((one) => one.id)).toEqual(['u1'])
+  })
+
+  it('hands a list back by identity when there is nothing to drop', () => {
+    /* The no-write convention every store's change detection relies on. */
+    const placed = [mark()]
+    expect(placedIn(placed)).toBe(placed)
+  })
+
+  it('keeps a placeholder section rather than an out-of-range one', () => {
+    /* ⚠️ NOT −1. `isMark` refuses a negative index for a real reason — it
+       matches no section, so the mark would be undrawable BY ACCIDENT — and
+       safety resting on an out-of-range number is the shape `unplaced` exists
+       to replace. The class keeps it away from the painter; the number does
+       not have to. */
+    expect(parseMarks(JSON.stringify([row({ sectionIndex: -1 })]))).toEqual([])
+    const [ok] = parseMarks(JSON.stringify([row()]))!
+    expect(ok!.sectionIndex).toBe(0)
   })
 })

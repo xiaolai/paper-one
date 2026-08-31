@@ -222,7 +222,7 @@ const importMarksNow = useCallback(() => {
      * `addMany` was written against these exact bytes. The invariant is
      * enforced there and invisible here, which is why it is written down: a
      * change that let name-matched rows back into `.marks` would put a foreign
-     * CFI into the reader's own store from this line, silently. `unimportable`
+     * CFI into the reader's own store from this line, silently. `unplacedBooks`
      * is where those rows go, and `cards` carries the name-matched half with
      * `localAnchor` already nulled. */
     const settled = await Promise.allSettled([
@@ -244,6 +244,37 @@ const importMarksNow = useCallback(() => {
           })),
         ),
       ),
+      /* ⚠️ **THE NAME-MATCHED MARKS, STORED WITHOUT THEIR ANCHORS** (WI-21.7).
+       * A SECOND `addMany` per book rather than one merged call, because the
+       * two lists are two different writes: the shape above reads
+       * `mark.localAnchor.cfi` and this one must not, and merging them would
+       * put the decision back inside a `map` where a later edit can lose it.
+       *
+       * `cfi: ''` with an `unplaced` record beside it is the only shape
+       * `isMark` accepts an empty anchor in — see the field. `sectionIndex: 0`
+       * is a placeholder and means nothing; the class the store puts these in
+       * is what keeps them away from the painter, not the number. */
+      ...plan.additions
+        .filter((one) => one.unplaced.length > 0)
+        .map((one) =>
+          marks.addMany(
+            one.bookId,
+            one.unplaced.map(({ mark, fromBook }) => ({
+              bookId: one.bookId,
+              cfi: '',
+              sectionIndex: 0,
+              text: mark.text,
+              prefix: mark.prefix,
+              suffix: mark.suffix,
+              note: mark.note,
+              kind: mark.kind,
+              tint: mark.tint,
+              style: mark.style,
+              chapter: mark.chapter,
+              unplaced: { reason: 'foreign-build' as const, fromBook },
+            })),
+          ),
+        ),
       cards.makeMany(
         plan.additions.flatMap((one) =>
           one.cards.map((card) => ({
@@ -297,22 +328,30 @@ const importMarksNow = useCallback(() => {
     const missing = plan.unmatched
     const missed = missing.length > 0 ? ` Not on this shelf: ${nameThem(missing)}.` : ''
     /* ⚠️ **A DIFFERENT SENTENCE FROM "not on this shelf" (WI-21.2).** These
-     * books WERE found — by title and author — and it is the marks that could
-     * not come across: their anchors were written against another build of the
-     * work, where the same path addresses different words. Told as one list the
-     * reader would go looking for a book that is right there.
+     * books WERE found — by title and author — and their marks DO come across
+     * now (WI-21.7); what could not come with them is the ANCHOR, written
+     * against another build where the same path addresses different words.
+     *
+     * Stage 1 refused these marks and this line said "Not placed", which was
+     * the honest word for throwing them away. They are kept now, so the
+     * sentence says the thing that is true: the reader has their quote and
+     * their note, and Paper cannot yet take them to the passage.
      *
      * NAMED, NOT COUNTED, for the same reason `unmatched` is: a reader who
      * loses the marks on a book they were not reading shrugs, and one who loses
      * them on the book they were reading needs to know it was that book. */
-    const stranded = plan.unimportable
-    const unplaced = stranded.length > 0 ? ` Not placed — a different edition here: ${nameThem(stranded)}.` : ''
+    const stranded = plan.unplacedBooks
+    const kept = plan.unplacedAdded
+    const unplaced =
+      stranded.length > 0
+        ? ` ${kept} ${kept === 1 ? 'mark' : 'marks'} kept without a place — another edition here: ${nameThem(stranded)}.`
+        : ''
     const already = plan.duplicates > 0 ? ` ${plan.duplicates} already here.` : ''
     /* SAID, NOT SWALLOWED: two archived marks that overlapped each other were
        kept as one, and the reader who exported both deserves to hear it. */
     const folded = plan.folded > 0 ? ` ${plan.folded} overlapping ${plan.folded === 1 ? 'mark' : 'marks'} kept as one.` : ''
     notice(
-      plan.marksAdded === 0 && plan.cardsAdded === 0
+      plan.marksAdded === 0 && plan.cardsAdded === 0 && plan.unplacedAdded === 0
         ? `Nothing to add.${already}${folded}${missed}${unplaced}`
         : marksAdded === 0 && cardsAdded === 0
           ? /* Everything the plan had was refused. Saying so first is the

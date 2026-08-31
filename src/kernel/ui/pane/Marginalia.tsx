@@ -15,6 +15,7 @@ import {
 import { cardFromMark } from '../../core/cards'
 import {
   compareMarks,
+  isPlaced,
   isAnnotation,
   isBookmark,
   type Annotation,
@@ -24,6 +25,16 @@ import {
 import type { MarkFocus } from '../hooks/useMarking'
 import type { JumpTarget } from '../hooks/useJumps'
 import { ICON, type Platform } from '../../core/metrics'
+
+/**
+ * What a row says when it cannot be jumped to because the mark has no anchor
+ * HERE — imported from another build of the book (WI-21.7).
+ *
+ * One sentence, one place. The reason is not guessable from the row: the book
+ * is on the shelf and may well be open, so a disabled control reads as a defect
+ * unless it explains itself.
+ */
+const UNPLACED_TITLE = 'From another edition of this book — Paper has not found this passage here yet.'
 import { onBeforeClose } from '../../core/beforeClose'
 import { relativeTime } from '../../core/relativeTime'
 import type { CardsView } from '../hooks/useCards'
@@ -319,10 +330,10 @@ function PlaceRow({
 
 export interface MarginaliaProps {
   /**
-   * What browsing marks needs — five members, not all fourteen of `MarksView`.
+   * What browsing marks needs — six members, not all of `MarksView`.
    *
    * NARROWED for the same reason `SearchPanel`'s `book` was: this pane reads
-   * `all`, `allBookmarks`, `persistent`, `loadAll` and `setNote`, and declaring
+   * `all`, `allBookmarks`, `allUnplaced`, `persistent`, `loadAll` and `setNote`, and declaring
    * the other nine made it mountable only by a host that owns a `MarkStorage`.
    * The browser client has a channel and `mark.list`, which is enough for these
    * and not for the fourteen.
@@ -340,6 +351,10 @@ export interface MarginaliaProps {
   marks: {
     readonly all: MarksView['all']
     readonly allBookmarks: MarksView['allBookmarks']
+    /** The unplaced ones (WI-21.7) — this pane is the only surface that shows
+     *  them, so leaving them off this list would make them invisible while
+     *  still stored, exported and synced. */
+    readonly allUnplaced: MarksView['allUnplaced']
     readonly persistent: MarksView['persistent']
     /**
      * Optional, because the browser client's store is fed over the wire and
@@ -482,9 +497,15 @@ export function Marginalia({
    * A book that has LEFT the shelf is not reachable, and its row stays
    * disabled — `Marginalia` still refuses to draw a control that does nothing,
    * which is the same rule as before with a narrower subject.
+   *
+   * ⚠️ **AND AN UNPLACED MARK IS NOT REACHABLE EITHER, WHATEVER BOOK IT IS ON**
+   * (WI-21.7). It has no CFI: the book is right there and open, and there is
+   * still nowhere to go. Folded into this one rule rather than checked at the
+   * jump — the note above says "one rule, three rows" and this is the third
+   * thing that can make a row unjumpable.
    */
   const reachable = useCallback(
-    (mark: Mark) => mark.bookId === bookId || (onShelf?.(mark.bookId) ?? false),
+    (mark: Mark) => isPlaced(mark) && (mark.bookId === bookId || (onShelf?.(mark.bookId) ?? false)),
     [bookId, onShelf],
   )
   /** The mark whose note is being written. One at a time, like a text field. */
@@ -500,10 +521,19 @@ export function Marginalia({
   const [editing, setEditing] = useState<string | null>(null)
   const rows = useRef(new Map<string, HTMLDivElement>())
 
-  /** Everything this panel browses: both classes, from every book. */
+  /**
+   * Everything this panel browses: all THREE classes, from every book.
+   *
+   * ⚠️ **THE UNPLACED ONES BELONG HERE AND NOWHERE ELSE** (WI-21.7). A mark
+   * imported from another build of a book has no anchor in this library, so
+   * nothing paints it — but it is still the reader's own words and their own
+   * note, and this panel is the one surface whose job is showing them. Left out
+   * of this list, an imported mark would be stored, exported, synced and
+   * invisible.
+   */
   const everything = useMemo(
-    () => [...marks.all, ...marks.allBookmarks],
-    [marks.all, marks.allBookmarks],
+    () => [...marks.all, ...marks.allUnplaced, ...marks.allBookmarks],
+    [marks.all, marks.allUnplaced, marks.allBookmarks],
   )
 
   /**
@@ -787,6 +817,11 @@ export function Marginalia({
                ⌘[ brings the reader home. What is still unreachable is a book
                that has left the shelf, and those rows are still disabled. */
             disabled={!reachable(mark) || !onGoTo}
+            /* SAYS WHY, when the reason is not the obvious one. A row for a
+               book that has left the shelf explains itself — the book is gone.
+               An unplaced mark's book is right there and open, so a control
+               that does nothing looks like a defect unless it says otherwise. */
+            {...(mark.unplaced ? { title: UNPLACED_TITLE, 'aria-description': UNPLACED_TITLE } : {})}
             onClick={() => onGoTo?.({ bookId: mark.bookId, cfi: mark.cfi })}
           >
             <span className={styles.noteBody}>{mark.text}</span>

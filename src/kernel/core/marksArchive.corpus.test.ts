@@ -118,7 +118,7 @@ describe("an archive from one build, imported onto another (WI-21.2)", () => {
     const archive = exportMarks([shelfBook(from)], marksMadeIn(from), [])
     const plan = planImport(archive, [shelfBook(onto)], [], [])
     expect(plan.unmatched).toEqual([])
-    expect(plan.unimportable).toEqual([
+    expect(plan.unplacedBooks).toEqual([
       { title: CORPUS_BUILDS[onto].title, author: CORPUS_BUILDS[onto].author, marks: CORPUS_PASSAGES.length },
     ])
   })
@@ -131,7 +131,7 @@ describe("an archive from one build, imported onto another (WI-21.2)", () => {
        shelf, which would send them looking for a match that does not exist. */
     const archive = exportMarks([shelfBook(from)], marksMadeIn(from), [])
     const plan = planImport(archive, [shelfBook(onto)], [], [])
-    expect(plan.unimportable).toEqual([])
+    expect(plan.unplacedBooks).toEqual([])
     expect(plan.unmatched).toEqual([
       {
         title: CORPUS_BUILDS[from].title,
@@ -151,7 +151,7 @@ describe("an archive from one build, imported onto another (WI-21.2)", () => {
       const archive = exportMarks([shelfBook(id)], marksMadeIn(id), [])
       const plan = planImport(archive, [shelfBook(id)], [], [])
       expect(plan.marksAdded, id).toBe(CORPUS_PASSAGES.length)
-      expect(plan.unimportable, id).toEqual([])
+      expect(plan.unplacedBooks, id).toEqual([])
       expect(new Set(anchorsIn(plan)), id).toEqual(new Set(CORPUS_PASSAGES.map((one) => one.places[id].cfi)))
     }
   })
@@ -174,7 +174,7 @@ describe("an archive from one build, imported onto another (WI-21.2)", () => {
     const plan = planImport(archive, [shelved], [], [])
     expect(plan.marksAdded).toBe(0)
     expect(anchorsIn(plan)).toEqual([])
-    expect(plan.unimportable).toEqual([
+    expect(plan.unplacedBooks).toEqual([
       { title: onto.title, author: onto.author, marks: CORPUS_PASSAGES.length },
     ])
   })

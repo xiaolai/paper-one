@@ -69,7 +69,7 @@ const book = () =>
   }) as unknown as Book
 
 const marksView = () =>
-  ({ all: [], current: [], bookmarks: [], allBookmarks: [], persistent: true, ready: true, loadAll: vi.fn() }) as unknown as MarksView
+  ({ all: [], current: [], bookmarks: [], allBookmarks: [], allUnplaced: [], persistent: true, ready: true, loadAll: vi.fn() }) as unknown as MarksView
 
 /** The pane in the reader, on one panel, with only what that panel reads varied. */
 function draw(over: Partial<SidePaneProps> & { pane: 'search' | 'companion' | 'library' }) {

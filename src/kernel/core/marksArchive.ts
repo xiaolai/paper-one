@@ -188,7 +188,17 @@ export interface MarksImportPlan {
    * shipped behaviour and it silently put the reader's marginalia on the wrong
    * passages.
    */
-  readonly unimportable: readonly UnimportableBook[]
+  readonly unplacedBooks: readonly UnplacedBook[]
+  /**
+   * How many marks come across WITHOUT an anchor (WI-21.7).
+   *
+   * Counted apart from `marksAdded` because they are a different promise: a
+   * placed mark is drawn on the page, and one of these is a quote and a note
+   * the reader can read and cannot yet be taken to. Telling them apart is what
+   * lets the notice say so instead of claiming N marks were added and leaving
+   * the reader to discover that some of them go nowhere.
+   */
+  readonly unplacedAdded: number
   readonly booksTouched: number
   readonly marksAdded: number
   /**
@@ -211,7 +221,7 @@ export interface BookImport {
    * ⚠️ **ONLY ID-MATCHED ROWS ARE HERE, and that is a contract rather than a
    * consequence.** `bookId` is derived from the file's own bytes, so an id
    * match is evidence the anchors in these rows were written against THESE
-   * bytes. Name-matched rows go to `unimportable`.
+   * bytes. Name-matched rows go to `unplacedBooks`.
    *
    * ⚠️ **AND "THESE BYTES" IS EXACT ONLY BELOW 64 MiB.** `contentId` hashes a
    * size prefix, the first and last 64 KiB and sixteen interior probes
@@ -239,6 +249,22 @@ export interface BookImport {
    */
   readonly marks: readonly ArchivedMark[]
   /**
+   * Marks from rows matched BY NAME — to be stored WITHOUT their anchors
+   * (WI-21.7).
+   *
+   * ⚠️ **THESE CARRY A FOREIGN `localAnchor` AND IT MUST NOT BE READ.** The row
+   * is handed over whole because the reader's quote, context, note, colour and
+   * chapter are all on it and all worth keeping; the one field that is
+   * meaningless here is the anchor. `useArchives` writes these with
+   * `cfi: ''` and an `unplaced` record, which is the only shape `isMark`
+   * accepts an empty anchor in.
+   *
+   * Separate from `marks` rather than flagged inside it, so a caller cannot
+   * reach an anchor it should not by forgetting a check — the same argument
+   * the exact/name partition itself rests on.
+   */
+  readonly unplaced: readonly UnplacedImport[]
+  /**
    * Cards from both match kinds — id-matched first, keeping their anchors, then
    * name-matched with `localAnchor` dropped.
    *
@@ -264,16 +290,30 @@ export interface UnmatchedBook {
 }
 
 /**
+ * One mark that will be stored WITHOUT an anchor, and where it came from.
+ *
+ * The provenance is per MARK rather than per book because a shelf book's group
+ * can gather rows from several archive entries — an export merged from two
+ * devices — and each carries its own `bookId`. Rolled up to the group it would
+ * name whichever row happened to be first.
+ */
+export interface UnplacedImport {
+  readonly mark: ArchivedMark
+  /** The archive row's own `bookId`. Provenance, never an anchor. */
+  readonly fromBook: string
+}
+
+/**
  * A book matched by name, and how much of it could not come across.
  *
  * NAMED, NOT COUNTED, for `UnmatchedBook`'s reason: "14 marks not imported"
  * tells the reader a number, and the title tells them whether the book it
  * happened to is one they care about.
  */
-export interface UnimportableBook {
+export interface UnplacedBook {
   readonly title: string
   readonly author: string
-  /** Marks refused because their anchors belong to another build. */
+  /** Marks stored with no anchor, because theirs belong to another build. */
   readonly marks: number
 }
 
@@ -559,9 +599,10 @@ export function planImport(
 
   const additions: BookImport[] = []
   const unmatched: UnmatchedBook[] = []
-  const unimportable: UnimportableBook[] = []
+  const unplacedBooks: UnplacedBook[] = []
   let marksAdded = 0
   let cardsAdded = 0
+  let unplacedAdded = 0
   let duplicates = 0
   let folded = 0
 
@@ -583,7 +624,7 @@ export function planImport(
   interface Partitioned {
     readonly book: IndexedBook
     readonly exact: { marks: ArchivedMark[]; cards: ArchivedCard[] }
-    readonly name: { marks: ArchivedMark[]; cards: ArchivedCard[] }
+    readonly name: { marks: UnplacedImport[]; cards: ArchivedCard[] }
   }
   const grouped = new Map<string, Partitioned>()
   for (const row of archive.books) {
@@ -623,7 +664,12 @@ export function planImport(
      * call stack size exceeded` before the plan is built. Measured on this
      * runtime at exactly that count. The same trap `base64Of` names in
      * `services/content.ts`, on a bound this file sets itself. */
-    for (const one of row.marks) side.marks.push(one)
+    /* THE ROW'S OWN `bookId` TRAVELS WITH EACH NAME-MATCHED MARK — see
+     * `UnplacedImport`. A group can gather rows from several archive entries,
+     * so rolled up to the group the provenance would name whichever came
+     * first. */
+    if (exact) for (const one of row.marks) into.exact.marks.push(one)
+    else for (const one of row.marks) into.name.marks.push({ mark: one, fromBook: row.bookId })
     for (const one of row.cards) side.cards.push(one)
     grouped.set(match.bookId, into)
   }
@@ -634,6 +680,19 @@ export function planImport(
      * vouches for one. */
     const row = {
       marks: group.exact.marks,
+      /* ⚠️ **THE NAME-MATCHED MARKS COME ACROSS AGAIN (WI-21.7), UNPLACED.**
+       * Stage 1 refused them outright because there was no state for a mark
+       * with no anchor here — `isMark` rejected an empty `cfi`, correctly, and
+       * the plan called the refusal "the one user-visible regression". There is
+       * a state now: `Mark.unplaced` says the anchorlessness is deliberate and
+       * where the mark came from, and the store keeps such marks in a class the
+       * painter is never handed.
+       *
+       * SO THE FOREIGN CFI IS STILL NEVER STORED. That is the whole of Stage 1
+       * and it is untouched — what changes is that the reader keeps their
+       * quote, their note, their colour and their chapter instead of losing all
+       * four, and a resolver can find the passage later. */
+      unplaced: group.name.marks,
       /* ID-MATCHED CARDS FIRST, THEN NAME-MATCHED WITH THE ANCHOR DROPPED.
        * Both halves matter and they are different guarantees: the order stops
        * a name-matched card winning body dedup and taking an exact card's
@@ -642,11 +701,12 @@ export function planImport(
        * imports and simply cannot be navigated to. */
       cards: [...group.exact.cards, ...group.name.cards.map(unanchored)],
     }
+
     if (group.name.marks.length > 0) {
       /* THE SHELF BOOK'S OWN TITLE, not the archive row's. The reader is being
        * told which book on THEIR shelf did not get its marks, and the archive
        * row's title is the other build's spelling of it. */
-      unimportable.push({
+      unplacedBooks.push({
         title: group.book.title,
         author: group.book.author,
         marks: group.name.marks.length,
@@ -698,18 +758,24 @@ export function planImport(
       else cardBodies.add(incoming.body)
       return !already
     })
-    if (kept.length === 0 && freshCards.length === 0) continue
-    additions.push({ bookId, marks: kept, cards: freshCards })
+    /* ⚠️ THE UNPLACED ONES COUNT AS SOMETHING TO ADD. Left out of this test, a
+     * book whose archive rows are ALL name-matched — which is the whole
+     * cross-build case — would `continue` here and the marks would be dropped
+     * on the floor after all the work of deciding to keep them. */
+    if (kept.length === 0 && freshCards.length === 0 && row.unplaced.length === 0) continue
+    additions.push({ bookId, marks: kept, unplaced: row.unplaced, cards: freshCards })
     marksAdded += kept.length
+    unplacedAdded += row.unplaced.length
     cardsAdded += freshCards.length
   }
 
   return {
     additions,
     unmatched,
-    unimportable,
+    unplacedBooks,
     booksTouched: additions.length,
     marksAdded,
+    unplacedAdded,
     cardsAdded,
     duplicates,
     folded,

@@ -30,6 +30,7 @@ export { createLibrary } from './core/libraryStore'
 export type { Library, LibraryOptions, RekeyOutcome, RemoteRow } from './core/libraryStore'
 export { createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
+export type { UnplacedMark } from './core/marks'
 export { createCard, createCards } from './core/cardStore'
 export type { CardSnapshot, CardStorage, Cards, CardsOptions } from './core/cardStore'
 
@@ -327,6 +328,9 @@ export type { ContentExtension, KnownExtension, SyncLevel, VaultFs } from './cor
  * to be one of three strings is how an unknown value reaches a switch with no
  * case for it — see `app/web/wireRow.ts`. */
 export {
+  isPlaced,
+  placedIn,
+  unplacedIn,
   MARK_KINDS,
   MARK_STYLES,
   MARK_TINTS,

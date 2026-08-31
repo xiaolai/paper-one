@@ -53,7 +53,7 @@ function marksView(over: Partial<MarksView> = {}): MarksView {
     all: [],
     current: [],
     bookmarks: [],
-    allBookmarks: [],
+    allBookmarks: [], allUnplaced: [],
     persistent: true,
     unreadable: false,
     scanFailed: false,
@@ -74,6 +74,7 @@ const cardsView = (): CardsView =>
 function draw(over: {
   all?: readonly Annotation[]
   allBookmarks?: readonly Bookmark[]
+  allUnplaced?: readonly Annotation[]
   onShelf?: (bookId: string) => boolean
   onGoTo?: (target: JumpTarget) => void
   unreadable?: boolean
@@ -85,6 +86,7 @@ function draw(over: {
       marks={marksView({
         all: over.all ?? [],
         allBookmarks: over.allBookmarks ?? [],
+        allUnplaced: over.allUnplaced ?? [],
         unreadable: over.unreadable ?? false,
         scanFailed: over.scanFailed ?? false,
       })}
@@ -161,7 +163,7 @@ describe('a place row', () => {
     const away = BOOKMARK({ id: 'b-away', bookId: 'other-book', chapter: 'Telemachus' })
     const gone = BOOKMARK({ id: 'b-gone', bookId: 'deleted-book', chapter: 'Nowhere' })
     const { onGoTo } = draw({
-      allBookmarks: [here, away, gone],
+      allBookmarks: [here, away, gone], allUnplaced: [],
       onShelf: (id) => id !== 'deleted-book',
     })
     /* ANCHORED, because the delete button's `aria-label` is "Remove this

@@ -1,4 +1,5 @@
 import {
+  isPlaced,
   MARK_KINDS,
   MARK_STYLES,
   MARK_TINTS,
@@ -51,6 +52,9 @@ import type { ShelfChannel } from './channel'
 export interface RemoteMarks {
   readonly all: readonly Annotation[]
   readonly allBookmarks: readonly Bookmark[]
+  /** Annotations with no anchor in this library — see `MarkSnapshot.unplaced`.
+   *  Never in `all`, so `Reader` never maps one to a drawable anchor. */
+  readonly allUnplaced: readonly Annotation[]
   readonly persistent: boolean
   /* `MarkRef`, not `Mark` — a write needs only which mark and which book, which
    * is also all this client can be sure it has. */
@@ -126,6 +130,26 @@ export function asMark(row: MarkRow): Mark {
  * `prefix`/`suffix` default to `''` because they genuinely may be absent — a
  * mark made before phase 19 has none.
  */
+/** One shared empty list, so a client with none does not re-render on identity. */
+const NONE: readonly Annotation[] = []
+
+/**
+ * The `unplaced` record a wire row carries, or undefined.
+ *
+ * The kernel's `readUnplaced` in one sentence, restated here because this file
+ * parses SOMEBODY ELSE'S JSON and may not assume the shelf sent a well-formed
+ * one — the same reason every other field on this row is read rather than cast.
+ * A row claiming `unplaced: true`, or a reason this build has never heard of,
+ * is not an unplaced mark and is refused with its missing anchor.
+ */
+function readUnplaced(value: unknown): Mark['unplaced'] {
+  if (typeof value !== 'object' || value === null) return undefined
+  const row = value as Record<string, unknown>
+  if (row['reason'] !== 'foreign-build') return undefined
+  const fromBook = id(row['fromBook'])
+  return fromBook === null ? undefined : { reason: 'foreign-build', fromBook }
+}
+
 export function parseMarks(answer: unknown): readonly Mark[] {
   if (!Array.isArray(answer)) return []
   const out: Mark[] = []
@@ -147,6 +171,38 @@ export function parseMarks(answer: unknown): readonly Mark[] {
     const kind = oneOf(MARK_KINDS, row['kind'])
     const tint = oneOf(MARK_TINTS, row['tint'])
     const style = oneOf(MARK_STYLES, row['style'])
+    /* ⚠️ **AN UNPLACED MARK HAS NO `cfi` AND NO SECTION, AND THIS PARSER DROPPED
+     * IT** (WI-21.7). The rule above — "a mark with no `cfi` cannot be found in
+     * a book" — is right about a mark that is MISSING one and wrong about a mark
+     * that declares it has none. Left as it was, a reader importing an archive
+     * on the desktop would open the browser client and find those marks simply
+     * gone, with nothing anywhere reporting a drop.
+     *
+     * Validated, not trusted: only a row that says WHY, in a word this build
+     * knows, is allowed to arrive anchorless. Anything else still falls through
+     * to the refusal below. */
+    const unplaced = readUnplaced(row['unplaced'])
+    if (unplaced !== undefined) {
+      if (text === null || note === null || chapter === null || createdAt === null) continue
+      if (kind === null || tint === null || style === null) continue
+      out.push({
+        id: rowId,
+        bookId,
+        cfi: '',
+        sectionIndex: 0,
+        text,
+        prefix: str(row['prefix']) ?? '',
+        suffix: str(row['suffix']) ?? '',
+        note,
+        kind,
+        tint,
+        style,
+        chapter,
+        createdAt,
+        unplaced,
+      })
+      continue
+    }
     if (
       cfi === null ||
       sectionIndex === null ||
@@ -204,8 +260,15 @@ export function createRemoteMarks(channel: ShelfChannel): MarksStore {
    * time it looked and re-render forever. */
   let annotations: readonly Annotation[] = []
   let bookmarks: readonly Bookmark[] = []
+  let unplaced: readonly Annotation[] = NONE
   const resplit = (): void => {
-    annotations = marks.filter(isAnnotation)
+    /* THREE CLASSES, as the kernel store splits them — `MarkSnapshot.unplaced`
+     * says why. A mark with no anchor here is an annotation the reader can read
+     * and cannot be sent to, so it belongs in the panel's list and out of
+     * `all`, which is what the reader's own view paints from. */
+    const live = marks.filter(isAnnotation)
+    annotations = live.filter(isPlaced)
+    unplaced = live.length === annotations.length ? NONE : live.filter((one) => !isPlaced(one))
     bookmarks = marks.filter(isBookmark)
     changed()
   }
@@ -262,6 +325,9 @@ export function createRemoteMarks(channel: ShelfChannel): MarksStore {
     },
     get allBookmarks() {
       return bookmarks
+    },
+    get allUnplaced() {
+      return unplaced
     },
     get persistent() {
       return persistent

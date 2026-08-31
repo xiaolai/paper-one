@@ -29,6 +29,11 @@ export interface MarksView {
   readonly bookmarks: readonly Bookmark[]
   /** Every book's bookmarks, beside `all`. Empty until `loadAll` has run. */
   readonly allBookmarks: readonly Bookmark[]
+  /** The open book's annotations with NO ANCHOR HERE — see
+   *  `MarkSnapshot.unplaced`. Never in `current`, so nothing paints one. */
+  readonly unplaced: readonly Annotation[]
+  /** Every book's unplaced annotations, beside `all`. Empty until `loadAll`. */
+  readonly allUnplaced: readonly Annotation[]
   /** False once a write has failed — see `MarkSnapshot.persistent`. */
   readonly persistent: boolean
   /** Whether this book's marks have been READ — see `MarkSnapshot.ready`.
@@ -171,6 +176,7 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
    * opening page of the new one. */
   const current = snapshot.bookId === bookId ? snapshot.current : EMPTY
   const bookmarks = snapshot.bookId === bookId ? snapshot.bookmarks : NO_BOOKMARKS
+  const unplaced = snapshot.bookId === bookId ? snapshot.unplaced : EMPTY
 
   const verbs = useMemo(
     () => ({
@@ -215,7 +221,11 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
         /* BOTH CLASSES. They share a file and a store and are split at the
            snapshot; anything that wants the whole of what a reader left in
            their books has to put them back together. */
-        return [...fresh.all, ...fresh.allBookmarks]
+        /* ⚠️ ALL THREE CLASSES. This said two, and a third arriving without
+           this line is the empty-file trap wearing a new hat: an export would
+           write a backup that silently omitted every unplaced mark, and the
+           file is not read again until the day the reader needs it. */
+        return [...fresh.all, ...fresh.allUnplaced, ...fresh.allBookmarks]
       },
     }),
     [store],
@@ -225,8 +235,10 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
     () => ({
       all: snapshot.all,
       allBookmarks: snapshot.allBookmarks,
+      allUnplaced: snapshot.allUnplaced,
       current,
       bookmarks,
+      unplaced,
       persistent: snapshot.persistent,
       ready: snapshot.ready && snapshot.bookId === bookId,
       unreadable: snapshot.unreadable && snapshot.bookId === bookId,
@@ -238,8 +250,10 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
       snapshot.all,
       snapshot.scanFailed,
       snapshot.allBookmarks,
+      snapshot.allUnplaced,
       current,
       bookmarks,
+      unplaced,
       snapshot.persistent,
       snapshot.ready,
       snapshot.unreadable,
