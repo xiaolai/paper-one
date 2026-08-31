@@ -38,6 +38,26 @@ export const BOOKS_DIR = 'books'
 export const TRASH_DIR = 'trash'
 
 /**
+ * Which fields a parse writes into a record — bumped when that set GROWS.
+ *
+ * ⚠️ **THE BACKFILL MARKER, AND WITHOUT IT A NEW METADATA FIELD NEVER REACHES
+ * AN EXISTING LIBRARY.** `needsEnrichment` is *"`parsedAt` absent is the whole
+ * condition"*, so every book already parsed is skipped for ever. Adding
+ * `identifier` to `recordFromMeta` therefore changed nothing at all for any
+ * shelf that already existed — the pass had no reason to come back.
+ *
+ * A NUMBER, NOT A FLAG. The next field added to a parse has the same problem,
+ * and a boolean can only be spent once. Bump this in the same change that adds
+ * the field, and every record below the new number is re-parsed exactly once.
+ *
+ * | Schema | What a parse writes |
+ * |---|---|
+ * | 0 | Everything up to WI-21.3 — absent on a record written before this. |
+ * | 1 | Adds `identifier` (`dc:identifier`), for WI-21.3. |
+ */
+export const META_SCHEMA = 1
+
+/**
  * One tag's register in a record's tag clock: whether the tag is ON the book,
  * when that was last decided, and how the reader spells it. Keyed by
  * `tagKey(spelling)`, so two spellings of one tag are one register — which is
@@ -139,6 +159,23 @@ export interface BookRecord {
   readonly bookId?: string
   readonly title: string
   readonly author: string
+  /**
+   * The WORK's own identifier, as the book declares it — `dc:identifier` in an
+   * EPUB's OPF, usually a UUID or an ISBN (WI-21.3). Absent when the book
+   * declares none, never empty.
+   *
+   * DISTINCT FROM `bookId`, AND BOTH ARE NEEDED. `bookId` is derived from the
+   * bytes and says *this exact file*; this says *this book, whoever's copy*.
+   * Anything that has to recognise a work across two downloads of it has to
+   * key on the second, because two readers almost never hold byte-identical
+   * files — and foliate has been parsing this all along while `recordFromMeta`
+   * dropped it on the floor.
+   *
+   * `workKey.ts` is what turns it into something comparable. Read that before
+   * comparing two of these directly: one build declares an ISBN-10 and another
+   * the ISBN-13 for the same work, and as strings they do not match.
+   */
+  readonly identifier?: string
   readonly sortAs?: string
   readonly series?: string
   readonly seriesIndex?: number | null
@@ -173,6 +210,19 @@ export interface BookRecord {
    * trap.
    */
   readonly parsedAt?: number
+  /**
+   * Which metadata schema the last parse wrote — see `META_SCHEMA`.
+   *
+   * ⚠️ **`parsedAt` CANNOT ANSWER THIS, AND THAT IS WHY THIS EXISTS.** It
+   * records that the parser RAN, and `needsEnrichment` reads its absence as the
+   * whole condition — so a library parsed before `identifier` was carried is
+   * indistinguishable from a library whose books declare none, and no existing
+   * shelf would ever acquire one. A number rather than a flag, because the next
+   * field added to a parse has exactly this problem again.
+   *
+   * Absent means "parsed before this existed", which is schema 0.
+   */
+  readonly metaSchema?: number
   /**
    * Where this book was imported from, for provenance only.
    *
@@ -461,6 +511,19 @@ export function parseRecord(raw: string | null): BookRecord | null {
     ...(typeof r['bookId'] === 'string' && r['bookId'] !== '' && r['bookId'].length <= MAX_FIELD ? { bookId: r['bookId'] } : {}),
     title,
     author: text(r['author']) ?? '',
+    /* ⚠️ **NEVER CUT, for `bookId`'s reason one field down**: an identity
+     * sliced to five hundred characters is a DIFFERENT identity, and two long
+     * identifiers sharing a prefix would compare equal after a write/read
+     * cycle — `recordFromMeta` writes the whole value, so the truncation would
+     * appear only on reload. Over the bound the field is dropped, which reads
+     * as "this book declares none" and is recoverable by a re-parse.
+     * Trimmed-empty is absent too: the field's contract is absent-never-empty,
+     * and a record of three spaces would otherwise satisfy `identifier ?`. */
+    ...(typeof r['identifier'] === 'string' &&
+    r['identifier'].trim() !== '' &&
+    r['identifier'].length <= MAX_FIELD
+      ? { identifier: r['identifier'] }
+      : {}),
     ...(text(r['sortAs']) ? { sortAs: text(r['sortAs'])! } : {}),
     ...(text(r['series']) ? { series: text(r['series'])! } : {}),
     ...(num(r['seriesIndex']) === undefined ? {} : { seriesIndex: num(r['seriesIndex'])! }),
@@ -496,6 +559,13 @@ export function parseRecord(raw: string | null): BookRecord | null {
      * that never happened. Dropped, the record reads "never parsed", which
      * is the honest floor. */
     ...(num(r['parsedAt']) === undefined || num(r['parsedAt'])! < 0 ? {} : { parsedAt: num(r['parsedAt'])! }),
+    /* Bounded the same way and for a sharper reason: a hand-edited schema
+       ABOVE `META_SCHEMA` would tell the pass this record is newer than the
+       code, and the book would never be re-parsed again by any future
+       backfill. Clamped to what this build can actually have written. */
+    ...(num(r['metaSchema']) === undefined || num(r['metaSchema'])! < 0
+      ? {}
+      : { metaSchema: Math.min(META_SCHEMA, Math.floor(num(r['metaSchema'])!)) }),
     /* NOT `text`, which SLICES — see `MAX_ORIGIN`. A shortened path or URL is
      * not a rougher way back, it is a broken one, and it survived the next merge
      * to be written over the good value. */
@@ -773,6 +843,7 @@ export function recordFromMeta(
   meta: {
     readonly title: string
     readonly author: string
+    readonly identifier?: string
     readonly sortAs?: string
     readonly series?: string
     readonly seriesIndex?: number | null
@@ -786,6 +857,21 @@ export function recordFromMeta(
   return {
     title: titleAsParsed(meta.title, source),
     author: meta.author,
+    /* THE SCHEMA THE PARSE WROTE, stamped by every route that parses. See
+     * `META_SCHEMA`: `parsedAt` alone cannot say WHICH fields a parse knew
+     * about, so a library parsed before `identifier` existed is
+     * indistinguishable from one whose books declare none — and `enrich`
+     * skips every record that has a `parsedAt`, so without this no existing
+     * library would ever acquire an identifier. */
+    metaSchema: META_SCHEMA,
+    /* Bounded HERE TOO, and to the same number. `parseRecord` drops an
+     * over-long identifier rather than truncating it, so a parse that wrote one
+     * would produce a record whose identifier vanished on the next load —
+     * present in memory, absent on disk, with nothing reporting the
+     * difference. */
+    ...(meta.identifier && meta.identifier.trim() !== '' && meta.identifier.length <= MAX_FIELD
+      ? { identifier: meta.identifier }
+      : {}),
     ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
     ...(meta.series ? { series: meta.series } : {}),
     ...(meta.seriesIndex === null || meta.seriesIndex === undefined

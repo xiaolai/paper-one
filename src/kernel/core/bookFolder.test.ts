@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { asHlc, hlcOf } from './hlc'
 import { storedBookName, type VaultFs } from './bookVault'
+import { workKey } from './workKey'
 import {
   BOOKS_DIR,
+  META_SCHEMA,
   atomicWrite,
   contentPathIn,
   coverPathIn,
@@ -353,6 +355,10 @@ describe('mergeParsed', () => {
     format: 'preserve',
     title: 'replace',
     author: 'replace',
+    /* The book's own name for itself as a WORK — `dc:identifier`. On the
+       replace side for the same reason `title` is: a corrected OPF must be
+       able to take effect, and a reader has no way to edit this by hand. */
+    identifier: 'replace',
     sortAs: 'replace',
     series: 'replace',
     seriesIndex: 'replace',
@@ -361,6 +367,11 @@ describe('mergeParsed', () => {
     published: 'replace',
     languages: 'replace',
     parsedAt: 'provenance',
+    /* About the PARSE — which fields it knew how to write — not about the
+       book. Same side as `parsedAt`, and for the same reason: it is the
+       parse's own record of itself, and `enrich` reads it to decide whether
+       to come back. */
+    metaSchema: 'provenance',
   }
 
   /** A record with every single field set, so nothing is asserted vacuously. */
@@ -383,6 +394,8 @@ describe('mergeParsed', () => {
     format: 'pdf',
     title: 'moby-dick-1851',
     author: '',
+    identifier: 'urn:isbn:9780142437247',
+    metaSchema: 1,
     sortAs: 'Moby-Dick',
     series: 'Everyman',
     seriesIndex: 3,
@@ -866,5 +879,94 @@ describe('atomicWrite', () => {
     await atomicWrite(fs, 'index.json', new TextEncoder().encode('[]'))
     expect(fs.files.has('index.json')).toBe(true)
     expect([...fs.dirs]).toEqual([])
+  })
+})
+
+/**
+ * `dc:identifier`, persisted (WI-21.3).
+ *
+ * foliate has been parsing it all along and `recordFromMeta` dropped it — so
+ * the one field that says *this book, whoever's copy* never reached `book.json`
+ * at all. `bookId` answers a different question: it is derived from the bytes
+ * and says *this exact file*, which is precisely why it cannot recognise
+ * another download of the same work.
+ */
+describe('the work identifier', () => {
+  it('round-trips through book.json', () => {
+    /* The whole acceptance criterion for the storage half: what a parse
+       produced is what the next launch reads back. */
+    const parsed = recordFromMeta({
+      title: 'Moby-Dick',
+      author: 'Herman Melville',
+      identifier: 'urn:isbn:9780142437247',
+    })
+    expect(parsed.identifier).toBe('urn:isbn:9780142437247')
+    const back = parseRecord(JSON.stringify(parsed))
+    expect(back?.identifier).toBe('urn:isbn:9780142437247')
+    expect(workKey(back?.identifier)?.key).toBe('isbn:9780142437247')
+  })
+
+  it('is ABSENT, not empty, when the book declares none', () => {
+    /* `mergeParsed` reads a parse as the book's own account of itself, so an
+       EMPTY string here is the book SAYING it has no identifier — which would
+       overwrite one an earlier parse had found. Every optional field in
+       `recordFromMeta` is omitted for this reason; this one is no different. */
+    const parsed = recordFromMeta({ title: 'Moby-Dick', author: 'Herman Melville' })
+    expect(parsed).not.toHaveProperty('identifier')
+    expect(recordFromMeta({ title: 'x', author: '', identifier: '' })).not.toHaveProperty('identifier')
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', identifier: '' }))).not.toHaveProperty('identifier')
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', identifier: 42 }))).not.toHaveProperty('identifier')
+  })
+
+  it('drops an over-long identifier rather than truncating it', () => {
+    /* ⚠️ **AN IDENTITY SLICED TO 500 CHARACTERS IS A DIFFERENT IDENTITY** — the
+       rule `bookId` states one field up, arriving on the field it matters most
+       for. The generic `text()` reader truncates; `recordFromMeta` wrote the
+       whole value; so two long identifiers sharing a prefix compared UNEQUAL in
+       memory and EQUAL after a reload, with nothing reporting the difference.
+       Dropped, the book reads as declaring none, which a re-parse fixes. */
+    const long = `urn:x:${'a'.repeat(600)}`
+    expect(recordFromMeta({ title: 'M', author: 'H', identifier: long })).not.toHaveProperty('identifier')
+    expect(parseRecord(JSON.stringify({ title: 'M', author: '', identifier: long }))).not.toHaveProperty('identifier')
+    /* Two that differ only past the old cut are still two. */
+    const a = `urn:x:${'a'.repeat(400)}1`
+    const b = `urn:x:${'a'.repeat(400)}2`
+    expect(parseRecord(JSON.stringify({ title: 'M', author: '', identifier: a }))?.identifier).toBe(a)
+    expect(parseRecord(JSON.stringify({ title: 'M', author: '', identifier: b }))?.identifier).toBe(b)
+  })
+
+  it('treats a whitespace-only identifier as absent, per its own contract', () => {
+    /* The field's contract is absent-never-empty. Three spaces satisfied
+       `identifier ?` and would have travelled as a declared value. */
+    expect(parseRecord(JSON.stringify({ title: 'M', author: '', identifier: '   ' }))).not.toHaveProperty('identifier')
+    expect(recordFromMeta({ title: 'M', author: 'H', identifier: '  ' })).not.toHaveProperty('identifier')
+  })
+
+  it('updates with the metadata group when the book is re-parsed', () => {
+    /* A corrected OPF must be able to take effect — the same rule `title`
+       follows, and the reason `identifier` is on the replace side of the
+       partition above. */
+    const had = { ...recordFromMeta({ title: 'M', author: 'H', identifier: 'urn:uuid:old' }), parsedAt: 1 }
+    const again = recordFromMeta({ title: 'M', author: 'H', identifier: 'urn:isbn:9780142437247' })
+    expect(mergeParsed(had, again).identifier).toBe('urn:isbn:9780142437247')
+  })
+
+  it('stamps the metadata schema, so an existing library is backfilled once', () => {
+    /* ⚠️ WITHOUT THIS THE FIELD SHIPS AND REACHES NOBODY. `needsEnrichment`
+       skips every record that has a `parsedAt`, so a library parsed before
+       this change would never be revisited and every book would read as
+       declaring no identifier — with nothing failing anywhere. */
+    const parsed = recordFromMeta({ title: 'M', author: 'H' })
+    expect(parsed.metaSchema).toBe(META_SCHEMA)
+    expect(parseRecord(JSON.stringify(parsed))?.metaSchema).toBe(META_SCHEMA)
+  })
+
+  it('clamps a hand-edited schema from the future rather than trusting it', () => {
+    /* A stored schema ABOVE this build's would tell the pass the record is
+       newer than the code, and the book would be opted out of every later
+       backfill — permanently, and silently. */
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: 99 }))?.metaSchema).toBe(META_SCHEMA)
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: -1 }))).not.toHaveProperty('metaSchema')
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: 'soon' }))).not.toHaveProperty('metaSchema')
   })
 })

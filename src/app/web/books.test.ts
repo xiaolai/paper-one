@@ -103,6 +103,7 @@ describe('parseRows', () => {
       bookId: 'a',
       title: 'A',
       author: 'M',
+      identifier: 'urn:isbn:9780142437247',
       series: 'S',
       seriesIndex: 2,
       publisher: 'P',

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { IndexedBook } from './bookIndex'
+import { META_SCHEMA } from './bookFolder'
 import { enrichOne, needsEnrichment, nextStep, pendingFor, type EnrichDeps } from './enrich'
 
 /**
@@ -36,10 +37,36 @@ describe('needsEnrichment', () => {
     expect(needsEnrichment(shelved())).toBe(true)
   })
 
-  /* The whole condition, and the reason the pass converges: `parsedAt` records
-   * that the parser RAN, so a book it could not read is not retried forever. */
-  it('leaves a book the parser has already been to', () => {
-    expect(needsEnrichment(shelved({ parsedAt: 1 }))).toBe(false)
+  /* Why the pass converges: `parsedAt` records that the parser RAN, so a book
+   * it could not read is not retried forever. Since WI-21.3 the record must
+   * also carry the CURRENT schema — a parse from before a field existed has
+   * been to the book and does not know about the field. */
+  it('leaves a book the parser has already been to at this schema', () => {
+    expect(needsEnrichment(shelved({ parsedAt: 1, metaSchema: META_SCHEMA }))).toBe(false)
+  })
+
+  /* ⚠️ **THE BACKFILL** (WI-21.3). `parsedAt` alone was the whole condition,
+   * so a field added to `recordFromMeta` reached no book that had already been
+   * parsed — `identifier` would have shipped and never appeared on a single
+   * existing shelf, with nothing failing anywhere. An older record reads as
+   * schema 0 and is selected exactly once. */
+  it('goes back to a book parsed before the current metadata schema', () => {
+    expect(needsEnrichment(shelved({ parsedAt: 1 }))).toBe(true)
+    expect(needsEnrichment(shelved({ parsedAt: 1, metaSchema: 0 }))).toBe(true)
+  })
+
+  /* And it must still CONVERGE, which is the property `parsedAt` was chosen
+   * for: one pass at the new schema and the book is never selected again. */
+  it('does not come back a second time once the schema is current', () => {
+    const backfilled = shelved({ parsedAt: 1, metaSchema: META_SCHEMA })
+    expect(needsEnrichment(backfilled)).toBe(false)
+    expect(pendingFor([backfilled])).toEqual([])
+  })
+
+  /* A missing file is still nothing to parse, whatever the schema says —
+   * checked first, or the backfill would re-select every contentless row. */
+  it('still skips a contentless row that is below the schema', () => {
+    expect(needsEnrichment(shelved({ parsedAt: 1, metaSchema: 0, hasContent: false }))).toBe(false)
   })
 
   it('skips a row whose bytes are missing — there is nothing to parse', () => {
@@ -61,7 +88,7 @@ describe('pendingFor', () => {
   it('takes only the books that still need it', () => {
     const books = [
       shelved({ bookId: 'a' }),
-      shelved({ bookId: 'b', parsedAt: 5 }),
+      shelved({ bookId: 'b', parsedAt: 5, metaSchema: META_SCHEMA }),
       shelved({ bookId: 'c', hasContent: false }),
       shelved({ bookId: 'd' }),
     ]
@@ -313,7 +340,7 @@ describe('nextStep', () => {
   /* Complete is a DIFFERENT idle from standing aside, and the distinction is
    * the whole answer when somebody asks why their covers stopped appearing. */
   it('reports completion when every book has been parsed', () => {
-    const done = [shelved({ bookId: 'a', parsedAt: 1 })]
+    const done = [shelved({ bookId: 'a', parsedAt: 1, metaSchema: META_SCHEMA })]
     expect(nextStep({ books: done, hasFilesystem: true, reading: false })).toEqual({
       kind: 'idle',
       why: 'complete',

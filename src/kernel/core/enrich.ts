@@ -1,6 +1,6 @@
 import type { IndexedBook } from './bookIndex'
 import type { BookRecord } from './bookFolder'
-import { recordFromMeta } from './bookFolder'
+import { META_SCHEMA, recordFromMeta } from './bookFolder'
 
 /**
  * Give a book that was never opened its own title, author and jacket.
@@ -82,7 +82,21 @@ export interface EnrichDeps {
  * would make the pass skip every older book on the shelf.
  */
 export function needsEnrichment(book: IndexedBook): boolean {
-  return book.parsedAt === undefined && book.hasContent !== false
+  /* ⚠️ **`parsedAt` IS NO LONGER THE WHOLE CONDITION** (WI-21.3), and the
+   * sentence above records why it was and what that cost: a field added to
+   * `recordFromMeta` reaches no book that has already been parsed, so
+   * `identifier` would have shipped and never appeared on a single existing
+   * shelf. Nothing would have failed; the field would simply have been absent
+   * everywhere, which looks exactly like a library of books that declare none.
+   *
+   * `META_SCHEMA` is the backfill marker. A record below it is re-parsed
+   * ONCE — the pass then writes the current schema and stops coming back —
+   * so this stays convergent, which is the property `parsedAt` was chosen for
+   * and must not lose. `parseRecord` clamps a stored schema to `META_SCHEMA`,
+   * so a hand-edited future number cannot opt a book out of every later
+   * backfill. */
+  if (book.hasContent === false) return false
+  return book.parsedAt === undefined || (book.metaSchema ?? 0) < META_SCHEMA
 }
 
 /**
@@ -247,7 +261,12 @@ export async function enrichOne(deps: EnrichDeps, book: IndexedBook): Promise<En
        * So a failure claims nothing new. It carries the record forward
        * unchanged and moves only `parsedAt`, which is the one field a failed
        * attempt has actually learned something about. */
-      record: { ...recordOf(book), parsedAt },
+      /* AND THE SCHEMA MOVES WITH IT. A failure that left `metaSchema` where
+       * it was would be re-selected by the backfill on the next launch, and on
+       * every launch after that — the exact non-convergence `parsedAt` is set
+       * on failure to prevent, arriving through the new marker. The attempt is
+       * what is being recorded, not the success. */
+      record: { ...recordOf(book), parsedAt, metaSchema: META_SCHEMA },
       cover: null,
     }
   }

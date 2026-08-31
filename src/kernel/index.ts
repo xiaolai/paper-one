@@ -248,7 +248,15 @@ export { CONTENT_EXTENSIONS, isContentExtension, isKnownExtension } from './core
  * months later by a bundle that will not build. */
 export { sizePortOver } from './core/bookSizes'
 export type { SizeOps } from './core/bookSizes'
+export { META_SCHEMA } from './core/bookFolder'
 export type { BookRecord, TagClock, TagClockEntry } from './core/bookFolder'
+/* The work key (WI-21.3): what a book's declared `identifier` says about the
+ * WORK, as one comparable string. Exported here rather than kept private
+ * because "two devices derive the same key" is a claim about two PROCESSES,
+ * and a host that cannot call it cannot check it. Pure string work — nothing
+ * platform-bound joins the browser-safe subtree by this. */
+export { sameWork, workKey } from './core/workKey'
+export type { WorkKey, WorkKeyKind } from './core/workKey'
 export { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex } from './core/bookIndex'
 export type { IndexFs, IndexedBook, ShelfSource } from './core/bookIndex'
 /* The FLAT STORE's seam and its opener. Public since phase 11: a host outside

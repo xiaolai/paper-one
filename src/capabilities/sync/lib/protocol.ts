@@ -45,7 +45,23 @@ export const SYNC_JOURNAL_FORMAT = 1
  * field, would resurrect the book with a fresh clock (WI-20.1). The semantics
  * changed under the same wire shape, so the versions must not interoperate;
  * `versionsOverlap([2, 2], [3, 3])` is false and the hello is refused. */
-export const SYNC_VERSION: readonly [number, number] = [3, 3]
+/* [4, 4] since 2026-08-31 (WI-21.3): a book record now carries `identifier`
+ * and `metaSchema`, both in the metadata group. The wire shape is unchanged and
+ * a v3 peer would parse the row quite happily — which is exactly the failure
+ * this constant exists for, and it is the bookmark case again, field for field.
+ *
+ * `parseRecord` is built from KNOWN FIELDS, so a v3 peer STRIPS both, ACKs the
+ * stripped row, and `applyAck` clears the sender's outbox. The metadata group
+ * merges on `parsedAt`, and an ACK carries the sender's own stamp back — so the
+ * equal-stamp tie falls to the canonical serialisation and the stripped side
+ * can win, ERASING THE SENDER'S OWN IDENTIFIER. The sender then records the
+ * book as replicated and never sends it again.
+ *
+ * `versionsOverlap([3, 3], [4, 4])` is false and the hello is refused with a
+ * message naming both versions. Refusing to sync is a bad outcome; syncing and
+ * quietly losing a field is a worse one, and it is the one the reader cannot
+ * detect. */
+export const SYNC_VERSION: readonly [number, number] = [4, 4]
 
 /** The service names, and the grant each is gated on. */
 export const SYNC_SERVICES = {

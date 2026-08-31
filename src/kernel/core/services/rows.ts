@@ -64,6 +64,14 @@ export interface BookRow {
   readonly bookId: string
   readonly title: string
   readonly author: string
+  /**
+   * The WORK's own identifier — `dc:identifier`, usually a UUID or an ISBN.
+   *
+   * Published because it is the only field on a row that says *this book,
+   * whoever's copy*: `bookId` is derived from the bytes and answers a different
+   * question. A caller reconciling two shelves has nothing else to key on.
+   */
+  readonly identifier: string | null
   readonly series: string | null
   readonly seriesIndex: number | null
   readonly publisher: string | null
@@ -97,6 +105,7 @@ export function bookRow(book: IndexedBook): BookRow {
     bookId: book.bookId,
     title: book.title,
     author: book.author,
+    identifier: book.identifier ?? null,
     series: book.series ?? null,
     seriesIndex: book.seriesIndex ?? null,
     publisher: book.publisher ?? null,

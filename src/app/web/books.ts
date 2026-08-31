@@ -123,6 +123,11 @@ export function parseRows(answer: unknown): readonly BookRow[] {
       bookId: row['bookId'],
       title: str(row['title']) ?? '',
       author: str(row['author']) ?? '',
+      /* WI-21.3. Carried rather than dropped for the reason the header gives:
+         the row IS the kernel's type, so adding a field to the wire stops this
+         file compiling until `parseRows` decides what to do with it — which is
+         the conversation that should happen, and did. */
+      identifier: str(row['identifier']),
       series: str(row['series']),
       seriesIndex: num(row['seriesIndex']),
       publisher: str(row['publisher']),
@@ -163,6 +168,7 @@ function same(a: readonly BookRow[], b: readonly BookRow[]): boolean {
       row.bookId === other.bookId &&
       row.title === other.title &&
       row.author === other.author &&
+      row.identifier === other.identifier &&
       row.series === other.series &&
       row.seriesIndex === other.seriesIndex &&
       row.publisher === other.publisher &&
@@ -312,6 +318,12 @@ export function asIndexedBook(row: BookRow): IndexedBook {
     bookId: row.bookId,
     title: row.title,
     author: row.author,
+    /* ⚠️ CARRIED, not merely parsed and compared. `parseRows` reads it and
+       `same` observes it, so a changed identifier already re-renders the shelf
+       — and without this line the value was then DISCARDED before any consumer
+       saw it: a re-render for a field nobody could read. WI-21.3 asks this row
+       to "parse, compare and carry", and carrying is the third of the three. */
+    ...(row.identifier !== null ? { identifier: row.identifier } : {}),
     ...(row.series !== null ? { series: row.series } : {}),
     ...(row.seriesIndex !== null ? { seriesIndex: row.seriesIndex } : {}),
     ...(row.publisher !== null ? { publisher: row.publisher } : {}),

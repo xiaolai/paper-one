@@ -64,6 +64,7 @@ describe('bookRow', () => {
       'finished',
       'format',
       'hasContent',
+      'identifier',
       'languages',
       'openedAt',
       'position',

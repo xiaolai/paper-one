@@ -6,6 +6,7 @@ import {
   parseCards,
   parseRecord,
   validMarks,
+  workKey,
   type BookRecord,
   type Card,
   type Mark,
@@ -52,6 +53,15 @@ const arbRecord: fc.Arbitrary<BookRecord> = fc
     {
       title: fc.constantFrom('Moby-Dick', 'Walden', ''),
       author: fc.constantFrom('Melville', ''),
+      /* ⚠️ GENERATED, or the property tests are DECORATIVE for these two
+       * (WI-21.3). "The property test passes unchanged" was the first draft's
+       * acceptance criterion for adding `identifier` to the metadata group, and
+       * it would have passed while the merge silently dropped the field — a
+       * generator that never produces a value cannot notice it going missing.
+       * Two spellings of one work plus absent, which is the case the group's
+       * tie rule has to decide. */
+      identifier: fc.option(fc.constantFrom('urn:isbn:9780142437247', 'urn:uuid:2701'), { nil: undefined }),
+      metaSchema: fc.option(fc.constantFrom(0, 1), { nil: undefined }),
       publisher: fc.option(fc.constantFrom('Harper', 'Ticknor'), { nil: undefined }),
       subjects: fc.option(fc.subarray(['Whaling', 'Nature']), { nil: undefined }),
       tags: fc.option(fc.subarray(['Sea', 'To reread', 'Melville']), { nil: undefined }),
@@ -535,5 +545,113 @@ describe('digests', () => {
   it('canonicalJson sorts keys at every depth', () => {
     expect(canonicalJson({ b: { d: 1, c: 2 }, a: 3 })).toBe('{"a":3,"b":{"c":2,"d":1}}')
     expect(canonicalJson([{ b: 1, a: 2 }])).toBe('[{"a":2,"b":1}]')
+  })
+})
+
+/**
+ * `identifier` across two replicas (WI-21.3).
+ *
+ * The property tests above now GENERATE it, which is what makes them mean
+ * anything here: the first draft's acceptance criterion was *"the property test
+ * passes unchanged"*, and it would have passed while the merge silently dropped
+ * the field — a generator that never produces a value cannot notice one going
+ * missing.
+ *
+ * These are the specific cases, stated so a failure names the mechanism.
+ */
+describe('the work identifier, replicated', () => {
+  const parsed = (over: Partial<BookRecord>): BookRecord =>
+    parseRecord(JSON.stringify({ title: 'Moby-Dick', author: 'Melville', ...over }))!
+
+  it('survives the wire and derives the same work key on the other side', () => {
+    /* THE ACCEPTANCE CRITERION, END TO END: what a second device reads back
+       has to derive the SAME key, or nothing can be built on it. */
+    const here = parsed({ identifier: 'urn:isbn:9780142437247', parsedAt: 10, metaSchema: 1 })
+    const there = fromWire(JSON.parse(JSON.stringify(toWire(here))))
+    expect(there?.identifier).toBe('urn:isbn:9780142437247')
+    expect(workKey(there?.identifier)?.key).toBe(workKey(here.identifier)?.key)
+  })
+
+  it('travels with the parse that produced it, not on its own', () => {
+    /* The metadata GROUP is taken whole from the later parse. A replica that
+       parsed later knows more about the book; splitting `identifier` out as a
+       scalar would let a stale replica's identifier outlive its own title. */
+    const older = parsed({ title: 'moby-dick-1851', identifier: 'urn:uuid:guess', parsedAt: 1, metaSchema: 1 })
+    const newer = parsed({ title: 'Moby-Dick; or, The Whale', identifier: 'urn:isbn:9780142437247', parsedAt: 2, metaSchema: 1 })
+    for (const merged of [mergeRecord(older, newer), mergeRecord(newer, older)]) {
+      expect(merged.title).toBe('Moby-Dick; or, The Whale')
+      expect(merged.identifier).toBe('urn:isbn:9780142437247')
+    }
+  })
+
+  it('loses to a parse that found one, and beats a replica that never parsed', () => {
+    const never = parsed({})
+    const found = parsed({ identifier: 'urn:isbn:9780142437247', parsedAt: 5, metaSchema: 1 })
+    expect(mergeRecord(never, found).identifier).toBe('urn:isbn:9780142437247')
+    expect(mergeRecord(found, never).identifier).toBe('urn:isbn:9780142437247')
+  })
+
+  it('is not erased by an older build’s LATER parse', () => {
+    /* ⚠️ **THE DATA-LOSS CASE THE SCHEMA ORDERING EXISTS FOR.** Device A is
+       updated but has not run the backfill, so its record is still schema 0 —
+       and it was parsed LATER than device B's backfilled one. Under a
+       `parsedAt`-only order A wins and the identifier is gone.
+
+       It self-heals wherever the bytes are: the merged record is schema 0, so
+       `needsEnrichment` re-selects it. On a satchel with `hasContent: false`
+       there is nothing to re-parse and the loss is permanent, which is what
+       makes this worth an ordering rule rather than a comment. */
+    const stale = parsed({ title: 'moby-dick-1851', parsedAt: 300 })
+    const informed = parsed({ title: 'Moby-Dick', identifier: 'urn:isbn:9780142437247', parsedAt: 200, metaSchema: 1 })
+    for (const merged of [mergeRecord(stale, informed), mergeRecord(informed, stale)]) {
+      expect(merged.identifier).toBe('urn:isbn:9780142437247')
+      expect(merged.metaSchema).toBe(1)
+    }
+  })
+
+  it('still lets a later parse win when both know the same fields', () => {
+    /* The schema key must not swallow the ordinary rule: at equal schemas the
+       later parse is still the authority, or a corrected OPF could never take
+       effect at all. */
+    const older = parsed({ title: 'moby-dick-1851', parsedAt: 100, metaSchema: 1 })
+    const newer = parsed({ title: 'Moby-Dick; or, The Whale', parsedAt: 200, metaSchema: 1 })
+    expect(mergeRecord(older, newer).title).toBe('Moby-Dick; or, The Whale')
+    expect(mergeRecord(newer, older).title).toBe('Moby-Dick; or, The Whale')
+  })
+
+  it('does not let a schema alone promote a record that never parsed', () => {
+    /* ⚠️ ORDER OF THE KEYS. "Never parsed" is checked BEFORE the schema, or a
+       record carrying `metaSchema` with no `parsedAt` — which `recordFromMeta`
+       produces before a caller stamps it — would outrank a real parse. */
+    const neverParsed = parsed({ metaSchema: 1, identifier: 'urn:isbn:9780142437247' })
+    const realParse = parsed({ title: 'Moby-Dick; or, The Whale', parsedAt: 50 })
+    expect(mergeRecord(neverParsed, realParse).title).toBe('Moby-Dick; or, The Whale')
+    expect(mergeRecord(realParse, neverParsed).title).toBe('Moby-Dick; or, The Whale')
+  })
+
+  /**
+   * ⚠️ **WHAT AN UNBUMPED `SYNC_VERSION` WOULD HAVE DONE.**
+   *
+   * `parseRecord` is built from KNOWN FIELDS, so a peer that predates
+   * `identifier` STRIPS it — and then ACKs the row it stripped. The metadata
+   * group merges on `parsedAt`; an ACK carries the sender's own stamp back, so
+   * the stamps are EQUAL and the tie falls to the canonical serialisation,
+   * where the stripped side can win. The sender's own identifier is erased, the
+   * outbox is cleared, and the row is never sent again.
+   *
+   * This reproduces that merge directly. It is not a claim that it can happen
+   * now — `SYNC_VERSION` is [4, 4] and a v3 hello is refused — it is the
+   * evidence for why the bump was needed, kept where it can be re-run.
+   */
+  it('would have been erased by an equal-stamp echo from a peer that stripped it', () => {
+    const mine = parsed({ identifier: 'urn:isbn:9780142437247', parsedAt: 7, metaSchema: 1 })
+    /* What a v3 peer hands back: the same row, same stamp, field gone. */
+    const stripped = parsed({ parsedAt: 7 })
+    const echoed = mergeRecord(mine, stripped)
+    /* Whichever side the tie picks, the point stands: the outcome is decided
+       by a canonical-serialisation coin toss rather than by which replica knew
+       more — which is exactly what a version range exists to prevent. */
+    expect([undefined, 'urn:isbn:9780142437247']).toContain(echoed.identifier)
+    expect(mergeRecord(mine, stripped)).toEqual(mergeRecord(stripped, mine))
   })
 })

@@ -122,6 +122,15 @@ const finishedGroup = (r: BookRecord): Group | null =>
 const metadataValue = (r: BookRecord): Partial<BookRecord> => ({
   title: r.title,
   author: r.author,
+  /* ⚠️ `identifier` AND `metaSchema` ARE METADATA-GROUP FIELDS (WI-21.3), not
+   * scalars. Both are facts the PARSE produced, so they travel with the parse
+   * that produced them and are stamped by the same `parsedAt`: a replica that
+   * parsed later knows more about the book than one that parsed earlier, and
+   * splitting either out would let a stale replica's identifier survive its own
+   * title. The group's tie and stamp rules were modelled over 10 000 cases and
+   * stayed commutative, associative and idempotent with these in it. */
+  ...(r.identifier ? { identifier: r.identifier } : {}),
+  ...(r.metaSchema === undefined ? {} : { metaSchema: r.metaSchema }),
   ...(r.sortAs ? { sortAs: r.sortAs } : {}),
   ...(r.series ? { series: r.series } : {}),
   ...(r.seriesIndex === undefined ? {} : { seriesIndex: r.seriesIndex }),
@@ -133,17 +142,44 @@ const metadataValue = (r: BookRecord): Partial<BookRecord> => ({
 })
 
 /**
- * The metadata group, taken whole from the later PARSE. `parsedAt` is a
- * NUMBER and is compared as one — the old fixed-width decimal encoding broke
- * on anything `toString` spells with an exponent, and lexical order quietly
- * stopped being numeric order. Absent means never parsed and loses to any
- * parse; equal stamps fall to the canonical serialisation, `pick`'s own tie.
+ * The metadata group, taken whole from the better-informed PARSE.
+ *
+ * The order is lexicographic over four keys, and each one is there for a
+ * defect:
+ *
+ *  1. **Has it been parsed at all?** Absent `parsedAt` means never parsed and
+ *     loses to any parse. Unchanged, and checked FIRST so the schema rule below
+ *     can never promote a record that has not actually parsed.
+ *  2. **Which metadata schema did the parse write?** ⚠️ **THIS ONE IS A DATA-LOSS
+ *     FIX (WI-21.3, found by audit).** `parsedAt` alone let an OLDER build's
+ *     LATER parse win — a record still at schema 0, which knows nothing about
+ *     `identifier`, beating a schema-1 record that carries one, and ERASING it.
+ *     It self-heals wherever the bytes are present (the record drops to schema 0
+ *     and `needsEnrichment` re-selects it), but a satchel with
+ *     `hasContent: false` cannot re-parse and keeps the loss for good.
+ *
+ *     The cost, stated: during a rolling upgrade a not-yet-updated device's
+ *     corrected OPF stops winning until it updates. Both sides parsed the same
+ *     file, so what it loses is a title correction for the length of the
+ *     upgrade; what the other order loses is a field, permanently, on the
+ *     replica least able to recover it.
+ *  3. **Which parse is later.** A NUMBER, compared as one — the old fixed-width
+ *     decimal encoding broke on anything `toString` spells with an exponent, and
+ *     lexical order quietly stopped being numeric order.
+ *  4. **The canonical serialisation**, `pick`'s own tie.
+ *
+ * A lexicographic max over a total order, so it stays commutative, associative
+ * and idempotent — which `merge.test.ts`'s property tests check, and which is
+ * why they had to start GENERATING `metaSchema` before this could be trusted.
  */
 const mergeMetadata = (a: BookRecord, b: BookRecord): Partial<BookRecord> => {
   const va = metadataValue(a)
   const vb = metadataValue(b)
   if (a.parsedAt === undefined && b.parsedAt !== undefined) return vb
   if (b.parsedAt === undefined && a.parsedAt !== undefined) return va
+  const schemaA = a.metaSchema ?? 0
+  const schemaB = b.metaSchema ?? 0
+  if (schemaA !== schemaB) return schemaA > schemaB ? va : vb
   if (a.parsedAt !== undefined && b.parsedAt !== undefined && a.parsedAt !== b.parsedAt) {
     return a.parsedAt > b.parsedAt ? va : vb
   }

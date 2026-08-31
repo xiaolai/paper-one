@@ -575,7 +575,7 @@ describe('the star protocol over two real stacks (WI-C.2)', () => {
             hubSeq,
             journalFormat: 1,
             // Speaks this build's version — an earlier one is refused, see SYNC_VERSION.
-            services: { sync: [3, 3] },
+            services: { sync: [4, 4] },
           }
         }
         if (service === 'sync.pull') return page
@@ -914,8 +914,13 @@ describe('carried findings — removals, content facts, and covers', () => {
       expect((await readPresence(shelf.fs))['book:a']?.state).toBe('live')
     })
 
-    it('speaks [3, 3]: the version bump that makes `live` safe against an old shelf', () => {
-      expect(SYNC_VERSION).toEqual([3, 3])
+    /* ⚠️ **PINNED, AND THE PIN MOVES WITH EVERY VOCABULARY WIDENING.** [3, 3]
+       made `live` safe against a shelf from before it; [4, 4] since WI-21.3
+       makes `identifier` and `metaSchema` safe against a shelf that would strip
+       them, ACK the stripped row and erase the sender's own field. Same defect,
+       third version. */
+    it('speaks [4, 4]: the version bump that keeps a v3 peer from erasing `identifier`', () => {
+      expect(SYNC_VERSION).toEqual([4, 4])
     })
 
     /* (i) THE BUMP IS THE WHOLE SAFETY OF `live.at` against a peer from before
@@ -938,7 +943,7 @@ describe('carried findings — removals, content facts, and covers', () => {
       }
       await expect(hello.handler(older as never, asCtx(hello.handler))).rejects.toMatchObject({
         code: 'unsupported',
-        message: expect.stringMatching(/\[2, 2\].*\[3, 3\]/),
+        message: expect.stringMatching(/\[2, 2\].*\[4, 4\]/),
       })
     })
 
@@ -961,7 +966,7 @@ describe('carried findings — removals, content facts, and covers', () => {
       }
       await expect(satchel.ledger.runSession(olderShelf)).rejects.toMatchObject({
         code: 'unsupported',
-        message: expect.stringMatching(/\[2, 2\].*\[3, 3\]/),
+        message: expect.stringMatching(/\[2, 2\].*\[4, 4\]/),
       })
     })
 
