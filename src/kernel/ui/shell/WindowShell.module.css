@@ -78,6 +78,14 @@
 .paneSlot {
   display: flex;
   min-height: 0;
+  /* ⚠️ **`min-width: 0`, AND ONLY `min-height` WAS HERE.** A flex item's
+     `min-width` defaults to `auto`, which is its content's min-content size —
+     so `width: 0` below was silently clamped to the 400px card inside it, and
+     the closed slot kept a 416px column of the window. Invisible while the
+     card had a background of its own; obvious the moment a screen tried to
+     use the full width and got 1024 of 1440. The `min-height: 0` beside it is
+     the same fix for the other axis, written years earlier. */
+  min-width: 0;
   overflow: hidden;
   width: var(--pane-track);
   transition: width var(--motion-pane);

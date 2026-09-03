@@ -19,6 +19,7 @@ import {
   loadMarks,
   marginMarks,
   parseMarks,
+  placeMark,
   removeMark,
   sameClass,
   saveMarks,
@@ -28,6 +29,8 @@ import {
   type Mark,
   type MarkStorage,
 } from './marks'
+import { hlcOf } from './hlc'
+import { resolvedCfiForTesting } from './resolvedCfi.testkit'
 
 function mark(over: Partial<Mark> = {}): Mark {
   return {
@@ -954,5 +957,92 @@ describe('an unplaced mark', () => {
     expect(parseMarks(JSON.stringify([row({ sectionIndex: -1 })]))).toEqual([])
     const [ok] = parseMarks(JSON.stringify([row()]))!
     expect(ok!.sectionIndex).toBe(0)
+  })
+})
+
+describe('placeMark', () => {
+  const unplaced = (over: Partial<Mark> = {}): Mark =>
+    mark({ cfi: '', unplaced: { reason: 'foreign-build', fromBook: 'book:elsewhere' }, ...over })
+
+  const at = hlcOf(1_000)
+
+  it('gives an unplaced mark its anchor and takes the class off it', () => {
+    /* THE WHOLE OF WI-22.A2 ON THIS SIDE. Marginalia lists an unplaced mark
+       with its jump control disabled and *"Paper has not found this passage
+       here yet."*; this is the write that retires that sentence. */
+    const [placed] = placeMark([unplaced()], 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)
+
+    expect(placed!.cfi).toBe('epubcfi(/6/8!/4/2)')
+    expect(placed!.sectionIndex).toBe(3)
+    expect(placed!.unplaced).toBeUndefined()
+    expect(isPlaced(placed!)).toBe(true)
+    /* ⚠️ REMOVED, not set to undefined. `exactOptionalPropertyTypes` is on, and
+       a present-but-undefined key is a different value to `isMark`, to the JSON
+       on disk and to the merge. `in` is what tells the two apart. */
+    expect('unplaced' in placed!).toBe(false)
+  })
+
+  it('stamps the edit, so the placement travels to a peer', () => {
+    /* A mark placed here and not stamped merges as OLDER than the unplaced copy
+       on another device, and comes back unplaced on the next sync — the same
+       shape `updateNote` and `setTint` stamp for. */
+    const [placed] = placeMark([unplaced()], 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)
+    expect(placed!.updatedAt).toEqual(at)
+  })
+
+  it("leaves a tombstoned row alone — resurrection is the merge's decision", () => {
+    /* `updateNote` and `setTint` both say this and it holds harder here: a pass
+       runs over every unplaced mark of a book without a reader having asked for
+       anything, so a deleted mark quietly coming back would have no gesture
+       behind it to explain itself. */
+    const dead = unplaced({ deletedAt: hlcOf(500) })
+    const list = [dead]
+    const after = placeMark(list, 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)
+
+    expect(after).toBe(list)
+    expect(after[0]!.cfi).toBe('')
+    expect(after[0]!.unplaced).toBeDefined()
+    expect(after[0]!.deletedAt).toEqual(hlcOf(500))
+  })
+
+  it('returns its input BY IDENTITY when there is nothing to place', () => {
+    /* The no-write convention every store's change detection relies on. Four
+       ways there is nothing to do, and each must not produce a new array — a
+       pass runs over every unplaced mark of a book on every open, so a copy per
+       call is a republish per open for no change. */
+    const dead = unplaced({ deletedAt: hlcOf(500) })
+    const already = mark({ id: 'm2' })
+    const list = [dead, already]
+
+    expect(placeMark(list, 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)).toBe(list)
+    expect(placeMark(list, 'm2', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)).toBe(list)
+    expect(placeMark(list, 'nobody', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)).toBe(list)
+  })
+
+  it('refuses an empty cfi and a section that is not a real index', () => {
+    /* Each is a state `isMark` refuses off disk, so writing one produces a mark
+       that is neither placed nor legally unplaced — rejected at the file after
+       the screen has already shown it placed. */
+    const list = [unplaced()]
+    expect(placeMark(list, 'm1', resolvedCfiForTesting(''), 3, at)).toBe(list)
+    expect(placeMark(list, 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), -1, at)).toBe(list)
+    expect(placeMark(list, 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 1.5, at)).toBe(list)
+  })
+
+  it('does not touch a mark it now overlaps', () => {
+    /* ⚠️ **DELIBERATE, and the opposite of what `add` does.** `add` tombstones
+       the row a selection resolved to, because there the reader gestured at
+       that passage. Here nobody gestured: a passage the reader marked in this
+       build and an imported mark of the same passage are two records that
+       happened to meet. Superseding either deletes a note somebody wrote.
+       Two highlights on one passage is visible and recoverable; a silently
+       deleted note is not. */
+    const mine = mark({ id: 'mine', cfi: 'epubcfi(/6/8!/4/2)', sectionIndex: 3, note: 'my note' })
+    const theirs = unplaced({ id: 'theirs' })
+    const after = placeMark([mine, theirs], 'theirs', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)
+
+    expect(after).toHaveLength(2)
+    expect(after.every((one) => one.deletedAt === undefined)).toBe(true)
+    expect(after.find((one) => one.id === 'mine')!.note).toBe('my note')
   })
 })

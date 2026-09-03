@@ -111,3 +111,6 @@ coverage/
 # committed once by a directory-scoped `git add` before this rule existed.
 __pycache__/
 *.pyc
+.stryker-tmp
+vitest.mutants.mjs
+stryker.mutants.json

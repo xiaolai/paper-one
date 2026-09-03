@@ -688,7 +688,7 @@ module.exports = {
     // The shared compiler options, for `paths` (`@/*`) and the TypeScript
     // parse. Absolute, so the same config serves a fixture tree rooted
     // elsewhere (the selftest) without a copy of the tsconfig beside it.
-    tsConfig: { fileName: path.join(__dirname, 'tsconfig.base.json') },
+    tsConfig: { fileName: path.join(__dirname, 'tsconfig.cruiser.json') },
     enhancedResolveOptions: {
       exportsFields: ['exports'],
       conditionNames: ['import', 'require', 'node', 'default', 'types'],

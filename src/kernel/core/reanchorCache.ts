@@ -1,4 +1,5 @@
 import type { Mark } from './marks'
+import type { ResolvedCfi } from './resolvedCfi'
 
 /**
  * What a re-anchoring attempt already answered, and when that answer expires.
@@ -45,9 +46,14 @@ import type { Mark } from './marks'
  * them only in memory is still correct — it simply pays more.
  */
 
-/** Where a mark was found — the anchor a resolution produces. */
+/** Where a mark was found — the anchor a resolution produces.
+ *
+ *  `ResolvedCfi`, because the only thing that fills one in is the resolver
+ *  (WI-22.A1). A cache that remembered bare strings would launder them: a
+ *  fabricated anchor stored here would come back out branded and go straight
+ *  to `marks.place`, which is the one write that installs an anchor. */
 export interface Placement {
-  readonly cfi: string
+  readonly cfi: ResolvedCfi
   readonly sectionIndex: number
 }
 

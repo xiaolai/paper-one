@@ -21,17 +21,30 @@ pub const MAX_FRAME: u32 = 4 * 1024 * 1024;
 /// Read one frame. `Ok(None)` when the stream ended cleanly at a frame
 /// boundary; an EOF inside a frame is an error.
 pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Bytes>> {
+    read_capped(reader, MAX_FRAME).await
+}
+
+/// One frame, under a cap this caller chose.
+///
+/// ⚠️ **THE CAP IS CHECKED AGAINST THE DECLARED LENGTH BEFORE THE BODY IS READ
+/// OR ALLOCATED**, which is the whole point of taking it as a parameter. A
+/// door a stranger can open — `circle::CIRCLE_HELLO_ALPN` — must not be
+/// willing to allocate `MAX_FRAME`'s four megabytes because a peer said it
+/// would send that much; it says 64 KiB and the refusal happens before a byte
+/// of body moves.
+///
+/// `read_frame` is this with the transport-wide cap, so there is one
+/// implementation of "read a length-prefixed frame" rather than two that can
+/// drift about whether the length is checked first.
+pub async fn read_capped<R: AsyncRead + Unpin>(reader: &mut R, max: u32) -> Result<Option<Bytes>> {
     let mut len_buf = [0u8; 4];
     match reader.read(&mut len_buf[..1]).await? {
         0 => return Ok(None),
         _ => reader.read_exact(&mut len_buf[1..]).await?,
     };
     let len = u32::from_be_bytes(len_buf);
-    if len > MAX_FRAME {
-        return Err(Error::FrameTooLarge {
-            size: len,
-            max: MAX_FRAME,
-        });
+    if len > max {
+        return Err(Error::FrameTooLarge { size: len, max });
     }
     let mut buf = vec![0u8; len as usize];
     reader.read_exact(&mut buf).await?;
@@ -156,5 +169,34 @@ mod tests {
             "frameMalformed",
             "a clean end where a control frame was due is malformed, not None"
         );
+    }
+
+    #[tokio::test]
+    async fn a_frame_exactly_at_the_cap_is_allowed() {
+        /* ⚠️ **THE BOUNDARY WAS ONLY EVER TESTED FROM ABOVE.** Both existing
+        cases use `MAX + 1`, so changing the check to `len >= max` — off by one
+        in the refusing direction — left them green while every frame exactly at
+        the limit started failing. A cap that cannot be reached is a different
+        cap. */
+        const CAP: u32 = 64;
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &vec![7u8; CAP as usize])
+            .await
+            .unwrap();
+
+        let got = read_capped(&mut wire.as_slice(), CAP).await.unwrap();
+
+        assert_eq!(got.map(|b| b.len()), Some(CAP as usize));
+    }
+
+    #[tokio::test]
+    async fn one_byte_over_the_cap_is_refused() {
+        const CAP: u32 = 64;
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &vec![7u8; CAP as usize + 1])
+            .await
+            .unwrap();
+
+        assert!(read_capped(&mut wire.as_slice(), CAP).await.is_err());
     }
 }

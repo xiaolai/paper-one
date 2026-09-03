@@ -1,3 +1,4 @@
+import { paneAvailable, screenJump } from '../state'
 import {
   AudioLines,
   BookOpen,
@@ -6,6 +7,7 @@ import {
   Minus,
   PanelLeft,
   PanelRight,
+  Puzzle,
   Search,
   Sparkles,
   Square,
@@ -17,6 +19,7 @@ import { ICON } from '../../core/metrics'
 import type { Platform } from '../../core/metrics'
 import { inTauri } from '../inTauri'
 import { PANE_TITLES, comboFor } from '../panes'
+import type { ContributedScreenId } from '../../core/uiTypes'
 import type { AppDispatch, AppState, KernelPaneId } from '../state'
 import type { Speech } from '../reader/useSpeech'
 import styles from './TitleBar.module.css'
@@ -49,6 +52,16 @@ export interface TitleBarProps {
   speech: Speech
   /** False with no book open: there is nothing to read aloud. */
   hasBook: boolean
+  /**
+   * The screens capabilities contributed — see `ScreenContribution`.
+   *
+   * ⚠️ **NAVIGATION IS THE KERNEL'S, WHICH IS WHY THIS IS HERE AND NOT IN THE
+   * SCREEN ITSELF.** A contributed screen takes the whole window, so if it drew
+   * its own way back, every capability would have to draw one and one of them
+   * would forget — leaving a reader in a room with no door. The kernel offers
+   * the switch, so a screen cannot be entered without a way out of it.
+   */
+  screens?: readonly { readonly id: ContributedScreenId; readonly label: string }[]
 }
 
 /**
@@ -72,9 +85,11 @@ export function TitleBar({
   bookSubtitle,
   speech,
   hasBook,
+  screens,
 }: TitleBarProps) {
   const isMac = platform === 'macos'
   const isReader = state.screen === 'reader'
+  const jump = screenJump(state.screen, hasBook)
 
   /* §06: chrome fades to 0 and returns on pointer-near — but only in the
    * reader, and never while the switcher is up, since the chip it is anchored
@@ -187,6 +202,42 @@ export function TitleBar({
         style={chromeStyle}
         inert={chromeHidden}
       >
+        {/* ⚠️ **NOT IN THE READER.** A book is a place you are IN; a switch
+            between the shelf and a capability's screen belongs where the reader
+            is choosing what to look at, not on top of the page they are
+            reading. `Open the library` in the reader's own chrome is the way
+            out of a book, and adding a second one here would be two controls
+            for one intent. */}
+        {!isReader && (screens?.length ?? 0) > 0 && (
+          <div className={styles.toggleGroup}>
+            <button
+              type="button"
+              className={styles.action}
+              title="Library"
+              aria-label="Library"
+              aria-pressed={state.screen === 'library'}
+              data-on={state.screen === 'library'}
+              onClick={() => dispatch({ type: 'goScreen', screen: 'library' })}
+            >
+              <LibraryIcon size={ICON.control} strokeWidth={ICON.stroke} />
+            </button>
+            {screens?.map((one) => (
+              <button
+                key={one.id}
+                type="button"
+                className={styles.action}
+                title={one.label}
+                aria-label={one.label}
+                aria-pressed={state.screen === one.id}
+                data-on={state.screen === one.id}
+                onClick={() => dispatch({ type: 'goScreen', screen: one.id })}
+              >
+                <Puzzle size={ICON.control} strokeWidth={ICON.stroke} />
+              </button>
+            ))}
+          </div>
+        )}
+
         {isReader && (
           <>
             <div className={styles.toggleGroup}>
@@ -281,17 +332,12 @@ export function TitleBar({
              no book — the destination is the reader's empty state, which is
              where a book gets dropped or picked. The control is always drawn;
              what it is NAMED still has to be true. */
-          title={
-            isReader
-              ? `Library · ${comboFor('⌘L', platform)}`
-              : hasBook
-                ? `Back to the book · ${comboFor('⌘L', platform)}`
-                : `Open a book · ${comboFor('⌘L', platform)}`
-          }
-          aria-label={isReader ? 'Library' : hasBook ? 'Back to the book' : 'Open a book'}
-          onClick={() =>
-            dispatch({ type: 'goScreen', screen: isReader ? 'library' : 'reader' })
-          }
+          /* ⚠️ **THE NAME AND THE DESTINATION COME FROM ONE PLACE.** This
+             computed its own and disagreed with the shortcut printed in its
+             own tooltip on every screen that is neither of the kernel's. */
+          title={`${jump.label} · ${comboFor('⌘L', platform)}`}
+          aria-label={jump.label}
+          onClick={() => dispatch({ type: 'goScreen', screen: jump.to })}
         >
           {isReader ? (
             <LibraryIcon size={ICON.control} strokeWidth={ICON.stroke} />
@@ -311,6 +357,12 @@ export function TitleBar({
         >
           <Search size={ICON.control} strokeWidth={ICON.stroke} />
         </button>
+        {/* ⚠️ **NOT DRAWN WHERE THERE IS NO PANE.** A contributed screen owns
+            the window, so `WindowShell` gives the slot no width and `SidePane`
+            draws nothing — and this button went on looking active and toggling
+            a state nothing reflected. A lit control that does nothing is worse
+            than an absent one. */}
+        {paneAvailable(state.screen) && (
         <button
           type="button"
           className={`${styles.action} ${styles.paneToggle}`}
@@ -326,6 +378,7 @@ export function TitleBar({
             <PanelRight size={ICON.control} strokeWidth={ICON.stroke} />
           )}
         </button>
+        )}
       </div>
     </div>
   )

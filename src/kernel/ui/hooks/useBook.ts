@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
 import type { BookmarkPlace, MarkAnchor, SearchHit, SessionNavigator } from '../reader/session'
+import type { PassOutcome, PendingMark } from '../reader/reanchorPass'
 import type { AskPassage } from '../../core/companion'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { bookIdFor } from '../../core/marks'
@@ -87,6 +88,16 @@ export interface Book extends BookState {
   deselect: () => void
   /** The book text on screen, as passages a companion answer can cite. */
   passages: () => readonly AskPassage[]
+  /**
+   * Walk this book for marks with no anchor here — WI-22.A2, `useReanchor`'s.
+   *
+   * Reads through the navigator ref like everything else here, so it answers
+   * about whatever book is open now. Before a navigator exists the answer is an
+   * empty INCOMPLETE walk — `complete: false`, never `true` — because a walk
+   * that did not happen has established nothing, and a caller that took it for
+   * a completed one would remember every mark as a miss.
+   */
+  reanchor: (pending: readonly PendingMark[]) => Promise<PassOutcome>
   /** Dismiss the footnote popover — the session holds its view. */
   closeFootnote: () => void
   /** Register the box notes render into — see the session. */
@@ -288,6 +299,13 @@ export function useBook(): Book {
      whatever book is open now rather than the one this callback was made
      for. `[]` before a navigator exists — the honest empty. */
   const passages = useCallback((): readonly AskPassage[] => navigatorRef.current?.passages() ?? [], [])
+  /* `complete: false` for the absent navigator — see the interface. */
+  const reanchor = useCallback(
+    (pending: readonly PendingMark[]): Promise<PassOutcome> =>
+      navigatorRef.current?.reanchor(pending) ??
+      Promise.resolve({ found: [], missed: [], complete: false, walked: 0 }),
+    [],
+  )
   const closeFootnote = useCallback(() => navigatorRef.current?.closeFootnote(), [])
   /**
    * The box notes render into, remembered across books.
@@ -431,6 +449,7 @@ export function useBook(): Book {
       eraseMark,
       deselect,
       passages,
+      reanchor,
       closeFootnote,
       setFootnoteMount,
       next,
@@ -472,6 +491,7 @@ export function useBook(): Book {
       eraseMark,
       deselect,
       passages,
+      reanchor,
       closeFootnote,
       setFootnoteMount,
       next,

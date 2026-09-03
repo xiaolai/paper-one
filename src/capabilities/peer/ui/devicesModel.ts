@@ -390,9 +390,21 @@ export function createDevicesModel({
        survived. Each handle is registered the moment it exists, and a throw
        part-way unsubscribes what was taken before re-throwing. */
     try {
-      offs.push(port.onPairingPending((pending) => publish({ pending })))
+      /* ⚠️ **DEVICE ATTEMPTS ONLY — the circle shares this stream.** The two
+         surfaces confirm with DIFFERENT grants, so an unfiltered pending event
+         let this panel answer a circle request with the reader's own-device
+         grants, handing another person the permissions meant for their phone.
+         The circle side filters symmetrically in `personPort`. */
+      offs.push(
+        port.onPairingPending((pending) => {
+          if (pending.kind === 'circle') return
+          publish({ pending })
+        }),
+      )
       offs.push(
         port.onPairingResult((lastResult) => {
+          /* Device attempts only — see the pending handler above. */
+          if (lastResult.kind === 'circle') return
           /* ⚠️ **THE PEER LIST IS UNKNOWN AGAIN UNTIL THE REFRESH LANDS.**
              This cleared `pending` and `sas` — the two flags `setRole` reads
              to mean "a pairing could still land a peer" — and then started an

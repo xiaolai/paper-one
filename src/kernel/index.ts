@@ -45,6 +45,7 @@ export type {
   Disposable,
   KernelApi,
   PaneContribution,
+  ScreenContribution,
   PaneRenderer,
   ServiceContext,
   ServiceContribution,
@@ -289,6 +290,57 @@ export { createGenerations } from './core/generations'
 export type { Generations } from './core/generations'
 export { writeQueue } from './core/writeQueue'
 export type { WriteQueue } from './core/writeQueue'
+/* The circle's own store lives beside `marks.json` and never inside it — see
+   `circlePathIn`. The paths are the kernel's because the folder layout is. */
+export { circleFolderIn, circlePathIn, sharedPathIn } from './core/bookFolder'
+export type { ForeignAnnotation, ForeignEntry } from './core/circle/foreign'
+/* The overlay seam's vocabulary — a capability implementing one needs to name
+   the request it is handed and the resolver inside it. */
+export type {
+  OverlayContribution,
+  OverlayRequest,
+  PendingPassage,
+  ResolvedPassage,
+  ResolvePort,
+  ResolveResult,
+} from './core/circle/overlay'
+export { drawable, foreignWeight, offersShare, offersUnshare, overlayKey } from './core/circle/foreign'
+/* The page protocol. Pure, and deliberately so — the crypto is INJECTED, which
+   is what keeps `page.ts` inside `check-browser-safe.mjs`'s pinned set while
+   the Ed25519 that satisfies it lives in a capability. */
+export {
+  SUPPORTED,
+  WIRE_VERSION,
+  chainHash,
+  checkPage,
+  integersOnly,
+  isCanonical,
+  negotiate,
+  paginate,
+  signedBytes,
+} from './core/circle/page'
+export type { Page, PageCrypto, PageRefusal, SignedKind, VersionRange } from './core/circle/page'
+/* The log a page carries, and the fold that turns one into what is held. */
+export { compacted, compareEntries, fold, mergeLogs, nextSeq } from './core/circle/log'
+export type { Entry, Held, Passage } from './core/circle/log'
+/* What a book is called when two libraries have to agree it is the same book.
+   Never a hash of the file — `wire.md` §"`workKey` cannot be the log key". */
+export { claimFor, indexKeys, matchWork } from './core/circle/workClaim'
+export type { ClaimSource, WorkClaim, WorkMatch } from './core/circle/workClaim'
+/* The bound that runs BEFORE a page is parsed, and the states it reads. */
+export { BLOCKED_BUDGET, DEFAULT_BUDGET, NOTHING_SPENT, charge, readRouting } from './core/circle/bound'
+export type { Budget, Charge, Routing, Spend } from './core/circle/bound'
+export {
+  acceptsTransport,
+  budgetFor,
+  drawsEntry,
+  drawsOverlays,
+  mergeRelationship,
+} from './core/circle/relationships'
+export type { Relationship, RelationshipState, Retain } from './core/circle/relationships'
+/* Whether the device that signed a page may still speak for its person. */
+export { checkDelegation, maySpeak, shouldRenew } from './core/circle/identity'
+export type { Delegation as CircleDelegation } from './core/circle/identity'
 export { tagKey } from './core/tags'
 
 /* The ledger's primitives: the stamp, the presence register, the formats. */
@@ -322,6 +374,11 @@ export type { Format } from './core/formats'
 export type { TrashFs } from './core/bookTrash'
 export type { ContentExtension, KnownExtension, SyncLevel, VaultFs } from './core/bookVault'
 
+/* ONE canonical serialisation, shared by sync's registers and the circle's
+   signed bytes. In `core/` because a capability cannot import another's
+   internals — see the module header. */
+export { canonicalJson } from './core/canonicalJson'
+
 /* The vocabulary. */
 /* THE CLOSED DOMAINS, exported so a client can VALIDATE a wire row against
  * them rather than casting. Reading somebody else's JSON and trusting `kind`
@@ -342,7 +399,24 @@ export {
   mergeMarks,
   validMarks,
 } from './core/marks'
-export type { Annotation, Bookmark, Mark, MarkKind, MarkStorage, MarkStyle, MarkTint, NewMark } from './core/marks'
+export type {
+  Annotation,
+  Bookmark,
+  Mark,
+  MarkKind,
+  MarkStorage,
+  MarkStyle,
+  MarkTint,
+  NewMark,
+  /* WI-22.A1's narrowing, beside the predicate that produces it: a client that
+   * paints has to be able to NAME the class `isPlaced` answers, or it can only
+   * widen back to `Annotation` and lose the guarantee at its own boundary. */
+  Placed,
+} from './core/marks'
+/* The brand itself, so a client can spell the painter's door. From `core/`,
+ * which is where it is declared — it used to be re-exported through the reader,
+ * whose module imports foliate's CFI parser. */
+export type { ResolvedCfi } from './core/resolvedCfi'
 export { CARD_KINDS, CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
 export type { Card, CardKind, NewCard } from './core/cards'
 /* `paneOffered` and its list are the rule for whether a reader may see a panel

@@ -60,6 +60,20 @@ interface BookColours {
   markPurpleRule: string
   /** §01's companion hue, darkened per theme to clear 4.5:1 on its own tint. */
   amber: string
+  /**
+   * The hue every foreign mark is drawn in — one, for every reader.
+   *
+   * ⚠️ **A NEW VISUAL ROLE GETS ITS OWN COLOUR rather than borrowing one.**
+   * Three were considered and rejected: a reader TINT is the reader's own
+   * vocabulary and a friend's mark must not claim it (`surfaces.md`); `amber`
+   * is the companion's and means "this is Paper speaking"; `accent` is the
+   * app's link colour and a rule under text in it reads as a hyperlink.
+   *
+   * A desaturated teal because it is the one family none of the three tints
+   * occupies — yellow, green, purple — so it cannot be mistaken for a tint the
+   * reader has forgotten choosing.
+   */
+  shared: string
   /** The reading ruler's band. `--wash` — one step off the page, never a tint. */
   band: string
 }
@@ -299,11 +313,11 @@ export function isDark(hex: string): boolean {
 }
 
 export const BOOK_COLOURS: Record<Theme, BookColours> = {
-  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#FAE8AF', markRule: '#D5B75A', markGreen: '#CAF7CA', markGreenRule: '#88CE8A', markPurple: '#E9CCFF', markPurpleRule: '#D1A4F3', amber: '#9E5A16', band: '#F2F3F1' },
-  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#FCE4A8', markRule: '#B79A3B', markGreen: '#C5F5C7', markGreenRule: '#6CB06E', markPurple: '#E6C4FF', markPurpleRule: '#B388D4', amber: '#8A4C11', band: '#CBCFCA' },
-  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#F3E8B8', markRule: '#C7AA4C', markGreen: '#C1F7D5', markGreenRule: '#7BC07D', markPurple: '#D2BCFF', markPurpleRule: '#C397E4', amber: '#985614', band: '#EBDFC9' },
-  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#FFE2AF', markRule: '#B99C3D', markGreen: '#CAF2CF', markGreenRule: '#6EB270', markPurple: '#E2BAFF', markPurpleRule: '#B68AD6', amber: '#8F5013', band: '#C7D4C1' },
-  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#533E00', markRule: '#85702A', markGreen: '#1F471B', markGreenRule: '#4E8050', markPurple: '#4C2D5B', markPurpleRule: '#83629A', amber: '#D9A25E', band: '#1E2226' },
+  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#FAE8AF', markRule: '#D5B75A', markGreen: '#CAF7CA', markGreenRule: '#88CE8A', markPurple: '#E9CCFF', markPurpleRule: '#D1A4F3', amber: '#9E5A16', band: '#F2F3F1', shared: '#2E6B6B' },
+  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#FCE4A8', markRule: '#B79A3B', markGreen: '#C5F5C7', markGreenRule: '#6CB06E', markPurple: '#E6C4FF', markPurpleRule: '#B388D4', amber: '#8A4C11', band: '#CBCFCA', shared: '#28605F' },
+  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#F3E8B8', markRule: '#C7AA4C', markGreen: '#C1F7D5', markGreenRule: '#7BC07D', markPurple: '#D2BCFF', markPurpleRule: '#C397E4', amber: '#985614', band: '#EBDFC9', shared: '#2F6560' },
+  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#FFE2AF', markRule: '#B99C3D', markGreen: '#CAF2CF', markGreenRule: '#6EB270', markPurple: '#E2BAFF', markPurpleRule: '#B68AD6', amber: '#8F5013', band: '#C7D4C1', shared: '#2A6260' },
+  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#533E00', markRule: '#85702A', markGreen: '#1F471B', markGreenRule: '#4E8050', markPurple: '#4C2D5B', markPurpleRule: '#83629A', amber: '#D9A25E', band: '#1E2226', shared: '#6FB8B4' },
 }
 
 /**
@@ -371,7 +385,7 @@ export function markPalette(theme: Theme, brightness: number, contrast: number):
     green: c.markGreenRule,
     purple: c.markPurpleRule,
   }
-  return { fill, rule, companion: c.amber }
+  return { fill, rule, companion: c.amber, foreign: c.shared }
 }
 
 /**

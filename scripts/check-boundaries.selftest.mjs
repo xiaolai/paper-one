@@ -865,20 +865,29 @@ export async function runAll(cases, width = defaultWidth()) {
 
 /** The cap both consumers get unless one asks for another. */
 export function defaultWidth() {
-  /* THE BUDGET IS NOT THIS FUNCTION'S TO SPEND WHEN VITEST IS RUNNING.
+  /* ⚠️ **THE LONG ANALYSIS THAT USED TO BE HERE WAS LOOKING AT THE WRONG
+   * THING, AND SAID SO WITHOUT KNOWING IT.** It recorded that neither lever —
+   * this width, or `vitest.config.ts`'s pool size — made the
+   * `[vitest-worker]: Timeout calling "onTaskUpdate"` gate reliable: every
+   * configuration tried had been both green and red. Its own conclusion was
+   * that a mechanism responding non-monotonically to CPU contention is not a
+   * CPU contention problem. That was right, and the search stopped one step
+   * short.
    *
-   * Six was chosen for work that shares one event loop. Each case is a
-   * CPU-bound CHILD PROCESS — measured 2026-08-29 at 2.9 s each, 64 s for the
-   * set — and under Vitest the pool has already committed `maxWorkers`
-   * processes (`cpus − 2`, so 8 of 10 here). Six more makes fourteen on ten
-   * cores, and the one that loses is Vitest's MAIN thread, which must answer
-   * `onTaskUpdate` inside birpc's 60 s. This file holds that state for longer
-   * than the deadline, which is the `[vitest-worker]: Timeout calling
-   * "onTaskUpdate"` the gate has been failing on with every test passing.
+   * The mechanism was the COST OF ONE CRUISE. `.dependency-cruiser.cjs` handed
+   * the cruiser `tsconfig.base.json`, which declares no `files` and no
+   * `include`; TypeScript's default is then every file under the config's
+   * directory, so each cruise of a ten-file fixture parsed the whole
+   * repository. Measured 2026-09-02: **22,671 ms per cruise, 481 ms after
+   * pointing it at a config with an empty file set** — same graph either way,
+   * 677 modules and 2578 dependencies. This file went from 90 s to 10 s alone,
+   * and stopped being the run's critical path. `check-boundaries.test.mjs`
+   * carries the assertions that keep it that way.
    *
-   * Standalone, six is still right: nothing else is running and these cases
-   * are the whole job. The number is about what is FREE, and only one of the
-   * two situations has six cores free. */
+   * Which is why six is simply six again: the number was never the problem,
+   * and with each case costing half a second there is no starvation window for
+   * it to widen. Standalone or under Vitest, six is right for the plain
+   * reason — nothing here holds a core for long enough to matter. */
   return Math.max(1, Math.min(6, availableParallelism()))
 }
 

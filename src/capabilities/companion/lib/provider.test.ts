@@ -269,8 +269,21 @@ describe('the bound provider', () => {
    * presented as a finished answer, with no failure line and no way to tell it
    * from a complete one. The quietest possible way to lose half an answer.
    */
+  /* ⚠️ **`%p` STOPPED SUBSTITUTING IN VITEST 4, and the six cases collapsed to
+   * ONE name.** `%p` is Jest's pretty-format specifier; vitest 4 does not
+   * expand it and no longer appends the value either, so `null`, `undefined`,
+   * `0`, `''`, `false` and `NaN` all collected as the same title.
+   *
+   * That is not cosmetic. `check-test-ledger` names TESTS — its whole design is
+   * *"a rising test count is not evidence that nothing was lost"* — and six
+   * tests sharing one name means five of them could be deleted without the
+   * ledger noticing. Recording the collapsed name would have baked in exactly
+   * the blindness the gate exists to remove.
+   *
+   * `%o` is expanded by vitest 4 and distinguishes every one of these values,
+   * including `''` from `undefined`, which `%s` does not. */
   it.each([[null], [undefined], [0], [''], [false]])(
-    'raises a rejection that carries %p rather than calling it a success',
+    'raises a rejection that carries %o rather than calling it a success',
     async (thrown) => {
       const { port } = portWith(async (onChunk) => {
         onChunk('half an answer')

@@ -14,19 +14,23 @@
 //! on every platform; the ACL grant is `peer:default`.
 
 mod blobs;
+mod circle;
 mod commands;
 mod data_root;
 mod error;
 mod events;
 mod frame;
 mod identity;
+mod keeper;
 mod node;
 mod pairing;
 mod paths;
 mod peers;
+mod person;
 mod role;
 mod session;
 mod state;
+mod store;
 #[cfg(test)]
 mod testutil;
 
@@ -68,6 +72,19 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::peer_close,
             commands::peer_blob_fetch,
             commands::peer_hash_file,
+            commands::peer_person_status,
+            commands::peer_person_ensure,
+            commands::peer_person_phrase,
+            commands::peer_person_restore,
+            commands::peer_person_forget,
+            commands::peer_person_delegate,
+            commands::peer_circle_people,
+            commands::peer_circle_mine,
+            commands::peer_page_sign,
+            commands::peer_circle_introduce,
+            commands::peer_circle_revoke,
+            commands::peer_circle_remember,
+            commands::peer_circle_forget,
         ])
         .setup(|app, _api| {
             let state = PeerState::default();

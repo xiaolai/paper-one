@@ -331,6 +331,14 @@
     ]
   },
   {
+    "name": "bip39",
+    "version": "2.2.2",
+    "license": "CC0-1.0",
+    "texts": [
+      "6d489af62926"
+    ]
+  },
+  {
     "name": "bit-set",
     "version": "0.8.0",
     "license": "Apache-2.0 OR MIT",
@@ -346,6 +354,18 @@
     "texts": [
       "7e1b38c60796",
       "4c4e6eed8b86"
+    ]
+  },
+  {
+    "name": "bitcoin_hashes",
+    "version": "0.14.101",
+    "license": "CC0-1.0",
+    "texts": [
+      "6d489af62926"
+    ],
+    "standard": true,
+    "authors": [
+      "Andrew Poelstra <apoelstra@wpsoftware.net>"
     ]
   },
   {
@@ -1712,6 +1732,14 @@
     "texts": [
       "6dc0e068dcf3",
       "9dde4a6ad496"
+    ]
+  },
+  {
+    "name": "hex-conservative",
+    "version": "0.2.3",
+    "license": "CC0-1.0",
+    "texts": [
+      "6d489af62926"
     ]
   },
   {
@@ -4638,6 +4666,15 @@
       "85ad950cce87",
       "30fefc3a7d6a",
       "361d79129578"
+    ]
+  },
+  {
+    "name": "unicode-normalization",
+    "version": "0.1.25",
+    "license": "MIT OR Apache-2.0",
+    "texts": [
+      "954f335b8baf",
+      "033a9383ff21"
     ]
   },
   {

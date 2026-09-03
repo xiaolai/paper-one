@@ -198,6 +198,52 @@ function scanFile(file) {
  * `services.cards.stored()` (WI-10.4).
  */
 const REVIEWED_FOOTPRINT = [
+  /* -- circle -- another reader's passages, beside the marks and never in them.
+   *
+   * ⚠️ **THE REVIEW, since that is what this list is.** The circle writes ONE
+   * shape of path and reads one: `books/<id>/circle/<person>.json`, built by
+   * the kernel's `circlePathIn`. Three things make that narrow enough to
+   * allow:
+   *
+   *  - **The person id goes through `safeId`**, the same sanitiser
+   *    `folderOf` uses — no slash, never empty. That id arrives from ANOTHER
+   *    READER and is the least trusted string any capability writes with, so
+   *    the check is not incidental. `bookFolder.ts` records what an empty
+   *    segment once cost: `trashBook(fs, '')` renamed the whole library.
+   *  - **It is never `books/<id>/marks.json`.** A foreign passage in the marks
+   *    file is carried by `exportMarks`, by the sync feed and by every one of
+   *    the reader's own devices — as THEIR annotation. The separate file IS
+   *    the mechanism that prevents it, which is why the write is here rather
+   *    than through the marks store.
+   *  - **The only delete is that same path.** `purgeForeign` removes one
+   *    person's file for one book — `relationships.md`'s `retain: 'purge'` —
+   *    and cannot name anything else, because it builds the path the same way.
+   *
+   * `services.fs` in `index.ts` is the read side: the capability lists the
+   * circle folder and reads those files to draw. It writes nothing there. */
+  'circle/index.ts services.fs',
+  /* ⚠️ `atomicWrite`, and this said `fs.writeFile`. The raw call would have
+     failed on the FIRST production write: `circle/` does not exist until
+     something creates it and `writeFile` creates no parent. `atomicWrite`
+     makes the parent and renames into place, which also means a crash
+     mid-write leaves the previous file rather than a truncated one. The path
+     it is given is still built the same way, so everything above still holds
+     — it is the same one path, written more carefully. */
+  /* ⚠️ **THE PUBLISHER'S STORE, AND IT IS DELIBERATELY NOT UNDER `circle/`.**
+     `peopleFor` lists the `circle/` folder and reads every `*.json` in it as a
+     PERSON, so a publisher's file put there would appear in the reader's own
+     circle as somebody called `published` — a person who cannot be removed
+     because they do not exist. `sharedPathIn` is the kernel's constant, beside
+     `marks.json`, and this capability cannot name any other file with it.
+
+     It is also NOT a field on `Mark`, which `wire.md` argues and refuses: a
+     field would ride the existing sync for free and thereby send a SOCIAL fact
+     — what you chose to publish — to every one of your own devices whether
+     they take part in the circle or not. */
+  'circle/lib/publish.ts atomicWrite(fs, sharedPathIn(bookId))',
+  'circle/lib/store.ts atomicWrite(fs, circlePathIn(bookId, person))',
+  'circle/lib/store.ts fs.remove(path)',
+
   /* -- the kernel handles sync holds -- */
   // `start` takes the fs for the journal, the cover cache and the downloads
   // ledger. No `services.storage` anywhere: the cards read rides

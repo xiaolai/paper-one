@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { PAINT_HINT_KEY } from '../../core/paintHint'
 import { PANE_W, paneTakesTrack, type Platform } from '../../core/metrics'
+import { isContributedScreenId } from '../../core/uiTypes'
 import { useAvailableWidth } from '../hooks/useAvailableWidth'
 import type { AppState } from '../state'
 import { LeadingCard } from './LeadingCard'
@@ -83,7 +84,12 @@ export function WindowShell({
    * for is `measure + …`, and §09 gives every step a different measure. A flat
    * 1024 let the pane in at widths where the gutters then went to zero. */
   const asSheet = !paneTakesTrack(width, state.stepIdx)
-  const paneOpen = state.pane !== null
+  /* ⚠️ **CLOSED ON A CONTRIBUTED SCREEN, which owns the whole window.**
+   * `SidePane` already refuses to draw anything there, but the SLOT is this
+   * component's and it kept its width — so the first circle screen shipped with
+   * an empty 320px column beside it. Two halves of one rule, and only one of
+   * them had been written. */
+  const paneOpen = state.pane !== null && !isContributedScreenId(state.screen)
 
   return (
     <div className={styles.root} ref={setRoot} data-theme={state.theme} data-platform={platform}>

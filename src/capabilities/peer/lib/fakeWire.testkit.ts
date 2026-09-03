@@ -1,5 +1,9 @@
 import { grantCovers } from './grants'
 import type {
+  PagePublisher,
+  KnownPerson,
+  PairKind,
+  PersonStatus,
   BlobRequest,
   HashResult,
   PairOffer,
@@ -95,6 +99,8 @@ class FakeWireImpl implements FakeWire {
   pendingRole: PeerRole | null = null
   readonly blobs = new Map<string, Uint8Array>()
   landBlob: FakeWire['landBlob'] = null
+  /** What the standing offer is for — see `pairBegin`. */
+  offerKind: PairKind = 'device'
   serveBlob: FakeWire['serveBlob'] = null
 
   private readonly name: string
@@ -231,7 +237,12 @@ class FakeWireImpl implements FakeWire {
     return held ? grantCovers(held.grants, grant) : false
   }
 
-  async pairBegin(name?: string): Promise<PairOffer> {
+  /* ⚠️ **THE KIND IS MODELLED, AND IT USED TO BE DROPPED.** The fake ignored
+     the parameter entirely, so no test could exercise the filter that stops
+     Devices answering a circle request — and a fake that silently discards the
+     one field a security decision reads is worse than no fake. */
+  async pairBegin(name?: string, kind: PairKind = 'device'): Promise<PairOffer> {
+    this.offerKind = kind
     const secret = `s${Math.random().toString(36).slice(2)}`
     const offer: PairOffer = {
       url: `paper://pair?v=1&id=${this.id}&s=${secret}`,
@@ -263,9 +274,10 @@ class FakeWireImpl implements FakeWire {
     this.offer = null
     const satchel = pending.satchel
     if (!accept) {
-      const refusal: PairingResult = { ok: false, id: this.id, reason: 'refused' }
+      const kind = this.offerKind
+      const refusal: PairingResult = { ok: false, id: this.id, reason: 'refused', kind }
       satchel.emit('pairing-result', refusal)
-      this.emit('pairing-result', { ok: false, id: satchel.id, reason: 'refused' })
+      this.emit('pairing-result', { ok: false, id: satchel.id, reason: 'refused', kind })
       return null
     }
     const record: WirePeer = {
@@ -289,8 +301,9 @@ class FakeWireImpl implements FakeWire {
       lastSeenAt: Date.now(),
       lastAddrs: [],
     })
-    satchel.emit('pairing-result', { ok: true, id: this.id, name: this.name, platform: 'test', role: 'shelf' })
-    this.emit('pairing-result', { ok: true, id: satchel.id, name: pending.name, platform: 'test', role: 'satchel' })
+    const kind = this.offerKind
+    satchel.emit('pairing-result', { ok: true, id: this.id, name: this.name, platform: 'test', role: 'shelf', kind })
+    this.emit('pairing-result', { ok: true, id: satchel.id, name: pending.name, platform: 'test', role: 'satchel', kind })
     return record
   }
 
@@ -303,7 +316,16 @@ class FakeWireImpl implements FakeWire {
     const sas = '000000'
     const attemptId = `att-${this.id}`
     shelf.pending = { satchel: this, name: name ?? this.name, grants: grants ?? [], attemptId }
-    shelf.emit('pairing-pending', { id: this.id, name: name ?? this.name, platform: 'test', sas, attemptId })
+    shelf.emit('pairing-pending', {
+      id: this.id,
+      name: name ?? this.name,
+      platform: 'test',
+      sas,
+      attemptId,
+      /* The OFFERER's kind decides — the real `serve_inner` refuses a hello
+         whose kind disagrees with the offer before it emits anything. */
+      kind: shelf.offerKind,
+    })
     return { sas }
   }
 
@@ -419,6 +441,112 @@ class FakeWireImpl implements FakeWire {
   }
   onTransfer(fn: (e: TransferProgress) => void): Unsubscribe {
     return this.on('transfer', fn)
+  }
+
+  /* ── the person identity and the circle (WI-22.B1/B3) ────────────────
+   *
+   * ⚠️ **REAL BEHAVIOUR, NOT STUBS THAT RESOLVE.** The one property a panel
+   * test needs to hold is that a status call MINTS NOTHING — a fake whose
+   * `personStatus` invented an identity would make the panel look correct
+   * while the real command's laziness was broken, which is precisely the
+   * defect the Rust side has a test for. So this models the same state
+   * machine: absent until `personEnsure`, and phrase-bearing only then. */
+  private phraseHeld: string | null = null
+  private people: KnownPerson[] = []
+
+  personStatus(devices: number, circle: number): Promise<PersonStatus> {
+    return Promise.resolve({
+      personId: this.phraseHeld === null ? null : `person-${this.id}`,
+      hasIdentity: this.phraseHeld !== null,
+      canShowPhrase: this.phraseHeld !== null,
+      role: this.phraseHeld === null ? null : 'home',
+      devices,
+      circle,
+      atRisk: this.phraseHeld !== null && devices <= 1,
+    })
+  }
+  personEnsure(): Promise<string> {
+    this.phraseHeld ??= 'abandon '.repeat(11).concat('about').trim()
+    return Promise.resolve(`person-${this.id}`)
+  }
+  personPhrase(): Promise<string | null> {
+    return Promise.resolve(this.phraseHeld)
+  }
+  personRestore(words: string): Promise<string> {
+    this.phraseHeld = words
+    return Promise.resolve(`person-${this.id}`)
+  }
+  personForget(): Promise<void> {
+    this.phraseHeld = null
+    return Promise.resolve()
+  }
+  circlePeople(): Promise<readonly KnownPerson[]> {
+    return Promise.resolve([...this.people])
+  }
+  circleRemember(person: string, displayName: string): Promise<void> {
+    const known = this.people.find((one) => one.person === person)
+    if (known === undefined) {
+      this.people.push({
+        person,
+        displayName,
+        roster: { epoch: 0, hlc: 0 },
+        revoked: [],
+      })
+    } else {
+      this.people = this.people.map((one) =>
+        one.person === person ? { ...one, displayName } : one,
+      )
+    }
+    return Promise.resolve()
+  }
+  circleForget(person: string): Promise<void> {
+    this.people = this.people.filter((one) => one.person !== person)
+    return Promise.resolve()
+  }
+
+  /** Devices this fake will admit, and what each dial was asked to reach. */
+  admits: readonly string[] = []
+  introduced: { readonly device: string; readonly addrs: readonly string[] | undefined }[] = []
+
+  circleIntroduce(device: string, addrs?: readonly string[]): Promise<boolean> {
+    this.introduced.push({ device, addrs })
+    /* Resolves either way: a refusal is an ANSWER. A fake that rejected would
+       let a surface pass its tests while showing "something went wrong" for
+       the ordinary case of not being known yet. */
+    return Promise.resolve(this.admits.includes(device))
+  }
+
+  revoked: string[] = []
+
+  /** What this fake publishes with. `null` until a test sets one. */
+  mine: PagePublisher | null = null
+
+  circleMine(): Promise<PagePublisher | null> {
+    return Promise.resolve(this.mine)
+  }
+
+  circleRevoke(device: string): Promise<void> {
+    this.revoked.push(device)
+    this.admits = this.admits.filter((one) => one !== device)
+    return Promise.resolve()
+  }
+
+  /** What this fake was asked to sign, and what it answered with. */
+  signed: string[] = []
+
+  pageSign(message: string): Promise<string> {
+    /* ⚠️ **THE FAKE ENFORCES THE DOMAIN THE REAL ONE DOES.** A fake that signs
+       anything lets a caller reach production with bytes Rust will refuse, and
+       the failure lands on a reader rather than in this suite. */
+    if (!/^paper\.circle\.\d+\.page\n/u.test(message)) {
+      return Promise.reject(new Error('this device signs pages and nothing else'))
+    }
+    this.signed.push(message)
+    /* Deterministic and message-dependent, so a test can tell two pages'
+       signatures apart without pulling in real crypto. */
+    let hash = 0
+    for (const ch of message) hash = (hash * 31 + ch.codePointAt(0)!) >>> 0
+    return Promise.resolve(hash.toString(16).padStart(8, '0').repeat(16))
   }
 }
 

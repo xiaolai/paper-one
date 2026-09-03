@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import type { ScreenContribution } from '../kernel'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   isCapabilityId,
@@ -1194,5 +1195,189 @@ describe('capability id validation is not reachable from outside', () => {
     for (const bad of ['', 'Sync', '2fast', 'a/b', 'a.b', 'a b', '-a', 'a_b', null, 42]) {
       expect(isCapabilityId(bad as unknown)).toBe(false)
     }
+  })
+})
+
+describe('screens — a capability may own a whole view (WI-22.D3)', () => {
+  const screen = (id: string) => ({ id: id as `${string}:${string}`, label: 'Circle', render: () => null })
+
+  it('collects them from every capability that started', async () => {
+    const composition = await composeCapabilities(
+      [cap('alpha', { screens: [screen('alpha:one')] })],
+      api(),
+      new AbortController().signal,
+    )
+    expect(composition.screens.map((one) => one.id)).toEqual(['alpha:one'])
+    composition.dispose()
+  })
+
+  it('namespaces them under their owner, like every other contribution', async () => {
+    /* A screen id with no colon would collide with `library` or `reader` — the
+       kernel's own, neither of which has one. */
+    await expect(
+      composeCapabilities([cap('alpha', { screens: [screen('circle')] })], api(), new AbortController().signal),
+    ).rejects.toThrow(/must be "alpha:<name>"/u)
+  })
+
+  it('refuses two capabilities claiming one screen id', async () => {
+    await expect(
+      composeCapabilities(
+        [cap('alpha', { screens: [screen('alpha:one')] }), cap('beta', { screens: [{ ...screen('alpha:one') }] })],
+        api(),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/registered twice|must be "beta:<name>"/u)
+  })
+
+  it('refuses one with no render() to call', async () => {
+    /* An id that validates and a `render` that is undefined takes the whole
+       window when a reader switches to it, and fails in the kernel's render
+       path rather than at composition — the wrong end. */
+    const broken = { ...screen('alpha:one'), render: undefined } as unknown as ScreenContribution
+    await expect(
+      composeCapabilities([cap('alpha', { screens: [broken] })], api(), new AbortController().signal),
+    ).rejects.toThrow(/no render\(\) to call/u)
+  })
+
+  it('drops the screens of a capability whose start threw', async () => {
+    /* A screen contributed by something that is not running is a window with
+       nothing behind it. */
+    const composition = await composeCapabilities(
+      [cap('good', { screens: [screen('good:one')] }), cap('bad', { screens: [screen('bad:one')] }, [], { throwOnStart: new Error('no') })],
+      api(),
+      new AbortController().signal,
+    )
+    expect(composition.screens.map((one) => one.id)).toEqual(['good:one'])
+    composition.dispose()
+  })
+
+  it('answers nothing once disposed', async () => {
+    const composition = await composeCapabilities(
+      [cap('alpha', { screens: [screen('alpha:one')] })],
+      api(),
+      new AbortController().signal,
+    )
+    expect(composition.screens).toHaveLength(1)
+    composition.dispose()
+    expect(composition.screens).toEqual([])
+  })
+})
+
+describe('overlays — the fourth contribution type (WI-22.D1)', () => {
+  const overlay = (id: string, annotations: readonly unknown[] = []) => ({
+    id,
+    forBook: () => Promise.resolve(annotations as never),
+    subscribe: () => () => {},
+  })
+
+  it('collects them from every capability that started', async () => {
+    const composition = await composeCapabilities(
+      [
+        cap('alpha', { overlays: [overlay('alpha:shared')] }),
+        cap('beta', { overlays: [overlay('beta:shared')] }),
+      ],
+      api(),
+      new AbortController().signal,
+    )
+    expect(composition.overlays.map((one) => one.id)).toEqual(['alpha:shared', 'beta:shared'])
+    composition.dispose()
+  })
+
+  it('namespaces them under their owner, like every other contribution', async () => {
+    /* Decision 5. An unnamespaced overlay id would make "who drew this mark"
+       unanswerable at exactly the surface where the answer matters most. */
+    await expect(
+      composeCapabilities(
+        [cap('alpha', { overlays: [overlay('shared')] })],
+        api(),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/must be "alpha:<name>"/u)
+  })
+
+  it('refuses two capabilities claiming one overlay id', async () => {
+    await expect(
+      composeCapabilities(
+        [
+          cap('alpha', { overlays: [overlay('alpha:shared')] }),
+          cap('beta', { overlays: [{ ...overlay('alpha:shared') }] }),
+        ],
+        api(),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/registered twice|must be "beta:<name>"/u)
+  })
+
+  it.each(['forBook', 'subscribe'])(
+    'refuses one that has no %s() to call',
+    async (method) => {
+      /* ⚠️ The pane above is refused for naming no screen; this is the same
+         check on the same reasoning. An id that validates and a `subscribe`
+         that is undefined throws inside the reader's own effect — so a
+         capability's malformed contribution takes down the book being read,
+         rather than the composition that wired it. */
+      const broken = { ...overlay('alpha:shared'), [method]: undefined }
+      await expect(
+        composeCapabilities(
+          [cap('alpha', { overlays: [broken] })],
+          api(),
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(new RegExp(`no ${method}\\(\\) to call`, 'u'))
+    },
+  )
+
+  it('holds the methods it validated, not whatever the capability holds later', async () => {
+    /* ⚠️ Freezing the ARRAY leaves the contributed objects live, so a
+       capability's own `start` could replace `subscribe` with `undefined`
+       after the check passed — the validation would then guarantee nothing and
+       the failure would land inside the reader's effect. */
+    const mutable = { ...overlay('alpha:shared') }
+    const composition = await composeCapabilities(
+      [cap('alpha', { overlays: [mutable] })],
+      api(),
+      new AbortController().signal,
+    )
+
+    /* The capability keeps its own object and may do as it likes with it. */
+    ;(mutable as { subscribe?: unknown }).subscribe = undefined
+    ;(mutable as { forBook?: unknown }).forBook = undefined
+
+    const kept = composition.overlays[0]
+    expect(typeof kept?.subscribe).toBe('function')
+    expect(typeof kept?.forBook).toBe('function')
+    expect(kept?.subscribe(() => {})).toBeTypeOf('function')
+    composition.dispose()
+  })
+
+  it('drops the overlays of a capability whose start threw', async () => {
+    /* ⚠️ Decision 9, applied here for a reason the other contributions do not
+       have: a pane a failed capability contributed is an empty panel, and an
+       overlay it contributed is a MARK DRAWN IN THE BOOK by something that is
+       not running. */
+    const composition = await composeCapabilities(
+      [
+        cap('good', { overlays: [overlay('good:shared')] }),
+        cap('bad', { overlays: [overlay('bad:shared')] }, [], { throwOnStart: new Error('no') }),
+      ],
+      api(),
+      new AbortController().signal,
+    )
+    /* A failed start is tolerated by default — every other capability still
+       starts, and the failure is recorded rather than thrown. */
+    expect(composition.failures.map((one) => one.id)).toEqual(['bad'])
+    expect(composition.overlays.map((one) => one.id)).toEqual(['good:shared'])
+    composition.dispose()
+  })
+
+  it('contributes nothing once disposed, so a torn-down mark leaves the page', async () => {
+    const composition = await composeCapabilities(
+      [cap('alpha', { overlays: [overlay('alpha:shared')] })],
+      api(),
+      new AbortController().signal,
+    )
+    expect(composition.overlays).toHaveLength(1)
+    composition.dispose()
+    expect(composition.overlays).toEqual([])
   })
 })

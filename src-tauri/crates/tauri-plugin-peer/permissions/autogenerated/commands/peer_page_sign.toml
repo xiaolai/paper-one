@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-page-sign"
+description = "Enables the peer_page_sign command without any pre-configured scope."
+commands.allow = ["peer_page_sign"]
+
+[[permission]]
+identifier = "deny-peer-page-sign"
+description = "Denies the peer_page_sign command without any pre-configured scope."
+commands.deny = ["peer_page_sign"]

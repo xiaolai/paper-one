@@ -5,7 +5,10 @@ description = """
 The commands a Paper webview needs from the peer plugin: the endpoint's status,
 the device's role, the storage root; the
 paired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);
-sessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).
+sessions (ready, connect, send, recv, close) and blob transfers (fetch, hash);
+and the person identity (status, ensure, phrase, restore, forget, delegate) —
+WI-22.B1, whose root key never leaves the keychain except as the twelve words a
+reader asked to see.
 Every path the plugin touches is validated to lie inside the data root, and
 every session is accepted only from a persisted peer.
 """
@@ -29,4 +32,17 @@ permissions = [
     "allow-peer-close",
     "allow-peer-blob-fetch",
     "allow-peer-hash-file",
+    "allow-peer-person-status",
+    "allow-peer-person-ensure",
+    "allow-peer-person-phrase",
+    "allow-peer-person-restore",
+    "allow-peer-person-forget",
+    "allow-peer-person-delegate",
+    "allow-peer-circle-people",
+    "allow-peer-circle-introduce",
+    "allow-peer-circle-mine",
+    "allow-peer-page-sign",
+    "allow-peer-circle-remember",
+    "allow-peer-circle-revoke",
+    "allow-peer-circle-forget",
 ]

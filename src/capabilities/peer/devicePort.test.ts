@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { WirePeer } from './lib/wire'
-import { devicePortOver, deviceRow, readRole, releasePeer, serveWhenShelf } from './index'
+import { devicePortOver, deviceRow, personPortOver, readRole, releasePeer, serveWhenShelf } from './index'
 
 /**
  * THE `device` NOUN'S ADAPTER — the three operations that change who this
@@ -413,5 +413,100 @@ describe('serveWhenShelf', () => {
     const world = port('shelf')
     await serveWhenShelf({ port: world.port, stopped: () => false, diagnostics: quiet })([] as never)
     expect(world.state.served).toBe(0)
+  })
+})
+
+describe('the person port (WI-22.B3)', () => {
+  const wireWith = (over: Record<string, unknown> = {}) =>
+    ({
+      pairBegin: vi.fn(() => Promise.resolve({ url: 'u', svg: '', expiresAt: 0 })),
+      pairFromUri: vi.fn(() => Promise.resolve({ sas: '000000' })),
+      pairConfirm: vi.fn(() => Promise.resolve(null)),
+      pairCancel: vi.fn(() => Promise.resolve()),
+      ...over,
+    }) as never
+
+  it('offers a CIRCLE pairing, never a device one', async () => {
+    /* ⚠️ **THE KIND IS THE WHOLE POINT AND IT WAS UNTESTED.** A device offer
+       refuses a shelf, so a circle started as one would fail at the far end
+       with nothing here to say why. The panel's own test could not catch this:
+       it only saw that `offer` had been called. */
+    const wire = wireWith()
+    await personPortOver(wire).offer()
+
+    expect((wire as unknown as { pairBegin: ReturnType<typeof vi.fn> }).pairBegin).toHaveBeenCalledWith(
+      undefined,
+      'circle',
+    )
+  })
+
+  it('joins with the circle grant, so the far side files it as one', async () => {
+    const wire = wireWith()
+    await personPortOver(wire).join('paper://pair?s=x')
+
+    expect((wire as unknown as { pairFromUri: ReturnType<typeof vi.fn> }).pairFromUri).toHaveBeenCalledWith(
+      'paper://pair?s=x',
+      undefined,
+      ['circle:read'],
+    )
+  })
+
+  it('ignores a DEVICE attempt, so it cannot answer one with circle grants', async () => {
+    /* ⚠️ **TWO SURFACES, ONE EVENT STREAM, DIFFERENT GRANTS.** Devices confirms
+       with a reader's own-device grants; the circle confirms with
+       `circle:read`. Before the events carried a `kind`, whichever panel was
+       mounted answered whatever arrived — so Devices could hand another PERSON
+       the permissions meant for the reader's own phone, and the circle could
+       file the reader's own phone with circle access only.
+
+       Filtered in the PORT rather than in each panel, so a third consumer
+       inherits the rule instead of re-deriving it. */
+    const seen: string[] = []
+    /* An array, not a `let`: TypeScript's control flow cannot see an
+       assignment made inside a callback, so a `let` narrows to `never` and
+       calling it does not compile. */
+    const emit: ((e: unknown) => void)[] = []
+    const wire = wireWith({
+      onPairingPending: (fn: (e: unknown) => void) => {
+        emit.push(fn)
+        return () => {}
+      },
+    })
+    personPortOver(wire).onPending((e) => seen.push(e.name))
+
+    emit[0]?.({ id: 'd', name: 'my phone', platform: 'macos', sas: '1', attemptId: 'a', kind: 'device' })
+    emit[0]?.({ id: 'c', name: 'a friend', platform: 'macos', sas: '2', attemptId: 'b', kind: 'circle' })
+
+    expect(seen).toEqual(['a friend'])
+  })
+
+  it('ignores a device RESULT for the same reason', async () => {
+    const seen: boolean[] = []
+    const emit: ((e: unknown) => void)[] = []
+    const wire = wireWith({
+      onPairingResult: (fn: (e: unknown) => void) => {
+        emit.push(fn)
+        return () => {}
+      },
+    })
+    personPortOver(wire).onResult((e) => seen.push(e.ok))
+
+    emit[0]?.({ ok: true, id: 'd', kind: 'device' })
+    emit[0]?.({ ok: false, id: 'c', kind: 'circle' })
+
+    expect(seen).toEqual([false])
+  })
+
+  it('carries the attempt id through a confirmation', async () => {
+    /* Bound to the attempt the human saw, not to whatever a pre-played QR has
+       since started — the reason `attemptId` exists at all. */
+    const wire = wireWith()
+    await personPortOver(wire).confirm(true, 'attempt-9')
+
+    expect((wire as unknown as { pairConfirm: ReturnType<typeof vi.fn> }).pairConfirm).toHaveBeenCalledWith(
+      true,
+      ['circle:read'],
+      'attempt-9',
+    )
   })
 })

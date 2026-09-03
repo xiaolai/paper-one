@@ -121,6 +121,65 @@ fn exclude_from_backup(dir: &Path) {
 #[cfg(not(target_os = "macos"))]
 fn exclude_from_backup(_dir: &Path) {}
 
+/// The one thing this device's endpoint key may be asked to sign.
+///
+/// ⚠️ **A COMMAND THAT SIGNS ARBITRARY BYTES WITH THE ENDPOINT KEY IS A SIGNING
+/// ORACLE, AND THIS ONE IS REACHABLE FROM THE RENDERER.** The same key
+/// authenticates the QUIC connection, so bytes signed for one purpose and
+/// presented as another is the classic cross-protocol substitution — the exact
+/// attack `signedBytes` prefixes its domain to prevent. Confining the command
+/// to this prefix is that defence made structural rather than conventional.
+///
+/// `page` and nothing else: a delegation and a roster are signed by the PERSON
+/// root, in `person.rs`, on a key the renderer can never reach. If a second
+/// device-signed kind is ever wanted, widening this is the deliberate act that
+/// grants it.
+const PAGE_DOMAIN: &str = "paper.circle.";
+
+/// Whether `message` is a page's signed bytes and not something else.
+///
+/// `paper.circle.<version>.page\n…` — see `signedBytes` in `page.ts`, which is
+/// the ONE place these bytes are built. The version is not pinned here: a v2
+/// page is still a page, and a Rust constant that had to move in lockstep with
+/// a TypeScript one is a second list of the kind `commands.rs` opens by warning
+/// about.
+fn is_page_bytes(message: &str) -> bool {
+    let Some(rest) = message.strip_prefix(PAGE_DOMAIN) else {
+        return false;
+    };
+    let Some((version, tail)) = rest.split_once('.') else {
+        return false;
+    };
+    !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()) && tail.starts_with("page\n")
+}
+
+/// Sign a page with this device's endpoint key.
+///
+/// ⚠️ **THE DEVICE SIGNS PAGES; THE PERSON SIGNS DELEGATIONS.** A page is
+/// authorised by the delegation it carries, which is why it may be signed by a
+/// key that lives on disk rather than in the keychain — and why losing a device
+/// costs a revocation rather than the identity.
+pub fn sign_page(root: &Path, message: &str) -> Result<String> {
+    if !is_page_bytes(message) {
+        return Err(Error::Identity(
+            "this device signs pages and nothing else".into(),
+        ));
+    }
+    let key = load_or_create(root)?;
+    Ok(hex(&key.sign(message.as_bytes()).to_bytes()))
+}
+
+/// Lower-case hex. `person.rs` has its own; this module may not import from it
+/// (it is the lower layer), and eight lines is cheaper than a shared crate.
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from_digit((byte >> 4) as u32, 16).expect("a nibble is a hex digit"));
+        out.push(char::from_digit((byte & 0x0f) as u32, 16).expect("a nibble is a hex digit"));
+    }
+    out
+}
+
 fn load(path: &Path, len: u64) -> Result<SecretKey> {
     if len != KEY_LEN as u64 {
         return Err(Error::IdentityCorrupt {
@@ -443,5 +502,95 @@ mod tests {
         assert_eq!(loaded.public(), key.public());
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn the_device_signs_pages_and_nothing_else() {
+        /* ⚠️ **A COMMAND THAT SIGNS ARBITRARY BYTES WITH THE ENDPOINT KEY IS A
+        SIGNING ORACLE, AND IT IS REACHABLE FROM THE RENDERER.** The same key
+        authenticates every QUIC connection this device makes, so bytes signed
+        for one purpose and presented as another is cross-protocol
+        substitution — the attack `signedBytes` prefixes a domain to prevent.
+        Confining it here makes that defence structural. */
+        let dir = ScratchDir::new("sign-page");
+        assert!(sign_page(dir.path(), "paper.circle.1.page\n{}").is_ok());
+
+        for refused in [
+            /* Another kind under the same domain — a delegation or a roster is
+            the PERSON's to sign, on a key the renderer cannot reach. */
+            "paper.circle.1.roster\n{}",
+            "paper.circle.1.delegation\n{}",
+            "paper.circle.1.revocation\n{}",
+            "paper.circle.1.succession\n{}",
+            /* Another protocol entirely. */
+            "one.paper.reader/pair/1",
+            "paper/circle/roster/1\n{}",
+            /* The prefix without the structure. */
+            "",
+            "paper.circle.",
+            "paper.circle.page\n{}",
+            "paper.circle..page\n{}",
+            "paper.circle.1.page",
+            "paper.circle.x.page\n{}",
+            /* And the prefix buried rather than leading, which a `contains`
+            would have accepted. */
+            "x paper.circle.1.page\n{}",
+        ] {
+            assert!(
+                sign_page(dir.path(), refused).is_err(),
+                "signed something that is not a page: {refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_signature_verifies_under_this_devices_endpoint_id() {
+        /* The signature is worth nothing unless the key a peer already knows —
+        the endpoint id it dialled — is the key that verifies it. */
+        let dir = ScratchDir::new("sign-verify");
+        let message = "paper.circle.1.page\n{\"v\":1}";
+        let sig = sign_page(dir.path(), message).unwrap();
+        let key = load_or_create(dir.path()).unwrap();
+
+        assert_eq!(sig.len(), 128, "64 bytes as hex");
+        assert!(key
+            .public()
+            .verify(message.as_bytes(), &parse_sig(&sig))
+            .is_ok());
+        /* And not over anything else. */
+        assert!(key
+            .public()
+            .verify(b"paper.circle.1.page\n{}", &parse_sig(&sig))
+            .is_err());
+    }
+
+    #[test]
+    fn signing_twice_gives_the_same_bytes_because_ed25519_is_deterministic() {
+        /* The property the cross-language golden vector in `person.rs` rests
+        on. A signature with randomness in it could not be pinned at all. */
+        let dir = ScratchDir::new("sign-twice");
+        let message = "paper.circle.1.page\n{}";
+        assert_eq!(
+            sign_page(dir.path(), message).unwrap(),
+            sign_page(dir.path(), message).unwrap()
+        );
+    }
+
+    #[test]
+    fn hex_is_lower_case_and_zero_padded() {
+        /* ⚠️ **A DROPPED LEADING ZERO SHORTENS THE STRING AND MOVES EVERY BYTE
+        AFTER IT.** The signature then verifies nowhere, and the symptom is
+        "some pages fail" — the ones whose signature happens to contain a byte
+        below 0x10, which is most of them, sometimes. */
+        assert_eq!(hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
+        assert_eq!(hex(&[]), "");
+    }
+
+    fn parse_sig(hex: &str) -> iroh::Signature {
+        let mut bytes = [0u8; 64];
+        for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+            bytes[i] = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+        }
+        iroh::Signature::from_bytes(&bytes)
     }
 }

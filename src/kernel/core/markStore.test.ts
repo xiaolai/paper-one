@@ -4,6 +4,7 @@ import { fakeFs } from './indexFsFake.testkit'
 import { createMarkStore } from './markStore'
 import { bookmarkFrom, createMark, type Mark, type NewMark } from './marks'
 import { writeQueue } from './writeQueue'
+import { resolvedCfiForTesting } from './resolvedCfi.testkit'
 
 /**
  * The split at the store's door.
@@ -557,5 +558,95 @@ describe('a cross-book scan that fails', () => {
     broken = false
     await marks.loadAll()
     expect(marks.getSnapshot().scanFailed).toBe(false)
+  })
+})
+
+describe('place — WI-22.A2', () => {
+  const imported = (over: Partial<NewMark> = {}): Mark =>
+    createMark({
+      bookId: BOOK,
+      cfi: '',
+      sectionIndex: 0,
+      text: 'driving off the spleen',
+      prefix: '',
+      suffix: '',
+      note: 'what I thought about it',
+      kind: 'highlight',
+      tint: 'green',
+      style: 'fill',
+      chapter: '',
+      unplaced: { reason: 'foreign-build', fromBook: 'book:elsewhere' },
+      ...over,
+    })
+
+  it('moves an unplaced mark into `current`, where the painter reads from', async () => {
+    /* ⚠️ **THE ACCEPTANCE, END TO END THROUGH THE STORE.** `MarkSnapshot`
+       splits three classes at the one door every subscriber reads through:
+       an unplaced mark is in `unplaced` and NOT in `current`, which is what
+       makes "the painter is never handed an anchorless mark" true by
+       construction. Placing it has to move it between those two lists, or
+       the write landed on disk and nothing on screen changed. */
+    const { store: marks } = store()
+    const one = imported()
+    await marks.open(BOOK)
+    await marks.addMany(BOOK, [one])
+
+    expect(marks.getSnapshot().unplaced.map((m) => m.id)).toEqual([one.id])
+    expect(marks.getSnapshot().current).toEqual([])
+
+    await marks.place(one.id, resolvedCfiForTesting('epubcfi(/6/8!/4/2,/1:0,/1:6)'), 3, BOOK)
+
+    expect(marks.getSnapshot().unplaced).toEqual([])
+    expect(marks.getSnapshot().current.map((m) => m.id)).toEqual([one.id])
+    expect(marks.getSnapshot().current[0]!.sectionIndex).toBe(3)
+  })
+
+  it('writes it to disk, so it survives a relaunch', async () => {
+    /* ⚠️ **THE FALSIFIER THE PLAN NAMES**: *"relaunch and watch `marks.json`.
+       If a mark that resolved is unplaced again, the write did not happen."*
+       A second store over the same filesystem is that relaunch — a mark
+       resolved only in memory passes every assertion above and fails here. */
+    const { fs, store: marks } = store()
+    const one = imported()
+    await marks.open(BOOK)
+    await marks.addMany(BOOK, [one])
+    await marks.place(one.id, resolvedCfiForTesting('epubcfi(/6/8!/4/2,/1:0,/1:6)'), 3, BOOK)
+
+    const relaunched = createMarkStore({ fs, queue: writeQueue() })
+    await relaunched.open(BOOK)
+
+    expect(relaunched.getSnapshot().unplaced).toEqual([])
+    const after = relaunched.getSnapshot().current
+    expect(after.map((m) => m.id)).toEqual([one.id])
+    expect(after[0]!.cfi).toBe('epubcfi(/6/8!/4/2,/1:0,/1:6)')
+    expect(after[0]!.sectionIndex).toBe(3)
+    /* The reader's own note came with it. A placement that rewrote the row
+       rather than moving its anchor would lose what they wrote. */
+    expect(after[0]!.note).toBe('what I thought about it')
+  })
+
+  it('rejects an id the store does not know, rather than passing quietly', async () => {
+    /* The twin of `remove`, `updateNote` and `setTint`: *"a mark none of them
+       know is a rejection, not a silent no-op."* A pass that has drifted from
+       the store must say so. */
+    const { store: marks } = store()
+    await marks.open(BOOK)
+    await expect(marks.place('nobody', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 1, BOOK)).rejects.toThrow(/no mark/u)
+  })
+
+  it('leaves an already-placed mark exactly as it was', async () => {
+    /* Overwriting a good anchor with a re-derived one is how a mark moves off
+       the words it was made on — `keyFor` refuses to cache one for the same
+       reason. */
+    const { store: marks } = store()
+    const mine = highlight()
+    await marks.open(BOOK)
+    await marks.add(mine)
+    await marks.place(mine.id, resolvedCfiForTesting('epubcfi(/6/99!/4/2)'), 7, BOOK)
+
+    const after = marks.getSnapshot().current
+    expect(after).toHaveLength(1)
+    expect(after[0]!.cfi).toBe(mine.cfi)
+    expect(after[0]!.sectionIndex).toBe(0)
   })
 })

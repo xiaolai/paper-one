@@ -319,6 +319,78 @@
           "markdownDescription": "Denies the peer_blob_fetch command without any pre-configured scope."
         },
         {
+          "description": "Enables the peer_circle_forget command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-circle-forget",
+          "markdownDescription": "Enables the peer_circle_forget command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_circle_forget command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-circle-forget",
+          "markdownDescription": "Denies the peer_circle_forget command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_circle_introduce command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-circle-introduce",
+          "markdownDescription": "Enables the peer_circle_introduce command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_circle_introduce command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-circle-introduce",
+          "markdownDescription": "Denies the peer_circle_introduce command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_circle_mine command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-circle-mine",
+          "markdownDescription": "Enables the peer_circle_mine command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_circle_mine command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-circle-mine",
+          "markdownDescription": "Denies the peer_circle_mine command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_circle_people command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-circle-people",
+          "markdownDescription": "Enables the peer_circle_people command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_circle_people command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-circle-people",
+          "markdownDescription": "Denies the peer_circle_people command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_circle_remember command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-circle-remember",
+          "markdownDescription": "Enables the peer_circle_remember command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_circle_remember command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-circle-remember",
+          "markdownDescription": "Denies the peer_circle_remember command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_circle_revoke command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-circle-revoke",
+          "markdownDescription": "Enables the peer_circle_revoke command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_circle_revoke command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-circle-revoke",
+          "markdownDescription": "Denies the peer_circle_revoke command without any pre-configured scope."
+        },
+        {
           "description": "Enables the peer_close command without any pre-configured scope.",
           "type": "string",
           "const": "allow-peer-close",
@@ -403,6 +475,18 @@
           "markdownDescription": "Denies the peer_local_role command without any pre-configured scope."
         },
         {
+          "description": "Enables the peer_page_sign command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-page-sign",
+          "markdownDescription": "Enables the peer_page_sign command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_page_sign command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-page-sign",
+          "markdownDescription": "Denies the peer_page_sign command without any pre-configured scope."
+        },
+        {
           "description": "Enables the peer_pair_begin command without any pre-configured scope.",
           "type": "string",
           "const": "allow-peer-pair-begin",
@@ -449,6 +533,78 @@
           "type": "string",
           "const": "deny-peer-pair-from-uri",
           "markdownDescription": "Denies the peer_pair_from_uri command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_person_delegate command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-person-delegate",
+          "markdownDescription": "Enables the peer_person_delegate command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_person_delegate command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-person-delegate",
+          "markdownDescription": "Denies the peer_person_delegate command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_person_ensure command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-person-ensure",
+          "markdownDescription": "Enables the peer_person_ensure command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_person_ensure command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-person-ensure",
+          "markdownDescription": "Denies the peer_person_ensure command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_person_forget command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-person-forget",
+          "markdownDescription": "Enables the peer_person_forget command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_person_forget command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-person-forget",
+          "markdownDescription": "Denies the peer_person_forget command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_person_phrase command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-person-phrase",
+          "markdownDescription": "Enables the peer_person_phrase command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_person_phrase command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-person-phrase",
+          "markdownDescription": "Denies the peer_person_phrase command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_person_restore command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-person-restore",
+          "markdownDescription": "Enables the peer_person_restore command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_person_restore command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-person-restore",
+          "markdownDescription": "Denies the peer_person_restore command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the peer_person_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-person-status",
+          "markdownDescription": "Enables the peer_person_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_person_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-person-status",
+          "markdownDescription": "Denies the peer_person_status command without any pre-configured scope."
         },
         {
           "description": "Enables the peer_ready command without any pre-configured scope.",
@@ -523,10 +679,10 @@
           "markdownDescription": "Denies the peer_status command without any pre-configured scope."
         },
         {
-          "description": "The commands a Paper webview needs from the peer plugin: the endpoint's status,\nthe device's role, the storage root; the\npaired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);\nsessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).\nEvery path the plugin touches is validated to lie inside the data root, and\nevery session is accepted only from a persisted peer.\n\n#### This default permission set includes:\n\n- `allow-peer-status`\n- `allow-peer-local-role`\n- `allow-peer-set-local-role`\n- `allow-paper-data-root`\n- `allow-peer-list-peers`\n- `allow-peer-forget-peer`\n- `allow-peer-set-grants`\n- `allow-peer-has-grant`\n- `allow-peer-pair-begin`\n- `allow-peer-pair-cancel`\n- `allow-peer-pair-confirm`\n- `allow-peer-pair-from-uri`\n- `allow-peer-ready`\n- `allow-peer-connect`\n- `allow-peer-send`\n- `allow-peer-session-recv`\n- `allow-peer-close`\n- `allow-peer-blob-fetch`\n- `allow-peer-hash-file`",
+          "description": "The commands a Paper webview needs from the peer plugin: the endpoint's status,\nthe device's role, the storage root; the\npaired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);\nsessions (ready, connect, send, recv, close) and blob transfers (fetch, hash);\nand the person identity (status, ensure, phrase, restore, forget, delegate) —\nWI-22.B1, whose root key never leaves the keychain except as the twelve words a\nreader asked to see.\nEvery path the plugin touches is validated to lie inside the data root, and\nevery session is accepted only from a persisted peer.\n\n#### This default permission set includes:\n\n- `allow-peer-status`\n- `allow-peer-local-role`\n- `allow-peer-set-local-role`\n- `allow-paper-data-root`\n- `allow-peer-list-peers`\n- `allow-peer-forget-peer`\n- `allow-peer-set-grants`\n- `allow-peer-has-grant`\n- `allow-peer-pair-begin`\n- `allow-peer-pair-cancel`\n- `allow-peer-pair-confirm`\n- `allow-peer-pair-from-uri`\n- `allow-peer-ready`\n- `allow-peer-connect`\n- `allow-peer-send`\n- `allow-peer-session-recv`\n- `allow-peer-close`\n- `allow-peer-blob-fetch`\n- `allow-peer-hash-file`\n- `allow-peer-person-status`\n- `allow-peer-person-ensure`\n- `allow-peer-person-phrase`\n- `allow-peer-person-restore`\n- `allow-peer-person-forget`\n- `allow-peer-person-delegate`\n- `allow-peer-circle-people`\n- `allow-peer-circle-introduce`\n- `allow-peer-circle-mine`\n- `allow-peer-page-sign`\n- `allow-peer-circle-remember`\n- `allow-peer-circle-revoke`\n- `allow-peer-circle-forget`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "The commands a Paper webview needs from the peer plugin: the endpoint's status,\nthe device's role, the storage root; the\npaired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);\nsessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).\nEvery path the plugin touches is validated to lie inside the data root, and\nevery session is accepted only from a persisted peer.\n\n#### This default permission set includes:\n\n- `allow-peer-status`\n- `allow-peer-local-role`\n- `allow-peer-set-local-role`\n- `allow-paper-data-root`\n- `allow-peer-list-peers`\n- `allow-peer-forget-peer`\n- `allow-peer-set-grants`\n- `allow-peer-has-grant`\n- `allow-peer-pair-begin`\n- `allow-peer-pair-cancel`\n- `allow-peer-pair-confirm`\n- `allow-peer-pair-from-uri`\n- `allow-peer-ready`\n- `allow-peer-connect`\n- `allow-peer-send`\n- `allow-peer-session-recv`\n- `allow-peer-close`\n- `allow-peer-blob-fetch`\n- `allow-peer-hash-file`"
+          "markdownDescription": "The commands a Paper webview needs from the peer plugin: the endpoint's status,\nthe device's role, the storage root; the\npaired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);\nsessions (ready, connect, send, recv, close) and blob transfers (fetch, hash);\nand the person identity (status, ensure, phrase, restore, forget, delegate) —\nWI-22.B1, whose root key never leaves the keychain except as the twelve words a\nreader asked to see.\nEvery path the plugin touches is validated to lie inside the data root, and\nevery session is accepted only from a persisted peer.\n\n#### This default permission set includes:\n\n- `allow-peer-status`\n- `allow-peer-local-role`\n- `allow-peer-set-local-role`\n- `allow-paper-data-root`\n- `allow-peer-list-peers`\n- `allow-peer-forget-peer`\n- `allow-peer-set-grants`\n- `allow-peer-has-grant`\n- `allow-peer-pair-begin`\n- `allow-peer-pair-cancel`\n- `allow-peer-pair-confirm`\n- `allow-peer-pair-from-uri`\n- `allow-peer-ready`\n- `allow-peer-connect`\n- `allow-peer-send`\n- `allow-peer-session-recv`\n- `allow-peer-close`\n- `allow-peer-blob-fetch`\n- `allow-peer-hash-file`\n- `allow-peer-person-status`\n- `allow-peer-person-ensure`\n- `allow-peer-person-phrase`\n- `allow-peer-person-restore`\n- `allow-peer-person-forget`\n- `allow-peer-person-delegate`\n- `allow-peer-circle-people`\n- `allow-peer-circle-introduce`\n- `allow-peer-circle-mine`\n- `allow-peer-page-sign`\n- `allow-peer-circle-remember`\n- `allow-peer-circle-revoke`\n- `allow-peer-circle-forget`"
         }
       ]
     }

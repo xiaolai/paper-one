@@ -30,6 +30,8 @@ notices test walks what is installed to hold this list to it.
 | `lucide-react` | 1.31.0 | ISC |
 | `pdfjs-dist` | 6.2.108 | Apache-2.0 |
 | `foliate-js` | github:xiaolai/foliate-js#eef3cec5b1fb0e46c3417b67ae5175cb3c38603e | MIT |
+| `@noble/ed25519` | 3.2.0 | MIT |
+| `@noble/hashes` | 2.4.0 | MIT |
 | `@tauri-apps/api` | 2.11.1 | MIT |
 | `@tauri-apps/plugin-dialog` | 2.7.2 | MIT |
 | `@tauri-apps/plugin-fs` | 2.5.1 | MIT |
@@ -325,6 +327,62 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### `@noble/ed25519`
+
+MIT, reproduced whole:
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2019 Paul Miller (https://paulmillr.com)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the “Software”), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+### `@noble/hashes`
+
+MIT, reproduced whole:
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2022 Paul Miller (https://paulmillr.com)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the “Software”), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ### `@tauri-apps/api`, `@tauri-apps/plugin-dialog`, `@tauri-apps/plugin-fs`
 
 MIT, reproduced whole:
@@ -568,7 +626,7 @@ only one of those targets links is listed anyway — naming a crate a particular
 copy does not contain costs a reader a line, and omitting one it does contain is
 the thing the licence forbids.
 
-592 crates, 322 distinct licence and notice texts.
+596 crates, 322 distinct licence and notice texts.
 
 | Crate | Version | Licence |
 | --- | --- | --- |
@@ -609,8 +667,10 @@ the thing the licence forbids.
 | `base64` | 0.22.1 | MIT OR Apache-2.0 |
 | `base64ct` | 1.8.3 | Apache-2.0 OR MIT |
 | `bincode` | 1.3.3 | MIT |
+| `bip39` | 2.2.2 | CC0-1.0 |
 | `bit-set` | 0.8.0 | Apache-2.0 OR MIT |
 | `bit-vec` | 0.8.0 | Apache-2.0 OR MIT |
+| `bitcoin_hashes` | 0.14.101 | CC0-1.0 |
 | `bitflags` | 1.3.2 | MIT/Apache-2.0 |
 | `bitflags` | 2.13.1 | MIT OR Apache-2.0 |
 | `blake3` | 1.8.6 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception |
@@ -764,6 +824,7 @@ the thing the licence forbids.
 | `heck` | 0.4.1 | MIT OR Apache-2.0 |
 | `heck` | 0.5.0 | MIT OR Apache-2.0 |
 | `hex` | 0.4.3 | MIT OR Apache-2.0 |
+| `hex-conservative` | 0.2.3 | CC0-1.0 |
 | `hickory-net` | 0.26.1 | MIT OR Apache-2.0 |
 | `hickory-proto` | 0.26.1 | MIT OR Apache-2.0 |
 | `hickory-resolver` | 0.26.1 | MIT OR Apache-2.0 |
@@ -1085,6 +1146,7 @@ the thing the licence forbids.
 | `unic-ucd-ident` | 0.9.0 | MIT/Apache-2.0 |
 | `unic-ucd-version` | 0.9.0 | MIT/Apache-2.0 |
 | `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 |
+| `unicode-normalization` | 0.1.25 | MIT OR Apache-2.0 |
 | `unicode-segmentation` | 1.13.3 | MIT OR Apache-2.0 |
 | `unicode-xid` | 0.2.6 | MIT OR Apache-2.0 |
 | `universal-hash` | 0.5.1 | MIT OR Apache-2.0 |
@@ -1167,7 +1229,7 @@ the thing the licence forbids.
 
 ### Crates that declare terms and publish no licence text
 
-These 54 crates state an SPDX identifier in their manifest and ship no licence
+These 55 crates state an SPDX identifier in their manifest and ship no licence
 file of any kind. The standard text for each identifier they name is reproduced
 below, taken verbatim from the SPDX licence list, and the copyright holders are
 the crate’s own declared authors — the substitution `cargo-about` makes for
@@ -1178,6 +1240,7 @@ than inventing one.
 | --- | --- | --- | --- |
 | `acto` | 0.8.2 | Apache-2.0 OR MIT | `Roland Kuhn <rk@rkuhn.info>` |
 | `alloc-stdlib` | 0.2.4 | BSD-3-Clause | `Daniel Reiter Horn <danielrh@dropbox.com>` |
+| `bitcoin_hashes` | 0.14.101 | CC0-1.0 | `Andrew Poelstra <apoelstra@wpsoftware.net>` |
 | `block2` | 0.5.1 | MIT | `Steven Sheldon`, `Mads Marquart <mads@marquart.dk>` |
 | `block2` | 0.6.2 | MIT | `Mads Marquart <mads@marquart.dk>` |
 | `defmt-parser` | 1.0.0 | MIT OR Apache-2.0 | `The Knurling-rs developers` |
@@ -2160,7 +2223,7 @@ END OF TERMS AND CONDITIONS
 
 #### Text 15 of 322
 
-Applies to 113 crates: `arc-swap` 1.9.2, `arrayvec` 0.7.8, `async-channel` 2.5.0, `async-executor` 1.14.0, `async-io` 2.6.0, `async-lock` 3.4.2, `async-process` 2.5.0, `async-recursion` 1.1.1, `async-signal` 0.2.14, `async-task` 4.7.1, `atomic-waker` 1.1.2, `base64` 0.21.7, `base64` 0.22.1, `bitflags` 1.3.2, `bitflags` 2.13.1, `blocking` 1.7.0, `bs58` 0.5.1, `camino` 1.2.5, `cfg-if` 1.0.4, `concurrent-queue` 2.5.0, `core-foundation` 0.10.1, `core-foundation` 0.9.4, `core-foundation-sys` 0.8.7, `core-graphics` 0.25.0, `core-graphics-types` 0.2.0, `critical-section` 1.2.0, `crossbeam-channel` 0.5.16, `crossbeam-epoch` 0.9.20, `crossbeam-utils` 0.8.22, `curve25519-dalek-derive` 0.1.1, `dbus-secret-service` 4.1.0, `displaydoc` 0.2.7, `either` 1.17.0, `embedded-io` 0.4.0, `embedded-io` 0.6.1, `equivalent` 1.0.2, `errno` 0.3.14, `event-listener` 5.4.2, `event-listener-strategy` 0.5.4, `fastrand` 2.5.0, `flate2` 1.1.9, `fnv` 1.0.7, `form_urlencoded` 1.2.2, `futures-lite` 2.6.1, `glob` 0.3.4, `hashbrown` 0.12.3, `hashbrown` 0.17.1, `heck` 0.4.1, `heck` 0.5.0, `html5ever` 0.38.0, `httparse` 1.10.1, `hyper-rustls` 0.27.9, `idna` 1.1.0, `idna_adapter` 1.2.2, `indexmap` 1.9.3, `indexmap` 2.14.0, `ipconfig` 0.3.4, `keyboard-types` 0.7.0, `libappindicator` 0.9.0, `linux-raw-sys` 0.12.1, `lock_api` 0.4.14, `log` 0.4.33, `markup5ever` 0.38.0, `mime` 0.3.17, `muda` 0.19.3, `num-traits` 0.2.19, `once_cell` 1.21.4, `openssl-probe` 0.2.1, `ordered-stream` 0.2.0, `parking` 2.2.1, `parking_lot` 0.12.5, `parking_lot_core` 0.9.12, `percent-encoding` 2.3.2, `piper` 0.2.5, `png` 0.17.16, `png` 0.18.1, `polling` 3.11.0, `postcard` 1.1.3, `postcard-derive` 0.2.2, `regex` 1.13.1, `regex-automata` 0.4.18, `regex-syntax` 0.8.11, `rustix` 1.1.4, `rustls` 0.23.43, `rustls-native-certs` 0.8.4, `scopeguard` 1.2.0, `security-framework` 3.7.0, `security-framework-sys` 2.17.0, `serde_with` 3.22.0, `serde_with_macros` 3.22.0, `servo_arc` 0.4.3, `signal-hook-registry` 1.4.8, `smallvec` 1.15.2, `smol_str` 0.1.24, `socket2` 0.6.5, `stable_deref_trait` 1.2.1, `string_cache` 0.9.0, `syn` 1.0.109, `system-configuration` 0.7.0, `system-configuration-sys` 0.6.0, `tendril` 0.5.1, `toml_datetime` 0.6.3, `tray-icon` 0.24.2, `tungstenite` 0.28.0, `tungstenite` 0.29.0, `unicode-segmentation` 1.13.3, `unicode-xid` 0.2.6, `url` 2.5.8, `uuid` 1.24.0, `web_atoms` 0.2.6, `window-vibrancy` 0.6.0, `wmi` 0.18.4, `wry` 0.55.1.
+Applies to 114 crates: `arc-swap` 1.9.2, `arrayvec` 0.7.8, `async-channel` 2.5.0, `async-executor` 1.14.0, `async-io` 2.6.0, `async-lock` 3.4.2, `async-process` 2.5.0, `async-recursion` 1.1.1, `async-signal` 0.2.14, `async-task` 4.7.1, `atomic-waker` 1.1.2, `base64` 0.21.7, `base64` 0.22.1, `bitflags` 1.3.2, `bitflags` 2.13.1, `blocking` 1.7.0, `bs58` 0.5.1, `camino` 1.2.5, `cfg-if` 1.0.4, `concurrent-queue` 2.5.0, `core-foundation` 0.10.1, `core-foundation` 0.9.4, `core-foundation-sys` 0.8.7, `core-graphics` 0.25.0, `core-graphics-types` 0.2.0, `critical-section` 1.2.0, `crossbeam-channel` 0.5.16, `crossbeam-epoch` 0.9.20, `crossbeam-utils` 0.8.22, `curve25519-dalek-derive` 0.1.1, `dbus-secret-service` 4.1.0, `displaydoc` 0.2.7, `either` 1.17.0, `embedded-io` 0.4.0, `embedded-io` 0.6.1, `equivalent` 1.0.2, `errno` 0.3.14, `event-listener` 5.4.2, `event-listener-strategy` 0.5.4, `fastrand` 2.5.0, `flate2` 1.1.9, `fnv` 1.0.7, `form_urlencoded` 1.2.2, `futures-lite` 2.6.1, `glob` 0.3.4, `hashbrown` 0.12.3, `hashbrown` 0.17.1, `heck` 0.4.1, `heck` 0.5.0, `html5ever` 0.38.0, `httparse` 1.10.1, `hyper-rustls` 0.27.9, `idna` 1.1.0, `idna_adapter` 1.2.2, `indexmap` 1.9.3, `indexmap` 2.14.0, `ipconfig` 0.3.4, `keyboard-types` 0.7.0, `libappindicator` 0.9.0, `linux-raw-sys` 0.12.1, `lock_api` 0.4.14, `log` 0.4.33, `markup5ever` 0.38.0, `mime` 0.3.17, `muda` 0.19.3, `num-traits` 0.2.19, `once_cell` 1.21.4, `openssl-probe` 0.2.1, `ordered-stream` 0.2.0, `parking` 2.2.1, `parking_lot` 0.12.5, `parking_lot_core` 0.9.12, `percent-encoding` 2.3.2, `piper` 0.2.5, `png` 0.17.16, `png` 0.18.1, `polling` 3.11.0, `postcard` 1.1.3, `postcard-derive` 0.2.2, `regex` 1.13.1, `regex-automata` 0.4.18, `regex-syntax` 0.8.11, `rustix` 1.1.4, `rustls` 0.23.43, `rustls-native-certs` 0.8.4, `scopeguard` 1.2.0, `security-framework` 3.7.0, `security-framework-sys` 2.17.0, `serde_with` 3.22.0, `serde_with_macros` 3.22.0, `servo_arc` 0.4.3, `signal-hook-registry` 1.4.8, `smallvec` 1.15.2, `smol_str` 0.1.24, `socket2` 0.6.5, `stable_deref_trait` 1.2.1, `string_cache` 0.9.0, `syn` 1.0.109, `system-configuration` 0.7.0, `system-configuration-sys` 0.6.0, `tendril` 0.5.1, `toml_datetime` 0.6.3, `tray-icon` 0.24.2, `tungstenite` 0.28.0, `tungstenite` 0.29.0, `unicode-normalization` 0.1.25, `unicode-segmentation` 1.13.3, `unicode-xid` 0.2.6, `url` 2.5.8, `uuid` 1.24.0, `web_atoms` 0.2.6, `window-vibrancy` 0.6.0, `wmi` 0.18.4, `wry` 0.55.1.
 
 ```
 Apache License
@@ -4074,6 +4137,134 @@ SOFTWARE.
 
 #### Text 33 of 322
 
+Applies to 6 crates: `bip39` 2.2.2, `bitcoin_hashes` 0.14.101, `blake3` 1.8.6, `constant_time_eq` 0.4.2, `dunce` 1.0.5, `hex-conservative` 0.2.3.
+
+```
+Creative Commons Legal Code
+
+CC0 1.0 Universal
+
+    CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE
+    LEGAL SERVICES. DISTRIBUTION OF THIS DOCUMENT DOES NOT CREATE AN
+    ATTORNEY-CLIENT RELATIONSHIP. CREATIVE COMMONS PROVIDES THIS
+    INFORMATION ON AN "AS-IS" BASIS. CREATIVE COMMONS MAKES NO WARRANTIES
+    REGARDING THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS
+    PROVIDED HEREUNDER, AND DISCLAIMS LIABILITY FOR DAMAGES RESULTING FROM
+    THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED
+    HEREUNDER.
+
+Statement of Purpose
+
+The laws of most jurisdictions throughout the world automatically confer
+exclusive Copyright and Related Rights (defined below) upon the creator
+and subsequent owner(s) (each and all, an "owner") of an original work of
+authorship and/or a database (each, a "Work").
+
+Certain owners wish to permanently relinquish those rights to a Work for
+the purpose of contributing to a commons of creative, cultural and
+scientific works ("Commons") that the public can reliably and without fear
+of later claims of infringement build upon, modify, incorporate in other
+works, reuse and redistribute as freely as possible in any form whatsoever
+and for any purposes, including without limitation commercial purposes.
+These owners may contribute to the Commons to promote the ideal of a free
+culture and the further production of creative, cultural and scientific
+works, or to gain reputation or greater distribution for their Work in
+part through the use and efforts of others.
+
+For these and/or other purposes and motivations, and without any
+expectation of additional consideration or compensation, the person
+associating CC0 with a Work (the "Affirmer"), to the extent that he or she
+is an owner of Copyright and Related Rights in the Work, voluntarily
+elects to apply CC0 to the Work and publicly distribute the Work under its
+terms, with knowledge of his or her Copyright and Related Rights in the
+Work and the meaning and intended legal effect of CC0 on those rights.
+
+1. Copyright and Related Rights. A Work made available under CC0 may be
+protected by copyright and related or neighboring rights ("Copyright and
+Related Rights"). Copyright and Related Rights include, but are not
+limited to, the following:
+
+  i. the right to reproduce, adapt, distribute, perform, display,
+     communicate, and translate a Work;
+ ii. moral rights retained by the original author(s) and/or performer(s);
+iii. publicity and privacy rights pertaining to a person's image or
+     likeness depicted in a Work;
+ iv. rights protecting against unfair competition in regards to a Work,
+     subject to the limitations in paragraph 4(a), below;
+  v. rights protecting the extraction, dissemination, use and reuse of data
+     in a Work;
+ vi. database rights (such as those arising under Directive 96/9/EC of the
+     European Parliament and of the Council of 11 March 1996 on the legal
+     protection of databases, and under any national implementation
+     thereof, including any amended or successor version of such
+     directive); and
+vii. other similar, equivalent or corresponding rights throughout the
+     world based on applicable law or treaty, and any national
+     implementations thereof.
+
+2. Waiver. To the greatest extent permitted by, but not in contravention
+of, applicable law, Affirmer hereby overtly, fully, permanently,
+irrevocably and unconditionally waives, abandons, and surrenders all of
+Affirmer's Copyright and Related Rights and associated claims and causes
+of action, whether now known or unknown (including existing as well as
+future claims and causes of action), in the Work (i) in all territories
+worldwide, (ii) for the maximum duration provided by applicable law or
+treaty (including future time extensions), (iii) in any current or future
+medium and for any number of copies, and (iv) for any purpose whatsoever,
+including without limitation commercial, advertising or promotional
+purposes (the "Waiver"). Affirmer makes the Waiver for the benefit of each
+member of the public at large and to the detriment of Affirmer's heirs and
+successors, fully intending that such Waiver shall not be subject to
+revocation, rescission, cancellation, termination, or any other legal or
+equitable action to disrupt the quiet enjoyment of the Work by the public
+as contemplated by Affirmer's express Statement of Purpose.
+
+3. Public License Fallback. Should any part of the Waiver for any reason
+be judged legally invalid or ineffective under applicable law, then the
+Waiver shall be preserved to the maximum extent permitted taking into
+account Affirmer's express Statement of Purpose. In addition, to the
+extent the Waiver is so judged Affirmer hereby grants to each affected
+person a royalty-free, non transferable, non sublicensable, non exclusive,
+irrevocable and unconditional license to exercise Affirmer's Copyright and
+Related Rights in the Work (i) in all territories worldwide, (ii) for the
+maximum duration provided by applicable law or treaty (including future
+time extensions), (iii) in any current or future medium and for any number
+of copies, and (iv) for any purpose whatsoever, including without
+limitation commercial, advertising or promotional purposes (the
+"License"). The License shall be deemed effective as of the date CC0 was
+applied by Affirmer to the Work. Should any part of the License for any
+reason be judged legally invalid or ineffective under applicable law, such
+partial invalidity or ineffectiveness shall not invalidate the remainder
+of the License, and in such case Affirmer hereby affirms that he or she
+will not (i) exercise any of his or her remaining Copyright and Related
+Rights in the Work or (ii) assert any associated claims and causes of
+action with respect to the Work, in either case contrary to Affirmer's
+express Statement of Purpose.
+
+4. Limitations and Disclaimers.
+
+ a. No trademark or patent rights held by Affirmer are waived, abandoned,
+    surrendered, licensed or otherwise affected by this document.
+ b. Affirmer offers the Work as-is and makes no representations or
+    warranties of any kind concerning the Work, express, implied,
+    statutory or otherwise, including without limitation warranties of
+    title, merchantability, fitness for a particular purpose, non
+    infringement, or the absence of latent or other defects, accuracy, or
+    the present or absence of errors, whether or not discoverable, all to
+    the greatest extent permissible under applicable law.
+ c. Affirmer disclaims responsibility for clearing rights of other persons
+    that may apply to the Work or any use thereof, including without
+    limitation any person's Copyright and Related Rights in the Work.
+    Further, Affirmer disclaims responsibility for obtaining any necessary
+    consents, permissions or other rights required for any use of the
+    Work.
+ d. Affirmer understands and acknowledges that Creative Commons is not a
+    party to this document and has no duty or obligation with respect to
+    this CC0 or use of the Work.
+```
+
+#### Text 34 of 322
+
 Applies to 5 crates: `bit-set` 0.8.0, `bit-vec` 0.8.0, `defmt` 1.1.1, `defmt-macros` 1.1.1, `diatomic-waker` 0.2.3.
 
 ```
@@ -4280,7 +4471,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-#### Text 34 of 322
+#### Text 35 of 322
 
 Applies to 2 crates: `bit-set` 0.8.0, `bit-vec` 0.8.0.
 
@@ -4312,7 +4503,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-#### Text 35 of 322
+#### Text 36 of 322
 
 Applies to 8 crates: `bitflags` 1.3.2, `bitflags` 2.13.1, `glob` 0.3.4, `log` 0.4.33, `num-traits` 0.2.19, `regex` 1.13.1, `regex-automata` 0.4.18, `regex-syntax` 0.8.11.
 
@@ -4344,7 +4535,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-#### Text 36 of 322
+#### Text 37 of 322
 
 Applies to 1 crate: `blake3` 1.8.6.
 
@@ -4552,7 +4743,7 @@ Apache License
    limitations under the License.
 ```
 
-#### Text 37 of 322
+#### Text 38 of 322
 
 Applies to 1 crate: `blake3` 1.8.6.
 
@@ -4775,134 +4966,6 @@ conflicts with the conditions of the GPLv2, you may retroactively and
 prospectively choose to deem waived or otherwise exclude such Section(s) of
 the License, but only in their entirety and only with respect to the Combined
 Software.
-```
-
-#### Text 38 of 322
-
-Applies to 3 crates: `blake3` 1.8.6, `constant_time_eq` 0.4.2, `dunce` 1.0.5.
-
-```
-Creative Commons Legal Code
-
-CC0 1.0 Universal
-
-    CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE
-    LEGAL SERVICES. DISTRIBUTION OF THIS DOCUMENT DOES NOT CREATE AN
-    ATTORNEY-CLIENT RELATIONSHIP. CREATIVE COMMONS PROVIDES THIS
-    INFORMATION ON AN "AS-IS" BASIS. CREATIVE COMMONS MAKES NO WARRANTIES
-    REGARDING THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS
-    PROVIDED HEREUNDER, AND DISCLAIMS LIABILITY FOR DAMAGES RESULTING FROM
-    THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED
-    HEREUNDER.
-
-Statement of Purpose
-
-The laws of most jurisdictions throughout the world automatically confer
-exclusive Copyright and Related Rights (defined below) upon the creator
-and subsequent owner(s) (each and all, an "owner") of an original work of
-authorship and/or a database (each, a "Work").
-
-Certain owners wish to permanently relinquish those rights to a Work for
-the purpose of contributing to a commons of creative, cultural and
-scientific works ("Commons") that the public can reliably and without fear
-of later claims of infringement build upon, modify, incorporate in other
-works, reuse and redistribute as freely as possible in any form whatsoever
-and for any purposes, including without limitation commercial purposes.
-These owners may contribute to the Commons to promote the ideal of a free
-culture and the further production of creative, cultural and scientific
-works, or to gain reputation or greater distribution for their Work in
-part through the use and efforts of others.
-
-For these and/or other purposes and motivations, and without any
-expectation of additional consideration or compensation, the person
-associating CC0 with a Work (the "Affirmer"), to the extent that he or she
-is an owner of Copyright and Related Rights in the Work, voluntarily
-elects to apply CC0 to the Work and publicly distribute the Work under its
-terms, with knowledge of his or her Copyright and Related Rights in the
-Work and the meaning and intended legal effect of CC0 on those rights.
-
-1. Copyright and Related Rights. A Work made available under CC0 may be
-protected by copyright and related or neighboring rights ("Copyright and
-Related Rights"). Copyright and Related Rights include, but are not
-limited to, the following:
-
-  i. the right to reproduce, adapt, distribute, perform, display,
-     communicate, and translate a Work;
- ii. moral rights retained by the original author(s) and/or performer(s);
-iii. publicity and privacy rights pertaining to a person's image or
-     likeness depicted in a Work;
- iv. rights protecting against unfair competition in regards to a Work,
-     subject to the limitations in paragraph 4(a), below;
-  v. rights protecting the extraction, dissemination, use and reuse of data
-     in a Work;
- vi. database rights (such as those arising under Directive 96/9/EC of the
-     European Parliament and of the Council of 11 March 1996 on the legal
-     protection of databases, and under any national implementation
-     thereof, including any amended or successor version of such
-     directive); and
-vii. other similar, equivalent or corresponding rights throughout the
-     world based on applicable law or treaty, and any national
-     implementations thereof.
-
-2. Waiver. To the greatest extent permitted by, but not in contravention
-of, applicable law, Affirmer hereby overtly, fully, permanently,
-irrevocably and unconditionally waives, abandons, and surrenders all of
-Affirmer's Copyright and Related Rights and associated claims and causes
-of action, whether now known or unknown (including existing as well as
-future claims and causes of action), in the Work (i) in all territories
-worldwide, (ii) for the maximum duration provided by applicable law or
-treaty (including future time extensions), (iii) in any current or future
-medium and for any number of copies, and (iv) for any purpose whatsoever,
-including without limitation commercial, advertising or promotional
-purposes (the "Waiver"). Affirmer makes the Waiver for the benefit of each
-member of the public at large and to the detriment of Affirmer's heirs and
-successors, fully intending that such Waiver shall not be subject to
-revocation, rescission, cancellation, termination, or any other legal or
-equitable action to disrupt the quiet enjoyment of the Work by the public
-as contemplated by Affirmer's express Statement of Purpose.
-
-3. Public License Fallback. Should any part of the Waiver for any reason
-be judged legally invalid or ineffective under applicable law, then the
-Waiver shall be preserved to the maximum extent permitted taking into
-account Affirmer's express Statement of Purpose. In addition, to the
-extent the Waiver is so judged Affirmer hereby grants to each affected
-person a royalty-free, non transferable, non sublicensable, non exclusive,
-irrevocable and unconditional license to exercise Affirmer's Copyright and
-Related Rights in the Work (i) in all territories worldwide, (ii) for the
-maximum duration provided by applicable law or treaty (including future
-time extensions), (iii) in any current or future medium and for any number
-of copies, and (iv) for any purpose whatsoever, including without
-limitation commercial, advertising or promotional purposes (the
-"License"). The License shall be deemed effective as of the date CC0 was
-applied by Affirmer to the Work. Should any part of the License for any
-reason be judged legally invalid or ineffective under applicable law, such
-partial invalidity or ineffectiveness shall not invalidate the remainder
-of the License, and in such case Affirmer hereby affirms that he or she
-will not (i) exercise any of his or her remaining Copyright and Related
-Rights in the Work or (ii) assert any associated claims and causes of
-action with respect to the Work, in either case contrary to Affirmer's
-express Statement of Purpose.
-
-4. Limitations and Disclaimers.
-
- a. No trademark or patent rights held by Affirmer are waived, abandoned,
-    surrendered, licensed or otherwise affected by this document.
- b. Affirmer offers the Work as-is and makes no representations or
-    warranties of any kind concerning the Work, express, implied,
-    statutory or otherwise, including without limitation warranties of
-    title, merchantability, fitness for a particular purpose, non
-    infringement, or the absence of latent or other defects, accuracy, or
-    the present or absence of errors, whether or not discoverable, all to
-    the greatest extent permissible under applicable law.
- c. Affirmer disclaims responsibility for clearing rights of other persons
-    that may apply to the Work or any use thereof, including without
-    limitation any person's Copyright and Related Rights in the Work.
-    Further, Affirmer disclaims responsibility for obtaining any necessary
-    consents, permissions or other rights required for any use of the
-    Work.
- d. Affirmer understands and acknowledges that Creative Commons is not a
-    party to this document and has no duty or obligation with respect to
-    this CC0 or use of the Work.
 ```
 
 #### Text 39 of 322
@@ -10543,7 +10606,7 @@ DEALINGS IN THE SOFTWARE.
 
 #### Text 127 of 322
 
-Applies to 4 crates: `heck` 0.4.1, `heck` 0.5.0, `unicode-segmentation` 1.13.3, `unicode-xid` 0.2.6.
+Applies to 5 crates: `heck` 0.4.1, `heck` 0.5.0, `unicode-normalization` 0.1.25, `unicode-segmentation` 1.13.3, `unicode-xid` 0.2.6.
 
 ```
 Copyright (c) 2015 The Rust Project Developers

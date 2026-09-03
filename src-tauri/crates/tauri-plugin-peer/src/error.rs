@@ -59,6 +59,18 @@ pub enum Error {
     #[error("identity key {} has {len} bytes, expected 32", path.display())]
     IdentityCorrupt { path: PathBuf, len: u64 },
 
+    /// Anything wrong with the PERSON identity — WI-22.B1. The device key's
+    /// failures are `IdentityCorrupt` above and stay separate: one is a file
+    /// this machine owns, the other is a key several machines share, and a
+    /// reader told "your identity is broken" needs to know which.
+    ///
+    /// ⚠️ **THE MESSAGE NEVER CARRIES THE PHRASE OR THE KEY.** Every
+    /// constructor of this in `person.rs` names what failed, not what it was
+    /// working on; an error string is the one place a secret reaches a log
+    /// without anybody deciding it should.
+    #[error("{0}")]
+    Identity(String),
+
     // ── peers ───────────────────────────────────────────────────────────
     /// `peer/peers.json` exists but does not parse. Never treated as an
     /// empty list — that would drop every paired device on a bad write.
@@ -224,6 +236,7 @@ impl Error {
             Error::DataRootNotAbsolute(_) => "dataRootNotAbsolute",
             Error::UnknownRole(_) => "unknownRole",
             Error::IdentityCorrupt { .. } => "identityCorrupt",
+            Error::Identity(_) => "identity",
             Error::PeersMalformed { .. } => "peersMalformed",
             Error::PeersUnsupportedVersion { .. } => "peersUnsupportedVersion",
             Error::InvalidPeerId(_) => "invalidPeerId",

@@ -101,6 +101,37 @@ export function inlineStyleOffences(source: string): { line: number; text: strin
   return found
 }
 
+/**
+ * Uses of a MODIFIER class without the base class it modifies.
+ *
+ * ⚠️ **`paper-cap-button-primary` ALONE IS NOT A BUTTON.** The base carries the
+ * height, the padding and the pill radius; the modifier carries only the fill.
+ * Used by itself it produces a coloured rectangle 17px tall with no padding —
+ * which is what the first circle screen shipped, and it is INVISIBLE to every
+ * other check: the class name is real, `check-dead-css` sees it used, and the
+ * page renders. Only a human looking at it can tell, which is exactly the kind
+ * of mistake a contract test should be holding instead.
+ */
+export function modifierOffences(source: string): { line: number; text: string }[] {
+  const out: { line: number; text: string }[] = []
+  const lines = source.split('\n')
+  for (const [i, line] of lines.entries()) {
+    for (const base of ['button', 'field'] as const) {
+      /* `buttonPrimary`/`buttonDanger`/`fieldNarrow` — the modifier keys on
+         `CAPABILITY_UI`, matched where they are read rather than by class
+         string, because that is how a capability writes them. */
+      const modifier = new RegExp(`\\.${base}[A-Z][A-Za-z]*`, 'u')
+      if (!modifier.test(line)) continue
+      /* The base has to appear on the SAME expression. Both are read off
+         `CAPABILITY_UI` (or an alias of it), so a template literal naming both
+         is the shape every correct use takes — see `DevicesPane`. */
+      const hasBase = new RegExp(`\\.${base}[^A-Za-z]`, 'u').test(line)
+      if (!hasBase) out.push({ line: i + 1, text: line.trim() })
+    }
+  }
+  return out
+}
+
 function tsxUnder(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const path = join(dir, entry)
@@ -128,6 +159,32 @@ describe('capability UI draws with the kernel’s vocabulary', () => {
       offences,
       `use CAPABILITY_UI, or add a rule to kernel/ui/styles/capability.css:\n${offences.join('\n')}`,
     ).toEqual([])
+  })
+
+  it('never uses a style modifier without the class it modifies', () => {
+    /* ⚠️ The first circle screen used `buttonPrimary` alone and rendered a
+       17px coloured rectangle with no padding. Every other gate passed. */
+    const offences = files.flatMap((file) =>
+      modifierOffences(readFileSync(file, 'utf8')).map(
+        (one) => `${relative(CAPABILITIES, file)}:${one.line}  ${one.text}`,
+      ),
+    )
+    expect(
+      offences,
+      `a modifier carries only its fill — pair it with the base class:\n${offences.join('\n')}`,
+    ).toEqual([])
+  })
+
+  it('catches a modifier used alone, and passes one used with its base', () => {
+    // The guard's own guard — a regex that stopped matching passes for ever.
+    expect(modifierOffences('className={CAPABILITY_UI.buttonPrimary}')).toHaveLength(1)
+    expect(modifierOffences('className={ui.buttonDanger}')).toHaveLength(1)
+    expect(
+      modifierOffences('className={`${CAPABILITY_UI.button} ${CAPABILITY_UI.buttonPrimary}`}'),
+    ).toEqual([])
+    expect(modifierOffences('className={`${ui.field} ${ui.fieldNarrow}`}')).toEqual([])
+    // A base on its own is not an offence.
+    expect(modifierOffences('className={CAPABILITY_UI.button}')).toEqual([])
   })
 
   /* THE GUARD'S OWN GUARD — the `boundaries:selftest` idea, in miniature. A

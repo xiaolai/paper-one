@@ -22,6 +22,7 @@
 import { compare } from 'foliate-js/epubcfi.js'
 import { identityParts } from './contentIdentity'
 import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
+import type { ResolvedCfi } from './resolvedCfi'
 
 /**
  * WHAT A RECORD IS — no longer only whose it is.
@@ -470,8 +471,33 @@ export interface UnplacedMark {
   readonly fromBook: string
 }
 
-/** Whether a mark has an anchor in THIS library. */
-export const isPlaced = (mark: Mark): boolean => mark.unplaced === undefined && mark.cfi !== ''
+/**
+ * A mark whose `cfi` addresses a passage in the build now open — WI-22.A1.
+ *
+ * The `Annotation` of the anchor world: `Annotation` narrows `kind` so the
+ * painter's door can refuse a bookmark, and this narrows `cfi` so the same
+ * door can refuse a passage with no anchor here. Both are produced the same
+ * way — by a filter over a type predicate, never by a cast.
+ */
+export type Placed<T extends Mark> = T & { readonly cfi: ResolvedCfi }
+
+/**
+ * Whether a mark has an anchor in THIS library.
+ *
+ * ⚠️ **A TYPE PREDICATE, and that is the whole of WI-22.A1 on this side.** It
+ * used to answer `boolean`, so `placedIn` handed the painter the same widened
+ * type it was given and the guarantee lived in a comment. `isAnnotation` is
+ * the precedent and the reason the shape is this one: a runtime check that
+ * establishes an invariant should hand back the narrowed type, so a caller who
+ * skips the check fails to build rather than failing to draw.
+ *
+ * The brand is `ResolvedCfi`, whose only cast is in `reanchor.ts`. Nothing is
+ * asserted here that the two conditions do not establish: `unplaced` absent
+ * means no foreign path was carried across an import, and a non-empty `cfi`
+ * means there IS a path — which together is what `ResolvedCfi` claims.
+ */
+export const isPlaced = <T extends Mark>(mark: T): mark is Placed<T> =>
+  mark.unplaced === undefined && mark.cfi !== ''
 
 /**
  * The marks that can actually be drawn — placed annotations, nothing else.
@@ -483,9 +509,11 @@ export const isPlaced = (mark: Mark): boolean => mark.unplaced === undefined && 
  * offer it to the painter, and both are wrong.
  *
  * Returns its input by identity when there is nothing to drop, the convention
- * every store's change-detection relies on.
+ * every store's change-detection relies on. `every` with a type predicate
+ * narrows the ARRAY, which is what lets that convention survive the stronger
+ * return type — the same trick `annotationsIn` turns, and for the same reason.
  */
-export function placedIn<T extends Mark>(marks: readonly T[]): readonly T[] {
+export function placedIn<T extends Mark>(marks: readonly T[]): readonly Placed<T>[] {
   return marks.every(isPlaced) ? marks : marks.filter(isPlaced)
 }
 
@@ -728,6 +756,74 @@ export function setTint(
   return marks.some((mark) => mark.id === id && mark.deletedAt === undefined && mark.tint !== tint)
     ? marks.map((mark) => (mark.id === id && mark.deletedAt === undefined ? { ...mark, tint, updatedAt: at } : mark))
     : marks
+}
+
+/**
+ * Give an UNPLACED mark the anchor a re-anchoring pass found for it — WI-22.A2.
+ *
+ * ⚠️ **THE WRITE THAT MAKES `unplaced` STOP BEING PERMANENT.** WI-21.7 built
+ * the class so an import could keep a mark it had nowhere to draw, and
+ * Marginalia says so in as many words: *"Paper has not found this passage here
+ * yet."* This is the mutation that retires that sentence for one mark.
+ *
+ * It is a STORE WRITE and not a render-time decoration, which the plan states
+ * as the item's first constraint. A mark resolved only in memory is resolved
+ * again on every open and is invisible to export, to sync and to the browser
+ * client — the exact class phase 21 spent three rounds removing.
+ *
+ * ## What it refuses, and why each refusal is not paranoia
+ *
+ *  - **A tombstoned row.** Resurrection is the merge's decision (`mergeMarks`),
+ *    never an edit's side effect — `updateNote` and `setTint` both say this and
+ *    it holds harder here, because a pass runs over every unplaced mark of a
+ *    book without a reader having asked for anything.
+ *  - **A mark that is already placed.** Nothing to do, and overwriting a good
+ *    anchor with a re-derived one is how a mark moves off the words it was made
+ *    on. `keyFor` refuses to cache one for the same reason.
+ *  - **An empty `cfi`.** The one state `isMark` refuses outright, and the
+ *    resolver never produces it — so reaching this is a caller bug, and writing
+ *    it would produce a mark that is neither placed nor legally unplaced.
+ *  - **A negative `sectionIndex`.** `isMark` refuses one, and `UnplacedMark`'s
+ *    note says why: safety that depends on an out-of-range number is the shape
+ *    that field exists to replace.
+ *
+ * ## What it deliberately does NOT do
+ *
+ * It does not tombstone a mark it now overlaps. `add` does, because there the
+ * reader's own gesture said *"this passage"* and the row underneath is the one
+ * that gesture resolved to. Here nobody gestured: a passage the reader marked
+ * in this build and an imported mark of the same passage are two records that
+ * happen to have met, and superseding either would delete a note the reader
+ * wrote. Two highlights on one passage is visible and recoverable; a silently
+ * deleted note is not.
+ *
+ * `unplaced` is REMOVED rather than set to undefined — `exactOptionalPropertyTypes`
+ * is on, and a present-but-undefined key is a different value to `isMark`,
+ * to the JSON on disk and to the merge.
+ */
+export function placeMark(
+  marks: readonly Mark[],
+  id: string,
+  /* `ResolvedCfi`, not `string` — WI-22.A1 applied to the one write that can
+   * turn an unplaced mark into a placed one. Taking a bare string meant any
+   * fabricated or foreign path could be persisted, have `unplaced` removed, and
+   * later come back out of `current` wearing the brand: the resolver-only
+   * invariant, bypassed by the single function whose whole job is to install an
+   * anchor. `reanchorPass` produces one from a live Range; nothing else can. */
+  cfi: ResolvedCfi,
+  sectionIndex: number,
+  at: Hlc = hlcOf(Date.now()),
+): readonly Mark[] {
+  if (cfi === '' || !Number.isInteger(sectionIndex) || sectionIndex < 0) return marks
+  const target = marks.find(
+    (mark) => mark.id === id && mark.deletedAt === undefined && mark.unplaced !== undefined,
+  )
+  if (!target) return marks
+  return marks.map((mark) => {
+    if (mark !== target) return mark
+    const { unplaced: _dropped, ...rest } = mark
+    return { ...rest, cfi, sectionIndex, updatedAt: at }
+  })
 }
 
 /** Identity. `randomUUID` needs a secure context, which a file:// build is not. */

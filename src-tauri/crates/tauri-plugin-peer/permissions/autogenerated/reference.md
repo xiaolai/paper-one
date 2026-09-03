@@ -3,7 +3,10 @@
 The commands a Paper webview needs from the peer plugin: the endpoint's status,
 the device's role, the storage root; the
 paired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);
-sessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).
+sessions (ready, connect, send, recv, close) and blob transfers (fetch, hash);
+and the person identity (status, ensure, phrase, restore, forget, delegate) —
+WI-22.B1, whose root key never leaves the keychain except as the twelve words a
+reader asked to see.
 Every path the plugin touches is validated to lie inside the data root, and
 every session is accepted only from a persisted peer.
 
@@ -28,6 +31,19 @@ every session is accepted only from a persisted peer.
 - `allow-peer-close`
 - `allow-peer-blob-fetch`
 - `allow-peer-hash-file`
+- `allow-peer-person-status`
+- `allow-peer-person-ensure`
+- `allow-peer-person-phrase`
+- `allow-peer-person-restore`
+- `allow-peer-person-forget`
+- `allow-peer-person-delegate`
+- `allow-peer-circle-people`
+- `allow-peer-circle-introduce`
+- `allow-peer-circle-mine`
+- `allow-peer-page-sign`
+- `allow-peer-circle-remember`
+- `allow-peer-circle-revoke`
+- `allow-peer-circle-forget`
 
 ## Permission Table
 
@@ -86,6 +102,162 @@ Enables the peer_blob_fetch command without any pre-configured scope.
 <td>
 
 Denies the peer_blob_fetch command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-circle-forget`
+
+</td>
+<td>
+
+Enables the peer_circle_forget command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-circle-forget`
+
+</td>
+<td>
+
+Denies the peer_circle_forget command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-circle-introduce`
+
+</td>
+<td>
+
+Enables the peer_circle_introduce command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-circle-introduce`
+
+</td>
+<td>
+
+Denies the peer_circle_introduce command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-circle-mine`
+
+</td>
+<td>
+
+Enables the peer_circle_mine command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-circle-mine`
+
+</td>
+<td>
+
+Denies the peer_circle_mine command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-circle-people`
+
+</td>
+<td>
+
+Enables the peer_circle_people command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-circle-people`
+
+</td>
+<td>
+
+Denies the peer_circle_people command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-circle-remember`
+
+</td>
+<td>
+
+Enables the peer_circle_remember command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-circle-remember`
+
+</td>
+<td>
+
+Denies the peer_circle_remember command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-circle-revoke`
+
+</td>
+<td>
+
+Enables the peer_circle_revoke command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-circle-revoke`
+
+</td>
+<td>
+
+Denies the peer_circle_revoke command without any pre-configured scope.
 
 </td>
 </tr>
@@ -275,6 +447,32 @@ Denies the peer_local_role command without any pre-configured scope.
 <tr>
 <td>
 
+`peer:allow-peer-page-sign`
+
+</td>
+<td>
+
+Enables the peer_page_sign command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-page-sign`
+
+</td>
+<td>
+
+Denies the peer_page_sign command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `peer:allow-peer-pair-begin`
 
 </td>
@@ -372,6 +570,162 @@ Enables the peer_pair_from_uri command without any pre-configured scope.
 <td>
 
 Denies the peer_pair_from_uri command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-person-delegate`
+
+</td>
+<td>
+
+Enables the peer_person_delegate command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-person-delegate`
+
+</td>
+<td>
+
+Denies the peer_person_delegate command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-person-ensure`
+
+</td>
+<td>
+
+Enables the peer_person_ensure command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-person-ensure`
+
+</td>
+<td>
+
+Denies the peer_person_ensure command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-person-forget`
+
+</td>
+<td>
+
+Enables the peer_person_forget command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-person-forget`
+
+</td>
+<td>
+
+Denies the peer_person_forget command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-person-phrase`
+
+</td>
+<td>
+
+Enables the peer_person_phrase command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-person-phrase`
+
+</td>
+<td>
+
+Denies the peer_person_phrase command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-person-restore`
+
+</td>
+<td>
+
+Enables the peer_person_restore command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-person-restore`
+
+</td>
+<td>
+
+Denies the peer_person_restore command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-person-status`
+
+</td>
+<td>
+
+Enables the peer_person_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-person-status`
+
+</td>
+<td>
+
+Denies the peer_person_status command without any pre-configured scope.
 
 </td>
 </tr>

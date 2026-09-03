@@ -14,6 +14,9 @@ import {
   type FootnoteType,
 } from 'foliate-js/footnotes.js'
 import type { AskPassage } from '../../core/companion'
+import type { ResolvedCfi } from './reanchor'
+import { foreignWeight } from '../../core/circle/foreign'
+import { reanchorPass, type PassOutcome, type PendingMark } from './reanchorPass'
 import { screenPassages } from './passages'
 import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
@@ -115,6 +118,29 @@ function scrollableUnder(event: WheelEvent): boolean {
  */
 const ENTER_AT_FOOT_MS = 1500
 
+/**
+ * Hand the main thread back — what `reanchorPass` awaits between sections.
+ *
+ * ⚠️ **NOT `requestAnimationFrame`, and the reason is written down elsewhere in
+ * this repository already.** An occluded window stops servicing rAF —
+ * `#openAtFootIfArrivedBackwards` defends against exactly that, and AGENTS.md
+ * records the day it cost an investigation, because WebKit parks pdf.js's page
+ * render there and the book loads, reports its page count and shows a blank
+ * canvas with no error anywhere. A re-anchoring pass parked the same way would
+ * simply never finish: the reader switches away mid-open and comes back to
+ * marks that are still unplaced, with nothing to say why.
+ *
+ * `scheduler.yield()` where the engine has it — it resumes at the FRONT of the
+ * task queue, so a walk that yields forty times is not forty trips behind every
+ * pending timer. `setTimeout(0)` otherwise, which is throttled in a hidden tab
+ * but does keep running, which is the property that matters here.
+ */
+const BREATHE = (): Promise<void> => {
+  const scheduler = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler
+  if (typeof scheduler?.yield === 'function') return scheduler.yield()
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
 /** One hit, flattened from foliate's mixed yield shapes. */
 export interface SearchHit {
   readonly cfi: string
@@ -132,7 +158,23 @@ export interface SearchHit {
  * lets the drawing be reasoned about without the store in view.
  */
 export interface MarkAnchor {
-  readonly cfi: string
+  /**
+   * `ResolvedCfi`, NOT `string` — WI-22.A1, and the twin of the `kind`
+   * narrowing below.
+   *
+   * `kind` refuses a bookmark at this door; this refuses a passage with no
+   * anchor in the build now open. The only way to hold one is to have gone
+   * through `isPlaced`/`placedIn` (a checked narrowing) or `cfiFor` (the
+   * resolver's own mint, which takes a live `Range` as its evidence). A
+   * foreign passage arrives as three strings and can do neither, so the
+   * compiler stops it here rather than the painter drawing it on whatever the
+   * path happens to hit.
+   *
+   * `surfaces.md`: *"so the compiler refuses an unresolved one at the
+   * painter's door, the way `MarkAnchor` narrowing already refuses a bookmark
+   * there."*
+   */
+  readonly cfi: ResolvedCfi
   readonly sectionIndex: number
   /**
    * `AnnotationKind`, NOT `MarkKind` — a bookmark cannot be drawn.
@@ -150,6 +192,51 @@ export interface MarkAnchor {
      truth for what a mark looks like, resolved at a different moment. */
   readonly tint: MarkTint
   readonly style: MarkStyle
+}
+
+/**
+ * Another reader's passage, ready to draw — WI-22.D2.
+ *
+ * ⚠️ **NOT A `MarkAnchor`, AND THE DIFFERENCE IS THE FEATURE.** A `MarkAnchor`
+ * carries `tint` and `style`, which are the READER'S OWN vocabulary —
+ * *"agreements in green and questions in purple"* — and `surfaces.md` forbids
+ * a friend's mark claiming it: *"A friend's highlight drawn in your tints is a
+ * passage you will remember marking and did not."* So this type has neither
+ * field, and the wire does not carry them either. There is nothing to ignore.
+ *
+ * The companion is the precedent and the mechanism: *"a companion mark is an
+ * amber underline whatever the reader has chosen for their own, because here
+ * the colour is not a preference — it is what says whose mark this is."*
+ */
+export interface ForeignAnchor {
+  /** `ResolvedCfi` — the compiler refuses an unanchored passage here (A1). */
+  readonly cfi: ResolvedCfi
+  readonly sectionIndex: number
+  /**
+   * The Overlayer key — `circle:<person>:<pub>`.
+   *
+   * ⚠️ **SEPARATE FROM THE CFI, WHICH IS THE WHOLE POINT.** `review.md`'s
+   * overlay blocker 1: `addAnnotation` keys the Overlayer on the annotation's
+   * VALUE, so several readers at one CFI collapse into one entry and the last
+   * writer wins — *"This breaks the feature's central case — '4 of 11 readers
+   * marked this.'"* `Overlayer.add(key, range, …)` already takes them
+   * separately; what does not is `addAnnotation`, and that is one line in our
+   * own fork (`annotation.key ?? annotation.value`).
+   *
+   * ⚠️ **UNTIL THE FORK MOVES, THIS IS CARRIED AND IGNORED.** Passing it costs
+   * nothing and changes nothing today; the day the fork lands, the collapse
+   * stops without another edit here.
+   */
+  readonly key: string
+  /**
+   * How many readers marked this passage — see `foreignWeight`.
+   *
+   * Weight carries multiplicity because colour cannot: there is ONE neutral
+   * hue for every foreign mark, so the only channel left is how heavy the rule
+   * is. That is what makes *"4 of 11 readers marked this"* legible without a
+   * click, which WI-22.D2's falsifier asks for.
+   */
+  readonly readers: number
 }
 
 /** A live selection in the book, with its anchor already resolved. */
@@ -190,6 +277,15 @@ export interface MarkPalette {
    * preference — it is what says whose mark this is.
    */
   readonly companion: string
+  /**
+   * The hue every foreign mark is drawn in — one, for every reader.
+   *
+   * ⚠️ **ONE HUE AND NOT A PALETTE.** Giving each friend a colour would put
+   * them in competition with the reader's own three, and `MarkTint` is where
+   * the reader's meaning lives. A single neutral rule says *"somebody else"*;
+   * `readers` says how many, through weight.
+   */
+  readonly foreign: string
 }
 
 /**
@@ -457,6 +553,13 @@ export interface SessionCallbacks {
    * since.
    */
   getMarks: () => readonly MarkAnchor[]
+  /**
+   * The passages other readers shared, already anchored HERE.
+   *
+   * OPTIONAL: a composition with no `circle` capability has none, and a host
+   * that does not supply this draws exactly what it drew before.
+   */
+  getOverlays?: () => readonly ForeignAnchor[]
   /** Read at draw time, so marks follow a theme change. */
   getPalette: () => MarkPalette
   /**
@@ -600,6 +703,25 @@ export interface SessionNavigator {
    * a reader pressing ⌘B is most likely to be caught.
    */
   placeHere: () => BookmarkPlace | null
+  /**
+   * Walk this book for marks that have no anchor here yet — WI-22.A2.
+   *
+   * ON THE NAVIGATOR because the SESSION owns the book: the walk needs
+   * `book.sections[i].createDocument()`, and that is the object
+   * `refuseBookScripts` wrapped at open. A host that parsed the file a second
+   * time to do this would be reading a document the script strip never
+   * touched, which is the one thing that makes the path derived here address
+   * the same words the reader sees.
+   *
+   * Answers what was FOUND. Writing it is the host's — `marks.place` — for the
+   * reason `MarkAnchor` is not the stored `Mark`: the session has no business
+   * knowing where marks live.
+   *
+   * ⚠️ **Not on the reading path.** The walk yields between sections and stops
+   * the moment this session is disposed; see `reanchorPass`. A caller must
+   * still not put it on a page turn — forty cold sections is ~139 ms.
+   */
+  reanchor: (pending: readonly PendingMark[]) => Promise<PassOutcome>
 }
 
 export interface SessionDeps {
@@ -746,6 +868,30 @@ export class ReaderSession {
    * section that has been scrolled away would resolve CFIs for nothing.
    */
   readonly #sections = new Set<number>()
+  /**
+   * The foreign anchors currently painted in each live section.
+   *
+   * ⚠️ **A WITHDRAWAL HAS NO ERASE CALL, so a redraw is the only chance to
+   * remove one.** The reader's own marks are erased by name — `eraseMark`,
+   * called when the reader deletes one. A foreign passage disappears from the
+   * OTHER side: somebody unshares, the capability's next answer omits it, and
+   * `#drawSection` was purely additive — so the friend's underline stayed on
+   * the page for the rest of the session, and came back on every redraw.
+   * Un-sharing that leaves the mark up is worse than no un-sharing at all,
+   * because the reader is told it is gone.
+   *
+   * Keyed by section, and by the overlay key within it — the key
+   * `useOverlays` composes, so `n` readers on one passage are `n` entries and
+   * one of them going away does not erase the others.
+   */
+  readonly #foreignDrawn = new Map<number, Map<string, ForeignAnchor>>()
+  /**
+   * Sections with a reconciliation in flight, and whether one is owed after it.
+   *
+   * Present means running; `true` means the answer changed while it ran, so
+   * the pass goes round again from the CURRENT answer. See `#reconcileForeign`.
+   */
+  readonly #reconciling = new Map<number, boolean>()
   /**
    * Per-document listener teardown, keyed by the document itself.
    *
@@ -1040,6 +1186,11 @@ export class ReaderSession {
       this.#onTeardown(doc, () => {
         this.#sections.delete(index)
         this.#rendered.delete(index)
+        /* The overlay died with the document, and so did everything painted
+           into it. Remembering it would ask the section's NEXT overlay — a
+           fresh one that never held any of it — to remove marks it does not
+           have. */
+        this.#foreignDrawn.delete(index)
         /* AND `#renderedIndex` STOPS NAMING A DOCUMENT THAT IS GONE.
          *
          * It was left pointing at the torn-down section, so after the most
@@ -1162,6 +1313,17 @@ export class ReaderSession {
         container && container.nodeType === ELEMENT_NODE
           ? (container as Element)
           : (container?.parentElement ?? null)
+      /* ⚠️ **EVERY RULE PAINTER READS THIS, AND NONE OF THEM WERE TOLD.**
+       * foliate's `underline`, `strikethrough` and `squiggly` each take
+       * `writingMode` and put the rule on the block's far edge — under the
+       * words horizontally, beside the column in a vertical book. Omitted, the
+       * default is horizontal, so in a `vertical-rl` book every rule Paper
+       * draws — the reader's own, the companion's wave, and a friend's — is
+       * struck across the text instead of alongside it. The fill painter is
+       * the only one that noticed vertical writing, and it noticed in order to
+       * bail (`balanceRects`); the three that could simply have been told were
+       * the ones left wrong. */
+      const writingMode = writingModeAt(doc, at)
       /* §01 SAID AMBER UNDERLINE, and this is an amber WAVE — the one place
        * this file departs from the section it implements, deliberately.
        * The underline was provenance back when the reader's own mark was
@@ -1190,13 +1352,50 @@ export class ReaderSession {
        * decides which painter runs rather than only to the ones that decide
        * what colour it is — foliate round-trips this object untyped, so the
        * value arriving here is not the value the type system saw. */
+      /* ⚠️ **A WHITELIST THAT ONLY REFUSED STRINGS IS NOT A WHITELIST.** The
+       * test was `typeof kind === 'string' && !includes(kind)`, so a `kind`
+       * that was absent, `null` or a number fell PAST it and was painted by
+       * the final branch as a yellow fill — a band over a passage the reader
+       * never marked, which is the exact defect the comment above describes
+       * for `bookmark`. Every mark this code draws sets `kind` (`annotationFor`
+       * takes it from a required field), so nothing legitimate arrives without
+       * one; foliate round-trips the object untyped, which is why the check
+       * has to hold for values the type system never saw. */
       const kind = detail.annotation?.kind
-      if (typeof kind === 'string' && !(ANNOTATION_KINDS as readonly string[]).includes(kind)) {
+      if (typeof kind !== 'string' || !(PAINTABLE_KINDS as readonly string[]).includes(kind)) {
         return
       }
       if (kind === 'companion') {
-        detail.draw(painters.wave, { color: palette.companion })
+        detail.draw(painters.wave, { color: palette.companion, writingMode })
         drawn()
+        return
+      }
+      if (kind === FOREIGN_KIND) {
+        /* ⚠️ **AN UNDERLINE, IN ONE HUE, WITH WEIGHT CARRYING MULTIPLICITY.**
+         * The reader's three tints say what THEY meant by a passage; a
+         * friend's mark must not claim that vocabulary, so it gets none of
+         * them and the colour is not a preference — it is what says whose mark
+         * this is. The companion's amber rule is the precedent and the same
+         * sentence covers both.
+         *
+         * A RULE and not a fill, because the central case is several people on
+         * one sentence and fills stack illegibly. Weight is then the only
+         * channel left, which is what makes "4 of 11 readers marked this"
+         * readable without a click. */
+        detail.draw(painters.underline, {
+          color: palette.foreign,
+          width: foreignWeight(readersOf(detail.annotation?.['readers'])),
+          writingMode,
+        })
+        /* ⚠️ **NOT `drawn()` — A FOREIGN PASSAGE IS NOT ONE OF THE READER'S
+         * MARKS.** `onMarkDrawn` fills the map `useMarking` describes as
+         * *"ranges for the marks foliate has drawn"*, which the margin
+         * measures to place a control beside each one. Reporting a friend's
+         * underline put an entry there for a CFI the reader has no mark at,
+         * and nothing ever took it out again: `forgetRange` is called from
+         * `unmark`, and a foreign passage is never unmarked. So the map grew a
+         * Range per foreign mark per redraw, each retaining the DOM it points
+         * into, for as long as the book stayed open. */
         return
       }
 
@@ -1213,7 +1412,7 @@ export class ReaderSession {
       if (style === 'fill') {
         detail.draw(painters.fill, { color: palette.fill[tint], doc, at })
       } else {
-        detail.draw(painters[style], { color: palette.rule[tint] })
+        detail.draw(painters[style], { color: palette.rule[tint], writingMode })
       }
       drawn()
     })
@@ -1406,6 +1605,10 @@ export class ReaderSession {
       goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),
       goRight: () => void view.goRight()?.catch?.(reportNavigation('goRight')),
       placeHere: () => this.placeHere(),
+      /* Bound to the SESSION for `passages`' reason — it reads `#view` and
+         `#disposed`, so a navigator held past a teardown answers with an empty
+         walk rather than parsing sections of a book nobody is reading. */
+      reanchor: (pending) => this.reanchorUnplaced(pending),
     })
 
     this.#cb.onFixedLayout(view.isFixedLayout)
@@ -1875,7 +2078,90 @@ export class ReaderSession {
       if (anchor.sectionIndex !== index) continue
       attachMark(view, anchor)
     }
+    /* ⚠️ **AFTER the reader's own, which decides what sits on top.** The
+     * Overlayer paints in the order it was given, so a friend's rule drawn
+     * second sits over the reader's band rather than under it — and a rule
+     * under a band is a rule nobody can see. */
+    void this.#reconcileForeign(view, index)
   }
+
+  /**
+   * Bring one section's foreign marks to what the overlay now says.
+   *
+   * ⚠️ **ONE AT A TIME PER SECTION, and it used to be free-for-all.** Every add
+   * and every erase is asynchronous — `addAnnotation` resolves a CFI before it
+   * paints — and they were launched with `void` while `#foreignDrawn` was
+   * updated as though they had already happened. Two interleavings follow, and
+   * both leave the page saying the opposite of the truth:
+   *
+   *  - an add is still in flight when the passage is withdrawn; the erase runs,
+   *    finds nothing to remove, and is forgotten; the old add then lands and
+   *    paints a withdrawn passage that nothing is tracking any more, so no
+   *    later redraw will take it off;
+   *  - a passage is dropped and restored within one turn; the new add lands
+   *    first and the stale erase lands last, removing the mark that should be
+   *    there.
+   *
+   * Serialising per section removes the whole class rather than the two
+   * instances: while a pass is running, another request only marks the section
+   * dirty, and the pass runs again from the CURRENT answer when it finishes.
+   * The desired state is re-read at the top of every pass, so a request that
+   * arrived mid-flight is never lost and never applied out of order.
+   */
+  async #reconcileForeign(view: View, index: number): Promise<void> {
+    if (this.#reconciling.has(index)) {
+      /* A pass is running; it will re-read the answer when it lands. */
+      this.#reconciling.set(index, true)
+      return
+    }
+    this.#reconciling.set(index, false)
+    try {
+      do {
+        this.#reconciling.set(index, false)
+        if (this.#disposed || !this.#sections.has(index)) return
+        await this.#foreignPass(view, index)
+      } while (this.#reconciling.get(index) === true)
+    } finally {
+      this.#reconciling.delete(index)
+    }
+  }
+
+  /** One reconciliation, from the answer as it stands right now. */
+  async #foreignPass(view: View, index: number): Promise<void> {
+    const now = new Map<string, ForeignAnchor>()
+    for (const anchor of this.#cb.getOverlays?.() ?? []) {
+      if (anchor.sectionIndex !== index) continue
+      now.set(anchor.key, anchor)
+    }
+    /* ⚠️ **ERASED BEFORE THE REST ARE DRAWN — see `#foreignDrawn`.** Anything
+     * this section held and the current answer no longer names has been
+     * withdrawn, and nothing else will ever ask for it to come off. */
+    const held = new Map(now)
+    for (const [key, anchor] of this.#foreignDrawn.get(index) ?? []) {
+      if (now.has(key)) continue
+      /* ⚠️ **KEPT UNTIL THE ERASE IS SEEN TO WORK, and it used to be dropped
+       * on the attempt.** `attachForeign` swallows its failures by design —
+       * the CFI of a PDF page that has not been painted does not resolve yet —
+       * so "asked to remove it" and "removed it" are different facts, and only
+       * one of them was recorded. Forgetting the anchor on the attempt meant a
+       * withdrawal that failed once was never retried: the friend's underline
+       * stayed on the page, and every later redraw agreed there was nothing to
+       * take off. */
+      if (await attachForeign(view, anchor, true)) continue
+      held.set(key, anchor)
+    }
+    /* Together, not one after another: within a pass a key is either being
+       erased or being drawn and never both, so two adds cannot conflict —
+       and a section with several friends' marks should not pay for them
+       one round trip at a time. */
+    await Promise.all([...now.values()].map((anchor) => attachForeign(view, anchor)))
+    /* Written AFTER both halves have settled, so the record is what is on the
+       page rather than what was asked for. */
+    if (this.#disposed) return
+    if (held.size === 0) this.#foreignDrawn.delete(index)
+    else this.#foreignDrawn.set(index, held)
+  }
+
 
   /**
    * Which spine item this relocation is in.
@@ -2014,6 +2300,47 @@ export class ReaderSession {
       prefix: context.prefix,
       suffix: context.suffix,
     }
+  }
+
+  /**
+   * Walk this book for the marks that have no anchor here — WI-22.A2.
+   *
+   * The session's half of the pass: it supplies the SECTIONS and the liveness,
+   * `reanchorPass` decides the walk, and the host does the writing.
+   *
+   * ⚠️ **`section.createDocument()`, NOT a second parse of the file.** That
+   * object is the one `refuseBookScripts` wrapped at open, so the strip applies
+   * to it too — which is what makes a path derived from it address the same
+   * text the reader sees. A host that opened the file again to do this would
+   * get an unstripped document and a path that can disagree by a child index.
+   *
+   * ⚠️ **`#disposed` IS THE LIVENESS, and it has to be read at the moment the
+   * walk asks rather than captured.** A closure over `this.#view` would keep a
+   * whole book alive for the length of a walk the reader ended by closing it.
+   */
+  async reanchorUnplaced(pending: readonly PendingMark[]): Promise<PassOutcome> {
+    const view = this.#view
+    const sections = view?.book?.sections
+    if (this.#disposed || !Array.isArray(sections)) {
+      /* NOT `complete: true`. Nothing was looked at, so nothing has been
+       * established — and a caller that remembered these as misses would
+       * answer "not in these bytes" for a book it never opened. */
+      return { found: [], missed: [], complete: false, walked: 0 }
+    }
+    return reanchorPass(pending, {
+      sections: sections.length,
+      documentFor: async (index) => {
+        const section = sections[index] as
+          | { createDocument?: () => Promise<Document> }
+          | null
+          | undefined
+        if (!section || typeof section.createDocument !== 'function') return null
+        const doc = await section.createDocument()
+        return doc.body ?? doc
+      },
+      live: () => !this.#disposed && this.#view === view,
+      breathe: BREATHE,
+    })
   }
 
   /**
@@ -2670,6 +2997,8 @@ export class ReaderSession {
       this.#unwatch.clear()
       this.#sections.clear()
       this.#rendered.clear()
+      this.#foreignDrawn.clear()
+      this.#reconciling.clear()
       this.#painters = null
       /**
        * ⚠️ **THE OPEN NOTE USED TO SURVIVE THE BOOK.**
@@ -2811,6 +3140,41 @@ function annotationFor(
   return { value: anchor.cfi, kind: anchor.kind, tint: anchor.tint, style: anchor.style }
 }
 
+/**
+ * The `kind` a foreign mark carries through foliate.
+ *
+ * ⚠️ **NOT ADDED TO `ANNOTATION_KINDS`, and that is deliberate.** That list is
+ * the STORED mark kinds — what `validMarks` accepts off disk and what
+ * `Mark.kind` may be. A foreign passage is never a stored mark; putting it
+ * there would make every reader of that constant have to remember the
+ * exception. This is a painter kind, and `PAINTABLE_KINDS` is the whitelist
+ * the draw handler checks.
+ */
+const FOREIGN_KIND = 'circle'
+
+/**
+ * What the painter will draw, asked as a WHITELIST.
+ *
+ * ⚠️ The handler's own note explains why this is not "anything that is not the
+ * companion's": classifying by exclusion means a `bookmark` arriving here is
+ * painted as a band over a passage the reader never marked. Widening the
+ * whitelist by one entry keeps that property; widening the *stored* kinds
+ * would not.
+ */
+const PAINTABLE_KINDS: readonly string[] = [...ANNOTATION_KINDS, FOREIGN_KIND]
+
+/**
+ * How many readers a foreign annotation claims, read defensively.
+ *
+ * foliate round-trips the annotation object untyped, so the value arriving at
+ * the painter is not the value the type system saw — the same reason `tintOf`
+ * and `styleOf` exist beside this. One reader is the honest floor: a mark is
+ * on the page because at least one person put it there.
+ */
+function readersOf(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? value : 1
+}
+
 /** One of the three tints, or yellow — the same default `validMarks` applies. */
 function tintOf(value: unknown): MarkTint {
   return MARK_TINTS.includes(value as MarkTint) ? (value as MarkTint) : 'yellow'
@@ -2840,6 +3204,69 @@ function styleOf(value: unknown): MarkStyle {
 interface AttachOptions {
   readonly remove?: boolean
   readonly report?: boolean
+}
+
+/**
+ * Attach or erase one FOREIGN mark.
+ *
+ * ⚠️ **`key` IS SENT AND IS IGNORED UNTIL THE FORK MOVES.** `addAnnotation`
+ * currently keys the Overlayer on `value`, so several readers at one CFI still
+ * collapse into one entry — `review.md`'s overlay blocker 1. `Overlayer.add`
+ * already takes a key separately; the one line that connects them is
+ * `annotation.key ?? annotation.value` in our own fork. Sending it now costs
+ * nothing, changes nothing, and means the day the fork lands no edit is needed
+ * here — which is the difference between a fix that is one commit away and one
+ * that is one commit plus an archaeology session away.
+ *
+ * `report: false`, like the speculative offers `attachMark` makes: a foreign
+ * mark is offered when the overlay is built and again when it lands, and
+ * reporting the first attempt would log a line per mark per page.
+ */
+async function attachForeign(view: View, anchor: ForeignAnchor, remove = false): Promise<boolean> {
+  try {
+    await view.addAnnotation(
+      {
+        value: anchor.cfi,
+        key: anchor.key,
+        kind: FOREIGN_KIND,
+        readers: anchor.readers,
+      },
+      remove,
+    )
+    return true
+  } catch {
+    /* Same expected failure as `attachMark`'s: a CFI addresses a position in a
+       document, and a PDF page has no text until it has been painted.
+       ⚠️ ANSWERED rather than only swallowed — `#drawSection` needs to know
+       whether an ERASE actually happened, because a withdrawal it cannot
+       retry is a mark that stays on the page for ever. Still not reported:
+       these are speculative offers made once per mark per page. */
+    return false
+  }
+}
+
+/**
+ * Which way the marked text runs, as foliate's rule painters ask for it.
+ *
+ * Measured on the element the words are in rather than on `body`, for
+ * `balanceRects`' reason: an EPUB is free to set `writing-mode` on a section,
+ * a pull quote or a single element, so the book's default is not the answer.
+ *
+ * `undefined` when the document cannot be reached, which is exactly what
+ * omitting the option meant — so an unreachable document is the old behaviour
+ * rather than a new failure.
+ */
+function writingModeAt(doc: Document | null, at: Element | null): string | undefined {
+  const view = doc?.defaultView
+  const target = at && at.ownerDocument === doc ? at : doc?.body
+  if (!view || !target) return undefined
+  try {
+    return view.getComputedStyle(target).writingMode || undefined
+  } catch {
+    /* A document torn down between the event and this call has no view to
+       measure with. The rule is still worth drawing; only its side is. */
+    return undefined
+  }
 }
 
 function attachMark(view: View, anchor: MarkAnchor, options: AttachOptions = {}): void {

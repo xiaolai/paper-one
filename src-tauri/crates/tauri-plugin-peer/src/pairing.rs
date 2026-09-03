@@ -75,6 +75,15 @@ struct Inner {
 
 struct Pending {
     secret: Secret,
+    /// What the reader said this pairing is FOR — WI-22.B3.
+    ///
+    /// ⚠️ **THE OFFERER CONSTRAINS IT, and leaving that to the joiner would be
+    /// an intent bug the SAS cannot catch.** A reader who chose *"add my
+    /// phone"* and got a stranger's shelf has been through a perfectly sound
+    /// handshake and paired with the wrong kind of thing. The six digits prove
+    /// there is no interceptor; they say nothing about what the two ends
+    /// believe they are doing.
+    kind: PairKind,
     /// Monotonic deadline (finding L10): a wall-clock change cannot stretch or
     /// shrink the window. The wall-clock expiry is encoded in the QR separately,
     /// for display only.
@@ -107,6 +116,8 @@ enum Claim {
         shelf_name: String,
         attempt_id: String,
         decision: oneshot::Receiver<Decision>,
+        /// What the OFFER was for — see `Pending::kind`.
+        kind: PairKind,
     },
 }
 
@@ -177,6 +188,7 @@ impl PairingState {
             shelf_name: pending.name,
             attempt_id,
             decision: rx,
+            kind: pending.kind,
         }
     }
 }
@@ -362,6 +374,43 @@ fn render_qr(text: &str) -> Result<String> {
 
 // ── wire ──────────────────────────────────────────────────────────────────
 
+/// What a pairing is FOR — WI-22.B3.
+///
+/// The two role checks below used to hard-code the only pairing that existed:
+/// a shelf offers and a satchel joins. Two people reading each other are two
+/// SHELVES, so `cargo test a_shelf_dialing_as_a_satchel_is_refused_by_role`
+/// passed and the feature was unreachable.
+///
+/// ⚠️ **A KIND, NOT A LOOSENED ROLE CHECK.** Dropping the checks would admit a
+/// satchel offering to a satchel, which nothing supports. Naming what the
+/// pairing is for keeps each shape refused by the rule that owns it, and
+/// `docs/design/circle/identity.md` is explicit that this is the whole change:
+/// *"What changes is four things, none of them cryptographic."*
+///
+/// Everything underneath is untouched and was already right for this job — the
+/// consumed pairing secret, the MAC over `shelfId ‖ satchelId` where the
+/// joiner's id is the one TLS proved, the constant-time compare, the 6-digit
+/// SAS and the two-sided commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PairKind {
+    /// Your own second device. A shelf offers; a satchel joins.
+    #[default]
+    Device,
+    /// Another person. A shelf offers; a shelf joins.
+    Circle,
+}
+
+impl PairKind {
+    /// The role a joiner must present for this kind of pairing.
+    fn joiner(self) -> Role {
+        match self {
+            PairKind::Device => Role::Satchel,
+            PairKind::Circle => Role::Shelf,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct PairHello {
     name: String,
@@ -369,6 +418,27 @@ struct PairHello {
     role: Role,
     /// Hex.
     mac: String,
+    /// ⚠️ **`default` IS THE COMPATIBILITY STORY, and it points the right way.**
+    /// A peer built before this field sends no `kind`, which reads as `Device`
+    /// — exactly what it means. And an OLD shelf receiving `kind: "circle"`
+    /// ignores the unknown field, then refuses the hello on `role`, which is
+    /// also correct: it cannot do circle pairing and should say no.
+    #[serde(default)]
+    kind: PairKind,
+    /// Who this device speaks for — WI-22.B3.
+    ///
+    /// ⚠️ **THE PERSON ID CROSSES HERE AND NOWHERE ELSE, because here is the
+    /// only place a human compared six digits.** `circle::admit` refuses a
+    /// person it has never met, so the hello ALPN can introduce a new DEVICE of
+    /// a known person and never a new person — a stranger's id learned over the
+    /// wire is a claim with nothing behind it. The SAS is what turns it into a
+    /// statement somebody vouched for.
+    ///
+    /// `None` from a peer with no person identity, which is the ordinary state
+    /// for a device-only pairing and is not a failure: the pairing succeeds and
+    /// no person is recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    person: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -385,6 +455,9 @@ struct PairAck {
     /// Hex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mac_ack: Option<String>,
+    /// The offerer's person — the other half of the exchange. See `PairHello`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    person: Option<String>,
 }
 
 /// The satchel's commit: sent after it persists the shelf, so the shelf can
@@ -422,7 +495,11 @@ fn default_device_name() -> String {
 // ── shelf side ────────────────────────────────────────────────────────────
 
 /// Mint a secret, publish the offer. A second call replaces the first.
-pub fn begin(node: &Node, name: Option<String>) -> Result<PairOffer> {
+pub fn begin(node: &Node, name: Option<String>, kind: PairKind) -> Result<PairOffer> {
+    /* THE OFFERER IS A SHELF FOR BOTH KINDS. A satchel has no library to
+    offer, and `serveWhenShelf` is the policy that says so on the other
+    side; this is the transport agreeing. What the kind changes is who may
+    JOIN — see `accept`. */
     if node.role() != Role::Shelf {
         return Err(Error::RoleMismatch {
             expected: Role::Shelf,
@@ -450,6 +527,7 @@ pub fn begin(node: &Node, name: Option<String>) -> Result<PairOffer> {
     let svg = render_qr(&url)?;
     node.pairing.replace(Pending {
         secret,
+        kind,
         expires_at: deadline,
         name: name.unwrap_or_else(default_device_name),
     });
@@ -494,9 +572,23 @@ pub async fn confirm(
 }
 
 /// One incoming `pair/1` connection on the shelf.
+/// What an attempt was, for the events — filled as soon as it is known.
+///
+/// ⚠️ **AN OUT-PARAM RATHER THAN A RETURN VALUE, because the FAILURE paths need
+/// it too.** A refused circle attempt must still be reported as a circle
+/// attempt: the panel showing six digits has to learn its own attempt failed,
+/// and a result carrying neither the kind nor the attempt id is one no surface
+/// can bind to anything.
+#[derive(Debug, Default)]
+struct Attempt {
+    kind: PairKind,
+    id: Option<String>,
+}
+
 pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
     let remote = conn.remote_id();
-    let outcome = serve_inner(&node, &conn).await;
+    let mut attempt = Attempt::default();
+    let outcome = serve_inner(&node, &conn, &mut attempt).await;
     match outcome {
         Ok(Some(record)) => {
             node.emit(PeerEvent::PairingResult(PairingResult {
@@ -506,6 +598,8 @@ pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
                 platform: Some(record.platform),
                 role: Some(record.role),
                 reason: None,
+                kind: attempt.kind,
+                attempt_id: attempt.id.clone(),
             }));
             conn.close(VarInt::from_u32(0), b"done");
         }
@@ -518,6 +612,8 @@ pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
                 platform: None,
                 role: None,
                 reason: Some(reason_of(&err)),
+                kind: attempt.kind,
+                attempt_id: attempt.id.clone(),
             }));
             conn.close(VarInt::from_u32(1), b"refused");
         }
@@ -533,7 +629,11 @@ fn reason_of(err: &Error) -> String {
 
 /// `Ok(Some)` paired, `Ok(None)` the human said no (nothing emitted beyond
 /// the ack), `Err` refused for a stated reason.
-async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerRecord>> {
+async fn serve_inner(
+    node: &Arc<Node>,
+    conn: &Connection,
+    attempt: &mut Attempt,
+) -> Result<Option<PeerRecord>> {
     let remote = conn.remote_id();
     let (mut send, mut recv) = timeout(HELLO_TIMEOUT, conn.accept_bi())
         .await
@@ -542,14 +642,20 @@ async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerR
         .await
         .map_err(|_| Error::Timeout("pair hello"))??;
 
-    if hello.role != Role::Satchel {
+    /* ⚠️ **STILL A WHITELIST, per kind.** `hello.kind.joiner()` is a satchel for
+    a device pairing and a shelf for a circle one; anything else is refused
+    by the same line that always refused it. Reading the kind off the HELLO
+    rather than off stored state is deliberate — the offer and the join have
+    to agree about what they are doing, and a joiner that claims `circle`
+    against a shelf too old to know the word is refused on `role` there. */
+    if hello.role != hello.kind.joiner() {
         return refuse(&mut send, "role-mismatch").await;
     }
     let Some(mac) = parse_mac(&hello.mac) else {
         return refuse(&mut send, "bad-mac").await;
     };
 
-    let (secret, shelf_name, attempt_id, decision) =
+    let (secret, shelf_name, attempt_id, decision, offered) =
         match node.pairing.claim(&node.id(), &remote, &mac) {
             Claim::NoPending => return refuse(&mut send, "no-pending").await,
             Claim::Expired => return refuse(&mut send, "expired").await,
@@ -559,8 +665,24 @@ async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerR
                 shelf_name,
                 attempt_id,
                 decision,
-            } => (secret, shelf_name, attempt_id, decision),
+                kind,
+            } => (secret, shelf_name, attempt_id, decision, kind),
         };
+
+    /* ⚠️ **THE JOINER MUST WANT WHAT WAS OFFERED.** Checked AFTER the claim, so
+    a mismatched attempt consumes the single-shot secret rather than leaving
+    it for a retry — the conservative direction, and the same one a bad
+    decision takes. A reader who chose "add my phone" and met a shelf has
+    been through a sound handshake and paired with the wrong kind of thing;
+    the SAS proves there is no interceptor and says nothing about intent. */
+    if hello.kind != offered {
+        return refuse(&mut send, "kind-mismatch").await;
+    }
+
+    /* Recorded before the event, so every later result — including a refusal
+    from the timeout below — can name the attempt it belongs to. */
+    attempt.kind = hello.kind;
+    attempt.id = Some(attempt_id.clone());
 
     node.emit(PeerEvent::PairingPending(PairingPending {
         attempt_id,
@@ -568,6 +690,7 @@ async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerR
         name: hello.name.clone(),
         platform: hello.platform.clone(),
         sas: sas(&secret, &node.id(), &remote),
+        kind: hello.kind,
     }));
 
     let decision = match timeout(node.confirm_timeout, decision).await {
@@ -592,7 +715,18 @@ async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerR
         id: remote.to_string(),
         name: hello.name,
         platform: hello.platform,
-        role: Role::Satchel,
+        /* ⚠️ **THE ROLE THE PEER ACTUALLY GAVE, not a constant.** This said
+        `Role::Satchel` because for a device pairing it always is one — and
+        in a circle pairing the peer is a SHELF, so the record said the
+        opposite of the truth. Everything downstream reads this: `sync`
+        binds behaviour to it, and a shelf filed as a satchel is a peer
+        nobody dials and nobody answers.
+
+        `hello.role` is safe to trust HERE and nowhere earlier: the kind
+        check above has already established that it matches what the offer
+        was for, and the id it is recorded against is the one TLS proved,
+        never a field. */
+        role: hello.role,
         grants: decision.grants,
         paired_at: now,
         last_seen_at: now,
@@ -610,6 +744,20 @@ async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerR
     // peer only once the satchel confirms it persisted too. A satchel that
     // resets after the human accepts — or fails its own persist — never sends a
     // valid commit, so the shelf rolls back and no one-way trust survives.
+    /* ⚠️ **ONLY FOR A CIRCLE PAIRING.** A device pairing is this reader's own
+    two machines; there is no second person in it, and minting an identity —
+    or handing one over — for a laptop meeting a phone would be both useless
+    and a widening of what the reader agreed to. */
+    let mine = if hello.kind == PairKind::Circle {
+        person_for_pairing(node).await
+    } else {
+        None
+    };
+    if hello.kind == PairKind::Circle {
+        if let Some(theirs) = hello.person.clone() {
+            remember_person(node, &theirs, &record.name, &record.id);
+        }
+    }
     let ack = PairAck {
         ok: true,
         reason: None,
@@ -617,6 +765,7 @@ async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerR
         platform: Some(std::env::consts::OS.to_owned()),
         role: Some(Role::Shelf),
         mac_ack: Some(ack_mac(&secret, &remote, &node.id()).to_hex().to_string()),
+        person: mine,
     };
     match await_commit(node, &mut send, &mut recv, &secret, &remote, &ack).await {
         Ok(()) => {
@@ -658,6 +807,80 @@ async fn await_commit(
     Ok(())
 }
 
+/// This device's person id for a circle pairing, minting one if there is none.
+///
+/// ⚠️ **THE FIRST CIRCLE PAIRING IS A MINT TRIGGER, and `identity.md` names it
+/// as one.** A reader who never shares never gets an identity; the moment they
+/// hand one to somebody, they need one to hand. Nothing is SHOWN here — the
+/// twelve words stay behind the button that says so.
+///
+/// `None` on any failure, and deliberately: a keychain that will not answer
+/// must not fail a pairing the two humans have already agreed to. They get a
+/// device pairing, and the circle stays empty until it works.
+async fn person_for_pairing(node: &Node) -> Option<String> {
+    let root = node.root().to_path_buf();
+    let keychain = node.keychain();
+    tokio::task::spawn_blocking(move || {
+        /* ⚠️ **A LEAF ANNOUNCES THE PERSON IT ALREADY BELONGS TO, and must not
+         * mint a second one.** `ensure` refuses for a leaf now, so calling it
+         * first would drop the person from every pairing a demoted device
+         * makes — it would pair as a device and its circle would stay empty
+         * for ever, with nothing anywhere saying why. Minting is for a device
+         * that has no identity AT ALL, which is the laziness the whole custody
+         * design rests on. */
+        if let Ok(Some(id)) = crate::person::person_id_at(keychain.as_ref(), &root) {
+            return Some(id.to_string());
+        }
+        crate::person::ensure(keychain.as_ref(), &root)
+            .ok()
+            .map(|(id, _phrase)| id.to_string())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Record somebody met through a circle pairing.
+///
+/// ⚠️ **BEST EFFORT, AND IT MUST NOT UNDO THE PAIRING.** The device trust is
+/// what the two humans compared six digits for; a circle file that will not
+/// write is a circle entry the reader can add again, not a reason to throw the
+/// pairing away. Reported so the failure is not silent.
+fn remember_person(node: &Node, person: &str, display_name: &str, device: &str) {
+    use crate::circle::{known_people, set_known_people, KnownPerson, Version};
+    let root = node.root();
+    let mut people = match known_people(root) {
+        Ok(people) => people,
+        Err(err) => {
+            log::warn!("circle: could not read the people file: {err}");
+            return;
+        }
+    };
+    if people.iter().any(|k| k.person == person) {
+        return;
+    }
+    people.push(KnownPerson {
+        person: person.to_owned(),
+        display_name: display_name.to_owned(),
+        /* The empty roster: anything they present next is newer, which is
+        right — the first hello is where their roster comes from. */
+        roster: Version { epoch: 0, hlc: 0 },
+        /* Nothing heard from them yet, so no roster to fingerprint. */
+        roster_hash: String::new(),
+        revoked: Vec::new(),
+        /* ⚠️ **THE ONE DEVICE THIS READER KNOWS IS THEIRS.** It came across a
+         * channel two humans compared six digits over, which is the strongest
+         * evidence in the system — stronger than any later roster. Seeding it
+         * is what lets this person revoke THIS device later and have it acted
+         * on; `KnownPerson::devices` explains why a revocation that is not
+         * bound to its issuer is an eviction primitive for anybody. */
+        devices: vec![device.to_owned()],
+    });
+    if let Err(err) = set_known_people(root, &people) {
+        log::warn!("circle: could not record {person}: {err}");
+    }
+}
+
 /// Send `PairAck { ok: false, reason }`, wait for it to be acknowledged, and
 /// return the matching error.
 async fn refuse<T>(send: &mut SendStream, reason: &str) -> Result<T> {
@@ -668,6 +891,10 @@ async fn refuse<T>(send: &mut SendStream, reason: &str) -> Result<T> {
         platform: None,
         role: None,
         mac_ack: None,
+        /* ⚠️ NOTHING ON A REFUSAL. A peer told no must not walk away with this
+        reader's person id — that is an identifier they can then present to
+        somebody else as evidence of a circle they are not in. */
+        person: None,
     };
     let _ = write_json(send, &ack).await;
     flush(send).await;
@@ -676,7 +903,13 @@ async fn refuse<T>(send: &mut SendStream, reason: &str) -> Result<T> {
 
 /// Finish the stream and wait (bounded) for the peer to acknowledge the
 /// bytes, so a `conn.close()` right after does not discard them.
-async fn flush(send: &mut SendStream) {
+///
+/// `pub(crate)` because `circle::serve` needs exactly this and did not have it:
+/// it wrote its ack and closed immediately, so the answer was discarded on the
+/// wire and the caller saw a closed connection instead of a verdict. One
+/// implementation of "make sure the bytes landed", rather than two that can
+/// disagree about whether waiting matters.
+pub(crate) async fn flush(send: &mut SendStream) {
     let _ = send.finish();
     let _ = timeout(FLUSH_TIMEOUT, send.stopped()).await;
 }
@@ -709,12 +942,15 @@ pub async fn from_uri(
     grants: Vec<String>,
 ) -> Result<(PairStart, JoinHandle<Result<PeerRecord>>)> {
     let uri = PairUri::parse(uri)?;
-    if node.role() != Role::Satchel {
-        return Err(Error::RoleMismatch {
-            expected: Role::Satchel,
-            got: node.role(),
-        });
-    }
+    /* ⚠️ **BOTH ROLES MAY JOIN NOW — a satchel a device pairing, a shelf a
+    circle one — and this guard is why the feature was unreachable rather
+    than merely unbuilt.** It refused BEFORE touching the network, so a shelf
+    dialling another shelf never got as far as a hello, and the wire-level
+    check was never the thing saying no.
+    `a_shelf_dialing_as_a_satchel_is_refused_by_role` passed against this
+    line, not against the protocol.
+    What is NOT loosened: the role still decides the kind (below), the
+    offerer still constrains the kind, and a satchel still cannot offer. */
     let shelf = uri.id;
     let conn = timeout(
         DIAL_TIMEOUT,
@@ -723,13 +959,32 @@ pub async fn from_uri(
     .await
     .map_err(|_| Error::Timeout("pair dial"))??;
     let (mut send, mut recv) = conn.open_bi().await?;
+    /* ⚠️ **THE JOINER'S OWN ROLE, NOT `Role::Satchel` — the third hard-coding.**
+    `pairing.rs` fixed the role in three places and this was the one that
+    made a shelf DIAL as a satchel, so `a_shelf_dialing_as_a_satchel_is_
+    refused_by_role` refused a lie the code had told on its behalf. A shelf
+    joining is a circle pairing by construction; a satchel joining is a
+    device one. The kind follows from the role rather than being a fourth
+    thing that can disagree with it. */
+    let role = node.role();
+    let kind = match role {
+        Role::Shelf => PairKind::Circle,
+        Role::Satchel => PairKind::Device,
+    };
     let hello = PairHello {
         name: name.unwrap_or_else(default_device_name),
         platform: std::env::consts::OS.to_owned(),
-        role: Role::Satchel,
+        role,
+        kind,
         mac: pair_mac(&uri.secret, &shelf, &node.id())
             .to_hex()
             .to_string(),
+        /* Only for a circle: a device pairing has no second person in it. */
+        person: if kind == PairKind::Circle {
+            person_for_pairing(node).await
+        } else {
+            None
+        },
     };
     write_json(&mut send, &hello).await?;
     // The send stream stays open: after the ack the satchel sends its commit on
@@ -739,7 +994,10 @@ pub async fn from_uri(
     let node = node.clone();
     let secret = uri.secret;
     let task = tokio::spawn(async move {
-        let result = finish(&node, &conn, &mut send, &mut recv, shelf, &secret, grants).await;
+        let result = finish(
+            &node, &conn, &mut send, &mut recv, shelf, &secret, grants, kind,
+        )
+        .await;
         node.emit(PeerEvent::PairingResult(match &result {
             Ok(record) => PairingResult {
                 ok: true,
@@ -748,6 +1006,11 @@ pub async fn from_uri(
                 platform: Some(record.platform.clone()),
                 role: Some(record.role),
                 reason: None,
+                kind,
+                /* The joiner has no attempt id: the offerer mints one for the
+                side that has to CONFIRM. `kind` is what a joining surface
+                filters on, and it is the side that started this. */
+                attempt_id: None,
             },
             Err(err) => PairingResult {
                 ok: false,
@@ -756,6 +1019,8 @@ pub async fn from_uri(
                 platform: None,
                 role: None,
                 reason: Some(reason_of(err)),
+                kind,
+                attempt_id: None,
             },
         }));
         conn.close(VarInt::from_u32(0), b"done");
@@ -773,6 +1038,8 @@ async fn finish(
     shelf: EndpointId,
     secret: &Secret,
     grants: Vec<String>,
+    // Which kind this attempt was — only a circle exchanges a person.
+    kind: PairKind,
 ) -> Result<PeerRecord> {
     let ack: PairAck = match timeout(node.confirm_timeout + ACK_GRACE, read_json(recv)).await {
         Ok(Ok(ack)) => ack,
@@ -800,11 +1067,17 @@ async fn finish(
             got: role,
         });
     }
+    /* Taken before `ack` is picked apart below. */
+    let ack_person = ack.person.clone();
     let now = now_ms();
     let record = PeerRecord {
         id: shelf.to_string(),
         name: ack.name.unwrap_or_else(|| "shelf".into()),
         platform: ack.platform.unwrap_or_default(),
+        /* The offerer is a shelf for BOTH kinds — `begin` refuses anything
+        else — so this constant is still true, and it is left as one rather
+        than read off the ack: a field the remote controls must not decide
+        what role we file it under when the transport already knows. */
         role: Role::Shelf,
         grants,
         paired_at: now,
@@ -812,6 +1085,11 @@ async fn finish(
         last_addrs: remote_addrs(node, shelf).await,
     };
     node.peers().insert(record.clone())?;
+    if kind == PairKind::Circle {
+        if let Some(theirs) = ack_person {
+            remember_person(node, &theirs, &record.name, &record.id);
+        }
+    }
     // Confirm to the shelf that we persisted, so it keeps the peer (finding M8).
     // Best-effort: if this commit is lost the shelf rolls back to no trust —
     // leaving at worst a benign satchel-only record, never shelf-only trust.
@@ -953,7 +1231,7 @@ mod tests {
         String,
         String,
     ) {
-        let offer = begin(&shelf.node, Some("Desk".into())).unwrap();
+        let offer = begin(&shelf.node, Some("Desk".into()), PairKind::Device).unwrap();
         let (start, task) = from_uri(
             &satchel.node,
             &offer.url,
@@ -1049,7 +1327,7 @@ mod tests {
     async fn a_wrong_secret_is_refused_and_the_offer_survives() {
         let mut shelf = TestNode::start("pair-wrong-shelf", Role::Shelf).await;
         let satchel = TestNode::start("pair-wrong-satchel", Role::Satchel).await;
-        let offer = begin(&shelf.node, None).unwrap();
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
         let mut uri = PairUri::parse(&offer.url).unwrap();
         uri.secret[0] ^= 1;
         let (_, task) = from_uri(&satchel.node, &uri.to_uri(), None, vec![])
@@ -1091,7 +1369,7 @@ mod tests {
     async fn an_expired_offer_is_refused() {
         let mut shelf = TestNode::start("pair-expired-shelf", Role::Shelf).await;
         let satchel = TestNode::start("pair-expired-satchel", Role::Satchel).await;
-        let offer = begin(&shelf.node, None).unwrap();
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
         // Age the pending secret in place, on the monotonic deadline (finding
         // L10) — the enforcement clock, not the wall clock.
         {
@@ -1119,7 +1397,7 @@ mod tests {
     async fn a_second_use_of_a_spent_secret_is_refused() {
         let mut shelf = TestNode::start("pair-reuse-shelf", Role::Shelf).await;
         let mut satchel = TestNode::start("pair-reuse-satchel", Role::Satchel).await;
-        let offer = begin(&shelf.node, None).unwrap();
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
         let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
             .await
             .unwrap();
@@ -1153,7 +1431,7 @@ mod tests {
     async fn cancel_refuses_a_satchel_awaiting_the_human() {
         let mut shelf = TestNode::start("pair-cancel-shelf", Role::Shelf).await;
         let satchel = TestNode::start("pair-cancel-satchel", Role::Satchel).await;
-        let offer = begin(&shelf.node, None).unwrap();
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
         let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
             .await
             .unwrap();
@@ -1174,6 +1452,143 @@ mod tests {
         satchel.close().await;
     }
 
+    /// ⚠️ **WI-22.B3's ACCEPTANCE: two people, both shelves, paired.**
+    ///
+    /// The item exists because *"two authors are both shelves, and two shelves
+    /// cannot pair"* — and the plan's falsifier is *"two shelves complete
+    /// admission without either reader comparing a SAS."* Both halves are
+    /// asserted here: the pairing completes, AND the six digits match on both
+    /// screens, which is the only thing binding a key to a human when the two
+    /// ends are two different people.
+    #[tokio::test]
+    async fn two_shelves_complete_a_circle_pairing_and_still_compare_a_sas() {
+        let mut alice = TestNode::start("circle-alice", Role::Shelf).await;
+        let bob = TestNode::start("circle-bob", Role::Shelf).await;
+
+        let offer = begin(&alice.node, Some("Alice".into()), PairKind::Circle).unwrap();
+        let (start, task) = from_uri(
+            &bob.node,
+            &offer.url,
+            Some("Bob".into()),
+            vec!["circle:read".into()],
+        )
+        .await
+        .expect("a shelf may join a circle offer");
+
+        let PeerEvent::PairingPending(pending) = alice
+            .next_event_where(|e| matches!(e, PeerEvent::PairingPending(_)))
+            .await
+        else {
+            unreachable!()
+        };
+        assert_eq!(pending.id, bob.id());
+        assert_eq!(pending.name, "Bob");
+
+        /* ⚠️ **THE SAS STOPS BEING A FORMALITY HERE.** Between a reader's own
+        two devices a mismatch means a typo; between two PEOPLE it means an
+        interceptor. Asserted as equality on both screens, because a pairing
+        that completed without the two humans having the same digits to
+        compare is the falsifier the plan names. */
+        assert_eq!(pending.sas, start.sas, "SAS equal on both screens");
+        assert_eq!(pending.sas.len(), 6);
+
+        let confirmed = confirm(
+            &alice.node,
+            true,
+            vec!["circle:read".into()],
+            pending.attempt_id.clone(),
+        )
+        .await;
+        let bob_record = task.await.unwrap().expect("bob records alice");
+        let alice_record = confirmed.unwrap().expect("alice records bob");
+
+        /* Both sides recorded the OTHER as a shelf, which is what a circle
+        relationship is: neither is anyone's satchel. */
+        assert_eq!(alice_record.id, bob.id());
+        assert_eq!(alice_record.role, Role::Shelf);
+        assert_eq!(alice_record.grants, vec!["circle:read"]);
+        assert_eq!(bob_record.id, alice.id());
+        assert_eq!(bob_record.role, Role::Shelf);
+
+        /* ⚠️ **AND EACH LEARNED WHO THE OTHER IS, which is what makes this a
+        circle rather than two machines that can talk.** The person id crosses
+        HERE and nowhere else: `circle::admit` refuses a person it has never
+        met, so the hello ALPN can introduce a new DEVICE of a known person and
+        never a new PERSON. The six digits the two humans just compared are
+        what turn an id on the wire into a statement somebody vouched for.
+
+        Before this, a circle pairing produced two peer records and an empty
+        circle — the panel said "nothing is shared until you add somebody" and
+        offered no way to add anybody. */
+        let alice_knows = crate::circle::known_people(alice.node.root()).unwrap();
+        let bob_knows = crate::circle::known_people(bob.node.root()).unwrap();
+        assert_eq!(alice_knows.len(), 1, "alice recorded one person");
+        assert_eq!(bob_knows.len(), 1, "bob recorded one person");
+        assert_eq!(alice_knows[0].display_name, "Bob");
+        assert_eq!(bob_knows[0].display_name, "Alice");
+        /* Two different people, and each id is the OTHER's — not a copy of
+        their own, which is what a swapped field would look like. */
+        assert_ne!(alice_knows[0].person, bob_knows[0].person);
+
+        alice.close().await;
+        bob.close().await;
+    }
+
+    /// A DEVICE pairing exchanges no person, and mints none.
+    #[tokio::test]
+    async fn a_device_pairing_leaves_the_circle_alone() {
+        /* ⚠️ A reader's own laptop meeting their own phone has no second person
+        in it. Minting an identity for that — or handing one over — would be
+        both useless and a widening of what the reader agreed to. */
+        let mut shelf = TestNode::start("device-shelf", Role::Shelf).await;
+        let phone = TestNode::start("device-phone", Role::Satchel).await;
+
+        let offer = begin(&shelf.node, Some("Desk".into()), PairKind::Device).unwrap();
+        let (_start, task) = from_uri(&phone.node, &offer.url, Some("Phone".into()), vec![])
+            .await
+            .unwrap();
+        let PeerEvent::PairingPending(pending) = shelf
+            .next_event_where(|e| matches!(e, PeerEvent::PairingPending(_)))
+            .await
+        else {
+            unreachable!()
+        };
+        let confirmed = confirm(&shelf.node, true, vec![], pending.attempt_id.clone()).await;
+        task.await.unwrap().expect("phone records the shelf");
+        confirmed.unwrap().expect("shelf records the phone");
+
+        assert!(crate::circle::known_people(shelf.node.root())
+            .unwrap()
+            .is_empty());
+        assert!(crate::circle::known_people(phone.node.root())
+            .unwrap()
+            .is_empty());
+
+        shelf.close().await;
+        phone.close().await;
+    }
+
+    /// A satchel must not be talked into a circle pairing by an offer.
+    #[tokio::test]
+    async fn a_satchel_cannot_join_a_circle_offer() {
+        let alice = TestNode::start("circle-only-shelf", Role::Shelf).await;
+        let phone = TestNode::start("circle-phone", Role::Satchel).await;
+        let offer = begin(&alice.node, None, PairKind::Circle).unwrap();
+
+        /* The phone dials honestly — it says satchel, and therefore `device` —
+        and the offer was for a circle. Refused on the kind, which is the
+        same line that refuses the mirror case above. */
+        let (_start, task) = from_uri(&phone.node, &offer.url, None, vec![])
+            .await
+            .unwrap();
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("kind-mismatch"), "{err}");
+        assert!(alice.node.list_peers().is_empty());
+
+        alice.close().await;
+        phone.close().await;
+    }
+
     #[tokio::test]
     async fn no_confirmation_in_time_refuses() {
         let mut shelf = TestNode::start_with(
@@ -1183,7 +1598,7 @@ mod tests {
         )
         .await;
         let satchel = TestNode::start("pair-timeout-satchel", Role::Satchel).await;
-        let offer = begin(&shelf.node, None).unwrap();
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
         let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
             .await
             .unwrap();
@@ -1206,18 +1621,30 @@ mod tests {
         let shelf = TestNode::start("pair-role-shelf", Role::Shelf).await;
         let other_shelf = TestNode::start("pair-role-other", Role::Shelf).await;
         let satchel = TestNode::start("pair-role-satchel", Role::Satchel).await;
-        let offer = begin(&shelf.node, None).unwrap();
-        // The dialing side refuses before touching the network.
-        assert_eq!(
-            from_uri(&other_shelf.node, &offer.url, None, vec![])
-                .await
-                .unwrap_err()
-                .kind(),
-            "roleMismatch"
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
+        /* ⚠️ **THE REFUSAL MOVED FROM A PRE-FLIGHT GUARD TO THE PROTOCOL, and
+        that is the point of WI-22.B3.** `from_uri` used to refuse any
+        non-satchel before touching the network, so this assertion passed
+        against ONE LINE rather than against the handshake — and a shelf
+        could never reach a hello even when the pairing was legitimate.
+
+        A shelf joining now dials, says honestly that it is a shelf doing a
+        CIRCLE pairing, and is refused because the OFFER was for a device.
+        The property this test names is unchanged: a shelf cannot join a
+        device pairing. What changed is what enforces it. */
+        let (_start, task) = from_uri(&other_shelf.node, &offer.url, None, vec![])
+            .await
+            .expect("a shelf may now dial; the refusal is on the wire");
+        let err = task.await.unwrap().unwrap_err();
+        assert!(
+            err.to_string().contains("kind-mismatch"),
+            "a shelf must not join a device offer: {err}"
         );
         // A satchel cannot mint an offer.
         assert_eq!(
-            begin(&satchel.node, None).unwrap_err().kind(),
+            begin(&satchel.node, None, PairKind::Device)
+                .unwrap_err()
+                .kind(),
             "roleMismatch"
         );
         // And a hand-rolled hello claiming to be a shelf is refused on the wire.
@@ -1235,9 +1662,11 @@ mod tests {
                 name: "x".into(),
                 platform: "test".into(),
                 role: Role::Shelf,
+                kind: PairKind::Device,
                 mac: pair_mac(&uri.secret, &shelf.node.id(), &raw.id())
                     .to_hex()
                     .to_string(),
+                person: None,
             },
         )
         .await
@@ -1255,7 +1684,7 @@ mod tests {
     #[tokio::test]
     async fn the_shelf_uses_the_authenticated_id_not_a_claimed_one() {
         let mut shelf = TestNode::start("pair-claim-shelf", Role::Shelf).await;
-        let offer = begin(&shelf.node, None).unwrap();
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
         let uri = PairUri::parse(&offer.url).unwrap();
         let raw = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
@@ -1361,7 +1790,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn one_hundred_concurrent_attempts_with_one_secret_pair_exactly_once() {
         let mut shelf = TestNode::start("pair-race-shelf", Role::Shelf).await;
-        let offer = begin(&shelf.node, None).unwrap();
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
         let uri = Arc::new(PairUri::parse(&offer.url).unwrap());
         let shelf_id = shelf.node.id();
 
@@ -1388,9 +1817,11 @@ mod tests {
                         name: format!("racer {i}"),
                         platform: "test".into(),
                         role: Role::Satchel,
+                        kind: PairKind::Device,
                         mac: pair_mac(&uri.secret, &shelf_id, &raw.id())
                             .to_hex()
                             .to_string(),
+                        person: None,
                     },
                 )
                 .await
@@ -1491,7 +1922,7 @@ mod tests {
         // it persisted too. A satchel that reads the ack then drops without a
         // commit must leave the shelf with no one-way trust.
         let mut shelf = TestNode::start("pair-commit-shelf", Role::Shelf).await;
-        let offer = begin(&shelf.node, None).unwrap();
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
         let uri = PairUri::parse(&offer.url).unwrap();
         let raw = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
@@ -1506,9 +1937,11 @@ mod tests {
                 name: "ghost".into(),
                 platform: "test".into(),
                 role: Role::Satchel,
+                kind: PairKind::Device,
                 mac: pair_mac(&uri.secret, &shelf.node.id(), &raw.id())
                     .to_hex()
                     .to_string(),
+                person: None,
             },
         )
         .await
@@ -1548,7 +1981,7 @@ mod tests {
         // does not consume the pending attempt; only the matching id confirms.
         let mut shelf = TestNode::start("pair-attempt-shelf", Role::Shelf).await;
         let mut satchel = TestNode::start("pair-attempt-satchel", Role::Satchel).await;
-        let offer = begin(&shelf.node, None).unwrap();
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
         let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
             .await
             .unwrap();

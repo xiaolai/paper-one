@@ -287,11 +287,92 @@ const COVERAGE_THRESHOLDS = {
  * the default even under a load spike, and four costs forty percent on a
  * quiet machine; the cap is the first, not the second.
  *
- * SMALL MACHINES KEEP THE DEFAULT. A 3- or 4-core CI runner is dedicated —
- * nothing else competes for its main thread — and `cpus − 2` there would
- * halve the fan-out for a case it never meets.
  */
 const CORES = availableParallelism()
+/**
+ * ⚠️ **A KNOWN FLAKE LIVES HERE AND `cpus − 2` IS NOT THE FIX — do not spend
+ * another afternoon on it without reading this.**
+ *
+ * Under `--coverage`, in the full multi-project run, vitest intermittently
+ * reports `[vitest-worker]: Timeout calling "onTaskUpdate"` as an unhandled
+ * error and exits 1 **with every test passing**. `defaultWidth` in
+ * `scripts/check-boundaries.selftest.mjs` already named that exact string as
+ * something "the gate has been failing on", so it predates the branch that
+ * finally measured it.
+ *
+ * Measured 2026-09-01 on a 10-core machine, full `pnpm test:coverage`, all
+ * tests passing in every one of these runs:
+ *
+ * | workers | cruiser fan-out | scripts pool | result |
+ * |---|---|---|---|
+ * | 8 (`cpus − 2`) | 6 | threads | ✗ ✗ ✗ ✓ |
+ * | 8 | 2 | threads | ✓ ✓ ✗ |
+ * | 5 (`cpus − 5`) | 6 | threads | ✓ ✗ |
+ * | 5 | 6 | forks | ✗ |
+ *
+ * And two more hypotheses ruled out, recorded so nobody re-runs them:
+ * **the reporter** (`--reporter=dot` removes the live tree for 5 965 tests from
+ * the main thread — still red) and **worker pool type** (`forks` gives the
+ * scripts project its own heap and GC — still red). Per-test timeouts were a
+ * separate, real finding and are fixed; they are not this.
+ *
+ * ⚠️ **IT REPRODUCES ON `main` WITH NONE OF THIS BRANCH'S CODE** — verified by
+ * stashing the whole working tree and running the same command: one green, one
+ * red, 5904 tests passing in both. So it is not something the circle work
+ * introduced; a bigger suite only makes the dice land badly more often.
+ *
+ * **Every lever was green at least once and red at least once**, which is what
+ * says the mechanism is not CPU contention — that would respond monotonically.
+ * Two facts narrow it: it needs `--coverage`, and it needs more than one
+ * project. The main thread merges a v8 coverage payload per file for 299 files
+ * and must still answer birpc inside 60 s; a burst of completions is the
+ * likeliest starver, and the fan-out levers only change how bursts happen to
+ * line up.
+ *
+ * So the value is left where it was. Reducing it made one run the fastest seen
+ * (169 s) and did not make the gate reliable, and a permanent CI slowdown for a
+ * flake it does not fix is a bad trade.
+ *
+ * ## ⚠️ VITEST 4 FIXES IT, AND LANDING IT NEEDS ONE DECISION THAT IS NOT MINE
+ *
+ * Scouted end to end on 2026-09-01, on a scratch upgrade to 4.1.11:
+ *
+ * - **The flake is GONE.** Full `pnpm test:coverage`, no unhandled error, exit
+ *   driven only by real results.
+ * - **And it is twice as fast** — 111 s against 250 s.
+ * - Three migration defects were found and **all three are already fixed in
+ *   this tree, because each is a real improvement on vitest 3 as well**:
+ *   `scripts/lib/vitestBin.mjs` (v4 dropped `./vitest.mjs` from its `exports`,
+ *   which took 16 tests down with one error), `%p` → `%o` in two `it.each`
+ *   tables (v4 stops substituting `%p`, collapsing six distinct test names into
+ *   one — which would have blinded `check-test-ledger` to five deletions), and
+ *   the ledger rewritten for the new names.
+ *
+ * **What is NOT done is the coverage re-baseline, and it is deliberately left.**
+ * v4's v8 provider counts differently — AST-aware remapping — so the same tests
+ * over the same 703 files report:
+ *
+ * | | vitest 3 | vitest 4 |
+ * |---|---|---|
+ * | statements | 80.37% (37 947/47 218) | 77.51% (19 321/24 926) |
+ * | functions | 82.98% (2 521/3 038) | 73.79% (3 867/5 240) |
+ * | `src/kernel/ui` branches | 81.76% | **61.61%** |
+ *
+ * Functions are a good illustration: the percentage FALLS while the absolute
+ * count covered RISES from 2 521 to 3 867, because v4 counts far more of them.
+ * That reads as a stricter measurement rather than worse code — but
+ * `src/kernel/ui` branches falling twenty points is not something one run can
+ * distinguish from a real gap the old metric hid, and **lowering a gate by
+ * twenty points is not a change to make quietly**. Re-baselining every
+ * threshold from a single measurement is the last step and it wants a human.
+ *
+ * The upgrade is otherwise ready: `pnpm add -D vitest@4 @vitest/coverage-v8@4`,
+ * drop `all: true` (v4 removed it), then re-baseline `COVERAGE_THRESHOLDS`.
+ *
+ * SMALL MACHINES KEEP THE DEFAULT. A 3- or 4-core CI runner is dedicated —
+ * nothing else competes for its main thread — and a subtraction there would
+ * halve the fan-out for a case it never meets.
+ */
 const MAX_WORKERS = CORES >= 6 ? CORES - 2 : undefined
 
 export default mergeConfig(
@@ -299,6 +380,9 @@ export default mergeConfig(
   defineConfig({
     test: {
       passWithNoTests: true,
+      /* One line, in one file: `findBy*`/`waitFor` get a bound that matches
+         what this suite's async UI actually costs. See `vitest.setup.ts`. */
+      setupFiles: ['./vitest.setup.ts'],
       maxWorkers: MAX_WORKERS,
       /**
        * A PASSING TEST'S CONSOLE OUTPUT IS MAIN-THREAD WORK, and this suite
@@ -340,6 +424,34 @@ export default mergeConfig(
           environment: 'node',
           include: [...project.include],
           exclude: [...configDefaults.exclude, ...(project.exclude ?? [])],
+          /**
+           * ⚠️ **THE `scripts` PROJECT GETS 60 s, BECAUSE NOTHING IN IT IS A
+           * UNIT TEST.** Every file there exercises a GATE: it walks the whole
+           * of `src/`, or spawns `node` against a CLI, or runs
+           * dependency-cruiser over a fixture tree. The root `testTimeout` of
+           * 15 s is a hang detector sized for tests that touch a few modules,
+           * and applying it here makes the gate decide on machine load.
+           *
+           * Measured 2026-09-01 on a 10-core machine — standalone against the
+           * same test inside a full `pnpm test:coverage`:
+           *
+           * | test | alone | under the full run |
+           * |---|---|---|
+           * | `check-browser-safe` pinned-module walk | 0.44 s | **25 s ✗** |
+           * | `check-coverage` CLI usage errors | 1.8 s | **20 s ✗** |
+           *
+           * ⚠️ **TWO INSTANCES ARE A CLASS.** The first was fixed with a
+           * timeout on one `describe`, and the second arrived four hours later
+           * in a different file for the identical reason — a subprocess-spawning
+           * gate test measured in single-digit seconds, killed at 15 under
+           * contention. Fixing the class here rather than instance by instance
+           * is what stops a third.
+           *
+           * A hang is unbounded, so 60 s still catches one. Nothing about what
+           * these tests assert is relaxed, and the other four projects — which
+           * really are unit tests — keep the tighter bound.
+           */
+          ...(project.name === 'scripts' ? { testTimeout: 60_000 } : {}),
         },
       })),
     },

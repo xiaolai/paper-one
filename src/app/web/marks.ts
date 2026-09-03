@@ -6,6 +6,7 @@ import {
   isAnnotation,
   isBookmark,
   type Annotation,
+  type Placed,
   type Bookmark,
   type Mark,
   type MarkRow,
@@ -50,7 +51,10 @@ import type { ShelfChannel } from './channel'
 
 /** What `Marginalia` reads. Five of `MarksView`'s fourteen members. */
 export interface RemoteMarks {
-  readonly all: readonly Annotation[]
+  /** `Placed`, so the anchors `Reader` maps out of this can reach the painter
+   *  at all — WI-22.A1. `resplit` has always filtered by `isPlaced`; this is
+   *  what makes the compiler carry that rather than the comment below it. */
+  readonly all: readonly Placed<Annotation>[]
   readonly allBookmarks: readonly Bookmark[]
   /** Annotations with no anchor in this library — see `MarkSnapshot.unplaced`.
    *  Never in `all`, so `Reader` never maps one to a drawable anchor. */
@@ -271,7 +275,7 @@ export function createRemoteMarks(channel: ShelfChannel): MarksStore {
   /* SPLIT ONCE PER CHANGE, not per render. `getSnapshot`'s contract is identity
    * stability, and filtering in a getter would hand React a new array every
    * time it looked and re-render forever. */
-  let annotations: readonly Annotation[] = []
+  let annotations: readonly Placed<Annotation>[] = []
   let bookmarks: readonly Bookmark[] = []
   let unplaced: readonly Annotation[] = NONE
   const resplit = (): void => {

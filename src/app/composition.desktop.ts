@@ -1,4 +1,5 @@
 import type { Capability } from '../kernel'
+import { circle } from '../capabilities/circle'
 import { companion } from '../capabilities/companion'
 import { inference } from '../capabilities/inference'
 import { peer } from '../capabilities/peer'
@@ -40,4 +41,4 @@ import { webhost } from '../capabilities/webhost'
  *
  * DESKTOP ONLY: a phone is a satchel, never a shelf, and has nothing to
  * serve. */
-export const capabilities: readonly Capability[] = [peer, sync, inference, companion, webhost]
+export const capabilities: readonly Capability[] = [peer, sync, inference, companion, circle, webhost]

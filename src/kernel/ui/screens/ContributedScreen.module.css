@@ -1,0 +1,69 @@
+/* The frame the kernel draws around a capability's whole-window view.
+ *
+ * ⚠️ **A CONTRIBUTED SCREEN HAD NO CONTAINER AT ALL, and it showed.** It was
+ * rendered as a bare fragment into normal flow, so it landed at the bottom of
+ * the window as unstyled text with the reader still visible behind it. Both of
+ * the kernel's own screens are `position: absolute; inset: 0` with a background
+ * and a z-index; a screen that is not is not a screen.
+ *
+ * THE FRAME IS THE KERNEL'S, NOT THE CAPABILITY'S. A capability may only reach
+ * the kernel through its public entry, so it cannot read `--titlebar-h` or know
+ * that macOS insets the top — and asking every capability to get window
+ * chrome right is asking for one of them to get it wrong. It contributes
+ * content; this puts it in a page.
+ */
+
+.screen {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+/* The traffic lights are drawn over the top of the window — the same inset
+   `Library` takes, and for the same reason. */
+.screen[data-platform='macos'] {
+  padding-top: var(--titlebar-h);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ONE READABLE COLUMN, centred. A capability's content is prose and rows, and
+   a full-window width of either is unreadable on a wide display — the same
+   measure argument the reader makes about a page of a book.
+   `--prose-wide` rather than a number: `tokens.test.ts` refuses a raw value
+   where a scale exists, and it was right to — 42rem was a width I liked, not
+   one the design system had an opinion about. It is also the honest measure
+   here, being within twenty pixels of the 400px pane this content was written
+   for and read fine in. */
+.column {
+  max-width: var(--prose-wide);
+  margin: 0 auto;
+  padding: var(--space-40) var(--space-32) var(--space-56);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-24);
+}
+
+.title {
+  margin: 0;
+  font: var(--text-title);
+  color: var(--ink);
+}
+
+/* What a screen that could not draw says. Quiet: the fault is a capability's,
+   and the reader is being told the rest of the app is fine. */
+.failure {
+  margin: 0;
+  color: var(--muted);
+  font: var(--text-ui);
+}

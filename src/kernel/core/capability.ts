@@ -1,7 +1,19 @@
 import type { IndexedBook } from './bookIndex'
 import type { Diagnostics, SettingsStore } from './ports'
 import type { KernelServices } from './services'
-import type { ContributedPaneId, PaneId, Screen } from './uiTypes'
+import type { ContributedPaneId, ContributedScreenId, PaneId, Screen } from './uiTypes'
+import type { OverlayContribution } from './circle/overlay'
+
+/* Re-exported so a capability author reaches one module for the whole
+   contribution vocabulary, the way `PaneContribution` is declared here. */
+export type {
+  OverlayContribution,
+  OverlayRequest,
+  PendingPassage,
+  ResolvePort,
+  ResolveResult,
+  ResolvedPassage,
+} from './circle/overlay'
 
 /**
  * The contribution API — what a capability IS to the kernel.
@@ -273,6 +285,24 @@ export type ServiceHandler = (req: unknown, ctx: ServiceContext) => Promise<unkn
  * otherwise (ADR decision 5). The grant is checked against the peer's
  * persisted grants BEFORE the handler sees a byte.
  */
+/**
+ * A whole screen a capability owns — the NINTH contribution type.
+ *
+ * ⚠️ **A SCREEN IS NOT A WIDE PANE.** A pane renders into a slot the kernel
+ * keeps beside a book or a shelf; a screen REPLACES that whole arrangement, and
+ * the kernel closes the side pane while one is showing. Reach for a pane when
+ * the thing is about what is already on screen, and a screen when it is not.
+ *
+ * `id` is `<capability>:<name>`, so a screen says who owns it and cannot
+ * collide with `library` or `reader`, neither of which has a colon.
+ */
+export interface ScreenContribution {
+  readonly id: ContributedScreenId
+  /** What the reader sees in the place that switches to it. */
+  readonly label: string
+  readonly render: PaneRenderer
+}
+
 export interface ServiceContribution {
   readonly name: `${string}.${string}`
   readonly grant: string
@@ -290,6 +320,8 @@ export interface Capability {
   /** Ids of the capabilities this one needs; absent means none. */
   readonly requires?: readonly string[]
   readonly panes?: readonly PaneContribution[]
+  /** Whole screens — see `ScreenContribution`. */
+  readonly screens?: readonly ScreenContribution[]
   readonly commands?: (ctx: CommandContext) => Command[]
   readonly settings?: readonly SettingsSection[]
   readonly bookActions?: readonly BookAction[]
@@ -297,6 +329,18 @@ export interface Capability {
   readonly bookStatuses?: readonly BookStatus[]
   readonly services?: readonly ServiceContribution[]
   readonly clients?: readonly ClientContribution[]
+  /**
+   * Annotations another reader made, to be drawn in the book — WI-22.D1.
+   *
+   * ⚠️ **THE CAPABILITY SUPPLIES DATA AND THE KERNEL'S OWN PAINTER DRAWS IT.**
+   * Handing back a DOM node or a paint callback would put rendering inside a
+   * capability; the reader is the one surface this codebase keeps whole. Same
+   * line `panes` does not cross — a pane renders into a slot the kernel owns.
+   *
+   * Every annotation carries a `ResolvedCfi`, so a passage that did not anchor
+   * in THIS build cannot be handed over at all. See `core/circle/overlay.ts`.
+   */
+  readonly overlays?: readonly OverlayContribution[]
   /**
    * Run once, in registration order, after every capability has been
    * validated. Whatever it begins — timers, listeners, connections — its
