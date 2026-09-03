@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -270,4 +270,96 @@ describe('the cruiser is spawned in a way all three platforms can', () => {
   it('keeps a real timeout far above what one cruise costs', () => {
     expect(CRUISE_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000)
   })
+})
+
+/**
+ * ⚠️ **THE CRUISER WAS BUILDING A TYPESCRIPT PROGRAM OVER THE WHOLE REPOSITORY
+ * ON EVERY CRUISE, AND NOTHING COULD SEE IT.**
+ *
+ * `options.tsConfig` pointed at `tsconfig.base.json`, which declares
+ * `compilerOptions` and NO `files` or `include`. TypeScript's default when a
+ * config names neither is every file under the config's own directory — so
+ * each cruise of a ten-file fixture parsed `src/`, `scripts/`, `coverage/`,
+ * every `dist` directory, `.types/` and whatever `src-tauri/target/` happened
+ * to contain. (Naming that glob with a star and a slash inside a block comment
+ * ends the comment — which is how this paragraph first failed to parse.)
+ *
+ * MEASURED 2026-09-02, one cruise of the standard fixture: **22,671 ms before,
+ * 481 ms after** — 45×. The graph is IDENTICAL either way (677 modules, 2578
+ * dependencies, 0 violations, both configs), because dependency-cruiser feeds
+ * the compiler its own file list and wants this config only for
+ * `compilerOptions` — `paths`, `jsx`, `moduleResolution`. There was never a
+ * file set to supply.
+ *
+ * WHAT IT COST, and why it was invisible: this is the longest file in the
+ * suite and therefore the run's critical path. At ~35 fixture cruises it held
+ * a worker for 90 s alone and 242 s under `--coverage`, and a worker held that
+ * long is the starvation window behind `[vitest-worker]: Timeout calling
+ * "onTaskUpdate"` — the intermittent red gate with every test passing that two
+ * earlier sessions attributed to CPU contention and tried to fix by moving
+ * pool size and fan-out. Both levers were measured; both were green sometimes
+ * and red sometimes, which is what said the mechanism had not been found. It
+ * had not: a slow cruise looks exactly like a fast one, and this one had been
+ * getting slower with every file added to the repository since it was written.
+ * The comment on `cruise` still said "most of a second of TypeScript start-up"
+ * — true when written, 20× wrong by the time anybody read it back.
+ *
+ * These are the assertions that stop it returning, because the next person to
+ * repoint this at a config with a file set would see nothing but a slow gate.
+ */
+describe('the cruiser is not handed a file set to compile', () => {
+  const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
+  const cruiserConfig = JSON.parse(readFileSync(path.join(REPO_ROOT, 'tsconfig.cruiser.json'), 'utf8'))
+
+  it('points at a tsconfig that names no files of its own', () => {
+    /* The mechanism, asserted directly rather than through a stopwatch. An
+       empty `files` with no `include` is a config that supplies OPTIONS and
+       nothing else, which is exactly what dependency-cruiser wants. */
+    expect(cruiserConfig.files).toEqual([])
+    expect(cruiserConfig.include).toBeUndefined()
+    expect(cruiserConfig.extends).toBe('./tsconfig.base.json')
+  })
+
+  it('uses that config and not the base, which globs the repository', () => {
+    const config = readFileSync(path.join(REPO_ROOT, '.dependency-cruiser.cjs'), 'utf8')
+    expect(config).toContain('tsconfig.cruiser.json')
+    /* `[{]` rather than `\{`: under the `u` flag an escaped brace is not a
+       valid identity escape, and the file then fails to parse at all. */
+    expect(config).not.toMatch(/tsConfig:\s*[{]\s*fileName:.*tsconfig\.base\.json/u)
+  })
+
+  it('still keeps the compiler options the boundary rules resolve through', () => {
+    /* ⚠️ **A CONFIG THAT LOST `paths` WOULD LEAVE `@/*` AND
+       `virtual:paper-composition` UNRESOLVED**, and an unresolved edge is an
+       edge no rule can judge — the gate would go green by seeing less. The
+       cases above already prove every rule still fires; this names the reason
+       they can. */
+    /* Read as TEXT: `tsconfig.base.json` is JSONC and carries `//` comments,
+       which `JSON.parse` refuses. The cruiser config is plain JSON and is
+       parsed above; this one is matched. */
+    const base = readFileSync(path.join(REPO_ROOT, 'tsconfig.base.json'), 'utf8')
+    expect(base).toContain('"@/*": ["src/*"]')
+    expect(base).toContain('"virtual:paper-composition"')
+    expect(base).toContain('"jsx": "react-jsx"')
+    /* And the base still names no file set of its own — which is WHY it must
+       not be the cruiser's config, and is left alone rather than "fixed":
+       `tsc -b` builds through the referenced projects, each of which brings
+       its own `include`. */
+    expect(base).not.toContain('"include"')
+    expect(base).not.toContain('"files"')
+  })
+
+  /* ⚠️ **A STOPWATCH WAS TRIED HERE AND DELETED, BECAUSE IT COULD NOT FAIL.**
+   * The obvious assertion is "one cruise costs under ten seconds" — 481 ms
+   * fixed against 22,671 ms broken looks like an enormous margin. It is not:
+   * the broken cost is dominated by FIRST-READ filesystem work, and warms.
+   * Measured in one process, same broken config, four cruises in a row:
+   * 22,671 / 22,484 / 8,540 / 5,998 ms. Planting the defect back with the
+   * timing test in place failed the two config assertions above and PASSED the
+   * stopwatch, which is the whole reason it is not here: a test that goes
+   * green against the defect it was written for is worse than no test, because
+   * it is counted.
+   *
+   * The three assertions above are deterministic, name the mechanism exactly,
+   * and cannot be warmed. */
 })

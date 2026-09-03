@@ -319,6 +319,46 @@ export const coverPathIn = (bookId: string): string => `${folderOf(bookId)}/cove
  */
 export const legacyCoverPathIn = (bookId: string): string => `${folderOf(bookId)}/cover.webp`
 export const marksPathIn = (bookId: string): string => `${folderOf(bookId)}/marks.json`
+/**
+ * Where another reader's passages for this book live — WI-22.D1.
+ *
+ * ⚠️ **BESIDE `marks.json`, NEVER INSIDE IT.** A foreign passage in the marks
+ * file is picked up by `exportMarks`, by the sync feed and by every one of the
+ * reader's own devices — as THEIR annotation. `review.md` states it as a
+ * blocker: *"a foreign passage must never enter `marks.json`, or it
+ * republishes as the recipient's own."*
+ *
+ * Same folder, so removing a book takes its foreign overlays with it — which
+ * is what a reader expects and what a separate top-level directory would not
+ * give. One file per person, so blocking one person is one deletion.
+ *
+ * ⚠️ **THE PERSON ID GOES THROUGH `safeId`, for the reason it already gives.**
+ * A person id arrives from ANOTHER READER — it is the least trusted string in
+ * this file — and `safeId`'s two promises are exactly the ones needed: no
+ * slash, and never empty. `folderOf('')` was once `books/`, so `trashBook`
+ * renamed the whole library into the trash; the same shape here would be a
+ * peer choosing where its file lands.
+ */
+export const circlePathIn = (bookId: string, personId: string): string =>
+  `${folderOf(bookId)}/circle/${safeId(personId)}.json`
+/** The folder those files live in, for listing and for a whole-person purge. */
+export const circleFolderIn = (bookId: string): string => `${folderOf(bookId)}/circle`
+/**
+ * What THIS reader has published of this book — the publisher's own store.
+ *
+ * ⚠️ **BESIDE `marks.json`, NOT INSIDE `circle/`, AND THAT IS NOT TIDINESS.**
+ * `peopleFor` lists `circle/` and reads every `*.json` in it as a PERSON. A
+ * publisher's file put there would appear in the reader's circle as somebody
+ * called `published`, be handed to `readForeign`, and fail its author check —
+ * a person who cannot be removed because they do not exist.
+ *
+ * ⚠️ **AND IT IS NOT A FIELD ON `Mark`.** `wire.md` argues the alternative and
+ * refuses it: a field would ride the existing sync for free, and would thereby
+ * conflate *what I wrote* with *what I published* — two facts with different
+ * lifetimes, different audiences and different privacy weight — sending a
+ * social fact to every one of your own devices whether they participate or not.
+ */
+export const sharedPathIn = (bookId: string): string => `${folderOf(bookId)}/shared.json`
 export const contentPathIn = (bookId: string, name: string): string =>
   `${folderOf(bookId)}/content.${extensionFor(name)}`
 

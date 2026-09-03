@@ -1,3 +1,5 @@
+import { isContributedScreenId } from '../core/uiTypes'
+import { screenJump } from './state'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -831,6 +833,84 @@ describe('contributed panes', () => {
     const shut = at({ screen: 'reader', pane: null, lastPane: 'example:pane' })
     expect(reducer(shut, { type: 'togglePane' }, contributed).pane).toBe('example:pane')
     expect(reducer(shut, { type: 'togglePane' }).pane).toBe('toc')
+  })
+})
+
+describe('one answer to where ⌘L goes', () => {
+  /* ⚠️ **THREE SURFACES DERIVED THIS SEPARATELY AND TWO DISAGREED.** The
+     titlebar button, the keyboard handler and the palette each computed the
+     destination; with two screens the formulas were equivalent, with three they
+     were not. From a capability's screen the button said "Back to the book" and
+     went to the reader while the shortcut in its own tooltip opened the
+     library. */
+
+  it('goes out to the shelf from the reader', () => {
+    expect(screenJump('reader', true)).toEqual({ to: 'library', label: 'Library' })
+    expect(screenJump('reader', false)).toEqual({ to: 'library', label: 'Library' })
+  })
+
+  it('goes in to the book from the shelf', () => {
+    expect(screenJump('library', true)).toEqual({ to: 'reader', label: 'Back to the book' })
+  })
+
+  it('goes in to the book from a capability’s screen too', () => {
+    // "Anywhere that is not the reader" is one rule, not two.
+    expect(screenJump('circle:circle', true)).toEqual({
+      to: 'reader',
+      label: 'Back to the book',
+    })
+  })
+
+  it('does not say "back" to a place the reader has never been', () => {
+    /* The destination with no book open is the reader's EMPTY state. Naming it
+       "back to the book" is a lie the control tells on first launch. */
+    expect(screenJump('library', false).label).toBe('Open a book')
+    expect(screenJump('circle:circle', false).label).toBe('Open a book')
+  })
+
+  it('never sends a screen to itself', () => {
+    // A control that appears to do nothing is indistinguishable from a broken one.
+    for (const screen of ['library', 'reader', 'circle:circle'] as const) {
+      expect(screenJump(screen, true).to).not.toBe(screen)
+    }
+  })
+})
+
+describe('a contributed screen owns the whole window (WI-22.D3)', () => {
+  const contributed = [
+    { id: 'circle:circle' as const, label: 'Circle', screens: ['library'] as const, render: () => null },
+  ]
+
+  it('offers no kernel panel on one', () => {
+    /* ⚠️ The rail is panels ABOUT a book or ABOUT the shelf. A capability's
+       full-window view is neither, so drawing them beside it is furniture from
+       a room the reader has left. Without this the final ternary reads every
+       non-`reader` screen as the library. */
+    for (const pane of ['toc', 'marginalia', 'search', 'library', 'settings'] as const) {
+      expect(paneFits('circle:screen', pane, { contributed: [], developer: true, hiddenPanes: [] })).toBe(false)
+    }
+  })
+
+  it('still offers the kernel panels on the kernel screens', () => {
+    // The guard must not have taken the ordinary case with it.
+    expect(paneFits('library', 'library', { contributed: [], developer: false, hiddenPanes: [] })).toBe(true)
+    expect(paneFits('reader', 'toc', { contributed: [], developer: false, hiddenPanes: [] })).toBe(true)
+  })
+
+  it('is not the reader, so the reader must go inert on it', () => {
+    /* ⚠️ **THE TEST IN `App` WAS `screen === 'library'`.** With a third screen
+       that stopped meaning "somewhere else" and started meaning "the shelf", so
+       on a contributed screen the reader stayed LIVE AND VISIBLE underneath —
+       which is exactly what the first circle screen looked like. The rule is
+       `screen !== 'reader'`, and this is the fact it rests on. */
+    expect(isContributedScreenId('circle:circle')).toBe(true)
+    expect(isContributedScreenId('library')).toBe(false)
+    expect(isContributedScreenId('reader')).toBe(false)
+  })
+
+  it('offers a contributed pane only on a screen it named', () => {
+    expect(paneFits('library', 'circle:circle', { contributed, developer: false, hiddenPanes: [] })).toBe(true)
+    expect(paneFits('reader', 'circle:circle', { contributed, developer: false, hiddenPanes: [] })).toBe(false)
   })
 })
 

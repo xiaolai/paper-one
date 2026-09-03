@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
+import { vitestBin } from './lib/vitestBin.mjs'
 
 /**
  * `pnpm test:projects` — every test file belongs to exactly one Vitest project.
@@ -88,7 +89,7 @@ export function listTestFiles(root) {
  * an unanswerable question must not read as "no files".
  */
 export function askVitest(root) {
-  const bin = require.resolve('vitest/vitest.mjs')
+  const bin = vitestBin()
   const result = spawnSync(process.execPath, [bin, 'list', '--filesOnly', '--json', '--root', root], {
     cwd: root,
     encoding: 'utf8',

@@ -1,16 +1,19 @@
 import { folderOf, marksPathIn, readMarks, trashOf, writeMarks } from './bookFolder'
+import type { ResolvedCfi } from './resolvedCfi'
 import { scanAllMarks, type IndexFs } from './bookIndex'
 import { hlcOf, type Hlc } from './hlc'
 import { upsertOverlapping } from './markMatch'
 import {
   annotationsIn,
   placedIn,
+  type Placed,
   unplacedIn,
   bookmarksIn,
   isBookmark,
   liveMarks,
   mergeMarks,
   removeMark,
+  placeMark as placeMarkIn,
   setTint as setTintIn,
   updateNote as updateNoteIn,
   validMarks,
@@ -51,19 +54,39 @@ import type { WriteQueue } from './writeQueue'
 
 /** One shared empty list per class, so a book with none does not re-render on
  *  identity. Two constants because the two are differently typed now. */
-const EMPTY: readonly Annotation[] = []
+const EMPTY: readonly Placed<Annotation>[] = []
 const NO_BOOKMARKS: readonly Bookmark[] = []
 /** The third class's empty list — see `project`. Almost every book has none. */
 const NO_UNPLACED: readonly Annotation[] = []
 
 export interface MarkSnapshot {
-  /** Every LIVE ANNOTATION, across every book — what the Marginalia panel browses.
-   *  Empty until `loadAll` has run, because it costs a read per book.
-   *  Tombstoned rows stay in the files and in the store's own working lists
-   *  (a merge needs them); no snapshot ever shows one. */
+  /** Every LIVE PLACED ANNOTATION, across every book — what the Marginalia
+   *  panel browses. Empty until `loadAll` has run, because it costs a read per
+   *  book. Tombstoned rows stay in the files and in the store's own working
+   *  lists (a merge needs them); no snapshot ever shows one.
+   *
+   *  ⚠️ PLACED ONLY, which this comment used to omit. `project` splits the
+   *  unplaced rows into `allUnplaced`, so a caller that wants everything a
+   *  reader has left in their books — an export, a backup — must combine the
+   *  two. Reading "every live annotation" literally is how an export comes to
+   *  silently omit a whole class. */
+  /* ⚠️ `Annotation`, NOT `Placed<Annotation>` — and it was briefly the latter.
+   * The projection does filter this list by `isPlaced`, so the narrower type
+   * compiled; but `all` is CROSS-BOOK, and `ResolvedCfi` means "addresses a
+   * passage in the build now open". Branding another book's anchors with it
+   * says something false, and says it at exactly the door the brand exists to
+   * guard. `current` is the per-book list and keeps the narrowing. */
   readonly all: readonly Annotation[]
-  /** The open book's LIVE ANNOTATIONS. `EMPTY` until its file is read. */
-  readonly current: readonly Annotation[]
+  /**
+   * The open book's LIVE ANNOTATIONS. `EMPTY` until its file is read.
+   *
+   * `Placed<Annotation>`, not `Annotation` — WI-22.A1. `placedIn` is a filter
+   * over a type predicate, so the narrowing this list already performs at
+   * runtime is now carried in its type: `MarkAnchor.cfi` is `ResolvedCfi`, and
+   * that makes "the painter is never handed an anchorless mark" a compile
+   * error rather than a paragraph of prose two fields down.
+   */
+  readonly current: readonly Placed<Annotation>[]
   /**
    * The open book's LIVE BOOKMARKS, in book order. `EMPTY` until its file is
    * read, and for a book with none.
@@ -220,6 +243,20 @@ export interface MarkStore {
    */
   setTint(id: string, tint: MarkTint, bookId?: string): Promise<void>
   /**
+   * Give an UNPLACED mark the anchor a re-anchoring pass found — WI-22.A2.
+   *
+   * The third mutator routed like `updateNote` and `setTint`, stamped like
+   * them, and rejecting an unknown id like them rather than no-op'ing. It is a
+   * WRITE and not a render-time decoration for the reason the plan gives: a
+   * mark resolved only in memory is resolved again on every open and is
+   * invisible to export, to sync and to the browser client.
+   *
+   * `placeMark` refuses a tombstoned row, an already-placed mark, an empty cfi
+   * and a negative section — so a pass that has drifted from the store cannot
+   * write a mark into a state `isMark` would later reject off disk.
+   */
+  place(id: string, cfi: ResolvedCfi, sectionIndex: number, bookId?: string): Promise<void>
+  /**
    * Carry marks written under a superseded book id onto this one.
    *
    * With marks in book folders this MOVES a file rather than rewriting rows: the
@@ -350,7 +387,7 @@ export function createMarkStore({
   interface Projection {
     source: readonly Mark[]
     /** PLACED annotations — what can be painted. See `project`. */
-    annotations: readonly Annotation[]
+    annotations: readonly Placed<Annotation>[]
     /** Annotations with no anchor in this library. */
     unplaced: readonly Annotation[]
     bookmarks: readonly Bookmark[]
@@ -773,6 +810,11 @@ export function createMarkStore({
     return applyToMark(id, bookId, (prev) => setTintIn(prev, id, tint, at))
   }
 
+  const place: MarkStore['place'] = (id, cfi, sectionIndex, bookId) => {
+    const at = clock()
+    return applyToMark(id, bookId, (prev) => placeMarkIn(prev, id, cfi, sectionIndex, at))
+  }
+
   const rekey: MarkStore['rekey'] = async (from, to) => {
     if (!fs || from === to) return
     /* TWO PLACES, because the library may have got here first.
@@ -863,6 +905,7 @@ export function createMarkStore({
     remove,
     updateNote,
     setTint,
+    place,
     rekey,
     mergeRemote,
   }

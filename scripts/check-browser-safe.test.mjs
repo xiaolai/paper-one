@@ -42,6 +42,21 @@ function fixture(files) {
 
 const blockedFiles = (root, entry) => [...blockersOf(root, entry).blockers.keys()].sort()
 
+/**
+ * ⚠️ **These walk the WHOLE of `src/` and are therefore slow by nature** —
+ * `checkBrowserSafe` resolves and reads every module reachable from each pinned
+ * entry. Measured 2026-09-01: 0.44 s alone, 9.2 s under `--coverage`, 25 s
+ * inside a full `pnpm test:coverage` where the main thread is contended.
+ *
+ * The 60 s bound that makes that survivable is set for the whole `scripts`
+ * PROJECT in `vitest.config.ts`, not here — a second gate test hit the same
+ * 15 s ceiling for the same reason within hours, and two instances are a class.
+ * That note carries the measurements and the reasoning.
+ *
+ * The cheap fix is not available: the walk cache is already shared across all
+ * ten pinned modules in one `checkBrowserSafe` call (see `newWalkCache`), and
+ * `pinnedReports()` memoises so the tree is walked once for the whole block.
+ */
 describe('the real tree — the cases this gate was built from', () => {
   /**
    * ⚠️ **WALKED ONCE, ASSERTED TWICE — AND IT USED TO BE WALKED TWICE.**

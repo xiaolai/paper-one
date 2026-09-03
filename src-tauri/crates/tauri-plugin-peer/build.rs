@@ -33,6 +33,23 @@ const COMMANDS: &[&str] = &[
     // WI-B.4 — blobs
     "peer_blob_fetch",
     "peer_hash_file",
+    // WI-22.B1 — the person identity. `peer_person_phrase` is the ONLY
+    // command that returns a secret, and it does so because the design
+    // requires the twelve words be re-showable — see `commands.rs`.
+    "peer_person_status",
+    "peer_person_ensure",
+    "peer_person_phrase",
+    "peer_person_restore",
+    "peer_person_forget",
+    "peer_person_delegate",
+    // WI-22.B3 — the circle roster
+    "peer_circle_people",
+    "peer_circle_introduce",
+    "peer_circle_mine",
+    "peer_page_sign",
+    "peer_circle_remember",
+    "peer_circle_revoke",
+    "peer_circle_forget",
 ];
 
 fn main() {

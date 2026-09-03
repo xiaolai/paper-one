@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import type { MarkStore } from '../../core/markStore'
-import { createMark, type Annotation, type Bookmark, type Mark, type NewMark } from '../../core/marks'
+import type { ResolvedCfi } from '../../core/resolvedCfi'
+import {
+  createMark,
+  type Annotation,
+  type Bookmark,
+  type Mark,
+  type NewMark,
+  type Placed,
+} from '../../core/marks'
 
 /**
  * The annotation store, bound to React — an ADAPTER over `core/markStore`.
@@ -12,7 +20,7 @@ import { createMark, type Annotation, type Bookmark, type Mark, type NewMark } f
  */
 
 /** One shared empty list, so a book with no marks does not re-render on identity. */
-const EMPTY: readonly Annotation[] = []
+const EMPTY: readonly Placed<Annotation>[] = []
 const NO_BOOKMARKS: readonly Bookmark[] = []
 
 /** Enough of a mark to act on it: which one, and whose book it is. */
@@ -23,8 +31,10 @@ export interface MarksView {
    *  until `loadAll` has run, because it costs a read per book. */
   readonly all: readonly Annotation[]
   /** The open book's ANNOTATIONS, in book order. Never a bookmark — the store
-   *  splits the two at its own door, see `MarkSnapshot.bookmarks`. */
-  readonly current: readonly Annotation[]
+   *  splits the two at its own door, see `MarkSnapshot.bookmarks`. And never
+   *  an unplaced one, which WI-22.A1 makes a fact about the TYPE rather than
+   *  a promise in this comment — see `MarkSnapshot.current`. */
+  readonly current: readonly Placed<Annotation>[]
   /** The open book's BOOKMARKS, in book order — what the ribbon reads. */
   readonly bookmarks: readonly Bookmark[]
   /** Every book's bookmarks, beside `all`. Empty until `loadAll` has run. */
@@ -85,6 +95,16 @@ export interface MarksView {
   remove: (mark: MarkRef) => void
   /** Rewrite a note, in its own book — same reasoning as `remove`. */
   setNote: (mark: MarkRef, note: string) => void
+  /**
+   * Give an UNPLACED mark the anchor a re-anchoring pass found — WI-22.A2.
+   *
+   * The book is named rather than looked up, for `remove`'s reason: the caller
+   * is `useReanchor`, which walked ONE book and has its id in hand. A pass that
+   * let the store work it out would fail in exactly the case the lookup comes
+   * up empty — a cross-book scan that failed — and the mark would stay unplaced
+   * with the rejection logged and swallowed.
+   */
+  place: (id: string, cfi: ResolvedCfi, sectionIndex: number, bookId: string) => void
   /** Move every row from a superseded book id onto the current one — see the service. */
   rekey: (from: string, to: string) => void
   /** Read every book's marks into `all`. Called by the Marginalia pane when it mounts. */
@@ -202,6 +222,8 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
       },
       remove: (mark: MarkRef) => letGo(store.remove(mark.id, mark.bookId)),
       setNote: (mark: MarkRef, note: string) => letGo(store.updateNote(mark.id, note, mark.bookId)),
+      place: (id: string, cfi: ResolvedCfi, sectionIndex: number, forBook: string) =>
+        letGo(store.place(id, cfi, sectionIndex, forBook)),
       rekey: (from: string, to: string) => letGo(store.rekey(from, to)),
       loadAll: () => {
         setScans((n) => n + 1)

@@ -19,7 +19,35 @@
  * the titlebar counted `pdf` as a reading screen while the chrome fade beside
  * it did not, so the two disagreed about what the reader was looking at.
  */
-export type Screen = 'library' | 'reader'
+/**
+ * The kernel's own screens. Two, and it is not a coincidence that they are the
+ * two things Paper is: a shelf, and a book.
+ */
+export type KernelScreen = 'library' | 'reader'
+
+/**
+ * A screen a capability owns — `<capability>:<name>`, like a pane.
+ *
+ * ⚠️ **A CONTRIBUTED SCREEN OWNS THE WHOLE WINDOW, which is what makes it a
+ * screen rather than a pane.** A pane draws into a slot the kernel keeps beside
+ * something else; a screen replaces what is beside it. That is the entire
+ * difference, and it is why the side pane is closed on one — a rail of panels
+ * about a book, drawn next to a capability's full-window view, is furniture
+ * from a room the reader has left.
+ */
+export type ContributedScreenId = `${string}:${string}`
+
+export type Screen = KernelScreen | ContributedScreenId
+
+/** Whether an id names a contributed screen. */
+export function isContributedScreenId(id: Screen): id is ContributedScreenId {
+  return id.includes(':')
+}
+
+/** Whether an id — from anywhere, typed or not — is one of the kernel's own. */
+export function isKernelScreen(id: unknown): id is KernelScreen {
+  return id === 'library' || id === 'reader'
+}
 
 /** The themes, in §05's order. `ui/panes.ts` gives each its label. */
 export const THEME_IDS = ['paper', 'slate', 'sepia', 'sage', 'night'] as const

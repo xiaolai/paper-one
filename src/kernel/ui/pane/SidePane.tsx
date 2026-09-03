@@ -16,6 +16,7 @@ import type { PaneContribution, SettingsSection } from '../../core/capability'
 import type { AskPassage, CompanionProvider } from '../../core/companion'
 import { ICON, type Platform } from '../../core/metrics'
 import { PANE_TITLES, renderContribution, shownPane } from '../panes'
+import { isContributedScreenId } from '../../core/uiTypes'
 import { defaultPaneFor, paneFits, setReadingStyle, type AppDispatch, type AppState, type KernelPaneId, type PaneAudience } from '../state'
 import type { Book } from '../hooks/useBook'
 import type { Annotation } from '../../core/marks'
@@ -278,6 +279,12 @@ export function SidePane({
     developer: state.developer,
     hiddenPanes: state.hiddenPanes,
   }
+  /* ⚠️ **NOTHING IS DRAWN OVER A CONTRIBUTED SCREEN.** It owns the whole
+     window by definition, so a rail of panels about a book or a shelf beside it
+     is furniture from a room the reader has left. `paneFits` already refuses
+     every kernel pane there; this is the other half — the slot itself goes. */
+  if (isContributedScreenId(state.screen)) return null
+
   const fallback = defaultPaneFor(state.screen)
   const wanted =
     state.pane ?? (paneFits(state.screen, state.lastPane, audience) ? state.lastPane : fallback)

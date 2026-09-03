@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { findMark } from '../../core/markMatch'
-import type { Annotation, MarkAppearance } from '../../core/marks'
+import { isPlaced, type Annotation, type MarkAppearance, type Placed } from '../../core/marks'
 import type { SelectionSnapshot } from '../reader/session'
 import type { Book } from './useBook'
 import type { MarksView } from './useMarks'
@@ -40,8 +40,10 @@ export interface Marking {
   /** Live ranges by CFI for the marks foliate has drawn, for the margin. */
   readonly ranges: ReadonlyMap<string, Range>
   onMarkDrawn: (cfi: string, range: Range) => void
-  /** The existing mark on the current selection, if that passage is marked. */
-  readonly selected: Annotation | null
+  /** The existing mark on the current selection, if that passage is marked.
+   *  `Placed`, because it is found in `marks.current` — which by WI-22.A1 is
+   *  the placed list in its type as well as at runtime. */
+  readonly selected: Placed<Annotation> | null
   /**
    * Mark the selection in the given tint and style. Returns the mark, or null
    * if nothing was selected.
@@ -52,7 +54,7 @@ export interface Marking {
    * reader comparing a rule against a wave cannot compare anything if the first
    * press takes the popup away.
    */
-  mark: (note: string, appearance: MarkAppearance, keep?: boolean) => Annotation | null
+  mark: (note: string, appearance: MarkAppearance, keep?: boolean) => Placed<Annotation> | null
   unmark: (target: Annotation) => void
   /** The mark the Marginalia panel should reveal, if any. */
   readonly focus: MarkFocus | null
@@ -169,8 +171,29 @@ export function useMarking(book: Book, marks: MarksView): Marking {
    * back.
    */
   const mark = useCallback(
-    (note: string, appearance: MarkAppearance, keep = false): Annotation | null => {
+    (note: string, appearance: MarkAppearance, keep = false): Placed<Annotation> | null => {
       if (!selection || !bookId) return null
+      /* ⚠️ **A SELECTION WITH NO ANCHOR IS NOT A MARK, and this guard is new
+       * with WI-22.A1.** `view.getCFI` answers `''` for a range it cannot
+       * address, and the empty string was written through as an anchor — the
+       * defect commit b1aa0dd removed on the import path and that this path
+       * still had. `isMark` refuses an empty `cfi` on the way to disk, so the
+       * row was rejected at the file while the overlay had already drawn it:
+       * a highlight on screen that no relaunch brings back.
+       *
+       * Refused BEFORE the store is asked, so nothing is written and nothing
+       * is drawn. Null is the same answer a caller already handles for "no
+       * selection", which is what this is. */
+      if (selection.cfi === '') {
+        /* SAID OUT LOUD. Returning null silently is the shape this repository
+         * names as worse than no control at all: the reader presses Mark and
+         * nothing happens, with no way to tell it from a broken app. The
+         * surface-level fix — never offering the control for a selection that
+         * cannot be anchored — belongs to whoever owns the selection bar and is
+         * recorded as outstanding; this at least leaves a trace. */
+        console.warn('Paper: this selection has no anchor, so it cannot be marked')
+        return null
+      }
       const created = marks.add({
         bookId,
         cfi: selection.cfi,
@@ -192,6 +215,23 @@ export function useMarking(book: Book, marks: MarksView): Marking {
         style: appearance.style,
         chapter,
       })
+      /* ⚠️ **THE ASSERTION, NOT A FILTER — AND IT COMES BEFORE THE ERASE.** The
+       * guard above establishes that `created` carries a real anchor; this is
+       * what makes the compiler agree, and it is deliberately loud rather than
+       * a silent skip. Reaching the `else` would mean `createMark` dropped a
+       * cfi it was handed — a store invariant broken, not a passage that failed
+       * to resolve.
+       *
+       * It used to sit AFTER the erase below, which made the failure path
+       * destructive: the superseded mark's drawing was already gone and its
+       * cached range already dropped by the time this returned null, so a
+       * reader would have lost a highlight in exchange for nothing appearing.
+       * A check that bails out must run before the side effects it is bailing
+       * out of, even when — as here — the bail-out is thought unreachable. */
+      if (!isPlaced(created)) {
+        console.error('Paper: a mark was created with no anchor and was not drawn', created.id)
+        return null
+      }
       /* The overlay of the mark this one replaced goes with it. The store drops
        * the superseded row — `marks.add` resolves the same mark `selected`
        * did, from the same selection — but foliate has already drawn it at its
@@ -239,6 +279,13 @@ export function useMarking(book: Book, marks: MarksView): Marking {
        * range with it. */
       marks.remove(target)
       if (target.bookId !== bookId) return
+      /* AN UNPLACED MARK HAS NOTHING DRAWN TO ERASE. Marginalia lists both
+       * classes and `unmark` is reachable from that list, so `target` can be a
+       * mark with no anchor here — `eraseMark` on one would ask foliate to
+       * resolve a foreign path, which is the whole state WI-21.7 built the
+       * class for. The ROW still goes, above and unconditionally; only the
+       * drawing is skipped, because there is none. */
+      if (!isPlaced(target)) return
       eraseMark(target)
       forgetRange(target.cfi)
     },

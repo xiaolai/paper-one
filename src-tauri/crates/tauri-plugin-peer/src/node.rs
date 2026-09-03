@@ -16,6 +16,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::blobs::{Transfers, MAX_BLOB_STREAMS};
+use crate::circle::{self, CIRCLE_HELLO_ALPN};
 use crate::error::{Error, Result};
 use crate::events::{EventSink, PeerEvent};
 use crate::identity;
@@ -121,12 +122,21 @@ pub struct Node {
     pub(crate) transfers: Transfers,
     /// Caps concurrent blob-serve tasks so a peer cannot open unbounded streams.
     pub(crate) blob_serve_limit: Arc<Semaphore>,
+    /// Caps concurrent introductions — the one door a STRANGER may knock on.
+    /// See `circle::MAX_HELLOS`.
+    pub(crate) hello_limit: Arc<Semaphore>,
     /// Idle deadline (ms) for a blob body transfer.
     blob_idle_timeout_ms: AtomicU64,
     ready: AtomicBool,
     sink: EventSink,
     pub(crate) confirm_timeout: Duration,
     accept_task: Mutex<Option<JoinHandle<()>>>,
+    /// Renews this device's circle credentials and carries its roster around.
+    /// See `keeper`.
+    keeper_task: Mutex<Option<JoinHandle<()>>>,
+    /// Poked when something happened that friends should hear about sooner
+    /// than the next scheduled round — a revocation, above all.
+    pub(crate) keeper_wake: Arc<tokio::sync::Notify>,
     /// Test seam for the forget-vs-admission window (finding H5): if set, the
     /// acceptor pauses right before registering a session.
     #[cfg(test)]
@@ -177,7 +187,16 @@ impl Node {
             };
             builder = builder
                 .secret_key(secret.clone())
-                .alpns(vec![PAIR_ALPN.to_vec(), PEER_ALPN.to_vec()])
+                /* THREE DOORS, and each answers a different question. `PAIR_ALPN`
+                meets a device for the first time; `PEER_ALPN` carries every
+                session and refuses a stranger flatly; `CIRCLE_HELLO_ALPN`
+                is the ONLY one an unknown endpoint may say anything on, and
+                all it may say is one bounded frame. */
+                .alpns(vec![
+                    PAIR_ALPN.to_vec(),
+                    PEER_ALPN.to_vec(),
+                    CIRCLE_HELLO_ALPN.to_vec(),
+                ])
                 .relay_mode(relay_mode.clone());
             match port {
                 // v4 only: `bind_addr` replaces the unspecified bind for THAT
@@ -273,11 +292,14 @@ impl Node {
             sessions: Arc::new(Sessions::default()),
             transfers: Transfers::default(),
             blob_serve_limit: Arc::new(Semaphore::new(MAX_BLOB_STREAMS)),
+            hello_limit: Arc::new(Semaphore::new(circle::MAX_HELLOS)),
             blob_idle_timeout_ms: AtomicU64::new(BLOB_IDLE_TIMEOUT_MS),
             ready: AtomicBool::new(false),
             sink: config.sink,
             confirm_timeout: config.confirm_timeout,
             accept_task: Mutex::new(None),
+            keeper_task: Mutex::new(None),
+            keeper_wake: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             admit_hook: Mutex::new(None),
             #[cfg(test)]
@@ -285,6 +307,15 @@ impl Node {
         });
         let task = tokio::spawn(accept_loop(Arc::downgrade(&node), endpoint));
         *node.accept_task.lock().expect("accept task lock") = Some(task);
+        /* ⚠️ **WEAK, SO THE KEEPER CANNOT KEEP THE NODE ALIVE.** It sleeps for
+         * hours at a time; an `Arc` held across that sleep is an endpoint that
+         * stays bound after the app closes, and a next launch that cannot take
+         * the port. */
+        let keeper = tokio::spawn(crate::keeper::keep(
+            Arc::downgrade(&node),
+            Arc::clone(&node.keeper_wake),
+        ));
+        *node.keeper_task.lock().expect("keeper task lock") = Some(keeper);
         Ok(node)
     }
 
@@ -294,6 +325,25 @@ impl Node {
 
     pub fn role(&self) -> Role {
         self.role
+    }
+
+    /// The keychain this node's person identity lives in.
+    ///
+    /// ⚠️ **A `cfg(test)` SEAM, like `admit_hook` above, and for a sharper
+    /// reason.** `OsKeychain` is machine-wide: under `cargo test` two nodes
+    /// with two data roots read back ONE entry, so a suite asserting that two
+    /// peers are two different people cannot fail even when they are the same
+    /// — and every run leaves a real credential in the developer's login
+    /// keychain. The memory keychain is keyed by data root, which is what a
+    /// Paper installation actually is.
+    #[cfg(not(test))]
+    pub(crate) fn keychain(&self) -> Box<dyn crate::person::Keychain> {
+        Box::new(crate::person::OsKeychain)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keychain(&self) -> Box<dyn crate::person::Keychain> {
+        Box::new(crate::person::testkit::MemoryKeychain::for_root(&self.root))
     }
 
     pub fn root(&self) -> &Path {
@@ -374,6 +424,14 @@ impl Node {
         if let Some(task) = self.accept_task.lock().expect("accept task lock").take() {
             task.abort();
         }
+        /* ⚠️ **ABORTED WITH THE ACCEPTOR, NOT LEFT TO NOTICE.** The keeper
+         * holds a WEAK reference, so it would eventually stop on its own —
+         * but "eventually" is up to six hours, and a test that closes a node
+         * and starts another would have the old one's round dialling out of a
+         * suite that thought it had finished. */
+        if let Some(task) = self.keeper_task.lock().expect("keeper task lock").take() {
+            task.abort();
+        }
         for session in self.sessions.all() {
             session.close_with("closed");
         }
@@ -406,6 +464,7 @@ async fn dispatch(node: Arc<Node>, conn: Connection) {
     match conn.alpn() {
         alpn if alpn == PAIR_ALPN => pairing::serve(node, conn).await,
         alpn if alpn == PEER_ALPN => session::serve(node, conn).await,
+        alpn if alpn == CIRCLE_HELLO_ALPN => circle::serve(node, conn).await,
         _ => conn.close(VarInt::from_u32(1), b"unknown-alpn"),
     }
 }

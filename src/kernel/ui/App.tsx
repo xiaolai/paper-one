@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { buildCommands } from './commands'
+import { ContributedScreen } from './screens/ContributedScreen'
+import { isContributedScreenId } from '../core/uiTypes'
 import { coverIn } from '../core/coverArt'
 import { tauriVaultFs } from '../core/vaultFsTauri'
 import { offeredFaces } from '../core/typefaces'
@@ -19,7 +21,7 @@ import { requestWindowClose, useWindowClose } from './hooks/useWindowClose'
 import { takeOpened, type OpenRequests } from './openedFiles'
 import { closePrepare } from './closeWindow'
 import { openExternal } from './openExternal'
-import { hasOpenLayer, useAppState } from './state'
+import { hasOpenLayer, paneAvailable, screenJump, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
 import type { Composition } from '../core/registry'
@@ -33,6 +35,8 @@ import { useCards } from './hooks/useCards'
 import { useMarks } from './hooks/useMarks'
 import { useMarking } from './hooks/useMarking'
 import { useBookmarking } from './hooks/useBookmarking'
+import { useOverlays } from './hooks/useOverlays'
+import { useReanchor } from './hooks/useReanchor'
 import { useJumps, type JumpTarget } from './hooks/useJumps'
 import { locationToOpen, overrideSpent, type Place } from '../core/jumpStack'
 import type { ExternalLinkDetail } from 'foliate-js/view.js'
@@ -599,6 +603,35 @@ export function App({
    * asked two more — where the bytes are and where the jacket is — and kept a
    * field for each; a book is a folder now, so both are derived from its id. */
   const isShelved = Boolean(openRow)
+
+  /* WI-22.A2 — the marks an import kept but could not place are walked for
+   * once per open, and a hit is WRITTEN. Here rather than inside `useMarking`,
+   * which acts on a selection: nobody selected anything, and the pass runs on
+   * a book the reader has only just opened. `openRow?.contentHash` is the
+   * cache's generation, and is legitimately absent on a build composed without
+   * `sync` — which means no cache, never an unversioned one. */
+  /* WI-22.D1 — what other readers shared in this book, already anchored here.
+     `composition.overlays` is the fourth contribution type; `book.reanchor` is
+     the resolver port the kernel hands over rather than a capability finding
+     one. Empty for a composition with no `circle`. */
+  const overlays = useOverlays({
+    contributions: composition.overlays,
+    bookId: book.bookId,
+    openGeneration: book.generation,
+    parsed: book.meta !== null,
+    resolve: book.reanchor,
+  })
+
+  useReanchor({
+    reanchor: book.reanchor,
+    parsed: book.meta !== null,
+    bookId: book.bookId,
+    openGeneration: book.generation,
+    contentHash: openRow?.contentHash,
+    unplaced: marks.unplaced,
+    ready: marks.ready,
+    place: marks.place,
+  })
 
 
 
@@ -1616,7 +1649,20 @@ export function App({
        * render. Without the guard, an arrow key pressed while browsing the
        * shelf, or with the palette open, turned pages in a book nobody could
        * see, and the reader came back to a different place than they left. */
-      const reading = state.screen !== 'library' && !overlayOpen
+      /* ⚠️ **`onReader`, NOT A SECOND COPY OF THE SAME QUESTION.** This read
+       * `state.screen !== 'library'` — and `accel.ts` had ALREADY written the
+       * lesson down, on the field it exposes for exactly this: *"Not
+       * `screen !== 'library'`: the reader stays mounted under the shelf with a
+       * live position."* The component even computes `onReader` correctly a few
+       * hundred lines above. So this was not a new mistake; it was the same one
+       * made a second time, twenty feet from its own warning.
+       *
+       * Correcting it to `=== 'reader'` would have left two expressions that
+       * can drift again. Using the one that exists is what makes a third copy
+       * impossible — with a third screen, "not the shelf" stopped meaning
+       * "reading", and every paging key drove the book mounted invisibly
+       * underneath a capability's page, persisting a position nobody saw. */
+      const reading = onReader && !overlayOpen
 
       /* §11: ← → turn the page. Unbound until now, which went unnoticed
        * because a scrolled EPUB scrolls — but a fixed-layout book, which is
@@ -1711,13 +1757,16 @@ export function App({
           dispatch({ type: 'toggleLayer', layer: 'paletteOpen' })
           return
         case 'togglePane':
-          dispatch({ type: 'togglePane' })
+          /* ⚠️ A no-op where there is no pane — see `paneAvailable`. `lastPane`
+             is left alone deliberately, so leaving a contributed screen
+             restores whatever the reader had open before they arrived. */
+          if (paneAvailable(state.screen)) dispatch({ type: 'togglePane' })
           return
         case 'toggleScreen':
-          dispatch({
-            type: 'goScreen',
-            screen: state.screen === 'library' ? 'reader' : 'library',
-          })
+          /* `screenJump`, not a comparison of its own — see `state.ts`. The
+             titlebar advertises this shortcut in its own tooltip, and the two
+             disagreed on every screen that is neither of the kernel's. */
+          dispatch({ type: 'goScreen', screen: screenJump(state.screen, book.source !== null).to })
           return
         case 'markSelection':
           // The tint and style the selection bar is showing — see `markSelection`.
@@ -1823,6 +1872,7 @@ export function App({
             bookSubtitle={subtitle}
             speech={speech}
             hasBook={book.source !== null}
+            screens={composition.screens}
           />
         }
         overlays={
@@ -2012,6 +2062,7 @@ export function App({
              never shown. See `ReaderProps.diagnostics`. */
           diagnostics={services.diagnostics}
           marks={marks}
+          overlays={overlays}
           marking={marking}
           bookmarking={bookmarking}
           /* Read at every render and consumed once, when the book finishes
@@ -2030,8 +2081,41 @@ export function App({
           reducedMotion={reducedMotion}
           onAddBooks={addBooks}
           dragging={dragging}
-          inert={state.screen === 'library'}
+          /* ⚠️ **ANY SCREEN THAT IS NOT THE READER, and this said
+             `=== 'library'`.** With a third screen that test stopped meaning
+             "somewhere else" and started meaning "the shelf" — so on a
+             contributed screen the reader stayed live and visible UNDERNEATH
+             it, which is exactly what the first circle screen looked like. */
+          inert={state.screen !== 'reader'}
         />
+
+        {/* ⚠️ **A CONTRIBUTED SCREEN REPLACES BOTH OF THE KERNEL'S**, which is
+            what distinguishes it from a pane. `Reader` above stays mounted and
+            inert the way it does for the library — the book keeps its position
+            and its scroll — and the shelf simply does not draw. */}
+        {isContributedScreenId(state.screen) &&
+          (() => {
+            const shown = composition.screens.find((one) => one.id === state.screen)
+            /* ⚠️ **KEYED ON THE SCREEN, so two contributed screens are two
+             * subtrees.** Without it React reconciles them as one whenever the
+             * rendered component type matches — which it does for any two
+             * capabilities drawing the same shape — and the second screen
+             * inherits the first's form state and its `useEffect([])` lifetime.
+             *
+             * The renderer is NOT invoked here: `ContributedScreen` takes the
+             * function and calls it below its own error boundary, so a
+             * capability that throws does not unmount the window. Calling it
+             * in this expression would put the throw above the boundary. */
+            return (
+              <ContributedScreen
+                key={state.screen}
+                label={shown?.label ?? 'Not here'}
+                platform={platform}
+                id={state.screen}
+                {...(shown === undefined ? {} : { render: shown.render })}
+              />
+            )
+          })()}
 
         {state.screen === 'library' && (
           <Library

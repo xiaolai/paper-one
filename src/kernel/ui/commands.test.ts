@@ -5,7 +5,7 @@ import { buildCommands, filterCommands, score, type Command } from './commands'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
 import { PANES, PANE_SHORTCUTS, panesFor } from './panes'
 import { resolveAccel, resolvePageKey } from './accel'
-import { initialState, paneFits, type AppState } from './state'
+import { initialState, paneFits, screenJump, type AppState } from './state'
 
 function context(over: Partial<AppState> = {}) {
   const dispatched: unknown[] = []
@@ -885,3 +885,29 @@ describe('resolvePageKey', () => {
     expect(view).toMatch(/goLeft\(\)\s*\{\s*return this\.book\.dir === 'rtl' \? this\.next\(\) : this\.prev\(\)/)
   })
 })
+
+describe('the ⌘L command agrees with every other surface that offers it', () => {
+  /* ⚠️ **THE ASSERTION THAT STOPS THIS CLASS COMING BACK.** The palette, the
+     titlebar button and the keyboard handler each derived ⌘L's destination and
+     its label independently. With two screens the three formulas were
+     equivalent, so nothing noticed; with a third, the titlebar named one
+     destination and performed another. Pinning the palette to `screenJump`
+     means a fourth surface written from a comparison of its own fails HERE
+     rather than in a reader's hands. */
+
+  for (const screen of ['library', 'reader', 'circle:circle'] as const) {
+    for (const hasBook of [true, false]) {
+      it(`dispatches and names the shared jump from ${screen} (book: ${hasBook})`, () => {
+        const { ctx, dispatched } = context({ screen })
+        const command = find(buildCommands({ ...ctx, hasBook }), 'screen:library')
+        const jump = screenJump(screen, hasBook)
+
+        expect(command?.label).toBe(jump.label)
+        command?.run()
+
+        expect(dispatched).toEqual([{ type: 'goScreen', screen: jump.to }])
+      })
+    }
+  }
+})
+

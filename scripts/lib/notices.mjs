@@ -79,6 +79,12 @@ export const BUNDLED_LIBRARIES = [
   { name: 'lucide-react' },
   { name: 'pdfjs-dist' },
   { name: 'foliate-js' },
+  /* The circle's page signatures. `checkPage` runs its checks cheapest-first
+     and verifies the signature LAST, which only works if the crypto is
+     synchronous — `crypto.subtle` is not, and BLAKE3 already goes to Rust over
+     an async IPC. Both are zero-dependency and both publish a plain `LICENSE`. */
+  { name: '@noble/ed25519' },
+  { name: '@noble/hashes' },
   /* `Apache-2.0 OR MIT`, and a notice must say which the copy travels under. */
   { name: '@tauri-apps/api', file: 'LICENSE_MIT', license: 'MIT' },
   { name: '@tauri-apps/plugin-dialog', vendored: 'tauri-apps-plugin-dialog-MIT.txt', license: 'MIT' },

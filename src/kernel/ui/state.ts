@@ -4,7 +4,7 @@ import { BRIGHTNESS, CONTRAST, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPA
 import type { SettingsStore } from '../core/ports'
 import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
 import type { PaneContribution } from '../core/capability'
-import { isContributedPaneId, paneOffered, type Align, type PageLayout, type PaneId, type ReadingStyle, type ReadingStyleKey, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
+import { isContributedPaneId, isContributedScreenId, paneOffered, type Align, type PageLayout, type PaneId, type ReadingStyle, type ReadingStyleKey, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
 
 /**
  * Application state.
@@ -634,6 +634,13 @@ export function paneFits(screen: Screen, pane: PaneId, audience: PaneAudience = 
   if (isContributedPaneId(pane)) {
     return contributed.some((entry) => entry.id === pane && entry.screens.includes(screen))
   }
+  /* ⚠️ **NO KERNEL PANEL FITS A CONTRIBUTED SCREEN, and that is what makes a
+   * screen a screen.** The rail below is panels about a book or about the
+   * shelf; a capability's full-window view is neither, so drawing them beside
+   * it is furniture from a room the reader has left. Without this the ternary
+   * at the end treats every non-`reader` screen as the library and offers
+   * Library, Marginalia and Cards over somebody else's page. */
+  if (isContributedScreenId(screen)) return false
   /* ⚠️ **TWO FACTS, ONE QUESTION, AND DELIBERATELY NOT TWO FUNCTIONS.** This
    * asks "has this panel anything to show here", and a panel the reader has not
    * asked to be shown has nothing — so `paneOffered` is folded in rather than
@@ -656,6 +663,11 @@ export function paneFits(screen: Screen, pane: PaneId, audience: PaneAudience = 
  * hold things about this shelf, and now there is a panel that does.
  */
 export function defaultPaneFor(screen: Screen): PaneId {
+  /* A contributed screen has no panel to fall back to — `paneFits` refuses
+     every one of them. The answer is never read (the side pane is closed on
+     such a screen); returning the shelf's panel keeps the type honest without
+     inventing a state. */
+  if (isContributedScreenId(screen)) return 'library'
   /* ⚠️ **CONTENTS, AND IT USED TO BE COMPANION.** The reader's fallback panel
    * cannot be one that most readers are not shown: `companion` is in
    * `UNFINISHED_PANE_IDS`, so with developer options off it fits nowhere, and a
@@ -714,6 +726,55 @@ function audienceOf(state: AppState, contributed: ContributedPanes): PaneAudienc
 function paneFor(screen: Screen, wanted: PaneId | null, audience: PaneAudience): PaneId {
   if (wanted && paneFits(screen, wanted, audience)) return wanted
   return defaultPaneFor(screen)
+}
+
+/**
+ * Whether the side pane exists on this screen at all.
+ *
+ * ⚠️ **`WindowShell` AND `SidePane` ALREADY REFUSED TO DRAW ONE, AND THE
+ * CONTROLS DID NOT KNOW.** A contributed screen owns the whole window, so no
+ * pane is shown there — but the titlebar kept drawing an active "Close pane"
+ * button and ⌘\ kept toggling, so both mutated a state nothing reflected. The
+ * reader pressed a lit control and nothing happened, and whether the pane came
+ * back on the way out silently changed.
+ *
+ * One predicate rather than three copies of `!isContributedScreenId(...)`, for
+ * `paneFits`' reason: this question has five askers already.
+ */
+export function paneAvailable(screen: Screen): boolean {
+  return !isContributedScreenId(screen)
+}
+
+/** Where ⌘L goes from here, and what the control that does it is called. */
+export interface ScreenJump {
+  readonly to: Screen
+  readonly label: string
+}
+
+/**
+ * The ONE answer to "where does ⌘L go", for every surface that offers it.
+ *
+ * ⚠️ **THREE SURFACES DERIVED THIS SEPARATELY AND TWO OF THEM DISAGREED.** The
+ * titlebar button computed `isReader ? 'library' : 'reader'`; the keyboard
+ * handler and the command palette both computed
+ * `screen === 'library' ? 'reader' : 'library'`. With two screens those are the
+ * same function. With a third they are not: from a capability's screen the
+ * button said "Back to the book" and went to the reader, while the shortcut it
+ * advertised in its own tooltip opened the library. A control that names one
+ * destination and performs another is worse than no control.
+ *
+ * The label comes back with the destination for the same reason — they were
+ * also computed apart, so a fourth surface could have named this one correctly
+ * and sent the reader somewhere else.
+ *
+ * The rule: from the reader, out to the shelf. From ANYWHERE else — the shelf
+ * or a capability's screen — in to the book, which is the reader's empty state
+ * when there is no book. Saying "Open a book" rather than "Back to the book"
+ * there is what keeps the name true.
+ */
+export function screenJump(screen: Screen, hasBook: boolean): ScreenJump {
+  if (screen === 'reader') return { to: 'library', label: 'Library' }
+  return { to: 'reader', label: hasBook ? 'Back to the book' : 'Open a book' }
 }
 
 export function screenFor(search: string): Screen {

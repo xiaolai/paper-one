@@ -52,6 +52,16 @@
       ]
     },
     {
+      "id": "circle",
+      "requires": [
+        "peer"
+      ],
+      "ts": "circle",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "webhost",
       "requires": [
         "peer"

@@ -102,8 +102,17 @@ export function loadManifest(root) {
  * answer in JSON. A non-zero exit alone is NOT an error — the CLI exits with
  * the violation count, and the violations are what we came for.
  *
- * Asynchronous so the selftest can run its fixture trees a few at a time;
- * one cruise is most of a second of TypeScript start-up.
+ * Asynchronous so the selftest can run its fixture trees a few at a time.
+ *
+ * ⚠️ **ONE CRUISE IS ABOUT HALF A SECOND, AND THAT SENTENCE WAS 20× WRONG FOR
+ * MONTHS.** It said "most of a second" and stayed true only until the
+ * repository grew: `options.tsConfig` pointed at `tsconfig.base.json`, which
+ * names no `files` and no `include`, so TypeScript's default took every file
+ * under the repository root — and each cruise of a ten-file fixture paid for
+ * parsing the whole tree. Measured 2026-09-02 at 22,671 ms; 481 ms once the
+ * cruiser was given a config with an empty file set. A number in a comment
+ * that nothing checks is the defect `check-boundaries.test.mjs` now carries
+ * assertions for.
  */
 export function cruise(root, { bin = DEPCRUISE, timeoutMs = CRUISE_TIMEOUT_MS } = {}) {
   if (!existsSync(bin)) throw new Error(`${bin} is missing — run pnpm install`)

@@ -7,7 +7,13 @@ import { useFontsReady } from '../fontProbe'
 import { isPdf, isRanged, type BookSource } from '../../core/formats'
 import { applyBookVars, bookSheets, markPalette, noteSheets } from './bookCss'
 import { balanceRects } from './markGeometry'
-import { ReaderSession, type FootnoteRender, type MarkAnchor, type SelectionSnapshot } from './session'
+import {
+  ReaderSession,
+  type FootnoteRender,
+  type ForeignAnchor,
+  type MarkAnchor,
+  type SelectionSnapshot,
+} from './session'
 import type { PasswordReason } from './makePdf'
 import { protectionOf } from './protection'
 import { PasswordSheet } from '../overlays/PasswordSheet'
@@ -82,6 +88,13 @@ export interface FoliateViewProps {
    * making a mark redraws the overlay without reopening the book.
    */
   marks: readonly MarkAnchor[]
+  /**
+   * Passages other readers shared, already anchored HERE — WI-22.D2.
+   *
+   * Read through a ref like `marks`, and for the same reason: a share arriving
+   * mid-session must redraw the overlay without reopening the book.
+   */
+  overlays?: readonly ForeignAnchor[]
   /** The book's selection, or null when it collapses. */
   onSelection: (selection: SelectionSnapshot | null) => void
   /** A mark was drawn, with the live Range it resolved to. */
@@ -435,6 +448,7 @@ export function FoliateView({
   onError,
   onNavigator,
   marks,
+  overlays,
   onSelection,
   onMarkDrawn,
   onLink,
@@ -501,6 +515,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
+  const overlaysRef = useRef(overlays)
   /* Built ONCE per render, like `currentHandlers` and for the same reason:
    * this object used to be written out three times — the ref's initial value,
    * the layout-effect commit, and the settings effect below — and a setting
@@ -521,6 +536,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
+    overlaysRef.current = overlays
     settings.current = currentSettings
     lastLocationRef.current = lastLocation
   })
@@ -560,6 +576,7 @@ export function FoliateView({
       onFixedLayout: (fixed) => handlers.current.onFixedLayout(gen, fixed),
       onDirection: (direction) => handlers.current.onDirection(gen, direction),
       getMarks: () => marksRef.current,
+      getOverlays: () => overlaysRef.current ?? [],
       getPalette: () =>
         markPalette(
           settings.current.theme,
@@ -782,7 +799,16 @@ export function FoliateView({
    *
    * `redrawMarks` only walks the sections currently on screen, and re-attaching
    * an already-attached mark replaces it rather than stacking a second copy, so
-   * running this on every change costs nothing and needs no diff. */
+   * running this on every change costs nothing and needs no diff.
+   *
+   * ⚠️ **`overlays` IS IN HERE FOR THE SAME REASON AND WAS NOT.** It is read
+   * through the same ref and arrives the same way — later, and again whenever
+   * a contribution signals — so without it a foreign mark was drawn only if a
+   * section happened to rebuild afterwards. That is precisely the defect the
+   * whole `subscribe` seam exists to remove: *"the reader redraws only when its
+   * `marks` input changes, so a share arriving mid-session can neither appear
+   * nor disappear."* The signal reached `useOverlays`, `useOverlays` produced a
+   * new list, and the list stopped here. */
   useEffect(() => {
     const session = sessionRef.current
     if (!session || ready === 0) return
@@ -791,7 +817,7 @@ export function FoliateView({
     } catch (cause) {
       console.error('Paper: could not draw the marks', cause)
     }
-  }, [marks, ready])
+  }, [marks, overlays, ready])
 
   return (
     <>

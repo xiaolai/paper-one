@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import type { Capability, CapabilityContext, DevicePort, DeviceRow, Disposable, ServiceContribution } from '../../kernel'
 import { createPeerPort, type PeerPort } from './lib/port'
-import { hasTauri, tauriWire, type WirePeer } from './lib/wire'
+import { hasTauri, tauriWire, type KnownPerson, type PairOffer, type PairStart, type PairingPending, type PairingResult, type PagePublisher, type PeerWire, type PersonStatus, type WirePeer } from './lib/wire'
 import { createDevicesModel, type DevicesModel } from './ui/devicesModel'
 import { DevicesPane } from './ui/DevicesPane'
 
@@ -23,6 +23,14 @@ import { DevicesPane } from './ui/DevicesPane'
  */
 
 let port: PeerPort | null = null
+/**
+ * The raw wire, kept because `personPort` needs commands the `PeerPort`
+ * abstraction does not carry — identity is not a session.
+ *
+ * Set and cleared with `port`, so "peer is running" is one fact rather than
+ * two that can disagree.
+ */
+let wire: PeerWire | null = null
 let model: DevicesModel | null = null
 /** "Sync now" — the sync capability drops its trigger here (peer cannot
  *  import sync; the dependency runs the other way). */
@@ -77,6 +85,135 @@ export async function readRole(
 
 export function peerPort(): PeerPort | null {
   return port
+}
+
+/**
+ * The person identity and the circle roster, for `circle` — WI-22.B1/B3.
+ *
+ * ⚠️ **A PORT RATHER THAN A SECOND WIRE**, the way `companion` reaches
+ * `inferencePort()`. These are the PEER plugin's commands, and
+ * `no-tauri-api-outside-peer-wire` asks for one file per plugin *"so the set of
+ * command names is auditable in one place"* — a wire of `circle`'s own calling
+ * `plugin:peer|…` would leave that sentence false while the rule still passed.
+ *
+ * `null` before `peer` has started, and on a composition that has no `peer` at
+ * all — the browser client. A caller shows the panel's empty state rather than
+ * failing: no plugin is no circle, which is a state and not an error.
+ */
+export function personPort(): PersonPort | null {
+  /* Captured, not read through the module binding on every call: `wire` is
+     cleared on stop, and a port that re-read it would start throwing mid-flight
+     instead of simply belonging to the run that made it. */
+  const held = wire
+  return held === null ? null : personPortOver(held)
+}
+
+/**
+ * What a page needs from this device: its identity, and its signature.
+ *
+ * ⚠️ **SEPARATE FROM `PersonPort`, BECAUSE THE AUDIENCE IS.** `PersonPort` is
+ * what the circle PANEL uses — the reader's own custody, the people they know.
+ * This is what the page TRANSPORT uses, and it is the only surface that can
+ * make this device sign anything. Keeping them apart means a UI component
+ * cannot reach a signing key by holding the port it needed for a name.
+ *
+ * `null` before `peer` has started, and on a composition without it.
+ */
+export interface PublishPort {
+  /** The device's person, delegation and roster. `null` if it has no identity. */
+  mine(): Promise<PagePublisher | null>
+  /** Sign a page's bytes. Rust refuses anything that is not a page. */
+  sign(message: string): Promise<string>
+}
+
+export function publishPort(): PublishPort | null {
+  const held = wire
+  return held === null ? null : publishPortOver(held)
+}
+
+/** The port over a wire — see `personPortOver` for why this is separate. */
+export function publishPortOver(held: PeerWire): PublishPort {
+  return {
+    mine: () => held.circleMine(),
+    sign: (message) => held.pageSign(message),
+  }
+}
+
+/**
+ * The port over a wire — the shape `devicePortOver` uses, and for its reason.
+ *
+ * ⚠️ **SO THE PAIRING KIND CAN BE TESTED.** `personPort` reads module state
+ * that only `start` sets, so nothing could assert that a circle offer really
+ * asks for a CIRCLE pairing; a test at the panel could only check that `offer`
+ * was called, which passed just as happily with `'device'` bound here. That is
+ * the whole decision this function exists to expose.
+ */
+export function personPortOver(held: PeerWire): PersonPort {
+  return {
+    status: (devices, circle) => held.personStatus(devices, circle),
+    ensure: () => held.personEnsure(),
+    phrase: () => held.personPhrase(),
+    restore: (words) => held.personRestore(words),
+    forget: () => held.personForget(),
+    people: () => held.circlePeople(),
+    remember: (person, name) => held.circleRemember(person, name),
+    forgetPerson: (person) => held.circleForget(person),
+    introduce: (device, addrs) => held.circleIntroduce(device, addrs),
+    revokeDevice: (device) => held.circleRevoke(device),
+    /* ── adding somebody (WI-22.B3) ──────────────────────────────────────
+     *
+     * ⚠️ **A PERSON IS ADDED BY PAIRING, NOT BY TYPING AN ID.** The circle file
+     * records people this reader has MET; `circle::admit` refuses anybody else,
+     * so an id entered by hand would be a row that never admits anything. What
+     * makes a person real is the six digits two humans compared — which is why
+     * this is the pairing flow and not a text field. */
+    offer: () => held.pairBegin(undefined, 'circle'),
+    join: (uri) => held.pairFromUri(uri, undefined, ['circle:read']),
+    confirm: (accept, attemptId) => held.pairConfirm(accept, ['circle:read'], attemptId),
+    cancel: () => held.pairCancel(),
+    /* ⚠️ **FILTERED HERE, SO A PANEL CANNOT FORGET.** Devices and the circle
+       subscribe to ONE stream and confirm with different grants — unlabelled,
+       Devices could answer a circle request with a reader's own-device grants.
+       Doing the filter in the port rather than in each panel means a third
+       consumer inherits it instead of re-deriving it. */
+    onPending: (fn) => held.onPairingPending((e) => { if (e.kind === 'circle') fn(e) }),
+    onResult: (fn) => held.onPairingResult((e) => { if (e.kind === 'circle') fn(e) }),
+  }
+}
+
+/** What `circle`'s panel needs, with no Tauri types in it. */
+export interface PersonPort {
+  status(devices: number, circle: number): Promise<PersonStatus>
+  ensure(): Promise<string>
+  phrase(): Promise<string | null>
+  restore(words: string): Promise<string>
+  forget(): Promise<void>
+  people(): Promise<readonly KnownPerson[]>
+  remember(person: string, displayName: string): Promise<void>
+  forgetPerson(person: string): Promise<void>
+  /**
+   * Introduce this device to another over the circle door.
+   *
+   * `false` means that person's device did not admit this one — an answer, not
+   * an error. See `PeerWire.circleIntroduce`.
+   */
+  introduce(device: string, addrs?: readonly string[]): Promise<boolean>
+  /**
+   * Revoke one of this reader's OWN devices.
+   *
+   * Distinct from `forgetPerson`, which drops somebody else. See
+   * `PeerWire.circleRevoke`.
+   */
+  revokeDevice(device: string): Promise<void>
+  /** Start a circle offer — the QR and link a friend joins with. */
+  offer(): Promise<PairOffer>
+  /** Join a friend's offer. Answers the six digits to compare. */
+  join(uri: string): Promise<PairStart>
+  /** Answer somebody who is asking to join. */
+  confirm(accept: boolean, attemptId: string): Promise<WirePeer | null>
+  cancel(): Promise<void>
+  onPending(fn: (event: PairingPending) => void): () => void
+  onResult(fn: (event: PairingResult) => void): () => void
 }
 
 /** Register the Devices section's "Sync now" action. Returns the unregister. */
@@ -267,12 +404,20 @@ export const peer: Capability = {
       signal.removeEventListener('abort', stop)
       releasePeer(held, api.diagnostics)
       if (model === held.model) model = null
-      if (port === held.port) port = null
+      if (port === held.port) {
+        port = null
+        /* Cleared WITH the port, so "peer is running" stays one fact. A wire
+           left standing past a stop would hand `circle` a live door into a
+           plugin this capability has already released. */
+        wire = null
+      }
     }
     api.onCleanup(stop)
     signal.addEventListener('abort', stop, { once: true })
 
-    held.port = hasTauri() ? createPeerPort(tauriWire()) : null
+    const built = hasTauri() ? tauriWire() : null
+    wire = built
+    held.port = built === null ? null : createPeerPort(built)
     port = held.port
     held.model = createDevicesModel({ port: held.port })
     model = held.model
@@ -305,10 +450,14 @@ export type { PeerPort, Channel } from './lib/port'
 export { createPeerPort } from './lib/port'
 export type {
   BlobRequest,
+  DeviceRole,
   HashResult,
+  KnownPerson,
   PairOffer,
   PairStart,
   PairingPending,
+  PersonStatus,
+  Version,
   PairingResult,
   PeerRole,
   PeerStatus,

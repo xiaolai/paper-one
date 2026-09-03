@@ -57,3 +57,49 @@ describe('the titlebar off macOS', () => {
     }
   })
 })
+
+describe('the controls a contributed screen does not have', () => {
+  /* ⚠️ **`WindowShell` AND `SidePane` ALREADY REFUSED TO DRAW A PANE THERE, AND
+     THE CONTROLS DID NOT KNOW.** The titlebar kept an active "Close pane"
+     button and ⌘\\ kept toggling, so both mutated a state nothing reflected —
+     a lit control that does nothing, and a silent change to whether the pane
+     came back on the way out. */
+
+  it('draws no pane toggle on a capability’s screen', () => {
+    render(
+      <TitleBar
+        state={{ ...initialState, screen: 'circle:circle' }}
+        dispatch={vi.fn()}
+        platform="macos"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={speech}
+        hasBook={false}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /pane/iu })).toBeNull()
+  })
+
+  it('still draws it on the kernel’s own screens', () => {
+    // The refusal must not have taken the ordinary case with it.
+    /* `chromeOn` for the reader: §06 fades the whole zone and marks it
+       `inert` there until the pointer is near, and an inert subtree is
+       invisible to a role query — correctly, since it is invisible to the
+       reader too. */
+    for (const which of ['library', 'reader'] as const) {
+      cleanup()
+      render(
+        <TitleBar
+          state={{ ...initialState, screen: which, chromeOn: true }}
+          dispatch={vi.fn()}
+          platform="macos"
+          bookTitle="Paper"
+          bookSubtitle=""
+          speech={speech}
+          hasBook={false}
+        />,
+      )
+      expect(screen.getByRole('button', { name: /pane/iu })).toBeTruthy()
+    }
+  })
+})

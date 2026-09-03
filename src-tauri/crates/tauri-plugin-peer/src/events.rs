@@ -31,6 +31,16 @@ pub struct PairingPending {
     pub platform: String,
     /// Six decimal digits, zero-padded, identical on the satchel's screen.
     pub sas: String,
+    /// What this attempt is FOR — `device` or `circle`.
+    ///
+    /// ⚠️ **WITHOUT IT, TWO SURFACES ACT ON ONE EVENT AND ONE OF THEM IS
+    /// WRONG.** Devices and the circle panel both subscribe to this stream, and
+    /// they confirm with DIFFERENT grants: Devices with a reader's own-device
+    /// grants, the circle with `circle:read`. An unlabelled pending event let
+    /// Devices answer a circle request — handing another PERSON the permissions
+    /// meant for the reader's own phone — and the circle panel answer a device
+    /// request, filing the reader's own phone with circle access only.
+    pub kind: crate::pairing::PairKind,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -44,6 +54,16 @@ pub struct PairingResult {
     pub role: Option<Role>,
     /// Set when `ok` is false: `refused`, `bad-mac`, `expired`, `timeout`, …
     pub reason: Option<String>,
+    /// What the attempt was for — see `PairingPending::kind`.
+    pub kind: crate::pairing::PairKind,
+    /// Which attempt this is the result OF.
+    ///
+    /// ⚠️ **A RESULT WITH NO ATTEMPT CANNOT BE BOUND TO ONE.** A surface
+    /// showing six digits has to know whether an arriving result belongs to the
+    /// attempt in front of the reader or to some other one — without it, an
+    /// unrelated failure clears the flow the reader is halfway through, and
+    /// theirs clears nothing.
+    pub attempt_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -162,6 +182,7 @@ mod tests {
                 name: "n".into(),
                 platform: "macos".into(),
                 sas: "000042".into(),
+                kind: crate::pairing::PairKind::Circle,
             }),
             PeerEvent::PairingResult(PairingResult {
                 ok: false,
@@ -170,6 +191,8 @@ mod tests {
                 platform: None,
                 role: None,
                 reason: Some("bad-mac".into()),
+                kind: crate::pairing::PairKind::Device,
+                attempt_id: Some("att-1".into()),
             }),
             PeerEvent::SessionOpen(SessionOpen {
                 session_id: 3,

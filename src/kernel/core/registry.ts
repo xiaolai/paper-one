@@ -8,7 +8,9 @@ import type {
   CommandContext,
   Disposable,
   KernelApi,
+  OverlayContribution,
   PaneContribution,
+  ScreenContribution,
   ServiceContribution,
   SettingsSection,
 } from './capability'
@@ -81,6 +83,10 @@ export const RESERVED_ID = 'kernel'
 export interface Contributions {
   /** Every contributed pane, sorted (`PaneContribution.order`, then registration). */
   readonly panes: readonly PaneContribution[]
+  /** Foreign annotations to draw in a book — see `Capability.overlays`. */
+  readonly overlays: readonly OverlayContribution[]
+  /** Whole screens — see `Capability.screens`. */
+  readonly screens: readonly ScreenContribution[]
   /** Every contributed command for this context, in registration order. */
   commands(ctx: CommandContext): Command[]
   readonly settings: readonly SettingsSection[]
@@ -456,6 +462,8 @@ function checkNamespaces(
   kernelClients: readonly ClientContribution[] = [],
 ): void {
   const panes = new Set<string>()
+  const overlays = new Set<string>()
+  const screens = new Set<string>()
   const sections = new Set<string>()
   const actions = new Set<string>()
   /* ITS OWN SET. Statuses used to claim into `actions`, so a capability whose
@@ -515,6 +523,38 @@ function checkNamespaces(
       prefixed('settings section id', section.id, colon, cap.id)
       claim(sections, 'settings section', section.id, cap.id)
     }
+    for (const screen of cap.screens ?? []) {
+      prefixed('screen id', screen.id, colon, cap.id)
+      /* ⚠️ **THE RENDERER IS CHECKED, like the overlay's two methods.** A screen
+       * whose `render` is undefined has an id that validates and takes the whole
+       * window when a reader switches to it — the failure lands in the kernel's
+       * render path rather than at composition, which is the wrong end. */
+      if (typeof screen.render !== 'function') {
+        throw invalid('namespace', cap.id, `screen "${screen.id}" has no render() to call`)
+      }
+      claim(screens, 'screen', screen.id, cap.id)
+    }
+    for (const overlay of cap.overlays ?? []) {
+      prefixed('overlay id', overlay.id, colon, cap.id)
+      /* ⚠️ **THE TWO METHODS ARE CHECKED, NOT JUST THE ID** — the same posture
+       * the pane above takes for its `screens`. A contribution reaching the
+       * kernel from a build that predates one of these, or from a composition
+       * assembled at runtime, has an id that validates and a `subscribe` that
+       * is `undefined`; the first call then throws inside the reader's own
+       * effect, and a capability's malformed contribution takes down the book
+       * the reader is looking at. Refused here, it is a composition that does
+       * not start — which is where a wiring mistake belongs. */
+      for (const method of ['forBook', 'subscribe'] as const) {
+        if (typeof overlay[method] !== 'function') {
+          throw invalid(
+            'namespace',
+            cap.id,
+            `overlay "${overlay.id}" has no ${method}() to call`,
+          )
+        }
+      }
+      claim(overlays, 'overlay', overlay.id, cap.id)
+    }
     for (const action of cap.bookActions ?? []) {
       prefixed('book action id', action.id, colon, cap.id)
       claim(actions, 'book action', action.id, cap.id)
@@ -539,6 +579,8 @@ function checkNamespaces(
 
 const NOTHING: Disposable = { dispose: () => {} }
 const EMPTY_PANES: readonly PaneContribution[] = Object.freeze([])
+const EMPTY_OVERLAYS: readonly OverlayContribution[] = Object.freeze([])
+const EMPTY_SCREENS: readonly ScreenContribution[] = Object.freeze([])
 const EMPTY_SECTIONS: readonly SettingsSection[] = Object.freeze([])
 const EMPTY_ACTIONS: readonly BookAction[] = Object.freeze([])
 const EMPTY_STATUSES: readonly BookStatus[] = Object.freeze([])
@@ -669,6 +711,31 @@ export async function composeCapabilities(
       bookStatuses: Object.freeze([...(cap.bookStatuses ?? [])]),
       clients: Object.freeze([...(cap.clients ?? [])]),
       services: Object.freeze([...(cap.services ?? [])]),
+      /* ⚠️ **THE RECORD IS COPIED, NOT JUST THE ARRAY.** Every other line here
+       * freezes the array and keeps the contributed objects, which is right
+       * for the ones the kernel only reads. An overlay is different: its two
+       * methods were CHECKED above, and a frozen array of live objects lets a
+       * capability's own `start` replace `subscribe` with `undefined` after
+       * the check passed — the validation then guarantees nothing, and the
+       * failure lands inside the reader's effect rather than at composition.
+       * Bound, because `OverlayContribution` declares `forBook` as a method
+       * and a capability is free to implement it as one; copying it off the
+       * object without binding would break `this` for exactly the authors who
+       * wrote it in the ordinary way. */
+      screens: Object.freeze(
+        (cap.screens ?? []).map((screen) =>
+          Object.freeze({ id: screen.id, label: screen.label, render: screen.render.bind(screen) }),
+        ),
+      ),
+      overlays: Object.freeze(
+        (cap.overlays ?? []).map((overlay) =>
+          Object.freeze({
+            id: overlay.id,
+            forBook: overlay.forBook.bind(overlay),
+            subscribe: overlay.subscribe.bind(overlay),
+          }),
+        ),
+      ),
     }),
   )
   let disposed = false
@@ -832,6 +899,10 @@ export async function composeCapabilities(
   const settings = byOrder(kept.flatMap((one) => [...one.settings]))
   const bookActions = Object.freeze(kept.flatMap((one) => [...one.bookActions]))
   const bookStatuses = Object.freeze(kept.flatMap((one) => [...one.bookStatuses]))
+  /* Filtered to what STARTED, like every other contribution: a capability that
+     failed to start must not have its overlays drawn in a book. */
+  const overlays = Object.freeze(kept.flatMap((one) => [...one.overlays]))
+  const screens = Object.freeze(kept.flatMap((one) => [...one.screens]))
   const clients = Object.freeze([...kernelClients, ...kept.flatMap((one) => [...one.clients])])
   /* The kernel's own services first, then the capabilities' — one map, one
    * router registration, one grant check. `checkNamespaces` already refused a
@@ -861,6 +932,14 @@ export async function composeCapabilities(
     failures: frozenFailures,
     get panes() {
       return disposed ? EMPTY_PANES : panes
+    },
+    /* A disposed composition contributes nothing, exactly as `panes` does —
+       a torn-down capability's marks must not stay on the page. */
+    get screens() {
+      return disposed ? EMPTY_SCREENS : screens
+    },
+    get overlays() {
+      return disposed ? EMPTY_OVERLAYS : overlays
     },
     commands(ctx) {
       if (disposed) return []

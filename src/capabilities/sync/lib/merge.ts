@@ -50,33 +50,18 @@ import {
   type Card,
   type Mark,
   type TagClockEntry,
+  canonicalJson,
 } from '../../../kernel'
 
 /* ------------------------------------------------------------- canonical */
 
-/** A value with every object's keys sorted, recursively — one serialisation
- *  for one meaning, whatever order a map was built in. The accumulator has a
- *  NULL PROTOTYPE: a tag clock's keys are reader-chosen, `JSON.parse` makes
- *  `__proto__` an own key, and assigning that onto a plain `{}` hits the
- *  prototype setter instead of the dictionary — the key silently vanished
- *  from every digest. */
-function sortedDeep(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortedDeep)
-  if (typeof value === 'object' && value !== null) {
-    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>
-    for (const key of Object.keys(value).sort()) {
-      out[key] = sortedDeep((value as Record<string, unknown>)[key])
-    }
-    return out
-  }
-  return value
-}
-
-/** Canonical JSON: sorted keys at every depth. The tie-breaker and the
- *  digests both read THIS, never `JSON.stringify` raw. */
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(sortedDeep(value))
-}
+/* ⚠️ **MOVED TO `core/canonicalJson.ts`, and re-exported here so this module's
+ * own readers still find it.** The circle needs the same function to compute
+ * signed bytes and cannot import it from a capability; `wire.md` makes the move
+ * a hard ORDERING constraint, because two canonicalisers disagreeing about key
+ * order is a signature that verifies on one machine and fails on another. The
+ * body is unchanged, null prototype and all. */
+export { canonicalJson }
 
 /* ------------------------------------------------------------ the record */
 

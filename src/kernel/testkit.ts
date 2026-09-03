@@ -26,3 +26,9 @@ export { fakeFs as fakeTrashFs } from './core/fakeFs.testkit'
 /* The size port's conformance fixture — one library, asked of every host. See
    that module's header for the two-walks-one-contract defect it exists for. */
 export { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES } from './core/librarySizes.testkit'
+
+/* WI-22.A1's brand, mintable from a bare string — for session tests whose
+   anchors are readable sentinels rather than real paths. That module's header
+   says why this is not a second production minting site, and names the
+   boundary rule that keeps it from becoming one. */
+export { resolvedCfiForTesting } from './core/resolvedCfi.testkit'

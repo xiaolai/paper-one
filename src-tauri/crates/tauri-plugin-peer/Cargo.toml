@@ -81,6 +81,42 @@ log = "0.4"
 # The pairing QR is rendered in Rust as SVG so the secret never enters JS
 # state; no raster output, so no `image`.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# The PERSON root key — WI-22.B1. `identity.rs`'s key is the DEVICE's and is an
+# iroh `SecretKey`; this is the root that says several devices are one reader,
+# and it signs delegations rather than opening connections.
+#
+# `ed25519-dalek` is ALREADY IN THE TREE (iroh's own signatures resolve to it),
+# so this adds a direct path to a crate that was being compiled anyway rather
+# than a new one. `rand_core` for minting from the OS CSPRNG; `zeroize` so a
+# secret does not outlive its scope in freed memory. Not `serde`: a key is
+# carried as bytes at the one seam that needs it, and deriving Serialize on a
+# signing key is how one ends up in a log line.
+ed25519-dalek = { version = "3", features = ["rand_core", "zeroize"] }
+# Twelve words — `identity.md` §"The shape". 128 bits, not 256: *"Twenty-four
+# words is Bitcoin's paranoia budget; the prize here is joining a reading
+# circle."* `default-features = false` keeps the other ten wordlists out; the
+# phrase is English because the checksum is over the wordlist and a reader who
+# switches language must not silently get a different key.
+bip39 = { version = "2", default-features = false, features = ["std", "zeroize"] }
+# The keychain is a CACHE for the root, never its backup — see
+# `identity.md` §"The keychain cannot be the durable store": nothing sets
+# `kSecAttrSynchronizable`, so an entry dies with the machine, and adding a
+# replacement device is the whole reason the root exists. The phrase is the
+# durable copy.
+#
+# ⚠️ **THE FEATURE LIST IS COPIED FROM `tauri-plugin-inference` DELIBERATELY,
+# INCLUDING WHAT IT LEAVES OUT.** That crate's manifest carries the full
+# measurement: adding `crypto-rust` — the one-line fix for Linux's unencrypted
+# Secret Service session — resolves keyring's weak feature references and adds
+# 22 packages to `Cargo.lock` that are never compiled, which is enough to break
+# `check-third-party-notices`'s `cargo metadata --offline --locked`. Two
+# manifests naming different feature sets for one crate is also how a
+# unification surprise arrives. Read that note before changing this one.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
 
 # `O_NOFOLLOW` for the blob file opens, so a planted final-component symlink
 # fails the open rather than being followed out of the data root. Unix only;

@@ -42,6 +42,15 @@ export interface WirePeer {
   readonly lastAddrs: readonly string[]
 }
 
+/**
+ * What a pairing is FOR — mirrors Rust's `PairKind`.
+ *
+ * `device` is a reader's own two machines. `circle` is two PEOPLE, where the
+ * six digits stop being a formality: between your laptop and your phone a
+ * mismatch means a typo, and between two people it means an interceptor.
+ */
+export type PairKind = 'device' | 'circle'
+
 export interface PairOffer {
   /** CARRIES THE SECRET (it is what the other device scans) — sensitive,
    *  never logged; diagnostics' redaction covers `url` keys. */
@@ -67,10 +76,26 @@ export interface PairingPending {
    *  `pairConfirm` so a confirmation is bound to the attempt the human saw,
    *  not to whatever a pre-played QR has since started (Rust M9). */
   readonly attemptId: string
+  /** What this attempt is for — see `PairingResult.kind`. */
+  readonly kind: PairKind
 }
 
 export interface PairingResult {
   readonly ok: boolean
+  /**
+   * What the attempt was for.
+   *
+   * ⚠️ **TWO SURFACES SUBSCRIBE TO ONE STREAM AND CONFIRM WITH DIFFERENT
+   * GRANTS.** Devices answers with a reader's own-device grants; the circle
+   * panel answers with `circle:read`. Unlabelled, Devices could answer a
+   * CIRCLE request — handing another person the permissions meant for the
+   * reader's own phone — and the circle panel could answer a device request,
+   * filing the reader's own phone with circle access only. Each consumer now
+   * ignores the other's events.
+   */
+  readonly kind: PairKind
+  /** Which attempt this is the result of; absent on the joining side. */
+  readonly attemptId?: string
   readonly id: string
   readonly name?: string
   readonly platform?: string
@@ -154,7 +179,17 @@ export interface PeerWire {
   setGrants(id: string, grants: readonly string[]): Promise<void>
   hasGrant(id: string, grant: string): Promise<boolean>
 
-  pairBegin(name?: string): Promise<PairOffer>
+  /**
+   * Offer a pairing.
+   *
+   * ⚠️ **`kind` DECIDES WHO MAY JOIN, and it was never sent.** The Rust
+   * `peer_pair_begin` has taken a `PairKind` since circle pairing landed;
+   * omitting it here meant every offer was a DEVICE offer, so a circle
+   * pairing could not be started from the app at all — the door was built and
+   * had no handle. `'device'` stays the default, which is what an offer with
+   * no kind has always meant.
+   */
+  pairBegin(name?: string, kind?: PairKind): Promise<PairOffer>
   pairCancel(): Promise<void>
   /** `attemptId` is REQUIRED — the binding that stops a stale or pre-played
    *  confirmation approving whichever attempt happens to be pending. */
@@ -183,6 +218,125 @@ export interface PeerWire {
   whenListening?(): Promise<void>
   onSessionFrames(fn: (event: SessionFrames) => void): Unsubscribe
   onTransfer(fn: (event: TransferProgress) => void): Unsubscribe
+
+  /* ── the person identity and the circle roster (WI-22.B1/B3) ──────────
+   *
+   * ⚠️ **HERE RATHER THAN IN A WIRE OF `circle`'S OWN, because these are the
+   * PEER plugin's commands.** `no-tauri-api-outside-peer-wire` says why in as
+   * many words — *"One file per plugin, so the set of command names is
+   * auditable in one place"* — and a second file invoking `plugin:peer|…`
+   * would make that sentence false while the rule still passed on a
+   * technicality. `circle` reaches these through `personPort()`, the way
+   * `companion` reaches `inferencePort()`. */
+
+  /** Read-only. Minting from a status call would delete the laziness the
+   *  whole custody design rests on. */
+  personStatus(devices: number, circle: number): Promise<PersonStatus>
+  personEnsure(): Promise<string>
+  /** `null` when this device holds no root — a leaf, or no identity. */
+  personPhrase(): Promise<string | null>
+  personRestore(words: string): Promise<string>
+  personForget(): Promise<void>
+  circlePeople(): Promise<readonly KnownPerson[]>
+  circleRemember(person: string, displayName: string): Promise<void>
+  circleForget(person: string): Promise<void>
+  /**
+   * Introduce this device over the circle door, and report the verdict.
+   *
+   * ⚠️ **`false` IS AN ANSWER, NOT A FAILURE.** That person does not know this
+   * reader yet. It resolves rather than rejecting so a surface cannot show it
+   * as "something went wrong" — and WHICH check refused is deliberately not
+   * available, because telling a caller that would let them probe a stranger's
+   * circle one dial at a time.
+   */
+  circleIntroduce(device: string, addrs?: readonly string[]): Promise<boolean>
+  /**
+   * Revoke one of THIS person's own devices — a laptop lost, a phone sold.
+   *
+   * ⚠️ **NOT `circleForget`, WHICH DROPS SOMEBODY ELSE.** This says a device of
+   * the reader's own is finished: the roster stops vouching for it, the
+   * revocation is stated so peers holding an older roster stop too, and it
+   * loses its trust on this machine. Friends are told on the next round.
+   *
+   * A device cannot revoke itself — giving up the device you are holding is
+   * `personForget`.
+   */
+  circleRevoke(device: string): Promise<void>
+  /**
+   * Sign a page with THIS DEVICE's endpoint key.
+   *
+   * ⚠️ **PAGES AND NOTHING ELSE, AND THE CONFINEMENT IS IN RUST.** The same key
+   * authenticates every QUIC connection this device makes, so a binding that
+   * signed arbitrary bytes would let a caller mint something a peer reads as a
+   * different protocol. `identity::sign_page` refuses anything whose bytes are
+   * not `paper.circle.<version>.page\n…` — the shape `signedBytes` produces.
+   *
+   * A delegation and a roster are signed by the PERSON root, which lives in the
+   * OS keychain and has no binding here at all.
+   */
+  pageSign(message: string): Promise<string>
+  /**
+   * What this device puts on a page — its person, delegation and roster.
+   *
+   * `null` for a reader who has never shared, which is the ordinary state and
+   * not a failure. Renews the delegation when it is due: a publisher whose
+   * credentials expired is one whose pages every friend silently refuses.
+   */
+  circleMine(): Promise<PagePublisher | null>
+}
+
+/** The device's publishing identity, as `peer_circle_mine` reports it. */
+export interface PagePublisher {
+  readonly person: string
+  readonly device: string
+  /** As Rust serialised it; the page layer canonicalises before use. */
+  readonly delegation: {
+    readonly person: string
+    readonly device: string
+    readonly notBefore: number
+    readonly notAfter: number
+    readonly roster: number
+    readonly sig: string
+  }
+  /** Device ids the roster vouches for — ids only, never address hints. */
+  readonly roster: readonly string[]
+  readonly revocations: number
+}
+
+/** What a device may do with the person identity. */
+export type DeviceRole = 'home' | 'leaf'
+
+/** A roster version — `(epoch, hlc)`, never a counter. */
+export interface Version {
+  readonly epoch: number
+  readonly hlc: number
+}
+
+export interface KnownPerson {
+  readonly person: string
+  /** What the reader calls them. Display only; never matched on. */
+  readonly displayName: string
+  readonly roster: Version
+  readonly revoked: readonly string[]
+}
+
+/**
+ * The standing custody state — `identity.md` §"The window closes silently".
+ *
+ * ⚠️ **`atRisk` IS COMPUTED IN RUST, NOT HERE.** Every surface that shows the
+ * marker would otherwise re-derive the condition, and three copies of "is this
+ * reader at risk" is how one of them ends up saying no while the others say yes.
+ */
+export interface PersonStatus {
+  /** `null` for a reader who has never shared. Not a warning. */
+  readonly personId: string | null
+  readonly hasIdentity: boolean
+  /** Whether THIS device can still show the phrase. */
+  readonly canShowPhrase: boolean
+  readonly role: DeviceRole | null
+  readonly devices: number
+  readonly circle: number
+  readonly atRisk: boolean
 }
 
 const command = (name: string) => `plugin:peer|${name}`
@@ -264,7 +418,7 @@ export function tauriWire(): PeerWire {
     setGrants: (id, grants) => invoke(command('peer_set_grants'), { id, grants }),
     hasGrant: (id, grant) => invoke(command('peer_has_grant'), { id, grant }),
 
-    pairBegin: (name) => invoke(command('peer_pair_begin'), { name: name ?? null }),
+    pairBegin: (name, kind) => invoke(command('peer_pair_begin'), { name: name ?? null, kind: kind ?? null }),
     pairCancel: () => invoke(command('peer_pair_cancel')),
     pairConfirm: (accept, grants, attemptId) => invoke(command('peer_pair_confirm'), { accept, grants: grants ?? null, attemptId }),
     pairFromUri: (uri, name, grants) => invoke(command('peer_pair_from_uri'), { uri, name: name ?? null, grants: grants ?? null }),
@@ -272,6 +426,21 @@ export function tauriWire(): PeerWire {
     ready: () => invoke(command('peer_ready')),
     connect: (peerId, hello) => invoke(command('peer_connect'), { peerId, hello: hello ?? null }),
     send: (sessionId, bytes) => invoke(command('peer_send'), { sessionId, bytes: Array.from(bytes) }),
+    personStatus: (devices, circle) => invoke(command('peer_person_status'), { devices, circle }),
+    personEnsure: () => invoke(command('peer_person_ensure')),
+    personPhrase: () => invoke(command('peer_person_phrase')),
+    personRestore: (words) => invoke(command('peer_person_restore'), { words }),
+    personForget: () => invoke(command('peer_person_forget')),
+    circlePeople: () => invoke(command('peer_circle_people')),
+    circleRemember: (person, displayName) =>
+      invoke(command('peer_circle_remember'), { person, displayName }),
+    circleForget: (person) => invoke(command('peer_circle_forget'), { person }),
+    circleIntroduce: (device, addrs) =>
+      invoke(command('peer_circle_introduce'), { device, addrs: addrs === undefined ? null : [...addrs] }),
+    circleRevoke: (device) => invoke(command('peer_circle_revoke'), { device }),
+    pageSign: (message) => invoke(command('peer_page_sign'), { message }),
+    circleMine: () => invoke(command('peer_circle_mine')),
+
     sessionRecv: async (sessionId, max) => {
       const frames = await invoke<number[][]>(command('peer_session_recv'), { sessionId, max: max ?? null })
       return frames.map((frame) => Uint8Array.from(frame))

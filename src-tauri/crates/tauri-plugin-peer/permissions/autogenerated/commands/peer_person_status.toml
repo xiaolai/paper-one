@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-person-status"
+description = "Enables the peer_person_status command without any pre-configured scope."
+commands.allow = ["peer_person_status"]
+
+[[permission]]
+identifier = "deny-peer-person-status"
+description = "Denies the peer_person_status command without any pre-configured scope."
+commands.deny = ["peer_person_status"]

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { parse, toRange } from 'foliate-js/epubcfi.js'
 import {
@@ -62,8 +63,35 @@ describe('the canonical index', () => {
   it('gives curly and straight quotation marks the same canonical form', () => {
     const curly = indexText(docOf('standard-ebooks', 2).body).text
     const straight = indexText(docOf('gutenberg', 1).body).text
-    expect(curly).toContain(`"who ain't a slave?"`)
-    expect(straight).toContain(`"who ain't a slave?"`)
+    expect(curly).toContain(`"Who ain't a slave?"`)
+    expect(straight).toContain(`"Who ain't a slave?"`)
+  })
+
+  it('does NOT fold case, which is the decision WI-22.A0 restored', () => {
+    /* ⚠️ **THE ASSERTION THAT PINS A0, and it is deliberately a WHOLE STRING
+       rather than a substring.** `canonicalChar` ended in `.toLowerCase()` in
+       shipped code while `phase-21-the-circle.md` had decided *"no case
+       folding, because case is meaningful in a quote"* —
+       `docs/design/circle/review.md` found the contradiction by running the
+       check. The plan's falsifier for A0 is that the corpus stops anchoring
+       across builds, which the crossing tests below answer; this is the other
+       half, and without it the fold can come back looking green.
+
+       `'US'` against `'us'` is the concrete cost of folding: a passage about a
+       country would anchor on a pronoun, and `reanchor`'s gate is EXACT
+       canonical equality — so a character the fold drops is evidence the gate
+       no longer has. */
+    expect(canonicalise('US')).not.toBe(canonicalise('us'))
+    expect(canonicalise('US')).toBe('US')
+
+    /* The other four folds are UNCHANGED, which is the rest of A0's acceptance.
+       Whole strings, so a fold that quietly stopped folding fails here. */
+    expect(canonicalise('\u2018quoted\u2019')).toBe(`'quoted'`)
+    expect(canonicalise('\u201Cquoted\u201D')).toBe(`"quoted"`)
+    expect(canonicalise('en\u2013dash')).toBe('en\u2014dash')
+    expect(canonicalise('A \u2014 B')).toBe('A\u2014B')
+    expect(canonicalise('a  \n b')).toBe('a b')
+    expect(canonicalise('soft\u00ADhyphen')).toBe('softhyphen')
   })
 
   it('reads no text out of a script, which is text the reader cannot see', () => {
@@ -72,7 +100,7 @@ describe('the canonical index', () => {
        after it. */
     const index = indexText(docOf('gutenberg', 1).body)
     expect(index.text).not.toContain('reading-progress')
-    expect(index.text).toContain('call me ishmael')
+    expect(index.text).toContain('Call me Ishmael')
   })
 
   it('is NOT bounded, which is the thing flatten could not give route B', () => {
@@ -91,9 +119,55 @@ describe('the canonical index', () => {
     for (let i = 0; i < index.text.length; i += 1) {
       const node = index.nodes[index.node[i]!]
       expect(node, `character ${i} has no node`).toBeDefined()
-      expect(index.to[i]!).toBeGreaterThan(index.from[i]!)
+      expect(index.from[i]!).toBeGreaterThanOrEqual(0)
       expect(index.to[i]!).toBeLessThanOrEqual(node!.data.length)
+      /* ⚠️ **A SPACE MAY BE ZERO-WIDTH; EVERY OTHER CHARACTER MAY NOT.** This
+         asserted `to > from` for all of them, which was right until the walk
+         started emitting a break at block edges: a boundary between `</p>` and
+         `<p>` has NO source character behind it, and its honest origin is the
+         zero-width position just past the last real one. The first attempt gave
+         it `lastOff..lastOff + 1` to satisfy the old assertion and that offset
+         is one past the node's length — this test caught it, which is what it
+         is for. */
+      if (index.text[i] === ' ') expect(index.to[i]!).toBeGreaterThanOrEqual(index.from[i]!)
+      else expect(index.to[i]!).toBeGreaterThan(index.from[i]!)
     }
+  })
+
+  it('never begins or ends a canonical quote with a space', () => {
+    /* ⚠️ **WHAT MAKES THE ZERO-WIDTH BOUNDARY SAFE FOR THE RANGE.** The range's
+       ends are `from[best]` and `to[last]`, so a zero-width origin would matter
+       if a match could start or end on one. It cannot: `canonicalise` never
+       leads with a space (nothing is emitted while the output is empty) and
+       never trails with one (a pending space at the end is simply dropped), and
+       a match is an exact substring of that canonical quote.
+
+       Asserted rather than reasoned about in a comment, because it is the
+       premise the whole boundary change rests on. */
+    for (const passage of CORPUS_PASSAGES) {
+      for (const build of BUILD_IDS) {
+        const quote = canonicalise(passage.places[build].quote)
+        if (quote === '') continue
+        expect(quote.startsWith(' '), `${passage.id}/${build}`).toBe(false)
+        expect(quote.endsWith(' '), `${passage.id}/${build}`).toBe(false)
+      }
+    }
+    expect(canonicalise('   leading and trailing   ')).toBe('leading and trailing')
+  })
+
+  it('breaks the text at a block edge, so two paragraphs do not run together', () => {
+    /* ⚠️ **`<p>done</p><p>Start</p>` INDEXED AS `doneStart`** — a word in
+       neither paragraph, which invents matches across a break and loses every
+       real one. The other side of the comparison already had the boundary:
+       `markContext` captures through `flatten`, which emits `SENTINEL` at
+       exactly these edges. The defect was the asymmetry between the two walks. */
+    const doc = new DOMParser().parseFromString(
+      '<html><body><p>done</p><p>Start</p><p>a<br>b</p></body></html>',
+      'text/html',
+    )
+    const index = indexText(doc.body)
+    expect(index.text).toBe('done Start a b')
+    expect(index.text).not.toContain('doneStart')
   })
 })
 
@@ -264,6 +338,31 @@ describe('a section the reader has never opened', () => {
   })
 })
 
+/**
+ * The ceiling both cost checks assert against.
+ *
+ * ⚠️ **IT IS A COMPLEXITY DETECTOR, NOT A PERFORMANCE BUDGET, and 250 ms was
+ * the wrong number for that job.** Both tests below already say what they are
+ * for: *"The bound is deliberately loose for that reason: it fails on a
+ * resolver that became quadratic, and on nothing else."* 250 ms against a
+ * 3.46 ms measurement is a 70× margin, which sounds generous and is not — under
+ * jsdom, v8 coverage instrumentation and a loaded machine the same work
+ * measured **383 ms** and failed, in a run whose `setup` and `transform` times
+ * had both doubled against the previous green one. Nothing about the resolver
+ * had changed.
+ *
+ * ⚠️ **THIS IS THE THIRD BOUND IN THIS SUITE SIZED ON AN IDLE MACHINE AND
+ * EVALUATED ON A BUSY ONE** — after the `scripts` project's 15 s `testTimeout`
+ * and Testing Library's 1 s `asyncUtilTimeout`. The mechanism is one mechanism,
+ * and it is worth naming: a number measured once, on a quiet laptop, becomes a
+ * gate that decides on load.
+ *
+ * 2 000 ms keeps a ~570× margin over the idle measurement. A genuinely
+ * quadratic resolver on a 22 904-character section is seconds to minutes, not
+ * hundreds of milliseconds, so nothing this test exists to catch escapes.
+ */
+const COMPLEXITY_CEILING_MS = 2_000
+
 describe('what it costs', () => {
   it('resolves a whole 22 000-character section well inside a frame', () => {
     /* ⚠️ **NOT AN ACCEPTANCE CRITERION.** The plan is explicit that a
@@ -282,7 +381,7 @@ describe('what it costs', () => {
       expect(reanchor(doc.body, asArchived(passage, 'standard-ebooks'))).not.toBeNull()
     }
     const each = (performance.now() - started) / runs
-    expect(each, `one resolution over a 22k section took ${each.toFixed(1)}ms`).toBeLessThan(250)
+    expect(each, `one resolution over a 22k section took ${each.toFixed(1)}ms`).toBeLessThan(COMPLEXITY_CEILING_MS)
   })
 
   it('parses and resolves a COLD section inside a frame', () => {
@@ -303,7 +402,7 @@ describe('what it costs', () => {
       expect(reanchor(cold.body, asArchived(passage, 'standard-ebooks'))).not.toBeNull()
     }
     const each = (performance.now() - started) / runs
-    expect(each, `one cold section took ${each.toFixed(1)}ms`).toBeLessThan(250)
+    expect(each, `one cold section took ${each.toFixed(1)}ms`).toBeLessThan(COMPLEXITY_CEILING_MS)
   })
 
   it('indexes every build’s every section without a bound', () => {
@@ -317,5 +416,212 @@ describe('what it costs', () => {
         expect(index.from.length).toBe(index.text.length)
       }
     }
+  })
+})
+
+describe('ResolvedCfi, the painter\'s door', () => {
+  /* ⚠️ **WI-22.A1's FALSIFIER, RUN AS A TEST rather than left as a `rg` in a
+     plan nobody re-runs.** The plan states it as *"`rg` for the brand cast
+     across `src/` returns any hit outside the resolver — if a second minting
+     site exists, the type is decoration"*, and a falsifier that lives in a
+     document fires once, on the day somebody remembers it.
+
+     It names a WHOLE SET rather than a count, which is the plan's own stated
+     preference: a count passes when one mint is added and another deleted in
+     the same change, and the set says which file. */
+
+  /* `process.cwd()` is the repo root under vitest — the config lives there and
+     vitest does not change directory. Not `import.meta.url`: this suite runs in
+     the jsdom environment, where it is not a `file:` URL and `readFileSync`
+     refuses it. */
+  const REPO_ROOT = process.cwd()
+
+  /* ⚠️ **ASSEMBLED, NOT WRITTEN OUT, and the first version was written out.**
+     A test that searches the tree for a string is in the tree, so spelling the
+     needle literally made this file match itself — the walk returned three
+     paths and the failure looked like a real second mint. Any check of this
+     shape has the same trap; joining the halves is the whole fix, and it is
+     why no path is excluded from the walk below. Excluding this file would
+     have hidden a genuine mint added to it later. */
+  const NEEDLE = ['as', 'ResolvedCfi'].join(' ')
+
+  /**
+   * The OTHER spelling of the same cast, and it is the one that got past.
+   *
+   * ⚠️ **`x as never` MINTS A `ResolvedCfi` JUST AS WELL AS `x as ResolvedCfi`,
+   * and an audit found one in production while this test was green.** The
+   * circle capability widened the resolver's answer with `fresh.cfi as never`
+   * — so any string reaching that seam reached the painter, and the falsifier
+   * that exists to make that impossible could not see it.
+   *
+   * `never` is assignable to every type, which is exactly what makes it a
+   * universal cast and exactly why a brand check must look for it. The real
+   * fix was to type the seam so no cast is needed at all; this is what stops
+   * the next one being invisible.
+   */
+  const ANY_CAST = ['as', 'never'].join(' ')
+
+  /**
+   * The file with its comments removed.
+   *
+   * ⚠️ **PROSE ABOUT A CAST IS NOT A CAST, and the second thing this check did
+   * was report three files that describe the rule.** `core/resolvedCfi.ts`
+   * explains where the one cast lives, and this suite explains what the grep
+   * can and cannot see — both by writing the cast out. Deleting the sentences
+   * would have worked and would have been the wrong fix: the check would go on
+   * failing for the next person who explains the rule, and the pressure would
+   * be to stop explaining it.
+   *
+   * `check-browser-safe.mjs` learned the identical lesson and AGENTS.md records
+   * it — it counted `@tauri-apps` inside doc comments, because `bookVault.ts`
+   * names the package three times to say it does NOT import it.
+   *
+   * Deliberately crude: block and line comments, no string-literal awareness. A
+   * cast inside a string is not a cast either, and this suite's `NEEDLE` is
+   * itself assembled from halves precisely so it is not one.
+   */
+  const code = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//gu, ' ').replace(/\/\/[^\n]*/gu, ' ')
+
+  /* ⚠️ **THE CAST IS NOT THE ONLY WAY A `ResolvedCfi` COMES INTO BEING, and a
+     grep for the cast cannot see the other one.** `isPlaced` in `core/marks.ts`
+     is a TYPE PREDICATE — no cast, so it is invisible to the set below — and it
+     narrows to `Placed<T>`, whose `cfi` is branded. That is deliberate and it is
+     the weaker of the two mints: it establishes that no foreign path was carried
+     across an import and that a path exists, not that the path was re-derived
+     this session.
+
+     Named here so the plan's falsifier is not read as saying more than it can.
+     `rg 'as ResolvedCfi'` answers "where is the brand asserted without a check";
+     it does not answer "where does a branded value come from". */
+  const CHECKED_MINT = 'src/kernel/core/marks.ts'
+
+  const MINTS = new Set([
+    /* The production mint. Sound because of its ARGUMENT — a live `Range` is
+       the evidence the document is here and has the structure the path is
+       derived from. */
+    'src/kernel/ui/reader/reanchor.ts',
+    /* The test mint, reachable only through `src/kernel/testkit.ts`, which
+       `kernel-testkit-in-tests-only` refuses to production code. That rule is
+       what makes this entry not a hole; see the module's own header. */
+    'src/kernel/core/resolvedCfi.testkit.ts',
+  ])
+
+  it('is minted in exactly two files, one of which tests cannot escape', async () => {
+    const { readdirSync } = await import('node:fs')
+
+    /* A REAL WALK OF `src/`, not `git grep`. The first version used git, and
+       git reads the INDEX — so the testkit above was invisible to it until it
+       was staged, and the test passed over the very file it exists to account
+       for. That failure mode points the wrong way: an UNTRACKED file carrying
+       a mint is exactly the case worth failing on, because it is what an
+       experiment left behind looks like the moment before it is committed. */
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const at = `${dir}/${entry.name}`
+        if (entry.isDirectory()) return walk(at)
+        return /\.tsx?$/u.test(entry.name) ? [at] : []
+      })
+
+    const found = walk(`${REPO_ROOT}/src`)
+      .filter((at) => code(readFileSync(at, 'utf8')).includes(NEEDLE))
+      .map((at) => at.slice(REPO_ROOT.length + 1))
+
+    /* NOT `toHaveLength(2)`. A count passes when one mint is added and another
+       deleted in the same change; the set says which file, which is the thing
+       a reader of a failure needs. */
+    expect(new Set(found)).toEqual(MINTS)
+  })
+
+  it('has exactly one CHECKED mint, which no cast-grep can see', async () => {
+    /* The predicate that narrows to `Placed<T>` without a cast. One, and it is
+       `isPlaced` — a second would be a second unaudited way for a bare string
+       to acquire the brand, and nothing above would notice. */
+    const { readdirSync } = await import('node:fs')
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const at = `${dir}/${entry.name}`
+        if (entry.isDirectory()) return walk(at)
+        return /\.tsx?$/u.test(entry.name) ? [at] : []
+      })
+    /* ⚠️ **`is Placed<`, NOT `mark is Placed<`, and the narrower spelling could
+       barely fire.** The first version named the parameter, so a predicate
+       written `(m: Mark): m is Placed<Mark>` — which is what a second one would
+       plausibly look like — slipped straight past. Verified by planting exactly
+       that: it went unreported until the needle stopped assuming the argument's
+       name. A detector that finds nothing looks exactly like a clean result. */
+    const needle = [' is', 'Placed<'].join(' ')
+    const found = walk(`${REPO_ROOT}/src`)
+      .filter((at) => code(readFileSync(at, 'utf8')).includes(needle))
+      .map((at) => at.slice(REPO_ROOT.length + 1))
+    expect(found).toEqual([CHECKED_MINT])
+  })
+
+  it('has no universal cast in the modules that carry the brand', async () => {
+    /* ⚠️ Scoped to the files that HANDLE a `ResolvedCfi`, not the whole tree:
+       `as never` is a legitimate idiom for a fake context in a test, and a
+       repo-wide ban would be noise nobody keeps. What must not contain one is
+       any module through which a cfi travels — because there it is a silent
+       mint. */
+    const { readdirSync } = await import('node:fs')
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const at = `${dir}/${entry.name}`
+        if (entry.isDirectory()) return walk(at)
+        return /\.tsx?$/u.test(entry.name) && !/\.test\.tsx?$/u.test(entry.name) ? [at] : []
+      })
+
+    const carriers = walk(`${REPO_ROOT}/src`).filter((at) => {
+      const source = code(readFileSync(at, 'utf8'))
+      return source.includes('ResolvedCfi') || source.includes('ForeignAnnotation')
+    })
+    expect(carriers.length, 'no carrier modules found — the filter is wrong').toBeGreaterThan(3)
+
+    const offenders = carriers
+      .filter((at) => code(readFileSync(at, 'utf8')).includes(ANY_CAST))
+      .map((at) => at.slice(REPO_ROOT.length + 1))
+    expect(offenders).toEqual([])
+  })
+
+  it('finds the mint it is looking for, which is what makes the walk evidence', async () => {
+    /* ⚠️ **THE KNOWN POSITIVE.** `check-browser-safe.mjs` shipped two confident
+       wrong answers before it worked, and AGENTS.md draws the rule from it: a
+       detector that finds nothing looks exactly like a clean result. The test
+       above asserts a SET, so a walk that read no files and a walk that found
+       the two real mints are told apart only by this — that the needle really
+       does match the resolver's own source. */
+    const { readdirSync } = await import('node:fs')
+    expect(readdirSync(`${REPO_ROOT}/src`).length).toBeGreaterThan(0)
+    expect(readFileSync(`${REPO_ROOT}/src/kernel/ui/reader/reanchor.ts`, 'utf8')).toContain(NEEDLE)
+  })
+
+  it('cannot be spelled by a module that does not import it', () => {
+    /* The brand is a `declare const` symbol that is never exported, so
+       `ResolvedCfi` has no structural spelling anywhere else — this is what
+       makes it nominal rather than a naming convention. The check is that the
+       source declares it that way, because a later edit to
+       `{ readonly __brand: 'resolved' }` would compile, would keep every test
+       above green, and would silently make the type forgeable. */
+    const src = readFileSync(`${REPO_ROOT}/src/kernel/core/resolvedCfi.ts`, 'utf8')
+    expect(src).toContain('declare const RESOLVED: unique symbol')
+    expect(src).toContain('export type ResolvedCfi = string & { readonly [RESOLVED]: true }')
+    /* ⚠️ The brand lives in `core/`, not here. It was declared in this module,
+       which made `core/marks.ts` import from `ui/` in order to name it —
+       backwards, and flagged by review. The MINT stayed here; only the
+       vocabulary moved. */
+    expect(code(readFileSync(`${REPO_ROOT}/src/kernel/ui/reader/reanchor.ts`, 'utf8'))).not.toContain(
+      'declare const RESOLVED',
+    )
+  })
+
+  it('mints from a live range, which is the evidence a foreign passage lacks', () => {
+    /* `cfiFor`'s soundness is its ARGUMENT. A resolved passage produces a
+       Range in this document; the three strings a foreign passage arrives as
+       produce nothing, so there is no way to reach the mint without first
+       having found the words. */
+    const doc = docOf('gutenberg', 1)
+    const found = reanchor(doc.body, asArchived(CORPUS_PASSAGES[0]!, 'standard-ebooks'))
+    expect(found).not.toBeNull()
+    expect(cfiFor(1, found!.range)).toMatch(/^epubcfi\(\/6\/4!/)
   })
 })

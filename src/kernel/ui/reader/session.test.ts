@@ -8,8 +8,15 @@ import {
   releaseNoteView,
   watchNoteLinks,
 } from './session'
-import type { MarkAnchor, MarkPalette, SelectionSnapshot, SessionCallbacks } from './session'
+import type {
+  ForeignAnchor,
+  MarkAnchor,
+  MarkPalette,
+  SelectionSnapshot,
+  SessionCallbacks,
+} from './session'
 import type { BookSource } from '../../core/formats'
+import { resolvedCfiForTesting } from '../../core/resolvedCfi.testkit'
 import { buildFixture, elem, txt } from './wordSnap/domFake.testkit'
 import { fakeDocument, type FakeDocument } from './wordSnap/documentFake.testkit'
 import { selectionOver, type FakeSelection } from './wordSnap/selectionFake.testkit'
@@ -235,7 +242,7 @@ function fakeView(overrides: FakeViewOptions = {}): FakeView {
 const PALETTE: MarkPalette = {
   fill: { yellow: '#F3E6C0', green: '#D1EED3', purple: '#F2E0FF' },
   rule: { yellow: '#E0BE55', green: '#85D288', purple: '#DDAFFF' },
-  companion: '#9E5A16',
+  companion: '#9E5A16', foreign: '#teal',
 }
 
 function callbacks(
@@ -1506,14 +1513,23 @@ describe('ReaderSession link events', () => {
 })
 
 describe('ReaderSession marks', () => {
-  const anchor = (over: Partial<MarkAnchor> = {}): MarkAnchor => ({
-    cfi: 'epubcfi(/6/4)',
-    sectionIndex: 0,
-    kind: 'highlight',
-    tint: 'yellow',
-    style: 'fill',
-    ...over,
-  })
+  /* `cfi` is a plain string here and a `ResolvedCfi` on the way out — WI-22.A1
+     narrowed the painter's door, and these anchors are readable SENTINELS
+     (`'here'`, `'elsewhere'`, `'made-later'`) rather than real paths, which is
+     what the assertions below are actually about. `resolvedCfiForTesting` is
+     the testkit's mint; its header says why that is not a second production
+     minting site, and `kernel-testkit-in-tests-only` is what enforces it. */
+  const anchor = (over: Partial<Omit<MarkAnchor, 'cfi'>> & { cfi?: string } = {}): MarkAnchor => {
+    const { cfi = 'epubcfi(/6/4)', ...rest } = over
+    return {
+      sectionIndex: 0,
+      kind: 'highlight',
+      tint: 'yellow',
+      style: 'fill',
+      ...rest,
+      cfi: resolvedCfiForTesting(cfi),
+    }
+  }
 
   it('draws only the marks belonging to the section being built', async () => {
     // foliate offers one overlay per spine item. Handing it a mark from
@@ -1563,6 +1579,103 @@ describe('ReaderSession marks', () => {
     void session
     return painted
   }
+
+  /** A document that reports one writing mode for everything in it. */
+  const runningIn = (writingMode: string) =>
+    ({
+      body: {},
+      defaultView: { getComputedStyle: () => ({ writingMode }) },
+    }) as unknown as Document
+
+  /** Draw one annotation in a given writing mode and report the full options. */
+  const optionsFor = async (annotation: Record<string, unknown>, writingMode: string) => {
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      getOverlays: () => [],
+    })
+    await session.start('book.epub', deps(view))
+    const seen: Record<string, unknown>[] = []
+    view.emit('draw-annotation', {
+      draw: (_fn: unknown, options: Record<string, unknown>) => seen.push(options),
+      annotation,
+      range: null,
+      doc: runningIn(writingMode),
+    })
+    void session
+    return seen[0]
+  }
+
+  it.each([
+    ['a reader’s rule', { kind: 'highlight', tint: 'purple', style: 'underline' }],
+    ['the companion’s wave', { kind: 'companion' }],
+    ['a friend’s underline', { kind: 'circle', readers: 1 }],
+  ])('tells the painter which way the text runs — %s', async (_what, annotation) => {
+    /* ⚠️ **foliate's `underline`, `strikethrough` and `squiggly` each READ
+       `writingMode`** and put the rule on the block's far edge — under the
+       words horizontally, beside the column in a vertical book. Omitted, the
+       default is horizontal, so in a `vertical-rl` book every rule Paper draws
+       is struck THROUGH the text rather than alongside it. */
+    expect(await optionsFor(annotation, 'vertical-rl')).toMatchObject({
+      writingMode: 'vertical-rl',
+    })
+  })
+
+  it('measures the writing mode where the words are, not where the book declares it', async () => {
+    /* An EPUB may set `writing-mode` on a section, a pull quote or one
+       element, so the book's default is not the answer — `balanceRects`
+       measures the containing element for the same reason. */
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    const seen: Record<string, unknown>[] = []
+    const doc = {
+      body: { tag: 'body' },
+      defaultView: {
+        getComputedStyle: (el: { tag: string }) => ({
+          writingMode: el.tag === 'quote' ? 'vertical-rl' : 'horizontal-tb',
+        }),
+      },
+    } as unknown as Document
+    view.emit('draw-annotation', {
+      draw: (_fn: unknown, options: Record<string, unknown>) => seen.push(options),
+      annotation: { kind: 'highlight', tint: 'purple', style: 'underline' },
+      range: { startContainer: { nodeType: 1, tag: 'quote', ownerDocument: doc } },
+      doc,
+    })
+
+    expect(seen[0]).toMatchObject({ writingMode: 'vertical-rl' })
+  })
+
+  it('omits the writing mode when the document cannot be measured', async () => {
+    /* Which is exactly what leaving the option out meant, so an unreachable
+       document is the old behaviour rather than a new failure. */
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    const seen: Record<string, unknown>[] = []
+    view.emit('draw-annotation', {
+      draw: (_fn: unknown, options: Record<string, unknown>) => seen.push(options),
+      annotation: { kind: 'highlight', tint: 'purple', style: 'underline' },
+      range: null,
+      doc: null,
+    })
+
+    expect(seen[0]?.['writingMode']).toBeUndefined()
+  })
+
+  it.each([
+    ['no kind at all', {}],
+    ['a null kind', { kind: null }],
+    ['a numeric kind', { kind: 7 }],
+    ['a kind nothing paints', { kind: 'bookmark' }],
+  ])('draws nothing for an annotation with %s', async (_what, over) => {
+    /* ⚠️ The whitelist only refused STRINGS it did not know, so an absent,
+       null or numeric kind fell past it and was painted by the last branch as
+       a yellow fill — a band over a passage the reader never marked, which is
+       exactly what the whitelist exists to prevent for `bookmark`. */
+    expect(await paintOne({ value: 'cfi', tint: 'yellow', style: 'fill', ...over })).toEqual([])
+  })
 
   it('draws a fill mark as a band in its tint', async () => {
     expect(await paintOne({ kind: 'highlight', tint: 'green', style: 'fill' })).toEqual([
@@ -1627,7 +1740,7 @@ describe('ReaderSession marks', () => {
     cb.getPalette = () => ({
       fill: { yellow: '#4A3B18', green: '#2C4230', purple: '#433851' },
       rule: { yellow: '#8A6E2C', green: '#4B7D4D', purple: '#85659D' },
-      companion: '#D9A25E',
+      companion: '#D9A25E', foreign: '#teal',
     })
     const session = new ReaderSession(fakeHost(), cb)
     await session.start('book.epub', deps(view))
@@ -3736,5 +3849,316 @@ describe('ReaderSession and a book that carries scripts', () => {
     expect(removedAttribute).toHaveBeenCalledWith('onclick')
     expect(removedAttribute).not.toHaveBeenCalledWith('class')
     session.dispose()
+  })
+})
+
+describe('a foreign mark (WI-22.D2)', () => {
+  /* The reader's own, for the ordering test. `anchor` in the marks block above
+     is scoped to it; a second definition here is cheaper than widening that
+     one's scope for two assertions. */
+  const mine = (cfi: string): MarkAnchor => ({
+    cfi: resolvedCfiForTesting(cfi),
+    sectionIndex: 0,
+    kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
+  })
+
+  const foreign = (over: Partial<ForeignAnchor> = {}): ForeignAnchor => ({
+    cfi: resolvedCfiForTesting('epubcfi(/6/4!/4/2)'),
+    sectionIndex: 0,
+    key: 'circle:alice:pub1',
+    readers: 1,
+    ...over,
+  })
+
+  /* The erase settles a turn later — `attachForeign` awaits `addAnnotation`
+     and only then answers whether it worked — so one microtask is not enough
+     to see the record updated. A macrotask drains both. */
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  const withOverlays = (overlays: readonly ForeignAnchor[], marks: MarkAnchor[] = []) => {
+    const view = fakeView()
+    const cb = callbacks(marks)
+    return { view, cb: { ...cb, getOverlays: () => overlays } }
+  }
+
+  it('is offered to the section it belongs to, and no other', async () => {
+    const { view, cb } = withOverlays([foreign({ sectionIndex: 2 })])
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+
+    view.emit('create-overlay', { index: 0 })
+    expect(view.annotations).toHaveLength(0)
+
+    view.emit('create-overlay', { index: 2 })
+    expect(view.annotations.map((a) => a.value)).toEqual(['epubcfi(/6/4!/4/2)'])
+  })
+
+  it('carries the overlay key separately from the cfi', async () => {
+    /* ⚠️ **`review.md`'s overlay blocker 1.** `addAnnotation` keys the
+       Overlayer on `value`, so several readers at one CFI collapse and the last
+       writer wins — which breaks *"4 of 11 readers marked this"*. The one line
+       that fixes it is in our own fork; sending the key now means the day it
+       lands, nothing here changes. */
+    const { view, cb } = withOverlays([foreign()])
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    view.emit('create-overlay', { index: 0 })
+
+    const drawn = view.annotations[0] as Record<string, unknown>
+    expect(drawn['key']).toBe('circle:alice:pub1')
+    expect(drawn['value']).toBe('epubcfi(/6/4!/4/2)')
+    expect(drawn['key']).not.toBe(drawn['value'])
+  })
+
+  it('carries NO tint and NO style, so it cannot claim the reader vocabulary', async () => {
+    /* *"A friend's highlight drawn in your tints is a passage you will remember
+       marking and did not."* The fields are absent rather than defaulted. */
+    const { view, cb } = withOverlays([foreign()])
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    view.emit('create-overlay', { index: 0 })
+
+    expect(Object.keys(view.annotations[0] as object)).not.toContain('tint')
+    expect(Object.keys(view.annotations[0] as object)).not.toContain('style')
+  })
+
+  it('is drawn AFTER the reader\'s own, so a rule is not buried under a band', async () => {
+    /* The Overlayer paints in the order it was given. A friend's rule drawn
+       first would sit under the reader's band, which is a rule nobody sees. */
+    const { view, cb } = withOverlays([foreign()], [mine('mine')])
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    view.emit('create-overlay', { index: 0 })
+
+    expect(view.annotations.map((a) => a.value)).toEqual(['mine', 'epubcfi(/6/4!/4/2)'])
+  })
+
+  it('erases one the next answer no longer names, rather than leaving it standing', async () => {
+    /* ⚠️ **A WITHDRAWAL HAS NO ERASE CALL.** The reader's own marks come off by
+       name, through `eraseMark`. A foreign passage disappears from the OTHER
+       side — somebody unshares, and the capability's next answer simply omits
+       it — so an additive redraw left the friend's underline on the page for
+       the rest of the session while the reader was told it was gone. */
+    let overlays: readonly ForeignAnchor[] = [
+      foreign({ key: 'circle:alice:pub1', cfi: resolvedCfiForTesting('a') }),
+      foreign({ key: 'circle:bob:pub2', cfi: resolvedCfiForTesting('b') }),
+    ]
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      getOverlays: () => overlays,
+    })
+    await session.start('book.epub', deps(view))
+    view.emit('create-overlay', { index: 0 })
+    view.annotations.length = 0
+
+    overlays = [foreign({ key: 'circle:alice:pub1', cfi: resolvedCfiForTesting('a') })]
+    session.redrawMarks()
+    await settled()
+
+    expect(view.annotations).toEqual([
+      expect.objectContaining({ value: 'b', remove: true }),
+      expect.objectContaining({ value: 'a', remove: false }),
+    ])
+  })
+
+  it('erases only the reader who withdrew, not every reader of that passage', async () => {
+    /* The key is per reader, so `n` readers on one passage are `n` entries —
+       keying the erase on the CFI would take all of them off for one. */
+    const at = resolvedCfiForTesting('shared')
+    let overlays: readonly ForeignAnchor[] = [
+      foreign({ key: 'circle:alice:pub1', cfi: at }),
+      foreign({ key: 'circle:bob:pub2', cfi: at }),
+    ]
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      getOverlays: () => overlays,
+    })
+    await session.start('book.epub', deps(view))
+    view.emit('create-overlay', { index: 0 })
+    view.annotations.length = 0
+
+    overlays = [foreign({ key: 'circle:bob:pub2', cfi: at })]
+    session.redrawMarks()
+    await settled()
+
+    const erased = view.annotations.filter((one) => one.remove)
+    expect(erased).toHaveLength(1)
+    expect((erased[0] as unknown as Record<string, unknown>)['key']).toBe('circle:alice:pub1')
+  })
+
+  it('never leaves a withdrawn passage painted by an add that landed late', async () => {
+    /* ⚠️ **THE INTERLEAVING, which an immediately-resolving fake cannot
+       reach.** Every add and every erase is asynchronous — `addAnnotation`
+       resolves a CFI before it paints — and they used to be launched with
+       `void` while the record was updated as though they had already happened.
+       So: an add is still in flight when the passage is withdrawn; the erase
+       runs, finds nothing to remove, and is forgotten; the old add then lands
+       and paints a withdrawn passage that nothing is tracking, and no later
+       redraw takes it off. */
+    const pending: (() => void)[] = []
+    const view = fakeView()
+    let overlays: readonly ForeignAnchor[] = [
+      foreign({ key: 'circle:alice:pub1', cfi: resolvedCfiForTesting('a') }),
+    ]
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      getOverlays: () => overlays,
+    })
+    await session.start('book.epub', deps(view))
+
+    /* Every attach from here hangs until the test releases it. */
+    const real = view.addAnnotation.bind(view)
+    view.addAnnotation = (annotation: Parameters<typeof real>[0], remove = false) =>
+      new Promise<void>((resolve) => {
+        pending.push(() => {
+          real(annotation, remove)
+          resolve()
+        })
+      })
+
+    view.emit('create-overlay', { index: 0 })
+    await settled()
+
+    /* Withdrawn while the add is still in flight. */
+    overlays = []
+    session.redrawMarks()
+    await settled()
+
+    /* Everything lands, in the order it was issued. */
+    while (pending.length > 0) pending.shift()?.()
+    await settled()
+    while (pending.length > 0) pending.shift()?.()
+    await settled()
+
+    /* Whatever the order, the LAST word about this key must be a removal. */
+    const forKey = view.annotations.filter((one) => one.value === 'a')
+    expect(forKey.at(-1)).toEqual(expect.objectContaining({ remove: true }))
+  })
+
+  it('tries the erase again when it did not take', async () => {
+    /* ⚠️ `attachForeign` swallows its failures by design — a PDF page that has
+       not been painted has no CFI to resolve — so "asked to remove it" and
+       "removed it" are different facts. Forgetting the anchor on the ATTEMPT
+       meant a withdrawal that failed once was never retried, and every later
+       redraw agreed there was nothing to take off. */
+    let overlays: readonly ForeignAnchor[] = [
+      foreign({ key: 'circle:alice:pub1', cfi: resolvedCfiForTesting('a') }),
+    ]
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      getOverlays: () => overlays,
+    })
+    await session.start('book.epub', deps(view))
+    view.emit('create-overlay', { index: 0 })
+
+    /* Every erase from here on refuses, the way an unresolvable CFI does. */
+    const real = view.addAnnotation.bind(view)
+    view.addAnnotation = (annotation: Parameters<typeof real>[0], remove = false) => {
+      if (remove) throw new Error('this CFI does not resolve yet')
+      return real(annotation, remove)
+    }
+    overlays = []
+    view.annotations.length = 0
+    session.redrawMarks()
+    await settled()
+
+    /* The refusal must not be recorded as a removal. */
+    view.addAnnotation = real
+    view.annotations.length = 0
+    session.redrawMarks()
+
+    expect(view.annotations).toEqual([expect.objectContaining({ value: 'a', remove: true })])
+  })
+
+  it('stops retrying once the erase has taken', async () => {
+    /* The other half: a retry that never stops is a redraw that never
+       settles. */
+    let overlays: readonly ForeignAnchor[] = [
+      foreign({ key: 'circle:alice:pub1', cfi: resolvedCfiForTesting('a') }),
+    ]
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      getOverlays: () => overlays,
+    })
+    await session.start('book.epub', deps(view))
+    view.emit('create-overlay', { index: 0 })
+
+    overlays = []
+    session.redrawMarks()
+    await settled()
+    view.annotations.length = 0
+    session.redrawMarks()
+
+    expect(view.annotations).toEqual([])
+  })
+
+  it('forgets what a torn-down section held, rather than erasing into its replacement', async () => {
+    /* The overlay died with the document, and so did everything painted into
+       it. Remembering it means the section's NEXT overlay — a fresh one that
+       never held any of it — is asked to remove marks it does not have. */
+    const first = fakeDocument()
+    let overlays: readonly ForeignAnchor[] = [
+      foreign({ key: 'circle:alice:pub1', cfi: resolvedCfiForTesting('a') }),
+    ]
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      getOverlays: () => overlays,
+    })
+    await session.start('book.epub', deps(view))
+    view.emit('load', { doc: first.asDocument(), index: 0 })
+    view.emit('create-overlay', { index: 0 })
+    await settled()
+    expect(view.annotations.map((a) => a.value)).toEqual(['a'])
+
+    /* `pagehide` on the section's own window is how a teardown reaches the
+       session — see `#onTeardown`. */
+    first.defaultView?.dispatch('pagehide')
+    view.annotations.length = 0
+
+    overlays = [foreign({ key: 'circle:bob:pub2', cfi: resolvedCfiForTesting('b') })]
+    view.emit('load', { doc: fakeDocument().asDocument(), index: 0 })
+    view.emit('create-overlay', { index: 0 })
+    await settled()
+
+    expect(view.annotations).toEqual([expect.objectContaining({ value: 'b', remove: false })])
+  })
+
+  it('is NOT reported as one of the reader’s own marks', async () => {
+    /* ⚠️ `onMarkDrawn` fills the map `useMarking` calls *"ranges for the marks
+       foliate has drawn"*, which the margin measures to place a control beside
+       each. A friend's underline reported there is a control beside a passage
+       the reader never marked — and nothing takes the entry out again, because
+       `forgetRange` runs from `unmark` and a foreign passage is never
+       unmarked. */
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), { ...cb, getOverlays: () => [foreign()] })
+    await session.start('book.epub', deps(view))
+
+    view.emit('draw-annotation', {
+      draw: () => {},
+      annotation: { value: 'epubcfi(/6/4!/4/2)', kind: 'circle', readers: 1 },
+      range: { id: 'a-range' },
+    })
+
+    expect(cb.calls['onMarkDrawn']).toBeUndefined()
+  })
+
+  it('draws exactly what a host with no overlays drew before', async () => {
+    /* `getOverlays` is optional: a composition without `circle` must be
+       untouched by any of this. */
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks([mine('only-mine')]))
+    await session.start('book.epub', deps(view))
+    view.emit('create-overlay', { index: 0 })
+
+    expect(view.annotations.map((a) => a.value)).toEqual(['only-mine'])
   })
 })

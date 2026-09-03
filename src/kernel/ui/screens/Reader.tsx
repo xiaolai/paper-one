@@ -28,6 +28,7 @@ import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../core/ports'
 import { askGloss, useGloss } from '../hooks/useGloss'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
+import type { ForeignAnchor } from '../reader/session'
 import type { SaveFailureView } from '../hooks/useLibrary'
 import type { Marking } from '../hooks/useMarking'
 import type { Bookmarking } from '../hooks/useBookmarking'
@@ -149,6 +150,8 @@ export interface ReaderProps {
    */
   diagnostics?: Diagnostics
   marks: MarksView
+  /** Passages other readers shared, anchored here — see `useOverlays`. */
+  overlays?: readonly ForeignAnchor[]
   marking: Marking
   /** Keeping a place, and telling whether this one is kept — see the hook. */
   bookmarking: Bookmarking
@@ -252,6 +255,7 @@ export function Reader({
   onDismissImportNotice,
   diagnostics = NOOP_DIAGNOSTICS,
   marks,
+  overlays,
   marking,
   bookmarking,
   returnTo = null,
@@ -397,6 +401,13 @@ export function Reader({
   /* What actually goes in the margin: notes and companion marks, not every
    * highlight. Counting highlights too would open a 250px column to show a
    * column of dots that repeat what the gold fill on the words already says. */
+  /* SPREAD RATHER THAN PASSED, because `exactOptionalPropertyTypes`
+     distinguishes an absent prop from one that is present and
+     undefined. `overlays` is optional at both ends, so a host with no
+     circle capability hands the reader exactly what it handed it
+     before — rather than an explicit `undefined`, which is a different
+     value to the type system and to anything that counts its props. */
+  const overlayProp = overlays ? { overlays } : {}
   const inMargin = useMemo(() => marginMarks(marks.current), [marks.current])
 
   // The margin column is only reserved once the book has marks to put in it.
@@ -607,7 +618,11 @@ export function Reader({
        * scrolled is the default and it describes a PDF's renderer under a name
        * that renderer does not answer to. */
       if (state.pageLayout !== 'paginated' && !book.fixedLayout) return
-      if (state.screen === 'library' || hasOpenLayer(state)) return
+      /* ⚠️ **THE SECOND INSTANCE OF THE SAME MECHANISM as `reading` in
+         `App.tsx`.** `=== 'library'` meant "not reading" only while there were
+         two screens; on a capability's screen this did not return, so a wheel
+         or a swipe paged the book nobody could see. */
+      if (state.screen !== 'reader' || hasOpenLayer(state)) return
       /* The side pane counts too, below §06's threshold, where it stops being a
        * track beside the reader and becomes a SHEET over it. `hasOpenLayer`
        * knows only about the palette and the switcher, so without this a
@@ -810,6 +825,7 @@ export function Reader({
                       onError={book.fail}
                       onNavigator={book.setNavigator}
                       marks={marks.current}
+                      {...overlayProp}
                       onSelection={setSelection}
                       onMarkDrawn={onMarkDrawn}
                       onLink={onLink}

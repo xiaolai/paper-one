@@ -1,3 +1,4 @@
+import { screenJump } from './state'
 import type { Command, CommandContext } from '../core/capability'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { panesFor, THEMES } from './panes'
@@ -465,12 +466,10 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
      * open, the reader screen is the empty book-opening state — the titlebar
      * already words this correctly, and the palette said "back" to a place
      * the reader had never been. */
-    label:
-      state.screen === 'library'
-        ? ctx.hasBook
-          ? 'Back to the reader'
-          : 'Go to the reader'
-        : 'Go to the library',
+    /* One source for the destination AND its name — see `screenJump`. The
+       palette, the titlebar and the keyboard handler each derived these
+       separately, and on a capability's screen two of the three disagreed. */
+    label: screenJump(state.screen, ctx.hasBook).label,
     group: 'Book',
     // The key the titlebar button names and the handler binds. Three surfaces
     // for one action, and the palette is where a reader learns the shortcut.
@@ -478,10 +477,7 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     keywords: 'shelf books home library',
     on: state.screen === 'library',
     run: () =>
-      dispatch({
-        type: 'goScreen',
-        screen: state.screen === 'library' ? 'reader' : 'library',
-      }),
+      dispatch({ type: 'goScreen', screen: screenJump(state.screen, ctx.hasBook).to }),
   })
 
   commands.push({

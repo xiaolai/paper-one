@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-person-delegate"
+description = "Enables the peer_person_delegate command without any pre-configured scope."
+commands.allow = ["peer_person_delegate"]
+
+[[permission]]
+identifier = "deny-peer-person-delegate"
+description = "Denies the peer_person_delegate command without any pre-configured scope."
+commands.deny = ["peer_person_delegate"]

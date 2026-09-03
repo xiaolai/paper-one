@@ -350,7 +350,13 @@ fn is_synthetic(ip: std::net::IpAddr) -> bool {
     }
 }
 
-fn endpoint_addr(id: EndpointId, hints: &[String]) -> EndpointAddr {
+/// A dialable address from an id and whatever hints are on file.
+///
+/// `pub(crate)` because the circle door needs exactly this — including the
+/// synthetic-address filter, which is not an optimisation: dialling
+/// `198.18.x.x` or `0.0.0.0` wastes the whole dial timeout on an address that
+/// cannot answer.
+pub(crate) fn endpoint_addr(id: EndpointId, hints: &[String]) -> EndpointAddr {
     let mut addr = EndpointAddr::new(id);
     for hint in hints {
         if let Ok(ip) = hint.parse::<std::net::SocketAddr>() {

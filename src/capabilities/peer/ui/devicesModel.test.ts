@@ -34,6 +34,39 @@ describe('the devices model', () => {
     expect(model.getSnapshot().available).toBe(false)
   })
 
+  it('does not present a CIRCLE request as a device to pair with', async () => {
+    /* ⚠️ **ONE EVENT STREAM, TWO SURFACES, DIFFERENT GRANTS.** This panel
+       confirms with a reader's OWN-DEVICE grants; the circle confirms with
+       `circle:read`. Unfiltered, this panel would answer a circle request and
+       hand another PERSON the permissions meant for the reader's own phone —
+       and the reader would be looking at a dialog that called them a device. */
+    const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-c' })
+    const joinerWire = fakeWire({ role: 'shelf', endpointId: 'joiner-c' })
+    linkWires(shelfWire, joinerWire)
+    const shelf = createDevicesModel({ port: createPeerPort(shelfWire) })
+
+    /* A CIRCLE offer, which is what the circle panel makes. */
+    const circleOffer = await shelfWire.pairBegin('Mine', 'circle')
+    await joinerWire.pairFromUri(circleOffer.url, 'A friend', ['circle:read'])
+    await tick()
+
+    expect(shelf.getSnapshot().pending).toBeNull()
+  })
+
+  it('still presents a DEVICE request, which is its own', async () => {
+    // The filter must not have taken the ordinary case with it.
+    const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-d' })
+    const phoneWire = fakeWire({ role: 'satchel', endpointId: 'phone-d' })
+    linkWires(shelfWire, phoneWire)
+    const shelf = createDevicesModel({ port: createPeerPort(shelfWire) })
+
+    await shelf.beginPairing('Mine')
+    await phoneWire.pairFromUri(shelf.getSnapshot().offer!.url, 'My phone')
+    await tick()
+
+    expect(shelf.getSnapshot().pending?.id).toBe('phone-d')
+  })
+
   it('pairs two devices end to end: QR offer, code, pending, confirm, peers listed', async () => {
     const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-dev' })
     const satchelWire = fakeWire({ role: 'satchel', endpointId: 'satchel-dev' })
