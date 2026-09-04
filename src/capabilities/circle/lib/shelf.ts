@@ -1,4 +1,4 @@
-import { MAX_WORK_FIELD } from './lists'
+import { MAX_WORK_FIELD, cutToField } from './workField'
 import {
   OWN_SHELF_PATH,
   atomicWrite,
@@ -11,7 +11,7 @@ import {
   type WriteQueue,
   isHlc,
 } from '../../../kernel'
-import { isSealedPage, pagesOver, type Bounds, type Publisher, type SealedPage, DEFAULT_BOUNDS, boundariesInOrder } from './publish'
+import { isSealedPage, isWithdrawal, pagesOver, withdrawnBy, type Bounds, type Publisher, type SealedPage, type Withdrawal, DEFAULT_BOUNDS, boundariesInOrder } from './publish'
 
 /**
  * The reader's own shelf, as PUBLISHED — WI-23.C1's store.
@@ -52,7 +52,8 @@ export interface ShelfRow {
   readonly device: string
   readonly seq: number
   readonly at: Hlc
-  readonly unshelved?: { readonly seq: number; readonly at: Hlc }
+  /** The removal, when there is one — stamped by the device that removed it, see `Withdrawal`. */
+  readonly unshelved?: Withdrawal
 }
 
 export interface ShelfFile {
@@ -76,12 +77,18 @@ export interface ShelvedBook {
   readonly cover?: string
 }
 
-/** The work a book publishes as. Absent title and author publish as `''`. */
+/**
+ * The work a book publishes as. Absent title and author publish as `''`.
+ *
+ * Every field within `MAX_WORK_FIELD` — `cutToField` — because the store's
+ * own reader refuses a longer one: a row written past the bound was a shelf
+ * that would not read back, for ever.
+ */
 export function workOf(book: ShelvedBook): ShelvedWork {
   return {
-    title: book.title ?? '',
-    author: book.author ?? '',
-    ...(book.identifier === undefined ? {} : { identifier: book.identifier }),
+    title: cutToField(book.title ?? ''),
+    author: cutToField(book.author ?? ''),
+    ...(book.identifier === undefined ? {} : { identifier: cutToField(book.identifier) }),
     language: primaryLanguage(book.languages?.[0]),
     ...(book.cover === undefined ? {} : { cover: book.cover }),
   }
@@ -93,9 +100,10 @@ const sameWork = (a: ShelvedWork, b: ShelvedWork): boolean =>
 /** One past the highest sequence this device has used on the shelf log. */
 export function nextShelfSeq(held: ShelfFile, device: string): number {
   let top = 0
+  /* A removal counts in the stream it was stamped in, for `nextSeqFor`'s reason. */
   for (const row of held.works) {
-    if (row.device !== device) continue
-    top = Math.max(top, row.seq, row.unshelved?.seq ?? 0)
+    if (row.device === device) top = Math.max(top, row.seq)
+    if (row.unshelved !== undefined && withdrawnBy(row, row.unshelved) === device) top = Math.max(top, row.unshelved.seq)
   }
   /* And past every sealed boundary, for `nextSeqFor`'s reason: a boundary
      can outlive the rows it covers, and a sequence inside one was served. */
@@ -106,11 +114,25 @@ export function nextShelfSeq(held: ShelfFile, device: string): number {
   return top + 1
 }
 
-/** The rows still on the shelf, by this copy's id. */
+/** Every row still on the shelf, in file order — more than one per book when two device stores met. */
+export function liveShelfRows(held: ShelfFile): readonly ShelfRow[] {
+  return held.works.filter((row) => row.unshelved === undefined)
+}
+
+/**
+ * The rows still on the shelf, ONE per copy's id.
+ *
+ * ⚠️ **THE EARLIEST IN LOG ORDER, NOT THE LAST IN FILE ORDER.** Two of the
+ * reader's devices can each have shelved one book before their stores met, so
+ * a book can have two live rows; which one this answers has to be the same on
+ * every device, because `syncShelf` keeps that one and takes the others back.
+ * `liveShelfRows` is the whole set, for a caller that must find any of them.
+ */
 export function shelvedNow(held: ShelfFile): ReadonlyMap<string, ShelfRow> {
   const live = new Map<string, ShelfRow>()
-  for (const row of held.works) {
-    if (row.unshelved === undefined) live.set(row.bookId, row)
+  for (const row of liveShelfRows(held)) {
+    const seen = live.get(row.bookId)
+    if (seen === undefined || compareEntries(row, seen) < 0) live.set(row.bookId, row)
   }
   return live
 }
@@ -123,6 +145,15 @@ export function shelvedNow(held: ShelfFile): ReadonlyMap<string, ShelfRow> {
  * the item's acceptance. The log then reproduces the published shelf exactly:
  * the live rows ARE the shelf, and a friend folding the log holds the same
  * set.
+ *
+ * ⚠️ **EVERY LIVE ROW OF A BOOK, NOT ONE.** Two of the reader's devices can
+ * each have shelved a book before their stores met; a removal that tombstoned
+ * only the row it happened to look at left the other on the wire, still
+ * disclosing the book. One row stays per book — the earliest in log order that
+ * says what the library says now, `shelvedNow`'s own choice, so two devices
+ * running this agree on which — and every other is taken back, a duplicate as
+ * much as a stale one. Each removal is stamped in THIS device's stream
+ * (`Withdrawal`), whichever device shelved the row.
  */
 export function syncShelf(
   held: ShelfFile,
@@ -131,7 +162,6 @@ export function syncShelf(
   at: Hlc,
   mintPub: () => string,
 ): ShelfFile {
-  const live = shelvedNow(held)
   const onShelf = new Map(books.map((book) => [book.bookId, workOf(book)]))
   let next = held
   const stamped = () => ({ device, seq: nextShelfSeq(next, device), at })
@@ -139,22 +169,28 @@ export function syncShelf(
     const gone = stamped()
     next = {
       ...next,
-      works: next.works.map((one) => (one === row ? { ...one, unshelved: { seq: gone.seq, at: gone.at } } : one)),
+      works: next.works.map((one) => (one === row ? { ...one, unshelved: gone } : one)),
     }
   }
   const shelve = (bookId: string, work: ShelvedWork) => {
     next = { ...next, works: [...next.works, { pub: mintPub(), bookId, work, ...stamped() }] }
   }
 
-  for (const [bookId, row] of live) {
+  const live = new Map<string, ShelfRow[]>()
+  for (const row of liveShelfRows(held)) {
+    const rows = live.get(row.bookId)
+    if (rows) rows.push(row)
+    else live.set(row.bookId, [row])
+  }
+  for (const [bookId, rows] of live) {
     const now = onShelf.get(bookId)
-    if (now === undefined) unshelve(row)
-    else if (!sameWork(row.work, now)) {
-      /* Changed metadata is a new publication under a new pub, never a row
-         rewritten under the old one. */
-      unshelve(row)
-      shelve(bookId, now)
+    const keep = now === undefined ? undefined : [...rows].sort(compareEntries).find((row) => sameWork(row.work, now))
+    for (const row of rows) {
+      if (row !== keep) unshelve(row)
     }
+    /* Changed metadata is a new publication under a new pub, never a row
+       rewritten under the old one. */
+    if (now !== undefined && keep === undefined) shelve(bookId, now)
   }
   for (const [bookId, work] of onShelf) {
     if (!live.has(bookId)) shelve(bookId, work)
@@ -168,7 +204,8 @@ export function shelfLogOf(held: ShelfFile): readonly Entry[] {
   for (const row of held.works) {
     entries.push({ op: 'shelf', pub: row.pub, work: row.work, device: row.device, seq: row.seq, at: row.at })
     if (row.unshelved) {
-      entries.push({ op: 'unshelf', pub: row.pub, device: row.device, seq: row.unshelved.seq, at: row.unshelved.at })
+      /* Under the device that removed it, which is the stream that serves it. */
+      entries.push({ op: 'unshelf', pub: row.pub, device: withdrawnBy(row, row.unshelved), seq: row.unshelved.seq, at: row.unshelved.at })
     }
   }
   return [...entries].sort(compareEntries)
@@ -234,21 +271,19 @@ function isShelfRow(value: unknown): value is ShelfRow {
   /* A cover is a digest, and a store row with anything else in its place would be a page every recipient refuses. */
   // Stryker disable next-line ConditionalExpression: a non-string never matches the digest pattern; the type check spells out what the pattern already refuses.
   if (named['cover'] !== undefined && !(typeof named['cover'] === 'string' && COVER_DIGEST.test(named['cover']))) return false
-  const gone = row['unshelved']
-  if (gone === undefined) return true
-  /* Stryker disable next-line ConditionalExpression: a non-object has no `seq` member, so the check below refuses it anyway. */
-  if (typeof gone !== 'object' || gone === null) return false
-  const mark = gone as Record<string, unknown>
-  /* A removal comes AFTER the shelving it removes, on the same log. */
-  return Number.isSafeInteger(mark['seq']) && (mark['seq'] as number) > (row['seq'] as number) && isHlc(mark['at'])
+  /* A removal is a withdrawal, held to the one rule a passage's and a
+     review's are — EXACTLY its fields included, so a field written by a later
+     build is refused here rather than dropped on the next write. */
+  return isWithdrawal(row['unshelved'], row['seq'] as number, row['device'] as string)
 }
 
-/** Every `(device, seq)` a shelf file holds — rows and removals — is one position, held once. */
+/** Every `(device, seq)` a shelf file holds — rows and removals, each in the stream it was stamped in — is one position, held once. */
 function reusesSequence(works: readonly ShelfRow[]): boolean {
   const held = new Set<string>()
   for (const row of works) {
-    for (const seq of [row.seq, ...(row.unshelved === undefined ? [] : [row.unshelved.seq])]) {
-      const key = `${row.device}:${seq}`
+    const positions = [`${row.device}:${row.seq}`]
+    if (row.unshelved !== undefined) positions.push(`${withdrawnBy(row, row.unshelved)}:${row.unshelved.seq}`)
+    for (const key of positions) {
       if (held.has(key)) return true
       held.add(key)
     }

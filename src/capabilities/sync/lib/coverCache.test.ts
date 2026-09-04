@@ -13,7 +13,16 @@ import type { BlobFacts } from './ledger'
  * OLDEST over the byte cap and never the one just used.
  */
 
-async function world() {
+/** The host's hasher, over the fake fs: the digest of the bytes that are there. */
+const hasherOver = (fs: { store: Map<string, Uint8Array> }) => () => ({
+  hashFile: async (folder: string, name: string) => {
+    const bytes = fs.store.get(`books/${folder}/${name}`)
+    if (!bytes) throw new Error(`no ${name} under ${folder}`)
+    return { blake3: await fakeBlobHash(bytes), size: bytes.length }
+  },
+})
+
+async function world(over: { readonly hasher?: boolean } = {}) {
   const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-cover' })
   const satchelWire = fakeWire({ role: 'satchel', endpointId: 'satchel-cover' })
   linkWires(shelfWire, satchelWire)
@@ -50,19 +59,22 @@ async function world() {
 
   let now = 1_000
   const stamp = vi.fn(() => Promise.resolve())
+  const unstamp = vi.fn(() => Promise.resolve())
   const cache = createCoverCache({
     fs,
     settings: services.settings,
     lookup,
     stamp,
+    unstamp,
     fetchBlob: (peerId, folder, blob) =>
       port.fetchBlob({ peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash }),
     // The REAL kernel primitive (WI-10.2/10.5), so eviction here proves the
     // closed-name door — not a stand-in that would accept anything.
     removeBlob: (book, name) => services.removeBlob(book, name),
     now: () => ++now,
+    ...(over.hasher ? { hashes: hasherOver(fs as unknown as { store: Map<string, Uint8Array> }) } : {}),
   })
-  return { cache, fs, serve, services, stamp }
+  return { cache, fs, serve, services, stamp, unstamp }
 }
 
 const jacket = (size: number, fill = 7): Uint8Array => new Uint8Array(size).fill(fill)
@@ -99,6 +111,121 @@ describe('the cover cache', () => {
     expect((await w.cache.index())['book:old']?.name).toBe('cover.webp')
   })
 
+  /* THE DEBT OF A STAMP THAT WOULD NOT TAKE. The record refused the jacket's
+     facts when it landed; the entry records that a stamp is OWED, and the
+     next `ensure` that finds the jacket present pays it from a fresh
+     measurement of the file. A swallowed failure used to be permanent — the
+     present path had nothing to stamp with, and a phone composes no circle
+     pass to do it later. */
+  it('keeps a failed stamp as a debt on the entry and pays it, MEASURED, on the next present-cover ensure', async () => {
+    const w = await world({ hasher: true })
+    await w.serve('book_a', 'cover.jpg', jacket(1000))
+    w.stamp.mockRejectedValueOnce(new Error('the record would not take it'))
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect((await w.cache.index())['book:a']).toEqual({ name: 'cover.jpg', size: 1000, usedAt: expect.any(Number), owed: true })
+    expect(w.stamp).toHaveBeenCalledTimes(1)
+    /* The jacket is present now: the debt is paid on the touch, from the file, and cleared. */
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect(w.stamp).toHaveBeenCalledTimes(2)
+    expect(w.stamp).toHaveBeenLastCalledWith('book:a', { name: 'cover.jpg', size: 1000, hash: await fakeBlobHash(jacket(1000)) })
+    expect((await w.cache.index())['book:a']).not.toHaveProperty('owed')
+    /* Paid once: a third touch stamps nothing. */
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect(w.stamp).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads a digest an older index kept as a stamp owed, and pays it from the file, not from that digest', async () => {
+    const w = await world({ hasher: true })
+    await w.fs.writeFile('books/book_a/cover.jpg', jacket(1000))
+    await w.fs.writeFile(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ 'book:a': { name: 'cover.jpg', size: 1000, usedAt: 1, pendingHash: 'ab'.repeat(32) } })))
+    expect((await w.cache.index())['book:a']).toEqual({ name: 'cover.jpg', size: 1000, usedAt: 1, owed: true })
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect(w.stamp).toHaveBeenLastCalledWith('book:a', { name: 'cover.jpg', size: 1000, hash: await fakeBlobHash(jacket(1000)) })
+  })
+
+  /* WITHOUT A MEASUREMENT THE DEBT STANDS. A size is not an identity: a
+     same-name file replaced since the digest was taken — at another size or
+     the SAME size — is not those bytes, and stamping the old digest onto it
+     published facts that were wrong. The record carries no facts it cannot
+     back, and the debt waits for an `ensure` that can measure. */
+  it('leaves a stamp owed unpaid without a hasher, clears the facts it cannot back, and pays nothing onto a same-size replacement', async () => {
+    const w = await world()
+    await w.serve('book_a', 'cover.jpg', jacket(1000))
+    w.stamp.mockRejectedValueOnce(new Error('the record would not take it'))
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    /* Replaced behind the index's back, under the same name, at the SAME size. */
+    await w.fs.writeFile('books/book_a/cover.jpg', jacket(1000, 9))
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect(w.stamp).toHaveBeenCalledTimes(1)
+    expect(w.unstamp).toHaveBeenCalledWith('book:a', 'cover.jpg')
+    expect((await w.cache.index())['book:a']).toEqual({ name: 'cover.jpg', size: 1000, usedAt: expect.any(Number), owed: true })
+    /* And still owed on the next touch: nothing was measured. */
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect(w.stamp).toHaveBeenCalledTimes(1)
+    expect((await w.cache.index())['book:a']?.owed).toBe(true)
+  })
+
+  it('pays a stamp owed from a FRESH measurement of a replaced file — the file that is there, not the digest that was', async () => {
+    const w = await world({ hasher: true })
+    await w.serve('book_a', 'cover.jpg', jacket(1000))
+    w.stamp.mockRejectedValueOnce(new Error('the record would not take it'))
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    await w.fs.writeFile('books/book_a/cover.jpg', jacket(1200, 9))
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect(w.stamp).toHaveBeenLastCalledWith('book:a', { name: 'cover.jpg', size: 1200, hash: await fakeBlobHash(jacket(1200, 9)) })
+    expect(w.unstamp).not.toHaveBeenCalled()
+    expect((await w.cache.index())['book:a']).toEqual({ name: 'cover.jpg', size: 1200, usedAt: expect.any(Number) })
+  })
+
+  /* THE TRACKED JACKET GONE AND ITS LEGACY SIBLING HERE. The entry used to
+     take the new name quietly: the record kept describing the old file, and
+     the new one was never measured. */
+  it('takes the old name’s facts off and stamps the file under the new name when the tracked jacket is replaced by its sibling', async () => {
+    const w = await world({ hasher: true })
+    await w.serve('book_a', 'cover.jpg', jacket(1000))
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    w.fs.store.delete('books/book_a/cover.jpg')
+    await w.fs.writeFile('books/book_a/cover.webp', jacket(700, 5))
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect(w.unstamp).toHaveBeenCalledWith('book:a', 'cover.jpg')
+    expect(w.stamp).toHaveBeenLastCalledWith('book:a', { name: 'cover.webp', size: 700, hash: await fakeBlobHash(jacket(700, 5)) })
+    expect((await w.cache.index())['book:a']).toEqual({ name: 'cover.webp', size: 700, usedAt: expect.any(Number) })
+    /* Without a hasher: the old facts go, the new file is tracked as owed, and nothing false is stamped. */
+    const bare = await world()
+    await bare.serve('book_a', 'cover.jpg', jacket(1000))
+    expect(await bare.cache.ensure('book:a')).toBe(true)
+    bare.fs.store.delete('books/book_a/cover.jpg')
+    await bare.fs.writeFile('books/book_a/cover.webp', jacket(700, 5))
+    expect(await bare.cache.ensure('book:a')).toBe(true)
+    expect(bare.unstamp).toHaveBeenCalledWith('book:a', 'cover.jpg')
+    expect(bare.stamp).toHaveBeenCalledTimes(1)
+    expect((await bare.cache.index())['book:a']).toEqual({ name: 'cover.webp', size: 700, usedAt: expect.any(Number), owed: true })
+  })
+
+  /* THE FACTS GO WITH THE FILE. A jacket the cache was tracking that is gone
+     behind its back — a folder replaced or restored — leaves a record whose
+     facts name a digest this device cannot serve; the cache says so when it
+     finds out, and only for a jacket it was tracking. */
+  it('unstamps a tracked jacket it finds missing — before any fetch — and says nothing for a book it never tracked', async () => {
+    const w = await world()
+    await w.serve('book_a', 'cover.jpg', jacket(1000))
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect(w.stamp).toHaveBeenCalledTimes(1)
+    /* A book the cache never tracked is not the cache's to speak for. */
+    expect(await w.cache.ensure('book:none')).toBe(false)
+    expect(w.unstamp).not.toHaveBeenCalled()
+    /* Gone behind the index's back. The facts are cleared the moment the
+       cache finds out, BEFORE the shelf is asked again — and the jacket that
+       then lands is stamped afresh, so the record ends up describing the
+       file that is actually there. */
+    w.fs.store.delete('books/book_a/cover.jpg')
+    expect(await w.cache.ensure('book:a')).toBe(true)
+    expect(w.unstamp).toHaveBeenCalledTimes(1)
+    expect(w.unstamp).toHaveBeenCalledWith('book:a', 'cover.jpg')
+    expect(w.stamp).toHaveBeenCalledTimes(2)
+    expect(w.unstamp.mock.invocationCallOrder[0]).toBeLessThan(w.stamp.mock.invocationCallOrder[1]!)
+  })
+
   it('evicts the oldest covers over the cap, never the one just fetched', async () => {
     const w = await world()
     // A 1 MB cap; three ~0.6 MB covers cannot all stay.
@@ -119,6 +246,24 @@ describe('the cover cache', () => {
     expect(w.fs.store.has('books/book_b/cover.jpg')).toBe(false)
     expect(w.fs.store.has('books/book_c/cover.jpg')).toBe(true)
     expect(await w.cache.totalBytes()).toBe(size)
+  })
+
+  it('clears the facts of an evicted jacket whose file was already gone — the primitive’s no-op clears nothing', async () => {
+    /* The kernel's `removeBlob` takes the facts with a file it deletes; a
+       file already gone resolves as the documented no-op and leaves them,
+       and the record kept describing a jacket this device could not serve. */
+    const w = await world()
+    w.services.settings.set(COVER_CAP_SETTING, 1)
+    const size = Math.round(0.6 * 1024 * 1024)
+    await w.serve('book_a', 'cover.jpg', jacket(size, 1))
+    await w.serve('book_b', 'cover.jpg', jacket(size, 2))
+    await w.cache.ensure('book:a')
+    /* Gone behind the index's back, before the eviction its turn. */
+    w.fs.store.delete('books/book_a/cover.jpg')
+    w.unstamp.mockClear()
+    await w.cache.ensure('book:b')
+    expect(Object.keys(await w.cache.index()).sort()).toEqual(['book:b'])
+    expect(w.unstamp).toHaveBeenCalledWith('book:a', 'cover.jpg')
   })
 
   /**

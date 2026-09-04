@@ -2,11 +2,17 @@ import { getPublicKey, hashes, sign } from '@noble/ed25519'
 import { sha512 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import { describe, expect, it, vi } from 'vitest'
+
+/* The jacket served in chunks is over the chunk boundary — half a megabyte
+   hashed in JavaScript, twice; under coverage instrumentation that outruns
+   the default fifteen seconds. The same allowance `covers.test.ts` makes,
+   for the same jacket. */
+vi.setConfig({ testTimeout: 60_000 })
 import { MAX_COVER_BYTES } from '../../../kernel'
 import { bytesOfBase64 } from './base64'
 import { SHELF_WORK, WIRE_VERSION, canonicalJson, listWork, makeHlc, type Passage } from '../../../kernel'
 import { NOTHING_LISTED, createList, placeOnList, type ListFile } from './lists'
-import { COVER_CHUNK_BYTES, MAX_PAGES_PER_ANSWER, parseListsRequest } from './protocol'
+import { COVER_CHUNK_BYTES, MAX_PAGES_PER_ANSWER, parseListsRequest, type PagesAnswer } from './protocol'
 import { pageCrypto } from './crypto'
 import {
   answerCover,
@@ -22,9 +28,10 @@ import {
   answerShelf,
 } from './exchange'
 import { CIRCLE_PROTO, CIRCLE_VERSION } from './protocol'
-import { NOTHING_PUBLISHED, nextSeqFor, share, type Publisher, type SharedFile } from './publish'
+import { NOTHING_PUBLISHED, nextSeqFor, share, wireBytesOf, type Publisher, type SharedFile } from './publish'
 import { delegationBytes, takePages, type Ledger, type SignedDelegation } from './receive'
-import { NOTHING_SHELVED, syncShelf, type ShelfFile } from './shelf'
+import { NOTHING_SHELVED, syncShelf, workOf, type ShelfFile, type ShelvedBook } from './shelf'
+import { claimOfShelved } from './circleView'
 import { NOTHING_SHARED } from './store'
 
 hashes.sha512 = sha512
@@ -474,6 +481,51 @@ describe('answering a request for the lists — WI-23.E1, under WI-23.C2’s swi
     expect(answer?.more).toBe(true)
   })
 
+  it('serves the lists the caller named before the rest, in the caller’s order — a long unnamed list cannot starve them', async () => {
+    /* ⚠️ A caller with more lists than a cursor may name sends a window of
+       cursors; the rest are served from their beginning, and one long list
+       among them filled every answer before a named list behind it was
+       reached. Named first: the cursor sent is the first thing honoured. */
+    const many = (seed: number, items: number) => {
+      let held = createList(NOTHING_LISTED, `List ${seed}`, by(seed * 100))
+      for (let i = 1; i <= items; i++) held = placeOnList(held, { pub: `i${seed}-${i}`, work: { title: `T${i}`, author: 'A', language: 'en' }, position: i, note: '' }, by(seed * 100 + i))
+      return held
+    }
+    const lists = withLists([
+      { id: 'aa11', held: many(1, 80) },
+      { id: 'bb22', held: many(2, 1) },
+      { id: 'cc33', held: many(3, 1) },
+    ])
+    const claimsOf = (answer: PagesAnswer | null) => answer!.pages.map((raw) => (JSON.parse(raw) as { work: { ids: string[] } }).work.ids[0])
+    /* Room for a few pages, two lists named: the named lists are served, in the caller's order, and the long unnamed one waits. */
+    const named = await answerLists(ask({ since: { cc33: { [DEVICE.id]: 0 }, bb22: { [DEVICE.id]: 0 } } }), lists, true, { maxPages: 4, budget: 200 })
+    const claims = claimsOf(named)
+    expect(claims[0]).toBe('paper.circle.list:cc33')
+    expect(claims).toContain('paper.circle.list:bb22')
+    expect(claims).not.toContain('paper.circle.list:aa11')
+    expect(named?.more).toBe(true)
+    /* Nothing named: this side's own order, as before. */
+    const nobody = await answerLists(ask(), lists, true, { maxPages: 2, budget: 200 })
+    expect(claimsOf(nobody)).toEqual(['paper.circle.list:aa11', 'paper.circle.list:aa11'])
+  })
+
+  it('holds the answer to the caller’s page bound when it is under the cap, across every list', async () => {
+    /* `bounds.maxPages` below the cap: the answer as a whole is held to it.
+       ⚠️ It used to be a bound PER LIST — each list took up to `maxPages`,
+       and the answer grew to the cap — so two lists under a bound of two
+       answered four. The existing tests bound at a thousand could not see it. */
+    const many = (seed: number) => {
+      let held = createList(NOTHING_LISTED, `List ${seed}`, by(seed * 100))
+      for (let i = 1; i <= 80; i++) held = placeOnList(held, { pub: `i${seed}-${i}`, work: { title: `T${i}`, author: 'A', language: 'en' }, position: i, note: '' }, by(seed * 100 + i))
+      return held
+    }
+    const answer = await answerLists(ask(), withLists([{ id: 'aa11', held: many(1) }, { id: 'bb22', held: many(2) }]), true, { maxPages: 2, budget: 200 })
+    expect(answer?.pages.length).toBe(2)
+    expect(answer?.more).toBe(true)
+    /* Both pages are the first list's: the bound was reached before the second list was begun. */
+    expect(answer!.pages.map((raw) => (JSON.parse(raw) as { work: { ids: string[] } }).work.ids[0])).toEqual(['paper.circle.list:aa11', 'paper.circle.list:aa11'])
+  })
+
   it('leaves the second list only the room the first did not take', async () => {
     const many = (seed: number, items: number) => {
       let held = createList(NOTHING_LISTED, `List ${seed}`, by(seed * 100))
@@ -498,13 +550,22 @@ describe('answering a request for the lists — WI-23.E1, under WI-23.C2’s swi
     }
     const bounds = { maxPages: 1_000, budget: 200 }
     const alone = await answerLists(ask(), withLists([{ id: 'aa11', held: many(1) }]), true, bounds)
-    const [first, second] = alone!.pages.map((one) => one.length)
+    const [first, second] = alone!.pages.map(wireBytesOf)
     /* Two pages and a little: the first list takes its two, and the second is
-       left less than a page — which it takes anyway, as a list's first page is
-       always cut. Handed the whole budget instead, it would take more. */
-    const both = await answerLists(ask(), withLists([{ id: 'aa11', held: many(1) }, { id: 'bb22', held: many(2) }]), true, { ...bounds, maxChars: first! + second! + 50 })
-    expect(both?.pages.length).toBe(3)
+       left less than a page — which it does NOT take. ⚠️ It used to: a log's
+       first page goes through `pagesOver` whatever the size budget says, so
+       every list put one page over what was left, and the answer as a whole
+       outgrew the frame. Only the ANSWER's first page is unconditional; the
+       second list waits for the next request, which is what `more` says. */
+    const maxChars = first! + second! + 50
+    const both = await answerLists(ask(), withLists([{ id: 'aa11', held: many(1) }, { id: 'bb22', held: many(2) }]), true, { ...bounds, maxChars })
+    expect(both?.pages.length).toBe(2)
     expect(both?.more).toBe(true)
+    expect(both!.pages.reduce((sum, page) => sum + wireBytesOf(page), 0)).toBeLessThanOrEqual(maxChars)
+    /* With room for the second list's first page, it is taken — and the budget still holds as a whole. */
+    const third = await answerLists(ask(), withLists([{ id: 'aa11', held: many(1) }, { id: 'bb22', held: many(2) }]), true, { ...bounds, maxChars: first! + second! + first! })
+    expect(third?.pages.length).toBe(3)
+    expect(third!.pages.reduce((sum, page) => sum + wireBytesOf(page), 0)).toBeLessThanOrEqual(first! + second! + first!)
   })
 
   it('answers at most the character budget across every list, not per list', async () => {
@@ -659,6 +720,22 @@ describe('answering for a jacket — WI-23.C5', () => {
     expect(bytesOfBase64(second.bytes)).toEqual(JACKET.subarray(head.length))
   })
 
+  it('serves a jacket by ANY live row’s pub, not only the one row per book the shelf keeps', async () => {
+    /* Two device stores that met hold two live rows for one book; a friend
+       asks by whichever pub their page carried. */
+    const work = { title: 'Moby-Dick', author: 'Herman Melville', language: 'en', cover: DIGEST }
+    const twice: ShelfFile = {
+      works: [
+        { pub: 'abcd', bookId: MOBY.id, work, device: DEVICE.id, seq: 1, at },
+        { pub: 'ef01', bookId: MOBY.id, work, device: 'e'.repeat(64), seq: 1, at },
+      ],
+      sealed: [],
+    }
+    const serve = covered({ shelf: () => Promise.resolve(twice) })
+    expect(await answerCover({ pub: 'ef01', offset: 0 }, serve, true)).toMatchObject({ offset: 0, size: JACKET.length })
+    expect(await answerCover({ pub: 'abcd', offset: 0 }, serve, true)).toMatchObject({ offset: 0, size: JACKET.length })
+  })
+
   it.each([
     ['a person the switch is off for', covered(), false, { pub: 'abcd', offset: 0 }],
     ['a request the build does not read', covered(), true, { pub: 'abcd' }],
@@ -671,5 +748,14 @@ describe('answering for a jacket — WI-23.C5', () => {
     ['an offset past the end', covered(), true, { pub: 'abcd', offset: JACKET.length }],
   ])('refuses %s with the one refusal', async (_what, serve, discloses, request) => {
     expect(await answerCover(request, serve, discloses)).toBeNull()
+  })
+})
+
+describe('the claim of a book with a field past the bound', () => {
+  it('is the claim of the work as published — cut — so a friend’s row links back to the reader’s copy', () => {
+    /* Cut on the row and not on the claim, a long title matched nothing. */
+    const long: BookLike = { id: 'book:long', title: 'x'.repeat(2_000), author: 'Somebody', languages: ['en'] }
+    const asPublished = workOf(long as unknown as ShelvedBook & { bookId: string })
+    expect(bookVia(indexOf([long]), claimOfShelved({ ...asPublished }))?.id).toBe('book:long')
   })
 })

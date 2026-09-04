@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { WIRE_VERSION, canonicalJson, chainHash, checkPage, signedBytes, type Page } from '../../../kernel'
+import { WIRE_VERSION, canonicalJson, chainHash, checkPage, hlcOf, signedBytes, type Page } from '../../../kernel'
 import { pageCrypto, unhex } from './crypto'
 
 /**
@@ -137,12 +137,13 @@ describe('a whole page, checked with the real crypto', () => {
   const page: Page = {
     v: WIRE_VERSION,
     person: PUBLIC_KEY,
-    work: { ids: [], titles: ['aa'], author: 'bb', language: 'en' },
+    work: { ids: [], titles: ['aa'.repeat(32)], author: 'bb'.repeat(32), language: 'en' },
     device: PUBLIC_KEY,
     from: 1,
     to: 1,
     prevPageHash: '',
-    entries: [],
+    /* One entry, the page's own: an empty page is refused before its signature is read. */
+    entries: [{ op: 'share', pub: 'p1', device: PUBLIC_KEY, seq: 1, at: hlcOf(1), passage: { quote: 'q', prefix: '', suffix: '', chapter: '' } }],
     roster: [PUBLIC_KEY],
     revocations: 0,
     delegation: 'd',

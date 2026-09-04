@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { atomicWrite } from './bookFolder'
 import { scopeFs } from './registry'
 import type { KernelServices } from './services'
 
@@ -64,6 +65,30 @@ describe('the circle’s two reviewed write shapes', () => {
     for (const path of OK.slice(0, 3)) {
       await expect(sync.writeFile(path, bytes)).rejects.toThrow(/may only writeFile under "sync\/"/u)
     }
+  })
+
+  /* THE FALLBACK PATH, which every filesystem without `writeAtomic` takes —
+     the fake one every test runs on among them. `atomicWrite` makes the
+     file's parent first, and one review for every operation refused that
+     `mkdir` while allowing the file inside it, so both reviewed shapes failed
+     on exactly the platforms that fall back. The review is per operation:
+     the two parents may be made, and nothing else outside the namespace may
+     be made or taken down. */
+  it('lets atomicWrite’s fallback make the reviewed files’ parents, and refuses any other mkdir or removeDir', async () => {
+    const raw = rawFs()
+    const { writeAtomic: _none, ...withoutAtomic } = raw
+    const scoped = scopeFs(withoutAtomic as unknown as NonNullable<KernelServices['fs']>, 'circle')!
+    expect(scoped.writeAtomic).toBeUndefined()
+    await expect(atomicWrite(scoped, 'books/book_abc/circle/aa11bb22.json', bytes)).resolves.toBeUndefined()
+    await expect(atomicWrite(scoped, 'books/book_abc/shared.json', bytes)).resolves.toBeUndefined()
+    expect((raw.mkdir.mock.calls as readonly (readonly unknown[])[]).map((call) => call[0])).toEqual(['books/book_abc/circle', 'books/book_abc'])
+    expect(raw.rename).toHaveBeenCalledTimes(2)
+    await expect(scoped.mkdir('books/book_abc/marks')).rejects.toThrow(/may only mkdir under "circle\/"/u)
+    await expect(scoped.mkdir('books/book_abc/shared.json')).rejects.toThrow(/may only mkdir/u)
+    await expect(scoped.removeDir('books/book_abc')).rejects.toThrow(/may only removeDir under "circle\/"/u)
+    await expect(scoped.removeDir('books/book_abc/circle')).rejects.toThrow(/may only removeDir/u)
+    const sync = scopeFs(withoutAtomic as unknown as NonNullable<KernelServices['fs']>, 'sync')!
+    await expect(sync.mkdir('books/book_abc')).rejects.toThrow(/may only mkdir under "sync\/"/u)
   })
 
   it('still lets every capability write under its own namespace, and read anywhere', async () => {

@@ -10,6 +10,8 @@ import {
   type Placed,
   unplacedIn,
   bookmarksIn,
+  boundedMark,
+  checkMarkIdentity,
   isBookmark,
   liveMarks,
   mergeMarks,
@@ -17,6 +19,7 @@ import {
   placeMark as placeMarkIn,
   setTint as setTintIn,
   updateNote as updateNoteIn,
+  readStoredMarks,
   validMarks,
   type Annotation,
   type Bookmark,
@@ -488,6 +491,15 @@ export function createMarkStore({
   }
 
   /**
+   * Said, not swallowed: rows this build keeps aside are the reader's, and a
+   * count in the console is the least a silent loss becomes. Once per read,
+   * not per write — a write reads too, and would say it again.
+   */
+  const keptAside = (where: string, refused: readonly unknown[]): void => {
+    if (refused.length > 0) console.warn(`Paper: ${refused.length} mark(s) in ${where} could not be read and were kept aside`)
+  }
+
+  /**
    * Write a change to one book's marks file — the only thing that writes one.
    *
    * Named for the case it was added for, which is a mark belonging to a book
@@ -548,7 +560,13 @@ export function createMarkStore({
         }
         if (prepare) await prepare()
         const trashedBefore = await target.exists(trashOf(targetId))
-        const before = validMarks(await readMarks(target, targetId))
+        /* ⚠️ **A ROW THIS BUILD CANNOT READ IS KEPT WHERE IT WAS.** The file is
+           rewritten whole from the marks that read, so a refused row — an id
+           past a bound an older build never enforced, a hand-edited stamp —
+           was gone from disk at the next highlight, with nothing saying so.
+           It is written back untouched, behind the marks, and counted aloud. */
+        const { marks: before, refused } = readStoredMarks(await readMarks(target, targetId))
+        keptAside(targetId, refused)
         const next = mutate(before)
         if (next === before) {
           /* An unchanged answer for a mark the file does not hold is the
@@ -560,7 +578,7 @@ export function createMarkStore({
           }
           return
         }
-        await recorded(recorder, targetId, 'marks', () => writeMarks(target, targetId, next))
+        await recorded(recorder, targetId, 'marks', () => writeMarks(target, targetId, [...next, ...refused]))
         if (!trashedBefore && (await target.exists(trashOf(targetId)))) {
           /* The removal won. What was just written is a fragment of this
            * book's marks in a folder that is no longer the book — and leaving
@@ -695,7 +713,9 @@ export function createMarkStore({
         // Parsed through the same validator every read uses: this is a file on
         // disk, and a mark with no CFI cannot be drawn.
         if (mine !== generation) return
-        loaded = { bookId, marks: validMarks(raw) }
+        const { marks, refused } = readStoredMarks(raw)
+        keptAside(bookId, refused)
+        loaded = { bookId, marks }
         /* A read that landed is the screen agreeing with the disk again —
          * the point the failure note in `applyElsewhere` names as what
          * clears the flag; it cleared `failed` and left `persistent` false
@@ -729,7 +749,9 @@ export function createMarkStore({
      * same folder could run beside each other. */
     await queue.append(lane(bookId), async () => {
       // LIVE only — a read model, like every other. The file keeps its rows.
-      marks = liveMarks(validMarks(await readMarks(target, bookId)))
+      const read = readStoredMarks(await readMarks(target, bookId))
+      keptAside(bookId, read.refused)
+      marks = liveMarks(read.marks)
     })
     return marks
   }
@@ -741,7 +763,9 @@ export function createMarkStore({
     const before = new Map(writeGen)
     return scanAllMarks(fs)
       .then((raw) => {
-        const scanned = validMarks(raw)
+        const read = readStoredMarks(raw)
+        keptAside('the library', read.refused)
+        const scanned = read.marks
         const stale = new Set(
           [...writeGen.keys()].filter((bookId) => writeGen.get(bookId) !== before.get(bookId)),
         )
@@ -771,8 +795,22 @@ export function createMarkStore({
    * file — and a `clock()` inside it minted two different stamps for one
    * edit: memory and disk disagreed until the confirmation republished,
    * and the generation moved twice. One reading, both applications. */
-  const add: MarkStore['add'] = (mark) => {
+  const add: MarkStore['add'] = (raw) => {
+    /* REFUSED AT THE DOOR, for the fields that cannot be cut: an id or an
+       anchor past the record's bound was saved, displayed, and refused by
+       the next read — a mark quietly gone. A rejection is a failure the
+       reader is shown. */
+    try {
+      checkMarkIdentity(raw)
+    } catch (cause) {
+      return Promise.reject(cause)
+    }
     const at = clock()
+    /* CUT AT THE WRITE, to the bounds the read applies — `updateNote`'s rule
+     * for every cut field. A chapter label, a quote or a note written whole
+     * and cut on the next read is a mark the reader saw one way and reloaded
+     * another; the cut the reader sees is the cut the file keeps. */
+    const mark = boundedMark(raw)
     /* Overlapping, not byte-identical. A mark is reached by any selection
      * that covers part of it, so the row a new mark replaces is the row that
      * selection resolved to — otherwise re-marking a passage the reader was
@@ -790,13 +828,21 @@ export function createMarkStore({
     if (stray) {
       return Promise.reject(new Error(`addMany: mark ${stray.id} belongs to ${stray.bookId}, not ${bookId}`))
     }
+    /* The identity bounds, refused for the batch as `add` refuses them for one. */
+    try {
+      for (const mark of marks) checkMarkIdentity(mark)
+    } catch (cause) {
+      return Promise.reject(cause)
+    }
     /* ONE CLOCK READING PER MARK, as `add` takes — the stamps have to be
      * distinct or the tombstones a later mark writes over an earlier one in
      * the same batch cannot be ordered. Minted here, once per mark, so both
      * applications of the mutation write the same stamps. */
     const stamps = marks.map(() => clock())
+    /* Cut at the write, as `add` cuts — an archive's rows come through here. */
+    const bounded = marks.map(boundedMark)
     return applyTo(bookId, (prev) =>
-      marks.reduce<readonly Mark[]>((sofar, mark, i) => upsertOverlapping(sofar, mark, stamps[i]!), prev),
+      bounded.reduce<readonly Mark[]>((sofar, mark, i) => upsertOverlapping(sofar, mark, stamps[i]!), prev),
     )
   }
 
@@ -818,7 +864,15 @@ export function createMarkStore({
 
   const place: MarkStore['place'] = (id, cfi, sectionIndex, bookId) => {
     const at = clock()
-    return applyToMark(id, bookId, (prev) => placeMarkIn(prev, id, cfi, sectionIndex, at))
+    /* `placeMark` refuses an anchor past the record's bound by throwing —
+       inside the mutation, which `applyTo` runs synchronously over the
+       screen's list first. A rejection, so the caller hears it the way it
+       hears every other failed write. */
+    try {
+      return applyToMark(id, bookId, (prev) => placeMarkIn(prev, id, cfi, sectionIndex, at))
+    } catch (cause) {
+      return Promise.reject(cause)
+    }
   }
 
   const rekey: MarkStore['rekey'] = async (from, to) => {
@@ -880,7 +934,11 @@ export function createMarkStore({
   }
 
   const mergeRemote: MarkStore['mergeRemote'] = (bookId, incoming) => {
-    const marks = validMarks(incoming)
+    /* A peer's row that will not read is not merged and not kept — it was
+       never this device's — but it is said: a silent drop is a mark two
+       devices disagree about for ever. */
+    const { marks, refused } = readStoredMarks(incoming)
+    if (refused.length > 0) console.warn(`Paper: ${refused.length} mark(s) a peer sent for ${bookId} could not be read and were not merged`)
     const stray = marks.find((mark) => mark.bookId !== bookId)
     if (stray) {
       return Promise.reject(new Error(`mergeRemote: mark ${stray.id} belongs to ${stray.bookId}, not ${bookId}`))

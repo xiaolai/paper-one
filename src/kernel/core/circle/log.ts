@@ -261,55 +261,36 @@ export interface Folded {
  * device's later word. Stated so two recipients folding the same log agree.
  */
 export function fold(entries: readonly Entry[]): Folded {
-  const shares = new Map<string, Held & Stamped>()
-  const withdrawn = new Set<string>()
-  const reviews = new Map<string, HeldReview & Stamped>()
-  const unreviewed = new Set<string>()
-  const shelf = new Map<string, HeldWork & Stamped>()
-  const unshelved = new Set<string>()
+  const shares = publications<Held & Stamped>()
+  const reviews = publications<HeldReview & Stamped>()
+  const shelf = publications<HeldWork & Stamped>()
   let status: (Register<ReadingState> & Stamped) | undefined
   let stars: (Register<Stars> & Stamped) | undefined
   let tags: (Register<readonly string[]> & Stamped) | undefined
 
   for (const entry of resolved(entries)) {
     switch (entry.op) {
+      /* The three publication kinds fold by ONE mechanism — `publications`
+         — so a change to what a tombstone means, or to which duplicate
+         wins, is made once. Each arm names only its payload. */
       case 'unshare':
-        withdrawn.add(entry.pub)
-        shares.delete(entry.pub)
+        shares.withdraw(entry.pub)
         break
-      case 'share': {
-        if (withdrawn.has(entry.pub)) break
-        const seen = shares.get(entry.pub)
-        /* Duplicate delivery: keep ONE entry, whole — the one that stamps
-           first, so a redelivery cannot quietly move a passage up the
-           reader's list, and two replicas folding in different orders hold
-           the same passage with the same words. */
-        if (seen && !earlier(entry, seen)) break
-        shares.set(entry.pub, { pub: entry.pub, passage: entry.passage, at: entry.at, device: entry.device, seq: entry.seq })
+      case 'share':
+        shares.publish(entry, { pub: entry.pub, passage: entry.passage, at: entry.at, device: entry.device, seq: entry.seq })
         break
-      }
       case 'unreview':
-        unreviewed.add(entry.pub)
-        reviews.delete(entry.pub)
+        reviews.withdraw(entry.pub)
         break
-      case 'review': {
-        if (unreviewed.has(entry.pub)) break
-        const seen = reviews.get(entry.pub)
-        if (seen && !earlier(entry, seen)) break
-        reviews.set(entry.pub, { pub: entry.pub, text: entry.text, at: entry.at, device: entry.device, seq: entry.seq })
+      case 'review':
+        reviews.publish(entry, { pub: entry.pub, text: entry.text, at: entry.at, device: entry.device, seq: entry.seq })
         break
-      }
       case 'unshelf':
-        unshelved.add(entry.pub)
-        shelf.delete(entry.pub)
+        shelf.withdraw(entry.pub)
         break
-      case 'shelf': {
-        if (unshelved.has(entry.pub)) break
-        const seen = shelf.get(entry.pub)
-        if (seen && !earlier(entry, seen)) break
-        shelf.set(entry.pub, { pub: entry.pub, work: entry.work, at: entry.at, device: entry.device, seq: entry.seq })
+      case 'shelf':
+        shelf.publish(entry, { pub: entry.pub, work: entry.work, at: entry.at, device: entry.device, seq: entry.seq })
         break
-      }
       case 'status':
         if (newer(entry, status)) status = { value: entry.state, at: entry.at, device: entry.device, seq: entry.seq }
         break
@@ -334,15 +315,54 @@ export function fold(entries: readonly Entry[]): Folded {
     }
   }
   return {
-    /* In LOG ORDER, not arrival order: a Map remembers insertion, and two
-       replicas that received the pages differently would otherwise list the
-       same passages differently. */
-    shares: [...shares.values()].sort(compareEntries).map(({ device: _d, seq: _s, ...held }) => held),
-    reviews: [...reviews.values()].sort(compareEntries).map(({ device: _d, seq: _s, ...held }) => held),
-    shelf: [...shelf.values()].sort(compareEntries).map(({ device: _d, seq: _s, ...held }) => held),
+    shares: shares.rows(({ device: _d, seq: _s, ...held }) => held),
+    reviews: reviews.rows(({ device: _d, seq: _s, ...held }) => held),
+    shelf: shelf.rows(({ device: _d, seq: _s, ...held }) => held),
     ...(status === undefined ? {} : { status: { value: status.value, at: status.at } }),
     ...(stars === undefined ? {} : { stars: { value: stars.value, at: stars.at } }),
     ...(tags === undefined ? {} : { tags: { value: tags.value, at: tags.at } }),
+  }
+}
+
+/**
+ * ONE KIND of tombstoned publication, folded: the live rows under their
+ * `pub`, and the pubs withdrawn for ever.
+ *
+ * ⚠️ **ONE MECHANISM FOR THE THREE KINDS.** Shares, reviews and shelf rows
+ * each had a map, a tombstone set, a sort and a strip of their own — three
+ * parallel copies of one rule, and a change to what a tombstone means had to
+ * be made three times, or was made twice. The payload is the only thing that
+ * differs between them, and it is the only thing a caller supplies.
+ *
+ * A tombstone: the `pub` is withdrawn for ever, and whatever it named is
+ * dropped. A publication, unless withdrawn — and on a duplicate delivery
+ * keep ONE entry, whole: the one that stamps first, so a redelivery cannot
+ * quietly move a passage up the reader's list, and two replicas folding in
+ * different orders hold the same passage with the same words.
+ */
+function publications<T extends Stamped>(): {
+  withdraw(pub: string): void
+  publish(entry: Stamped & { readonly pub: string }, row: T): void
+  /** The live rows in LOG ORDER, each stripped as the caller says. */
+  rows<R>(strip: (row: T) => R): R[]
+} {
+  const held = new Map<string, T>()
+  const gone = new Set<string>()
+  return {
+    withdraw: (pub) => {
+      gone.add(pub)
+      held.delete(pub)
+    },
+    publish: (entry, row) => {
+      if (gone.has(entry.pub)) return
+      const seen = held.get(entry.pub)
+      if (seen && !earlier(entry, seen)) return
+      held.set(entry.pub, row)
+    },
+    /* In LOG ORDER, not arrival order: a Map remembers insertion, and two
+       replicas that received the pages differently would otherwise list the
+       same passages differently. */
+    rows: (strip) => [...held.values()].sort(compareEntries).map(strip),
   }
 }
 
@@ -455,9 +475,13 @@ export function compacted(raw: readonly Entry[], device: string): readonly Entry
      stream served does not depend on which side of a fork arrived first. */
   const entries = resolved(raw)
   const folded = fold(entries)
-  const live = new Set(folded.shares.map((held) => held.pub))
-  const liveReviews = new Set(folded.reviews.map((held) => held.pub))
-  const liveShelf = new Set(folded.shelf.map((held) => held.pub))
+  /* What survived the fold, per kind — ONE table, read by the kind's own
+     name below, rather than three sets with three names and three arms. */
+  const live: Readonly<Record<'share' | 'review' | 'shelf', ReadonlySet<string>>> = {
+    share: new Set(folded.shares.map((held) => held.pub)),
+    review: new Set(folded.reviews.map((held) => held.pub)),
+    shelf: new Set(folded.shelf.map((held) => held.pub)),
+  }
   /* The ENTRY each register folded to — the same rule `fold` applies, so the
      one served is the one a recipient would have folded to anyway. */
   const winners = new Set<Entry>()
@@ -488,11 +512,9 @@ export function compacted(raw: readonly Entry[], device: string): readonly Entry
   const kept = entries.filter((entry) => {
     switch (entry.op) {
       case 'share':
-        return live.has(entry.pub) && chosen.has(entry)
       case 'review':
-        return liveReviews.has(entry.pub) && chosen.has(entry)
       case 'shelf':
-        return liveShelf.has(entry.pub) && chosen.has(entry)
+        return live[entry.op].has(entry.pub) && chosen.has(entry)
       case 'status':
       case 'rate':
       case 'tag':

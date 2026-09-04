@@ -1,4 +1,4 @@
-import { MAX_COVER_BYTES, SUPPORTED, negotiate, type VersionRange, type WorkClaim, MAX_PAGE_CHARS as KERNEL_MAX_PAGE_CHARS } from '../../../kernel'
+import { MAX_COVER_BYTES, MAX_ROSTER_DEVICES, SUPPORTED, isClaimShape, negotiate, type VersionRange, type WorkClaim, MAX_PAGE_CHARS as KERNEL_MAX_PAGE_CHARS, MAX_CLAIM_DIGESTS } from '../../../kernel'
 
 /**
  * The circle's own vocabulary on the wire — WI-22.C1.
@@ -98,8 +98,12 @@ export interface CircleWelcome {
   readonly agreed: number
 }
 
-/** The most devices one person's roster may have, for a bounded cursor. */
-export const MAX_CURSOR_DEVICES = 64
+/**
+ * The most devices a cursor may name — THE ROSTER'S OWN BOUND, not a number
+ * of this module's: a cursor tighter than the roster refused the sixty-fifth
+ * device's stream for ever, and a second constant would drift again.
+ */
+export const MAX_CURSOR_DEVICES: number = MAX_ROSTER_DEVICES
 
 /** Ask one person for what they have shared of one work. */
 export interface PagesRequest {
@@ -194,32 +198,23 @@ function personId(value: unknown): string | null {
   return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value) ? value : null
 }
 
-/** A `WorkClaim`, whose fields are digests and one language subtag. */
+/**
+ * A `WorkClaim`, whose fields are digests and one language subtag — or one
+ * reserved claim. The kernel's rule, which a page and a sealed boundary are
+ * held to as well: three parsers of one shape had drifted three ways.
+ */
 function workClaim(value: unknown): WorkClaim | null {
-  const held = object(value)
-  if (!held || !exactly(held, ['ids', 'titles', 'author', 'language'])) return null
-  const { ids, titles, author, language } = held
-  /* Every field but the language is a digest — `workClaim.ts`: sixty-four
-     hex characters — and a claim names a handful of them, not a thousand. */
-  const digests = (list: unknown): list is readonly string[] =>
-    // Stryker disable next-line ConditionalExpression: a non-string never matches the digest pattern, so the type check only spells out what the pattern refuses.
-    Array.isArray(list) && list.length <= MAX_CLAIM_DIGESTS && list.every((one) => typeof one === 'string' && DIGEST.test(one))
-  if (!digests(ids) || !digests(titles)) return null
-  // Stryker disable next-line ConditionalExpression: a non-string is neither empty nor a digest, so the pattern refuses it alone.
-  if (typeof author !== 'string' || (author !== '' && !DIGEST.test(author))) return null
-  // Stryker disable next-line ConditionalExpression: as above, for the language subtag.
-  if (typeof language !== 'string' || (language !== '' && !/^[a-z]{2,3}$/u.test(language))) return null
-  return { ids, titles, author, language }
+  return isClaimShape(value) ? value : null
 }
 
-/** A SHA-256 digest as `pageCrypto.hash` spells it. */
-const DIGEST = /^[0-9a-f]{64}$/u
-
 /**
- * The most characters one answer's pages may carry between them — under the
- * transport's own 4 MiB envelope with room for the frame. The per-page cap
- * and the page count each held on their own, and thirty-two pages at the
- * page cap made an answer four times what the envelope carries.
+ * The most one answer's pages may weigh between them, in BYTES on the wire
+ * as `wireBytesOf` counts them — under the transport's own 4 MiB envelope
+ * with room for the frame. The per-page cap and the page count each held on
+ * their own, and thirty-two pages at the page cap made an answer four times
+ * what the envelope carries. (The receiving parser holds an answer to the
+ * same number in characters, which is at most the bytes: a bound on what it
+ * will parse, not a promise about the frame.)
  */
 export const MAX_ANSWER_CHARS = 3 * 1024 * 1024
 
@@ -268,8 +263,8 @@ export function parseCoverAnswer(value: unknown): CoverAnswer | null {
   return { offset: offset as number, size: size as number, bytes, more }
 }
 
-/** The most identifiers, or title spellings, one claim may carry. */
-export const MAX_CLAIM_DIGESTS = 16
+/** The most identifiers, or title spellings, one claim may carry — the kernel's bound, named here for the callers that had it here. */
+export { MAX_CLAIM_DIGESTS }
 
 /** `null` for anything this build will not answer. */
 export function parseCircleHello(value: unknown): CircleHello | null {

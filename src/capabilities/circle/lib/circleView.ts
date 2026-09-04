@@ -2,6 +2,7 @@ import {
   claimFor,
   FIRST_EPOCH, drawsEntry,
   drawsOverlays,
+  indexKeys,
   matchWork,
   READING_STATES,
   type Hlc,
@@ -116,7 +117,13 @@ export function claimOfShelved(work: ShelvedWork): WorkClaim {
   )
 }
 
-export function viewOf(book: BookLike, books: readonly BookLike[], people: readonly PersonHeld[]): CircleView {
+export function viewOf(
+  book: BookLike,
+  books: readonly BookLike[],
+  people: readonly PersonHeld[],
+  /** How two claims are compared — `matchWork`. A PARAMETER so a test can count the comparisons the grouping makes; the default is the policy. */
+  match: (a: WorkClaim, b: WorkClaim) => ReturnType<typeof matchWork> = matchWork,
+): CircleView {
   const claim = claimOf(book)
   const index = indexOf(books)
   const opinions: CircleOpinion[] = []
@@ -159,7 +166,7 @@ export function viewOf(book: BookLike, books: readonly BookLike[], people: reado
      reader is looking at. */
   // Stryker disable next-line StringLiteral,LogicalOperator: the self row is dropped with its whole component; only its claim is ever read.
   const self: Candidate = { person: '', name: '', pub: '', title: book.title ?? '', author: book.author ?? '', claim }
-  const alsoRead = groupsOf([self, ...others], index)
+  const alsoRead = groupsOf([self, ...others], index, match)
     .filter((group) => !group.persons.has(''))
     .map(({ key, title, author, names, own }) => ({ key, title, author, names, own }))
     .sort((a, b) => b.names.length - a.names.length || a.title.localeCompare(b.title))
@@ -188,10 +195,19 @@ interface Candidate {
  *
  * Membership is by PERSON; the names are what is shown. Two people who share
  * a display name are two people, and both count.
+ *
+ * ⚠️ **BUCKETED BY INDEX KEY, NOT EVERY PAIR.** Two claims `matchWork` joins
+ * share an identifier or a title-author-language — which is exactly what
+ * `indexKeys` mints — so only candidates in one bucket can meet, and only
+ * those pairs are judged. Every pair over every friend's whole shelf was
+ * quadratic in the circle's books, and blocked the pane for tens of millions
+ * of comparisons on ordinary shelves. `matchWork` still decides each pair:
+ * a shared key is a candidate, not an answer.
  */
 function groupsOf(
   candidates: readonly Candidate[],
   index: ReturnType<typeof indexOf>,
+  match: (a: WorkClaim, b: WorkClaim) => ReturnType<typeof matchWork>,
 ): readonly { key: string; title: string; author: string; persons: Set<string>; names: string[]; own: string | null }[] {
   const sorted = [...candidates].sort((a, b) => a.person.localeCompare(b.person) || a.pub.localeCompare(b.pub))
   const parent = sorted.map((_, i) => i)
@@ -199,13 +215,24 @@ function groupsOf(
     while (parent[i] !== i) i = parent[i]!
     return i
   }
-  // Stryker disable next-line EqualityOperator: one index past the end has nothing after it to compare with, so the inner loop never runs there.
-  for (let i = 0; i < sorted.length; i++) {
-    for (let j = i + 1; j < sorted.length; j++) {
-      if (matchWork(sorted[i]!.claim, sorted[j]!.claim) === 'none') continue
-      const [a, b] = [rootOf(i), rootOf(j)]
-      // Stryker disable next-line ConditionalExpression: joining a root to itself writes what is already there.
-      if (a !== b) parent[Math.max(a, b)] = Math.min(a, b)
+  const buckets = new Map<string, number[]>()
+  sorted.forEach((one, i) => {
+    for (const key of indexKeys(one.claim)) {
+      const bucket = buckets.get(key)
+      if (bucket) bucket.push(i)
+      else buckets.set(key, [i])
+    }
+  })
+  for (const bucket of buckets.values()) {
+    // Stryker disable next-line EqualityOperator: one index past the end has nothing after it to compare with, so the inner loop never runs there.
+    for (let x = 0; x < bucket.length; x++) {
+      for (let y = x + 1; y < bucket.length; y++) {
+        const [i, j] = [bucket[x]!, bucket[y]!]
+        if (match(sorted[i]!.claim, sorted[j]!.claim) === 'none') continue
+        const [a, b] = [rootOf(i), rootOf(j)]
+        // Stryker disable next-line ConditionalExpression: joining a root to itself writes what is already there.
+        if (a !== b) parent[Math.max(a, b)] = Math.min(a, b)
+      }
     }
   }
   const groups = new Map<number, { key: string; title: string; author: string; persons: Set<string>; names: string[]; own: string | null }>()

@@ -142,4 +142,23 @@ describe('an action that rejects', () => {
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('circle:boom'), expect.objectContaining({ message: 'the port went away' }))
     spy.mockRestore()
   })
+
+  /* The other failure shape: an action that throws BEFORE it has a promise
+     to reject. Said the same way, under the same id — through the one runner
+     the card's fetch button shares, so the two cannot drift again. */
+  it('is said the same way when it throws before returning a promise', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const early = {
+      id: 'circle:early' as const,
+      label: 'Early',
+      run: () => {
+        throw new Error('failed before the promise')
+      },
+    }
+    render(<Library {...shelf} bookActions={[early]} />)
+    openMenu()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Early' }))
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('circle:early'), expect.objectContaining({ message: 'failed before the promise' }))
+    spy.mockRestore()
+  })
 })

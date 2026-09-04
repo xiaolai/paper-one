@@ -5,6 +5,7 @@ import type { IndexedBook } from '../../core/bookIndex'
 import type { ActionIcon, BookAction } from '../../core/capability'
 import { TRASH_KEPT_FOR } from '../../core/bookTrash'
 import { ICON } from '../../core/metrics'
+import { runBookAction } from './runAction'
 
 /** Every `ActionIcon`, drawn once. `Record` over the union, so a name added
  *  to `ACTION_ICONS` without artwork here does not compile. */
@@ -166,18 +167,12 @@ export function BookMenu({
           className={itemClass}
           onClick={() => {
             closeMenu()
-            /* Caught here, whatever the action returns: a rejected promise
-               out of a capability's action used to be an unhandled rejection
-               with nothing on screen. Said on the console; the capability's
+            /* Caught and said, whichever way the action fails — the one
+               runner, shared with the card's fetch button (`runAction.ts`).
+               A rejected promise out of a capability's action used to be an
+               unhandled rejection with nothing on screen; the capability's
                own surface is still where it should say it. */
-            const report = (cause: unknown) => {
-              console.error(`Paper: the action "${action.id}" failed`, cause)
-            }
-            try {
-              void Promise.resolve(action.run(book.bookId)).catch(report)
-            } catch (cause) {
-              report(cause)
-            }
+            runBookAction(action, book.bookId)
           }}
         >
           {action.icon ? (

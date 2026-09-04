@@ -6,7 +6,7 @@ import {
   type Publishability,
 } from '../../../kernel'
 import { share, unshare, type Publication, type SharedFile } from './publish'
-import { tellEach } from './listeners'
+import { createListeners } from './listeners'
 
 /**
  * The share control's deciding half — WI-23.A1.
@@ -53,7 +53,7 @@ export interface SharePort {
   share(mark: Annotation, withNote: boolean): Promise<void>
   /** Withdraw the live publication of this mark. A no-op when there is none. */
   unshare(mark: Annotation): Promise<void>
-  /** Told after every share or withdrawal, so a row re-asks `state`. */
+  /** Told after every share or withdrawal — and after the store changes under a fetch, or the identity is made — so a row re-asks `state`. */
   subscribe(listener: () => void): () => void
 }
 
@@ -151,11 +151,19 @@ export interface SharingDeps {
   /** THE clock — `KernelServices.clock`, never one of the capability's own. */
   readonly clock: () => Hlc
   readonly mintPub: () => string
+  /**
+   * The store's own change signal — `circleChanged` — so a control re-asks
+   * its state when the world moves under it, not only after its own acts.
+   * A control mounted before the circle had an identity kept saying "Start a
+   * circle" after one was made, because nothing it listened to had fired.
+   */
+  readonly onChanged?: (listener: () => void) => () => void
 }
 
-export function sharePortOver(deps: SharingDeps): SharePort {
-  const listeners = new Set<() => void>()
-  const changed = (): void => tellEach(listeners, 'share')
+export function sharePortOver(deps: SharingDeps): SharePort & { dispose(): void } {
+  const listeners = createListeners('share')
+  const changed = (): void => listeners.tell()
+  const off = deps.onChanged?.(changed) ?? (() => {})
   /* Reachability is sampled ONCE per check: read twice around an await, a
      peer stopping in between made the identity of a reachable peer and the
      reachability of an absent one — a state that is neither. */
@@ -168,6 +176,23 @@ export function sharePortOver(deps: SharingDeps): SharePort {
   /* Asked only when the peer is there: `mine()` on a peer that has not
      started is a call into nothing. */
   const deviceOrNull = (): Promise<string | null> => (deps.reachable() ? deps.device() : Promise.resolve(null))
+  /**
+   * The device an act is stamped by, or the reason there is none.
+   *
+   * ONE SAMPLE DECIDES. The state is read once and refused by its own reason;
+   * a peer that stops between that read and the identity read is refused as
+   * unreachable, which it now is — never as "usable". A withdrawal needs it
+   * as a share does: the tombstone is stamped in the withdrawing device's own
+   * stream (`Withdrawal`), and no device is no stream to put it in.
+   */
+  const identified = async (): Promise<string> => {
+    const state = await publishability()
+    if (state !== 'usable') throw new Error(shareAbsentBecause(state) ?? state)
+    const device = await deviceOrNull()
+    // Stryker disable next-line StringLiteral: `shareAbsentBecause` names every state; the fallback is for the type.
+    if (device === null) throw new Error(shareAbsentBecause('unreachable') ?? 'unreachable')
+    return device
+  }
 
   return {
     state: async (mark) => ({
@@ -175,14 +200,7 @@ export function sharePortOver(deps: SharingDeps): SharePort {
       published: livePublication(await deps.shared(mark.bookId), mark.id) !== null,
     }),
     share: async (mark, withNote) => {
-      /* ONE SAMPLE DECIDES. The state is read once and refused by its own
-         reason; a peer that stops between that read and the identity read
-         is refused as unreachable, which it now is — never as "usable". */
-      const state = await publishability()
-      if (state !== 'usable') throw new Error(shareAbsentBecause(state) ?? state)
-      const device = await deviceOrNull()
-      // Stryker disable next-line StringLiteral: `shareAbsentBecause` names every state; the fallback is for the type.
-      if (device === null) throw new Error(shareAbsentBecause('unreachable') ?? 'unreachable')
+      const device = await identified()
       const pub = deps.mintPub()
       const at = deps.clock()
       const passage = passageOf(mark, withNote)
@@ -192,20 +210,25 @@ export function sharePortOver(deps: SharingDeps): SharePort {
       changed()
     },
     unshare: async (mark) => {
+      /* A no-op when nothing is out, as the contract says — asked of the store
+         BEFORE the peer: a mark with no publication needs no device to stamp
+         a tombstone it will not write, and must not be refused for one. */
+      if (livePublications(await deps.shared(mark.bookId), mark.id).length === 0) return
+      const device = await identified()
       const at = deps.clock()
       await deps.update(mark.bookId, (held) => {
-        /* Every one of them — see `livePublications`. */
+        /* Every one of them — see `livePublications` — and each in THIS
+           device's stream, whichever device published it. */
         let next = held
-        for (const live of livePublications(held, mark.id)) next = unshare(next, live.pub, at)
+        for (const live of livePublications(held, mark.id)) next = unshare(next, live.pub, device, at)
         return next
       })
       changed()
     },
-    subscribe: (listener) => {
-      listeners.add(listener)
-      return () => {
-        listeners.delete(listener)
-      }
+    subscribe: listeners.subscribe,
+    dispose: () => {
+      off()
+      listeners.clear()
     },
   }
 }

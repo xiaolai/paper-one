@@ -266,6 +266,27 @@ describe('the live review is the newest by stamp, and a change takes every live 
     const next = republish(held, opinion({ review: 'both, superseded' }), DEVICE, at(), minted)
     expect(next.reviews.filter((row) => row.unreviewed !== undefined).map((row) => row.pub).sort()).toEqual(['r-laptop', 'r-phone'])
     expect(liveReview(next)?.text).toBe('both, superseded')
+    /* Both withdrawals in THIS device's stream — the phone's review included,
+       which filed under the phone was a tombstone this device never served
+       and a number the phone could mint again. */
+    const gone = logOf(next).filter((one) => one.op === 'unreview')
+    expect(gone.map((one) => [one.device, one.seq])).toEqual([
+      [DEVICE, 2],
+      [DEVICE, 3],
+    ])
+    expect(logOf(next).find((one) => one.op === 'review' && one.pub === 'rev1')).toMatchObject({ device: DEVICE, seq: 4 })
+  })
+
+  it('refuses a withdrawal that would need a sequence past the safe integers', () => {
+    const held: SharedFile = {
+      ...NOTHING_PUBLISHED,
+      reviews: [
+        { pub: 'a', text: 'a', device: DEVICE, seq: Number.MAX_SAFE_INTEGER - 1, at: hlcOf(1) },
+        { pub: 'b', text: 'b', device: 'e'.repeat(64), seq: 1, at: hlcOf(2) },
+      ],
+    }
+    /* The first take-back takes the last safe number; the second has none. */
+    expect(() => republish(held, opinion({ review: 'c' }), DEVICE, hlcOf(3), () => 'c')).toThrow(/run out of sequence numbers/u)
   })
 })
 

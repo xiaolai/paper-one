@@ -80,6 +80,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::peer_person_delegate,
             commands::peer_circle_people,
             commands::peer_circle_mine,
+            commands::peer_circle_roster,
             commands::peer_page_sign,
             commands::peer_circle_introduce,
             commands::peer_circle_revoke,

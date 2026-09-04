@@ -10,6 +10,7 @@ import { MAX_PAGE_CHARS } from './protocol'
 import { DEFAULT_BOUNDS, type Publisher } from './publish'
 import { delegationBytes, takePages, type Ledger, type SignedDelegation } from './receive'
 import {
+  liveShelfRows,
   nextShelfSeq,
   NOTHING_SHELVED,
   readOwnShelf,
@@ -205,6 +206,10 @@ describe('the published shelf on disk', () => {
       ['a removal not after the row it removes', { works: [{ ...row(), seq: 3, unshelved: { seq: 3, at: at() } }] }, /work list/u],
       ['two rows on one sequence', { works: [{ ...row(), seq: 4 }, { ...row(), pub: 'other', seq: 4 }] }, /reuses a sequence/u],
       ['a removal on the sequence of another row', { works: [{ ...row(), seq: 4 }, { ...row(), pub: 'other', seq: 2, unshelved: { seq: 4, at: at() } }] }, /reuses a sequence/u],
+      ['a removal in another device’s stream on a sequence that device holds', { works: [{ ...row(), device: 'e'.repeat(64), seq: 1 }, { ...row(), pub: 'other', seq: 2, unshelved: { seq: 1, at: at(), device: 'e'.repeat(64) } }] }, /reuses a sequence/u],
+      ['a removal with a field the build does not know', { works: [{ ...row(), unshelved: { seq: 2, at: at(), extra: 1 } }] }, /work list/u],
+      ['a removal by another device with an empty name', { works: [{ ...row(), unshelved: { seq: 1, at: at(), device: '' } }] }, /work list/u],
+      ['a removal by the row’s own device, named, not after the row', { works: [{ ...row(), seq: 3, unshelved: { seq: 3, at: at(), device: DEVICE } }] }, /work list/u],
       ['a list where only SOME are works', { works: [row(), 'no'] }, /work list/u],
       ['boundaries that are a string', { sealed: 'sealed' }, /page boundaries/u],
       ['a boundary with no chain version', { sealed: [{ ...boundary(), v: undefined }] }, /page boundaries/u],
@@ -352,5 +357,72 @@ describe('the shelf file’s rows, held to the letter', () => {
   it('counts only this device’s boundaries towards its next sequence, and refuses to run out', () => {
     expect(nextShelfSeq({ works: [], sealed: [{ device: 'e'.repeat(64), from: 1, to: 9, v: 2 }] }, DEVICE)).toBe(1)
     expect(() => nextShelfSeq({ works: [{ ...okay(), seq: Number.MAX_SAFE_INTEGER }] as never, sealed: [] }, DEVICE)).toThrow(/run out of sequence numbers/u)
+  })
+})
+
+describe('a book shelved from two devices', () => {
+  const OTHER = 'e'.repeat(64)
+
+  it('is taken back on BOTH rows, each removal stamped in the syncing device’s stream', () => {
+    /* Two stores that met: each device shelved Moby-Dick before they synced.
+       A removal that tombstoned only the row it looked at left the other on
+       the wire, still disclosing the book. */
+    const held: ShelfFile = {
+      works: [
+        { pub: 'a', bookId: 'book:moby', work: workOf(moby), device: DEVICE, seq: 1, at: at() },
+        { pub: 'b', bookId: 'book:moby', work: workOf(moby), device: OTHER, seq: 1, at: at() },
+      ],
+      sealed: [],
+    }
+    const removed = syncShelf(held, [], DEVICE, at(), mint)
+    expect(shelvedNow(removed).size).toBe(0)
+    expect(liveShelfRows(removed)).toEqual([])
+    const gone = shelfLogOf(removed).filter((one) => one.op === 'unshelf')
+    expect(gone.map((one) => [one.device, one.seq])).toEqual([
+      [DEVICE, 2],
+      [DEVICE, 3],
+    ])
+    /* The other device's own count is untouched: the removals are not in its stream. */
+    expect(nextShelfSeq(removed, OTHER)).toBe(2)
+  })
+
+  it('keeps ONE row while the book stays — the earliest in log order — and takes the duplicate back', () => {
+    const first = at()
+    const held: ShelfFile = {
+      works: [
+        { pub: 'later', bookId: 'book:moby', work: workOf(moby), device: OTHER, seq: 1, at: at() },
+        { pub: 'earlier', bookId: 'book:moby', work: workOf(moby), device: DEVICE, seq: 1, at: first },
+      ],
+      sealed: [],
+    }
+    const synced = syncShelf(held, [moby], DEVICE, at(), mint)
+    expect(liveShelfRows(synced).map((row) => row.pub)).toEqual(['earlier'])
+    expect(shelvedNow(synced).get('book:moby')?.pub).toBe('earlier')
+    expect(shelfLogOf(synced).find((one) => one.op === 'unshelf')).toMatchObject({ pub: 'later', device: DEVICE, seq: 2 })
+    /* Settled: nothing more to say. */
+    expect(syncShelf(synced, [moby], DEVICE, at(), mint)).toBe(synced)
+  })
+
+  it('reads a removal made by another device from the first sequence of that device’s stream', async () => {
+    const works = [{ pub: 's1', bookId: 'book:moby', work: workOf(moby), device: DEVICE, seq: 5, at: at(), unshelved: { seq: 1, at: at(), device: OTHER } }]
+    const store = fakeFs({ [OWN_SHELF_PATH]: JSON.stringify({ works, sealed: [] }) }) as unknown as VaultFs
+    const held = await readOwnShelf(store)
+    expect(shelfLogOf(held).find((one) => one.op === 'unshelf')).toMatchObject({ device: OTHER, seq: 1 })
+    expect(nextShelfSeq(held, OTHER)).toBe(2)
+    expect(nextShelfSeq(held, DEVICE)).toBe(6)
+  })
+})
+
+describe('a work’s fields, held to their bound', () => {
+  it('cuts a title past MAX_WORK_FIELD, never inside a surrogate pair, so the row written is one the store reads back', async () => {
+    /* A row written past the bound was a shelf that would not read back, for ever. */
+    const long = `${'a'.repeat(MAX_WORK_FIELD - 1)}😀`
+    const work = workOf({ bookId: 'b', title: long, author: 'x'.repeat(MAX_WORK_FIELD + 5) })
+    expect(work.title).toBe('a'.repeat(MAX_WORK_FIELD - 1))
+    expect(work.author).toHaveLength(MAX_WORK_FIELD)
+    const held = syncShelf(NOTHING_SHELVED, [{ bookId: 'book:long', title: long, author: 'A', languages: ['en'] }], DEVICE, at(), mint)
+    const store = fakeFs({}) as unknown as VaultFs
+    await store.writeFile(OWN_SHELF_PATH, new TextEncoder().encode(JSON.stringify(held)))
+    expect((await readOwnShelf(store)).works[0]?.work.title).toBe('a'.repeat(MAX_WORK_FIELD - 1))
   })
 })

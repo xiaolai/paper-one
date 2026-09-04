@@ -86,30 +86,33 @@ export function mergeRelationship(a: Relationship, b: Relationship): Relationshi
      replicas reach whichever two they merge first. */
   // Stryker disable next-line EqualityOperator: reached only when the epochs differ, so `>` and `>=` choose alike.
   const state = a.epoch !== b.epoch ? (a.epoch > b.epoch ? a : b) : a.changedAt !== b.changedAt ? (laterHlc(a.changedAt, b.changedAt) === a.changedAt ? a : b) : restrictiveOf(a, b)
-  /* The SHELF half by its own stamp; at a tie, off — the answer that is safe
-     to be wrong about.
-
-     ⚠️ **AND ONLY WITHIN THE WINNING EPOCH.** A grant belongs to the
-     relationship it was made in: a stale replica that turned the shelf on
-     under epoch 1, stamped after a re-admission it had not yet heard of,
-     must not carry that grant into epoch 2 — `readmit` turned it off for
-     exactly this reason. When the epochs differ, the winning record's own
-     shelf stands, whatever the other's stamp says. */
-  const shelfAtOf = (one: Relationship): Hlc => one.shelfAt ?? one.changedAt
-  const shelf =
-    a.epoch !== b.epoch
-      ? state
-      : shelfAtOf(a) !== shelfAtOf(b)
-        ? laterHlc(shelfAtOf(a), shelfAtOf(b)) === shelfAtOf(a)
-          ? a
-          : b
-        : // Stryker disable next-line ConditionalExpression: with the switches alike either record answers the same switch and the same stamp.
-          a.shelf === b.shelf
-          ? a
-          : a.shelf
-            ? b
-            : a
+  const shelf = shelfWinner(a, b, state)
   return { ...state, shelf: shelf.shelf, shelfAt: shelfAtOf(shelf) }
+}
+
+/** The switch's own stamp — `changedAt` on a record written before it had one. */
+const shelfAtOf = (one: Relationship): Hlc => one.shelfAt ?? one.changedAt
+
+/**
+ * Which record's SHELF switch stands — the security-sensitive half of the
+ * merge, named so each branch can be read on its own.
+ *
+ * ⚠️ **ONLY WITHIN THE WINNING EPOCH.** A grant belongs to the relationship
+ * it was made in: a stale replica that turned the shelf on under epoch 1,
+ * stamped after a re-admission it had not yet heard of, must not carry that
+ * grant into epoch 2 — `readmit` turned it off for exactly this reason. When
+ * the epochs differ, the winning record's own shelf stands, whatever the
+ * other's stamp says. Within one epoch the later stamp wins; at a true tie,
+ * OFF — the answer that is safe to be wrong about.
+ */
+function shelfWinner(a: Relationship, b: Relationship, state: Relationship): Relationship {
+  if (a.epoch !== b.epoch) return state
+  const stampA = shelfAtOf(a)
+  const stampB = shelfAtOf(b)
+  if (stampA !== stampB) return laterHlc(stampA, stampB) === stampA ? a : b
+  // Stryker disable next-line ConditionalExpression: with the switches alike either record answers the same switch and the same stamp.
+  if (a.shelf === b.shelf) return a
+  return a.shelf ? b : a
 }
 
 /** Of two records stamped alike, the one that gives away less. */

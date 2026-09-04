@@ -241,7 +241,6 @@ const REVIEWED_FOOTPRINT = [
      — what you chose to publish — to every one of your own devices whether
      they take part in the circle or not. */
   'circle/lib/publish.ts atomicWrite(fs, sharedPathIn(bookId))',
-  'circle/lib/store.ts atomicWrite(fs, circlePathIn(bookId, person))',
   'circle/lib/store.ts fs.remove(path)',
   /* ⚠️ **THE FIRST CIRCLE FILES OUTSIDE A BOOK — WI-23.C1 and C3, and this
      entry is the review the plan says the gate exists for.** Three shapes,
@@ -259,17 +258,23 @@ const REVIEWED_FOOTPRINT = [
         reader's own decisions about a person: the WI-22.E1 record, and the
         shelf switch (WI-23.C2). Read-merge-written by `changedAt`.
 
-     And ONE delete: `purgePerson` removes `circle/<person>/` whole — the
-     shelf and the relationship together — after the per-book files, which is
-     `relationships.md` §"Retained data" for a person who has been removed. It
-     can name no other directory: the path is built by the same helper. */
+     And the deletes: `purgePerson` removes what is IN `circle/<person>/` —
+     the shelf, the lists, the jackets, each entry of the folder's own
+     listing as a file or a directory — after the per-book files, which is
+     `relationships.md` §"Retained data" for a person who has been removed,
+     and KEEPS `relationship.json` as the tombstone a re-admission is measured
+     against (a person with no record read as the admitted default). It can
+     name no other directory: the folder is built by the same helper, and
+     each path is that folder joined with a name the listing answered. */
   'circle/lib/relationships.ts atomicWrite(fs, path)',
-  'circle/lib/relationships.ts fs.removeDir(folder)',
+  'circle/lib/relationships.ts fs.remove(path)',
+  'circle/lib/relationships.ts fs.removeDir(path)',
   'circle/lib/shelf.ts atomicWrite(fs, OWN_SHELF_PATH)',
-  /* ONE writer for both of a person's files — `writePersonFile(path)` —
-     shelf and list alike, so the path is a parameter here; the two callers
-     build it with `personShelfPathIn` and `personListPathIn` and nothing
-     else reaches it. */
+  /* ONE writer for every held file — `writeOnLane(path)` — per book and per
+     person alike, so the path is a parameter here; the callers build it with
+     `circlePathIn`, `personShelfPathIn` and `personListPathIn` and nothing
+     else reaches it. The write re-asks the relationship inside the lane, so
+     a keep queued behind a purge writes nothing for a person just removed. */
   'circle/lib/store.ts atomicWrite(fs, path)',
   /* WI-23.E1 — lists, under the same namespace and the same rule:
       - `circle/lists/<listId>.json` (`ownListPathIn`) — the reader's OWN
@@ -284,14 +289,20 @@ const REVIEWED_FOOTPRINT = [
       - `circle/covers.json` (`COVER_INDEX_PATH`) — the LRU index over every
         kept jacket: size and last use, so the cap can evict the least recently
         drawn.
-     The `mkdir` makes `circle/<person>/covers/` before the first jacket lands.
-     The `remove` is the LRU's eviction, and it removes only the paths the
-     index names — which are only ever `coverPathOf` paths. Nothing here
-     touches a book's folder. */
+     A jacket is written with `atomicWrite`, which makes `circle/<person>/covers/`
+     and renames into place — a raw `mkdir` and `writeFile` left half a jacket
+     under a whole digest when a write was cut short. The `remove` is the
+     LRU's eviction, and a kept file that no longer hashes to its digest; both
+     remove only `coverPathOf` paths — the eviction's from the index, the
+     other's the one just read. Nothing here touches a book's folder. */
   'circle/lib/covers.ts atomicWrite(fs, COVER_INDEX_PATH)',
-  'circle/lib/covers.ts fs.mkdir()',
+  'circle/lib/covers.ts atomicWrite(fs, coverPathOf(person, digest))',
+  'circle/lib/covers.ts fs.remove(path)',
+  /* The purge: a person forgotten takes the jackets the index names for
+     them — `coverPathOf` paths again, built from the index key, so a hit
+     queued behind the purge cannot answer from a file about to go and
+     re-index it. Reviewed 2026-09-04; nothing here touches a book's folder. */
   'circle/lib/covers.ts fs.remove(coverPathOf(key.slice(0, cut), key.slice(cut + 1)))',
-  'circle/lib/covers.ts fs.writeFile(path)',
 
   /* -- the kernel handles sync holds -- */
   // `start` takes the fs for the journal, the cover cache and the downloads

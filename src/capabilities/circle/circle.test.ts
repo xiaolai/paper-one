@@ -24,6 +24,9 @@ import { NOTHING_SHARED, heldListIdsOf, readHeldList, readHeldShelf, writeHeldLi
    kernel takes the testkit door like any other consumer. */
 import { fakeFs, resolvedCfiForTesting } from '../../kernel/testkit'
 
+/** A person still admitted, for every write here: the lane re-check is `store.ts`'s to prove. */
+const ADMITS = () => Promise.resolve(true)
+
 /**
  * A queue that runs its task and nothing else.
  *
@@ -150,7 +153,7 @@ describe('the store', () => {
 
   it('round-trips what it wrote', async () => {
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     expect(await readForeign(fs, BOOK, PERSON)).toEqual(shared([entry()]))
     /* The file name IS the id, because `safeId` is the identity on hex —
        which is what lets `readForeign` compare the claimed author exactly. */
@@ -184,7 +187,7 @@ describe('the store', () => {
        file is carried by `exportMarks`, by the sync feed and by every one of
        the reader's own devices — as THEIR annotation. */
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     expect(await fs.exists(`books/book_moby/marks.json`)).toBe(false)
     expect(circlePathIn(BOOK, PERSON)).toContain('/circle/')
   })
@@ -201,8 +204,8 @@ describe('the store', () => {
     /* WI-22.E3's `retain: 'purge'`. */
     const fs = fsWith()
     const queue = queueOf()
-    await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([entry({ person: 'alice' })]), NOTED)
-    await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([entry({ person: 'bob', pub: 'p2' })]), NOTED)
+    await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([entry({ person: 'alice' })]), NOTED, ADMITS)
+    await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([entry({ person: 'bob', pub: 'p2' })]), NOTED, ADMITS)
 
     await purgeForeign(fs, queue, LANE, BOOK, 'alice', NOTED)
 
@@ -218,7 +221,7 @@ describe('the store', () => {
        shape of "green is not evidence that anything happened". */
     const fs = fsWith()
     expect(await fs.exists('books/book_moby/circle')).toBe(false)
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     expect(await fs.exists(circlePathIn(BOOK, PERSON))).toBe(true)
   })
 
@@ -320,7 +323,7 @@ describe('the store', () => {
     same person it is ordinary, because their laptop can withdraw what their
     phone published and the two pages travel independently. */
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, { entries: [], withdrawn: ['p1'], heads: {}, cursor: {}, v: 1, opinion: {}, reviews: [], unreviewed: [], works: [], unshelved: [], list: NO_LIST_HELD }, NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, { entries: [], withdrawn: ['p1'], heads: {}, cursor: {}, v: 1, opinion: {}, reviews: [], unreviewed: [], works: [], unshelved: [], list: NO_LIST_HELD }, NOTED, ADMITS)
 
     const held = await readForeign(fs, BOOK, PERSON)
     expect(held.withdrawn).toEqual(['p1'])
@@ -390,7 +393,7 @@ describe('the store', () => {
     const fs = fsWith()
     const queue = queueOf()
     for (const who of ['zoe', 'alice', 'mike']) {
-      await writeForeign(fs, queue, LANE, BOOK, who, shared([entry({ person: who })]), NOTED)
+      await writeForeign(fs, queue, LANE, BOOK, who, shared([entry({ person: who })]), NOTED, ADMITS)
     }
     expect(await peopleFor(fs, BOOK)).toEqual(['alice', 'mike', 'zoe'])
   })
@@ -404,7 +407,7 @@ describe('the store', () => {
        files"*), and `Library.lane` says the rule in as many words: deriving it
        again elsewhere is a race that does not show up in a diff. */
     const keys: string[] = []
-    await writeForeign(fsWith(), queueOf(keys), LANE, 'book:a/b', 'alice', shared([]), NOTED)
+    await writeForeign(fsWith(), queueOf(keys), LANE, 'book:a/b', 'alice', shared([]), NOTED, ADMITS)
     await purgeForeign(fsWith(), queueOf(keys), LANE, 'book:a_b', 'alice', NOTED)
 
     expect(keys).toEqual([LANE('book:a/b'), LANE('book:a_b')])
@@ -462,7 +465,7 @@ describe('the overlay contribution', () => {
        anchor here; the kernel hands over a resolver; the capability contributes
        an annotation whose cfi the painter can take. */
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     const disposable = start(fs)
 
     const resolve = vi.fn(
@@ -495,7 +498,7 @@ describe('the overlay contribution', () => {
     /* The honest outcome, and not an error: a friend's passage that is not in
        your edition simply has nowhere to be painted. */
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     const disposable = start(fs)
 
     const drawn = await overlay.forBook({
@@ -538,8 +541,8 @@ describe('the overlay contribution', () => {
        one the painter used to collapse. */
     const fs = fsWith()
     const queue = queueOf()
-    await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([entry({ person: 'alice', pub: 'a' })]), NOTED)
-    await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([entry({ person: 'bob', pub: 'b' })]), NOTED)
+    await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([entry({ person: 'alice', pub: 'a' })]), NOTED, ADMITS)
+    await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([entry({ person: 'bob', pub: 'b' })]), NOTED, ADMITS)
     const disposable = start(fs)
 
     /* Both land at ONE anchor, which is the case: two people, one sentence. */
@@ -560,7 +563,7 @@ describe('the overlay contribution', () => {
     const queue = queueOf()
     await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([
       entry({ person: 'alice', pub: 'same' }),
-    ]), NOTED)
+    ]), NOTED, ADMITS)
     await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([
       entry({
         person: 'bob',
@@ -572,7 +575,7 @@ describe('the overlay contribution', () => {
           chapter: 'Ch. 1',
         },
       }),
-    ]), NOTED)
+    ]), NOTED, ADMITS)
     const disposable = start(fs)
 
     /* Each pending passage is placed at its OWN section, so a swap shows. */
@@ -603,7 +606,7 @@ describe('the overlay contribution', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const fs = fsWith({ [circlePathIn(BOOK, 'broken')]: 'not json at all' })
-      await writeForeign(fs, queueOf(), LANE, BOOK, 'alice', shared([entry({ person: 'alice' })]), NOTED)
+      await writeForeign(fs, queueOf(), LANE, BOOK, 'alice', shared([entry({ person: 'alice' })]), NOTED, ADMITS)
       const disposable = start(fs)
 
       const drawn = await overlay.forBook({ bookId: BOOK, resolve: placesEverything() })
@@ -617,7 +620,7 @@ describe('the overlay contribution', () => {
 
   it('stops contributing once disposed', async () => {
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     const disposable = start(fs)
     expect(await overlay.forBook({ bookId: BOOK, resolve: placesEverything() })).toHaveLength(1)
 
@@ -635,7 +638,7 @@ describe('the overlay contribution', () => {
     const told = vi.fn()
     overlay.subscribe(told)
 
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), circleChanged)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), circleChanged, ADMITS)
 
     expect(told).toHaveBeenCalledTimes(1)
     disposable.dispose()
@@ -930,6 +933,31 @@ describe('every clause of every validity check', () => {
     })
   })
 
+  describe('a file 0.1.3 wrote — heads, and neither cursor nor version', () => {
+    /* That build persisted the chain heads and nothing about how far along
+       them it was. Refused, every passage a friend sent before the upgrade
+       threw on the first read after it. */
+    it('reads as a chain started from nothing, with what is held kept', async () => {
+      const held = await readForeign(
+        file({ entries: [entry({ pub: 'kept' })], withdrawn: ['gone'], heads: { [PERSON]: 'a'.repeat(64) }, cursor: undefined, v: undefined }),
+        BOOK,
+        PERSON,
+      )
+      expect(held.entries.map((one) => one.pub)).toEqual(['kept'])
+      expect(held.withdrawn).toEqual(['gone'])
+      /* The heads go WITH the cursor: a head kept beside an empty cursor
+         asks for the first page and refuses it as a gap, for ever. */
+      expect(held.heads).toEqual({})
+      expect(held.cursor).toEqual({})
+      expect(held.v).toBe(1)
+    })
+
+    it('is the one shape read that way — one of the two alone is a hand-made file', async () => {
+      await expect(readForeign(file({ cursor: undefined }), BOOK, PERSON)).rejects.toThrow(/fetch cursor/u)
+      await expect(readForeign(file({ v: undefined }), BOOK, PERSON)).rejects.toThrow(/chain version/u)
+    })
+  })
+
   describe('the opinion — WI-23.B5', () => {
     /* ⚠️ Read as "nothing said", the next page naming an OLDER word would
        make it current again. One row per clause, each bad in one way. */
@@ -1108,7 +1136,7 @@ describe('every clause of every validity check', () => {
 
     it('lists only the json files under the person, not a folder or a note beside them', async () => {
       const fs = fsWith()
-      await writeHeldList(fs, queueOf(), PERSON, 'aa11', NOTHING_SHARED, () => {})
+      await writeHeldList(fs, queueOf(), PERSON, 'aa11', NOTHING_SHARED, () => {}, ADMITS)
       await fs.writeFile(`${personListsDirIn(PERSON)}/notes.txt`, new TextEncoder().encode('x'))
       await fs.writeFile(`${personListsDirIn(PERSON)}/folder/inside.json`, new TextEncoder().encode('{}'))
       expect(await heldListIdsOf(fs, PERSON)).toEqual(['aa11'])
@@ -1119,7 +1147,7 @@ describe('every clause of every validity check', () => {
       const noted = vi.fn()
       const held = { ...NOTHING_SHARED, works: [{ pub: 's1', at: hlcOf(1), work: { title: 'Moby-Dick', author: 'Herman Melville', language: 'en' } }] } as ForeignFile
       expect(await readHeldShelf(fs, PERSON)).toEqual(NOTHING_SHARED)
-      await writeHeldShelf(fs, queueOf(), PERSON, held, noted)
+      await writeHeldShelf(fs, queueOf(), PERSON, held, noted, ADMITS)
       expect(noted).toHaveBeenCalledTimes(1)
       expect(await fs.exists(personShelfPathIn(PERSON))).toBe(true)
       expect(await readHeldShelf(fs, PERSON)).toEqual(held)
@@ -1136,8 +1164,8 @@ describe('every clause of every validity check', () => {
       const held = { ...NOTHING_SHARED, list: list() } as ForeignFile
       expect(await heldListIdsOf(fs, PERSON)).toEqual([])
       const noted = vi.fn()
-      await writeHeldList(fs, queueOf(), PERSON, 'bb22', held, noted)
-      await writeHeldList(fs, queueOf(), PERSON, 'aa11', { ...held, list: list({ title: undefined }) } as ForeignFile, noted)
+      await writeHeldList(fs, queueOf(), PERSON, 'bb22', held, noted, ADMITS)
+      await writeHeldList(fs, queueOf(), PERSON, 'aa11', { ...held, list: list({ title: undefined }) } as ForeignFile, noted, ADMITS)
       expect(noted).toHaveBeenCalledTimes(2)
       expect(await heldListIdsOf(fs, PERSON)).toEqual(['aa11', 'bb22'])
       expect((await readHeldList(fs, PERSON, 'bb22')).list.title?.value).toBe('Sea')
@@ -1491,5 +1519,37 @@ describe('the disposer on the kernel’s stack — round 3 #97', () => {
     expect((control()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }).props.port).not.toBeNull()
     cleanups[0]!()
     expect((control()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }).props.port).toBeNull()
+  })
+})
+
+describe('a keep queued behind a purge — the admission re-asked inside the lane', () => {
+  it('writes nothing for a person the record no longer admits, and still tells the listeners', async () => {
+    const fs = fsWith()
+    const noted = vi.fn()
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), noted, () => Promise.resolve(false))
+    expect(await fs.exists(circlePathIn(BOOK, PERSON))).toBe(false)
+    expect(noted).toHaveBeenCalledTimes(1)
+    await writeHeldShelf(fs, queueOf(), PERSON, NOTHING_SHARED, noted, () => Promise.resolve(false))
+    expect(await fs.exists(personShelfPathIn(PERSON))).toBe(false)
+    await writeHeldList(fs, queueOf(), PERSON, 'aa11', NOTHING_SHARED, noted, () => Promise.resolve(false))
+    expect(await fs.exists(personListPathIn(PERSON, 'aa11'))).toBe(false)
+  })
+
+  it('asks on the lane, after whatever was queued before it — a purge included', async () => {
+    const fs = fsWith({ [circlePathIn(BOOK, PERSON)]: JSON.stringify(shared([entry()])) })
+    const order: string[] = []
+    const queue = queueOf()
+    /* The purge takes the lane first; the keep's question is answered after it ran. */
+    const purged = queue.append(LANE(BOOK), async () => {
+      order.push('purge')
+      await fs.remove(circlePathIn(BOOK, PERSON))
+    })
+    const kept = writeForeign(fs, queue, LANE, BOOK, PERSON, shared([entry()]), () => {}, () => {
+      order.push('asked')
+      return Promise.resolve(false)
+    })
+    await Promise.all([purged, kept])
+    expect(order).toEqual(['purge', 'asked'])
+    expect(await fs.exists(circlePathIn(BOOK, PERSON))).toBe(false)
   })
 })

@@ -557,6 +557,20 @@ function readTags(raw: unknown, limit: number): readonly string[] | undefined {
 /** A BLAKE3 hash as `contentHash` stores it: 64 lowercase hex digits. */
 const CONTENT_HASH = /^[0-9a-f]{64}$/
 
+/**
+ * Whether a value is a BLAKE3 digest as this store spells one — THE ONE RULE,
+ * for every door a digest comes through: the record on disk, a peer's push
+ * and pull rows, and a browser's `book.list` answer. Each of those had its
+ * own copy of the pattern, and one of them (the browser's) had none at all.
+ *
+ * The type check is not decoration: `RegExp.test` coerces its argument, so
+ * `['a'.repeat(64)]` — an array holding one well-formed digest — stringifies
+ * to that digest and matches. A guard that only ran the pattern would admit it.
+ */
+export function isContentHash(value: unknown): value is string {
+  return typeof value === 'string' && CONTENT_HASH.test(value)
+}
+
 /** `coverFacts` as a file may spell it — exactly its three fields, each well-formed — or nothing. */
 export function parseCoverFacts(value: unknown): CoverFacts | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
@@ -564,8 +578,7 @@ export function parseCoverFacts(value: unknown): CoverFacts | undefined {
   if (!Object.keys(facts).every((key) => key === 'name' || key === 'size' || key === 'hash')) return undefined
   if (!(COVER_NAMES as readonly unknown[]).includes(facts['name'])) return undefined
   if (!Number.isSafeInteger(facts['size']) || (facts['size'] as number) < 0) return undefined
-  // Stryker disable next-line ConditionalExpression: a non-string never matches the digest pattern; the type check spells out what the pattern already refuses.
-  if (typeof facts['hash'] !== 'string' || !CONTENT_HASH.test(facts['hash'])) return undefined
+  if (!isContentHash(facts['hash'])) return undefined
   return { name: facts['name'] as CoverName, size: facts['size'] as number, hash: facts['hash'] }
 }
 
@@ -647,6 +660,7 @@ export function parseRecord(raw: string | null): BookRecord | null {
   const derivedTags = clock ? tagsFromClock(clock) : undefined
   const status = readStatus(r['status'])
   const review = readReview(r['review'])
+  const coverFacts = parseCoverFacts(r['coverFacts'])
   return {
     /* NEVER CUT: an id sliced to five hundred characters is a different
      * identity, and everything after it would target a different folder. */
@@ -732,11 +746,9 @@ export function parseRecord(raw: string | null): BookRecord | null {
      * from before the ledger simply has none of these. */
     ...(isHlc(r['positionAt']) ? { positionAt: r['positionAt'] } : {}),
     ...(isHlc(r['finishedAt']) ? { finishedAt: r['finishedAt'] } : {}),
-    ...(typeof r['contentHash'] === 'string' && CONTENT_HASH.test(r['contentHash'])
-      ? { contentHash: r['contentHash'] }
-      : {}),
+    ...(isContentHash(r['contentHash']) ? { contentHash: r['contentHash'] } : {}),
     ...(isFormat(r['format']) ? { format: r['format'] } : {}),
-    ...(parseCoverFacts(r['coverFacts']) === undefined ? {} : { coverFacts: parseCoverFacts(r['coverFacts'])! }),
+    ...(coverFacts === undefined ? {} : { coverFacts }),
   }
 }
 
@@ -944,11 +956,28 @@ export async function updateBook(
  * `finished` is true if either says so; `addedAt` is the earlier, since that is
  * when the book actually arrived.
  */
-/** The `finished` flag the merged record carries — from the winning status, else the legacy flags. */
-function finishedOf(stranded: BookRecord, live: BookRecord): { finished?: true } {
+/**
+ * The `finished` flag the merged record carries — DERIVED from the winning
+ * status, as `parseRecord` derives it, so the two cannot disagree; the legacy
+ * OR of two flags only where neither side has a status.
+ */
+function finishedOf(stranded: BookRecord, live: BookRecord): { finished?: boolean } {
   const status = live.status ?? stranded.status
-  if (status !== undefined) return status.state === 'finished' ? { finished: true } : {}
+  if (status !== undefined) return { finished: status.state === 'finished' }
   return stranded.finished || live.finished ? { finished: true } : {}
+}
+
+/**
+ * The rating register the merged record carries — a rating WITH ITS OWN
+ * stamp, live side first. A stamp is never split from its rating: a live
+ * `ratingAt` beside no live rating is an orphan `parseRecord` kept alone, and
+ * attaching it to the stranded side's rating would date that rating by a
+ * write it was not part of.
+ */
+function ratingOf(stranded: BookRecord, live: BookRecord): { rating?: Stars; ratingAt?: Hlc } {
+  const side = live.rating !== undefined ? live : stranded.rating !== undefined ? stranded : undefined
+  if (side === undefined) return {}
+  return { rating: side.rating!, ...(side.ratingAt === undefined ? {} : { ratingAt: side.ratingAt }) }
 }
 
 export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecord {
@@ -961,7 +990,23 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
    * one. Merging the REGISTERS — last writer per tag, a legacy list
    * synthesised at its documented stamp by `tagRegisters` — and deriving
    * the list from the result is the only shape a read cannot undo. */
-  const { tags: _tags, tagClock: _clock, ...rest } = live
+  /* THE OPINION REGISTERS ARE TAKEN OUT OF THE SPREAD TOO, and rebuilt whole
+   * below. Spread through, a field the merge decided should LOSE stayed: a
+   * live record from before `status` existed carries `finished: true`, and
+   * with a stranded `reading` status winning, the result said `reading` and
+   * `finished` at once — the one thing `BookRecord` promises a record can
+   * never say. The same spread married a live orphan `ratingAt` to the
+   * stranded side's unstamped rating. */
+  const {
+    tags: _tags,
+    tagClock: _clock,
+    finished: _finished,
+    status: _status,
+    rating: _rating,
+    ratingAt: _ratingAt,
+    review: _review,
+    ...rest
+  } = live
   const clock = mergeTagClocks(tagRegisters(stranded), tagRegisters(live))
   const tags = clock ? tagsFromClock(clock) : []
   const addedAt =
@@ -980,16 +1025,14 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
       : { progress: live.progress ?? stranded.progress! }),
     /* `finished` follows the status that wins — one fact, not two — and the
      * legacy OR of two flags only where neither side has a status. */
-    ...(finishedOf(stranded, live)),
+    ...finishedOf(stranded, live),
     /* The reader's own opinion of the book, live side first — the record
-     * the reader kept using is the one whose opinion is current, and `rest`
-     * already carries it. The stranded side fills only a register the live
-     * side never set, each with its stamp, never split from it. */
-    ...(live.status === undefined && stranded.status !== undefined ? { status: stranded.status } : {}),
-    ...(live.rating === undefined && stranded.rating !== undefined
-      ? { rating: stranded.rating, ...(stranded.ratingAt === undefined ? {} : { ratingAt: stranded.ratingAt }) }
-      : {}),
-    ...(live.review === undefined && stranded.review !== undefined ? { review: stranded.review } : {}),
+     * the reader kept using is the one whose opinion is current. The
+     * stranded side fills only a register the live side never set, each
+     * with its stamp, never split from it. */
+    ...((live.status ?? stranded.status) === undefined ? {} : { status: (live.status ?? stranded.status)! }),
+    ...ratingOf(stranded, live),
+    ...((live.review ?? stranded.review) === undefined ? {} : { review: (live.review ?? stranded.review)! }),
     ...(addedAt === undefined ? {} : { addedAt }),
   }
 }

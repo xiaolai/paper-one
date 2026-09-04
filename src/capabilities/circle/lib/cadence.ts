@@ -23,6 +23,8 @@
  * interleaving their writes to one person's file would race on the cursor.
  */
 
+import { isThenable } from './listeners'
+
 export interface CadenceTimers {
   setTimeout(fn: () => void, ms: number): unknown
   clearTimeout(handle: unknown): void
@@ -50,8 +52,8 @@ export interface CadenceOptions {
   readonly firstAfterMs?: number
   readonly everyMs?: number
   readonly timers?: CadenceTimers
-  /** Told the cause of a round that threw. The cadence goes on either way. */
-  readonly failed?: (cause: unknown) => void
+  /** Told the cause of a round that threw. The cadence goes on either way, and does not wait on it: a reporter that rejects is said, not left unhandled. */
+  readonly failed?: (cause: unknown) => void | Promise<void>
 }
 
 export interface Cadence {
@@ -87,7 +89,13 @@ export function createCadence({
              stopped fetching. The telling is guarded too: a reporter that
              throws must not be the thing that stops the clock. */
           try {
-            failed?.(cause)
+            const told: unknown = failed?.(cause)
+            /* A thenable from anywhere, not `instanceof Promise` — see `isThenable`. */
+            if (isThenable(told)) {
+              told.then(undefined, (thrown: unknown) => {
+                console.error('Paper: the circle could not report a failed round', thrown)
+              })
+            }
           } catch (thrown) {
             console.error('Paper: the circle could not report a failed round', thrown)
           }

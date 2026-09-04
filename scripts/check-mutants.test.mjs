@@ -67,9 +67,27 @@ describe('what the mutation gate chooses to mutate', () => {
 
     if (untracked.length === 0) return
     /* Those files are importable subjects for `testsCovering`, which is the
-       thing that broke: it was handed a list that did not contain them. */
-    const covered = testsCovering(['src/capabilities/circle/lib/store.ts'], untracked)
-    expect(covered.length).toBeGreaterThan(0)
+       thing that broke: it was handed a list that did not contain them.
+
+       ASSERTED ON WHATEVER IS UNTRACKED, NOT ON ONE NAMED MODULE. This used to
+       ask whether the untracked files covered the circle's `store.ts` — true
+       on the day it was written, when that module's new test was the
+       untracked one, and false on any tree whose only untracked test is about
+       something else: the gate was then reported broken by an unrelated file
+       sitting in the working copy. Each untracked test names, by its own
+       imports, a module that exists; handed that module, the selector must
+       find the test. */
+    const { existsSync, readFileSync } = require('node:fs')
+    const path = require('node:path')
+    for (const test of untracked) {
+      const source = readFileSync(test, 'utf8')
+      const subject = [...source.matchAll(/from\s+'(\.[^']+)'/gu)]
+        .map((spec) => path.resolve(path.dirname(test), spec[1]))
+        .flatMap((target) => ['.ts', '.tsx', '.mjs', '/index.ts'].map((ext) => target + ext))
+        .find((candidate) => existsSync(candidate) && !/\.test\.[cm]?tsx?$|\.testkit\./u.test(candidate))
+      if (subject === undefined) continue
+      expect(testsCovering([subject], untracked), `${test} imports ${subject}`).toContain(test)
+    }
   })
 
   it('resolves a directory import to its index', () => {

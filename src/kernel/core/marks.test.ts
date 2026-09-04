@@ -6,6 +6,7 @@ import {
   bookIdFor,
   bookmarkFrom,
   bookmarksIn,
+  boundedMark,
   openingLine,
   compareCfi,
   compareMarks,
@@ -25,6 +26,8 @@ import {
   type Annotation,
   type Mark,
   validMarks,
+  readStoredMarks,
+  checkMarkIdentity,
   MAX_MARK_NOTE,
 } from './marks'
 import { hlcOf } from './hlc'
@@ -1009,15 +1012,89 @@ describe('the validator holds the identity fields to the record limits', () => {
     expect(rows({ sectionIndex: Number.MAX_SAFE_INTEGER })).toHaveLength(1)
   })
 
-  it('refuses an id, a book, a chapter or a position past the limits a record keeps', () => {
+  it('refuses an id, a book or a position past the limits a record keeps', () => {
     expect(rows({ id: 'x'.repeat(501) })).toEqual([])
     expect(rows({ id: 'x'.repeat(500) })).toHaveLength(1)
     expect(rows({ bookId: 'b'.repeat(501) })).toEqual([])
     expect(rows({ bookId: 'b'.repeat(500) })).toHaveLength(1)
-    expect(rows({ chapter: 'c'.repeat(501) })).toEqual([])
-    expect(rows({ chapter: 'c'.repeat(500) })).toHaveLength(1)
     expect(rows({ cfi: 'c'.repeat(64_001) })).toEqual([])
     expect(rows({ cfi: 'c'.repeat(64_000) })).toHaveLength(1)
+  })
+
+  /* A CHAPTER LABEL IS CUT, NOT REFUSED. It is display only, nothing bounded
+     it at the write, and refusing it dropped the whole mark on the read after
+     the reader had seen it saved. */
+  it('cuts a chapter past the limit rather than dropping the mark', () => {
+    expect(rows({ chapter: 'c'.repeat(501) })[0]?.chapter).toHaveLength(500)
+    expect(rows({ chapter: 'c'.repeat(500) })[0]?.chapter).toHaveLength(500)
+    /* Never on a lone high surrogate, as every other cut here. */
+    expect(rows({ chapter: `${'c'.repeat(499)}😀` })[0]?.chapter).toBe('c'.repeat(499))
+  })
+})
+
+/* A ROW THE READ REFUSES IS HANDED BACK, NOT LOST. The store rewrites the file
+   whole from what read, so a refused row used to be gone from disk at the next
+   highlight with nothing saying so. */
+describe('a row the read refuses', () => {
+  it('is kept aside verbatim, beside the marks that read', () => {
+    const bad = { ...mark({ id: 'stale' }), id: 'x'.repeat(501) }
+    const { marks, refused } = readStoredMarks([mark({ id: 'm1' }), bad, 'not a row'])
+    expect(marks.map((one) => one.id)).toEqual(['m1'])
+    expect(refused).toEqual([bad, 'not a row'])
+    expect(refused[0]).toBe(bad)
+  })
+
+  it('has its `unplaced` read ONCE — the gate and the projection are one read', () => {
+    let reads = 0
+    const row = {
+      ...mark({ id: 'm1', cfi: '' as never }),
+      get unplaced() {
+        reads += 1
+        return { reason: 'foreign-build', fromBook: 'book:other' }
+      },
+    }
+    const [one] = validMarks([row])
+    expect(one?.unplaced).toEqual({ reason: 'foreign-build', fromBook: 'book:other' })
+    expect(reads).toBe(1)
+  })
+})
+
+/* THE IDENTITY FIELDS ARE REFUSED AT THE WRITE. `boundedMark` cuts what can
+   be cut; an id or an anchor cut short is a different mark, so those are
+   refused — where a refusal is a failure the reader hears, not on the read,
+   where it was a mark saved, displayed, and quietly gone at the next load. */
+describe('the identity fields at the write door', () => {
+  it('refuses an id, a book id or an anchor past the record’s bound, and passes one at it', () => {
+    expect(() => checkMarkIdentity(mark({ id: 'x'.repeat(501) }))).toThrow(/mark id/u)
+    expect(() => checkMarkIdentity(mark({ bookId: 'x'.repeat(501) }))).toThrow(/book id/u)
+    expect(() => checkMarkIdentity(mark({ cfi: 'x'.repeat(64_001) as never }))).toThrow(/anchor/u)
+    expect(() => checkMarkIdentity(mark({ id: 'x'.repeat(500), bookId: 'b'.repeat(500), cfi: 'x'.repeat(64_000) as never }))).not.toThrow()
+  })
+
+  it('refuses to place a mark at an anchor past the bound rather than install one the read would refuse', () => {
+    const waiting = mark({ id: 'm1', cfi: '' as never, unplaced: { reason: 'foreign-build', fromBook: 'book:other' } })
+    expect(() => placeMark([waiting], 'm1', resolvedCfiForTesting('x'.repeat(64_001)), 3)).toThrow(/anchor/u)
+    /* At the bound, placed. */
+    expect(placeMark([waiting], 'm1', resolvedCfiForTesting('x'.repeat(64_000)), 3)[0]?.cfi).toHaveLength(64_000)
+  })
+})
+
+/* THE WRITE DOOR CUTS WHAT THE READ WOULD CUT, so a mark is the same on the
+   day it is made and the day it is reloaded. `updateNote` did this for a note;
+   `boundedMark` does it for every cut field of a new mark. */
+describe('a new mark is cut at the write', () => {
+  it('cuts the label, the quote, its context and the note to the read’s bounds, and leaves a bounded mark as it is', () => {
+    const long = mark({ chapter: 'c'.repeat(600), text: 'x'.repeat(MAX_MARK_TEXT + 5), prefix: 'p'.repeat(MAX_MARK_TEXT + 5), suffix: 's'.repeat(MAX_MARK_TEXT + 5), note: 'n'.repeat(MAX_MARK_NOTE + 5) })
+    const cut = boundedMark(long)
+    expect(cut.chapter).toHaveLength(500)
+    expect(cut.text).toHaveLength(MAX_MARK_TEXT)
+    expect(cut.prefix).toHaveLength(MAX_MARK_TEXT)
+    expect(cut.suffix).toHaveLength(MAX_MARK_TEXT)
+    expect(cut.note).toHaveLength(MAX_MARK_NOTE)
+    /* What the write keeps is exactly what the read answers. */
+    expect(parseMarks(JSON.stringify([cut]))[0]).toEqual(cut)
+    const fine = mark({ chapter: 'Chapter One' })
+    expect(boundedMark(fine)).toBe(fine)
   })
 })
 

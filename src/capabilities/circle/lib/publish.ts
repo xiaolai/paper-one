@@ -7,6 +7,7 @@ import {
   canonicalJson,
   carriedBy,
   compareEntries,
+  isClaimShape,
   paginate,
   sharedPathIn,
   signedBytes,
@@ -50,6 +51,30 @@ import type { LaneFor } from './store'
  * mark the receiver cannot tell which, because there is nothing to name.
  */
 
+/**
+ * A withdrawal, as a row carries it: its own sequence and stamp, and the
+ * device that made it.
+ *
+ * ⚠️ **THE DEVICE IS THE WITHDRAWING DEVICE, NOT THE ROW'S.** Two of the
+ * reader's devices are two streams, and `pagesOver` serves only the stream of
+ * the device that took the call — so a tombstone filed under the ORIGINAL
+ * publisher's device was one the withdrawing device never served, and its
+ * sequence, minted from the withdrawing device's count, could collide with a
+ * number the original device minted for itself. Absent on rows written before
+ * it was kept, which read as the row's own device: the only device that could
+ * have withdrawn then.
+ */
+export interface Withdrawal {
+  readonly seq: number
+  readonly at: Hlc
+  readonly device?: string
+}
+
+/** The device a withdrawal is stamped in — its own, or the row's for one written before that was kept. */
+export function withdrawnBy(row: { readonly device: string }, gone: Withdrawal): string {
+  return gone.device ?? row.device
+}
+
 /** One thing this reader published, kept whole. */
 export interface Publication {
   /** The publication id — minted per share, never reused. */
@@ -62,8 +87,8 @@ export interface Publication {
   readonly at: Hlc
   /** What was published, copied. See the module header. */
   readonly passage: Passage
-  /** The withdrawal, when there is one. Its own sequence and stamp. */
-  readonly unshared?: { readonly seq: number; readonly at: Hlc }
+  /** The withdrawal, when there is one — see `Withdrawal`. */
+  readonly unshared?: Withdrawal
 }
 
 /**
@@ -94,7 +119,9 @@ export interface SealedPage {
    * boundaries fall in different places from the v2 chain's and its bytes
    * are different bytes. One list of boundaries with no `v` would hand a v1
    * peer a v2 boundary — and the page served under it would not be the page
-   * that boundary was sealed for. `readShared` refuses a boundary without one.
+   * that boundary was sealed for. `readShared` reads a boundary without one
+   * as v1 — the only chain a build before this field served — and refuses one
+   * naming a chain this build does not serve.
    */
   readonly v: number
   /**
@@ -140,7 +167,7 @@ export interface ReviewRow extends PublishedRow {
   readonly pub: string
   /** What was published, copied — the same snapshot rule as `Publication`. */
   readonly text: string
-  readonly unreviewed?: { readonly seq: number; readonly at: Hlc }
+  readonly unreviewed?: Withdrawal
 }
 
 /** This reader's publications for one book, and the pages already served. */
@@ -198,11 +225,17 @@ export async function readShared(fs: VaultFs, bookId: string): Promise<SharedFil
   }
   /* ⚠️ **PAGE BOUNDARIES THAT WILL NOT READ THROW TOO.** Reading them as "none
    * sealed yet" re-paginates from the start, which changes the bytes of pages
-   * every recipient already holds — and breaks their chains permanently. */
+   * every recipient already holds — and breaks their chains permanently.
+   *
+   * ⚠️ **AND A BOUNDARY WITH NO CHAIN VERSION IS A v1 BOUNDARY, NOT A REFUSAL.**
+   * 0.1.3 sealed `{ device, from, to }` and nothing else, because there was
+   * one chain; refusing those made every book with a page served before the
+   * upgrade unreadable, for ever, on the first read after it. Read as the
+   * chain they were sealed on, and written back with it on the next write. */
   const sealed = held['sealed']
-  if (!Array.isArray(sealed) || !sealed.every(isSealed)) {
-    throw new Error(`shared file for ${bookId} has no page boundaries`)
-  }
+  if (!Array.isArray(sealed)) throw new Error(`shared file for ${bookId} has no page boundaries`)
+  const versioned = sealed.map(legacyBoundary)
+  if (!versioned.every(isSealed)) throw new Error(`shared file for ${bookId} has no page boundaries`)
   /* ABSENT IS EMPTY, MALFORMED THROWS. A file written before the book-level
    * rows existed holds none, and reading it as none loses nothing — no
    * sequence number was ever minted for a row that is not there. A list that
@@ -223,13 +256,24 @@ export async function readShared(fs: VaultFs, bookId: string): Promise<SharedFil
   if (typeof publishOpinion !== 'boolean') {
     throw new Error(`shared file for ${bookId} has a publish switch that will not read`)
   }
-  const file: SharedFile = { publications: rows, sealed, opinions, reviews, publishOpinion }
+  const file: SharedFile = { publications: rows, sealed: versioned, opinions, reviews, publishOpinion }
   /* Checked as the LOG it serves: a reused `(device, seq)` would let `bySeq`
      keep one entry and drop the other silently, and boundaries out of chain
      order would rebuild a chain nobody holds. */
   if (reusesSequence(logOf(file))) throw new Error(`shared file for ${bookId} reuses a sequence`)
-  if (!boundariesInOrder(sealed)) throw new Error(`shared file for ${bookId} has page boundaries out of order`)
+  if (!boundariesInOrder(versioned)) throw new Error(`shared file for ${bookId} has page boundaries out of order`)
   return file
+}
+
+/** The chain the first build sealed on — the only one there was before `SealedPage.v`. */
+const FIRST_CHAIN = 1
+
+/** A boundary as written before `v` existed, read onto the one chain it could be for; anything else, as it is. */
+function legacyBoundary(value: unknown): unknown {
+  /* Stryker disable next-line ConditionalExpression: a non-object is refused by `isSealedPage` whether or not it is spread here. */
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
+  const row = value as Record<string, unknown>
+  return row['v'] === undefined ? { ...row, v: FIRST_CHAIN } : row
 }
 
 function isPublishedRow(value: unknown): value is PublishedRow & Record<string, unknown> {
@@ -269,7 +313,7 @@ function isReview(value: unknown): value is ReviewRow {
   if (!isPublishedRow(value)) return false
   if (!hasOnly(value, ['pub', 'text', 'device', 'seq', 'at', 'unreviewed'])) return false
   if (typeof value['pub'] !== 'string' || value['pub'] === '' || typeof value['text'] !== 'string') return false
-  return isWithdrawal(value['unreviewed'], value['seq'] as number)
+  return isWithdrawal(value['unreviewed'], value['seq'] as number, value['device'])
 }
 
 /**
@@ -340,16 +384,6 @@ export function isSealedPage(value: unknown): value is SealedPage {
 /** The widest range one boundary may cover — see `isSealedPage`. */
 export const MAX_BOUNDARY_SPAN = 1 << 20
 
-/** A claim as the store keeps one — EXACTLY the shape the wire refuses otherwise, within its bounds. */
-function isClaimShape(value: unknown): value is WorkClaim {
-  // Stryker disable next-line ConditionalExpression: a non-object has no claim member, so the key check below refuses it anyway.
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const claim = value as Record<string, unknown>
-  if (!hasOnly(claim, ['ids', 'titles', 'author', 'language'])) return false
-  const strings = (list: unknown): boolean => Array.isArray(list) && list.length <= 64 && list.every((one) => typeof one === 'string')
-  return strings(claim['ids']) && strings(claim['titles']) && typeof claim['author'] === 'string' && typeof claim['language'] === 'string'
-}
-
 const isSealed = isSealedPage
 
 function isPublication(value: unknown): value is Publication {
@@ -372,20 +406,27 @@ function isPublication(value: unknown): value is Publication {
   /* A note is optional, and a string when it is there: an object here would
      reach the page as a signed entry nobody can draw. */
   if (parts['note'] !== undefined && typeof parts['note'] !== 'string') return false
-  return isWithdrawal(row['unshared'], row['seq'] as number)
+  return isWithdrawal(row['unshared'], row['seq'] as number, row['device'] as string)
 }
 
 /**
- * A withdrawal mark — absent, or a sequence and a stamp: the sequence AFTER
- * the row it withdraws, on the same log, and the stamp an HLC. One rule for
- * a passage's tombstone and a review's, which had drifted apart.
+ * A withdrawal mark — absent, or a sequence and a stamp, and the device that
+ * made it when it is not the row's own. In the row's own stream the sequence
+ * comes AFTER the row it withdraws; in another device's stream it is a
+ * position on that log from 1, and the reuse check over the whole log is what
+ * holds it apart from the rest. One rule for a passage's tombstone, a
+ * review's and a shelf row's, which had drifted apart.
  */
-function isWithdrawal(gone: unknown, parentSeq: number): boolean {
+export function isWithdrawal(gone: unknown, parentSeq: number, parentDevice: string): boolean {
   if (gone === undefined) return true
   /* Stryker disable next-line ConditionalExpression: a non-object has no `seq` member, so the check below refuses it anyway. */
   if (typeof gone !== 'object' || gone === null || Array.isArray(gone)) return false
   const mark = gone as Record<string, unknown>
-  return hasOnly(mark, ['seq', 'at']) && Number.isSafeInteger(mark['seq']) && (mark['seq'] as number) > parentSeq && isHlc(mark['at'])
+  if (!hasOnly(mark, ['seq', 'at', 'device']) || !Number.isSafeInteger(mark['seq']) || (mark['seq'] as number) < 1 || !isHlc(mark['at'])) return false
+  const device = mark['device']
+  if (device === undefined) return (mark['seq'] as number) > parentSeq
+  if (typeof device !== 'string' || device === '') return false
+  return device !== parentDevice || (mark['seq'] as number) > parentSeq
 }
 
 
@@ -427,9 +468,12 @@ export async function updateShared(
  */
 export function nextSeqFor(held: SharedFile, device: string): number {
   let top = 0
+  /* A withdrawal is counted in the stream it was STAMPED in — `withdrawnBy` —
+     which is not always the row's: the laptop takes back what the phone
+     published, in the laptop's own stream. */
   for (const row of held.publications) {
-    if (row.device !== device) continue
-    top = Math.max(top, row.seq, row.unshared?.seq ?? 0)
+    if (row.device === device) top = Math.max(top, row.seq)
+    if (row.unshared !== undefined && withdrawnBy(row, row.unshared) === device) top = Math.max(top, row.unshared.seq)
   }
   /* The book-level rows are entries in the same stream, so their numbers are
      taken too — a `rate` at seq 4 and a `share` minted at seq 4 is the
@@ -438,8 +482,8 @@ export function nextSeqFor(held: SharedFile, device: string): number {
     if (row.device === device) top = Math.max(top, row.seq)
   }
   for (const row of held.reviews) {
-    if (row.device !== device) continue
-    top = Math.max(top, row.seq, row.unreviewed?.seq ?? 0)
+    if (row.device === device) top = Math.max(top, row.seq)
+    if (row.unreviewed !== undefined && withdrawnBy(row, row.unreviewed) === device) top = Math.max(top, row.unreviewed.seq)
   }
   /* And past every sealed boundary, which can outlive the rows it covers —
      a sequence inside one has been served. A sequence past the safe
@@ -477,13 +521,16 @@ export function share(
  * snapshot the withdrawal's own page still needs, and would let the sequence
  * numbers it used be minted again. `unshare` is a tombstone at every layer of
  * this design, for the same reason `Mark.deletedAt` is one.
+ *
+ * ⚠️ **STAMPED IN THE WITHDRAWING DEVICE'S STREAM** — `device` is the device
+ * taking it back, which need not be the one that published. See `Withdrawal`.
  */
-export function unshare(held: SharedFile, pub: string, at: Hlc): SharedFile {
+export function unshare(held: SharedFile, pub: string, device: string, at: Hlc): SharedFile {
   return {
     ...held,
     publications: held.publications.map((row) => {
       if (row.pub !== pub || row.unshared) return row
-      return { ...row, unshared: { seq: nextSeqFor(held, row.device), at } }
+      return { ...row, unshared: { device, seq: nextSeqFor(held, device), at } }
     }),
   }
 }
@@ -509,7 +556,7 @@ export function logOf(held: SharedFile): readonly Entry[] {
   for (const row of held.reviews) {
     entries.push({ op: 'review', pub: row.pub, device: row.device, seq: row.seq, at: row.at, text: row.text })
     if (row.unreviewed) {
-      entries.push({ op: 'unreview', pub: row.pub, device: row.device, seq: row.unreviewed.seq, at: row.unreviewed.at })
+      entries.push({ op: 'unreview', pub: row.pub, device: withdrawnBy(row, row.unreviewed), seq: row.unreviewed.seq, at: row.unreviewed.at })
     }
   }
   for (const row of held.publications) {
@@ -522,10 +569,11 @@ export function logOf(held: SharedFile): readonly Entry[] {
       passage: row.passage,
     })
     if (row.unshared) {
+      /* Under the device that withdrew it, which is the stream that serves it. */
       entries.push({
         op: 'unshare',
         pub: row.pub,
-        device: row.device,
+        device: withdrawnBy(row, row.unshared),
         seq: row.unshared.seq,
         at: row.unshared.at,
       })
@@ -631,6 +679,11 @@ export async function pagesFor(
  * How many characters a page of this publisher costs before its entries: the
  * canonical frame with an empty entry list and a signature of the length an
  * Ed25519 signature has, plus a small margin for the entries' own brackets.
+ *
+ * ⚠️ **MEASURED WITH THE WIDEST SEQUENCES A PAGE CAN CARRY.** `from` and `to`
+ * were measured as one-digit zeroes, and two safe integers are thirty
+ * characters more — so a page filled to the budget at a high sequence went
+ * out past `MAX_PAGE_CHARS`, and every recipient refused it as too large.
  */
 export function envelopeOf(publisher: Publisher, version: number): number {
   const frame: Page = {
@@ -638,8 +691,8 @@ export function envelopeOf(publisher: Publisher, version: number): number {
     person: publisher.person,
     work: publisher.work,
     device: publisher.device,
-    from: 0,
-    to: 0,
+    from: Number.MAX_SAFE_INTEGER,
+    to: Number.MAX_SAFE_INTEGER,
     prevPageHash: 'f'.repeat(64),
     entries: [],
     roster: [...publisher.roster],
@@ -648,6 +701,20 @@ export function envelopeOf(publisher: Publisher, version: number): number {
     sig: 'f'.repeat(128),
   }
   return canonicalJson(frame).length + 16
+}
+
+/**
+ * What a page costs on the wire — the bytes of its JSON-escaped, UTF-8
+ * encoded self inside the envelope's own JSON.
+ *
+ * ⚠️ **NOT `raw.length`.** That counts UTF-16 units, and the envelope encodes
+ * each page as UTF-8 and escapes it again as a JSON string: a page of
+ * Chinese prose is three bytes per unit, and one of quotation marks grows by
+ * every backslash. An answer held to a character count could be three times
+ * the frame the transport carries.
+ */
+export function wireBytesOf(page: string): number {
+  return new TextEncoder().encode(JSON.stringify(page)).length
 }
 
 export async function pagesOver(
@@ -664,34 +731,137 @@ export async function pagesOver(
   /** Every boundary, the ones this call sealed appended. */
   readonly sealed: readonly SealedPage[]
 }> {
+  const { mine, boundaries } = streamOf(log, sealed, publisher, version)
+  const bySeq = new Map(mine.map((entry) => [entry.seq, entry]))
+  const sealedNow = sealFresh(mine, boundaries, publisher, bounds, version)
+  const wanted = since[publisher.device] ?? 0
+  const answer = boundedAnswer(bounds)
+  let prevPageHash = ''
+  let more = false
+
+  /* ⚠️ **THE CHAIN IS WALKED FROM THE FIRST PAGE EVEN WHEN THE ANSWER STARTS
+   * LATER.** `prevPageHash` links every page this device has ever emitted, so
+   * the hash a resumed page must carry can only be had by walking from the
+   * beginning. Skipping ahead emits a page whose predecessor the recipient
+   * holds and whose hash does not match it. */
+  for (const boundary of [...boundaries, ...sealedNow]) {
+    const served = boundary.to > wanted
+    /* THE CAP, BEFORE THE SIGNATURE: a page past it is not sent, so signing
+       it is a key operation spent on nothing. Pages at or before the cursor
+       are still signed — their hash is the chain the next page carries. */
+    // Stryker disable next-line EqualityOperator,ConditionalExpression: boundaries are walked in order, so every one at or before the cursor is passed before a page is served; the guard spells out what the order ensures.
+    if (served && answer.full()) {
+      more = true
+      break
+    }
+    const page = await renderPage(boundary, bySeq, publisher, version, prevPageHash, hash)
+    prevPageHash = page.hash
+    if (!served) continue
+    if (!answer.add(page.raw)) {
+      more = true
+      break
+    }
+  }
+
+  return { pages: answer.pages, more, sealed: [...sealed, ...sealedNow] }
+}
+
+/**
+ * This device's stream on ONE chain: its entries the version carries, in
+ * order, and every boundary it has already served on that chain, in the
+ * order it served them. Another version's boundaries are another chain's.
+ */
+function streamOf(log: readonly Entry[], sealed: readonly SealedPage[], publisher: Publisher, version: number): { readonly mine: readonly Entry[]; readonly boundaries: readonly SealedPage[] } {
   const mine = log
     .filter((entry) => entry.device === publisher.device && carriedBy(version, entry))
     .sort((a, b) => a.seq - b.seq)
-  const bySeq = new Map(mine.map((entry) => [entry.seq, entry]))
-
-  /* Every page this device has already served ON THIS CHAIN, in the order it
-     served them. Another version's boundaries are another chain's. */
   const boundaries = sealed.filter((one) => one.device === publisher.device && one.v === version)
-  const lastSealed = boundaries.reduce((top, one) => Math.max(top, one.to), 0)
+  return { mine, boundaries }
+}
 
-  /* Whatever is past the last boundary becomes new pages, sealed here. */
+/**
+ * One page under its boundary, signed, in the bytes that travel — and the
+ * hash the next page on the chain carries.
+ *
+ * ⚠️ **`canonicalJson`, NOT `signedBytes`, FOR THE BYTES THAT TRAVEL.**
+ * `signedBytes` DROPS `sig` — that is what a signature covers — so building
+ * the wire bytes from it emits a page with no signature at all, and every
+ * recipient answers `not-canonical` because what arrived is not the
+ * canonical form of what parsed. Two different strings on purpose, and
+ * using one for the other has no symptom on this side.
+ *
+ * `body` has no `sig` and `signedBytes` drops one anyway — a placeholder
+ * was a value with no meaning, which reads as though it had one.
+ */
+async function renderPage(
+  boundary: SealedPage,
+  bySeq: ReadonlyMap<number, Entry>,
+  publisher: Publisher,
+  version: number,
+  prevPageHash: string,
+  hash: (value: string) => string,
+): Promise<{ readonly raw: string; readonly hash: string }> {
+  const body = rebuilt(boundary, bySeq, publisher, version, prevPageHash)
+  const sig = await publisher.sign(signedBytes('page', version, body))
+  const raw = canonicalJson({ ...body, sig })
+  return { raw, hash: hash(raw) }
+}
+
+/**
+ * The bounded answer: which served pages go out, and when the rest wait for
+ * the next request. PURE — a page count and a byte budget, the bytes as
+ * `wireBytesOf` counts them — so the two limits can be read and tested apart
+ * from the signing and the chain they used to be interleaved with.
+ *
+ * THE ANSWER AS A WHOLE fits the envelope: each page fits on its own, and
+ * thirty-two of them at the cap did not. The answer's FIRST page is
+ * unconditional — a page that fits the frame always goes, or a cursor could
+ * never advance past it — and every later one must fit beside the rest.
+ */
+export function boundedAnswer(bounds: Bounds): { readonly pages: readonly string[]; full(): boolean; add(raw: string): boolean } {
+  const pages: string[] = []
+  const maxBytes = bounds.maxChars ?? MAX_ANSWER_CHARS
+  /* Bytes on the wire, as `wireBytesOf` counts them — the bound is the frame's. */
+  let bytes = 0
+  return {
+    pages,
+    full: () => pages.length >= bounds.maxPages,
+    add: (raw) => {
+      const cost = wireBytesOf(raw)
+      if (pages.length > 0 && bytes + cost > maxBytes) return false
+      bytes += cost
+      pages.push(raw)
+      return true
+    },
+  }
+}
+
+/**
+ * The boundaries this call seals: whatever is past the last boundary on this
+ * chain, cut into pages that each fit the frame, with the publisher's roster,
+ * revocations, delegation and claim of THIS moment written beside each.
+ *
+ * ⚠️ **NO EMPTY GROUP TO FILTER OUT: `paginate` PUSHES ONLY WHEN
+ * `current.length > 0`**, so an empty log yields an empty list rather than
+ * one empty page. A guard here was dead code that read as caution — and it
+ * hid the fact that the `?? 0` below can never be taken either.
+ *
+ * The `?.`/`?? 0` below are unreachable for the same reason: a group always
+ * holds at least one entry. They exist because `noUncheckedIndexedAccess`
+ * cannot see `paginate`'s guarantee, and a non-null assertion would be a
+ * claim with no check behind it.
+ *
+ * ⚠️ **THE ENVELOPE IS MEASURED, NOT ASSUMED.** The frame cap is on the whole
+ * page, and what surrounds the entries — the roster, the delegation, the
+ * claim, the signature — is as long as this publisher makes it. A fixed
+ * allowance fitted the roster it was written against and no other.
+ */
+function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], publisher: Publisher, bounds: Bounds, version: number): readonly SealedPage[] {
+  const lastSealed = boundaries.reduce((top, one) => Math.max(top, one.to), 0)
   const fresh = mine.filter((entry) => entry.seq > lastSealed)
-  /* ⚠️ **NO EMPTY GROUP TO FILTER OUT: `paginate` PUSHES ONLY WHEN
-   * `current.length > 0`**, so an empty log yields an empty list rather than
-   * one empty page. A guard here was dead code that read as caution — and it
-   * hid the fact that the `?? 0` below can never be taken either.
-   *
-   * The `?.`/`?? 0` below are unreachable for the same reason: a group always
-   * holds at least one entry. They exist because `noUncheckedIndexedAccess`
-   * cannot see `paginate`'s guarantee, and a non-null assertion would be a
-   * claim with no check behind it. */
-  /* ⚠️ **THE ENVELOPE IS MEASURED, NOT ASSUMED.** The frame cap is on the
-   * whole page, and what surrounds the entries — the roster, the delegation,
-   * the claim, the signature — is as long as this publisher makes it. A fixed
-   * allowance fitted the roster it was written against and no other. */
   const budget = Math.min(bounds.budget, MAX_PAGE_CHARS - envelopeOf(publisher, version))
   // Stryker disable OptionalChaining
-  const sealedNow: SealedPage[] = paginate(fresh, budget).map((group) => ({
+  return paginate(fresh, budget).map((group) => ({
     device: publisher.device,
     from: group[0]?.seq ?? 0,
     to: group.at(-1)?.seq ?? 0,
@@ -702,75 +872,39 @@ export async function pagesOver(
     work: publisher.work,
   }))
   // Stryker restore OptionalChaining
+}
 
-  const wanted = since[publisher.device] ?? 0
-  const pages: string[] = []
-  let prevPageHash = ''
-  let more = false
-  let chars = 0
-  const maxChars = bounds.maxChars ?? MAX_ANSWER_CHARS
-
-  /* ⚠️ **THE CHAIN IS WALKED FROM THE FIRST PAGE EVEN WHEN THE ANSWER STARTS
-   * LATER.** `prevPageHash` links every page this device has ever emitted, so
-   * the hash a resumed page must carry can only be had by walking from the
-   * beginning. Skipping ahead emits a page whose predecessor the recipient
-   * holds and whose hash does not match it. */
-  for (const boundary of [...boundaries, ...sealedNow]) {
-    const group = []
-    for (let seq = boundary.from; seq <= boundary.to; seq++) {
-      const entry = bySeq.get(seq)
-      /* ⚠️ **A STORED BOUNDARY CAN OUTLIVE THE ENTRIES IT COVERS** — a file
-       * edited by hand, a row dropped by a future migration. Pushing the
-       * `undefined` would put a `null` inside `entries`, and the page then
-       * goes out signed, canonical and holding a hole that every recipient
-       * refuses without being able to say what is wrong with it. */
-      if (entry) group.push(entry)
-    }
-    const body: Omit<Page, 'sig'> = {
-      v: version,
-      person: publisher.person,
-      work: boundary.work ?? publisher.work,
-      device: publisher.device,
-      from: boundary.from,
-      to: boundary.to,
-      prevPageHash,
-      entries: group,
-      /* As first served — see `SealedPage`. A boundary sealed before the
-         metadata was kept rebuilds with the current values, as it always did. */
-      roster: [...(boundary.roster ?? publisher.roster)],
-      revocations: boundary.revocations ?? publisher.revocations,
-      delegation: boundary.delegation ?? publisher.delegation,
-    }
-    /* THE CAP, BEFORE THE SIGNATURE: a page past it is not sent, so signing
-       it is a key operation spent on nothing. Pages at or before the cursor
-       are still signed — their hash is the chain the next page carries. */
-    // Stryker disable next-line EqualityOperator,ConditionalExpression: boundaries are walked in order, so every one at or before the cursor is passed before a page is served; the guard spells out what the order ensures.
-    if (boundary.to > wanted && pages.length >= bounds.maxPages) {
-      more = true
-      break
-    }
-    /* `body` has no `sig` and `signedBytes` drops one anyway — a placeholder
-       here was a value with no meaning, which reads as though it had one. */
-    const sig = await publisher.sign(signedBytes('page', version, body))
-    /* ⚠️ **`canonicalJson`, NOT `signedBytes`, FOR THE BYTES THAT TRAVEL.**
-     * `signedBytes` DROPS `sig` — that is what a signature covers — so building
-     * the wire bytes from it emits a page with no signature at all, and every
-     * recipient answers `not-canonical` because what arrived is not the
-     * canonical form of what parsed. Two different strings on purpose, and
-     * using one for the other has no symptom on this side. */
-    const raw = canonicalJson({ ...body, sig })
-    prevPageHash = hash(raw)
-    if (boundary.to <= wanted) continue
-    /* THE ANSWER AS A WHOLE fits the envelope: each page fits on its own,
-       and thirty-two of them at the cap did not. The rest wait for the next
-       request, which is what `more` says. */
-    if (pages.length > 0 && chars + raw.length > maxChars) {
-      more = true
-      break
-    }
-    chars += raw.length
-    pages.push(raw)
+/**
+ * One page, rebuilt under its boundary — the entries the boundary covers, and
+ * the metadata it was sealed with.
+ *
+ * ⚠️ **A STORED BOUNDARY CAN OUTLIVE THE ENTRIES IT COVERS** — a file edited
+ * by hand, a row dropped by a future migration. Pushing the `undefined` would
+ * put a `null` inside `entries`, and the page then goes out signed, canonical
+ * and holding a hole that every recipient refuses without being able to say
+ * what is wrong with it. (A page missing an end the boundary names is refused
+ * by `checkPage` as malformed, which is the honest outcome for a store whose
+ * rows have gone; it is not silently skipped over.)
+ */
+function rebuilt(boundary: SealedPage, bySeq: ReadonlyMap<number, Entry>, publisher: Publisher, version: number, prevPageHash: string): Omit<Page, 'sig'> {
+  const group: Entry[] = []
+  for (let seq = boundary.from; seq <= boundary.to; seq++) {
+    const entry = bySeq.get(seq)
+    if (entry) group.push(entry)
   }
-
-  return { pages, more, sealed: [...sealed, ...sealedNow] }
+  return {
+    v: version,
+    person: publisher.person,
+    work: boundary.work ?? publisher.work,
+    device: publisher.device,
+    from: boundary.from,
+    to: boundary.to,
+    prevPageHash,
+    entries: group,
+    /* As first served — see `SealedPage`. A boundary sealed before the
+       metadata was kept rebuilds with the current values, as it always did. */
+    roster: [...(boundary.roster ?? publisher.roster)],
+    revocations: boundary.revocations ?? publisher.revocations,
+    delegation: boundary.delegation ?? publisher.delegation,
+  }
 }

@@ -387,6 +387,24 @@ describe('a tag taken off the whole shelf', () => {
     expect(library.getSnapshot().every((one) => !(one.tags ?? []).includes('sea'))).toBe(true)
     expect(library.lastRemoval()).toMatchObject({ tag: 'sea', bookIds: ['book_1', 'book_2'] })
   })
+
+  it('takes it off a book whose record carries it and whose row does not — the disk is asked, not the cache', async () => {
+    /* The crash window: `book.json` a write ahead of `index.json`, and the
+       row built from the index. Judged from the snapshot, the removal left
+       this tag standing while claiming the whole shelf. */
+    const { fs, library } = world(['book_1', 'book_2'])
+    await library.tagBooks(['book_1'], ['sea'])
+    fs.store.set(`${BOOKS_DIR}/book_2/book.json`, new TextEncoder().encode(JSON.stringify({ title: 'book_2', author: '', tags: ['sea'] })))
+    expect(library.getSnapshot()[1]?.tags ?? []).not.toContain('sea')
+    await library.removeTag('sea')
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_2/book.json`)!)) as { tags?: string[] }
+    expect(written.tags ?? []).not.toContain('sea')
+    expect(library.getSnapshot().every((one) => !(one.tags ?? []).includes('sea'))).toBe(true)
+    /* And the way back names it, with the one the index knew about. */
+    expect([...(library.lastRemoval()?.bookIds ?? [])].sort()).toEqual(['book_1', 'book_2'])
+    await library.undoRemoveTag()
+    expect(library.getSnapshot().map((one) => one.tags)).toEqual([['sea'], ['sea']])
+  })
 })
 
 describe('a jacket the store keeps is measured — WI-23.C5', () => {

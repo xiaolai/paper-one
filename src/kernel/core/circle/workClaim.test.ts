@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CORPUS_BUILDS, BUILD_IDS } from '../markCorpus.testkit'
-import { SHELF_WORK, claimFor, indexKeys, listIdOf, listWork, matchWork, normaliseName, primaryLanguage, titleProper } from './workClaim'
+import { MAX_CLAIM_DIGESTS, SHELF_WORK, claimFor, indexKeys, isClaimShape, listIdOf, listWork, logOfClaim, matchWork, normaliseName, primaryLanguage, titleProper } from './workClaim'
 
 /**
  * WI-22.C1 — the log key.
@@ -336,5 +336,52 @@ describe('two languages, one title, one author', () => {
   it('do not meet on the weak key', () => {
     const digest = (value: string) => `h(${value})`
     expect(matchWork(claimFor({ title: 'Dune', author: 'Herbert', languages: ['en'] }, digest), claimFor({ title: 'Dune', author: 'Herbert', languages: ['fr'] }, digest))).toBe('none')
+  })
+})
+
+describe('the one rule for a claim’s shape', () => {
+  const HEX = '1a'.repeat(32)
+  const regular = { ids: [HEX], titles: ['2b'.repeat(32)], author: '3c'.repeat(32), language: 'en' }
+
+  it('reads a regular claim, the shelf’s, and a list’s', () => {
+    expect(isClaimShape(regular)).toBe(true)
+    expect(isClaimShape({ ...regular, ids: [], titles: [], author: '', language: '' })).toBe(true)
+    expect(isClaimShape(SHELF_WORK)).toBe(true)
+    expect(isClaimShape(listWork('aa11'))).toBe(true)
+  })
+
+  it.each([
+    ['a string', 'claim'],
+    ['null', null],
+    ['a list', []],
+    ['a missing field', { ids: [HEX], titles: [], author: '' }],
+    ['an extra field', { ...regular, extra: 1 }],
+    ['ids that are not a list', { ...regular, ids: HEX }],
+    ['an id that is not a digest', { ...regular, ids: ['x'] }],
+    ['an upper-case digest', { ...regular, ids: [HEX.toUpperCase()] }],
+    ['a title that is not a digest', { ...regular, titles: ['t'] }],
+    ['an author that is not a digest', { ...regular, author: 'a' }],
+    ['a language that is not a subtag', { ...regular, language: 'english' }],
+    ['more ids than the bound', { ...regular, ids: Array.from({ length: MAX_CLAIM_DIGESTS + 1 }, (_, i) => i.toString(16).padStart(64, '0')) }],
+    ['more titles than the bound', { ...regular, titles: Array.from({ length: MAX_CLAIM_DIGESTS + 1 }, (_, i) => i.toString(16).padStart(64, '0')) }],
+    ['the shelf’s id beside a digest', { ...regular, ids: [SHELF_WORK.ids[0], HEX] }],
+    ['the shelf’s id with a title', { ...SHELF_WORK, titles: ['2b'.repeat(32)] }],
+    ['a list id that is not a list id', { ...SHELF_WORK, ids: ['paper.circle.list:not-hex'] }],
+    ['two list ids', { ...SHELF_WORK, ids: ['paper.circle.list:aa11', 'paper.circle.list:bb22'] }],
+  ])('refuses %s', (_what, value) => {
+    expect(isClaimShape(value)).toBe(false)
+  })
+
+  it('names which log a claim is for', () => {
+    expect(logOfClaim(regular)).toBe('work')
+    expect(logOfClaim(SHELF_WORK)).toBe('shelf')
+    expect(logOfClaim(listWork('aa11'))).toBe('list')
+  })
+})
+
+describe('the weak index key', () => {
+  it('is minted only with a language AND an author — `matchWork` refuses a weak match on an empty author', () => {
+    expect(indexKeys({ ids: ['x'], titles: ['t'], author: '', language: 'en' })).toEqual(['s:x'])
+    expect(indexKeys({ ids: [], titles: ['t'], author: '', language: 'en' })).toEqual([])
   })
 })

@@ -146,16 +146,32 @@ describe('a list log, compacted', () => {
       { ...stamp(A, 6, 6), op: 'remove', pub: 'y' },
     ]
     const served = compactedList(log, B)
-    /* The creation rides along with the winning retitle: without it the
-       served log folds to a list never created, and a newly admitted peer
-       would hold a renamed list that did not exist. */
+    /* ONE creation, carrying the winning title under the winner's own stamp:
+       the losing title is retracted history, and a view holding only the
+       retitle would fold to a list never created. */
     expect(served.map((one) => [one.op, one.device, one.seq])).toEqual([
       ['create', B, 1],
-      ['retitle', B, 2],
-      ['place', B, 3],
+      ['place', B, 2],
     ])
-    expect(served[2]).toMatchObject({ pub: 'x', position: 2, note: 'moved' })
+    expect(served[0]).toMatchObject({ op: 'create', title: 'Newer', at: at(2) })
+    expect(served[1]).toMatchObject({ pub: 'x', position: 2, note: 'moved' })
     expect(foldList(served)).toMatchObject({ created: true, title: 'Newer', items: [{ pub: 'x', position: 2 }] })
+    /* And no retracted title anywhere in what is served — the falsifier. */
+    expect(JSON.stringify(served)).not.toContain('"L"')
+  })
+
+  it('serves the same bytes from every arrival order — sorted before it is renumbered', () => {
+    const log: Entry[] = [create, place(B, 1, 5, 'y', 2), place(A, 2, 3, 'x', 1), { ...stamp(A, 3, 4), op: 'retitle', title: 'Newer' }]
+    const one = compactedList(log, B)
+    const other = compactedList([...log].reverse(), B)
+    expect(one).toEqual(other)
+    expect(one.map((entry) => entry.seq)).toEqual([1, 2, 3])
+    /* Log order: the placement at stamp 3, the retitle-turned-create at 4, the placement at 5. */
+    expect(one.map((entry) => [entry.op, entry.at])).toEqual([
+      ['place', at(3)],
+      ['create', at(4)],
+      ['place', at(5)],
+    ])
   })
 
   it('serves the creation alone as the title when nothing retitled it', () => {
@@ -172,11 +188,18 @@ describe('a list log, compacted', () => {
 })
 
 describe('one placement delivered twice', () => {
-  it('keeps the first word at one (device, seq, stamp), whatever the second says', () => {
+  it('keeps ONE word at one (device, seq, stamp), the same whichever arrived first — a fork, resolved as `fold` resolves one', () => {
+    /* An honest device never writes two entries at one sequence, so this is a
+       forgery or a corruption; what matters is that two replicas that met
+       the two in either order hold the same list, or they diverge for ever.
+       The canonical spelling orders them, and the lesser is kept. */
     const create: Entry = { ...stamp(A, 1, 1), op: 'create', title: 'L' }
     const first = place(A, 2, 5, 'x', 3, 'first')
     const again = { ...first, note: 'again', position: 9 }
-    expect(foldList([create, first, again]).items).toEqual([expect.objectContaining({ note: 'first', position: 3 })])
-    expect(foldList([create, again, first]).items).toEqual([expect.objectContaining({ note: 'again', position: 9 })])
+    const oneWay = foldList([create, first, again]).items
+    const otherWay = foldList([create, again, first]).items
+    expect(oneWay).toEqual(otherWay)
+    expect(oneWay).toHaveLength(1)
+    expect(compactedList([create, first, again], B)).toEqual(compactedList([create, again, first], B))
   })
 })

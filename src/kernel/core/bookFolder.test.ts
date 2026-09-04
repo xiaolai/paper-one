@@ -9,6 +9,7 @@ import {
   contentPathIn,
   coverPathIn,
   folderOf,
+  isContentHash,
   legacyCoverPathIn,
   marksPathIn,
   MAX_REVIEW,
@@ -190,6 +191,10 @@ describe('parseRecord', () => {
       { ...facts, size: 1.5 },
       { ...facts, hash: 'CD'.repeat(32) },
       { ...facts, hash: 'cd'.repeat(31) },
+      /* COERCIBLE, NOT MERELY THE WRONG TYPE: `RegExp.test` stringifies its
+         argument, and a one-element array of a well-formed digest stringifies
+         to that digest. The type check in `isContentHash` is what refuses it. */
+      { ...facts, hash: ['cd'.repeat(32)] },
       { ...facts, extra: 1 },
       { name: 'cover.jpg', size: 1 },
       'cd'.repeat(32),
@@ -198,6 +203,19 @@ describe('parseRecord', () => {
     ]) {
       expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', coverFacts: bad }))!, JSON.stringify(bad)).not.toHaveProperty('coverFacts')
     }
+  })
+
+  /* THE ONE DIGEST RULE, held to the letter: sixty-four lowercase hex digits
+     as a string — not upper case, not sixty-three, and not a value that only
+     STRINGIFIES to one, which `RegExp.test` alone would have accepted. */
+  it('isContentHash accepts exactly a 64-digit lowercase hex string', () => {
+    expect(isContentHash('cd'.repeat(32))).toBe(true)
+    expect(isContentHash('CD'.repeat(32))).toBe(false)
+    expect(isContentHash('cd'.repeat(31))).toBe(false)
+    expect(isContentHash(`${'cd'.repeat(32)}\n`)).toBe(false)
+    expect(isContentHash(['cd'.repeat(32)])).toBe(false)
+    expect(isContentHash({ toString: () => 'cd'.repeat(32) })).toBe(false)
+    expect(isContentHash(null)).toBe(false)
   })
 
   it('derives tags from a tagClock when one is present — the clock can say "removed"', () => {
@@ -738,6 +756,35 @@ describe('mergeStranded', () => {
   it('keeps the live metadata', () => {
     expect(mergeStranded(stranded, book({ title: 'Corrected' })).title).toBe('Corrected')
   })
+
+  /* ONE FACT, NOT TWO. A live record from before `status` existed carries a
+   * legacy `finished: true`; when a stranded `reading` status wins, the merged
+   * record must say `reading` and NOT finished. Spreading `live` first kept
+   * both — the one thing `BookRecord` promises a record can never say. */
+  it('derives finished from the winning status rather than keeping a legacy flag beside it', () => {
+    const reading = { state: 'reading' as const, at: hlcOf(40) }
+    const merged = mergeStranded(book({ status: reading }), book({ finished: true }))
+    expect(merged.status).toEqual(reading)
+    expect(merged.finished).toBe(false)
+    /* The live status wins over the stranded one, and `finished` follows it. */
+    const done = { state: 'finished' as const, at: hlcOf(50) }
+    const liveWins = mergeStranded(book({ status: reading }), book({ status: done }))
+    expect(liveWins.status).toEqual(done)
+    expect(liveWins.finished).toBe(true)
+  })
+
+  it('never marries a live orphan ratingAt to the stranded side’s rating', () => {
+    const merged = mergeStranded(book({ rating: 4 }), book({ ratingAt: hlcOf(60) }))
+    expect(merged.rating).toBe(4)
+    expect(merged).not.toHaveProperty('ratingAt')
+    /* A live rating keeps its own stamp; the stranded one is not consulted. */
+    const live = mergeStranded(book({ rating: 2, ratingAt: hlcOf(10) }), book({ rating: 5, ratingAt: hlcOf(70) }))
+    expect(live.rating).toBe(5)
+    expect(live.ratingAt).toEqual(hlcOf(70))
+    /* And a live review still beats a stranded one, without the spread. */
+    const words = { text: 'live words', at: hlcOf(80) }
+    expect(mergeStranded(book({ review: { text: 'old', at: hlcOf(20) } }), book({ review: words })).review).toEqual(words)
+  })
 })
 
 /**
@@ -1177,13 +1224,19 @@ describe('the reader’s own opinion through the two merges — WI-23.B3, one ro
 })
 
 describe('finished follows the status that wins the merge', () => {
+  /* `false`, NOT ABSENT, when a status wins and is not `finished`: the shape
+   * `parseRecord`, `libraryStore.setStatus` and the sync merge all write, so a
+   * rescue cannot produce a record those three would spell differently. This
+   * pinned "absent" while the spread of `live` was quietly carrying a legacy
+   * `finished: true` through beside a `reading` status. */
   it('is true for a finished status, false for any other status whatever the old flags said, and the old OR without a status', () => {
     const finished = { state: 'finished' as const, at: hlcOf(5) }
     const reading = { state: 'reading' as const, at: hlcOf(5) }
-    expect(mergeStranded(book({ finished: true }), book({ status: reading })).finished).toBeUndefined()
-    expect(mergeStranded(book({ status: reading, finished: true }), book({})).finished).toBeUndefined()
+    expect(mergeStranded(book({ finished: true }), book({ status: reading })).finished).toBe(false)
+    expect(mergeStranded(book({ status: reading, finished: true }), book({})).finished).toBe(false)
+    expect(mergeStranded(book({ status: reading }), book({ finished: true })).finished).toBe(false)
     expect(mergeStranded(book({}), book({ status: finished })).finished).toBe(true)
-    expect(mergeStranded(book({ status: finished }), book({ status: reading })).finished).toBeUndefined()
+    expect(mergeStranded(book({ status: finished }), book({ status: reading })).finished).toBe(false)
     expect(mergeStranded(book({ finished: true }), book({})).finished).toBe(true)
     expect(mergeStranded(book({}), book({ finished: true })).finished).toBe(true)
     expect(mergeStranded(book({}), book({})).finished).toBeUndefined()

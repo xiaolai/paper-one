@@ -36,6 +36,73 @@ describe('a service, through the composition', () => {
     const service = { name: 'circle.ping', grant: 'circle:read', handler: 'later' } as unknown as ServiceContribution
     await expect(composeCapabilities([withServices([service])], api(), signal())).rejects.toThrow(/has no handler to call/u)
   })
+
+  it('refuses one of the kernel’s own rows with nothing to call BY NAME, not with a TypeError from the bind', async () => {
+    /* The kernel's services were bound before the namespace check ran, so a
+       row with no handler failed as `.bind` of a non-function — a raw error
+       naming nothing — rather than as the composition refusal every other
+       row gets. */
+    const service = { name: 'book.ping', grant: 'book:read', handler: 'later' } as unknown as ServiceContribution
+    const refused = composeCapabilities([], api(), signal(), { services: [service] })
+    await expect(refused).rejects.toThrow(/service "book.ping" has no handler to call/u)
+    await expect(refused).rejects.not.toThrow(/bind/u)
+  })
+
+  it('reads an accessor-backed handler exactly once — what was checked is what is called', async () => {
+    /* Checked in one place and bound in another, the row was read twice, and
+       an accessor could answer the check with one function and the bind with
+       another. One read: the function it answered is the one bound. */
+    let reads = 0
+    const row = {
+      name: 'circle.ping',
+      grant: 'circle:read',
+      get handler() {
+        reads += 1
+        const nth = reads
+        return async () => `read ${nth}`
+      },
+    } as unknown as ServiceContribution
+    const composition = await composeCapabilities([withServices([row])], api(), signal())
+    expect(reads).toBe(1)
+    await expect(composition.services.get('circle.ping')!.handler({} as never, {} as never)).resolves.toBe('read 1')
+    composition.dispose()
+  })
+
+  /* READ ONCE AND BOUND, like every other checked method. A spread copies own
+     enumerable keys only: a handler inherited from a prototype passed the
+     check and vanished from the copy, and one reading `this` ran with the
+     copy for a receiver. */
+  it('keeps an inherited handler, and calls it with its own receiver', async () => {
+    class Row {
+      readonly name = 'circle.ping'
+      readonly grant = 'circle:read'
+      readonly word = 'from the receiver'
+      async handler(): Promise<string> {
+        return this.word
+      }
+    }
+    const composition = await composeCapabilities([withServices([new Row() as unknown as ServiceContribution])], api(), signal())
+    const held = composition.services.get('circle.ping')
+    expect(typeof held?.handler).toBe('function')
+    await expect(held!.handler({} as never, {} as never)).resolves.toBe('from the receiver')
+    composition.dispose()
+  })
+})
+
+/* A SNAPSHOT HAS NO LIVE PARTS. The pane record was a frozen copy while its
+   `screens` array stayed the capability's own, so the list the fitting rule
+   reads could be emptied or extended after the namespace check. */
+describe('a pane’s screens, snapshotted', () => {
+  it('are a frozen copy the capability cannot change afterwards', async () => {
+    const screens = ['library']
+    const pane = { id: 'circle:pane', label: 'Circle', screens, render: () => 'drawn' } as unknown as NonNullable<Capability['panes']>[number]
+    const composition = await composeCapabilities([{ id: 'circle', panes: [pane] }], api(), signal())
+    screens.length = 0
+    screens.push('reader')
+    expect(composition.panes[0]!.screens).toEqual(['library'])
+    expect(Object.isFrozen(composition.panes[0]!.screens)).toBe(true)
+    composition.dispose()
+  })
 })
 
 describe('a contribution with nothing to call', () => {

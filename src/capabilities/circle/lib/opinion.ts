@@ -1,6 +1,6 @@
 import { compareEntries } from '../../../kernel'
 import type { BookRecord, Hlc, ReadingState, Stars } from '../../../kernel'
-import { nextSeqFor, type OpinionRow, type ReviewRow, type SharedFile, MAX_TAGS } from './publish'
+import { nextSeqFor, type OpinionRow, type ReviewRow, type SharedFile, type Withdrawal, MAX_TAGS } from './publish'
 
 /**
  * What the reader thinks of a book, published — WI-23.B4's deciding half.
@@ -129,10 +129,17 @@ export function republish(
   if (now.review !== was.review) {
     /* Taken back first — a review is edited as a withdrawal plus a new
        publication, never rewritten in place. EVERY live one: two devices can
-       each have published, and a change made here supersedes them all. */
+       each have published, and a change made here supersedes them all — and
+       each withdrawal is stamped in THIS device's stream, the one it serves,
+       whichever device published the review (`Withdrawal`). */
     let seq = nextSeqFor(next, device)
-    const gone = new Map<ReviewRow, { readonly seq: number; readonly at: Hlc }>()
-    for (const live of liveReviews(next)) gone.set(live, { seq: seq++, at })
+    const gone = new Map<ReviewRow, Withdrawal>()
+    for (const live of liveReviews(next)) {
+      /* One number per withdrawal, and past the safe integers there is no
+         next number: `nextSeqFor` refuses the first, this refuses the rest. */
+      if (!Number.isSafeInteger(seq)) throw new Error(`the log for ${device} has run out of sequence numbers`)
+      gone.set(live, { device, seq: seq++, at })
+    }
     // Stryker disable next-line ConditionalExpression,EqualityOperator: with nothing to take back the map copies the rows unchanged, and the publication that follows replaces the list anyway.
     if (gone.size > 0) {
       next = { ...next, reviews: next.reviews.map((row) => (gone.has(row) ? { ...row, unreviewed: gone.get(row)! } : row)) }

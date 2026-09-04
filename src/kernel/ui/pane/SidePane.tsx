@@ -482,9 +482,24 @@ export function SidePane({
 
         {/* A contributed pane: the capability's own element, narrowed from
             the opaque handle it registered — see `renderContribution`. */}
+        {/* THE BOOK THE SCREEN SHOWS, not the book the reader holds. The
+            reader stays loaded behind the library, so `book.bookId` still
+            names the last book opened while the library is on screen — and
+            `PaneContext` promises `null` there. A pane fitted to the library
+            was handed the previous book's id; the reset key read the same
+            value, so it did not start over either. The label a reader sees is
+            the pane's own; the id goes to the log. */}
         {shown.contribution && (
-          <ContributionBoundary label={shown.contribution.id} resetKey={`${shown.contribution.id}:${book.bookId}`}>
-            <ContributionBody id={shown.contribution.id} render={shown.contribution.render} context={{ bookId: book.bookId }} />
+          <ContributionBoundary
+            label={shown.contribution.label}
+            id={shown.contribution.id}
+            resetKey={`${shown.contribution.id}:${state.screen === 'reader' ? book.bookId : null}`}
+          >
+            <ContributionBody
+              id={shown.contribution.id}
+              render={shown.contribution.render}
+              context={{ bookId: state.screen === 'reader' ? book.bookId : null }}
+            />
           </ContributionBoundary>
         )}
       </div>

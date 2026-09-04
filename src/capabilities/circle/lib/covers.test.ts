@@ -1,7 +1,7 @@
 import { blake3 } from '@noble/hashes/blake3.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { describe, expect, it, vi } from 'vitest'
-import { MAX_COVER_BYTES, NOTHING_SPENT, personFolderIn, type Spend, type VaultFs } from '../../../kernel'
+import { MAX_COVER_BYTES, NOTHING_SPENT, charge, personFolderIn, type Spend, type VaultFs } from '../../../kernel'
 import { fakeFs } from '../../../kernel/testkit'
 import { base64Of } from './base64'
 import { COVER_CAP_SETTING, COVER_INDEX_PATH, coverPathOf, createCoverFetcher } from './covers'
@@ -50,8 +50,12 @@ function world(serve = serving(), over: { cap?: number; budget?: Spend } = {}) {
   const fetcher = createCoverFetcher({
     fs,
     dial,
-    spend: (person) => ledger.get(person) ?? NOTHING_SPENT,
-    spent: (person, next) => void ledger.set(person, next),
+    /* The ledger as `index.ts` keeps it: read, decided and committed in one step. */
+    charge: (person, bytes) => {
+      const charged = charge(ledger.get(person) ?? NOTHING_SPENT, 'cover', bytes, ++now)
+      if (charged.allowed) ledger.set(person, charged.spend)
+      return charged.allowed
+    },
     now: () => ++now,
     capBytes: () => over.cap ?? 64 * 1024 * 1024,
   })
@@ -257,5 +261,243 @@ describe('the index and the cap, to the letter', () => {
     expect(await tiny.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)).toEqual(small)
     expect(tiny.fs.store.has(coverPathOf(ALICE, smallDigest))).toBe(true)
     expect(Object.keys(indexOf(tiny))).toEqual([`${ALICE}/${smallDigest}`])
+  })
+})
+
+describe('forgetting a person’s jackets', () => {
+  const small = new Uint8Array(1000).fill(3)
+  const smallDigest = bytesToHex(blake3(small))
+  const indexOf = (w: ReturnType<typeof world>) => JSON.parse(new TextDecoder().decode(w.fs.store.get(COVER_INDEX_PATH)!)) as Record<string, { size: number; usedAt: number }>
+
+  it('drops their index entries and nobody else’s', async () => {
+    const w = world(serving(small))
+    await w.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)
+    const BOB = 'c1'.repeat(32)
+    w.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ ...indexOf(w), [`${BOB}/${'ff'.repeat(32)}`]: { size: 1, usedAt: 1 } })))
+    await w.fetcher.purge(ALICE)
+    expect(Object.keys(indexOf(w))).toEqual([`${BOB}/${'ff'.repeat(32)}`])
+  })
+
+  it('fences a fetch that was on its way: it keeps nothing when it lands, and answers null', async () => {
+    /* The dial answers only when told to, so the purge can run in between. */
+    let release: (() => void) | null = null
+    const base = serving(small)
+    const gated = {
+      ...base,
+      session: {
+        ...base.session,
+        call: (s: string, body: unknown) =>
+          new Promise<{ offset: number; size: number; bytes: string; more: boolean }>((done) => {
+            release = () => void base.session.call(s, body).then(done)
+          }),
+      },
+    }
+    const w = world(gated)
+    const landing = w.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)
+    await new Promise((done) => setTimeout(done, 0))
+    await w.fetcher.purge(ALICE)
+    release!()
+    expect(await landing).toBeNull()
+    expect(w.fs.store.has(coverPathOf(ALICE, smallDigest))).toBe(false)
+    expect(w.fs.store.has(COVER_INDEX_PATH) ? Object.keys(indexOf(w)) : []).toEqual([])
+    /* Asked again after the purge, it is fetched afresh and kept. */
+    w.dial.mockImplementation(() => Promise.resolve(serving(small).session))
+    expect(await w.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)).toEqual(small)
+    expect(w.fs.store.has(coverPathOf(ALICE, smallDigest))).toBe(true)
+  })
+})
+
+describe('the cache, held to the letter', () => {
+  const small = new Uint8Array(1000).fill(3)
+  const smallDigest = bytesToHex(blake3(small))
+  const indexOf = (w: ReturnType<typeof world>) => JSON.parse(new TextDecoder().decode(w.fs.store.get(COVER_INDEX_PATH)!)) as Record<string, { size: number; usedAt: number }>
+
+  it('refetches a kept file that no longer hashes to its digest, rather than trusting it under that digest', async () => {
+    const w = world(serving(small))
+    w.fs.store.set(coverPathOf(ALICE, smallDigest), new Uint8Array(1000).fill(9))
+    w.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ [`${ALICE}/${smallDigest}`]: { size: 1000, usedAt: 1 } })))
+    expect(await w.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)).toEqual(small)
+    expect(w.dial).toHaveBeenCalledTimes(1)
+    expect(w.fs.store.get(coverPathOf(ALICE, smallDigest))).toEqual(small)
+  })
+
+  it('keeps counting a file that would not go, so the cap is a number the disk obeys', async () => {
+    const w = world(serving(small), { cap: 1500 })
+    const stuck = 'aa'.repeat(32)
+    w.fs.store.set(coverPathOf(ALICE, stuck), new Uint8Array(1000))
+    w.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ [`${ALICE}/${stuck}`]: { size: 1000, usedAt: 1 } })))
+    const remove = w.fs.remove.bind(w.fs)
+    w.fs.remove = (path: string) => (path === coverPathOf(ALICE, stuck) ? Promise.reject(new Error('locked')) : remove(path))
+    expect(await w.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)).toEqual(small)
+    /* Still indexed, still on disk: an entry that lied about being gone would be disk the cap never saw again. */
+    expect(Object.keys(indexOf(w)).sort()).toEqual([`${ALICE}/${stuck}`, `${ALICE}/${smallDigest}`].sort())
+    expect(w.fs.store.has(coverPathOf(ALICE, stuck))).toBe(true)
+    /* A file already gone leaves the index without a removal. */
+    w.fs.store.delete(coverPathOf(ALICE, stuck))
+    await w.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)
+    expect(Object.keys(indexOf(w))).toEqual([`${ALICE}/${smallDigest}`])
+  })
+
+  it('makes room on a cache hit too, so a lowered cap is obeyed before the next download', async () => {
+    const w = world(serving(small), { cap: 1500 })
+    const other = 'bb'.repeat(32)
+    w.fs.store.set(coverPathOf(ALICE, smallDigest), small)
+    w.fs.store.set(coverPathOf(ALICE, other), new Uint8Array(1000))
+    w.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ [`${ALICE}/${smallDigest}`]: { size: 1000, usedAt: 9 }, [`${ALICE}/${other}`]: { size: 1000, usedAt: 1 } })))
+    expect(await w.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)).toEqual(small)
+    expect(w.dial).not.toHaveBeenCalled()
+    expect(Object.keys(indexOf(w))).toEqual([`${ALICE}/${smallDigest}`])
+    expect(w.fs.store.has(coverPathOf(ALICE, other))).toBe(false)
+  })
+
+  it('drops an index entry whose use is not finite — `1e400` is valid JSON and sorts nowhere', async () => {
+    const w = world(serving(small))
+    w.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(`{"${ALICE}/${'ff'.repeat(32)}":{"size":1,"usedAt":1e400}}`))
+    await w.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)
+    expect(Object.keys(indexOf(w))).toEqual([`${ALICE}/${smallDigest}`])
+  })
+})
+
+describe('the cache and a purge, or an eviction, in flight together', () => {
+  const small = new Uint8Array(1000).fill(3)
+  const smallDigest = bytesToHex(blake3(small))
+  const indexOf = (w: ReturnType<typeof world>) => JSON.parse(new TextDecoder().decode(w.fs.store.get(COVER_INDEX_PATH)!)) as Record<string, { size: number; usedAt: number }>
+
+  it('answers null from the cache for a fetch begun after a purge was asked for, and does not re-index the file', async () => {
+    /* The purge's turn comes after the hit's: answered from the file it is
+       about to lose, the hit re-indexed a jacket in a folder that was gone. */
+    const w = world(serving(small))
+    w.fs.store.set(coverPathOf(ALICE, smallDigest), small)
+    w.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ [`${ALICE}/${smallDigest}`]: { size: 1000, usedAt: 1 } })))
+    const purged = w.fetcher.purge(ALICE)
+    /* Begun after the purge was ASKED for, before its turn: the cache says no — the purge takes the file with the entry — and the wire is asked. */
+    const asked = w.fetcher.ensure(ALICE, LAPTOP, 'pub1', smallDigest)
+    await purged
+    expect(await asked).toEqual(small)
+    expect(w.dial).toHaveBeenCalledTimes(1)
+    expect(Object.keys(indexOf(w))).toEqual([`${ALICE}/${smallDigest}`])
+    /* The purge removed what its index named. */
+    const again = world(serving(small))
+    again.fs.store.set(coverPathOf(ALICE, smallDigest), small)
+    again.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ [`${ALICE}/${smallDigest}`]: { size: 1000, usedAt: 1 } })))
+    await again.fetcher.purge(ALICE)
+    expect(again.fs.store.has(coverPathOf(ALICE, smallDigest))).toBe(false)
+    /* And one begun BEFORE the purge is fenced at the keep, whichever path it took. */
+    w.fs.store.set(coverPathOf(ALICE, 'ff'.repeat(32)), small)
+    w.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ [`${ALICE}/${'ff'.repeat(32)}`]: { size: 1000, usedAt: 1 } })))
+    const before = w.fetcher.ensure(ALICE, LAPTOP, 'pub2', 'ff'.repeat(32))
+    const gone = w.fetcher.purge(ALICE)
+    await gone
+    /* The stale bytes do not verify against that digest, so the hit path drops them and the wire answers `small`, whose digest is not `ff…`: null, and nothing indexed for Alice. */
+    expect(await before).toBeNull()
+    expect(Object.keys(indexOf(w)).filter((key) => key.startsWith(`${ALICE}/`))).toEqual([])
+  })
+
+  it('reads a kept jacket whole before a later keep can evict it — the hit and the eviction take turns', async () => {
+    /* Read outside the serialisation, an eviction between the `exists` and
+       the read deleted the file under it. A read that yields mid-way is how
+       the old race is forced. */
+    const w = world(serving(small), { cap: 1500 })
+    const other = 'bb'.repeat(32)
+    w.fs.store.set(coverPathOf(ALICE, other), new Uint8Array(1000).fill(4))
+    w.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ [`${ALICE}/${other}`]: { size: 1000, usedAt: 1 } })))
+    const order: string[] = []
+    const readFile = w.fs.readFile.bind(w.fs)
+    const remove = w.fs.remove.bind(w.fs)
+    w.fs.readFile = async (path: string) => {
+      order.push(`read ${path}`)
+      await new Promise((done) => setTimeout(done, 5))
+      return readFile(path)
+    }
+    w.fs.remove = (path: string) => {
+      order.push(`remove ${path}`)
+      return remove(path)
+    }
+    const otherDigestOf = bytesToHex(blake3(new Uint8Array(1000).fill(4)))
+    w.fs.store.set(coverPathOf(ALICE, otherDigestOf), new Uint8Array(1000).fill(4))
+    w.fs.store.set(COVER_INDEX_PATH, new TextEncoder().encode(JSON.stringify({ [`${ALICE}/${otherDigestOf}`]: { size: 1000, usedAt: 1 } })))
+    /* The hit begins; the download of `small` lands while its read is paused, and its keep must evict the oldest — the very file being read. */
+    const hit = w.fetcher.ensure(ALICE, LAPTOP, 'pub-other', otherDigestOf)
+    const landing = w.fetcher.ensure(ALICE, LAPTOP, 'pub-small', smallDigest)
+    expect(await hit).toEqual(new Uint8Array(1000).fill(4))
+    expect(await landing).toEqual(small)
+    const read = order.findIndex((one) => one === `read ${coverPathOf(ALICE, otherDigestOf)}`)
+    const removed = order.findIndex((one) => one === `remove ${coverPathOf(ALICE, otherDigestOf)}`)
+    expect(read).toBeGreaterThanOrEqual(0)
+    expect(removed).toBeGreaterThan(read)
+    /* AND THE TOUCH DID NOT PUT THE EVICTED ENTRY BACK. Outside the
+       serialisation the hit's touch landed after the eviction and re-indexed
+       a file the eviction had just removed: the index named a jacket that
+       was not on disk. Every entry names a file that is there. */
+    const index = indexOf(w)
+    expect(Object.keys(index)).toEqual([`${ALICE}/${smallDigest}`])
+    expect(w.fs.store.has(coverPathOf(ALICE, otherDigestOf))).toBe(false)
+    for (const key of Object.keys(index)) {
+      const cut = key.indexOf('/')
+      expect(w.fs.store.has(coverPathOf(key.slice(0, cut), key.slice(cut + 1)))).toBe(true)
+    }
+  })
+})
+
+/* THE SIGNAL REACHES THE TRANSFER. A signal that only cancelled the answer
+   left the bytes moving — and the budget spending — for a row that had
+   scrolled away. One transfer per digest, shared; abandoned when the LAST
+   caller has let go, and not before. */
+describe('a transfer abandoned', () => {
+  /** The first chunk is answered only when the test opens the gate. */
+  function gated() {
+    const serve = serving()
+    let open: () => void = () => {}
+    const held = new Promise<void>((done) => {
+      open = done
+    })
+    const session = {
+      call: async (service: string, body: unknown) => {
+        if (serve.calls.length === 0) await held
+        return serve.session.call(service, body)
+      },
+      close: serve.session.close,
+    }
+    return { serve, session, open: () => open() }
+  }
+
+  it('stops once every caller has let go: the next chunk is not asked for, the session is closed, and a fresh ask dials again', async () => {
+    const g = gated()
+    const w = world({ ...g.serve, session: g.session })
+    const a = new AbortController()
+    const b = new AbortController()
+    const first = w.fetcher.ensure(ALICE, LAPTOP, 'pub1', DIGEST, a.signal)
+    const second = w.fetcher.ensure(ALICE, LAPTOP, 'pub1', DIGEST, b.signal)
+    await new Promise((done) => setTimeout(done, 0))
+    expect(w.dial).toHaveBeenCalledTimes(1)
+    a.abort()
+    b.abort()
+    g.open()
+    expect(await first).toBeNull()
+    expect(await second).toBeNull()
+    /* The first chunk had landed; the second was never asked for. */
+    expect(g.serve.calls).toHaveLength(1)
+    expect(g.serve.closed()).toBe(1)
+    /* Nothing stale in flight: the next ask is a new transfer. */
+    expect(await w.fetcher.ensure(ALICE, LAPTOP, 'pub1', DIGEST)).toEqual(JACKET)
+    expect(w.dial).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps going while one caller still wants it, and answers null at once to a signal already aborted', async () => {
+    const g = gated()
+    const w = world({ ...g.serve, session: g.session })
+    const a = new AbortController()
+    const first = w.fetcher.ensure(ALICE, LAPTOP, 'pub1', DIGEST, a.signal)
+    /* A second caller with no signal wants it until it lands. */
+    const second = w.fetcher.ensure(ALICE, LAPTOP, 'pub1', DIGEST)
+    a.abort()
+    g.open()
+    expect(await second).toEqual(JACKET)
+    expect(await first).toEqual(JACKET)
+    expect(g.serve.calls).toHaveLength(2)
+    const gone = new AbortController()
+    gone.abort()
+    expect(await w.fetcher.ensure(ALICE, LAPTOP, 'pub2', 'ee'.repeat(32), gone.signal)).toBeNull()
+    expect(w.dial).toHaveBeenCalledTimes(1)
   })
 })

@@ -4,7 +4,7 @@ import { createCards, type CardStorage, type Cards } from './cardStore'
 import { type Hlc, makeHlc, ZERO_DEVICE, HLC_MAX_COUNTER } from './hlc'
 import { createLibrary, type Library } from './libraryStore'
 import { createMarkStore, type MarkStore } from './markStore'
-import { folderOf } from './bookFolder'
+import { folderOf, readBook, recordPath } from './bookFolder'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
 import { NO_GLOSS, type GlossProvider } from './gloss'
 import { NO_WORK_LINE, NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_KINDS, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type HashPort, type SizePort, type WorkLine } from './ports'
@@ -376,7 +376,6 @@ function routedRecorder(
 /** What `removeBlob` needs of the services being built around it. */
 interface BlobRemoval {
   readonly fs: IndexFs | null
-  readonly writes: WriteQueue
   readonly library: Library
   readonly recorder: MutationRecorder
 }
@@ -392,7 +391,7 @@ interface BlobRemoval {
  * thing in `createKernelServices` and the only one that did any work.
  */
 async function removeBlob(
-  { fs, writes, library, recorder }: BlobRemoval,
+  { fs, library, recorder }: BlobRemoval,
   bookId: string,
   name: RemovableBlobName,
 ): Promise<void> {
@@ -453,62 +452,103 @@ async function removeBlob(
      * added to the closed set would have been journalled as `content` and
      * told every peer the book's bytes had changed. */
     const kind = REMOVABLE_BLOB_KINDS[name]
-    await writes.append(library.lane(bookId), async () => {
-      /* ⚠️ **ASKED INSIDE THE LANE, where the answer cannot go stale.** The
-       * shelf was read before the queue was joined — a check-then-act across
-       * a lane boundary — so an add or a rekey already queued for this folder
-       * could claim it while the deletion waited its turn, and the delete
-       * then ran against a snapshot describing a book that no longer owned
-       * these bytes. This is the same repair `AddGuard.fresh` and
-       * `RestoreGuard` are: the scan is the diagnosis, the lane is the
-       * decision. */
-      /* RESOLVED INSIDE THE LANE, beside the ownership check it belongs with:
-       * a rekey queued ahead of this may have moved the book, and then the
-       * folder this id names either belongs to the new id — refused below —
-       * or no longer holds the bytes, which the exists check reads as the
-       * documented absent no-op. An id no longer on the shelf still clears
-       * its orphaned folder: that is the no-op the contract promises. */
-      const folder = folderOf(bookId)
-      const other = claimant()
-      if (other !== undefined) {
-        throw new Error(
-          `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(other.bookId)} does`,
-        )
-      }
-      const path = `${folder}/${name}`
-      /* ⚠️ CHECKED BEFORE THE BRACKET IS OPENED, not inside it. An absent
-       * blob is the documented no-op, and opening a bracket around it wrote
-       * a committed mutation for a change that did not happen: the journal
-       * advanced, the feed carried an entry, and the verify pass had one more
-       * surface to digest — all for a file that was already gone. Removing
-       * the same blob twice, or evicting a book whose bytes a peer already
-       * took, did exactly this.
-       *
-       * EXISTS-THEN-REMOVE IS ATOMIC ONLY AGAINST THIS QUEUE, and another
-       * PROCESS can still take the file in between — so a remove that races
-       * one is an ordinary absence, not a fault. Absence is the documented
-       * no-op for this operation either way; raising it would turn two
-       * callers both doing the right thing into an error for one of them.
-       * Both checks are inside the queued task, so the pair is still atomic
-       * against everything else touching this folder. */
-      if (!(await fs.exists(path))) return
-      await recorded(recorder, bookId, kind, async () => {
-        await fs.remove(path).catch(async (cause: unknown) => {
-          if (await fs.exists(path)) throw cause
-        })
-      })
-    })
-  /* A JACKET GONE IS ITS FACTS GONE (WI-23.C5): `coverFacts` describe a file
-     that is no longer there, and a circle that read them would publish a
-     digest this device cannot serve. After the lane above, not inside it —
-     `update` takes the lane itself. */
-  if (name === 'cover.jpg' || name === 'cover.webp') {
-    await library.update(bookId, (held) => {
-      if (held.coverFacts === undefined) return held
-      const { coverFacts: _gone, ...rest } = held
-      return rest
-    })
-  }
+    /* ⚠️ **THE UNLINK AND THE FACTS IN ONE LANE TASK** — `updateAfter`. Two
+       tasks — the unlink, then a record change queued after it — left a gap
+       a stamp could land in: a jacket landed again under this name between
+       the two had its fresh facts erased by the cleanup. And a recorder
+       commit that failed after the unlink used to throw past the cleanup
+       altogether, leaving facts describing a file that was not there. The
+       hook runs inside the lane, before the record write, and says whether
+       the record follows; a refusal by another book's claim, and a recorder
+       failure after the bytes left, are raised once the lane is done. */
+    let claimedBy: string | null = null
+    let unreadable: Error | null = null
+    let deletable = false
+    await library.updateAfter(
+      bookId,
+      {
+        before: async (target) => {
+          /* ⚠️ **ASKED INSIDE THE LANE, where the answer cannot go stale.** The
+           * shelf was read before the queue was joined — a check-then-act across
+           * a lane boundary — so an add or a rekey already queued for this folder
+           * could claim it while the deletion waited its turn, and the delete
+           * then ran against a snapshot describing a book that no longer owned
+           * these bytes. This is the same repair `AddGuard.fresh` and
+           * `RestoreGuard` are: the scan is the diagnosis, the lane is the
+           * decision. */
+          /* RESOLVED INSIDE THE LANE, beside the ownership check it belongs with:
+           * a rekey queued ahead of this may have moved the book, and then the
+           * folder this id names either belongs to the new id — refused below —
+           * or no longer holds the bytes, which the exists check reads as the
+           * documented absent no-op. An id no longer on the shelf still clears
+           * its orphaned folder: that is the no-op the contract promises. */
+          const other = claimant()
+          if (other !== undefined) {
+            claimedBy = other.bookId
+            return 'refuse'
+          }
+          /* ⚠️ CHECKED BEFORE ANY BRACKET IS OPENED. An absent blob is the
+           * documented no-op, and opening a bracket around it wrote a
+           * committed mutation for a change that did not happen: the journal
+           * advanced, the feed carried an entry, and the verify pass had one
+           * more surface to digest — all for a file that was already gone.
+           *
+           * EXISTS-THEN-REMOVE IS ATOMIC ONLY AGAINST THIS QUEUE, and another
+           * PROCESS can still take the file in between — so a remove that races
+           * one is an ordinary absence, not a fault. Both checks are inside the
+           * queued task, so the pair is still atomic against everything else
+           * touching this folder. */
+          if (!(await target.exists(`${folderOf(bookId)}/${name}`))) return 'refuse'
+          /* THE RECORD, READ WHERE THE WRITE HAPPENS — BEFORE THE BYTES GO. One
+             that is there and will not read cannot have its facts cleared, and
+             a jacket deleted under it would leave facts for a file that is
+             gone: refused, and said. An absent record is an orphaned folder,
+             whose blob the contract still clears. */
+          const record = await readBook(target, bookId)
+          if (record === null && (await target.exists(recordPath(bookId)))) {
+            unreadable = new Error(`removeBlob: book.json for ${bookId} is there but could not be read`)
+            return 'refuse'
+          }
+          deletable = true
+          /* A JACKET GONE IS ITS FACTS GONE (WI-23.C5): `coverFacts` describe a
+             file that is no longer there, and a circle that read them would
+             publish a digest this device cannot serve.
+
+             THE FACTS OF THIS NAME, not any facts. A book can hold both names
+             (a legacy `cover.webp` beside the honest `cover.jpg`), and clearing
+             whatever facts were there when the legacy one went discarded the
+             JPEG's valid measurement. A record carrying no facts of this name
+             is not written, so an ordinary removal costs no record bracket. */
+          if (kind !== 'cover') return 'refuse'
+          return record?.coverFacts?.name === name ? 'go' : 'refuse'
+        },
+        /* ⚠️ **THE FACTS FIRST, THE FILE SECOND.** Two brackets, each honest
+           about its kind, and the record's before the cover's: a crash or a
+           journal failure between them leaves a jacket with no facts — which
+           the next pass measures again — and never facts with no jacket, which
+           the circle would publish and this device could not serve. The other
+           order had exactly that window. One lane task around both, so a stamp
+           queued behind the removal lands after it, not between. */
+        after: async (target) => {
+          if (!deletable) return
+          const path = `${folderOf(bookId)}/${name}`
+          await recorded(recorder, bookId, kind, async () => {
+            await target.remove(path).catch(async (cause: unknown) => {
+              if (await target.exists(path)) throw cause
+            })
+          })
+        },
+      },
+      (held) => {
+        if (held.coverFacts?.name !== name) return held
+        const { coverFacts: _gone, ...rest } = held
+        return rest
+      },
+    )
+    if (claimedBy !== null) {
+      throw new Error(`removeBlob: ${JSON.stringify(bookId)} does not own ${folderOf(bookId)} — ${JSON.stringify(claimedBy)} does`)
+    }
+    if (unreadable !== null) throw unreadable
 }
 
 /**
@@ -673,7 +713,7 @@ export function createKernelServices({
     shelfRead: () => shelfRead,
     fs,
     storage,
-    removeBlob: (bookId, name) => removeBlob({ fs, writes, library, recorder: recorderPort }, bookId, name),
+    removeBlob: (bookId, name) => removeBlob({ fs, library, recorder: recorderPort }, bookId, name),
     bindRecorder: (next) => recorderSlot.bind(next),
     bindClock: (next) => clockSlot.bind(next),
     clock: clockPort,

@@ -1,9 +1,10 @@
-import { matchWork, type Hlc, type ShelvedWork } from '../../../kernel'
+import { matchWork, type Hlc } from '../../../kernel'
 import { claimOfShelved } from './circleView'
 import { bookVia, claimOf, indexOf, type BookLike } from './exchange'
-import { createList, deleteList, placeOnList, removeFromList, retitleList, stateOf, type ListFile, MAX_LIST_NOTE, MAX_LIST_TITLE, MAX_WORK_FIELD } from './lists'
+import { createList, deleteList, placeOnList, removeFromList, retitleList, stateOf, type ListFile, MAX_LIST_NOTE, MAX_LIST_TITLE } from './lists'
 import { workOf, type ShelvedBook } from './shelf'
-import { tellEach } from './listeners'
+import { createListeners } from './listeners'
+import { MAX_LISTS_PER_REQUEST } from './protocol'
 
 /**
  * The reader's own lists, as the surfaces use them — WI-23.E1.
@@ -80,6 +81,9 @@ export const NO_IDENTITY = 'Start a circle to keep a list.'
 /** What an act on a list that is not there says. */
 export const NO_SUCH_LIST = 'That list is not there any more.'
 
+/** What making one list too many says. */
+export const TOO_MANY_LISTS = `A circle carries at most ${MAX_LISTS_PER_REQUEST} lists.`
+
 /**
  * A list an act may change: created, and not deleted. A row appended to a
  * list that was never made, or is gone, is a row nobody will ever see —
@@ -110,26 +114,9 @@ function titled(title: string): string {
   return title
 }
 
-/** A work's fields within their bound — CUT, not refused: they are the book's, not the reader's, and a long title is still that book. */
-function bounded(work: ShelvedWork): ShelvedWork {
-  const cut = (value: string): string => {
-    if (value.length <= MAX_WORK_FIELD) return value
-    const head = value.slice(0, MAX_WORK_FIELD)
-    const last = head.charCodeAt(head.length - 1)
-    return last >= 0xd8_00 && last <= 0xdb_ff ? head.slice(0, -1) : head
-  }
-  return {
-    title: cut(work.title),
-    author: cut(work.author),
-    language: cut(work.language),
-    ...(work.identifier === undefined ? {} : { identifier: cut(work.identifier) }),
-    ...(work.cover === undefined ? {} : { cover: cut(work.cover) }),
-  }
-}
-
 export function listsPortOver(deps: ListsDeps): ListsPort & { dispose(): void } {
-  const listeners = new Set<() => void>()
-  const changed = (): void => tellEach(listeners, 'list')
+  const listeners = createListeners('list')
+  const changed = (): void => listeners.tell()
   let chain: Promise<unknown> = Promise.resolve()
   /** Run one act after every act before it, and tell the listeners. */
   const act = <T>(work: (by: { device: string; at: Hlc }) => Promise<T>): Promise<T> => {
@@ -177,6 +164,15 @@ export function listsPortOver(deps: ListsDeps): ListsPort & { dispose(): void } 
     },
     create: (title) =>
       act(async (by) => {
+        /* ⚠️ **HELD TO THE BOUND A FRIEND'S REQUEST CAN NAME.** A lists
+           request carries one cursor per list, and the parser refuses one
+           naming more than `MAX_LISTS_PER_REQUEST`; a sixty-fifth list made
+           every request for this reader's lists invalid, and their lists
+           stopped reaching anybody. Deleted lists count: their ids are still
+           files a friend holds a cursor for. Refused, not silently capped —
+           it is the reader's own act. */
+        const ids = await deps.ids()
+        if (ids.length >= MAX_LISTS_PER_REQUEST) throw new Error(TOO_MANY_LISTS)
         const id = deps.mintPub()
         await deps.update(id, (held) => createList(held, titled(title), by))
         return id
@@ -190,7 +186,14 @@ export function listsPortOver(deps: ListsDeps): ListsPort & { dispose(): void } 
         if (note.length > MAX_LIST_NOTE) throw new Error(`a note on a list is at most ${MAX_LIST_NOTE} characters`)
         const book = deps.books().find((one) => one.bookId === bookId)
         if (book === undefined) throw new Error('that book is not on the shelf')
-        const work = bounded(workOf(book))
+        /* ⚠️ **ONE CUT FOR THE WORK AND THE CLAIM.** `workOf` holds the fields
+           to their bound and `claimOf` hashes the same cut fields, so the
+           claim a duplicate is looked for by, the work the item carries and
+           the claim it is linked back by are made from one string. Cut on
+           the item alone, a long title was placed under the whole title's
+           claim and linked by the cut one's: an item that read as a book the
+           reader did not have, and a second placement a duplicate. */
+        const work = workOf(book)
         const claim = claimOf(bookLike(book))
         const pub = deps.mintPub()
         await deps.update(listId, (held) => {
@@ -214,12 +217,7 @@ export function listsPortOver(deps: ListsDeps): ListsPort & { dispose(): void } 
       act(async (by) => {
         await deps.update(listId, (held) => deleteList(alive(held, listId), by))
       }),
-    subscribe: (listener) => {
-      listeners.add(listener)
-      return () => {
-        listeners.delete(listener)
-      }
-    },
+    subscribe: listeners.subscribe,
     dispose: () => {
       listeners.clear()
     },

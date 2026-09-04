@@ -221,6 +221,7 @@ export {
   TRASH_DIR,
   atomicWrite,
   folderOf,
+  isContentHash,
   marksPathIn,
   parseRecord,
   readBook,
@@ -338,6 +339,7 @@ export type { Publishability } from './core/circle/foreign'
 export {
   MAX_ENTRIES_PER_PAGE,
   MAX_PAGE_CHARS,
+  MAX_ROSTER_DEVICES,
   SUPPORTED,
   WIRE_VERSION,
   carriedBy,
@@ -368,7 +370,7 @@ export type {
 } from './core/circle/log'
 /* What a book is called when two libraries have to agree it is the same book.
    Never a hash of the file — `wire.md` §"`workKey` cannot be the log key". */
-export { LIST_ID, SHELF_WORK, claimFor, indexKeys, listIdOf, listWork, matchWork, primaryLanguage } from './core/circle/workClaim'
+export { LIST_ID, MAX_CLAIM_DIGESTS, SHELF_WORK, claimFor, indexKeys, isClaimShape, listIdOf, listWork, logOfClaim, matchWork, primaryLanguage } from './core/circle/workClaim'
 export type { ClaimSource, WorkClaim, WorkMatch } from './core/circle/workClaim'
 /* A list's log, folded — WI-23.E1. */
 export { NO_LIST, compactedList, compareItems, foldList } from './core/circle/list'
@@ -424,6 +426,8 @@ export type { Presence, PresenceEntry, PresenceState } from './core/presence'
 export { FORMATS, formatOf, isFormat, sniffFormat } from './core/formats'
 export type { Format } from './core/formats'
 export type { TrashFs } from './core/bookTrash'
+/* The trash's listing, for a capability that must reach a person's files in a trashed book's folder too — `purgePerson`. */
+export { listTrash } from './core/bookTrash'
 export type { ContentExtension, KnownExtension, SyncLevel, VaultFs } from './core/bookVault'
 
 /* ONE canonical serialisation, shared by sync's registers and the circle's

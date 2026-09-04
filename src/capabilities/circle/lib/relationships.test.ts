@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { circlePathIn, hlcOf, mergeRelationship, newRelationship, personFolderIn, relationshipPathIn, showShelf, type IndexFs, type Relationship, type WriteQueue } from '../../../kernel'
+import { circlePathIn, hlcOf, mergeRelationship, newRelationship, personFolderIn, relationshipPathIn, showShelf, type IndexFs, type Relationship, type WriteQueue, trashOf } from '../../../kernel'
 import { fakeFs } from '../../../kernel/testkit'
 import { purgePerson, readRelationship, writeRelationship } from './relationships'
 
@@ -86,23 +86,30 @@ describe('the relationship record on disk', () => {
 describe('purging a person — WI-23.C3', () => {
   const LANE = (bookId: string) => `books/${bookId.replace(/[^a-zA-Z0-9]/gu, '_')}`
 
-  it('removes their per-book files and their folder, shelf included — the falsifier', async () => {
+  it('removes their per-book files and everything in their folder — shelf, lists, jackets — and KEEPS the record: the falsifier', async () => {
+    const record = JSON.stringify(newRelationship(PERSON, hlcOf(1)))
     const fs = fsWith({
       [circlePathIn('book:a', PERSON)]: '{}',
       [circlePathIn('book:b', PERSON)]: '{}',
       [`${personFolderIn(PERSON)}/shelf.json`]: '{}',
-      [relationshipPathIn(PERSON)]: '{}',
+      [`${personFolderIn(PERSON)}/lists/aa11.json`]: '{}',
+      [`${personFolderIn(PERSON)}/covers/${'ab'.repeat(32)}`]: '{}',
+      [relationshipPathIn(PERSON)]: record,
       /* Somebody else's, which must be untouched. */
       [circlePathIn('book:a', 'b2'.repeat(32))]: '{}',
     })
     const changed = vi.fn()
     await purgePerson(fs, queue(), LANE, PERSON, ['book:a', 'book:b', 'book:c'], changed)
     expect(await fs.exists(`${personFolderIn(PERSON)}/shelf.json`)).toBe(false)
-    expect(await fs.exists(relationshipPathIn(PERSON))).toBe(false)
-    expect(await fs.exists(personFolderIn(PERSON))).toBe(false)
+    expect(await fs.exists(`${personFolderIn(PERSON)}/lists/aa11.json`)).toBe(false)
+    expect(await fs.exists(`${personFolderIn(PERSON)}/covers/${'ab'.repeat(32)}`)).toBe(false)
     expect(await fs.exists(circlePathIn('book:a', PERSON))).toBe(false)
     expect(await fs.exists(circlePathIn('book:b', PERSON))).toBe(false)
     expect(await fs.exists(circlePathIn('book:a', 'b2'.repeat(32)))).toBe(true)
+    /* ⚠️ THE RECORD STAYS, byte for byte: a person with no record reads as
+       the admitted default, which is what a round in flight, a peer that
+       would not forget them, and a stale switch write all used to find. */
+    expect(new TextDecoder().decode(await fs.readFile(relationshipPathIn(PERSON)))).toBe(record)
     expect(changed).toHaveBeenCalledTimes(1)
   })
 
@@ -176,7 +183,7 @@ describe('purging a person whose files will not all go', () => {
     const queue: WriteQueue = { append: (_lane, job) => job() } as WriteQueue
     await expect(purgePerson(stubborn, queue, (id) => id, PERSON, ['book:a', 'book:b'], () => {})).rejects.toThrow(/could not purge everything/u)
     expect(await fs.exists(circlePathIn('book:b', PERSON))).toBe(false)
-    expect(await fs.exists(personFolderIn(PERSON))).toBe(false)
+    expect(await fs.exists(relationshipPathIn(PERSON))).toBe(true)
     expect(await fs.exists(circlePathIn('book:a', PERSON))).toBe(true)
   })
 })
@@ -208,12 +215,12 @@ describe('a purge that cannot finish', () => {
     await expect(purgePerson(refusing, queue(), lane, PERSON, ['book:a', 'book:b'], changed)).rejects.toThrow(/1 of 3 steps failed/u)
     /* The steps after the failing one still ran. */
     expect(await fs.exists(circlePathIn('book:b', PERSON))).toBe(false)
-    expect(await fs.exists(personFolderIn(PERSON))).toBe(false)
+    expect(await fs.exists(`${personFolderIn(PERSON)}/shelf.json`)).toBe(false)
     expect(changed).toHaveBeenCalledTimes(1)
   })
 
   it('counts the folder step among the failures when it is the one that fails', async () => {
-    const fs = fsWith({ [circlePathIn('book:a', PERSON)]: '{}', [`${personFolderIn(PERSON)}/shelf.json`]: '{}' })
+    const fs = fsWith({ [circlePathIn('book:a', PERSON)]: '{}', [`${personFolderIn(PERSON)}/lists/aa11.json`]: '{}' })
     const refusing = { ...fs, removeDir: () => Promise.reject(new Error('busy')) } as unknown as IndexFs
     const lane = (bookId: string) => `books/${bookId.replace(/[^a-zA-Z0-9]/gu, '_')}`
     await expect(purgePerson(refusing, queue(), lane, PERSON, ['book:a'], vi.fn())).rejects.toThrow(/1 of 2 steps failed/u)
@@ -233,5 +240,26 @@ describe('the shelf stamp of a record written before the switch existed', () => 
     const read = await readRelationship(fs, PERSON)
     expect(read.shelf).toBe(true)
     expect(read.shelfAt).toBeUndefined()
+  })
+})
+
+describe('purging a person from the trash too', () => {
+  it('removes their file from a trashed book’s folder, on that book’s lane, and leaves the rest of the trash alone', async () => {
+    /* A trashed book keeps the person's file beside its marks, and a
+       restore brought it back — hidden by the exited record, but theirs. */
+    const LANE = (bookId: string) => `lane:${bookId}`
+    const theirs = `${trashOf('book:gone')}/circle/${circlePathIn('book:gone', PERSON).split('/').pop()!}`
+    const others = `${trashOf('book:gone')}/circle/${circlePathIn('book:gone', 'b2'.repeat(32)).split('/').pop()!}`
+    const fs = fsWith({ [theirs]: '{}', [others]: '{}', [`${trashOf('book:gone')}/marks.json`]: '[]' })
+    const lanes: string[] = []
+    const q: WriteQueue = { ...queue(), append: (key, task) => { lanes.push(key); return task() } }
+    await purgePerson(fs, q, LANE, PERSON, [], () => {}, ['book:gone'])
+    expect(await fs.exists(theirs)).toBe(false)
+    expect(await fs.exists(others)).toBe(true)
+    expect(await fs.exists(`${trashOf('book:gone')}/marks.json`)).toBe(true)
+    expect(lanes).toContain(LANE('book:gone'))
+    /* Counted among the steps when it fails. */
+    const refusing = { ...fsWith({ [theirs]: '{}' }), remove: () => Promise.reject(new Error('locked')) } as unknown as IndexFs
+    await expect(purgePerson(refusing, queue(), LANE, PERSON, [], () => {}, ['book:gone'])).rejects.toThrow(/1 of 2 steps failed/u)
   })
 })

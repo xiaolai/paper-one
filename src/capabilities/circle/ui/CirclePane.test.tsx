@@ -51,6 +51,8 @@ const portWith = (over: Partial<PersonPort> = {}): PersonPort => ({
   cancel: () => Promise.resolve(),
   onPending: () => () => {},
   onResult: () => () => {},
+  /* The identity lifecycle the capability subscribes to — nobody here, the pane does not. */
+  onIdentity: () => () => {},
   ...over,
 })
 
@@ -1069,14 +1071,49 @@ describe('the offer’s own clock', () => {
 })
 
 describe('an act with nowhere of its own to put a failure', () => {
-  it('replaces the pane with the failure line', async () => {
+  it('says so beside the controls that stay — never as a circle that could not be read', async () => {
+    /* ⚠️ A person who could not be removed used to be reported as "Paper
+       could not read your circle", over a roster that had read perfectly
+       well — and the whole panel went with it. */
     const people: readonly KnownPerson[] = [{ person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 2 }, revoked: [], devices: [] }]
     const forgetPerson = vi.fn(() => Promise.reject(new Error('the peer would not forget')))
     render(<CirclePane port={portWith({ people: () => Promise.resolve(people), forgetPerson })} />)
     await screen.findByText('Mo')
     fireEvent.click(screen.getByRole('button', { name: /Remove/u }))
-    await screen.findByText(/Paper could not read your circle\. the peer would not forget/u)
+    await screen.findByText(/That did not go through\. the peer would not forget/u)
+    expect(screen.queryByText(/could not read your circle/u)).toBeNull()
+    /* The roster stands, and so does the way to try again. */
+    expect(screen.getByText('Mo')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Remove/u })).toBeTruthy()
   })
+
+  it('re-reads the status once the button has minted — the circle hears of the identity from the peer, not from here', async () => {
+    let minted = false
+    const ensure = vi.fn(() => {
+      minted = true
+      return Promise.resolve('person')
+    })
+    const circle = minimalCircleFor()
+    render(<CirclePane port={portWith({ ensure, status: () => Promise.resolve(minted ? status() : status({ hasIdentity: false, personId: null })) })} circle={circle} />)
+    const start = await screen.findByRole('button', { name: /Start a circle/u })
+    await act(async () => {
+      fireEvent.click(start)
+    })
+    expect(ensure).toHaveBeenCalledTimes(1)
+    await screen.findByText(/holds your keys/u)
+    expect('identityChanged' in circle).toBe(false)
+  })
+})
+
+/** A circle port with nothing in it, for a test about the pane's own acts. */
+const minimalCircleFor = (): CirclePort => ({
+  showsShelf: () => Promise.resolve(false),
+  setShowsShelf: () => Promise.resolve(),
+  friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
+  cover: () => Promise.resolve(null),
+  book: () => Promise.resolve({ people: [], alsoRead: [] }),
+  forget: () => Promise.resolve(),
+  subscribe: () => () => {},
 })
 
 describe('the reader’s own lists, read', () => {
@@ -1146,5 +1183,215 @@ describe('the reader’s own lists, read', () => {
     await new Promise((done) => setTimeout(done, 0))
     expect(screen.queryByLabelText('Title of Older')).toBeNull()
     expect(screen.getByLabelText('Title of Newer')).toBeTruthy()
+  })
+})
+
+describe('an act begun through a port the screen no longer holds', () => {
+  it('does not refresh through the old port after the new one’s read, nor put its roster back', async () => {
+    /* ⚠️ The peer restarted while a removal was out: its refresh, bound to
+       the old port, landed after the new port's read and put the old run's
+       status and roster back — with the newest generation number, so the
+       revision guard believed it. */
+    let finish: (() => void) | null = null
+    const ann: KnownPerson = { person: 'aa'.repeat(32), displayName: 'Ann', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+    const bea: KnownPerson = { person: 'bb'.repeat(32), displayName: 'Bea', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+    const first = portWith({
+      people: vi.fn(() => Promise.resolve([ann])),
+      forgetPerson: () =>
+        new Promise<void>((done) => {
+          finish = done
+        }),
+    })
+    const view = render(<CirclePane port={first} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(finish).not.toBeNull())
+    expect(first.people).toHaveBeenCalledTimes(1)
+    /* Ann is on both rosters, so her row — and the act on it — survives the swap. */
+    const second = portWith({ people: vi.fn(() => Promise.resolve([ann, bea])) })
+    view.rerender(<CirclePane port={second} />)
+    await screen.findByText('Bea')
+    finish!()
+    await new Promise((done) => setTimeout(done, 0))
+    /* The old port was read once, at mount, and never again; the new one's roster stands. */
+    expect(first.people).toHaveBeenCalledTimes(1)
+    expect(second.people).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Bea')).toBeTruthy()
+    expect(screen.getByText('Ann')).toBeTruthy()
+  })
+})
+
+describe('a friend’s jackets, asked for when seen — WI-23.C5', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+
+  it('asks only for the rows that have come into view, and once each', async () => {
+    /* ⚠️ A shelf of hundreds drew hundreds of rows and dialled for every
+       one at mount. Observed instead: a row asks when it intersects. */
+    const observed: { node: Element; tell: (entries: readonly Partial<IntersectionObserverEntry>[]) => void }[] = []
+    class FakeObserver {
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+      observe(node: Element) {
+        observed.push({ node, tell: (entries) => this.callback(entries as IntersectionObserverEntry[], this as unknown as IntersectionObserver) })
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    const world = globalThis as { IntersectionObserver?: unknown }
+    const before = world.IntersectionObserver
+    world.IntersectionObserver = FakeObserver
+    try {
+      const cover = vi.fn((_person: string, book: { readonly pub: string }) => Promise.resolve(`data:image/png;base64,${book.pub}`))
+      const shelf = ['s1', 's2', 's3'].map((pub) => ({ pub, title: `Book ${pub}`, author: '', language: 'en', own: null, device: 'd1', cover: 'ab'.repeat(32) }))
+      const circle = { ...minimalCircleFor(), friend: () => Promise.resolve({ shelf, recent: [], lists: [] }), cover }
+      const { container } = render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+      await screen.findByText('Book s3')
+      await new Promise((done) => setTimeout(done, 0))
+      expect(cover).not.toHaveBeenCalled()
+      expect(observed.map((one) => one.node.getAttribute('data-jacket-slot'))).toEqual(['s1', 's2', 's3'])
+      /* Not intersecting is not seen. */
+      await act(async () => observed[0]!.tell([{ isIntersecting: false }]))
+      expect(cover).not.toHaveBeenCalled()
+      /* The second row comes into view: that row, and only it. */
+      await act(async () => observed[1]!.tell([{ isIntersecting: true }]))
+      await waitFor(() => expect(container.querySelector('img[data-jacket="s2"]')).not.toBeNull())
+      expect(cover).toHaveBeenCalledTimes(1)
+      expect(cover.mock.calls[0]![1]).toMatchObject({ pub: 's2' })
+      expect(container.querySelector('img[data-jacket="s1"]')).toBeNull()
+      /* Seen once is seen: a second intersection does not ask again. */
+      await act(async () => observed[1]!.tell([{ isIntersecting: true }]))
+      expect(cover).toHaveBeenCalledTimes(1)
+    } finally {
+      if (before === undefined) delete world.IntersectionObserver
+      else world.IntersectionObserver = before
+    }
+  })
+})
+
+describe('each section acts on its own — held apart', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const ann: KnownPerson = { person: 'aa'.repeat(32), displayName: 'Ann', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const listsWith = (own: OwnListView[], over: Partial<ListsPort> = {}): ListsPort => ({
+    lists: () => Promise.resolve(own),
+    create: vi.fn(() => Promise.resolve('new1')),
+    retitle: vi.fn(() => Promise.resolve()),
+    place: vi.fn(() => Promise.resolve()),
+    takeOff: vi.fn(() => Promise.resolve()),
+    delete: vi.fn(() => Promise.resolve()),
+    subscribe: () => () => {},
+    ...over,
+  })
+
+  it('holds only the row that is busy: removing Mo leaves Ann’s switch, the offer and the twelve words usable', async () => {
+    /* ⚠️ One `busy` for the whole screen disabled every control for every act. */
+    let finish: (() => void) | null = null
+    const circle = {
+      ...minimalCircleFor(),
+      forget: () =>
+        new Promise<void>((done) => {
+          finish = done
+        }),
+    }
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo, ann]) })} circle={circle} />)
+    await screen.findByRole('checkbox', { name: 'Show my shelf to Ann' })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Remove' })[0]!)
+    await waitFor(() => expect((screen.getAllByRole('button', { name: 'Remove' })[0] as HTMLButtonElement).disabled).toBe(true))
+    expect((screen.getAllByRole('button', { name: 'Remove' })[1] as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('checkbox', { name: 'Show my shelf to Ann' }) as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: /Add somebody/u }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: /Show my twelve words/u }) as HTMLButtonElement).disabled).toBe(false)
+    finish!()
+  })
+
+  it('says a list that would not rename beside that list — not beside the pairing — and leaves the other list usable', async () => {
+    const sea: OwnListView = { id: 'aa', title: 'Sea', items: [] }
+    const deserts: OwnListView = { id: 'bb', title: 'Deserts', items: [] }
+    const lists = listsWith([sea, deserts], { retitle: () => Promise.reject(new Error('the list would not write')) })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={minimalCircleFor()} lists={lists} />)
+    fireEvent.change(await screen.findByLabelText('Title of Sea'), { target: { value: 'Whales' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }))
+    await screen.findByText(/That did not go through\. the list would not write/u)
+    expect(document.querySelector('[data-own-list="aa"]')!.textContent).toContain('the list would not write')
+    expect(document.querySelector('[data-own-list="bb"]')!.textContent).not.toContain('the list would not write')
+    expect((screen.getByLabelText('Title of Deserts') as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: /Add somebody/u }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('keeps the roster on screen when the twelve words cannot be read', async () => {
+    /* ⚠️ A failed keychain read used to replace the whole screen with "could
+       not read your circle", over a roster that had read perfectly well. */
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]), phrase: () => Promise.reject(new Error('keychain locked')) })} />)
+    await screen.findByText('Mo')
+    fireEvent.click(screen.getByRole('button', { name: /Show my twelve words/u }))
+    await screen.findByText(/keychain locked/u)
+    expect(screen.getByText('Mo')).toBeTruthy()
+    expect(screen.queryByText(/could not read your circle/u)).toBeNull()
+  })
+
+  it('says a pairing that would not start beside the pairing, with the roster’s Remove still usable', async () => {
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]), offer: () => Promise.reject(new Error('no network')) })} />)
+    await screen.findByText('Mo')
+    fireEvent.click(screen.getByRole('button', { name: /Add somebody/u }))
+    await screen.findByText(/That did not go through\. no network/u)
+    expect((screen.getByRole('button', { name: 'Remove' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByRole('button', { name: /Add somebody/u })).toBeTruthy()
+  })
+})
+
+describe('Start a circle begun through a port the screen no longer holds', () => {
+  it('does not read the old port’s status after its ensure lands, and keeps drawing the new port’s', async () => {
+    /* ⚠️ Two ports with no identity share the identity section's empty key,
+       so a peer restart while the button was out left the section mounted
+       under the new port with an act bound to the old one. Its refresh read
+       the OLD peer's freshly minted status and drew it as the new peer's. */
+    let finish: (() => void) | null = null
+    let minted = false
+    const first = portWith({
+      ensure: () =>
+        new Promise<string>((done) => {
+          finish = () => {
+            minted = true
+            done('person')
+          }
+        }),
+      status: vi.fn(() => Promise.resolve(minted ? status() : status({ hasIdentity: false, personId: null }))),
+    })
+    const view = render(<CirclePane port={first} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Start a circle/u }))
+    await waitFor(() => expect(finish).not.toBeNull())
+    expect(first.status).toHaveBeenCalledTimes(1)
+    /* The new port has no identity either: the same section instance, under the same key. */
+    const second = portWith({ status: vi.fn(() => Promise.resolve(status({ hasIdentity: false, personId: null }))) })
+    view.rerender(<CirclePane port={second} />)
+    await waitFor(() => expect(second.status).toHaveBeenCalledTimes(1))
+    finish!()
+    await new Promise((done) => setTimeout(done, 0))
+    /* The old port was read once, at mount, and never again; the new port's state stands, and the button is free again. */
+    expect(first.status).toHaveBeenCalledTimes(1)
+    expect(second.status).toHaveBeenCalledTimes(1)
+    expect((screen.getByRole('button', { name: /Start a circle/u }) as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByText(/holds your keys/u)).toBeNull()
+  })
+
+  it('does not show twelve words read through the old port under the new one', async () => {
+    let finish: ((words: string) => void) | null = null
+    const who = 'aa'.repeat(32)
+    const first = portWith({
+      status: () => Promise.resolve(status({ personId: who })),
+      phrase: () =>
+        new Promise<string | null>((done) => {
+          finish = done
+        }),
+    })
+    const view = render(<CirclePane port={first} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Show my twelve words/u }))
+    await waitFor(() => expect(finish).not.toBeNull())
+    /* The same person on the new port — the same key, the same instance. */
+    const second = portWith({ status: () => Promise.resolve(status({ personId: who })), phrase: vi.fn(() => Promise.resolve('the new words')) })
+    view.rerender(<CirclePane port={second} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /Show my twelve words/u })).toBeTruthy())
+    finish!('the old secret words')
+    await new Promise((done) => setTimeout(done, 0))
+    expect(screen.queryByText('the old secret words')).toBeNull()
+    expect(second.phrase).not.toHaveBeenCalled()
   })
 })

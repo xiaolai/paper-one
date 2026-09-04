@@ -239,8 +239,11 @@ export function matchWork(a: WorkClaim, b: WorkClaim): WorkMatch {
  * index is allowed to be generous because it is not the answer.
  */
 export function indexKeys(claim: WorkClaim): readonly string[] {
+  /* A weak key needs a language AND an author: `matchWork` refuses a weak
+     match on an empty author outright, so a key minted for one could only
+     ever produce candidates that fail. */
   const weak =
-    claim.language === ''
+    claim.language === '' || claim.author === ''
       ? []
       : claim.titles.map((title) => `w:${claim.language}:${title}:${claim.author}`)
   return [...claim.ids.map((id) => `s:${id}`), ...weak]
@@ -288,3 +291,46 @@ export function listIdOf(claim: WorkClaim): string | null {
 
 /** A list id as `mintPub` spells one — and as `parseListsRequest` accepts one. */
 export const LIST_ID = /^[0-9a-f]{1,64}$/u
+
+/** The most identifiers, or title spellings, one claim may carry — on the wire, on a page, and in a store. */
+export const MAX_CLAIM_DIGESTS = 16
+
+/** A digest as `claimFor`'s `digest` spells one: SHA-256, lower-case hex. */
+const DIGEST = /^[0-9a-f]{64}$/u
+
+/**
+ * Whether a value is a claim this build can act on — ONE rule for a request,
+ * a page and a sealed boundary, which each had their own and disagreed.
+ *
+ * Either a REGULAR claim — every field a digest, within `MAX_CLAIM_DIGESTS`,
+ * the language a primary subtag or empty — or EXACTLY one reserved claim:
+ * `SHELF_WORK`, or a list's. A claim naming a reserved id beside a digest is
+ * refused: it would match a real book AND the shelf, and a page served under
+ * it could be filed against either log.
+ */
+export function isClaimShape(value: unknown): value is WorkClaim {
+  // Stryker disable next-line ConditionalExpression: a non-object has no claim member, so the key check below refuses it anyway.
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const claim = value as Record<string, unknown>
+  const keys = Object.keys(claim)
+  if (keys.length !== 4 || !['ids', 'titles', 'author', 'language'].every((key) => Object.hasOwn(claim, key))) return false
+  const { ids, titles, author, language } = claim
+  const strings = (list: unknown): list is readonly string[] => Array.isArray(list) && list.every((one) => typeof one === 'string')
+  if (!strings(ids) || !strings(titles) || typeof author !== 'string' || typeof language !== 'string') return false
+  /* Reserved: exactly the shape, nothing beside it. */
+  if (titles.length === 0 && author === '' && language === '' && ids.length === 1) {
+    const [id] = ids
+    if (id === SHELF_WORK.ids[0]) return true
+    if (listIdOf({ ids, titles, author, language }) !== null) return true
+  }
+  if (ids.length > MAX_CLAIM_DIGESTS || titles.length > MAX_CLAIM_DIGESTS) return false
+  if (!ids.every((one) => DIGEST.test(one)) || !titles.every((one) => DIGEST.test(one))) return false
+  if (author !== '' && !DIGEST.test(author)) return false
+  return language === '' || /^[a-z]{2,3}$/u.test(language)
+}
+
+/** Which LOG a claim names — the per-work log, the shelf's, or a list's. */
+export function logOfClaim(claim: WorkClaim): 'work' | 'shelf' | 'list' {
+  if (claim.ids.length === 1 && claim.ids[0] === SHELF_WORK.ids[0] && claim.titles.length === 0 && claim.author === '' && claim.language === '') return 'shelf'
+  return listIdOf(claim) !== null ? 'list' : 'work'
+}

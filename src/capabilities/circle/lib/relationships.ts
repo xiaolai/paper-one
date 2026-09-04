@@ -1,9 +1,12 @@
 import {
   atomicWrite,
+  circleFolderIn,
+  circlePathIn,
   mergeRelationship,
   newRelationship,
   personFolderIn,
   relationshipPathIn,
+  trashOf,
   type Hlc,
   type IndexFs,
   type Relationship,
@@ -85,8 +88,21 @@ export async function writeRelationship(
 }
 
 /**
- * Drop everything one person sent, and everything decided about them — the
- * per-book files across every book, then the person's own folder.
+ * Drop everything one person sent — the per-book files across every book,
+ * then everything in the person's own folder — and KEEP what was decided
+ * about them.
+ *
+ * ⚠️ **THE RELATIONSHIP RECORD STAYS, AS A TOMBSTONE.** It used to go with
+ * the folder, and a person with no record reads as the default: admitted,
+ * first epoch. So between the purge and the peer forgetting them — or for
+ * ever, when the peer would not — a person just removed read as admitted
+ * again, a round already out passed its re-check and wrote their pages back,
+ * and a stale switch write recreated a record with nothing to merge against.
+ * An exited record answers all three: `acceptsTransport` refuses their pages,
+ * `drawsEntry` refuses their old epoch, and `mergeRelationship` holds a stale
+ * writer to the newer decision. Meeting them again is a pairing, and the
+ * pairing is what re-admits them in a new epoch (`readmit`, wired in
+ * `index.ts`) — never the absence of a file.
  *
  * ⚠️ **AND IT PROMISES NOTHING ABOUT THE OTHER DIRECTION**, as `purgeForeign`
  * says: what they already received of yours is theirs. Idempotent, because a
@@ -99,6 +115,14 @@ export async function purgePerson(
   person: string,
   books: readonly string[],
   changed: () => void,
+  /**
+   * The books in the TRASH, by id — `listTrash`. A trashed folder keeps the
+   * person's file beside its marks, and a restore brought it back: hidden
+   * by the exited record and its epoch, but theirs, and on this disk after
+   * the reader said to forget them. Purged on each book's own lane, as a
+   * live book's is.
+   */
+  trashed: readonly string[] = [],
 ): Promise<void> {
   /* EVERY step is attempted, and what failed is raised together at the end:
      one book's file refusing to go used to end the loop, leaving every later
@@ -113,23 +137,51 @@ export async function purgePerson(
         failures.push(cause)
       }
     }
+    for (const bookId of trashed) {
+      try {
+        await queue.append(lane(bookId), async () => {
+          const path = `${trashOf(bookId)}/circle/${circleFileOf(bookId, person)}`
+          if (await fs.exists(path)) await fs.remove(path)
+        })
+      } catch (cause) {
+        failures.push(cause)
+      }
+    }
     try {
       await queue.append(personLane(person), async () => {
         const folder = personFolderIn(person)
-        /* Stryker disable next-line ConditionalExpression: the platform's removeDir refuses a missing folder; the fake does not, so the guard cannot be observed here. */
-        if (await fs.exists(folder)) await fs.removeDir(folder)
+        /* Stryker disable next-line ConditionalExpression: the platform's readDir refuses a missing folder; the fake does not, so the guard cannot be observed here. */
+        if (!(await fs.exists(folder))) return
+        /* Everything but the record: their shelf, their lists, their jackets. */
+        const record = relationshipFileOf(person)
+        for (const entry of await fs.readDir(folder)) {
+          if (entry.name === record) continue
+          const path = `${folder}/${entry.name}`
+          if (entry.isDirectory) await fs.removeDir(path)
+          else await fs.remove(path)
+        }
       })
     } catch (cause) {
       failures.push(cause)
     }
     if (failures.length > 0) {
-      throw new AggregateError(failures, `could not purge everything of ${person}: ${failures.length} of ${books.length + 1} steps failed`)
+      throw new AggregateError(failures, `could not purge everything of ${person}: ${failures.length} of ${books.length + trashed.length + 1} steps failed`)
     }
   } finally {
     /* Told even when a step failed: what was removed before it is gone, and
        a screen holding the old overlays must not keep drawing them. */
     changed()
   }
+}
+
+/** The record's own file name inside the person's folder — derived from the kernel's path, so the two cannot drift. */
+function relationshipFileOf(person: string): string {
+  return relationshipPathIn(person).slice(personFolderIn(person).length + 1)
+}
+
+/** The person's file name inside a book's `circle/` folder — derived the same way, for a folder that has moved to the trash. */
+function circleFileOf(bookId: string, person: string): string {
+  return circlePathIn(bookId, person).slice(circleFolderIn(bookId).length + 1)
 }
 
 const STATES = new Set(['admitted', 'muted', 'blocked', 'exited'])

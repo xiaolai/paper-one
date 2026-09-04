@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { hlcOf, newRelationship, type Hlc, type Relationship } from '../../../kernel'
-import { RECENT_LIMIT, circlePortOver, type CirclePortDeps } from './circlePort'
+import { COVER_WIDTH, RECENT_LIMIT, circlePortOver, type CirclePortDeps, type FriendBook } from './circlePort'
 import { NOTHING_SHARED, type ForeignFile } from './store'
 
 /**
@@ -46,6 +46,7 @@ function world(over: Partial<CirclePortDeps> = {}) {
       return Promise.resolve()
     }),
     forgetPeer: vi.fn(() => Promise.resolve()),
+    warn: vi.fn(),
     onChanged: (listener) => {
       listeners.add(listener)
       return () => listeners.delete(listener)
@@ -415,13 +416,213 @@ describe('a friend’s jacket — WI-23.C5', () => {
       ['s1', 'd1', 'ab'.repeat(32)],
       ['s2', 'd1', null],
     ])
+    /* The type the BYTES say, not a declared JPEG: a legacy jacket can be a PNG under any name. */
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
+    ;(deps.coverOf as ReturnType<typeof vi.fn>).mockResolvedValueOnce(jpeg)
+    expect(await port.cover(BOB, view.shelf[0]!)).toBe(`data:image/jpeg;base64,${btoa(String.fromCharCode(...jpeg))}`)
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00])
+    ;(deps.coverOf as ReturnType<typeof vi.fn>).mockResolvedValueOnce(png)
+    expect(await port.cover(BOB, view.shelf[0]!)).toMatch(/^data:image\/png;base64,/u)
+    /* Bytes that are no picture this build knows say so, and the browser sniffs them. */
     ;(deps.coverOf as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new TextEncoder().encode('jpeg'))
-    expect(await port.cover(BOB, view.shelf[0]!)).toBe(`data:image/jpeg;base64,${btoa('jpeg')}`)
-    expect(deps.coverOf).toHaveBeenCalledWith(BOB, 'd1', 's1', 'ab'.repeat(32))
+    expect(await port.cover(BOB, view.shelf[0]!)).toBe(`data:application/octet-stream;base64,${btoa('jpeg')}`)
+    /* And the row's signal beside them — none here, and the transfer is told so. */
+    expect(deps.coverOf).toHaveBeenCalledWith(BOB, 'd1', 's1', 'ab'.repeat(32), undefined)
     /* No digest, no ask; and a fetch that answers nothing draws nothing. */
     expect(await port.cover(BOB, view.shelf[1]!)).toBeNull()
     expect(await port.cover(BOB, { ...view.shelf[0]!, device: null })).toBeNull()
-    expect(deps.coverOf).toHaveBeenCalledTimes(1)
+    /* The three draws above, and nothing for the two rows that name no jacket. */
+    expect(deps.coverOf).toHaveBeenCalledTimes(3)
     expect(await port.cover(BOB, view.shelf[0]!)).toBeNull()
+  })
+})
+
+describe('the switch and a forget, on one person’s turn', () => {
+  it('refuses the switch for a person the peer no longer names', async () => {
+    const { port, deps } = world()
+    await expect(port.setShowsShelf('e9'.repeat(32), true)).rejects.toThrow(/not in your circle/u)
+    expect(deps.writeRelationship).not.toHaveBeenCalled()
+  })
+
+  it('runs a flip queued behind a forget after the peer has forgotten them — and refuses it as such', async () => {
+    const { port, deps, people, records } = world()
+    ;(deps.forgetPeer as ReturnType<typeof vi.fn>).mockImplementation((person: string) => {
+      people.splice(people.findIndex((one) => one.person === person), 1)
+      return Promise.resolve()
+    })
+    const gone = port.forget(BOB)
+    const flipped = port.setShowsShelf(BOB, true)
+    await gone
+    await expect(flipped).rejects.toThrow(/not in your circle/u)
+    /* The exited record stands, with no grant written over it. */
+    expect(records.get(BOB)).toMatchObject({ state: 'exited', shelf: false })
+  })
+
+  it('lets go of a person’s turn once it has settled', async () => {
+    const { port } = world()
+    await port.setShowsShelf(BOB, true)
+    await port.setShowsShelf(BOB, false)
+    /* Observable only through behaviour: a later act still runs in order. */
+    await expect(port.setShowsShelf(BOB, true)).resolves.toBeUndefined()
+    expect(await port.showsShelf(BOB)).toBe(true)
+  })
+})
+
+describe('a friend’s lists, under the relationship — WI-23.E1 meets WI-23.D3', () => {
+  const work = { title: 'Moby-Dick', author: 'Herman Melville', language: 'en' }
+  const item = (pub: string, epoch?: number) => ({ pub, work, position: 1, note: '', at: at(1), device: 'd1', seq: 1, ...(epoch === undefined ? {} : { epoch }) })
+  const title = (value: string, epoch?: number) => ({ value, at: at(1), device: 'd1', seq: 1, ...(epoch === undefined ? {} : { epoch }) })
+  const listHeld = (over: Record<string, unknown> = {}) => ({ ...NOTHING_SHARED, list: { created: true, createdEpoch: 1, title: title('Sea books', 1), deleted: false, items: [item('x', 1)], removed: [], ...over } })
+
+  it('shows nothing of a muted or blocked person’s lists', async () => {
+    const { port, lists, records } = world()
+    lists.set(BOB, new Map([['aa', listHeld()]]))
+    expect((await port.friend(BOB)).lists).toHaveLength(1)
+    records.set(BOB, { ...newRelationship(BOB, at(0)), state: 'muted' })
+    expect((await port.friend(BOB)).lists).toEqual([])
+    records.set(BOB, { ...newRelationship(BOB, at(0)), state: 'blocked' })
+    expect((await port.friend(BOB)).lists).toEqual([])
+  })
+
+  it('hides a list retained from an earlier epoch, and the items placed under one, after a re-admission', async () => {
+    const { port, lists, records } = world()
+    records.set(BOB, { ...newRelationship(BOB, at(0)), epoch: 2 })
+    lists.set(
+      BOB,
+      new Map([
+        ['old', listHeld({ createdEpoch: 1 })],
+        ['new', listHeld({ createdEpoch: 2, title: title('New', 2), items: [item('x', 1), item('y', 2)] })],
+        ['unstamped', listHeld({ createdEpoch: undefined, title: title('Unstamped'), items: [item('z')] })],
+      ]),
+    )
+    const view = await port.friend(BOB)
+    expect(view.lists.map((one) => [one.id, one.items.map((it) => it.pub)])).toEqual([['new', ['y']]])
+  })
+
+  it('draws no part that arrived under the old relationship, whatever arrived later — the creation, the title, each item on its own', async () => {
+    /* ⚠️ One epoch on the whole list, moved by its newest page, re-exposed
+       everything the old relationship had retained the moment one item was
+       placed under the new one. Each part answers for itself. */
+    const { port, lists, records } = world()
+    records.set(BOB, { ...newRelationship(BOB, at(0)), epoch: 2 })
+    lists.set(
+      BOB,
+      new Map([
+        /* Created under the old relationship, an item placed under the new: not drawn — its existence is old. */
+        ['revived', listHeld({ createdEpoch: 1, title: title('Old', 1), items: [item('x', 1), item('y', 2)] })],
+        /* Created under the new, its title retitled under… the old? Impossible by order — but a title's epoch is its own: an old one is not drawn. */
+        ['retitled', listHeld({ createdEpoch: 2, title: title('Stale', 1), items: [item('z', 2)] })],
+      ]),
+    )
+    const view = await port.friend(BOB)
+    expect(view.lists.map((one) => [one.id, one.title, one.items.map((it) => it.pub)])).toEqual([['retitled', '', ['z']]])
+  })
+
+  it('keeps a deletion whatever its epoch — a withdrawal is never revived by a re-admission', async () => {
+    const { port, lists, records } = world()
+    records.set(BOB, { ...newRelationship(BOB, at(0)), epoch: 2 })
+    lists.set(BOB, new Map([['gone', listHeld({ createdEpoch: 2, title: title('Gone', 2), deleted: true, items: [item('x', 2)] })]]))
+    expect((await port.friend(BOB)).lists).toEqual([])
+  })
+})
+
+describe('a friend’s jackets, a few at a time — WI-23.C5', () => {
+  const book = (pub: string): FriendBook => ({ pub, title: 'T', author: 'A', language: 'en', own: null, device: 'd1', cover: 'ab'.repeat(32) })
+
+  it('fetches at most COVER_WIDTH at once, the rest waiting their turn', async () => {
+    let inFlight = 0
+    let most = 0
+    const releases: (() => void)[] = []
+    const coverOf = vi.fn(() => {
+      inFlight += 1
+      most = Math.max(most, inFlight)
+      return new Promise<Uint8Array | null>((done) => {
+        releases.push(() => {
+          inFlight -= 1
+          done(new Uint8Array([0xff, 0xd8, 0xff]))
+        })
+      })
+    })
+    const { port } = world({ coverOf })
+    const asked = Array.from({ length: COVER_WIDTH + 3 }, (_, i) => port.cover(BOB, book(`s${i}`)))
+    await new Promise((done) => setTimeout(done, 0))
+    expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
+    while (releases.length > 0) {
+      releases.shift()!()
+      await new Promise((done) => setTimeout(done, 0))
+    }
+    expect((await Promise.all(asked)).every((one) => one?.startsWith('data:image/jpeg'))).toBe(true)
+    expect(most).toBe(COVER_WIDTH)
+    expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH + 3)
+  })
+
+  it('does not dial for a request abandoned before its turn, and answers it null', async () => {
+    const coverOf = vi.fn(() => Promise.resolve<Uint8Array | null>(null))
+    const { port } = world({ coverOf })
+    /* Every slot taken, then one more that is abandoned before a slot frees. */
+    const held = Array.from({ length: COVER_WIDTH }, (_, i) => port.cover(BOB, book(`s${i}`)))
+    const abandon = new AbortController()
+    const waiting = port.cover(BOB, book('late'), abandon.signal)
+    abandon.abort()
+    await Promise.all(held)
+    expect(await waiting).toBeNull()
+    expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
+    /* Abandoned before it was even asked: null, no dial. */
+    const gone = new AbortController()
+    gone.abort()
+    expect(await port.cover(BOB, book('never'), gone.signal)).toBeNull()
+    expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
+  })
+
+  it('reports a fetch that failed through the diagnostics, and draws nothing', async () => {
+    const warn = vi.fn()
+    const { port } = world({ coverOf: () => Promise.reject(new Error('the disk said no')), warn })
+    expect(await port.cover(BOB, book('s1'))).toBeNull()
+    expect(warn).toHaveBeenCalledWith('circle.cover-failed', expect.objectContaining({ person: BOB, pub: 's1', message: 'the disk said no' }))
+  })
+
+  it('answers null and says so when the RECORD read fails — the whole of it is caught, not the fetch alone', async () => {
+    /* A rejection from the relationship read left `cover` rejecting, and the
+       row's empty handler swallowed it with no record anywhere. */
+    const warn = vi.fn()
+    const { port } = world({ relationship: () => Promise.reject(new Error('the record would not read')), warn })
+    await expect(port.cover(BOB, book('s1'))).resolves.toBeNull()
+    expect(warn).toHaveBeenCalledWith('circle.cover-failed', expect.objectContaining({ person: BOB, pub: 's1', message: 'the record would not read' }))
+  })
+
+  it('hands the row’s signal to the transfer, so abandoning the row can stop the bytes', async () => {
+    const coverOf = vi.fn((_person: string, _device: string, _pub: string, _digest: string, _signal?: AbortSignal) => Promise.resolve(null))
+    const { port } = world({ coverOf })
+    const abandon = new AbortController()
+    await port.cover(BOB, book('s1'), abandon.signal)
+    expect(coverOf).toHaveBeenCalledTimes(1)
+    expect(coverOf.mock.calls[0]![4]).toBe(abandon.signal)
+  })
+})
+
+describe('a person’s turn, let go', () => {
+  it('holds no turn once every act on the person has settled', async () => {
+    /* A port that outlives a thousand toggles must not hold a thousand promises. */
+    const { port } = world()
+    await port.setShowsShelf(BOB, true)
+    await port.setShowsShelf(BOB, false)
+    await new Promise((done) => setTimeout(done, 0))
+    expect(port.pendingTurns()).toBe(0)
+    const flips = Promise.all([port.setShowsShelf(BOB, true), port.setShowsShelf(BOB, false)])
+    expect(port.pendingTurns()).toBe(1)
+    await flips
+    await new Promise((done) => setTimeout(done, 0))
+    expect(port.pendingTurns()).toBe(0)
+  })
+})
+
+describe('a jacket for a person the record no longer admits', () => {
+  it('is neither fetched nor answered from disk', async () => {
+    const coverOf = vi.fn(() => Promise.resolve(new Uint8Array([0xff, 0xd8, 0xff])))
+    const { port, records } = world({ coverOf })
+    records.set(BOB, { ...newRelationship(BOB, at(0)), state: 'exited' })
+    const book: FriendBook = { pub: 's1', title: 'T', author: 'A', language: 'en', own: null, device: 'd1', cover: 'ab'.repeat(32) }
+    expect(await port.cover(BOB, book)).toBeNull()
+    expect(coverOf).not.toHaveBeenCalled()
   })
 })

@@ -1,5 +1,5 @@
 import { type Hlc } from '../hlc'
-import { compareEntries, type Entry, type ShelvedWork, type Stamped } from './log'
+import { compareEntries, mergeLogs, type Entry, type ShelvedWork, type Stamped } from './log'
 
 /**
  * A list (豆列), folded — WI-23.E1.
@@ -45,6 +45,8 @@ export interface ListItem {
   readonly at: Hlc
   readonly device: string
   readonly seq: number
+  /** Which relationship epoch it arrived under, as a recipient holds it — `HeldWork.epoch`'s reason. Absent on a fold's own output, and on rows kept before it was. */
+  readonly epoch?: number
 }
 
 export interface ListState {
@@ -76,7 +78,11 @@ export function foldList(entries: readonly Entry[]): ListState {
   const items = new Map<string, ListItem>()
   const removed = new Set<string>()
 
-  for (const entry of entries) {
+  /* ⚠️ **FORKS RESOLVED FIRST, AS `fold` RESOLVES THEM.** Two entries at one
+     `(device, seq)` are a forgery or a corruption; folded in arrival order the
+     first seen won, and two replicas that received them the other way round
+     held two different lists for ever. `mergeLogs` keeps the canonical one. */
+  for (const entry of mergeLogs(entries, [])) {
     switch (entry.op) {
       case 'create':
         created = true
@@ -125,38 +131,37 @@ export function foldList(entries: readonly Entry[]): ListState {
 }
 
 /**
- * A list log's compacted view — the title's winning entry, the live
- * placements, and the deletion if any. What a newly admitted peer would be
- * served, for `compacted`'s reason; the removed and the re-placed are
- * retracted history.
+ * A list log's compacted view — ONE creation carrying the winning title, the
+ * live placements, and the deletion if any. What a newly admitted peer would
+ * be served, for `compacted`'s reason; the removed, the re-placed and every
+ * retracted title are retracted history.
+ *
+ * ⚠️ **THE TITLE'S WINNER IS SERVED AS THE CREATION, WHATEVER KIND IT WAS.**
+ * Every `create` used to be kept beside the winning retitle, so a compacted
+ * view served the losing titles it existed to withhold; and a view holding
+ * only the retitle folds to a list never created. One synthesized `create`
+ * under the winner's own stamp does both jobs.
+ *
+ * In LOG ORDER before renumbering, as `compacted` is: two replicas holding
+ * the same entries in different arrival orders must serve the same bytes.
  */
 export function compactedList(entries: readonly Entry[], device: string): readonly Entry[] {
-  const state = foldList(entries)
-  const live = new Set(state.items.map((one) => `${one.device}:${one.seq}`))
-  let titled: Entry | undefined
-  for (const entry of entries) {
-    if ((entry.op === 'create' || entry.op === 'retitle') && newer(entry, titled)) titled = entry
-  }
-  const kept = entries.filter((entry) => {
-    switch (entry.op) {
-      case 'create':
-        /* KEPT WHATEVER THE TITLE'S WINNER. The creation is what makes the
-           log a list at all: a compacted view holding the retitle and not the
-           create folds to a list never created, and a newly admitted peer
-           served it would hold a renamed list that does not exist. */
-        return true
-      case 'retitle':
-        return entry === titled
-      case 'place':
-        return live.has(`${entry.device}:${entry.seq}`)
-      case 'delete':
-        return true
-      default:
-        return false
-    }
-  })
+  const resolved = mergeLogs(entries, [])
+  const state = foldList(resolved)
   /* A deleted list's compacted view is the deletion alone, and a list never
      created is nothing: neither has anything a new peer should hold. */
-  const served = state.deleted ? kept.filter((entry) => entry.op === 'delete').slice(0, 1) : state.created ? kept : []
-  return served.map((entry, i) => ({ ...entry, device, seq: i + 1 }))
+  if (state.deleted) {
+    const gone = resolved.find((entry) => entry.op === 'delete')
+    return gone === undefined ? [] : [{ ...gone, device, seq: 1 }]
+  }
+  if (!state.created) return []
+  let titled: (Stamped & { readonly title: string }) | undefined
+  for (const entry of resolved) {
+    if ((entry.op === 'create' || entry.op === 'retitle') && newer(entry, titled)) titled = entry
+  }
+  const live = new Set(state.items.map((one) => `${one.device}:${one.seq}`))
+  const kept: Entry[] = resolved.filter((entry) => entry.op === 'place' && live.has(`${entry.device}:${entry.seq}`))
+  /* Stryker disable next-line ConditionalExpression: a created list has a `create`, so the winner is never undefined; the guard is for the type. */
+  if (titled !== undefined) kept.push({ op: 'create', title: titled.title, device: titled.device, seq: titled.seq, at: titled.at })
+  return [...kept].sort(compareEntries).map((entry, i) => ({ ...entry, device, seq: i + 1 }))
 }

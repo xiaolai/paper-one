@@ -76,6 +76,23 @@ describe('a subscription on the Tauri wire', () => {
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('peer://pairing-result'), expect.objectContaining({ message: 'unlisten refused' }))
     spy.mockRestore()
   })
+
+  /* A listener that never attached has nothing to take down: its failure is
+     said once, at the subscribe, and unsubscribing must not say it again as a
+     leak — there is no native registration to leak. */
+  it('does not warn of a leaked listener when unsubscribing from a registration that never attached', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    attach = () => Promise.reject(new Error('no pairing events'))
+    const off = tauriWire().onPairingResult(() => {})
+    await settled()
+    off()
+    await settled()
+    expect(error).toHaveBeenCalledTimes(1)
+    expect(warn).not.toHaveBeenCalled()
+    error.mockRestore()
+    warn.mockRestore()
+  })
 })
 
 describe('a registration that rejects with nothing at all', () => {

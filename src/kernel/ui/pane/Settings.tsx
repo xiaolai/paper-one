@@ -851,7 +851,7 @@ export function Settings({
           onToggle={() => toggleGroup(section.id)}
         >
           {/* The group mounts its body only while open — one gate, the group's — and a throw stops at the section. */}
-          <ContributionBoundary label={section.title} resetKey={section.id}>
+          <ContributionBoundary label={section.title} id={section.id} resetKey={section.id}>
             <ContributionBody id={section.id} render={section.render} context={NO_BOOK} />
           </ContributionBoundary>
         </PaneGroup>

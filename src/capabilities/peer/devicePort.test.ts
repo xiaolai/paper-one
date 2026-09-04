@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { WirePeer } from './lib/wire'
 import { fakeWire } from './lib/fakeWire.testkit'
-import { devicePortOver, deviceRow, personPortOver, readRole, releasePeer, serveWhenShelf } from './index'
+import { devicePortOver, deviceRow, personPortOver, publishPortOver, readRole, releasePeer, serveWhenShelf } from './index'
 
 /**
  * THE `device` NOUN'S ADAPTER — the three operations that change who this
@@ -203,6 +203,50 @@ describe('device.forget', () => {
  * nothing — so a shelf that lost one race at startup silently served nothing
  * until the app was restarted.
  */
+/**
+ * ONE PORT PER WIRE. The circle's publisher refuses to sign through any port
+ * but the one that answered `mine()`, by identity — so `publishPort()` has to
+ * answer the SAME object for as long as the same peer is running, and a new
+ * one only when the wire is replaced. It built a fresh object per call, and
+ * against the real plugin every page signing failed.
+ */
+describe('the publish port over a wire', () => {
+  it('is one object per wire, and another for another wire', () => {
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-1' })
+    const port = publishPortOver(wire)
+    expect(publishPortOver(wire)).toBe(port)
+    expect(publishPortOver(fakeWire({ role: 'shelf', endpointId: 'shelf-2' }))).not.toBe(port)
+  })
+})
+
+/**
+ * THE ROSTER'S SIZE IS READ, NOT MINTED. `devices()` went through
+ * `circleMine`, which renews a due delegation and refuses a leaf whose
+ * delegation ran out — so refreshing the Circle panel wrote credentials or
+ * became an error, for a count that was on disk the whole time.
+ */
+describe('the person port’s device count', () => {
+  const mine = {
+    person: 'p1',
+    device: 'd1',
+    roster: ['d1', 'd2', 'd3'],
+    revocations: 0,
+    delegation: { person: 'p1', device: 'd1', notBefore: 0, notAfter: 1, roster: 1, sig: 's' },
+  }
+
+  it('counts the roster the file holds without asking the wire to mint or renew', async () => {
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-1' })
+    /* `mine` is the fake's own field — what its `circleRoster` reads, as the real command reads the file. */
+    const held = wire as unknown as { mine: typeof mine | null }
+    const minted = vi.spyOn(wire, 'circleMine')
+    held.mine = mine
+    expect(await personPortOver(wire).devices()).toBe(3)
+    held.mine = null
+    expect(await personPortOver(wire).devices()).toBe(0)
+    expect(minted).not.toHaveBeenCalled()
+  })
+})
+
 describe('readRole', () => {
   const quiet = { warn: () => {} }
 
@@ -225,6 +269,33 @@ describe('readRole', () => {
       await vi.advanceTimersByTimeAsync(2_000)
       expect(await answer).toBe('shelf')
       expect(tries).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /* THE WAIT IS COUNTED IN POLLS, NOT READ OFF THE CLOCK. `Date.now()` is
+   * not monotonic: set back an hour during the backoff, a wait measured as
+   * `now - started` held the shelf's services for the hour. The retry must
+   * come at the backoff whatever the wall clock does. */
+  it('retries on schedule even when the wall clock is set back during the wait', async () => {
+    vi.useFakeTimers()
+    try {
+      let tries = 0
+      const port = {
+        localRole: async () => {
+          tries += 1
+          if (tries < 2) throw new Error('not ready')
+          return 'satchel' as const
+        },
+      }
+      const answer = readRole(port, () => false, quiet)
+      /* The clock jumps back an hour once the wait has begun. */
+      await vi.advanceTimersByTimeAsync(50)
+      vi.setSystemTime(Date.now() - 3_600_000)
+      await vi.advanceTimersByTimeAsync(300)
+      expect(tries).toBe(2)
+      expect(await answer).toBe('satchel')
     } finally {
       vi.useRealTimers()
     }
@@ -520,9 +591,12 @@ describe('the device count the circle panel reads — WI-23.A3', () => {
      device presents is the count, this device included; a reader with no
      identity has no roster to lose and answers 0, which the marker never
      reads because `hasIdentity` is false first. */
+  /* `circleRoster` is the read; `circleMine` would mint or renew, and a
+     status read that reached for it is the defect the read exists to stop. */
   const withRoster = (roster: readonly string[] | null) =>
     personPortOver({
-      circleMine: () => Promise.resolve(roster === null ? null : { roster }),
+      circleRoster: () => Promise.resolve(roster),
+      circleMine: () => Promise.reject(new Error('a count must not mint')),
     } as never)
 
   it('is the roster’s size', async () => {
@@ -595,5 +669,47 @@ describe('the role read’s wait, held to the letter', () => {
     const said: unknown[] = []
     releasePeer({ port: null, model: null, serviceHost: undefined, devicePort: undefined } as never, { warn: (event) => void said.push(event) })
     expect(said).toEqual([])
+  })
+})
+
+/* ONE PORT PER WIRE, with the identity's listeners on it: a port built afresh
+   on every `personPort()` call had nobody to tell, and everything that waited
+   on an identity — the published shelf, the share controls — heard nothing. */
+describe('the person port’s identity lifecycle', () => {
+  it('is one port per wire, and tells its listeners when an identity is made, restored or forgotten', async () => {
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-1' })
+    const port = personPortOver(wire)
+    expect(personPortOver(wire)).toBe(port)
+    const heard: unknown[] = []
+    const off = port.onIdentity((event) => heard.push(event))
+    const person = await port.ensure()
+    expect(heard).toEqual([{ kind: 'made', person }])
+    /* Told AFTER the wire answered: a listener that asks finds the identity there. */
+    await port.forget()
+    expect(heard.at(-1)).toEqual({ kind: 'forgotten' })
+    const words = (await (async () => {
+      await port.ensure()
+      return port.phrase()
+    })())!
+    await port.forget()
+    const restored = await port.restore(words)
+    expect(heard.at(-1)).toEqual({ kind: 'restored', person: restored })
+    off()
+    await port.ensure()
+    expect(heard).toHaveLength(5)
+    /* A listener that throws does not stop the next one. */
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const after: string[] = []
+      port.onIdentity(() => {
+        throw new Error('a surface fell over')
+      })
+      port.onIdentity(() => after.push('told'))
+      await port.ensure()
+      expect(after).toEqual(['told'])
+      expect(spy).toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

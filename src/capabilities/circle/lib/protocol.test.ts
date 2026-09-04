@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_COVER_BYTES } from '../../../kernel'
+import { MAX_COVER_BYTES, MAX_ROSTER_DEVICES, isPageShape } from '../../../kernel'
 import { WIRE_VERSION, type WorkClaim } from '../../../kernel'
 import {
   CIRCLE_PROTO,
@@ -200,6 +200,35 @@ describe('what a peer can put in each field', () => {
       many[i.toString(16).padStart(64, '0')] = 1
     }
     expect(parsePagesRequest({ ...request(), since: many })).toBeNull()
+  })
+
+  it('names as many devices as the roster a page may carry — a cursor is never tighter than the roster', () => {
+    /* ⚠️ The bound is the roster's, by construction, and the test says so in
+       a way a reverted constant cannot pass: a page whose roster is full
+       parses, and a cursor naming every device on it parses too. The old
+       bound, sixty-four, refused the sixty-fifth. */
+    expect(MAX_CURSOR_DEVICES).toBe(MAX_ROSTER_DEVICES)
+    const devices = Array.from({ length: MAX_ROSTER_DEVICES }, (_, i) => i.toString(16).padStart(64, '0'))
+    const page = {
+      v: 1,
+      person: 'p',
+      work: { ids: ['ab'.repeat(32)], titles: [], author: '', language: 'en' },
+      device: devices[0],
+      from: 1,
+      to: 1,
+      prevPageHash: '',
+      entries: [],
+      roster: devices,
+      revocations: 0,
+      delegation: 'd',
+      sig: 's',
+    }
+    expect(isPageShape(page)).toBe(true)
+    expect(isPageShape({ ...page, roster: [...devices, 'one more'] })).toBe(false)
+    const every: Record<string, number> = Object.fromEntries(devices.map((device) => [device, 1]))
+    expect(parsePagesRequest({ ...request(), since: every })).not.toBeNull()
+    const sixtyFive: Record<string, number> = Object.fromEntries(devices.slice(0, 65).map((device) => [device, 1]))
+    expect(parsePagesRequest({ ...request(), since: sixtyFive })).not.toBeNull()
   })
 
   it('refuses the right NUMBER of members with a wrong NAME', () => {

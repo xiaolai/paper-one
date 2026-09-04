@@ -110,3 +110,27 @@ describe('a held list item', () => {
     }
   })
 })
+
+describe('a held list’s epoch', () => {
+  const item = { pub: 'i1', at: AT, device: 'd1', seq: 1, position: 1, note: '', work: { title: 'T', author: 'A', language: 'en' } }
+  it('is kept on the creation, on the title and on each item — each its own — and absent on a list kept before it was', async () => {
+    const title = { value: 'L', at: AT, device: 'd1', seq: 1, epoch: 3 }
+    const held = await read({ list: { created: true, createdEpoch: 3, title, deleted: false, items: [{ ...item, epoch: 2 }], removed: [] } })
+    expect(held.list.createdEpoch).toBe(3)
+    expect(held.list.title).toMatchObject({ value: 'L', epoch: 3 })
+    expect(held.list.items[0]).toMatchObject({ pub: 'i1', epoch: 2 })
+    const older = await read({ list: { created: true, title: { value: 'L', at: AT, device: 'd1', seq: 1 }, deleted: false, items: [item], removed: [] } })
+    expect(older.list).not.toHaveProperty('createdEpoch')
+    expect(older.list.title).not.toHaveProperty('epoch')
+    expect(older.list.items[0]).not.toHaveProperty('epoch')
+  })
+
+  it.each([
+    ['an epoch of zero on the creation', { created: true, createdEpoch: 0, deleted: false, items: [], removed: [] }],
+    ['a fractional epoch on the creation', { created: true, createdEpoch: 1.5, deleted: false, items: [], removed: [] }],
+    ['an epoch of zero on the title', { created: true, title: { value: 'L', at: AT, device: 'd1', seq: 1, epoch: 0 }, deleted: false, items: [], removed: [] }],
+    ['an epoch of zero on an item', { created: true, deleted: false, items: [{ ...item, epoch: 0 }], removed: [] }],
+  ])('refuses %s as a list that will not read', async (_what, list) => {
+    await expect(read({ list })).rejects.toThrow(/has a list that will not read/u)
+  })
+})

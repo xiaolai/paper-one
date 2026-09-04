@@ -10,13 +10,14 @@ import {
   type CircleWelcome,
   type PagesAnswer,
 } from './protocol'
-import { DEFAULT_BOUNDS, pagesFor, type Bounds, type Publisher, type SharedFile } from './publish'
-import { shelfPagesFor, shelvedNow, type ShelfFile } from './shelf'
+import { DEFAULT_BOUNDS, pagesFor, wireBytesOf, type Bounds, type Publisher, type SharedFile } from './publish'
+import { liveShelfRows, shelfPagesFor, type ShelfFile } from './shelf'
 import { base64Of } from './base64'
 import { SHELF_WORK, listWork } from '../../../kernel'
 import { listPagesFor, type ListFile, type OwnList } from './lists'
 import { COVER_CHUNK_BYTES, MAX_ANSWER_CHARS, MAX_PAGES_PER_ANSWER, parseCoverRequest, parseListsRequest, type CoverAnswer } from './protocol'
 import { MAX_COVER_BYTES } from '../../../kernel'
+import { cutToField } from './workField'
 
 /**
  * The two sides of an exchange, as functions of their inputs — WI-22.C4.
@@ -45,9 +46,23 @@ export interface BookLike extends ClaimSource {
   readonly id: string
 }
 
-/** The claim for one book of this library. */
+/**
+ * The claim for one book of this library.
+ *
+ * Over the fields as a shelf row or a list item carries them — cut to
+ * `MAX_WORK_FIELD` — so a claim made here and one made from the published
+ * work (`claimOfShelved`) are the same claim for the same book.
+ */
 export function claimOf(book: BookLike): WorkClaim {
-  return claimFor(book, workDigest)
+  return claimFor(
+    {
+      ...(book.title === undefined ? {} : { title: cutToField(book.title) }),
+      ...(book.author === undefined ? {} : { author: cutToField(book.author) }),
+      ...(book.identifier === undefined ? {} : { identifier: cutToField(book.identifier) }),
+      ...(book.languages === undefined ? {} : { languages: book.languages }),
+    },
+    workDigest,
+  )
 }
 
 /**
@@ -184,7 +199,10 @@ export async function answerCover(request: unknown, serving: Serving, discloses:
   const asked = parseCoverRequest(request)
   if (!asked) return null
   if (!discloses) return null
-  const row = [...shelvedNow(await serving.shelf()).values()].find((one) => one.pub === asked.pub)
+  /* ANY live row, not the one per book `shelvedNow` keeps: a friend asks by
+     the pub their page carried, and two device stores that met can hold two
+     live rows for one book. */
+  const row = liveShelfRows(await serving.shelf()).find((one) => one.pub === asked.pub)
   // Stryker disable next-line ConditionalExpression: a row that names no cover matches no held hash below; this refuses it a line earlier.
   if (row === undefined || row.work.cover === undefined) return null
   const held = await serving.cover(row.bookId)
@@ -242,26 +260,54 @@ export async function answerLists(request: unknown, serving: Serving, discloses:
   if (!discloses) return NOTHING
 
   const pages: string[] = []
-  /* ONE CHARACTER BUDGET ACROSS THE LISTS, as there is one page budget: a
-     caller with many lists is answered to the same size as one with one. */
-  const maxChars = bounds.maxChars ?? MAX_ANSWER_CHARS
-  let chars = 0
+  /* ONE SIZE BUDGET ACROSS THE LISTS, as there is one page budget: a caller
+     with many lists is answered to the same size as one with one. Both are
+     the caller's bounds, the module's caps notwithstanding: a test that
+     narrows them must see them held. */
+  const maxPages = Math.min(bounds.maxPages, MAX_PAGES_PER_ANSWER)
+  const maxBytes = Math.min(bounds.maxChars ?? MAX_ANSWER_CHARS, MAX_ANSWER_CHARS)
+  let bytes = 0
   let more = false
-  for (const list of await serving.lists()) {
+  /* ⚠️ **THE LISTS THE CALLER NAMED GO FIRST.** A caller holding more lists
+     than a cursor may name asks for a window of them and names no cursor for
+     the rest — which this side then serves from their beginning, and one
+     long list among them filled every answer before a named list behind it
+     was reached: the window rotated, and the named lists starved. Named
+     lists in the caller's order, then the unnamed in this side's — a cursor
+     the caller sent is the first thing honoured, and the discovery of a list
+     they have never held takes the room that is left. */
+  const rank = new Map(Object.keys(asked.since).map((id, at) => [id, at]))
+  const unnamed = Number.MAX_SAFE_INTEGER
+  const lists = [...(await serving.lists())].sort((a, b) => (rank.get(a.id) ?? unnamed) - (rank.get(b.id) ?? unnamed))
+  for (const list of lists) {
     /* ⚠️ **NOTHING IS CUT OR SIGNED FOR AN ANSWER THAT IS ALREADY FULL.** The
      * cap bounds the wire; it has to bound the work too, or a caller with
      * many lists makes this side sign pages it then throws away. */
-    if (pages.length >= MAX_PAGES_PER_ANSWER || chars >= maxChars) {
+    if (pages.length >= maxPages || bytes >= maxBytes) {
       more = true
       break
     }
     const publisher = await serving.publisher(listWork(list.id))
     if (!publisher) return NOTHING
-    const room = MAX_PAGES_PER_ANSWER - pages.length
-    const built = await listPagesFor(list.held, publisher, asked.since[list.id] ?? {}, workDigest, { ...bounds, maxPages: Math.min(bounds.maxPages, room), maxChars: maxChars - chars }, asked.v)
+    const room = maxPages - pages.length
+    const built = await listPagesFor(list.held, publisher, asked.since[list.id] ?? {}, workDigest, { ...bounds, maxPages: room, maxChars: maxBytes - bytes }, asked.v)
     if (built.held.sealed.length !== list.held.sealed.length) await serving.sealList(list.id, built.held)
-    pages.push(...built.pages)
-    for (const page of built.pages) chars += page.length
+    /* ⚠️ **PAGE BY PAGE AGAINST THE WHOLE ANSWER.** `pagesOver` lets a log's
+       FIRST page through whatever the size budget says — a page has to be
+       sendable on its own — so every list could put one page over what was
+       left, and the answer as a whole outgrew the frame. Here the answer's
+       first page is the only one that goes through regardless; the rest
+       wait for the next request, which is what `more` says. */
+    for (const page of built.pages) {
+      const cost = wireBytesOf(page)
+      if (pages.length > 0 && bytes + cost > maxBytes) {
+        more = true
+        break
+      }
+      pages.push(page)
+      bytes += cost
+    }
+    if (more) break
     if (built.more) more = true
   }
   return { pages, more }

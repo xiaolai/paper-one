@@ -502,7 +502,7 @@ const TABLE = [
     verb: 'get',
     grant: 'book:read',
     kind: 'req',
-    summary: 'One record by id, with its registers — the ledger stamps a shelf listing does not carry.',
+    summary: 'One record by id, with its ledger registers — the position and finished stamps and the tag clock, which a shelf listing does not carry. (A listing carries the opinion stamps.)',
     input: [BOOK_ID],
     output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'status', 'rating', 'review', 'hasContent'] },
   },

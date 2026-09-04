@@ -194,21 +194,42 @@ export interface HeldReview {
  */
 export interface HeldList {
   readonly created: boolean
+  /**
+   * The relationship epoch the `create` arrived under — `HeldWork.epoch`'s
+   * reason, for the list's existence: a list retained across a block must
+   * not be drawn on re-admission. ⚠️ **EACH PART CARRIES ITS OWN EPOCH**,
+   * not the list one for all of them: one epoch on the list, moved by
+   * whichever page came last, let a `place` under the new relationship
+   * re-expose a title and a creation that arrived under the old one. The
+   * title's epoch is on its register, an item's on the item. Absent on a
+   * list kept before epochs were, which reads as the first epoch.
+   */
+  readonly createdEpoch?: number
+  /** The winning title, with the epoch it arrived under — drawn only under that relationship. */
   readonly title?: HeldRegister<string>
+  /**
+   * WITHDRAWALS CARRY NO EPOCH, and are never gated on one: `deleted` and
+   * `removed` only ever take content away, and a withdrawal that stopped
+   * counting on re-admission would REVIVE what it withdrew — the one
+   * direction the epoch exists to prevent.
+   */
   readonly deleted: boolean
-  /** In the position rule's order — `compareItems`. */
+  /** In the position rule's order — `compareItems`. Each carries the epoch it arrived under. */
   readonly items: readonly ListItem[]
   readonly removed: readonly string[]
 }
 
 export const NO_LIST_HELD: HeldList = { created: false, deleted: false, items: [], removed: [] }
 
+/** The chain the first build fetched — the only one there was before `ForeignFile.v`. */
+const FIRST_CHAIN = 1
+
 export const NOTHING_SHARED: ForeignFile = {
   entries: [],
   withdrawn: [],
   heads: {},
   cursor: {},
-  v: 1,
+  v: FIRST_CHAIN,
   opinion: {},
   reviews: [],
   unreviewed: [],
@@ -288,125 +309,146 @@ async function readFileAt(fs: VaultFs, path: string, person: string, where: stri
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`circle file for ${where} is not a circle file`)
   }
-  const bookId = where
   const held = parsed as Record<string, unknown>
-  const rows = held['entries']
-  if (!Array.isArray(rows)) {
-    throw new Error(`circle file for ${bookId} has no entry list`)
-  }
-  /* ⚠️ **A WITHDRAWAL LIST THAT WILL NOT READ IS A FILE THAT THROWS, not one
-   * that reads as "nothing withdrawn".** Silently emptying it un-withdraws
-   * every passage this person has taken back — the file would then resurrect
-   * them on the next page that mentions one, which is the failure the list
-   * exists to prevent, produced by the code that reads it. */
-  const gone = held['withdrawn']
-  if (!Array.isArray(gone) || !gone.every((one) => typeof one === 'string')) {
-    throw new Error(`circle file for ${bookId} has no withdrawal list`)
-  }
-  /* ⚠️ **EVERY ENTRY IS CHECKED, AND VALIDATION USED TO STOP AT THE ARRAY.**
-   * `[null]` parsed as a `ForeignFile`, and the first `entry.passage.quote`
-   * downstream threw — AFTER the per-person error isolation had already run,
-   * so one malformed record took down every other person's overlay for that
-   * book. This file is written by a remote peer, which makes it the least
-   * trusted input the capability has; `validMarks` applies the same rule to
-   * `marks.json` and for the same reason.
-   *
-   * A malformed ROW is dropped and reported; a malformed FILE still throws,
-   * because a file that will not parse at all is a fact worth surfacing rather
-   * than silently reading as empty (see the header). */
-  const kept: ForeignEntry[] = []
-  for (const row of rows) {
-    if (isForeignEntry(row, person)) kept.push(asShared(row))
-    else console.warn(`Paper: dropped a malformed circle entry in ${bookId}`)
-  }
-  /* ⚠️ **A WITHDRAWN `pub` WINS OVER AN ENTRY THAT NAMES IT**, whatever order
-   * they were written in. Otherwise a file that somehow held both would draw a
-   * passage its author has taken back — and the reader would have no way to
-   * make it stop. */
-  /* ⚠️ **A HEAD MAP THAT WILL NOT READ THROWS TOO.** Reading it as "no chain
-   * yet" resets every chain to its start, which is precisely the substitution
-   * `prevPageHash` exists to refuse — and it would be granted by a relaunch. */
-  const heads = held['heads']
-  if (
-    typeof heads !== 'object' ||
-    heads === null ||
-    Array.isArray(heads) ||
-    !Object.values(heads).every((one) => typeof one === 'string')
-  ) {
-    throw new Error(`circle file for ${bookId} has no chain heads`)
-  }
-  /* ⚠️ **A CURSOR THAT WILL NOT READ THROWS, and an ABSENT one does too.** Read
-   * as "nothing fetched yet" it would re-fetch every log from zero — which is
-   * the exact defect the field was added to remove, granted by a relaunch.
-   * Absent is refused for `heads`'s reason: no file this capability has ever
-   * written lacks one, and a hand-made file is a file somebody can finish. */
-  const cursor = held['cursor']
-  if (
-    typeof cursor !== 'object' ||
-    cursor === null ||
-    Array.isArray(cursor) ||
-    !Object.values(cursor).every((one) => Number.isSafeInteger(one) && (one as number) >= 0)
-  ) {
-    throw new Error(`circle file for ${bookId} has no fetch cursor`)
-  }
-  /* The chain version the heads belong to. Refused rather than guessed: a
-     head read into the wrong chain is a chain that never verifies again. */
-  const v = held['v']
-  if (!Number.isSafeInteger(v) || (v as number) < 1) {
-    throw new Error(`circle file for ${bookId} names no chain version`)
-  }
+  /* One parser per part of the file — the chain state, and each domain's
+     rows with their withdrawals — so a shape can move in one without the
+     others being read past. A withdrawn `pub` wins over a row that names it
+     in every domain, whatever order they were written in: otherwise a file
+     that somehow held both would draw a passage its author has taken back,
+     and the reader would have no way to make it stop. */
+  const chain = readChain(held, where)
+  const passages = readPassages(held, person, where)
+  const reviews = readTombstoned(held, 'reviews', 'unreviewed', isHeldReview, where, 'a review list', 'a review withdrawal list')
+  const shelf = readTombstoned(held, 'works', 'unshelved', isHeldWork, where, 'a shelf', 'a shelf withdrawal list')
   /* ⚠️ **AN OPINION THAT WILL NOT PARSE IS A FILE THAT THROWS**, for the
    * reason a bad withdrawal list is: read as "nothing said", the next page
    * naming an older word would make that word current again, and the reader
    * would be shown a rating this person has since changed. Absent is empty —
-   * nothing said, which loses nothing. */
-  /* `undefined` is absent; `null` is a value, and not one an opinion can be. */
+   * nothing said, which loses nothing. `undefined` is absent; `null` is a
+   * value, and not one an opinion can be. */
   const opinion = readOpinion(held['opinion'] === undefined ? {} : held['opinion'])
-  if (opinion === null) {
-    throw new Error(`circle file for ${bookId} has an opinion that will not read`)
-  }
-  const reviews = held['reviews'] === undefined ? [] : held['reviews']
-  if (!Array.isArray(reviews) || !reviews.every(isHeldReview)) {
-    throw new Error(`circle file for ${bookId} has a review list that will not read`)
-  }
-  const unreviewedRaw = held['unreviewed'] === undefined ? [] : held['unreviewed']
-  if (!Array.isArray(unreviewedRaw) || !unreviewedRaw.every((one) => typeof one === 'string')) {
-    throw new Error(`circle file for ${bookId} has a review withdrawal list that will not read`)
-  }
-  const works = held['works'] === undefined ? [] : held['works']
-  if (!Array.isArray(works) || !works.every(isHeldWork)) {
-    throw new Error(`circle file for ${bookId} has a shelf that will not read`)
-  }
-  const unshelvedRaw = held['unshelved'] === undefined ? [] : held['unshelved']
-  if (!Array.isArray(unshelvedRaw) || !unshelvedRaw.every((one) => typeof one === 'string')) {
-    throw new Error(`circle file for ${bookId} has a shelf withdrawal list that will not read`)
-  }
+  if (opinion === null) throw new Error(`circle file for ${where} has an opinion that will not read`)
   /* A list that will not read throws, for the opinion's reason: read as
      "no list", the next page would re-place what the person removed. */
   const list = held['list'] === undefined ? NO_LIST_HELD : readList(held['list'])
-  if (list === null) {
-    throw new Error(`circle file for ${bookId} has a list that will not read`)
-  }
-  const withdrawn = [...new Set(gone)]
-  const hidden = new Set(withdrawn)
-  const unreviewed = [...new Set(unreviewedRaw as string[])]
-  const silenced = new Set(unreviewed)
-  const unshelved = [...new Set(unshelvedRaw as string[])]
-  const offShelf = new Set(unshelved)
+  if (list === null) throw new Error(`circle file for ${where} has a list that will not read`)
   return {
-    entries: kept.filter((one) => !hidden.has(one.pub)),
-    withdrawn,
-    heads: heads as Readonly<Record<string, string>>,
-    cursor: cursor as Readonly<Record<string, number>>,
-    v: v as number,
+    entries: passages.rows,
+    withdrawn: passages.gone,
+    ...chain,
     opinion,
-    /* A withdrawn review wins over a row that names it, as a passage's does. */
-    reviews: reviews.filter((one) => !silenced.has(one.pub)),
-    unreviewed,
-    works: works.filter((one) => !offShelf.has(one.pub)),
-    unshelved,
+    reviews: reviews.rows,
+    unreviewed: reviews.gone,
+    works: shelf.rows,
+    unshelved: shelf.gone,
     list,
   }
+}
+
+/**
+ * The chain state: heads, cursor and version.
+ *
+ * ⚠️ **A HEAD MAP THAT WILL NOT READ THROWS.** Reading it as "no chain yet"
+ * resets every chain to its start, which is precisely the substitution
+ * `prevPageHash` exists to refuse — and it would be granted by a relaunch.
+ *
+ * ⚠️ **A FILE 0.1.3 WROTE HAS NEITHER `cursor` NOR `v`, AND IT IS NOT A FILE
+ * THAT WILL NOT READ.** That build persisted the chain heads and nothing
+ * about how far along them it was; refusing it made every passage a friend
+ * had sent before the upgrade throw on the first read after it. Read as a
+ * chain started from nothing — heads and cursor empty, on the first chain —
+ * with what is HELD kept, for `ForeignFile.v`'s reason: the folded entries
+ * and withdrawals survive, and a share re-delivered from the start is a
+ * duplicate the fold keeps once. The heads go WITH the cursor: a head kept
+ * beside an empty cursor asks for the first page and refuses it as a gap,
+ * for ever. One full re-fetch per log, once, is the price. Both absent and
+ * nothing else is the shape; one of the two alone is a hand-made file.
+ *
+ * ⚠️ **A CURSOR THAT WILL NOT READ THROWS, and an ABSENT one does too.** Read
+ * as "nothing fetched yet" it would re-fetch every log from zero — which is
+ * the exact defect the field was added to remove, granted by a relaunch.
+ * Absent is refused for `heads`'s reason — save the one shape above. The
+ * version likewise: refused rather than guessed, since a head read into the
+ * wrong chain is a chain that never verifies again.
+ */
+function readChain(held: Record<string, unknown>, where: string): Pick<ForeignFile, 'heads' | 'cursor' | 'v'> {
+  const heads = held['heads']
+  if (typeof heads !== 'object' || heads === null || Array.isArray(heads) || !Object.values(heads).every((one) => typeof one === 'string')) {
+    throw new Error(`circle file for ${where} has no chain heads`)
+  }
+  const legacy = held['cursor'] === undefined && held['v'] === undefined
+  const cursor = legacy ? {} : held['cursor']
+  if (typeof cursor !== 'object' || cursor === null || Array.isArray(cursor) || !Object.values(cursor).every((one) => Number.isSafeInteger(one) && (one as number) >= 0)) {
+    throw new Error(`circle file for ${where} has no fetch cursor`)
+  }
+  const v = legacy ? FIRST_CHAIN : held['v']
+  if (!Number.isSafeInteger(v) || (v as number) < 1) {
+    throw new Error(`circle file for ${where} names no chain version`)
+  }
+  return {
+    heads: legacy ? {} : (heads as Readonly<Record<string, string>>),
+    cursor: cursor as Readonly<Record<string, number>>,
+    v: v as number,
+  }
+}
+
+/**
+ * The passages, and every `pub` withdrawn.
+ *
+ * ⚠️ **A WITHDRAWAL LIST THAT WILL NOT READ IS A FILE THAT THROWS, not one
+ * that reads as "nothing withdrawn".** Silently emptying it un-withdraws
+ * every passage this person has taken back — the file would then resurrect
+ * them on the next page that mentions one, which is the failure the list
+ * exists to prevent, produced by the code that reads it.
+ *
+ * ⚠️ **EVERY ENTRY IS CHECKED, AND VALIDATION USED TO STOP AT THE ARRAY.**
+ * `[null]` parsed as a `ForeignFile`, and the first `entry.passage.quote`
+ * downstream threw — AFTER the per-person error isolation had already run,
+ * so one malformed record took down every other person's overlay for that
+ * book. This file is written by a remote peer, which makes it the least
+ * trusted input the capability has; `validMarks` applies the same rule to
+ * `marks.json` and for the same reason. A malformed ROW is dropped and
+ * reported; a malformed FILE still throws, because a file that will not parse
+ * at all is a fact worth surfacing rather than silently reading as empty.
+ */
+function readPassages(held: Record<string, unknown>, person: string, where: string): { readonly rows: readonly ForeignEntry[]; readonly gone: readonly string[] } {
+  const rows = held['entries']
+  if (!Array.isArray(rows)) throw new Error(`circle file for ${where} has no entry list`)
+  const gone = readNames(held['withdrawn'], () => new Error(`circle file for ${where} has no withdrawal list`))
+  const kept: ForeignEntry[] = []
+  for (const row of rows) {
+    if (isForeignEntry(row, person)) kept.push(asShared(row))
+    else console.warn(`Paper: dropped a malformed circle entry in ${where}`)
+  }
+  const hidden = new Set(gone)
+  return { rows: kept.filter((one) => !hidden.has(one.pub)), gone }
+}
+
+/**
+ * A tombstoned domain — reviews, shelf rows — with its withdrawal list. Absent
+ * is empty, which loses nothing: nothing was said. Present and malformed
+ * throws, for the withdrawal list's reason.
+ */
+function readTombstoned<T extends { readonly pub: string }>(
+  held: Record<string, unknown>,
+  rowsKey: string,
+  goneKey: string,
+  isRow: (value: unknown) => value is T,
+  where: string,
+  rowsWhat: string,
+  goneWhat: string,
+): { readonly rows: readonly T[]; readonly gone: readonly string[] } {
+  const rows = held[rowsKey] === undefined ? [] : held[rowsKey]
+  if (!Array.isArray(rows) || !rows.every(isRow)) throw new Error(`circle file for ${where} has ${rowsWhat} that will not read`)
+  const gone = readNames(held[goneKey] === undefined ? [] : held[goneKey], () => new Error(`circle file for ${where} has ${goneWhat} that will not read`))
+  const hidden = new Set(gone)
+  return { rows: (rows as readonly T[]).filter((one) => !hidden.has(one.pub)), gone }
+}
+
+/** A list of names — `pub`s withdrawn — deduplicated, or the error the caller names. */
+function readNames(value: unknown, refuse: () => Error): readonly string[] {
+  if (!Array.isArray(value) || !value.every((one) => typeof one === 'string')) throw refuse()
+  return [...new Set(value as string[])]
 }
 
 /** A held list, or `null` for one that will not read. A removed pub wins over an item that names it. */
@@ -423,10 +465,15 @@ function readList(value: unknown): HeldList | null {
   if (title !== undefined) {
     if (!isRegisterShape(title) || typeof title['value'] !== 'string') return null
   }
+  const createdEpoch = held['createdEpoch']
+  if (createdEpoch !== undefined && !isEpoch(createdEpoch)) return null
   const gone = new Set(removed as string[])
   return {
     created: held['created'],
-    ...(title === undefined ? {} : { title: { value: title['value'] as string, at: title.at, device: title.device, seq: title.seq } }),
+    ...(createdEpoch === undefined ? {} : { createdEpoch }),
+    ...(title === undefined
+      ? {}
+      : { title: { value: title['value'] as string, at: title.at, device: title.device, seq: title.seq, ...(title['epoch'] === undefined ? {} : { epoch: title['epoch'] as number }) } }),
     deleted: held['deleted'],
     items: [...(items as ListItem[]).filter((one) => !gone.has(one.pub))].sort(compareItems),
     removed: [...new Set(removed as string[])],
@@ -661,25 +708,47 @@ export async function writeForeign(
    * argument rather than looking one up.
    */
   changed: () => void,
+  /**
+   * Whether the person is still admitted, asked INSIDE the lane — see
+   * `writePersonFile`. Required, for `changed`'s reason.
+   */
+  admits: () => Promise<boolean>,
 ): Promise<void> {
-  await queue.append(lane(bookId), async () => {
-    /* ⚠️ **`atomicWrite`, AND THIS WAS A RAW `writeFile` — which would have
-     * failed on the FIRST production write.** `circle/` does not exist until
-     * something creates it, and a bare `writeFile` creates no parent; the fake
-     * filesystem these tests run against is permissive and created one
-     * implicitly, so every test passed against a call that cannot work on a
-     * real disk. The same fake hid the second half: a raw write is not atomic,
-     * so an interruption leaves truncated JSON that `readForeign` then refuses
-     * for ever — a book whose foreign marks are permanently unreadable.
-     *
-     * `atomicWrite` makes the parent and renames into place. It is the same
-     * primitive `marks.json` is written with; using anything else here was the
-     * whole defect. */
-    await atomicWrite(
-      fs,
-      circlePathIn(bookId, person),
-      new TextEncoder().encode(JSON.stringify(held)),
-    )
+  await writeOnLane(fs, queue, lane(bookId), circlePathIn(bookId, person), held, changed, admits)
+}
+
+/**
+ * One circle file, replaced whole on ONE lane, the caller told after — the
+ * write every held file goes through, per book or per person.
+ *
+ * ⚠️ **RE-ASKED INSIDE THE LANE, NOT ONLY BEFORE IT.** The round asks the
+ * record before every keep and a purge takes the same lane — but a keep
+ * queued behind a purge ran after it, and put the person's file back from
+ * the dead. The record the purge leaves says exited, and that is read here,
+ * on the lane, with nothing between the answer and the write.
+ *
+ * ⚠️ **`atomicWrite`, AND THIS WAS A RAW `writeFile` — which would have failed
+ * on the FIRST production write.** `circle/` does not exist until something
+ * creates it, and a bare `writeFile` creates no parent; the fake filesystem
+ * these tests run against is permissive and created one implicitly, so every
+ * test passed against a call that cannot work on a real disk. The same fake
+ * hid the second half: a raw write is not atomic, so an interruption leaves
+ * truncated JSON that `readForeign` then refuses for ever — a book whose
+ * foreign marks are permanently unreadable. `atomicWrite` makes the parent
+ * and renames into place, as `marks.json` is written.
+ */
+async function writeOnLane(
+  fs: VaultFs,
+  queue: WriteQueue,
+  laneKey: string,
+  path: string,
+  held: ForeignFile,
+  changed: () => void,
+  admits: () => Promise<boolean>,
+): Promise<void> {
+  await queue.append(laneKey, async () => {
+    if (!(await admits())) return
+    await atomicWrite(fs, path, new TextEncoder().encode(JSON.stringify(held)))
   })
   /* AFTER the queued write, not inside it: a listener that re-reads would
      otherwise queue behind the very task it is reacting to. */
@@ -753,23 +822,22 @@ export async function writeHeldList(
   listId: string,
   held: ForeignFile,
   changed: () => void,
+  admits: () => Promise<boolean>,
 ): Promise<void> {
-  await writePersonFile(fs, queue, person, personListPathIn(person, listId), held, changed)
+  await writePersonFile(fs, queue, person, personListPathIn(person, listId), held, changed, admits)
 }
 
-/** One of a person's files, replaced whole on the person's lane, and the caller told after. */
-async function writePersonFile(
+/** One of a person's files, replaced whole on the PERSON's lane — the lane their folder is purged on — and the caller told after. */
+function writePersonFile(
   fs: VaultFs,
   queue: WriteQueue,
   person: string,
   path: string,
   held: ForeignFile,
   changed: () => void,
+  admits: () => Promise<boolean>,
 ): Promise<void> {
-  await queue.append(personFolderIn(person), async () => {
-    await atomicWrite(fs, path, new TextEncoder().encode(JSON.stringify(held)))
-  })
-  changed()
+  return writeOnLane(fs, queue, personFolderIn(person), path, held, changed, admits)
 }
 
 /**
@@ -784,6 +852,7 @@ export async function writeHeldShelf(
   person: string,
   held: ForeignFile,
   changed: () => void,
+  admits: () => Promise<boolean>,
 ): Promise<void> {
-  await writePersonFile(fs, queue, person, personShelfPathIn(person), held, changed)
+  await writePersonFile(fs, queue, person, personShelfPathIn(person), held, changed, admits)
 }

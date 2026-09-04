@@ -124,7 +124,7 @@ describe('parseRows', () => {
       addedAt: 111,
       openedAt: 222,
       format: 'epub',
-      contentHash: 'h',
+      contentHash: 'ab'.repeat(32),
       hasContent: true,
     }
     expect(parseRows([wire])[0]).toEqual(wire)
@@ -429,11 +429,59 @@ describe('what makes two rows differ', () => {
   })
 
   it('carries a format and a content hash only when the row has them', () => {
-    const with_ = asIndexedBook(parseRows([{ bookId: 'a', title: 'A', format: 'epub', contentHash: 'h' }])[0]!)
+    const digest = 'ab'.repeat(32)
+    const with_ = asIndexedBook(parseRows([{ bookId: 'a', title: 'A', format: 'epub', contentHash: digest }])[0]!)
     expect(with_.format).toBe('epub')
-    expect(with_.contentHash).toBe('h')
+    expect(with_.contentHash).toBe(digest)
     const without = asIndexedBook(parseRows([{ bookId: 'a', title: 'A' }])[0]!)
     expect('format' in without).toBe(false)
     expect('contentHash' in without).toBe(false)
+  })
+
+  /* THE KERNEL'S ONE DIGEST RULE, at the browser's door too. This fixture
+     used to be `'h'`, and `'h'` went through: a shelf's malformed hash became
+     the shelf's cache generation, which no real digest could ever equal. */
+  it('reads a content hash only when it is a BLAKE3 digest, as the record and the sync wire do', () => {
+    const [short, upper, fine] = parseRows([
+      { bookId: 'a', title: 'A', contentHash: 'h' },
+      { bookId: 'b', title: 'B', contentHash: 'AB'.repeat(32) },
+      { bookId: 'c', title: 'C', contentHash: 'ab'.repeat(32) },
+    ])
+    expect([short!.contentHash, upper!.contentHash, fine!.contentHash]).toEqual([null, null, 'ab'.repeat(32)])
+  })
+
+  it('reads a status only from the kernel’s own vocabulary', () => {
+    const [want, other] = parseRows([
+      { bookId: 'a', title: 'A', status: 'want' },
+      { bookId: 'b', title: 'B', status: 'abandoned' },
+    ])
+    expect([want!.status, other!.status]).toEqual(['want', null])
+  })
+})
+
+/* ONE FACT, NOT TWO. With a status on the wire, `finished` follows it and
+   is stamped by it, as every kernel writer spells it; the legacy flag speaks
+   only for a row with no status. A row saying `reading` beside `finished:
+   true` used to project a record that said both. */
+describe('finished, projected from the row', () => {
+  const HLC = '018bcfe56809-0000-1d8865efc2eaef44'
+  const row = (over: Record<string, unknown>) => asIndexedBook(parseRows([{ bookId: 'a', title: 'A', ...over }])[0]!)
+
+  it('follows the status when there is one, stamped by it, whatever the legacy flag said', () => {
+    const reading = row({ status: 'reading', statusAt: HLC, finished: true })
+    expect(reading.finished).toBe(false)
+    expect(reading.finishedAt).toBe(HLC)
+    const done = row({ status: 'finished', statusAt: HLC, finished: false })
+    expect(done.finished).toBe(true)
+    expect(done.finishedAt).toBe(HLC)
+  })
+
+  it('keeps the legacy flag, unstamped, for a row with no status or no stamp', () => {
+    const legacy = row({ finished: true })
+    expect(legacy.finished).toBe(true)
+    expect('finishedAt' in legacy).toBe(false)
+    const unstamped = row({ status: 'reading', finished: true })
+    expect(unstamped.finished).toBe(true)
+    expect('finishedAt' in unstamped).toBe(false)
   })
 })

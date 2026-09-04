@@ -1,4 +1,4 @@
-import { parseCards, validMarks, type Card, type Mark } from '../../../kernel'
+import { COVER_NAMES, isContentHash, parseCards, validMarks, type Card, type Mark } from '../../../kernel'
 import { isHlc, type Hlc } from './clock'
 import { fromWire } from './merge'
 import type { BookRecord } from '../../../kernel'
@@ -350,7 +350,7 @@ export function parsePushGroup(value: unknown): PushGroup | null {
   /* A pushed hash is checked before the record it rides on is applied, so a
      record never lands promising bytes the verified fetch will refuse — and a
      record that has no hash yet carries none, not an empty one. */
-  if (contentHash !== undefined && !BLAKE3.test(contentHash)) return null
+  if (contentHash !== undefined && !isContentHash(contentHash)) return null
   if (contentHash !== undefined) out.contentHash = contentHash
   if (format !== undefined) out.format = format
   if (size !== undefined) out.size = size
@@ -359,13 +359,11 @@ export function parsePushGroup(value: unknown): PushGroup | null {
     if (
       !isRecord(cover) ||
       typeof cover['name'] !== 'string' ||
-      /* The two names a cover may have on disk — anything else is skipped on landing, so it is refused here. */
-      !COVER_NAMES.has(cover['name']) ||
+      /* The kernel's cover names — anything else is skipped on landing, so it is refused here. */
+      !(COVER_NAMES as readonly string[]).includes(cover['name']) ||
       optSize(cover['size']) === BAD ||
       cover['size'] === undefined ||
-      // Stryker disable next-line ConditionalExpression: a non-string never matches the digest pattern either.
-      typeof cover['hash'] !== 'string' ||
-      !BLAKE3.test(cover['hash'])
+      !isContentHash(cover['hash'])
     ) {
       return null
     }
@@ -446,6 +444,11 @@ export function parsePullPage(value: unknown): PullPage | null {
     const rowMarksDigest = optString(raw['marksDigest'])
     const rowCoverAt = optSize(raw['coverAt'])
     if (rowHash === BAD || rowFormat === BAD || rowSize === BAD || rowMarksDigest === BAD || rowCoverAt === BAD) return null
+    /* A present hash is a BLAKE3 digest, as a push group's and a content
+       answer's must be — a pull row was the one message that took any
+       string, and handed the ledger a `PullPage` the other parsers would
+       have refused. */
+    if (rowHash !== undefined && !isContentHash(rowHash)) return null
     rows.push({
       book: raw['book'],
       seq: raw['seq'],
@@ -486,11 +489,12 @@ export function parsePullPage(value: unknown): PullPage | null {
   }
 }
 
-/** The names a cover blob may carry; `ledger.ts` lands no other. */
-const COVER_NAMES: ReadonlySet<string> = new Set(['cover.jpg', 'cover.webp'])
-
-/** A BLAKE3 digest as the ledger spells it: sixty-four hex characters. */
-const BLAKE3 = /^[0-9a-f]{64}$/u
+/* The cover names and the digest rule are the KERNEL's — `COVER_NAMES` and
+   `isContentHash` — not restated here. This file, `coverCache.ts` and
+   `ledger.ts` each carried a copy of the two names, and this one carried its
+   own copy of the digest pattern; a name added to the kernel's set, or a
+   digest rule tightened there, would have left parsing, caching and landing
+   disagreeing with the record they serve. */
 
 export function parseContentAnswer(value: unknown): ContentAnswer | null {
   if (!isRecord(value)) return null
@@ -502,8 +506,7 @@ export function parseContentAnswer(value: unknown): ContentAnswer | null {
   /* EMPTY IS THE DOCUMENTED "COULD NOT HASH" ANSWER — a shelf with no plugin
      and no stored hash still answers, and the caller refuses to fetch bytes
      it cannot verify. Anything else must be a digest. */
-  // Stryker disable next-line ConditionalExpression: a non-string never matches the digest pattern either.
-  if (typeof value['contentHash'] !== 'string' || (value['contentHash'] !== '' && !BLAKE3.test(value['contentHash']))) return null
+  if (typeof value['contentHash'] !== 'string' || (value['contentHash'] !== '' && !isContentHash(value['contentHash']))) return null
   const coverName = value['coverName']
   if (coverName !== null && typeof coverName !== 'string') return null
   /* The cover's facts are one tuple: all three present and well-formed, or
@@ -515,8 +518,7 @@ export function parseContentAnswer(value: unknown): ContentAnswer | null {
   if (coverFacts) {
     if (coverName === null) return null
     if (!Number.isSafeInteger(coverSize) || (coverSize as number) < 0) return null
-    // Stryker disable next-line ConditionalExpression: as above.
-    if (typeof coverHash !== 'string' || !BLAKE3.test(coverHash)) return null
+    if (!isContentHash(coverHash)) return null
   }
   return {
     folder: value['folder'],

@@ -52,6 +52,28 @@ describe('a contributed renderer inside its boundary', () => {
     )
     expect(seen).toEqual([{ bookId: 'book:x' }])
   })
+
+  /* TWO NAMES FOR TWO READERS: the label is the reader's, the id is the log's.
+     One value served both, so the side pane showed a reader `circle:friends`
+     and Marginalia told the log "A mark control" for every control there is. */
+  it('names the contribution by its id in the log and by its label to the reader', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    render(
+      <ContributionBoundary label="Friends" id="circle:friends">
+        <ContributionBody
+          id="circle:friends"
+          render={() => {
+            throw new Error('port gone')
+          }}
+          context={{ bookId: null }}
+        />
+      </ContributionBoundary>,
+    )
+    expect(screen.getByText(/Friends could not be drawn\./u)).toBeTruthy()
+    expect(screen.queryByText(/circle:friends/u)).toBeNull()
+    expect(spy.mock.calls.some((call) => String(call[0]).includes('circle:friends failed to draw'))).toBe(true)
+    spy.mockRestore()
+  })
 })
 
 describe('a boundary asked to draw another contribution', () => {

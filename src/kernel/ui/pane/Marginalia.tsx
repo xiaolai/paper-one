@@ -914,7 +914,7 @@ export function Marginalia({
           {isHighlight(mark)
             ? markControls?.map((control) => (
                 <div key={control.id} data-mark-control={control.id}>
-                  <ContributionBoundary label="A mark control" resetKey={control.id}>
+                  <ContributionBoundary label="A mark control" id={control.id} resetKey={control.id}>
                     <ContributionBody id={control.id} render={() => control.render(mark)} context={controlContext(bookId)} />
                   </ContributionBoundary>
                 </div>

@@ -604,6 +604,22 @@ pub async fn peer_circle_mine<R: Runtime>(
     .await
 }
 
+/// The device ids this device's LAST ACCEPTED roster vouches for — read from
+/// the file, minting and renewing nothing. `None` for a device that has never
+/// published.
+///
+/// ⚠️ **READ-ONLY, FOR `peer_person_status`'S REASON.** The Circle panel counts
+/// the roster on every refresh to decide whether to show the custody marker,
+/// and it read the count out of `peer_circle_mine` — which renews a delegation
+/// that is due and REFUSES a leaf whose delegation has run out. Refreshing a
+/// panel then either wrote credentials or replaced the panel with an error, for
+/// a number that was on disk the whole time.
+#[tauri::command]
+pub async fn peer_circle_roster<R: Runtime>(app: AppHandle<R>) -> Result<Option<Vec<String>>> {
+    let root = data_root(&app)?;
+    off_thread(move || Ok(circle::read_mine(&root)?.map(|mine| mine.roster.roster.devices))).await
+}
+
 /// Sign a page with this device's endpoint key.
 ///
 /// ⚠️ **THE ONLY THING THIS KEY MAY BE ASKED TO SIGN, AND THE CONFINEMENT IS

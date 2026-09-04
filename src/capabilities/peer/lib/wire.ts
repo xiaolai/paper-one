@@ -283,6 +283,15 @@ export interface PeerWire {
    * credentials expired is one whose pages every friend silently refuses.
    */
   circleMine(): Promise<PagePublisher | null>
+  /**
+   * The device ids this device's last accepted roster vouches for, READ FROM
+   * THE FILE — minting and renewing nothing. `null` for a device that has
+   * never published. What a status surface counts: `circleMine` renews a
+   * delegation that is due and refuses a leaf whose delegation ran out, and a
+   * panel refresh that wrote credentials or turned into an error for a number
+   * that was on disk the whole time is the thing this exists to stop.
+   */
+  circleRoster(): Promise<readonly string[] | null>
 }
 
 /** The device's publishing identity, as `peer_circle_mine` reports it. */
@@ -424,12 +433,24 @@ function subscription<T>(registrations: Registrations, event: string, fn: (paylo
     live = false
     /* Said, for the subscribe failure's reason: a listener that could not be
        taken down is a native registration kept for the rest of the run, and
-       the only evidence of it is this line. */
-    void pending
-      .then((unlisten) => unlisten())
-      .catch((thrown: unknown) => {
-        console.warn(`peer: could not unsubscribe from "${event}"`, thrown)
-      })
+       the only evidence of it is this line.
+
+       ONLY FOR A LISTENER THAT WAS THERE. A registration that never attached
+       has nothing to take down — its failure was already said above, and
+       catching the same rejection here warned of a leaked listener that does
+       not exist. The `then` takes the rejection branch, so a rejected
+       `pending` settles quietly and only `unlisten()` itself throwing is a
+       leak worth a line. */
+    void pending.then(
+      (unlisten) => {
+        try {
+          unlisten()
+        } catch (thrown: unknown) {
+          console.warn(`peer: could not unsubscribe from "${event}"`, thrown)
+        }
+      },
+      () => {},
+    )
   }
 }
 
@@ -469,6 +490,7 @@ export function tauriWire(): PeerWire {
     circleRevoke: (device) => invoke(command('peer_circle_revoke'), { device }),
     pageSign: (message) => invoke(command('peer_page_sign'), { message }),
     circleMine: () => invoke(command('peer_circle_mine')),
+    circleRoster: () => invoke(command('peer_circle_roster')),
 
     sessionRecv: async (sessionId, max) => {
       const frames = await invoke<number[][]>(command('peer_session_recv'), { sessionId, max: max ?? null })

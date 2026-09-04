@@ -1,12 +1,18 @@
 import { getPublicKey, hashes, sign } from '@noble/ed25519'
+import { blake3 } from '@noble/hashes/blake3.js'
+import { createSpendLedger } from './spendLedger'
+import { createCoverFetcher } from './covers'
+import { base64Of } from './base64'
+import { COVER_CHUNK_BYTES } from './protocol'
+import { fakeFs } from '../../../kernel/testkit'
 import { sha512 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import { describe, expect, it, vi } from 'vitest'
-import { NOTHING_SPENT, canonicalJson, makeHlc, type Hlc, type Passage, type Spend, hlcOf } from '../../../kernel'
+import { NOTHING_SPENT, canonicalJson, charge, makeHlc, type Hlc, type Passage, type Spend, hlcOf } from '../../../kernel'
 import { pageCrypto } from './crypto'
 import { answerLists, answerPages, answerShelf, welcome, workDigest, type BookLike, type Serving } from './exchange'
-import { MAX_ANSWERS_PER_LOG, fetchRound, type Dialled, type FetchPorts, type PersonToFetch } from './fetch'
-import { CIRCLE_SERVICES } from './protocol'
+import { LIST_WINDOW_ROTATES_MS, MAX_ANSWERS_PER_LOG, fetchRound, listWindowOf, type Dialled, type FetchPorts, type PersonToFetch } from './fetch'
+import { CIRCLE_SERVICES, MAX_LISTS_PER_REQUEST, parseListsRequest } from './protocol'
 import { DEFAULT_BOUNDS, NOTHING_PUBLISHED, pagesFor, share, type Publisher, type SharedFile } from './publish'
 import { delegationBytes, type SignedDelegation } from './receive'
 import { NOTHING_SHELVED, syncShelf } from './shelf'
@@ -117,9 +123,12 @@ function sessionTo(serving: Serving, answering = ALICE.id): Dialled & { readonly
   return session
 }
 
+/* ONE device to dial by default: every device that answers is dialled, and
+   with the phone mapped to the laptop's session every count below would
+   double. The tests about a second device name it. */
 const alicePerson = (over: Partial<PersonToFetch> = {}): PersonToFetch => ({
   person: ALICE.id,
-  devices: [ALICE_LAPTOP.id, ALICE_PHONE.id],
+  devices: [ALICE_LAPTOP.id],
   revoked: [],
   roster: { epoch: 0 },
   ...over,
@@ -158,8 +167,13 @@ function bob(over: Partial<FetchPorts> = {}) {
     heldLists: (person) =>
       Promise.resolve(new Map([...held].filter(([key]) => key.startsWith(`list/${person}/`)).map(([key, file]) => [key.slice(`list/${person}/`.length), file]))),
     keepList,
-    spend: (person) => spend.get(person) ?? NOTHING_SPENT,
-    spent,
+    /* The ledger as `index.ts` keeps it: one step, read to commit. `spent`
+       records each charge that landed, for the assertions that count them. */
+    charge: (person, key, bytes, now, budget) => {
+      const charged = charge(spend.get(person) ?? NOTHING_SPENT, key, bytes, now, budget)
+      if (charged.allowed) spent(person, charged.spend)
+      return charged.allowed
+    },
     now: () => NOW,
     crypto: pageCrypto,
     ...over,
@@ -522,6 +536,7 @@ describe('who is asked, and who is not', () => {
     a.shareOne('x')
     const dialled: string[] = []
     const b = bob({
+      people: () => Promise.resolve([alicePerson({ devices: [ALICE_LAPTOP.id, ALICE_PHONE.id] })]),
       dial: (device) => {
         dialled.push(device)
         return device === ALICE_PHONE.id ? Promise.resolve(sessionTo(a.serving)) : Promise.reject(new Error('asleep'))
@@ -827,7 +842,7 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
     expect(b.shelfOfAlice().works).toHaveLength(1)
   })
 
-  it('asks the device furthest along for its last page, from one before the cursor, and keeps the shelf only when that page comes back', async () => {
+  it('asks the DIALLED device for its last page, from one before its own cursor, and keeps the shelf only when that page comes back', async () => {
     const heads = { [ALICE_LAPTOP.id]: pageCrypto.hash('laptop-last'), [ALICE_PHONE.id]: pageCrypto.hash('phone-last') }
     /* The phone is furthest along, and comes FIRST, so "the last one seen"
        and "the furthest" are different answers. */
@@ -855,25 +870,37 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
       const report = await fetchRound(b.ports)
       return { asked, b, report }
     }
-    /* The phone is furthest along: its cursor steps back by one, the laptop's stands. */
-    const kept = await round({ pages: ['phone-last'], more: false })
-    expect(kept.asked[1]).toEqual({ since: { [ALICE_PHONE.id]: 4, [ALICE_LAPTOP.id]: 2 }, v: 3 })
+    /* ⚠️ THE LAPTOP IS DIALLED, so the laptop's cursor steps back by one and
+       the phone's stands — however far along the phone is. A device serves
+       only its own stream: asked for the phone's last page, the laptop
+       answered nothing, and the probe read the whole shelf as gone. */
+    const kept = await round({ pages: ['laptop-last'], more: false })
+    expect(kept.asked[1]).toEqual({ since: { [ALICE_PHONE.id]: 5, [ALICE_LAPTOP.id]: 1 }, v: 3 })
     expect(kept.b.keepShelf).not.toHaveBeenCalled()
     /* The book's log, the shelf, its probe, and the lists — asked once each. */
     expect(kept.report.calls).toBe(4)
-    /* A page that is not the one held is not the shelf still served. */
+    /* A page that is not the one held is not the shelf still served — by
+       the LAPTOP: its stream goes, cursor, head and rows, and the phone's
+       stands until the phone says so for itself. A row kept before devices
+       were stamped can be nobody's but the device that served it, and goes
+       with the first stream that goes. */
     const dropped = await round({ pages: ['some other page'], more: false })
-    expect(dropped.b.keepShelf).toHaveBeenCalledWith(ALICE.id, NOTHING_SHARED)
+    expect(dropped.b.keepShelf).toHaveBeenCalledWith(ALICE.id, expect.objectContaining({ cursor: { [ALICE_PHONE.id]: 5 }, heads: { [ALICE_PHONE.id]: heads[ALICE_PHONE.id] }, works: [] }), expect.any(Number))
+    /* The phone's last page is not the laptop's: the laptop no longer serves what this side holds of it. */
+    const theirs = await round({ pages: ['phone-last'], more: false })
+    expect(theirs.b.keepShelf).toHaveBeenCalledWith(ALICE.id, expect.objectContaining({ cursor: { [ALICE_PHONE.id]: 5 } }), expect.any(Number))
+    /* The last stream to go takes the file with it: the person-wide confirmation, one device at a time. */
+    const last = await round({ pages: ['some other page'], more: false }, { ...heldShelf, cursor: { [ALICE_LAPTOP.id]: 2 }, heads: { [ALICE_LAPTOP.id]: heads[ALICE_LAPTOP.id]! } })
+    expect(last.b.keepShelf).toHaveBeenCalledWith(ALICE.id, NOTHING_SHARED, expect.any(Number))
     /* An answer that will not read leaves the shelf alone, and fails nobody. */
     const unreadable = await round({ pages: 'no' })
     expect(unreadable.b.keepShelf).not.toHaveBeenCalled()
     expect(unreadable.report.skipped).toEqual([])
-    /* Two devices equally far along: the first one held is asked. */
-    const tied = await round({ pages: ['phone-last'], more: false }, { ...heldShelf, cursor: { [ALICE_PHONE.id]: 5, [ALICE_LAPTOP.id]: 5 } })
-    expect(tied.asked[1]).toEqual({ since: { [ALICE_PHONE.id]: 4, [ALICE_LAPTOP.id]: 5 }, v: 3 })
-    /* And the furthest is found wherever it is held. */
-    const last = await round({ pages: ['phone-last'], more: false }, { ...heldShelf, cursor: { [ALICE_LAPTOP.id]: 2, [ALICE_PHONE.id]: 5 } })
-    expect(last.asked[1]).toEqual({ since: { [ALICE_LAPTOP.id]: 2, [ALICE_PHONE.id]: 4 }, v: 3 })
+    /* A device this side holds no page from is not probed: it has nothing to re-send, and its silence says nothing. */
+    const unheld = await round({ pages: ['phone-last'], more: false }, { ...heldShelf, cursor: { [ALICE_PHONE.id]: 5 } })
+    expect(unheld.asked).toHaveLength(1)
+    expect(unheld.b.keepShelf).not.toHaveBeenCalled()
+    expect(unheld.report.calls).toBe(3)
   })
 
   it('does not probe a shelf with nothing fetched to ask for again, and keeps it', async () => {
@@ -933,7 +960,7 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
     expect(asked[1]).toEqual({ since: { aa11: { [ALICE_LAPTOP.id]: 2 } }, v: 3 })
     expect(asked[2]).toEqual({ since: { bb22: { [ALICE_LAPTOP.id]: 0 } }, v: 3 })
     expect(b.keepList).toHaveBeenCalledTimes(1)
-    expect(b.keepList).toHaveBeenCalledWith(ALICE.id, 'bb22', NOTHING_SHARED)
+    expect(b.keepList).toHaveBeenCalledWith(ALICE.id, 'bb22', NOTHING_SHARED, expect.any(Number))
     expect(report.calls).toBe(5)
   })
 
@@ -1432,7 +1459,9 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
     const report = await fetchRound(b.ports)
     expect(b.keep).not.toHaveBeenCalled()
     expect(report.accepted).toBe(0)
-    expect(report.skipped).toEqual([])
+    /* And SAID: a person whose round ended short is reported, not left to
+       read as one with nothing new. */
+    expect(report.skipped).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
   })
 
   it.each([
@@ -1444,7 +1473,8 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
     const a = alice()
     a.shareOne('Call me Ishmael')
     let asked = 0
-    const b = bob({ dial: () => Promise.resolve(sessionTo(a.serving)), people: () => Promise.resolve([asked++ === 0 ? alicePerson() : moved]) })
+    /* Two devices to start from, so a device leaving is a move. */
+    const b = bob({ dial: () => Promise.resolve(sessionTo(a.serving)), people: () => Promise.resolve([asked++ === 0 ? alicePerson({ devices: [ALICE_LAPTOP.id, ALICE_PHONE.id] }) : moved]) })
     await fetchRound(b.ports)
     expect(b.keep).not.toHaveBeenCalled()
   })
@@ -1458,8 +1488,10 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
 
   /* The relationship is read once more between the answer and the keep. A block
      that lands exactly there — after the answer was charged, before the pages
-     were taken — ends the person's round with nothing kept, nothing skipped
-     as failed, and the calls still counted. */
+     were taken — ends the person's round with nothing kept, nothing more asked
+     of them, the person reported as no longer admitted, and the calls still
+     counted. It used to end only that LOG, and the round went on to the shelf
+     and the lists of a person it had just been told not to read. */
   const flippingAfter = (session: ReturnType<typeof sessionTo>, service: string, onCall: number) => {
     let after = 0
     return () => {
@@ -1477,8 +1509,11 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
       const report = await fetchRound(b.ports)
       expect(b.keep).not.toHaveBeenCalled()
       expect(report.accepted).toBe(0)
-      expect(report.skipped).toEqual([])
+      expect(report.skipped).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
       expect(report.calls).toBeGreaterThanOrEqual(1)
+      /* Nothing more asked of them: the shelf and the lists were not. */
+      expect(session.calls).not.toContain(CIRCLE_SERVICES.shelf.name)
+      expect(session.calls).not.toContain(CIRCLE_SERVICES.lists.name)
     }
   })
 
@@ -1489,7 +1524,8 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
       const b = bob({ dial: () => Promise.resolve(session), relationship: flippingAfter(session, CIRCLE_SERVICES.shelf.name, onCall) })
       const report = await fetchRound(b.ports)
       expect(b.keepShelf).not.toHaveBeenCalled()
-      expect(report.skipped).toEqual([])
+      expect(report.skipped).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
+      expect(session.calls).not.toContain(CIRCLE_SERVICES.lists.name)
       expect(Number.isFinite(report.calls)).toBe(true)
     }
   })
@@ -1501,15 +1537,14 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
       const b = bob({ dial: () => Promise.resolve(session), relationship: flippingAfter(session, CIRCLE_SERVICES.lists.name, onCall) })
       const report = await fetchRound(b.ports)
       expect(b.keepList).not.toHaveBeenCalled()
-      expect(report.skipped).toEqual([])
+      expect(report.skipped).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
       expect(Number.isFinite(report.calls)).toBe(true)
     }
   })
 
   it('skips a person as over budget when the shelf answer cannot be paid for, and keeps no shelf', async () => {
     const { serving } = aliceWithShelfAndList()
-    const exhausted: Spend = { since: NOW, total: 64 * 1024 * 1024, byWork: {} }
-    const b = bob({ dial: () => Promise.resolve(sessionTo(serving)), spend: () => exhausted })
+    const b = bob({ dial: () => Promise.resolve(sessionTo(serving)), charge: () => false })
     const report = await fetchRound(b.ports)
     expect(report.skipped).toEqual([{ person: ALICE.id, why: 'over-budget' }])
     expect(b.keepShelf).not.toHaveBeenCalled()
@@ -1589,13 +1624,210 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
     expect(Object.keys(b.listOfAlice('aa11').cursor)).toHaveLength(1)
     /* The shelf's probe is paid first each round and exhausts the budget as it is recorded; the list's probe is the one refused. */
     let charged = 0
-    const spent = vi.fn((person: string, next: Spend) => {
-      charged += 1
-      b.spend.set(person, charged >= 1 ? { since: NOW, total: 64 * 1024 * 1024, byWork: {} } : next)
-    })
-    const c = bob({ dial: () => Promise.resolve(sessionTo(serving)), spent, spend: (person) => b.spend.get(person) ?? NOTHING_SPENT, heldShelf: b.ports.heldShelf, heldLists: b.ports.heldLists })
+    const c = bob({ dial: () => Promise.resolve(sessionTo(serving)), charge: () => charged++ < 1, heldShelf: b.ports.heldShelf, heldLists: b.ports.heldLists })
     const broke = await fetchRound(c.ports)
     expect(broke.skipped).toEqual([{ person: ALICE.id, why: 'over-budget' }])
     expect(c.keepList).not.toHaveBeenCalled()
+  })
+})
+
+describe('every device of a person is asked — a device serves only its own stream', () => {
+  it('takes the phone’s passages as well as the laptop’s, from one hello each', async () => {
+    /* Their stores have met — the laptop's file holds the phone's row — but
+       the laptop serves only its own stream, so dialling the first device
+       that answered kept the phone's passages from ever arriving. */
+    const a = alice()
+    a.shareOne('from the laptop')
+    a.files.set(MOBY.id, share(a.files.get(MOBY.id)!, { markId: 'm-phone', passage: passage('from the phone'), device: ALICE_PHONE.id }, 'pub-phone', stamp(9, ALICE_PHONE.id)).held)
+    const phoneServing: Serving = {
+      ...a.serving,
+      publisher: (work) =>
+        Promise.resolve({
+          ...a.publisher(work),
+          device: ALICE_PHONE.id,
+          delegation: delegationFor(ALICE, ALICE_PHONE.id),
+          sign: (message: string) => Promise.resolve(bytesToHex(sign(utf8ToBytes(message), ALICE_PHONE.secret))),
+        }),
+    }
+    const dialled: string[] = []
+    const b = bob({
+      people: () => Promise.resolve([alicePerson({ devices: [ALICE_LAPTOP.id, ALICE_PHONE.id] })]),
+      dial: (device) => {
+        dialled.push(device)
+        return Promise.resolve(sessionTo(device === ALICE_PHONE.id ? phoneServing : a.serving))
+      },
+    })
+    const report = await fetchRound(b.ports)
+    expect(dialled).toEqual([ALICE_LAPTOP.id, ALICE_PHONE.id])
+    expect(report.asked).toBe(1)
+    expect(report.accepted).toBe(2)
+    expect(report.skipped).toEqual([])
+    expect(b.fromAlice().entries.map((one) => one.passage.quote).sort()).toEqual(['from the laptop', 'from the phone'])
+    expect(Object.keys(b.fromAlice().cursor).sort()).toEqual([ALICE_LAPTOP.id, ALICE_PHONE.id].sort())
+  })
+
+  it('ends the person at the first device that spends their budget, and asks no other', async () => {
+    const a = alice()
+    a.shareOne('x')
+    const dialled: string[] = []
+    const b = bob({
+      people: () => Promise.resolve([alicePerson({ devices: [ALICE_LAPTOP.id, ALICE_PHONE.id] })]),
+      dial: (device) => {
+        dialled.push(device)
+        return Promise.resolve(sessionTo(a.serving))
+      },
+      charge: () => false,
+    })
+    const report = await fetchRound(b.ports)
+    expect(report.skipped).toEqual([{ person: ALICE.id, why: 'over-budget' }])
+    expect(dialled).toEqual([ALICE_LAPTOP.id])
+  })
+
+  it('reports a person refused by every device as refused, and one refused by only some as served', async () => {
+    const a = alice()
+    a.shareOne('x')
+    const b = bob({
+      people: () => Promise.resolve([alicePerson({ devices: [ALICE_LAPTOP.id, ALICE_PHONE.id] })]),
+      dial: (device) => Promise.resolve(sessionTo(a.serving, device === ALICE_PHONE.id ? BOB.id : ALICE.id)),
+    })
+    const report = await fetchRound(b.ports)
+    expect(report.skipped).toEqual([])
+    expect(report.accepted).toBe(1)
+    const both = bob({
+      people: () => Promise.resolve([alicePerson({ devices: [ALICE_LAPTOP.id, ALICE_PHONE.id] })]),
+      dial: () => Promise.resolve(sessionTo(a.serving, BOB.id)),
+    })
+    expect((await fetchRound(both.ports)).skipped).toEqual([{ person: ALICE.id, why: 'refused-hello' }])
+  })
+})
+
+describe('a lists request names at most what the peer’s parser reads', () => {
+  it('names the first MAX_LISTS_PER_REQUEST held lists by id, and asks the rest from their start', async () => {
+    /* Sixty-five held lists made every lists request invalid, and list
+       synchronisation stopped for good. */
+    const asked: Record<string, unknown>[] = []
+    const session: Dialled = {
+      call: (service, body) => {
+        if (service === CIRCLE_SERVICES.hello.name) return Promise.resolve(welcome(body, ALICE.id))
+        if (service === CIRCLE_SERVICES.lists.name) asked.push(body as Record<string, unknown>)
+        return Promise.resolve({ pages: [], more: false })
+      },
+      close: () => Promise.resolve(),
+    }
+    const held = new Map(Array.from({ length: MAX_LISTS_PER_REQUEST + 1 }, (_, i) => [i.toString(16).padStart(4, '0'), { ...NOTHING_SHARED, v: 3 }] as const))
+    const b = bob({ dial: () => Promise.resolve(session), heldLists: () => Promise.resolve(held) })
+    const report = await fetchRound(b.ports)
+    expect(report.skipped).toEqual([])
+    const since = asked[0]!['since'] as Record<string, unknown>
+    expect(Object.keys(since)).toHaveLength(MAX_LISTS_PER_REQUEST)
+    expect(Object.keys(since)).toEqual([...listWindowOf([...held.keys()], NOW)])
+    /* And the request is one the peer reads. */
+    expect(parseListsRequest(asked[0])).not.toBeNull()
+  })
+
+  it('is served the lists it named before a long list it did not — the window cannot be starved by what is outside it', async () => {
+    /* ⚠️ END TO END. A held list outside the window is served from its
+       beginning and its pages are put aside; served FIRST, one long such
+       list filled every answer of every round, and the lists the window
+       named were never reached. The peer serves the named lists first. */
+    const by = (n: number) => ({ device: ALICE_LAPTOP.id, at: stamp(n, ALICE_LAPTOP.id) })
+    const listOf = (seed: number, items: number) => {
+      let held = createList(NOTHING_LISTED, `List ${seed}`, by(seed * 1000))
+      for (let i = 1; i <= items; i++) held = placeOnList(held, { pub: `i${seed}-${i}`, work: { title: `T${i}`, author: 'A', language: 'en' }, position: i, note: '' }, by(seed * 1000 + i))
+      return held
+    }
+    const ids = Array.from({ length: MAX_LISTS_PER_REQUEST + 2 }, (_, i) => i.toString(16).padStart(4, '0'))
+    const window = new Set(listWindowOf(ids, NOW))
+    const long = ids.find((id) => !window.has(id))!
+    const a = alice()
+    /* The long list FIRST in Alice's own order, and outside Bob's window. */
+    a.ownLists.set(long, listOf(1, 80))
+    ids.filter((id) => id !== long).forEach((id, i) => a.ownLists.set(id, listOf(i + 2, 1)))
+    /* A few pages per answer, so the long list alone would fill one. */
+    const session: Dialled = {
+      call: (service, body) => {
+        if (service === CIRCLE_SERVICES.hello.name) return Promise.resolve(welcome(body, ALICE.id))
+        if (service === CIRCLE_SERVICES.pages.name) return answerPages(body, a.serving)
+        if (service === CIRCLE_SERVICES.shelf.name) return answerShelf(body, a.serving, true)
+        if (service === CIRCLE_SERVICES.lists.name) return answerLists(body, a.serving, true, { maxPages: 4, budget: 200 })
+        return Promise.reject(new Error(`no such service ${service}`))
+      },
+      close: () => Promise.resolve(),
+    }
+    const held = new Map(ids.map((id) => [id, { ...NOTHING_SHARED, v: 3 }] as const))
+    const b = bob({ dial: () => Promise.resolve(session), heldLists: () => Promise.resolve(held) })
+    const report = await fetchRound(b.ports)
+    expect(report.skipped).toEqual([])
+    const kept = b.keepList.mock.calls.map((call) => call[1] as string)
+    expect(kept.length).toBeGreaterThan(0)
+    expect(kept.every((id) => window.has(id))).toBe(true)
+    expect(kept).not.toContain(long)
+  })
+
+  it('moves the window with the clock, so every held list is named within a few rounds', () => {
+    const ids = Array.from({ length: MAX_LISTS_PER_REQUEST + 10 }, (_, i) => i.toString(16).padStart(4, '0'))
+    const one = listWindowOf(ids, NOW)
+    const next = listWindowOf(ids, NOW + LIST_WINDOW_ROTATES_MS)
+    expect(one).toHaveLength(MAX_LISTS_PER_REQUEST)
+    expect(one).not.toEqual(next)
+    const named = new Set([...one, ...next])
+    expect(named.size).toBe(ids.length)
+    /* Within the bound, every list, every time. */
+    expect(listWindowOf(ids.slice(0, MAX_LISTS_PER_REQUEST), NOW)).toEqual([...ids.slice(0, MAX_LISTS_PER_REQUEST)].sort())
+  })
+})
+
+/* ONE BUDGET FOR THE ROUND AND THE JACKETS — WI-23.C5. The two production
+   callers, over the one production ledger, interleaved across their awaits:
+   the `spend`/`spent` pair let a round holding its own snapshot write back
+   over a jacket's charge, and the two together spent past the budget. */
+describe('the round and a jacket over one ledger', () => {
+  /* Over the chunk boundary, under the jacket cap. */
+  const jacket = new Uint8Array(COVER_CHUNK_BYTES + 100).map((_, i) => (i * 7) % 256)
+  const digest = bytesToHex(blake3(jacket))
+  /** A device serving the jacket chunk by chunk, as `answerCover` does. */
+  const jacketSession = () => ({
+    call: (service: string, body: unknown) => {
+      if (service !== CIRCLE_SERVICES.cover.name) return Promise.reject(new Error(`no such service ${service}`))
+      const asked = body as { pub: string; offset: number }
+      const slice = jacket.subarray(asked.offset, Math.min(jacket.length, asked.offset + COVER_CHUNK_BYTES))
+      return Promise.resolve({ offset: asked.offset, size: jacket.length, bytes: base64Of(slice), more: asked.offset + slice.length < jacket.length })
+    },
+    close: () => Promise.resolve(),
+  })
+  const fetcherOver = (ledger: ReturnType<typeof createSpendLedger>, budget?: Parameters<typeof ledger.charge>[4]) =>
+    createCoverFetcher({
+      fs: fakeFs() as never,
+      dial: () => Promise.resolve(jacketSession()),
+      charge: (person, bytes) => ledger.charge(person, 'cover', bytes, NOW, budget),
+      now: () => NOW,
+      capBytes: () => 64 * 1024 * 1024,
+    })
+
+  it('charges pages and a jacket to the one ledger, interleaved, and neither forgets the other’s charge', async () => {
+    const ledger = createSpendLedger()
+    const a = alice()
+    a.shareOne('Call me Ishmael')
+    a.shareOne('the whiteness of the whale')
+    const b = bob({ dial: () => Promise.resolve(sessionTo(a.serving)), charge: (person, key, bytes, now, budget) => ledger.charge(person, key, bytes, now, budget) })
+    const [report, bytes] = await Promise.all([fetchRound(b.ports), fetcherOver(ledger).ensure(ALICE.id, ALICE_LAPTOP.id, 'pub-jacket', digest)])
+    expect(report.accepted).toBe(1)
+    expect(bytes).toEqual(jacket)
+    const spent = ledger.spend(ALICE.id)
+    expect(spent.byWork['cover']).toBe(jacket.length)
+    expect(spent.byWork[MOBY.id]).toBeGreaterThan(0)
+    expect(spent.total).toBe(spent.byWork['cover']! + spent.byWork[MOBY.id]!)
+  })
+
+  it('holds the two to ONE budget: what the jacket spent, the round cannot spend again', async () => {
+    const ledger = createSpendLedger()
+    const budget = { perPeer: jacket.length + 10, perWork: jacket.length + 10, windowMs: 1_000 }
+    const a = alice()
+    a.shareOne('Call me Ishmael')
+    const b = bob({ dial: () => Promise.resolve(sessionTo(a.serving)), charge: (person, key, bytes, now) => ledger.charge(person, key, bytes, now, budget) })
+    const [bytes, report] = await Promise.all([fetcherOver(ledger, budget).ensure(ALICE.id, ALICE_LAPTOP.id, 'pub-jacket', digest), fetchRound(b.ports)])
+    /* One of the two was refused — whichever asked second — and the total never passed the budget. */
+    expect(ledger.spend(ALICE.id).total).toBeLessThanOrEqual(budget.perPeer)
+    expect(bytes === null || report.skipped.some((one) => one.why === 'over-budget')).toBe(true)
   })
 })

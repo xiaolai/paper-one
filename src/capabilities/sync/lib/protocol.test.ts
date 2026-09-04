@@ -121,6 +121,11 @@ describe('required and optional fields are typed, not coerced', () => {
     expect(page({ ...row, size: 'big' })).toBeNull()
     expect(page({ ...row, coverAt: -1 })).toBeNull()
     expect(page({ ...row, marksDigest: 7 })).toBeNull()
+    /* A present hash is a digest, as a push group's is — a pull row was the
+       one message that took any string for it. */
+    expect(page({ ...row, contentHash: 'h' })).toBeNull()
+    expect(page({ ...row, contentHash: 'AB'.repeat(32) })).toBeNull()
+    expect(page({ ...row, contentHash: 'ab'.repeat(32) })).toMatchObject({ rows: [{ contentHash: 'ab'.repeat(32) }] })
   })
 })
 

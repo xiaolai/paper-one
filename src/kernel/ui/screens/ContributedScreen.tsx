@@ -71,7 +71,7 @@ export function ContributedScreen({ label, platform, id, render, openBook }: Con
           {/* OUTSIDE the boundary, so the heading and the way back survive a
               renderer that throws. */}
           <h1 className={styles.title}>{label}</h1>
-          <ContributionBoundary label={label} resetKey={id}>
+          <ContributionBoundary label={label} id={id} resetKey={id}>
             {render === undefined ? (
               <p className={styles.failure}>
                 That screen belongs to something this copy of Paper is not running.

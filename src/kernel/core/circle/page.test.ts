@@ -35,7 +35,7 @@ const entry = (pub: string, seq: number, note = ''): Entry => ({
 const page = (over: Partial<Page> = {}): Page => ({
   v: WIRE_VERSION,
   person: 'alice',
-  work: { ids: ['#i'], titles: ['#t'], author: '#a', language: 'en' },
+  work: { ids: ['1a'.repeat(32)], titles: ['2b'.repeat(32)], author: '3c'.repeat(32), language: 'en' },
   device: 'd1',
   from: 1,
   to: 1,
@@ -675,5 +675,59 @@ describe('every clause of the page shape and check — one row each', () => {
     expect(checkPage(exact, canonicalJson(exact), okay, 'key', '', speaks)).toBeNull()
     const over = sized('x'.repeat(MAX_PAGE_CHARS - base + 1))
     expect(checkPage(over, canonicalJson(over), okay, 'key', '', speaks)).toBe('too-large')
+  })
+})
+
+describe('the entries a page carries belong to the log its claim names — WI-23.E1’s three logs', () => {
+  const okay: PageCrypto = { verify: () => true, hash: () => 'h' }
+  const speaks = () => true
+  const check = (one: Page) => checkPage(one, canonicalJson(one), okay, 'key', '', speaks)
+  const shelved: Entry = { op: 'shelf', pub: 's', device: 'd1', seq: 1, at: hlcOf(1), work: { title: 'T', author: 'A', language: 'en' } }
+  const placed: Entry = { op: 'place', pub: 'x', device: 'd1', seq: 1, at: hlcOf(1), work: { title: 'T', author: 'A', language: 'en' }, position: 1, note: '' }
+  const SHELF = { ids: ['paper.circle.shelf'], titles: [], author: '', language: '' }
+  const LIST = { ids: ['paper.circle.list:aa11'], titles: [], author: '', language: '' }
+
+  it('takes each kind on its own log', () => {
+    expect(check(page())).toBeNull()
+    expect(check(page({ work: SHELF, entries: [shelved] }))).toBeNull()
+    expect(check(page({ work: LIST, entries: [placed] }))).toBeNull()
+  })
+
+  it('refuses a shelf or list operation on a per-work page, a passage on the shelf’s, and a shelving on a list’s', () => {
+    /* ⚠️ Checked by version alone, a per-work page carried a `shelf` and the
+       receiver applied it to the shelf section of a file about one book. */
+    expect(check(page({ entries: [shelved] }))).toBe('malformed')
+    expect(check(page({ entries: [placed] }))).toBe('malformed')
+    expect(check(page({ work: SHELF, entries: [entry('p1', 1)] }))).toBe('malformed')
+    expect(check(page({ work: LIST, entries: [shelved] }))).toBe('malformed')
+  })
+
+  it('refuses an empty page, one missing its first or last sequence, and one whose sequences do not climb', () => {
+    /* ⚠️ Accepted, the receiver advanced its cursor to `to` and never asked for the omitted sequences again. */
+    expect(check(page({ from: 1, to: 2, entries: [] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 2, entries: [entry('p1', 1)] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 2, entries: [entry('p2', 2)] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 2, entries: [entry('p2', 2), entry('p1', 1)] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 2, entries: [entry('p1', 1), { ...entry('p1', 1), pub: 'twin' } as Entry] }))).toBe('malformed')
+    /* A gap between the ends is a page cut under an older version, and stands. */
+    expect(check(page({ from: 1, to: 3, entries: [entry('p1', 1), entry('p3', 3)] }))).toBeNull()
+  })
+})
+
+describe('the claim a page carries is one a request could ask for', () => {
+  const whole = page()
+  it('is digests within the bound, or exactly one reserved claim — and nothing between', () => {
+    expect(isPageShape(whole)).toBe(true)
+    expect(isPageShape({ ...whole, work: { ids: ['paper.circle.shelf'], titles: [], author: '', language: '' } })).toBe(true)
+    expect(isPageShape({ ...whole, work: { ids: ['paper.circle.list:aa11'], titles: [], author: '', language: '' } })).toBe(true)
+    expect(isPageShape({ ...whole, work: { ...whole.work, ids: ['#i'] } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, titles: ['t'] } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, author: 'a' } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, language: 'english' } })).toBe(false)
+    /* A reserved id beside a digest would match a book AND the shelf. */
+    expect(isPageShape({ ...whole, work: { ...whole.work, ids: ['paper.circle.shelf', '1a'.repeat(32)] } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ids: ['paper.circle.shelf'], titles: ['2b'.repeat(32)], author: '', language: '' } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, ids: Array.from({ length: 17 }, (_, i) => i.toString(16).padStart(64, '0')) } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, ids: Array.from({ length: 16 }, (_, i) => i.toString(16).padStart(64, '0')) } })).toBe(true)
   })
 })

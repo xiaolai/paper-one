@@ -38,7 +38,7 @@ hashes.sha512 = sha512
  */
 
 const NOW = 1_700_000_000_000
-const WORK: WorkClaim = { ids: ['w1'], titles: ['t1'], author: 'a1', language: 'en' }
+const WORK: WorkClaim = { ids: ['1a'.repeat(32)], titles: ['2b'.repeat(32)], author: '3c'.repeat(32), language: 'en' }
 
 /** A device or person keypair, as hex. */
 function keypair(seed: string) {
@@ -79,7 +79,9 @@ function page(over: Partial<Page> = {}, secret: Uint8Array = DEVICE.secret): str
     from: 1,
     to: 1,
     prevPageHash: '',
-    entries: [],
+    /* One entry, the page's own: an empty page is refused as malformed
+       before its delegation or signature is read. */
+    entries: [share('p1', 1)],
     roster: [DEVICE.id],
     revocations: 0,
     delegation: delegation(),
@@ -158,11 +160,25 @@ describe('a page that is everything it should be', () => {
     /* ⚠️ `page.to`, NOT THE ENTRIES' OWN `seq`: `pagesFor` answers `since` by
        comparing BOUNDARIES, so a cursor spoken in entry numbers could name a
        point inside a sealed page and re-fetch it for ever. */
-    const result = take([page({ from: 3, to: 4, entries: [share('p1', 3)] })])
+    const result = take([page({ from: 3, to: 4, entries: [share('p1', 3), share('p2', 4)] })])
     expect(result.cursor[DEVICE.id]).toBe(4)
     /* And it is the STORE's cursor — persisted with the file, not a value
        that lasts one session. */
     expect(result.held.cursor[DEVICE.id]).toBe(4)
+  })
+
+  it('refuses a page whose range outruns its entries, so the cursor cannot be walked past what was never held', () => {
+    /* ⚠️ Accepted, a page sealed 3..4 that carried only 3 moved the cursor to
+       4 — and sequence 4 was never asked for again. */
+    const short = take([page({ from: 3, to: 4, entries: [share('p1', 3)] })])
+    expect(short.refusals).toEqual(['malformed'])
+    expect(short.held.cursor[DEVICE.id]).toBeUndefined()
+    const empty = take([page({ from: 3, to: 4, entries: [] })])
+    expect(empty.refusals).toEqual(['malformed'])
+    const late = take([page({ from: 3, to: 4, entries: [share('p2', 4)] })])
+    expect(late.refusals).toEqual(['malformed'])
+    const backwards = take([page({ from: 3, to: 4, entries: [share('p2', 4), share('p1', 3)] })])
+    expect(backwards.refusals).toEqual(['malformed'])
   })
 
   it('never moves the cursor backwards over a page already held', () => {
@@ -353,7 +369,7 @@ describe('the roster a page carries cannot vouch for the device that signed it',
     const stranger = keypair('stranger')
     const theirs = delegation({ device: stranger.id })
     const raw = page(
-      { device: stranger.id, delegation: theirs, roster: [stranger.id] },
+      { device: stranger.id, delegation: theirs, roster: [stranger.id], entries: [share('p1', 1, stranger.id)] },
       stranger.secret,
     )
 
@@ -387,7 +403,7 @@ describe('what a peer can send instead of a page', () => {
   })
 
   it('refuses a page for another book', () => {
-    const elsewhere = { ids: ['zz'], titles: ['zz'], author: 'zz', language: 'fr' }
+    const elsewhere = { ids: ['9f'.repeat(32)], titles: ['9e'.repeat(32)], author: '9d'.repeat(32), language: 'fr' }
     expect(take([page({ work: elsewhere })]).refusals).toEqual(['wrong-work'])
   })
 
@@ -807,5 +823,34 @@ describe('what a page leaves in the file carries its epoch', () => {
     const held = applyEntries(NOTHING_SHARED, [shelfRow, status], PERSON.id, 7, NOW)
     expect(held.works[0]).toMatchObject({ pub: 's1', epoch: 7 })
     expect(held.opinion.status).toMatchObject({ value: 'reading', epoch: 7 })
+  })
+
+  it('stamps a list’s creation, its title and each item with the epoch ITS page arrived under — part by part', () => {
+    const work = { title: 'T', author: 'A', language: 'en' }
+    const created: Entry = { op: 'create', title: 'L', device: DEVICE.id, seq: 1, at: stampFor(DEVICE.id, 1) }
+    const placed: Entry = { op: 'place', pub: 'x', work, position: 1, note: '', device: DEVICE.id, seq: 2, at: stampFor(DEVICE.id, 2) }
+    const before = applyEntries(NOTHING_SHARED, [created, placed], PERSON.id, 1, NOW)
+    expect(before.list.createdEpoch).toBe(1)
+    expect(before.list.title).toMatchObject({ value: 'L', epoch: 1 })
+    expect(before.list.items[0]).toMatchObject({ pub: 'x', epoch: 1 })
+    /* ⚠️ A page under the next relationship stamps ITS OWN parts and no other:
+       one epoch on the whole list, moved by the newest page, let this `place`
+       re-expose the creation and the title that arrived under the old one. */
+    const again: Entry = { op: 'place', pub: 'y', work, position: 2, note: '', device: DEVICE.id, seq: 3, at: stampFor(DEVICE.id, 3) }
+    const after = applyEntries(before, [again], PERSON.id, 2, NOW)
+    expect(after.list.createdEpoch).toBe(1)
+    expect(after.list.title).toMatchObject({ value: 'L', epoch: 1 })
+    expect(after.list.items.map((one) => [one.pub, one.epoch])).toEqual([
+      ['x', 1],
+      ['y', 2],
+    ])
+    /* A retitle carries its own; the creation keeps its own. */
+    const retitled = applyEntries(after, [{ op: 'retitle', title: 'M', device: DEVICE.id, seq: 4, at: stampFor(DEVICE.id, 4) }], PERSON.id, 3, NOW)
+    expect(retitled.list.title).toMatchObject({ value: 'M', epoch: 3 })
+    expect(retitled.list.createdEpoch).toBe(1)
+    /* A deletion carries none: a withdrawal is never revived by a re-admission. */
+    const deleted = applyEntries(retitled, [{ op: 'delete', device: DEVICE.id, seq: 5, at: stampFor(DEVICE.id, 5) }], PERSON.id, 4, NOW)
+    expect(deleted.list.deleted).toBe(true)
+    expect(deleted.list).not.toHaveProperty('epoch')
   })
 })

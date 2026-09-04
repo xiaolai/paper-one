@@ -247,6 +247,32 @@ describe('the corner mark on a book with no bytes here', () => {
     spy.mockRestore()
   })
 
+  /* The OTHER failure shape — a throw before there is a promise — used to
+     release the button and say nothing, while the menu's copy of the same
+     wrapper said it. One runner now, and both surfaces say both. */
+  it('says on the console when the download throws before returning, and releases the button', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { container } = render(
+      <BookCell
+        {...shared}
+        setQuery={vi.fn()}
+        book={noBytes()}
+        actions={[
+          {
+            ...downloadAction,
+            run: () => {
+              throw new Error('failed before the promise')
+            },
+          },
+        ]}
+      />,
+    )
+    fireEvent.click(mark(container)!)
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining(downloadAction.id), expect.objectContaining({ message: 'failed before the promise' }))
+    expect((mark(container) as HTMLButtonElement).disabled).toBe(false)
+    spy.mockRestore()
+  })
+
   it('is a real button, so a keyboard reaches it', () => {
     const { container } = render(
       <BookCell {...shared} setQuery={vi.fn()} book={noBytes()} actions={[downloadAction]} />,

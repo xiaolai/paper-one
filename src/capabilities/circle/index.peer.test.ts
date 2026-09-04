@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { circlePathIn, hlcOf, relationshipPathIn, type IndexFs, type WriteQueue } from '../../kernel'
+import { circlePathIn, hlcOf, personListPathIn, relationshipPathIn, type IndexFs, type WriteQueue } from '../../kernel'
 import { fakeFs, resolvedCfiForTesting } from '../../kernel/testkit'
 import { claimOf, welcome } from './lib/exchange'
 import { CIRCLE_PROTO, CIRCLE_SERVICES, CIRCLE_VERSION } from './lib/protocol'
@@ -16,9 +16,31 @@ import { share, updateShared } from './lib/publish'
  * when the port is not there.
  */
 const slots = vi.hoisted(() => ({ peer: null as unknown, person: null as unknown, publish: null as unknown }))
+/* The pairing-result stream the run subscribes to for re-admission: the
+   test fires one through `pairing.fire`. A person slot may override it. */
+const pairing = vi.hoisted(() => ({ fire: null as null | ((event: { ok: boolean; kind: string; id: string }) => void) }))
+/* The identity lifecycle the run subscribes to: the test fires one through `identity.fire`. */
+const ownIdentity = vi.hoisted(() => ({ fire: null as null | ((event: { kind: string; person?: string }) => void) }))
 vi.mock('../peer', () => ({
   peerPort: () => slots.peer,
-  personPort: () => slots.person,
+  personPort: () =>
+    slots.person === null
+      ? null
+      : {
+          onResult: (fn: (event: { ok: boolean; kind: string; id: string }) => void) => {
+            pairing.fire = fn
+            return () => {
+              pairing.fire = null
+            }
+          },
+          onIdentity: (fn: (event: { kind: string; person?: string }) => void) => {
+            ownIdentity.fire = fn
+            return () => {
+              ownIdentity.fire = null
+            }
+          },
+          ...(slots.person as object),
+        },
   publishPort: () => slots.publish,
 }))
 /* The cadence is replaced too, so a round runs when the test says and not
@@ -34,6 +56,9 @@ vi.mock('./lib/cadence', async (importActual) => ({
 }))
 
 import { circle } from './index'
+
+/** A person still admitted, for every write here: the lane re-check is `store.ts`'s to prove. */
+const ADMITS = () => Promise.resolve(true)
 
 const ALICE = 'a1'.repeat(32)
 const ALICE_LAPTOP = 'b1'.repeat(32)
@@ -254,13 +279,32 @@ describe('a fetch round through the peer', () => {
 describe('what the run reads for a friend', () => {
   it('lists the lists held for them', async () => {
     const fs = fakeFs() as unknown as IndexFs
-    await writeHeldList(fs, writes, ALICE, 'aa11', { ...NOTHING_SHARED, list: { created: true, title: { value: 'Sea books', at: hlcOf(1), device: ALICE_LAPTOP, seq: 1 }, deleted: false, items: [], removed: [] } } as never, () => {})
+    await writeHeldList(fs, writes, ALICE, 'aa11', { ...NOTHING_SHARED, list: { created: true, title: { value: 'Sea books', at: hlcOf(1), device: ALICE_LAPTOP, seq: 1 }, deleted: false, items: [], removed: [] } } as never, () => {}, ADMITS)
     slots.person = { people: () => Promise.resolve([alice()]), forgetPerson: () => Promise.resolve() }
     const run = started(fs)
     try {
       const pane = circle.screens![0]!.render({ openBook: null } as never) as { readonly props: { readonly circle: { friend(person: string): Promise<{ lists: readonly { title: string }[] }> } } }
       const friend = await pane.props.circle.friend(ALICE)
       expect(friend.lists.map((one) => one.title)).toEqual(['Sea books'])
+    } finally {
+      run.dispose()
+      slots.person = null
+    }
+  })
+
+  it('draws every list that reads when one beside them will not, and says which', async () => {
+    /* ⚠️ One read over every list, and one malformed file rejected the whole
+       of it — the friend's shelf, their activity and every valid list. Read
+       per list: the rest are drawn, and the one that would not read is named. */
+    const fs = fakeFs({ [personListPathIn(ALICE, 'bb22')]: 'not json at all' }) as unknown as IndexFs
+    await writeHeldList(fs, writes, ALICE, 'aa11', { ...NOTHING_SHARED, list: { created: true, title: { value: 'Sea books', at: hlcOf(1), device: ALICE_LAPTOP, seq: 1 }, deleted: false, items: [], removed: [] } } as never, () => {}, ADMITS)
+    slots.person = { people: () => Promise.resolve([alice()]), forgetPerson: () => Promise.resolve() }
+    const run = started(fs)
+    try {
+      const pane = circle.screens![0]!.render({ openBook: null } as never) as { readonly props: { readonly circle: { friend(person: string): Promise<{ lists: readonly { title: string }[] }> } } }
+      const friend = await pane.props.circle.friend(ALICE)
+      expect(friend.lists.map((one) => one.title)).toEqual(['Sea books'])
+      expect(run.warn).toHaveBeenCalledWith('circle.list-read-failed', expect.objectContaining({ person: ALICE, listId: 'bb22' }))
     } finally {
       run.dispose()
       slots.person = null
@@ -293,26 +337,30 @@ describe('what the overlay draws of a person, under their relationship', () => {
     Promise.resolve({ found: pending.map((one) => ({ id: one.id, cfi: resolvedCfiForTesting('epubcfi(/6/4!/4/2)'), sectionIndex: 1 })), missed: [], complete: true })
 
   it('draws an admitted person’s passage, nothing of a blocked one, and nothing of one whose record will not read — warning about that', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const console_ = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
+      let reported: ReturnType<typeof started>['warn'] | null = null
       for (const [what, record, drawn] of [
         ['admitted', relationship(), 1],
         ['blocked', relationship({ state: 'blocked' }), 0],
         ['unreadable', 'not json at all', 0],
       ] as const) {
         const fs = fakeFs({ [relationshipPathIn(ALICE)]: record }) as unknown as IndexFs
-        await writeForeign(fs, writes, (id) => id, 'book:moby', ALICE, { ...NOTHING_SHARED, entries: [entry(ALICE)] } as never, () => {})
+        await writeForeign(fs, writes, (id) => id, 'book:moby', ALICE, { ...NOTHING_SHARED, entries: [entry(ALICE)] } as never, () => {}, ADMITS)
         const run = started(fs)
         try {
           const overlay = circle.overlays![0]! as unknown as { forBook(request: unknown): Promise<unknown[]> }
           expect((await overlay.forBook({ bookId: 'book:moby', resolve })).length, what).toBe(drawn)
+          if (what === 'unreadable') reported = run.warn
         } finally {
           run.dispose()
         }
       }
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not read the relationship'), expect.anything())
+      /* In the diagnostics the reader can open — the log a circle file that
+         will not read goes to — not only on the console. */
+      expect(reported).toHaveBeenCalledWith('circle.relationship-read-failed', expect.objectContaining({ person: ALICE, message: expect.stringContaining('JSON') }))
     } finally {
-      warn.mockRestore()
+      console_.mockRestore()
     }
   })
 })
@@ -390,6 +438,11 @@ describe('the shelf carries a jacket’s digest — WI-23.C5', () => {
         const at = rows.findIndex((row) => row['bookId'] === bookId)
         rows[at] = change(rows[at]!)
         for (const listener of listeners) listener()
+      },
+      /* The pass stamps through `updateAfter`, fenced on the jacket still being there — asked over the same fs. */
+      updateAfter: async (bookId: string, hooks: { before: (target: unknown, live: string) => Promise<'go' | 'refuse'> }, change: (record: Record<string, unknown>) => Record<string, unknown>) => {
+        if ((await hooks.before(fs, bookId)) === 'refuse') return
+        await lib.update(bookId, change)
       },
     }
     const disposable = circle.start!(
@@ -503,5 +556,106 @@ describe('the jacket a friend is served — WI-23.C5', () => {
     await withRun(relationship(), JACKET.subarray(1), [alice()], async (pub) => {
       await expect(call(CIRCLE_SERVICES.cover.name, { pub, offset: 0 }, ALICE_LAPTOP)).rejects.toThrow(/not one this build answers/u)
     })
+  })
+})
+
+describe('re-admission is a pairing', () => {
+  it('re-admits, in a new epoch, the person a completed circle pairing added — and only them', async () => {
+    /* Alice was removed: her record is the tombstone `purgePerson` leaves.
+       Bob was blocked, and is not on the roster this pairing adds. */
+    const BOB = 'a2'.repeat(32)
+    const fs = fakeFs({
+      [relationshipPathIn(ALICE)]: relationship({ state: 'exited', retain: 'purge', changedAt: hlcOf(3) }),
+      [relationshipPathIn(BOB)]: relationship({ person: BOB, state: 'blocked', retain: 'purge', changedAt: hlcOf(3) }),
+    }) as unknown as IndexFs
+    let people: readonly unknown[] = []
+    slots.publish = publishing()
+    slots.person = { people: () => Promise.resolve(people) }
+    const run = started(fs)
+    try {
+      await settled()
+      expect(pairing.fire).not.toBeNull()
+      /* The ceremony completes and the roster names her again. */
+      people = [alice()]
+      pairing.fire!({ ok: true, kind: 'circle', id: ALICE_LAPTOP })
+      await settled()
+      await settled()
+      const again = JSON.parse(new TextDecoder().decode(await fs.readFile(relationshipPathIn(ALICE)))) as { state: string; epoch: number; shelf: boolean; retain: string }
+      expect(again).toMatchObject({ state: 'admitted', epoch: 2, shelf: false, retain: 'keep' })
+      expect(run.info).toHaveBeenCalledWith('circle.readmitted', { person: ALICE, epoch: 2 })
+      /* Bob's record is as it was: nothing paired with him. */
+      const bob = JSON.parse(new TextDecoder().decode(await fs.readFile(relationshipPathIn(BOB)))) as { state: string; epoch: number }
+      expect(bob).toMatchObject({ state: 'blocked', epoch: 1 })
+      /* A pairing that failed mints nothing, and a person already admitted needs nothing. */
+      people = [alice(), { ...alice(), person: BOB, displayName: 'Bob' }]
+      pairing.fire!({ ok: false, kind: 'circle', id: ALICE_LAPTOP })
+      await settled()
+      await settled()
+      expect(JSON.parse(new TextDecoder().decode(await fs.readFile(relationshipPathIn(BOB))))).toMatchObject({ state: 'blocked', epoch: 1 })
+      pairing.fire!({ ok: true, kind: 'circle', id: ALICE_LAPTOP })
+      await settled()
+      await settled()
+      expect(JSON.parse(new TextDecoder().decode(await fs.readFile(relationshipPathIn(BOB))))).toMatchObject({ state: 'admitted', epoch: 2 })
+      expect(JSON.parse(new TextDecoder().decode(await fs.readFile(relationshipPathIn(ALICE))))).toMatchObject({ epoch: 2 })
+    } finally {
+      run.dispose()
+      slots.publish = null
+      slots.person = null
+    }
+    /* Disposed: the stream is let go. */
+    expect(pairing.fire).toBeNull()
+  })
+})
+
+describe('an identity made after start', () => {
+  it('publishes the shelf that waited on one and tells the surfaces — from the peer’s own lifecycle, not a panel’s call', async () => {
+    const fs = fakeFs() as unknown as IndexFs
+    slots.publish = null
+    slots.person = { people: () => Promise.resolve([]) }
+    const run = started(fs)
+    try {
+      await settled()
+      /* No identity at start: nothing published, and a surface listening. */
+      expect((await readOwnShelf(fs)).works).toHaveLength(0)
+      const told = vi.fn()
+      const off = circle.overlays![0]!.subscribe(told)
+      expect(ownIdentity.fire).not.toBeNull()
+      slots.publish = publishing()
+      ownIdentity.fire!({ kind: 'made', person: ME })
+      await settled()
+      await settled()
+      expect((await readOwnShelf(fs)).works).toHaveLength(2)
+      expect(told).toHaveBeenCalled()
+      off()
+    } finally {
+      run.dispose()
+      slots.publish = null
+      slots.person = null
+    }
+    /* Disposed: the stream is let go. */
+    expect(ownIdentity.fire).toBeNull()
+  })
+
+  it('tells the surfaces even when the shelf would not publish, and says what failed', async () => {
+    const fs = fakeFs() as unknown as IndexFs
+    slots.publish = null
+    slots.person = { people: () => Promise.resolve([]) }
+    const run = started(fs)
+    try {
+      await settled()
+      const told = vi.fn()
+      const off = circle.overlays![0]!.subscribe(told)
+      slots.publish = publishing({ mine: () => Promise.reject(new Error('the key is not here')) })
+      ownIdentity.fire!({ kind: 'made', person: ME })
+      await settled()
+      await settled()
+      expect(told).toHaveBeenCalled()
+      expect(run.warn).toHaveBeenCalledWith('circle.shelf.publish-failed', { message: 'the key is not here' })
+      off()
+    } finally {
+      run.dispose()
+      slots.publish = null
+      slots.person = null
+    }
   })
 })

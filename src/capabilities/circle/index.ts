@@ -5,8 +5,8 @@ import {
   publishableCover,
   drawable,
   drawsEntry,
-  NOTHING_SPENT,
   overlayKey,
+  readmit,
   type Capability,
   type CapabilityContext,
   type Disposable,
@@ -22,9 +22,10 @@ import {
   type Relationship,
   type ResolvedPassage,
   type SettingsStore,
-  type Spend,
+  type TrashFs,
   type VaultFs,
   type WriteQueue,
+  listTrash,
 } from '../../kernel'
 import { createElement } from 'react'
 import { peopleFor, readForeign, type ForeignFile } from './lib/store'
@@ -44,6 +45,8 @@ import { answerLists, answerShelf } from './lib/exchange'
 import { ownListIds, readOwnList, updateOwnList } from './lib/lists'
 import { heldListIdsOf, readHeldList, writeHeldList } from './lib/store'
 import { circlePortOver, type CirclePort } from './lib/circlePort'
+import { tellEach } from './lib/listeners'
+import { createSpendLedger, type SpendLedger } from './lib/spendLedger'
 import { listsPortOver, type ListsPort } from './lib/listsPort'
 import { purgePerson, readRelationship, writeRelationship } from './lib/relationships'
 import { peerPort, personPort, publishPort, type PublishPort } from '../peer'
@@ -183,7 +186,10 @@ async function annotationsFor(
     try {
       relationships.set(person, await readRelationship(held.fs as VaultFs, person))
     } catch (cause) {
-      console.warn(`Paper: could not read the relationship with ${person}; drawing nothing of theirs`, cause)
+      /* In the log the reader can open, as a circle file that will not read
+         is — a decision about a person that cannot be read is as much their
+         news as a passage that cannot be. Drawing nothing of theirs. */
+      held.warn('circle.relationship-read-failed', { person, message: cause instanceof Error ? cause.message : String(cause) })
     }
   }
   return drawable(
@@ -279,7 +285,7 @@ interface Running {
    * store on each. Made at `start`, so it is bound to this run's filesystem
    * and clock and dies with them.
    */
-  readonly sharing: SharePort
+  readonly sharing: SharePort & { dispose(): void }
   /**
    * The book pane's port and the republish driver behind it — WI-23.B4.
    * One per run, for `sharing`'s reason, and disposed with the run: it holds
@@ -296,6 +302,12 @@ interface Running {
    * written only when the shelf changed.
    */
   readonly publishShelf: () => Promise<void>
+  /**
+   * The reader has just made an identity — `PersonPort.onIdentity`: publish
+   * what waited on one, each on its own, and tell every surface that asks
+   * whether it can publish, whatever failed.
+   */
+  readonly identityChanged: () => Promise<void>
 }
 
 /**
@@ -490,7 +502,11 @@ export const circle: Capability = {
         }
       : null
     /* ONE ledger for the run: the round and the jackets charge the same budget (WI-23.C5). */
-    const ledger = spendLedger()
+    const ledger = createSpendLedger()
+    /* RE-ADMISSION IS A PAIRING — the ceremony `readmit` insists on. A person
+       removed keeps an exited record as a tombstone (`purgePerson`), and the
+       one act that turns it into a new epoch is meeting them again. */
+    const offPairing = mine ? readmitOnPairing(mine.fs as VaultFs, ctx.services.writes, ctx.services.clock, ctx.diagnostics) : null
     held = mine
     running = mine
       ? runningOver({
@@ -502,6 +518,15 @@ export const circle: Capability = {
           hashes: () => ctx.services.hashes(),
           ledger,
           settings: ctx.settings,
+          /* This run's listeners — the overlay's set, which `circleChanged`
+             also tells — handed in rather than read from the module slot. */
+          onChanged: (listener) => {
+            mine.listeners.add(listener)
+            return () => {
+              mine.listeners.delete(listener)
+            }
+          },
+          changed: () => tellEach(mine.listeners, 'circle'),
         })
       : null
     const ours = running
@@ -509,7 +534,7 @@ export const circle: Capability = {
        the spend ledger; ports made afresh each round handed every person a
        fresh budget every five minutes. The peer's own ports are still read
        inside them per call, so a peer that starts later is found. */
-    const fetchPorts = mine ? fetchPortsOver(mine.fs, ctx.services.library, ctx.services.writes, ledger) : null
+    const fetchPorts = mine ? fetchPortsOver(mine.fs, ctx.services.library, ctx.services.writes, ledger, mine.warn) : null
     /* THE FETCH DRIVER — WI-23.A2. On a cadence timed from this start and
        from nothing else; see `cadence.ts` for why a book being opened must
        never move it. Its ports are read per round, so a peer that starts
@@ -530,10 +555,14 @@ export const circle: Capability = {
        slots pointing at it — is one the composition believes is not running
        at all. `dispose` is idempotent, so the same function serves both. */
     let offShelf: (() => void) | null = null
+    let offIdentity: (() => void) | null = null
     const dispose = (): void => {
       driver?.stop()
+      offPairing?.()
       offShelf?.()
+      offIdentity?.()
       ours?.circle.dispose()
+      ours?.sharing.dispose()
       ours?.opinion.dispose()
       ours?.lists.dispose()
       mine?.listeners.clear()
@@ -566,6 +595,13 @@ export const circle: Capability = {
       void ours?.publishShelf().catch((cause: unknown) => {
         ctx.diagnostics.warn('circle.shelf.publish-failed', { message: cause instanceof Error ? cause.message : String(cause) })
       })
+      /* AN IDENTITY MADE LATER — WI-23.C1 and A1. The peer's own lifecycle,
+         not a panel's call: `ensure` on the Circle screen is one way an
+         identity arrives, and the capability must not depend on every
+         surface that makes one remembering to say so. The port is read at
+         start: `peer` starts first (`requires`), and a composition without
+         one — the browser client — has no identity to make. */
+      offIdentity = ours ? (personPort()?.onIdentity(() => void ours.identityChanged()) ?? null) : null
     } catch (cause) {
       dispose()
       throw cause
@@ -578,10 +614,30 @@ export const circle: Capability = {
   },
 }
 
-/** Every list held for a person, by id — one reader for the two adapters that need it. */
-async function readHeldLists(fs: IndexFs, person: string): Promise<ReadonlyMap<string, ForeignFile>> {
+/**
+ * Every list held for a person, by id — one reader for the two adapters that
+ * need it.
+ *
+ * ⚠️ **ONE LIST THAT WILL NOT READ MUST NOT COST THE OTHERS** — `entriesFor`'s
+ * rule, and it was broken here: one malformed file rejected the whole read,
+ * and with it the friend's shelf, their activity and every valid list, on
+ * the screen and in the round. Reported per list, and the rest are read; in
+ * the round a list unread is asked for from its start, and the file that
+ * would not read is written over by one that does.
+ */
+async function readHeldLists(fs: IndexFs, person: string, warn: Held['warn']): Promise<ReadonlyMap<string, ForeignFile>> {
   const ids = await heldListIdsOf(fs, person)
-  return new Map(await Promise.all(ids.map(async (id) => [id, await readHeldList(fs as VaultFs, person, id)] as const)))
+  const read = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        return [id, await readHeldList(fs as VaultFs, person, id)] as const
+      } catch (cause) {
+        warn('circle.list-read-failed', { person, listId: id, message: cause instanceof Error ? cause.message : String(cause) })
+        return null
+      }
+    }),
+  )
+  return new Map(read.filter((one) => one !== null))
 }
 
 /**
@@ -597,18 +653,59 @@ async function readHeldLists(fs: IndexFs, person: string): Promise<ReadonlyMap<s
  * this side re-launch to reset it, which is the case `bound.ts` persists the
  * serving-side ledger against.
  */
-/** The per-person spend ledger — one for the run, shared by the round and the jackets (WI-23.C5), so both draw on one budget. */
-interface SpendLedger {
-  readonly spend: (person: string) => Spend
-  readonly spent: (person: string, next: Spend) => void
+/* The spend ledger is `lib/spendLedger.ts` — one step, read to commit. */
+
+/**
+ * Whether a person is still admitted in the epoch some pages were recorded
+ * under — asked by the store's writers INSIDE the file's lane, where a purge
+ * that took the lane first has left an exited record. See `writeForeign`.
+ */
+async function stillAdmits(fs: VaultFs, person: string, epoch: number): Promise<boolean> {
+  const held = await readRelationship(fs, person)
+  return acceptsTransport(held.state) && held.epoch === epoch
 }
 
-function spendLedger(): SpendLedger {
-  const held = new Map<string, Spend>()
-  return { spend: (person) => held.get(person) ?? NOTHING_SPENT, spent: (person, next) => void held.set(person, next) }
+/**
+ * Re-admit, in a new epoch, a person the reader has just met again.
+ *
+ * The roster is diffed across each circle pairing that completes: the
+ * person it added, and only them, is looked up, and one whose record has
+ * ended — exited by a forget, or blocked — is re-admitted through `readmit`,
+ * which is the bump the design makes unforgettable. A person whose record
+ * still admits them needs nothing. Nothing is minted for a pairing that
+ * failed, and a roster that will not read is reported and leaves every
+ * record as it was.
+ */
+function readmitOnPairing(fs: VaultFs, writes: WriteQueue, clock: () => Hlc, diagnostics: CapabilityContext['diagnostics']): (() => void) | null {
+  const port = personPort()
+  if (!port) return null
+  const roster = async (): Promise<ReadonlySet<string>> => new Set((await port.people()).map((one) => one.person))
+  let known: ReadonlySet<string> | null = null
+  const first = roster().then((now) => {
+    known = now
+  })
+  return port.onResult((result) => {
+    if (!result.ok) return
+    void (async () => {
+      /* The roster as it was at start, before anything is diffed against it. */
+      await first.catch(() => {})
+      const now = await roster()
+      const before = known ?? new Set<string>()
+      known = now
+      for (const person of now) {
+        if (before.has(person)) continue
+        const held = await readRelationship(fs, person)
+        if (acceptsTransport(held.state)) continue
+        const again = await writeRelationship(fs, writes, readmit(held, clock()))
+        diagnostics.info('circle.readmitted', { person, epoch: again.epoch })
+      }
+    })().catch((cause: unknown) => {
+      diagnostics.warn('circle.readmit-failed', { message: cause instanceof Error ? cause.message : String(cause) })
+    })
+  })
 }
 
-function fetchPortsOver(fs: IndexFs, library: Library, writes: WriteQueue, ledger: SpendLedger): FetchPorts {
+function fetchPortsOver(fs: IndexFs, library: Library, writes: WriteQueue, ledger: SpendLedger, warn: Held['warn']): FetchPorts {
   return {
     mine: async () => {
       const mine = await publishPort()?.mine()
@@ -627,19 +724,18 @@ function fetchPortsOver(fs: IndexFs, library: Library, writes: WriteQueue, ledge
     books: () => library.getSnapshot().map(bookLike),
     /* Stryker disable all: the stores, handed through — reached only with a verified page in hand, which needs a peer's real signature; the fetch driver's tests hold what a keep does at the port. */
     held: (bookId, person) => readForeign(fs as VaultFs, bookId, person),
-    keep: (bookId, person, file) =>
+    keep: (bookId, person, file, epoch) =>
       /* A book removed while the round was out is not written back into being:
          its folder is gone, and a keep would recreate it around one file. */
       library.getSnapshot().some((one) => one.bookId === bookId)
-        ? writeForeign(fs as VaultFs, writes, (id) => library.lane(id), bookId, person, file, circleChanged)
+        ? writeForeign(fs as VaultFs, writes, (id) => library.lane(id), bookId, person, file, circleChanged, () => stillAdmits(fs as VaultFs, person, epoch))
         : Promise.resolve(),
     heldShelf: (person) => readHeldShelf(fs as VaultFs, person),
-    keepShelf: (person, file) => writeHeldShelf(fs as VaultFs, writes, person, file, circleChanged),
-    heldLists: (person) => readHeldLists(fs, person),
-    keepList: (person, id, file) => writeHeldList(fs as VaultFs, writes, person, id, file, circleChanged),
+    keepShelf: (person, file, epoch) => writeHeldShelf(fs as VaultFs, writes, person, file, circleChanged, () => stillAdmits(fs as VaultFs, person, epoch)),
+    heldLists: (person) => readHeldLists(fs, person, warn),
+    keepList: (person, id, file, epoch) => writeHeldList(fs as VaultFs, writes, person, id, file, circleChanged, () => stillAdmits(fs as VaultFs, person, epoch)),
     /* The spend ledger, charged only as pages land — the same reach. */
-    spend: ledger.spend,
-    spent: ledger.spent,
+    charge: (person, key, bytes, now, budget) => ledger.charge(person, key, bytes, now, budget),
     /* Stryker restore all */
     // Stryker disable next-line ArrowFunction: the clock, handed through.
     now: () => Date.now(),
@@ -660,9 +756,22 @@ interface RunningDeps {
   readonly hashes: () => HashPort | null
   readonly ledger: SpendLedger
   readonly settings: SettingsStore
+  /**
+   * The store's change signal, THIS RUN'S — handed in by `start`, which owns
+   * the listeners, rather than read from the module slot: the factories below
+   * are then functions of what they are given, and a test can hand them a
+   * set of its own.
+   */
+  readonly onChanged: (listener: () => void) => () => void
+  readonly changed: () => void
 }
 
-function runningOver({ fs, library, writes, clock, warn, hashes, ledger, settings }: RunningDeps): Running {
+/**
+ * What the service handlers read — the serving side, over one run's stores.
+ * Its own factory, so what a friend is SERVED can be read apart from what
+ * the reader's own surfaces are handed.
+ */
+function servingOver({ fs, library, writes }: Pick<RunningDeps, 'fs' | 'library' | 'writes'>): () => Serving {
   /* The same `books` array for the same shelf snapshot, so `indexOf` in
      `exchange.ts` finds its index built rather than building it per request.
      `getSnapshot` answers one array until the library changes. */
@@ -673,7 +782,7 @@ function runningOver({ fs, library, writes, clock, warn, hashes, ledger, setting
     if (indexed === null || indexed.snapshot !== snapshot) indexed = { snapshot, books: snapshot.map(bookLike) }
     return indexed.books
   }
-  const serving = (): Serving => ({
+  return (): Serving => ({
     books: booksNow(),
     shared: (bookId) => readShared(fs as VaultFs, bookId),
     seal: (bookId, sealed) =>
@@ -718,12 +827,24 @@ function runningOver({ fs, library, writes, clock, warn, hashes, ledger, setting
       return bytes === null ? null : { hash: facts.hash, size: facts.size, bytes }
     },
   })
-  const publisher = () => serving().publisher(EMPTY_WORK)
-  /* ⚠️ **`services.clock`, NOT A CLOCK OF THIS CAPABILITY'S OWN.** One clock
-   * per device — two could order one edit before the removal that preceded
-   * it — and `Publication.at` is a stamp the stores' registers are compared
-   * against. `KernelServices.clock` reads the bound slot, which is the sync
-   * capability's HLC once it has started. */
+}
+
+/**
+ * The reader's own side: the ports the surfaces are handed, and the drivers
+ * that publish what the library and the reader change.
+ */
+/**
+ * The share control's port and the opinion driver — WI-23.A1 and B4 — over
+ * one run's stores. Its own factory: what the reader PUBLISHES, read apart
+ * from what they are shown of others.
+ *
+ * ⚠️ **`services.clock`, NOT A CLOCK OF THIS CAPABILITY'S OWN.** One clock
+ * per device — two could order one edit before the removal that preceded
+ * it — and `Publication.at` is a stamp the stores' registers are compared
+ * against. `KernelServices.clock` reads the bound slot, which is the sync
+ * capability's HLC once it has started.
+ */
+function publicationOver({ fs, library, writes, clock, warn, onChanged }: RunningDeps, publisher: Running['publisher']): Pick<Running, 'sharing' | 'opinion'> {
   /* Stryker disable all: wiring — each line hands one store, port or prop through; the port's own tests hold the behaviour, and `index.peer.test.ts` holds that the seams reach the peer. */
   const sharing = sharePortOver({
     shared: (bookId) => readShared(fs as VaultFs, bookId),
@@ -732,6 +853,7 @@ function runningOver({ fs, library, writes, clock, warn, hashes, ledger, setting
     device: async () => (await publisher())?.device ?? null,
     clock,
     mintPub: () => mintPub(),
+    onChanged,
   })
   const opinion = opinionPortOver({
     books: () => library.getSnapshot(),
@@ -745,7 +867,16 @@ function runningOver({ fs, library, writes, clock, warn, hashes, ledger, setting
     mintPub: () => mintPub(),
   })
   /* Stryker restore all */
-  // Stryker disable next-line ArrowFunction: as above — the lane, handed through.
+  return { sharing, opinion }
+}
+
+/**
+ * The Circle screen's reads — the roster's relationships, the friends'
+ * files, their jackets, the purge — and the disclosure rule the shelf
+ * service asks. WI-23.C2–C5, over one run's stores.
+ */
+function circleReadsOver({ fs, library, writes, clock, warn, ledger, settings, onChanged, changed }: RunningDeps): Pick<Running, 'circle' | 'discloses'> {
+  // Stryker disable next-line ArrowFunction: the lane, handed through.
   const lane = (id: string) => library.lane(id)
   /** The person a calling device speaks for, by the rosters this side holds. */
   const personOf = async (device: string): Promise<string | null> => {
@@ -770,8 +901,7 @@ function runningOver({ fs, library, writes, clock, warn, hashes, ledger, setting
       if (!port) throw new Error('peer has not started')
       return port.connect(device)
     },
-    spend: ledger.spend,
-    spent: ledger.spent,
+    charge: (person, bytes) => ledger.charge(person, 'cover', bytes, Date.now()),
     now: () => Date.now(),
     capBytes: () => settings.get(COVER_CAP_SETTING) * 1024 * 1024,
   })
@@ -783,25 +913,38 @@ function runningOver({ fs, library, writes, clock, warn, hashes, ledger, setting
     writeRelationship: (record) => writeRelationship(fs as VaultFs, writes, record),
     heldShelf: (person) => readHeldShelf(fs as VaultFs, person),
     heldOf: (bookId, person) => readForeign(fs as VaultFs, bookId, person),
-    heldLists: (person) => readHeldLists(fs, person),
-    coverOf: (person, device, pub, digest) => covers.ensure(person, device, pub, digest),
-    purge: (person, books) => purgePerson(fs, writes, lane, person, books, circleChanged),
+    heldLists: (person) => readHeldLists(fs, person, warn),
+    coverOf: (person, device, pub, digest, signal) => covers.ensure(person, device, pub, digest, signal),
+    /* The jackets first — their index, and the fence on any still on their
+       way — then the files: a fetch landing after the folder went would have
+       put the folder back. */
+    purge: async (person, books) => {
+      await covers.purge(person)
+      /* The trash too: a trashed book keeps the person's file, and a restore
+         brings it back. Hidden by the exited record, but theirs. */
+      const trashed = (await listTrash(fs as unknown as TrashFs)).map((one) => one.bookId)
+      await purgePerson(fs, writes, lane, person, books, changed, trashed)
+    },
     forgetPeer: async (person) => {
       await personPort()?.forgetPerson(person)
     },
-    onChanged: (listener) => {
-      held?.listeners.add(listener)
-      return () => {
-        held?.listeners.delete(listener)
-      }
-    },
+    onChanged,
+    warn,
   })
   /* Stryker restore all */
-  /* One step on the shelf's lane — read, sync, write — so the library
-     firing on every page turn cannot interleave two passes on the one file,
-     and a pass that fails fails alone: the next one runs. */
+  return { circle, discloses }
+}
+
+/**
+ * The reader's own shelf, brought up to the library — WI-23.C1's driver.
+ *
+ * One step on the shelf's lane — read, sync, write — so the library firing
+ * on every page turn cannot interleave two passes on the one file, and a
+ * pass that fails fails alone: the next one runs.
+ */
+function shelfPublisherOver({ fs, library, writes, clock, hashes }: RunningDeps, publisher: Running['publisher']): Running['publishShelf'] {
   const coverPass = createCoverFactsPass({ fs, library, hashes })
-  const publishShelf = async (): Promise<void> => {
+  return async () => {
     const mine = await publisher()
     if (!mine) return
     /* The jackets measured first, a few per pass (WI-23.C5): each stamp is a
@@ -811,8 +954,12 @@ function runningOver({ fs, library, writes, clock, warn, hashes, ledger, setting
     const books = library.getSnapshot().map(shelvedBook)
     await updateOwnShelf(fs as VaultFs, writes, (before) => syncShelf(before, books, mine.device, clock(), () => mintPub()))
   }
+}
+
+/** The reader's own lists — WI-23.E1. One per run, for `sharing`'s reason. */
+function listsOver({ fs, library, writes, clock }: RunningDeps, publisher: Running['publisher']): Running['lists'] {
   /* Stryker disable all: wiring — each line hands one store, port or prop through; the port's own tests hold the behaviour, and `index.peer.test.ts` holds that the seams reach the peer. */
-  const lists = listsPortOver({
+  return listsPortOver({
     ids: () => ownListIds(fs),
     read: (listId) => readOwnList(fs as VaultFs, listId),
     update: (listId, transform) => updateOwnList(fs as VaultFs, writes, listId, transform),
@@ -822,7 +969,33 @@ function runningOver({ fs, library, writes, clock, warn, hashes, ledger, setting
     mintPub: () => mintPub(),
   })
   /* Stryker restore all */
-  return { publisher, serving, sharing, opinion, discloses, circle, lists, publishShelf }
+}
+
+/**
+ * One run's services, COMPOSED — each made by its own factory above, so what
+ * the reader publishes, what they are shown, and what they are served can be
+ * read and tested apart. Nothing here reads a module slot: the change signal
+ * comes in through `deps`.
+ */
+function runningOver(deps: RunningDeps): Running {
+  const serving = servingOver(deps)
+  const publisher = () => serving().publisher(EMPTY_WORK)
+  const { sharing, opinion } = publicationOver(deps, publisher)
+  const publishShelf = shelfPublisherOver(deps, publisher)
+  const { circle, discloses } = circleReadsOver(deps)
+  const lists = listsOver(deps, publisher)
+  /* What waited on an identity: the shelf, and the opinions whose switch is
+     on — EACH ON ITS OWN, so a shelf that would not publish does not keep
+     the opinions unpublished. Then everyone who asks whether they can
+     publish is told, whatever failed: a share control saying "Start a
+     circle" over an identity that exists is the state this signal ends. */
+  const identityChanged = async (): Promise<void> => {
+    const [shelf, opinions] = await Promise.allSettled([publishShelf(), opinion.warm()])
+    deps.changed()
+    if (shelf.status === 'rejected') deps.warn('circle.shelf.publish-failed', { message: shelf.reason instanceof Error ? shelf.reason.message : String(shelf.reason) })
+    if (opinions.status === 'rejected') deps.warn('circle.opinion.warm-failed', { message: opinions.reason instanceof Error ? opinions.reason.message : String(opinions.reason) })
+  }
+  return { publisher, serving, sharing, opinion, discloses, circle, lists, publishShelf, identityChanged }
 }
 
 /** What a book says about the work it is — the claim's inputs, in clear, absent when the book says nothing. */
@@ -876,13 +1049,7 @@ function bookLike(book: IndexedBook): BookLike {
  * `checkPage` takes `maySpeak` as a required parameter instead of looking it up.
  */
 export function circleChanged(): void {
-  /* A copy, because a listener may unsubscribe while being told. */
-  for (const listener of [...(held?.listeners ?? [])]) {
-    try {
-      listener()
-    } catch (cause) {
-      /* One surface failing to react must not stop the others hearing. */
-      console.warn('Paper: a circle listener could not be told', cause)
-    }
-  }
+  /* Each on its own — one surface failing to react, or rejecting, must not
+     stop the others hearing. */
+  if (held) tellEach(held.listeners, 'circle')
 }

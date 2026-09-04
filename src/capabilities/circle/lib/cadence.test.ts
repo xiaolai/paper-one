@@ -274,3 +274,33 @@ describe('a failed round with nobody to tell', () => {
     cadence.stop()
   })
 })
+
+describe('a reporter that rejects', () => {
+  it('is said on the console rather than left as an unhandled rejection, and the next round is armed', async () => {
+    /* `failed` is typed `void`, and an async reporter is assignable to it. */
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    try {
+      vi.useFakeTimers()
+      let runs = 0
+      const run = vi.fn(() => {
+        runs += 1
+        return runs === 1 ? Promise.reject(new Error('peer gone')) : Promise.resolve()
+      })
+      const cadence = createCadence({ run, failed: async () => { throw new Error('the log is full') }, firstAfterMs: 10, everyMs: 10 })
+      cadence.start()
+      await vi.advanceTimersByTimeAsync(10)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(error).toHaveBeenCalledWith('Paper: the circle could not report a failed round', expect.objectContaining({ message: 'the log is full' }))
+      await vi.advanceTimersByTimeAsync(10)
+      expect(run).toHaveBeenCalledTimes(2)
+      expect(unhandled).not.toHaveBeenCalled()
+      cadence.stop()
+    } finally {
+      vi.useRealTimers()
+      process.off('unhandledRejection', unhandled)
+      error.mockRestore()
+    }
+  })
+})

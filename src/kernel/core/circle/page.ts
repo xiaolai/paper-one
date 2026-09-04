@@ -1,7 +1,7 @@
 import { canonicalJson } from '../canonicalJson'
 import { isHlc } from '../hlc'
 import type { Entry } from './log'
-import type { WorkClaim } from './workClaim'
+import { isClaimShape, logOfClaim, type WorkClaim } from './workClaim'
 
 /**
  * Pages: what one frame carries, and what is signed — WI-22.C1, C4 and the
@@ -212,6 +212,15 @@ export const MAX_PAGE_CHARS = 512 * 1024
 /** The most entries one page may carry — a bound on the work a signed page can ask for. */
 export const MAX_ENTRIES_PER_PAGE = 4_096
 
+/**
+ * The most devices one person's roster may name on a page — and so the most
+ * streams a person can have, which is what every per-device bound in the
+ * protocol must be measured against. ⚠️ **ONE NUMBER, READ BY THE CURSOR
+ * BOUND TOO.** A cursor held to sixty-four devices while a roster could name
+ * two hundred and fifty-six refused the sixty-fifth device's stream for ever.
+ */
+export const MAX_ROSTER_DEVICES = 256
+
 export type PageRefusal =
   | 'version'
   | 'not-canonical'
@@ -269,8 +278,21 @@ const FIELDS: Readonly<Record<Entry['op'], readonly string[]>> = {
 }
 const PASSAGE_FIELDS = new Set(['quote', 'prefix', 'suffix', 'chapter', 'note'])
 const WORK_FIELDS = new Set(['title', 'author', 'language', 'identifier', 'cover'])
-const CLAIM_FIELDS = new Set(['ids', 'titles', 'author', 'language'])
 const PAGE_FIELDS = new Set(['v', 'person', 'work', 'device', 'from', 'to', 'prevPageHash', 'entries', 'roster', 'revocations', 'delegation', 'sig'])
+
+/**
+ * The kinds each LOG carries — WI-23.E1's three logs, told apart by the claim.
+ *
+ * ⚠️ **A PAGE'S ENTRIES BELONG TO THE LOG ITS CLAIM NAMES.** Checked by
+ * version alone, a per-work page could carry a `shelf` or a `place`, and the
+ * receiver applied it to the shelf or the list section of a file that was
+ * about one book — and a shelf page could carry a `share`.
+ */
+const OPS_BY_LOG: Readonly<Record<ReturnType<typeof logOfClaim>, ReadonlySet<Entry['op']>>> = {
+  work: new Set<Entry['op']>(['share', 'unshare', 'status', 'rate', 'tag', 'review', 'unreview']),
+  shelf: new Set<Entry['op']>(['shelf', 'unshelf']),
+  list: new Set<Entry['op']>(['create', 'retitle', 'place', 'remove', 'delete']),
+}
 
 // Stryker disable next-line ConditionalExpression: a non-object that passes this has no keys the field sets allow and no fields of its own, so every check after it refuses it anyway.
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -357,9 +379,10 @@ export function isEntryShape(value: unknown): value is Entry {
 export function isPageShape(value: unknown): value is Page {
   if (!isObject(value) || !hasOnly(value, PAGE_FIELDS)) return false
   const page = value
-  const work = page['work']
-  if (!isObject(work) || !hasOnly(work, CLAIM_FIELDS) || !isStrings(work['ids'], 64) || !isStrings(work['titles'], 64)) return false
-  if (typeof work['author'] !== 'string' || typeof work['language'] !== 'string') return false
+  /* The claim as a request's parser reads one — digests within their bound,
+     or exactly one reserved claim — so a page cannot name a claim no request
+     could ask for, nor a reserved id beside a real digest. */
+  if (!isClaimShape(page['work'])) return false
   const entries = page['entries']
   if (!Array.isArray(entries) || entries.length > MAX_ENTRIES_PER_PAGE || !entries.every(isEntryShape)) return false
   /* Numbers, not integers: whether a number is a safe integer is
@@ -371,7 +394,7 @@ export function isPageShape(value: unknown): value is Page {
     typeof page['from'] === 'number' &&
     typeof page['to'] === 'number' &&
     typeof page['prevPageHash'] === 'string' &&
-    isStrings(page['roster'], 256) &&
+    isStrings(page['roster'], MAX_ROSTER_DEVICES) &&
     typeof page['revocations'] === 'number' &&
     typeof page['delegation'] === 'string' &&
     typeof page['sig'] === 'string'
@@ -417,12 +440,28 @@ export function checkPage(
      the cursor it would advance would be wrong. After the chain check, so a
      gap reads as a gap; before the signature, which is the expensive step. */
   if (page.from < 1 || page.to < page.from) return 'malformed'
-  if (!page.entries.every((entry) => entry.device === page.device && entry.seq >= page.from && entry.seq <= page.to)) return 'malformed'
+  /* ⚠️ **THE RANGE IS THE ENTRIES, NOT A BOX AROUND THEM.** Checked only for
+     entries INSIDE the range, an empty page, or one missing its first or last
+     sequence, verified — and the receiver then advanced its cursor to `to`
+     and skipped the omitted entries for ever, silently. The first entry IS
+     `from`, the last IS `to`, and between them the sequences climb: a page
+     cut under an older version skips the kinds it does not carry, so the
+     climb may have gaps, but it never stalls or turns back. */
+  if (page.entries.length === 0) return 'malformed'
+  let last = 0
+  for (const entry of page.entries) {
+    if (entry.device !== page.device || entry.seq <= last) return 'malformed'
+    last = entry.seq
+  }
+  if (page.entries[0]!.seq !== page.from || last !== page.to) return 'malformed'
   /* And each entry is one the page's OWN version carries: a v1 page holding
      a `status` was checked against the negotiated number and never against
      what the number allows, so a v1 peer could be handed v2 kinds inside a
      page it had agreed to. */
   if (!page.entries.every((entry) => carriedBy(page.v, entry))) return 'malformed'
+  /* And one the page's LOG carries — see `OPS_BY_LOG`. */
+  const carried = OPS_BY_LOG[logOfClaim(page.work)]
+  if (!page.entries.every((entry) => carried.has(entry.op))) return 'malformed'
   /* BEFORE the signature, because it is the cheaper of the two and a device
      that may not speak is refused whatever it signed. */
   if (!maySpeak(page)) return 'may-not-speak'

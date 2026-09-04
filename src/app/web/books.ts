@@ -104,7 +104,7 @@ export interface RemoteBooks {
 /* Shared with the other stores — see `wireRow.ts`, which was extracted when
  * `marks.ts` and `cards.ts` turned out to be casting where this file reads. */
 import { byFirstId, num, str, strings } from './wireRow'
-import { STARS, isHlc, type Stars } from '../../kernel'
+import { READING_STATES, STARS, isContentHash, isHlc, type ReadingState, type Stars } from '../../kernel'
 
 /** The formats `services/rows.ts` can send. Anything else reads as unknown. */
 const FORMATS = new Set(['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin'])
@@ -139,9 +139,12 @@ export function parseRows(answer: unknown): readonly BookRow[] {
       progress: within01(num(row['progress'])),
       finished: row['finished'] === true,
       /* The reader's own opinion (WI-23.B3), read as the row declares it: a
-         status outside the three words is a shelf disagreeing about the wire
-         and reads as nothing said, never as a fourth state. */
-      status: (['want', 'reading', 'finished'] as const).find((one) => one === row['status']) ?? null,
+         status outside the kernel's own vocabulary is a shelf disagreeing
+         about the wire and reads as nothing said, never as a fourth state.
+         AGAINST `READING_STATES`, not a list spelled out here — the three
+         words were restated inline, and a fourth state added to the kernel
+         would have read as "nothing said" on every browser shelf. */
+      status: (READING_STATES as readonly unknown[]).includes(row['status']) ? (row['status'] as ReadingState) : null,
       /* A stamp that is not an HLC is no stamp: it would be cast to one
          further down and merged as though it ordered anything. */
       statusAt: stamp(row['statusAt']),
@@ -152,7 +155,13 @@ export function parseRows(answer: unknown): readonly BookRow[] {
       addedAt: num(row['addedAt']),
       openedAt: num(row['openedAt']),
       format: FORMATS.has(row['format'] as string) ? (row['format'] as BookRow['format']) : null,
-      contentHash: str(row['contentHash']),
+      /* A DIGEST OR NOTHING — the kernel's one rule, `isContentHash`. This
+         took any string, and `asIndexedBook` then published it as the row's
+         cache generation: a shelf sending `"h"` handed every view a
+         generation that no real hash could ever equal, so changed bytes
+         reused it. The record parser and the sync wire refuse the same
+         shape; the browser was the door with no guard on it. */
+      contentHash: isContentHash(row['contentHash']) ? row['contentHash'] : null,
       /* THREE STATES, NOT TWO. `hasContent` is present / absent / never
        * measured, and `?? false` would collapse the third into "absent" — a
        * definite answer this client has no grounds to give. */
@@ -168,9 +177,8 @@ export function parseRows(answer: unknown): readonly BookRow[] {
 }
 
 const stamp = (value: unknown): Hlc | null => (isHlc(value) ? value : null)
-/** A progress is a fraction of the book: outside 0–1, or not a number at all, it reads as none — the record parser's own rule. */
-// Stryker disable next-line ConditionalExpression,LogicalOperator: null is not finite, so the null clause only spells out what isFinite refuses anyway.
-const within01 = (value: number | null): number => (value !== null && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0)
+/** A progress is a fraction of the book: outside 0–1 it is clamped, and not a number at all reads as none — the record parser's own rule. `num` has already refused anything that is not finite. */
+const within01 = (value: number | null): number => (value === null ? 0 : Math.min(1, Math.max(0, value)))
 const stars = (value: unknown): Stars | null => (STARS as readonly unknown[]).includes(value) ? (value as Stars) : null
 
 const sameList = (a: readonly string[], b: readonly string[]): boolean =>
@@ -355,11 +363,10 @@ export function asIndexedBook(row: BookRow): IndexedBook {
        has: a shelf drawn from the wire says what the reader said, and a
        register with no stamp on the wire is one with none here. */
     ...(row.status !== null && row.statusAt !== null ? { status: { state: row.status, at: row.statusAt as Hlc } } : {}),
-    /* One to five, as the record holds it; a wire row carrying anything else carries no rating. */
-    // Stryker disable next-line ConditionalExpression,LogicalOperator: null is not among the stars, so the null clause only spells out what the membership test refuses anyway.
-    ...(row.rating !== null && STARS.includes(row.rating as Stars)
-      ? { rating: row.rating as Stars, ...(row.ratingAt !== null ? { ratingAt: row.ratingAt as Hlc } : {}) }
-      : {}),
+    /* One to five, as the record holds it — `parseRows` already refused
+       anything else, and `BookRow.rating` is typed `Stars | null` to say so;
+       a second membership test here was a fallback no caller could reach. */
+    ...(row.rating !== null ? { rating: row.rating, ...(row.ratingAt !== null ? { ratingAt: row.ratingAt as Hlc } : {}) } : {}),
     ...(row.review !== null && row.reviewAt !== null ? { review: { text: row.review, at: row.reviewAt as Hlc } } : {}),
     /* What the bytes are, and their digest — representable, and read by the
        shelf's own views, so a shelf drawn from the wire carries them too. */
@@ -374,7 +381,15 @@ export function asIndexedBook(row: BookRow): IndexedBook {
     tags: row.tags,
     position: row.position,
     progress: row.progress,
-    finished: row.finished,
+    /* ONE FACT, NOT TWO — the kernel's own rule (`parseRecord`, the sync
+       merge, `setStatus`): with a status on the wire, `finished` FOLLOWS it
+       and is stamped by it, and the legacy flag speaks only for a row that
+       carries no status. This copied the flag beside the status, so a row
+       saying `reading` next to `finished: true` became a record that said
+       both, and the status filter and the progress bar disagreed about it. */
+    ...(row.status !== null && row.statusAt !== null
+      ? { finished: row.status === 'finished', finishedAt: row.statusAt as Hlc }
+      : { finished: row.finished }),
     ...(row.addedAt !== null ? { addedAt: row.addedAt } : {}),
     ...(row.openedAt !== null ? { openedAt: row.openedAt } : {}),
     ...(row.hasContent !== null ? { hasContent: row.hasContent } : {}),

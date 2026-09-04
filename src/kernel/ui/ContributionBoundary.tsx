@@ -16,8 +16,17 @@ import styles from './screens/ContributedScreen.module.css'
  * React renders it and not when the parent builds its JSX; the BOUNDARY, so
  * what it throws stops here.
  */
+/**
+ * TWO NAMES, because two readers. `label` is what the reader sees when the
+ * contribution fails to draw — a pane's own label, a section's title. `id` is
+ * what the log names — the contribution's id, which says whose it is and
+ * cannot collide. One value served both: the side pane handed the technical
+ * id to the reader, and Marginalia handed the log the words "A mark control"
+ * for every control there is, so two failing controls were one line. `id`
+ * falls back to the label for a caller with nothing better.
+ */
 export class ContributionBoundary extends Component<
-  { readonly label: string; readonly children: ReactNode; readonly resetKey?: string },
+  { readonly label: string; readonly id?: string; readonly children: ReactNode; readonly resetKey?: string },
   { readonly failed: boolean }
 > {
   // Stryker disable next-line ObjectLiteral: an absent `failed` reads as not failed, which is the same start.
@@ -41,7 +50,7 @@ export class ContributionBoundary extends Component<
   override componentDidCatch(error: unknown) {
     /* Reported, not swallowed: the reader sees a line that says something is
        wrong, and whoever is debugging gets the stack. */
-    console.error(`Paper: ${this.props.label} failed to draw`, error)
+    console.error(`Paper: ${this.props.id ?? this.props.label} failed to draw`, error)
   }
 
   override render() {

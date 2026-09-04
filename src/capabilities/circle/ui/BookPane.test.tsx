@@ -548,6 +548,8 @@ describe('every clause of the circle’s view and the lists on the pane — one 
 
     const late = deferred<CircleView>()
     calls = 0
+    /* The listener the FIRST pane registered, or the tell below reaches a component that has gone and the late read is never begun. */
+    tell = null
     draw(
       portWith(),
       'book:moby',
@@ -577,7 +579,9 @@ describe('every clause of the circle’s view and the lists on the pane — one 
     const second = listsWith([off])
     view.rerender(<BookPane bookId="book:moby" port={portWith()} circle={null} lists={second} />)
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Take this book off Sea' })).toBeNull())
-    expect(screen.getByRole('button', { name: 'Put this book on Deserts' })).toBeTruthy()
+    /* The lists are read again once the new port's opinion has landed — the
+       gate the whole pane waits behind — so they are awaited, not expected. */
+    expect(await screen.findByRole('button', { name: 'Put this book on Deserts' })).toBeTruthy()
   })
 
   it('says when the lists cannot be read, keeps the last ones read, and lets a slow read not overwrite a later one', async () => {
@@ -1004,5 +1008,84 @@ describe('the pane, held to the letter', () => {
     fireEvent.change(box, { target: { value: 'Two' } })
     fireEvent.click(screen.getByRole('button', { name: 'Start list' }))
     await waitFor(() => expect(quickCreate).toHaveBeenCalledTimes(2))
+  })
+})
+
+describe('an act begun through a port the pane no longer holds', () => {
+  it('does not refresh through the old port after the new one’s read', async () => {
+    /* ⚠️ The capability restarted while the act was out: its refresh, bound
+       to the old port, landed after the new port's read and handed the new
+       run the old one's state. */
+    let finish: (() => void) | null = null
+    const first = portWith(own({ status: 'reading' }), false, {
+      setStatus: vi.fn(() => new Promise<void>((done) => { finish = done })),
+    })
+    const firstOwn = vi.spyOn(first, 'own')
+    const view = draw(first)
+    fireEvent.click(await screen.findByRole('button', { name: 'Finished' }))
+    await waitFor(() => expect(first.setStatus).toHaveBeenCalled())
+    expect(firstOwn).toHaveBeenCalledTimes(1)
+    const second = portWith(own({ status: 'finished' }))
+    view.rerender(<BookPane bookId="book:moby" port={second} circle={null} />)
+    await screen.findByRole('button', { name: 'Finished' })
+    finish!()
+    await new Promise((done) => setTimeout(done, 0))
+    /* The old port was read once, at mount, and never again. */
+    expect(firstOwn).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Finished' }).getAttribute('aria-pressed')).toBe('true')
+  })
+})
+
+describe('the three sections act on their own — WI-23.B4, held apart', () => {
+  const listsWith = (own: OwnListView[], over: Partial<ListsPort> = {}): ListsPort => ({
+    lists: () => Promise.resolve(own),
+    create: vi.fn(() => Promise.resolve('new1')),
+    retitle: vi.fn(() => Promise.resolve()),
+    place: vi.fn(() => Promise.resolve()),
+    takeOff: vi.fn(() => Promise.resolve()),
+    delete: vi.fn(() => Promise.resolve()),
+    subscribe: () => () => {},
+    ...over,
+  })
+  const deserts: OwnListView = { id: 'bb', title: 'Deserts', items: [] }
+  const deferred = <T,>() => {
+    let resolve: (value: T) => void = () => {}
+    const promise = new Promise<T>((res) => {
+      resolve = res
+    })
+    return { promise, resolve }
+  }
+
+  it('says a list that would not take the book beside the lists, and leaves the stars and the switch usable', async () => {
+    /* ⚠️ One trouble line and one `busy` for the whole pane: a list that
+       would not write was reported over the stars, and disabled them. */
+    const lists = listsWith([deserts], { place: () => Promise.reject(new Error('the list would not write')) })
+    render(<BookPane bookId="book:moby" port={portWith()} circle={null} lists={lists} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Put this book on Deserts' }))
+    await screen.findByText(/That did not save\. the list would not write/u)
+    expect(document.querySelector('[data-own-lists]')!.textContent).toContain('the list would not write')
+    expect(screen.getByRole('group', { name: 'Reading status' }).parentElement!.textContent).not.toContain('did not save')
+    expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Reading' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('holds only the opinion while a status is being written: the lists stay usable', async () => {
+    const pending = deferred<void>()
+    const port = portWith(own(), false, { setStatus: vi.fn(() => pending.promise) })
+    render(<BookPane bookId="book:moby" port={port} circle={null} lists={listsWith([deserts])} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Reading' }))
+    await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true))
+    expect((screen.getByRole('button', { name: 'Put this book on Deserts' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByLabelText('New list') as HTMLInputElement).disabled).toBe(false)
+    pending.resolve()
+    await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(false))
+  })
+
+  it('says an opinion that would not save beside the opinion, and leaves the lists usable', async () => {
+    render(<BookPane bookId="book:moby" port={portWith(own(), false, { setStars: () => Promise.reject(new Error('disk full')) })} circle={null} lists={listsWith([deserts])} />)
+    fireEvent.click(await screen.findByRole('button', { name: '4 stars' }))
+    await screen.findByText(/That did not save\. disk full/u)
+    expect(document.querySelector('[data-own-lists]')!.textContent).not.toContain('disk full')
+    expect((screen.getByRole('button', { name: 'Put this book on Deserts' }) as HTMLButtonElement).disabled).toBe(false)
   })
 })

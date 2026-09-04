@@ -15,7 +15,7 @@ import {
   type WorkClaim,
 } from '../../../kernel'
 import { matchWork } from '../../../kernel'
-import type { ForeignFile } from './store'
+import type { ForeignFile, HeldList, HeldOpinion } from './store'
 
 /**
  * Taking a page from somebody, and deciding whether to believe it — WI-22.C4.
@@ -395,76 +395,130 @@ export function applyEntries(
   epoch: number,
   receivedAt: number,
 ): ForeignFile {
-  const withdrawn = new Set(held.withdrawn)
-  const unreviewed = new Set(held.unreviewed)
-  const byPub = new Map(held.entries.map((one) => [one.pub, one]))
-  const reviews = new Map(held.reviews.map((one) => [one.pub, one]))
-  const unshelved = new Set(held.unshelved)
-  const works = new Map(held.works.map((one) => [one.pub, one]))
-  let { status, stars, tags } = held.opinion
-  /* The list — WI-23.E1 — folded by `foldList`'s rules, one entry at a time. */
-  let { created, deleted, title } = held.list
-  const items = new Map(held.list.items.map((one) => [one.pub, one]))
-  const removed = new Set(held.list.removed)
+  /* Five families, each folded by its own reducer over the same pages — so
+     a kind added to one cannot reach into another's state, and each rule can
+     be read on its own. The chain state — heads, cursor, version — is the
+     caller's, and passes through untouched. */
+  return {
+    heads: held.heads,
+    cursor: held.cursor,
+    v: held.v,
+    ...foldPassages(held, incoming, person, epoch, receivedAt),
+    ...foldReviews(held, incoming, epoch),
+    ...foldShelf(held, incoming, epoch),
+    opinion: foldRegisters(held.opinion, incoming, epoch),
+    list: foldListState(held.list, incoming, epoch),
+  }
+}
 
+/**
+ * A tombstoned publication kind — passages, reviews, shelf rows — folded
+ * one rule: a withdrawal is remembered even for a `pub` not yet seen, and a
+ * duplicate `pub` keeps the earlier entry BY STAMP.
+ *
+ * ⚠️ **REMEMBERED EVEN FOR A `pub` NOT YET SEEN.** Pages from two of a
+ * person's devices travel independently, so a withdrawal can land before the
+ * share it withdraws — and a withdrawal that is dropped comes straight back
+ * when that share arrives.
+ *
+ * ⚠️ **A DUPLICATE `pub` KEEPS THE EARLIER ENTRY, BY STAMP — `fold`'s rule,
+ * not first-arrival.** Two of a person's devices can publish one pub, and
+ * their pages travel independently; a recipient that kept whichever page it
+ * opened first held a different passage from a recipient that opened the
+ * other, for ever. The stored row keeps its stamp so the comparison is the
+ * same one `fold` makes over the whole log; a row written before stamps were
+ * kept stands.
+ */
+function foldPublications<T extends { readonly pub: string; readonly at?: Hlc; readonly device?: string; readonly seq?: number }>(
+  heldRows: readonly T[],
+  heldGone: readonly string[],
+  incoming: readonly Entry[],
+  kinds: { readonly publish: Entry['op']; readonly withdraw: Entry['op'] },
+  rowOf: (entry: Entry & { readonly pub: string }) => T,
+): { readonly rows: readonly T[]; readonly gone: readonly string[] } {
+  const gone = new Set(heldGone)
+  const byPub = new Map(heldRows.map((one) => [one.pub, one]))
+  for (const entry of incoming) {
+    if (!('pub' in entry)) continue
+    if (entry.op === kinds.withdraw) {
+      gone.add(entry.pub)
+      byPub.delete(entry.pub)
+    } else if (entry.op === kinds.publish) {
+      if (gone.has(entry.pub) || !precedes(entry, byPub.get(entry.pub))) continue
+      byPub.set(entry.pub, rowOf(entry))
+    }
+  }
+  return { rows: [...byPub.values()], gone: [...gone] }
+}
+
+function foldPassages(held: ForeignFile, incoming: readonly Entry[], person: string, epoch: number, receivedAt: number): Pick<ForeignFile, 'entries' | 'withdrawn'> {
+  const { rows, gone } = foldPublications(held.entries, held.withdrawn, incoming, { publish: 'share', withdraw: 'unshare' }, (entry) =>
+    entry.op === 'share'
+      ? { pub: entry.pub, person, passage: entry.passage, epoch, receivedAt, at: entry.at, device: entry.device, seq: entry.seq }
+      : unreachable(entry),
+  )
+  return { entries: rows, withdrawn: gone }
+}
+
+/** Its own withdrawal list, for `ForeignFile.unreviewed`'s reason: a tombstone withdraws only the kind it names. */
+function foldReviews(held: ForeignFile, incoming: readonly Entry[], epoch: number): Pick<ForeignFile, 'reviews' | 'unreviewed'> {
+  const { rows, gone } = foldPublications(held.reviews, held.unreviewed, incoming, { publish: 'review', withdraw: 'unreview' }, (entry) =>
+    entry.op === 'review' ? { pub: entry.pub, text: entry.text, at: entry.at, epoch, device: entry.device, seq: entry.seq } : unreachable(entry),
+  )
+  return { reviews: rows, unreviewed: gone }
+}
+
+function foldShelf(held: ForeignFile, incoming: readonly Entry[], epoch: number): Pick<ForeignFile, 'works' | 'unshelved'> {
+  const { rows, gone } = foldPublications(held.works, held.unshelved, incoming, { publish: 'shelf', withdraw: 'unshelf' }, (entry) =>
+    entry.op === 'shelf' ? { pub: entry.pub, work: entry.work, at: entry.at, device: entry.device, seq: entry.seq, epoch } : unreachable(entry),
+  )
+  return { works: rows, unshelved: gone }
+}
+
+/**
+ * ⚠️ **THE REGISTERS FOLD BY STAMP, NOT BY ARRIVAL** — WI-23.B5. The file
+ * keeps the winning entry's stamp and `(device, seq)`, so the comparison here
+ * is `fold`'s own, ties included, and applying pages one at a time answers
+ * what folding the whole log would.
+ */
+function foldRegisters(held: HeldOpinion, incoming: readonly Entry[], epoch: number): HeldOpinion {
+  let { status, stars, tags } = held
+  for (const entry of incoming) {
+    if (entry.op === 'status' && newer(entry, status)) status = { value: entry.state, at: entry.at, device: entry.device, seq: entry.seq, epoch }
+    else if (entry.op === 'rate' && newer(entry, stars)) stars = { value: entry.stars, at: entry.at, device: entry.device, seq: entry.seq, epoch }
+    else if (entry.op === 'tag' && newer(entry, tags)) tags = { value: entry.tags, at: entry.at, device: entry.device, seq: entry.seq, epoch }
+  }
+  return {
+    ...(status === undefined ? {} : { status }),
+    ...(stars === undefined ? {} : { stars }),
+    ...(tags === undefined ? {} : { tags }),
+  }
+}
+
+/**
+ * The list — WI-23.E1 — folded by `foldList`'s rules, one entry at a time.
+ * Stamped with the epoch as the shelf and the registers are, PART BY PART:
+ * the creation with the epoch its `create` arrived under, the title with
+ * its winning entry's, every item with its own — so a list retained across
+ * a block is not drawn on re-admission, and nothing of it is drawn under a
+ * page that arrived later under a new relationship. ⚠️ One epoch on the
+ * list, moved by its newest page, let a `place` under the new relationship
+ * re-expose a title and a creation that arrived under the old one. The
+ * withdrawals — `delete`, `remove` — carry none; see `HeldList`.
+ */
+function foldListState(held: HeldList, incoming: readonly Entry[], epoch: number): HeldList {
+  let { created, createdEpoch, deleted, title } = held
+  const items = new Map(held.items.map((one) => [one.pub, one]))
+  const removed = new Set(held.removed)
   for (const entry of incoming) {
     switch (entry.op) {
-      case 'unshare':
-        /* ⚠️ **REMEMBERED EVEN FOR A `pub` NOT YET SEEN.** Pages from two of a
-         * person's devices travel independently, so a withdrawal can land
-         * before the share it withdraws — and a withdrawal that is dropped
-         * comes straight back when that share arrives. */
-        withdrawn.add(entry.pub)
-        byPub.delete(entry.pub)
-        break
-      case 'unreview':
-        /* Its own list, for `ForeignFile.unreviewed`'s reason: a tombstone
-           withdraws only the kind it names. */
-        unreviewed.add(entry.pub)
-        reviews.delete(entry.pub)
-        break
-      /* ⚠️ **A DUPLICATE `pub` KEEPS THE EARLIER ENTRY, BY STAMP — `fold`'s
-       * rule, not first-arrival.** Two of a person's devices can publish one
-       * pub, and their pages travel independently; a recipient that kept
-       * whichever page it opened first held a different passage from a
-       * recipient that opened the other, for ever. The stored row keeps its
-       * stamp so the comparison is the same one `fold` makes over the whole
-       * log; a row written before stamps were kept stands. */
-      case 'share':
-        if (withdrawn.has(entry.pub) || !precedes(entry, byPub.get(entry.pub))) break
-        byPub.set(entry.pub, { pub: entry.pub, person, passage: entry.passage, epoch, receivedAt, at: entry.at, device: entry.device, seq: entry.seq })
-        break
-      case 'review':
-        if (unreviewed.has(entry.pub) || !precedes(entry, reviews.get(entry.pub))) break
-        reviews.set(entry.pub, { pub: entry.pub, text: entry.text, at: entry.at, epoch, device: entry.device, seq: entry.seq })
-        break
-      case 'unshelf':
-        unshelved.add(entry.pub)
-        works.delete(entry.pub)
-        break
-      case 'shelf':
-        if (unshelved.has(entry.pub) || !precedes(entry, works.get(entry.pub))) break
-        works.set(entry.pub, { pub: entry.pub, work: entry.work, at: entry.at, device: entry.device, seq: entry.seq, epoch })
-        break
-      /* ⚠️ **THE REGISTERS FOLD BY STAMP, NOT BY ARRIVAL** — WI-23.B5. The
-       * file keeps the winning entry's stamp and `(device, seq)`, so the
-       * comparison here is `fold`'s own, ties included, and applying pages one
-       * at a time answers what folding the whole log would. */
-      case 'status':
-        if (newer(entry, status)) status = { value: entry.state, at: entry.at, device: entry.device, seq: entry.seq, epoch }
-        break
-      case 'rate':
-        if (newer(entry, stars)) stars = { value: entry.stars, at: entry.at, device: entry.device, seq: entry.seq, epoch }
-        break
-      case 'tag':
-        if (newer(entry, tags)) tags = { value: entry.tags, at: entry.at, device: entry.device, seq: entry.seq, epoch }
-        break
       case 'create':
         created = true
-        if (newer(entry, title)) title = { value: entry.title, at: entry.at, device: entry.device, seq: entry.seq }
+        createdEpoch = epoch
+        if (newer(entry, title)) title = { value: entry.title, at: entry.at, device: entry.device, seq: entry.seq, epoch }
         break
       case 'retitle':
-        if (newer(entry, title)) title = { value: entry.title, at: entry.at, device: entry.device, seq: entry.seq }
+        if (newer(entry, title)) title = { value: entry.title, at: entry.at, device: entry.device, seq: entry.seq, epoch }
         break
       case 'delete':
         deleted = true
@@ -483,35 +537,30 @@ export function applyEntries(
           at: entry.at,
           device: entry.device,
           seq: entry.seq,
+          epoch,
         }
         items.set(entry.pub, item)
         break
       }
+      /* Every other kind belongs to another family's reducer. */
+      default:
+        break
     }
   }
   return {
-    entries: [...byPub.values()],
-    withdrawn: [...withdrawn],
-    heads: held.heads,
-    cursor: held.cursor,
-    v: held.v,
-    opinion: {
-      ...(status === undefined ? {} : { status }),
-      ...(stars === undefined ? {} : { stars }),
-      ...(tags === undefined ? {} : { tags }),
-    },
-    reviews: [...reviews.values()],
-    unreviewed: [...unreviewed],
-    works: [...works.values()],
-    unshelved: [...unshelved],
-    list: {
-      created,
-      ...(title === undefined ? {} : { title }),
-      deleted,
-      items: [...items.values()].sort(compareItems),
-      removed: [...removed],
-    },
+    created,
+    ...(createdEpoch === undefined ? {} : { createdEpoch }),
+    ...(title === undefined ? {} : { title }),
+    deleted,
+    items: [...items.values()].sort(compareItems),
+    removed: [...removed],
   }
+}
+
+/** The arm `foldPublications` never reaches: it hands a reducer only the kind it named. */
+// Stryker disable next-line all: unreachable by construction — the reducer is called with the kind it asked for.
+function unreachable(entry: Entry): never {
+  throw new Error(`receive: a ${entry.op} handed to the wrong reducer`)
 }
 
 /** Whether an entry is a later word than the register held — `fold`'s rule. */

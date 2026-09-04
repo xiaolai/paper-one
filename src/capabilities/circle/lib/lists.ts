@@ -59,7 +59,8 @@ export interface OwnList {
  */
 export const MAX_LIST_TITLE = 200
 export const MAX_LIST_NOTE = 2_000
-export const MAX_WORK_FIELD = 1_024
+import { MAX_WORK_FIELD } from './workField'
+export { MAX_WORK_FIELD }
 
 /** One past the highest sequence this device has used on the list's log. */
 export function nextListSeq(held: ListFile, device: string): number {

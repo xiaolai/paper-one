@@ -13,7 +13,7 @@ import {
   type KernelServices,
   type Mark,
 } from '../../../kernel'
-import { createPeerPort, fakeWire, linkWires, type FakeWire, type PeerPort } from '../../peer'
+import { createPeerPort, fakeBlobHash, fakeWire, linkWires, type FakeWire, type PeerPort } from '../../peer'
 import { createClock, makeHlc, type Clock } from './clock'
 import { JOURNAL_KEY, createJournal, type Journal } from './journal'
 import { crashableFs, fsOver, type CrashableFs } from './journalFs.testkit'
@@ -1266,6 +1266,31 @@ describe('carried findings — removals, content facts, and covers', () => {
         pushTo(shelf, { book: 'book:c', revs: { record: 1 }, hasContent: true, record: toWire({ ...rec('Renamed'), ext: 'epub', format: 'epub' }) }),
       ).rejects.toMatchObject({ code: 'unverifiable', retryable: true })
       expect(shelf.services.library.getSnapshot().find((b) => b.bookId === 'book:c')?.title).toBe(before?.title)
+    })
+
+    /* THE SIZE STAMPED IS THE LOCAL FILE'S. On the already-here path nothing
+     * verifies the offer's size against anything, and the peer's number was
+     * stamped as this device's own measurement — a peer could make this shelf
+     * publish a size for a jacket it never measured at that size. The hash
+     * result carries the local length; that is what the record gets. */
+    it('stamps the local size, not the offered one, for a jacket already held under the offered hash', async () => {
+      const { shelf } = await makeWorld()
+      const coverBytes = new TextEncoder().encode('a jacket already here')
+      await shelf.services.library.add('book:c', rec('Covered'))
+      await shelf.fs.writeFile('books/book_c/cover.jpg', coverBytes)
+      await pushTo(shelf, {
+        book: 'book:c',
+        revs: { record: 1 },
+        hasContent: false,
+        record: toWire(rec('Covered')),
+        cover: { name: 'cover.jpg', size: coverBytes.length + 100, hash: await fakeBlobHash(coverBytes) },
+      })
+      await shelf.services.drain()
+      expect(shelf.services.library.getSnapshot().find((b) => b.bookId === 'book:c')?.coverFacts).toEqual({
+        name: 'cover.jpg',
+        size: coverBytes.length,
+        hash: await fakeBlobHash(coverBytes),
+      })
     })
 
     it('(#56) a pulled row for a book this device removed does not re-add it, and the removal still pushes', async () => {

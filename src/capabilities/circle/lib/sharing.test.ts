@@ -87,7 +87,7 @@ describe('the live publication of a mark', () => {
     /* Published, withdrawn, published again: three rows, one live, and the
        withdrawal has to name the right `pub`. */
     let held = shared(NOTHING_PUBLISHED, 'm1', 'pub1', 1)
-    held = unshare(held, 'pub1', at(2))
+    held = unshare(held, 'pub1', DEVICE, at(2))
     expect(livePublication(held, 'm1')).toBeNull()
     held = shared(held, 'm1', 'pub2', 3)
     expect(livePublication(held, 'm1')?.pub).toBe('pub2')
@@ -192,7 +192,7 @@ describe('the share port', () => {
 
     const withdrawn = files.get('book:moby')!
     expect(withdrawn.publications).toHaveLength(1)
-    expect(withdrawn.publications[0]!.unshared).toEqual({ seq: 2, at: hlcOf(2) })
+    expect(withdrawn.publications[0]!.unshared).toEqual({ device: DEVICE, seq: 2, at: hlcOf(2) })
     expect(await port.state(mark())).toEqual({ publishability: 'usable', published: false })
     /* `logOf` emits share then unshare for it, in that order — the acceptance. */
     expect(logOf(withdrawn).map((one) => one.op)).toEqual(['share', 'unshare'])
@@ -341,6 +341,41 @@ describe('a mark published from two devices', () => {
     await port.unshare(mark)
     expect(livePublications(files.get('book:moby')!, 'm1')).toEqual([])
     expect((await port.state(mark)).published).toBe(false)
+    /* Both tombstones in THIS device's stream — the one it serves — numbered
+       one after the other, whichever device published the row. Filed under
+       the other device, the second was one this device never served. */
+    const gone = logOf(files.get('book:moby')!).filter((one) => one.op === 'unshare')
+    expect(gone.map((one) => [one.device, one.seq])).toEqual([
+      [DEVICE, 2],
+      [DEVICE, 3],
+    ])
+  })
+
+  it('refuses to withdraw with no peer to stamp the tombstone, and writes nothing', async () => {
+    /* A tombstone is stamped in the withdrawing device's own stream, and with
+       no peer there is no device to stamp as — the same reason Share gives. */
+    const files = new Map<string, SharedFile>()
+    const before = share(NOTHING_PUBLISHED, { markId: 'm1', passage: { quote: 'q', prefix: '', suffix: '', chapter: '' }, device: DEVICE }, 'pub-a', hlcOf(1)).held
+    files.set('book:moby', before)
+    const port = sharePortOver({
+      shared: (bookId) => Promise.resolve(files.get(bookId) ?? NOTHING_PUBLISHED),
+      update: async (bookId, transform) => {
+        const next = await transform(files.get(bookId) ?? NOTHING_PUBLISHED)
+        files.set(bookId, next)
+        return next
+      },
+      reachable: () => false,
+      device: () => Promise.resolve(DEVICE),
+      clock: () => hlcOf(5),
+      mintPub: () => 'p',
+    })
+    await expect(port.unshare(mark)).rejects.toThrow('has not answered')
+    expect(files.get('book:moby')).toBe(before)
+    /* And a mark with NOTHING out is a no-op whatever the peer says — the
+       contract's no-op, asked of the store before the peer. */
+    const never = { id: 'm-never-shared', bookId: 'book:moby', text: 'q', prefix: '', suffix: '', chapter: '', note: '' } as never
+    await expect(port.unshare(never)).resolves.toBeUndefined()
+    expect(files.get('book:moby')).toBe(before)
   })
 
   it('asks whether the peer is reachable once per state read', async () => {
@@ -374,5 +409,33 @@ describe('a peer that stops between the check and the share', () => {
     const mark = { id: 'm1', bookId: 'book:moby', text: 'Call me Ishmael', prefix: '', suffix: '', note: '', chapter: 'One' } as unknown as Annotation
     /* The reason the control shows for an unreachable shelf — and not the type's fallback word. */
     await expect(port.share(mark, false)).rejects.toThrow('has not answered')
+  })
+})
+
+describe('the share port hears the store change', () => {
+  it('tells its subscribers when the circle changes under it — an identity made, a fetch landed — and lets go on dispose', () => {
+    /* A control mounted before the circle had an identity kept saying
+       "Start a circle" after one was made: nothing it listened to had fired. */
+    const changes = new Set<() => void>()
+    const port = sharePortOver({
+      shared: () => Promise.resolve(NOTHING_PUBLISHED),
+      update: () => Promise.reject(new Error('unused')),
+      reachable: () => true,
+      device: () => Promise.resolve(DEVICE),
+      clock: () => hlcOf(1),
+      mintPub: () => 'p',
+      onChanged: (listener) => {
+        changes.add(listener)
+        return () => changes.delete(listener)
+      },
+    })
+    const heard = vi.fn()
+    port.subscribe(heard)
+    for (const change of changes) change()
+    expect(heard).toHaveBeenCalledTimes(1)
+    port.dispose()
+    expect(changes.size).toBe(0)
+    for (const change of changes) change()
+    expect(heard).toHaveBeenCalledTimes(1)
   })
 })

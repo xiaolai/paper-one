@@ -526,6 +526,11 @@ class FakeWireImpl implements FakeWire {
     return Promise.resolve(this.mine)
   }
 
+  /** The roster as the file holds it — `mine`'s, read and never minted, as the real command reads. */
+  circleRoster(): Promise<readonly string[] | null> {
+    return Promise.resolve(this.mine === null ? null : [...this.mine.roster])
+  }
+
   circleRevoke(device: string): Promise<void> {
     this.revoked.push(device)
     this.admits = this.admits.filter((one) => one !== device)

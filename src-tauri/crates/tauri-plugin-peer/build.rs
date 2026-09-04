@@ -46,6 +46,10 @@ const COMMANDS: &[&str] = &[
     "peer_circle_people",
     "peer_circle_introduce",
     "peer_circle_mine",
+    // The roster's size read from the file, minting nothing — what the
+    // Circle panel counts on every refresh. `peer_circle_mine` renews and
+    // refuses, which a status read must never do.
+    "peer_circle_roster",
     "peer_page_sign",
     "peer_circle_remember",
     "peer_circle_revoke",

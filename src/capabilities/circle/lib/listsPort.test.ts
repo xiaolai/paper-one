@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { hlcOf, type Hlc } from '../../../kernel'
-import { MAX_LIST_NOTE, MAX_LIST_TITLE, NOTHING_LISTED, placeOnList, stateOf, type ListFile } from './lists'
-import { NO_IDENTITY, NO_SUCH_LIST, listsPortOver, type ListsDeps } from './listsPort'
+import { MAX_LIST_NOTE, MAX_LIST_TITLE, MAX_WORK_FIELD, NOTHING_LISTED, placeOnList, stateOf, type ListFile } from './lists'
+import { NO_IDENTITY, NO_SUCH_LIST, TOO_MANY_LISTS, listsPortOver, type ListsDeps } from './listsPort'
+import { MAX_LISTS_PER_REQUEST } from './protocol'
 
 /**
  * WI-23.E1 from the screen's side: every act is a row on the list's file,
@@ -208,5 +209,35 @@ describe('a list with no room for another position', () => {
     const held = w.files.get(id)!
     w.files.set(id, placeOnList(held, { pub: 'far', work: { title: 'Far', author: 'A', language: 'en' }, position: Number.MAX_SAFE_INTEGER, note: '' }, { device: 'd'.repeat(64), at: hlcOf(5) }))
     await expect(w.port.place(id, 'book:moby', 'read this first')).resolves.toBeUndefined()
+  })
+})
+
+describe('the lists a circle carries, bounded', () => {
+  it('refuses one list more than a friend’s request can name a cursor for — deleted lists counted', async () => {
+    /* A sixty-fifth list made every request for this reader's lists invalid,
+       and their lists stopped reaching anybody. */
+    const { port } = world()
+    for (let i = 0; i < MAX_LISTS_PER_REQUEST; i++) await port.create(`List ${i}`)
+    await expect(port.create('one more')).rejects.toThrow(TOO_MANY_LISTS)
+    /* A deleted list is still a file a friend holds a cursor for. */
+    const [first] = await port.lists()
+    await port.delete(first!.id)
+    await expect(port.create('still one more')).rejects.toThrow(TOO_MANY_LISTS)
+  })
+})
+
+describe('a book whose title is past the field bound', () => {
+  it('is placed once, found again on a second placement, and linked back to the shelf — one cut for the work and the claim', async () => {
+    /* Cut on the item and not on the claim, the item read as a book the
+       reader did not have, and a second placement made a duplicate. */
+    const long = { bookId: 'book:long', title: 'x'.repeat(2_000), author: 'Somebody', languages: ['en'] }
+    const { port } = world({ books: () => [...BOOKS, long] })
+    const id = await port.create('Long ones')
+    await port.place(id, 'book:long', 'first')
+    await port.place(id, 'book:long', 'second')
+    const [list] = await port.lists()
+    expect(list!.items).toHaveLength(1)
+    expect(list!.items[0]).toMatchObject({ note: 'second', bookId: 'book:long' })
+    expect(list!.items[0]!.title).toHaveLength(MAX_WORK_FIELD)
   })
 })

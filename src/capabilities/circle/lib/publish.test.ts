@@ -2,7 +2,7 @@ import { getPublicKey, hashes, sign } from '@noble/ed25519'
 import { sha512 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import { describe, expect, it } from 'vitest'
-import { WIRE_VERSION, canonicalJson, makeHlc, type Entry, type Hlc, type Passage, type WorkClaim } from '../../../kernel'
+import { MAX_CLAIM_DIGESTS, SHELF_WORK, WIRE_VERSION, canonicalJson, makeHlc, type Entry, type Hlc, type Passage, type WorkClaim } from '../../../kernel'
 import { pageCrypto } from './crypto'
 import { delegationBytes, takePages, type Ledger, type SignedDelegation } from './receive'
 import {
@@ -17,11 +17,13 @@ import {
   share,
   unshare,
   updateShared,
+  wireBytesOf,
   type Publisher,
   type SharedFile,
   boundariesInOrder,
   MAX_BOUNDARY_SPAN,
   MAX_TAGS,
+  boundedAnswer,
 } from './publish'
 import { NOTHING_SHARED, type LaneFor } from './store'
 import { MAX_PAGES_PER_ANSWER, MAX_PAGE_CHARS } from './protocol'
@@ -42,7 +44,7 @@ hashes.sha512 = sha512
  */
 
 const NOW = 1_700_000_000_000
-const WORK: WorkClaim = { ids: ['w1'], titles: ['t1'], author: 'a1', language: 'en' }
+const WORK: WorkClaim = { ids: ['1a'.repeat(32)], titles: ['2b'.repeat(32)], author: '3c'.repeat(32), language: 'en' }
 
 function keypair(seed: string) {
   const secret = utf8ToBytes(seed.padEnd(32, '.')).slice(0, 32)
@@ -125,7 +127,7 @@ describe("the publisher's store", () => {
     let held = NOTHING_PUBLISHED
     held = share(held, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'a', stamp(1, DEVICE.id)).held
     held = share(held, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'b', stamp(2, DEVICE.id)).held
-    held = unshare(held, 'a', stamp(3, DEVICE.id))
+    held = unshare(held, 'a', DEVICE.id, stamp(3, DEVICE.id))
 
     const log = logOf(held)
     expect(log.filter((one) => one.op === 'share')).toHaveLength(2)
@@ -140,7 +142,7 @@ describe("the publisher's store", () => {
        exists to make impossible. */
     let held = twoShares()
     expect(nextSeqFor(held, DEVICE.id)).toBe(3)
-    held = unshare(held, 'pub1', stamp(3, DEVICE.id))
+    held = unshare(held, 'pub1', DEVICE.id, stamp(3, DEVICE.id))
     expect(held.publications[0]?.unshared?.seq).toBe(3)
     expect(nextSeqFor(held, DEVICE.id)).toBe(4)
 
@@ -158,14 +160,14 @@ describe("the publisher's store", () => {
   })
 
   it('keeps the row when it is withdrawn, tombstone and all', () => {
-    const held = unshare(twoShares(), 'pub1', stamp(3, DEVICE.id))
+    const held = unshare(twoShares(), 'pub1', DEVICE.id, stamp(3, DEVICE.id))
     expect(held.publications).toHaveLength(2)
     expect(held.publications[0]?.passage.quote).toBe('first')
   })
 
   it('does not withdraw the same publication twice', () => {
-    const once = unshare(twoShares(), 'pub1', stamp(3, DEVICE.id))
-    const twice = unshare(once, 'pub1', stamp(9, DEVICE.id))
+    const once = unshare(twoShares(), 'pub1', DEVICE.id, stamp(3, DEVICE.id))
+    const twice = unshare(once, 'pub1', DEVICE.id, stamp(9, DEVICE.id))
     expect(twice.publications[0]?.unshared?.seq).toBe(3)
   })
 
@@ -173,7 +175,7 @@ describe("the publisher's store", () => {
     /* ⚠️ **A TOMBSTONE THAT REPEATED THE QUOTE WOULD DISCLOSE THE WITHDRAWN
        PASSAGE** to a peer who never saw the share — a retraction that publishes
        the thing being retracted. The type enforces it; this checks the value. */
-    const held = unshare(twoShares(), 'pub1', stamp(3, DEVICE.id))
+    const held = unshare(twoShares(), 'pub1', DEVICE.id, stamp(3, DEVICE.id))
     for (const entry of logOf(held)) {
       if (entry.op === 'unshare') expect(Object.hasOwn(entry, 'passage')).toBe(false)
     }
@@ -194,7 +196,7 @@ describe('the order of the log', () => {
   })
 
   it('puts a withdrawal after the share it withdraws', () => {
-    const held = unshare(twoShares(), 'pub1', stamp(9, DEVICE.id))
+    const held = unshare(twoShares(), 'pub1', DEVICE.id, stamp(9, DEVICE.id))
     const log = logOf(held)
     const shared = log.findIndex((one) => pubOf(one) === 'pub1' && one.op === 'share')
     const gone = log.findIndex((one) => pubOf(one) === 'pub1' && one.op === 'unshare')
@@ -237,7 +239,7 @@ describe('the pages a publisher serves', () => {
        The store is appended to in publication order, which is not sequence
        order once a withdrawal comes between two shares. */
     let held = twoShares()
-    held = unshare(held, 'pub1', stamp(3, DEVICE.id))
+    held = unshare(held, 'pub1', DEVICE.id, stamp(3, DEVICE.id))
     held = share(held, { markId: 'm3', passage: passage('third'), device: DEVICE.id }, 'pub3', stamp(4, DEVICE.id)).held
 
     const { pages } = await pagesFor(held, publisher(), {}, pageCrypto.hash, { maxPages: 32, budget: 1 })
@@ -434,7 +436,7 @@ describe('a page this side published is a page the other side takes', () => {
   })
 
   it('carries a withdrawal all the way through to the reader not seeing it', async () => {
-    const held = unshare(twoShares(), 'pub1', stamp(3, DEVICE.id))
+    const held = unshare(twoShares(), 'pub1', DEVICE.id, stamp(3, DEVICE.id))
     const { pages } = await pagesFor(held, publisher(), {}, pageCrypto.hash)
 
     const taken = takePages(pages, WORK, PERSON.id, ledger(), pageCrypto, NOW)
@@ -634,8 +636,9 @@ describe('reading and writing the publisher’s store', () => {
       ['a boundary with no to', [{ ...boundary(), to: undefined }]],
       ['a boundary with a fractional to', [{ ...boundary(), to: 2.5 }]],
       ['a boundary with a to that is a string', [{ ...boundary(), to: '2' }]],
-      /* WI-23.B2: a boundary names its chain, or it is a boundary for no chain. */
-      ['a boundary with no chain version', [{ ...boundary(), v: undefined }]],
+      /* WI-23.B2: a boundary names its chain, or it is a boundary for no chain
+         — save one written before the field existed, which is a v1 boundary
+         and is read as one; see the describe below. */
       ['a boundary with a fractional chain version', [{ ...boundary(), v: 1.5 }]],
       ['a boundary with a chain version that is a string', [{ ...boundary(), v: '2' }]],
     ]
@@ -978,7 +981,7 @@ describe('the store’s parsers, one row per clause — the shape of what is rea
   const D = DEVICE.id
   const row = (over: Record<string, unknown> = {}) => ({ pub: 'p', markId: 'm', device: D, seq: 1, at: stamp(1, D), passage: { quote: 'q', prefix: 'a', suffix: 'b', chapter: 'c' }, ...over })
   const bound = (over: Record<string, unknown> = {}) => ({ device: D, from: 1, to: 2, v: WIRE_VERSION, ...over })
-  const claim = (over: Record<string, unknown> = {}) => ({ ids: ['#a'], titles: ['t'], author: 'a', language: 'en', ...over })
+  const claim = (over: Record<string, unknown> = {}) => ({ ids: ['1a'.repeat(32)], titles: ['2b'.repeat(32)], author: '3c'.repeat(32), language: 'en', ...over })
   const tagRow = (tags: unknown) => ({ op: 'tag', tags, device: D, seq: 2, at: stamp(2, D) })
   const file = (over: Record<string, unknown>) => fsWith({ [sharedPathIn(BOOK)]: JSON.stringify({ publications: [], sealed: [], ...over }) })
 
@@ -1008,7 +1011,9 @@ describe('the store’s parsers, one row per clause — the shape of what is rea
     ['a work with a field the claim does not name', { sealed: [bound({ work: claim({ extra: 1 }) })] }, /page boundaries/u],
     ['a work with ids that are a string', { sealed: [bound({ work: claim({ ids: '#a' }) })] }, /page boundaries/u],
     ['a work with an id that is a number', { sealed: [bound({ work: claim({ ids: [1] }) })] }, /page boundaries/u],
-    ['a work with sixty-five ids', { sealed: [bound({ work: claim({ ids: Array.from({ length: 65 }, (_, i) => `#${i}`) }) })] }, /page boundaries/u],
+    ['a work with one id more than a claim may carry', { sealed: [bound({ work: claim({ ids: Array.from({ length: MAX_CLAIM_DIGESTS + 1 }, (_, i) => i.toString(16).padStart(64, '0')) }) })] }, /page boundaries/u],
+    ['a work with an id that is not a digest', { sealed: [bound({ work: claim({ ids: ['#a'] }) })] }, /page boundaries/u],
+    ['a work naming the shelf’s reserved id beside a digest', { sealed: [bound({ work: claim({ ids: [SHELF_WORK.ids[0], '1a'.repeat(32)] }) })] }, /page boundaries/u],
     ['a work with titles that are a string', { sealed: [bound({ work: claim({ titles: 't' }) })] }, /page boundaries/u],
     ['a work with a title that is a number', { sealed: [bound({ work: claim({ titles: [1] }) })] }, /page boundaries/u],
     ['a work with an author that is a number', { sealed: [bound({ work: claim({ author: 1 }) })] }, /page boundaries/u],
@@ -1027,7 +1032,8 @@ describe('the store’s parsers, one row per clause — the shape of what is rea
     ['a chain version of this build', { sealed: [bound({ v: WIRE_VERSION })] }],
     ['the first chain version', { sealed: [bound({ v: 1 })] }],
     ['a roster of two hundred and fifty-six', { sealed: [bound({ roster: Array.from({ length: 256 }, () => D) })] }],
-    ['a work with sixty-four ids', { sealed: [bound({ work: claim({ ids: Array.from({ length: 64 }, (_, i) => `#${i}`) }) })] }],
+    ['a work with as many ids as a claim may carry', { sealed: [bound({ work: claim({ ids: Array.from({ length: MAX_CLAIM_DIGESTS }, (_, i) => i.toString(16).padStart(64, '0')) }) })] }],
+    ['a work that is the shelf’s reserved claim', { sealed: [bound({ work: SHELF_WORK })] }],
     ['a tag register at the bound', { opinions: [tagRow(Array.from({ length: MAX_TAGS }, () => 't'))] }],
     ['a register at the first sequence', { opinions: [{ ...tagRow(['t']), seq: 1, at: stamp(1, D) }] }],
   ])('accepts %s', async (_what, over) => {
@@ -1053,8 +1059,10 @@ describe('the store’s parsers, one row per clause — the shape of what is rea
       person: p.person,
       work: p.work,
       device: p.device,
-      from: 0,
-      to: 0,
+      /* The widest sequences a page can carry — measured as zeroes, a page
+         filled to the budget high up in a long log went out past the cap. */
+      from: Number.MAX_SAFE_INTEGER,
+      to: Number.MAX_SAFE_INTEGER,
       prevPageHash: 'f'.repeat(64),
       entries: [],
       roster: [...p.roster],
@@ -1063,6 +1071,7 @@ describe('the store’s parsers, one row per clause — the shape of what is rea
       sig: 'f'.repeat(128),
     }
     expect(envelopeOf(p, WIRE_VERSION)).toBe(canonicalJson(frame).length + 16)
+    expect(envelopeOf(p, WIRE_VERSION)).toBe(canonicalJson({ ...frame, from: 0, to: 0 }).length + 16 + 30)
   })
 
   it('re-serves a sealed page under the work it was sealed with, not the publisher’s current one', async () => {
@@ -1084,9 +1093,131 @@ describe('the store’s parsers, one row per clause — the shape of what is rea
     const all = await pagesFor(sealed.held, publisher(), {}, pageCrypto.hash, { ...DEFAULT_BOUNDS, budget: 600, maxPages: sealed.pages.length })
     expect(all.pages).toHaveLength(sealed.pages.length)
     expect(all.more).toBe(false)
-    /* The character budget: exactly two pages' worth answers two; one character less answers one. */
-    const chars = two.pages[0]!.length + two.pages[1]!.length
-    expect((await pagesFor(sealed.held, publisher(), {}, pageCrypto.hash, { ...DEFAULT_BOUNDS, budget: 600, maxChars: chars })).pages).toHaveLength(2)
-    expect((await pagesFor(sealed.held, publisher(), {}, pageCrypto.hash, { ...DEFAULT_BOUNDS, budget: 600, maxChars: chars - 1 })).pages).toHaveLength(1)
+    /* The size budget, in bytes ON THE WIRE — the page JSON-escaped inside
+       the envelope and UTF-8 encoded, which is more than its characters:
+       exactly two pages' worth answers two; one byte less answers one. */
+    const bytes = wireBytesOf(two.pages[0]!) + wireBytesOf(two.pages[1]!)
+    expect(bytes).toBeGreaterThan(two.pages[0]!.length + two.pages[1]!.length)
+    expect((await pagesFor(sealed.held, publisher(), {}, pageCrypto.hash, { ...DEFAULT_BOUNDS, budget: 600, maxChars: bytes })).pages).toHaveLength(2)
+    expect((await pagesFor(sealed.held, publisher(), {}, pageCrypto.hash, { ...DEFAULT_BOUNDS, budget: 600, maxChars: bytes - 1 })).pages).toHaveLength(1)
+  })
+
+  it('weighs a page as the envelope carries it — escaped and encoded — so a page of prose in Chinese cannot outgrow the frame', () => {
+    const ascii = '{"a":"b"}'
+    expect(wireBytesOf(ascii)).toBe(new TextEncoder().encode(JSON.stringify(ascii)).length)
+    /* Two backslashes and two quotes for the string's own, and one more for the string's delimiters. */
+    expect(wireBytesOf(ascii)).toBe(ascii.length + 2 + 4)
+    const prose = '{"quote":"白鲸"}'
+    expect(wireBytesOf(prose)).toBeGreaterThan(prose.length + 4)
+    expect(wireBytesOf(prose)).toBe(new TextEncoder().encode(JSON.stringify(prose)).length)
+  })
+})
+
+describe('a withdrawal made by another of the reader’s devices', () => {
+  const phone = (): Publisher =>
+    publisher({ device: PHONE.id, delegation: delegationFor(PHONE.id), sign: (message) => Promise.resolve(bytesToHex(sign(utf8ToBytes(message), PHONE.secret))) })
+  const ops = (pages: readonly string[]): string[][] => pages.map((raw) => (JSON.parse(raw) as { entries: { op: string }[] }).entries.map((one) => one.op))
+
+  it('is stamped in the WITHDRAWING device’s stream, counted there, and served by it', async () => {
+    /* The phone takes back what the desktop published. Filed under the
+       desktop, the tombstone was one the phone never served — `pagesOver`
+       serves only the caller's own stream — and its number, minted from the
+       phone's count, could collide with one the desktop minted later. */
+    const held = unshare(twoShares(), 'pub1', PHONE.id, stamp(3, PHONE.id))
+    expect(held.publications[0]?.unshared).toEqual({ device: PHONE.id, seq: 1, at: stamp(3, PHONE.id) })
+    expect(nextSeqFor(held, PHONE.id)).toBe(2)
+    expect(nextSeqFor(held, DEVICE.id)).toBe(3)
+    expect(logOf(held).find((one) => one.op === 'unshare')).toMatchObject({ device: PHONE.id, seq: 1, pub: 'pub1' })
+
+    /* The phone serves it; the desktop's chain does not carry it. */
+    const fromPhone = await pagesFor(held, phone(), {}, pageCrypto.hash)
+    expect(ops(fromPhone.pages)).toEqual([['unshare']])
+    const fromDesk = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+    expect(ops(fromDesk.pages)).toEqual([['share', 'share']])
+
+    /* And a recipient holding both streams no longer sees the passage. */
+    const taken = takePages([...fromDesk.pages, ...fromPhone.pages], WORK, PERSON.id, ledger(), pageCrypto, NOW)
+    expect(taken.refusals).toEqual([])
+    expect(taken.held.entries.map((one) => one.pub)).toEqual(['pub2'])
+    expect(taken.held.withdrawn).toEqual(['pub1'])
+  })
+
+  it('reads back from disk, and the row’s own stream keeps its own rule', async () => {
+    const row = { pub: 'p', markId: 'm', device: DEVICE.id, seq: 3, at: stamp(1, DEVICE.id), passage: { quote: 'q', prefix: '', suffix: '', chapter: '' } }
+    const fileWith = (unshared: unknown) =>
+      fakeFs({ [sharedPathIn('book:x')]: JSON.stringify({ publications: [{ ...row, unshared }], sealed: [], opinions: [], reviews: [], publishOpinion: false }) }) as unknown as VaultFs
+    /* Another device's stream starts from 1, whatever the row's own number. */
+    const other = await readShared(fileWith({ seq: 1, at: stamp(2, PHONE.id), device: PHONE.id }), 'book:x')
+    expect(logOf(other).find((one) => one.op === 'unshare')).toMatchObject({ device: PHONE.id, seq: 1 })
+    /* A row written before the device was kept reads as the row's own. */
+    const legacy = await readShared(fileWith({ seq: 4, at: stamp(2, DEVICE.id) }), 'book:x')
+    expect(logOf(legacy).find((one) => one.op === 'unshare')).toMatchObject({ device: DEVICE.id, seq: 4 })
+    for (const bad of [
+      /* The row's own device, named, is held to the row's own rule. */
+      { seq: 3, at: stamp(2, DEVICE.id), device: DEVICE.id },
+      { seq: 1, at: stamp(2, PHONE.id), device: '' },
+      { seq: 1, at: stamp(2, PHONE.id), device: 7 },
+      { seq: 0, at: stamp(2, PHONE.id), device: PHONE.id },
+    ]) {
+      await expect(readShared(fileWith(bad), 'book:x')).rejects.toThrow(/publication list/u)
+    }
+  })
+})
+
+describe('a store 0.1.3 wrote — boundaries with no chain version', () => {
+  /* That build sealed `{ device, from, to }`: one chain, nothing to name. A
+     reader refusing it made every book with a page served before the upgrade
+     unreadable on the first read after it. */
+  const legacy = () => {
+    const held = twoShares()
+    return fakeFs({ [sharedPathIn('book:x')]: JSON.stringify({ publications: held.publications, sealed: [{ device: DEVICE.id, from: 1, to: 2 }] }) }) as unknown as VaultFs
+  }
+
+  it('reads such a boundary as v1, and reproduces the page it sealed on the v1 chain without re-cutting it', async () => {
+    const held = await readShared(legacy(), 'book:x')
+    expect(held.sealed).toEqual([{ device: DEVICE.id, from: 1, to: 2, v: 1 }])
+    const v1 = await pagesFor(held, publisher(), {}, pageCrypto.hash, DEFAULT_BOUNDS, 1)
+    expect(v1.pages).toHaveLength(1)
+    expect(JSON.parse(v1.pages[0]!)).toMatchObject({ v: 1, from: 1, to: 2 })
+    /* Nothing new sealed: the boundary read IS the boundary served. */
+    expect(v1.held.sealed).toEqual(held.sealed)
+  })
+
+  it('seals the v2 chain afresh beside it — two chains, as `SealedPage.v` says', async () => {
+    const held = await readShared(legacy(), 'book:x')
+    const v2 = await pagesFor(held, publisher(), {}, pageCrypto.hash, DEFAULT_BOUNDS, 2)
+    expect(v2.pages).toHaveLength(1)
+    expect(v2.held.sealed).toEqual([
+      { device: DEVICE.id, from: 1, to: 2, v: 1 },
+      expect.objectContaining({ device: DEVICE.id, from: 1, to: 2, v: 2 }),
+    ])
+  })
+
+  it('still refuses a boundary naming a chain this build does not serve', async () => {
+    const fs = fakeFs({ [sharedPathIn('book:x')]: JSON.stringify({ publications: [], sealed: [{ device: DEVICE.id, from: 1, to: 2, v: WIRE_VERSION + 1 }] }) }) as unknown as VaultFs
+    await expect(readShared(fs, 'book:x')).rejects.toThrow(/page boundaries/u)
+  })
+})
+
+/* THE TWO LIMITS, READ APART FROM THE SIGNING: a page count and a byte budget
+   over the bytes that travel, the first page unconditional. */
+describe('the bounded answer', () => {
+  it('takes the first page whatever it costs, then only what fits beside the rest, and is full at the page cap', () => {
+    const answer = boundedAnswer({ maxPages: 2, budget: 200, maxChars: 12 })
+    expect(answer.full()).toBe(false)
+    /* Ten bytes on the wire — eight and the quotes — and it would go at any size. */
+    expect(answer.add('12345678')).toBe(true)
+    /* Five more is fifteen, past twelve: it waits. */
+    expect(answer.add('123')).toBe(false)
+    expect(answer.pages).toEqual(['12345678'])
+    expect(answer.full()).toBe(false)
+    /* One that fits beside the first goes, and the cap is reached. */
+    expect(answer.add('')).toBe(true)
+    expect(answer.full()).toBe(true)
+    expect(answer.pages).toEqual(['12345678', ''])
+    /* A first page over the budget on its own still goes — or a cursor could never pass it. */
+    const wide = boundedAnswer({ maxPages: 1, budget: 200, maxChars: 4 })
+    expect(wide.add('a page wider than the budget')).toBe(true)
+    expect(wide.full()).toBe(true)
   })
 })

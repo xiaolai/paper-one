@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hlcOf, newRelationship, readmit, type Hlc, type Relationship } from '../../../kernel'
+import { hlcOf, matchWork, newRelationship, readmit, type Hlc, type Relationship } from '../../../kernel'
 import { namesOf, sentencesOf, starsText, viewOf, type PersonHeld } from './circleView'
 import { NOTHING_SHARED, type ForeignFile } from './store'
 
@@ -308,5 +308,38 @@ describe('the view, held to the letter', () => {
     const view = viewOf(book as never, shelf as never, [ann, bob] as never)
     expect(view.alsoRead).toHaveLength(1)
     expect(view.alsoRead[0]!.own).toBe('book:dune')
+  })
+})
+
+describe('the also-read grouping, bounded', () => {
+  it('compares only candidates that can meet — a shelf of a thousand unrelated books costs no comparison at all', () => {
+    /* Every pair across every friend's whole shelf was quadratic in the
+       circle's books. Bucketed by index key, two claims that share neither an
+       identifier nor a title-author-language are never compared. */
+    const books = [MOBY, ...Array.from({ length: 200 }, (_, i) => ({ id: `book:${i}`, title: `Title ${i}`, author: `Author ${i}`, languages: ['en'] }))]
+    const friends = Array.from({ length: 5 }, (_, f) =>
+      person(`F${f}`, {
+        shelf: shelfOf(MOBY_ROW, ...Array.from({ length: 200 }, (_, i) => ({ title: `Title ${i}`, author: `Author ${i}` }))),
+      }),
+    )
+    let compared = 0
+    const counting: Parameters<typeof viewOf>[3] = (a, b) => {
+      compared += 1
+      return matchWork(a, b)
+    }
+    const view = viewOf(MOBY, books, friends, counting)
+    /* Five friends hold each of the two hundred titles: only the copies of
+       one title meet — ten pairs per title, judged once per key they share
+       — where every pair of the thousand-odd candidates was half a million. */
+    expect(view.alsoRead).toHaveLength(200)
+    expect(view.alsoRead.every((one) => one.names.length === 5)).toBe(true)
+    const naive = (1_005 * 1_004) / 2
+    expect(compared).toBeLessThan(naive / 100)
+    expect(compared).toBeLessThanOrEqual(200 * 10 * 2 + 30)
+    /* Against the grain: two hundred distinct titles from one friend meet
+       nothing but the book itself, and cost nothing beyond it. */
+    compared = 0
+    viewOf(MOBY, books, [friends[0]!], counting)
+    expect(compared).toBeLessThanOrEqual(2)
   })
 })
