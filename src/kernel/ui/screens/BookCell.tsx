@@ -377,8 +377,13 @@ export function BookCell({
                    is caught here is only so a capability that breaks that
                    contract cannot leave the control stuck. */
                 try {
+                  /* CALLED SYNCHRONOUSLY, so a throw before the promise is
+                     the `catch` below's — and a rejection after it is said
+                     rather than swallowed: it used to vanish here. */
                   void Promise.resolve(fetch.run(book.bookId))
-                    .catch(() => {})
+                    .catch((cause: unknown) => {
+                      console.error(`Paper: the action "${fetch.id}" failed`, cause)
+                    })
                     .finally(() => setFetching(false))
                 } catch {
                   setFetching(false)

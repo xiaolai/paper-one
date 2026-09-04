@@ -104,6 +104,22 @@ const finishedGroup = (r: BookRecord): Group | null =>
         value: { finished: r.finished, ...(r.finishedAt ? { finishedAt: r.finishedAt } : {}) },
       }
 
+/* The reader's own opinion of the book — WI-23.B3. Three registers, each by
+ * its own stamp, each taken WHOLE from its winner like every group above. A
+ * stamp lives inside `status` and `review` (the design's shape) and beside
+ * `rating`; either way the group is value-plus-stamp and never one without
+ * the other. */
+const statusGroup = (r: BookRecord): Group | null =>
+  r.status === undefined ? null : { at: r.status.at, value: { status: r.status } }
+
+const ratingGroup = (r: BookRecord): Group | null =>
+  r.rating === undefined
+    ? null
+    : { at: r.ratingAt ?? EPOCH, value: { rating: r.rating, ...(r.ratingAt ? { ratingAt: r.ratingAt } : {}) } }
+
+const reviewGroup = (r: BookRecord): Group | null =>
+  r.review === undefined ? null : { at: r.review.at, value: { review: r.review } }
+
 const metadataValue = (r: BookRecord): Partial<BookRecord> => ({
   title: r.title,
   author: r.author,
@@ -224,8 +240,11 @@ export function mergeRecord(a: BookRecord, b: BookRecord): BookRecord {
   const origin = scalar(a.origin ?? undefined, b.origin ?? undefined)
   const ext = scalar(a.ext, b.ext)
   const contentHash = scalar(a.contentHash, b.contentHash)
+  /* Device-local, like `ext`: the wire never carries one, so this is the local side's own, kept. */
+  const coverFacts = scalar(a.coverFacts, b.coverFacts)
   const format = scalar(a.format, b.format)
 
+  const status = mergeGroup(statusGroup(a), statusGroup(b))
   return {
     /* Each group taken WHOLE from its winner — a field from the losing
      * side's group must not leak under the winner's, which is why nothing
@@ -233,6 +252,14 @@ export function mergeRecord(a: BookRecord, b: BookRecord): BookRecord {
     ...mergeMetadata(a, b),
     ...mergeGroup(positionGroup(a), positionGroup(b)),
     ...mergeGroup(finishedGroup(a), finishedGroup(b)),
+    ...status,
+    /* ⚠️ `finished` FOLLOWS THE MERGED `status`, exactly as `parseRecord`
+     * derives it — so what this answers is what a read of the written file
+     * answers, and the index cannot disagree with the disk for one tick. A
+     * function of the merged result, so the semilattice is untouched. */
+    ...(status.status === undefined ? {} : { finished: status.status.state === 'finished', finishedAt: status.status.at }),
+    ...mergeGroup(ratingGroup(a), ratingGroup(b)),
+    ...mergeGroup(reviewGroup(a), reviewGroup(b)),
     ...tags,
     ...(addedAt === undefined ? {} : { addedAt }),
     ...(openedAt === undefined ? {} : { openedAt }),
@@ -241,6 +268,7 @@ export function mergeRecord(a: BookRecord, b: BookRecord): BookRecord {
     ...(ext === undefined ? {} : { ext }),
     ...(contentHash === undefined ? {} : { contentHash }),
     ...(format === undefined ? {} : { format }),
+    ...(coverFacts === undefined ? {} : { coverFacts }),
   } as BookRecord
 }
 

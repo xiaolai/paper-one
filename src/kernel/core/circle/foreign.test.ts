@@ -134,7 +134,7 @@ describe('WI-22.D3 — publishability', () => {
   it('offers Share only when the shelf can take one', () => {
     expect(offersShare('usable')).toBe(true)
     expect(offersShare('pending')).toBe(true)
-    for (const state of ['read-only', 'revoked', 'unreachable'] as const) {
+    for (const state of ['read-only', 'revoked', 'unreachable', 'no-identity'] as const) {
       expect(offersShare(state)).toBe(false)
     }
   })
@@ -157,9 +157,13 @@ describe('WI-22.D3 — publishability', () => {
     /* ⚠️ **ABSENT, NOT DISABLED, AND ALWAYS WITH A REASON.** A greyed control
        with no explanation is indistinguishable from a broken app — the defect
        `MobileApp.tsx` names about `onAddBooks`. */
-    for (const state of ['read-only', 'revoked', 'unreachable'] as const) {
+    for (const state of ['read-only', 'revoked', 'unreachable', 'no-identity'] as const) {
       expect(shareAbsentBecause(state)).toBeTruthy()
     }
+    /* ⚠️ **THE DESKTOP'S REASON NAMES THE DESKTOP'S REMEDY.** The shelf IS
+       this machine, so a reason about a shelf that has not answered would
+       send the reader looking for a device that is in front of them. */
+    expect(shareAbsentBecause('no-identity')).toBe('Start a circle to share a passage.')
     for (const state of ['usable', 'pending'] as const) {
       expect(shareAbsentBecause(state)).toBeNull()
     }
@@ -168,9 +172,52 @@ describe('WI-22.D3 — publishability', () => {
   it('has a reason for every state that hides Share, with none missed', () => {
     /* A `switch` over the union means a sixth state added later fails to
        compile rather than silently returning undefined. */
-    const all: Publishability[] = ['usable', 'pending', 'read-only', 'revoked', 'unreachable']
+    const all: Publishability[] = ['usable', 'pending', 'read-only', 'revoked', 'unreachable', 'no-identity']
     for (const state of all) {
       expect(offersShare(state) === (shareAbsentBecause(state) === null)).toBe(true)
     }
+  })
+})
+
+describe('the last clauses of publishability and the overlay — one row each', () => {
+  it('says why Share is absent, for every state', () => {
+    expect(shareAbsentBecause('usable')).toBeNull()
+    expect(shareAbsentBecause('pending')).toBeNull()
+    expect(shareAbsentBecause('read-only')).toBe('This device can read your shelf but not write to it.')
+    expect(shareAbsentBecause('revoked')).toBe('Your shelf no longer recognises this device.')
+    expect(shareAbsentBecause('unreachable')).toBe('Your shelf has not answered.')
+    expect(shareAbsentBecause('no-identity')).toBe('Start a circle to share a passage.')
+  })
+
+  it('offers Unshare for what is published or pending, and for nothing else', () => {
+    for (const state of ['usable', 'read-only', 'revoked', 'unreachable', 'no-identity'] as const) {
+      expect(offersUnshare(state, false)).toBe(false)
+      expect(offersUnshare(state, true)).toBe(true)
+    }
+    expect(offersUnshare('pending', false)).toBe(true)
+  })
+
+  it('carries a note only when the passage has one', () => {
+    const [bare] = drawable([entry()], named, always)
+    expect('note' in bare!).toBe(false)
+    const [noted] = drawable([entry({ passage: { quote: 'q', prefix: 'p', suffix: 's', chapter: 'c', note: 'mine' } })], named, always)
+    expect(noted!.note).toBe('mine')
+  })
+})
+
+describe('readers are people, not entries', () => {
+  it('counts one person once however many passages they placed at the anchor, and two people twice', () => {
+    const one = drawable([entry(), entry({ pub: 'pub2' })], named, always)
+    expect(one).toHaveLength(1)
+    expect(one[0]!.readers).toBe(1)
+    const two = drawable([entry(), entry({ pub: 'pub2', person: 'bob' })], named, always)
+    expect(two[0]!.readers).toBe(2)
+  })
+})
+
+describe('a weight for a count that is not a number', () => {
+  it('is one reader’s worth', () => {
+    expect(foreignWeight(Number.NaN)).toBe(foreignWeight(1))
+    expect(foreignWeight(Number.POSITIVE_INFINITY)).toBe(foreignWeight(1))
   })
 })

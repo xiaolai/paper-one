@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hlcOf } from './hlc'
+import { ZERO_DEVICE, hlcOf } from './hlc'
 import type { MutationKind, MutationRecorder, MutationToken } from './ports'
 import { gatedRecorder, servicesWith, spyRecorder } from './servicesWorld.testkit'
 
@@ -78,6 +78,20 @@ describe('bindRecorder / bindClock disposers', () => {
     expect(() => services.bindClock(stamp)).toThrow(/already bound/)
     unbind.dispose()
     expect(() => services.bindClock(stamp)).not.toThrow()
+  })
+
+  it('clock() answers the bound clock, and the legacy wall clock before and after', () => {
+    /* ⚠️ **ONE CLOCK PER DEVICE.** A capability minting a stamp of its own
+       beside the stores' could order one edit before the removal that preceded
+       it; `clock()` is how it asks the one the stores use instead. It reads
+       through the SLOT, so a bind and an unbind both reach it. */
+    const services = servicesWith(spyRecorder().recorder)
+    expect(services.clock().endsWith(`-${ZERO_DEVICE}`)).toBe(true)
+    const unbind = services.bindClock(stamp)
+    expect(services.clock()).toBe(stamp())
+    unbind.dispose()
+    expect(services.clock()).not.toBe(stamp())
+    expect(services.clock().endsWith(`-${ZERO_DEVICE}`)).toBe(true)
   })
 })
 

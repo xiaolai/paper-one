@@ -842,6 +842,9 @@ export const sync: Capability = {
           }
         },
         fetchBlob: fetchVerifiedBlob,
+        /* A jacket that landed carries its facts onto the record (WI-23.C5). */
+        // Stryker disable next-line all: wiring — the cache's stamp handed to the library; `coverCache.test.ts` holds the call and `bookFolder.test.ts` the field.
+        stamp: (book, facts) => services.library.update(book, (held) => (held.coverFacts?.hash === facts.hash ? held : { ...held, coverFacts: facts })),
         /* Eviction's only delete — the kernel's closed-name primitive
          * (WI-10.2/10.5); the scoped fs cannot reach a book's folder. */
         removeBlob: (book, name) => services.removeBlob(book, name),

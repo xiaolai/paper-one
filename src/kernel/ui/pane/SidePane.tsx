@@ -12,10 +12,10 @@ import {
 } from 'lucide-react'
 import type { IndexedBook } from '../../core/bookIndex'
 import type { JumpTarget } from '../hooks/useJumps'
-import type { PaneContribution, SettingsSection } from '../../core/capability'
+import type { MarkControl, PaneContribution, SettingsSection } from '../../core/capability'
 import type { AskPassage, CompanionProvider } from '../../core/companion'
 import { ICON, type Platform } from '../../core/metrics'
-import { PANE_TITLES, renderContribution, shownPane } from '../panes'
+import { PANE_TITLES, shownPane } from '../panes'
 import { isContributedScreenId } from '../../core/uiTypes'
 import { defaultPaneFor, paneFits, setReadingStyle, type AppDispatch, type AppState, type KernelPaneId, type PaneAudience } from '../state'
 import type { Book } from '../hooks/useBook'
@@ -37,6 +37,7 @@ import type { DiagnosticLog } from '../../core/diagnosticsLog'
 import type { CopyOutcome } from '../clipboard'
 import { Settings } from './Settings'
 import styles from './SidePane.module.css'
+import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
 
 /**
  * The pane's tools, in rail order.
@@ -232,6 +233,13 @@ export interface SidePaneProps {
    * them — a contribution carries a label, not an icon.
    */
   contributed: readonly PaneContribution[]
+  /**
+   * The controls the composed capabilities draw on the reader's own marks —
+   * handed straight to Marginalia, which is the one panel that lists them.
+   * Optional so a host with no composition (the browser client) mounts the
+   * same panel and draws none.
+   */
+  markControls?: readonly MarkControl[] | undefined
 }
 
 export function SidePane({
@@ -253,6 +261,7 @@ export function SidePane({
   library,
   settings,
   contributed,
+  markControls,
   developer,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
@@ -279,11 +288,6 @@ export function SidePane({
     developer: state.developer,
     hiddenPanes: state.hiddenPanes,
   }
-  /* ⚠️ **NOTHING IS DRAWN OVER A CONTRIBUTED SCREEN.** It owns the whole
-     window by definition, so a rail of panels about a book or a shelf beside it
-     is furniture from a room the reader has left. `paneFits` already refuses
-     every kernel pane there; this is the other half — the slot itself goes. */
-  if (isContributedScreenId(state.screen)) return null
 
   const fallback = defaultPaneFor(state.screen)
   const wanted =
@@ -318,6 +322,13 @@ export function SidePane({
     [state.screen, contributed, state.developer, state.hiddenPanes],
   )
 
+  /* ⚠️ **NOTHING IS DRAWN OVER A CONTRIBUTED SCREEN.** It owns the whole
+     window by definition, so a rail of panels about a book or a shelf beside it
+     is furniture from a room the reader has left. `paneFits` already refuses
+     every kernel pane there; this is the other half — the slot itself goes. */
+  /* AFTER every hook, so the hook count is the same on every render — a
+     return between hooks is a React error the next time the screen changes. */
+  if (isContributedScreenId(state.screen)) return null
   return (
     <>
       <div className={styles.paneTitle}>{shown.title}</div>
@@ -380,6 +391,7 @@ export function SidePane({
             onShelf={onShelf}
             focus={markFocus}
             onFocusDone={onMarkFocusDone}
+            markControls={markControls}
             {...goToProps}
           />
         )}
@@ -470,7 +482,11 @@ export function SidePane({
 
         {/* A contributed pane: the capability's own element, narrowed from
             the opaque handle it registered — see `renderContribution`. */}
-        {shown.contribution && renderContribution(shown.contribution.id, shown.contribution.render)}
+        {shown.contribution && (
+          <ContributionBoundary label={shown.contribution.id} resetKey={`${shown.contribution.id}:${book.bookId}`}>
+            <ContributionBody id={shown.contribution.id} render={shown.contribution.render} context={{ bookId: book.bookId }} />
+          </ContributionBoundary>
+        )}
       </div>
 
       {/* The rail sits at the foot of the pane. It is the pane's own

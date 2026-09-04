@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createRemoteBooks, parseRows } from './books'
+import { asIndexedBook, createRemoteBooks, parseRows } from './books'
+import type { BookRow } from '../../kernel'
 import type { ShelfChannel } from './channel'
 
 /** A channel a test answers for. */
@@ -114,6 +115,12 @@ describe('parseRows', () => {
       position: 'epubcfi(/6/2)',
       progress: 0.5,
       finished: true,
+      status: 'reading',
+      rating: 4,
+      review: 'a whale of a book',
+      statusAt: null,
+      ratingAt: null,
+      reviewAt: null,
       addedAt: 111,
       openedAt: 222,
       format: 'epub',
@@ -299,5 +306,134 @@ describe('createRemoteBooks', () => {
     books.dispose()
     drop()
     expect(books.status()).toBe('ready')
+  })
+})
+
+describe('what wakes the shelf', () => {
+  it('publishes when a register’s stamp moves with nothing else, and once more when a failure’s reason changes', async () => {
+    let answer: unknown = TWO
+    const { channel } = fakeChannel(() => {
+      if (answer instanceof Error) throw answer
+      return answer
+    })
+    const books = createRemoteBooks(channel)
+    const told = vi.fn()
+    books.subscribe(told)
+    await settled()
+    const before = told.mock.calls.length
+    /* The same rows with one stamp moved: a re-render, because the stamp is the register. */
+    answer = TWO.map((row, i) => (i === 0 ? { ...row, rating: 4, ratingAt: '018bcfe56809-0000-1d8865efc2eaef44' } : row))
+    await books.refresh()
+    expect(told.mock.calls.length).toBe(before + 1)
+    answer = TWO.map((row, i) => (i === 0 ? { ...row, rating: 4, ratingAt: '018bcfe56809-0001-1d8865efc2eaef44' } : row))
+    await books.refresh()
+    expect(told.mock.calls.length).toBe(before + 2)
+    /* Two failures, two reasons: each is news. The same reason twice is not. */
+    answer = new Error('first reason')
+    await books.refresh()
+    const failed = told.mock.calls.length
+    expect(books.status()).toBe('stale')
+    answer = new Error('second reason')
+    await books.refresh()
+    expect(told.mock.calls.length).toBe(failed + 1)
+    await books.refresh()
+    expect(told.mock.calls.length).toBe(failed + 1)
+  })
+})
+
+describe('the opinion stamps off the wire', () => {
+  it('keeps a stamp that is an HLC and reads any other as no stamp', () => {
+    const [row] = parseRows([{ bookId: 'a', title: 'A', statusAt: '018bcfe56809-0000-1d8865efc2eaef44', ratingAt: 'yesterday', reviewAt: 5 }])
+    expect(row!.statusAt).toBe('018bcfe56809-0000-1d8865efc2eaef44')
+    expect(row!.ratingAt).toBeNull()
+    expect(row!.reviewAt).toBeNull()
+  })
+})
+
+describe('progress off the wire', () => {
+  it('is held to a fraction of the book', () => {
+    const [over, under, nan, fine] = parseRows([
+      { bookId: 'a', title: 'A', progress: 7 },
+      { bookId: 'b', title: 'B', progress: -1 },
+      { bookId: 'c', title: 'C', progress: Number.NaN },
+      { bookId: 'd', title: 'D', progress: 0.25 },
+    ])
+    expect([over!.progress, under!.progress, nan!.progress, fine!.progress]).toEqual([1, 0, 0, 0.25])
+  })
+})
+
+describe('a row projected onto the shelf', () => {
+  const row = (over: Partial<BookRow> = {}): BookRow =>
+    ({ bookId: 'a', title: 'A', author: '', identifier: '', series: '', seriesIndex: null, publisher: '', published: '', languages: [], subjects: [], tags: [], position: null, progress: 0, finished: false, status: null, statusAt: null, rating: null, ratingAt: null, review: null, reviewAt: null, addedAt: null, openedAt: null, format: null, contentHash: null, hasContent: null, ...over }) as BookRow
+  const HLC = '018bcfe56809-0000-1d8865efc2eaef44'
+
+  it('carries each opinion register only when the row has both its value and its stamp', () => {
+    const whole = asIndexedBook(row({ status: 'reading', statusAt: HLC, rating: 4, ratingAt: HLC, review: 'r', reviewAt: HLC }))
+    expect(whole.status).toEqual({ state: 'reading', at: HLC })
+    expect(whole.rating).toBe(4)
+    expect(whole.ratingAt).toBe(HLC)
+    expect(whole.review).toEqual({ text: 'r', at: HLC })
+    const unstamped = asIndexedBook(row({ status: 'reading', statusAt: null, rating: 4, ratingAt: null, review: 'r', reviewAt: null }))
+    expect(unstamped.status).toBeUndefined()
+    expect(unstamped.rating).toBe(4)
+    expect('ratingAt' in unstamped).toBe(false)
+    expect(unstamped.review).toBeUndefined()
+    const unsaid = asIndexedBook(row({ status: null, statusAt: HLC, rating: null, ratingAt: HLC, review: null, reviewAt: HLC }))
+    expect(unsaid.status).toBeUndefined()
+    expect('rating' in unsaid).toBe(false)
+    expect(unsaid.review).toBeUndefined()
+  })
+})
+
+describe('two snapshots that say the same thing', () => {
+  it('are one snapshot, list fields included — and a list that differs is a change', async () => {
+    let answer: unknown[] = [{ bookId: 'a', title: 'A', languages: ['en', 'fr'], tags: ['x'] }]
+    const { channel } = fakeChannel(() => answer)
+    const books = createRemoteBooks(channel)
+    await settled()
+    const first = books.getSnapshot()
+    await books.refresh()
+    expect(books.getSnapshot()).toBe(first)
+    answer = [{ bookId: 'a', title: 'A', languages: ['en', 'de'], tags: ['x'] }]
+    await books.refresh()
+    expect(books.getSnapshot()).not.toBe(first)
+    expect(books.getSnapshot()[0]!.languages).toEqual(['en', 'de'])
+    answer = [{ bookId: 'a', title: 'A', languages: ['en'], tags: ['x'] }]
+    await books.refresh()
+    expect(books.getSnapshot()[0]!.languages).toEqual(['en'])
+  })
+})
+
+describe('what makes two rows differ', () => {
+  const HLC = '018bcfe56809-0000-1d8865efc2eaef44'
+  const HLC2 = '018bcfe56810-0000-1d8865efc2eaef44'
+  const base = { bookId: 'a', title: 'A', status: 'reading', statusAt: HLC, rating: 4, ratingAt: HLC, review: 'r', reviewAt: HLC }
+  for (const [field, value] of [['status', 'want'], ['statusAt', HLC2], ['rating', 5], ['ratingAt', HLC2], ['review', 'other'], ['reviewAt', HLC2]] as const) {
+    it(`a change of ${field} alone is a new snapshot`, async () => {
+      let answer: unknown[] = [base]
+      const { channel } = fakeChannel(() => answer)
+      const books = createRemoteBooks(channel)
+      await settled()
+      const first = books.getSnapshot()
+      await books.refresh()
+      expect(books.getSnapshot()).toBe(first)
+      answer = [{ ...base, [field]: value }]
+      await books.refresh()
+      expect(books.getSnapshot()).not.toBe(first)
+    })
+  }
+
+  it('keeps a review stamp that is an HLC', () => {
+    const [row] = parseRows([{ bookId: 'a', title: 'A', reviewAt: HLC }])
+    expect(row!.reviewAt).toBe(HLC)
+  })
+
+  it('carries a format and a content hash only when the row has them', () => {
+    const with_ = asIndexedBook(parseRows([{ bookId: 'a', title: 'A', format: 'epub', contentHash: 'h' }])[0]!)
+    expect(with_.format).toBe('epub')
+    expect(with_.contentHash).toBe('h')
+    const without = asIndexedBook(parseRows([{ bookId: 'a', title: 'A' }])[0]!)
+    expect('format' in without).toBe(false)
+    expect('contentHash' in without).toBe(false)
   })
 })

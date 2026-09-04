@@ -27,7 +27,7 @@
 export { createKernelServices } from './core/services'
 export type { KernelServices, KernelServicesOptions } from './core/services'
 export { createLibrary } from './core/libraryStore'
-export type { Library, LibraryOptions, RekeyOutcome, RemoteRow } from './core/libraryStore'
+export type { BookPatch, Library, LibraryOptions, RekeyOutcome, RemoteRow } from './core/libraryStore'
 export { createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
 export type { UnplacedMark } from './core/marks'
@@ -44,6 +44,8 @@ export type {
   CommandContext,
   Disposable,
   KernelApi,
+  MarkControl,
+  PaneContext,
   PaneContribution,
   ScreenContribution,
   PaneRenderer,
@@ -113,7 +115,7 @@ export type {
  * to `serveServices`, and what an in-process caller runs directly — one set
  * of handlers, three ways of reaching them. */
 export { buildReadServices, buildServices, handlerFor } from './core/services/handlers'
-export type { DevicePort, DeviceRow, ServiceEnvironment, ShelfFacts, ShelfPort, SizePort } from './core/services/environment'
+export type { DevicePort, DeviceRow, HashPort, ServiceEnvironment, ShelfFacts, ShelfPort, SizePort } from './core/services/environment'
 export { SERVICE_ERRORS, isRefusal, refuse } from './core/services/refusals'
 export type { Refusal, ServiceErrorCode } from './core/services/refusals'
 export { PAGE_BYTES, PAGE_ROWS, pages } from './core/services/paging'
@@ -211,7 +213,9 @@ export type { KernelPreferences, SettingsEnvelope, SettingsMigration, SettingsSt
  * stay behind the stores. */
 export {
   BOOKS_DIR,
+  COVER_NAMES,
   DEVICE_LOCAL_FIELDS,
+  parseCoverFacts,
   MAX_RECORD_FIELD,
   MAX_RECORD_POSITION,
   TRASH_DIR,
@@ -251,7 +255,9 @@ export { CONTENT_EXTENSIONS, isContentExtension, isKnownExtension } from './core
 export { sizePortOver } from './core/bookSizes'
 export type { SizeOps } from './core/bookSizes'
 export { META_SCHEMA } from './core/bookFolder'
-export type { BookRecord, TagClock, TagClockEntry } from './core/bookFolder'
+export type { BookRecord, CoverFacts, CoverName, TagClock, TagClockEntry } from './core/bookFolder'
+export { MAX_COVER_BYTES, createCoverFactsPass, measureCover, publishableCover } from './core/coverFacts'
+export type { CoverFactsPass, CoverFs } from './core/coverFacts'
 /* The work key (WI-21.3): what a book's declared `identifier` says about the
  * WORK, as one comparable string. Exported here rather than kept private
  * because "two devices derive the same key" is a claim about two PROCESSES,
@@ -292,7 +298,20 @@ export { writeQueue } from './core/writeQueue'
 export type { WriteQueue } from './core/writeQueue'
 /* The circle's own store lives beside `marks.json` and never inside it — see
    `circlePathIn`. The paths are the kernel's because the folder layout is. */
-export { circleFolderIn, circlePathIn, sharedPathIn } from './core/bookFolder'
+export {
+  CIRCLE_DIR,
+  OWN_SHELF_PATH,
+  circleFolderIn,
+  circlePathIn,
+  personFolderIn,
+  personShelfPathIn,
+  OWN_LISTS_DIR,
+  ownListPathIn,
+  personListsDirIn,
+  personListPathIn,
+  relationshipPathIn,
+  sharedPathIn,
+} from './core/bookFolder'
 export type { ForeignAnnotation, ForeignEntry } from './core/circle/foreign'
 /* The overlay seam's vocabulary — a capability implementing one needs to name
    the request it is handed and the resolver inside it. */
@@ -304,38 +323,71 @@ export type {
   ResolvePort,
   ResolveResult,
 } from './core/circle/overlay'
-export { drawable, foreignWeight, offersShare, offersUnshare, overlayKey } from './core/circle/foreign'
+export {
+  drawable,
+  foreignWeight,
+  offersShare,
+  offersUnshare,
+  overlayKey,
+  shareAbsentBecause,
+} from './core/circle/foreign'
+export type { Publishability } from './core/circle/foreign'
 /* The page protocol. Pure, and deliberately so — the crypto is INJECTED, which
    is what keeps `page.ts` inside `check-browser-safe.mjs`'s pinned set while
    the Ed25519 that satisfies it lives in a capability. */
 export {
+  MAX_ENTRIES_PER_PAGE,
+  MAX_PAGE_CHARS,
   SUPPORTED,
   WIRE_VERSION,
+  carriedBy,
   chainHash,
   checkPage,
   integersOnly,
   isCanonical,
+  isEntryShape,
+  isPageShape,
   negotiate,
   paginate,
   signedBytes,
 } from './core/circle/page'
 export type { Page, PageCrypto, PageRefusal, SignedKind, VersionRange } from './core/circle/page'
 /* The log a page carries, and the fold that turns one into what is held. */
-export { compacted, compareEntries, fold, mergeLogs, nextSeq } from './core/circle/log'
-export type { Entry, Held, Passage } from './core/circle/log'
+export { READING_STATES, STARS, compacted, compareEntries, fold, mergeLogs, nextSeq } from './core/circle/log'
+export type {
+  Entry,
+  Folded,
+  Held,
+  HeldReview,
+  HeldWork,
+  Passage,
+  ReadingState,
+  Register,
+  ShelvedWork,
+  Stars,
+} from './core/circle/log'
 /* What a book is called when two libraries have to agree it is the same book.
    Never a hash of the file — `wire.md` §"`workKey` cannot be the log key". */
-export { claimFor, indexKeys, matchWork } from './core/circle/workClaim'
+export { LIST_ID, SHELF_WORK, claimFor, indexKeys, listIdOf, listWork, matchWork, primaryLanguage } from './core/circle/workClaim'
 export type { ClaimSource, WorkClaim, WorkMatch } from './core/circle/workClaim'
+/* A list's log, folded — WI-23.E1. */
+export { NO_LIST, compactedList, compareItems, foldList } from './core/circle/list'
+export type { ListItem, ListState } from './core/circle/list'
 /* The bound that runs BEFORE a page is parsed, and the states it reads. */
 export { BLOCKED_BUDGET, DEFAULT_BUDGET, NOTHING_SPENT, charge, readRouting } from './core/circle/bound'
 export type { Budget, Charge, Routing, Spend } from './core/circle/bound'
 export {
   acceptsTransport,
+  admits,
   budgetFor,
+  changeState,
   drawsEntry,
   drawsOverlays,
   mergeRelationship,
+  FIRST_EPOCH,
+  newRelationship,
+  readmit,
+  showShelf,
 } from './core/circle/relationships'
 export type { Relationship, RelationshipState, Retain } from './core/circle/relationships'
 /* Whether the device that signed a page may still speak for its person. */
@@ -394,6 +446,7 @@ export {
   createMark,
   isAnnotation,
   isBookmark,
+  isHighlight,
   liveMarks,
   markStamp,
   mergeMarks,
@@ -402,6 +455,7 @@ export {
 export type {
   Annotation,
   Bookmark,
+  Highlight,
   Mark,
   MarkKind,
   MarkStorage,

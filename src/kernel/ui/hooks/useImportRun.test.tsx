@@ -103,7 +103,7 @@ describe('the import coordinator', () => {
       return 0
     })
 
-    let running: Promise<void> | null = null
+    let running: Promise<boolean> | null = null
     await act(async () => {
       running = world.imports().run(
         async (run) => {
@@ -143,7 +143,7 @@ describe('the import coordinator', () => {
     })
 
     const gate = deferred()
-    let older: Promise<void> | null = null
+    let older: Promise<boolean> | null = null
     await act(async () => {
       older = world.imports().run(
         async (run) => {
@@ -176,11 +176,45 @@ describe('the import coordinator', () => {
   })
 
   /* AND ITS SIGNAL IS ABORTED, so it stops COPYING and not merely reporting. */
+  it('answers whether it was still current once the settle had finished', async () => {
+    const gate = deferred()
+    const world = harness(async () => {
+      /* The shelf write is what is slow: the work has finished and answered
+         "current" by the time the supersession lands. */
+      await gate.promise
+      return 0
+    })
+    let older: Promise<boolean> | null = null
+    await act(async () => {
+      older = world.imports().run(
+        async (run) => {
+          run.shelve(kept('one'))
+          expect(run.current()).toBe(true)
+          return [kept('one')]
+        },
+        { summarise: () => 'older finished', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+    act(() => world.imports().supersede())
+    await act(async () => {
+      gate.open()
+      await expect(older).resolves.toBe(false)
+    })
+    /* And a run nothing retired says so. */
+    await act(async () => {
+      await expect(
+        world.imports().run(async () => [kept('two')], { summarise: () => 'done', onFailure: () => {} }),
+      ).resolves.toBe(true)
+    })
+    world.unmount()
+  })
+
   it('aborts a superseded run’s signal', async () => {
     const world = harness(async () => 0)
     let seen: ImportRun | null = null
     const gate = deferred()
-    let running: Promise<void> | null = null
+    let running: Promise<boolean> | null = null
     await act(async () => {
       running = world.imports().run(
         async (run) => {
@@ -206,7 +240,7 @@ describe('the import coordinator', () => {
   it('reports progress while it runs, and ignores a superseded run’s', async () => {
     const world = harness(async () => 0)
     const gate = deferred()
-    let running: Promise<void> | null = null
+    let running: Promise<boolean> | null = null
     let seen: ImportRun | null = null
     await act(async () => {
       running = world.imports().run(
@@ -248,7 +282,7 @@ describe('the import coordinator', () => {
   it('takes the bar down when the run that raised it is retired by nothing', async () => {
     const world = harness(async () => 0)
     const gate = deferred()
-    let running: Promise<void> | null = null
+    let running: Promise<boolean> | null = null
     await act(async () => {
       running = world.imports().run(
         async (run) => {
@@ -279,8 +313,8 @@ describe('the import coordinator', () => {
     const world = harness(async () => 0)
     const older = deferred()
     const newer = deferred()
-    let first: Promise<void> | null = null
-    let second: Promise<void> | null = null
+    let first: Promise<boolean> | null = null
+    let second: Promise<boolean> | null = null
     await act(async () => {
       first = world.imports().run(
         async (run) => {
@@ -441,5 +475,58 @@ describe('the import coordinator', () => {
     })
     expect(world.notices).toEqual(['1 did not land'])
     world.unmount()
+  })
+})
+
+describe('a caller whose last word throws', () => {
+  it('does not make the run reject: the promise settles true and the failure is said on the console', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const world = harness(async () => 0)
+    let outcome: boolean | null = null
+    await act(async () => {
+      outcome = await world.imports().run(async () => [kept('one')], {
+        summarise: () => {
+          throw new Error('no words')
+        },
+        onFailure: () => {},
+      })
+    })
+    expect(outcome).toBe(true)
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('could not say'), expect.objectContaining({ message: 'no words' }))
+    expect(world.imports().busy).toBe(false)
+    spy.mockRestore()
+    world.unmount()
+  })
+})
+
+describe('the run follows its options', () => {
+  it('shelves through the shelve it was last given, not the one it was made with', async () => {
+    const first = vi.fn(async () => 0)
+    const second = vi.fn(async () => 0)
+    let latest: Imports | null = null
+    let current = first
+    function Probe(): ReactNode {
+      latest = useImportRun({ shelve: current, batch: 2, notice: () => {} })
+      return null
+    }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    act(() => root.render(createElement(Probe)))
+    current = second
+    act(() => root.render(createElement(Probe)))
+    await act(async () => {
+      await latest!.run(
+        async (run) => {
+          run.shelve(kept('one'))
+          return [kept('one')]
+        },
+        { summarise: () => 'done', onFailure: () => {} },
+      )
+    })
+    expect(second).toHaveBeenCalled()
+    expect(first).not.toHaveBeenCalled()
+    act(() => root.unmount())
+    host.remove()
   })
 })

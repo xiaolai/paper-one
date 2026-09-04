@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
+import { compareHlc, parseHlc } from './hlc'
+import { monotonicClock } from './services'
 import { NO_GLOSS, type GlossProvider } from './gloss'
 import { NO_WORK_LINE, type WorkLine } from './ports'
 import { servicesWith, spyRecorder } from './servicesWorld.testkit'
@@ -402,3 +404,93 @@ describe('serving a composed set of services', () => {
  * has to remember to pass it. `gloss.test.ts` pins the `NO_GLOSS` end and
  * `ui/lookUp.test.ts` pins what the reader UI does with it.
  */
+
+describe('the fallback clock', () => {
+  it('never answers the same stamp twice, and moves on with the millisecond', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1_700_000_000_000)
+      const clock = monotonicClock()
+      const [a, b, c] = [clock(), clock(), clock()]
+      expect(a).not.toBe(b)
+      expect(b).not.toBe(c)
+      expect(compareHlc(a, b)).toBeLessThan(0)
+      expect(compareHlc(b, c)).toBeLessThan(0)
+      vi.setSystemTime(1_700_000_000_001)
+      const d = clock()
+      expect(compareHlc(c, d)).toBeLessThan(0)
+      expect(parseHlc(d).counter).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('a host whose disposer cannot even be read', () => {
+  it('is refused like one that returned none, and the hosts that served are taken down first', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    let disposed = 0
+    services.bindServiceHost(() => ({ dispose: () => void (disposed += 1) }))
+    services.bindServiceHost(
+      () =>
+        ({
+          get dispose(): () => void {
+            throw new Error('no disposer today')
+          },
+        }) as never,
+    )
+    await expect(services.serveServices([])).rejects.toThrow(/no disposer/u)
+    expect(disposed, 'the host that served properly was left running').toBe(1)
+  })
+})
+
+describe('the clock slot, held to the letter', () => {
+  it('stamps the first millisecond of time itself, and refuses a second clock by name', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(0)
+      const clock = monotonicClock()
+      expect(parseHlc(clock()).ms).toBe(0)
+      expect(parseHlc(clock()).counter).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+    const services = servicesWith(spyRecorder().recorder)
+    const bound = services.bindClock(() => '018bcfe56809-0000-1d8865efc2eaef44' as never)
+    expect(() => services.bindClock(() => '018bcfe56809-0001-1d8865efc2eaef44' as never)).toThrow(/bindClock: the clock port is already bound/u)
+    bound.dispose()
+  })
+})
+
+describe('the clock’s counter, exhausted', () => {
+  it('moves into the next millisecond rather than throwing', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1_700_000_000_000)
+      const clock = monotonicClock()
+      let last = clock()
+      for (let i = 0; i < 65_540; i++) {
+        const next = clock()
+        expect(compareHlc(last, next)).toBeLessThan(0)
+        last = next
+      }
+      expect(parseHlc(last).ms).toBe(1_700_000_000_001)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('the hash port — BLAKE3 by the peer plugin, bound late (WI-23.C5)', () => {
+  it('answers null until bound, the port while bound, and null again once released', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    expect(services.hashes()).toBeNull()
+    const port = { hashFile: vi.fn(() => Promise.resolve({ blake3: 'ab'.repeat(32), size: 3 })) }
+    const bound = services.bindHashPort(port)
+    expect(await services.hashes()!.hashFile('books/b', 'cover.jpg')).toEqual({ blake3: 'ab'.repeat(32), size: 3 })
+    /* One at a time, like every slot: a second binder is refused rather than quietly replacing the first. */
+    expect(() => services.bindHashPort(port)).toThrow(/already bound/u)
+    bound.dispose()
+    expect(services.hashes()).toBeNull()
+  })
+})

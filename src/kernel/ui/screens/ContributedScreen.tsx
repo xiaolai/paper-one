@@ -1,8 +1,7 @@
-import { Component, type ReactNode } from 'react'
 import type { PaneRenderer } from '../../core/capability'
 import type { Platform } from '../../core/metrics'
-import { renderContribution } from '../panes'
 import styles from './ContributedScreen.module.css'
+import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
 
 /**
  * The page a capability's whole-window view is drawn in — WI-22.D3.
@@ -41,9 +40,6 @@ import styles from './ContributedScreen.module.css'
  * would take the reader back out. Passing an ELEMENT defers the call to the
  * moment React renders this, which is inside.
  */
-function ContributedBody({ id, render }: { readonly id: string; readonly render: PaneRenderer }) {
-  return <>{renderContribution(id, render)}</>
-}
 
 /**
  * A screen that fails without taking the window with it.
@@ -56,32 +52,6 @@ function ContributedBody({ id, render }: { readonly id: string; readonly render:
  *
  * A class, because that is the only thing React lets catch a render error.
  */
-class ScreenBoundary extends Component<
-  { readonly label: string; readonly children: ReactNode },
-  { readonly failed: boolean }
-> {
-  override state = { failed: false }
-
-  static getDerivedStateFromError() {
-    return { failed: true }
-  }
-
-  override componentDidCatch(error: unknown) {
-    /* Reported, not swallowed: the reader sees a screen that says something is
-       wrong, and whoever is debugging gets the stack. */
-    console.error('Paper: a contributed screen failed to draw', error)
-  }
-
-  override render() {
-    if (!this.state.failed) return this.props.children
-    return (
-      <p className={styles.failure}>
-        {this.props.label} could not be drawn. Everything else still works —
-        switch away and back to try again.
-      </p>
-    )
-  }
-}
 
 export interface ContributedScreenProps {
   readonly label: string
@@ -89,9 +59,11 @@ export interface ContributedScreenProps {
   readonly id: string
   /** Absent when no composition offers this screen — see the render below. */
   readonly render?: PaneRenderer
+  /** How a screen opens one of the reader's own books — see `PaneContext.openBook`. */
+  readonly openBook?: ((bookId: string) => void) | undefined
 }
 
-export function ContributedScreen({ label, platform, id, render }: ContributedScreenProps) {
+export function ContributedScreen({ label, platform, id, render, openBook }: ContributedScreenProps) {
   return (
     <div className={styles.screen} data-platform={platform}>
       <div className={styles.body}>
@@ -99,15 +71,15 @@ export function ContributedScreen({ label, platform, id, render }: ContributedSc
           {/* OUTSIDE the boundary, so the heading and the way back survive a
               renderer that throws. */}
           <h1 className={styles.title}>{label}</h1>
-          <ScreenBoundary label={label}>
+          <ContributionBoundary label={label} resetKey={id}>
             {render === undefined ? (
               <p className={styles.failure}>
                 That screen belongs to something this copy of Paper is not running.
               </p>
             ) : (
-              <ContributedBody id={id} render={render} />
+              <ContributionBody id={id} render={render} context={{ bookId: null, ...(openBook ? { openBook } : {}) }} />
             )}
-          </ScreenBoundary>
+          </ContributionBoundary>
         </div>
       </div>
     </div>

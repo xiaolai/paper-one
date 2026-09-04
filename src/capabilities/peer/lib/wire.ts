@@ -318,6 +318,17 @@ export interface KnownPerson {
   readonly displayName: string
   readonly roster: Version
   readonly revoked: readonly string[]
+  /**
+   * The devices this person's last accepted roster vouched for.
+   *
+   * ⚠️ **RUST HAS SERIALISED THIS ALL ALONG AND THE TYPE LEFT IT OUT.**
+   * `KnownPerson::devices` in `circle.rs` is what binds a revocation to its
+   * issuer, and it is exactly the list the fetch driver (WI-23.A2) needs to
+   * know WHICH endpoints to dial for a person: a device id is an endpoint id.
+   * Empty for a person met and not yet heard from — their first hello is
+   * where the roster comes from — and such a person has nothing to fetch.
+   */
+  readonly devices: readonly string[]
 }
 
 /**
@@ -354,9 +365,22 @@ const command = (name: string) => `plugin:peer|${name}`
  * and a caller that carried on without its events; it is the rejection
  * here, at the call that would have depended on them.
  */
-async function whenListening(): Promise<void> {
-  await Promise.allSettled([...attaching])
-  if (firstRegistrationFailure !== null) throw firstRegistrationFailure
+/**
+ * The registrations one wire has in flight, and the first that failed —
+ * PER WIRE, so a failure that poisoned one instance's `whenListening` does
+ * not poison every wire made after it for the life of the process.
+ */
+interface Registrations {
+  readonly attaching: Set<Promise<unknown>>
+  /* `undefined` is "no failure yet": a listener can reject with anything,
+     `null` included, and a null that read as "nothing failed" made
+     `whenListening` resolve over a registration that never attached. */
+  firstFailure: { readonly cause: unknown } | undefined
+}
+
+async function whenListeningOf(registrations: Registrations): Promise<void> {
+  await Promise.allSettled([...registrations.attaching])
+  if (registrations.firstFailure !== undefined) throw registrations.firstFailure.cause
 }
 
 /**
@@ -365,22 +389,19 @@ async function whenListening(): Promise<void> {
  * (the race where an event lands between the two), and detaches when the
  * plugin's unlisten arrives.
  */
-/** Registrations still in flight, and the first that failed — what
- *  `whenListening` answers with. See `PeerWire.whenListening`. */
-const attaching = new Set<Promise<unknown>>()
-let firstRegistrationFailure: unknown = null
-
-function subscription<T>(event: string, fn: (payload: T) => void): Unsubscribe {
+function subscription<T>(registrations: Registrations, event: string, fn: (payload: T) => void): Unsubscribe {
   let live = true
   const pending = listen<T>(event, (received) => {
     if (live) fn(received.payload)
   })
-  attaching.add(pending)
+  registrations.attaching.add(pending)
+  /* Stryker disable ArrowFunction,CallExpression: bookkeeping — a registration that stays in `attaching` after it settled is awaited once more at teardown and found settled; nothing the wire answers changes. */
   void pending.then(
-    () => attaching.delete(pending),
+    () => registrations.attaching.delete(pending),
     (thrown: unknown) => {
-      attaching.delete(pending)
-      if (firstRegistrationFailure === null) firstRegistrationFailure = thrown
+      registrations.attaching.delete(pending)
+      // Stryker restore ArrowFunction,CallExpression
+      if (registrations.firstFailure === undefined) registrations.firstFailure = { cause: thrown }
     },
   )
   /* A registration that FAILS must not sit as an unhandled rejection until
@@ -401,12 +422,20 @@ function subscription<T>(event: string, fn: (payload: T) => void): Unsubscribe {
   return () => {
     if (!live) return
     live = false
-    void pending.then((unlisten) => unlisten()).catch(() => {})
+    /* Said, for the subscribe failure's reason: a listener that could not be
+       taken down is a native registration kept for the rest of the run, and
+       the only evidence of it is this line. */
+    void pending
+      .then((unlisten) => unlisten())
+      .catch((thrown: unknown) => {
+        console.warn(`peer: could not unsubscribe from "${event}"`, thrown)
+      })
   }
 }
 
 /** The real wire: every method one `invoke`, every listener one `listen`. */
 export function tauriWire(): PeerWire {
+  const registrations: Registrations = { attaching: new Set(), firstFailure: undefined }
   return {
     status: () => invoke(command('peer_status')),
     localRole: () => invoke(command('peer_local_role')),
@@ -450,13 +479,13 @@ export function tauriWire(): PeerWire {
     blobFetch: (request) => invoke(command('peer_blob_fetch'), { request }),
     hashFile: (folder, name) => invoke(command('peer_hash_file'), { folder, name }),
 
-    onPairingPending: (fn) => subscription('peer://pairing-pending', fn),
-    onPairingResult: (fn) => subscription('peer://pairing-result', fn),
-    onSessionOpen: (fn) => subscription('peer://session-open', fn),
-    onSessionClosed: (fn) => subscription('peer://session-closed', fn),
-    whenListening,
-    onSessionFrames: (fn) => subscription('peer://session-frames', fn),
-    onTransfer: (fn) => subscription('peer://transfer', fn),
+    onPairingPending: (fn) => subscription(registrations, 'peer://pairing-pending', fn),
+    onPairingResult: (fn) => subscription(registrations, 'peer://pairing-result', fn),
+    onSessionOpen: (fn) => subscription(registrations, 'peer://session-open', fn),
+    onSessionClosed: (fn) => subscription(registrations, 'peer://session-closed', fn),
+    whenListening: () => whenListeningOf(registrations),
+    onSessionFrames: (fn) => subscription(registrations, 'peer://session-frames', fn),
+    onTransfer: (fn) => subscription(registrations, 'peer://transfer', fn),
   }
 }
 

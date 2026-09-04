@@ -4,13 +4,16 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
 import {
+  WIRE_VERSION,
   canonicalJson,
   fold,
+  foldList,
   makeHlc,
   signedBytes,
   type Entry,
   type Page,
   type WorkClaim,
+  compareEntries,
 } from '../../../kernel'
 import { pageCrypto } from './crypto'
 import {
@@ -69,7 +72,7 @@ function delegation(over: Partial<SignedDelegation> = {}): string {
 /** A page the DEVICE really signed. */
 function page(over: Partial<Page> = {}, secret: Uint8Array = DEVICE.secret): string {
   const body: Omit<Page, 'sig'> = {
-    v: 1,
+    v: WIRE_VERSION,
     person: PERSON.id,
     work: WORK,
     device: DEVICE.id,
@@ -151,9 +154,22 @@ describe('a page that is everything it should be', () => {
     expect(result.held.heads[DEVICE.id]).toMatch(/^[0-9a-f]{64}$/u)
   })
 
-  it('reports a cursor drawn from what it accepted', () => {
-    const result = take([page({ entries: [share('p1', 3)] })])
-    expect(result.cursor[DEVICE.id]).toBe(3)
+  it('reports a cursor drawn from what it accepted, in the units the publisher seals', () => {
+    /* ⚠️ `page.to`, NOT THE ENTRIES' OWN `seq`: `pagesFor` answers `since` by
+       comparing BOUNDARIES, so a cursor spoken in entry numbers could name a
+       point inside a sealed page and re-fetch it for ever. */
+    const result = take([page({ from: 3, to: 4, entries: [share('p1', 3)] })])
+    expect(result.cursor[DEVICE.id]).toBe(4)
+    /* And it is the STORE's cursor — persisted with the file, not a value
+       that lasts one session. */
+    expect(result.held.cursor[DEVICE.id]).toBe(4)
+  })
+
+  it('never moves the cursor backwards over a page already held', () => {
+    const held: ForeignFile = { ...NOTHING_SHARED, cursor: { [DEVICE.id]: 9 }, v: WIRE_VERSION }
+    const result = takePages([page({ from: 1, to: 1 })], WORK, PERSON.id, ledger({ held }), pageCrypto, NOW)
+    expect(result.accepted).toBe(1)
+    expect(result.held.cursor[DEVICE.id]).toBe(9)
   })
 })
 
@@ -387,7 +403,21 @@ describe('what a peer can send instead of a page', () => {
   })
 
   it('refuses a version this build does not speak', () => {
-    expect(take([page({ v: 2 })]).refusals).toEqual(['version'])
+    expect(take([page({ v: WIRE_VERSION + 1 })]).refusals).toEqual(['version'])
+  })
+
+  it('refuses a page of a version other than the one the hello agreed — WI-23.B2', () => {
+    /* A v1 page when v2 was agreed is a page from the other chain; taking it
+       would put a v1 head on the v2 chain. And the reverse. */
+    expect(take([page({ v: 1 })]).refusals).toEqual(['version'])
+    expect(takePages([page({ v: WIRE_VERSION })], WORK, PERSON.id, ledger(), pageCrypto, NOW, 1).refusals).toEqual(['version'])
+  })
+
+  it('takes a v1 page when v1 was agreed, and files it under the v1 chain', () => {
+    const result = takePages([page({ v: 1, entries: [share('p1', 1)] })], WORK, PERSON.id, ledger(), pageCrypto, NOW, 1)
+    expect(result.refusals).toEqual([])
+    expect(result.held.entries.map((one) => one.pub)).toEqual(['p1'])
+    expect(result.held.v).toBe(1)
   })
 
   it('refuses a page signed by a key that is not the device it claims', () => {
@@ -425,6 +455,37 @@ describe('the chain', () => {
 
     expect(result.refusals).toEqual([])
     expect(result.held.entries.map((one) => one.pub).sort()).toEqual(['p1', 'p2'])
+    /* The cursor followed the chain: the next request asks from 2. */
+    expect(result.held.cursor[DEVICE.id]).toBe(2)
+  })
+
+  it('starts a new chain from nothing when the agreed version moves, and keeps what is held', () => {
+    /* ⚠️ **TWO VERSIONS ARE TWO CHAINS.** The v1 head is no head on the v2
+       chain, so the v2 chain's first page — `prevPageHash: ''` — is taken
+       rather than refused as `chain`, and the cursor starts over. The folded
+       entries survive: a share re-delivered on the new chain is a duplicate
+       the fold keeps once. */
+    const onV1 = takePages([page({ v: 1, entries: [share('p1', 1)] })], WORK, PERSON.id, ledger(), pageCrypto, NOW, 1)
+    expect(onV1.held.v).toBe(1)
+    expect(onV1.held.cursor[DEVICE.id]).toBe(1)
+
+    const onV2 = takePages(
+      [page({ v: 2, entries: [share('p1', 1)] })],
+      WORK,
+      PERSON.id,
+      ledger({ held: onV1.held }),
+      pageCrypto,
+      NOW,
+      2,
+    )
+    expect(onV2.refusals).toEqual([])
+    expect(onV2.held.v).toBe(2)
+    expect(onV2.held.entries.map((one) => one.pub)).toEqual(['p1'])
+    expect(onV2.held.entries).toHaveLength(1)
+    /* And the same page under the OLD version, with the old file, is a chain
+       break — the head was set by the v1 page. */
+    const again = takePages([page({ v: 1, entries: [share('p1', 1)] })], WORK, PERSON.id, ledger({ held: onV1.held }), pageCrypto, NOW, 1)
+    expect(again.refusals).toEqual(['chain'])
   })
 
   it('remembers the head across a reload, because it is on disk', () => {
@@ -506,8 +567,18 @@ describe('a person whose pages are not read at all', () => {
 
   it('keeps the cursor it already had for a person who is not admitted', () => {
     const heads = { [DEVICE.id]: 'a'.repeat(64) }
-    const result = take([page()], { admitted: false, held: { ...NOTHING_SHARED, heads } })
-    expect(result.cursor).toEqual({ [DEVICE.id]: 0 })
+    const cursor = { [DEVICE.id]: 7 }
+    const result = take([page()], { admitted: false, held: { ...NOTHING_SHARED, heads, cursor } })
+    expect(result.cursor).toEqual({ [DEVICE.id]: 7 })
+    expect(result.held.cursor).toEqual({ [DEVICE.id]: 7 })
+  })
+
+  it('does not move a cursor over a page it refused', () => {
+    /* A cursor moved past a refused page is a page never fetched again. */
+    const forged = page({ entries: [share('bad', 1)] }, OTHER_DEVICE.secret)
+    const result = take([forged])
+    expect(result.refusals).toEqual(['bad-signature'])
+    expect(result.held.cursor).toEqual({})
   })
 })
 
@@ -534,24 +605,118 @@ describe('applying entries is folding them', () => {
     expect(again.entries[0]?.receivedAt).toBe(100)
   })
 
-  it('agrees with folding the whole log, in every order', () => {
+  it('files a book-level entry under the opinion, never as a passage — WI-23.B5', () => {
+    const rated: Entry = { op: 'rate', stars: 4, device: DEVICE.id, seq: 1, at: stampFor(DEVICE.id, 1) }
+    const held = applyEntries(NOTHING_SHARED, [rated, share('p1', 2)], PERSON.id, 1, NOW)
+    expect(held.entries.map((one) => one.pub)).toEqual(['p1'])
+    expect(held.opinion.stars).toMatchObject({ value: 4, at: stampFor(DEVICE.id, 1), device: DEVICE.id, seq: 1 })
+  })
+
+  it('keeps the register with the newest STAMP across pages, whatever order they land in', () => {
+    /* ⚠️ The item's falsifier through the store rather than through `fold`:
+       device 1 says `finished` at T+10, seq 5; device 2 says `reading` at T,
+       seq 9. Either order of arrival must answer `finished`. */
+    const finished: Entry = { op: 'status', state: 'finished', device: DEVICE.id, seq: 5, at: stampFor(DEVICE.id, 10) }
+    const reading: Entry = { op: 'status', state: 'reading', device: OTHER_DEVICE.id, seq: 9, at: stampFor(OTHER_DEVICE.id, 0) }
+    const a = applyEntries(applyEntries(NOTHING_SHARED, [finished], PERSON.id, 1, NOW), [reading], PERSON.id, 1, NOW)
+    const b = applyEntries(applyEntries(NOTHING_SHARED, [reading], PERSON.id, 1, NOW), [finished], PERSON.id, 1, NOW)
+    expect(a.opinion.status?.value).toBe('finished')
+    expect(b.opinion.status?.value).toBe('finished')
+    expect(a.opinion).toEqual(b.opinion)
+  })
+
+  it('keeps the FIRST word at one (device, seq), and carries no register it never heard', () => {
+    /* A duplicate delivery or a forgery: every recipient keeps the same one,
+       the first. And a file with no `status` has no `status` KEY — a key
+       holding `undefined` would survive in memory and vanish on disk. */
+    const first: Entry = { op: 'rate', stars: 1, device: DEVICE.id, seq: 3, at: stampFor(DEVICE.id, 7) }
+    const forged: Entry = { ...first, stars: 5 }
+    const held = applyEntries(NOTHING_SHARED, [first, forged], PERSON.id, 1, NOW)
+    expect(held.opinion.stars?.value).toBe(1)
+    expect('status' in held.opinion).toBe(false)
+    expect('tags' in held.opinion).toBe(false)
+    expect('stars' in applyEntries(NOTHING_SHARED, [], PERSON.id, 1, NOW).opinion).toBe(false)
+    expect('title' in applyEntries(NOTHING_SHARED, [], PERSON.id, 1, NOW).list).toBe(false)
+  })
+
+  it('holds a review, withdraws it by pub, and remembers a withdrawal that arrives first', () => {
+    const review: Entry = { op: 'review', pub: 'r1', text: 'a whale of a book', device: DEVICE.id, seq: 1, at: stampFor(DEVICE.id, 1) }
+    const gone: Entry = { op: 'unreview', pub: 'r1', device: DEVICE.id, seq: 2, at: stampFor(DEVICE.id, 2) }
+    const held = applyEntries(NOTHING_SHARED, [review], PERSON.id, 3, NOW)
+    /* With its stamp, so a duplicate from another device folds by `fold`'s rule. */
+    expect(held.reviews).toEqual([{ pub: 'r1', text: 'a whale of a book', at: review.at, epoch: 3, device: DEVICE.id, seq: 1 }])
+    const withdrawn = applyEntries(held, [gone], PERSON.id, 3, NOW)
+    expect(withdrawn.reviews).toEqual([])
+    expect(withdrawn.unreviewed).toEqual(['r1'])
+    /* And the passages' own tombstone list is untouched: a review's pub is
+       not a passage's. */
+    expect(withdrawn.withdrawn).toEqual([])
+    /* First the withdrawal, then the review: held back. */
+    const early = applyEntries(applyEntries(NOTHING_SHARED, [gone], PERSON.id, 3, NOW), [review], PERSON.id, 3, NOW)
+    expect(early.reviews).toEqual([])
+    /* And a redelivered review does not move its stamp or its epoch. */
+    const twice = applyEntries(held, [{ ...review, at: stampFor(DEVICE.id, 9) }], PERSON.id, 4, NOW)
+    expect(twice.reviews).toEqual(held.reviews)
+  })
+
+  it('agrees with folding the whole log, in every order — over every kind', () => {
     /* ⚠️ **THE STORE KEEPS THE FOLDED RESULT, NOT THE LOG**, so applying pages
        one at a time has to give what folding the whole log would — for every
        interleaving, not for the cases somebody thought of. `fold` is the
-       specification; this is the implementation that has to match it. */
+       specification; this is the implementation that has to match it. Since
+       WI-23.B1 the log has nine kinds and since WI-23.E1 fourteen, and the
+       property covers all of them — the list's five against `foldList`. */
     const pubs = ['a', 'b', 'c']
     const arb = fc.array(
-      fc.tuple(fc.constantFrom(...pubs), fc.boolean(), fc.integer({ min: 1, max: 9 })),
-      { minLength: 0, maxLength: 8 },
+      fc.tuple(
+        fc.integer({ min: 0, max: 13 }),
+        fc.constantFrom(...pubs),
+        fc.integer({ min: 1, max: 9 }),
+        fc.constantFrom(DEVICE.id, OTHER_DEVICE.id),
+      ),
+      { minLength: 0, maxLength: 10 },
     )
+    const build = ([kind, pub, at, device]: [number, string, number, string], i: number): Entry => {
+      const seq = i + 1
+      const stamped = { device, seq, at: stampFor(device, at) }
+      switch (kind) {
+        case 0:
+          return { ...stamped, op: 'share', pub, passage: { quote: `q-${pub}`, prefix: 'p', suffix: 's', chapter: 'One' } }
+        case 1:
+          return { ...stamped, op: 'unshare', pub }
+        case 2:
+          return { ...stamped, op: 'status', state: at % 2 ? 'reading' : 'finished' }
+        case 3:
+          return { ...stamped, op: 'rate', stars: ((at % 5) + 1) as 1 | 2 | 3 | 4 | 5 }
+        case 4:
+          return { ...stamped, op: 'tag', tags: [pub] }
+        case 5:
+          return { ...stamped, op: 'review', pub, text: `text-${pub}` }
+        case 6:
+          return { ...stamped, op: 'unreview', pub }
+        case 7:
+          return { ...stamped, op: 'shelf', pub, work: { title: `book-${pub}`, author: 'A', language: 'en' } }
+        case 8:
+          return { ...stamped, op: 'unshelf', pub }
+        case 9:
+          return { ...stamped, op: 'create', title: `list-${pub}` }
+        case 10:
+          return { ...stamped, op: 'retitle', title: `title-${at}` }
+        case 11:
+          return { ...stamped, op: 'place', pub, work: { title: `book-${pub}`, author: 'A', language: 'en' }, position: at % 3, note: `n-${at}` }
+        case 12:
+          return { ...stamped, op: 'remove', pub }
+        default:
+          return { ...stamped, op: 'delete' }
+      }
+    }
 
     fc.assert(
-      fc.property(arb, fc.array(fc.integer({ min: 0, max: 7 }), { maxLength: 8 }), (ops, cuts) => {
-        const log: Entry[] = ops.map(([pub, isShare, seq]) =>
-          isShare ? share(pub, seq) : unshare(pub, seq),
-        )
+      fc.property(arb, fc.array(fc.integer({ min: 0, max: 9 }), { maxLength: 10 }), (rows, cuts) => {
+        const log: Entry[] = rows.map(build)
         /* One shot, the specification. */
-        const wanted = new Set(fold(log).map((one) => one.pub))
+        const folded = fold(log)
+        const list = foldList(log)
 
         /* Applied in batches, the way pages actually arrive. */
         let held: ForeignFile = NOTHING_SHARED
@@ -563,8 +728,19 @@ describe('applying entries is folding them', () => {
         }
         held = applyEntries(held, log.slice(at), PERSON.id, 1, NOW)
 
-        const got = new Set(held.entries.map((one) => one.pub))
-        expect([...got].sort()).toEqual([...wanted].sort())
+        expect(held.entries.map((one) => one.pub).sort()).toEqual(folded.shares.map((one) => one.pub).sort())
+        expect(held.reviews.map((one) => `${one.pub}:${one.text}`).sort()).toEqual(
+          folded.reviews.map((one) => `${one.pub}:${one.text}`).sort(),
+        )
+        expect(held.works.map((one) => one.pub).sort()).toEqual(folded.shelf.map((one) => one.pub).sort())
+        expect(held.opinion.status?.value).toEqual(folded.status?.value)
+        expect(held.opinion.status?.at).toEqual(folded.status?.at)
+        expect(held.opinion.stars?.value).toEqual(folded.stars?.value)
+        expect(held.opinion.tags?.value).toEqual(folded.tags?.value)
+        expect(held.list.created).toBe(list.created)
+        expect(held.list.deleted).toBe(list.deleted)
+        expect(held.list.title?.value ?? '').toBe(list.title)
+        expect(held.list.items.map((one) => [one.pub, one.position, one.note])).toEqual(list.items.map((one) => [one.pub, one.position, one.note]))
       }),
       { numRuns: 300 },
     )
@@ -587,5 +763,49 @@ describe('the golden vector the Rust side pins', () => {
         sig: 'ignored',
       }),
     ).toBe(`paper/circle/delegation/1\n${'aa'.repeat(32)}\n${'bb'.repeat(32)}\n10\n20\n3`)
+  })
+})
+
+describe('the shape of a page, before anything is read from it', () => {
+  const raw = (over: Record<string, unknown>) => JSON.stringify({ ...(JSON.parse(page()) as Record<string, unknown>), ...over })
+  const refused = (pages: string[]) => takePages(pages, WORK, PERSON.id, ledger(), pageCrypto, NOW).refusals
+  it('refuses a claim that is not a claim, entries that are not entries, and a roster of numbers — as unparseable, not by throwing', () => {
+    expect(refused([raw({ work: 'moby' })])).toEqual(['unparseable'])
+    expect(refused([raw({ work: { ids: 'a', titles: [], author: '', language: '' } })])).toEqual(['unparseable'])
+    expect(refused([raw({ entries: [{ op: 'share', pub: 'p' }] })])).toEqual(['unparseable'])
+    expect(refused([raw({ entries: [{ op: 'sing', device: 'd', seq: 1, at: 'x' }] })])).toEqual(['unparseable'])
+    expect(refused([raw({ roster: [1] })])).toEqual(['unparseable'])
+    expect(refused([raw({ sig: 7 })])).toEqual(['unparseable'])
+    expect(refused(['[]', 'null', '"page"'])).toEqual(['unparseable', 'unparseable', 'unparseable'])
+  })
+})
+
+describe('one pub published from two devices', () => {
+  it('folds to the same entry whichever page lands first — the earlier stamp, as fold keeps it', () => {
+    const mine = share('p9', 1, DEVICE.id) as Extract<Entry, { op: 'share' }>
+    const theirs = { ...(share('p9', 1, OTHER_DEVICE.id) as Extract<Entry, { op: 'share' }>), passage: { quote: 'the other device’s words', prefix: '', suffix: '', chapter: '' } }
+    const oneWay = applyEntries(applyEntries(NOTHING_SHARED, [mine], PERSON.id, 1, NOW), [theirs], PERSON.id, 1, NOW)
+    const otherWay = applyEntries(applyEntries(NOTHING_SHARED, [theirs], PERSON.id, 1, NOW), [mine], PERSON.id, 1, NOW)
+    expect(oneWay.entries).toEqual(otherWay.entries)
+    expect(oneWay.entries).toHaveLength(1)
+    const earlier = [mine, theirs].sort((a, b) => compareEntries(a, b))[0]!
+    expect(oneWay.entries[0]!.passage).toEqual(earlier.passage)
+    expect(oneWay.entries[0]).toMatchObject({ device: earlier.device, seq: earlier.seq, at: earlier.at })
+  })
+
+  it('leaves a row written before stamps were kept standing against any duplicate', () => {
+    const legacy = { ...NOTHING_SHARED, entries: [{ pub: 'p9', person: PERSON.id, passage: { quote: 'legacy', prefix: '', suffix: '', chapter: '' }, epoch: 1, receivedAt: NOW }] }
+    const next = applyEntries(legacy, [share('p9', 1, OTHER_DEVICE.id)], PERSON.id, 1, NOW)
+    expect(next.entries[0]!.passage.quote).toBe('legacy')
+  })
+})
+
+describe('what a page leaves in the file carries its epoch', () => {
+  it('stamps shelf rows and registers with the relationship epoch they arrived under', () => {
+    const shelfRow: Entry = { op: 'shelf', pub: 's1', work: { title: 'T', author: 'A', language: 'en' }, device: DEVICE.id, seq: 1, at: stampFor(DEVICE.id, 1) }
+    const status: Entry = { op: 'status', state: 'reading', device: DEVICE.id, seq: 2, at: stampFor(DEVICE.id, 2) }
+    const held = applyEntries(NOTHING_SHARED, [shelfRow, status], PERSON.id, 7, NOW)
+    expect(held.works[0]).toMatchObject({ pub: 's1', epoch: 7 })
+    expect(held.opinion.status).toMatchObject({ value: 'reading', epoch: 7 })
   })
 })

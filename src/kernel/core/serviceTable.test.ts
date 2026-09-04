@@ -144,8 +144,8 @@ describe('the service table', () => {
    */
   it('withdraws title and author from book.set by name, and takes only the fields it can keep', () => {
     const set = serviceDescriptor('book.set') as ServiceDescriptor
-    expect(set.input.map((field) => field.name)).toEqual(['book', 'finished', 'position', 'progress'])
-    expect(set.atLeastOne).toEqual(['finished', 'position', 'progress'])
+    expect(set.input.map((field) => field.name)).toEqual(['book', 'finished', 'position', 'progress', 'status', 'rating', 'review'])
+    expect(set.atLeastOne).toEqual(['finished', 'position', 'progress', 'status', 'rating', 'review'])
     expect((set.withdrawn ?? []).map((gone) => gone.name)).toEqual(['title', 'author'])
     for (const gone of set.withdrawn ?? []) expect(gone.why).toMatch(/rename/i)
   })

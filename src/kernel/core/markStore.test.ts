@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { marksPathIn, recordPath } from './bookFolder'
 import { fakeFs } from './indexFsFake.testkit'
 import { createMarkStore } from './markStore'
@@ -648,5 +648,27 @@ describe('place — WI-22.A2', () => {
     expect(after).toHaveLength(1)
     expect(after[0]!.cfi).toBe(mine.cfi)
     expect(after[0]!.sectionIndex).toBe(0)
+  })
+})
+
+describe('what the write found, compared to what was predicted', () => {
+  it('tells a subscriber once for a change the disk confirms, and once more when the disk had moved under it', async () => {
+    const { fs, store: marks } = store()
+    await marks.open(BOOK)
+    const m1 = highlight()
+    const m2 = highlight({ cfi: 'epubcfi(/6/4!/4/2,/1:20,/1:30)', text: 'the whale' })
+    await marks.add(m1)
+    await marks.add(m2)
+    const heard = vi.fn()
+    marks.subscribe(heard)
+    await marks.updateNote(m1.id, 'a note')
+    expect(heard).toHaveBeenCalledTimes(1)
+    /* Another device changed the SECOND mark on disk; the next write reads that in and must say so. */
+    const onDisk = JSON.parse(new TextDecoder().decode(fs.store.get(marksPathIn(BOOK))!)) as Mark[]
+    const moved = onDisk.map((mark) => (mark.id === m2.id ? { ...mark, note: 'from elsewhere', updatedAt: '018bcfe56809-0001-1d8865efc2eaef44' } : mark))
+    fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(JSON.stringify(moved)))
+    await marks.updateNote(m1.id, 'another note')
+    expect(heard).toHaveBeenCalledTimes(3)
+    expect(marks.getSnapshot().current.find((mark) => mark.id === m2.id)?.note).toBe('from elsewhere')
   })
 })

@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { IndexFs } from '../bookIndex'
 import { fakeFs } from '../fakeFs.testkit'
 import { createKernelServices } from '../services'
-import { bookAdd, bookRestore } from './book'
+import { bookAdd, bookPosition, bookRestore, bookSet } from './book'
 
 /**
  * ⚠️ **THE FOLDER CAN CHANGE HANDS BETWEEN THE CHECK AND THE ACT.**
@@ -109,5 +109,123 @@ describe('book.restore and a trash that changed hands', () => {
     })
     await services.drain()
     expect(fs.store.has('books/book_a/book.json')).toBe(true)
+  })
+})
+
+describe('book.set and the reader’s own opinion — WI-23.B3', () => {
+  const shelf = () => {
+    const fs = fakeFs({ 'books/book_a/book.json': RECORD('book_a', 'Moby-Dick') })
+    const services = createKernelServices({
+      fs,
+      storage: null,
+      initialBooks: [{ bookId: 'book_a', title: 'Moby-Dick', author: '', hasContent: true }],
+    })
+    return { fs, services, set: bookSet({ services }) }
+  }
+
+  it('sets status, rating and review in one write, and answers the detail with them', async () => {
+    const { services, set } = shelf()
+    const detail = await set({ book: 'book_a', status: 'reading', rating: 4, review: 'a whale of a book' })
+    expect(detail.status).toBe('reading')
+    expect(detail.rating).toBe(4)
+    expect(detail.review).toBe('a whale of a book')
+    expect(detail.finished).toBe(false)
+    await services.drain()
+    const held = services.library.getSnapshot()[0]!
+    expect(held.status?.state).toBe('reading')
+    expect(held.rating).toBe(4)
+    expect(held.ratingAt).toBeDefined()
+    expect(held.review?.text).toBe('a whale of a book')
+  })
+
+  it('moves finished with a status of finished, and takes a review back with an empty string', async () => {
+    const { set } = shelf()
+    expect((await set({ book: 'book_a', status: 'finished' })).finished).toBe(true)
+    await set({ book: 'book_a', review: 'words' })
+    expect((await set({ book: 'book_a', review: '' })).review).toBeNull()
+  })
+
+  it('refuses a status and a finished that disagree, by name', async () => {
+    const { set } = shelf()
+    await expect(set({ book: 'book_a', status: 'reading', finished: true })).rejects.toThrow('disagree')
+    await expect(set({ book: 'book_a', status: 'finished', finished: false })).rejects.toThrow('disagree')
+    expect((await set({ book: 'book_a', status: 'finished', finished: true })).finished).toBe(true)
+    expect((await set({ book: 'book_a', status: 'want', finished: false })).finished).toBe(false)
+  })
+
+  it('refuses a status that is not one of the three words, by name', async () => {
+    const { set } = shelf()
+    await expect(set({ book: 'book_a', status: 'abandoned' })).rejects.toMatchObject({
+      code: 'malformed',
+      message: expect.stringContaining('want, reading, finished'),
+    })
+  })
+
+  it('refuses a rating outside the five stars, and a fractional one, at the row', async () => {
+    const { set } = shelf()
+    for (const rating of [0, 6, 2.5]) {
+      await expect(set({ book: 'book_a', rating })).rejects.toMatchObject({ code: 'malformed' })
+    }
+  })
+
+  it('still takes the fields it always took, alone', async () => {
+    const { set } = shelf()
+    expect((await set({ book: 'book_a', finished: true })).finished).toBe(true)
+    expect((await set({ book: 'book_a', finished: true })).status).toBe('finished')
+    expect((await set({ book: 'book_a', position: 'epubcfi(/6/4)', progress: 0.5 })).progress).toBe(0.5)
+  })
+})
+
+describe('what book.set hands the library — WI-23.B3, one row each', () => {
+  it('patches only the fields the request named', async () => {
+    const fs = fakeFs({ 'books/book_a/book.json': RECORD('book_a', 'Moby-Dick') })
+    const services = createKernelServices({
+      fs,
+      storage: null,
+      initialBooks: [{ bookId: 'book_a', title: 'Moby-Dick', author: '', hasContent: true }],
+    })
+    const patch = vi.spyOn(services.library, 'patch')
+    const set = bookSet({ services })
+    await set({ book: 'book_a', rating: 2 })
+    expect(Object.keys(patch.mock.calls.at(-1)![1])).toEqual(['rating'])
+    await set({ book: 'book_a', status: 'want' })
+    expect(Object.keys(patch.mock.calls.at(-1)![1])).toEqual(['status'])
+    await set({ book: 'book_a', review: 'r' })
+    expect(Object.keys(patch.mock.calls.at(-1)![1])).toEqual(['review'])
+  })
+})
+
+describe('book.position — the narrow door', () => {
+  function shelf() {
+    /* A record on disk: the position is written inside the book's lane, which reads the record there. */
+    const fs = fakeFs({ 'books/book_a/book.json': RECORD('book_a', 'Moby-Dick') }) as unknown as IndexFs
+    const services = createKernelServices({
+      fs,
+      storage: null,
+      initialBooks: [{ bookId: 'book_a', title: 'Moby-Dick', author: '', hasContent: true }],
+    })
+    return { services, at: bookPosition({ services }) }
+  }
+
+  it('moves the position, carries a progress when one is given, and leaves it alone when none is', async () => {
+    const { services, at } = shelf()
+    await at({ book: 'book_a', position: 'epubcfi(/6/2)', progress: 0.25 })
+    await services.drain()
+    let held = services.library.getSnapshot()[0]!
+    expect(held.position).toBe('epubcfi(/6/2)')
+    expect(held.progress).toBe(0.25)
+    await at({ book: 'book_a', position: 'epubcfi(/6/4)' })
+    await services.drain()
+    held = services.library.getSnapshot()[0]!
+    expect(held.position).toBe('epubcfi(/6/4)')
+    expect(held.progress).toBe(0.25)
+    await at({ book: 'book_a', position: 'epubcfi(/6/6)', progress: 0.75 })
+    await services.drain()
+    expect(services.library.getSnapshot()[0]!.progress).toBe(0.75)
+  })
+
+  it('refuses a book that is not here, by name', async () => {
+    const { at } = shelf()
+    await expect(at({ book: 'book_zz', position: 'epubcfi(/6/2)' })).rejects.toMatchObject({ code: 'not-found' })
   })
 })

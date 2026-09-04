@@ -491,6 +491,7 @@ class FakeWireImpl implements FakeWire {
         displayName,
         roster: { epoch: 0, hlc: 0 },
         revoked: [],
+        devices: [],
       })
     } else {
       this.people = this.people.map((one) =>

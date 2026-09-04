@@ -166,7 +166,18 @@ export function BookMenu({
           className={itemClass}
           onClick={() => {
             closeMenu()
-            void action.run(book.bookId)
+            /* Caught here, whatever the action returns: a rejected promise
+               out of a capability's action used to be an unhandled rejection
+               with nothing on screen. Said on the console; the capability's
+               own surface is still where it should say it. */
+            const report = (cause: unknown) => {
+              console.error(`Paper: the action "${action.id}" failed`, cause)
+            }
+            try {
+              void Promise.resolve(action.run(book.bookId)).catch(report)
+            } catch (cause) {
+              report(cause)
+            }
           }}
         >
           {action.icon ? (

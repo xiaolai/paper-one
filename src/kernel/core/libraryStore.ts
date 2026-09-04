@@ -23,6 +23,7 @@ import {
   type IndexFs,
   type IndexedBook,
 } from './bookIndex'
+import { measureCover } from './coverFacts'
 import { keepCover } from './coverArt'
 import {
   TRASH_WINDOW_MS,
@@ -35,10 +36,12 @@ import {
   type RestoreOutcome,
 } from './bookTrash'
 import { hlcOf, type Hlc } from './hlc'
+import type { ReadingState, Stars } from './circle/log'
 import { normalizeTag, tagKey } from './library'
-import { NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type MutationRecorder } from './ports'
+import { NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type HashPort, type MutationRecorder } from './ports'
 import { PRESENCE_KEY, notePresence, readPresence } from './presence'
 import type { WriteQueue } from './writeQueue'
+import { canonicalJson } from './canonicalJson'
 
 /**
  * The library — the shelf as a service, with no React in it.
@@ -114,6 +117,15 @@ export interface BookPatch {
    * register a real rename needs is designed in phase 20's D2, not here. */
   readonly finished?: boolean
   readonly position?: { readonly position: string; readonly progress?: number }
+  /**
+   * The reader's own opinion of the book — WI-23.B3. Each is its own register
+   * and each write stamps it; `status` and `finished` are one fact and a patch
+   * naming either moves both under one stamp.
+   */
+  readonly status?: ReadingState
+  readonly rating?: Stars
+  /** The whole text; `''` takes a review back (see `BookRecord.review`). */
+  readonly review?: string
 }
 
 export interface Library {
@@ -192,7 +204,8 @@ export interface Library {
    * [0, 1] because a hand-edited or remote value past that would draw a bar
    * wider than its track.
    */
-  rememberPosition(bookId: string, position: string, progress: number): Promise<void>
+  /** A progress not given keeps the record's — read inside the lane, not from a snapshot the caller held. */
+  rememberPosition(bookId: string, position: string, progress?: number): Promise<void>
   /**
    * Rewrite the index now, if a position tick left it behind (phase 20, D4).
    *
@@ -521,6 +534,12 @@ export interface LibraryOptions {
   readonly initial?: readonly IndexedBook[]
   readonly recorder?: MutationRecorder
   /**
+   * The hash port, read per call — bound late by the peer capability. With
+   * one, a jacket the store keeps is measured and its facts stamped on the
+   * record (WI-23.C5); without one, the facts wait for the circle's pass.
+   */
+  readonly hashes?: () => HashPort | null
+  /**
    * The stamp for the presence register's writes. The default is the legacy
    * clock — wall time, counter zero, the zero device — which is monotone only
    * as far as the wall clock is and is enough with no sync composed; the sync
@@ -540,24 +559,14 @@ async function readText(fs: IndexFs, path: string): Promise<string | null> {
 
 /** A value serialised with keys sorted at every depth — so two objects that
  *  say the same thing compare equal whatever order their keys were built in. */
-const canonical = (value: unknown): string => {
-  const sorted = (v: unknown): unknown => {
-    if (Array.isArray(v)) return v.map(sorted)
-    if (typeof v === 'object' && v !== null) {
-      const out: Record<string, unknown> = {}
-      for (const key of Object.keys(v).sort()) out[key] = sorted((v as Record<string, unknown>)[key])
-      return out
-    }
-    return v
-  }
-  return JSON.stringify(sorted(value))
-}
 
 /** Two rows say the same thing. CANONICAL, not the raw serialisation: the
  *  register writers (`setTag`) rebuild a record with its keys in a different
  *  order than `parseRecord` does, and a reconcile that treated key order as
  *  a change published a notification for a row that had not changed. */
-const sameRow = (a: IndexedBook, b: IndexedBook): boolean => canonical(a) === canonical(b)
+/* The kernel's own canonical spelling — the one `signedBytes` uses — so a
+   key the local copy dropped (`__proto__` on a plain object) is compared too. */
+const sameRow = (a: IndexedBook, b: IndexedBook): boolean => canonicalJson(a) === canonicalJson(b)
 
 /**
  * How many books this store writes at once.
@@ -667,6 +676,8 @@ export function createLibrary({
   fs,
   queue,
   initial = [],
+  // Stryker disable next-line ArrowFunction: no port at all reads as no port — the measure fails and is caught.
+  hashes = () => null,
   recorder = NOOP_RECORDER,
   clock = () => hlcOf(Date.now()),
 }: LibraryOptions): Library {
@@ -1709,7 +1720,10 @@ export function createLibrary({
    * the ledger's registers now; with no sync composed the stamp is the legacy
    * wall clock under the zero device, which merges exactly like a legacy
    * record's synthesised stamp — nothing changes until a real clock arrives.) */
-  const patchWith = (bookId: string, fields: BookPatch, how: WriteWith): Promise<void> => {
+  /* `async`, so a patch refused inside the transform — the contradiction check
+     below — comes back as the rejection every caller is already awaiting, not
+     as a throw out of the call before a promise exists. */
+  const patchWith = async (bookId: string, fields: BookPatch, how: WriteWith): Promise<void> => {
     const at = clock()
     return updateWith(bookId, (record) => {
       let next = record
@@ -1717,8 +1731,36 @@ export function createLibrary({
        * which two already hold writes only what moved — and a patch that
        * moves nothing returns `record` itself, which `update` reads as
        * "nothing to do" and does not write. This runs on every page turn. */
-      if (fields.finished !== undefined && fields.finished !== next.finished) {
-        next = { ...next, finished: fields.finished, finishedAt: at }
+      /* ⚠️ **`status` AND `finished` ARE ONE FACT, MOVED TOGETHER.** A patch
+       * naming `finished` — the menu's verb — sets the status it implies:
+       * finished, or reading when there is a position to come back to, or
+       * want when there is not. A patch naming `status` sets `finished` to
+       * match. Both stamps are `at`, so the two registers cannot disagree
+       * about when the reader decided. */
+      /* "A position to come back to" counts one carried by THIS patch as well
+         as one already on the record: a menu that marks a book unfinished as
+         it saves where the reader stopped is one act, not two. */
+      /* A position to come back to is a NON-EMPTY one: the record's `position`
+         is `string | null | undefined`, and a null read as "placed" marked a
+         book the reader never opened as `reading` when it was unfinished. */
+      // Stryker disable next-line ConditionalExpression,StringLiteral: `parseRecord` drops an empty position on the way in, so none reaches here; the check is belt and braces.
+      const placed = fields.position !== undefined || (typeof next.position === 'string' && next.position !== '')
+      /* One fact, said twice, must be said the same way: a patch naming both
+         `status` and `finished` is refused when they disagree, rather than
+         letting one silently win over the other. */
+      if (fields.status !== undefined && fields.finished !== undefined && fields.finished !== (fields.status === 'finished')) {
+        throw new Error(`a patch cannot say status "${fields.status}" and finished ${String(fields.finished)} at once`)
+      }
+      const state: ReadingState | undefined =
+        fields.status ?? (fields.finished === undefined ? undefined : fields.finished ? 'finished' : placed ? 'reading' : 'want')
+      if (state !== undefined && state !== next.status?.state) {
+        next = { ...next, status: { state, at }, finished: state === 'finished', finishedAt: at }
+      }
+      if (fields.rating !== undefined && fields.rating !== next.rating) {
+        next = { ...next, rating: fields.rating, ratingAt: at }
+      }
+      if (fields.review !== undefined && fields.review !== next.review?.text) {
+        next = { ...next, review: { text: fields.review, at } }
       }
       const where = fields.position
       if (where !== undefined) {
@@ -1746,7 +1788,8 @@ export function createLibrary({
    * --position` from the CLI goes through `patch` and stays structural — it
    * is one write, not one every two seconds. */
   const rememberPosition: Library['rememberPosition'] = (bookId, position, progress) =>
-    patchWith(bookId, { position: { position, progress } }, TICK)
+    // Stryker disable next-line ConditionalExpression: an explicit undefined progress is dropped by the record's writer, as no progress is.
+    patchWith(bookId, { position: { position, ...(progress === undefined ? {} : { progress }) } }, TICK)
 
   const setFinished: Library['setFinished'] = (bookId, finished) => patch(bookId, { finished })
 
@@ -1833,17 +1876,12 @@ export function createLibrary({
     )
   }
 
-  const removeTag: Library['removeTag'] = (raw) => {
-    const key = tagKey(raw)
-    const at = clock()
-    // Judged per record, not from the cached row — see `renameTag`.
-    return eachBook((record) => {
-      const own = record.tags ?? []
-      const held = own.find((one) => tagKey(one) === key)
-      if (held === undefined) return record
-      return setTag(record, held, false, at)
-    })
-  }
+  /* THROUGH `untagBooks`, which is the one place a removal is recorded — the
+     interface promises the shelf-wide removal the same way back as the
+     editor's, and this used to bypass the recorder and offer none. The books
+     named are the ones that carry the tag; `untagBooks` judges each record
+     for itself, as `renameTag` does. */
+  const removeTag: Library['removeTag'] = (raw) => untagBooks(ownTagBooks(raw), raw).then(() => undefined)
 
   const keepJacket: Library['keepJacket'] = (bookId, cover) => {
     if (!fs) return Promise.resolve()
@@ -1863,6 +1901,17 @@ export function createLibrary({
       await recorded(recorder, live, 'cover', async () => {
         await keepCover(target, live, cover)
       })
+    }).then(async () => {
+      /* MEASURED ONCE IT IS THERE, outside the lane — `update` takes the lane
+         itself. A port that is not bound yet leaves the facts to the circle's
+         pass; a jacket the store could not keep has no facts to stamp. */
+      const port = hashes()
+      // Stryker disable next-line ConditionalExpression: a null port fails the measure, which is caught; this spares the attempt.
+      if (port === null) return
+      const live = resolveId(bookId)
+      const facts = await measureCover(target, port, live).catch(() => null)
+      if (facts === null) return
+      await update(live, (held) => (held.coverFacts === undefined ? { ...held, coverFacts: facts } : held))
     })
   }
 
@@ -2248,6 +2297,9 @@ export function createLibrary({
           const landed = await recorded(recorder, live, 'record', () => updateBook(target, live, row.change))
           if (landed) {
             reconcile(live, landed)
+            /* A write that landed is a write that landed: the failure this
+               book was showing from an earlier attempt is over. */
+            noteLanded(live)
           } else if (books.some((one) => one.bookId === live)) {
             /* `null` IS "NOTHING LANDED" HERE TOO — `updateBook`'s only other
              * answer, and what it says when the folder holds no record. It was

@@ -36,11 +36,9 @@ let model: DevicesModel | null = null
  *  import sync; the dependency runs the other way). */
 let syncNow: (() => void) | null = null
 
-/** The peer port, for capabilities that declared `requires: ["peer"]`.
- *  Null before `peer.start` ran, and outside the Tauri app. */
-/** How many times, and how long between, a role read is retried at boot. */
-const ROLE_TRIES = 3
+/** How long between each retried role read at boot — one wait per retry, so the count of tries follows the list. */
 const ROLE_BACKOFF_MS = [250, 500] as const
+const ROLE_TRIES = ROLE_BACKOFF_MS.length + 1
 
 /**
  * This device's role, retried — or `null` when it could not be read at all.
@@ -69,7 +67,17 @@ export async function readRole(
       last = error
       const wait = ROLE_BACKOFF_MS[attempt]
       if (wait === undefined) break
-      await new Promise((resolve) => setTimeout(resolve, wait))
+      /* The wait gives up as soon as the run is stopped, rather than holding
+         the composition for the rest of the backoff. */
+      await new Promise<void>((resolve) => {
+        const started = Date.now()
+        const tick = (): void => {
+          // Stryker disable next-line EqualityOperator: one poll later is the same wait to a caller measured in polls.
+          if (stopped() || Date.now() - started >= wait) resolve()
+          else setTimeout(tick, 25)
+        }
+        setTimeout(tick, Math.min(25, wait))
+      })
     }
   }
   if (stopped()) return null
@@ -83,6 +91,8 @@ export async function readRole(
   return null
 }
 
+/** The peer port, for capabilities that declared `requires: ["peer"]`.
+ *  Null before `peer.start` ran, and outside the Tauri app. */
 export function peerPort(): PeerPort | null {
   return port
 }
@@ -156,6 +166,13 @@ export function personPortOver(held: PeerWire): PersonPort {
     restore: (words) => held.personRestore(words),
     forget: () => held.personForget(),
     people: () => held.circlePeople(),
+    /* ⚠️ **THE ROSTER'S SIZE, READ FROM THE ROSTER — WI-23.A3.** `circle`
+       used to answer a hardcoded 1 here, which showed the custody marker to a
+       reader with three devices. `circleMine` carries the roster this device
+       presents, this device included; a reader with no identity has no roster
+       and is not at risk of losing one, so 0 is the honest count and the
+       marker does not read it. */
+    devices: async () => (await held.circleMine())?.roster.length ?? 0,
     remember: (person, name) => held.circleRemember(person, name),
     forgetPerson: (person) => held.circleForget(person),
     introduce: (device, addrs) => held.circleIntroduce(device, addrs),
@@ -189,6 +206,8 @@ export interface PersonPort {
   restore(words: string): Promise<string>
   forget(): Promise<void>
   people(): Promise<readonly KnownPerson[]>
+  /** How many of this reader's OWN devices the roster carries, this one included. */
+  devices(): Promise<number>
   remember(person: string, displayName: string): Promise<void>
   forgetPerson(person: string): Promise<void>
   /**
@@ -314,6 +333,8 @@ export interface PeerResources {
   model: DevicesModel | null
   serviceHost: Disposable | null
   devicePort: Disposable | null
+  /** The kernel's hash port, bound while the plugin is there — BLAKE3 in Rust (WI-23.C5). */
+  hashPort: Disposable | null
 }
 
 /**
@@ -329,14 +350,24 @@ export function releasePeer(held: PeerResources, diagnostics: { warn: (event: st
     try {
       fn()
     } catch (error) {
-      diagnostics.warn('peer.teardown-step-failed', {
-        label,
-        message: error instanceof Error ? error.message : String(error),
-      })
+      /* The report itself is guarded: a diagnostics port that throws must
+         not rob the steps after this one either. */
+      try {
+        diagnostics.warn('peer.teardown-step-failed', {
+          label,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      } catch {
+        /* Nothing left to tell it to. */
+      }
     }
   }
-  step('service-host', () => held.serviceHost?.dispose())
+  /* In REVERSE order of acquisition — `start` binds the model, then the
+     service host, then the device port — so the device port goes first. The
+     test that pinned the other order named it reverse and was not. */
+  step('hash-port', () => held.hashPort?.dispose())
   step('device-port', () => held.devicePort?.dispose())
+  step('service-host', () => held.serviceHost?.dispose())
   step('devices-model', () => held.model?.dispose())
 }
 
@@ -396,7 +427,8 @@ export const peer: Capability = {
      * `createDevicesModel` that throws leaves no live port behind. And it
      * clears the MODULE slots only while it still owns them — an overlapping
      * restart's newer instances are not this stop's to destroy. */
-    const held: PeerResources = { port: null, model: null, serviceHost: null, devicePort: null }
+    // Stryker disable next-line ObjectLiteral: every field is null until acquired; `releasePeer` reads them by name.
+    const held: PeerResources = { port: null, model: null, serviceHost: null, devicePort: null, hashPort: null }
     let stopped = false
     const stop = () => {
       if (stopped) return
@@ -438,6 +470,10 @@ export const peer: Capability = {
      * see what is paired". */
     if (held.port) {
       held.devicePort = api.services.bindDevicePort(devicePortOver(held.port))
+      /* Captured, not re-read: a port the run no longer holds must not answer through the slot. */
+      const port = held.port
+      // Stryker disable next-line all: wiring — the plugin's hash handed to the kernel's slot; `services.ports.test.ts` holds the slot and the plugin its hash.
+      held.hashPort = api.services.bindHashPort({ hashFile: (folder, name) => port.hashFile(folder, name) })
     }
 
     api.diagnostics.info('peer.started', { available: held.port !== null })

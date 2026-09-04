@@ -707,7 +707,12 @@ export function App({
       if (imports.busy) setImportNotice('That replaced the import already running.')
       imports.supersede()
 
-      if (picked.length > 1 && fs) {
+      /* Whether this intake was still the current one when it finished — a
+         superseded one must not open its book over the one asked for since.
+         The hook's answer, taken once the settle is over; a single pick runs
+         nothing and is current by construction. */
+      const current = await (async (): Promise<boolean> => {
+        if (!(picked.length > 1 && fs)) return true
         const bytes = fs
         /* THE LIFECYCLE IS `useImportRun`'s — the token, the signal, the
          * progress bar, the handover chained one batch behind the copying, the
@@ -715,7 +720,9 @@ export function App({
          * All six were written out here AND in the folder route, and had
          * already drifted apart in three separate ways. What is left below is
          * the WORK: copy each picked file, and say what happened to it. */
-        await imports.run(
+        /* Asked again once the settle is over: a drop landing during the shelf
+           writes supersedes this run after the work last looked. */
+        return imports.run(
           async (run) => {
             const outcomes: ImportOutcome[] = []
             for (const [index, { file, path }] of picked.entries()) {
@@ -749,7 +756,8 @@ export function App({
             },
           },
         )
-      }
+      })()
+      if (!current) return
       openBook(opening.file, opening.path)
     },
     [openBook, fs, imports],
@@ -1049,16 +1057,23 @@ export function App({
      newer one's rows. A counter settles it without the caller having to
      remember a cleanup it has nowhere to put. */
   const trashScan = useRef(0)
-  const readTrash = useCallback(() => {
+  /**
+   * Read the trash into state. `done` settles once the rows are set or the
+   * failure recorded — a restore awaits it, so its row is not re-enabled over
+   * a list that has not caught up and offered for a second restore. `cancel`
+   * is the effect's cleanup; `trashScan` is what stops a superseded read from
+   * answering either way.
+   */
+  const scanTrash = useCallback((): { readonly done: Promise<void>; readonly cancel: () => void } => {
     if (!fs) {
       setTrashRows([])
       setTrashError(null)
-      return
+      return { done: Promise.resolve(), cancel: () => {} }
     }
     const scan = ++trashScan.current
     let live = true
     setTrashError(null)
-    void listTrash(fs)
+    const done = listTrash(fs)
       .then((rows) => {
         if (!live || scan !== trashScan.current) return
         /* Newest first — the book a reader came here for is the one they just
@@ -1074,10 +1089,14 @@ export function App({
         setTrashRows([])
         setTrashError(thrown instanceof Error ? thrown.message : String(thrown))
       })
-    return () => {
-      live = false
+    return {
+      done,
+      cancel: () => {
+        live = false
+      },
     }
   }, [fs])
+  const readTrash = useCallback(() => scanTrash().cancel, [scanTrash])
 
   useEffect(() => {
     if (!state.trashOpen) return
@@ -1112,16 +1131,16 @@ export function App({
         .catch((thrown: unknown) => {
           setRestoreError(thrown instanceof Error ? thrown.message : String(thrown))
         })
-        .finally(() => {
+        .finally(() =>
           /* The shelf learns about the restore itself through the library
-             subscription; this is only the trash list catching up. The
-             cleanup is discarded on purpose — `trashScan` is what stops a
-             superseded read from answering, and there is nowhere here to hang
-             an unsubscribe. */
-          void readTrash()
-        })
+             subscription; this is only the trash list catching up — AWAITED,
+             so the row is re-enabled over the list as it is now, not the list
+             as it was. `trashScan` is what stops a superseded read from
+             answering; there is nowhere here to hang the cleanup. */
+          scanTrash().done,
+        )
     },
-    [services.library, readTrash],
+    [services.library, scanTrash],
   )
 
   /**
@@ -1147,7 +1166,11 @@ export function App({
     let live = true
     void readBook(fs, bookId)
       .then((record) => {
-        if (live) setResumeAt({ bookId, position: record?.position ?? null })
+        /* A record that is not there, or will not read, is `null` from
+           `readBook` — and a null resume here suppressed the row's cached
+           position, which is the better answer. Only a record that was read
+           speaks. */
+        if (live && record) setResumeAt({ bookId, position: record.position ?? null })
       })
       .catch(() => {
         // The row's value stands. A record that will not read is a book that is
@@ -1958,6 +1981,7 @@ export function App({
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}
             onMarkFocusDone={marking.clearFocus}
+            markControls={composition.markControls}
             selection={marking.selection?.text ?? null}
             /* The one place the app decides what the companion is — and this
                IS the line the old comment said would change when a provider
@@ -2113,6 +2137,12 @@ export function App({
                 platform={platform}
                 id={state.screen}
                 {...(shown === undefined ? {} : { render: shown.render })}
+                /* By id, because a screen knows a book by its id and nothing
+                   else; the row is looked up here, where the shelf is. */
+                openBook={(bookId) => {
+                  const entry = library.books.find((one) => one.bookId === bookId)
+                  if (entry) openStored(entry)
+                }}
               />
             )
           })()}

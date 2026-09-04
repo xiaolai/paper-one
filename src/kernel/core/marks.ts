@@ -21,6 +21,7 @@
 
 import { compare } from 'foliate-js/epubcfi.js'
 import { identityParts } from './contentIdentity'
+import { MAX_RECORD_FIELD, MAX_RECORD_POSITION } from './bookFolder'
 import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
 import type { ResolvedCfi } from './resolvedCfi'
 
@@ -249,7 +250,6 @@ export interface Mark {
 /** A mark being created — the store assigns identity and time. */
 export type NewMark = Omit<Mark, 'id' | 'createdAt'>
 
-export const MARKS_STORAGE_KEY = 'paper.marks.v1'
 
 /**
  * Stable identity for a book across sessions.
@@ -413,6 +413,17 @@ export function liveMarks(marks: readonly Mark[]): readonly Mark[] {
  * two views of it in the code.
  */
 export type Annotation = Mark & { readonly kind: AnnotationKind }
+/**
+ * The reader's OWN mark on the text — the one kind a mark control is offered
+ * on. A companion annotation is a claim somebody else's model made, and a
+ * control that shares "what I marked" must not be handed one as though the
+ * reader had; the type says so where the row's `kind` check used to.
+ */
+export type Highlight = Annotation & { readonly kind: 'highlight' }
+
+export function isHighlight(mark: Annotation): mark is Highlight {
+  return mark.kind === 'highlight'
+}
 export type Bookmark = Mark & { readonly kind: (typeof BOOKMARK_KINDS)[number] }
 
 /**
@@ -607,7 +618,9 @@ export function mergeMarks(a: readonly Mark[], b: readonly Mark[]): readonly Mar
       continue
     }
     const winner = laterMark(held, incoming)
-    if (winner !== held && JSON.stringify(winner) !== JSON.stringify(held)) {
+    /* A winner that is not `held` differs from it: `laterMark` keeps `held`
+       at a tie of stamp and serialization. */
+    if (winner !== held) {
       byId.set(incoming.id, winner)
       changed = true
     }
@@ -726,9 +739,14 @@ export function updateNote(
   note: string,
   at: Hlc = hlcOf(Date.now()),
 ): readonly Mark[] {
-  return marks.some((mark) => mark.id === id && mark.deletedAt === undefined && mark.note !== note)
+  /* CUT HERE, AT THE WRITE. `validMarks` cuts a note to `MAX_MARK_NOTE` on
+     every read, so a longer one written whole would be kept whole on disk
+     and lose its tail the next time the file was read — a silent loss the
+     editor never showed. The cut the reader sees is the cut the file keeps. */
+  const kept = cutAt(note, MAX_MARK_NOTE)
+  return marks.some((mark) => mark.id === id && mark.deletedAt === undefined && mark.note !== kept)
     ? marks.map((mark) =>
-        mark.id === id && mark.deletedAt === undefined ? { ...mark, note, updatedAt: at } : mark,
+        mark.id === id && mark.deletedAt === undefined ? { ...mark, note: kept, updatedAt: at } : mark,
       )
     : marks
 }
@@ -994,9 +1012,16 @@ function isMark(value: unknown): value is StoredMark {
   return (
     typeof m['id'] === 'string' &&
     m['id'] !== '' &&
+    /* BOUNDED LIKE THE RECORD'S OWN FIELDS: an id, a book, a chapter title
+       and a position that a peer or a stale store hands over are held to the
+       limits `bookFolder.ts` holds a record to, so a row cannot outgrow the
+       wire that carries it. */
+    m['id'].length <= MAX_RECORD_FIELD &&
     typeof m['bookId'] === 'string' &&
     m['bookId'] !== '' &&
+    m['bookId'].length <= MAX_RECORD_FIELD &&
     typeof m['cfi'] === 'string' &&
+    m['cfi'].length <= MAX_RECORD_POSITION &&
     /* ⚠️ EMPTY ONLY WITH AN EXPLICIT `unplaced` BESIDE IT (WI-21.7). The
        original refusal is unchanged in spirit — an anchorless mark nobody
        meant still corrupts the list — and what is admitted is the mark that
@@ -1004,7 +1029,7 @@ function isMark(value: unknown): value is StoredMark {
        reason is still dropped. */
     (m['cfi'] !== '' || readUnplaced(m['unplaced']) !== undefined) &&
     typeof m['sectionIndex'] === 'number' &&
-    Number.isInteger(m['sectionIndex']) &&
+    Number.isSafeInteger(m['sectionIndex']) &&
     m['sectionIndex'] >= 0 &&
     typeof m['text'] === 'string' &&
     typeof m['note'] === 'string' &&
@@ -1015,6 +1040,7 @@ function isMark(value: unknown): value is StoredMark {
      * silently, because `validMarks` filters rather than throws. */
     MARK_KINDS.includes(m['kind'] as MarkKind) &&
     typeof m['chapter'] === 'string' &&
+    m['chapter'].length <= MAX_RECORD_FIELD &&
     typeof m['createdAt'] === 'number' &&
     Number.isFinite(m['createdAt']) &&
     m['createdAt'] >= 0
@@ -1047,11 +1073,25 @@ function readUnplaced(value: unknown): UnplacedMark | undefined {
   if (row['reason'] !== 'foreign-build') return undefined
   const fromBook = row['fromBook']
   if (typeof fromBook !== 'string' || fromBook === '') return undefined
-  return { reason: 'foreign-build', fromBook: fromBook.slice(0, 200) }
+  return { reason: 'foreign-build', fromBook: cutAt(fromBook, 200) }
+}
+
+/**
+ * The first `max` UTF-16 units of a string, never ending on a lone high
+ * surrogate: a pair split in two is a character the reader never wrote, and
+ * one that no longer round-trips through the wire's canonical JSON. The bound
+ * stays in UTF-16 units — the service table's — so what is cut here is what
+ * the table would have refused.
+ */
+function cutAt(value: string, max: number): string {
+  if (value.length <= max) return value
+  const cut = value.slice(0, max)
+  const last = cut.charCodeAt(cut.length - 1)
+  return last >= 0xd8_00 && last <= 0xdb_ff ? cut.slice(0, -1) : cut
 }
 
 function readContext(value: unknown): string {
-  return typeof value === 'string' ? value.slice(0, MAX_MARK_TEXT) : ''
+  return typeof value === 'string' ? cutAt(value, MAX_MARK_TEXT) : ''
 }
 
 /**
@@ -1139,7 +1179,7 @@ export function validMarks(parsed: unknown): Mark[] {
   if (!Array.isArray(parsed)) return []
   return dedupeById(
     parsed.filter(isMark).map((row) => {
-      const { updatedAt, deletedAt, ...rest } = row
+      const { updatedAt, deletedAt } = row
       /* The stamps, kept only when they ARE stamps — a malformed one is
        * dropped alone, and the mark stands as a legacy row (`markStamp`
        * falls back to `createdAt`). Dropping the whole mark over a bad
@@ -1154,22 +1194,33 @@ export function validMarks(parsed: unknown): Mark[] {
        * answer. A tombstone at or above the edit stays — deleted. */
       const tombstone =
         deleted !== undefined && !(updated !== undefined && updated > deleted) ? deleted : undefined
+      /* WRITTEN FIELD BY FIELD, NOT SPREAD. `...rest` carried every key the
+       * file held — a raw `unplaced` that `readUnplaced` had just refused,
+       * and any key the shape does not know — into memory, the digest and
+       * the wire. What leaves this door is the checked value of each field
+       * the type names, and nothing else. */
       return {
-        ...rest,
+        id: row.id,
+        bookId: row.bookId,
+        cfi: row.cfi,
+        sectionIndex: row.sectionIndex,
+        kind: row.kind,
+        chapter: row.chapter,
+        createdAt: row.createdAt,
         /* THE SAME BOUNDS THE SERVICE TABLE REFUSES AT, applied at the one
          * door stored rows come through. The table refuses an oversized mark
          * on the way in; a peer's `mergeRemote` and a hand-edited file do not
          * pass the table, and a row past the bound made every later answer
          * that carried it too large for the transport. Cut, not dropped: a
          * highlight with an over-long quote is still the reader's highlight. */
-        text: rest.text.slice(0, MAX_MARK_TEXT),
+        text: cutAt(row.text, MAX_MARK_TEXT),
         // Absent for every mark made before context was stored, which is most of
         // them. Empty is the honest reading: there is nothing extra to re-anchor
         // with — NOT a reason to drop a mark the reader made.
         prefix: readContext(row.prefix),
         suffix: readContext(row.suffix),
         tint: readTint(row.tint),
-        note: noteForKind(rest.note.slice(0, MAX_MARK_NOTE), row.kind),
+        note: noteForKind(cutAt(row.note, MAX_MARK_NOTE), row.kind),
         style: styleForKind(readStyle(row.style), row.kind),
         /* RE-VALIDATED HERE TOO, not spread through by `...rest`. `isMark`
            read this to decide whether the empty cfi was legal; the projection
@@ -1233,31 +1284,4 @@ function dedupeById(marks: readonly Mark[]): Mark[] {
 export interface MarkStorage {
   getItem: (key: string) => string | null
   setItem: (key: string, value: string) => void
-}
-
-export function loadMarks(storage: MarkStorage): Mark[] {
-  try {
-    return parseMarks(storage.getItem(MARKS_STORAGE_KEY))
-  } catch {
-    // Safari throws on getItem when storage is disabled entirely.
-    return []
-  }
-}
-
-/**
- * Persist, reporting failure to the caller rather than throwing.
- *
- * Writing can fail for reasons the reader cannot fix — a full quota, private
- * browsing, storage switched off — and none of them should take the reader
- * down mid-highlight. The boolean exists so the caller can tell the user their
- * mark will not survive a reload, which is the honest thing to do and is
- * strictly better than a silent no-op.
- */
-export function saveMarks(storage: MarkStorage, marks: readonly Mark[]): boolean {
-  try {
-    storage.setItem(MARKS_STORAGE_KEY, JSON.stringify(marks))
-    return true
-  } catch {
-    return false
-  }
 }

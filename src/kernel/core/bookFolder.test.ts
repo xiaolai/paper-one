@@ -11,6 +11,7 @@ import {
   folderOf,
   legacyCoverPathIn,
   marksPathIn,
+  MAX_REVIEW,
   mergeParsed,
   mergeStranded,
   parseRecord,
@@ -23,6 +24,17 @@ import {
   type BookRecord,
   updateBook,
   writeBook,
+} from './bookFolder'
+import {
+  CIRCLE_DIR,
+  OWN_LISTS_DIR,
+  OWN_SHELF_PATH,
+  ownListPathIn,
+  personFolderIn,
+  personListPathIn,
+  personListsDirIn,
+  personShelfPathIn,
+  relationshipPathIn,
 } from './bookFolder'
 
 /**
@@ -165,6 +177,27 @@ describe('parseRecord', () => {
     )!
     expect(bad).not.toHaveProperty('contentHash')
     expect(bad).not.toHaveProperty('format')
+  })
+
+  it('keeps well-formed cover facts and drops malformed ones whole — WI-23.C5', () => {
+    const facts = { name: 'cover.jpg', size: 12_345, hash: 'cd'.repeat(32) }
+    expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', coverFacts: facts }))!.coverFacts).toEqual(facts)
+    expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', coverFacts: { ...facts, name: 'cover.webp' } }))!.coverFacts?.name).toBe('cover.webp')
+    expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', coverFacts: { ...facts, size: 0 } }))!.coverFacts?.size).toBe(0)
+    for (const bad of [
+      { ...facts, name: 'content.epub' },
+      { ...facts, size: -1 },
+      { ...facts, size: 1.5 },
+      { ...facts, hash: 'CD'.repeat(32) },
+      { ...facts, hash: 'cd'.repeat(31) },
+      { ...facts, extra: 1 },
+      { name: 'cover.jpg', size: 1 },
+      'cd'.repeat(32),
+      null,
+      [],
+    ]) {
+      expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', coverFacts: bad }))!, JSON.stringify(bad)).not.toHaveProperty('coverFacts')
+    }
   })
 
   it('derives tags from a tagClock when one is present — the clock can say "removed"', () => {
@@ -350,8 +383,15 @@ describe('mergeParsed', () => {
      * so a parse may not touch any of them. */
     positionAt: 'preserve',
     finishedAt: 'preserve',
+    /* The reader's own opinion of the book (WI-23.B3): what they made of it
+       is theirs, and a parse knows nothing about it. */
+    status: 'preserve',
+    rating: 'preserve',
+    ratingAt: 'preserve',
+    review: 'preserve',
     tagClock: 'preserve',
     contentHash: 'preserve',
+    coverFacts: 'preserve',
     format: 'preserve',
     title: 'replace',
     author: 'replace',
@@ -387,10 +427,15 @@ describe('mergeParsed', () => {
     finished: true,
     positionAt: asHlc(`0000000000c8-0000-${'0'.repeat(16)}`),
     finishedAt: asHlc(`0000000000c9-0000-${'0'.repeat(16)}`),
+    status: { state: 'finished', at: asHlc(`0000000000c9-0000-${'0'.repeat(16)}`) },
+    rating: 4,
+    ratingAt: asHlc(`0000000000cb-0000-${'0'.repeat(16)}`),
+    review: { text: 'a whale of a book', at: asHlc(`0000000000cc-0000-${'0'.repeat(16)}`) },
     tagClock: {
       'to reread': { at: asHlc(`0000000000ca-0000-${'0'.repeat(16)}`), on: true, spelling: 'To reread' },
     },
     contentHash: 'ab'.repeat(32),
+    coverFacts: { name: 'cover.jpg', size: 1, hash: 'cd'.repeat(32) },
     format: 'pdf',
     title: 'moby-dick-1851',
     author: '',
@@ -968,5 +1013,192 @@ describe('the work identifier', () => {
     expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: 99 }))?.metaSchema).toBe(META_SCHEMA)
     expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: -1 }))).not.toHaveProperty('metaSchema')
     expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: 'soon' }))).not.toHaveProperty('metaSchema')
+  })
+})
+
+describe('the reader’s own opinion on the record — WI-23.B3', () => {
+  const at = asHlc(`0000000000c9-0000-${'0'.repeat(16)}`)
+  const later = asHlc(`0000000000ca-0000-${'0'.repeat(16)}`)
+  const parse = (over: Record<string, unknown>) => parseRecord(JSON.stringify({ title: 'T', author: 'A', ...over }))!
+
+  it('reads a status, a rating with its stamp, and a review', () => {
+    const record = parse({
+      status: { state: 'reading', at },
+      rating: 4,
+      ratingAt: later,
+      review: { text: 'a whale of a book', at: later },
+    })
+    expect(record.status).toEqual({ state: 'reading', at })
+    expect(record.rating).toBe(4)
+    expect(record.ratingAt).toBe(later)
+    expect(record.review).toEqual({ text: 'a whale of a book', at: later })
+  })
+
+  it('derives `finished` from the status whenever there is one, whatever the file stored', () => {
+    /* ⚠️ THE TWO CANNOT DISAGREE ON A READ. A file holding `finished: false`
+       beside `status: finished` — or the reverse — answers what the status
+       says, because the status is the register that carries the decision. */
+    expect(parse({ status: { state: 'finished', at }, finished: false }).finished).toBe(true)
+    expect(parse({ status: { state: 'reading', at }, finished: true }).finished).toBe(false)
+    expect(parse({ status: { state: 'want', at } }).finished).toBe(false)
+    /* And a record with no status keeps what it stored — the legacy case. */
+    expect(parse({ finished: true }).finished).toBe(true)
+    expect(parse({ finished: true })).not.toHaveProperty('status')
+    /* A `finished` that is not a boolean is dropped, as it always was. */
+    expect(parse({ finished: 'yes' })).not.toHaveProperty('finished')
+  })
+
+  it('drops a status that is not whole — one row per clause', () => {
+    const bad: readonly (readonly [string, unknown])[] = [
+      ['a string', 'reading'],
+      ['null', null],
+      ['an array', ['reading', at]],
+      ['a state this build does not know', { state: 'abandoned', at }],
+      ['a state that is a number', { state: 1, at }],
+      ['no stamp', { state: 'reading' }],
+      ['a stamp that is not one', { state: 'reading', at: 'yesterday' }],
+    ]
+    for (const [what, status] of bad) {
+      expect(parse({ status, finished: true }), what).not.toHaveProperty('status')
+      /* Without a status, `finished` is what the file stored. */
+      expect(parse({ status, finished: true }).finished, what).toBe(true)
+    }
+  })
+
+  it('drops a rating that is not one of the five stars, and its stamp alone when that is bad', () => {
+    for (const rating of [0, 6, 1.5, '4', null, -1, Number.NaN]) {
+      expect(parse({ rating, ratingAt: at }), String(rating)).not.toHaveProperty('rating')
+    }
+    for (const stars of [1, 2, 3, 4, 5]) expect(parse({ rating: stars }).rating).toBe(stars)
+    const stamped = parse({ rating: 3, ratingAt: 'yesterday' })
+    expect(stamped.rating).toBe(3)
+    expect(stamped).not.toHaveProperty('ratingAt')
+  })
+
+  it('keeps an empty review — a review taken back — and drops one past the bound rather than cutting it', () => {
+    expect(parse({ review: { text: '', at } }).review).toEqual({ text: '', at })
+    expect(parse({ review: { text: 'x'.repeat(MAX_REVIEW), at } }).review?.text).toHaveLength(MAX_REVIEW)
+    expect(parse({ review: { text: 'x'.repeat(MAX_REVIEW + 1), at } })).not.toHaveProperty('review')
+    for (const review of ['words', null, ['words', at], { text: 1, at }, { text: 'words' }, { text: 'words', at: 'yesterday' }]) {
+      expect(parse({ review }), JSON.stringify(review)).not.toHaveProperty('review')
+    }
+  })
+
+  it('survives a re-parse of the book, as the tags do', () => {
+    const previous = parse({ status: { state: 'reading', at }, rating: 5, ratingAt: at, review: { text: 'r', at } })
+    const fresh = parse({ title: 'Moby-Dick', parsedAt: 9 })
+    const merged = mergeParsed(previous, fresh)
+    expect(merged.status).toEqual({ state: 'reading', at })
+    expect(merged.rating).toBe(5)
+    expect(merged.ratingAt).toBe(at)
+    expect(merged.review).toEqual({ text: 'r', at })
+    expect(merged.title).toBe('Moby-Dick')
+  })
+
+  it('takes the live side’s opinion in a trash rescue, and the stranded side’s when the live one has none', () => {
+    const stranded = parse({ status: { state: 'want', at }, rating: 2, ratingAt: at, review: { text: 'old', at } })
+    const live = parse({ status: { state: 'finished', at: later }, rating: 5, ratingAt: later })
+    const rescued = mergeStranded(stranded, live)
+    expect(rescued.status).toEqual({ state: 'finished', at: later })
+    expect(rescued.rating).toBe(5)
+    expect(rescued.ratingAt).toBe(later)
+    expect(rescued.review).toEqual({ text: 'old', at })
+    const silent = mergeStranded(stranded, parse({}))
+    expect(silent.status).toEqual({ state: 'want', at })
+    expect(silent.rating).toBe(2)
+    expect(silent.ratingAt).toBe(at)
+  })
+})
+
+describe('where the circle’s files live — WI-23.C3 and E1', () => {
+  it('names each path under the circle folder, one segment per id, and never a book folder', () => {
+    const person = 'ab'.repeat(32)
+    expect(CIRCLE_DIR).toBe('circle')
+    expect(OWN_SHELF_PATH).toBe('circle/shelf.json')
+    expect(personFolderIn(person)).toBe(`circle/${person}`)
+    expect(personShelfPathIn(person)).toBe(`circle/${person}/shelf.json`)
+    expect(relationshipPathIn(person)).toBe(`circle/${person}/relationship.json`)
+    expect(OWN_LISTS_DIR).toBe('circle/lists')
+    expect(ownListPathIn('aa11')).toBe('circle/lists/aa11.json')
+    expect(personListsDirIn(person)).toBe(`circle/${person}/lists`)
+    expect(personListPathIn(person, 'aa11')).toBe(`circle/${person}/lists/aa11.json`)
+    /* A hostile id stays inside its one segment. */
+    expect(personFolderIn('../books').split('/')).toHaveLength(2)
+    expect(ownListPathIn('../x').split('/')).toHaveLength(3)
+    expect(personListPathIn('p/q', 'r/s').split('/')).toHaveLength(4)
+  })
+})
+
+describe('the reader’s own opinion through the two merges — WI-23.B3, one row each', () => {
+  const opinion = () => ({ status: { state: 'reading' as const, at: hlcOf(1) }, rating: 4 as const, ratingAt: hlcOf(2), review: { text: 'r', at: hlcOf(3) } })
+
+  it('carries each register through a re-parse only when the previous record has it', () => {
+    const kept = mergeParsed(book(opinion()), book({ title: 'Corrected' }))
+    expect(kept.status).toEqual(opinion().status)
+    expect(kept.rating).toBe(4)
+    expect(kept.ratingAt).toBe(hlcOf(2))
+    expect(kept.review).toEqual(opinion().review)
+    const bare = mergeParsed(book({}), book({ title: 'Corrected' }))
+    for (const key of ['status', 'rating', 'ratingAt', 'review']) expect(key in bare).toBe(false)
+  })
+
+  it('takes the rating from the live record first, with its stamp only when it has one, then from the stranded one', () => {
+    const live = mergeStranded(book({ rating: 2, ratingAt: hlcOf(9) }), book({ rating: 5, ratingAt: hlcOf(1) }))
+    expect([live.rating, live.ratingAt]).toEqual([5, hlcOf(1)])
+    const unstamped = mergeStranded(book({ rating: 2, ratingAt: hlcOf(9) }), book({ rating: 5 }))
+    expect(unstamped.rating).toBe(5)
+    expect('ratingAt' in unstamped).toBe(false)
+    const stranded = mergeStranded(book({ rating: 2, ratingAt: hlcOf(9) }), book({}))
+    expect([stranded.rating, stranded.ratingAt]).toEqual([2, hlcOf(9)])
+    const strandedUnstamped = mergeStranded(book({ rating: 2 }), book({}))
+    expect(strandedUnstamped.rating).toBe(2)
+    expect('ratingAt' in strandedUnstamped).toBe(false)
+    expect('rating' in mergeStranded(book({}), book({}))).toBe(false)
+  })
+
+  it('does the same for the status and the review: the live one, else the stranded one, else no key at all', () => {
+    const liveStatus = { state: 'finished' as const, at: hlcOf(5) }
+    const strandedStatus = { state: 'want' as const, at: hlcOf(1) }
+    const liveReview = { text: 'live', at: hlcOf(5) }
+    const strandedReview = { text: 'stranded', at: hlcOf(1) }
+    const both = mergeStranded(book({ status: strandedStatus, review: strandedReview }), book({ status: liveStatus, review: liveReview }))
+    expect(both.status).toEqual(liveStatus)
+    expect(both.review).toEqual(liveReview)
+    const fallback = mergeStranded(book({ status: strandedStatus, review: strandedReview }), book({}))
+    expect(fallback.status).toEqual(strandedStatus)
+    expect(fallback.review).toEqual(strandedReview)
+    const neither = mergeStranded(book({}), book({}))
+    expect('status' in neither).toBe(false)
+    expect('review' in neither).toBe(false)
+    const liveOnly = mergeStranded(book({}), book({ status: liveStatus, review: liveReview }))
+    expect(liveOnly.status).toEqual(liveStatus)
+    expect(liveOnly.review).toEqual(liveReview)
+  })
+})
+
+describe('finished follows the status that wins the merge', () => {
+  it('is true for a finished status, false for any other status whatever the old flags said, and the old OR without a status', () => {
+    const finished = { state: 'finished' as const, at: hlcOf(5) }
+    const reading = { state: 'reading' as const, at: hlcOf(5) }
+    expect(mergeStranded(book({ finished: true }), book({ status: reading })).finished).toBeUndefined()
+    expect(mergeStranded(book({ status: reading, finished: true }), book({})).finished).toBeUndefined()
+    expect(mergeStranded(book({}), book({ status: finished })).finished).toBe(true)
+    expect(mergeStranded(book({ status: finished }), book({ status: reading })).finished).toBeUndefined()
+    expect(mergeStranded(book({ finished: true }), book({})).finished).toBe(true)
+    expect(mergeStranded(book({}), book({ finished: true })).finished).toBe(true)
+    expect(mergeStranded(book({}), book({})).finished).toBeUndefined()
+  })
+})
+
+describe('the tag register cap', () => {
+  const full = (count: number) => ({
+    title: 'T',
+    author: '',
+    tagClock: Object.fromEntries(Array.from({ length: count }, (_, i) => [`t${i}`, { at: hlcOf(1), on: true, spelling: `t${i}` }])),
+  })
+  it('refuses a NEW register at the cap, keeps an existing one, and takes a new one just under it', () => {
+    expect(() => setTag(full(4096) as never, 'brand-new', true, hlcOf(2))).toThrow(/at most 4096 tag registers/u)
+    expect(() => setTag(full(4096) as never, 't0', false, hlcOf(2))).not.toThrow()
+    expect(() => setTag(full(4095) as never, 'brand-new', true, hlcOf(2))).not.toThrow()
   })
 })

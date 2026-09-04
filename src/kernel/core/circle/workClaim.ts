@@ -96,6 +96,7 @@ export type WorkMatch = 'strong' | 'weak' | 'none'
  */
 export function primaryLanguage(tag: string | undefined): string {
   if (!tag) return ''
+  /* Stryker disable next-line StringLiteral: `split` always yields a first element, so the fallback is for the type. */
   const first = tag.trim().toLowerCase().split(/[-_]/u)[0] ?? ''
   return /^[a-z]{2,3}$/u.test(first) ? first : ''
 }
@@ -123,10 +124,11 @@ export function normaliseName(value: string | undefined): string {
        become one word while "rock 'n' roll" stays three. */
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
-  const withoutArticle = folded.replace(/^(?:the|a|an)\s+/u, '')
-  /* An article-only title is still a title. Dropping it to '' would make every
-     such book match every other one on the weak key. */
-  return withoutArticle === '' ? folded : withoutArticle
+  /* An article-only title is still a title: `folded` is trimmed, so an
+     article is dropped only when a word follows it, and "The" stays "the"
+     rather than becoming '' and matching every other such book on the weak
+     key. One space, because the fold above collapsed every run to one. */
+  return folded.replace(/^(?:the|a|an) /u, '')
 }
 
 /**
@@ -159,9 +161,11 @@ export function titleProper(raw: string | undefined): string {
    * run". */
   if (!raw) return ''
   const cut = raw.search(/[;:]/u)
-  const head = cut <= 0 ? raw : raw.slice(0, cut)
+  /* Stryker disable next-line EqualityOperator: a separator at the very start cuts to '', and the fallback below reads the whole title then, as the other branch would. */
+  const head = cut < 0 ? raw : raw.slice(0, cut)
   const folded = normaliseName(head)
-  /* A title that is nothing but a separator keeps its whole self. */
+  /* A title that starts with a separator, or is nothing but one, keeps its
+     whole self. */
   return folded === '' ? normaliseName(raw) : folded
 }
 
@@ -196,7 +200,10 @@ export function claimFor(book: ClaimSource, digest: (value: string) => string): 
   return {
     ids: key ? [digest(key.key)] : [],
     titles: spellings.map(digest),
-    author: digest(normaliseName(book.author)),
+    /* ABSENT STAYS ABSENT. Hashing the empty name gave every authorless book
+       one author, and two books with the same title and no author then met
+       on the weak key as though they agreed about who wrote them. */
+    author: normaliseName(book.author) === '' ? '' : digest(normaliseName(book.author)),
     language: primaryLanguage(book.languages?.[0]),
   }
 }
@@ -212,8 +219,14 @@ export function claimFor(book: ClaimSource, digest: (value: string) => string): 
  * book; only the fallback is withheld.
  */
 export function matchWork(a: WorkClaim, b: WorkClaim): WorkMatch {
+  /* ⚠️ **A SHARED IDENTIFIER DOES NOT BRIDGE TWO LANGUAGES.** The header
+     names the case: *Moby-Dick* and its Chinese translation share a title, an
+     author and often an identifier, and share no passages at all. A strong
+     match needs the languages to agree — or one of them to be silent, which
+     is a book that has said nothing, not a book that disagrees. */
+  if (a.language !== '' && b.language !== '' && a.language !== b.language) return 'none'
   for (const id of a.ids) if (b.ids.includes(id)) return 'strong'
-  if (a.language === '' || a.language !== b.language || a.author !== b.author) return 'none'
+  if (a.language === '' || a.language !== b.language || a.author === '' || a.author !== b.author) return 'none'
   return a.titles.some((title) => b.titles.includes(title)) ? 'weak' : 'none'
 }
 
@@ -232,3 +245,46 @@ export function indexKeys(claim: WorkClaim): readonly string[] {
       : claim.titles.map((title) => `w:${claim.language}:${title}:${claim.author}`)
   return [...claim.ids.map((id) => `s:${id}`), ...weak]
 }
+
+/**
+ * The claim the SHELF log is served under — WI-23.C1.
+ *
+ * ⚠️ **A RESERVED CLAIM, NOT A WORK.** The shelf is one log per person rather
+ * than per work, but a page carries a claim and is signed over it; this is
+ * the one claim `circle.shelf` answers under and `takePages` files a shelf
+ * page against. It can meet no real book: a book's ids are digests, sixty-four
+ * hex characters, and this one is a word — so `bookVia` never lands a shelf
+ * page in a book's folder, and a per-work page can never be passed off as
+ * the shelf.
+ */
+export const SHELF_WORK: WorkClaim = { ids: ['paper.circle.shelf'], titles: [], author: '', language: '' }
+
+/** The prefix a list's reserved claim carries — see `listWork`. */
+const LIST_CLAIM = 'paper.circle.list:'
+
+/**
+ * The claim a LIST's log is served under — WI-23.E1. Reserved like
+ * `SHELF_WORK`, and for its reasons; one per list, so `circle.lists` can
+ * answer pages for several lists in one call and the recipient files each
+ * under the id its claim names.
+ */
+export function listWork(listId: string): WorkClaim {
+  /* The same rule `listIdOf` reads by, so the two are a round trip: a claim
+     built from a name no file should have is refused here, not served. */
+  if (!LIST_ID.test(listId)) throw new Error(`list id ${JSON.stringify(listId)} is not a list id`)
+  return { ids: [`${LIST_CLAIM}${listId}`], titles: [], author: '', language: '' }
+}
+
+/** The list id a claim names, or `null` for a claim that is not a list's. */
+export function listIdOf(claim: WorkClaim): string | null {
+  const id = claim.ids.length === 1 ? claim.ids[0] : undefined
+  if (id === undefined || !id.startsWith(LIST_CLAIM)) return null
+  const listId = id.slice(LIST_CLAIM.length)
+  /* The same shape a lists request accepts: a minted `pub`, hex, bounded —
+     so a claim from a page cannot name a list a request could not ask for,
+     nor one whose id is a path. */
+  return LIST_ID.test(listId) ? listId : null
+}
+
+/** A list id as `mintPub` spells one — and as `parseListsRequest` accepts one. */
+export const LIST_ID = /^[0-9a-f]{1,64}$/u

@@ -243,6 +243,55 @@ const REVIEWED_FOOTPRINT = [
   'circle/lib/publish.ts atomicWrite(fs, sharedPathIn(bookId))',
   'circle/lib/store.ts atomicWrite(fs, circlePathIn(bookId, person))',
   'circle/lib/store.ts fs.remove(path)',
+  /* ⚠️ **THE FIRST CIRCLE FILES OUTSIDE A BOOK — WI-23.C1 and C3, and this
+     entry is the review the plan says the gate exists for.** Three shapes,
+     all under `circle/`, which is the capability's own namespace and the one
+     place `scopeFs` lets it write without a reviewed exception:
+
+      - `circle/shelf.json` (`OWN_SHELF_PATH`) — the reader's OWN shelf as
+        PUBLISHED: one row per book, in clear, with the boundaries of the pages
+        served from it. Nothing about another reader lives in it.
+      - `circle/<person>/shelf.json` (`personShelfPathIn`) — a friend's shelf,
+        as fetched. About books the reader may not have, so it cannot live in
+        a book's folder; the person id goes through `safeId` exactly as the
+        per-book file's does.
+      - `circle/<person>/relationship.json` (`relationshipPathIn`) — the
+        reader's own decisions about a person: the WI-22.E1 record, and the
+        shelf switch (WI-23.C2). Read-merge-written by `changedAt`.
+
+     And ONE delete: `purgePerson` removes `circle/<person>/` whole — the
+     shelf and the relationship together — after the per-book files, which is
+     `relationships.md` §"Retained data" for a person who has been removed. It
+     can name no other directory: the path is built by the same helper. */
+  'circle/lib/relationships.ts atomicWrite(fs, path)',
+  'circle/lib/relationships.ts fs.removeDir(folder)',
+  'circle/lib/shelf.ts atomicWrite(fs, OWN_SHELF_PATH)',
+  /* ONE writer for both of a person's files — `writePersonFile(path)` —
+     shelf and list alike, so the path is a parameter here; the two callers
+     build it with `personShelfPathIn` and `personListPathIn` and nothing
+     else reaches it. */
+  'circle/lib/store.ts atomicWrite(fs, path)',
+  /* WI-23.E1 — lists, under the same namespace and the same rule:
+      - `circle/lists/<listId>.json` (`ownListPathIn`) — the reader's OWN
+        list as published, `readOwnShelf`'s twin.
+      - `circle/<person>/lists/<listId>.json` (`personListPathIn`) — one of a
+        friend's lists, purged with the person's folder. */
+  'circle/lib/lists.ts atomicWrite(fs, ownListPathIn(listId))',
+  /* WI-23.C5 — a friend's JACKETS, verified and kept under the person:
+      - `circle/<person>/covers/<digest>` (`coverPathOf`) — one verified jacket,
+        named by its BLAKE3 digest and nothing else; removed by the LRU below
+        and, with the person's folder, by `purgePerson`.
+      - `circle/covers.json` (`COVER_INDEX_PATH`) — the LRU index over every
+        kept jacket: size and last use, so the cap can evict the least recently
+        drawn.
+     The `mkdir` makes `circle/<person>/covers/` before the first jacket lands.
+     The `remove` is the LRU's eviction, and it removes only the paths the
+     index names — which are only ever `coverPathOf` paths. Nothing here
+     touches a book's folder. */
+  'circle/lib/covers.ts atomicWrite(fs, COVER_INDEX_PATH)',
+  'circle/lib/covers.ts fs.mkdir()',
+  'circle/lib/covers.ts fs.remove(coverPathOf(key.slice(0, cut), key.slice(cut + 1)))',
+  'circle/lib/covers.ts fs.writeFile(path)',
 
   /* -- the kernel handles sync holds -- */
   // `start` takes the fs for the journal, the cover cache and the downloads

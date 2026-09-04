@@ -11,7 +11,7 @@ import {
   type Card,
   type Mark,
 } from '../../../kernel'
-import { hlcOf, makeHlc } from './clock'
+import { asHlc, hlcOf, makeHlc } from './clock'
 import {
   canonicalJson,
   cardsDigest,
@@ -81,6 +81,16 @@ const arbRecord: fc.Arbitrary<BookRecord> = fc
       positionAt: fc.option(arbHlc, { nil: undefined }),
       finished: fc.option(fc.boolean(), { nil: undefined }),
       finishedAt: fc.option(arbHlc, { nil: undefined }),
+      /* The reader's own opinion (WI-23.B3): three registers, in the
+         property net with everything else so the semilattice is proven over
+         them rather than assumed. */
+      status: fc.option(
+        fc.record({ state: fc.constantFrom('want', 'reading', 'finished'), at: arbHlc }),
+        { nil: undefined },
+      ),
+      rating: fc.option(fc.constantFrom(1, 2, 3, 4, 5), { nil: undefined }),
+      ratingAt: fc.option(arbHlc, { nil: undefined }),
+      review: fc.option(fc.record({ text: fc.constantFrom('', 'a whale of a book'), at: arbHlc }), { nil: undefined }),
       addedAt: fc.option(fc.integer({ min: 0, max: 2_000_000 }), { nil: undefined }),
       openedAt: fc.option(fc.integer({ min: 0, max: 2_000_000 }), { nil: undefined }),
       parsedAt: fc.option(fc.integer({ min: 0, max: 2_000_000 }), { nil: undefined }),
@@ -444,6 +454,7 @@ describe('the wire', () => {
         expect(wire).not.toHaveProperty('ext')
         expect(wire).not.toHaveProperty('keepContent')
         expect(wire).not.toHaveProperty('hasContent')
+        expect(wire).not.toHaveProperty('coverFacts')
         // format travels; ext does not.
         if (record.format) expect(wire.format).toBe(record.format)
         // And a peer ASSERTING one inbound is stripped on arrival.
@@ -653,5 +664,84 @@ describe('the work identifier, replicated', () => {
        more — which is exactly what a version range exists to prevent. */
     expect([undefined, 'urn:isbn:9780142437247']).toContain(echoed.identifier)
     expect(mergeRecord(mine, stripped)).toEqual(mergeRecord(stripped, mine))
+  })
+})
+
+describe('the reader’s own opinion — WI-23.B3', () => {
+  const t = (n: number) => asHlc(`${n.toString(16).padStart(12, '0')}-0000-${'0'.repeat(16)}`)
+  const base = parseRecord(JSON.stringify({ title: 'T', author: 'A' }))!
+
+  it('merges each register by its own stamp, whole', () => {
+    const mine: BookRecord = { ...base, rating: 3, ratingAt: t(10), review: { text: 'first', at: t(10) } }
+    const theirs: BookRecord = { ...base, rating: 5, ratingAt: t(20), review: { text: '', at: t(5) } }
+    const merged = mergeRecord(mine, theirs)
+    expect(merged.rating).toBe(5)
+    expect(merged.ratingAt).toBe(t(20))
+    /* The review taken back was taken back EARLIER than it was written, so
+       the words stand. */
+    expect(merged.review).toEqual({ text: 'first', at: t(10) })
+    expect(mergeRecord(theirs, mine)).toEqual(merged)
+  })
+
+  it('takes the LATER-stamped rating even when the tie-break would have chosen the other', () => {
+    /* `pick` breaks a tie by canonical serialisation, where `5` beats `3`. A
+       later `3` must still win — which it does only if the group's stamp is
+       the rating's own and not the epoch. */
+    const five: BookRecord = { ...base, rating: 5, ratingAt: t(10) }
+    const three: BookRecord = { ...base, rating: 3, ratingAt: t(20) }
+    expect(mergeRecord(five, three).rating).toBe(3)
+    expect(mergeRecord(three, five).rating).toBe(3)
+  })
+
+  it('leaves a record with no rating without one, rather than an empty register', () => {
+    expect('rating' in mergeRecord(base, { ...base, title: 'T' })).toBe(false)
+    expect('rating' in mergeRecord({ ...base, finished: true }, base)).toBe(false)
+  })
+
+  it('derives `finished` from the merged status, so the index cannot disagree with the disk', () => {
+    const done: BookRecord = { ...base, status: { state: 'finished', at: t(10) }, finished: true, finishedAt: t(10) }
+    const reading: BookRecord = { ...base, status: { state: 'reading', at: t(20) }, finished: false, finishedAt: t(20) }
+    const merged = mergeRecord(done, reading)
+    expect(merged.status).toEqual({ state: 'reading', at: t(20) })
+    expect(merged.finished).toBe(false)
+    /* And with the STATUS the later side but the `finished` group the
+       earlier — two devices that stamped the two apart — the status decides,
+       exactly as a read of the written file would. */
+    const split: BookRecord = { ...base, status: { state: 'finished', at: t(30) }, finished: false, finishedAt: t(40) }
+    expect(mergeRecord(reading, split).finished).toBe(true)
+    expect(mergeRecord(split, reading).finished).toBe(true)
+    /* And the stamp follows the same decision: a `finished` derived from the
+       status carries the status's stamp, not the losing group's later one. */
+    expect(mergeRecord(reading, split).finishedAt).toBe(t(30))
+    expect(mergeRecord(split, reading).finishedAt).toBe(t(30))
+  })
+
+  it('would have been erased by an equal-stamp echo from a peer that stripped it — why [5, 5]', () => {
+    /* The identifier's defect, a fourth time. A v4 peer strips `rating` and
+       `ratingAt`, ACKs the row, and the ACK's group is absent — which LOSES,
+       here; but the outbox is cleared, and the row is never sent again. What
+       the bump refuses is the ACK ever being taken. */
+    const mine: BookRecord = { ...base, rating: 4, ratingAt: t(7) }
+    const stripped: BookRecord = { ...base }
+    expect(mergeRecord(mine, stripped).rating).toBe(4)
+    expect(mergeRecord(stripped, mine)).toEqual(mergeRecord(mine, stripped))
+    /* Off the wire, a v5 row keeps every register a v4 parser would drop. */
+    expect(fromWire({ ...mine, status: { state: 'want', at: t(1) }, review: { text: 'r', at: t(2) } })).toMatchObject({
+      rating: 4,
+      ratingAt: t(7),
+      status: { state: 'want', at: t(1) },
+      review: { text: 'r', at: t(2) },
+    })
+  })
+})
+
+describe('the jacket facts stay home — WI-23.C5', () => {
+  const FACTS = { name: 'cover.jpg' as const, size: 1234, hash: 'ab'.repeat(32) }
+  it('are stripped on the way out, stripped on the way in, and kept through a merge with a peer that has none', () => {
+    const mine = { title: 'T', author: 'A', coverFacts: FACTS } as BookRecord
+    expect(toWire(mine)).not.toHaveProperty('coverFacts')
+    const landed = fromWire({ ...toWire(mine), coverFacts: { name: 'cover.jpg', size: 1, hash: 'ff'.repeat(32) } })
+    expect(landed).not.toHaveProperty('coverFacts')
+    expect(mergeRecord(mine, landed!).coverFacts).toEqual(FACTS)
   })
 })

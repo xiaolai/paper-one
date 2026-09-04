@@ -27,19 +27,34 @@ describe('shownPane', () => {
 })
 
 describe('renderContribution', () => {
+  const NO_BOOK = { bookId: null }
+
   it('passes through what React can draw', () => {
-    const element = renderContribution('example:pane', contributed[0]!.render)
+    const element = renderContribution('example:pane', contributed[0]!.render, NO_BOOK)
     expect(element).toMatchObject({ type: 'p' })
-    expect(renderContribution('x:y', () => null)).toBe(null)
-    expect(renderContribution('x:y', () => 'text')).toBe('text')
-    expect(renderContribution('x:y', () => [createElement('i'), 'and text'])).toHaveLength(2)
+    expect(renderContribution('x:y', () => null, NO_BOOK)).toBe(null)
+    expect(renderContribution('x:y', () => 'text', NO_BOOK)).toBe('text')
+    expect(renderContribution('x:y', () => [createElement('i'), 'and text'], NO_BOOK)).toHaveLength(2)
+  })
+
+  it('hands the renderer the context it was drawn in — the open book, if any (WI-23.B4)', () => {
+    /* A pane about a book has to know which; the kernel's own panes get it as
+       a prop, and a contribution gets it here. */
+    const seen: (string | null)[] = []
+    const render = (context: { bookId: string | null }) => {
+      seen.push(context.bookId)
+      return null
+    }
+    renderContribution('x:y', render, { bookId: 'book:moby' })
+    renderContribution('x:y', render, NO_BOOK)
+    expect(seen).toEqual(['book:moby', null])
   })
 
   it('refuses, by pane id, what React cannot — before React does, without saying which capability', () => {
-    expect(() => renderContribution('sync:status', () => ({ not: 'an element' }))).toThrow(/"sync:status" rendered an object of Object/)
-    expect(() => renderContribution('sync:status', () => () => null)).toThrow(/a function/)
-    expect(() => renderContribution('sync:status', () => Symbol('x'))).toThrow(/a symbol/)
-    expect(() => renderContribution('sync:status', () => [1, { no: 1 }])).toThrow(/sync:status/)
+    expect(() => renderContribution('sync:status', () => ({ not: 'an element' }), NO_BOOK)).toThrow(/"sync:status" rendered an object of Object/)
+    expect(() => renderContribution('sync:status', () => () => null, NO_BOOK)).toThrow(/a function/)
+    expect(() => renderContribution('sync:status', () => Symbol('x'), NO_BOOK)).toThrow(/a symbol/)
+    expect(() => renderContribution('sync:status', () => [1, { no: 1 }], NO_BOOK)).toThrow(/sync:status/)
   })
 
   /**
@@ -54,14 +69,14 @@ describe('renderContribution', () => {
       yield createElement('li', { key: 'a' })
       yield createElement('li', { key: 'b' })
     }
-    expect(() => renderContribution('x:y', rows)).not.toThrow()
+    expect(() => renderContribution('x:y', rows, NO_BOOK)).not.toThrow()
 
     /* A PROMISE, which `use` unwraps. */
-    expect(() => renderContribution('x:y', () => Promise.resolve('later'))).not.toThrow()
+    expect(() => renderContribution('x:y', () => Promise.resolve('later'), NO_BOOK)).not.toThrow()
 
     /* A PORTAL, recognised by React's own marker rather than by shape. */
     const portal = { $$typeof: Symbol.for('react.portal'), children: null, containerInfo: null }
-    expect(() => renderContribution('x:y', () => portal)).not.toThrow()
+    expect(() => renderContribution('x:y', () => portal, NO_BOOK)).not.toThrow()
   })
 
   /* AND AN ITERABLE IS NOT CONSUMED. Walking a generator to check it would
@@ -72,7 +87,7 @@ describe('renderContribution', () => {
       pulled += 1
       yield createElement('li', { key: 'a' })
     }
-    const drawn = renderContribution('x:y', counted) as Iterable<unknown>
+    const drawn = renderContribution('x:y', counted, NO_BOOK) as Iterable<unknown>
     expect(pulled, 'the guard consumed the generator').toBe(0)
     expect([...drawn]).toHaveLength(1)
   })
@@ -132,5 +147,14 @@ describe('comboFor', () => {
     withPlatform('MacIntel', () => expect(comboFor('⌘B', 'web')).toBe('⌘B'))
     withPlatform('Win32', () => expect(comboFor('⌘B', 'web')).toBe('Ctrl+B'))
     withPlatform('Linux x86_64', () => expect(comboFor('⌘B', 'web')).toBe('Ctrl+B'))
+  })
+})
+
+describe('what renderContribution lets through as a node', () => {
+  it('lets a portal through by React’s own marker, and refuses an object marked with some other symbol', () => {
+    const portal = { $$typeof: Symbol.for('react.portal'), key: null, children: null, containerInfo: {} }
+    expect(() => renderContribution('cap:one', () => portal as never, { bookId: null })).not.toThrow()
+    const stranger = { $$typeof: Symbol('not a portal') }
+    expect(() => renderContribution('cap:one', () => stranger as never, { bookId: null })).toThrow(/pane "cap:one" rendered/u)
   })
 })

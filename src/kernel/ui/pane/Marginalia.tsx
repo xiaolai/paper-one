@@ -21,6 +21,8 @@ import {
   type Annotation,
   type Bookmark,
   type Mark,
+  isHighlight,
+  MAX_MARK_NOTE,
 } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
 import type { JumpTarget } from '../hooks/useJumps'
@@ -38,6 +40,11 @@ const UNPLACED_TITLE = 'From another edition of this book — Paper has not foun
 import { onBeforeClose } from '../../core/beforeClose'
 import { relativeTime } from '../../core/relativeTime'
 import type { CardsView } from '../hooks/useCards'
+import type { MarkControl } from '../../core/capability'
+
+/* The context a mark control's contribution is drawn under: the open book, which the control's own render never reads — it is handed the mark. */
+// Stryker disable next-line ObjectLiteral,ArrowFunction: no control reads the context, so what it holds — or that it is nothing — cannot be seen.
+const controlContext = (bookId: string | null): { readonly bookId: string | null } => ({ bookId })
 
 /**
  * Whether an annotation carries a note the reader can see.
@@ -49,6 +56,9 @@ import type { CardsView } from '../hooks/useCards'
  */
 const hasNote = (mark: { readonly note: string }): boolean => mark.note.trim() !== ''
 
+/** §11: say what happened and what to do. A store that has quietly stopped saving looks exactly like one that works. */
+const NOT_SAVING = "Marginalia is not being saved — this device's storage is unavailable."
+
 /** The one sentence for a marks file that would not read, wherever it stands. */
 const UNREADABLE_MARKS =
   "This book's marks file could not be read. It is left as it is, and marks made now are not being saved over it."
@@ -58,6 +68,7 @@ import type { MarksView } from '../hooks/useMarks'
 import { comboFor } from '../panes'
 import { FilterChips } from './FilterChips'
 import styles from './SidePane.module.css'
+import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
 
 /**
  * Marginalia — everything the reader put in a book, across every book.
@@ -227,6 +238,9 @@ function NoteEditor({ initial, onCommit, onDone }: NoteEditorProps) {
       className={styles.noteInput}
       defaultValue={initial}
       autoFocus
+      /* The store cuts a note at this length on every read; the field stops
+         the reader there so nothing typed is lost to the cut. */
+      maxLength={MAX_MARK_NOTE}
       placeholder="Write a note"
       onChange={(event) => {
         draft.current = event.target.value
@@ -472,6 +486,16 @@ export interface MarginaliaProps {
    */
   onShelf?: ((bookId: string) => boolean) | undefined
   onGoTo?: (target: JumpTarget) => void
+  /**
+   * The controls the composed capabilities draw on a mark — the circle's
+   * share control is the first (`MarkControl`).
+   *
+   * DRAWN ON ANNOTATION ROWS ONLY. A bookmark is a place, not a passage, and
+   * there is nothing of one to hand to a capability. Optional, and absent
+   * draws nothing: the browser client mounts this panel with no composition
+   * at all.
+   */
+  markControls?: readonly MarkControl[] | undefined
 }
 
 export function Marginalia({
@@ -487,6 +511,7 @@ export function Marginalia({
   onShelf,
   now: injectedNow,
   titleOf,
+  markControls,
 }: MarginaliaProps) {
   const [filter, setFilter] = useState<KindFilter>('All')
   /* ALL BOOKS BY DEFAULT, which is what this panel has always shown. Narrowing
@@ -660,6 +685,13 @@ export function Marginalia({
     [inScope],
   )
 
+  /* AN EDITOR WHOSE ROW LEFT THE LIST CLOSES. Filtered out, scoped out, or its
+     book switched away, the row unmounts without a blur, and an id kept
+     here would reopen the editor by itself the moment the row came back. */
+  useEffect(() => {
+    if (editing !== null && !inScope.some((mark) => mark.id === editing && matches(mark, filter))) setEditing(null)
+  }, [editing, inScope, filter])
+
   if (everything.length === 0) {
     /* NOT YET AN ANSWER. The cross-book scan costs a read per book and the
        panel mounts before it lands, so "Nothing kept yet" stood over a
@@ -686,16 +718,25 @@ export function Marginalia({
     }
     return (
       <div className={styles.empty}>
+        {/* A STORE THAT STOPPED SAVING IS SAID HERE TOO: a failed write that
+            left nothing visible would otherwise read as an empty shelf. */}
+        {!marks.persistent && <div className={styles.emptyBody}>{NOT_SAVING}</div>}
         {/* THE CASE THIS MATTERS MOST IN: a reader whose marks file is damaged
             reaches exactly this branch, and "Nothing kept yet" is the one
-            sentence that must not stand alone over it (WI-20.36). */}
-        {marks.unreadable && <div className={styles.emptyBody}>{UNREADABLE_MARKS}</div>}
-        <div className={styles.emptyTitle}>Nothing kept yet</div>
-        <div className={styles.emptyBody}>
-          Select a passage and choose Mark — notes you write on a mark appear
-          beside the line they belong to. Press {comboFor('⌘B', platform)} to
-          keep the place you are reading.
-        </div>
+            sentence that must not stand over it (WI-20.36) — the file's
+            contents are unknown, not absent. */}
+        {marks.unreadable ? (
+          <div className={styles.emptyTitle}>{UNREADABLE_MARKS}</div>
+        ) : (
+          <>
+            <div className={styles.emptyTitle}>Nothing kept yet</div>
+            <div className={styles.emptyBody}>
+              Select a passage and choose Mark — notes you write on a mark appear
+              beside the line they belong to. Press {/* Stryker disable next-line StringLiteral: copy */ comboFor('⌘B', platform)} to
+              keep the place you are reading.
+            </div>
+          </>
+        )}
       </div>
     )
   }
@@ -710,11 +751,9 @@ export function Marginalia({
         </span>
       </div>
 
-      {/* §11: say what happened and what to do. A store that has quietly
-          stopped saving looks exactly like one that works. */}
       {!marks.persistent && (
         <div className={styles.panelMeta}>
-          <span>Marginalia is not being saved — this device's storage is unavailable.</span>
+          <span>{NOT_SAVING}</span>
         </div>
       )}
 
@@ -761,7 +800,7 @@ export function Marginalia({
         )}
       </div>
 
-      {shown.length === 0 && everything.length > 0 && (
+      {shown.length === 0 && (
         <div className={styles.empty}>
           <div className={styles.emptyBody}>
             {/* Says which filter is empty, and which scope. A blank panel under
@@ -844,7 +883,7 @@ export function Marginalia({
               nothing, which is true: there is no note, and this reader cannot
               add one here. */}
           {marks.setNote === undefined ? (
-            mark.note ? <div className={styles.noteComment}>{mark.note}</div> : null
+            hasNote(mark) ? <div className={styles.noteComment}>{mark.note.trim()}</div> : null
           ) : editing === mark.id ? (
             <NoteEditor
               initial={mark.note}
@@ -859,9 +898,28 @@ export function Marginalia({
               className={styles.noteComment}
               onClick={() => setEditing(mark.id)}
             >
-              {mark.note || 'Add a note'}
+              {hasNote(mark) ? mark.note.trim() : 'Add a note'}
             </button>
           )}
+
+          {/* A capability's control on THIS mark, under the note and above
+              the source line — the circle's Share is the first. The element
+              is the capability's own, narrowed by `renderContribution` the
+              way a contributed pane is; the kernel supplies the mark and
+              never learns what the control does. */}
+          {/* ⚠️ THE READER'S OWN HIGHLIGHTS ONLY. A companion annotation is a
+              claim somebody else's model made about the text, and a control
+              that shares "what I marked" must not be offered on it as though
+              the reader had. */}
+          {isHighlight(mark)
+            ? markControls?.map((control) => (
+                <div key={control.id} data-mark-control={control.id}>
+                  <ContributionBoundary label="A mark control" resetKey={control.id}>
+                    <ContributionBody id={control.id} render={() => control.render(mark)} context={controlContext(bookId)} />
+                  </ContributionBoundary>
+                </div>
+              ))
+            : null}
 
           <div className={styles.noteSource}>
             <span>{mark.chapter || 'Unknown chapter'}</span>

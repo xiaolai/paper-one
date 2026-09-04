@@ -4,7 +4,7 @@ import { coverPathIn, folderOf, marksPathIn, recordPath, trashOf, type BookRecor
 import type { Card } from './cards'
 import { createDiagnostics, redact } from './diagnostics'
 import { fakeFs, jsonAt, type FakeFs } from './fakeFs.testkit'
-import { hlcOf } from './hlc'
+import { ZERO_DEVICE, asHlc, deviceOf, hlcOf, parseHlc } from './hlc'
 import type { Mark } from './marks'
 import type { MarkStorage } from './marks'
 import { BLOB_FOLDER, NOOP_RECORDER, type MutationRecorder, type MutationToken } from './ports'
@@ -284,15 +284,25 @@ describe('the same cases through the services and through a remote-style adapter
     /* marks — one LIVE, with its note and its edit stamp; the removed one
      * stays in the FILE as a tombstone (a deletion has to be able to travel)
      * and is hidden from `current`, which is a read model. The stamps are
-     * deterministic because the wall clock is frozen at NOW and no sync is
-     * composed, so the default clock stamps under the zero device. */
-    const edited = { ...MARK_1, note: 'the whale', updatedAt: hlcOf(NOW) }
-    expect(jsonAt(fs, marksPathIn('book:a'))).toEqual([edited, { ...MARK_2, deletedAt: hlcOf(NOW) }])
+     * deterministic in their millisecond and their device — the wall clock
+     * is frozen at NOW and no sync is composed, so the default clock stamps
+     * under the zero device — and the counter ticks once per stamp, so two
+     * writes in one frozen millisecond are still two stamps. */
+    const written = jsonAt(fs, marksPathIn('book:a')) as [{ updatedAt: string }, { deletedAt: string }]
+    const edited = { ...MARK_1, note: 'the whale', updatedAt: written[0].updatedAt }
+    expect(written).toEqual([edited, { ...MARK_2, deletedAt: written[1].deletedAt }])
+    for (const stamp of [written[0].updatedAt, written[1].deletedAt]) {
+      expect(parseHlc(stamp).ms).toBe(NOW)
+      expect(deviceOf(asHlc(stamp))).toBe(ZERO_DEVICE)
+    }
     expect(kernel.marks.getSnapshot().current).toEqual([edited])
     expect(kernel.marks.getSnapshot().persistent).toBe(true)
     // cards — one live in the snapshot; the discarded one a tombstone in the flat store.
-    expect(JSON.parse(w.storage.map.get('paper.cards.v1')!)).toEqual([
-      { ...CARD_2, deletedAt: hlcOf(NOW) },
+    const cards = JSON.parse(w.storage.map.get('paper.cards.v1')!) as [{ deletedAt: string }, unknown]
+    expect(parseHlc(cards[0].deletedAt).ms).toBe(NOW)
+    expect(deviceOf(asHlc(cards[0].deletedAt))).toBe(ZERO_DEVICE)
+    expect(cards).toEqual([
+      { ...CARD_2, deletedAt: cards[0].deletedAt },
       CARD_1,
     ])
     expect(kernel.cards.getSnapshot().all).toEqual([CARD_1])
@@ -714,6 +724,33 @@ describe('removeBlob — the closed-name delete twin of the blob port (WI-10.2)'
     expect(w.fs.store.has(recordPath(BOOK))).toBe(true)
   })
 
+  it('takes the jacket’s facts off the record with the jacket — WI-23.C5', async () => {
+    /* A world whose library HOLDS the book, so the record has a row to carry the facts. */
+    const w = blobWorld()
+    const facts = { name: 'cover.jpg' as const, size: 6, hash: 'ab'.repeat(32) }
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+    await kernel.removeBlob(BOOK, 'cover.jpg')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+    /* The content's removal says nothing about the jacket. */
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.removeBlob(BOOK, 'content.epub')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+    /* The legacy name's removal clears them as the current name's does. */
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: { ...facts, name: 'cover.webp' as const } }))
+    await kernel.removeBlob(BOOK, 'cover.webp')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+  })
+
   it('removing a blob that is not there is done, not an error', async () => {
     const w = world()
     await expect(w.kernel.removeBlob(BOOK, 'content.epub')).resolves.toBeUndefined()
@@ -885,5 +922,30 @@ describe('Diagnostics', () => {
     diag.child('sync').info('anything')
     expect(sink.info).not.toHaveBeenCalled()
     expect(sink.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('a jacket the store keeps is measured — WI-23.C5', () => {
+  it('stamps the record’s cover facts through the hash port once the jacket is there, and leaves them when no port is bound', async () => {
+    const BOOK = 'book:a'
+    const w = world()
+    w.fs.store.set(recordPath(BOOK), new TextEncoder().encode(JSON.stringify(REC_A)))
+    /* Already on disk: `keepCover` keeps what is there rather than decoding, which this environment cannot. */
+    w.fs.store.set(coverPathIn(BOOK), new TextEncoder().encode('jacket'))
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.keepJacket(BOOK, new Blob(['ignored']))
+    await kernel.drain()
+    expect(kernel.library.getSnapshot()[0]).not.toHaveProperty('coverFacts')
+    const hashFile = vi.fn(() => Promise.resolve({ blake3: 'ab'.repeat(32), size: 6 }))
+    const bound = kernel.bindHashPort({ hashFile })
+    await kernel.library.keepJacket(BOOK, new Blob(['ignored']))
+    await kernel.drain()
+    expect(hashFile).toHaveBeenCalledWith(folderOf(BOOK).slice(folderOf(BOOK).lastIndexOf('/') + 1), 'cover.jpg')
+    expect(kernel.library.getSnapshot()[0]?.coverFacts).toEqual({ name: 'cover.jpg', size: 6, hash: 'ab'.repeat(32) })
+    bound.dispose()
   })
 })

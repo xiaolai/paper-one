@@ -1,3 +1,4 @@
+import { canonicalJson } from './canonicalJson'
 import { folderOf, marksPathIn, readMarks, trashOf, writeMarks } from './bookFolder'
 import type { ResolvedCfi } from './resolvedCfi'
 import { scanAllMarks, type IndexFs } from './bookIndex'
@@ -306,7 +307,12 @@ export interface MarkStoreOptions {
 function sameMarks(a: readonly Mark[], b: readonly Mark[]): boolean {
   if (a === b) return true
   if (a.length !== b.length) return false
-  return a.every((mark, i) => JSON.stringify(mark) === JSON.stringify(b[i]))
+  /* CANONICAL, so the answer does not depend on which order a row's keys were
+     written in: a row read back through `validMarks` names the same fields in
+     its own order, and a plain stringify called that a change — one more
+     notification per edit, for nothing. `libraryStore.sameRow` had the same
+     defect and the same cure. */
+  return a.every((mark, i) => canonicalJson(mark) === canonicalJson(b[i]))
 }
 
 export function createMarkStore({

@@ -375,13 +375,25 @@ export function createLedger({
    * "cover" `content.epub` would otherwise aim the fetch at the book's
    * bytes. The folder never crosses — it is derived locally from the book.
    */
-  const ensureCover = async (peer: string, folder: string, cover: PushGroup['cover']): Promise<void> => {
+  const ensureCover = async (peer: string, book: string, folder: string, cover: PushGroup['cover']): Promise<void> => {
     if (!cover || !fetchBlob) return
     if (cover.name !== 'cover.jpg' && cover.name !== 'cover.webp') return
+    /* THE FACTS RIDE WITH THE JACKET (WI-23.C5): the hash and size this side
+       verified are what the circle publishes for it, stamped on the record as
+       device-local facts — a jacket landed here is this device's to serve. */
+    const name = cover.name
+    const stamp = (): Promise<void> =>
+      library.update(book, (held) =>
+        // Stryker disable next-line ConditionalExpression: rewriting the same facts is the same record.
+        held.coverFacts?.hash === cover.hash ? held : { ...held, coverFacts: { name, size: cover.size, hash: cover.hash } },
+      )
     if (hashFile) {
       try {
         const have = await hashFile(folder, cover.name)
-        if (have.blake3 === cover.hash) return
+        if (have.blake3 === cover.hash) {
+          await stamp()
+          return
+        }
       } catch {
         /* Not here yet — fetch it below. */
       }
@@ -394,7 +406,9 @@ export function createLedger({
        * book's next push happens — an edit, a mark — which may be never. A
        * persisted retry for a jacket is more machinery than a jacket is
        * worth; the trade is recorded here rather than implied away. */
+      return
     }
+    await stamp()
   }
 
   /**
@@ -762,7 +776,7 @@ export function createLedger({
      * used to say "tracked for retry", which was true of a `coverRetry` set
      * nothing ever read — see `ensureCover`, which carries the trade. */
     if (group.cover && group.book !== '') {
-      await ensureCover(peer, folder, group.cover)
+      await ensureCover(peer, group.book, folder, group.cover)
     }
 
     const ack: {

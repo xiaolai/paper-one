@@ -2,7 +2,8 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Marginalia } from './Marginalia'
-import type { Annotation, Bookmark, Mark } from '../../core/marks'
+import { MAX_MARK_NOTE, type Annotation, type Bookmark, type Mark } from '../../core/marks'
+import type { MarkControl } from '../../core/capability'
 import type { MarksView } from '../hooks/useMarks'
 import type { CardsView } from '../hooks/useCards'
 import type { JumpTarget } from '../hooks/useJumps'
@@ -79,17 +80,26 @@ function draw(over: {
   onGoTo?: (target: JumpTarget) => void
   unreadable?: boolean
   scanFailed?: boolean
+  persistent?: boolean
+  readOnly?: boolean
+  markControls?: readonly MarkControl[]
 }) {
   const onGoTo = over.onGoTo ?? vi.fn()
+  const readOnly = (view: MarksView): MarksView => {
+    const { setNote: _setNote, ...rest } = view
+    return rest as MarksView
+  }
   render(
     <Marginalia
-      marks={marksView({
+      {...(over.markControls ? { markControls: over.markControls } : {})}
+      marks={(over.readOnly ? readOnly : (view: MarksView) => view)(marksView({
         all: over.all ?? [],
         allBookmarks: over.allBookmarks ?? [],
         allUnplaced: over.allUnplaced ?? [],
         unreadable: over.unreadable ?? false,
         scanFailed: over.scanFailed ?? false,
-      })}
+        persistent: over.persistent ?? true,
+      }))}
       cards={cardsView()}
       bookId="open-book"
       onDelete={vi.fn()}
@@ -322,6 +332,32 @@ describe('a focus request', () => {
     expect(editor()).not.toBeNull()
   })
 
+  it('closes for good when its row leaves the list, and stays closed when the row returns', () => {
+    const { republish } = drawFocused([NOTED], { id: 'm1', edit: true, nonce: 1 })
+    expect(editor()).not.toBeNull()
+    /* The row unmounts without a blur — filtered out, scoped out, or the
+       list re-read — so nothing tells the editor it closed. Another row is
+       still there, so the list is not simply empty. */
+    const other = ANNOTATION({ id: 'm2', text: 'a second passage' })
+    republish([other])
+    expect(editor()).toBeNull()
+    republish([NOTED, other])
+    expect(editor()).toBeNull()
+  })
+
+  it('stays open while its row is still listed among others', () => {
+    const other = ANNOTATION({ id: 'm2', text: 'a second passage' })
+    const { republish } = drawFocused([NOTED, other], { id: 'm1', edit: true, nonce: 1 })
+    expect(editor()).not.toBeNull()
+    republish([NOTED, other])
+    expect(editor()).not.toBeNull()
+  })
+
+  it('stops the note at the length the store keeps', () => {
+    drawFocused([NOTED], { id: 'm1', edit: true, nonce: 1 })
+    expect(editor()!.getAttribute('maxlength')).toBe(String(MAX_MARK_NOTE))
+  })
+
   it('waits for a mark the cross-book list has not loaded yet', () => {
     /* `marks.all` is empty until `loadAll` has run, and the panel mounts on the
        very click that asks for the mark — so on a first open the request
@@ -415,5 +451,138 @@ describe('an unplaced row explains its disabled jump', () => {
     const row = rowFor('Loomings')
     expect(row.hasAttribute('disabled')).toBe(false)
     expect(row.getAttribute('title')).toBeNull()
+  })
+})
+
+describe('a contributed mark control', () => {
+  /* ⚠️ **THE SEAM WI-23.A1 NEEDS, PROVEN FROM THE PANEL'S SIDE.** A capability
+     draws its element on the reader's own mark; the kernel places it and
+     never learns what it does. What has to be true here is WHERE it lands —
+     under every annotation, never on a bookmark — and that the mark handed
+     over is the row's own. */
+  const seen: string[] = []
+  const control = {
+    id: 'circle:share' as const,
+    render: (mark: Annotation) => {
+      seen.push(mark.id)
+      return <button type="button">Share {mark.id}</button>
+    },
+  }
+
+  it('is drawn on every annotation row, with that row’s own mark', () => {
+    seen.length = 0
+    render(
+      <Marginalia
+        marks={marksView({ all: [ANNOTATION({ id: 'm1' }), ANNOTATION({ id: 'm2', text: 'the whale' })] })}
+        cards={cardsView()}
+        bookId="open-book"
+        platform="macos"
+        markControls={[control]}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Share m1' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Share m2' })).toBeTruthy()
+    expect([...seen].sort()).toEqual(['m1', 'm2'])
+  })
+
+  it('is never drawn on a bookmark, which is a place and not a passage', () => {
+    seen.length = 0
+    render(
+      <Marginalia
+        marks={marksView({ allBookmarks: [BOOKMARK({ id: 'b1' })] })}
+        cards={cardsView()}
+        bookId="open-book"
+        platform="macos"
+        markControls={[control]}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /^Share/u })).toBeNull()
+    expect(seen).toEqual([])
+  })
+
+  it('draws nothing when the host contributes none', () => {
+    render(
+      <Marginalia
+        marks={marksView({ all: [ANNOTATION({ id: 'm1' })] })}
+        cards={cardsView()}
+        bookId="open-book"
+        platform="macos"
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /^Share/u })).toBeNull()
+  })
+})
+
+describe('a mark control — on the reader’s own highlights, inside a boundary', () => {
+  const control = (render: (mark: Annotation) => unknown): MarkControl => ({ id: 'circle:share', render })
+
+  it('is drawn on a highlight and not on a companion annotation', () => {
+    draw({
+      all: [ANNOTATION(), ANNOTATION({ id: 'm2', kind: 'companion', text: 'a model claims this' })],
+      markControls: [control((mark) => <button type="button">{`share ${mark.id}`}</button>)],
+    })
+    expect(screen.getByRole('button', { name: 'share m1' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'share m2' })).toBeNull()
+    expect(document.querySelectorAll('[data-mark-control]')).toHaveLength(1)
+  })
+
+  it('cannot take the row with it when it throws', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    draw({
+      all: [ANNOTATION()],
+      markControls: [
+        control(() => {
+          throw new Error('port gone')
+        }),
+      ],
+    })
+    expect(screen.getByText(/A mark control could not be drawn/u)).toBeTruthy()
+    expect(rowFor('call me ishmael')).toBeTruthy()
+    spy.mockRestore()
+  })
+})
+
+describe('a store that stopped saving, over an empty list', () => {
+  it('is said in the empty state, not only over rows', () => {
+    draw({ persistent: false })
+    expect(screen.getByText(/not being saved/)).not.toBeNull()
+  })
+
+  it('is not said of a store that saves', () => {
+    draw({})
+    expect(screen.queryByText(/not being saved/)).toBeNull()
+  })
+})
+
+describe('a marks file that could not be read, over an empty list', () => {
+  it('does not claim the shelf is empty', () => {
+    draw({ unreadable: true })
+    expect(screen.queryByText(/Nothing kept yet/)).toBeNull()
+    expect(screen.getByText(/could not be read/)).not.toBeNull()
+  })
+})
+
+describe('a note read without an editor', () => {
+  it('is drawn trimmed, and a whitespace note is not drawn at all', () => {
+    draw({ readOnly: true, all: [ANNOTATION({ id: 'm1', note: '  spaced  ' }), ANNOTATION({ id: 'm2', text: 'blank', note: '   ' })] })
+    expect(screen.getByText('spaced').textContent).toBe('spaced')
+    expect(screen.queryByText(/^\s+$/)).toBeNull()
+  })
+})
+
+describe('a filter with nothing under it', () => {
+  it('says which filter is empty, and says nothing when rows are shown', () => {
+    draw({ all: [ANNOTATION({ id: 'm1', note: '' })] })
+    expect(screen.queryByText(/^No /)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Notes' }))
+    expect(screen.getByText(/^No notes/)).not.toBeNull()
+  })
+})
+
+describe('the note button', () => {
+  it('shows the note trimmed, and offers to add one over a blank note', () => {
+    draw({ all: [ANNOTATION({ id: 'm1', note: '  spaced  ' }), ANNOTATION({ id: 'm2', text: 'blank', note: '   ' })] })
+    expect(screen.getByRole('button', { name: 'spaced' }).textContent).toBe('spaced')
+    expect(screen.getByRole('button', { name: 'Add a note' })).not.toBeNull()
   })
 })

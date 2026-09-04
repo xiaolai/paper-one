@@ -4,6 +4,7 @@ import { INDEX_FILE, type IndexFs, type IndexedBook } from './bookIndex'
 import { fakeFs } from './indexFsFake.testkit'
 import { WRITE_WIDTH, createLibrary } from './libraryStore'
 import { writeQueue } from './writeQueue'
+import { spyRecorder } from './servicesWorld.testkit'
 
 /**
  * A failed write is SAID, not logged (WI-20.36).
@@ -352,5 +353,27 @@ describe('the undo offer and a write that fails', () => {
     await library.undoRemoveTag()
     expect(library.lastRemoval()).toBeNull()
     expect(library.getSnapshot()[0]?.tags).toEqual(['Sea'])
+  })
+})
+
+describe('a remote row that lands', () => {
+  it('is recorded as a record write, and clears the failure the book was showing', async () => {
+    const fs = fakeFs(seeded(['book_a']))
+    const spy = spyRecorder()
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [row('book_a')], recorder: spy.recorder })
+    await library.applyRemoteRows([{ bookId: 'book_a', change: (record) => ({ ...record, finished: true }) }])
+    expect(spy.kinds).toContain('record')
+  })
+})
+
+describe('a remote row landing after a failure', () => {
+  it('clears the failure the book was showing', async () => {
+    const { library, refuse } = world(['book_a'], { book_a: 'Moby-Dick' })
+    refuse('book_a', true)
+    await expect(library.tag('book_a', 'Sea')).rejects.toThrow('disk full')
+    expect(library.lastFailure()?.bookId).toBe('book_a')
+    refuse('book_a', false)
+    await library.applyRemoteRows([{ bookId: 'book_a', change: (record) => ({ ...record, finished: true }) }])
+    expect(library.lastFailure()).toBeNull()
   })
 })

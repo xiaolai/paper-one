@@ -130,3 +130,16 @@ describe("a book's own menu", () => {
     expect(onRemove).toHaveBeenCalledWith(expect.objectContaining({ bookId: 'bk1' }))
   })
 })
+
+describe('an action that rejects', () => {
+  it('is caught and said on the console, never left as an unhandled rejection', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const boom = { id: 'circle:boom' as const, label: 'Boom', run: () => Promise.reject(new Error('the port went away')) }
+    render(<Library {...shelf} bookActions={[boom]} />)
+    openMenu()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Boom' }))
+    await new Promise((done) => setTimeout(done, 0))
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('circle:boom'), expect.objectContaining({ message: 'the port went away' }))
+    spy.mockRestore()
+  })
+})

@@ -1,4 +1,5 @@
 import { folderOf, type BookRecord } from '../bookFolder'
+import type { ReadingState, Stars } from '../circle/log'
 import { BLOB_FOLDER } from '../ports'
 import { listTrash } from '../bookTrash'
 import type { IndexedBook } from '../bookIndex'
@@ -220,6 +221,20 @@ export function bookSet(env: ServiceEnvironment) {
     const finished = bool(input, 'finished')
     const position = str(input, 'position')
     const progress = num(input, 'progress')
+    /* The reader's own opinion (WI-23.B3). The row bounds the rating to a
+     * whole number in [1, 5] and the review to `MAX_REVIEW`; the status is a
+     * closed word this checks by name, so a typo is refused rather than
+     * stored as a state no reader has. */
+    const status = str(input, 'status')
+    const rating = num(input, 'rating') as Stars | undefined
+    const review = str(input, 'review')
+    /* STATUS MOVES `finished` WITH IT — the row says so — so a request that
+     * sends both, disagreeing, asks for two states at once. Refused by name
+     * here rather than answered with whichever the store applied last, or
+     * with the store's own refusal, which names no field. */
+    if (status !== undefined && finished !== undefined && (status === 'finished') !== finished) {
+      throw refuse(SERVICE_ERRORS.malformed, `status ${status} and finished ${String(finished)} disagree`)
+    }
     /* A PATCH THAT CHANGES NOTHING IS NOT A READ, and the table says so now.
      *
      * `book.set` answers with the whole `BookDetail`, and `book:write` does
@@ -262,6 +277,9 @@ export function bookSet(env: ServiceEnvironment) {
     await env.services.library.patch(bookId, {
       ...(finished === undefined ? {} : { finished }),
       ...(position === undefined ? {} : { position: { position, ...(progress === undefined ? {} : { progress }) } }),
+      ...(status === undefined ? {} : { status: status as ReadingState }),
+      ...(rating === undefined ? {} : { rating }),
+      ...(review === undefined ? {} : { review }),
     })
     return bookDetail(find(env, bookId))
   }
@@ -279,10 +297,16 @@ export function bookPosition(env: ServiceEnvironment) {
   return async (req: unknown): Promise<PositionSetRow> => {
     const input = readInput(descriptorOf('book.position'), req)
     const bookId = reqStr(input, 'book')
-    const book = find(env, bookId)
+    /* Found, so a position for a book that is not here is refused here — the store's own answer would be a silent no-op. */
+    // Stryker disable next-line CallExpression: the answer's own `find`, below, refuses an unknown book the same way; this one spares the store a write that is a no-op.
+    find(env, bookId)
     const position = reqStr(input, 'position')
-    const progress = num(input, 'progress') ?? book.progress ?? 0
-    await env.services.library.rememberPosition(bookId, position, progress)
+    /* A progress not given is left to the store, which reads the record
+       inside the book's lane — a copy taken from the snapshot here could
+       overwrite a progress that landed while this write waited its turn. */
+    const progress = num(input, 'progress')
+    // Stryker disable next-line ConditionalExpression: an explicit undefined reads as no progress in the store.
+    await env.services.library.rememberPosition(bookId, position, ...(progress === undefined ? [] : [progress]))
     return positionSet(find(env, bookId))
   }
 }

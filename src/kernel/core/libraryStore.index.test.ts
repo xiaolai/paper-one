@@ -226,3 +226,191 @@ describe('what a minute of reading writes', () => {
     expect(after).toBeLessThan(before / 100)
   })
 })
+
+describe('the reader’s own opinion, through `patch` — WI-23.B3', () => {
+  it('moves status and finished together, under one stamp, from either verb', async () => {
+    const { library } = world(['book_1'])
+    await library.patch('book_1', { status: 'finished' })
+    let held = library.getSnapshot().find((one) => one.bookId === 'book_1')!
+    expect(held.status?.state).toBe('finished')
+    expect(held.finished).toBe(true)
+    expect(held.finishedAt).toBe(held.status?.at)
+
+    /* The menu's verb: unfinishing a book with no position makes it wanted. */
+    await library.setFinished('book_1', false)
+    held = library.getSnapshot().find((one) => one.bookId === 'book_1')!
+    expect(held.status?.state).toBe('want')
+    expect(held.finished).toBe(false)
+
+    /* And with a position to come back to, reading. */
+    await library.patch('book_1', { position: { position: 'epubcfi(/6/4)', progress: 0.3 }, finished: true })
+    await library.setFinished('book_1', false)
+    held = library.getSnapshot().find((one) => one.bookId === 'book_1')!
+    expect(held.status?.state).toBe('reading')
+  })
+
+  it('stamps a rating and a review each with its own clock reading, and takes a review back as empty', async () => {
+    const { library } = world(['book_1'])
+    await library.patch('book_1', { rating: 4, review: 'a whale of a book' })
+    let held = library.getSnapshot().find((one) => one.bookId === 'book_1')!
+    expect(held.rating).toBe(4)
+    expect(held.ratingAt).toBeDefined()
+    expect(held.review?.text).toBe('a whale of a book')
+    expect(held.review?.at).toBe(held.ratingAt)
+    /* A rating says nothing about where the reader is with the book. */
+    expect(held).not.toHaveProperty('status')
+    expect(held).not.toHaveProperty('finished')
+
+    await library.patch('book_1', { review: '' })
+    held = library.getSnapshot().find((one) => one.bookId === 'book_1')!
+    expect(held.review?.text).toBe('')
+    expect(held.rating).toBe(4)
+  })
+
+  it('does not re-stamp a status or a review that is already what the patch says', async () => {
+    /* Every stamp is a word two replicas compare; re-saying the same thing
+       with a newer stamp would win merges it has no business winning. */
+    const { library } = world(['book_1'])
+    await library.patch('book_1', { status: 'reading', review: 'r' })
+    const first = library.getSnapshot().find((one) => one.bookId === 'book_1')!
+    await library.patch('book_1', { status: 'reading', review: 'r' })
+    const again = library.getSnapshot().find((one) => one.bookId === 'book_1')!
+    expect(again.status).toEqual(first.status)
+    expect(again.review).toEqual(first.review)
+    expect(again.finishedAt).toBe(first.finishedAt)
+  })
+
+  it('writes nothing for a patch that changes nothing', async () => {
+    const { library, fs } = world(['book_1'])
+    await library.patch('book_1', { rating: 3 })
+    const before = new TextDecoder().decode(await fs.readFile('books/book_1/book.json'))
+    await library.patch('book_1', { rating: 3 })
+    const after = new TextDecoder().decode(await fs.readFile('books/book_1/book.json'))
+    expect(after).toBe(before)
+  })
+})
+
+describe('every clause of the opinion patch — WI-23.B3, one row each', () => {
+  it('derives the status a finished flag implies, from the position it has', async () => {
+    const { library } = world(['book_1'])
+    await library.patch('book_1', { finished: false })
+    expect(library.getSnapshot()[0]!.status?.state).toBe('want')
+    await library.patch('book_1', { position: { position: 'epubcfi(/6/4)', progress: 0.3 }, finished: false })
+    expect(library.getSnapshot()[0]!.status?.state).toBe('reading')
+    await library.patch('book_1', { finished: true })
+    expect(library.getSnapshot()[0]!.status?.state).toBe('finished')
+  })
+
+  it('writes nothing when the patch says the same again, and only the register it changes otherwise', async () => {
+    const { fs, library } = world(['book_1'])
+    const record = `${BOOKS_DIR}/book_1/book.json`
+    await library.patch('book_1', { status: 'reading', rating: 3, review: 'first words' })
+    const written = fs.writes(record)
+    const before = library.getSnapshot()[0]!
+    await library.patch('book_1', { status: 'reading' })
+    await library.patch('book_1', { review: 'first words' })
+    await library.patch('book_1', { rating: 3 })
+    expect(fs.writes(record)).toBe(written)
+    await library.patch('book_1', { rating: 5 })
+    expect(fs.writes(record)).toBe(written + 1)
+    const after = library.getSnapshot()[0]!
+    expect(after.status).toEqual(before.status)
+    expect(after.review).toEqual(before.review)
+    expect(after.rating).toBe(5)
+  })
+})
+
+describe('a patch that contradicts itself', () => {
+  it('is refused rather than letting one of its two words win', async () => {
+    const { library } = world(['book_1'])
+    await expect(library.patch('book_1', { status: 'reading', finished: true })).rejects.toThrow(/cannot say status "reading" and finished true/u)
+    await expect(library.patch('book_1', { status: 'finished', finished: false })).rejects.toThrow(/cannot say/u)
+    /* Said the same way twice: fine. */
+    await library.patch('book_1', { status: 'finished', finished: true })
+    expect(library.getSnapshot()[0]!.status?.state).toBe('finished')
+    await library.patch('book_1', { status: 'want', finished: false })
+    expect(library.getSnapshot()[0]!.finished).toBe(false)
+  })
+})
+
+describe('marking a book unfinished', () => {
+  it('reads a null position as no place to come back to, and says want rather than reading', async () => {
+    const fs = fakeFs(seeded(['book_1']))
+    /* A record written with `position: null` — the type allows it, and an
+       older writer produced it. */
+    fs.store.set(`${BOOKS_DIR}/book_1/book.json`, new TextEncoder().encode(JSON.stringify({ title: 'book_1', author: '', position: null })))
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [row('book_1')] })
+    await library.patch('book_1', { finished: false })
+    expect(library.getSnapshot()[0]!.status?.state).toBe('want')
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_1/book.json`)!)) as { status?: { state: string } }
+    expect(written.status?.state).toBe('want')
+  })
+})
+
+describe('marking a book unfinished with an empty position', () => {
+  it('reads an empty position as no place to come back to', async () => {
+    const fs = fakeFs(seeded(['book_1']))
+    fs.store.set(`${BOOKS_DIR}/book_1/book.json`, new TextEncoder().encode(JSON.stringify({ title: 'book_1', author: '', position: '' })))
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [row('book_1')] })
+    await library.patch('book_1', { finished: false })
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_1/book.json`)!)) as { status?: { state: string } }
+    expect(written.status?.state).toBe('want')
+  })
+})
+
+describe('a subscriber hears once per change', () => {
+  it('is not told again when the write lands and the record on disk says what the row already said', async () => {
+    const { library } = world(['book_1'])
+    const heard = vi.fn()
+    library.subscribe(heard)
+    await library.patch('book_1', { rating: 3 })
+    expect(heard).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('a position remembered without a progress', () => {
+  it('keeps the record’s progress, and a progress given moves it', async () => {
+    const { library } = world(['book_1'])
+    await library.rememberPosition('book_1', 'p1', 0.4)
+    await library.rememberPosition('book_1', 'p2')
+    expect(library.getSnapshot()[0]).toMatchObject({ position: 'p2', progress: 0.4 })
+    await library.rememberPosition('book_1', 'p3', 0.9)
+    expect(library.getSnapshot()[0]).toMatchObject({ position: 'p3', progress: 0.9 })
+  })
+})
+
+describe('a tag taken off the whole shelf', () => {
+  it('leaves no book carrying it, and records the removal the way a selection’s does', async () => {
+    const { library } = world(['book_1', 'book_2'])
+    await library.tagBooks(['book_1', 'book_2'], ['sea'])
+    await library.removeTag('sea')
+    expect(library.getSnapshot().every((one) => !(one.tags ?? []).includes('sea'))).toBe(true)
+    expect(library.lastRemoval()).toMatchObject({ tag: 'sea', bookIds: ['book_1', 'book_2'] })
+  })
+})
+
+describe('a jacket the store keeps is measured — WI-23.C5', () => {
+  it('stamps the facts through the hash port once the jacket is there, keeps a stamp another writer made, and does nothing with no port', async () => {
+    const fs = fakeFs(seeded(['book_1']))
+    fs.store.set(`${BOOKS_DIR}/book_1/cover.jpg`, new TextEncoder().encode('jacket'))
+    const hashFile = vi.fn(() => Promise.resolve({ blake3: 'ab'.repeat(32), size: 6 }))
+    let port: { hashFile: typeof hashFile } | null = null
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [row('book_1')], hashes: () => port })
+    await library.keepJacket('book_1', new Blob(['ignored']))
+    expect(library.getSnapshot()[0]).not.toHaveProperty('coverFacts')
+    port = { hashFile }
+    await library.keepJacket('book_1', new Blob(['ignored']))
+    expect(hashFile).toHaveBeenCalledWith('book_1', 'cover.jpg')
+    expect(library.getSnapshot()[0]?.coverFacts).toEqual({ name: 'cover.jpg', size: 6, hash: 'ab'.repeat(32) })
+    /* Stamped already: the next keep measures again but writes nothing new. */
+    hashFile.mockResolvedValueOnce({ blake3: 'cd'.repeat(32), size: 7 })
+    await library.keepJacket('book_1', new Blob(['ignored']))
+    expect(library.getSnapshot()[0]?.coverFacts).toEqual({ name: 'cover.jpg', size: 6, hash: 'ab'.repeat(32) })
+    /* A port that refuses leaves the record alone. */
+    const refusing = fakeFs(seeded(['book_2']))
+    refusing.store.set(`${BOOKS_DIR}/book_2/cover.jpg`, new TextEncoder().encode('jacket'))
+    const other = createLibrary({ fs: refusing, queue: writeQueue(), initial: [row('book_2')], hashes: () => ({ hashFile: () => Promise.reject(new Error('no')) }) })
+    await other.keepJacket('book_2', new Blob(['ignored']))
+    expect(other.getSnapshot()[0]).not.toHaveProperty('coverFacts')
+  })
+})

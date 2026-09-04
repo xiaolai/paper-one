@@ -1,5 +1,5 @@
 import { isValidElement, type ReactNode } from 'react'
-import type { PaneContribution, PaneRenderer } from '../core/capability'
+import type { PaneContext, PaneContribution, PaneRenderer } from '../core/capability'
 import { resolvePaneId } from '../core/registry'
 import { paneFits, type KernelPaneId, type PaneAudience, type PaneId, type Screen, type Theme } from './state'
 import type { Platform } from '../core/metrics'
@@ -73,11 +73,13 @@ export function panesFor(screen: Screen, audience: PaneAudience = {}): readonly 
  * ⌘2 stayed with this panel through its rename for the same reason.
  */
 export const PANE_SHORTCUTS: readonly { combo: string; digit: string; pane: KernelPaneId }[] =
-  PANES.filter((pane) => pane.combo).map((pane) => ({
-    combo: pane.combo ?? '',
-    digit: (pane.combo ?? '').slice(-1),
-    pane: pane.id,
-  }))
+  PANES.filter((pane): pane is (typeof PANES)[number] & { readonly combo: string } => typeof pane.combo === 'string' && pane.combo !== '').map(
+    (pane) => ({
+      combo: pane.combo,
+      digit: pane.combo.slice(-1),
+      pane: pane.id,
+    }),
+  )
 
 /**
  * The themes, in §05's order — the other registry that was written twice.
@@ -130,8 +132,8 @@ export function shownPane(
  * "Objects are not valid as a React child" and no word about which
  * capability sent it.
  */
-export function renderContribution(id: string, render: PaneRenderer): ReactNode {
-  const value = render()
+export function renderContribution(id: string, render: PaneRenderer, context: PaneContext): ReactNode {
+  const value = render(context)
   if (isReactNode(value)) return value
   throw new Error(`pane "${id}" rendered ${describe(value)}, which React cannot show`)
 }
@@ -166,7 +168,7 @@ function isReactNode(value: unknown): value is ReactNode {
          a PROMISE is what `use` unwraps. Neither can be inspected further
          without doing the rendering this only means to permit. */
       const tagged = value as { $$typeof?: symbol; then?: unknown }
-      if (typeof tagged.$$typeof === 'symbol') return true
+      if (tagged.$$typeof === Symbol.for('react.portal')) return true
       if (typeof tagged.then === 'function') return true
       /* AN ITERABLE IS NOT READ. Consuming a generator here would leave React
          nothing to render — the guard would eat the pane it approved. */

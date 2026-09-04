@@ -115,3 +115,19 @@ describe('a contributed screen that throws', () => {
     screen.getByText(/not running/u)
   })
 })
+
+describe('the context a contributed screen is handed', () => {
+  it('names no book, and carries the way to open one only when the shell gave it', () => {
+    const shown = (context: { bookId: string | null; openBook?: unknown }) => (
+      <p>
+        {String(context.bookId)}:{typeof context.openBook}
+      </p>
+    )
+    const open = () => {}
+    const { unmount } = render(<ContributedScreen label="Circle" platform="macos" id="cap:one" render={shown} openBook={open} />)
+    expect(screen.getByText('null:function')).toBeTruthy()
+    unmount()
+    render(<ContributedScreen label="Circle" platform="macos" id="cap:one" render={shown} />)
+    expect(screen.getByText('null:undefined')).toBeTruthy()
+  })
+})

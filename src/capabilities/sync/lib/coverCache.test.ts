@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createKernelServices } from '../../../kernel'
 import { fakeBlobHash, fakeWire, linkWires } from '../../peer'
 import { createPeerPort } from '../../peer'
@@ -49,10 +49,12 @@ async function world() {
   }
 
   let now = 1_000
+  const stamp = vi.fn(() => Promise.resolve())
   const cache = createCoverCache({
     fs,
     settings: services.settings,
     lookup,
+    stamp,
     fetchBlob: (peerId, folder, blob) =>
       port.fetchBlob({ peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash }),
     // The REAL kernel primitive (WI-10.2/10.5), so eviction here proves the
@@ -60,7 +62,7 @@ async function world() {
     removeBlob: (book, name) => services.removeBlob(book, name),
     now: () => ++now,
   })
-  return { cache, fs, serve, services }
+  return { cache, fs, serve, services, stamp }
 }
 
 const jacket = (size: number, fill = 7): Uint8Array => new Uint8Array(size).fill(fill)
@@ -72,6 +74,9 @@ describe('the cover cache', () => {
     expect(await w.cache.ensure('book:a')).toBe(true)
     expect(w.fs.store.get('books/book_a/cover.jpg')).toEqual(jacket(1000))
     expect((await w.cache.index())['book:a']?.size).toBe(1000)
+    /* The landing carries its facts onto the record (WI-23.C5) — once, for the fetch. */
+    expect(w.stamp).toHaveBeenCalledTimes(1)
+    expect(w.stamp).toHaveBeenCalledWith('book:a', expect.objectContaining({ name: 'cover.jpg', size: 1000, hash: expect.any(String) }))
 
     const opsBefore = w.fs.ops.length
     expect(await w.cache.ensure('book:a')).toBe(true) // present: an LRU touch, no fetch

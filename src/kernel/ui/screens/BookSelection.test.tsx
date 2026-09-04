@@ -236,6 +236,17 @@ describe('the corner mark on a book with no bytes here', () => {
     expect(run).toHaveBeenCalledWith('bk1')
   })
 
+  it('says on the console when the download rejects, naming the action', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { container } = render(
+      <BookCell {...shared} setQuery={vi.fn()} book={noBytes()} actions={[{ ...downloadAction, run: () => Promise.reject(new Error('no session')) }]} />,
+    )
+    fireEvent.click(mark(container)!)
+    await new Promise((done) => setTimeout(done, 0))
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining(downloadAction.id), expect.objectContaining({ message: 'no session' }))
+    spy.mockRestore()
+  })
+
   it('is a real button, so a keyboard reaches it', () => {
     const { container } = render(
       <BookCell {...shared} setQuery={vi.fn()} book={noBytes()} actions={[downloadAction]} />,

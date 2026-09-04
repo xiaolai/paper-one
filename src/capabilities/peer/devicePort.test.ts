@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { WirePeer } from './lib/wire'
+import { fakeWire } from './lib/fakeWire.testkit'
 import { devicePortOver, deviceRow, personPortOver, readRole, releasePeer, serveWhenShelf } from './index'
 
 /**
@@ -297,10 +298,11 @@ describe('releasePeer', () => {
         model: disposer(seen, 'model') as never,
         serviceHost: disposer(seen, 'service-host'),
         devicePort: disposer(seen, 'device-port'),
+        hashPort: disposer(seen, 'hash-port'),
       },
       { warn: () => {} },
     )
-    expect(seen).toEqual(['service-host', 'device-port', 'model'])
+    expect(seen).toEqual(['hash-port', 'device-port', 'service-host', 'model'])
   })
 
   /**
@@ -316,18 +318,20 @@ describe('releasePeer', () => {
         model: disposer(seen, 'model') as never,
         serviceHost: disposer(seen, 'service-host', true),
         devicePort: disposer(seen, 'device-port'),
+        hashPort: disposer(seen, 'hash-port', true),
       },
       { warn: (event: string, fields: Record<string, unknown>) => said.push({ event, fields }) },
     )
-    expect(seen).toEqual(['service-host', 'device-port', 'model'])
-    expect(said).toHaveLength(1)
-    expect(said[0]?.event).toBe('peer.teardown-step-failed')
-    expect(said[0]?.fields.label).toBe('service-host')
+    expect(seen).toEqual(['hash-port', 'device-port', 'service-host', 'model'])
+    expect(said).toHaveLength(2)
+    expect(said.map((one) => one.event)).toEqual(['peer.teardown-step-failed', 'peer.teardown-step-failed'])
+    /* Each step named by its own label, so the log says which slot would not let go. */
+    expect(said.map((one) => one.fields.label)).toEqual(['hash-port', 'service-host'])
   })
 
   it('is a no-op for what was never acquired', () => {
     expect(() =>
-      releasePeer({ port: null, model: null, serviceHost: null, devicePort: null }, { warn: () => {} }),
+      releasePeer({ port: null, model: null, serviceHost: null, devicePort: null, hashPort: null }, { warn: () => {} }),
     ).not.toThrow()
   })
 })
@@ -508,5 +512,88 @@ describe('the person port (WI-22.B3)', () => {
       ['circle:read'],
       'attempt-9',
     )
+  })
+})
+
+describe('the device count the circle panel reads — WI-23.A3', () => {
+  /* ⚠️ **THE CUSTODY MARKER USED TO READ A HARDCODED 1.** The roster this
+     device presents is the count, this device included; a reader with no
+     identity has no roster to lose and answers 0, which the marker never
+     reads because `hasIdentity` is false first. */
+  const withRoster = (roster: readonly string[] | null) =>
+    personPortOver({
+      circleMine: () => Promise.resolve(roster === null ? null : { roster }),
+    } as never)
+
+  it('is the roster’s size', async () => {
+    expect(await withRoster(['a'.repeat(64)]).devices()).toBe(1)
+    expect(await withRoster(['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)]).devices()).toBe(3)
+  })
+
+  it('is 0 with no identity, and is not rounded up to 1', async () => {
+    expect(await withRoster(null).devices()).toBe(0)
+  })
+})
+
+describe('readRole, stopped after the retries', () => {
+  it('answers null without a word once the run has stopped', async () => {
+    let failures = 0
+    const port = { localRole: () => { failures += 1; return Promise.reject(new Error('not yet')) } }
+    const warn = vi.fn()
+    vi.useFakeTimers()
+    try {
+      const answer = readRole(port, () => failures >= 3, { warn })
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(await answer).toBeNull()
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('the person port over a wire', () => {
+  it('introduces a device and revokes one through the wire', async () => {
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-1' })
+    const seen = wire as unknown as { introduced: unknown[]; revoked: string[] }
+    const port = personPortOver(wire)
+    await port.introduce('dev-1', ['addr'])
+    expect(seen.introduced).toEqual([{ device: 'dev-1', addrs: ['addr'] }])
+    await port.revokeDevice('dev-2')
+    expect(seen.revoked).toEqual(['dev-2'])
+  })
+})
+
+describe('the role read’s wait, held to the letter', () => {
+  it('retries only once the backoff has passed, and gives up within a tick of a stop', async () => {
+    vi.useFakeTimers()
+    try {
+      let tries = 0
+      const port = { localRole: () => { tries += 1; return Promise.reject(new Error('not yet')) } }
+      const answer = readRole(port, () => false, { warn: () => {} })
+      await vi.advanceTimersByTimeAsync(100)
+      expect(tries).toBe(1)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(tries).toBe(2)
+      await vi.advanceTimersByTimeAsync(600)
+      expect(tries).toBe(3)
+      expect(await answer).toBeNull()
+      let stopped = false
+      let asked = 0
+      const slow = readRole({ localRole: () => { asked += 1; return Promise.reject(new Error('not yet')) } }, () => stopped, { warn: () => {} })
+      await vi.advanceTimersByTimeAsync(10)
+      stopped = true
+      await vi.advanceTimersByTimeAsync(60)
+      expect(await slow).toBeNull()
+      expect(asked).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('releases without a word when there is no service host to release', () => {
+    const said: unknown[] = []
+    releasePeer({ port: null, model: null, serviceHost: undefined, devicePort: undefined } as never, { warn: (event) => void said.push(event) })
+    expect(said).toEqual([])
   })
 })

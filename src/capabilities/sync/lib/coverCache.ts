@@ -1,4 +1,4 @@
-import { BOOKS_DIR, atomicWrite, defineSetting, isRefusal, type IndexFs, type RemovableBlobName, type Setting, type SettingsStore } from '../../../kernel'
+import { BOOKS_DIR, atomicWrite, defineSetting, isRefusal, type CoverName, type IndexFs, type RemovableBlobName, type Setting, type SettingsStore } from '../../../kernel'
 import { blobFolderOf, type BlobFacts } from './ledger'
 
 /**
@@ -57,6 +57,8 @@ export interface CoverCacheOptions {
   /** Where a book's cover is — the `sync.content` answer, reduced. */
   readonly lookup: (book: string) => Promise<CoverLookup | null>
   readonly fetchBlob: (peerId: string, folder: string, blob: BlobFacts) => Promise<void>
+  /** Told the facts of a jacket that landed, so the record can carry them (WI-23.C5). */
+  readonly stamp?: (book: string, facts: { readonly name: CoverName; readonly size: number; readonly hash: string }) => Promise<void>
   /**
    * Delete one closed-name blob from a book's folder — the kernel's
    * `removeBlob` primitive (WI-10.2/10.5). Eviction's only delete: this
@@ -90,6 +92,7 @@ export function createCoverCache({
   settings,
   lookup,
   fetchBlob,
+  stamp,
   removeBlob,
   now = Date.now,
   bytesAt,
@@ -298,6 +301,12 @@ export function createCoverCache({
            * cover is not here, so a tracked entry for it is a lie either
            * way. */
           return dropStale()
+        }
+        try {
+          // Stryker disable next-line OptionalChaining: a cache with nobody to tell throws here and is caught below; the jacket is kept either way.
+          await stamp?.(book, { name: found.cover.name as CoverName, size: found.cover.size, hash: found.cover.hash })
+        } catch {
+          /* The jacket is here either way; the facts wait for the circle's pass. */
         }
         index[book] = { name: found.cover.name, size: found.cover.size, usedAt: now() }
         await writeIndex(await evictLocked(index, book))

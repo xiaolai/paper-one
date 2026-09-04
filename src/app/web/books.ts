@@ -1,4 +1,4 @@
-import type { BookRow, IndexedBook } from '../../kernel'
+import type { BookRow, IndexedBook, Hlc } from '../../kernel'
 import type { ShelfChannel } from './channel'
 
 /**
@@ -103,8 +103,8 @@ export interface RemoteBooks {
  * behind a plausible-looking row. */
 /* Shared with the other stores — see `wireRow.ts`, which was extracted when
  * `marks.ts` and `cards.ts` turned out to be casting where this file reads. */
-export { str, num, strings } from './wireRow'
 import { byFirstId, num, str, strings } from './wireRow'
+import { STARS, isHlc, type Stars } from '../../kernel'
 
 /** The formats `services/rows.ts` can send. Anything else reads as unknown. */
 const FORMATS = new Set(['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin'])
@@ -136,8 +136,19 @@ export function parseRows(answer: unknown): readonly BookRow[] {
       subjects: strings(row['subjects']),
       tags: strings(row['tags']),
       position: str(row['position']),
-      progress: num(row['progress']) ?? 0,
+      progress: within01(num(row['progress'])),
       finished: row['finished'] === true,
+      /* The reader's own opinion (WI-23.B3), read as the row declares it: a
+         status outside the three words is a shelf disagreeing about the wire
+         and reads as nothing said, never as a fourth state. */
+      status: (['want', 'reading', 'finished'] as const).find((one) => one === row['status']) ?? null,
+      /* A stamp that is not an HLC is no stamp: it would be cast to one
+         further down and merged as though it ordered anything. */
+      statusAt: stamp(row['statusAt']),
+      rating: stars(row['rating']),
+      ratingAt: stamp(row['ratingAt']),
+      review: str(row['review']),
+      reviewAt: stamp(row['reviewAt']),
       addedAt: num(row['addedAt']),
       openedAt: num(row['openedAt']),
       format: FORMATS.has(row['format'] as string) ? (row['format'] as BookRow['format']) : null,
@@ -155,6 +166,12 @@ export function parseRows(answer: unknown): readonly BookRow[] {
      bug"; only the missing half was actually handled. */
   return byFirstId(rows, (row) => row.bookId)
 }
+
+const stamp = (value: unknown): Hlc | null => (isHlc(value) ? value : null)
+/** A progress is a fraction of the book: outside 0–1, or not a number at all, it reads as none — the record parser's own rule. */
+// Stryker disable next-line ConditionalExpression,LogicalOperator: null is not finite, so the null clause only spells out what isFinite refuses anyway.
+const within01 = (value: number | null): number => (value !== null && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0)
+const stars = (value: unknown): Stars | null => (STARS as readonly unknown[]).includes(value) ? (value as Stars) : null
 
 const sameList = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((x, i) => x === b[i])
@@ -182,6 +199,12 @@ function same(a: readonly BookRow[], b: readonly BookRow[]): boolean {
       row.position === other.position &&
       row.progress === other.progress &&
       row.finished === other.finished &&
+      row.status === other.status &&
+      row.statusAt === other.statusAt &&
+      row.rating === other.rating &&
+      row.ratingAt === other.ratingAt &&
+      row.review === other.review &&
+      row.reviewAt === other.reviewAt &&
       row.addedAt === other.addedAt &&
       row.openedAt === other.openedAt &&
       row.format === other.format &&
@@ -253,11 +276,15 @@ export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
       }
     } catch (thrown) {
       if (stale()) return
+      const before = why
       why = thrown instanceof Error ? thrown.message : String(thrown)
       /* ONE WAKE-UP, NOT TWO. `setStatus` publishes when the status changes and
          this published again unconditionally, so every failure re-rendered
          every subscriber twice for one piece of news. */
-      const moved = state !== (rows.length > 0 ? 'stale' : 'failed')
+      /* Once per piece of news — and a changed REASON is news, even when the
+         state it lands in is the one already shown. */
+      // Stryker disable next-line ConditionalExpression: the rows only change on a success, which clears the reason — so a state that moved under the same reason cannot be presented.
+      const moved = state !== (rows.length > 0 ? 'stale' : 'failed') || why !== before
       state = rows.length > 0 ? 'stale' : 'failed'
       if (moved) publish()
       return
@@ -324,6 +351,20 @@ export function asIndexedBook(row: BookRow): IndexedBook {
        saw it: a re-render for a field nobody could read. WI-21.3 asks this row
        to "parse, compare and carry", and carrying is the third of the three. */
     ...(row.identifier !== null ? { identifier: row.identifier } : {}),
+    /* The reader's own opinion (WI-23.B3), carried with the stamps the row
+       has: a shelf drawn from the wire says what the reader said, and a
+       register with no stamp on the wire is one with none here. */
+    ...(row.status !== null && row.statusAt !== null ? { status: { state: row.status, at: row.statusAt as Hlc } } : {}),
+    /* One to five, as the record holds it; a wire row carrying anything else carries no rating. */
+    // Stryker disable next-line ConditionalExpression,LogicalOperator: null is not among the stars, so the null clause only spells out what the membership test refuses anyway.
+    ...(row.rating !== null && STARS.includes(row.rating as Stars)
+      ? { rating: row.rating as Stars, ...(row.ratingAt !== null ? { ratingAt: row.ratingAt as Hlc } : {}) }
+      : {}),
+    ...(row.review !== null && row.reviewAt !== null ? { review: { text: row.review, at: row.reviewAt as Hlc } } : {}),
+    /* What the bytes are, and their digest — representable, and read by the
+       shelf's own views, so a shelf drawn from the wire carries them too. */
+    ...(row.format !== null ? { format: row.format } : {}),
+    ...(row.contentHash !== null ? { contentHash: row.contentHash } : {}),
     ...(row.series !== null ? { series: row.series } : {}),
     ...(row.seriesIndex !== null ? { seriesIndex: row.seriesIndex } : {}),
     ...(row.publisher !== null ? { publisher: row.publisher } : {}),

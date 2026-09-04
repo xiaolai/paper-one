@@ -39,6 +39,29 @@ export interface Relationship {
   /** LWW register, exactly as `tagClock` is. */
   readonly changedAt: Hlc
   readonly retain: Retain
+  /**
+   * Whether this person is shown the reader's SHELF — WI-23.C2.
+   *
+   * ⚠️ **PER PERSON, OFF BY DEFAULT, SEPARATE FROM PASSAGE SHARING.** The
+   * three disclosures are nested — a marked sentence, then a book you own,
+   * then your library — and a reader who agreed to the first has not agreed
+   * to the third. Per person and not per circle, because there is no circle
+   * object, only pairings; not per book, because a shelf with holes says
+   * which books you are hiding. Converges by `changedAt` with the rest of the
+   * record, so turning it on from the phone reaches the laptop.
+   */
+  readonly shelf: boolean
+  /**
+   * When the shelf switch was last moved — its OWN register, WI-23.C2.
+   *
+   * ⚠️ **THE SWITCH MUST NOT CARRY THE STATE WITH IT.** With one stamp for
+   * the whole record, a shelf toggle made on a stale admitted copy stamped
+   * later than a block made elsewhere would win the merge whole — and
+   * re-admit the person along with showing them the shelf. The state and the
+   * switch merge apart, each by its own stamp. Absent on a record written
+   * before this existed, which reads as `changedAt`.
+   */
+  readonly shelfAt?: Hlc
 }
 
 /**
@@ -54,8 +77,50 @@ export interface Relationship {
  * safe to be wrong about.
  */
 export function mergeRelationship(a: Relationship, b: Relationship): Relationship {
-  if (a.changedAt !== b.changedAt) return laterHlc(a.changedAt, b.changedAt) === a.changedAt ? a : b
-  return RESTRICTION[a.state] >= RESTRICTION[b.state] ? a : b
+  /* The STATE half — state, epoch, retain, admittedAt. THE NEWER EPOCH WINS
+     OUTRIGHT: an epoch is a re-admission, and a record of an older one is
+     stale whatever its stamp says — a replica that never heard of the
+     re-admission cannot outvote it by having a clock that runs ahead. Within
+     one epoch, by `changedAt`; at a true tie the more restrictive state,
+     then purge over keep, then the earlier admission: an order three
+     replicas reach whichever two they merge first. */
+  // Stryker disable next-line EqualityOperator: reached only when the epochs differ, so `>` and `>=` choose alike.
+  const state = a.epoch !== b.epoch ? (a.epoch > b.epoch ? a : b) : a.changedAt !== b.changedAt ? (laterHlc(a.changedAt, b.changedAt) === a.changedAt ? a : b) : restrictiveOf(a, b)
+  /* The SHELF half by its own stamp; at a tie, off — the answer that is safe
+     to be wrong about.
+
+     ⚠️ **AND ONLY WITHIN THE WINNING EPOCH.** A grant belongs to the
+     relationship it was made in: a stale replica that turned the shelf on
+     under epoch 1, stamped after a re-admission it had not yet heard of,
+     must not carry that grant into epoch 2 — `readmit` turned it off for
+     exactly this reason. When the epochs differ, the winning record's own
+     shelf stands, whatever the other's stamp says. */
+  const shelfAtOf = (one: Relationship): Hlc => one.shelfAt ?? one.changedAt
+  const shelf =
+    a.epoch !== b.epoch
+      ? state
+      : shelfAtOf(a) !== shelfAtOf(b)
+        ? laterHlc(shelfAtOf(a), shelfAtOf(b)) === shelfAtOf(a)
+          ? a
+          : b
+        : // Stryker disable next-line ConditionalExpression: with the switches alike either record answers the same switch and the same stamp.
+          a.shelf === b.shelf
+          ? a
+          : a.shelf
+            ? b
+            : a
+  return { ...state, shelf: shelf.shelf, shelfAt: shelfAtOf(shelf) }
+}
+
+/** Of two records stamped alike, the one that gives away less. */
+function restrictiveOf(a: Relationship, b: Relationship): Relationship {
+  // Stryker disable next-line EqualityOperator: reached only when the two differ, so `>` and `>=` choose alike.
+  if (RESTRICTION[a.state] !== RESTRICTION[b.state]) return RESTRICTION[a.state] > RESTRICTION[b.state] ? a : b
+  if (a.retain !== b.retain) return a.retain === 'purge' ? a : b
+  /* Alike in every deciding field: the earlier admission stands, so two
+     replicas holding the same two records agree whichever they read first. */
+  // Stryker disable next-line ConditionalExpression: with the admissions alike the two records are alike in every deciding field, so either answers the same.
+  return laterHlc(a.admittedAt, b.admittedAt) === a.admittedAt && a.admittedAt !== b.admittedAt ? b : a
 }
 
 /** How restrictive each state is, for the tie above. */
@@ -123,7 +188,27 @@ export function readmit(previous: Relationship, at: Hlc): Relationship {
     admittedAt: at,
     changedAt: at,
     retain: 'keep',
+    /* A new epoch cannot revive old grants, and showing a shelf is one. */
+    shelf: false,
+    shelfAt: at,
   }
+}
+
+/** The epoch a relationship starts in — and the one a record kept before epochs were stamped belongs to. */
+export const FIRST_EPOCH = 1
+
+/**
+ * A relationship as it starts: admitted, first epoch, keeping what arrives,
+ * showing NO shelf. The default a person has before the reader decides
+ * anything about them — which is also what a record read from nothing is.
+ */
+export function newRelationship(person: string, at: Hlc): Relationship {
+  return { person, state: 'admitted', epoch: FIRST_EPOCH, admittedAt: at, changedAt: at, retain: 'keep', shelf: false, shelfAt: at }
+}
+
+/** Turn the shelf on or off for one person, under the switch's own stamp — the state's is left alone. */
+export function showShelf(previous: Relationship, shelf: boolean, at: Hlc): Relationship {
+  return { ...previous, shelf, shelfAt: at }
 }
 
 /** The default `retain` for a state — see `relationships.md`. */
@@ -140,6 +225,17 @@ export function changeState(
   at: Hlc,
   retain: Retain = defaultRetain(state),
 ): Relationship {
+  /* ⚠️ **AN ENDED RELATIONSHIP DOES NOT COME BACK BY A STATE CHANGE.** Blocked
+     or exited to admitted, in the same epoch, would revive every entry the
+     old epoch retained — which is exactly what `readmit`'s new epoch exists
+     to prevent. Muted to admitted is a state change; the other two are a
+     re-admission, and only `readmit` makes one — and so is blocked or
+     exited to MUTED, which accepts transport again: the two words that
+     let their leaves connect are reached from an ended relationship only
+     through the ceremony. */
+  if (acceptsTransport(state) && !acceptsTransport(previous.state)) {
+    throw new Error(`a ${previous.state} relationship is re-admitted through readmit, not changeState`)
+  }
   return { ...previous, state, changedAt: at, retain }
 }
 
