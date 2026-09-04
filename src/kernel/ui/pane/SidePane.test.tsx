@@ -234,3 +234,33 @@ describe('the rail', () => {
     expect(new Set(ids).size).toBe(ids.length)
   })
 })
+
+/**
+ * THE BOOK THE SCREEN SHOWS, not the book the reader holds. The reader stays
+ * loaded behind the library, so `book.bookId` still names the last book
+ * opened while the library is on screen — and `PaneContext` promises `null`
+ * there. A pane fitted to both screens was handed the previous book's id on
+ * the library.
+ */
+describe('what a contributed pane is handed', () => {
+  const friends = {
+    id: 'circle:friends' as const,
+    label: 'Friends',
+    screens: ['library', 'reader'] as const,
+    render: (context: { readonly bookId: string | null }) => <p>{`book=${String(context.bookId)}`}</p>,
+  }
+  const on = (screenId: 'library' | 'reader') =>
+    draw({
+      pane: 'library',
+      state: { ...initialState, screen: screenId, pane: 'circle:friends', lastPane: 'circle:friends' },
+      contributed: [friends as unknown as SidePaneProps['contributed'][number]],
+    })
+
+  it('gets null for the book on the library screen, and the open book in the reader', () => {
+    on('library')
+    expect(screen.getByText('book=null')).toBeTruthy()
+    cleanup()
+    on('reader')
+    expect(screen.getByText('book=open-book')).toBeTruthy()
+  })
+})

@@ -1,13 +1,13 @@
 import type { IndexFs, IndexedBook } from './bookIndex'
 import type { Disposable, ServiceContribution } from './capability'
 import { createCards, type CardStorage, type Cards } from './cardStore'
-import { hlcOf, type Hlc } from './hlc'
+import { type Hlc, makeHlc, ZERO_DEVICE, HLC_MAX_COUNTER } from './hlc'
 import { createLibrary, type Library } from './libraryStore'
 import { createMarkStore, type MarkStore } from './markStore'
-import { folderOf } from './bookFolder'
+import { folderOf, readBook, recordPath } from './bookFolder'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
 import { NO_GLOSS, type GlossProvider } from './gloss'
-import { NO_WORK_LINE, NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_KINDS, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type SizePort, type WorkLine } from './ports'
+import { NO_WORK_LINE, NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_KINDS, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type HashPort, type SizePort, type WorkLine } from './ports'
 import { carryLegacySettings, createSettingsStore, type SettingsMigration } from './settings'
 import { writeQueue, type WriteQueue } from './writeQueue'
 
@@ -94,6 +94,18 @@ export interface KernelServices {
    */
   bindClock(clock: () => Hlc): Disposable
   /**
+   * A stamp from THE clock — the one every store stamps with.
+   *
+   * ⚠️ **ONE CLOCK PER DEVICE, so a capability that mints a stamp asks here
+   * rather than keeping a clock of its own.** The option's note says why in
+   * as many words: two clocks on one device could order one edit before the
+   * removal that preceded it. The circle stamps what it publishes with an
+   * HLC (`Publication.at`), and a second clock beside the stores' would be
+   * exactly that second clock. Reads through the bound slot, so it is the
+   * sync capability's HLC once bound and the legacy wall clock before.
+   */
+  clock(): Hlc
+  /**
    * Bind the SERVICE HOST — the peer transport, at composition. A shelf serves
    * the capabilities' contributed `services` over the peer router; the host is
    * what turns a `ServiceContribution` set into served, grant-gated handlers.
@@ -128,6 +140,9 @@ export interface KernelServices {
    */
   bindSizePort(port: SizePort): Disposable
   sizes(): SizePort | null
+  /** Bind the HASH port — BLAKE3 in Rust, by the peer capability. The same slot rule as the size port. */
+  bindHashPort(port: HashPort): Disposable
+  hashes(): HashPort | null
   /**
    * Bind the COMPANION provider — `companion`, at composition, and only
    * `companion`. Same late-bound, once-at-a-time rule and the same restoring
@@ -361,7 +376,6 @@ function routedRecorder(
 /** What `removeBlob` needs of the services being built around it. */
 interface BlobRemoval {
   readonly fs: IndexFs | null
-  readonly writes: WriteQueue
   readonly library: Library
   readonly recorder: MutationRecorder
 }
@@ -377,7 +391,7 @@ interface BlobRemoval {
  * thing in `createKernelServices` and the only one that did any work.
  */
 async function removeBlob(
-  { fs, writes, library, recorder }: BlobRemoval,
+  { fs, library, recorder }: BlobRemoval,
   bookId: string,
   name: RemovableBlobName,
 ): Promise<void> {
@@ -397,7 +411,6 @@ async function removeBlob(
      * and absence is this operation's documented no-op — but an id whose
      * folder belongs to a DIFFERENT, live book is refused rather than
      * quietly honoured. */
-    const folder = folderOf(bookId)
     /* ANY row on the folder that is not this id refuses — not the FIRST row
      * found. A snapshot holding both the requested id and a colliding alias
      * (a corrupt index, a caller-supplied initial set) let ordering decide
@@ -439,44 +452,132 @@ async function removeBlob(
      * added to the closed set would have been journalled as `content` and
      * told every peer the book's bytes had changed. */
     const kind = REMOVABLE_BLOB_KINDS[name]
-    await writes.append(library.lane(bookId), async () => {
-      /* ⚠️ **ASKED INSIDE THE LANE, where the answer cannot go stale.** The
-       * shelf was read before the queue was joined — a check-then-act across
-       * a lane boundary — so an add or a rekey already queued for this folder
-       * could claim it while the deletion waited its turn, and the delete
-       * then ran against a snapshot describing a book that no longer owned
-       * these bytes. This is the same repair `AddGuard.fresh` and
-       * `RestoreGuard` are: the scan is the diagnosis, the lane is the
-       * decision. */
-      const other = claimant()
-      if (other !== undefined) {
-        throw new Error(
-          `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(other.bookId)} does`,
-        )
-      }
-      const path = `${folder}/${name}`
-      /* ⚠️ CHECKED BEFORE THE BRACKET IS OPENED, not inside it. An absent
-       * blob is the documented no-op, and opening a bracket around it wrote
-       * a committed mutation for a change that did not happen: the journal
-       * advanced, the feed carried an entry, and the verify pass had one more
-       * surface to digest — all for a file that was already gone. Removing
-       * the same blob twice, or evicting a book whose bytes a peer already
-       * took, did exactly this.
-       *
-       * EXISTS-THEN-REMOVE IS ATOMIC ONLY AGAINST THIS QUEUE, and another
-       * PROCESS can still take the file in between — so a remove that races
-       * one is an ordinary absence, not a fault. Absence is the documented
-       * no-op for this operation either way; raising it would turn two
-       * callers both doing the right thing into an error for one of them.
-       * Both checks are inside the queued task, so the pair is still atomic
-       * against everything else touching this folder. */
-      if (!(await fs.exists(path))) return
-      await recorded(recorder, bookId, kind, async () => {
-        await fs.remove(path).catch(async (cause: unknown) => {
-          if (await fs.exists(path)) throw cause
-        })
-      })
-    })
+    /* ⚠️ **THE UNLINK AND THE FACTS IN ONE LANE TASK** — `updateAfter`. Two
+       tasks — the unlink, then a record change queued after it — left a gap
+       a stamp could land in: a jacket landed again under this name between
+       the two had its fresh facts erased by the cleanup. And a recorder
+       commit that failed after the unlink used to throw past the cleanup
+       altogether, leaving facts describing a file that was not there. The
+       hook runs inside the lane, before the record write, and says whether
+       the record follows; a refusal by another book's claim, and a recorder
+       failure after the bytes left, are raised once the lane is done. */
+    let claimedBy: string | null = null
+    let unreadable: Error | null = null
+    let deletable = false
+    await library.updateAfter(
+      bookId,
+      {
+        before: async (target) => {
+          /* ⚠️ **ASKED INSIDE THE LANE, where the answer cannot go stale.** The
+           * shelf was read before the queue was joined — a check-then-act across
+           * a lane boundary — so an add or a rekey already queued for this folder
+           * could claim it while the deletion waited its turn, and the delete
+           * then ran against a snapshot describing a book that no longer owned
+           * these bytes. This is the same repair `AddGuard.fresh` and
+           * `RestoreGuard` are: the scan is the diagnosis, the lane is the
+           * decision. */
+          /* RESOLVED INSIDE THE LANE, beside the ownership check it belongs with:
+           * a rekey queued ahead of this may have moved the book, and then the
+           * folder this id names either belongs to the new id — refused below —
+           * or no longer holds the bytes, which the exists check reads as the
+           * documented absent no-op. An id no longer on the shelf still clears
+           * its orphaned folder: that is the no-op the contract promises. */
+          const other = claimant()
+          if (other !== undefined) {
+            claimedBy = other.bookId
+            return 'refuse'
+          }
+          /* ⚠️ CHECKED BEFORE ANY BRACKET IS OPENED. An absent blob is the
+           * documented no-op, and opening a bracket around it wrote a
+           * committed mutation for a change that did not happen: the journal
+           * advanced, the feed carried an entry, and the verify pass had one
+           * more surface to digest — all for a file that was already gone.
+           *
+           * EXISTS-THEN-REMOVE IS ATOMIC ONLY AGAINST THIS QUEUE, and another
+           * PROCESS can still take the file in between — so a remove that races
+           * one is an ordinary absence, not a fault. Both checks are inside the
+           * queued task, so the pair is still atomic against everything else
+           * touching this folder. */
+          if (!(await target.exists(`${folderOf(bookId)}/${name}`))) return 'refuse'
+          /* THE RECORD, READ WHERE THE WRITE HAPPENS — BEFORE THE BYTES GO. One
+             that is there and will not read cannot have its facts cleared, and
+             a jacket deleted under it would leave facts for a file that is
+             gone: refused, and said. An absent record is an orphaned folder,
+             whose blob the contract still clears. */
+          const record = await readBook(target, bookId)
+          if (record === null && (await target.exists(recordPath(bookId)))) {
+            unreadable = new Error(`removeBlob: book.json for ${bookId} is there but could not be read`)
+            return 'refuse'
+          }
+          deletable = true
+          /* A JACKET GONE IS ITS FACTS GONE (WI-23.C5): `coverFacts` describe a
+             file that is no longer there, and a circle that read them would
+             publish a digest this device cannot serve.
+
+             THE FACTS OF THIS NAME, not any facts. A book can hold both names
+             (a legacy `cover.webp` beside the honest `cover.jpg`), and clearing
+             whatever facts were there when the legacy one went discarded the
+             JPEG's valid measurement. A record carrying no facts of this name
+             is not written, so an ordinary removal costs no record bracket. */
+          if (kind !== 'cover') return 'refuse'
+          return record?.coverFacts?.name === name ? 'go' : 'refuse'
+        },
+        /* ⚠️ **THE FACTS FIRST, THE FILE SECOND.** Two brackets, each honest
+           about its kind, and the record's before the cover's: a crash or a
+           journal failure between them leaves a jacket with no facts — which
+           the next pass measures again — and never facts with no jacket, which
+           the circle would publish and this device could not serve. The other
+           order had exactly that window. One lane task around both, so a stamp
+           queued behind the removal lands after it, not between. */
+        after: async (target) => {
+          if (!deletable) return
+          const path = `${folderOf(bookId)}/${name}`
+          await recorded(recorder, bookId, kind, async () => {
+            await target.remove(path).catch(async (cause: unknown) => {
+              if (await target.exists(path)) throw cause
+            })
+          })
+        },
+      },
+      (held) => {
+        if (held.coverFacts?.name !== name) return held
+        const { coverFacts: _gone, ...rest } = held
+        return rest
+      },
+    )
+    if (claimedBy !== null) {
+      throw new Error(`removeBlob: ${JSON.stringify(bookId)} does not own ${folderOf(bookId)} — ${JSON.stringify(claimedBy)} does`)
+    }
+    if (unreadable !== null) throw unreadable
+}
+
+/**
+ * The clock the kernel runs on when no capability binds one — wall time,
+ * never repeating.
+ *
+ * `hlcOf(Date.now())` alone stamped two writes in one millisecond alike, and
+ * two of the circle's LWW registers written in one tick then merged as a
+ * tie — the later word lost to the tie rule. The counter is what an HLC has
+ * a counter FOR: it ticks when the millisecond does not.
+ */
+export function monotonicClock(): () => Hlc {
+  let lastMs = -1
+  let counter = 0
+  return () => {
+    const ms = Date.now()
+    if (ms > lastMs) {
+      lastMs = ms
+      counter = 0
+    } else if (counter < HLC_MAX_COUNTER) {
+      counter += 1
+    } else {
+      /* The counter is full: the stamp moves into the next millisecond, as
+         the sync clock's does, rather than throwing from `makeHlc`. */
+      lastMs += 1
+      counter = 0
+    }
+    return makeHlc(lastMs, counter, ZERO_DEVICE)
+  }
 }
 
 export function createKernelServices({
@@ -494,7 +595,7 @@ export function createKernelServices({
    * slot's default target is what an unbind RESTORES. */
   const recorderSlot = exclusiveSlot<MutationRecorder>('bindRecorder: the recorder port is already bound', recorder)
   const recorderPort = routedRecorder(recorderSlot, recorder)
-  const clockSlot = exclusiveSlot<() => Hlc>('bindClock: the clock port is already bound', clock ?? (() => hlcOf(Date.now())))
+  const clockSlot = exclusiveSlot<() => Hlc>('bindClock: the clock port is already bound', clock ?? monotonicClock())
   const clockPort = () => clockSlot.get()()
 
   const NOOP_DISPOSABLE: Disposable = { dispose: () => {} }
@@ -525,6 +626,7 @@ export function createKernelServices({
   const deviceSlot = exclusiveSlot<DevicePort | null>('bindDevicePort: the device port is already bound', null)
   const shelfSlot = exclusiveSlot<ShelfPort | null>('bindShelfPort: the shelf port is already bound', null)
   const sizeSlot = exclusiveSlot<SizePort | null>('bindSizePort: the size port is already bound', null)
+  const hashSlot = exclusiveSlot<HashPort | null>('bindHashPort: the hash port is already bound', null)
   /* The two provider ports (WI-15.4, WI-15.13). Held from birth for the same
    * reason the recorder is: a capability implementing one can only arrive
    * after construction, and the holders must not have to know that. */
@@ -533,7 +635,7 @@ export function createKernelServices({
   const workLineSlot = exclusiveSlot<WorkLine>('bindWorkLine: the work line port is already bound', NO_WORK_LINE)
 
   const writes = writeQueue()
-  const library = createLibrary({ fs, queue: writes, initial: initialBooks, recorder: recorderPort, clock: clockPort })
+  const library = createLibrary({ fs, queue: writes, initial: initialBooks, recorder: recorderPort, clock: clockPort, hashes: () => hashSlot.get() })
   /* THE LIBRARY'S LANE, so a marks write and the record/move writes for the
    * same book are on ONE lane even after a rekey — `folderOf` alone is folder-
    * correct but does not follow a rename chain. */
@@ -569,9 +671,15 @@ export function createKernelServices({
   const disposeAll = (all: readonly (Disposable | undefined)[]): unknown[] => {
     const failures: unknown[] = []
     for (const one of all) {
-      if (typeof one?.dispose !== 'function') continue
+      /* The property is read INSIDE the guard: a getter that throws is a
+         failure of this host, not a reason to leave the hosts after it
+         undisposed. */
       try {
-        one.dispose()
+        // Stryker disable next-line OptionalChaining: an undefined host throws inside this try and is recorded as a failure — the same outcome, by the guard below.
+        const dispose = one?.dispose
+        // Stryker disable next-line ConditionalExpression: a host with no disposer was refused before this runs, so nothing this skips is ever present.
+        if (typeof dispose !== 'function') continue
+        dispose.call(one)
       } catch (cause) {
         failures.push(cause)
       }
@@ -605,9 +713,10 @@ export function createKernelServices({
     shelfRead: () => shelfRead,
     fs,
     storage,
-    removeBlob: (bookId, name) => removeBlob({ fs, writes, library, recorder: recorderPort }, bookId, name),
+    removeBlob: (bookId, name) => removeBlob({ fs, library, recorder: recorderPort }, bookId, name),
     bindRecorder: (next) => recorderSlot.bind(next),
     bindClock: (next) => clockSlot.bind(next),
+    clock: clockPort,
     bindServiceHost: (next) => {
       /* A fresh object per bind — see the Set's own note. Two binds of one
        * function are two bindings and two disposers, and neither reaches the
@@ -631,6 +740,8 @@ export function createKernelServices({
     shelf: () => shelfSlot.get(),
     bindSizePort: (next) => sizeSlot.bind(next),
     sizes: () => sizeSlot.get(),
+    bindHashPort: (next) => hashSlot.bind(next),
+    hashes: () => hashSlot.get(),
     bindCompanion: (next) => companionSlot.bind(next),
     /* Resolved per call, never captured: a pane that read the provider once
      * at mount would still be showing "no model configured" after the reader
@@ -677,7 +788,20 @@ export function createKernelServices({
        * Checked for EVERY host, and the ones that answered properly are still
        * disposed before throwing — a partial serve left running is the leak
        * this check exists to prevent, arriving by a different door. */
-      const bad = served.findIndex((one) => typeof (one as Disposable | undefined)?.dispose !== 'function')
+      /* The READ is guarded as well: `dispose` could be a getter, and a
+         getter that throws escaped this line before `disposeAll` ran, leaking
+         every host that had answered properly. */
+      /* Stryker disable BlockStatement: an empty block answers undefined, which refuses the host the same way. */
+      const hasDisposer = (one: unknown): boolean => {
+        try {
+          // Stryker disable next-line OptionalChaining: an undefined host throws inside this try and is refused the same way.
+          return typeof (one as Disposable | undefined)?.dispose === 'function'
+        } catch {
+          return false
+        }
+      }
+      /* Stryker restore BlockStatement */
+      const bad = served.findIndex((one) => !hasDisposer(one))
       if (bad !== -1) {
         reportDisposeFailures('serve-no-disposer', disposeAll(served as (Disposable | undefined)[]))
         throw new Error(`serveServices: a bound service host returned no disposer (host ${bad + 1} of ${served.length})`)

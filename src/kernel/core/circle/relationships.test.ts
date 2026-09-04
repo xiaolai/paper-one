@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import fc from 'fast-check'
 import { hlcOf } from '../hlc'
 import { NOTHING_SPENT, charge } from './bound'
 import {
@@ -12,6 +13,8 @@ import {
   mergeRelationship,
   readmit,
   type Relationship,
+  newRelationship,
+  showShelf,
 } from './relationships'
 
 /** WI-22.E1, E2 and E3 — the review's ninth condition. */
@@ -23,6 +26,7 @@ const rel = (over: Partial<Relationship> = {}): Relationship => ({
   admittedAt: hlcOf(100),
   changedAt: hlcOf(100),
   retain: 'keep',
+  shelf: false,
   ...over,
 })
 
@@ -166,5 +170,173 @@ describe('WI-22.E3 — the re-admission epoch', () => {
     const again = readmit(rel({ state: 'blocked', retain: 'purge' }), hlcOf(300))
     expect(again.retain).toBe('keep')
     expect(again.admittedAt).toBe(hlcOf(300))
+  })
+})
+
+describe('the shelf switch — WI-23.C2', () => {
+  it('starts OFF for a new relationship, and off again after a re-admission', () => {
+    /* ⚠️ A DISCLOSURE SWITCH DEFAULTS OFF, and a new epoch cannot revive a
+       grant — showing a shelf is one. */
+    expect(newRelationship('A', hlcOf(1))).toEqual({
+      person: 'A',
+      state: 'admitted',
+      epoch: 1,
+      admittedAt: hlcOf(1),
+      changedAt: hlcOf(1),
+      retain: 'keep',
+      shelf: false,
+      shelfAt: hlcOf(1),
+    })
+    expect(readmit(rel({ shelf: true, state: 'blocked' }), hlcOf(300)).shelf).toBe(false)
+    expect(readmit(rel({ shelf: true, state: 'blocked' }), hlcOf(300)).shelfAt).toBe(hlcOf(300))
+  })
+
+  it('turns under its OWN stamp, so the phone’s decision reaches the laptop without moving the state', () => {
+    const on = showShelf(rel(), true, hlcOf(200))
+    expect(on.shelf).toBe(true)
+    expect(on.shelfAt).toBe(hlcOf(200))
+    expect(on.changedAt).toBe(rel().changedAt)
+    expect(mergeRelationship(rel(), on)).toEqual(on)
+    expect(mergeRelationship(on, rel())).toEqual(on)
+    const off = showShelf(on, false, hlcOf(300))
+    expect(mergeRelationship(on, off).shelf).toBe(false)
+  })
+
+  it('leaves everything else of the record alone', () => {
+    const on = showShelf(rel({ state: 'muted', epoch: 3, retain: 'purge' }), true, hlcOf(200))
+    expect(on).toMatchObject({ state: 'muted', epoch: 3, retain: 'purge', admittedAt: hlcOf(100) })
+  })
+})
+
+describe('the last two clauses — one row each', () => {
+  it('resolves a true tie of stamp and state the same way from either side — the more restrictive copy', () => {
+    const a = { ...newRelationship('p', hlcOf(5)), retain: 'keep' as const }
+    const b = { ...a, retain: 'purge' as const }
+    expect(mergeRelationship(a, b)).toEqual(b)
+    expect(mergeRelationship(b, a)).toEqual(b)
+    const later = { ...a, epoch: 2 }
+    expect(mergeRelationship(a, later)).toEqual(later)
+    expect(mergeRelationship(later, a)).toEqual(later)
+    expect(mergeRelationship(a, { ...a })).toEqual(a)
+  })
+
+  it('does not let a stale shelf toggle re-admit a person blocked meanwhile — the split stamps', () => {
+    /* The laptop blocks at 10; the phone, still holding the admitted copy,
+       turns the shelf on at 20. Merged either way: blocked, AND shown the
+       shelf — two registers, two answers, neither overwriting the other. */
+    const admitted = newRelationship('p', hlcOf(1))
+    const blocked = changeState(admitted, 'blocked', hlcOf(10))
+    const shown = showShelf(admitted, true, hlcOf(20))
+    for (const merged of [mergeRelationship(blocked, shown), mergeRelationship(shown, blocked)]) {
+      expect(merged.state).toBe('blocked')
+      expect(merged.changedAt).toBe(hlcOf(10))
+      expect(merged.shelf).toBe(true)
+      expect(merged.shelfAt).toBe(hlcOf(20))
+    }
+    /* A record written before the switch had a stamp reads its state's. */
+    const old = { ...admitted, shelf: true, changedAt: hlcOf(3) }
+    delete (old as { shelfAt?: unknown }).shelfAt
+    expect(mergeRelationship(old, showShelf(admitted, false, hlcOf(2))).shelf).toBe(true)
+    expect(mergeRelationship(showShelf(admitted, false, hlcOf(2)), old).shelf).toBe(true)
+    /* At a tie of the switch's stamp, off. */
+    const on = showShelf(admitted, true, hlcOf(7))
+    const off = showShelf(admitted, false, hlcOf(7))
+    expect(mergeRelationship(on, off).shelf).toBe(false)
+    expect(mergeRelationship(off, on).shelf).toBe(false)
+  })
+
+  it('admits an admitted or muted person and refuses the rest, and a stranger', () => {
+    const at = hlcOf(1)
+    expect(admits(newRelationship('p', at))).toBe('admit')
+    expect(admits({ ...newRelationship('p', at), state: 'muted' })).toBe('admit')
+    expect(admits({ ...newRelationship('p', at), state: 'blocked' })).toBe('refuse')
+    expect(admits({ ...newRelationship('p', at), state: 'exited' })).toBe('refuse')
+    expect(admits(null)).toBe('refuse')
+  })
+})
+
+describe('the shelf grant and the epoch', () => {
+  it('does not carry a stale replica’s later shelf-on across a re-admission', () => {
+    const blocked = rel({ state: 'blocked', epoch: 1, changedAt: hlcOf(100), shelf: false, shelfAt: hlcOf(100) })
+    const again = readmit(blocked, hlcOf(300))
+    /* A replica that never heard of the block or the re-admission turned the
+       shelf on under epoch 1, with a clock that runs ahead. */
+    const stale = rel({ state: 'admitted', epoch: 1, changedAt: hlcOf(50), shelf: true, shelfAt: hlcOf(400) })
+    for (const merged of [mergeRelationship(again, stale), mergeRelationship(stale, again)]) {
+      expect(merged.epoch).toBe(2)
+      expect(merged.shelf).toBe(false)
+    }
+  })
+
+  it('still lets the later switch win within one epoch', () => {
+    const off = rel({ epoch: 1, shelf: false, shelfAt: hlcOf(10) })
+    const on = rel({ epoch: 1, shelf: true, shelfAt: hlcOf(20) })
+    expect(mergeRelationship(off, on).shelf).toBe(true)
+    expect(mergeRelationship(on, off).shelf).toBe(true)
+  })
+})
+
+describe('the state half, held to the letter', () => {
+  it('lets the later stamp win even when it is the less restrictive state', () => {
+    const blocked = rel({ state: 'blocked', changedAt: hlcOf(10) })
+    const admitted = rel({ state: 'admitted', changedAt: hlcOf(20) })
+    expect(mergeRelationship(blocked, admitted).state).toBe('admitted')
+    expect(mergeRelationship(admitted, blocked).state).toBe('admitted')
+  })
+
+  it('breaks a full tie by the earlier admission, so both orders agree', () => {
+    const early = rel({ changedAt: hlcOf(10), admittedAt: hlcOf(1) })
+    const late = rel({ changedAt: hlcOf(10), admittedAt: hlcOf(2) })
+    expect(mergeRelationship(early, late).admittedAt).toBe(hlcOf(1))
+    expect(mergeRelationship(late, early).admittedAt).toBe(hlcOf(1))
+    /* Retain still decides before that: purge over keep at a tie. */
+    const keep = rel({ changedAt: hlcOf(10), retain: 'keep', admittedAt: hlcOf(1) })
+    const purge = rel({ changedAt: hlcOf(10), retain: 'purge', admittedAt: hlcOf(2) })
+    expect(mergeRelationship(keep, purge).retain).toBe('purge')
+    expect(mergeRelationship(purge, keep).retain).toBe('purge')
+  })
+})
+
+describe('how an ended relationship comes back', () => {
+  it('is through readmit alone: blocked and exited refuse a plain state change to admitted, muted allows it', () => {
+    expect(() => changeState(rel({ state: 'blocked' }), 'admitted', hlcOf(9))).toThrow(/re-admitted through readmit/u)
+    expect(() => changeState(rel({ state: 'exited' }), 'admitted', hlcOf(9))).toThrow(/re-admitted through readmit/u)
+    /* Muted accepts transport, so it is the same door by another name. */
+    expect(() => changeState(rel({ state: 'blocked' }), 'muted', hlcOf(9))).toThrow(/re-admitted through readmit/u)
+    expect(() => changeState(rel({ state: 'exited' }), 'muted', hlcOf(9))).toThrow(/re-admitted through readmit/u)
+    expect(changeState(rel({ state: 'blocked' }), 'exited', hlcOf(9)).state).toBe('exited')
+    expect(changeState(rel({ state: 'muted' }), 'admitted', hlcOf(9)).state).toBe('admitted')
+    expect(changeState(rel({ state: 'admitted' }), 'blocked', hlcOf(9)).state).toBe('blocked')
+  })
+})
+
+describe('the merge, as a property', () => {
+  const record = fc.record({
+    state: fc.constantFrom('admitted', 'muted', 'blocked', 'exited'),
+    epoch: fc.integer({ min: 1, max: 3 }),
+    changedAt: fc.integer({ min: 1, max: 6 }).map((n) => hlcOf(n)),
+    admittedAt: fc.integer({ min: 1, max: 6 }).map((n) => hlcOf(n)),
+    retain: fc.constantFrom('keep', 'purge'),
+    shelf: fc.boolean(),
+    shelfAt: fc.integer({ min: 1, max: 6 }).map((n) => hlcOf(n)),
+  }).map((over) => rel(over as Partial<Relationship>))
+  it('is commutative and associative over every record three replicas could hold', () => {
+    fc.assert(
+      fc.property(record, record, record, (a, b, c) => {
+        expect(mergeRelationship(a, b)).toEqual(mergeRelationship(b, a))
+        expect(mergeRelationship(mergeRelationship(a, b), c)).toEqual(mergeRelationship(a, mergeRelationship(b, c)))
+      }),
+      { numRuns: 400 },
+    )
+  })
+})
+
+describe('what a state change may do to an ended relationship', () => {
+  it('may move it between blocked and exited — every way back to transport is refused', () => {
+    expect(changeState(rel({ state: 'blocked' }), 'exited', hlcOf(9)).state).toBe('exited')
+    expect(changeState(rel({ state: 'exited' }), 'blocked', hlcOf(9)).state).toBe('blocked')
+    /* Muted accepts transport: blocked to muted to admitted would have been a re-admission with no ceremony and no new epoch. */
+    expect(() => changeState(rel({ state: 'blocked' }), 'muted', hlcOf(9))).toThrow(/re-admitted through readmit/u)
+    expect(changeState(rel({ state: 'muted' }), 'admitted', hlcOf(9)).state).toBe('admitted')
   })
 })

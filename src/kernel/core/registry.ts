@@ -8,6 +8,7 @@ import type {
   CommandContext,
   Disposable,
   KernelApi,
+  MarkControl,
   OverlayContribution,
   PaneContribution,
   ScreenContribution,
@@ -92,6 +93,8 @@ export interface Contributions {
   readonly settings: readonly SettingsSection[]
   readonly bookActions: readonly BookAction[]
   readonly bookStatuses: readonly BookStatus[]
+  /** A control on each of the reader's own marks — see `Capability.markControls`. */
+  readonly markControls: readonly MarkControl[]
   /** By service name. */
   readonly services: ReadonlyMap<string, ServiceContribution>
   readonly clients: readonly ClientContribution[]
@@ -228,12 +231,78 @@ function normalizeRelative(path: string): string | null {
  * `removeBlob` primitive (WI-10.2). Wrappers are async so a refusal is a
  * REJECTION — the shape every fs caller already handles — not a sync throw.
  */
+/**
+ * The writes a capability makes OUTSIDE its own namespace, reviewed here.
+ *
+ * ⚠️ **THE CIRCLE'S TWO FILES LIVE UNDER `books/<id>/`, AND THE SCOPE REFUSED
+ * THEM — SILENTLY, IN PRODUCTION, ON THE FIRST WRITE.** Phase 22 reviewed
+ * `books/<id>/circle/<person>.json` and `books/<id>/shared.json` in
+ * `capability-fs-footprint.test.mjs`, with the reasoning for each; the scope
+ * wrapper below knew nothing of that review, so every write the circle made
+ * through it was refused with a namespace error the moment the transport
+ * asked for one (WI-23.A1, A2). Nothing had noticed because nothing had
+ * written: the transport had no caller.
+ *
+ * The decision lives HERE, in the kernel, and not on the capability: a
+ * contribution that declared its own writable paths would be a capability
+ * widening its own confinement, which is the thing the scope exists to
+ * refuse. One reviewed shape per line, as narrow as the path helper that
+ * builds it — `safeId` yields `[A-Za-z0-9_]+`, so nothing else matches.
+ */
+/**
+ * A reviewed write is PER OPERATION. The files are what a capability may
+ * write, rename onto, remove and append to; the directories are the ones
+ * `atomicWrite`'s fallback makes on its way to those files when the platform
+ * has no `writeAtomic` — `mkdir` and nothing else. One list served every
+ * operation, so the fallback's `mkdir("books/<id>/circle")` was refused by
+ * the same review that allowed the file inside it, and both reviewed write
+ * forms failed on every filesystem without `writeAtomic` — the fake
+ * filesystem every test runs on among them, which is how it stayed green.
+ */
+interface ReviewedWrites {
+  readonly files: readonly RegExp[]
+  readonly dirs: readonly RegExp[]
+}
+
+const NO_REVIEWED_SHAPES: readonly RegExp[] = []
+
+const REVIEWED_WRITES: Readonly<Record<string, ReviewedWrites>> = {
+  circle: {
+    files: [
+      /* `circlePathIn`: another reader's passages, beside the marks, never in them. */
+      /^books\/[A-Za-z0-9_]+\/circle\/[A-Za-z0-9_]+\.json(?:\.writing)?$/u,
+      /* `sharedPathIn`: the publisher's own store. */
+      /^books\/[A-Za-z0-9_]+\/shared\.json(?:\.writing)?$/u,
+    ],
+    dirs: [
+      /* The parents of the two shapes above, and only those: the book's folder
+         for `shared.json`, its `circle/` for a passage file. Making a book's
+         folder is what the kernel's own writers do on the same path. */
+      /^books\/[A-Za-z0-9_]+$/u,
+      /^books\/[A-Za-z0-9_]+\/circle$/u,
+    ],
+  },
+}
+
 export function scopeFs(fs: KernelServices['fs'], capId: string): KernelServices['fs'] {
   if (fs === null) return null
   const prefix = `${capId}/`
+  const reviewed = REVIEWED_WRITES[capId]
+  /* Which review an operation reads: `mkdir` the directories, `removeDir`
+     none — a capability never takes a book's folder down — and every write
+     to a file the files. */
+  const shapesFor = (op: string): readonly RegExp[] => {
+    if (reviewed === undefined) return NO_REVIEWED_SHAPES
+    if (op === 'mkdir') return reviewed.dirs
+    if (op === 'removeDir') return NO_REVIEWED_SHAPES
+    return reviewed.files
+  }
   const guard = (op: string, path: string): string => {
     const normal = normalizeRelative(path)
-    if (normal === null || (normal !== capId && !normal.startsWith(prefix))) {
+    if (
+      normal === null ||
+      (normal !== capId && !normal.startsWith(prefix) && !shapesFor(op).some((shape) => shape.test(normal)))
+    ) {
       throw invalid('namespace', capId, `capability "${capId}" may only ${op} under "${prefix}", not ${JSON.stringify(path)}`)
     }
     return path
@@ -250,9 +319,18 @@ export function scopeFs(fs: KernelServices['fs'], capId: string): KernelServices
   }
   /* `appendFile` is a capability's cue that the platform appends natively
    * (the journal falls back to read-then-rewrite without it) — so it exists
-   * on the wrapper exactly when it exists behind it. */
+   * on the wrapper exactly when it exists behind it. `writeAtomic` likewise:
+   * without it on the wrapper, `atomicWrite` fell back to temp-and-rename for
+   * every capability, which survives a crash and not a power loss — a
+   * durability the kernel's own writes had and a capability's silently did
+   * not. Same guard, same prefix, same review. */
   const append = fs.appendFile
-  return append ? { ...scoped, appendFile: async (path, bytes) => append.call(fs, guard('appendFile', path), bytes) } : scoped
+  const atomic = fs.writeAtomic
+  return {
+    ...scoped,
+    ...(append ? { appendFile: async (path, bytes) => append.call(fs, guard('appendFile', path), bytes) } : {}),
+    ...(atomic ? { writeAtomic: async (path, bytes, level) => atomic.call(fs, guard('writeAtomic', path), bytes, level) } : {}),
+  }
 }
 
 /**
@@ -460,6 +538,12 @@ function checkNamespaces(
   caps: readonly Capability[],
   kernelServices: readonly ServiceContribution[] = [],
   kernelClients: readonly ClientContribution[] = [],
+  /* The services AS SNAPSHOTTED, not the capability's own rows: `snapshotOf`
+     has read each handler once and refused the ones with nothing to call, and
+     this reads the copies it made — a second read of the capability's row
+     could answer differently, and would be a check of something other than
+     what is called. */
+  capServices: ReadonlyMap<string, readonly ServiceContribution[]> = new Map(),
 ): void {
   const panes = new Set<string>()
   const overlays = new Set<string>()
@@ -472,6 +556,7 @@ function checkNamespaces(
      contribution. They are different contributions in different lists, read
      by different code; only the namespace prefix is shared. */
   const statuses = new Set<string>()
+  const markControls = new Set<string>()
   const services = new Set<string>()
   const clients = new Set<string>()
 
@@ -517,10 +602,18 @@ function checkNamespaces(
       if (!Array.isArray(pane.screens) || pane.screens.length === 0) {
         throw invalid('namespace', cap.id, `pane "${pane.id}" names no screen it fits`)
       }
+      /* Checked like a screen's: a pane with no `render` has an id that
+         validates and throws when the reader opens it. */
+      if (typeof pane.render !== 'function') {
+        throw invalid('namespace', cap.id, `pane "${pane.id}" has no render() to call`)
+      }
       claim(panes, 'pane', pane.id, cap.id)
     }
     for (const section of cap.settings ?? []) {
       prefixed('settings section id', section.id, colon, cap.id)
+      if (typeof section.render !== 'function') {
+        throw invalid('namespace', cap.id, `settings section "${section.id}" has no render() to call`)
+      }
       claim(sections, 'settings section', section.id, cap.id)
     }
     for (const screen of cap.screens ?? []) {
@@ -557,13 +650,34 @@ function checkNamespaces(
     }
     for (const action of cap.bookActions ?? []) {
       prefixed('book action id', action.id, colon, cap.id)
+      if (typeof action.run !== 'function') {
+        throw invalid('namespace', cap.id, `book action "${action.id}" has no run() to call`)
+      }
       claim(actions, 'book action', action.id, cap.id)
     }
     for (const status of cap.bookStatuses ?? []) {
       prefixed('book status id', status.id, colon, cap.id)
+      /* Checked like the overlay's two methods: an id that validates with a
+         `subscribe` that is undefined threw a raw TypeError at the snapshot. */
+      for (const method of ['subscribe', 'of'] as const) {
+        if (typeof status[method] !== 'function') {
+          throw invalid('namespace', cap.id, `book status "${status.id}" has no ${method}() to call`)
+        }
+      }
       claim(statuses, 'book status', status.id, cap.id)
     }
-    for (const service of cap.services ?? []) {
+    for (const control of cap.markControls ?? []) {
+      prefixed('mark control id', control.id, colon, cap.id)
+      /* The renderer is checked, as a screen's is: a control with no `render`
+       * has an id that validates and throws inside every Marginalia row that
+       * tries to draw it — the reader's own notes taken down by a wiring
+       * mistake that belongs at composition. */
+      if (typeof control.render !== 'function') {
+        throw invalid('namespace', cap.id, `mark control "${control.id}" has no render() to call`)
+      }
+      claim(markControls, 'mark control', control.id, cap.id)
+    }
+    for (const service of capServices.get(cap.id) ?? []) {
       prefixed('service name', service.name, dot, cap.id)
       prefixed('grant', service.grant, colon, cap.id)
       claim(services, 'service', service.name, cap.id)
@@ -577,6 +691,40 @@ function checkNamespaces(
 
 /* --------------------------------------------------------- composition */
 
+/**
+ * The services as they were at composition — each row its own frozen copy.
+ *
+ * The array was frozen and its rows were not, so a capability that kept a
+ * reference to its own service object could swap `handler` after the
+ * namespace check had passed and the router had been built over it. What
+ * was checked is what is called.
+ */
+function snapshotOf(services: readonly ServiceContribution[] | undefined, capability: string | null): readonly ServiceContribution[] {
+  /* THE HANDLER READ ONCE, CHECKED, AND BOUND — as every other checked method
+   * is. A spread copies own enumerable keys only, so a handler inherited from
+   * a prototype or defined non-enumerable passed the check and then vanished
+   * from the copy, and one that read `this` ran with the copy for a receiver.
+   *
+   * ⚠️ **THE CHECK IS HERE, ON THE ONE READ.** Checked in `checkNamespaces`
+   * and bound here, the row was read twice — an accessor could answer the
+   * check with a function and the bind with another — and the kernel's own
+   * services were bound BEFORE the check ran, so a row with nothing to call
+   * failed as a raw TypeError from `.bind` rather than by name. A service
+   * with nothing to call is a mistake that belongs at composition, not
+   * inside the transport with a caller waiting. */
+  return Object.freeze(
+    (services ?? []).map((service) => {
+      const handler: unknown = service.handler
+      if (typeof handler !== 'function') {
+        throw invalid('namespace', capability, `service "${service.name}" has no handler to call`)
+      }
+      /* NAMED FIELDS, NOT A SPREAD: a spread reads every own accessor again,
+         which is the second read this exists to remove. */
+      return Object.freeze({ name: service.name, grant: service.grant, handler: (handler as ServiceContribution['handler']).bind(service) })
+    }),
+  )
+}
+
 const NOTHING: Disposable = { dispose: () => {} }
 const EMPTY_PANES: readonly PaneContribution[] = Object.freeze([])
 const EMPTY_OVERLAYS: readonly OverlayContribution[] = Object.freeze([])
@@ -584,8 +732,10 @@ const EMPTY_SCREENS: readonly ScreenContribution[] = Object.freeze([])
 const EMPTY_SECTIONS: readonly SettingsSection[] = Object.freeze([])
 const EMPTY_ACTIONS: readonly BookAction[] = Object.freeze([])
 const EMPTY_STATUSES: readonly BookStatus[] = Object.freeze([])
+const EMPTY_MARK_CONTROLS: readonly MarkControl[] = Object.freeze([])
 const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
+const EMPTY_SERVICE_ROWS: readonly ServiceContribution[] = Object.freeze([])
 
 /**
  * A contributed list, arranged: by `order` (unset last), then registration.
@@ -682,11 +832,14 @@ export async function composeCapabilities(
    * arrays below. `checkNamespaces` validates these and the registries are
    * built from them, so a caller that kept a reference and pushed into it
    * during an awaited `start` would otherwise land a name nothing checked. */
-  const kernelServices: readonly ServiceContribution[] = Object.freeze([...(options.services ?? [])])
+  const kernelServices: readonly ServiceContribution[] = snapshotOf(options.services, null)
   const kernelClients: readonly ClientContribution[] = Object.freeze([...(options.clients ?? [])])
   checkIds(caps)
   checkRequires(caps)
-  checkNamespaces(caps, kernelServices, kernelClients)
+  /* Every capability's services, snapshotted BEFORE the namespace check and
+     read by it — `snapshotOf` is where a handler is read, once. */
+  const capServices = new Map(caps.map((cap) => [cap.id, snapshotOf(cap.services, cap.id)] as const))
+  checkNamespaces(caps, kernelServices, kernelClients, capServices)
   const order = registrationOrder(caps)
   const byId = new Map(caps.map((cap) => [cap.id, cap] as const))
   const ordered = order.map((id) => byId.get(id) as Capability)
@@ -705,12 +858,35 @@ export async function composeCapabilities(
   const snapshot = ordered.map((cap) =>
     Object.freeze({
       id: cap.id,
-      panes: Object.freeze([...(cap.panes ?? [])]),
-      settings: Object.freeze([...(cap.settings ?? [])]),
-      bookActions: Object.freeze([...(cap.bookActions ?? [])]),
-      bookStatuses: Object.freeze([...(cap.bookStatuses ?? [])]),
-      clients: Object.freeze([...(cap.clients ?? [])]),
-      services: Object.freeze([...(cap.services ?? [])]),
+      /* Each record copied and its checked method bound, for the overlay's
+         reason below: a live object could lose the method after the check. */
+      /* THE NESTED LIST COPIED AND FROZEN TOO. The pane record was a frozen
+         copy while its `screens` array stayed the capability's own, so a
+         capability could empty or extend it after the namespace check and
+         the fitting rule would read the change as though it had been
+         reviewed. A snapshot of validated state has no live parts. */
+      panes: Object.freeze(
+        (cap.panes ?? []).map((pane) => Object.freeze({ ...pane, screens: Object.freeze([...pane.screens]), render: pane.render.bind(pane) })),
+      ),
+      settings: Object.freeze((cap.settings ?? []).map((section) => Object.freeze({ ...section, render: section.render.bind(section) }))),
+      bookActions: Object.freeze(
+        (cap.bookActions ?? []).map((action) =>
+          Object.freeze({ ...action, run: action.run.bind(action), ...(action.when ? { when: action.when.bind(action) } : {}) }),
+        ),
+      ),
+      bookStatuses: Object.freeze(
+        (cap.bookStatuses ?? []).map((status) => Object.freeze({ ...status, subscribe: status.subscribe.bind(status), of: status.of.bind(status) })),
+      ),
+      /* Bound and copied like a screen's renderer, for the overlay's reason
+       * below: the method was CHECKED above, and a live object could lose it
+       * after the check. */
+      markControls: Object.freeze(
+        (cap.markControls ?? []).map((control) =>
+          Object.freeze({ id: control.id, render: control.render.bind(control) }),
+        ),
+      ),
+      clients: Object.freeze((cap.clients ?? []).map((client) => Object.freeze({ ...client }))),
+      services: capServices.get(cap.id) ?? EMPTY_SERVICE_ROWS,
       /* ⚠️ **THE RECORD IS COPIED, NOT JUST THE ARRAY.** Every other line here
        * freezes the array and keeps the contributed objects, which is right
        * for the ones the kernel only reads. An overlay is different: its two
@@ -765,12 +941,19 @@ export async function composeCapabilities(
   const skip = (id: string, kind: CapabilityFailure['kind'], error: unknown, because?: string): void => {
     failed.add(id)
     failures.push(Object.freeze({ id, kind, error, ...(because === undefined ? {} : { because }) }))
-    api.diagnostics.error('composition.capability-failed', {
-      capability: id,
-      kind,
-      ...(because === undefined ? {} : { because }),
-      message: error instanceof Error ? error.message : String(error),
-    })
+    /* The report must not become a second failure: a diagnostics port that
+       throws here would leave the capabilities already started with nobody
+       to dispose them. */
+    try {
+      api.diagnostics.error('composition.capability-failed', {
+        capability: id,
+        kind,
+        ...(because === undefined ? {} : { because }),
+        message: error instanceof Error ? error.message : String(error),
+      })
+    } catch (cause) {
+      console.error('Paper: could not report a capability that failed to compose', cause)
+    }
   }
 
   for (const cap of ordered) {
@@ -802,7 +985,12 @@ export async function composeCapabilities(
       cleanups.length = 0
       return errors
     }
-    const ctx: CapabilityContext = {
+    let disposable: Disposable | undefined
+    try {
+      /* INSIDE THE GUARD, `diagnostics.child` included: a context that could
+         not be built used to throw past the started list, and composition
+         rejected with every earlier capability left running. */
+      const ctx: CapabilityContext = {
       ...api,
       /* The services A CAPABILITY sees: the kernel's own stores, with every
        * tree-wide handle swapped for a namespace-confined wrapper — the
@@ -822,8 +1010,6 @@ export async function composeCapabilities(
         cleanups.push(dispose)
       },
     }
-    let disposable: Disposable | undefined
-    try {
       disposable = cap.start ? await cap.start(ctx, signal) : NOTHING
     } catch (cause) {
       /* The teardown errors are folded into the recorded failure rather than
@@ -899,6 +1085,7 @@ export async function composeCapabilities(
   const settings = byOrder(kept.flatMap((one) => [...one.settings]))
   const bookActions = Object.freeze(kept.flatMap((one) => [...one.bookActions]))
   const bookStatuses = Object.freeze(kept.flatMap((one) => [...one.bookStatuses]))
+  const markControls = Object.freeze(kept.flatMap((one) => [...one.markControls]))
   /* Filtered to what STARTED, like every other contribution: a capability that
      failed to start must not have its overlays drawn in a book. */
   const overlays = Object.freeze(kept.flatMap((one) => [...one.overlays]))
@@ -967,6 +1154,9 @@ export async function composeCapabilities(
     },
     get bookStatuses() {
       return disposed ? EMPTY_STATUSES : bookStatuses
+    },
+    get markControls() {
+      return disposed ? EMPTY_MARK_CONTROLS : markControls
     },
     get services() {
       return disposed ? EMPTY_SERVICES : services

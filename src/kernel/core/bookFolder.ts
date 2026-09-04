@@ -33,6 +33,7 @@ import { extensionFor } from './bookVault'
 import { isFormat, type Format, type NamedSource } from './formats'
 import { compareHlc, hlcOf, isHlc, type Hlc } from './hlc'
 import { TAG_MAX, normalizeTag, tagKey } from './tags'
+import { READING_STATES, STARS, type ReadingState, type Stars } from './circle/log'
 
 export const BOOKS_DIR = 'books'
 export const TRASH_DIR = 'trash'
@@ -77,9 +78,34 @@ export type TagClock = Readonly<Record<string, TagClockEntry>>
  * `toWire` (sync) strips exactly this list, and keeping the list beside the
  * record is what stops the two drifting apart. (`keepContent` and
  * `hasContent` are not stored in `book.json` today; they are here because a
- * serialised shelf row can carry them, and a wire row must not.)
+ * serialised shelf row can carry them, and a wire row must not.) `coverFacts`
+ * is here for the same reason `ext` is: it describes the jacket file THIS
+ * device holds, and another device holds its own — or none.
  */
-export const DEVICE_LOCAL_FIELDS = ['origin', 'ext', 'keepContent', 'hasContent'] as const
+export const DEVICE_LOCAL_FIELDS = ['origin', 'ext', 'keepContent', 'hasContent', 'coverFacts'] as const
+
+/** The two names a jacket file may have beside a book's bytes. */
+export const COVER_NAMES = ['cover.jpg', 'cover.webp'] as const
+export type CoverName = (typeof COVER_NAMES)[number]
+
+/**
+ * The jacket file this device holds, measured — WI-23.C5.
+ *
+ * ⚠️ **DEVICE-LOCAL, NEVER MERGED, NEVER ON THE WIRE.** Two of a reader's
+ * devices each downscale their own jacket and may not agree byte for byte,
+ * and a device that never fetched one has nothing to serve: a digest that
+ * travelled would advertise a cover the advertising device cannot hand over.
+ * Stamped by whatever lands the file (`keepCover`, a verified sync landing,
+ * the circle's own pass) and dropped with the file; the circle publishes it
+ * on the shelf only when the file is within the size it will serve.
+ */
+export interface CoverFacts {
+  readonly name: CoverName
+  /** Bytes on disk. */
+  readonly size: number
+  /** BLAKE3 of the file, full and hex — computed by the peer plugin, as `contentHash` is. */
+  readonly hash: string
+}
 
 /**
  * The reader's tags, derived from a tag clock: the spellings of the registers
@@ -133,7 +159,7 @@ export function setTag(record: BookRecord, spelling: string, on: boolean, at: Hl
    * registers and drops the rest on the next read — so a write that grew
    * the clock past it succeeded, and the register silently vanished later.
    * A capacity error at the write is a failure the reader is shown. */
-  if (!(key in held) && Object.keys(held).length >= MAX_TAGS) {
+  if (!Object.hasOwn(held, key) && Object.keys(held).length >= MAX_TAGS) {
     throw new Error(`a record can carry at most ${MAX_TAGS} tag registers`)
   }
   const clock: Record<string, TagClockEntry> = { ...held, [key]: { at, on, spelling } }
@@ -188,7 +214,32 @@ export interface BookRecord {
   readonly tags?: readonly string[]
   readonly position?: string | null
   readonly progress?: number
+  /**
+   * Whether the reader is done with it.
+   *
+   * ⚠️ **DERIVED FROM `status` WHENEVER `status` IS PRESENT** (WI-23.B3) —
+   * `parseRecord` and `mergeRecord` both re-derive it, so a record that carries
+   * a status can never say two things about whether the book is finished. It
+   * stays a field because everything that reads it goes on reading it, and
+   * because a record from before `status` existed carries only this.
+   */
   readonly finished?: boolean
+  /**
+   * Where the reader is with the book — Douban's 想读 / 在读 / 读过 — and when
+   * they said so. The reader's OWN copy (WI-23.B3); publishing it to the
+   * circle is a separate act, which is what keeps `sync` and the circle apart.
+   * Its own register: `at` is the stamp two replicas compare.
+   */
+  readonly status?: { readonly state: ReadingState; readonly at: Hlc }
+  /** One to five stars, the reader's own. Stamped by `ratingAt`. */
+  readonly rating?: Stars
+  readonly ratingAt?: Hlc
+  /**
+   * The reader's own words about the whole book, and when. An EMPTY text is a
+   * review taken back — a register cannot be un-set, only set to nothing, and
+   * absence would lose to any replica that still held the old words.
+   */
+  readonly review?: { readonly text: string; readonly at: Hlc }
   readonly addedAt?: number
   readonly openedAt?: number
   /**
@@ -258,6 +309,8 @@ export interface BookRecord {
   readonly contentHash?: string
   /** What the bytes ARE — the value that travels, unlike `ext`. */
   readonly format?: Format
+  /** This device's jacket file, measured — see `CoverFacts`. Device-local. */
+  readonly coverFacts?: CoverFacts
 }
 
 /**
@@ -359,6 +412,34 @@ export const circleFolderIn = (bookId: string): string => `${folderOf(bookId)}/c
  * social fact to every one of your own devices whether they participate or not.
  */
 export const sharedPathIn = (bookId: string): string => `${folderOf(bookId)}/shared.json`
+
+/* ── the circle's own folder, outside every book — WI-23.C3 ─────────────
+ *
+ * ⚠️ **THE FIRST CIRCLE FILES NOT UNDER A BOOK.** Every circle file until now
+ * lived in the book's folder because a friend's passages are about a book you
+ * have. A friend's SHELF is about books you may not have, so it has nowhere to
+ * live under that rule — and the reader's own shelf, as published, is not
+ * about one book either. `circle/` is the capability's own namespace under
+ * the data root, which is where `scopeFs` lets it write without a review of
+ * each path; `capability-fs-footprint.test.mjs` still names every call.
+ *
+ * Removing a person purges `circle/<person>/` whole, with their per-book
+ * files (`relationships.md` §"Retained data"). */
+export const CIRCLE_DIR = 'circle'
+/** The reader's OWN shelf as published — the publisher's store for the shelf log. */
+export const OWN_SHELF_PATH = `${CIRCLE_DIR}/shelf.json`
+/** Everything held about one person that is not about a book. */
+export const personFolderIn = (personId: string): string => `${CIRCLE_DIR}/${safeId(personId)}`
+/** A friend's shelf, as this device holds it. */
+export const personShelfPathIn = (personId: string): string => `${personFolderIn(personId)}/shelf.json`
+/** The relationship record — the reader's own decisions about a person. */
+export const relationshipPathIn = (personId: string): string => `${personFolderIn(personId)}/relationship.json`
+/** The reader's OWN lists as published, one file per list — WI-23.E1. */
+export const OWN_LISTS_DIR = `${CIRCLE_DIR}/lists`
+export const ownListPathIn = (listId: string): string => `${OWN_LISTS_DIR}/${safeId(listId)}.json`
+/** A friend's lists, as this device holds them, one file per list. */
+export const personListsDirIn = (personId: string): string => `${personFolderIn(personId)}/lists`
+export const personListPathIn = (personId: string, listId: string): string => `${personListsDirIn(personId)}/${safeId(listId)}.json`
 export const contentPathIn = (bookId: string, name: string): string =>
   `${folderOf(bookId)}/content.${extensionFor(name)}`
 
@@ -404,6 +485,13 @@ const MAX_POSITION = MAX_RECORD_POSITION
  * `canOpen` would go on offering the row because an origin was present.
  */
 const MAX_ORIGIN = 8_000
+/**
+ * The bound for the reader's own review, DROPPED past it rather than cut, for
+ * the position's reason: a review sliced in the middle of a sentence is not a
+ * shorter review, it is a different one, and it would survive the next merge
+ * as what the reader wrote. Far past where anyone will meet it by typing.
+ */
+export const MAX_REVIEW = 20_000
 /**
  * The bound for a list the BOOK declares — subjects, languages.
  *
@@ -468,6 +556,31 @@ function readTags(raw: unknown, limit: number): readonly string[] | undefined {
 
 /** A BLAKE3 hash as `contentHash` stores it: 64 lowercase hex digits. */
 const CONTENT_HASH = /^[0-9a-f]{64}$/
+
+/**
+ * Whether a value is a BLAKE3 digest as this store spells one — THE ONE RULE,
+ * for every door a digest comes through: the record on disk, a peer's push
+ * and pull rows, and a browser's `book.list` answer. Each of those had its
+ * own copy of the pattern, and one of them (the browser's) had none at all.
+ *
+ * The type check is not decoration: `RegExp.test` coerces its argument, so
+ * `['a'.repeat(64)]` — an array holding one well-formed digest — stringifies
+ * to that digest and matches. A guard that only ran the pattern would admit it.
+ */
+export function isContentHash(value: unknown): value is string {
+  return typeof value === 'string' && CONTENT_HASH.test(value)
+}
+
+/** `coverFacts` as a file may spell it — exactly its three fields, each well-formed — or nothing. */
+export function parseCoverFacts(value: unknown): CoverFacts | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const facts = value as Record<string, unknown>
+  if (!Object.keys(facts).every((key) => key === 'name' || key === 'size' || key === 'hash')) return undefined
+  if (!(COVER_NAMES as readonly unknown[]).includes(facts['name'])) return undefined
+  if (!Number.isSafeInteger(facts['size']) || (facts['size'] as number) < 0) return undefined
+  if (!isContentHash(facts['hash'])) return undefined
+  return { name: facts['name'] as CoverName, size: facts['size'] as number, hash: facts['hash'] }
+}
 
 /**
  * Read a tag clock back, dropping malformed ENTRIES individually — one entry
@@ -545,6 +658,9 @@ export function parseRecord(raw: string | null): BookRecord | null {
    * build wrote. */
   const clock = readTagClock(r['tagClock'])
   const derivedTags = clock ? tagsFromClock(clock) : undefined
+  const status = readStatus(r['status'])
+  const review = readReview(r['review'])
+  const coverFacts = parseCoverFacts(r['coverFacts'])
   return {
     /* NEVER CUT: an id sliced to five hundred characters is a different
      * identity, and everything after it would target a different folder. */
@@ -590,7 +706,19 @@ export function parseRecord(raw: string | null): BookRecord | null {
     ...(num(r['progress']) === undefined
       ? {}
       : { progress: Math.min(1, Math.max(0, num(r['progress'])!)) }),
-    ...(typeof r['finished'] === 'boolean' ? { finished: r['finished'] } : {}),
+    /* ⚠️ `finished` IS DERIVED FROM `status` WHEN THERE IS ONE, so the two
+     * cannot disagree on a read. A record from before `status` keeps what it
+     * stored. */
+    ...(status
+      ? { status, finished: status.state === 'finished' }
+      : typeof r['finished'] === 'boolean'
+        ? { finished: r['finished'] }
+        : {}),
+    /* A rating is one of five integers or it is not a rating; its stamp is
+     * dropped ALONE when malformed, like every other register stamp below. */
+    ...(isStars(r['rating']) ? { rating: r['rating'] } : {}),
+    ...(isHlc(r['ratingAt']) ? { ratingAt: r['ratingAt'] } : {}),
+    ...(review ? { review } : {}),
     ...(num(r['addedAt']) === undefined ? {} : { addedAt: num(r['addedAt'])! }),
     ...(num(r['openedAt']) === undefined ? {} : { openedAt: num(r['openedAt'])! }),
     /* A timestamp, so BOUNDED: non-negative and finite, or dropped — the
@@ -618,11 +746,44 @@ export function parseRecord(raw: string | null): BookRecord | null {
      * from before the ledger simply has none of these. */
     ...(isHlc(r['positionAt']) ? { positionAt: r['positionAt'] } : {}),
     ...(isHlc(r['finishedAt']) ? { finishedAt: r['finishedAt'] } : {}),
-    ...(typeof r['contentHash'] === 'string' && CONTENT_HASH.test(r['contentHash'])
-      ? { contentHash: r['contentHash'] }
-      : {}),
+    ...(isContentHash(r['contentHash']) ? { contentHash: r['contentHash'] } : {}),
     ...(isFormat(r['format']) ? { format: r['format'] } : {}),
+    ...(coverFacts === undefined ? {} : { coverFacts }),
   }
+}
+
+/** Whether a value is one of the five stars — an integer, and one of these. */
+function isStars(value: unknown): value is Stars {
+  /* Membership in the closed set is the whole check: a `'4'` is not in it. */
+  return (STARS as readonly unknown[]).includes(value)
+}
+
+/**
+ * The reading-status register, whole or not at all: a state this build knows
+ * and a stamp that reads. Half a register is no register — a state with no
+ * stamp cannot be compared, and a stamp with no state says nothing.
+ */
+function readStatus(value: unknown): BookRecord['status'] | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const held = value as Record<string, unknown>
+  const state = held['state']
+  if (!(READING_STATES as readonly unknown[]).includes(state)) return undefined
+  if (!isHlc(held['at'])) return undefined
+  return { state: state as ReadingState, at: held['at'] }
+}
+
+/**
+ * The review register, whole or not at all. An empty text is KEPT — it is a
+ * review taken back, and dropping it would let the old words win the merge.
+ * Over the bound the register is dropped, not cut: see `MAX_REVIEW`.
+ */
+function readReview(value: unknown): BookRecord['review'] | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const held = value as Record<string, unknown>
+  const text = held['text']
+  if (typeof text !== 'string' || text.length > MAX_REVIEW) return undefined
+  if (!isHlc(held['at'])) return undefined
+  return { text, at: held['at'] }
 }
 
 export async function readBook(fs: VaultFs, bookId: string): Promise<BookRecord | null> {
@@ -795,6 +956,30 @@ export async function updateBook(
  * `finished` is true if either says so; `addedAt` is the earlier, since that is
  * when the book actually arrived.
  */
+/**
+ * The `finished` flag the merged record carries — DERIVED from the winning
+ * status, as `parseRecord` derives it, so the two cannot disagree; the legacy
+ * OR of two flags only where neither side has a status.
+ */
+function finishedOf(stranded: BookRecord, live: BookRecord): { finished?: boolean } {
+  const status = live.status ?? stranded.status
+  if (status !== undefined) return { finished: status.state === 'finished' }
+  return stranded.finished || live.finished ? { finished: true } : {}
+}
+
+/**
+ * The rating register the merged record carries — a rating WITH ITS OWN
+ * stamp, live side first. A stamp is never split from its rating: a live
+ * `ratingAt` beside no live rating is an orphan `parseRecord` kept alone, and
+ * attaching it to the stranded side's rating would date that rating by a
+ * write it was not part of.
+ */
+function ratingOf(stranded: BookRecord, live: BookRecord): { rating?: Stars; ratingAt?: Hlc } {
+  const side = live.rating !== undefined ? live : stranded.rating !== undefined ? stranded : undefined
+  if (side === undefined) return {}
+  return { rating: side.rating!, ...(side.ratingAt === undefined ? {} : { ratingAt: side.ratingAt }) }
+}
+
 export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecord {
   /* THE CLOCKS, NOT THE LISTS. This used to union `tags` and spread `live`
    * — which carried `live.tagClock` through untouched. `parseRecord` treats
@@ -805,7 +990,23 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
    * one. Merging the REGISTERS — last writer per tag, a legacy list
    * synthesised at its documented stamp by `tagRegisters` — and deriving
    * the list from the result is the only shape a read cannot undo. */
-  const { tags: _tags, tagClock: _clock, ...rest } = live
+  /* THE OPINION REGISTERS ARE TAKEN OUT OF THE SPREAD TOO, and rebuilt whole
+   * below. Spread through, a field the merge decided should LOSE stayed: a
+   * live record from before `status` existed carries `finished: true`, and
+   * with a stranded `reading` status winning, the result said `reading` and
+   * `finished` at once — the one thing `BookRecord` promises a record can
+   * never say. The same spread married a live orphan `ratingAt` to the
+   * stranded side's unstamped rating. */
+  const {
+    tags: _tags,
+    tagClock: _clock,
+    finished: _finished,
+    status: _status,
+    rating: _rating,
+    ratingAt: _ratingAt,
+    review: _review,
+    ...rest
+  } = live
   const clock = mergeTagClocks(tagRegisters(stranded), tagRegisters(live))
   const tags = clock ? tagsFromClock(clock) : []
   const addedAt =
@@ -822,7 +1023,16 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
     ...((live.progress ?? stranded.progress) === undefined
       ? {}
       : { progress: live.progress ?? stranded.progress! }),
-    ...(stranded.finished || live.finished ? { finished: true } : {}),
+    /* `finished` follows the status that wins — one fact, not two — and the
+     * legacy OR of two flags only where neither side has a status. */
+    ...finishedOf(stranded, live),
+    /* The reader's own opinion of the book, live side first — the record
+     * the reader kept using is the one whose opinion is current. The
+     * stranded side fills only a register the live side never set, each
+     * with its stamp, never split from it. */
+    ...((live.status ?? stranded.status) === undefined ? {} : { status: (live.status ?? stranded.status)! }),
+    ...ratingOf(stranded, live),
+    ...((live.review ?? stranded.review) === undefined ? {} : { review: (live.review ?? stranded.review)! }),
     ...(addedAt === undefined ? {} : { addedAt }),
   }
 }
@@ -994,6 +1204,12 @@ export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): Bo
     ...(previous.position ? { position: previous.position } : {}),
     ...(previous.progress === undefined ? {} : { progress: previous.progress }),
     ...(previous.finished === undefined ? {} : { finished: previous.finished }),
+    /* The reader's own opinion survives a re-parse, as the tags do: a parse
+     * knows the book and nothing about what the reader made of it. */
+    ...(previous.status === undefined ? {} : { status: previous.status }),
+    ...(previous.rating === undefined ? {} : { rating: previous.rating }),
+    ...(previous.ratingAt === undefined ? {} : { ratingAt: previous.ratingAt }),
+    ...(previous.review === undefined ? {} : { review: previous.review }),
     ...(previous.addedAt === undefined ? {} : { addedAt: previous.addedAt }),
     /* THE ORIGIN IS KEPT unless the open supplies a new one.
      *
@@ -1036,9 +1252,9 @@ export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): Bo
      * same bytes may re-supply and an enrichment pass never does. */
     ...(parsed.positionAt ? {} : previous.positionAt ? { positionAt: previous.positionAt } : {}),
     ...(parsed.finishedAt ? {} : previous.finishedAt ? { finishedAt: previous.finishedAt } : {}),
-    ...(parsed.tagClock ? {} : previous.tagClock ? { tagClock: previous.tagClock } : {}),
     ...(parsed.contentHash ? {} : previous.contentHash ? { contentHash: previous.contentHash } : {}),
     ...(parsed.format ? {} : previous.format ? { format: previous.format } : {}),
+    ...(parsed.coverFacts ? {} : previous.coverFacts ? { coverFacts: previous.coverFacts } : {}),
     /* `openedAt` is kept the same way rather than unconditionally: it means
        "when the reader last opened this", so an open MUST be able to move it
        forward, and only a parse that is not an open leaves it alone. */

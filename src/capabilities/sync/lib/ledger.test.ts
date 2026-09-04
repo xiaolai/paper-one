@@ -13,7 +13,7 @@ import {
   type KernelServices,
   type Mark,
 } from '../../../kernel'
-import { createPeerPort, fakeWire, linkWires, type FakeWire, type PeerPort } from '../../peer'
+import { createPeerPort, fakeBlobHash, fakeWire, linkWires, type FakeWire, type PeerPort } from '../../peer'
 import { createClock, makeHlc, type Clock } from './clock'
 import { JOURNAL_KEY, createJournal, type Journal } from './journal'
 import { crashableFs, fsOver, type CrashableFs } from './journalFs.testkit'
@@ -575,7 +575,7 @@ describe('the star protocol over two real stacks (WI-C.2)', () => {
             hubSeq,
             journalFormat: 1,
             // Speaks this build's version — an earlier one is refused, see SYNC_VERSION.
-            services: { sync: [4, 4] },
+            services: { sync: [5, 5] },
           }
         }
         if (service === 'sync.pull') return page
@@ -919,8 +919,11 @@ describe('carried findings — removals, content facts, and covers', () => {
        makes `identifier` and `metaSchema` safe against a shelf that would strip
        them, ACK the stripped row and erase the sender's own field. Same defect,
        third version. */
-    it('speaks [4, 4]: the version bump that keeps a v3 peer from erasing `identifier`', () => {
-      expect(SYNC_VERSION).toEqual([4, 4])
+    it('speaks [5, 5]: the version bump that keeps a v4 peer from erasing the reader’s own rating', () => {
+      /* [5, 5] since WI-23.B3 — `status`, `rating` and `review` are fields a
+         v4 `parseRecord` strips, ACKs and thereby erases. Same defect, fourth
+         version. */
+      expect(SYNC_VERSION).toEqual([5, 5])
     })
 
     /* (i) THE BUMP IS THE WHOLE SAFETY OF `live.at` against a peer from before
@@ -943,7 +946,7 @@ describe('carried findings — removals, content facts, and covers', () => {
       }
       await expect(hello.handler(older as never, asCtx(hello.handler))).rejects.toMatchObject({
         code: 'unsupported',
-        message: expect.stringMatching(/\[2, 2\].*\[4, 4\]/),
+        message: expect.stringMatching(/\[2, 2\].*\[5, 5\]/),
       })
     })
 
@@ -966,7 +969,7 @@ describe('carried findings — removals, content facts, and covers', () => {
       }
       await expect(satchel.ledger.runSession(olderShelf)).rejects.toMatchObject({
         code: 'unsupported',
-        message: expect.stringMatching(/\[2, 2\].*\[4, 4\]/),
+        message: expect.stringMatching(/\[2, 2\].*\[5, 5\]/),
       })
     })
 
@@ -1195,6 +1198,49 @@ describe('carried findings — removals, content facts, and covers', () => {
     await satchel.ledger.runSession(channel)
     await channel.close()
     expect(shelf.fs.store.get('books/book_c/cover.jpg')).toEqual(coverBytes)
+    /* And the record carries the jacket's facts, this device's own (WI-23.C5). */
+    await shelf.services.drain()
+    expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'book:c')?.coverFacts).toMatchObject({ name: 'cover.jpg', size: coverBytes.length })
+  })
+
+  it('stamps the facts of a jacket the shelf already holds identically, without fetching it again', async () => {
+    const { shelf, satchel } = await makeWorld()
+    const bytes = new TextEncoder().encode('shared epub bytes')
+    const coverBytes = new TextEncoder().encode('a jacket')
+    for (const side of [satchel, shelf]) {
+      await side.services.library.add('book:c', { ...rec('Covered'), ext: 'epub', format: 'epub' })
+      await side.fs.writeFile('books/book_c/content.epub', bytes)
+      await side.fs.writeFile('books/book_c/cover.jpg', coverBytes)
+      await side.services.library.refreshContent('book:c')
+    }
+    const opsBefore = shelf.fs.ops.length
+    const channel = await satchel.port.connect(shelf.wire.id)
+    await satchel.ledger.runSession(channel)
+    await channel.close()
+    await shelf.services.drain()
+    expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'book:c')?.coverFacts).toMatchObject({ name: 'cover.jpg', size: coverBytes.length })
+    /* Identical, so no byte moved: nothing was written under the jacket's name. */
+    expect(shelf.fs.ops.slice(opsBefore).some((op) => op.path.includes('cover.jpg'))).toBe(false)
+  })
+
+  it('replaces a jacket the shelf holds under another hash, and stamps the new facts', async () => {
+    const { shelf, satchel } = await makeWorld()
+    const bytes = new TextEncoder().encode('shared epub bytes')
+    const newer = new TextEncoder().encode('a newer jacket')
+    await satchel.services.library.add('book:c', { ...rec('Covered'), ext: 'epub', format: 'epub' })
+    await satchel.fs.writeFile('books/book_c/content.epub', bytes)
+    await satchel.fs.writeFile('books/book_c/cover.jpg', newer)
+    await satchel.services.library.refreshContent('book:c')
+    await shelf.services.library.add('book:c', { ...rec('Covered'), ext: 'epub', format: 'epub' })
+    await shelf.fs.writeFile('books/book_c/content.epub', bytes)
+    await shelf.fs.writeFile('books/book_c/cover.jpg', new TextEncoder().encode('an old jacket'))
+    await shelf.services.library.refreshContent('book:c')
+    const channel = await satchel.port.connect(shelf.wire.id)
+    await satchel.ledger.runSession(channel)
+    await channel.close()
+    await shelf.services.drain()
+    expect(shelf.fs.store.get('books/book_c/cover.jpg')).toEqual(newer)
+    expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'book:c')?.coverFacts).toMatchObject({ name: 'cover.jpg', size: newer.length })
   })
 
   describe('audit-fix round 1 — what the mini audit found in the ledger', () => {
@@ -1220,6 +1266,31 @@ describe('carried findings — removals, content facts, and covers', () => {
         pushTo(shelf, { book: 'book:c', revs: { record: 1 }, hasContent: true, record: toWire({ ...rec('Renamed'), ext: 'epub', format: 'epub' }) }),
       ).rejects.toMatchObject({ code: 'unverifiable', retryable: true })
       expect(shelf.services.library.getSnapshot().find((b) => b.bookId === 'book:c')?.title).toBe(before?.title)
+    })
+
+    /* THE SIZE STAMPED IS THE LOCAL FILE'S. On the already-here path nothing
+     * verifies the offer's size against anything, and the peer's number was
+     * stamped as this device's own measurement — a peer could make this shelf
+     * publish a size for a jacket it never measured at that size. The hash
+     * result carries the local length; that is what the record gets. */
+    it('stamps the local size, not the offered one, for a jacket already held under the offered hash', async () => {
+      const { shelf } = await makeWorld()
+      const coverBytes = new TextEncoder().encode('a jacket already here')
+      await shelf.services.library.add('book:c', rec('Covered'))
+      await shelf.fs.writeFile('books/book_c/cover.jpg', coverBytes)
+      await pushTo(shelf, {
+        book: 'book:c',
+        revs: { record: 1 },
+        hasContent: false,
+        record: toWire(rec('Covered')),
+        cover: { name: 'cover.jpg', size: coverBytes.length + 100, hash: await fakeBlobHash(coverBytes) },
+      })
+      await shelf.services.drain()
+      expect(shelf.services.library.getSnapshot().find((b) => b.bookId === 'book:c')?.coverFacts).toEqual({
+        name: 'cover.jpg',
+        size: coverBytes.length,
+        hash: await fakeBlobHash(coverBytes),
+      })
     })
 
     it('(#56) a pulled row for a book this device removed does not re-add it, and the removal still pushes', async () => {

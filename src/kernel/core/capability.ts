@@ -1,4 +1,5 @@
 import type { IndexedBook } from './bookIndex'
+import type { Highlight } from './marks'
 import type { Diagnostics, SettingsStore } from './ports'
 import type { KernelServices } from './services'
 import type { ContributedPaneId, ContributedScreenId, PaneId, Screen } from './uiTypes'
@@ -80,7 +81,33 @@ export interface CapabilityContext extends KernelApi {
  * is not something React can show — so the loss of typing here is paid back
  * at the one place the value is used.
  */
-export type PaneRenderer = () => unknown
+export type PaneRenderer = (context: PaneContext) => unknown
+
+/**
+ * What a contributed pane or screen is told when it is drawn — WI-23.B4.
+ *
+ * ⚠️ **THE OPEN BOOK, OR A PANE ABOUT A BOOK CANNOT EXIST.** A contributed pane
+ * rendered into the reader's side pane had no way to learn which book was
+ * open, so *"the book's surface"* — where the reader says what they think of
+ * it, and where the circle's view of it is drawn — had nowhere to be. The
+ * kernel's own panes get it as a prop; a contribution gets it here, and
+ * nothing else: a pane that needs more than the id reaches the kernel's
+ * services for it, the way it does for everything.
+ *
+ * `null` on the library screen, and on a screen contribution, where no book is
+ * open. A renderer written before this existed takes no argument and is
+ * unaffected.
+ */
+export interface PaneContext {
+  readonly bookId: string | null
+  /**
+   * Open one of the reader's OWN books, by id — offered where the kernel can
+   * (a contributed screen), absent where it cannot. A Friends screen listing
+   * a friend's shelf links the books the reader also has (WI-23.C4), and a
+   * link that opens nothing is the control this repository refuses to draw.
+   */
+  readonly openBook?: (bookId: string) => void
+}
 
 /**
  * A pane in the side pane, contributed by a capability.
@@ -205,6 +232,34 @@ export interface BookStatus {
   of(book: IndexedBook): { readonly label: string; readonly fraction?: number } | null
 }
 
+/**
+ * A control drawn on one of the reader's OWN marks — the TENTH contribution
+ * type, and the first one a capability draws inside a kernel pane's row.
+ *
+ * ⚠️ **A RENDERER, NOT A VERB, and `BookAction` is why.** An action is
+ * `{ label, when, run }`: one word, one predicate, one call. A share control is
+ * not that shape — it is offered or absent with a stated reason, it says
+ * whether the mark is already out, and sharing the passage and sharing the
+ * note are two choices (`wire.md` §"The publisher's store": *"sharing the
+ * passage and sharing what you thought about it are different acts"*). Three
+ * states and a reason do not fit a label, so the capability draws its own
+ * element and the kernel places it, exactly as it does for a pane.
+ *
+ * The kernel supplies the MARK and the capability supplies the ELEMENT; the
+ * kernel never learns what the control does. `Marginalia` draws it under the
+ * note of every annotation row and never on a bookmark — a place is not a
+ * passage, and there is nothing of a bookmark to share.
+ *
+ * `render` answers an opaque value for the reason `PaneRenderer` does: this
+ * file is React-free, and the UI narrows what it is handed (`renderContribution`).
+ */
+export interface MarkControl {
+  /** `<capability>:<name>`, like a pane — so an id says who owns it. */
+  readonly id: `${string}:${string}`
+  /** The element for THIS mark — a highlight, never a companion annotation. Called on every render of the row. */
+  render(mark: Highlight): unknown
+}
+
 export interface BookAction {
   readonly id: `${string}:${string}`
   readonly label: string
@@ -253,10 +308,11 @@ export interface BookAction {
    */
   readonly icon?: ActionIcon
   /**
-   * The kernel's menu does NOT await this and attaches no rejection
-   * handler: an async action owns its own failures — catch, and speak
-   * through your capability's own surface (a status store, a pane), or the
-   * rejection is unhandled. The sync actions are the pattern.
+   * The kernel's menu does NOT await this. A rejection is caught and logged
+   * by the kernel so it is never an unhandled rejection — but nothing is
+   * drawn for it: an async action still owns telling the reader, through
+   * its capability's own surface (a status store, a pane). The sync actions
+   * are the pattern.
    */
   run(bookId: string): void | Promise<void>
 }
@@ -327,6 +383,8 @@ export interface Capability {
   readonly bookActions?: readonly BookAction[]
   /** Transient per-book state drawn on the shelf row — see `BookStatus`. */
   readonly bookStatuses?: readonly BookStatus[]
+  /** A control on each of the reader's own marks — see `MarkControl`. */
+  readonly markControls?: readonly MarkControl[]
   readonly services?: readonly ServiceContribution[]
   readonly clients?: readonly ClientContribution[]
   /**

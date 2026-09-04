@@ -491,6 +491,7 @@ class FakeWireImpl implements FakeWire {
         displayName,
         roster: { epoch: 0, hlc: 0 },
         revoked: [],
+        devices: [],
       })
     } else {
       this.people = this.people.map((one) =>
@@ -523,6 +524,11 @@ class FakeWireImpl implements FakeWire {
 
   circleMine(): Promise<PagePublisher | null> {
     return Promise.resolve(this.mine)
+  }
+
+  /** The roster as the file holds it — `mine`'s, read and never minted, as the real command reads. */
+  circleRoster(): Promise<readonly string[] | null> {
+    return Promise.resolve(this.mine === null ? null : [...this.mine.roster])
   }
 
   circleRevoke(device: string): Promise<void> {

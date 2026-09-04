@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   BOOKMARK_TEXT_MAX,
-  MARKS_STORAGE_KEY,
   MAX_MARK_TEXT,
   annotationsIn,
   bookIdFor,
   bookmarkFrom,
   bookmarksIn,
+  boundedMark,
   openingLine,
   compareCfi,
   compareMarks,
@@ -16,18 +16,19 @@ import {
   unplacedIn,
   identityParts,
   liveMarks,
-  loadMarks,
   marginMarks,
   parseMarks,
   placeMark,
   removeMark,
   sameClass,
-  saveMarks,
   updateNote,
   upsertMark,
   type Annotation,
   type Mark,
-  type MarkStorage,
+  validMarks,
+  readStoredMarks,
+  checkMarkIdentity,
+  MAX_MARK_NOTE,
 } from './marks'
 import { hlcOf } from './hlc'
 import { resolvedCfiForTesting } from './resolvedCfi.testkit'
@@ -64,31 +65,6 @@ function annotation(over: Partial<Annotation> = {}): Annotation {
      and silently get a highlight — a test whose meaning changed without its
      author noticing. */
   return { ...mark(over), kind: over.kind ?? 'highlight' }
-}
-
-/**
- * A storage double, with a switch for the failure the reader must be told about.
- *
- * It KEYS its entries, unlike the version that ignored the key and kept one
- * value: that one would have let `saveMarks` and `loadMarks` disagree about
- * which key to use and still pass the round trip, which is the one thing a
- * round-trip test exists to catch. `value` reads the marks key so the existing
- * assertions still read naturally.
- */
-function fakeStorage(initial: string | null = null, failWrites = false) {
-  const entries = new Map<string, string>()
-  if (initial !== null) entries.set(MARKS_STORAGE_KEY, initial)
-  return {
-    entries,
-    get value(): string | null {
-      return entries.get(MARKS_STORAGE_KEY) ?? null
-    },
-    getItem: (key: string) => entries.get(key) ?? null,
-    setItem: (key: string, value: string) => {
-      if (failWrites) throw new Error('QuotaExceededError')
-      entries.set(key, value)
-    },
-  } satisfies MarkStorage & { value: string | null; entries: Map<string, string> }
 }
 
 /**
@@ -601,48 +577,6 @@ describe('parseMarks', () => {
   })
 })
 
-describe('storage', () => {
-  it('round-trips through a storage', () => {
-    const storage = fakeStorage()
-    const marks = [mark()]
-    expect(saveMarks(storage, marks)).toBe(true)
-    expect(loadMarks(storage)).toEqual(marks)
-  })
-
-  it('writes under the versioned key, and reads back from the same one', () => {
-    /* Both halves, against ONE storage. The previous version wrote to a
-     * throwaway object and then asserted that a `storage` it had never been
-     * given was still empty — a true statement about nothing, which would have
-     * passed just as well had `saveMarks` and `loadMarks` disagreed about the
-     * key. Since the double now keys its entries, the round trip is the test:
-     * a mismatch loses every mark on reload. */
-    const storage = fakeStorage()
-    saveMarks(storage, [mark()])
-    expect([...storage.entries.keys()]).toEqual([MARKS_STORAGE_KEY])
-    expect(loadMarks(storage)).toHaveLength(1)
-
-    storage.entries.set('paper.marks.wrong-key', storage.entries.get(MARKS_STORAGE_KEY) ?? '')
-    storage.entries.delete(MARKS_STORAGE_KEY)
-    expect(loadMarks(storage)).toEqual([])
-  })
-
-  it('reports a failed write rather than throwing or silently losing it', () => {
-    // The reader can be told their marks are not being saved only if this
-    // returns false instead of swallowing the error.
-    expect(saveMarks(fakeStorage(null, true), [mark()])).toBe(false)
-  })
-
-  it('survives a storage that throws on read', () => {
-    const hostile: MarkStorage = {
-      getItem: () => {
-        throw new Error('storage disabled')
-      },
-      setItem: () => {},
-    }
-    expect(loadMarks(hostile)).toEqual([])
-  })
-})
-
 describe('the wave belongs to the companion', () => {
   /* Reserving a shape only means something if the store keeps it reserved. The
      reader can no longer CHOOSE a wave, but marks made before that was true are
@@ -1044,5 +978,132 @@ describe('placeMark', () => {
     expect(after).toHaveLength(2)
     expect(after.every((one) => one.deletedAt === undefined)).toBe(true)
     expect(after.find((one) => one.id === 'mine')!.note).toBe('my note')
+  })
+})
+
+describe('what leaves the door a stored row comes through', () => {
+  it('is the checked value of each named field and nothing the file added', () => {
+    const [kept] = validMarks([{ ...mark({ cfi: 'epubcfi(/6/2)' }), unplaced: 'junk', extra: 'ignored' }])
+    expect(kept).toBeDefined()
+    expect('unplaced' in kept!).toBe(false)
+    expect('extra' in kept!).toBe(false)
+    const [placed] = validMarks([{ ...mark({ cfi: '' }), unplaced: { reason: 'foreign-build', fromBook: 'book:other' } }])
+    expect(placed?.unplaced).toEqual({ reason: 'foreign-build', fromBook: 'book:other' })
+  })
+
+  it('cuts an over-long context without splitting a surrogate pair', () => {
+    const long = 'a'.repeat(MAX_MARK_TEXT - 1) + '😀' + 'tail'
+    const [kept] = validMarks([{ ...mark(), prefix: long, suffix: long, text: long }])
+    for (const field of [kept!.prefix, kept!.suffix, kept!.text]) {
+      expect(field.length).toBe(MAX_MARK_TEXT - 1)
+      expect(field.endsWith('a')).toBe(true)
+      expect(/[\uD800-\uDBFF]$/u.test(field)).toBe(false)
+    }
+    const whole = 'a'.repeat(MAX_MARK_TEXT - 2) + '😀' + 'tail'
+    expect(validMarks([{ ...mark(), prefix: whole }])[0]!.prefix.endsWith('😀')).toBe(true)
+  })
+})
+
+describe('the validator holds the identity fields to the record limits', () => {
+  const rows = (over: Record<string, unknown>) => parseMarks(JSON.stringify([{ ...mark(), ...over }]))
+
+  it('refuses a section index past the safe range', () => {
+    expect(rows({ sectionIndex: Number.MAX_SAFE_INTEGER + 2 })).toEqual([])
+    expect(rows({ sectionIndex: Number.MAX_SAFE_INTEGER })).toHaveLength(1)
+  })
+
+  it('refuses an id, a book or a position past the limits a record keeps', () => {
+    expect(rows({ id: 'x'.repeat(501) })).toEqual([])
+    expect(rows({ id: 'x'.repeat(500) })).toHaveLength(1)
+    expect(rows({ bookId: 'b'.repeat(501) })).toEqual([])
+    expect(rows({ bookId: 'b'.repeat(500) })).toHaveLength(1)
+    expect(rows({ cfi: 'c'.repeat(64_001) })).toEqual([])
+    expect(rows({ cfi: 'c'.repeat(64_000) })).toHaveLength(1)
+  })
+
+  /* A CHAPTER LABEL IS CUT, NOT REFUSED. It is display only, nothing bounded
+     it at the write, and refusing it dropped the whole mark on the read after
+     the reader had seen it saved. */
+  it('cuts a chapter past the limit rather than dropping the mark', () => {
+    expect(rows({ chapter: 'c'.repeat(501) })[0]?.chapter).toHaveLength(500)
+    expect(rows({ chapter: 'c'.repeat(500) })[0]?.chapter).toHaveLength(500)
+    /* Never on a lone high surrogate, as every other cut here. */
+    expect(rows({ chapter: `${'c'.repeat(499)}😀` })[0]?.chapter).toBe('c'.repeat(499))
+  })
+})
+
+/* A ROW THE READ REFUSES IS HANDED BACK, NOT LOST. The store rewrites the file
+   whole from what read, so a refused row used to be gone from disk at the next
+   highlight with nothing saying so. */
+describe('a row the read refuses', () => {
+  it('is kept aside verbatim, beside the marks that read', () => {
+    const bad = { ...mark({ id: 'stale' }), id: 'x'.repeat(501) }
+    const { marks, refused } = readStoredMarks([mark({ id: 'm1' }), bad, 'not a row'])
+    expect(marks.map((one) => one.id)).toEqual(['m1'])
+    expect(refused).toEqual([bad, 'not a row'])
+    expect(refused[0]).toBe(bad)
+  })
+
+  it('has its `unplaced` read ONCE — the gate and the projection are one read', () => {
+    let reads = 0
+    const row = {
+      ...mark({ id: 'm1', cfi: '' as never }),
+      get unplaced() {
+        reads += 1
+        return { reason: 'foreign-build', fromBook: 'book:other' }
+      },
+    }
+    const [one] = validMarks([row])
+    expect(one?.unplaced).toEqual({ reason: 'foreign-build', fromBook: 'book:other' })
+    expect(reads).toBe(1)
+  })
+})
+
+/* THE IDENTITY FIELDS ARE REFUSED AT THE WRITE. `boundedMark` cuts what can
+   be cut; an id or an anchor cut short is a different mark, so those are
+   refused — where a refusal is a failure the reader hears, not on the read,
+   where it was a mark saved, displayed, and quietly gone at the next load. */
+describe('the identity fields at the write door', () => {
+  it('refuses an id, a book id or an anchor past the record’s bound, and passes one at it', () => {
+    expect(() => checkMarkIdentity(mark({ id: 'x'.repeat(501) }))).toThrow(/mark id/u)
+    expect(() => checkMarkIdentity(mark({ bookId: 'x'.repeat(501) }))).toThrow(/book id/u)
+    expect(() => checkMarkIdentity(mark({ cfi: 'x'.repeat(64_001) as never }))).toThrow(/anchor/u)
+    expect(() => checkMarkIdentity(mark({ id: 'x'.repeat(500), bookId: 'b'.repeat(500), cfi: 'x'.repeat(64_000) as never }))).not.toThrow()
+  })
+
+  it('refuses to place a mark at an anchor past the bound rather than install one the read would refuse', () => {
+    const waiting = mark({ id: 'm1', cfi: '' as never, unplaced: { reason: 'foreign-build', fromBook: 'book:other' } })
+    expect(() => placeMark([waiting], 'm1', resolvedCfiForTesting('x'.repeat(64_001)), 3)).toThrow(/anchor/u)
+    /* At the bound, placed. */
+    expect(placeMark([waiting], 'm1', resolvedCfiForTesting('x'.repeat(64_000)), 3)[0]?.cfi).toHaveLength(64_000)
+  })
+})
+
+/* THE WRITE DOOR CUTS WHAT THE READ WOULD CUT, so a mark is the same on the
+   day it is made and the day it is reloaded. `updateNote` did this for a note;
+   `boundedMark` does it for every cut field of a new mark. */
+describe('a new mark is cut at the write', () => {
+  it('cuts the label, the quote, its context and the note to the read’s bounds, and leaves a bounded mark as it is', () => {
+    const long = mark({ chapter: 'c'.repeat(600), text: 'x'.repeat(MAX_MARK_TEXT + 5), prefix: 'p'.repeat(MAX_MARK_TEXT + 5), suffix: 's'.repeat(MAX_MARK_TEXT + 5), note: 'n'.repeat(MAX_MARK_NOTE + 5) })
+    const cut = boundedMark(long)
+    expect(cut.chapter).toHaveLength(500)
+    expect(cut.text).toHaveLength(MAX_MARK_TEXT)
+    expect(cut.prefix).toHaveLength(MAX_MARK_TEXT)
+    expect(cut.suffix).toHaveLength(MAX_MARK_TEXT)
+    expect(cut.note).toHaveLength(MAX_MARK_NOTE)
+    /* What the write keeps is exactly what the read answers. */
+    expect(parseMarks(JSON.stringify([cut]))[0]).toEqual(cut)
+    const fine = mark({ chapter: 'Chapter One' })
+    expect(boundedMark(fine)).toBe(fine)
+  })
+})
+
+describe('a note is cut at the write', () => {
+  it('keeps exactly what the reader will read back', () => {
+    const [row] = updateNote([mark({ id: 'm1' })], 'm1', 'x'.repeat(MAX_MARK_NOTE + 1_000))
+    expect(row?.note).toHaveLength(MAX_MARK_NOTE)
+    /* The same long note again is no edit: the cut is what is compared. */
+    const held = updateNote([mark({ id: 'm1' })], 'm1', 'x'.repeat(MAX_MARK_NOTE + 1_000))
+    expect(updateNote(held, 'm1', 'x'.repeat(MAX_MARK_NOTE + 5))).toBe(held)
   })
 })

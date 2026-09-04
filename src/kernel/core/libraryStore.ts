@@ -12,6 +12,7 @@ import {
   updateBook,
   writeBook,
   type BookRecord,
+  type CoverFacts,
 } from './bookFolder'
 import type { SyncLevel } from './bookVault'
 import {
@@ -23,6 +24,7 @@ import {
   type IndexFs,
   type IndexedBook,
 } from './bookIndex'
+import { measureCover } from './coverFacts'
 import { keepCover } from './coverArt'
 import {
   TRASH_WINDOW_MS,
@@ -35,10 +37,12 @@ import {
   type RestoreOutcome,
 } from './bookTrash'
 import { hlcOf, type Hlc } from './hlc'
+import type { ReadingState, Stars } from './circle/log'
 import { normalizeTag, tagKey } from './library'
-import { NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type MutationRecorder } from './ports'
+import { NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type HashPort, type MutationRecorder } from './ports'
 import { PRESENCE_KEY, notePresence, readPresence } from './presence'
 import type { WriteQueue } from './writeQueue'
+import { canonicalJson } from './canonicalJson'
 
 /**
  * The library — the shelf as a service, with no React in it.
@@ -114,6 +118,15 @@ export interface BookPatch {
    * register a real rename needs is designed in phase 20's D2, not here. */
   readonly finished?: boolean
   readonly position?: { readonly position: string; readonly progress?: number }
+  /**
+   * The reader's own opinion of the book — WI-23.B3. Each is its own register
+   * and each write stamps it; `status` and `finished` are one fact and a patch
+   * naming either moves both under one stamp.
+   */
+  readonly status?: ReadingState
+  readonly rating?: Stars
+  /** The whole text; `''` takes a review back (see `BookRecord.review`). */
+  readonly review?: string
 }
 
 export interface Library {
@@ -164,6 +177,21 @@ export interface Library {
   ): Promise<number>
   /** Change one book. The only mutator, because a book is one file. */
   update(bookId: string, change: (record: BookRecord) => BookRecord): Promise<void>
+  /**
+   * Change one book with work of the caller's own around it, in ONE task on
+   * the book's lane.
+   *
+   * `before` runs inside the lane ahead of the record write and decides
+   * whether the record is written (`'go'`) or not (`'refuse'`, no bracket);
+   * `after` runs inside the same task once that is settled, either way, and
+   * may record a bracket of another kind — a blob removed. ⚠️ **ONE LANE
+   * TASK.** A jacket's facts were cleared by a second task queued after the
+   * unlink, and a stamp queued between the two — a jacket landed again under
+   * the same name — was erased by the cleanup. No in-memory gate either: the
+   * caller's work happens whether or not the row would move, and `before`
+   * reads the disk to say whether the record follows.
+   */
+  updateAfter(bookId: string, hooks: { readonly before: (target: IndexFs, live: string) => Promise<'go' | 'refuse'>; readonly after?: (target: IndexFs, live: string) => Promise<void> }, change: (record: BookRecord) => BookRecord): Promise<void>
   /** Take a book off the shelf. Its folder goes to the trash, not away. */
   remove(bookId: string): Promise<void>
   /**
@@ -192,7 +220,8 @@ export interface Library {
    * [0, 1] because a hand-edited or remote value past that would draw a bar
    * wider than its track.
    */
-  rememberPosition(bookId: string, position: string, progress: number): Promise<void>
+  /** A progress not given keeps the record's — read inside the lane, not from a snapshot the caller held. */
+  rememberPosition(bookId: string, position: string, progress?: number): Promise<void>
   /**
    * Rewrite the index now, if a position tick left it behind (phase 20, D4).
    *
@@ -521,6 +550,12 @@ export interface LibraryOptions {
   readonly initial?: readonly IndexedBook[]
   readonly recorder?: MutationRecorder
   /**
+   * The hash port, read per call — bound late by the peer capability. With
+   * one, a jacket the store keeps is measured and its facts stamped on the
+   * record (WI-23.C5); without one, the facts wait for the circle's pass.
+   */
+  readonly hashes?: () => HashPort | null
+  /**
    * The stamp for the presence register's writes. The default is the legacy
    * clock — wall time, counter zero, the zero device — which is monotone only
    * as far as the wall clock is and is enough with no sync composed; the sync
@@ -540,24 +575,14 @@ async function readText(fs: IndexFs, path: string): Promise<string | null> {
 
 /** A value serialised with keys sorted at every depth — so two objects that
  *  say the same thing compare equal whatever order their keys were built in. */
-const canonical = (value: unknown): string => {
-  const sorted = (v: unknown): unknown => {
-    if (Array.isArray(v)) return v.map(sorted)
-    if (typeof v === 'object' && v !== null) {
-      const out: Record<string, unknown> = {}
-      for (const key of Object.keys(v).sort()) out[key] = sorted((v as Record<string, unknown>)[key])
-      return out
-    }
-    return v
-  }
-  return JSON.stringify(sorted(value))
-}
 
 /** Two rows say the same thing. CANONICAL, not the raw serialisation: the
  *  register writers (`setTag`) rebuild a record with its keys in a different
  *  order than `parseRecord` does, and a reconcile that treated key order as
  *  a change published a notification for a row that had not changed. */
-const sameRow = (a: IndexedBook, b: IndexedBook): boolean => canonical(a) === canonical(b)
+/* The kernel's own canonical spelling — the one `signedBytes` uses — so a
+   key the local copy dropped (`__proto__` on a plain object) is compared too. */
+const sameRow = (a: IndexedBook, b: IndexedBook): boolean => canonicalJson(a) === canonicalJson(b)
 
 /**
  * How many books this store writes at once.
@@ -624,6 +649,22 @@ async function pooled<T>(
   return failures
 }
 
+/**
+ * A write whose RECORD landed and whose index did not.
+ *
+ * The change is on disk, whatever the caller hears: `book.json` was written
+ * and `index.json` would not be. A caller keeping a list of what it changed
+ * — the undo a removal offers — must not strike the book off it on this
+ * failure, or the offer omits a tag that is genuinely gone. The message is
+ * the underlying failure's, so what the reader is shown does not change.
+ */
+export class LandedUnindexed extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+    this.name = 'LandedUnindexed'
+  }
+}
+
 /** The gathered failures, raised the way every batch verb here raises them. */
 function raiseGathered(failures: readonly unknown[], what: string): void {
   if (failures.length === 1) throw failures[0]
@@ -667,6 +708,8 @@ export function createLibrary({
   fs,
   queue,
   initial = [],
+  // Stryker disable next-line ArrowFunction: no port at all reads as no port — the measure fails and is caught.
+  hashes = () => null,
   recorder = NOOP_RECORDER,
   clock = () => hlcOf(Date.now()),
 }: LibraryOptions): Library {
@@ -921,7 +964,15 @@ export function createLibrary({
    */
   interface CommitHooks {
     readonly before: (target: IndexFs, live: string) => Promise<'go' | 'refuse'>
-    readonly retract: () => void
+    /** Put the optimistic row back after a refusal. Whether a row moved — which is what the index is rewritten for; a refusal that moved nothing writes nothing. */
+    readonly retract: () => boolean
+    /**
+     * Work of the caller's own AFTER the record, still inside the lane task —
+     * run whether the record was written or refused, so a caller that has
+     * something to do either way (a blob to unlink) does it in the one task.
+     * See `updateAfter`.
+     */
+    readonly after?: (target: IndexFs, live: string) => Promise<void>
   }
 
   /**
@@ -944,7 +995,11 @@ export function createLibrary({
     hooks?: CommitHooks,
     index: IndexPolicy = 'now',
   ): Promise<void> => {
-    publish(next)
+    /* The optimistic row — unless the caller handed the list back unchanged
+       (`updateAfter`): the lane is then the only truth, and a notification
+       for a change that has not happened told the cover pass to measure a
+       jacket the same task was about to remove. */
+    if (next !== books) publish(next)
     if (!fs) return Promise.resolve()
     const target = fs
     const lane = laneFor(key)
@@ -987,14 +1042,29 @@ export function createLibrary({
           const live = resolveId(key)
           if (hooks && (await hooks.before(target, live)) === 'refuse') {
             refused = true
-            return
+          } else {
+            /* ⚠️ **`landed` IS SET BY THE WRITE, NOT AFTER THE BRACKET.** Set
+             * once `recorded` returned, a recorder commit that failed AFTER
+             * the folder write left it unset — and a change that was on
+             * disk was then reported as one that never happened, and struck
+             * off the undo. What the write answered is what landed, whatever
+             * the journal said next. */
+            await recorded(recorder, live, what, async () => {
+              landed = await write(target, live)
+              return landed
+            })
           }
-          landed = await recorded(recorder, live, what, () => write(target, live))
+          await hooks?.after?.(target, live)
         })
         .then(() => {
           if (refused) {
-            hooks!.retract()
-            return writeIndexNow(target)
+            /* ⚠️ **A REFUSAL THAT MOVED NOTHING WRITES NOTHING.** The index is
+             * rewritten to take back a row published optimistically; a caller
+             * that published none (`updateAfter`) had nothing to take back, and
+             * an index write here made an absent-blob no-op, a content
+             * deletion, an ownership refusal fail — or report failure — for a
+             * write that had nothing to do with them. */
+            return hooks!.retract() ? writeIndexNow(target) : undefined
           }
           const live = resolveId(key)
           noteLanded(live)
@@ -1083,8 +1153,14 @@ export function createLibrary({
           /* RE-THROWN. The verbs return their promise to the caller — the hook
            * reports a failed save, `eachBook` gathers failures across a shelf —
            * so swallowing it here would make a write that did not happen look
-           * like one that did. */
-          throw cause
+           * like one that did.
+           *
+           * AND SAYING WHETHER THE RECORD LANDED. A failure past the folder
+           * write — an index that would not write — is a change that IS on
+           * disk, and `eachOfGathering` must keep the book on its list of
+           * what changed: struck off, the undo built from that list omitted
+           * a tag that was genuinely gone. */
+          throw landed ? new LandedUnindexed(cause) : cause
         })
     )
   }
@@ -1139,6 +1215,23 @@ export function createLibrary({
   }
 
   const update: Library['update'] = (bookId, change) => updateWith(bookId, change, STRUCTURAL)
+
+  const updateAfter: Library['updateAfter'] = (bookId, around, change) => {
+    if (!fs) return Promise.resolve()
+    /* ⚠️ **NO OPTIMISTIC ROW.** The lane decides whether anything changes
+       (`before` reads the disk), so the row is put right from what LANDED
+       (`reconcile`), after the caller's work — not predicted before it. A
+       prediction published first told every subscriber the jacket's facts
+       were gone while the jacket was still there: the cover pass measured
+       it and queued a stamp behind the removal, which then restored facts
+       for a deleted file. Nothing to retract, for the same reason. */
+    const hooks: CommitHooks = {
+      before: around.before,
+      ...(around.after ? { after: around.after } : {}),
+      retract: () => false,
+    }
+    return commit(bookId, books, 'record', (target, live) => updateBook(target, live, change, STRUCTURAL.level), hooks, STRUCTURAL.index)
+  }
 
   /**
    * Whether a row's bytes are back, checked and recorded. Runs INSIDE a
@@ -1330,14 +1423,15 @@ export function createLibrary({
        * is then refused in the lane. */
       retract: () => {
         const where = books.findIndex((one) => one.bookId === bookId)
-        if (where === -1) return
+        if (where === -1) return false
         if (!previous) {
           publish(books.filter((one) => one.bookId !== bookId))
-          return
+          return true
         }
         const back = [...books]
         back[where] = previous
         publish(back)
+        return true
       },
     }
     await commit(bookId, list, 'record', async (target, live) => {
@@ -1619,7 +1713,9 @@ export function createLibrary({
         return won ? 'go' : 'refuse'
       },
       retract: () => {
-        if (!books.some((one) => one.bookId === bookId)) publish([held, ...books])
+        if (books.some((one) => one.bookId === bookId)) return false
+        publish([held, ...books])
+        return true
       },
     })
     return won ? 'removed' : 'lost'
@@ -1709,7 +1805,10 @@ export function createLibrary({
    * the ledger's registers now; with no sync composed the stamp is the legacy
    * wall clock under the zero device, which merges exactly like a legacy
    * record's synthesised stamp — nothing changes until a real clock arrives.) */
-  const patchWith = (bookId: string, fields: BookPatch, how: WriteWith): Promise<void> => {
+  /* `async`, so a patch refused inside the transform — the contradiction check
+     below — comes back as the rejection every caller is already awaiting, not
+     as a throw out of the call before a promise exists. */
+  const patchWith = async (bookId: string, fields: BookPatch, how: WriteWith): Promise<void> => {
     const at = clock()
     return updateWith(bookId, (record) => {
       let next = record
@@ -1717,8 +1816,36 @@ export function createLibrary({
        * which two already hold writes only what moved — and a patch that
        * moves nothing returns `record` itself, which `update` reads as
        * "nothing to do" and does not write. This runs on every page turn. */
-      if (fields.finished !== undefined && fields.finished !== next.finished) {
-        next = { ...next, finished: fields.finished, finishedAt: at }
+      /* ⚠️ **`status` AND `finished` ARE ONE FACT, MOVED TOGETHER.** A patch
+       * naming `finished` — the menu's verb — sets the status it implies:
+       * finished, or reading when there is a position to come back to, or
+       * want when there is not. A patch naming `status` sets `finished` to
+       * match. Both stamps are `at`, so the two registers cannot disagree
+       * about when the reader decided. */
+      /* "A position to come back to" counts one carried by THIS patch as well
+         as one already on the record: a menu that marks a book unfinished as
+         it saves where the reader stopped is one act, not two. */
+      /* A position to come back to is a NON-EMPTY one: the record's `position`
+         is `string | null | undefined`, and a null read as "placed" marked a
+         book the reader never opened as `reading` when it was unfinished. */
+      // Stryker disable next-line ConditionalExpression,StringLiteral: `parseRecord` drops an empty position on the way in, so none reaches here; the check is belt and braces.
+      const placed = fields.position !== undefined || (typeof next.position === 'string' && next.position !== '')
+      /* One fact, said twice, must be said the same way: a patch naming both
+         `status` and `finished` is refused when they disagree, rather than
+         letting one silently win over the other. */
+      if (fields.status !== undefined && fields.finished !== undefined && fields.finished !== (fields.status === 'finished')) {
+        throw new Error(`a patch cannot say status "${fields.status}" and finished ${String(fields.finished)} at once`)
+      }
+      const state: ReadingState | undefined =
+        fields.status ?? (fields.finished === undefined ? undefined : fields.finished ? 'finished' : placed ? 'reading' : 'want')
+      if (state !== undefined && state !== next.status?.state) {
+        next = { ...next, status: { state, at }, finished: state === 'finished', finishedAt: at }
+      }
+      if (fields.rating !== undefined && fields.rating !== next.rating) {
+        next = { ...next, rating: fields.rating, ratingAt: at }
+      }
+      if (fields.review !== undefined && fields.review !== next.review?.text) {
+        next = { ...next, review: { text: fields.review, at } }
       }
       const where = fields.position
       if (where !== undefined) {
@@ -1746,7 +1873,8 @@ export function createLibrary({
    * --position` from the CLI goes through `patch` and stays structural — it
    * is one write, not one every two seconds. */
   const rememberPosition: Library['rememberPosition'] = (bookId, position, progress) =>
-    patchWith(bookId, { position: { position, progress } }, TICK)
+    // Stryker disable next-line ConditionalExpression: an explicit undefined progress is dropped by the record's writer, as no progress is.
+    patchWith(bookId, { position: { position, ...(progress === undefined ? {} : { progress }) } }, TICK)
 
   const setFinished: Library['setFinished'] = (bookId, finished) => patch(bookId, { finished })
 
@@ -1833,16 +1961,68 @@ export function createLibrary({
     )
   }
 
-  const removeTag: Library['removeTag'] = (raw) => {
+  /* THROUGH `untagBooks`, which is the one place a removal is recorded — the
+     interface promises the shelf-wide removal the same way back as the
+     editor's, and this used to bypass the recorder and offer none. The books
+     named are the ones that carry the tag; `untagBooks` judges each record
+     for itself, as `renameTag` does.
+
+     JUDGED FROM THE DISK, NOT THE SNAPSHOT. `updateWith` decides from the
+     in-memory row whether anything moved before it takes the lane, so a tag
+     the disk carries and the index does not — the crash window between
+     `book.json` and `index.json` — was left standing by a removal that
+     claimed the whole shelf. Every book the index says does not carry it is
+     READ first, off the lane: a record that does carry it is put back into
+     its row (`reconcile`, the correction a landed write makes) so the writer
+     sees what the disk holds, and the book joins the removal. A read costs no
+     journal entry and no index write; only a book that carries the tag
+     reaches a lane — which is what kept a disk-judged removal from recording
+     two thousand mutations for two thousand unchanged books. A record that
+     would not read is a failure the reader hears, after the removal has done
+     what it could — as one that would not write is. */
+  const removeTag: Library['removeTag'] = async (raw) => {
     const key = tagKey(raw)
     const at = clock()
-    // Judged per record, not from the cached row — see `renameTag`.
-    return eachBook((record) => {
-      const own = record.tags ?? []
-      const held = own.find((one) => tagKey(one) === key)
-      if (held === undefined) return record
-      return setTag(record, held, false, at)
+    const changed = new Set<string>()
+    const failures: unknown[] = []
+    /* JUDGED INSIDE EACH BOOK'S LANE — `updateAfter`'s `before`, which reads
+       the record where the write happens: a tag the disk carries and the
+       index does not — the crash window between `book.json` and
+       `index.json` — is found there, and a record that carries none is
+       refused without a bracket, so a shelf of two thousand unchanged books
+       journals nothing. A record that will not read is a failure the reader
+       hears once the removal has done what it could — not a book quietly
+       skipped, and not a write's failure either: refused, so the row stands. */
+    await pooled(books.map((one) => one.bookId), WRITE_WIDTH, async (bookId) => {
+      try {
+        await updateAfter(
+          bookId,
+          {
+            before: async (target, live) => {
+              const truth = await readBook(target, live)
+              if (!truth) {
+                if (await target.exists(recordPath(live))) failures.push(new Error(`book.json for ${live} is there but could not be read`))
+                return 'refuse'
+              }
+              if (!(truth.tags ?? []).some((held) => tagKey(held) === key)) return 'refuse'
+              changed.add(bookId)
+              return 'go'
+            },
+          },
+          (record) => {
+            const held = (record.tags ?? []).find((one) => tagKey(one) === key)
+            return held === undefined ? record : setTag(record, held, false, at)
+          },
+        )
+      } catch (cause) {
+        /* As `eachOfGathering` keeps it: a write that failed left the record
+           as it was — unless the record landed and only the index did not. */
+        if (!(cause instanceof LandedUnindexed)) changed.delete(bookId)
+        failures.push(cause)
+      }
     })
+    if (changed.size > 0) setLastRemoval({ tag: normalizeTag(raw), bookIds: [...changed] })
+    raiseGathered(failures, 'books could not be read or saved')
   }
 
   const keepJacket: Library['keepJacket'] = (bookId, cover) => {
@@ -1863,6 +2043,28 @@ export function createLibrary({
       await recorded(recorder, live, 'cover', async () => {
         await keepCover(target, live, cover)
       })
+    }).then(async () => {
+      /* MEASURED INSIDE THE LANE, once it is there — `updateAfter`, whose
+         hook hashes the file the moment before its facts are written, so they
+         describe THAT file: a removal queued between has taken it and nothing
+         is stamped; a replacement is measured as itself. Measured outside the
+         lane, the stamp could land after a removal and describe a file that
+         was gone. A port that is not bound yet leaves the facts to the
+         circle's pass; a jacket the store could not keep has no facts. */
+      const port = hashes()
+      // Stryker disable next-line ConditionalExpression: a null port fails the measure, which is caught; this spares the attempt.
+      if (port === null) return
+      const measured: { facts: CoverFacts | null } = { facts: null }
+      await updateAfter(
+        resolveId(bookId),
+        {
+          before: async (fsInLane, live) => {
+            measured.facts = await measureCover(fsInLane, port, live).catch(() => null)
+            return measured.facts === null ? 'refuse' : 'go'
+          },
+        },
+        (held) => (held.coverFacts === undefined && measured.facts !== null ? { ...held, coverFacts: measured.facts } : held),
+      )
     })
   }
 
@@ -1933,27 +2135,50 @@ export function createLibrary({
    * `change` returning the SAME object means "nothing to do", which is what
    * every caller here already signals with `continue`.
    */
-  const eachOf = async (
+  /**
+   * `eachOf` with the failures HANDED BACK rather than raised, and the ids
+   * that changed rather than their count — for the one caller that has to
+   * record what it did before it says what it could not: a removal that
+   * succeeded on some books and failed on one still took the tag off the
+   * others, and the way back must name them.
+   */
+  const eachOfGathering = async (
     bookIds: readonly string[],
     change: (record: BookRecord) => BookRecord,
-  ): Promise<number> => {
+  ): Promise<{ readonly changed: ReadonlySet<string>; readonly failures: readonly unknown[] }> => {
     /* BY BOOK, not by invocation. `update` calls `change` TWICE — once against
      * the in-memory row to decide whether anything moved, and again against
      * whatever is actually on disk (see its own comment) — so a naive counter
      * reported two changes for one book. A set of ids counts the thing being
      * asked about. */
-    const touched = new Set<string>()
-    raiseGathered(
-      await pooled(bookIds, WRITE_WIDTH, (bookId) =>
-        update(bookId, (record) => {
+    const changed = new Set<string>()
+    const failures = await pooled(bookIds, WRITE_WIDTH, async (bookId) => {
+      try {
+        await update(bookId, (record) => {
           const next = change(record)
-          if (next !== record) touched.add(bookId)
+          if (next !== record) changed.add(bookId)
           return next
-        }),
-      ),
-      'books could not be saved',
-    )
-    return touched.size
+        })
+      } catch (cause) {
+        /* NOT CHANGED, WHATEVER `change` DECIDED. The id went in when the
+         * callback said the record should move; the write is what makes it
+         * true, and a write that failed left the record as it was — unless
+         * the record landed and only the index did not (`LandedUnindexed`),
+         * which is a change on disk the way back must name. */
+        if (!(cause instanceof LandedUnindexed)) changed.delete(bookId)
+        throw cause
+      }
+    })
+    return { changed, failures }
+  }
+
+  const eachOf = async (
+    bookIds: readonly string[],
+    change: (record: BookRecord) => BookRecord,
+  ): Promise<number> => {
+    const { changed, failures } = await eachOfGathering(bookIds, change)
+    raiseGathered(failures, 'books could not be saved')
+    return changed.size
   }
 
   /* HELD HERE rather than in React state, because the store is the thing that
@@ -2003,26 +2228,28 @@ export function createLibrary({
     return { changed, failed: failures.length }
   }
 
-  const untagBooks: Library['untagBooks'] = (bookIds, raw) => {
+  const untagBooks: Library['untagBooks'] = async (bookIds, raw) => {
     const key = tagKey(raw)
     const at = clock()
-    /* WHICH BOOKS ACTUALLY LOSE IT, taken before anything is written — read
-     * afterwards the answer is always none, and an undo would have nothing to
-     * put the tag back on. Filtered rather than assumed: `bookIds` is a
-     * selection, and most of a selection may not carry the tag at all, so
-     * putting it back on all of them would tag books that never had it. */
-    const wanted = new Set(bookIds)
-    const touched = ownTagBooks(raw).filter((bookId) => wanted.has(bookId))
-    return eachOf(bookIds, (record) => {
+    /* WHICH BOOKS ACTUALLY LOSE IT — the ones whose record the write moved,
+     * as the writer reports them, not the snapshot's guess taken beforehand.
+     * The snapshot can be a write behind the disk, so it could name a book
+     * that had already lost the tag and miss one that carried it only on
+     * disk; an undo built from it put the tag back on the wrong books. And
+     * RECORDED BEFORE THE FAILURES ARE RAISED: one write failing after
+     * others succeeded still took the tag off the others, and this used to
+     * throw past the recorder, so the reader was offered no way back for the
+     * removals that did happen. */
+    const { changed, failures } = await eachOfGathering(bookIds, (record) => {
       const held = (record.tags ?? []).find((one) => tagKey(one) === key)
       // A publisher's subject cannot be removed — it is a fact about the book,
       // and it returns on the next parse anyway.
       if (held === undefined) return record
       return setTag(record, held, false, at)
-    }).then((changed) => {
-      if (touched.length > 0) setLastRemoval({ tag: normalizeTag(raw), bookIds: touched })
-      return changed
     })
+    if (changed.size > 0) setLastRemoval({ tag: normalizeTag(raw), bookIds: [...changed] })
+    raiseGathered(failures, 'books could not be saved')
+    return changed.size
   }
 
   const adoptTag: Library['adoptTag'] = (raw) => {
@@ -2248,6 +2475,9 @@ export function createLibrary({
           const landed = await recorded(recorder, live, 'record', () => updateBook(target, live, row.change))
           if (landed) {
             reconcile(live, landed)
+            /* A write that landed is a write that landed: the failure this
+               book was showing from an earlier attempt is over. */
+            noteLanded(live)
           } else if (books.some((one) => one.bookId === live)) {
             /* `null` IS "NOTHING LANDED" HERE TOO — `updateBook`'s only other
              * answer, and what it says when the folder holds no record. It was
@@ -2354,6 +2584,7 @@ export function createLibrary({
     untag,
     renameTag,
     removeTag,
+    updateAfter,
     ownTagCount,
     ownTagBooks,
     tagBooks,

@@ -1,4 +1,4 @@
-import { SERVICE_ERRORS, createRouter, readingGrant, refuse, type ServiceContribution } from '../../../kernel'
+import { SERVICE_ERRORS, createRouter, readServices, refuse, type ServiceContribution } from '../../../kernel'
 import type { WebHostWire } from './wire'
 
 /**
@@ -184,6 +184,9 @@ function boundToOpenedBook(services: readonly ServiceContribution[], openedBy: M
   })
 }
 
+/** The grants a browser session holds: the kernel table's reads, by the table's own split. */
+const WEB_READS: ReadonlySet<string> = new Set(readServices().map((one) => one.grant))
+
 export function servePipe(options: PumpOptions): Pump {
   const { wire, services } = options
   const pollMs = options.pollMs ?? POLL_MS
@@ -208,13 +211,18 @@ export function servePipe(options: PumpOptions): Pump {
   /** Session → the book it opened last. Dropped with the session. */
   const openedBy = new Map<string, string>()
 
-  /* THE KERNEL'S OWN SPLIT, not a list kept here. `readServices()` filters the
-   * table with this exact predicate, so a service added to the table lands on
-   * the correct side for the browser without anybody remembering to update a
-   * second register. Plus the one write, by its exact spelling. */
+  /* THE KERNEL'S OWN READS, not a list kept here and NOT EVERY `:read` THERE
+   * IS. `readServices()` is the table's own split, so a service added to the
+   * table lands on the correct side for the browser without anybody
+   * remembering a second register. A capability's read grant is another
+   * matter: every host is served every capability's services, and the
+   * circle's `circle:read` serves a person's pages and shelf to an ADMITTED
+   * PEER on the peer transport — a browser cookie is not that peer, and the
+   * spelling alone would have let it through. Plus the one write, by its
+   * exact spelling. */
   const router = createRouter({
     services: boundToOpenedBook([...services], openedBy),
-    hasGrant: (_session, grant) => readingGrant(grant) || grant === POSITION_GRANT,
+    hasGrant: (_session, grant) => WEB_READS.has(grant) || grant === POSITION_GRANT,
     ...(options.maxOutboundBytes === undefined ? {} : { maxOutboundBytes: options.maxOutboundBytes }),
   })
   const live = new Map<number, { connection: ReturnType<typeof router.connect>; stop: () => void }>()

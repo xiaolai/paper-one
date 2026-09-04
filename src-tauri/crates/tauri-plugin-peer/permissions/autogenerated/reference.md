@@ -40,6 +40,7 @@ every session is accepted only from a persisted peer.
 - `allow-peer-circle-people`
 - `allow-peer-circle-introduce`
 - `allow-peer-circle-mine`
+- `allow-peer-circle-roster`
 - `allow-peer-page-sign`
 - `allow-peer-circle-remember`
 - `allow-peer-circle-revoke`
@@ -258,6 +259,32 @@ Enables the peer_circle_revoke command without any pre-configured scope.
 <td>
 
 Denies the peer_circle_revoke command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-circle-roster`
+
+</td>
+<td>
+
+Enables the peer_circle_roster command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-circle-roster`
+
+</td>
+<td>
+
+Denies the peer_circle_roster command without any pre-configured scope.
 
 </td>
 </tr>

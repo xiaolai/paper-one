@@ -206,6 +206,18 @@ export interface SizePort {
   bytesAt(path: string): Promise<number | null>
 }
 
+/**
+ * The HASH port — BLAKE3 of a blob in this device's data root, which only the
+ * peer plugin computes (Rust; never in TypeScript). Bound by the peer
+ * capability when it starts, on the same late-bound, once-at-a-time slot as
+ * the size port; absent on a host with no peer, and every reader of it
+ * answers "unmeasured" then rather than failing.
+ */
+export interface HashPort {
+  /** BLAKE3, hex, and the byte count of `books/<folder>/<name>`; rejects when there is no such file. */
+  hashFile(folder: string, name: string): Promise<{ readonly blake3: string; readonly size: number }>
+}
+
 /* ------------------------------------------------------------------------ */
 /* Blob names and folders                                                    */
 /*                                                                           */

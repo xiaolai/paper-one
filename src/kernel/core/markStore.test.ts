@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { marksPathIn, recordPath } from './bookFolder'
 import { fakeFs } from './indexFsFake.testkit'
 import { createMarkStore } from './markStore'
@@ -648,5 +648,68 @@ describe('place — WI-22.A2', () => {
     expect(after).toHaveLength(1)
     expect(after[0]!.cfi).toBe(mine.cfi)
     expect(after[0]!.sectionIndex).toBe(0)
+  })
+})
+
+describe('what the write found, compared to what was predicted', () => {
+  it('tells a subscriber once for a change the disk confirms, and once more when the disk had moved under it', async () => {
+    const { fs, store: marks } = store()
+    await marks.open(BOOK)
+    const m1 = highlight()
+    const m2 = highlight({ cfi: 'epubcfi(/6/4!/4/2,/1:20,/1:30)', text: 'the whale' })
+    await marks.add(m1)
+    await marks.add(m2)
+    const heard = vi.fn()
+    marks.subscribe(heard)
+    await marks.updateNote(m1.id, 'a note')
+    expect(heard).toHaveBeenCalledTimes(1)
+    /* Another device changed the SECOND mark on disk; the next write reads that in and must say so. */
+    const onDisk = JSON.parse(new TextDecoder().decode(fs.store.get(marksPathIn(BOOK))!)) as Mark[]
+    const moved = onDisk.map((mark) => (mark.id === m2.id ? { ...mark, note: 'from elsewhere', updatedAt: '018bcfe56809-0001-1d8865efc2eaef44' } : mark))
+    fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(JSON.stringify(moved)))
+    await marks.updateNote(m1.id, 'another note')
+    expect(heard).toHaveBeenCalledTimes(3)
+    expect(marks.getSnapshot().current.find((mark) => mark.id === m2.id)?.note).toBe('from elsewhere')
+  })
+})
+
+/* WHAT THE STORE REFUSES AT THE DOOR, AND WHAT IT KEEPS ASIDE. An id or an
+   anchor past the record's bound is refused where the reader hears it; a row
+   already on disk that will not read is kept where it was, unshown, and said. */
+describe('the record’s bounds at the store', () => {
+  it('rejects a mark whose id or anchor is past the bound — a failure heard now, not a mark gone at the next load', async () => {
+    const { fs, store: marks } = store()
+    await marks.open(BOOK)
+    /* `createMark` mints the id, so the oversized one is set after. */
+    await expect(marks.add({ ...highlight(), id: 'x'.repeat(501) })).rejects.toThrow(/mark id/u)
+    await expect(marks.add(highlight({ cfi: 'x'.repeat(64_001) as never }))).rejects.toThrow(/anchor/u)
+    await expect(marks.addMany(BOOK, [{ ...highlight(), id: 'x'.repeat(501) }])).rejects.toThrow(/mark id/u)
+    await marks.add({ ...highlight({ cfi: '' as never, unplaced: { reason: 'foreign-build', fromBook: 'book:other' } }), id: 'waiting' })
+    await expect(marks.place('waiting', resolvedCfiForTesting('x'.repeat(64_001)), 0, BOOK)).rejects.toThrow(/anchor/u)
+    /* Nothing refused reached the disk, and the unplaced mark is still waiting. */
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(marksPathIn(BOOK))!)) as Mark[]
+    expect(written.map((one) => one.id)).toEqual(['waiting'])
+    expect(written[0]?.cfi).toBe('')
+  })
+
+  it('keeps a row it cannot read where it was, unshown, across a write — and says so once per read', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fs = libraryWith(BOOK)
+      const bad = { ...highlight(), id: 'x'.repeat(501) }
+      fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(JSON.stringify([{ ...highlight(), id: 'm1' }, bad])))
+      const marks = createMarkStore({ fs, queue: writeQueue() })
+      await marks.open(BOOK)
+      expect((await marks.forBook(BOOK)).map((one) => one.id)).toEqual(['m1'])
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`1 mark(s) in ${BOOK} could not be read and were kept aside`))
+      await marks.add({ ...highlight({ cfi: 'epubcfi(/6/6!/4/2,/1:5,/1:12)' as never }), id: 'm2' })
+      const written = JSON.parse(new TextDecoder().decode(fs.store.get(marksPathIn(BOOK))!)) as { id: string }[]
+      expect(written.map((one) => one.id)).toEqual(['m1', 'm2', 'x'.repeat(501)])
+      /* Verbatim — not projected, not cut. */
+      expect(written[2]).toEqual(bad)
+      expect((await marks.forBook(BOOK)).map((one) => one.id)).toEqual(['m1', 'm2'])
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

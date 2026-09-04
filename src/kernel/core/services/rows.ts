@@ -1,4 +1,5 @@
 import type { IndexedBook } from '../bookIndex'
+import type { Stars } from '../circle/log'
 import type { Card } from '../cards'
 import type { Mark } from '../marks'
 import type { TrashedBook } from '../bookTrash'
@@ -84,6 +85,20 @@ export interface BookRow {
   readonly position: string | null
   readonly progress: number
   readonly finished: boolean
+  /**
+   * The reader's OWN opinion of the book — WI-23.B3. `status` is where they
+   * are with it (`want` / `reading` / `finished`), `rating` one to five, and
+   * `review` their words; `null` where they have said nothing. An empty
+   * review is one taken back and reads as `null` here.
+   */
+  readonly status: 'want' | 'reading' | 'finished' | null
+  /** When each register was last set — `null` when never, so a remote shelf can carry the register whole. */
+  readonly statusAt: string | null
+  readonly ratingAt: string | null
+  readonly reviewAt: string | null
+  /** One to five, as the record holds it — the type says so, where a bare number let an impossible rating type-check. */
+  readonly rating: Stars | null
+  readonly review: string | null
   readonly addedAt: number | null
   readonly openedAt: number | null
   /** What the bytes ARE — the value that travels, unlike `ext`. */
@@ -120,6 +135,15 @@ export function bookRow(book: IndexedBook): BookRow {
     position: book.position ?? null,
     progress: book.progress ?? 0,
     finished: book.finished === true,
+    status: book.status?.state ?? null,
+    statusAt: book.status?.at ?? null,
+    rating: book.rating ?? null,
+    ratingAt: book.ratingAt ?? null,
+    review: book.review === undefined || book.review.text === '' ? null : book.review.text,
+    /* The stamp stays when the text is cleared: a taken-back review is a
+       write like any other, and a reconciler comparing stamps needs to see
+       that the clearing happened AFTER the words did. */
+    reviewAt: book.review?.at ?? null,
     addedAt: book.addedAt ?? null,
     openedAt: book.openedAt ?? null,
     format: book.format ?? null,
@@ -263,7 +287,7 @@ export function markRow(mark: Mark): MarkRow {
     /* SPREAD, not assigned — `exactOptionalPropertyTypes` is on, so an explicit
        `undefined` is not the same as an absent key, and a placed mark must not
        carry the field at all. */
-    ...(mark.unplaced ? { unplaced: mark.unplaced } : {}),
+    ...(mark.unplaced ? { unplaced: { ...mark.unplaced } } : {}),
   }
 }
 

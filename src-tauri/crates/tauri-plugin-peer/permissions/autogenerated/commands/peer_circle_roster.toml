@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-circle-roster"
+description = "Enables the peer_circle_roster command without any pre-configured scope."
+commands.allow = ["peer_circle_roster"]
+
+[[permission]]
+identifier = "deny-peer-circle-roster"
+description = "Denies the peer_circle_roster command without any pre-configured scope."
+commands.deny = ["peer_circle_roster"]

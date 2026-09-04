@@ -1,4 +1,4 @@
-import { BOOKS_DIR, atomicWrite, defineSetting, isRefusal, type IndexFs, type RemovableBlobName, type Setting, type SettingsStore } from '../../../kernel'
+import { BOOKS_DIR, COVER_NAMES, atomicWrite, defineSetting, isContentHash, isRefusal, type CoverName, type HashPort, type IndexFs, type RemovableBlobName, type Setting, type SettingsStore } from '../../../kernel'
 import { blobFolderOf, type BlobFacts } from './ledger'
 
 /**
@@ -41,6 +41,18 @@ export interface CoverEntry {
   readonly name: string
   readonly size: number
   readonly usedAt: number
+  /**
+   * A stamp still OWED: the record does not carry this jacket's facts — the
+   * stamp failed when it landed, or the file under this name is not the one
+   * the index knew. Paid by the next `ensure` that finds the jacket present
+   * and can MEASURE it (`hashes`): the facts stamped are always a fresh
+   * measurement of the file that is there. ⚠️ Not a digest kept from the
+   * landing: a same-name file replaced since — at any size — is not those
+   * bytes, and stamping the old digest onto it published facts that were
+   * wrong. Absent once the stamp has taken, and on every entry from before
+   * this field existed; a `pendingHash` an older index wrote reads as owed.
+   */
+  readonly owed?: true
 }
 
 export type CoverIndex = Readonly<Record<string, CoverEntry>>
@@ -57,6 +69,28 @@ export interface CoverCacheOptions {
   /** Where a book's cover is — the `sync.content` answer, reduced. */
   readonly lookup: (book: string) => Promise<CoverLookup | null>
   readonly fetchBlob: (peerId: string, folder: string, blob: BlobFacts) => Promise<void>
+  /** Told the facts of a jacket that landed, so the record can carry them (WI-23.C5). */
+  readonly stamp?: (book: string, facts: { readonly name: CoverName; readonly size: number; readonly hash: string }) => Promise<void>
+  /**
+   * Told that the jacket this cache was tracking under `name` is NOT here
+   * after all — or not the file the facts describe — so the record stops
+   * carrying THAT name's facts and no other's: a book can hold a legacy
+   * `cover.webp` beside `cover.jpg`, and clearing whatever facts were there
+   * discarded a valid measurement of the file still present. A record whose
+   * `coverFacts` describe a file that is gone is a digest the circle
+   * publishes and this device cannot serve. Told on eviction (the primitive
+   * clears nothing for a file already gone), on a tracked jacket found
+   * missing or replaced, and on a stamp owed that cannot be paid.
+   */
+  readonly unstamp?: (book: string, name: string) => Promise<void>
+  /**
+   * The host's hasher, read at CALL time like `bytesAt` — bound after the
+   * services are built, and absent on a composition without one. With it, a
+   * stamp still owed is paid from a FRESH measurement of the file that is
+   * there; without it, only for a file of the size the digest was taken
+   * over. See `measured`.
+   */
+  readonly hashes?: () => HashPort | null
   /**
    * Delete one closed-name blob from a book's folder — the kernel's
    * `removeBlob` primitive (WI-10.2/10.5). Eviction's only delete: this
@@ -90,7 +124,10 @@ export function createCoverCache({
   settings,
   lookup,
   fetchBlob,
+  stamp,
   removeBlob,
+  unstamp,
+  hashes,
   now = Date.now,
   bytesAt,
 }: CoverCacheOptions): CoverCache {
@@ -136,7 +173,16 @@ export function createCoverCache({
          * with itself and eviction either never starts or never stops. */
         if (!Number.isSafeInteger(entry['size']) || entry['size'] < 0) continue
         if (!Number.isFinite(entry['usedAt'])) continue
-        out[book] = { name: entry['name'], size: entry['size'], usedAt: entry['usedAt'] }
+        /* A stamp owed is a flag — or, from an index the previous build
+         * wrote, the digest it kept: either reads as owed, and the debt is
+         * paid from a fresh measurement, never from that digest. */
+        const owed = entry['owed'] === true || isContentHash(entry['pendingHash'])
+        out[book] = {
+          name: entry['name'],
+          size: entry['size'],
+          usedAt: entry['usedAt'],
+          ...(owed ? { owed: true } : {}),
+        }
       }
       return out
     } catch (cause) {
@@ -200,13 +246,44 @@ export function createCoverCache({
       if (!removed) continue
       delete index[book]
       total -= entry.size
+      /* THE FACTS GO WITH THE FILE, here too. The primitive clears them when
+         it deletes a file that was there; an entry whose file was already
+         gone resolves as the documented no-op and clears nothing, and the
+         record kept describing a jacket this device could not serve. Said
+         for every entry that leaves — clearing facts already absent costs
+         nothing. */
+      await unstamp?.(book, entry.name)
     }
     return index
   }
 
-  /* The honest name first, the legacy read-only name second — ONE list,
-   * shared by local discovery and remote-answer validation. */
-  const COVER_NAMES = ['cover.jpg', 'cover.webp'] as const
+  /**
+   * The facts of the jacket present under `name`, MEASURED — or null: no
+   * hasher on this composition, or one that would not answer.
+   *
+   * ⚠️ **A STAMP OWED IS PAID FROM THE FILE THAT IS THERE, OR NOT AT ALL.**
+   * The digest taken when a jacket landed described those bytes; a same-name
+   * file replaced or restored since — at ANY size, a size is not an
+   * identity — is not them, and stamping the old digest onto it published
+   * facts that were wrong. Without a measurement the debt stands and the
+   * record carries no facts it cannot back.
+   */
+  const measured = async (folder: string, name: string): Promise<{ readonly size: number; readonly hash: string } | null> => {
+    const port = hashes?.() ?? null
+    if (port === null) return null
+    try {
+      const facts = await port.hashFile(folder, name)
+      return { size: facts.size, hash: facts.blake3 }
+    } catch {
+      return null
+    }
+  }
+
+  /* The honest name first, the legacy read-only name second — THE KERNEL'S
+   * list, shared by local discovery and remote-answer validation. It was
+   * restated here (and in `ledger.ts`, and in `protocol.ts`) while the kernel
+   * exported `COVER_NAMES` all along; a name added to the kernel's set would
+   * have been parsed, cached and landed by three files that disagreed. */
   const coverHere = async (folder: string): Promise<string | null> => {
     for (const name of COVER_NAMES) {
       if (await fs.exists(`${BOOKS_DIR}/${folder}/${name}`)) return name
@@ -256,13 +333,49 @@ export function createCoverCache({
               return true
             }
           }
-          index[book] = { name: present, size, usedAt: now() }
+          /* THE JACKET THE INDEX KNEW IS GONE, AND ANOTHER NAME IS HERE — a
+             legacy `cover.webp` beside where `cover.jpg` was. Its facts go
+             (they describe a file that is not there), and the file that IS
+             here owes a stamp like any jacket nobody has measured. Left
+             alone, the entry quietly took the new name and the record kept
+             describing the old file. */
+          const replaced = held !== undefined && held.name !== present
+          if (replaced) await unstamp?.(book, held.name)
+          /* A STAMP STILL OWED IS PAID HERE, from a fresh measurement — see
+             `measured`. A swallowed stamp used to be permanent: this path had
+             nothing to stamp with, and on a phone there is no circle pass to
+             do it later. Without a hasher the debt stands, unpaid, and the
+             record carries no facts for a file nothing has measured. */
+          let owed = replaced || held?.owed === true
+          if (owed) {
+            const facts = await measured(folder, present)
+            if (facts !== null && stamp) {
+              try {
+                await stamp(book, { name: present as CoverName, size: facts.size, hash: facts.hash })
+                owed = false
+              } catch {
+                /* Still owed; the next `ensure` tries again. */
+              }
+              size = facts.size
+            } else {
+              await unstamp?.(book, present)
+            }
+          }
+          index[book] = { name: present, size, usedAt: now(), ...(owed ? { owed: true } : {}) }
           /* Evicted here too: DISCOVERY grows the tracked bytes exactly as
            * a fetch does, and a discovery path that never evicted let the
            * cache climb past its cap one found jacket at a time. */
           await writeIndex(await evictLocked(index, book))
           return true
         }
+        /* THE FACTS GO WITH THE FILE. A jacket this cache was tracking is not
+         * here after all — a folder replaced or restored behind the index —
+         * and a record still carrying its facts is a digest the circle
+         * publishes and this device cannot serve. Eviction clears them
+         * through `removeBlob`; this is the other way a jacket goes missing,
+         * and nothing cleared them. Told before any fetch below, which stamps
+         * afresh when a jacket lands. */
+        if (book in index) await unstamp?.(book, index[book]!.name)
         const dropStale = async (): Promise<false> => {
           if (book in index) {
             delete index[book]
@@ -299,7 +412,24 @@ export function createCoverCache({
            * way. */
           return dropStale()
         }
-        index[book] = { name: found.cover.name, size: found.cover.size, usedAt: now() }
+        let owed = false
+        try {
+          // Stryker disable next-line OptionalChaining: a cache with nobody to tell throws here and is caught below; the jacket is kept either way.
+          await stamp?.(book, { name: found.cover.name as CoverName, size: found.cover.size, hash: found.cover.hash })
+        } catch {
+          /* The jacket is here either way. THE DEBT IS RECORDED, not
+           * forgotten: the next `ensure` that finds the jacket present pays
+           * it from a fresh measurement of the file. This used to wait for
+           * "the circle's pass" — which a phone does not compose, so on a
+           * phone the facts never arrived at all. */
+          owed = true
+        }
+        index[book] = {
+          name: found.cover.name,
+          size: found.cover.size,
+          usedAt: now(),
+          ...(owed ? { owed: true } : {}),
+        }
         await writeIndex(await evictLocked(index, book))
         return true
       }),

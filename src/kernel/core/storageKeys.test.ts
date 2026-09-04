@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CARDS_STORAGE_KEY } from './cards'
 import { MIGRATED_KEYS, STORE_FILE } from './fileStore'
-import { MARKS_STORAGE_KEY } from './marks'
 import { SETTINGS_STORAGE_KEY } from './settings'
 import { TAG_PREFS_STORAGE_KEY } from './tagPrefs'
 
@@ -20,7 +19,6 @@ import { TAG_PREFS_STORAGE_KEY } from './tagPrefs'
  */
 describe('the keys in the one store', () => {
   const KEYS = {
-    marks: MARKS_STORAGE_KEY,
     cards: CARDS_STORAGE_KEY,
     settings: SETTINGS_STORAGE_KEY,
     tagPrefs: TAG_PREFS_STORAGE_KEY,
@@ -36,7 +34,7 @@ describe('the keys in the one store', () => {
        upgrading from the localStorage era they arrive full. A live store whose
        key is one of them inherits somebody else's data on first run. */
     for (const [what, key] of Object.entries(KEYS)) {
-      if (what === 'marks' || what === 'cards') continue // migrated by design
+      if (what === 'cards') continue // migrated by design
       expect(MIGRATED_KEYS as readonly string[], what).not.toContain(key)
     }
   })

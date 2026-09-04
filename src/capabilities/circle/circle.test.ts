@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { circle, circleChanged } from './index'
-import {
+import { NO_LIST_HELD,
   peopleFor,
   purgeForeign,
   readForeign,
@@ -10,16 +10,22 @@ import {
 } from './lib/store'
 import {
   circlePathIn,
+  hlcOf,
   type ForeignEntry,
   type IndexFs,
   type ResolveResult,
   type WriteQueue,
 } from '../../kernel'
+import { personListPathIn, personListsDirIn, personShelfPathIn } from '../../kernel'
+import { NOTHING_SHARED, heldListIdsOf, readHeldList, readHeldShelf, writeHeldList, writeHeldShelf } from './lib/store'
 /* ⚠️ THROUGH THE TESTKIT ENTRY, not the module. `kernel-testkit-in-tests-only`
    is what keeps this mint out of production, and `kernel-public-entry-only`
    refuses a capability reaching past the kernel's doors — so a test outside the
    kernel takes the testkit door like any other consumer. */
 import { fakeFs, resolvedCfiForTesting } from '../../kernel/testkit'
+
+/** A person still admitted, for every write here: the lane re-check is `store.ts`'s to prove. */
+const ADMITS = () => Promise.resolve(true)
 
 /**
  * A queue that runs its task and nothing else.
@@ -60,12 +66,32 @@ const shared = (entries: readonly ForeignEntry[]): ForeignFile => ({
   entries,
   withdrawn: [],
   heads: {},
+  cursor: {},
+  v: 1,
+  opinion: {},
+  reviews: [],
+  unreviewed: [],
+  works: [],
+  unshelved: [],
+  list: NO_LIST_HELD,
 })
 
 /* The writers REQUIRE a change notification — see `writeForeign`. These tests
    are not about the signal, so they pass a no-op and the one that IS about it
    passes a spy. */
 const NOTED = () => {}
+
+/**
+ * A library with nothing on it, for every start that is not ABOUT the shelf.
+ * The opinion driver (WI-23.B4) subscribes to the library at start, so a
+ * fixture with no library is a start that throws.
+ */
+const LIBRARY = {
+  getSnapshot: () => [],
+  lane: (id: string) => id,
+  subscribe: () => () => {},
+  patch: () => Promise.resolve(),
+}
 
 const LANE: LaneFor = (bookId) => `books/${bookId.replace(/[^a-zA-Z0-9]/gu, '_')}`
 
@@ -127,7 +153,7 @@ describe('the store', () => {
 
   it('round-trips what it wrote', async () => {
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     expect(await readForeign(fs, BOOK, PERSON)).toEqual(shared([entry()]))
     /* The file name IS the id, because `safeId` is the identity on hex —
        which is what lets `readForeign` compare the claimed author exactly. */
@@ -161,7 +187,7 @@ describe('the store', () => {
        file is carried by `exportMarks`, by the sync feed and by every one of
        the reader's own devices — as THEIR annotation. */
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     expect(await fs.exists(`books/book_moby/marks.json`)).toBe(false)
     expect(circlePathIn(BOOK, PERSON)).toContain('/circle/')
   })
@@ -178,8 +204,8 @@ describe('the store', () => {
     /* WI-22.E3's `retain: 'purge'`. */
     const fs = fsWith()
     const queue = queueOf()
-    await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([entry({ person: 'alice' })]), NOTED)
-    await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([entry({ person: 'bob', pub: 'p2' })]), NOTED)
+    await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([entry({ person: 'alice' })]), NOTED, ADMITS)
+    await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([entry({ person: 'bob', pub: 'p2' })]), NOTED, ADMITS)
 
     await purgeForeign(fs, queue, LANE, BOOK, 'alice', NOTED)
 
@@ -195,7 +221,7 @@ describe('the store', () => {
        shape of "green is not evidence that anything happened". */
     const fs = fsWith()
     expect(await fs.exists('books/book_moby/circle')).toBe(false)
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     expect(await fs.exists(circlePathIn(BOOK, PERSON))).toBe(true)
   })
 
@@ -207,7 +233,7 @@ describe('the store', () => {
     try {
       const good = entry()
       const fs = fsWith({
-        [circlePathIn(BOOK, PERSON)]: JSON.stringify({ entries: [null, { pub: 'x' }, good, 42], withdrawn: [], heads: {} }),
+        [circlePathIn(BOOK, PERSON)]: JSON.stringify({ entries: [null, { pub: 'x' }, good, 42], withdrawn: [], heads: {}, cursor: {}, v: 1 }),
       })
       expect(await readForeign(fs, BOOK, PERSON)).toEqual(shared([good]))
       expect(warn).toHaveBeenCalled()
@@ -224,7 +250,7 @@ describe('the store', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const fs = fsWith({
-        [circlePathIn(BOOK, 'alice')]: JSON.stringify({ entries: [entry({ person: 'bob' })], withdrawn: [], heads: {} }),
+        [circlePathIn(BOOK, 'alice')]: JSON.stringify({ entries: [entry({ person: 'bob' })], withdrawn: [], heads: {}, cursor: {}, v: 1 }),
       })
       expect(await readForeign(fs, BOOK, 'alice')).toEqual(shared([]))
     } finally {
@@ -250,7 +276,7 @@ describe('the store', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const fs = fsWith({
-        [circlePathIn(BOOK, 'alice')]: JSON.stringify({ entries: [{ ...entry({ person: 'alice' }), resolved }], withdrawn: [], heads: {} }),
+        [circlePathIn(BOOK, 'alice')]: JSON.stringify({ entries: [{ ...entry({ person: 'alice' }), resolved }], withdrawn: [], heads: {}, cursor: {}, v: 1 }),
       })
 
       const [read] = (await readForeign(fs, BOOK, 'alice')).entries
@@ -277,6 +303,8 @@ describe('the store', () => {
         ],
         withdrawn: [],
         heads: {},
+        cursor: {},
+        v: 1,
       }),
     })
 
@@ -295,7 +323,7 @@ describe('the store', () => {
     same person it is ordinary, because their laptop can withdraw what their
     phone published and the two pages travel independently. */
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, { entries: [], withdrawn: ['p1'], heads: {} }, NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, { entries: [], withdrawn: ['p1'], heads: {}, cursor: {}, v: 1, opinion: {}, reviews: [], unreviewed: [], works: [], unshelved: [], list: NO_LIST_HELD }, NOTED, ADMITS)
 
     const held = await readForeign(fs, BOOK, PERSON)
     expect(held.withdrawn).toEqual(['p1'])
@@ -310,6 +338,8 @@ describe('the store', () => {
         entries: [entry(), entry({ pub: 'p2' })],
         withdrawn: [entry().pub],
         heads: {},
+        cursor: {},
+        v: 1,
       }),
     })
 
@@ -323,7 +353,7 @@ describe('the store', () => {
     /* Two devices withdrawing the same passage, or one page redelivered. The
        list is a SET; storing it twice grows a file that only ever grows. */
     const fs = fsWith({
-      [circlePathIn(BOOK, PERSON)]: JSON.stringify({ entries: [], withdrawn: ['p1', 'p1', 'p2'], heads: {} }),
+      [circlePathIn(BOOK, PERSON)]: JSON.stringify({ entries: [], withdrawn: ['p1', 'p1', 'p2'], heads: {}, cursor: {}, v: 1 }),
     })
 
     expect((await readForeign(fs, BOOK, PERSON)).withdrawn).toEqual(['p1', 'p2'])
@@ -342,7 +372,7 @@ describe('the store', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const fs = fsWith({
-        [circlePathIn(BOOK, 'a_b')]: JSON.stringify({ entries: [entry({ person: 'a/b' })], withdrawn: [], heads: {} }),
+        [circlePathIn(BOOK, 'a_b')]: JSON.stringify({ entries: [entry({ person: 'a/b' })], withdrawn: [], heads: {}, cursor: {}, v: 1 }),
       })
       expect(await readForeign(fs, BOOK, 'a_b')).toEqual(shared([]))
     } finally {
@@ -363,7 +393,7 @@ describe('the store', () => {
     const fs = fsWith()
     const queue = queueOf()
     for (const who of ['zoe', 'alice', 'mike']) {
-      await writeForeign(fs, queue, LANE, BOOK, who, shared([entry({ person: who })]), NOTED)
+      await writeForeign(fs, queue, LANE, BOOK, who, shared([entry({ person: who })]), NOTED, ADMITS)
     }
     expect(await peopleFor(fs, BOOK)).toEqual(['alice', 'mike', 'zoe'])
   })
@@ -377,7 +407,7 @@ describe('the store', () => {
        files"*), and `Library.lane` says the rule in as many words: deriving it
        again elsewhere is a race that does not show up in a diff. */
     const keys: string[] = []
-    await writeForeign(fsWith(), queueOf(keys), LANE, 'book:a/b', 'alice', shared([]), NOTED)
+    await writeForeign(fsWith(), queueOf(keys), LANE, 'book:a/b', 'alice', shared([]), NOTED, ADMITS)
     await purgeForeign(fsWith(), queueOf(keys), LANE, 'book:a_b', 'alice', NOTED)
 
     expect(keys).toEqual([LANE('book:a/b'), LANE('book:a_b')])
@@ -397,7 +427,7 @@ describe('the overlay contribution', () => {
 
   const start = (fs: IndexFs) => {
     const disposable = circle.start!(
-      { services: { fs } } as never,
+      { onCleanup: () => {}, services: { hashes: () => null, fs, library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     return disposable
@@ -412,6 +442,8 @@ describe('the overlay contribution', () => {
         entries: [entry()],
         withdrawn: [entry().pub],
         heads: {},
+        cursor: {},
+        v: 1,
       }),
     })
     const disposable = start(fs)
@@ -433,7 +465,7 @@ describe('the overlay contribution', () => {
        anchor here; the kernel hands over a resolver; the capability contributes
        an annotation whose cfi the painter can take. */
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     const disposable = start(fs)
 
     const resolve = vi.fn(
@@ -466,7 +498,7 @@ describe('the overlay contribution', () => {
     /* The honest outcome, and not an error: a friend's passage that is not in
        your edition simply has nowhere to be painted. */
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     const disposable = start(fs)
 
     const drawn = await overlay.forBook({
@@ -490,6 +522,8 @@ describe('the overlay contribution', () => {
         entries: [{ ...entry(), resolved: { cfi: 'epubcfi(/6/4!/4/2)', sectionIndex: 1 } }],
         withdrawn: [],
         heads: {},
+        cursor: {},
+        v: 1,
       }),
     })
     const disposable = start(fs)
@@ -507,8 +541,8 @@ describe('the overlay contribution', () => {
        one the painter used to collapse. */
     const fs = fsWith()
     const queue = queueOf()
-    await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([entry({ person: 'alice', pub: 'a' })]), NOTED)
-    await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([entry({ person: 'bob', pub: 'b' })]), NOTED)
+    await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([entry({ person: 'alice', pub: 'a' })]), NOTED, ADMITS)
+    await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([entry({ person: 'bob', pub: 'b' })]), NOTED, ADMITS)
     const disposable = start(fs)
 
     /* Both land at ONE anchor, which is the case: two people, one sentence. */
@@ -529,7 +563,7 @@ describe('the overlay contribution', () => {
     const queue = queueOf()
     await writeForeign(fs, queue, LANE, BOOK, 'alice', shared([
       entry({ person: 'alice', pub: 'same' }),
-    ]), NOTED)
+    ]), NOTED, ADMITS)
     await writeForeign(fs, queue, LANE, BOOK, 'bob', shared([
       entry({
         person: 'bob',
@@ -541,7 +575,7 @@ describe('the overlay contribution', () => {
           chapter: 'Ch. 1',
         },
       }),
-    ]), NOTED)
+    ]), NOTED, ADMITS)
     const disposable = start(fs)
 
     /* Each pending passage is placed at its OWN section, so a swap shows. */
@@ -572,7 +606,7 @@ describe('the overlay contribution', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const fs = fsWith({ [circlePathIn(BOOK, 'broken')]: 'not json at all' })
-      await writeForeign(fs, queueOf(), LANE, BOOK, 'alice', shared([entry({ person: 'alice' })]), NOTED)
+      await writeForeign(fs, queueOf(), LANE, BOOK, 'alice', shared([entry({ person: 'alice' })]), NOTED, ADMITS)
       const disposable = start(fs)
 
       const drawn = await overlay.forBook({ bookId: BOOK, resolve: placesEverything() })
@@ -586,7 +620,7 @@ describe('the overlay contribution', () => {
 
   it('stops contributing once disposed', async () => {
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
     const disposable = start(fs)
     expect(await overlay.forBook({ bookId: BOOK, resolve: placesEverything() })).toHaveLength(1)
 
@@ -604,7 +638,7 @@ describe('the overlay contribution', () => {
     const told = vi.fn()
     overlay.subscribe(told)
 
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), circleChanged)
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), circleChanged, ADMITS)
 
     expect(told).toHaveBeenCalledTimes(1)
     disposable.dispose()
@@ -687,7 +721,7 @@ describe('the overlay contribution', () => {
   it('starts with no filesystem rather than failing', async () => {
     /* A composition with no filesystem — the browser client — means no shared
        passages, not a failed capability. */
-    const disposable = circle.start!({ services: { fs: null } } as never, new AbortController().signal) as {
+    const disposable = circle.start!({ onCleanup: () => {}, services: { hashes: () => null, fs: null } } as never, new AbortController().signal) as {
       dispose(): void
     }
     expect(await overlay.forBook({ bookId: BOOK, resolve: () => Promise.reject(new Error('x')) })).toEqual([])
@@ -724,10 +758,85 @@ describe('through the real composition', () => {
     )
 
     expect(composition.overlays.map((one) => one.id)).toContain('circle:shared')
+    /* WI-23.A1: the share control reaches Marginalia the same way — as a
+       COLLECTED contribution, not an export nothing mounts. */
+    expect(composition.markControls.map((one) => one.id)).toEqual(['circle:share'])
+    /* WI-23.B4: the book's surface is a pane on the reader screen. */
+    expect(composition.panes.map((one) => [one.id, [...one.screens]])).toEqual([['circle:book', ['reader']]])
     composition.dispose()
     /* And it stops contributing when the composition goes down, so a torn-down
        capability leaves no marks on the page. */
     expect(composition.overlays).toEqual([])
+    expect(composition.markControls).toEqual([])
+  })
+})
+
+describe('the share control contribution — WI-23.A1', () => {
+  const shareControl = () => circle.markControls?.find((one) => one.id === 'circle:share')
+
+  it('draws its control over NO port before the capability has started', () => {
+    /* A row rendered before `start`, or after `dispose`, must not hold a port
+       into a filesystem the run no longer owns. The control draws nothing
+       for a null port, which is the honest rendering. */
+    const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as {
+      readonly props: { readonly port: unknown; readonly mark: { readonly id: string } }
+    }
+    expect(element.props.port).toBeNull()
+    expect(element.props.mark.id).toBe('m1')
+  })
+
+  it('binds the control to this run’s port once started, and unbinds it on dispose', () => {
+    const disposable = circle.start!(
+      {
+        onCleanup: () => {},
+        services: {
+          hashes: () => null,
+          fs: fsWith(),
+          library: LIBRARY,
+          writes: queueOf(),
+          clock: () => 'stamp',
+        },
+      } as never,
+      new AbortController().signal,
+    ) as { dispose(): void }
+    const during = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }
+    expect(during.props.port).not.toBeNull()
+    /* ONE port per run: two rows share it, so the effect each keys on it
+       does not re-read the store on every render. */
+    const again = shareControl()?.render({ id: 'm2', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }
+    expect(again.props.port).toBe(during.props.port)
+    disposable.dispose()
+    const after = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }
+    expect(after.props.port).toBeNull()
+  })
+
+  it('answers the share state from this run’s store, and shares nothing without a peer', async () => {
+    /* No peer has started in this process, so the port answers `unreachable`
+       — and a share is refused with that reason rather than written. */
+    const fs = fsWith()
+    const disposable = circle.start!(
+      {
+        onCleanup: () => {},
+        services: {
+          fs,
+          library: LIBRARY,
+          writes: queueOf(),
+          clock: () => 'stamp',
+        },
+      } as never,
+      new AbortController().signal,
+    ) as { dispose(): void }
+    try {
+      const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as {
+        readonly props: { readonly port: { state(mark: unknown): Promise<unknown>; share(mark: unknown, note: boolean): Promise<void> } }
+      }
+      const mark = { id: 'm1', bookId: BOOK, text: 'q', prefix: '', suffix: '', chapter: '', note: '' }
+      expect(await element.props.port.state(mark)).toEqual({ publishability: 'unreachable', published: false })
+      await expect(element.props.port.share(mark, false)).rejects.toThrow('Your shelf has not answered.')
+      expect(await fs.exists(`books/${BOOK.replace(/[^a-zA-Z0-9]/gu, '_')}/shared.json`)).toBe(false)
+    } finally {
+      disposable.dispose()
+    }
   })
 })
 
@@ -745,7 +854,7 @@ describe('every clause of every validity check', () => {
    */
 
   const file = (over: Record<string, unknown>) =>
-    fsWith({ [circlePathIn(BOOK, PERSON)]: JSON.stringify({ entries: [], withdrawn: [], heads: {}, ...over }) })
+    fsWith({ [circlePathIn(BOOK, PERSON)]: JSON.stringify({ entries: [], withdrawn: [], heads: {}, cursor: {}, v: 1, ...over }) })
 
   describe('the chain-head map', () => {
     /* ⚠️ Reading a bad one as "no chain yet" resets every chain to its start,
@@ -770,6 +879,298 @@ describe('every clause of every validity check', () => {
     it('reads a real one, so the refusals above are not vacuous', async () => {
       const heads = { [PERSON]: 'a'.repeat(64) }
       expect((await readForeign(file({ heads }), BOOK, PERSON)).heads).toEqual(heads)
+    })
+  })
+
+  describe('the fetch cursor — WI-23.A2', () => {
+    /* ⚠️ Reading a bad one as "nothing fetched yet" re-fetches every log from
+       zero, which is the defect the field was added to remove — granted by a
+       relaunch. Absent is refused too: no file this capability wrote lacks
+       one, and a hand-made file is one somebody can finish. */
+    const bad: readonly (readonly [string, unknown])[] = [
+      ['no cursor at all', undefined],
+      ['a string', 'cursor'],
+      ['a number', 7],
+      ['null', null],
+      ['an array', []],
+      ['a map to a string', { device: '1' }],
+      ['a map to a fraction', { device: 1.5 }],
+      ['a map to a negative', { device: -1 }],
+      ['a map to null', { device: null }],
+      ['a map where only SOME values read', { d1: 1, d2: 'x' }],
+    ]
+    for (const [what, cursor] of bad) {
+      it(`throws on ${what}`, async () => {
+        await expect(readForeign(file({ cursor }), BOOK, PERSON)).rejects.toThrow(/fetch cursor/u)
+      })
+    }
+
+    it('reads a real one, zero included, so the refusals above are not vacuous', async () => {
+      const cursor = { [PERSON]: 0, ['b'.repeat(64)]: 12 }
+      expect((await readForeign(file({ cursor }), BOOK, PERSON)).cursor).toEqual(cursor)
+    })
+  })
+
+  describe('the chain version — WI-23.B2', () => {
+    /* A head read into the wrong chain is a chain that never verifies again. */
+    const bad: readonly (readonly [string, unknown])[] = [
+      ['no version at all', undefined],
+      ['a string', '1'],
+      ['null', null],
+      ['zero', 0],
+      ['a negative', -1],
+      ['a fraction', 1.5],
+    ]
+    for (const [what, v] of bad) {
+      it(`throws on ${what}`, async () => {
+        await expect(readForeign(file({ v }), BOOK, PERSON)).rejects.toThrow(/chain version/u)
+      })
+    }
+
+    it('reads a real one, so the refusals above are not vacuous', async () => {
+      expect((await readForeign(file({ v: 2 }), BOOK, PERSON)).v).toBe(2)
+      expect((await readForeign(file({ v: 1 }), BOOK, PERSON)).v).toBe(1)
+    })
+  })
+
+  describe('a file 0.1.3 wrote — heads, and neither cursor nor version', () => {
+    /* That build persisted the chain heads and nothing about how far along
+       them it was. Refused, every passage a friend sent before the upgrade
+       threw on the first read after it. */
+    it('reads as a chain started from nothing, with what is held kept', async () => {
+      const held = await readForeign(
+        file({ entries: [entry({ pub: 'kept' })], withdrawn: ['gone'], heads: { [PERSON]: 'a'.repeat(64) }, cursor: undefined, v: undefined }),
+        BOOK,
+        PERSON,
+      )
+      expect(held.entries.map((one) => one.pub)).toEqual(['kept'])
+      expect(held.withdrawn).toEqual(['gone'])
+      /* The heads go WITH the cursor: a head kept beside an empty cursor
+         asks for the first page and refuses it as a gap, for ever. */
+      expect(held.heads).toEqual({})
+      expect(held.cursor).toEqual({})
+      expect(held.v).toBe(1)
+    })
+
+    it('is the one shape read that way — one of the two alone is a hand-made file', async () => {
+      await expect(readForeign(file({ cursor: undefined }), BOOK, PERSON)).rejects.toThrow(/fetch cursor/u)
+      await expect(readForeign(file({ v: undefined }), BOOK, PERSON)).rejects.toThrow(/chain version/u)
+    })
+  })
+
+  describe('the opinion — WI-23.B5', () => {
+    /* ⚠️ Read as "nothing said", the next page naming an OLDER word would
+       make it current again. One row per clause, each bad in one way. */
+    const register = () => ({ value: 'reading', at: hlcOf(1), device: PERSON, seq: 1 })
+    const bad: readonly (readonly [string, unknown])[] = [
+      ['an opinion that is a string', 'reading'],
+      ['an opinion that is null', null],
+      ['an opinion that is an array', []],
+      ['a status that is a string', { status: 'reading' }],
+      ['a status that is null', { status: null }],
+      ['a status that is a list', { status: [] }],
+      ['stars that are a list', { stars: [] }],
+      ['a status with no stamp', { status: { ...register(), at: undefined } }],
+      ['a status with a stamp that is not one', { status: { ...register(), at: 'yesterday' } }],
+      ['a status with no device', { status: { ...register(), device: undefined } }],
+      ['a status with a fractional seq', { status: { ...register(), seq: 1.5 } }],
+      ['a status this build does not know', { status: { ...register(), value: 'abandoned' } }],
+      ['stars of six', { stars: { ...register(), value: 6 } }],
+      ['stars that are a string', { stars: { ...register(), value: '4' } }],
+      ['stars with no device', { stars: { ...register(), value: 4, device: undefined } }],
+      ['tags that are a string', { tags: { ...register(), value: 'sea' } }],
+      ['a tag that is a number', { tags: { ...register(), value: ['sea', 1] } }],
+      ['tags with no stamp', { tags: { ...register(), value: ['sea'], at: undefined } }],
+      ['a good status beside bad stars', { status: register(), stars: { ...register(), value: 9 } }],
+    ]
+    for (const [what, opinion] of bad) {
+      it(`throws on ${what}`, async () => {
+        await expect(readForeign(file({ opinion }), BOOK, PERSON)).rejects.toThrow(/opinion/u)
+      })
+    }
+
+    it('reads every good register, and an absent opinion as nothing said', async () => {
+      const opinion = {
+        status: register(),
+        stars: { ...register(), value: 4, seq: 2 },
+        tags: { ...register(), value: ['sea'], seq: 3 },
+      }
+      expect((await readForeign(file({ opinion }), BOOK, PERSON)).opinion).toEqual(opinion)
+      expect((await readForeign(file({ opinion: undefined }), BOOK, PERSON)).opinion).toEqual({})
+    })
+  })
+
+  describe('the review list and its withdrawals — WI-23.B5', () => {
+    const review = () => ({ pub: 'r1', text: 'a whale of a book', at: hlcOf(1), epoch: 1 })
+    const bad: readonly (readonly [string, unknown])[] = [
+      ['reviews that are a string', 'r1'],
+      ['a review that is null', [null]],
+      ['a review with no pub', [{ ...review(), pub: undefined }]],
+      ['a review with an empty pub', [{ ...review(), pub: '' }]],
+      ['a review with no text', [{ ...review(), text: undefined }]],
+      ['a review with a stamp that is not one', [{ ...review(), at: 'yesterday' }]],
+      ['a review with an epoch of zero', [{ ...review(), epoch: 0 }]],
+      ['a review with an epoch that is a float', [{ ...review(), epoch: 1.5 }]],
+      ['a review with an epoch that is a string', [{ ...review(), epoch: '1' }]],
+      ['a review with no epoch', [{ ...review(), epoch: undefined }]],
+      ['a list where only SOME are reviews', [review(), 'no']],
+    ]
+    for (const [what, reviews] of bad) {
+      it(`throws on ${what}`, async () => {
+        await expect(readForeign(file({ reviews }), BOOK, PERSON)).rejects.toThrow(/review list/u)
+      })
+    }
+
+    it('reads a real one, hides one that was taken back, and reads an absent list as none', async () => {
+      const held = await readForeign(file({ reviews: [review(), { ...review(), pub: 'r2' }], unreviewed: ['r2'] }), BOOK, PERSON)
+      expect(held.reviews).toEqual([review()])
+      expect(held.unreviewed).toEqual(['r2'])
+      expect((await readForeign(file({ reviews: undefined, unreviewed: undefined }), BOOK, PERSON)).reviews).toEqual([])
+    })
+
+    for (const [what, unreviewed] of [
+      ['a string', 'r1'],
+      ['a number', 1],
+      ['a list with a number in it', ['r1', 1]],
+    ] as const) {
+      it(`throws on review withdrawals that are ${what}`, async () => {
+        await expect(readForeign(file({ unreviewed }), BOOK, PERSON)).rejects.toThrow(/review withdrawal list/u)
+      })
+    }
+  })
+
+  describe('the shelf and its withdrawals — WI-23.C3', () => {
+    const work = () => ({ pub: 's1', at: hlcOf(1), work: { title: 'Moby-Dick', author: 'Herman Melville', language: 'en' } })
+    const bad: readonly (readonly [string, unknown])[] = [
+      ['a shelf that is a string', 'shelf'],
+      ['a shelf that is null', null],
+      ['a work that is null', [null]],
+      ['a work with no pub', [{ ...work(), pub: undefined }]],
+      ['a work with an empty pub', [{ ...work(), pub: '' }]],
+      ['a work with a stamp that is not one', [{ ...work(), at: 'yesterday' }]],
+      ['a work with no work', [{ ...work(), work: undefined }]],
+      ['a work whose work is a string', [{ ...work(), work: 'Moby-Dick' }]],
+      ['a work whose work is null', [{ ...work(), work: null }]],
+      ['a work whose work is a list', [{ ...work(), work: [] }]],
+      ['a work with no title', [{ ...work(), work: { author: 'A', language: 'en' } }]],
+      ['a work with no author', [{ ...work(), work: { title: 'T', language: 'en' } }]],
+      ['a work with no language', [{ ...work(), work: { title: 'T', author: 'A' } }]],
+      ['a work whose identifier is a number', [{ ...work(), work: { ...work().work, identifier: 1 } }]],
+      ['a work whose cover is a number', [{ ...work(), work: { ...work().work, cover: 1 } }]],
+      ['a list where only SOME are works', [work(), 'no']],
+    ]
+    for (const [what, works] of bad) {
+      it(`throws on ${what}`, async () => {
+        await expect(readForeign(file({ works }), BOOK, PERSON)).rejects.toThrow(/shelf/u)
+      })
+    }
+
+    it('reads a real one, hides one taken back, and reads an absent shelf as empty', async () => {
+      const withId = { ...work(), work: { ...work().work, identifier: 'isbn:1', cover: 'ab'.repeat(32) } }
+      const held = await readForeign(file({ works: [withId, { ...work(), pub: 's2' }], unshelved: ['s2'] }), BOOK, PERSON)
+      expect(held.works).toEqual([withId])
+      expect(held.unshelved).toEqual(['s2'])
+      expect((await readForeign(file({ works: undefined, unshelved: undefined }), BOOK, PERSON)).works).toEqual([])
+    })
+
+    for (const [what, unshelved] of [
+      ['a string', 's1'],
+      ['null', null],
+      ['a list with a number in it', ['s1', 1]],
+    ] as const) {
+      it(`throws on shelf withdrawals that are ${what}`, async () => {
+        await expect(readForeign(file({ unshelved }), BOOK, PERSON)).rejects.toThrow(/shelf withdrawal list/u)
+      })
+    }
+  })
+
+  describe('a list and its removals — WI-23.E1', () => {
+    const item = () => ({ pub: 'i1', at: hlcOf(2), device: 'd'.repeat(64), seq: 2, position: 1, note: 'n', work: { title: 'Moby-Dick', author: 'Herman Melville', language: 'en' } })
+    const list = (over: Record<string, unknown> = {}) => ({ created: true, title: { value: 'Sea', at: hlcOf(1), device: 'd'.repeat(64), seq: 1 }, deleted: false, items: [item()], removed: [], ...over })
+    const bad: readonly (readonly [string, unknown])[] = [
+      ['a list that is a string', 'list'],
+      ['a list that is null', null],
+      ['a list that is an array', []],
+      ['no created flag', list({ created: undefined })],
+      ['a created flag that is a string', list({ created: 'yes' })],
+      ['no deleted flag', list({ deleted: undefined })],
+      ['a title that is a string', list({ title: 'Sea' })],
+      ['a title with no value', list({ title: { at: hlcOf(1), device: 'd'.repeat(64), seq: 1 } })],
+      ['a title with no stamp', list({ title: { value: 'Sea' } })],
+      ['items that are not a list', list({ items: 'i1' })],
+      ['an item that is null', list({ items: [null] })],
+      ['an item with no pub', list({ items: [{ ...item(), pub: undefined }] })],
+      ['an item with no device', list({ items: [{ ...item(), device: undefined }] })],
+      ['an item with a sequence that is not one', list({ items: [{ ...item(), seq: 1.5 }] })],
+      ['an item with a position that is not an integer', list({ items: [{ ...item(), position: 1.5 }] })],
+      ['an item with no note', list({ items: [{ ...item(), note: undefined }] })],
+      ['an item with no work', list({ items: [{ ...item(), work: undefined }] })],
+      ['an item whose work is null', list({ items: [{ ...item(), work: null }] })],
+      ['a title that is null', list({ title: null })],
+      ['a title that is a list', list({ title: [] })],
+      ['removals that are not a list', list({ removed: 'i1' })],
+      ['a removal that is a number', list({ removed: [1] })],
+    ]
+    for (const [what, value] of bad) {
+      it(`throws on ${what}`, async () => {
+        await expect(readForeign(file({ list: value }), BOOK, PERSON)).rejects.toThrow(/list that will not read/u)
+      })
+    }
+
+    it('reads a real one, hides a removed item, orders by the position rule, and reads an absent list as none', async () => {
+      const later = { ...item(), pub: 'i2', seq: 3, at: hlcOf(3), position: 1 }
+      const held = await readForeign(file({ list: list({ items: [later, item(), { ...item(), pub: 'i3', seq: 4 }], removed: ['i3', 'i3'] }) }), BOOK, PERSON)
+      /* Same position: the earlier stamp first. */
+      expect(held.list.items.map((one) => one.pub)).toEqual(['i1', 'i2'])
+      expect(held.list.removed).toEqual(['i3'])
+      expect(held.list.title).toEqual({ value: 'Sea', at: hlcOf(1), device: 'd'.repeat(64), seq: 1 })
+      const untitled = await readForeign(file({ list: list({ title: undefined }) }), BOOK, PERSON)
+      expect('title' in untitled.list).toBe(false)
+      expect((await readForeign(file({ list: undefined }), BOOK, PERSON)).list).toEqual(NO_LIST_HELD)
+    })
+
+    it('names the list in the error for a list file that will not read', async () => {
+      const fs = fsWith({ [personListPathIn(PERSON, 'aa11')]: JSON.stringify({ ...NOTHING_SHARED, list: 'no' }) })
+      await expect(readHeldList(fs, PERSON, 'aa11')).rejects.toThrow(/lists\/aa11/u)
+    })
+
+    it('lists only the json files under the person, not a folder or a note beside them', async () => {
+      const fs = fsWith()
+      await writeHeldList(fs, queueOf(), PERSON, 'aa11', NOTHING_SHARED, () => {}, ADMITS)
+      await fs.writeFile(`${personListsDirIn(PERSON)}/notes.txt`, new TextEncoder().encode('x'))
+      await fs.writeFile(`${personListsDirIn(PERSON)}/folder/inside.json`, new TextEncoder().encode('{}'))
+      expect(await heldListIdsOf(fs, PERSON)).toEqual(['aa11'])
+    })
+
+    it('keeps a held shelf in its own file under the person, tells the caller, reads it back, and names it when it will not read', async () => {
+      const fs = fsWith()
+      const noted = vi.fn()
+      const held = { ...NOTHING_SHARED, works: [{ pub: 's1', at: hlcOf(1), work: { title: 'Moby-Dick', author: 'Herman Melville', language: 'en' } }] } as ForeignFile
+      expect(await readHeldShelf(fs, PERSON)).toEqual(NOTHING_SHARED)
+      await writeHeldShelf(fs, queueOf(), PERSON, held, noted, ADMITS)
+      expect(noted).toHaveBeenCalledTimes(1)
+      expect(await fs.exists(personShelfPathIn(PERSON))).toBe(true)
+      expect(await readHeldShelf(fs, PERSON)).toEqual(held)
+      await fs.writeFile(personShelfPathIn(PERSON), new TextEncoder().encode('"shelf"'))
+      await expect(readHeldShelf(fs, PERSON)).rejects.toThrow(/\/shelf is not a circle file/u)
+      /* A cover is a digest (WI-23.C5): a row with a word in its place is a shelf that will not read. */
+      const worded = { ...held, works: [{ ...held.works[0]!, work: { ...held.works[0]!.work, cover: 'not a digest' } }] } as ForeignFile
+      await fs.writeFile(personShelfPathIn(PERSON), new TextEncoder().encode(JSON.stringify(worded)))
+      await expect(readHeldShelf(fs, PERSON)).rejects.toThrow(/has a shelf that will not read/u)
+    })
+
+    it('keeps a held list in its own file under the person, listed by id, and reads it back', async () => {
+      const fs = fsWith()
+      const held = { ...NOTHING_SHARED, list: list() } as ForeignFile
+      expect(await heldListIdsOf(fs, PERSON)).toEqual([])
+      const noted = vi.fn()
+      await writeHeldList(fs, queueOf(), PERSON, 'bb22', held, noted, ADMITS)
+      await writeHeldList(fs, queueOf(), PERSON, 'aa11', { ...held, list: list({ title: undefined }) } as ForeignFile, noted, ADMITS)
+      expect(noted).toHaveBeenCalledTimes(2)
+      expect(await heldListIdsOf(fs, PERSON)).toEqual(['aa11', 'bb22'])
+      expect((await readHeldList(fs, PERSON, 'bb22')).list.title?.value).toBe('Sea')
+      expect((await readHeldList(fs, PERSON, 'zz99')).list).toEqual(NO_LIST_HELD)
+      expect(await fs.exists(personListPathIn(PERSON, 'bb22'))).toBe(true)
     })
   })
 
@@ -932,7 +1333,40 @@ describe('the services a friend calls', () => {
        pairing kinds exist to make. */
     expect(named('circle.hello')?.grant).toBe('circle:read')
     expect(named('circle.pages')?.grant).toBe('circle:read')
-    expect(circle.services).toHaveLength(2)
+    /* The shelf too (WI-23.C1): the same grant, and the per-person SWITCH
+       decides the rest, inside the handler. */
+    expect(named('circle.shelf')?.grant).toBe('circle:read')
+    /* And the lists (WI-23.E1), under the same switch. */
+    expect(named('circle.lists')?.grant).toBe('circle:read')
+    /* And the jacket (WI-23.C5), under the same grant and the same switch. */
+    expect(named('circle.cover')?.grant).toBe('circle:read')
+    expect(circle.services).toHaveLength(5)
+  })
+
+  it('refuses the shelf and the lists before the capability has started', async () => {
+    await expect(named('circle.shelf')?.handler({ since: {}, v: 2 }, { peer: 'd' } as never)).rejects.toThrow(/not started/u)
+    await expect(named('circle.lists')?.handler({ since: {}, v: 3 }, { peer: 'd' } as never)).rejects.toThrow(/not started/u)
+    await expect(named('circle.cover')?.handler({ pub: 'ab', offset: 0 }, { peer: 'd' } as never)).rejects.toThrow(/not started/u)
+  })
+
+  it('answers a device no roster names with the bytes a reader who owns nothing sends — WI-23.C2', async () => {
+    /* No peer has started here, so nobody's roster names the caller; that is
+       the same answer as a person the switch is off for, on purpose. */
+    const disposable = circle.start!(
+      { onCleanup: () => {}, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
+      new AbortController().signal,
+    ) as { dispose(): void }
+    try {
+      const answer = await named('circle.shelf')?.handler({ since: {}, v: 2 }, { peer: 'd'.repeat(64) } as never)
+      expect(JSON.stringify(answer)).toBe(JSON.stringify({ pages: [], more: false }))
+      const lists = await named('circle.lists')?.handler({ since: {}, v: 3 }, { peer: 'd'.repeat(64) } as never)
+      expect(JSON.stringify(lists)).toBe(JSON.stringify({ pages: [], more: false }))
+      await expect(named('circle.lists')?.handler({ since: {}, v: 2 }, { peer: 'd'.repeat(64) } as never)).rejects.toThrow(/not one this build answers/u)
+      /* And a request the build cannot parse is refused, not answered. */
+      await expect(named('circle.shelf')?.handler({ since: {} }, { peer: 'd'.repeat(64) } as never)).rejects.toThrow(/not one this build answers/u)
+    } finally {
+      disposable.dispose()
+    }
   })
 
   it('refuses before the capability has started', async () => {
@@ -943,7 +1377,7 @@ describe('the services a friend calls', () => {
 
   it('refuses a request this build cannot parse, rather than answering one', async () => {
     const disposable = circle.start!(
-      { services: { fs: fsWith(), library: { getSnapshot: () => [], lane: (id: string) => id }, writes: queueOf() } } as never,
+      { onCleanup: () => {}, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     try {
@@ -959,7 +1393,7 @@ describe('the services a friend calls', () => {
     /* ⚠️ **A HANDLER THAT OUTLIVED ITS RUN WOULD READ ANOTHER RUN'S SERVICES**,
        or a null. The teardown is guarded the way `held` is. */
     const disposable = circle.start!(
-      { services: { fs: fsWith(), library: { getSnapshot: () => [], lane: (id: string) => id }, writes: queueOf() } } as never,
+      { onCleanup: () => {}, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     disposable.dispose()
@@ -995,5 +1429,127 @@ describe('the purge', () => {
     const told = vi.fn()
     await purgeForeign(fsWith(), queueOf(), LANE, BOOK, PERSON, told)
     expect(told).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the fetch driver, as the capability runs it — WI-23.A2', () => {
+  /* ⚠️ **THE PULL-ON-OPEN FALSIFIER, AT THE LEVEL A BOOK CAN REACH.** The
+     cadence module has no input a book could touch; this proves the
+     capability gives it none either — the library's own change feed, which
+     an open moves, is not something `start` subscribes the driver to. */
+  const started = (info = vi.fn()) => {
+    const listeners = new Set<() => void>()
+    const library = {
+      getSnapshot: () => [],
+      lane: (id: string) => id,
+      subscribe: (listener: () => void) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+    }
+    const disposable = circle.start!(
+      {
+        onCleanup: () => {},
+        services: { hashes: () => null, fs: fsWith(), library, writes: queueOf(), clock: () => 'stamp' },
+        diagnostics: { info, warn: vi.fn(), error: vi.fn(), child: () => ({}) },
+      } as never,
+      new AbortController().signal,
+    ) as { dispose(): void }
+    return { disposable, info, open: () => listeners.forEach((one) => one()) }
+  }
+
+  it('runs no round in the ten seconds after a book is opened', async () => {
+    vi.useFakeTimers()
+    try {
+      const { disposable, info, open } = started()
+      await vi.advanceTimersByTimeAsync(5_000)
+      /* "open a book": the library publishes a change (`openedAt` moved). */
+      open()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(info).not.toHaveBeenCalled()
+      disposable.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('runs a round on the cadence, reports it, and asks nobody with no peer', async () => {
+    vi.useFakeTimers()
+    try {
+      const { disposable, info } = started()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(info).toHaveBeenCalledTimes(1)
+      expect(info).toHaveBeenCalledWith('circle.fetch', expect.objectContaining({ asked: 0, calls: 0, accepted: 0 }))
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      expect(info).toHaveBeenCalledTimes(2)
+      disposable.dispose()
+      await vi.advanceTimersByTimeAsync(60 * 60_000)
+      expect(info).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('runs no driver at all on a composition with no filesystem', async () => {
+    vi.useFakeTimers()
+    try {
+      const info = vi.fn()
+      const disposable = circle.start!(
+        { onCleanup: () => {}, services: { hashes: () => null, fs: null }, diagnostics: { info, warn: vi.fn(), error: vi.fn(), child: () => ({}) } } as never,
+        new AbortController().signal,
+      ) as { dispose(): void }
+      await vi.advanceTimersByTimeAsync(60 * 60_000)
+      expect(info).not.toHaveBeenCalled()
+      disposable.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('the disposer on the kernel’s stack — round 3 #97', () => {
+  it('is registered with onCleanup, and running it takes the run down', () => {
+    const cleanups: (() => void)[] = []
+    circle.start!(
+      { onCleanup: (dispose: () => void) => cleanups.push(dispose), services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
+      new AbortController().signal,
+    )
+    expect(cleanups).toHaveLength(1)
+    const control = () => circle.markControls?.find((one) => one.id === 'circle:share')
+    expect((control()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }).props.port).not.toBeNull()
+    cleanups[0]!()
+    expect((control()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }).props.port).toBeNull()
+  })
+})
+
+describe('a keep queued behind a purge — the admission re-asked inside the lane', () => {
+  it('writes nothing for a person the record no longer admits, and still tells the listeners', async () => {
+    const fs = fsWith()
+    const noted = vi.fn()
+    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), noted, () => Promise.resolve(false))
+    expect(await fs.exists(circlePathIn(BOOK, PERSON))).toBe(false)
+    expect(noted).toHaveBeenCalledTimes(1)
+    await writeHeldShelf(fs, queueOf(), PERSON, NOTHING_SHARED, noted, () => Promise.resolve(false))
+    expect(await fs.exists(personShelfPathIn(PERSON))).toBe(false)
+    await writeHeldList(fs, queueOf(), PERSON, 'aa11', NOTHING_SHARED, noted, () => Promise.resolve(false))
+    expect(await fs.exists(personListPathIn(PERSON, 'aa11'))).toBe(false)
+  })
+
+  it('asks on the lane, after whatever was queued before it — a purge included', async () => {
+    const fs = fsWith({ [circlePathIn(BOOK, PERSON)]: JSON.stringify(shared([entry()])) })
+    const order: string[] = []
+    const queue = queueOf()
+    /* The purge takes the lane first; the keep's question is answered after it ran. */
+    const purged = queue.append(LANE(BOOK), async () => {
+      order.push('purge')
+      await fs.remove(circlePathIn(BOOK, PERSON))
+    })
+    const kept = writeForeign(fs, queue, LANE, BOOK, PERSON, shared([entry()]), () => {}, () => {
+      order.push('asked')
+      return Promise.resolve(false)
+    })
+    await Promise.all([purged, kept])
+    expect(order).toEqual(['purge', 'asked'])
+    expect(await fs.exists(circlePathIn(BOOK, PERSON))).toBe(false)
   })
 })

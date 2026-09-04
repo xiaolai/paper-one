@@ -4,11 +4,12 @@ import { coverPathIn, folderOf, marksPathIn, recordPath, trashOf, type BookRecor
 import type { Card } from './cards'
 import { createDiagnostics, redact } from './diagnostics'
 import { fakeFs, jsonAt, type FakeFs } from './fakeFs.testkit'
-import { hlcOf } from './hlc'
+import { ZERO_DEVICE, asHlc, deviceOf, hlcOf, parseHlc } from './hlc'
 import type { Mark } from './marks'
 import type { MarkStorage } from './marks'
 import { BLOB_FOLDER, NOOP_RECORDER, type MutationRecorder, type MutationToken } from './ports'
 import { createKernelServices, type KernelServices } from './services'
+import { createCoverFactsPass } from './coverFacts'
 import { BRIGHTNESS } from './metrics'
 import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, createSettingsStore } from './settings'
 
@@ -284,15 +285,25 @@ describe('the same cases through the services and through a remote-style adapter
     /* marks — one LIVE, with its note and its edit stamp; the removed one
      * stays in the FILE as a tombstone (a deletion has to be able to travel)
      * and is hidden from `current`, which is a read model. The stamps are
-     * deterministic because the wall clock is frozen at NOW and no sync is
-     * composed, so the default clock stamps under the zero device. */
-    const edited = { ...MARK_1, note: 'the whale', updatedAt: hlcOf(NOW) }
-    expect(jsonAt(fs, marksPathIn('book:a'))).toEqual([edited, { ...MARK_2, deletedAt: hlcOf(NOW) }])
+     * deterministic in their millisecond and their device — the wall clock
+     * is frozen at NOW and no sync is composed, so the default clock stamps
+     * under the zero device — and the counter ticks once per stamp, so two
+     * writes in one frozen millisecond are still two stamps. */
+    const written = jsonAt(fs, marksPathIn('book:a')) as [{ updatedAt: string }, { deletedAt: string }]
+    const edited = { ...MARK_1, note: 'the whale', updatedAt: written[0].updatedAt }
+    expect(written).toEqual([edited, { ...MARK_2, deletedAt: written[1].deletedAt }])
+    for (const stamp of [written[0].updatedAt, written[1].deletedAt]) {
+      expect(parseHlc(stamp).ms).toBe(NOW)
+      expect(deviceOf(asHlc(stamp))).toBe(ZERO_DEVICE)
+    }
     expect(kernel.marks.getSnapshot().current).toEqual([edited])
     expect(kernel.marks.getSnapshot().persistent).toBe(true)
     // cards — one live in the snapshot; the discarded one a tombstone in the flat store.
-    expect(JSON.parse(w.storage.map.get('paper.cards.v1')!)).toEqual([
-      { ...CARD_2, deletedAt: hlcOf(NOW) },
+    const cards = JSON.parse(w.storage.map.get('paper.cards.v1')!) as [{ deletedAt: string }, unknown]
+    expect(parseHlc(cards[0].deletedAt).ms).toBe(NOW)
+    expect(deviceOf(asHlc(cards[0].deletedAt))).toBe(ZERO_DEVICE)
+    expect(cards).toEqual([
+      { ...CARD_2, deletedAt: cards[0].deletedAt },
       CARD_1,
     ])
     expect(kernel.cards.getSnapshot().all).toEqual([CARD_1])
@@ -714,9 +725,213 @@ describe('removeBlob — the closed-name delete twin of the blob port (WI-10.2)'
     expect(w.fs.store.has(recordPath(BOOK))).toBe(true)
   })
 
+  it('takes the jacket’s facts off the record with the jacket — WI-23.C5', async () => {
+    /* A world whose library HOLDS the book, so the record has a row to carry the facts. */
+    const w = blobWorld()
+    const facts = { name: 'cover.jpg' as const, size: 6, hash: 'ab'.repeat(32) }
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+    await kernel.removeBlob(BOOK, 'cover.jpg')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+    /* The content's removal says nothing about the jacket. */
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.removeBlob(BOOK, 'content.epub')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+    /* THE FACTS OF THIS NAME, NOT ANY FACTS. The book holds both names; the
+       facts describe the JPEG, and removing the legacy WebP beside it used to
+       discard them — a valid measurement of a file still there. */
+    w.fs.store.set(`${FOLDER}/cover.jpg`, new TextEncoder().encode('jacket'))
+    await kernel.removeBlob(BOOK, 'cover.webp')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+    /* The legacy name's removal clears facts that describe IT, as the current name's does. */
+    w.fs.store.set(`${FOLDER}/cover.webp`, new TextEncoder().encode('legacy jacket'))
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: { ...facts, name: 'cover.webp' as const } }))
+    await kernel.removeBlob(BOOK, 'cover.webp')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+    /* And a blob that was not there clears nothing: facts describing a file
+       nothing deleted are not this call's to take. */
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.removeBlob(BOOK, 'cover.jpg')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.removeBlob(BOOK, 'cover.jpg')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+  })
+
+  it('measures a jacket INSIDE its lane, so a removal and a same-name replacement each leave the facts of the file that is there', async () => {
+    /* THE CLASS BEHIND THE TWO-TASK WINDOW, FROM THE OTHER SIDE. A pass that
+       measured the jacket outside the lane queued its stamp behind a removal
+       and restored facts for a deleted file; a path check let a same-name
+       replacement receive the old digest. Measured in the lane, the stamp
+       describes the file at the moment it is written, and a removal queued
+       behind the measurement clears it again. */
+    const w = blobWorld()
+    /* One jacket only: the legacy sibling would be measured, rightly, once the JPEG went. */
+    w.fs.store.delete(`${FOLDER}/cover.webp`)
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    /* The hasher answers for the bytes on disk, and can be held. */
+    let hold: Promise<void> = Promise.resolve()
+    const hashFile = vi.fn(async (_segment: string, name: string) => {
+      await hold
+      const bytes = w.fs.store.get(`${FOLDER}/${name}`)
+      if (!bytes) throw new Error('gone')
+      return { blake3: (bytes[0] === 0x6a ? 'aa' : 'bb').repeat(32), size: bytes.length }
+    })
+    const pass = createCoverFactsPass({ fs: w.fs, library: kernel.library, hashes: () => ({ hashFile }) })
+    let release: () => void = () => {}
+    hold = new Promise<void>((done) => {
+      release = done
+    })
+    /* The pass takes the lane first and measures; the removal waits behind it.
+       (The pass begins on a microtask; a turn of the clock lets it take the lane.) */
+    const measuring = pass.runOnce()
+    await new Promise((done) => setTimeout(done, 0))
+    const removal = kernel.removeBlob(BOOK, 'cover.jpg')
+    release()
+    expect(await measuring).toBe(1)
+    await removal
+    await kernel.drain()
+    /* Stamped for the file that was there, then cleared with it: no facts, no file. */
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(false)
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+    /* A jacket kept again under the same name is measured as ITSELF, in its lane. */
+    const bound = kernel.bindHashPort({ hashFile })
+    w.fs.store.set(`${FOLDER}/cover.jpg`, new TextEncoder().encode('new jacket'))
+    await kernel.library.keepJacket(BOOK, new Blob(['ignored']))
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual({ name: 'cover.jpg', size: 10, hash: 'bb'.repeat(32) })
+    bound.dispose()
+  })
+
+  it('refuses to delete a cover whose record is there and will not read, and says so — no facts left for a file that is gone', async () => {
+    const w = blobWorld()
+    w.fs.store.set(recordPath(BOOK), new TextEncoder().encode('not json at all'))
+    await expect(w.kernel.removeBlob(BOOK, 'cover.jpg')).rejects.toThrow(/could not be read/u)
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(true)
+  })
+
+  it('clears the facts even when the recorder’s commit fails after the unlink, and raises that failure', async () => {
+    /* The bytes left and the journal did not say so: the facts still go — a
+       record describing a file that is not there is the worse outcome — and
+       the caller hears the recorder's failure once the lane is done. This
+       used to throw past the cleanup altogether. */
+    const w = blobWorld()
+    const facts = { name: 'cover.jpg' as const, size: 6, hash: 'ab'.repeat(32) }
+    let failCover = false
+    const recorder: MutationRecorder = {
+      begin: async (book, what) => ({ book, what }),
+      commit: async (token) => {
+        if (failCover && token.what === 'cover') throw new Error('journal commit failed')
+      },
+    }
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      recorder,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.drain()
+    failCover = true
+    await expect(kernel.removeBlob(BOOK, 'cover.jpg')).rejects.toThrow('journal commit failed')
+    await kernel.drain()
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(false)
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+  })
+
+  it('clears the facts BEFORE the file goes — a failure beginning the cover bracket leaves a jacket with no facts, never facts with no jacket', async () => {
+    /* Two brackets, the record's first: a crash or a journal failure between
+       them leaves a present jacket the next pass measures again — and never
+       stale facts for a file that is gone, which the circle would publish
+       and this device could not serve. The other order had that window. */
+    const w = blobWorld()
+    const facts = { name: 'cover.jpg' as const, size: 6, hash: 'ab'.repeat(32) }
+    const order: string[] = []
+    let refuseCover = false
+    const recorder: MutationRecorder = {
+      begin: async (book, what) => {
+        if (refuseCover && what === 'cover') throw new Error('the journal would not open')
+        order.push(`begin ${what}`)
+        return { book, what }
+      },
+      commit: async (token) => {
+        order.push(`commit ${token.what}`)
+      },
+    }
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      recorder,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.drain()
+    order.length = 0
+    await kernel.removeBlob(BOOK, 'cover.jpg')
+    await kernel.drain()
+    expect(order).toEqual(['begin record', 'commit record', 'begin cover', 'commit cover'])
+    /* And with the second bracket refused: the facts are gone, the jacket is still there, and the caller hears it. */
+    w.fs.store.set(`${FOLDER}/cover.jpg`, new TextEncoder().encode('jacket'))
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.drain()
+    refuseCover = true
+    await expect(kernel.removeBlob(BOOK, 'cover.jpg')).rejects.toThrow('the journal would not open')
+    await kernel.drain()
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(true)
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+  })
+
   it('removing a blob that is not there is done, not an error', async () => {
     const w = world()
     await expect(w.kernel.removeBlob(BOOK, 'content.epub')).resolves.toBeUndefined()
+  })
+
+  it('writes nothing for a refusal — not even the index — so an absent blob, a content deletion or an ownership refusal cannot be failed by it', async () => {
+    /* A refusal in the lane used to rewrite the index to take back an
+       optimistic row that these had never published — and an index that
+       would not write turned a no-op into a failure. */
+    const w = blobWorld()
+    let indexWrites = 0
+    const writeFile = w.fs.writeFile.bind(w.fs)
+    w.fs.writeFile = async (path, bytes) => {
+      if (path.startsWith(INDEX_FILE)) {
+        indexWrites += 1
+        throw new Error('the index would not write')
+      }
+      await writeFile(path, bytes)
+    }
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    /* Absent: the documented no-op, whole. */
+    await expect(kernel.removeBlob(BOOK, 'cover.png' as never)).rejects.toThrow(/not a blob the kernel removes/u)
+    await expect(kernel.removeBlob('book:absent', 'cover.jpg')).resolves.toBeUndefined()
+    /* Content: deleted, no record to change, no index to write. */
+    await expect(kernel.removeBlob(BOOK, 'content.epub')).resolves.toBeUndefined()
+    expect(w.fs.store.has(`${FOLDER}/content.epub`)).toBe(false)
+    /* A cover with no facts of its name on the record: deleted, nothing else. */
+    await expect(kernel.removeBlob(BOOK, 'cover.webp')).resolves.toBeUndefined()
+    expect(w.fs.store.has(`${FOLDER}/cover.webp`)).toBe(false)
+    await kernel.drain()
+    expect(indexWrites).toBe(0)
   })
 
   it('refuses book.json, a ../ escape, and a name outside the closed set', async () => {
@@ -885,5 +1100,30 @@ describe('Diagnostics', () => {
     diag.child('sync').info('anything')
     expect(sink.info).not.toHaveBeenCalled()
     expect(sink.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('a jacket the store keeps is measured — WI-23.C5', () => {
+  it('stamps the record’s cover facts through the hash port once the jacket is there, and leaves them when no port is bound', async () => {
+    const BOOK = 'book:a'
+    const w = world()
+    w.fs.store.set(recordPath(BOOK), new TextEncoder().encode(JSON.stringify(REC_A)))
+    /* Already on disk: `keepCover` keeps what is there rather than decoding, which this environment cannot. */
+    w.fs.store.set(coverPathIn(BOOK), new TextEncoder().encode('jacket'))
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.keepJacket(BOOK, new Blob(['ignored']))
+    await kernel.drain()
+    expect(kernel.library.getSnapshot()[0]).not.toHaveProperty('coverFacts')
+    const hashFile = vi.fn(() => Promise.resolve({ blake3: 'ab'.repeat(32), size: 6 }))
+    const bound = kernel.bindHashPort({ hashFile })
+    await kernel.library.keepJacket(BOOK, new Blob(['ignored']))
+    await kernel.drain()
+    expect(hashFile).toHaveBeenCalledWith(folderOf(BOOK).slice(folderOf(BOOK).lastIndexOf('/') + 1), 'cover.jpg')
+    expect(kernel.library.getSnapshot()[0]?.coverFacts).toEqual({ name: 'cover.jpg', size: 6, hash: 'ab'.repeat(32) })
+    bound.dispose()
   })
 })

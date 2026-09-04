@@ -17,6 +17,7 @@ import { withTag } from '../../core/searchQuery'
 import { useRowMenu } from '../hooks/useRowMenu'
 import { BookMenu } from './BookMenu'
 import { BookCover } from './BookCover'
+import { runBookAction } from './runAction'
 import type { CoverSource } from '../../core/coverArt'
 import { TagEditor } from './TagEditor'
 import editorStyles from './TagEditor.module.css'
@@ -361,28 +362,12 @@ export function BookCell({
               aria-busy={fetching}
               onClick={() => {
                 setFetching(true)
-                /* THE ACTION STILL STARTS SYNCHRONOUSLY — deferring it into a
-                   microtask to tidy the error handling would change when a
-                   download begins to buy nothing.
-
-                   BOTH FAILURE SHAPES RELEASE THE CONTROL. `run` is typed
-                   `void | Promise<void>`, so it can fail BEFORE returning
-                   anything, and a synchronous throw never reaches a
-                   `.finally` — which left this button disabled for the life
-                   of the card: the reader's only route to the bytes, dead,
-                   because the failure came too early.
-
-                   REPORTING IS THE ACTION'S JOB, not this button's — sync's
-                   download catches its own failure and sets `degraded`. What
-                   is caught here is only so a capability that breaks that
-                   contract cannot leave the control stuck. */
-                try {
-                  void Promise.resolve(fetch.run(book.bookId))
-                    .catch(() => {})
-                    .finally(() => setFetching(false))
-                } catch {
-                  setFetching(false)
-                }
+                /* BOTH FAILURE SHAPES RELEASE THE CONTROL AND ARE SAID — the
+                   one runner, shared with the book menu (`runAction.ts`).
+                   This copy reported a rejection and swallowed a throw, so a
+                   capability failing before its promise left no diagnostic;
+                   the menu's copy said both, and the two had drifted apart. */
+                runBookAction(fetch, book.bookId, () => setFetching(false))
               }}
             >
               {glyph}

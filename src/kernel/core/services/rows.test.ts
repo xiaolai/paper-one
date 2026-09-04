@@ -7,6 +7,7 @@ import type { IndexedBook } from '../bookIndex'
 import type { Card } from '../cards'
 import type { Mark } from '../marks'
 import type { TrashedBook } from '../bookTrash'
+import { hlcOf } from '../hlc'
 
 /**
  * THE PROJECTION BOUNDARY — the last thing between a stored record and a
@@ -71,12 +72,34 @@ describe('bookRow', () => {
       'progress',
       'published',
       'publisher',
+      'rating',
+      'ratingAt',
+      'review',
+      'reviewAt',
       'series',
       'seriesIndex',
+      'status',
+      'statusAt',
       'subjects',
       'tags',
       'title',
     ])
+  })
+
+  it('publishes the reader’s own opinion, and null where they have said nothing — WI-23.B3', () => {
+    const silent = bookRow(BOOK)
+    expect([silent.status, silent.rating, silent.review]).toEqual([null, null, null])
+    const opinionated = bookRow({
+      ...BOOK,
+      status: { state: 'reading', at: hlcOf(1) },
+      rating: 4,
+      review: { text: 'a whale of a book', at: hlcOf(1) },
+    })
+    expect([opinionated.status, opinionated.rating, opinionated.review]).toEqual(['reading', 4, 'a whale of a book'])
+    /* An empty review is one taken back, and reads as nothing said. */
+    expect(bookRow({ ...BOOK, review: { text: '', at: hlcOf(1) } }).review).toBeNull()
+    /* Cleared, the words go and the stamp stays: the taking-back is the register's latest write. */
+    expect(bookRow({ ...BOOK, review: { text: '', at: hlcOf(1) } }).reviewAt).toBe(hlcOf(1))
   })
 
   /**
@@ -385,5 +408,14 @@ describe('trashRow', () => {
   it('carries a missing stamp through as null', () => {
     const row = trashRow({ ...TRASHED, removedAt: null, expiresAt: null })
     expect(row).toMatchObject({ removedAt: null, expiresAt: null })
+  })
+})
+
+describe('the opinion stamps on a row', () => {
+  it('carry the record’s own stamps when it has them', () => {
+    const row = bookRow({ ...BOOK, status: { state: 'reading', at: hlcOf(3) }, rating: 4, ratingAt: hlcOf(4) })
+    expect(row.statusAt).toBe(hlcOf(3))
+    expect(row.ratingAt).toBe(hlcOf(4))
+    expect(bookRow(BOOK).statusAt).toBeNull()
   })
 })

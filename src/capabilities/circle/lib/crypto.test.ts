@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canonicalJson, chainHash, checkPage, signedBytes, type Page } from '../../../kernel'
+import { WIRE_VERSION, canonicalJson, chainHash, checkPage, hlcOf, signedBytes, type Page } from '../../../kernel'
 import { pageCrypto, unhex } from './crypto'
 
 /**
@@ -135,14 +135,15 @@ describe('a whole page, checked with the real crypto', () => {
   /* The two halves meeting. Everything above tests one primitive; this is the
      kernel's own check running against bindings that actually compute. */
   const page: Page = {
-    v: 1,
+    v: WIRE_VERSION,
     person: PUBLIC_KEY,
-    work: { ids: [], titles: ['aa'], author: 'bb', language: 'en' },
+    work: { ids: [], titles: ['aa'.repeat(32)], author: 'bb'.repeat(32), language: 'en' },
     device: PUBLIC_KEY,
     from: 1,
     to: 1,
     prevPageHash: '',
-    entries: [],
+    /* One entry, the page's own: an empty page is refused before its signature is read. */
+    entries: [{ op: 'share', pub: 'p1', device: PUBLIC_KEY, seq: 1, at: hlcOf(1), passage: { quote: 'q', prefix: '', suffix: '', chapter: '' } }],
     roster: [PUBLIC_KEY],
     revocations: 0,
     delegation: 'd',
@@ -168,7 +169,7 @@ describe('a whole page, checked with the real crypto', () => {
        be synchronous.** A peer that can make us verify a signature on
        malformed input has found a cheap way to spend our CPU. A page with the
        wrong version costs a comparison, not an Ed25519 verify. */
-    expect(checkPage({ ...page, v: 2 }, '', pageCrypto, PUBLIC_KEY, '', () => true)).toBe('version')
+    expect(checkPage({ ...page, v: WIRE_VERSION + 1 }, '', pageCrypto, PUBLIC_KEY, '', () => true)).toBe('version')
   })
 })
 

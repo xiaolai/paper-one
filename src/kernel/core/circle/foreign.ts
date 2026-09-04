@@ -1,3 +1,4 @@
+import type { Hlc } from '../hlc'
 import type { ResolvedCfi } from '../resolvedCfi'
 import type { Passage } from './log'
 
@@ -43,6 +44,15 @@ export interface ForeignEntry {
   /** Which relationship epoch this arrived under — see `relationships.ts`. */
   readonly epoch: number
   readonly receivedAt: number
+  /**
+   * The publication's own stamp — `(device, seq, at)` — kept so a duplicate
+   * `pub` from another of the person's devices folds by `fold`'s rule (the
+   * EARLIER stands) rather than by which page arrived first. Absent on rows
+   * written before it was kept; such a row stands against any duplicate.
+   */
+  readonly at?: Hlc
+  readonly device?: string
+  readonly seq?: number
   /**
    * Where it landed in THIS build, once a re-anchoring pass placed it.
    *
@@ -121,17 +131,27 @@ export function drawable(
   admits: (person: string, epoch: number) => boolean,
 ): readonly ForeignAnnotation[] {
   const byAnchor = new Map<string, ForeignAnnotation>()
+  /* Who has marked each anchor: a reader who shared the same words twice is
+     one reader, and the weight says how many PEOPLE, not how many rows. */
+  const readersAt = new Map<string, Set<string>>()
   for (const entry of entries) {
     if (!entry.resolved) continue
     if (!admits(entry.person, entry.epoch)) continue
     const at = `${entry.resolved.sectionIndex}#${entry.resolved.cfi}`
     const seen = byAnchor.get(at)
     if (seen) {
-      /* One more reader on the same words. The FIRST entry keeps the key, so a
-         redraw does not move which publication the mark is filed under. */
-      byAnchor.set(at, { ...seen, readers: seen.readers + 1 })
+      /* One more reader on the same words, if it is a new one. The FIRST
+         entry keeps the key, so a redraw does not move which publication the
+         mark is filed under. */
+      const people = readersAt.get(at)!
+      // Stryker disable next-line ConditionalExpression: adding a reader the set holds changes neither the set nor the count it is drawn from.
+      if (!people.has(entry.person)) {
+        people.add(entry.person)
+        byAnchor.set(at, { ...seen, readers: people.size })
+      }
       continue
     }
+    readersAt.set(at, new Set([entry.person]))
     byAnchor.set(at, {
       pub: entry.pub,
       person: entry.person,
@@ -163,7 +183,10 @@ export function drawable(
 export const FOREIGN_WEIGHTS = [1, 1.5, 2, 2.5, 3] as const
 
 export function foreignWeight(readers: number): number {
-  const step = Math.min(Math.max(Math.floor(readers), 1), FOREIGN_WEIGHTS.length)
+  /* A count that is not a number is one reader's worth: NaN through the
+     clamp below is NaN, and NaN indexes nothing. */
+  const counted = Number.isFinite(readers) ? Math.floor(readers) : 1
+  const step = Math.min(Math.max(counted, 1), FOREIGN_WEIGHTS.length)
   return FOREIGN_WEIGHTS[step - 1]!
 }
 
@@ -180,7 +203,24 @@ export function foreignWeight(readers: number): number {
  * With a client-minted `pub` the mutation is idempotent, so probing with the
  * real thing is safe — publishing the same `pub` twice is one publication.
  */
-export type Publishability = 'usable' | 'pending' | 'read-only' | 'revoked' | 'unreachable'
+export type Publishability =
+  | 'usable'
+  | 'pending'
+  | 'read-only'
+  | 'revoked'
+  | 'unreachable'
+  /**
+   * This device has no person identity, so there is nobody to publish AS.
+   *
+   * ⚠️ **THE DESKTOP'S OWN STATE, which the five above cannot name.** They
+   * describe a satchel reaching a shelf. On the shelf itself the publication
+   * is local — `shared.json` is written here and served from here — so the
+   * only thing that can be missing is the identity a page is signed under.
+   * A reader who never started a circle is in the ORDINARY state, and the
+   * reason Share is absent has to say so rather than blame a shelf that is
+   * this very machine.
+   */
+  | 'no-identity'
 
 /** Whether Share is offered. Absent, never disabled — see `surfaces.md`. */
 export function offersShare(state: Publishability): boolean {
@@ -213,5 +253,7 @@ export function shareAbsentBecause(state: Publishability): string | null {
       return 'Your shelf no longer recognises this device.'
     case 'unreachable':
       return 'Your shelf has not answered.'
+    case 'no-identity':
+      return 'Start a circle to share a passage.'
   }
 }

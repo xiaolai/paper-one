@@ -1,17 +1,22 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { canonicalJson } from '../canonicalJson'
 import { hlcOf } from '../hlc'
 import type { Entry } from './log'
 import {
-  SUPPORTED,
-  WIRE_VERSION,
+  carriedBy,
   chainHash,
   checkPage,
   integersOnly,
   isCanonical,
+  isEntryShape,
+  isPageShape,
+  MAX_ENTRIES_PER_PAGE,
+  MAX_PAGE_CHARS,
   negotiate,
   paginate,
   signedBytes,
+  SUPPORTED,
+  WIRE_VERSION,
   type Page,
   type PageCrypto,
 } from './page'
@@ -30,7 +35,7 @@ const entry = (pub: string, seq: number, note = ''): Entry => ({
 const page = (over: Partial<Page> = {}): Page => ({
   v: WIRE_VERSION,
   person: 'alice',
-  work: { ids: ['#i'], titles: ['#t'], author: '#a', language: 'en' },
+  work: { ids: ['1a'.repeat(32)], titles: ['2b'.repeat(32)], author: '3c'.repeat(32), language: 'en' },
   device: 'd1',
   from: 1,
   to: 1,
@@ -49,6 +54,9 @@ const crypto = (accept: string): PageCrypto => ({
   verify: (_key, message, sig) => sig === 'SIG' && message === accept,
   hash: (value) => `h(${value.length})`,
 })
+
+/** The publication an entry names, or null for a register — which names none. */
+const pubOf = (e: Entry): string | null => ('pub' in e ? e.pub : null)
 
 describe('version negotiation', () => {
   it('picks the highest both speak', () => {
@@ -202,8 +210,8 @@ describe('paginate', () => {
        exactly backwards. */
     const pages = paginate([long, entry('a', 2), entry('b', 3)], 400)
     expect(pages).toHaveLength(2)
-    expect(pages[0]!.map((e) => e.pub)).toEqual(['big'])
-    expect(pages[1]!.map((e) => e.pub)).toEqual(['a', 'b'])
+    expect(pages[0]!.map(pubOf)).toEqual(['big'])
+    expect(pages[1]!.map(pubOf)).toEqual(['a', 'b'])
 
     /* And the same three entries page differently at a different budget, which
        is the property itself rather than one arrangement of it. */
@@ -223,7 +231,7 @@ describe('paginate', () => {
   it('loses nothing and keeps the order', () => {
     const entries = Array.from({ length: 40 }, (_, i) => entry(`p${i}`, i + 1))
     const pages = paginate(entries, 500)
-    expect(pages.flat().map((e) => e.pub)).toEqual(entries.map((e) => e.pub))
+    expect(pages.flat().map(pubOf)).toEqual(entries.map(pubOf))
   })
 
   it('answers nothing for nothing', () => {
@@ -323,5 +331,403 @@ describe("WI-22.C1's strongest falsifier, run on an actual page", () => {
     /* A positive control: the passage text IS there, so this is grepping a page
        with content rather than an empty one. */
     expect(bytes).toContain('a note about the passage')
+  })
+})
+
+describe('which entries a version carries — WI-23.B2', () => {
+  const stamped = { device: 'd', seq: 1, at: hlcOf(1) }
+  const every: readonly Entry[] = [
+    { ...stamped, op: 'share', pub: 'p', passage: { quote: 'q', prefix: '', suffix: '', chapter: '' } },
+    { ...stamped, op: 'unshare', pub: 'p' },
+    { ...stamped, op: 'status', state: 'reading' },
+    { ...stamped, op: 'rate', stars: 3 },
+    { ...stamped, op: 'tag', tags: ['sea'] },
+    { ...stamped, op: 'review', pub: 'r', text: 't' },
+    { ...stamped, op: 'unreview', pub: 'r' },
+    { ...stamped, op: 'shelf', pub: 's', work: { title: 'T', author: 'A', language: 'en' } },
+    { ...stamped, op: 'unshelf', pub: 's' },
+    { ...stamped, op: 'create', title: 'L' },
+    { ...stamped, op: 'retitle', title: 'M' },
+    { ...stamped, op: 'place', pub: 'i', work: { title: 'T', author: 'A', language: 'en' }, position: 1, note: '' },
+    { ...stamped, op: 'remove', pub: 'i' },
+    { ...stamped, op: 'delete' },
+  ]
+
+  it('lets v1 carry passages only, v2 the nine, and v3 the lists too', () => {
+    expect(every.filter((one) => carriedBy(1, one)).map((one) => one.op)).toEqual(['share', 'unshare'])
+    expect(every.filter((one) => carriedBy(2, one)).map((one) => one.op)).toEqual([
+      'share',
+      'unshare',
+      'status',
+      'rate',
+      'tag',
+      'review',
+      'unreview',
+      'shelf',
+      'unshelf',
+    ])
+    expect(every.filter((one) => carriedBy(3, one))).toEqual(every)
+  })
+
+  it('lets a version this build does not know carry nothing at all', () => {
+    expect(every.some((one) => carriedBy(4, one))).toBe(false)
+    expect(every.some((one) => carriedBy(0, one))).toBe(false)
+  })
+
+  it('publishes v3, and reads all three', () => {
+    expect(WIRE_VERSION).toBe(3)
+    expect(SUPPORTED).toEqual({ min: 1, max: 3 })
+  })
+
+  it('lets two peers who both speak only v1 agree on v1', () => {
+    /* The overlap is one version wide; `>=` against `>` is the whole of it. */
+    expect(negotiate({ min: 1, max: 1 }, { min: 1, max: 1 })).toBe(1)
+  })
+})
+
+describe('integers only, over every shape', () => {
+  it('accepts a safe integer at any depth, and nothing that is not one', () => {
+    expect(integersOnly(7)).toBe(true)
+    expect(integersOnly(1.5)).toBe(false)
+    expect(integersOnly({ a: [1, { b: 2 }] })).toBe(true)
+    expect(integersOnly({ a: [1, { b: 2.5 }] })).toBe(false)
+    /* ONE float among integers is enough: `some` would let it through. */
+    expect(integersOnly({ a: 1, b: 2, c: 0.5 })).toBe(false)
+    expect(integersOnly([1, 2, 3.5])).toBe(false)
+  })
+
+  it('answers true for null and for strings, which hold no number', () => {
+    expect(integersOnly(null)).toBe(true)
+    expect(integersOnly('1.5')).toBe(true)
+    expect(integersOnly(undefined)).toBe(true)
+  })
+
+  it('refuses a page with a float where an integer belongs, before the signature', () => {
+    const floated = { ...page(), from: 1.5 }
+    const counting = { verify: vi.fn(() => true), hash: () => 'h' }
+    expect(checkPage(floated, canonicalJson(floated), counting, "key", "", () => true, floated.v)).toBe("non-integer")
+    expect(counting.verify).not.toHaveBeenCalled()
+  })
+})
+
+describe('the page budget, at its boundary', () => {
+  it('fills a page to the budget exactly, and splits one character past it', () => {
+    /* Each entry costs its canonical bytes, a comma sits between two, and a
+       page starts at the two bytes an empty list costs — exactly what the
+       list would serialise to, and not a byte more. */
+    const a = entry('a', 1)
+    const b = entry('b', 2)
+    const exactly = canonicalJson([a, b]).length
+    expect(exactly).toBe(2 + canonicalJson(a).length + 1 + canonicalJson(b).length)
+    expect(paginate([a, b], exactly)).toHaveLength(1)
+    expect(paginate([a, b], exactly - 1)).toHaveLength(2)
+  })
+})
+
+describe('the shape of a page and of an entry', () => {
+  /* Each kind with EXACTLY its fields — a `status` carries no `pub`, an
+     `unshare` no passage — because that is now what the shape demands. */
+  const NAMES_A_PUB = new Set(['share', 'unshare', 'review', 'unreview', 'shelf', 'unshelf', 'place', 'remove'])
+  const PASSAGE = { quote: 'q', prefix: '', suffix: '', chapter: '' }
+  const entry = (over: Record<string, unknown> = {}) => {
+    const op = typeof over['op'] === 'string' ? over['op'] : 'share'
+    return {
+      op,
+      device: 'd',
+      seq: 1,
+      at: '018bcfe56809-0000-1d8865efc2eaef44',
+      ...(NAMES_A_PUB.has(op) ? { pub: 'p' } : {}),
+      ...(op === 'share' ? { passage: PASSAGE } : {}),
+      ...over,
+    }
+  }
+  it('reads every kind with its fields, and refuses each without them', () => {
+    const okay = [
+      entry(),
+      entry({ op: 'unshare' }),
+      entry({ op: 'status', state: 'want' }),
+      entry({ op: 'rate', stars: 5 }),
+      entry({ op: 'tag', tags: ['a'] }),
+      entry({ op: 'review', text: 't' }),
+      entry({ op: 'unreview' }),
+      entry({ op: 'shelf', work: { title: 'T', author: 'A', language: 'en', identifier: 'i', cover: 'ab'.repeat(32) } }),
+      entry({ op: 'unshelf' }),
+      entry({ op: 'create', title: 'L' }),
+      entry({ op: 'retitle', title: 'M' }),
+      entry({ op: 'place', work: { title: 'T', author: 'A', language: 'en' }, position: 1, note: '' }),
+      entry({ op: 'remove' }),
+      entry({ op: 'delete' }),
+    ]
+    for (const one of okay) expect(isEntryShape(one)).toBe(true)
+    const bad = [
+      entry({ op: 'sing' }),
+      /* A cover is a digest the recipient fetches by (WI-23.C5), not a word and not a path. */
+      entry({ op: 'shelf', work: { title: 'T', author: 'A', language: 'en', cover: 'not a digest' } }),
+      entry({ op: 'shelf', work: { title: 'T', author: 'A', language: 'en', cover: 'AB'.repeat(32) } }),
+      entry({ op: 'shelf', work: { title: 'T', author: 'A', language: 'en', cover: `${'ab'.repeat(32)}x` } }),
+      entry({ op: 'shelf', work: { title: 'T', author: 'A', language: 'en', cover: `x${'ab'.repeat(32)}` } }),
+      entry({ pub: '' }),
+      entry({ passage: { quote: 'q' } }),
+      entry({ passage: { quote: 'q', prefix: '', suffix: '', chapter: '', note: 7 } }),
+      entry({ op: 'status', state: 'done' }),
+      entry({ op: 'rate', stars: 6 }),
+      entry({ op: 'tag', tags: 'a' }),
+      entry({ op: 'review', text: 1 }),
+      entry({ op: 'shelf', work: { title: 'T' } }),
+      entry({ op: 'shelf', work: { title: 'T', author: 'A', language: 'en', cover: 1 } }),
+      entry({ op: 'create', title: 1 }),
+      entry({ op: 'place', work: { title: 'T', author: 'A', language: 'en' }, position: 'first', note: '' }),
+      entry({ op: 'place', work: { title: 'T', author: 'A', language: 'en' }, position: 1 }),
+      entry({ device: 1 }),
+      entry({ seq: '1' }),
+      entry({ at: 1 }),
+      entry({ at: 'yesterday' }),
+      /* The disclosure rule, enforced: an `unshare` carrying the passage it withdraws. */
+      entry({ op: 'unshare', passage: PASSAGE }),
+      entry({ op: 'status', state: 'want', pub: 'p' }),
+      entry({ extra: 1 }),
+      entry({ passage: { quote: 'q', prefix: '', suffix: '', chapter: '', extra: 1 } }),
+      'share',
+      null,
+    ]
+    for (const one of bad) expect(isEntryShape(one)).toBe(false)
+  })
+
+  it('reads a page whose every field is what it says, and refuses one field short or wrong', () => {
+    const whole = page()
+    expect(isPageShape(whole)).toBe(true)
+    for (const over of [
+      { work: 'w' },
+      { work: { ...whole.work, ids: 'x' } },
+      { work: { ...whole.work, language: 1 } },
+      { entries: 'none' },
+      { entries: [{ op: 'share' }] },
+      { entries: Array.from({ length: MAX_ENTRIES_PER_PAGE + 1 }, () => whole.entries[0] ?? entry()) },
+      { v: '2' },
+      { person: 1 },
+      { device: 1 },
+      { from: '1' },
+      { to: null },
+      { prevPageHash: 1 },
+      { roster: 'd' },
+      { roster: Array.from({ length: 257 }, () => 'd') },
+      { revocations: '0' },
+      { delegation: 1 },
+      { sig: 1 },
+      { extra: 1 },
+      { work: { ...whole.work, extra: 1 } },
+    ]) {
+      expect(isPageShape({ ...whole, ...over })).toBe(false)
+    }
+    expect(isPageShape([])).toBe(false)
+    expect(isPageShape(null)).toBe(false)
+  })
+
+  it('refuses a page past the frame cap before looking at its chain', () => {
+    const big = page({ prevPageHash: 'x'.repeat(64) })
+    const bytes = canonicalJson(big)
+    const padded = bytes + ' '.repeat(MAX_PAGE_CHARS)
+    expect(checkPage(big, padded, crypto(signedBytes('page', WIRE_VERSION, big)), 'key', '', speaks)).not.toBe('chain')
+    expect(checkPage(big, padded, crypto(signedBytes('page', WIRE_VERSION, big)), 'key', '', speaks)).toBe('not-canonical')
+    /* A canonical page that is simply too long: the cap, not the chain. */
+    const long = page({ delegation: 'd'.repeat(MAX_PAGE_CHARS) })
+    expect(checkPage(long, canonicalJson(long), crypto(signedBytes('page', WIRE_VERSION, long)), 'key', 'not-the-prev', speaks)).toBe('too-large')
+  })
+})
+
+describe('the entries a page carries are its own', () => {
+  const okay = crypto(signedBytes('page', WIRE_VERSION, page()))
+  it('refuses a page whose entries belong to another device or fall outside its range, after the chain and before the signature', () => {
+    const stranger = page({ entries: [{ ...page().entries[0]!, device: 'other' }] })
+    expect(checkPage(stranger, canonicalJson(stranger), okay, 'key', '', speaks)).toBe('malformed')
+    const outside = page({ from: 5, to: 6 })
+    expect(checkPage(outside, canonicalJson(outside), okay, 'key', '', speaks)).toBe('malformed')
+    const backwards = page({ from: 2, to: 1, entries: [] })
+    expect(checkPage(backwards, canonicalJson(backwards), okay, 'key', '', speaks)).toBe('malformed')
+    const zero = page({ from: 0, to: 0, entries: [] })
+    expect(checkPage(zero, canonicalJson(zero), okay, 'key', '', speaks)).toBe('malformed')
+    /* A gap is still a gap first. */
+    expect(checkPage(stranger, canonicalJson(stranger), okay, 'key', 'not-the-prev', speaks)).toBe('chain')
+  })
+})
+
+describe('what a version carries, checked on the page itself', () => {
+  it('refuses a v1 page holding a kind only v2 carries, as malformed', () => {
+    const status: Entry = { op: 'status', state: 'reading', device: 'd1', seq: 1, at: hlcOf(1) }
+    const v1 = page({ v: 1, entries: [status] })
+    expect(checkPage(v1, canonicalJson(v1), crypto(signedBytes('page', 1, v1)), 'key', '', speaks, 1)).toBe('malformed')
+    /* The same entry on a v2 page is carried, and reaches the signature. */
+    const v2 = page({ v: 2, entries: [status] })
+    expect(checkPage(v2, canonicalJson(v2), crypto(signedBytes('page', 2, v2)), 'key', '', speaks, 2)).toBeNull()
+  })
+})
+
+describe('every clause of the entry shape — one row each', () => {
+  const HLC = '018bcfe56809-0000-1d8865efc2eaef44'
+  const stamped = (over: Record<string, unknown>) => ({ device: 'd', seq: 1, at: HLC, ...over })
+  const PASSAGE = { quote: 'q', prefix: '', suffix: '', chapter: '' }
+  const WORK = { title: 'T', author: 'A', language: 'en' }
+  const good: Record<string, Record<string, unknown>> = {
+    share: stamped({ op: 'share', pub: 'p', passage: PASSAGE }),
+    unshare: stamped({ op: 'unshare', pub: 'p' }),
+    status: stamped({ op: 'status', state: 'want' }),
+    rate: stamped({ op: 'rate', stars: 3 }),
+    tag: stamped({ op: 'tag', tags: ['a'] }),
+    review: stamped({ op: 'review', pub: 'p', text: 't' }),
+    unreview: stamped({ op: 'unreview', pub: 'p' }),
+    shelf: stamped({ op: 'shelf', pub: 'p', work: WORK }),
+    unshelf: stamped({ op: 'unshelf', pub: 'p' }),
+    create: stamped({ op: 'create', title: 'L' }),
+    retitle: stamped({ op: 'retitle', title: 'M' }),
+    place: stamped({ op: 'place', pub: 'p', work: WORK, position: 1, note: '' }),
+    remove: stamped({ op: 'remove', pub: 'p' }),
+    delete: stamped({ op: 'delete' }),
+  }
+  it('reads every kind', () => {
+    for (const [op, entry] of Object.entries(good)) expect(isEntryShape(entry), op).toBe(true)
+    for (const state of ['want', 'reading', 'finished']) expect(isEntryShape({ ...good['status'], state })).toBe(true)
+    for (const stars of [1, 2, 3, 4, 5]) expect(isEntryShape({ ...good['rate'], stars })).toBe(true)
+    expect(isEntryShape({ ...good['share'], passage: { ...PASSAGE, note: 'n' } })).toBe(true)
+    expect(isEntryShape({ ...good['shelf'], work: { ...WORK, identifier: 'i', cover: 'ab'.repeat(32) } })).toBe(true)
+    expect(isEntryShape({ ...good['tag'], tags: Array.from({ length: 256 }, (_, i) => `t${i}`) })).toBe(true)
+  })
+  const bad: [string, Record<string, unknown>][] = [
+    ['an unknown state', { ...good['status'], state: 'abandoned' }],
+    ['a state that is not a string', { ...good['status'], state: 1 }],
+    ['zero stars', { ...good['rate'], stars: 0 }],
+    ['six stars', { ...good['rate'], stars: 6 }],
+    ['stars as a string', { ...good['rate'], stars: '3' }],
+    ['tags past the limit', { ...good['tag'], tags: Array.from({ length: 257 }, (_, i) => `t${i}`) }],
+    ['tags with a number among them', { ...good['tag'], tags: ['a', 1] }],
+    ['tags that are a string', { ...good['tag'], tags: 'a' }],
+    ['a review with no text', { ...good['review'], text: undefined }],
+    ['a review whose text is a number', { ...good['review'], text: 1 }],
+    ['a title that is a number', { ...good['create'], title: 1 }],
+    ['a retitle with no title', { ...good['retitle'], title: undefined }],
+    ['a position that is a string', { ...good['place'], position: '1' }],
+    ['a note that is a number', { ...good['place'], note: 1 }],
+    ['a passage quote that is a number', { ...good['share'], passage: { ...PASSAGE, quote: 1 } }],
+    ['a passage prefix that is a number', { ...good['share'], passage: { ...PASSAGE, prefix: 1 } }],
+    ['a passage suffix that is a number', { ...good['share'], passage: { ...PASSAGE, suffix: 1 } }],
+    ['a passage chapter that is a number', { ...good['share'], passage: { ...PASSAGE, chapter: 1 } }],
+    ['a passage note that is a number', { ...good['share'], passage: { ...PASSAGE, note: 1 } }],
+    ['a passage with a nameless field', { ...good['share'], passage: { ...PASSAGE, '': 'x' } }],
+    ['a passage that is a string', { ...good['share'], passage: 'q' }],
+    ['a work title that is a number', { ...good['shelf'], work: { ...WORK, title: 1 } }],
+    ['a work author that is a number', { ...good['shelf'], work: { ...WORK, author: 1 } }],
+    ['a work language that is a number', { ...good['shelf'], work: { ...WORK, language: 1 } }],
+    ['a work identifier that is a number', { ...good['shelf'], work: { ...WORK, identifier: 1 } }],
+    ['a work cover that is a number', { ...good['shelf'], work: { ...WORK, cover: 1 } }],
+    ['a work with a field the schema does not name', { ...good['shelf'], work: { ...WORK, extra: 1 } }],
+    ['a work that is a string', { ...good['shelf'], work: 'T' }],
+    ['a work that is null', { ...good['place'], work: null }],
+    ['a place whose work is an array', { ...good['place'], work: [] }],
+    ['an op that is a number', { ...good['delete'], op: 7 }],
+    ['a delete carrying a field', { ...good['delete'], pub: 'p' }],
+    ['an entry whose device is a number', { ...good['delete'], device: 1 }],
+    ['an entry whose seq is a string', { ...good['delete'], seq: '1' }],
+    ['an entry with no stamp', { ...good['delete'], at: undefined }],
+  ]
+  for (const kind of ['unshare', 'unreview', 'unshelf', 'remove', 'review', 'shelf', 'place'] as const) {
+    bad.push([`a ${kind} with an empty pub`, { ...good[kind], pub: '' }])
+    bad.push([`a ${kind} whose pub is a number`, { ...good[kind], pub: 1 }])
+  }
+  bad.push(['a share with an empty pub', { ...good['share'], pub: '' }], ['a share whose pub is a number', { ...good['share'], pub: 1 }])
+  for (const [what, entry] of bad) {
+    it(`refuses ${what}`, () => {
+      expect(isEntryShape(entry)).toBe(false)
+    })
+  }
+})
+
+describe('every clause of the page shape and check — one row each', () => {
+  it('holds the claim, the entry count and each entry to the shape', () => {
+    const whole = page()
+    expect(isPageShape({ ...whole, work: { ...whole.work, author: 1 } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, language: 1 } })).toBe(false)
+    expect(isPageShape({ ...whole, entries: [entry('p1', 1), { op: 'share' }] })).toBe(false)
+    /* Exactly the cap is a page; one over is not. */
+    const one = entry('p1', 1)
+    expect(isPageShape({ ...whole, entries: Array.from({ length: MAX_ENTRIES_PER_PAGE }, () => one) })).toBe(true)
+    expect(isPageShape({ ...whole, entries: Array.from({ length: MAX_ENTRIES_PER_PAGE + 1 }, () => one) })).toBe(false)
+  })
+
+  it('refuses a page whose entries are not all its own, by device or by range', () => {
+    const okay = { verify: () => true, hash: (value: string) => `h(${value.length})` }
+    const check = (p: Page) => checkPage(p, canonicalJson(p), okay, 'key', '', speaks)
+    expect(check(page({ from: 0, to: 1, entries: [] }))).toBe('malformed')
+    expect(check(page({ from: 2, to: 1, entries: [] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 2, entries: [entry('p1', 1), { ...entry('p2', 2), device: 'd2' } as Entry] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 1, entries: [entry('p1', 1), entry('p2', 2)] }))).toBe('malformed')
+    expect(check(page({ from: 2, to: 2, entries: [entry('p1', 1)] }))).toBe('malformed')
+    /* One entry the version carries beside one it does not is still malformed. */
+    const status: Entry = { op: 'status', state: 'reading', device: 'd1', seq: 1, at: hlcOf(1) }
+    const placed: Entry = { op: 'place', pub: 'p', work: { title: 'T', author: 'A', language: 'en' }, position: 1, note: '', device: 'd1', seq: 2, at: hlcOf(2) }
+    expect(checkPage(page({ v: 2, from: 1, to: 2, entries: [status, placed] }), canonicalJson(page({ v: 2, from: 1, to: 2, entries: [status, placed] })), okay, 'key', '', speaks, 2)).toBe('malformed')
+  })
+
+  it('accepts a page exactly at the size cap and refuses one character more', () => {
+    const okay = { verify: () => true, hash: (value: string) => `h(${value.length})` }
+    const sized = (quote: string): Page => page({ entries: [{ ...entry('p1', 1), passage: { quote, prefix: 'p', suffix: 's', chapter: 'Ch. 1' } } as Entry] })
+    const base = canonicalJson(sized('')).length
+    const exact = sized('x'.repeat(MAX_PAGE_CHARS - base))
+    expect(canonicalJson(exact).length).toBe(MAX_PAGE_CHARS)
+    expect(checkPage(exact, canonicalJson(exact), okay, 'key', '', speaks)).toBeNull()
+    const over = sized('x'.repeat(MAX_PAGE_CHARS - base + 1))
+    expect(checkPage(over, canonicalJson(over), okay, 'key', '', speaks)).toBe('too-large')
+  })
+})
+
+describe('the entries a page carries belong to the log its claim names — WI-23.E1’s three logs', () => {
+  const okay: PageCrypto = { verify: () => true, hash: () => 'h' }
+  const speaks = () => true
+  const check = (one: Page) => checkPage(one, canonicalJson(one), okay, 'key', '', speaks)
+  const shelved: Entry = { op: 'shelf', pub: 's', device: 'd1', seq: 1, at: hlcOf(1), work: { title: 'T', author: 'A', language: 'en' } }
+  const placed: Entry = { op: 'place', pub: 'x', device: 'd1', seq: 1, at: hlcOf(1), work: { title: 'T', author: 'A', language: 'en' }, position: 1, note: '' }
+  const SHELF = { ids: ['paper.circle.shelf'], titles: [], author: '', language: '' }
+  const LIST = { ids: ['paper.circle.list:aa11'], titles: [], author: '', language: '' }
+
+  it('takes each kind on its own log', () => {
+    expect(check(page())).toBeNull()
+    expect(check(page({ work: SHELF, entries: [shelved] }))).toBeNull()
+    expect(check(page({ work: LIST, entries: [placed] }))).toBeNull()
+  })
+
+  it('refuses a shelf or list operation on a per-work page, a passage on the shelf’s, and a shelving on a list’s', () => {
+    /* ⚠️ Checked by version alone, a per-work page carried a `shelf` and the
+       receiver applied it to the shelf section of a file about one book. */
+    expect(check(page({ entries: [shelved] }))).toBe('malformed')
+    expect(check(page({ entries: [placed] }))).toBe('malformed')
+    expect(check(page({ work: SHELF, entries: [entry('p1', 1)] }))).toBe('malformed')
+    expect(check(page({ work: LIST, entries: [shelved] }))).toBe('malformed')
+  })
+
+  it('refuses an empty page, one missing its first or last sequence, and one whose sequences do not climb', () => {
+    /* ⚠️ Accepted, the receiver advanced its cursor to `to` and never asked for the omitted sequences again. */
+    expect(check(page({ from: 1, to: 2, entries: [] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 2, entries: [entry('p1', 1)] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 2, entries: [entry('p2', 2)] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 2, entries: [entry('p2', 2), entry('p1', 1)] }))).toBe('malformed')
+    expect(check(page({ from: 1, to: 2, entries: [entry('p1', 1), { ...entry('p1', 1), pub: 'twin' } as Entry] }))).toBe('malformed')
+    /* A gap between the ends is a page cut under an older version, and stands. */
+    expect(check(page({ from: 1, to: 3, entries: [entry('p1', 1), entry('p3', 3)] }))).toBeNull()
+  })
+})
+
+describe('the claim a page carries is one a request could ask for', () => {
+  const whole = page()
+  it('is digests within the bound, or exactly one reserved claim — and nothing between', () => {
+    expect(isPageShape(whole)).toBe(true)
+    expect(isPageShape({ ...whole, work: { ids: ['paper.circle.shelf'], titles: [], author: '', language: '' } })).toBe(true)
+    expect(isPageShape({ ...whole, work: { ids: ['paper.circle.list:aa11'], titles: [], author: '', language: '' } })).toBe(true)
+    expect(isPageShape({ ...whole, work: { ...whole.work, ids: ['#i'] } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, titles: ['t'] } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, author: 'a' } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, language: 'english' } })).toBe(false)
+    /* A reserved id beside a digest would match a book AND the shelf. */
+    expect(isPageShape({ ...whole, work: { ...whole.work, ids: ['paper.circle.shelf', '1a'.repeat(32)] } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ids: ['paper.circle.shelf'], titles: ['2b'.repeat(32)], author: '', language: '' } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, ids: Array.from({ length: 17 }, (_, i) => i.toString(16).padStart(64, '0')) } })).toBe(false)
+    expect(isPageShape({ ...whole, work: { ...whole.work, ids: Array.from({ length: 16 }, (_, i) => i.toString(16).padStart(64, '0')) } })).toBe(true)
   })
 })

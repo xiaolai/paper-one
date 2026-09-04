@@ -19,6 +19,7 @@ import {
 import { peerPort, registerSyncNow, type PeerPort } from '../peer'
 import { createClock, ensureDeviceId, isHlc, type Hlc } from './lib/clock'
 import { createBackfill } from './lib/backfill'
+import { stampMeasured, unstampUnlessVerified } from './lib/coverStamps'
 import { createCoverCache, type CoverCache } from './lib/coverCache'
 import { JOURNAL_DIRTY_PATH, createJournal, type Journal } from './lib/journal'
 import { createLedger, type Ledger, type SyncChannel } from './lib/ledger'
@@ -824,6 +825,10 @@ export const sync: Capability = {
          * webview does not. Read at CALL time like the other outward ports,
          * because it is bound after the services are built. */
         bytesAt: async (path) => (await services.sizes()?.bytesAt(path)) ?? null,
+        /* The host's hasher, for a stamp still owed: paid from a fresh
+           measurement of the file that is there. Read at call time, as `bytesAt` is. */
+        // Stryker disable next-line all: wiring — the hash port handed through; `coverCache.test.ts` holds what a stamp owed does with one.
+        hashes: () => services.hashes(),
         lookup: async (book) => {
           try {
             return await withShelf(async (channel) => {
@@ -842,6 +847,15 @@ export const sync: Capability = {
           }
         },
         fetchBlob: fetchVerifiedBlob,
+        /* A jacket that landed carries its facts onto the record (WI-23.C5). */
+        // Stryker disable next-line all: wiring — the cache's stamp handed to the library; `coverCache.test.ts` holds the call and `bookFolder.test.ts` the field.
+        /* A jacket that landed carries its facts onto the record, and a jacket
+           gone takes them back — both decided INSIDE the book's lane against
+           the file that is there (WI-23.C5): `coverStamps.ts`. */
+        // Stryker disable next-line all: wiring — `coverStamps.test.ts` holds what each does at the record.
+        stamp: (book, facts) => stampMeasured({ library: services.library, hashes: () => services.hashes() }, book, facts),
+        // Stryker disable next-line all: wiring — as above.
+        unstamp: (book, name) => unstampUnlessVerified({ library: services.library, hashes: () => services.hashes() }, book, name),
         /* Eviction's only delete — the kernel's closed-name primitive
          * (WI-10.2/10.5); the scoped fs cannot reach a book's folder. */
         removeBlob: (book, name) => services.removeBlob(book, name),

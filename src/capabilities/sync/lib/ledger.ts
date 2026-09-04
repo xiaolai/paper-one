@@ -1,5 +1,6 @@
 import {
   BOOKS_DIR,
+  COVER_NAMES,
   ENVELOPE_ERRORS,
   ServiceCallError,
   defineSetting,
@@ -13,6 +14,7 @@ import {
   validMarks,
   type BookRecord,
   type ContentBlobName,
+  type CoverName,
   type KernelServices,
   type Mark,
   type RemoteRow,
@@ -375,13 +377,63 @@ export function createLedger({
    * "cover" `content.epub` would otherwise aim the fetch at the book's
    * bytes. The folder never crosses — it is derived locally from the book.
    */
-  const ensureCover = async (peer: string, folder: string, cover: PushGroup['cover']): Promise<void> => {
+  const ensureCover = async (peer: string, book: string, folder: string, cover: PushGroup['cover']): Promise<void> => {
     if (!cover || !fetchBlob) return
-    if (cover.name !== 'cover.jpg' && cover.name !== 'cover.webp') return
+    if (!(COVER_NAMES as readonly string[]).includes(cover.name)) return
+    /* THE FACTS RIDE WITH THE JACKET (WI-23.C5): the hash and size THIS SIDE
+       verified are what the circle publishes for it, stamped on the record as
+       device-local facts — a jacket landed here is this device's to serve.
+
+       THE SIZE IS THE LOCAL FILE'S, on both paths. After a fetch, the
+       verified transfer has held the bytes to the offered size and hash, so
+       the offer's size is the file's; on the already-here path nothing has
+       checked the offer's size against anything, and stamping it let a peer
+       make this device publish a size for a file it never measured. The hash
+       result carries the local size, and that is what is stamped. */
+    const name = cover.name as CoverName
+    /* MEASURED INSIDE THE LANE — `coverFacts.ts`'s rule: the hook hashes the
+       file the moment before its facts are written, so they describe THAT
+       file, whatever landed or left since. Without a hasher, presence under
+       the name is all that can be checked, and the offer's verified facts
+       stand in. */
+    const stamp = (): Promise<void> => {
+      const measured: { facts: { name: CoverName; size: number; hash: string } | null } = { facts: null }
+      return library.updateAfter(
+        book,
+        {
+          before: async (target, live) => {
+            if (hashFile) {
+              try {
+                const have = await hashFile(folder, cover.name)
+                measured.facts = { name, size: have.size, hash: have.blake3 }
+                return 'go'
+              } catch {
+                return 'refuse'
+              }
+            }
+            measured.facts = (await target.exists(`${folderOf(live)}/${cover.name}`)) ? { name, size: cover.size, hash: cover.hash } : null
+            return measured.facts === null ? 'refuse' : 'go'
+          },
+        },
+        (held) => {
+          const fresh = measured.facts
+          if (fresh === null) return held
+          const facts = held.coverFacts
+          /* The whole tuple, not the hash alone: a record already carrying these
+             facts is rewritten only when one of the three differs. */
+          // Stryker disable next-line ConditionalExpression: rewriting the same facts is the same record.
+          if (facts !== undefined && facts.name === fresh.name && facts.size === fresh.size && facts.hash === fresh.hash) return held
+          return { ...held, coverFacts: fresh }
+        },
+      )
+    }
     if (hashFile) {
       try {
         const have = await hashFile(folder, cover.name)
-        if (have.blake3 === cover.hash) return
+        if (have.blake3 === cover.hash) {
+          await stamp()
+          return
+        }
       } catch {
         /* Not here yet — fetch it below. */
       }
@@ -394,7 +446,10 @@ export function createLedger({
        * book's next push happens — an edit, a mark — which may be never. A
        * persisted retry for a jacket is more machinery than a jacket is
        * worth; the trade is recorded here rather than implied away. */
+      return
     }
+    /* Verified to the offered size by the transfer, so the offer's size IS the file's here — and measured again in the lane where there is a hasher. */
+    await stamp()
   }
 
   /**
@@ -762,7 +817,7 @@ export function createLedger({
      * used to say "tracked for retry", which was true of a `coverRetry` set
      * nothing ever read — see `ensureCover`, which carries the trade. */
     if (group.cover && group.book !== '') {
-      await ensureCover(peer, folder, group.cover)
+      await ensureCover(peer, group.book, folder, group.cover)
     }
 
     const ack: {
@@ -968,11 +1023,11 @@ export function createLedger({
     return group
   }
 
-  /** A jacket beside the bytes, whichever of the two names it carries — the
-   *  one probe for the push offer and the content answer (#329). */
+  /** A jacket beside the bytes, whichever of the kernel's cover names it
+   *  carries — the one probe for the push offer and the content answer (#329). */
   const coverFacts = async (folder: string): Promise<{ name: string; size: number; hash: string } | null> => {
     if (!hashFile) return null
-    for (const name of ['cover.jpg', 'cover.webp'] as const) {
+    for (const name of COVER_NAMES) {
       try {
         const hashed = await hashFile(folder, name)
         return { name, size: hashed.size, hash: hashed.blake3 }

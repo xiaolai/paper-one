@@ -1,4 +1,4 @@
-import { MAX_RECORD_FIELD, MAX_RECORD_POSITION } from './bookFolder'
+import { MAX_RECORD_FIELD, MAX_RECORD_POSITION, MAX_REVIEW } from './bookFolder'
 import { CONTENT_EXTENSIONS } from './bookVault'
 import { CARD_KINDS, MAX_CARD_TEXT } from './cards'
 import { MARK_KINDS, MARK_TINTS, MAX_MARK_NOTE, MAX_MARK_TEXT } from './marks'
@@ -21,6 +21,7 @@ import type {
   PositionSetRow,
 } from './services/rows'
 import type { ClientContribution } from './capability'
+import { READING_STATES } from './circle/log'
 
 /**
  * THE SERVICE TABLE — one literal, from which the router registration, the
@@ -501,9 +502,9 @@ const TABLE = [
     verb: 'get',
     grant: 'book:read',
     kind: 'req',
-    summary: 'One record by id, with its registers — the ledger stamps a shelf listing does not carry.',
+    summary: 'One record by id, with its ledger registers — the position and finished stamps and the tag clock, which a shelf listing does not carry. (A listing carries the opinion stamps.)',
     input: [BOOK_ID],
-    output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'hasContent'] },
+    output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'status', 'rating', 'review', 'hasContent'] },
   },
   {
     name: 'book.add',
@@ -516,9 +517,9 @@ const TABLE = [
       BOOK_ID,
       { name: 'title', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_FIELD, doc: 'The title.', positional: 1 },
       { name: 'author', type: 'string', maxLength: MAX_RECORD_FIELD, doc: 'The author.', positional: 2 },
-      { name: 'ext', type: 'string', choices: CONTENT_EXTENSIONS, doc: "The content file's extension, when this device holds bytes — one the blob layer stores." },
+      { name: 'ext', type: 'string', choices: [...CONTENT_EXTENSIONS], doc: "The content file's extension, when this device holds bytes — one the blob layer stores." },
     ],
-    output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'hasContent'] },
+    output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'status', 'rating', 'review', 'hasContent'] },
   },
   {
     name: 'book.set',
@@ -526,20 +527,26 @@ const TABLE = [
     verb: 'set',
     grant: 'book:write',
     kind: 'req',
-    summary: 'Change fields on one record: finished, position.',
+    summary: 'Change fields on one record: finished, position, status, rating, review.',
     input: [
       BOOK_ID,
-      { name: 'finished', type: 'boolean', doc: 'Whether the reader is done with it.' },
+      { name: 'finished', type: 'boolean', doc: 'Whether the reader is done with it. Moves `status` with it.' },
       { name: 'position', type: 'string', maxLength: MAX_RECORD_POSITION, doc: 'Where the reader is, as a CFI.' },
       { name: 'progress', type: 'number', min: 0, max: 1, doc: 'How far through, in [0, 1]. Needs `position`.' },
+      /* The reader's own opinion of the book (WI-23.B3). Their copy, on the
+       * record; publishing it to the circle is a separate act on a separate
+       * surface, which is what keeps sync and the circle apart. */
+      { name: 'status', type: 'string', choices: [...READING_STATES], doc: 'Where the reader is with it: `want`, `reading` or `finished`. Moves `finished` with it.' },
+      { name: 'rating', type: 'number', integer: true, min: 1, max: 5, doc: 'One to five stars.' },
+      { name: 'review', type: 'string', maxLength: MAX_REVIEW, doc: 'The reader’s words about the whole book. An empty string takes a review back.' },
     ],
-    atLeastOne: ['finished', 'position', 'progress'],
+    atLeastOne: ['finished', 'position', 'progress', 'status', 'rating', 'review'],
     /* Refused by name, not dropped — see `withdrawn` on the descriptor. */
     withdrawn: [
       { name: 'title', why: 'a rename is not offered — an edit with no stamp loses to the next parse of the file' },
       { name: 'author', why: 'a rename is not offered — an edit with no stamp loses to the next parse of the file' },
     ],
-    output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'hasContent'] },
+    output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'status', 'rating', 'review', 'hasContent'] },
   },
   {
     name: 'book.position',
@@ -624,8 +631,8 @@ const TABLE = [
       BOOK_ID,
       { name: 'cfi', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_POSITION, doc: 'The anchor.', positional: 1 },
       { name: 'text', type: 'string', maxLength: MAX_MARK_TEXT, doc: 'The marked text.', positional: 2 },
-      { name: 'kind', type: 'string', maxLength: MAX_WORD, choices: MARK_KINDS, doc: 'What the mark is. Default highlight.' },
-      { name: 'colour', type: 'string', maxLength: MAX_WORD, choices: MARK_TINTS, doc: 'The highlight colour. Default yellow.' },
+      { name: 'kind', type: 'string', maxLength: MAX_WORD, choices: [...MARK_KINDS], doc: 'What the mark is. Default highlight.' },
+      { name: 'colour', type: 'string', maxLength: MAX_WORD, choices: [...MARK_TINTS], doc: 'The highlight colour. Default yellow.' },
       { name: 'note', type: 'string', maxLength: MAX_MARK_NOTE, doc: "The reader's note." },
       /* THE RECOVERY CONTEXT, which this row did not carry (phase 19). `Mark.prefix`
        * and `.suffix` are the words either side of the marked text, captured at
@@ -659,7 +666,7 @@ const TABLE = [
       { name: 'mark', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_FIELD, doc: 'The mark id.', positional: 0 },
       { name: 'book', type: 'string', maxLength: MAX_RECORD_FIELD, doc: 'The book it belongs to, when known.' },
       { name: 'note', type: 'string', maxLength: MAX_MARK_NOTE, doc: 'Replacement note text.' },
-      { name: 'colour', type: 'string', maxLength: MAX_WORD, choices: MARK_TINTS, doc: 'Replacement colour.' },
+      { name: 'colour', type: 'string', maxLength: MAX_WORD, choices: [...MARK_TINTS], doc: 'Replacement colour.' },
     ],
     atLeastOne: ['note', 'colour'],
     output: { many: false, of: 'MarkRow', columns: ['id', 'bookId', 'kind', 'text', 'note'] },
@@ -698,7 +705,7 @@ const TABLE = [
     summary: 'Make a card.',
     input: [
       { name: 'text', type: 'string', required: true, nonEmpty: true, maxLength: MAX_CARD_TEXT, doc: 'The card body.', positional: 0 },
-      { name: 'kind', type: 'string', maxLength: MAX_WORD, choices: CARD_KINDS, doc: 'The card kind. Default Idea.' },
+      { name: 'kind', type: 'string', maxLength: MAX_WORD, choices: [...CARD_KINDS], doc: 'The card kind. Default Idea.' },
       { name: 'book', type: 'string', maxLength: MAX_RECORD_FIELD, doc: 'The book it came from, when it came from one.' },
     ],
     output: { many: false, of: 'CardRow', columns: ['id', 'kind', 'body', 'bookId'] },
@@ -843,7 +850,7 @@ const TABLE = [
         /* A BLAKE3 digest is sixty-four hex digits; anything else reached
          * the handler and was reported as a content CONFLICT, which is the
          * wrong word for a caller who sent a typo. */
-        pattern: /^[0-9a-f]{64}$/,
+        pattern: new RegExp(`^[0-9a-f]{${MAX_CONTENT_HASH}}$`),
         doc: "The `contentHash` `content.locate` answered. Refused with `conflict` when this shelf's bytes are no longer the ones that hash describes, or when it cannot say.",
       },
     ],

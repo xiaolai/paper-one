@@ -4,6 +4,8 @@ import { INDEX_FILE, type IndexFs, type IndexedBook } from './bookIndex'
 import { fakeFs } from './indexFsFake.testkit'
 import { WRITE_WIDTH, createLibrary } from './libraryStore'
 import { writeQueue } from './writeQueue'
+import { spyRecorder } from './servicesWorld.testkit'
+import type { MutationRecorder } from './ports'
 
 /**
  * A failed write is SAID, not logged (WI-20.36).
@@ -352,5 +354,111 @@ describe('the undo offer and a write that fails', () => {
     await library.undoRemoveTag()
     expect(library.lastRemoval()).toBeNull()
     expect(library.getSnapshot()[0]?.tags).toEqual(['Sea'])
+  })
+
+  /* RECORDED BEFORE THE FAILURE IS RAISED. One write failing after the others
+     succeeded still took the tag off the others; this used to throw past the
+     recorder, and the reader was offered no way back for the removals that
+     did happen. The offer names exactly the books that lost the tag. */
+  it('offers the way back for the books that did lose the tag when one of them could not be written', async () => {
+    const { library, refuse } = world(['book_a', 'book_b', 'book_c'])
+    for (const id of ['book_a', 'book_b', 'book_c']) await library.tag(id, 'Sea')
+    refuse('book_b', true)
+    await expect(library.untagBooks(['book_a', 'book_b', 'book_c'], 'Sea')).rejects.toThrow('disk full')
+    const offered = library.lastRemoval()
+    expect(offered?.tag).toBe('Sea')
+    expect([...(offered?.bookIds ?? [])].sort()).toEqual(['book_a', 'book_c'])
+    /* The book that refused still carries it; the offer puts it back on the two that lost it. */
+    refuse('book_b', false)
+    await library.undoRemoveTag()
+    expect(library.getSnapshot().map((book) => book.tags)).toEqual([['Sea'], ['Sea'], ['Sea']])
+  })
+
+  /* THE RECORD LANDED AND THE INDEX DID NOT. The tag is off the book on
+     disk — `book.json` was written — and the write still rejects, for the
+     index. Struck off the list of what changed on any rejection, the book was
+     missing from the offer for a removal that had genuinely happened. */
+  it('offers the way back for a book whose record lost the tag when only the index could not be written', async () => {
+    const fs = fakeFs(seeded(['book_a']))
+    let refuseIndex = false
+    const wrapped: IndexFs = {
+      ...fs,
+      writeFile: async (path, bytes) => {
+        /* `atomicWrite` lands on `index.json.writing` first — the prefix is what names the index. */
+        if (refuseIndex && path.startsWith(INDEX_FILE)) throw new Error('index disk full')
+        await fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({ fs: wrapped, queue: writeQueue(), initial: [row('book_a')] })
+    await library.tag('book_a', 'Sea')
+    refuseIndex = true
+    await expect(library.untagBooks(['book_a'], 'Sea')).rejects.toThrow('index disk full')
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_a/book.json`)!)) as { tags?: string[] }
+    expect(written.tags ?? []).not.toContain('Sea')
+    expect(library.lastRemoval()).toMatchObject({ tag: 'Sea', bookIds: ['book_a'] })
+    refuseIndex = false
+    await library.undoRemoveTag()
+    expect(library.getSnapshot()[0]?.tags).toEqual(['Sea'])
+  })
+
+  /* THE RECORD LANDED AND THE JOURNAL DID NOT. `landed` was set once the
+     recorder's bracket had closed, so a commit that failed after the folder
+     write left it unset — and a tag genuinely gone from the book was struck
+     off the offer as a write that never happened. */
+  it('offers the way back for a book whose record lost the tag when the recorder’s commit failed after the write', async () => {
+    const fs = fakeFs(seeded(['book_a']))
+    let failRecord = false
+    const recorder: MutationRecorder = {
+      begin: async (book, what) => ({ book, what }),
+      commit: async (token) => {
+        if (failRecord && token.what === 'record') throw new Error('journal commit failed')
+      },
+    }
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [row('book_a')], recorder })
+    await library.tag('book_a', 'Sea')
+    failRecord = true
+    await expect(library.untagBooks(['book_a'], 'Sea')).rejects.toThrow('journal commit failed')
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_a/book.json`)!)) as { tags?: string[] }
+    expect(written.tags ?? []).not.toContain('Sea')
+    expect(library.lastRemoval()).toMatchObject({ tag: 'Sea', bookIds: ['book_a'] })
+  })
+
+  /* A RECORD THAT WILL NOT READ IS SAID, NOT SKIPPED. `readBook` answers null
+     for absent and for unreadable alike; judged from that alone, a shelf-wide
+     removal quietly passed over a book whose `book.json` was there and would
+     not parse — and reported the tag gone from everywhere. */
+  it('raises a record that will not read from a shelf-wide removal, after taking the tag off the rest — and leaves its row', async () => {
+    const { fs, library } = world(['book_a', 'book_b'])
+    await library.tagBooks(['book_a', 'book_b'], ['Sea'])
+    fs.store.set(`${BOOKS_DIR}/book_b/book.json`, new TextEncoder().encode('not json at all'))
+    await expect(library.removeTag('Sea')).rejects.toThrow(/book_b is there but could not be read/u)
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_a/book.json`)!)) as { tags?: string[] }
+    expect(written.tags ?? []).not.toContain('Sea')
+    expect(library.lastRemoval()).toMatchObject({ tag: 'Sea', bookIds: ['book_a'] })
+    /* Not a failed write: the row stands, the store is still persistent. */
+    expect(library.getSnapshot().map((one) => one.bookId)).toEqual(['book_a', 'book_b'])
+    expect(library.persistent).toBe(true)
+  })
+})
+
+describe('a remote row that lands', () => {
+  it('is recorded as a record write, and clears the failure the book was showing', async () => {
+    const fs = fakeFs(seeded(['book_a']))
+    const spy = spyRecorder()
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [row('book_a')], recorder: spy.recorder })
+    await library.applyRemoteRows([{ bookId: 'book_a', change: (record) => ({ ...record, finished: true }) }])
+    expect(spy.kinds).toContain('record')
+  })
+})
+
+describe('a remote row landing after a failure', () => {
+  it('clears the failure the book was showing', async () => {
+    const { library, refuse } = world(['book_a'], { book_a: 'Moby-Dick' })
+    refuse('book_a', true)
+    await expect(library.tag('book_a', 'Sea')).rejects.toThrow('disk full')
+    expect(library.lastFailure()?.bookId).toBe('book_a')
+    refuse('book_a', false)
+    await library.applyRemoteRows([{ bookId: 'book_a', change: (record) => ({ ...record, finished: true }) }])
+    expect(library.lastFailure()).toBeNull()
   })
 })

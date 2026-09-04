@@ -1,6 +1,7 @@
 import { canonicalJson } from '../canonicalJson'
+import { isHlc } from '../hlc'
 import type { Entry } from './log'
-import type { WorkClaim } from './workClaim'
+import { isClaimShape, logOfClaim, type WorkClaim } from './workClaim'
 
 /**
  * Pages: what one frame carries, and what is signed — WI-22.C1, C4 and the
@@ -38,8 +39,23 @@ import type { WorkClaim } from './workClaim'
  * a browser's reach (`check-browser-safe.mjs`).
  */
 
-/** The only wire version that exists. A second one is a `v2` constant here. */
-export const WIRE_VERSION = 1
+/**
+ * The newest wire version this build publishes — WI-23.B2.
+ *
+ * | Version | What a page may carry |
+ * |---|---|
+ * | 1 | `share`, `unshare` — passages only |
+ * | 2 | …and `status`, `rate`, `tag`, `review`, `unreview` — the book |
+ *
+ * ⚠️ **A v1 PEER IS SERVED v1 PAGES, FILTERED BEFORE PAGINATION, AND THAT IS
+ * NOT AN OPTIMISATION.** Page boundaries are sealed when first served and never
+ * move (`publish.ts`, `SealedPage`). A page sealed for a v2 peer and later
+ * served to a v1 peer with the v2 entries stripped is a DIFFERENT page —
+ * different bytes, different hash — under a boundary claiming to be the same
+ * one. So the v1 chain and the v2 chain are two chains, sealed separately, and
+ * `carriedBy` is the filter each is built through.
+ */
+export const WIRE_VERSION = 3
 
 /** What a peer can speak. Exchanged in the hello, before any page. */
 export interface VersionRange {
@@ -47,7 +63,45 @@ export interface VersionRange {
   readonly max: number
 }
 
-export const SUPPORTED: VersionRange = { min: WIRE_VERSION, max: WIRE_VERSION }
+/** Both versions are read and published; a v1 peer negotiates 1 and is served it. */
+export const SUPPORTED: VersionRange = { min: 1, max: WIRE_VERSION }
+
+/** The ops each version's pages may carry. Every version carries its predecessor's. */
+const OPS_BY_VERSION: Readonly<Record<number, ReadonlySet<Entry['op']>>> = {
+  1: new Set<Entry['op']>(['share', 'unshare']),
+  2: new Set<Entry['op']>(['share', 'unshare', 'status', 'rate', 'tag', 'review', 'unreview', 'shelf', 'unshelf']),
+  /* v3 — WI-23.E1: the five list ops, on a list's own log. A v2 peer never
+     asks for a list, so nothing is stripped; the version says what a peer
+     can PARSE, and a v2 build cannot parse `place`. */
+  3: new Set<Entry['op']>([
+    'share',
+    'unshare',
+    'status',
+    'rate',
+    'tag',
+    'review',
+    'unreview',
+    'shelf',
+    'unshelf',
+    'create',
+    'retitle',
+    'place',
+    'remove',
+    'delete',
+  ]),
+}
+
+/**
+ * Whether a version's page may carry this entry.
+ *
+ * A version this module does not know carries nothing: a publisher asked for
+ * v3 by a build that only knows v2 has no v3 chain to serve, and an empty page
+ * is what a chain nobody can build looks like. `negotiate` keeps that from
+ * being asked in the first place.
+ */
+export function carriedBy(version: number, entry: Entry): boolean {
+  return OPS_BY_VERSION[version]?.has(entry.op) ?? false
+}
 
 /**
  * The highest version both peers speak, or null when there is no overlap.
@@ -119,7 +173,8 @@ export function isCanonical(received: string, parsed: unknown): boolean {
  */
 export function integersOnly(value: unknown): boolean {
   if (typeof value === 'number') return Number.isSafeInteger(value)
-  if (Array.isArray(value)) return value.every(integersOnly)
+  /* An array is an object whose values are its elements, so one branch walks
+     both — a separate array branch was a second spelling of this one. */
   if (typeof value === 'object' && value !== null) {
     return Object.values(value).every(integersOnly)
   }
@@ -151,6 +206,21 @@ export function chainHash(crypto: PageCrypto, receivedBytes: string): string {
   return crypto.hash(receivedBytes)
 }
 
+/** The most a single page may be, in characters of canonical JSON — the frame's cap. */
+export const MAX_PAGE_CHARS = 512 * 1024
+
+/** The most entries one page may carry — a bound on the work a signed page can ask for. */
+export const MAX_ENTRIES_PER_PAGE = 4_096
+
+/**
+ * The most devices one person's roster may name on a page — and so the most
+ * streams a person can have, which is what every per-device bound in the
+ * protocol must be measured against. ⚠️ **ONE NUMBER, READ BY THE CURSOR
+ * BOUND TOO.** A cursor held to sixty-four devices while a roster could name
+ * two hundred and fifty-six refused the sixty-fifth device's stream for ever.
+ */
+export const MAX_ROSTER_DEVICES = 256
+
 export type PageRefusal =
   | 'version'
   | 'not-canonical'
@@ -158,6 +228,8 @@ export type PageRefusal =
   | 'bad-signature'
   | 'chain'
   | 'too-large'
+  /** Not the shape of a page, or of an entry — refused before anything is verified. */
+  | 'malformed'
   /** The signing device may not speak for this person — see `checkPage`. */
   | 'may-not-speak'
 
@@ -174,6 +246,161 @@ export type PageRefusal =
  * `prevPageHash` exists — and is refused rather than merged, because merging it
  * would silently accept a log with a hole in it.
  */
+/** The entry kinds a page may carry — the newest version's set, which holds every older one's. */
+const OPS: ReadonlySet<string> = OPS_BY_VERSION[WIRE_VERSION]!
+
+/**
+ * The fields each kind carries beyond its stamp — EXACTLY these.
+ *
+ * ⚠️ **A FIELD THE KIND DOES NOT NAME IS REFUSED, not ignored.** The type
+ * says an `unshare` carries no passage and an `unreview` no text — that is
+ * the disclosure rule — and a validator that only looked for the fields it
+ * wanted let a page carry the forbidden ones alongside, signed, into every
+ * recipient's file.
+ */
+const STAMP = ['op', 'device', 'seq', 'at'] as const
+const FIELDS: Readonly<Record<Entry['op'], readonly string[]>> = {
+  share: ['pub', 'passage'],
+  unshare: ['pub'],
+  status: ['state'],
+  rate: ['stars'],
+  tag: ['tags'],
+  review: ['pub', 'text'],
+  unreview: ['pub'],
+  shelf: ['pub', 'work'],
+  unshelf: ['pub'],
+  create: ['title'],
+  retitle: ['title'],
+  place: ['pub', 'work', 'position', 'note'],
+  remove: ['pub'],
+  // Stryker disable next-line ArrayDeclaration: a field name no delete carries can never be presented, so nothing can tell the difference.
+  delete: [],
+}
+const PASSAGE_FIELDS = new Set(['quote', 'prefix', 'suffix', 'chapter', 'note'])
+const WORK_FIELDS = new Set(['title', 'author', 'language', 'identifier', 'cover'])
+const PAGE_FIELDS = new Set(['v', 'person', 'work', 'device', 'from', 'to', 'prevPageHash', 'entries', 'roster', 'revocations', 'delegation', 'sig'])
+
+/**
+ * The kinds each LOG carries — WI-23.E1's three logs, told apart by the claim.
+ *
+ * ⚠️ **A PAGE'S ENTRIES BELONG TO THE LOG ITS CLAIM NAMES.** Checked by
+ * version alone, a per-work page could carry a `shelf` or a `place`, and the
+ * receiver applied it to the shelf or the list section of a file that was
+ * about one book — and a shelf page could carry a `share`.
+ */
+const OPS_BY_LOG: Readonly<Record<ReturnType<typeof logOfClaim>, ReadonlySet<Entry['op']>>> = {
+  work: new Set<Entry['op']>(['share', 'unshare', 'status', 'rate', 'tag', 'review', 'unreview']),
+  shelf: new Set<Entry['op']>(['shelf', 'unshelf']),
+  list: new Set<Entry['op']>(['create', 'retitle', 'place', 'remove', 'delete']),
+}
+
+// Stryker disable next-line ConditionalExpression: a non-object that passes this has no keys the field sets allow and no fields of its own, so every check after it refuses it anyway.
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+const hasOnly = (value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean => Object.keys(value).every((key) => allowed.has(key))
+const isStrings = (value: unknown, most: number): value is readonly string[] =>
+  Array.isArray(value) && value.length <= most && value.every((one) => typeof one === 'string')
+const isWork = (value: unknown): boolean => {
+  if (!isObject(value) || !hasOnly(value, WORK_FIELDS)) return false
+  const named = value
+  return (
+    typeof named['title'] === 'string' &&
+    typeof named['author'] === 'string' &&
+    typeof named['language'] === 'string' &&
+    (named['identifier'] === undefined || typeof named['identifier'] === 'string') &&
+    /* A cover is a DIGEST the recipient fetches by (WI-23.C5) — not text, and not a path. */
+    // Stryker disable next-line ConditionalExpression: a non-string never matches the digest pattern; the type check spells out what the pattern already refuses.
+    (named['cover'] === undefined || (typeof named['cover'] === 'string' && COVER_DIGEST.test(named['cover'])))
+  )
+}
+
+/** BLAKE3, hex — what a cover on a shelf entry is. */
+const COVER_DIGEST = /^[0-9a-f]{64}$/u
+
+/**
+ * Whether a value has the shape of an entry — the right fields for its kind,
+ * of the right types. Bounds that matter to a recipient are checked here too:
+ * a passage is four strings and a note, a tag list is a list of strings.
+ */
+export function isEntryShape(value: unknown): value is Entry {
+  if (!isObject(value)) return false
+  const e = value
+  /* A stamp is an HLC, spelled as one: a page stamping its entries with anything else folds them somewhere no honest log would. */
+  if (typeof e['device'] !== 'string' || typeof e['seq'] !== 'number' || !isHlc(e['at'])) return false
+  // Stryker disable next-line ConditionalExpression: an op that is not a string is not in OPS either, so the second clause refuses it alone.
+  if (typeof e['op'] !== 'string' || !OPS.has(e['op'])) return false
+  if (!hasOnly(e, new Set([...STAMP, ...FIELDS[e['op'] as Entry['op']]]))) return false
+  const pub = e['pub']
+  switch (e['op']) {
+    case 'share': {
+      const passage = e['passage']
+      if (!isObject(passage) || !hasOnly(passage, PASSAGE_FIELDS)) return false
+      return (
+        typeof pub === 'string' &&
+        pub !== '' &&
+        ['quote', 'prefix', 'suffix', 'chapter'].every((key) => typeof passage[key] === 'string') &&
+        (passage['note'] === undefined || typeof passage['note'] === 'string')
+      )
+    }
+    case 'unshare':
+    case 'unreview':
+    case 'unshelf':
+    case 'remove':
+      return typeof pub === 'string' && pub !== ''
+    case 'status':
+      return e['state'] === 'want' || e['state'] === 'reading' || e['state'] === 'finished'
+    case 'rate':
+      return e['stars'] === 1 || e['stars'] === 2 || e['stars'] === 3 || e['stars'] === 4 || e['stars'] === 5
+    case 'tag':
+      return isStrings(e['tags'], 256)
+    case 'review':
+      return typeof pub === 'string' && pub !== '' && typeof e['text'] === 'string'
+    case 'shelf':
+      return typeof pub === 'string' && pub !== '' && isWork(e['work'])
+    case 'create':
+    case 'retitle':
+      return typeof e['title'] === 'string'
+    case 'place':
+      return typeof pub === 'string' && pub !== '' && isWork(e['work']) && typeof e['position'] === 'number' && typeof e['note'] === 'string'
+    case 'delete':
+      return true
+    // Stryker disable all: an op outside OPS was refused above, so no value reaches this arm; it is the type's exhaustiveness, not a branch.
+    default:
+      return false
+    // Stryker restore all
+  }
+}
+
+/**
+ * Whether a parsed value has the shape of a page: every field present, of its
+ * type, with a claim and entries that are what they say. Checked BEFORE the
+ * claim is matched or the signature verified, so a hostile page cannot make
+ * this side throw inside `matchWork` or fold an entry with the wrong fields.
+ */
+export function isPageShape(value: unknown): value is Page {
+  if (!isObject(value) || !hasOnly(value, PAGE_FIELDS)) return false
+  const page = value
+  /* The claim as a request's parser reads one — digests within their bound,
+     or exactly one reserved claim — so a page cannot name a claim no request
+     could ask for, nor a reserved id beside a real digest. */
+  if (!isClaimShape(page['work'])) return false
+  const entries = page['entries']
+  if (!Array.isArray(entries) || entries.length > MAX_ENTRIES_PER_PAGE || !entries.every(isEntryShape)) return false
+  /* Numbers, not integers: whether a number is a safe integer is
+     `integersOnly`'s question, refused under its own name. */
+  return (
+    typeof page['v'] === 'number' &&
+    typeof page['person'] === 'string' &&
+    typeof page['device'] === 'string' &&
+    typeof page['from'] === 'number' &&
+    typeof page['to'] === 'number' &&
+    typeof page['prevPageHash'] === 'string' &&
+    isStrings(page['roster'], MAX_ROSTER_DEVICES) &&
+    typeof page['revocations'] === 'number' &&
+    typeof page['delegation'] === 'string' &&
+    typeof page['sig'] === 'string'
+  )
+}
+
 export function checkPage(
   page: Page,
   received: string,
@@ -206,7 +433,35 @@ export function checkPage(
   if (page.v !== version) return 'version'
   if (!isCanonical(received, page)) return 'not-canonical'
   if (!integersOnly(page)) return 'non-integer'
+  if (received.length > MAX_PAGE_CHARS) return 'too-large'
   if (page.prevPageHash !== expectedPrev) return 'chain'
+  /* The entries are the page's own: this device's, within the range the page
+     names. A signed page that says otherwise lies about what it carries, and
+     the cursor it would advance would be wrong. After the chain check, so a
+     gap reads as a gap; before the signature, which is the expensive step. */
+  if (page.from < 1 || page.to < page.from) return 'malformed'
+  /* ⚠️ **THE RANGE IS THE ENTRIES, NOT A BOX AROUND THEM.** Checked only for
+     entries INSIDE the range, an empty page, or one missing its first or last
+     sequence, verified — and the receiver then advanced its cursor to `to`
+     and skipped the omitted entries for ever, silently. The first entry IS
+     `from`, the last IS `to`, and between them the sequences climb: a page
+     cut under an older version skips the kinds it does not carry, so the
+     climb may have gaps, but it never stalls or turns back. */
+  if (page.entries.length === 0) return 'malformed'
+  let last = 0
+  for (const entry of page.entries) {
+    if (entry.device !== page.device || entry.seq <= last) return 'malformed'
+    last = entry.seq
+  }
+  if (page.entries[0]!.seq !== page.from || last !== page.to) return 'malformed'
+  /* And each entry is one the page's OWN version carries: a v1 page holding
+     a `status` was checked against the negotiated number and never against
+     what the number allows, so a v1 peer could be handed v2 kinds inside a
+     page it had agreed to. */
+  if (!page.entries.every((entry) => carriedBy(page.v, entry))) return 'malformed'
+  /* And one the page's LOG carries — see `OPS_BY_LOG`. */
+  const carried = OPS_BY_LOG[logOfClaim(page.work)]
+  if (!page.entries.every((entry) => carried.has(entry.op))) return 'malformed'
   /* BEFORE the signature, because it is the cheaper of the two and a device
      that may not speak is refused whatever it signed. */
   if (!maySpeak(page)) return 'may-not-speak'
@@ -233,7 +488,9 @@ export function paginate(entries: readonly Entry[], budget: number): readonly (r
   let current: Entry[] = []
   let size = 2 /* the `[]` an empty page still costs */
   for (const entry of entries) {
-    const cost = canonicalJson(entry).length + 1
+    /* The comma is charged only between entries: a JSON list of n has n − 1. */
+    // Stryker disable next-line EqualityOperator: charging the comma on the first entry instead of each one after it moves one character between two entries whose sum is what is measured.
+    const cost = canonicalJson(entry).length + (current.length > 0 ? 1 : 0)
     if (current.length > 0 && size + cost > budget) {
       pages.push(current)
       current = []

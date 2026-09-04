@@ -1,4 +1,4 @@
-import type { BookRow, IndexedBook } from '../../kernel'
+import type { BookRow, IndexedBook, Hlc } from '../../kernel'
 import type { ShelfChannel } from './channel'
 
 /**
@@ -103,8 +103,8 @@ export interface RemoteBooks {
  * behind a plausible-looking row. */
 /* Shared with the other stores — see `wireRow.ts`, which was extracted when
  * `marks.ts` and `cards.ts` turned out to be casting where this file reads. */
-export { str, num, strings } from './wireRow'
 import { byFirstId, num, str, strings } from './wireRow'
+import { READING_STATES, STARS, isContentHash, isHlc, type ReadingState, type Stars } from '../../kernel'
 
 /** The formats `services/rows.ts` can send. Anything else reads as unknown. */
 const FORMATS = new Set(['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin'])
@@ -136,12 +136,32 @@ export function parseRows(answer: unknown): readonly BookRow[] {
       subjects: strings(row['subjects']),
       tags: strings(row['tags']),
       position: str(row['position']),
-      progress: num(row['progress']) ?? 0,
+      progress: within01(num(row['progress'])),
       finished: row['finished'] === true,
+      /* The reader's own opinion (WI-23.B3), read as the row declares it: a
+         status outside the kernel's own vocabulary is a shelf disagreeing
+         about the wire and reads as nothing said, never as a fourth state.
+         AGAINST `READING_STATES`, not a list spelled out here — the three
+         words were restated inline, and a fourth state added to the kernel
+         would have read as "nothing said" on every browser shelf. */
+      status: (READING_STATES as readonly unknown[]).includes(row['status']) ? (row['status'] as ReadingState) : null,
+      /* A stamp that is not an HLC is no stamp: it would be cast to one
+         further down and merged as though it ordered anything. */
+      statusAt: stamp(row['statusAt']),
+      rating: stars(row['rating']),
+      ratingAt: stamp(row['ratingAt']),
+      review: str(row['review']),
+      reviewAt: stamp(row['reviewAt']),
       addedAt: num(row['addedAt']),
       openedAt: num(row['openedAt']),
       format: FORMATS.has(row['format'] as string) ? (row['format'] as BookRow['format']) : null,
-      contentHash: str(row['contentHash']),
+      /* A DIGEST OR NOTHING — the kernel's one rule, `isContentHash`. This
+         took any string, and `asIndexedBook` then published it as the row's
+         cache generation: a shelf sending `"h"` handed every view a
+         generation that no real hash could ever equal, so changed bytes
+         reused it. The record parser and the sync wire refuse the same
+         shape; the browser was the door with no guard on it. */
+      contentHash: isContentHash(row['contentHash']) ? row['contentHash'] : null,
       /* THREE STATES, NOT TWO. `hasContent` is present / absent / never
        * measured, and `?? false` would collapse the third into "absent" — a
        * definite answer this client has no grounds to give. */
@@ -155,6 +175,11 @@ export function parseRows(answer: unknown): readonly BookRow[] {
      bug"; only the missing half was actually handled. */
   return byFirstId(rows, (row) => row.bookId)
 }
+
+const stamp = (value: unknown): Hlc | null => (isHlc(value) ? value : null)
+/** A progress is a fraction of the book: outside 0–1 it is clamped, and not a number at all reads as none — the record parser's own rule. `num` has already refused anything that is not finite. */
+const within01 = (value: number | null): number => (value === null ? 0 : Math.min(1, Math.max(0, value)))
+const stars = (value: unknown): Stars | null => (STARS as readonly unknown[]).includes(value) ? (value as Stars) : null
 
 const sameList = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((x, i) => x === b[i])
@@ -182,6 +207,12 @@ function same(a: readonly BookRow[], b: readonly BookRow[]): boolean {
       row.position === other.position &&
       row.progress === other.progress &&
       row.finished === other.finished &&
+      row.status === other.status &&
+      row.statusAt === other.statusAt &&
+      row.rating === other.rating &&
+      row.ratingAt === other.ratingAt &&
+      row.review === other.review &&
+      row.reviewAt === other.reviewAt &&
       row.addedAt === other.addedAt &&
       row.openedAt === other.openedAt &&
       row.format === other.format &&
@@ -253,11 +284,15 @@ export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
       }
     } catch (thrown) {
       if (stale()) return
+      const before = why
       why = thrown instanceof Error ? thrown.message : String(thrown)
       /* ONE WAKE-UP, NOT TWO. `setStatus` publishes when the status changes and
          this published again unconditionally, so every failure re-rendered
          every subscriber twice for one piece of news. */
-      const moved = state !== (rows.length > 0 ? 'stale' : 'failed')
+      /* Once per piece of news — and a changed REASON is news, even when the
+         state it lands in is the one already shown. */
+      // Stryker disable next-line ConditionalExpression: the rows only change on a success, which clears the reason — so a state that moved under the same reason cannot be presented.
+      const moved = state !== (rows.length > 0 ? 'stale' : 'failed') || why !== before
       state = rows.length > 0 ? 'stale' : 'failed'
       if (moved) publish()
       return
@@ -324,6 +359,19 @@ export function asIndexedBook(row: BookRow): IndexedBook {
        saw it: a re-render for a field nobody could read. WI-21.3 asks this row
        to "parse, compare and carry", and carrying is the third of the three. */
     ...(row.identifier !== null ? { identifier: row.identifier } : {}),
+    /* The reader's own opinion (WI-23.B3), carried with the stamps the row
+       has: a shelf drawn from the wire says what the reader said, and a
+       register with no stamp on the wire is one with none here. */
+    ...(row.status !== null && row.statusAt !== null ? { status: { state: row.status, at: row.statusAt as Hlc } } : {}),
+    /* One to five, as the record holds it — `parseRows` already refused
+       anything else, and `BookRow.rating` is typed `Stars | null` to say so;
+       a second membership test here was a fallback no caller could reach. */
+    ...(row.rating !== null ? { rating: row.rating, ...(row.ratingAt !== null ? { ratingAt: row.ratingAt as Hlc } : {}) } : {}),
+    ...(row.review !== null && row.reviewAt !== null ? { review: { text: row.review, at: row.reviewAt as Hlc } } : {}),
+    /* What the bytes are, and their digest — representable, and read by the
+       shelf's own views, so a shelf drawn from the wire carries them too. */
+    ...(row.format !== null ? { format: row.format } : {}),
+    ...(row.contentHash !== null ? { contentHash: row.contentHash } : {}),
     ...(row.series !== null ? { series: row.series } : {}),
     ...(row.seriesIndex !== null ? { seriesIndex: row.seriesIndex } : {}),
     ...(row.publisher !== null ? { publisher: row.publisher } : {}),
@@ -333,7 +381,15 @@ export function asIndexedBook(row: BookRow): IndexedBook {
     tags: row.tags,
     position: row.position,
     progress: row.progress,
-    finished: row.finished,
+    /* ONE FACT, NOT TWO — the kernel's own rule (`parseRecord`, the sync
+       merge, `setStatus`): with a status on the wire, `finished` FOLLOWS it
+       and is stamped by it, and the legacy flag speaks only for a row that
+       carries no status. This copied the flag beside the status, so a row
+       saying `reading` next to `finished: true` became a record that said
+       both, and the status filter and the progress bar disagreed about it. */
+    ...(row.status !== null && row.statusAt !== null
+      ? { finished: row.status === 'finished', finishedAt: row.statusAt as Hlc }
+      : { finished: row.finished }),
     ...(row.addedAt !== null ? { addedAt: row.addedAt } : {}),
     ...(row.openedAt !== null ? { openedAt: row.openedAt } : {}),
     ...(row.hasContent !== null ? { hasContent: row.hasContent } : {}),

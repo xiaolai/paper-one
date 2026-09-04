@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CORPUS_BUILDS, BUILD_IDS } from '../markCorpus.testkit'
-import { claimFor, indexKeys, matchWork, normaliseName, primaryLanguage } from './workClaim'
+import { MAX_CLAIM_DIGESTS, SHELF_WORK, claimFor, indexKeys, isClaimShape, listIdOf, listWork, logOfClaim, matchWork, normaliseName, primaryLanguage, titleProper } from './workClaim'
 
 /**
  * WI-22.C1 — the log key.
@@ -77,6 +77,15 @@ describe('matchWork', () => {
     author: '#melville',
     language: 'en',
     ...over,
+  })
+
+  it('does not match weakly across languages, however alike the rest', () => {
+    const en = claim({ ids: [], titles: ['dune'], author: 'frank herbert', language: 'en' })
+    const de = claim({ ids: [], titles: ['dune'], author: 'frank herbert', language: 'de' })
+    expect(matchWork(en, de)).toBe('none')
+    /* A book that has said nothing about its language is not matched weakly either: the fallback needs both to speak. */
+    expect(matchWork(en, claim({ ids: [], titles: ['dune'], author: 'frank herbert', language: '' }))).toBe('none')
+    expect(matchWork(en, claim({ ids: [], titles: ['dune'], author: 'frank herbert', language: 'en' }))).toBe('weak')
   })
 
   it('matches strongly when the builds share one identifier', () => {
@@ -231,5 +240,148 @@ describe('claimFor', () => {
     expect(claim.ids).toEqual([])
     /* And is still usable — this is the 33-book case. */
     expect(indexKeys(claim)).toHaveLength(1)
+  })
+})
+
+describe('a list’s reserved claim — WI-23.E1', () => {
+  it('names the list in its one id, in clear, and reads it back', () => {
+    expect(listWork('aa11')).toEqual({ ids: ['paper.circle.list:aa11'], titles: [], author: '', language: '' })
+    expect(listIdOf(listWork('aa11'))).toBe('aa11')
+    expect(listIdOf(listWork('a'))).toBe('a')
+  })
+
+  it('is not a work, a shelf, or a list with no id', () => {
+    expect(listIdOf(SHELF_WORK)).toBeNull()
+    expect(listIdOf({ ids: [], titles: [], author: '', language: '' })).toBeNull()
+    expect(listIdOf({ ids: ['paper.circle.list:'], titles: [], author: '', language: '' })).toBeNull()
+    expect(listIdOf({ ids: ['paper.circle.list:aa11', 'paper.circle.list:bb22'], titles: [], author: '', language: '' })).toBeNull()
+    expect(listIdOf({ ids: ['aa11'], titles: [], author: '', language: '' })).toBeNull()
+    expect(listIdOf({ ids: ['xpaper.circle.list:aa11'], titles: [], author: '', language: '' })).toBeNull()
+    /* Two lists never meet, and a list never meets the shelf or a book. */
+    expect(matchWork(listWork('aa11'), listWork('bb22'))).toBe('none')
+    expect(matchWork(listWork('aa11'), SHELF_WORK)).toBe('none')
+    expect(SHELF_WORK).toEqual({ ids: ['paper.circle.shelf'], titles: [], author: '', language: '' })
+  })
+})
+
+describe('the rest of the claim’s clauses — one row each', () => {
+  it('takes the primary subtag from a padded, mixed-case tag and refuses one that is not two or three letters', () => {
+    expect(primaryLanguage('  EN-gb ')).toBe('en')
+    expect(primaryLanguage('zh_Hans')).toBe('zh')
+    expect(primaryLanguage('e')).toBe('')
+    expect(primaryLanguage('engl')).toBe('')
+    expect(primaryLanguage('1en')).toBe('')
+    expect(primaryLanguage('en1')).toBe('')
+    expect(primaryLanguage('-en')).toBe('')
+  })
+
+  it('drops an article only before a space, and keeps an article-only name', () => {
+    expect(normaliseName('The Whale')).toBe('whale')
+    expect(normaliseName('Theodore')).toBe('theodore')
+    expect(normaliseName('The')).toBe('the')
+    expect(normaliseName('A')).toBe('a')
+  })
+
+  it('cuts the title proper at the first separator, keeps a title that starts with one, and falls back to the whole', () => {
+    expect(titleProper('Moby-Dick; or, The Whale')).toBe('moby dick')
+    expect(titleProper(': Untitled')).toBe('untitled')
+    expect(titleProper(';')).toBe('')
+    expect(titleProper('')).toBe('')
+    expect(titleProper(undefined)).toBe('')
+  })
+
+  it('claims no title spelling for a book with no title, and no weak key without a language', () => {
+    const digest = (value: string) => `h(${value})`
+    const claim = claimFor({ author: 'A', languages: ['en'] }, digest)
+    expect(claim.titles).toEqual([])
+    expect(indexKeys({ ids: ['x'], titles: ['t'], author: 'a', language: '' })).toEqual(['s:x'])
+    expect(indexKeys({ ids: ['x'], titles: ['t'], author: 'a', language: 'en' })).toEqual(['s:x', 'w:en:t:a'])
+  })
+})
+
+describe('a list claim', () => {
+  it('is built only from a list id, so listIdOf reads back what listWork wrote', () => {
+    expect(listIdOf(listWork('ab12'))).toBe('ab12')
+    for (const bad of ['', 'nope', 'AB12', 'a'.repeat(65), '../x']) {
+      expect(() => listWork(bad), bad).toThrow(/is not a list id/u)
+    }
+  })
+})
+
+describe('the language clause of a match, every way round', () => {
+  const claim = (language: string, ids: string[] = ['id1']) => ({ ids, titles: ['t'], author: 'a', language })
+  it('refuses a shared identifier across two named, different languages, and allows it when either side is silent', () => {
+    expect(matchWork(claim('en'), claim('fr'))).toBe('none')
+    expect(matchWork(claim('fr'), claim('en'))).toBe('none')
+    expect(matchWork(claim('en'), claim(''))).toBe('strong')
+    expect(matchWork(claim(''), claim('en'))).toBe('strong')
+    expect(matchWork(claim(''), claim(''))).toBe('strong')
+    expect(matchWork(claim('en'), claim('en'))).toBe('strong')
+  })
+})
+
+describe('two books that name no author', () => {
+  it('do not meet on the weak key, however alike their titles', () => {
+    const digest = (value: string) => `h(${value})`
+    const one = claimFor({ title: 'Dune', languages: ['en'] }, digest)
+    const two = claimFor({ title: 'Dune', languages: ['en'] }, digest)
+    expect(one.author).toBe('')
+    expect(matchWork(one, two)).toBe('none')
+    const named = claimFor({ title: 'Dune', author: 'Herbert', languages: ['en'] }, digest)
+    expect(matchWork(named, claimFor({ title: 'Dune', author: 'Herbert', languages: ['en'] }, digest))).toBe('weak')
+  })
+})
+
+describe('two languages, one title, one author', () => {
+  it('do not meet on the weak key', () => {
+    const digest = (value: string) => `h(${value})`
+    expect(matchWork(claimFor({ title: 'Dune', author: 'Herbert', languages: ['en'] }, digest), claimFor({ title: 'Dune', author: 'Herbert', languages: ['fr'] }, digest))).toBe('none')
+  })
+})
+
+describe('the one rule for a claim’s shape', () => {
+  const HEX = '1a'.repeat(32)
+  const regular = { ids: [HEX], titles: ['2b'.repeat(32)], author: '3c'.repeat(32), language: 'en' }
+
+  it('reads a regular claim, the shelf’s, and a list’s', () => {
+    expect(isClaimShape(regular)).toBe(true)
+    expect(isClaimShape({ ...regular, ids: [], titles: [], author: '', language: '' })).toBe(true)
+    expect(isClaimShape(SHELF_WORK)).toBe(true)
+    expect(isClaimShape(listWork('aa11'))).toBe(true)
+  })
+
+  it.each([
+    ['a string', 'claim'],
+    ['null', null],
+    ['a list', []],
+    ['a missing field', { ids: [HEX], titles: [], author: '' }],
+    ['an extra field', { ...regular, extra: 1 }],
+    ['ids that are not a list', { ...regular, ids: HEX }],
+    ['an id that is not a digest', { ...regular, ids: ['x'] }],
+    ['an upper-case digest', { ...regular, ids: [HEX.toUpperCase()] }],
+    ['a title that is not a digest', { ...regular, titles: ['t'] }],
+    ['an author that is not a digest', { ...regular, author: 'a' }],
+    ['a language that is not a subtag', { ...regular, language: 'english' }],
+    ['more ids than the bound', { ...regular, ids: Array.from({ length: MAX_CLAIM_DIGESTS + 1 }, (_, i) => i.toString(16).padStart(64, '0')) }],
+    ['more titles than the bound', { ...regular, titles: Array.from({ length: MAX_CLAIM_DIGESTS + 1 }, (_, i) => i.toString(16).padStart(64, '0')) }],
+    ['the shelf’s id beside a digest', { ...regular, ids: [SHELF_WORK.ids[0], HEX] }],
+    ['the shelf’s id with a title', { ...SHELF_WORK, titles: ['2b'.repeat(32)] }],
+    ['a list id that is not a list id', { ...SHELF_WORK, ids: ['paper.circle.list:not-hex'] }],
+    ['two list ids', { ...SHELF_WORK, ids: ['paper.circle.list:aa11', 'paper.circle.list:bb22'] }],
+  ])('refuses %s', (_what, value) => {
+    expect(isClaimShape(value)).toBe(false)
+  })
+
+  it('names which log a claim is for', () => {
+    expect(logOfClaim(regular)).toBe('work')
+    expect(logOfClaim(SHELF_WORK)).toBe('shelf')
+    expect(logOfClaim(listWork('aa11'))).toBe('list')
+  })
+})
+
+describe('the weak index key', () => {
+  it('is minted only with a language AND an author — `matchWork` refuses a weak match on an empty author', () => {
+    expect(indexKeys({ ids: ['x'], titles: ['t'], author: '', language: 'en' })).toEqual(['s:x'])
+    expect(indexKeys({ ids: [], titles: ['t'], author: '', language: 'en' })).toEqual([])
   })
 })

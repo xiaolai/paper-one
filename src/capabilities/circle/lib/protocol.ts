@@ -1,4 +1,4 @@
-import { SUPPORTED, negotiate, type VersionRange, type WorkClaim } from '../../../kernel'
+import { MAX_COVER_BYTES, MAX_ROSTER_DEVICES, SUPPORTED, isClaimShape, negotiate, type VersionRange, type WorkClaim, MAX_PAGE_CHARS as KERNEL_MAX_PAGE_CHARS, MAX_CLAIM_DIGESTS } from '../../../kernel'
 
 /**
  * The circle's own vocabulary on the wire — WI-22.C1.
@@ -51,13 +51,34 @@ export const CIRCLE_VERSION: VersionRange = SUPPORTED
 export const CIRCLE_SERVICES = {
   hello: { name: 'circle.hello', grant: 'circle:read' },
   pages: { name: 'circle.pages', grant: 'circle:read' },
+  /**
+   * The shelf log — WI-23.C1. The same grant as pages: the SWITCH is what
+   * decides whether this caller is served anything, per person, and it is
+   * checked by the handler against the relationship, not by the envelope
+   * against a grant. A grant is per device and a relationship is per person.
+   */
+  shelf: { name: 'circle.shelf', grant: 'circle:read' },
+  /**
+   * The list logs — WI-23.E1. Gated exactly as the shelf is, by the same
+   * switch: a list is a subset of a shelf and discloses no more.
+   */
+  lists: { name: 'circle.lists', grant: 'circle:read' },
+  /**
+   * A jacket's bytes, by the shelf entry that named its digest — WI-23.C5.
+   * The same grant and the same switch as the shelf: a person the switch is
+   * off for is refused exactly as a pub nobody holds is.
+   */
+  cover: { name: 'circle.cover', grant: 'circle:read' },
 } as const
+
+/** The most lists one request names a cursor for. */
+export const MAX_LISTS_PER_REQUEST = 64
 
 /** The most pages one answer carries, whatever was asked for. */
 export const MAX_PAGES_PER_ANSWER = 32
 
-/** The most a single page may be, in characters of canonical JSON. */
-export const MAX_PAGE_CHARS = 512 * 1024
+/** The most a single page may be, in characters of canonical JSON — the kernel's frame cap, named here for the callers that had it here. */
+export const MAX_PAGE_CHARS = KERNEL_MAX_PAGE_CHARS
 
 /** What a caller says when it opens a circle exchange. */
 export interface CircleHello {
@@ -77,8 +98,12 @@ export interface CircleWelcome {
   readonly agreed: number
 }
 
-/** The most devices one person's roster may have, for a bounded cursor. */
-export const MAX_CURSOR_DEVICES = 64
+/**
+ * The most devices a cursor may name — THE ROSTER'S OWN BOUND, not a number
+ * of this module's: a cursor tighter than the roster refused the sixty-fifth
+ * device's stream for ever, and a second constant would drift again.
+ */
+export const MAX_CURSOR_DEVICES: number = MAX_ROSTER_DEVICES
 
 /** Ask one person for what they have shared of one work. */
 export interface PagesRequest {
@@ -97,6 +122,28 @@ export interface PagesRequest {
    * was published between two calls.
    */
   readonly since: Readonly<Record<string, number>>
+  /**
+   * The page version the caller reads — the one the hello agreed on.
+   *
+   * ⚠️ **ON THE REQUEST, SO THE ANSWERER NEEDS NO MEMORY OF THE HELLO.** A
+   * v1 caller's request has no `v` at all — it was written before the member
+   * existed, and its strict parser would refuse an answer it did not ask for
+   * — so absent means 1, and a v2 caller names its version. Serving is
+   * stateless either way, which is what lets a page be answered by whichever
+   * device of the publisher's took the call.
+   */
+  readonly v: number
+}
+
+/**
+ * Ask one person for their shelf — WI-23.C1. No work: the shelf is the one
+ * log a recipient can ask for whole, because it is about works the recipient
+ * cannot name yet.
+ */
+export interface ShelfRequest {
+  readonly since: Readonly<Record<string, number>>
+  /** The chain the caller negotiated — REQUIRED, unlike `PagesRequest.v`: the shelf is a v2 log, so there is no v1 to default to. */
+  readonly v: number
 }
 
 /** Pages, exactly as they were signed. */
@@ -151,17 +198,73 @@ function personId(value: unknown): string | null {
   return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value) ? value : null
 }
 
-/** A `WorkClaim`, whose fields are digests and one language subtag. */
+/**
+ * A `WorkClaim`, whose fields are digests and one language subtag — or one
+ * reserved claim. The kernel's rule, which a page and a sealed boundary are
+ * held to as well: three parsers of one shape had drifted three ways.
+ */
 function workClaim(value: unknown): WorkClaim | null {
-  const held = object(value)
-  if (!held || !exactly(held, ['ids', 'titles', 'author', 'language'])) return null
-  const { ids, titles, author, language } = held
-  const digests = (list: unknown): list is readonly string[] =>
-    Array.isArray(list) && list.every((one) => typeof one === 'string')
-  if (!digests(ids) || !digests(titles)) return null
-  if (typeof author !== 'string' || typeof language !== 'string') return null
-  return { ids, titles, author, language }
+  return isClaimShape(value) ? value : null
 }
+
+/**
+ * The most one answer's pages may weigh between them, in BYTES on the wire
+ * as `wireBytesOf` counts them — under the transport's own 4 MiB envelope
+ * with room for the frame. The per-page cap and the page count each held on
+ * their own, and thirty-two pages at the page cap made an answer four times
+ * what the envelope carries. (The receiving parser holds an answer to the
+ * same number in characters, which is at most the bytes: a bound on what it
+ * will parse, not a promise about the frame.)
+ */
+export const MAX_ANSWER_CHARS = 3 * 1024 * 1024
+
+/** A cover travels in chunks of this many bytes — two of them hold the largest jacket the circle serves. */
+export const COVER_CHUNK_BYTES = 512 * 1024
+
+/** The most characters one chunk spells in base64. */
+const COVER_CHUNK_CHARS = Math.ceil(COVER_CHUNK_BYTES / 3) * 4
+
+export interface CoverRequest {
+  /** The shelf entry whose digest the caller holds. */
+  readonly pub: string
+  /** Where to resume from, in bytes. */
+  readonly offset: number
+}
+
+export function parseCoverRequest(value: unknown): CoverRequest | null {
+  const held = object(value)
+  if (!held || !exactly(held, ['pub', 'offset'])) return null
+  const { pub, offset } = held
+  /* A pub is minted hex, bounded — the rule a list id is held to. */
+  if (typeof pub !== 'string' || !/^[0-9a-f]{1,64}$/u.test(pub)) return null
+  if (!Number.isSafeInteger(offset) || (offset as number) < 0 || (offset as number) >= MAX_COVER_BYTES) return null
+  return { pub, offset: offset as number }
+}
+
+export interface CoverAnswer {
+  readonly offset: number
+  /** The whole file's size, so the caller knows what it is collecting before the last chunk. */
+  readonly size: number
+  /** This chunk, base64. */
+  readonly bytes: string
+  readonly more: boolean
+}
+
+export function parseCoverAnswer(value: unknown): CoverAnswer | null {
+  const held = object(value)
+  if (!held || !exactly(held, ['offset', 'size', 'bytes', 'more'])) return null
+  const { offset, size, bytes, more } = held
+  if (!Number.isSafeInteger(offset) || (offset as number) < 0) return null
+  // Stryker disable next-line ConditionalExpression,EqualityOperator: a size of zero is refused by the offset check below; this spells it.
+  if (!Number.isSafeInteger(size) || (size as number) <= 0 || (size as number) > MAX_COVER_BYTES) return null
+  if ((offset as number) >= (size as number)) return null
+  if (typeof bytes !== 'string' || bytes === '' || bytes.length > COVER_CHUNK_CHARS) return null
+  if (typeof more !== 'boolean') return null
+  return { offset: offset as number, size: size as number, bytes, more }
+}
+
+/** The most identifiers, or title spellings, one claim may carry — the kernel's bound, named here for the callers that had it here. */
+export { MAX_CLAIM_DIGESTS }
 
 /** `null` for anything this build will not answer. */
 export function parseCircleHello(value: unknown): CircleHello | null {
@@ -214,11 +317,66 @@ function cursor(value: unknown): Readonly<Record<string, number>> | null {
 /** `null` for a request this build will not answer. */
 export function parsePagesRequest(value: unknown): PagesRequest | null {
   const held = object(value)
-  if (!held || !exactly(held, ['work', 'since'])) return null
+  if (!held) return null
+  /* `v` is the one member a request may omit — see `PagesRequest.v`. Present,
+     it must name a version this build publishes; a strict parser does not
+     guess at what a v3 caller wanted. */
+  const versioned = Object.hasOwn(held, 'v')
+  if (!exactly(held, versioned ? ['work', 'since', 'v'] : ['work', 'since'])) return null
+  const v = versioned ? held['v'] : 1
+  if (!Number.isSafeInteger(v) || (v as number) < CIRCLE_VERSION.min || (v as number) > CIRCLE_VERSION.max) return null
   const work = workClaim(held['work'])
   const since = cursor(held['since'])
   if (!work || !since) return null
-  return { work, since }
+  return { work, since, v: v as number }
+}
+
+/**
+ * Ask one person for every list they publish — WI-23.E1. A cursor per list
+ * this side already holds, by id; a list not named is asked from its start,
+ * which is how a new list is discovered: the answer's pages name it.
+ */
+export interface ListsRequest {
+  readonly since: Readonly<Record<string, Readonly<Record<string, number>>>>
+  /** Required, and at least 3: lists are a v3 log. */
+  readonly v: number
+}
+
+/** `null` for a lists request this build will not answer. */
+export function parseListsRequest(value: unknown): ListsRequest | null {
+  const held = object(value)
+  if (!held) return null
+  if (!exactly(held, ['since', 'v'])) return null
+  const v = held['v']
+  if (!Number.isSafeInteger(v) || (v as number) < 3 || (v as number) > CIRCLE_VERSION.max) return null
+  const named = object(held['since'])
+  if (!named) return null
+  const keys = Object.keys(named)
+  if (keys.length > MAX_LISTS_PER_REQUEST) return null
+  const since: Record<string, Readonly<Record<string, number>>> = {}
+  for (const key of keys) {
+    /* A list id is a minted `pub`: hex, and bounded. */
+    if (!/^[0-9a-f]{1,64}$/u.test(key)) return null
+    const one = cursor(named[key])
+    if (!one) return null
+    since[key] = one
+  }
+  return { since, v: v as number }
+}
+
+/** `null` for a shelf request this build will not answer. */
+export function parseShelfRequest(value: unknown): ShelfRequest | null {
+  const held = object(value)
+  if (!held) return null
+  /* A v1 build has no shelf at all — the log and its service are v2 — so a
+     request naming v1, or naming no version, is refused rather than answered
+     with a chain that carries no `shelf` entry. The version is required. */
+  if (!exactly(held, ['since', 'v'])) return null
+  const v = held['v']
+  if (!Number.isSafeInteger(v) || (v as number) < 2 || (v as number) > CIRCLE_VERSION.max) return null
+  const since = cursor(held['since'])
+  if (!since) return null
+  return { since, v: v as number }
 }
 
 /**
@@ -230,13 +388,25 @@ export function parsePagesRequest(value: unknown): PagesRequest | null {
  * page of forty megabytes, costs this side one length comparison.
  */
 export function parsePagesAnswer(value: unknown): PagesAnswer | null {
+  const parsed = pagesAnswer(value)
+  /* Nothing in hand and more to come is an answer no fetch can act on: the
+     loops stop on an empty page list, so `more` would be a promise nobody
+     keeps. Refused as the malformed answer it is. */
+  if (parsed !== null && parsed.pages.length === 0 && parsed.more) return null
+  return parsed
+}
+
+function pagesAnswer(value: unknown): PagesAnswer | null {
   const held = object(value)
   if (!held || !exactly(held, ['pages', 'more'])) return null
   const { pages, more } = held
   if (typeof more !== 'boolean') return null
   if (!Array.isArray(pages) || pages.length > MAX_PAGES_PER_ANSWER) return null
+  let chars = 0
   for (const page of pages) {
     if (typeof page !== 'string' || page.length > MAX_PAGE_CHARS) return null
+    chars += page.length
+    if (chars > MAX_ANSWER_CHARS) return null
   }
   return { pages: pages as readonly string[], more }
 }

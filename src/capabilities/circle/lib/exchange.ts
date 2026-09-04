@@ -6,10 +6,18 @@ import {
   agreedVersion,
   parseCircleHello,
   parsePagesRequest,
+  parseShelfRequest,
   type CircleWelcome,
   type PagesAnswer,
 } from './protocol'
-import { pagesFor, type Publisher, type SharedFile } from './publish'
+import { DEFAULT_BOUNDS, pagesFor, wireBytesOf, type Bounds, type Publisher, type SharedFile } from './publish'
+import { liveShelfRows, shelfPagesFor, type ShelfFile } from './shelf'
+import { base64Of } from './base64'
+import { SHELF_WORK, listWork } from '../../../kernel'
+import { listPagesFor, type ListFile, type OwnList } from './lists'
+import { COVER_CHUNK_BYTES, MAX_ANSWER_CHARS, MAX_PAGES_PER_ANSWER, parseCoverRequest, parseListsRequest, type CoverAnswer } from './protocol'
+import { MAX_COVER_BYTES } from '../../../kernel'
+import { cutToField } from './workField'
 
 /**
  * The two sides of an exchange, as functions of their inputs — WI-22.C4.
@@ -38,9 +46,23 @@ export interface BookLike extends ClaimSource {
   readonly id: string
 }
 
-/** The claim for one book of this library. */
+/**
+ * The claim for one book of this library.
+ *
+ * Over the fields as a shelf row or a list item carries them — cut to
+ * `MAX_WORK_FIELD` — so a claim made here and one made from the published
+ * work (`claimOfShelved`) are the same claim for the same book.
+ */
 export function claimOf(book: BookLike): WorkClaim {
-  return claimFor(book, workDigest)
+  return claimFor(
+    {
+      ...(book.title === undefined ? {} : { title: cutToField(book.title) }),
+      ...(book.author === undefined ? {} : { author: cutToField(book.author) }),
+      ...(book.identifier === undefined ? {} : { identifier: cutToField(book.identifier) }),
+      ...(book.languages === undefined ? {} : { languages: book.languages }),
+    },
+    workDigest,
+  )
 }
 
 /**
@@ -53,13 +75,22 @@ export function claimOf(book: BookLike): WorkClaim {
  * land in depend on the order the shelf happened to be read.
  */
 export function bookFor(books: readonly BookLike[], claim: WorkClaim): BookLike | null {
+  /* Two editions matching alike — two copies of one identifier, say — are
+     told apart by their id, the one thing about them that two reads of the
+     shelf agree on. Listing order is not a rule. */
+  let strong: BookLike | null = null
   let weak: BookLike | null = null
   for (const book of books) {
     const how = matchWork(claim, claimOf(book))
-    if (how === 'strong') return book
-    if (how === 'weak' && !weak) weak = book
+    // Stryker disable EqualityOperator: two books on one shelf never share an id, so `<` and `<=` choose alike.
+    if (how === 'strong') {
+      if (strong === null || book.id < strong.id) strong = book
+    } else if (how === 'weak') {
+      if (weak === null || book.id < weak.id) weak = book
+    }
+    // Stryker restore EqualityOperator
   }
-  return weak
+  return strong ?? weak
 }
 
 /**
@@ -68,7 +99,20 @@ export function bookFor(books: readonly BookLike[], claim: WorkClaim): BookLike 
  * `indexKeys` is deliberately generous — it is not the answer, `matchWork` is
  * — so a hit here is a CANDIDATE and every candidate is still judged.
  */
+/* One index per shelf snapshot. The array is the key: `runningOver` hands
+   the same array back until the library changes, so a thousand requests
+   over an unchanged shelf build the index once. */
+const INDEXES = new WeakMap<readonly BookLike[], ReadonlyMap<string, readonly BookLike[]>>()
+
 export function indexOf(books: readonly BookLike[]): ReadonlyMap<string, readonly BookLike[]> {
+  const known = INDEXES.get(books)
+  if (known !== undefined) return known
+  const built = buildIndex(books)
+  INDEXES.set(books, built)
+  return built
+}
+
+function buildIndex(books: readonly BookLike[]): ReadonlyMap<string, readonly BookLike[]> {
   const index = new Map<string, BookLike[]>()
   for (const book of books) {
     for (const key of indexKeys(claimOf(book))) {
@@ -120,6 +164,153 @@ export interface Serving {
   readonly seal: (bookId: string, held: SharedFile) => Promise<void>
   /** Who this device is, and how it signs. */
   readonly publisher: (work: WorkClaim) => Promise<Publisher | null>
+  /** The reader's own shelf as published, and the boundaries sealed — WI-23.C1. */
+  readonly shelf: () => Promise<ShelfFile>
+  readonly sealShelf: (held: ShelfFile) => Promise<void>
+  /** The reader's own lists as published, and the boundaries sealed — WI-23.E1. */
+  readonly lists: () => Promise<readonly OwnList[]>
+  readonly sealList: (listId: string, held: ListFile) => Promise<void>
+  /** The jacket this device holds for a book, measured — or null (WI-23.C5). */
+  readonly cover: (bookId: string) => Promise<CoverSource | null>
+}
+
+/** A jacket as the publisher holds it: the facts on its record and the file's bytes. */
+export interface CoverSource {
+  readonly hash: string
+  readonly size: number
+  readonly bytes: Uint8Array
+}
+
+/**
+ * Answer a request for one chunk of a jacket — WI-23.C5.
+ *
+ * ⚠️ **ONE REFUSAL FOR EVERY WAY OF HAVING NOTHING TO SAY.** A person the
+ * switch is off for, a pub nobody holds, a shelf entry that named no cover, a
+ * file that has changed under its digest, one past the size the circle
+ * serves: each answers `null`, and the caller cannot tell which. A friend
+ * who has been hidden from must not learn it by asking for a picture.
+ *
+ * The digest on the shelf entry is the contract: the bytes served are the
+ * file whose facts match it, and a file that no longer matches is not served
+ * rather than served with a caveat. The recipient verifies the whole file
+ * against the same digest before keeping a byte.
+ */
+export async function answerCover(request: unknown, serving: Serving, discloses: boolean): Promise<CoverAnswer | null> {
+  const asked = parseCoverRequest(request)
+  if (!asked) return null
+  if (!discloses) return null
+  /* ANY live row, not the one per book `shelvedNow` keeps: a friend asks by
+     the pub their page carried, and two device stores that met can hold two
+     live rows for one book. */
+  const row = liveShelfRows(await serving.shelf()).find((one) => one.pub === asked.pub)
+  // Stryker disable next-line ConditionalExpression: a row that names no cover matches no held hash below; this refuses it a line earlier.
+  if (row === undefined || row.work.cover === undefined) return null
+  const held = await serving.cover(row.bookId)
+  if (held === null || held.hash !== row.work.cover || held.size > MAX_COVER_BYTES || held.bytes.length !== held.size) return null
+  if (asked.offset >= held.size) return null
+  const slice = held.bytes.subarray(asked.offset, Math.min(held.size, asked.offset + COVER_CHUNK_BYTES))
+  return { offset: asked.offset, size: held.size, bytes: base64Of(slice), more: asked.offset + slice.length < held.size }
+}
+
+/** What a caller is served when there is nothing to say — ONE literal, see `answerShelf`. */
+const NOTHING: PagesAnswer = { pages: [], more: false }
+
+/**
+ * Answer one request for the shelf — WI-23.C1, gated by WI-23.C2.
+ *
+ * ⚠️ **A PERSON THE SWITCH IS OFF FOR IS ANSWERED EXACTLY AS A READER WHO
+ * OWNS NOTHING IS.** `discloses` is the relationship's `shelf` for the
+ * CALLER; false answers `NOTHING`, and so does a shelf with no books — the
+ * same literal, so the bytes on the wire cannot say which. A difference
+ * would be a bit of information about the shelf, leaked to somebody the
+ * switch is off for, which is the falsifier the item names.
+ */
+export async function answerShelf(request: unknown, serving: Serving, discloses: boolean, bounds: Bounds = DEFAULT_BOUNDS): Promise<PagesAnswer | null> {
+  const asked = parseShelfRequest(request)
+  if (!asked) return null
+  if (!discloses) return NOTHING
+
+  const publisher = await serving.publisher(SHELF_WORK)
+  if (!publisher) return NOTHING
+
+  const held = await serving.shelf()
+  const built = await shelfPagesFor(held, publisher, asked.since, workDigest, bounds, asked.v)
+  /* Boundaries before pages, for `answerPages`'s reason. */
+  if (built.held.sealed.length !== held.sealed.length) await serving.sealShelf(built.held)
+  return { pages: built.pages, more: built.more }
+}
+
+/**
+ * Answer one request for every list — WI-23.E1, gated by WI-23.C2's switch.
+ *
+ * ⚠️ **THE SAME `NOTHING` AS THE SHELF'S, FOR THE SAME REASON.** A list names
+ * works the recipient may not have, so it needs the shelf's disclosure rule:
+ * a person the switch is off for is answered byte for byte as a reader with
+ * no lists is. The falsifier compares the two answers' bytes.
+ *
+ * One answer carries pages from several lists; each page names its list in
+ * its claim (`listWork`), which is how the recipient files it and how a new
+ * list is discovered. Bounded to `MAX_PAGES_PER_ANSWER` across lists — a
+ * truncated tail is asked for again from the cursor, which only moves over
+ * pages taken.
+ */
+export async function answerLists(request: unknown, serving: Serving, discloses: boolean, bounds: Bounds = DEFAULT_BOUNDS): Promise<PagesAnswer | null> {
+  const asked = parseListsRequest(request)
+  if (!asked) return null
+  if (!discloses) return NOTHING
+
+  const pages: string[] = []
+  /* ONE SIZE BUDGET ACROSS THE LISTS, as there is one page budget: a caller
+     with many lists is answered to the same size as one with one. Both are
+     the caller's bounds, the module's caps notwithstanding: a test that
+     narrows them must see them held. */
+  const maxPages = Math.min(bounds.maxPages, MAX_PAGES_PER_ANSWER)
+  const maxBytes = Math.min(bounds.maxChars ?? MAX_ANSWER_CHARS, MAX_ANSWER_CHARS)
+  let bytes = 0
+  let more = false
+  /* ⚠️ **THE LISTS THE CALLER NAMED GO FIRST.** A caller holding more lists
+     than a cursor may name asks for a window of them and names no cursor for
+     the rest — which this side then serves from their beginning, and one
+     long list among them filled every answer before a named list behind it
+     was reached: the window rotated, and the named lists starved. Named
+     lists in the caller's order, then the unnamed in this side's — a cursor
+     the caller sent is the first thing honoured, and the discovery of a list
+     they have never held takes the room that is left. */
+  const rank = new Map(Object.keys(asked.since).map((id, at) => [id, at]))
+  const unnamed = Number.MAX_SAFE_INTEGER
+  const lists = [...(await serving.lists())].sort((a, b) => (rank.get(a.id) ?? unnamed) - (rank.get(b.id) ?? unnamed))
+  for (const list of lists) {
+    /* ⚠️ **NOTHING IS CUT OR SIGNED FOR AN ANSWER THAT IS ALREADY FULL.** The
+     * cap bounds the wire; it has to bound the work too, or a caller with
+     * many lists makes this side sign pages it then throws away. */
+    if (pages.length >= maxPages || bytes >= maxBytes) {
+      more = true
+      break
+    }
+    const publisher = await serving.publisher(listWork(list.id))
+    if (!publisher) return NOTHING
+    const room = maxPages - pages.length
+    const built = await listPagesFor(list.held, publisher, asked.since[list.id] ?? {}, workDigest, { ...bounds, maxPages: room, maxChars: maxBytes - bytes }, asked.v)
+    if (built.held.sealed.length !== list.held.sealed.length) await serving.sealList(list.id, built.held)
+    /* ⚠️ **PAGE BY PAGE AGAINST THE WHOLE ANSWER.** `pagesOver` lets a log's
+       FIRST page through whatever the size budget says — a page has to be
+       sendable on its own — so every list could put one page over what was
+       left, and the answer as a whole outgrew the frame. Here the answer's
+       first page is the only one that goes through regardless; the rest
+       wait for the next request, which is what `more` says. */
+    for (const page of built.pages) {
+      const cost = wireBytesOf(page)
+      if (pages.length > 0 && bytes + cost > maxBytes) {
+        more = true
+        break
+      }
+      pages.push(page)
+      bytes += cost
+    }
+    if (more) break
+    if (built.more) more = true
+  }
+  return { pages, more }
 }
 
 /**
@@ -147,7 +338,10 @@ export async function answerPages(request: unknown, serving: Serving): Promise<P
   if (!publisher) return { pages: [], more: false }
 
   const held = await serving.shared(book.id)
-  const built = await pagesFor(held, publisher, asked.since, workDigest)
+  /* The chain the CALLER negotiated — `PagesRequest.v` — and no other: a v1
+     peer handed a v2 page refuses it as `version`, and a v1 page cut from the
+     v2 boundaries is a page that reproduces under no chain at all. */
+  const built = await pagesFor(held, publisher, asked.since, workDigest, DEFAULT_BOUNDS, asked.v)
   /* ⚠️ **THE SEALED BOUNDARIES ARE WRITTEN BEFORE THE PAGES GO OUT.** A page
    * served under a boundary that was never recorded is a page the next fetch
    * re-paginates — and every recipient holding it then refuses the one after

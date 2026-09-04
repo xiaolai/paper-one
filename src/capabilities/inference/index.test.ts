@@ -70,12 +70,12 @@ describe('starting and stopping the capability', () => {
   it('contributes a Cloud endpoints section, drawn only while it is running', () => {
     const endpoints = inference.settings?.find((one) => one.id === 'inference:endpoints')
     expect(endpoints, 'the Cloud endpoints section is not contributed').toBeDefined()
-    expect(endpoints?.render(), 'a section drew before anything started').toBeNull()
+    expect(endpoints?.render({ bookId: null }), 'a section drew before anything started').toBeNull()
 
     const handle = started()
-    expect(endpoints?.render(), 'the section drew nothing while the capability ran').not.toBeNull()
+    expect(endpoints?.render({ bookId: null }), 'the section drew nothing while the capability ran').not.toBeNull()
     handle.dispose()
-    expect(endpoints?.render(), 'the section outlived the capability').toBeNull()
+    expect(endpoints?.render({ bookId: null }), 'the section outlived the capability').toBeNull()
   })
 
   /* AFTER Local models, because it is the same subject one step further out:
@@ -102,17 +102,17 @@ describe('starting and stopping the capability', () => {
     expect(models, 'the Local models section is not contributed').toBeDefined()
 
     const first = started()
-    expect(models?.render(), 'the first composition drew nothing').not.toBeNull()
+    expect(models?.render({ bookId: null }), 'the first composition drew nothing').not.toBeNull()
 
     const second = started()
     second.dispose()
     expect(
-      models?.render(),
+      models?.render({ bookId: null }),
       'stopping the second composition blanked the first’s pane',
     ).not.toBeNull()
 
     first.dispose()
-    expect(models?.render(), 'the section still drew after every composition stopped').toBeNull()
+    expect(models?.render({ bookId: null }), 'the section still drew after every composition stopped').toBeNull()
   })
 
   /**

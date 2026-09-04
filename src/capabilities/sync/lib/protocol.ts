@@ -1,4 +1,4 @@
-import { parseCards, validMarks, type Card, type Mark } from '../../../kernel'
+import { COVER_NAMES, isContentHash, parseCards, validMarks, type Card, type Mark } from '../../../kernel'
 import { isHlc, type Hlc } from './clock'
 import { fromWire } from './merge'
 import type { BookRecord } from '../../../kernel'
@@ -61,7 +61,16 @@ export const SYNC_JOURNAL_FORMAT = 1
  * message naming both versions. Refusing to sync is a bad outcome; syncing and
  * quietly losing a field is a worse one, and it is the one the reader cannot
  * detect. */
-export const SYNC_VERSION: readonly [number, number] = [4, 4]
+/* [5, 5] since 2026-09-03 (WI-23.B3): a book record now carries the reader's
+ * own `status`, `rating`/`ratingAt` and `review`. The wire shape is unchanged
+ * and a v4 peer parses the row happily — which is the bookmark case and the
+ * identifier case again, field for field: `parseRecord` is built from KNOWN
+ * FIELDS, so a v4 peer STRIPS all three, ACKs the stripped row, and the
+ * equal-stamp ACK can erase the sender's own rating. `versionsOverlap([4, 4],
+ * [5, 5])` is false and the hello is refused with a message naming both
+ * versions. `merge.test.ts` keeps the erasure reproducible beside the
+ * identifier's, as the evidence for why the bump was needed. */
+export const SYNC_VERSION: readonly [number, number] = [5, 5]
 
 /** The service names, and the grant each is gated on. */
 export const SYNC_SERVICES = {
@@ -216,13 +225,14 @@ export function parseSyncHello(value: unknown): SyncHello | null {
   if (!isRecord(value)) return null
   const services = readVersions(value['services'])
   if (services === null) return null
-  if (typeof value['proto'] !== 'number' || typeof value['journalFormat'] !== 'number') return null
+  if (!Number.isSafeInteger(value['proto']) || (value['proto'] as number) < 0) return null
+  if (!Number.isSafeInteger(value['journalFormat']) || (value['journalFormat'] as number) < 0) return null
   if (typeof value['device'] !== 'string' || value['device'] === '') return null
   if (value['role'] !== 'shelf' && value['role'] !== 'satchel') return null
   if (!isHlc(value['clock'])) return null
   return {
-    proto: value['proto'],
-    journalFormat: value['journalFormat'],
+    proto: value['proto'] as number,
+    journalFormat: value['journalFormat'] as number,
     services: { sync: services },
     device: value['device'],
     role: value['role'],
@@ -237,7 +247,9 @@ export function parseSyncWelcome(value: unknown): SyncWelcome | null {
   if (!isHlc(value['clock'])) return null
   if (typeof value['epoch'] !== 'string' || value['epoch'] === '') return null
   if (!isSeq(value['hubSeq'])) return null
-  if (typeof value['journalFormat'] !== 'number') return null
+  /* The same rule the hello applies: a format is a non-negative safe integer,
+     and a welcome saying otherwise is a peer this side cannot talk to. */
+  if (!isSeq(value['journalFormat'])) return null
   return {
     clock: value['clock'],
     epoch: value['epoch'],
@@ -335,6 +347,10 @@ export function parsePushGroup(value: unknown): PushGroup | null {
   const format = optString(value['format'])
   const size = optSize(value['size'])
   if (contentHash === BAD || format === BAD || size === BAD) return null
+  /* A pushed hash is checked before the record it rides on is applied, so a
+     record never lands promising bytes the verified fetch will refuse — and a
+     record that has no hash yet carries none, not an empty one. */
+  if (contentHash !== undefined && !isContentHash(contentHash)) return null
   if (contentHash !== undefined) out.contentHash = contentHash
   if (format !== undefined) out.format = format
   if (size !== undefined) out.size = size
@@ -343,9 +359,11 @@ export function parsePushGroup(value: unknown): PushGroup | null {
     if (
       !isRecord(cover) ||
       typeof cover['name'] !== 'string' ||
+      /* The kernel's cover names — anything else is skipped on landing, so it is refused here. */
+      !(COVER_NAMES as readonly string[]).includes(cover['name']) ||
       optSize(cover['size']) === BAD ||
       cover['size'] === undefined ||
-      typeof cover['hash'] !== 'string'
+      !isContentHash(cover['hash'])
     ) {
       return null
     }
@@ -426,6 +444,11 @@ export function parsePullPage(value: unknown): PullPage | null {
     const rowMarksDigest = optString(raw['marksDigest'])
     const rowCoverAt = optSize(raw['coverAt'])
     if (rowHash === BAD || rowFormat === BAD || rowSize === BAD || rowMarksDigest === BAD || rowCoverAt === BAD) return null
+    /* A present hash is a BLAKE3 digest, as a push group's and a content
+       answer's must be — a pull row was the one message that took any
+       string, and handed the ledger a `PullPage` the other parsers would
+       have refused. */
+    if (rowHash !== undefined && !isContentHash(rowHash)) return null
     rows.push({
       book: raw['book'],
       seq: raw['seq'],
@@ -440,8 +463,16 @@ export function parsePullPage(value: unknown): PullPage | null {
   }
   const removals: PullRemoval[] = []
   for (const raw of value['removals'] as unknown[]) {
-    if (!isRecord(raw) || typeof raw['book'] !== 'string' || !isSeq(raw['seq']) || !isHlc(raw['at'])) return null
+    if (!isRecord(raw) || typeof raw['book'] !== 'string' || raw['book'] === '' || !isSeq(raw['seq']) || !isHlc(raw['at'])) return null
     removals.push({ book: raw['book'], seq: raw['seq'], at: raw['at'] })
+  }
+  /* ONE JOURNAL POSITION, ONE OPERATION. A row and a removal — or two rows —
+     at the same seq would apply contradictory work and then advance the
+     cursor past both; a page that says so is refused whole. */
+  const seen = new Set<number>()
+  for (const { seq } of [...rows, ...removals]) {
+    if (seen.has(seq)) return null
+    seen.add(seq)
   }
   let cards: readonly Card[] | undefined
   if (value['cards'] !== undefined) {
@@ -458,21 +489,43 @@ export function parsePullPage(value: unknown): PullPage | null {
   }
 }
 
+/* The cover names and the digest rule are the KERNEL's — `COVER_NAMES` and
+   `isContentHash` — not restated here. This file, `coverCache.ts` and
+   `ledger.ts` each carried a copy of the two names, and this one carried its
+   own copy of the digest pattern; a name added to the kernel's set, or a
+   digest rule tightened there, would have left parsing, caching and landing
+   disagreeing with the record they serve. */
+
 export function parseContentAnswer(value: unknown): ContentAnswer | null {
   if (!isRecord(value)) return null
   if (typeof value['folder'] !== 'string' || typeof value['name'] !== 'string') return null
-  if (typeof value['size'] !== 'number' || typeof value['contentHash'] !== 'string') return null
+  /* A size is a count of bytes and a hash is a BLAKE3 digest: both feed the
+     verified transfer, and a NaN or a string of the wrong length would fail
+     there with a worse message, or not at all. */
+  if (!Number.isSafeInteger(value['size']) || (value['size'] as number) < 0) return null
+  /* EMPTY IS THE DOCUMENTED "COULD NOT HASH" ANSWER — a shelf with no plugin
+     and no stored hash still answers, and the caller refuses to fetch bytes
+     it cannot verify. Anything else must be a digest. */
+  if (typeof value['contentHash'] !== 'string' || (value['contentHash'] !== '' && !isContentHash(value['contentHash']))) return null
   const coverName = value['coverName']
   if (coverName !== null && typeof coverName !== 'string') return null
+  /* The cover's facts are one tuple: all three present and well-formed, or
+     none. A cover with a name and no readable size is not "a cover with no
+     usable facts", it is an answer this build does not accept. */
+  const coverSize = value['coverSize']
+  const coverHash = value['coverHash']
+  const coverFacts = coverSize !== undefined || coverHash !== undefined
+  if (coverFacts) {
+    if (coverName === null) return null
+    if (!Number.isSafeInteger(coverSize) || (coverSize as number) < 0) return null
+    if (!isContentHash(coverHash)) return null
+  }
   return {
     folder: value['folder'],
     name: value['name'],
-    size: value['size'],
+    size: value['size'] as number,
     contentHash: value['contentHash'],
     coverName: coverName as string | null,
-    ...(typeof value['coverSize'] === 'number' && Number.isSafeInteger(value['coverSize']) && value['coverSize'] >= 0
-      ? { coverSize: value['coverSize'] }
-      : {}),
-    ...(typeof value['coverHash'] === 'string' ? { coverHash: value['coverHash'] } : {}),
+    ...(coverFacts ? { coverSize: coverSize as number, coverHash: coverHash as string } : {}),
   }
 }

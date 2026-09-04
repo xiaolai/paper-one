@@ -38,13 +38,14 @@ import { useBookmarking } from './hooks/useBookmarking'
 import { useOverlays } from './hooks/useOverlays'
 import { useReanchor } from './hooks/useReanchor'
 import { useJumps, type JumpTarget } from './hooks/useJumps'
+import { useResumeAt } from './hooks/useResumeAt'
 import { locationToOpen, overrideSpent, type Place } from '../core/jumpStack'
 import type { ExternalLinkDetail } from 'foliate-js/view.js'
 import type { FootnoteRender } from './reader/session'
 import { extensionFor, readOwnedBook, storedBookName } from '../core/bookVault'
 import type { IndexedBook } from '../core/bookIndex'
 import type { IndexFs } from '../core/bookIndex'
-import { contentPathIn, readBook } from '../core/bookFolder'
+import { contentPathIn } from '../core/bookFolder'
 import {
   MAX_FILES,
   SHELVE_BATCH,
@@ -707,7 +708,12 @@ export function App({
       if (imports.busy) setImportNotice('That replaced the import already running.')
       imports.supersede()
 
-      if (picked.length > 1 && fs) {
+      /* Whether this intake was still the current one when it finished — a
+         superseded one must not open its book over the one asked for since.
+         The hook's answer, taken once the settle is over; a single pick runs
+         nothing and is current by construction. */
+      const current = await (async (): Promise<boolean> => {
+        if (!(picked.length > 1 && fs)) return true
         const bytes = fs
         /* THE LIFECYCLE IS `useImportRun`'s — the token, the signal, the
          * progress bar, the handover chained one batch behind the copying, the
@@ -715,7 +721,9 @@ export function App({
          * All six were written out here AND in the folder route, and had
          * already drifted apart in three separate ways. What is left below is
          * the WORK: copy each picked file, and say what happened to it. */
-        await imports.run(
+        /* Asked again once the settle is over: a drop landing during the shelf
+           writes supersedes this run after the work last looked. */
+        return imports.run(
           async (run) => {
             const outcomes: ImportOutcome[] = []
             for (const [index, { file, path }] of picked.entries()) {
@@ -749,7 +757,8 @@ export function App({
             },
           },
         )
-      }
+      })()
+      if (!current) return
       openBook(opening.file, opening.path)
     },
     [openBook, fs, imports],
@@ -1049,16 +1058,25 @@ export function App({
      newer one's rows. A counter settles it without the caller having to
      remember a cleanup it has nowhere to put. */
   const trashScan = useRef(0)
-  const readTrash = useCallback(() => {
+  /** The newest scan's `done` — what a superseded scan's `done` waits for. */
+  const latestScan = useRef<Promise<void>>(Promise.resolve())
+  /**
+   * Read the trash into state. `done` settles once the rows are set or the
+   * failure recorded — a restore awaits it, so its row is not re-enabled over
+   * a list that has not caught up and offered for a second restore. `cancel`
+   * is the effect's cleanup; `trashScan` is what stops a superseded read from
+   * answering either way.
+   */
+  const scanTrash = useCallback((): { readonly done: Promise<void>; readonly cancel: () => void } => {
     if (!fs) {
       setTrashRows([])
       setTrashError(null)
-      return
+      return { done: Promise.resolve(), cancel: () => {} }
     }
     const scan = ++trashScan.current
     let live = true
     setTrashError(null)
-    void listTrash(fs)
+    const applied = listTrash(fs)
       .then((rows) => {
         if (!live || scan !== trashScan.current) return
         /* Newest first — the book a reader came here for is the one they just
@@ -1074,10 +1092,22 @@ export function App({
         setTrashRows([])
         setTrashError(thrown instanceof Error ? thrown.message : String(thrown))
       })
-    return () => {
-      live = false
+    /* SUPERSEDED IS NOT DONE. A scan a newer one overtook resolved `done`
+       having set nothing, so a restore awaiting it re-enabled its row over a
+       list that had not caught up — and while the newer scan was still
+       pending, the same book could be restored a second time. A superseded
+       scan is done when the scan that superseded it is: what its awaiter
+       wanted was the list as it is now, and only the newest scan can say. */
+    const done: Promise<void> = applied.then(() => (scan === trashScan.current ? undefined : latestScan.current))
+    latestScan.current = done
+    return {
+      done,
+      cancel: () => {
+        live = false
+      },
     }
   }, [fs])
+  const readTrash = useCallback(() => scanTrash().cancel, [scanTrash])
 
   useEffect(() => {
     if (!state.trashOpen) return
@@ -1112,51 +1142,22 @@ export function App({
         .catch((thrown: unknown) => {
           setRestoreError(thrown instanceof Error ? thrown.message : String(thrown))
         })
-        .finally(() => {
+        .finally(() =>
           /* The shelf learns about the restore itself through the library
-             subscription; this is only the trash list catching up. The
-             cleanup is discarded on purpose — `trashScan` is what stops a
-             superseded read from answering, and there is nowhere here to hang
-             an unsubscribe. */
-          void readTrash()
-        })
+             subscription; this is only the trash list catching up — AWAITED,
+             so the row is re-enabled over the list as it is now, not the list
+             as it was. `trashScan` is what stops a superseded read from
+             answering; there is nowhere here to hang the cleanup. */
+          scanTrash().done,
+        )
     },
-    [services.library, readTrash],
+    [services.library, scanTrash],
   )
 
-  /**
-   * Where to resume, read from the BOOK'S OWN RECORD rather than from the index.
-   *
-   * The index is a cache and it can be one write behind — a crash between
-   * writing `book.json` and writing `index.json` leaves it so, and that is a
-   * trade this project accepts because a stale cache cannot cause a stale WRITE:
-   * every mutation applies to the record on disk.
-   *
-   * Except through here. The position it handed back was fed to the reader as
-   * the place to resume, and the reader then saved it — so the one path by which
-   * a stale cache could overwrite a newer record was the reading position, which
-   * is the single thing a reader notices losing.
-   *
-   * Falls back to the row until the read lands. One small file against parsing a
-   * book is not a close race, but if it were, the cached position is a better
-   * answer than none.
-   */
-  const [resumeAt, setResumeAt] = useState<{ bookId: string; position: string | null } | null>(null)
-  useEffect(() => {
-    if (!bookId || !fs) return
-    let live = true
-    void readBook(fs, bookId)
-      .then((record) => {
-        if (live) setResumeAt({ bookId, position: record?.position ?? null })
-      })
-      .catch(() => {
-        // The row's value stands. A record that will not read is a book that is
-        // about to fail to open anyway, and this is not where that is reported.
-      })
-    return () => {
-      live = false
-    }
-  }, [bookId, fs])
+  /* Where to resume, from the book's own record — `useResumeAt`, which says
+     why the record outranks the index and why the previous open's answer is
+     cleared before the next open's read lands. */
+  const resumeAt = useResumeAt(bookId, fs)
   /**
    * Open the NEXT book at a place, rather than where it was last left.
    *
@@ -1958,6 +1959,7 @@ export function App({
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}
             onMarkFocusDone={marking.clearFocus}
+            markControls={composition.markControls}
             selection={marking.selection?.text ?? null}
             /* The one place the app decides what the companion is — and this
                IS the line the old comment said would change when a provider
@@ -2113,6 +2115,23 @@ export function App({
                 platform={platform}
                 id={state.screen}
                 {...(shown === undefined ? {} : { render: shown.render })}
+                /* By id, because a screen knows a book by its id and nothing
+                   else; the row is looked up here, where the shelf is.
+
+                   OFFERED ONLY WHERE IT CAN OPEN ANYTHING. `openStored` returns
+                   at once with no filesystem, and a contribution reads the
+                   callback's presence to decide whether to draw an Open
+                   control — `PaneContext.openBook` is optional for exactly
+                   that. Handed over regardless, the browser client drew
+                   links that silently did nothing. */
+                {...(!fs
+                  ? {}
+                  : {
+                      openBook: (bookId: string) => {
+                        const entry = library.books.find((one) => one.bookId === bookId)
+                        if (entry) openStored(entry)
+                      },
+                    })}
               />
             )
           })()}

@@ -90,6 +90,12 @@ export interface Imports {
    * `onFailure` was never called, the bar never came down, and this promise
    * rejected instead. It does not reject any more, for any reason a caller
    * can produce — every ending goes out through `onFailure` or the notice.
+   *
+   * RESOLVES WHETHER THE RUN WAS STILL CURRENT ONCE THE SETTLE HAD FINISHED.
+   * `run.current()` inside the work answers for the copying; a supersession
+   * that lands during the shelf writes after it came after the last answer
+   * the work could take, and a caller opening the book it just added was
+   * reading a freshness that had gone stale in that window.
    */
   run(
     work: (run: ImportRun) => Promise<readonly ImportOutcome[]>,
@@ -98,7 +104,7 @@ export interface Imports {
       summarise: (outcomes: readonly ImportOutcome[], unsaved: number) => string
       onFailure: (cause: unknown) => void
     },
-  ): Promise<void>
+  ): Promise<boolean>
 }
 
 export interface ImportRunOptions {
@@ -208,11 +214,19 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
            pulling that one down is what the bare return was protecting. See
            `bar`. */
         if (bar.current === mine) setProgress(null)
-        return
+        return false
       }
       setProgress(null)
-      if (failed !== null) say.onFailure(failed.cause)
-      else notice(say.summarise(outcomes, unsaved))
+      /* The caller's own callbacks, guarded: `run` promises never to reject,
+         and a `summarise` that throws is a caller's bug, not a reason to
+         break that promise for every caller. */
+      try {
+        if (failed !== null) say.onFailure(failed.cause)
+        else notice(say.summarise(outcomes, unsaved))
+      } catch (cause) {
+        console.error('Paper: the import could not say what it did', cause)
+      }
+      return true
     },
     [shelve, batch, notice, supersede],
   )

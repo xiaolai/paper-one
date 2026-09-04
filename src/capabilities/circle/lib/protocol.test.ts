@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { MAX_COVER_BYTES, MAX_ROSTER_DEVICES, isPageShape } from '../../../kernel'
 import { WIRE_VERSION, type WorkClaim } from '../../../kernel'
 import {
   CIRCLE_PROTO,
@@ -6,16 +7,25 @@ import {
   CIRCLE_VERSION,
   MAX_PAGES_PER_ANSWER,
   MAX_CURSOR_DEVICES,
+  MAX_LISTS_PER_REQUEST,
+  parseListsRequest,
+  parseShelfRequest,
   MAX_PAGE_CHARS,
   agreedVersion,
   parseCircleHello,
   parseCircleWelcome,
   parsePagesAnswer,
   parsePagesRequest,
+  MAX_CLAIM_DIGESTS,
+  MAX_ANSWER_CHARS,
+  COVER_CHUNK_BYTES,
+  parseCoverAnswer,
+  parseCoverRequest,
 } from './protocol'
 
 const PERSON = '207a067892821e25d770f1fba0c47c11ff4b813e54162ece9eb839e076231ab6'
-const WORK: WorkClaim = { ids: ['a'], titles: ['b'], author: 'c', language: 'en' }
+/* Digests, as a claim's fields are — the parser refuses anything shorter. */
+const WORK: WorkClaim = { ids: ['a'.repeat(64)], titles: ['b'.repeat(64)], author: 'c'.repeat(64), language: 'en' }
 
 const hello = () => ({ proto: CIRCLE_PROTO, pages: { ...CIRCLE_VERSION }, person: PERSON })
 const welcome = () => ({ ...hello(), agreed: WIRE_VERSION })
@@ -37,7 +47,7 @@ describe('what the wire accepts', () => {
       person: PERSON,
       agreed: WIRE_VERSION,
     })
-    expect(parsePagesRequest(request())).toEqual({ work: WORK, since: {} })
+    expect(parsePagesRequest(request())).toEqual({ work: WORK, since: {}, v: 1 })
     expect(parsePagesAnswer(answer())).toEqual({ pages: ['{}'], more: false })
   })
 
@@ -141,6 +151,19 @@ describe('what a peer can put in each field', () => {
     expect(parsePagesRequest({ ...request(), since: { [PERSON.toUpperCase()]: 1 } })).toBeNull()
   })
 
+  it('reads the page version the caller names, and takes an unnamed one as v1 — WI-23.B2', () => {
+    /* A v1 caller's request predates the member; a v2 caller names its
+       version. Named outside what this build publishes, the request is
+       refused rather than answered with a chain nobody can build. */
+    expect(parsePagesRequest({ ...request(), v: 3 })?.v).toBe(3)
+    expect(parsePagesRequest({ ...request(), v: 2 })?.v).toBe(2)
+    expect(parsePagesRequest({ ...request(), v: 1 })?.v).toBe(1)
+    expect(parsePagesRequest(request())?.v).toBe(1)
+    for (const v of [0, 4, 1.5, '2', null, -1]) {
+      expect(parsePagesRequest({ ...request(), v })).toBeNull()
+    }
+  })
+
   it('reads a real per-device cursor', () => {
     /* ⚠️ **PER DEVICE, AND A SINGLE NUMBER WAS WRONG.** `mergeLogs`: two of a
        person's devices both mint seq 11, so a scalar cursor over two streams
@@ -177,6 +200,35 @@ describe('what a peer can put in each field', () => {
       many[i.toString(16).padStart(64, '0')] = 1
     }
     expect(parsePagesRequest({ ...request(), since: many })).toBeNull()
+  })
+
+  it('names as many devices as the roster a page may carry — a cursor is never tighter than the roster', () => {
+    /* ⚠️ The bound is the roster's, by construction, and the test says so in
+       a way a reverted constant cannot pass: a page whose roster is full
+       parses, and a cursor naming every device on it parses too. The old
+       bound, sixty-four, refused the sixty-fifth. */
+    expect(MAX_CURSOR_DEVICES).toBe(MAX_ROSTER_DEVICES)
+    const devices = Array.from({ length: MAX_ROSTER_DEVICES }, (_, i) => i.toString(16).padStart(64, '0'))
+    const page = {
+      v: 1,
+      person: 'p',
+      work: { ids: ['ab'.repeat(32)], titles: [], author: '', language: 'en' },
+      device: devices[0],
+      from: 1,
+      to: 1,
+      prevPageHash: '',
+      entries: [],
+      roster: devices,
+      revocations: 0,
+      delegation: 'd',
+      sig: 's',
+    }
+    expect(isPageShape(page)).toBe(true)
+    expect(isPageShape({ ...page, roster: [...devices, 'one more'] })).toBe(false)
+    const every: Record<string, number> = Object.fromEntries(devices.map((device) => [device, 1]))
+    expect(parsePagesRequest({ ...request(), since: every })).not.toBeNull()
+    const sixtyFive: Record<string, number> = Object.fromEntries(devices.slice(0, 65).map((device) => [device, 1]))
+    expect(parsePagesRequest({ ...request(), since: sixtyFive })).not.toBeNull()
   })
 
   it('refuses the right NUMBER of members with a wrong NAME', () => {
@@ -280,6 +332,13 @@ describe('version negotiation', () => {
     expect(agreedVersion({ min: 1, max: 9 })).toBe(WIRE_VERSION)
   })
 
+  it('reads a range one version wide, which is what a peer that speaks one version sends', () => {
+    /* `min === max` is a range; `max < min` is not. The two are one
+       character apart in the parser. */
+    expect(parseCircleHello({ ...hello(), pages: { min: 2, max: 2 } })?.pages).toEqual({ min: 2, max: 2 })
+    expect(parseCircleHello({ ...hello(), pages: { min: 2, max: 1 } })).toBeNull()
+  })
+
   it('refuses a peer with no overlap rather than guessing', () => {
     expect(agreedVersion({ min: WIRE_VERSION + 1, max: WIRE_VERSION + 2 })).toBeNull()
   })
@@ -293,5 +352,154 @@ describe('version negotiation', () => {
     expect(
       parseCircleWelcome({ ...welcome(), pages: { min: 99, max: 99 }, agreed: 99 }),
     ).toBeNull()
+  })
+})
+
+describe('a request for the lists — WI-23.E1', () => {
+  const DEVICE = 'd'.repeat(64)
+  const good = () => ({ since: { aa11: { [DEVICE]: 3 }, bb22: {} }, v: WIRE_VERSION })
+
+  it('reads a cursor per list, by id', () => {
+    expect(parseListsRequest(good())).toEqual(good())
+    expect(parseListsRequest({ since: {}, v: 3 })).toEqual({ since: {}, v: 3 })
+  })
+
+  const bad: readonly (readonly [string, unknown])[] = [
+    ['not an object', 'lists'],
+    ['null', null],
+    ['no version — lists are a v3 log, so an unversioned caller has none', { since: {} }],
+    ['version 2', { since: {}, v: 2 }],
+    ['a version above what this build publishes', { since: {}, v: WIRE_VERSION + 1 }],
+    ['a version that is not an integer', { since: {}, v: 3.5 }],
+    ['a version that is a string', { since: {}, v: '3' }],
+    ['an extra member', { ...good(), work: {} }],
+    ['a since that is a string', { since: 'aa11', v: 3 }],
+    ['a since that is null', { since: null, v: 3 }],
+    ['a list id that is not hex', { since: { 'not hex': {} }, v: 3 }],
+    ['a list id that is empty', { since: { '': {} }, v: 3 }],
+    ['a list id that is too long', { since: { ['a'.repeat(65)]: {} }, v: 3 }],
+    ['a cursor that is not one', { since: { aa11: { [DEVICE]: -1 } }, v: 3 }],
+    ['a cursor keyed by something that is not a device', { since: { aa11: { alice: 1 } }, v: 3 }],
+  ]
+  for (const [what, value] of bad) {
+    it(`refuses ${what}`, () => {
+      expect(parseListsRequest(value)).toBeNull()
+    })
+  }
+
+  it('takes the most lists a request may name, and refuses one more', () => {
+    const most: Record<string, Record<string, number>> = {}
+    for (let i = 0; i < MAX_LISTS_PER_REQUEST; i++) most[i.toString(16).padStart(4, '0')] = {}
+    expect(parseListsRequest({ since: most, v: 3 })?.since).toEqual(most)
+    most['ffff'] = {}
+    expect(Object.keys(most)).toHaveLength(MAX_LISTS_PER_REQUEST + 1)
+    expect(parseListsRequest({ since: most, v: 3 })).toBeNull()
+  })
+})
+
+describe('a request for the shelf — every clause', () => {
+  it('requires a version of at least 2, exactly the two members, and a cursor that reads', () => {
+    expect(parseShelfRequest({ since: {}, v: 2 })).toEqual({ since: {}, v: 2 })
+    expect(parseShelfRequest({ since: {} })).toBeNull()
+    expect(parseShelfRequest({ since: {}, v: 1 })).toBeNull()
+    expect(parseShelfRequest({ since: {}, v: WIRE_VERSION + 1 })).toBeNull()
+    expect(parseShelfRequest({ since: {}, v: 2, work: {} })).toBeNull()
+    expect(parseShelfRequest({ since: 'x', v: 2 })).toBeNull()
+    expect(parseShelfRequest({ since: { alice: 1 }, v: 2 })).toBeNull()
+    expect(parseShelfRequest({ v: 2 })).toBeNull()
+    expect(parseShelfRequest('shelf')).toBeNull()
+  })
+})
+
+describe('the shape of a claim in a request', () => {
+  const okay = () => parsePagesRequest({ work: { ...WORK }, since: {}, v: WIRE_VERSION })
+  it('reads digests of sixty-four hex characters, an empty author, and a language subtag or none', () => {
+    expect(okay()?.work).toEqual(WORK)
+    expect(parsePagesRequest({ work: { ...WORK, author: '', language: '' }, since: {}, v: WIRE_VERSION })?.work.language).toBe('')
+  })
+  for (const [what, work] of [
+    ['an id that is not a digest', { ...WORK, ids: ['a'] }],
+    ['a title that is not a digest', { ...WORK, titles: ['moby'] }],
+    ['an author that is not a digest', { ...WORK, author: 'melville' }],
+    ['a language that is not a subtag', { ...WORK, language: 'english' }],
+    ['a language in capitals', { ...WORK, language: 'EN' }],
+    ['more ids than a claim carries', { ...WORK, ids: Array.from({ length: 17 }, (_, i) => i.toString(16).padStart(64, '0')) }],
+  ] as const) {
+    it(`refuses ${what}`, () => {
+      expect(parsePagesRequest({ work, since: {}, v: WIRE_VERSION })).toBeNull()
+    })
+  }
+})
+
+describe('a work claim on the wire, held to the letter', () => {
+  const HEX = 'ab'.repeat(32)
+  const ask = (work: Record<string, unknown>) => parsePagesRequest({ work, since: {} })
+  it('reads exactly the most digests a claim may carry and refuses one more, a non-string among them, or a digest with anything around it', () => {
+    expect(ask({ ids: Array.from({ length: MAX_CLAIM_DIGESTS }, () => HEX), titles: [], author: '', language: '' })).not.toBeNull()
+    expect(ask({ ids: Array.from({ length: MAX_CLAIM_DIGESTS + 1 }, () => HEX), titles: [], author: '', language: '' })).toBeNull()
+    expect(ask({ ids: [HEX, 7], titles: [], author: '', language: '' })).toBeNull()
+    expect(ask({ ids: [`x${HEX}`], titles: [], author: '', language: '' })).toBeNull()
+    expect(ask({ ids: [`${HEX}x`], titles: [], author: '', language: '' })).toBeNull()
+    expect(ask({ ids: [HEX], titles: [], author: 7, language: '' })).toBeNull()
+    expect(ask({ ids: [HEX], titles: [], author: '', language: 7 })).toBeNull()
+    expect(ask({ ids: [HEX], titles: [], author: HEX, language: 'en' })).not.toBeNull()
+  })
+})
+
+describe('an answer, as a whole', () => {
+  it('cannot promise more with nothing in hand, and cannot outgrow the envelope', () => {
+    expect(parsePagesAnswer({ pages: [], more: true })).toBeNull()
+    expect(parsePagesAnswer({ pages: [], more: false })).toEqual({ pages: [], more: false })
+    const page = 'x'.repeat(MAX_PAGE_CHARS)
+    expect(parsePagesAnswer({ pages: Array.from({ length: 6 }, () => page), more: false })).not.toBeNull()
+    expect(parsePagesAnswer({ pages: Array.from({ length: 7 }, () => page), more: false })).toBeNull()
+    expect(MAX_ANSWER_CHARS).toBe(6 * MAX_PAGE_CHARS)
+  })
+})
+
+describe('the cover request and its answer — WI-23.C5', () => {
+  it('reads a request naming a pub and an offset, exactly, and refuses everything else', () => {
+    expect(parseCoverRequest({ pub: 'ab12', offset: 0 })).toEqual({ pub: 'ab12', offset: 0 })
+    expect(parseCoverRequest({ pub: 'f'.repeat(64), offset: MAX_COVER_BYTES - 1 })).toEqual({ pub: 'f'.repeat(64), offset: MAX_COVER_BYTES - 1 })
+    for (const bad of [
+      null,
+      'ab12',
+      { pub: 'ab12' },
+      { pub: 'ab12', offset: 0, more: true },
+      { pub: '', offset: 0 },
+      { pub: 'AB12', offset: 0 },
+      { pub: 'g'.repeat(64), offset: 0 },
+      { pub: 'a'.repeat(65), offset: 0 },
+      { pub: 'ab12', offset: -1 },
+      { pub: 'ab12', offset: 1.5 },
+      { pub: 'ab12', offset: MAX_COVER_BYTES },
+      { pub: 7, offset: 0 },
+    ]) {
+      expect(parseCoverRequest(bad), JSON.stringify(bad)).toBeNull()
+    }
+  })
+
+  it('reads an answer of one chunk, exactly, within the bounds a chunk and a jacket have', () => {
+    const chunk = { offset: 0, size: 10, bytes: 'YWJj', more: true }
+    expect(parseCoverAnswer(chunk)).toEqual(chunk)
+    expect(parseCoverAnswer({ ...chunk, offset: 9, more: false })).toMatchObject({ offset: 9 })
+    const chars = Math.ceil(COVER_CHUNK_BYTES / 3) * 4
+    expect(parseCoverAnswer({ ...chunk, size: MAX_COVER_BYTES, bytes: 'A'.repeat(chars) })).not.toBeNull()
+    for (const bad of [
+      null,
+      { ...chunk, extra: 1 },
+      { offset: 0, size: 10, bytes: 'YWJj' },
+      { ...chunk, offset: -1 },
+      { ...chunk, offset: 10 },
+      { ...chunk, size: 0 },
+      { ...chunk, size: MAX_COVER_BYTES + 1 },
+      { ...chunk, size: 1.5 },
+      { ...chunk, bytes: '' },
+      { ...chunk, bytes: 7 },
+      { ...chunk, bytes: 'A'.repeat(chars + 1) },
+      { ...chunk, more: 'yes' },
+    ]) {
+      expect(parseCoverAnswer(bad), JSON.stringify(bad)).toBeNull()
+    }
   })
 })

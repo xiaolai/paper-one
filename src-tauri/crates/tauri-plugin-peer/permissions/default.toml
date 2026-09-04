@@ -41,6 +41,7 @@ permissions = [
     "allow-peer-circle-people",
     "allow-peer-circle-introduce",
     "allow-peer-circle-mine",
+    "allow-peer-circle-roster",
     "allow-peer-page-sign",
     "allow-peer-circle-remember",
     "allow-peer-circle-revoke",

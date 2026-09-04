@@ -36,11 +36,11 @@ let model: DevicesModel | null = null
  *  import sync; the dependency runs the other way). */
 let syncNow: (() => void) | null = null
 
-/** The peer port, for capabilities that declared `requires: ["peer"]`.
- *  Null before `peer.start` ran, and outside the Tauri app. */
-/** How many times, and how long between, a role read is retried at boot. */
-const ROLE_TRIES = 3
+/** How long between each retried role read at boot — one wait per retry, so the count of tries follows the list. */
 const ROLE_BACKOFF_MS = [250, 500] as const
+const ROLE_TRIES = ROLE_BACKOFF_MS.length + 1
+/** One poll of the backoff wait — the unit the wait is counted in, so a stop is noticed within one of these. */
+const ROLE_POLL_MS = 25
 
 /**
  * This device's role, retried — or `null` when it could not be read at all.
@@ -69,7 +69,26 @@ export async function readRole(
       last = error
       const wait = ROLE_BACKOFF_MS[attempt]
       if (wait === undefined) break
-      await new Promise((resolve) => setTimeout(resolve, wait))
+      /* The wait gives up as soon as the run is stopped, rather than holding
+         the composition for the rest of the backoff.
+
+         COUNTED IN POLLS, NOT IN WALL TIME. This measured `Date.now() -
+         started`, and `Date.now()` is not monotonic: a clock set back during
+         the wait — NTP, a time-zone correction, a laptop waking — made the
+         difference negative and held the shelf's services for the rest of the
+         adjustment, not the rest of the backoff. Each poll is one timer of a
+         fixed length, so the polls ARE the elapsed time, and no clock is
+         consulted at all. */
+      await new Promise<void>((resolve) => {
+        let remaining = Math.ceil(wait / ROLE_POLL_MS)
+        const tick = (): void => {
+          remaining -= 1
+          // Stryker disable next-line EqualityOperator: one poll later is the same wait to a caller measured in polls.
+          if (stopped() || remaining <= 0) resolve()
+          else setTimeout(tick, ROLE_POLL_MS)
+        }
+        setTimeout(tick, ROLE_POLL_MS)
+      })
     }
   }
   if (stopped()) return null
@@ -83,6 +102,8 @@ export async function readRole(
   return null
 }
 
+/** The peer port, for capabilities that declared `requires: ["peer"]`.
+ *  Null before `peer.start` ran, and outside the Tauri app. */
 export function peerPort(): PeerPort | null {
   return port
 }
@@ -131,12 +152,30 @@ export function publishPort(): PublishPort | null {
   return held === null ? null : publishPortOver(held)
 }
 
+/**
+ * ONE PORT PER WIRE, so that `publishPort() === port` means "the peer that
+ * answered `mine()` is still the one running". The circle's publisher holds
+ * the port it built a page with and refuses to sign through any other — a
+ * restart between building and signing must not sign this page with a
+ * different device's key. That check reads identity, and this used to build a
+ * fresh object on every call, so against the real plugin it could never pass:
+ * every page signing failed in production, and the capability's own tests
+ * hid it by mocking `publishPort` with one stable object. Keyed weakly on the
+ * wire: a restart installs a new wire and therefore a new port, and a wire
+ * that is gone takes its port with it.
+ */
+const publishPorts = new WeakMap<PeerWire, PublishPort>()
+
 /** The port over a wire — see `personPortOver` for why this is separate. */
 export function publishPortOver(held: PeerWire): PublishPort {
-  return {
+  const known = publishPorts.get(held)
+  if (known !== undefined) return known
+  const port: PublishPort = {
     mine: () => held.circleMine(),
     sign: (message) => held.pageSign(message),
   }
+  publishPorts.set(held, port)
+  return port
 }
 
 /**
@@ -149,13 +188,54 @@ export function publishPortOver(held: PeerWire): PublishPort {
  * the whole decision this function exists to expose.
  */
 export function personPortOver(held: PeerWire): PersonPort {
-  return {
+  const known = personPorts.get(held)
+  if (known !== undefined) return known
+  /* The identity's listeners live with the port, and the port with the wire
+     (`personPorts`): a port built afresh on every call had nobody to tell. */
+  const identity = new Set<(event: IdentityEvent) => void>()
+  const told = (event: IdentityEvent): void => {
+    for (const fn of [...identity]) {
+      try {
+        fn(event)
+      } catch (cause) {
+        console.error('Paper: an identity listener threw', cause)
+      }
+    }
+  }
+  const port: PersonPort = {
     status: (devices, circle) => held.personStatus(devices, circle),
-    ensure: () => held.personEnsure(),
+    /* ⚠️ **TOLD ON EVERY `ensure`**, whether or not one existed: the wire does
+       not say, and what the listeners do — publish the shelf, warm the
+       opinions, tell the share controls — is idempotent. Told AFTER the wire
+       answered, so a listener that asks the wire finds the identity there. */
+    ensure: async () => {
+      const person = await held.personEnsure()
+      told({ kind: 'made', person })
+      return person
+    },
     phrase: () => held.personPhrase(),
-    restore: (words) => held.personRestore(words),
-    forget: () => held.personForget(),
+    restore: async (words) => {
+      const person = await held.personRestore(words)
+      told({ kind: 'restored', person })
+      return person
+    },
+    forget: async () => {
+      await held.personForget()
+      told({ kind: 'forgotten' })
+    },
     people: () => held.circlePeople(),
+    /* ⚠️ **THE ROSTER'S SIZE, READ FROM THE ROSTER — WI-23.A3.** `circle`
+       used to answer a hardcoded 1 here, which showed the custody marker to a
+       reader with three devices. The roster this device presents, this device
+       included; a reader with no identity has no roster and is not at risk of
+       losing one, so 0 is the honest count and the marker does not read it.
+
+       READ, NOT MINTED. This went through `circleMine`, which renews a
+       delegation that is due and REFUSES a leaf whose delegation ran out — so
+       refreshing the Circle panel either wrote credentials or replaced the
+       panel with an error, for a count that was on disk the whole time.
+       `circleRoster` reads the file and nothing else, as `status` does. */
+    devices: async () => (await held.circleRoster())?.length ?? 0,
     remember: (person, name) => held.circleRemember(person, name),
     forgetPerson: (person) => held.circleForget(person),
     introduce: (device, addrs) => held.circleIntroduce(device, addrs),
@@ -178,7 +258,30 @@ export function personPortOver(held: PeerWire): PersonPort {
        consumer inherits it instead of re-deriving it. */
     onPending: (fn) => held.onPairingPending((e) => { if (e.kind === 'circle') fn(e) }),
     onResult: (fn) => held.onPairingResult((e) => { if (e.kind === 'circle') fn(e) }),
+    onIdentity: (fn) => {
+      identity.add(fn)
+      return () => {
+        identity.delete(fn)
+      }
+    },
   }
+  personPorts.set(held, port)
+  return port
+}
+
+/**
+ * ONE PERSON PORT PER WIRE, for `publishPorts`' reason and one more: the
+ * identity's listeners are held by the port, so a port made afresh on every
+ * `personPort()` call would tell nobody. Keyed weakly, so a wire that is gone
+ * takes its port and its listeners with it.
+ */
+const personPorts = new WeakMap<PeerWire, PersonPort>()
+
+/** What changed about this device's OWN identity, through the person port. */
+export interface IdentityEvent {
+  readonly kind: 'made' | 'restored' | 'forgotten'
+  /** The person id — for `made` and `restored`. */
+  readonly person?: string
 }
 
 /** What `circle`'s panel needs, with no Tauri types in it. */
@@ -189,6 +292,8 @@ export interface PersonPort {
   restore(words: string): Promise<string>
   forget(): Promise<void>
   people(): Promise<readonly KnownPerson[]>
+  /** How many of this reader's OWN devices the roster carries, this one included. */
+  devices(): Promise<number>
   remember(person: string, displayName: string): Promise<void>
   forgetPerson(person: string): Promise<void>
   /**
@@ -214,6 +319,18 @@ export interface PersonPort {
   cancel(): Promise<void>
   onPending(fn: (event: PairingPending) => void): () => void
   onResult(fn: (event: PairingResult) => void): () => void
+  /**
+   * Told when this device's own identity is made, restored or forgotten —
+   * through THIS port, which is the only writer of it in this process.
+   *
+   * ⚠️ **THE ONE SIGNAL AN IDENTITY MAKES.** The library does not change
+   * when an identity is made, so everything that waited on one — the
+   * published shelf, the opinions whose switch is on, every share control
+   * saying "Start a circle" — had nothing to hear, and a panel calling a
+   * capability's method after `ensure` was the panel doing the capability's
+   * wiring. The capability subscribes here instead.
+   */
+  onIdentity(fn: (event: IdentityEvent) => void): () => void
 }
 
 /** Register the Devices section's "Sync now" action. Returns the unregister. */
@@ -314,6 +431,8 @@ export interface PeerResources {
   model: DevicesModel | null
   serviceHost: Disposable | null
   devicePort: Disposable | null
+  /** The kernel's hash port, bound while the plugin is there — BLAKE3 in Rust (WI-23.C5). */
+  hashPort: Disposable | null
 }
 
 /**
@@ -329,14 +448,24 @@ export function releasePeer(held: PeerResources, diagnostics: { warn: (event: st
     try {
       fn()
     } catch (error) {
-      diagnostics.warn('peer.teardown-step-failed', {
-        label,
-        message: error instanceof Error ? error.message : String(error),
-      })
+      /* The report itself is guarded: a diagnostics port that throws must
+         not rob the steps after this one either. */
+      try {
+        diagnostics.warn('peer.teardown-step-failed', {
+          label,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      } catch {
+        /* Nothing left to tell it to. */
+      }
     }
   }
-  step('service-host', () => held.serviceHost?.dispose())
+  /* In REVERSE order of acquisition — `start` binds the model, then the
+     service host, then the device port — so the device port goes first. The
+     test that pinned the other order named it reverse and was not. */
+  step('hash-port', () => held.hashPort?.dispose())
   step('device-port', () => held.devicePort?.dispose())
+  step('service-host', () => held.serviceHost?.dispose())
   step('devices-model', () => held.model?.dispose())
 }
 
@@ -396,7 +525,8 @@ export const peer: Capability = {
      * `createDevicesModel` that throws leaves no live port behind. And it
      * clears the MODULE slots only while it still owns them — an overlapping
      * restart's newer instances are not this stop's to destroy. */
-    const held: PeerResources = { port: null, model: null, serviceHost: null, devicePort: null }
+    // Stryker disable next-line ObjectLiteral: every field is null until acquired; `releasePeer` reads them by name.
+    const held: PeerResources = { port: null, model: null, serviceHost: null, devicePort: null, hashPort: null }
     let stopped = false
     const stop = () => {
       if (stopped) return
@@ -438,6 +568,10 @@ export const peer: Capability = {
      * see what is paired". */
     if (held.port) {
       held.devicePort = api.services.bindDevicePort(devicePortOver(held.port))
+      /* Captured, not re-read: a port the run no longer holds must not answer through the slot. */
+      const port = held.port
+      // Stryker disable next-line all: wiring — the plugin's hash handed to the kernel's slot; `services.ports.test.ts` holds the slot and the plugin its hash.
+      held.hashPort = api.services.bindHashPort({ hashFile: (folder, name) => port.hashFile(folder, name) })
     }
 
     api.diagnostics.info('peer.started', { available: held.port !== null })

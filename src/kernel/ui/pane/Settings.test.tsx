@@ -466,3 +466,38 @@ describe('the two bands', () => {
     }
   })
 })
+
+describe('a contributed section', () => {
+  it('is rendered only once its group is opened, and inside a boundary of its own', () => {
+    const render1 = vi.fn(() => <p>devices body</p>)
+    const { props } = full({ sections: [{ id: 'peer:devices', title: 'Devices', render: render1 }] })
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    expect(render1).not.toHaveBeenCalled()
+    const summary = [...container.querySelectorAll('button')].find((b) => b.textContent?.startsWith('Devices'))
+    expect(summary).toBeDefined()
+    fireEvent.click(summary!)
+    expect(render1).toHaveBeenCalled()
+    expect(screen.getByText('devices body')).toBeTruthy()
+  })
+
+  it('cannot take the panel with it when it throws', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { props } = full({
+      sections: [
+        {
+          id: 'peer:devices',
+          title: 'Devices',
+          render: () => {
+            throw new Error('port gone')
+          },
+        },
+      ],
+    })
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    const summary = [...container.querySelectorAll('button')].find((b) => b.textContent?.startsWith('Devices'))
+    fireEvent.click(summary!)
+    expect(screen.getByText(/Devices could not be drawn/u)).toBeTruthy()
+    expect(container.querySelectorAll('section').length).toBeGreaterThan(0)
+    spy.mockRestore()
+  })
+})

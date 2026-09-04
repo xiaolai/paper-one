@@ -10,7 +10,10 @@ import {
   SPACING,
   readingStep,
 } from '../../core/metrics'
-import { PANE_TITLES, THEMES, renderContribution } from '../panes'
+import { PANE_TITLES, THEMES } from '../panes'
+
+/* A settings section is about no book. Stryker disable next-line ObjectLiteral: no section reads the context, so what it holds cannot be seen. */
+const NO_BOOK = { bookId: null } as const
 import type { Face } from '../../core/typefaces'
 import { FacePicker } from './FacePicker'
 import type {
@@ -44,6 +47,7 @@ import { PaneBand } from './PaneBand'
 import { PaneGroup } from './PaneGroup'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
+import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
 
 /* THERE IS NO PREVIEW TABLE HERE ANY MORE. A face's stack was written once for
  * the book and again for its sample, so a face could be previewed in something
@@ -846,7 +850,10 @@ export function Settings({
           open={groupOpen(section.id)}
           onToggle={() => toggleGroup(section.id)}
         >
-          {renderContribution(section.id, section.render)}
+          {/* The group mounts its body only while open — one gate, the group's — and a throw stops at the section. */}
+          <ContributionBoundary label={section.title} id={section.id} resetKey={section.id}>
+            <ContributionBody id={section.id} render={section.render} context={NO_BOOK} />
+          </ContributionBoundary>
         </PaneGroup>
       ))}
 

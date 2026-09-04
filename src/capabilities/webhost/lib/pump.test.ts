@@ -699,3 +699,31 @@ describe('a router that hung up on its own', () => {
     vi.useRealTimers()
   })
 })
+
+/**
+ * A capability's read grant is NOT a browser's. Every service host is served
+ * every capability's services, and the circle's `circle:read` serves a
+ * person's pages and shelf to an admitted peer on the peer transport — its
+ * spelling alone used to satisfy the pump, which reads `:read` as "safe for a
+ * cookie". The kernel table's own split is what a browser holds.
+ */
+describe('a grant a capability contributes', () => {
+  it('is refused over the web even when it is spelled as a read', async () => {
+    const served: unknown[] = []
+    const pages: ServiceContribution = {
+      name: 'circle.pages',
+      grant: 'circle:read',
+      handler: async (req: unknown) => {
+        served.push(req)
+        return { pages: [] }
+      },
+    }
+    const { wire, client } = browser()
+    const pump = servePipe({ wire, services: [PING, pages], pollMs: 5, sessionsMs: 10 })
+    await expect(client.call('circle.pages', { person: 'p1' })).rejects.toMatchObject({ error: { code: 'forbidden' } })
+    expect(served).toEqual([])
+    /* The table's own read still answers, so the refusal is the grant's and not the socket's. */
+    await expect(client.call('example.ping', { hi: 1 })).resolves.toMatchObject({ echoed: { hi: 1 } })
+    pump.stop()
+  })
+})
