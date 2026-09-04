@@ -58,6 +58,12 @@ error.log
 # it was purged from the history, and nothing in dev-docs/ is tracked now.
 dev-docs/
 
+# Design notes, for the same reason: working documents, not the repository's.
+# The circle's design was tracked here for three commits and taken out of
+# the index in the commit that added this line; code comments still point at
+# the files, which exist on the machine that keeps them.
+docs/
+
 # --- Application build artifacts ---
 node_modules/
 dist/
