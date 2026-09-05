@@ -227,14 +227,20 @@ describe('loadCoverageOptions', () => {
     const options = await loadCoverageOptions(REPO_ROOT)
     /* `src/hosts/**` and `src/cli/**` joined in phase 11: a Node host and the
      * `paper` CLI are source, and an area not listed here is measured by
-     * nothing while the run stays green. */
+     * nothing while the run stays green.
+     *
+     * ⚠️ EACH ONE NAMES AN EXTENSION, and that is load-bearing under vitest 4:
+     * its v8 provider PARSES every included file, so a bare `scripts/**` fed
+     * three shell scripts to Rollup and got a syntax error per file. It
+     * recovers by excluding them and the run stays green, so the spelling is
+     * asserted here rather than left to whoever reads the log. */
     expect(options.include).toEqual([
-      'src/kernel/**',
-      'src/capabilities/**',
-      'src/hosts/**',
-      'src/cli/**',
-      'src/app/**',
-      'scripts/**',
+      'src/kernel/**/*.{ts,tsx}',
+      'src/capabilities/**/*.{ts,tsx}',
+      'src/hosts/**/*.{ts,tsx}',
+      'src/cli/**/*.{ts,tsx}',
+      'src/app/**/*.{ts,tsx}',
+      'scripts/**/*.mjs',
     ])
     expect(Object.keys(options.thresholds)).toEqual(
       expect.arrayContaining(['lines', 'statements', 'functions', 'branches', 'src/kernel/core/**', 'scripts/lib/**']),
