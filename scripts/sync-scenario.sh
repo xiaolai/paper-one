@@ -8,7 +8,14 @@
 # an ssh session does not have, and its own "Harness limits, measured" section
 # records that `webview_screenshot` times out on a 1,959-row library and that
 # `execute_js` times out whenever the script returns a promise. None of that
-# applies to a CLI. Every step below is `paper` on one machine and `paper` on
+# applies to a CLI.
+#
+# ⚠️ AND THAT PROMISE CLAIM IS WRONG, corrected 2026-09-05. The bridge's
+# `script_result` command had no capability granting it, so a deferred reply
+# was REFUSED and the client called it a timeout — the script itself ran and
+# its side effects landed. `Manager::add_capability` in `lib.rs` fixes it,
+# under the same debug cfg as the plugin. Kept here because this file's
+# reason for existing cited the limit as evidence. Every step below is `paper` on one machine and `paper` on
 # the other, over ssh — the same transport `scripts/second-instance.sh` uses,
 # and the reason this script takes `<user@host>` rather than a shelf key.
 #
