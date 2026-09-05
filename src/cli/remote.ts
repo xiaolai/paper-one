@@ -3,7 +3,7 @@
  * `capabilities/peer`, whose index evaluates React and the Tauri wire to hand
  * back a class that has nothing to do with either. A CLI that must not gain a
  * path to React was importing one for an error type. */
-import { ServiceCallError, type CallOptions } from '../kernel'
+import { ServiceCallError, messageOf, type CallOptions } from '../kernel'
 import type { ServiceCaller } from './caller'
 
 /**
@@ -74,13 +74,13 @@ function asRefusal(error: unknown, service: string): { code: string; message: st
   if (!looksLikeSession) {
     return {
       code: 'internal',
-      message: `${service}: ${error instanceof Error ? error.message : String(error)}`,
+      message: `${service}: ${messageOf(error)}`,
       retryable: false,
     }
   }
   return {
     code: DISCONNECTED,
-    message: `${service}: ${error instanceof Error ? error.message : String(error)}`,
+    message: `${service}: ${messageOf(error)}`,
     /* Retryable: a session that dropped may come back, and a caller deciding
      * whether to try again should be told the difference between "the shelf
      * said no" and "the shelf did not answer". */
@@ -150,7 +150,7 @@ export function remoteCaller({ channel, close }: RemoteCallerOptions): ServiceCa
         await (close ? close() : channel.close())
       } catch (cause) {
         const kind = (cause as { kind?: unknown })?.kind
-        const text = cause instanceof Error ? cause.message : String(cause)
+        const text = messageOf(cause)
         if (kind === 'noSession' || /no such session|not connected|already closed/i.test(text)) return
         throw cause
       }

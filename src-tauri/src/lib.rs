@@ -507,6 +507,54 @@ pub fn run() {
                 )?;
             }
 
+            /* THE AUTOMATION BRIDGE'S OWN COMMANDS, GRANTED AT RUNTIME.
+             *
+             * ⚠️ **THE PLUGIN WAS REGISTERED AND NEVER PERMITTED**, and the
+             * symptom did not look like a permission at all: the MCP client
+             * reported `Script execution timeout`.
+             *
+             * MEASURED 2026-09-05, and only this much was measured: a short
+             * script returned its value normally; a script that awaited a
+             * `fetch` timed out, and the global it had written was there
+             * afterwards with the right bytes in it — so the script RAN and the
+             * REPLY was lost. A `console.error` hook in the webview then named
+             * it: `mcp-bridge.script_result not allowed`. Granting the
+             * capability made async scripts return normally.
+             *
+             * ⚠️ **WHICH RESULTS TAKE THAT PATH IS NOT ESTABLISHED HERE.** An
+             * earlier version of this comment said a small synchronous value
+             * comes back through the invoke response while anything deferred
+             * goes through `script_result`. That was inferred from two
+             * observations, not read out of the plugin, and it is at best
+             * incomplete — the bridge has more than one return path and which
+             * one is used is not a function of size. What is certain is the
+             * grant: without it, some results never arrive.
+             *
+             * ⚠️ **AT RUNTIME AND NOT IN `capabilities/`, and the reason is
+             * narrower than it first looks.** `desktop` lists
+             * `dep:tauri-plugin-mcp-bridge` unconditionally (`Cargo.toml`), so
+             * the crate — and the permissions its build script generates — are
+             * compiled into RELEASE builds too. A static `mcp-bridge:default`
+             * in `capabilities/desktop.json` would therefore resolve fine; an
+             * earlier version of this comment claimed it would fail the build,
+             * which is wrong and was never tested. The real reason to register
+             * at runtime is that the grant then sits inside the same `cfg` as
+             * the plugin, so a shipped build carries no ACL entry for an
+             * automation bridge it never starts, and the two cannot drift
+             * apart. */
+            #[cfg(all(feature = "desktop", debug_assertions))]
+            {
+                use tauri::Manager as _;
+                app.add_capability(
+                    r#"{
+                        "identifier": "mcp-bridge-debug",
+                        "description": "The automation bridge's commands, debug desktop builds only — see the note in lib.rs.",
+                        "windows": ["main"],
+                        "permissions": ["mcp-bridge:default"]
+                    }"#,
+                )?;
+            }
+
             /* ONE PROCESS OWNS THE LIBRARY, and this is where it is decided —
              * before the webview boots, before the journal opens. The same
              * file, record and protocol as `paper`'s advisory lock, so the CLI

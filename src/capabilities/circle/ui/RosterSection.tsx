@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CAPABILITY_UI } from '../../../kernel'
+import { CAPABILITY_UI, messageOf } from '../../../kernel'
 import type { KnownPerson, PersonPort } from '../../peer'
 import type { CirclePort, FriendBook, FriendView } from '../lib/circlePort'
 import { short } from './personId'
@@ -105,7 +105,7 @@ function PersonRow({
       setUnread(null)
     } catch (cause) {
       if (read.current !== mine) return
-      setUnread(cause instanceof Error ? cause.message : String(cause))
+      setUnread(messageOf(cause))
     }
   }, [circle, person.person, open])
 

@@ -1,4 +1,4 @@
-import { atomicWrite, type IndexFs, type KernelServices } from '../../../kernel'
+import { atomicWrite, messageOf, type IndexFs, type KernelServices } from '../../../kernel'
 import { COVER_CAP_SETTING, type CoverCache } from '../lib/coverCache'
 import type { SyncStatus, SyncStatusStore } from '../lib/status'
 
@@ -322,7 +322,7 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
         /* SAID, not swallowed. The row stays where it is either way; the
          * difference is whether the reader knows the eviction did not
          * happen. */
-        publish({ failure: cause instanceof Error ? cause.message : String(cause) })
+        publish({ failure: messageOf(cause) })
       } finally {
         publish({ busy: null })
         await refresh()
@@ -348,7 +348,7 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
         settings.set(COVER_CAP_SETTING, wanted)
         if (coverCache) await coverCache.evict()
       } catch (cause) {
-        publish({ failure: cause instanceof Error ? cause.message : String(cause) })
+        publish({ failure: messageOf(cause) })
       }
       await refresh()
     },

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, Copy } from 'lucide-react'
-import { CAPABILITY_UI as ui, ICON } from '../../../kernel'
+import { CAPABILITY_UI as ui, ICON, messageOf } from '../../../kernel'
 import type { Browser, CodeOffer, WebHostAddress, WebHostWire } from '../lib/wire'
 
 /**
@@ -222,9 +222,6 @@ export interface BrowsersPaneProps {
   /** Injected so a test need not wait four seconds to see a refresh. */
   readonly pollMs?: number
 }
-
-/** One rendering of a failure, for the six places that used to spell it. */
-const messageOf = (thrown: unknown): string => (thrown instanceof Error ? thrown.message : String(thrown))
 
 export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
   const [address, setAddress] = useState<WebHostAddress | null>(null)

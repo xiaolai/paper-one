@@ -1,4 +1,4 @@
-import { messageOf } from '../lib/messageOf'
+import { messageOf } from '../../../kernel'
 import { createGenerations } from '../../../kernel'
 import type { ReportFailure } from '../lib/controller'
 import type { Endpoint, InferencePlugin, KeyState } from '../lib/plugin'

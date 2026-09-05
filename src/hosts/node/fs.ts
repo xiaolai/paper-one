@@ -5,6 +5,7 @@ import {
   /* THE PURE WALKS, not second copies of them — see the barrel's note. The
      TAURI binding is deliberately not exported there; these walks are,
      because both hosts must run the same ones. */
+  messageOf,
   sizePortOver,
   type FileSystem,
   type IndexFs,
@@ -372,7 +373,7 @@ export function nodeTextFs(root: string): FileSystem {
           `cannot quarantine ${path}: ${target} and .1 through .100 all exist. ` +
             'Something is producing corrupt files faster than they can be looked at; ' +
             'move the existing quarantines aside before this can continue.' +
-            (last === null ? '' : ` (last: ${last instanceof Error ? last.message : String(last)})`),
+            (last === null ? '' : ` (last: ${messageOf(last)})`),
         )
       }
       /* The copy is safe under its own name; this one is the caller's to lose. */

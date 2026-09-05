@@ -1,3 +1,4 @@
+import { messageOf } from '../kernel'
 import {
   GRANT_FAMILIES,
   grantCovers,
@@ -223,6 +224,10 @@ export function callerErrorCode(error: unknown): string {
 /** A refusal's message, or the best available account of anything else. */
 export function callerErrorMessage(error: unknown): string {
   if (isRefusal(error)) return error.message
-  if (error instanceof Error) return error.message
-  return String(error)
+  /* THE SHARED READER for everything that is not a refusal. This spelled the
+     `Error`-or-`String` idiom itself and so answered `[object Object]` for a
+     plugin rejection — the one shape `messageOf` exists for, missed here
+     because the refactor searched for the exact ternary and this is a
+     three-line function that means the same thing. */
+  return messageOf(error)
 }

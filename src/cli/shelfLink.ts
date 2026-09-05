@@ -1,4 +1,4 @@
-import { connectToShelf, type SocketLike } from '../kernel'
+import { connectToShelf, messageOf, type SocketLike } from '../kernel'
 import { nodeSocketOpener } from './nodeSocket'
 import { remoteCaller } from './remote'
 import { shelfAddress, type ShelfAddress } from './shelfAddress'
@@ -154,7 +154,7 @@ async function pair(
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
     })
   } catch (error) {
-    refuse(`could not reach ${address.origin} to pair: ${error instanceof Error ? error.message : String(error)}`)
+    refuse(`could not reach ${address.origin} to pair: ${messageOf(error)}`)
   }
   if (response.status >= 300 && response.status < 400) {
     refuse(`${address.origin} redirected the pairing request; that is not the shelf you named`)
@@ -204,7 +204,7 @@ async function sessionState(
     /* AN OUTAGE IS NOT A REVOCATION. Raised rather than returned, because the
      * two repairs are opposite — wait, versus pair again — and a caller that
      * had to tell them apart from a return value would get it wrong once. */
-    refuse(`could not reach ${address.origin}: ${error instanceof Error ? error.message : String(error)}`)
+    refuse(`could not reach ${address.origin}: ${messageOf(error)}`)
   }
   /* A 401 IS RETURNED, NOT RAISED. It means two different things depending on
    * where the credential came from, and this function does not know: from the

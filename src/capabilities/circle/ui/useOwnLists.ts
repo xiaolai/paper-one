@@ -1,3 +1,4 @@
+import { messageOf } from '../../../kernel'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ListsPort, OwnListView } from '../lib/listsPort'
 
@@ -31,7 +32,7 @@ export function useOwnLists(lists: ListsPort | null): { readonly own: readonly O
     } catch (cause) {
       if (read.current !== mine) return
       setOwn((was) => was ?? [])
-      setTrouble(cause instanceof Error ? cause.message : String(cause))
+      setTrouble(messageOf(cause))
     }
   }, [lists])
   useEffect(() => {

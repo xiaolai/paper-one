@@ -1,3 +1,4 @@
+import { messageOf } from '../../kernel'
 import { createElement } from 'react'
 import type { Capability, Disposable } from '../../kernel'
 import { BrowsersPane } from './ui/BrowsersPane'
@@ -90,7 +91,7 @@ export const webhost: Capability = {
         services,
         onError: (thrown) =>
           api.diagnostics.warn('webhost.pump', {
-            error: thrown instanceof Error ? thrown.message : String(thrown),
+            error: messageOf(thrown),
           }),
       })
       const running = pump

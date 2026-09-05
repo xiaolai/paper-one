@@ -1,9 +1,16 @@
-import { messageOf } from './lib/messageOf'
+import { messageOf } from '../../kernel'
 import { createElement } from 'react'
 import { createRenderSlot, openSession, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
 import { createController, type Controller } from './lib/controller'
 import { createGlossProvider } from './lib/glossProvider'
-import { cancelRequest, inferencePlugin, mintRequestId, type Depth, type InferencePlugin, type Probe } from './lib/plugin'
+import {
+  cancelRequest,
+  inferencePlugin,
+  mintRequestId,
+  type Depth,
+  type InferencePlugin,
+  type Probe,
+} from './lib/plugin'
 import { createModelsModel, downloadLine, type ModelsModel } from './ui/modelsModel'
 import { ModelsPane } from './ui/ModelsPane'
 import { createEndpointsModel, type EndpointsModel } from './ui/endpointsModel'
@@ -324,7 +331,6 @@ export { DEPTHS, errorKind, reasonOf } from './lib/plugin'
  * reason: the reader's sentence for a `kind` has one home, and the kernel's
  * thread cannot reach it. */
 export { detailFor } from './lib/controller'
-export { messageOf } from './lib/messageOf'
 /* ⚠️ EXACTLY WHAT `companion` IMPORTS, AND NOTHING ELSE. This list carried
  * `InstallProgress`, `ModelRow` and `RouteKind` too, plus the keep-loaded setting (since removed — see `ModelsPane`),
  * `useInference` and three controller types on their own lines — none of which

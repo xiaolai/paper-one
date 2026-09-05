@@ -61,15 +61,15 @@
 import {
   BOOKS_DIR,
   PRESENCE_KEY,
-  readPresence,
   PRESENCE_PATH,
   TRASH_DIR,
   atomicWrite,
   hlcOf,
+  messageOf,
   notePresence,
   parseRecord,
   readMarks,
-  validMarks,
+  readPresence,
   type Card,
   type Hlc,
   type IndexFs,
@@ -77,6 +77,7 @@ import {
   type MutationRecorder,
   type MutationToken,
   type WriteQueue,
+  validMarks,
 } from '../../../kernel'
 import { createDigests } from './journalDigests'
 import { scanJournal } from './journalScan'
@@ -385,7 +386,7 @@ export function createJournal({
    */
   class AppendNotAttempted extends Error {
     constructor(readonly cause: unknown) {
-      super(cause instanceof Error ? cause.message : String(cause))
+      super(messageOf(cause))
       this.name = 'AppendNotAttempted'
     }
   }
@@ -452,7 +453,7 @@ export function createJournal({
       /* Nothing was written, so nothing is ambiguous: raise the real cause and
        * leave the journal usable. */
       if (cause instanceof AppendNotAttempted) throw cause.cause
-      poisoned = cause instanceof Error ? cause : new Error(String(cause))
+      poisoned = cause instanceof Error ? cause : new Error(messageOf(cause))
       throw cause
     }
   }

@@ -1,3 +1,4 @@
+import { messageOf } from '../../kernel'
 /**
  * The browser client's half of the six-digit exchange.
  *
@@ -121,7 +122,7 @@ export async function signOut(fetcher: typeof fetch = fetch): Promise<SignOutRes
   try {
     response = await fetcher('/api/auth/signout', { ...SAME_ORIGIN, method: 'POST' })
   } catch (cause) {
-    return { kind: 'still-paired', why: cause instanceof Error ? cause.message : String(cause) }
+    return { kind: 'still-paired', why: messageOf(cause) }
   }
   /* 204 IS THE ONLY YES. The endpoint is idempotent and answers 204 whether or
      not anything was revoked, so any other status is the shelf declining — a

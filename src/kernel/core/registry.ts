@@ -1,3 +1,4 @@
+import { messageOf } from './messageOf'
 import type {
   BookStatus,
   BookAction,
@@ -949,7 +950,7 @@ export async function composeCapabilities(
         capability: id,
         kind,
         ...(because === undefined ? {} : { because }),
-        message: error instanceof Error ? error.message : String(error),
+        message: messageOf(error),
       })
     } catch (cause) {
       console.error('Paper: could not report a capability that failed to compose', cause)
@@ -1111,7 +1112,7 @@ export async function composeCapabilities(
   try {
     servingDisposer = await api.services.serveServices([...services.values()])
   } catch (error) {
-    api.diagnostics.error('composition.serve-failed', { message: error instanceof Error ? error.message : String(error) })
+    api.diagnostics.error('composition.serve-failed', { message: messageOf(error) })
   }
 
   const composition: Composition = {
@@ -1175,7 +1176,7 @@ export async function composeCapabilities(
       try {
         servingDisposer.dispose()
       } catch (error) {
-        api.diagnostics.error('composition.unserve-failed', { message: error instanceof Error ? error.message : String(error) })
+        api.diagnostics.error('composition.unserve-failed', { message: messageOf(error) })
       }
       const failures = disposeAll(started)
       started.length = 0
@@ -1196,7 +1197,7 @@ export async function composeCapabilities(
     try {
       composition.dispose()
     } catch (error) {
-      api.diagnostics.error('composition.dispose-failed', { message: error instanceof Error ? error.message : String(error) })
+      api.diagnostics.error('composition.dispose-failed', { message: messageOf(error) })
     }
   }
   signal.addEventListener('abort', onAbort, { once: true })

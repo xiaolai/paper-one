@@ -1,3 +1,4 @@
+import { messageOf } from './messageOf'
 import type { ServiceContext, ServiceContribution } from './capability'
 
 /**
@@ -257,7 +258,7 @@ export function encodeFrame(frame: Frame): Uint8Array {
        left is a cycle, or a `toJSON` that threw. */
     if (unencodable !== null) throw new MalformedFrame(unencodable)
     throw new MalformedFrame(
-      `frame body cannot be serialised as JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `frame body cannot be serialised as JSON: ${messageOf(cause)}`,
     )
   }
   const payload = encoder.encode(json)

@@ -1,4 +1,4 @@
-import { messageOf } from './messageOf'
+import { messageOf } from '../../../kernel'
 import type { GlossContext, GlossProvider } from '../../../kernel'
 import { detailFor, type Controller, type ReportFailure } from './controller'
 import { cancelRequest, errorKind, mintRequestId, type InferencePlugin } from './plugin'

@@ -1,3 +1,4 @@
+import { messageOf } from '../../../kernel'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 /**
@@ -46,7 +47,7 @@ export function useAction(said: string): Action {
         if (live.current && after) await after()
         return true
       } catch (cause) {
-        if (live.current) setTrouble(`${said} ${cause instanceof Error ? cause.message : String(cause)}`)
+        if (live.current) setTrouble(`${said} ${messageOf(cause)}`)
         return false
       } finally {
         // Stryker disable next-line ConditionalExpression: a component that has gone draws nothing, so a flag set into it is read by nobody.

@@ -1,4 +1,4 @@
-import { messageOf } from '../lib/messageOf'
+import { messageOf } from '../../../kernel'
 import type { ReportFailure } from '../lib/controller'
 import { mintRequestId, type InferencePlugin } from '../lib/plugin'
 
@@ -96,7 +96,7 @@ export function browserAudio(): AudioSink {
       }
       void element.play().catch((error: unknown) => {
         release()
-        on.failed(error instanceof Error ? error.message : String(error))
+        on.failed(messageOf(error))
       })
       return { stop: release }
     },

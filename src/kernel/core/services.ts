@@ -1,3 +1,4 @@
+import { messageOf } from './messageOf'
 import type { IndexFs, IndexedBook } from './bookIndex'
 import type { Disposable, ServiceContribution } from './capability'
 import { createCards, type CardStorage, type Cards } from './cardStore'
@@ -7,7 +8,24 @@ import { createMarkStore, type MarkStore } from './markStore'
 import { folderOf, readBook, recordPath } from './bookFolder'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
 import { NO_GLOSS, type GlossProvider } from './gloss'
-import { NO_WORK_LINE, NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_KINDS, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type HashPort, type SizePort, type WorkLine } from './ports'
+import {
+  NO_WORK_LINE,
+  NOOP_DIAGNOSTICS,
+  NOOP_RECORDER,
+  REMOVABLE_BLOB_KINDS,
+  REMOVABLE_BLOB_NAMES,
+  recorded,
+  type DevicePort,
+  type Diagnostics,
+  type MutationRecorder,
+  type MutationToken,
+  type RemovableBlobName,
+  type SettingsStore,
+  type ShelfPort,
+  type HashPort,
+  type SizePort,
+  type WorkLine,
+} from './ports'
 import { carryLegacySettings, createSettingsStore, type SettingsMigration } from './settings'
 import { writeQueue, type WriteQueue } from './writeQueue'
 
@@ -695,7 +713,7 @@ export function createKernelServices({
       try {
         diagnostics.warn('services.host-dispose-failed', {
           where,
-          message: cause instanceof Error ? cause.message : String(cause),
+          message: messageOf(cause),
         })
       } catch (reporting) {
         console.error('Paper: the diagnostics port threw while reporting a dispose failure', reporting, cause)

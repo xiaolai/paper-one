@@ -1,3 +1,4 @@
+import { messageOf } from './messageOf'
 import type { CapabilityContext } from './capability'
 
 /**
@@ -62,7 +63,7 @@ export function openSession(api: CapabilityContext, signal: AbortSignal, event: 
            unhandled error during shutdown naming nothing. */
         api.diagnostics.warn(event, {
           label,
-          message: error instanceof Error ? error.message : String(error),
+          message: messageOf(error),
         })
       }
     }

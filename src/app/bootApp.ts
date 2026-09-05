@@ -26,17 +26,18 @@
  * `.dependency-cruiser.cjs` refuses the shortcut (`mobile-root-not-desktop-ui-entry`).
  */
 import {
+  DIAGNOSTICS_FILE,
+  DIAGNOSTICS_SWITCH,
   buildServices,
   composeCapabilities,
   createDiagnosticLog,
   createDiagnosticSpool,
   createDiagnostics,
   createKernelServices,
-  DIAGNOSTICS_FILE,
-  DIAGNOSTICS_SWITCH,
   finishPendingRemovals,
   flushBeforeClose,
   kernelApi,
+  messageOf,
   serviceClients,
 } from '../kernel'
 import type { Composition, DiagnosticLog, IndexFs, KernelServices } from '../kernel'
@@ -315,7 +316,7 @@ export async function bootApp(): Promise<BootedApp> {
    * window, and the library errs towards keeping anything it cannot age. */
   void services.library.emptyExpiredTrash().catch((error: unknown) => {
     services.diagnostics.warn('trash.sweep-failed', {
-      message: error instanceof Error ? error.message : String(error),
+      message: messageOf(error),
     })
   })
 

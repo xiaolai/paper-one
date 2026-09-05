@@ -2,21 +2,23 @@ import {
   acceptsTransport,
   canonicalJson,
   createCoverFactsPass,
-  publishableCover,
   drawable,
   drawsEntry,
+  folderOf,
+  listTrash,
+  messageOf,
   overlayKey,
+  publishableCover,
   readmit,
   type Capability,
   type CapabilityContext,
   type Disposable,
   type ForeignAnnotation,
   type ForeignEntry,
-  folderOf,
   type HashPort,
   type Hlc,
-  type IndexedBook,
   type IndexFs,
+  type IndexedBook,
   type Library,
   type OverlayRequest,
   type Relationship,
@@ -25,7 +27,6 @@ import {
   type TrashFs,
   type VaultFs,
   type WriteQueue,
-  listTrash,
 } from '../../kernel'
 import { createElement } from 'react'
 import { peopleFor, readForeign, type ForeignFile } from './lib/store'
@@ -112,7 +113,7 @@ async function entriesFor(
     try {
       out.push(...(await readForeign(fs, bookId, person)).entries)
     } catch (cause) {
-      warn('circle.read-failed', { person, bookId, message: cause instanceof Error ? cause.message : String(cause) })
+      warn('circle.read-failed', { person, bookId, message: messageOf(cause) })
     }
   }
   return out
@@ -189,7 +190,7 @@ async function annotationsFor(
       /* In the log the reader can open, as a circle file that will not read
          is — a decision about a person that cannot be read is as much their
          news as a passage that cannot be. Drawing nothing of theirs. */
-      held.warn('circle.relationship-read-failed', { person, message: cause instanceof Error ? cause.message : String(cause) })
+      held.warn('circle.relationship-read-failed', { person, message: messageOf(cause) })
     }
   }
   return drawable(
@@ -546,7 +547,7 @@ export const circle: Capability = {
             ctx.diagnostics.info('circle.fetch', { ...report, skipped: report.skipped.length, skips: report.skipped })
           },
           failed: (cause) => {
-            ctx.diagnostics.warn('circle.fetch.failed', { message: cause instanceof Error ? cause.message : String(cause) })
+            ctx.diagnostics.warn('circle.fetch.failed', { message: messageOf(cause) })
           },
         })
       : null
@@ -580,7 +581,7 @@ export const circle: Capability = {
          on publishing what it published — and anything the reader changed
          while the app was closed is published now. Off the boot path. */
       void ours?.opinion.warm().catch((cause: unknown) => {
-        ctx.diagnostics.warn('circle.opinion.warm-failed', { message: cause instanceof Error ? cause.message : String(cause) })
+        ctx.diagnostics.warn('circle.opinion.warm-failed', { message: messageOf(cause) })
       })
       /* The published shelf follows the library — WI-23.C1: adding a book
          publishes `shelf`, removing one `unshelf`. Once at start, then on every
@@ -588,12 +589,12 @@ export const circle: Capability = {
       offShelf = ours
         ? ctx.services.library.subscribe(() => {
             void ours.publishShelf().catch((cause: unknown) => {
-              ctx.diagnostics.warn('circle.shelf.publish-failed', { message: cause instanceof Error ? cause.message : String(cause) })
+              ctx.diagnostics.warn('circle.shelf.publish-failed', { message: messageOf(cause) })
             })
           })
         : null
       void ours?.publishShelf().catch((cause: unknown) => {
-        ctx.diagnostics.warn('circle.shelf.publish-failed', { message: cause instanceof Error ? cause.message : String(cause) })
+        ctx.diagnostics.warn('circle.shelf.publish-failed', { message: messageOf(cause) })
       })
       /* AN IDENTITY MADE LATER — WI-23.C1 and A1. The peer's own lifecycle,
          not a panel's call: `ensure` on the Circle screen is one way an
@@ -632,7 +633,7 @@ async function readHeldLists(fs: IndexFs, person: string, warn: Held['warn']): P
       try {
         return [id, await readHeldList(fs as VaultFs, person, id)] as const
       } catch (cause) {
-        warn('circle.list-read-failed', { person, listId: id, message: cause instanceof Error ? cause.message : String(cause) })
+        warn('circle.list-read-failed', { person, listId: id, message: messageOf(cause) })
         return null
       }
     }),
@@ -700,7 +701,7 @@ function readmitOnPairing(fs: VaultFs, writes: WriteQueue, clock: () => Hlc, dia
         diagnostics.info('circle.readmitted', { person, epoch: again.epoch })
       }
     })().catch((cause: unknown) => {
-      diagnostics.warn('circle.readmit-failed', { message: cause instanceof Error ? cause.message : String(cause) })
+      diagnostics.warn('circle.readmit-failed', { message: messageOf(cause) })
     })
   })
 }
@@ -859,7 +860,7 @@ function publicationOver({ fs, library, writes, clock, warn, onChanged }: Runnin
     books: () => library.getSnapshot(),
     changes: (listener) => library.subscribe(listener),
     patch: (bookId, fields) => library.patch(bookId, fields),
-    failed: (cause) => warn('circle.opinion.publish-failed', { message: cause instanceof Error ? cause.message : String(cause) }),
+    failed: (cause) => warn('circle.opinion.publish-failed', { message: messageOf(cause) }),
     shared: (bookId) => readShared(fs as VaultFs, bookId),
     update: (bookId, transform) => updateShared(fs as VaultFs, writes, (id) => library.lane(id), bookId, transform),
     device: async () => (await publisher())?.device ?? null,
@@ -992,8 +993,8 @@ function runningOver(deps: RunningDeps): Running {
   const identityChanged = async (): Promise<void> => {
     const [shelf, opinions] = await Promise.allSettled([publishShelf(), opinion.warm()])
     deps.changed()
-    if (shelf.status === 'rejected') deps.warn('circle.shelf.publish-failed', { message: shelf.reason instanceof Error ? shelf.reason.message : String(shelf.reason) })
-    if (opinions.status === 'rejected') deps.warn('circle.opinion.warm-failed', { message: opinions.reason instanceof Error ? opinions.reason.message : String(opinions.reason) })
+    if (shelf.status === 'rejected') deps.warn('circle.shelf.publish-failed', { message: messageOf(shelf.reason) })
+    if (opinions.status === 'rejected') deps.warn('circle.opinion.warm-failed', { message: messageOf(opinions.reason) })
   }
   return { publisher, serving, sharing, opinion, discloses, circle, lists, publishShelf, identityChanged }
 }

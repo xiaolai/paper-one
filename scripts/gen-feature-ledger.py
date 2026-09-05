@@ -47,6 +47,10 @@ INFORMATIONAL_HEADERS = (
     ['row', 'was', 'is'],
     ['row', 'what has not been done'],
     ['state', 'meaning'],
+    # The 2026-09-05 pass's own drift log, which counts SURFACES rather than
+    # rows: three of them had no entry in the ledger at all, which is not a
+    # shape the row-level log above can say.
+    ['surface', 'landed', 'rows here before'],
 )
 
 

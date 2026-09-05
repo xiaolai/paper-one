@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CAPABILITY_UI, offersShare, offersUnshare, shareAbsentBecause, type Highlight } from '../../../kernel'
+import {
+  CAPABILITY_UI,
+  messageOf,
+  offersShare,
+  offersUnshare,
+  shareAbsentBecause,
+  type Highlight,
+} from '../../../kernel'
 import type { SharePort, ShareState } from '../lib/sharing'
 
 /**
@@ -66,7 +73,7 @@ export function ShareControl({ mark, port }: ShareControlProps) {
       if (read.current !== mine) return
       /* SHOWN, NOT SWALLOWED. A row that fails to read the store and draws
          "Share" is offering to publish over a file it could not read. */
-      setFailure(cause instanceof Error ? cause.message : String(cause))
+      setFailure(messageOf(cause))
     }
     /* The mark's IDENTITY, not the object: Marginalia hands a fresh row on
        every store change, and re-reading the file for a note edit would be
@@ -107,7 +114,7 @@ export function ShareControl({ mark, port }: ShareControlProps) {
     try {
       await what()
     } catch (cause) {
-      if (shown.current === marked) setTrouble(cause instanceof Error ? cause.message : String(cause))
+      if (shown.current === marked) setTrouble(messageOf(cause))
     } finally {
       if (shown.current === marked) setBusy(false)
     }
