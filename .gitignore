@@ -102,6 +102,15 @@ public/sample.pdf
 # repository's — none of them belong in version control.
 public/*.pdf
 public/*.epub
+# The format fixtures, copied out of tests/fixtures/ when the manual pass
+# (WI-24.A3) needs the webview to fetch them by URL rather than carry 36 KB of
+# base64 through a bridge call. The committed originals are in tests/fixtures/;
+# these are throwaway copies.
+public/*.mobi
+public/*.azw3
+public/*.cbz
+public/*.fb2
+public/*.fbz
 
 # Coverage output of `pnpm test:coverage` (`vitest run --coverage`):
 # `coverage-summary.json`, `lcov.info` and the HTML report. Rebuilt on every
