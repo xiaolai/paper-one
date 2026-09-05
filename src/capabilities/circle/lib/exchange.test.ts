@@ -3,10 +3,23 @@ import { sha512 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import { describe, expect, it, vi } from 'vitest'
 
-/* The jacket served in chunks is over the chunk boundary — half a megabyte
-   hashed in JavaScript, twice; under coverage instrumentation that outruns
-   the default fifteen seconds. The same allowance `covers.test.ts` makes,
-   for the same jacket. */
+/* ⚠️ **THIS FILE KEEPS ITS BIG JACKET, AND IT IS THE ONLY ONE THAT SHOULD.**
+   `answerCover` is the code that actually chunks at `COVER_CHUNK_BYTES`, so a
+   jacket larger than that constant IS the property under test here: shrink it
+   and the real 512 KiB boundary is covered nowhere.
+
+   `covers.test.ts` and `fetch.test.ts` used to carry the same half-megabyte
+   jacket and the same allowance, and for them the size was INCIDENTAL — the
+   fetcher follows `offset`/`more` and never reads the constant, so their fake
+   servers chunk at 2048 bytes now and their tests run in tens of milliseconds
+   instead of timing out. That is why this comment no longer points at them.
+
+   The cost here is real and bounded: ~4 s under coverage instrumentation on an
+   idle machine, against the sixty below. The default fifteen is not enough —
+   `covers.test.ts` blew a SIXTY-second budget intermittently on `main` before
+   its jacket was shrunk, which is what a 3x margin buys you under parallel
+   load. If this ever starts failing, the answer is not a bigger number: it is
+   that the margin has gone and the test needs to stop hashing in JavaScript. */
 vi.setConfig({ testTimeout: 60_000 })
 import { MAX_COVER_BYTES } from '../../../kernel'
 import { bytesOfBase64 } from './base64'

@@ -3,7 +3,6 @@ import { blake3 } from '@noble/hashes/blake3.js'
 import { createSpendLedger } from './spendLedger'
 import { createCoverFetcher } from './covers'
 import { base64Of } from './base64'
-import { COVER_CHUNK_BYTES } from './protocol'
 import { fakeFs } from '../../../kernel/testkit'
 import { sha512 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
@@ -1783,14 +1782,19 @@ describe('a lists request names at most what the peer’s parser reads', () => {
    over a jacket's charge, and the two together spent past the budget. */
 describe('the round and a jacket over one ledger', () => {
   /* Over the chunk boundary, under the jacket cap. */
-  const jacket = new Uint8Array(COVER_CHUNK_BYTES + 100).map((_, i) => (i * 7) % 256)
+  /* SMALL ON PURPOSE — see the note on `CHUNK` in `covers.test.ts`. A real
+     512 KiB jacket is hashed and base64'd in JavaScript here too, and under
+     coverage instrumentation it outran this file's default fifteen seconds.
+     The fetcher follows `offset`/`more`, so the fake server picks the size. */
+  const JACKET_CHUNK = 2048
+  const jacket = new Uint8Array(JACKET_CHUNK + 100).map((_, i) => (i * 7) % 256)
   const digest = bytesToHex(blake3(jacket))
   /** A device serving the jacket chunk by chunk, as `answerCover` does. */
   const jacketSession = () => ({
     call: (service: string, body: unknown) => {
       if (service !== CIRCLE_SERVICES.cover.name) return Promise.reject(new Error(`no such service ${service}`))
       const asked = body as { pub: string; offset: number }
-      const slice = jacket.subarray(asked.offset, Math.min(jacket.length, asked.offset + COVER_CHUNK_BYTES))
+      const slice = jacket.subarray(asked.offset, Math.min(jacket.length, asked.offset + JACKET_CHUNK))
       return Promise.resolve({ offset: asked.offset, size: jacket.length, bytes: base64Of(slice), more: asked.offset + slice.length < jacket.length })
     },
     close: () => Promise.resolve(),

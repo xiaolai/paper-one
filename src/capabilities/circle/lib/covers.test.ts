@@ -5,19 +5,44 @@ import { MAX_COVER_BYTES, NOTHING_SPENT, charge, personFolderIn, type Spend, typ
 import { fakeFs } from '../../../kernel/testkit'
 import { base64Of } from './base64'
 import { COVER_CAP_SETTING, COVER_INDEX_PATH, coverPathOf, createCoverFetcher } from './covers'
-import { CIRCLE_SERVICES, COVER_CHUNK_BYTES } from './protocol'
+import { CIRCLE_SERVICES } from './protocol'
 
 /**
  * The recipient's half of WI-23.C5: a jacket fetched by digest, paid for,
  * verified whole, kept under its person, and never fetched twice at once.
  */
 
-/* A jacket over the chunk boundary is half a megabyte hashed in JavaScript, twice per fetch; under coverage instrumentation that outruns the default fifteen seconds. */
-vi.setConfig({ testTimeout: 60_000 })
+/**
+ * ⚠️ **THE FAKE SERVER CHUNKS SMALL, AND THAT IS THE POINT OF THIS CONSTANT.**
+ *
+ * This test used the real chunk size (512 KiB), so every case built a jacket of
+ * half a megabyte and BLAKE3-hashed it twice per fetch and base64'd it a chunk
+ * at a time — in JavaScript. Under v8 coverage instrumentation that outran the
+ * default fifteen seconds, and the answer at the time was to widen the bound to
+ * sixty. It then outran sixty as well, intermittently, and `pnpm test:coverage`
+ * was red on `main` for it.
+ *
+ * The size was never the property under test. What is under test is a jacket
+ * that spans MORE THAN ONE CHUNK — the fetcher follows `offset`/`more` and does
+ * not read the protocol constant at all, so the number here is the fake
+ * server's to choose. 256 bytes proves the same thing ~2000x faster.
+ *
+ * The real 512 KiB chunking IS still covered, on the side that actually
+ * performs it: `exchange.test.ts` holds `answerCover` to it.
+ *
+ * ⚠️ **TWO CONSTRAINTS, BOTH LEARNED BY BREAKING THEM.** It must exceed every
+ * other fixture in this file — `small` is 1000 bytes, and at 256 it spanned
+ * four chunks, which hung the fence test: its gated fake registers one
+ * `release` per call and overwrites it, so only a single-chunk fixture can be
+ * released once. And `+ 100` below must stay smaller than this, or the jacket
+ * spans three chunks and the two-call assertion is wrong for a reason that has
+ * nothing to do with the code.
+ */
+const CHUNK = 2048
 
 const ALICE = 'a1'.repeat(32)
 const LAPTOP = 'b1'.repeat(32)
-const JACKET = new Uint8Array(COVER_CHUNK_BYTES + 100).map((_, i) => (i * 7) % 256)
+const JACKET = new Uint8Array(CHUNK + 100).map((_, i) => (i * 7) % 256)
 const DIGEST = bytesToHex(blake3(JACKET))
 
 /** A device that serves one jacket the way `answerCover` does, chunk by chunk. */
@@ -30,7 +55,7 @@ function serving(bytes: Uint8Array = JACKET, over: { size?: number; refuse?: boo
       calls.push(asked)
       if (service !== CIRCLE_SERVICES.cover.name || over.refuse) return Promise.reject(new Error('that request is not one this build answers'))
       const size = over.size ?? bytes.length
-      const slice = bytes.subarray(asked.offset, Math.min(bytes.length, asked.offset + COVER_CHUNK_BYTES))
+      const slice = bytes.subarray(asked.offset, Math.min(bytes.length, asked.offset + CHUNK))
       return Promise.resolve({ offset: asked.offset, size, bytes: base64Of(slice), more: asked.offset + slice.length < size })
     },
     close: () => {
@@ -69,7 +94,7 @@ describe('fetching a friend’s jacket', () => {
     expect(w.dial).toHaveBeenCalledWith(LAPTOP)
     expect(w.serve.calls).toEqual([
       { pub: 'pub1', offset: 0 },
-      { pub: 'pub1', offset: COVER_CHUNK_BYTES },
+      { pub: 'pub1', offset: CHUNK },
     ])
     expect(w.serve.closed()).toBe(1)
     expect(w.fs.store.get(coverPathOf(ALICE, DIGEST))).toEqual(JACKET)
