@@ -3,12 +3,13 @@ import {
   SHELF_WORK,
   acceptsTransport,
   chainHash,
+  compareHlc,
   listIdOf,
   listWork,
+  messageOf,
   type Budget,
   type PageCrypto,
   type Relationship,
-  compareHlc,
 } from '../../../kernel'
 import { claimOf, type BookLike } from './exchange'
 import {
@@ -226,7 +227,7 @@ export async function fetchRound(ports: FetchPorts): Promise<RoundReport> {
       if (outcome.skipped !== null) skipped.push(outcome.skipped)
     } catch (cause) {
       /* One person failing must not cost the round the people after them. */
-      skipped.push({ person: person.person, why: 'failed', detail: cause instanceof Error ? cause.message : String(cause) })
+      skipped.push({ person: person.person, why: 'failed', detail: messageOf(cause) })
     }
   }
   return { asked, calls: done.calls, accepted: done.accepted, refusals: done.refusals, skipped }
@@ -284,7 +285,7 @@ async function fetchPerson(
          round — `keeper.rs`'s rule for an introduction that does not
          answer. The reason is kept, so a failure that is not sleep — a
          bad grant, a misconfiguration — reads as what it is. */
-      asleep = cause instanceof Error ? cause.message : String(cause)
+      asleep = messageOf(cause)
       continue
     }
     answered += 1
@@ -296,7 +297,7 @@ async function fetchPerson(
     } catch (cause) {
       /* A failure past the dial is the person's, and they were ASKED: the
          hello went out. Reported as failed, and their round ends here. */
-      return { done, asked: true, skipped: { person: person.person, why: 'failed', detail: cause instanceof Error ? cause.message : String(cause) } }
+      return { done, asked: true, skipped: { person: person.person, why: 'failed', detail: messageOf(cause) } }
     } finally {
       /* Said, not swallowed: a session that would not close is a
          transport problem the round can go on past, and the only

@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import {
   INDEX_FILE,
   defineSetting,
+  messageOf,
   parseIndex,
   restThenBreathe,
   scanBooks,
@@ -153,7 +154,7 @@ function pruneArrivals(books: readonly { bookId: string; openedAt?: number }[]):
       void dropArrival(fs, book.bookId).catch((thrown: unknown) => {
         warn?.('sync.arrival-drop-failed', {
           book: book.bookId,
-          message: thrown instanceof Error ? thrown.message : String(thrown),
+          message: messageOf(thrown),
         })
       })
     }
@@ -182,7 +183,7 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
      * session, and nothing else says so. The task's own result or error is
      * what the caller sees either way. */
     await channel.close().catch((thrown: unknown) => {
-      warn?.('sync.channel-close-failed', { message: thrown instanceof Error ? thrown.message : String(thrown) })
+      warn?.('sync.channel-close-failed', { message: messageOf(thrown) })
     })
   }
 }
@@ -217,7 +218,7 @@ async function degrade(thrown: unknown, book?: string): Promise<void> {
    * had just started successfully. The callers that capture their own owner
    * check it before calling this; this is the check for the await INSIDE. */
   const owner = running
-  const message = thrown instanceof Error ? thrown.message : String((thrown as { message?: unknown })?.message ?? thrown)
+  const message = messageOf(thrown)
   const refusal = { kind: refusalKind(thrown), message, ...(book === undefined ? {} : { book }) }
   const names = await refusalNames()
   if (running !== owner) return
@@ -434,7 +435,7 @@ async function integrityPass(
         }
       }
     } catch (error) {
-      findings.push(`the library could not be scanned: ${error instanceof Error ? error.message : String(error)}`)
+      findings.push(`the library could not be scanned: ${messageOf(error)}`)
     }
   }
 
@@ -600,7 +601,7 @@ export const sync: Capability = {
       } catch (error) {
         api.diagnostics.warn('sync.teardown-step-failed', {
           label,
-          message: error instanceof Error ? error.message : String(error),
+          message: messageOf(error),
         })
       }
     }
@@ -725,7 +726,7 @@ export const sync: Capability = {
         journalHandoff = openedJournal.close().catch((error: unknown) => {
           api.diagnostics.warn('sync.teardown-step-failed', {
             label: 'journal-close',
-            message: error instanceof Error ? error.message : String(error),
+            message: messageOf(error),
           })
         })
       }
@@ -749,7 +750,7 @@ export const sync: Capability = {
         /* The shelf fallback serves nothing extra and schedules nothing —
          * the safe side — but a role that could not be read is a fact the
          * log must carry, not a silent guess. */
-        api.diagnostics.warn('sync.role-unknown', { message: error instanceof Error ? error.message : String(error) })
+        api.diagnostics.warn('sync.role-unknown', { message: messageOf(error) })
         return 'shelf' as SyncRole
       })
       if (abortedDuringStart()) throw new Error('sync: start aborted while the role was being read')
@@ -803,7 +804,7 @@ export const sync: Capability = {
               await recordArrival(fs, bookId, arrival).catch((thrown: unknown) => {
                 api.diagnostics.warn('sync.arrival-record-failed', {
                   book: bookId,
-                  message: thrown instanceof Error ? thrown.message : String(thrown),
+                  message: messageOf(thrown),
                 })
               })
             }
@@ -932,7 +933,7 @@ export const sync: Capability = {
                  for this run either way, but a silent loss is how a feature
                  comes to look as though it was never wired. */
               api.diagnostics.warn('sync.arrivals-read-failed', {
-                message: thrown instanceof Error ? thrown.message : String(thrown),
+                message: messageOf(thrown),
               })
             })
         }
@@ -979,7 +980,7 @@ export const sync: Capability = {
           } catch (thrown) {
             api.diagnostics.warn('sync.session-failed', {
               kind: refusalKind(thrown),
-              message: thrown instanceof Error ? thrown.message : String(thrown),
+              message: messageOf(thrown),
             })
             if (running !== owner) return
             await degrade(thrown)
@@ -1043,7 +1044,7 @@ export const sync: Capability = {
          * for the rest of the process with nothing anywhere saying so. Ended
          * still (a retry policy is its own decision), but loudly. */
         const stamped = await backfill.runOnce().catch((thrown: unknown) => {
-          api.diagnostics.warn('sync.backfill-failed', { message: thrown instanceof Error ? thrown.message : String(thrown) })
+          api.diagnostics.warn('sync.backfill-failed', { message: messageOf(thrown) })
           return 0
         })
         if (!stopped && stamped > 0) void backfillTick()

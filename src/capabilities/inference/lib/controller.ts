@@ -1,5 +1,5 @@
 import { createGenerations } from '../../../kernel'
-import { messageOf } from './messageOf'
+import { messageOf } from '../../../kernel'
 import type { InferencePlugin, InstallProgress, ModelRow, RuntimeStatus } from './plugin'
 import { cancelRequest, errorKind, isCancelled, mintRequestId } from './plugin'
 

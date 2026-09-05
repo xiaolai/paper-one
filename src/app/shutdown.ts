@@ -1,3 +1,4 @@
+import { messageOf } from '../kernel'
 import type { Diagnostics } from '../kernel'
 
 /**
@@ -68,7 +69,7 @@ export async function armShutdown(deps: ShutdownDeps, teardown: () => Promise<vo
     void teardown().catch((error: unknown) => {
       try {
         deps.diagnostics.warn('shutdown.teardown-failed', {
-          message: error instanceof Error ? error.message : String(error),
+          message: messageOf(error),
         })
       } catch {
         /* The reporter of last resort must not be allowed to re-raise. */
@@ -99,7 +100,7 @@ export function armShutdownInBackground(deps: ShutdownDeps): () => Promise<void>
   const teardown = createTeardown(deps)
   void armShutdown(deps, teardown).catch((error: unknown) => {
     deps.diagnostics.warn('shutdown.handshake-unavailable', {
-      message: error instanceof Error ? error.message : String(error),
+      message: messageOf(error),
     })
   })
   return teardown
@@ -165,7 +166,7 @@ async function runTeardown(deps: ShutdownDeps): Promise<void> {
     try {
       await run()
     } catch (error) {
-      failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
+      failures.push(`${name}: ${messageOf(error)}`)
     }
   }
   try {
@@ -200,7 +201,7 @@ async function runTeardown(deps: ShutdownDeps): Promise<void> {
     await deps.emit(SHUTDOWN_DONE_EVENT).catch((error: unknown) => {
       try {
         deps.diagnostics.warn('shutdown.ack-failed', {
-          message: error instanceof Error ? error.message : String(error),
+          message: messageOf(error),
         })
       } catch {
         /* The reporter of last resort must not be allowed to break the exit. */

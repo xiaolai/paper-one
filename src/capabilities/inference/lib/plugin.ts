@@ -1,4 +1,4 @@
-import { messageOf } from './messageOf'
+import { messageOf } from '../../../kernel'
 import { Channel, invoke } from '@tauri-apps/api/core'
 
 /**

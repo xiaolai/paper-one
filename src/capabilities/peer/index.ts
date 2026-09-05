@@ -1,7 +1,20 @@
+import { messageOf } from '../../kernel'
 import { createElement } from 'react'
 import type { Capability, CapabilityContext, DevicePort, DeviceRow, Disposable, ServiceContribution } from '../../kernel'
 import { createPeerPort, type PeerPort } from './lib/port'
-import { hasTauri, tauriWire, type KnownPerson, type PairOffer, type PairStart, type PairingPending, type PairingResult, type PagePublisher, type PeerWire, type PersonStatus, type WirePeer } from './lib/wire'
+import {
+  hasTauri,
+  tauriWire,
+  type KnownPerson,
+  type PairOffer,
+  type PairStart,
+  type PairingPending,
+  type PairingResult,
+  type PagePublisher,
+  type PeerWire,
+  type PersonStatus,
+  type WirePeer,
+} from './lib/wire'
 import { createDevicesModel, type DevicesModel } from './ui/devicesModel'
 import { DevicesPane } from './ui/DevicesPane'
 
@@ -97,7 +110,7 @@ export async function readRole(
    * guess. Reported after the retries, so it names a conclusion. */
   diagnostics.warn('peer.role-unknown', {
     tries: ROLE_TRIES,
-    message: last instanceof Error ? last.message : String(last),
+    message: messageOf(last),
   })
   return null
 }
@@ -453,7 +466,7 @@ export function releasePeer(held: PeerResources, diagnostics: { warn: (event: st
       try {
         diagnostics.warn('peer.teardown-step-failed', {
           label,
-          message: error instanceof Error ? error.message : String(error),
+          message: messageOf(error),
         })
       } catch {
         /* Nothing left to tell it to. */

@@ -1,7 +1,7 @@
 import { LockHeld, acquireDataLock, type DataLock } from '../hosts/node/lock'
 import { makeDataDir } from '../hosts/node/fs'
 import { defaultDataDir, openNodeServices } from '../hosts/node/services'
-import { readingGrant } from '../kernel'
+import { messageOf, readingGrant } from '../kernel'
 import { openLocalJournal, type LocalJournal } from '../capabilities/sync'
 import { localCaller, type ServiceCaller } from './caller'
 import { plain } from './format'
@@ -153,7 +153,7 @@ export async function paper({ argv, sinks, dataDir, remote, lockWaitMs }: PaperO
          * failed used to REPLACE it — the reader saw "could not close the
          * host" over the reason the journal would not open. */
         await host.close().catch((also: unknown) => {
-          sinks.err(`paper: closing the host after that also failed — ${also instanceof Error ? also.message : String(also)}`)
+          sinks.err(`paper: closing the host after that also failed — ${messageOf(also)}`)
         })
         throw error
       }
@@ -192,7 +192,7 @@ export async function paper({ argv, sinks, dataDir, remote, lockWaitMs }: PaperO
        * rejection, the reader saw a stack trace, and a script saw whatever
        * Node exits with rather than a code it could branch on. The sentinels
        * above keep their specific messages; this is the floor under them. */
-      sinks.err(`paper: ${plain(error instanceof Error ? error.message : String(error))}`)
+      sinks.err(`paper: ${plain(messageOf(error))}`)
       return EXIT.refused
     }
     /* REFUSED BY NAME, with the holder in the message: a lock that says only
@@ -209,7 +209,7 @@ export async function paper({ argv, sinks, dataDir, remote, lockWaitMs }: PaperO
     try {
       await (lock as DataLock | null)?.release()
     } catch (error) {
-      sinks.err(`paper: could not release the library lock — ${plain(error instanceof Error ? error.message : String(error))}`)
+      sinks.err(`paper: could not release the library lock — ${plain(messageOf(error))}`)
     }
   }
 }

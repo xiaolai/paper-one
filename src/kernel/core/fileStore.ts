@@ -1,3 +1,4 @@
+import { messageOf } from './messageOf'
 import type { MarkStorage } from './marks'
 
 /**
@@ -244,7 +245,7 @@ export async function openFileStore({
       if (dirty) chain()
       await inFlight
       if (lastFailure !== null) {
-        throw lastFailure instanceof Error ? lastFailure : new Error(String(lastFailure))
+        throw lastFailure instanceof Error ? lastFailure : new Error(messageOf(lastFailure))
       }
     },
 

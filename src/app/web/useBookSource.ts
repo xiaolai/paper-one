@@ -1,3 +1,4 @@
+import { messageOf } from '../../kernel'
 import { useEffect, useRef, useState } from 'react'
 import type { RemoteContent } from './content'
 
@@ -88,7 +89,7 @@ export function useBookSource(
           const { pdfRangeTransport } = await import('./pdfRange')
           const range = await pdfRangeTransport(content, bookId, facts.size, {
             onFailure: (cause) =>
-              problem.current(cause instanceof Error ? cause.message : String(cause)),
+              problem.current(messageOf(cause)),
             /* THE VERSION THIS OPEN SAW. Every range the document asks for,
                for as long as the reader has it open, is read against the book
                these facts describe — not against whatever a later `locate`
@@ -104,7 +105,7 @@ export function useBookSource(
         setOpening({ kind: 'reading', source: file })
       } catch (thrown) {
         if (!live) return
-        setOpening({ kind: 'failed', why: thrown instanceof Error ? thrown.message : String(thrown) })
+        setOpening({ kind: 'failed', why: messageOf(thrown) })
       }
     })()
     return () => {

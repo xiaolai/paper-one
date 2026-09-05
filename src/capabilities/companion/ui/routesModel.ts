@@ -1,5 +1,5 @@
 import type { SettingsStore } from '../../../kernel'
-import { createGenerations } from '../../../kernel'
+import { createGenerations, messageOf } from '../../../kernel'
 import type { Depth } from '../../inference'
 import { reasonOf, type InferencePort, type Probe, type Route } from '../../inference'
 import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
@@ -308,7 +308,7 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
         invalidate()
         report?.('companion.sign-in-failed', {
           route: id,
-          message: error instanceof Error ? error.message : String(error),
+          message: messageOf(error),
         })
       }
     },

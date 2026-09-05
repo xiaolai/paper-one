@@ -1,3 +1,4 @@
+import { messageOf } from '../../../kernel'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { BookPort, OwnOpinion } from '../lib/opinionPort'
 
@@ -55,7 +56,7 @@ export function useOpinion(port: BookPort | null, bookId: string | null): Opinio
       setFailure(null)
     } catch (cause) {
       if (read.current !== mine) return
-      setFailure({ book: bookId, message: cause instanceof Error ? cause.message : String(cause) })
+      setFailure({ book: bookId, message: messageOf(cause) })
     }
   }, [port, bookId])
 

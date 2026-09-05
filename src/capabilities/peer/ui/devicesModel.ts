@@ -1,3 +1,4 @@
+import { messageOf } from '../../../kernel'
 import type { PeerPort } from '../lib/port'
 import type {
   PairOffer,
@@ -376,9 +377,6 @@ export function createDevicesModel({
     snapshot = { ...snapshot, ...next }
     for (const listener of [...listeners]) listener()
   }
-  const said = (thrown: unknown): string =>
-    thrown instanceof Error ? thrown.message : String((thrown as { message?: string })?.message ?? thrown)
-
   const offs: Unsubscribe[] = []
   if (port) {
     /* ONE PUSH PER SUBSCRIPTION, AND ROLLED BACK. The two used to be
@@ -488,7 +486,7 @@ export function createDevicesModel({
       publish({ role: status.role, peers, peersLoaded: true, error: null })
     } catch (thrown) {
       if (mine !== refreshGeneration) return
-      publish({ error: said(thrown) })
+      publish({ error: messageOf(thrown) })
     }
   }
 
@@ -531,7 +529,7 @@ export function createDevicesModel({
         }
       } catch (thrown) {
         if (mine !== beginGeneration || disposed) return
-        publish({ error: said(thrown) })
+        publish({ error: messageOf(thrown) })
       }
     },
     cancelPairing: async () => {
@@ -547,7 +545,7 @@ export function createDevicesModel({
         /* The native attempt may still be live — saying "stopped" while it
          * runs would be a lie. Keep the state, show the failure. */
         if (mine !== beginGeneration || disposed) return
-        publish({ error: said(thrown) })
+        publish({ error: messageOf(thrown) })
       }
     },
     confirmPairing: async (accept) => {
@@ -580,7 +578,7 @@ export function createDevicesModel({
         }
         await refresh()
       } catch (thrown) {
-        if (!disposed) publish({ error: said(thrown) })
+        if (!disposed) publish({ error: messageOf(thrown) })
       } finally {
         confirming.delete(pending.attemptId)
       }
@@ -603,7 +601,7 @@ export function createDevicesModel({
         publish({ sas: start.sas, lastResult: null, error: null })
       } catch (thrown) {
         if (mine !== beginGeneration || disposed) return
-        publish({ error: said(thrown) })
+        publish({ error: messageOf(thrown) })
       }
     },
     forget: async (id) => {
@@ -613,7 +611,7 @@ export function createDevicesModel({
         if (disposed) return
         await refresh()
       } catch (thrown) {
-        if (!disposed) publish({ error: said(thrown) })
+        if (!disposed) publish({ error: messageOf(thrown) })
       }
     },
     setPeerCanWrite: async (id, canWrite) => {
@@ -639,7 +637,7 @@ export function createDevicesModel({
              what it wrote rather than what the store holds. */
           await refresh()
         } catch (thrown) {
-          if (!disposed) publish({ error: said(thrown) })
+          if (!disposed) publish({ error: messageOf(thrown) })
         }
       })
       grantEdits.set(id, mine)
@@ -696,7 +694,7 @@ export function createDevicesModel({
            would quietly contradict. The flag is what the pane shows instead. */
         publish({ roleNeedsRestart: changes })
       } catch (thrown) {
-        if (!disposed) publish({ error: said(thrown) })
+        if (!disposed) publish({ error: messageOf(thrown) })
       }
     },
     dispose: () => {

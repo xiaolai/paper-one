@@ -1,4 +1,14 @@
-import { acceptsTransport, changeState, FIRST_EPOCH, drawsEntry, showShelf, type Hlc, type ReadingState, type Relationship } from '../../../kernel'
+import {
+  FIRST_EPOCH,
+  acceptsTransport,
+  changeState,
+  drawsEntry,
+  messageOf,
+  showShelf,
+  type Hlc,
+  type ReadingState,
+  type Relationship,
+} from '../../../kernel'
 import { claimOfShelved, viewOf, EMPTY_VIEW, type CircleView } from './circleView'
 import { bookVia, indexOf, type BookLike } from './exchange'
 import type { ForeignFile } from './store'
@@ -308,7 +318,7 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
              here was one the row's empty handler swallowed with no record
              anywhere. The diagnostics are where a failure that is not "not
              served" goes. */
-          deps.warn('circle.cover-failed', { person, pub, message: cause instanceof Error ? cause.message : String(cause) })
+          deps.warn('circle.cover-failed', { person, pub, message: messageOf(cause) })
           return null
         }
       })

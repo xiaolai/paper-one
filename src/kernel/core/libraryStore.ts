@@ -1,3 +1,4 @@
+import { messageOf } from './messageOf'
 import {
   atomicWrite,
   contentPathIn,
@@ -660,7 +661,7 @@ async function pooled<T>(
  */
 export class LandedUnindexed extends Error {
   constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause })
+    super(messageOf(cause), { cause })
     this.name = 'LandedUnindexed'
   }
 }
@@ -828,7 +829,7 @@ export function createLibrary({
     const row = predicted.find((one) => one.bookId === bookId) ?? books.find((one) => one.bookId === bookId)
     const title = row?.title || bookId
     persistent = false
-    failure = { bookId, title, what, message: cause instanceof Error ? cause.message : String(cause) }
+    failure = { bookId, title, what, message: messageOf(cause) }
     notify()
   }
   const noteLanded = (bookId: string) => {

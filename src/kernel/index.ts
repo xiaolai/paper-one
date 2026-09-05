@@ -28,6 +28,10 @@ export { createKernelServices } from './core/services'
 export type { KernelServices, KernelServicesOptions } from './core/services'
 export { createLibrary } from './core/libraryStore'
 export type { BookPatch, Library, LibraryOptions, RekeyOutcome, RemoteRow } from './core/libraryStore'
+/* The one reader of a rejection's text. In the kernel because a capability
+   cannot import another capability's, which is how three broken copies of it
+   came to exist — see the module's own header. */
+export { messageOf } from './core/messageOf'
 export { createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
 export type { UnplacedMark } from './core/marks'

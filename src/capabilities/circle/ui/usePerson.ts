@@ -1,3 +1,4 @@
+import { messageOf } from '../../../kernel'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KnownPerson, PersonPort, PersonStatus } from '../../peer'
 
@@ -67,7 +68,7 @@ export function usePerson(port: PersonPort | null): PersonRead {
       setFailure(null)
     } catch (cause) {
       if (!live.current || read.current !== mine) return
-      setFailure(cause instanceof Error ? cause.message : String(cause))
+      setFailure(messageOf(cause))
     }
   }, [port])
 

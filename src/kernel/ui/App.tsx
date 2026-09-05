@@ -1,3 +1,4 @@
+import { messageOf } from '../core/messageOf'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { buildCommands } from './commands'
 import { ContributedScreen } from './screens/ContributedScreen'
@@ -1090,7 +1091,7 @@ export function App({
       .catch((thrown: unknown) => {
         if (!live || scan !== trashScan.current) return
         setTrashRows([])
-        setTrashError(thrown instanceof Error ? thrown.message : String(thrown))
+        setTrashError(messageOf(thrown))
       })
     /* SUPERSEDED IS NOT DONE. A scan a newer one overtook resolved `done`
        having set nothing, so a restore awaiting it re-enabled its row over a
@@ -1140,7 +1141,7 @@ export function App({
           }
         })
         .catch((thrown: unknown) => {
-          setRestoreError(thrown instanceof Error ? thrown.message : String(thrown))
+          setRestoreError(messageOf(thrown))
         })
         .finally(() =>
           /* The shelf learns about the restore itself through the library

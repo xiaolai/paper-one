@@ -1,5 +1,6 @@
 import type { AnswerEnd, AskContext, CompanionProvider } from '../../../kernel'
-import { detailFor, errorKind, messageOf, type Depth, type InferencePort } from '../../inference'
+import { detailFor, errorKind, type Depth, type InferencePort } from '../../inference'
+import { messageOf } from '../../../kernel'
 import {
   COMPANION_SYSTEM_PROMPT,
   buildAgentTurn,
