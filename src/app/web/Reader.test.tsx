@@ -178,7 +178,32 @@ describe('Reader', () => {
      * first frame and true if no transport were ever built. What the work item
      * is about is the SOURCE the reader is handed: a `{ range, name }` and not a
      * `File`. That is a prop, so it can be looked at. */
-    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    /* ⚠️ THE FAILURE THIS CAN HAVE IS BIMODAL, so the message says which one.
+       Measured 2026-09-06 under `--coverage --project app`: this case either
+       passes in 79–101 ms or never completes at all, consuming exactly whatever
+       `asyncUtilTimeout` is — 5 100 ms, then 10 045 ms, then 10 027 ms across
+       three failures, with NOTHING in between across ten passes. That gap is
+       the signature of a hang rather than of slowness, and it is why raising
+       the ceiling twice did not fix it and never will.
+       The live hypothesis is that `withView`'s `doMock` + `resetModules` +
+       dynamic re-import occasionally loses the race and the REAL `FoliateView`
+       renders — which pushes nothing, so `sources` stays empty for ever. If
+       that is what happened, `captured` holds no props at all, and this message
+       says so instead of leaving the next person the mystery it left this
+       one. */
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1), {
+      onTimeout: (error) => {
+        const keys = Object.keys(captured)
+        const mocked = keys.some((k) => k !== 'sources')
+        error.message +=
+          `\n\nDIAGNOSTIC: the mocked FoliateView ${mocked ? 'DID' : 'DID NOT'} render ` +
+          `(captured keys: ${JSON.stringify(keys)}). ` +
+          (mocked
+            ? 'It rendered but was never handed a non-null source — look at Reader, not at the mock.'
+            : 'It never rendered, so the doMock/resetModules race in withView is the cause, not Reader.')
+        return error
+      },
+    })
     const source = sourcesOf(captured)[0] as { range?: unknown; name?: string }
     expect(source.range, 'a measured PDF must reach the reader as a range transport').toBeDefined()
     expect(source.name, 'named so pdf.js routes on the suffix').toBe('Moby-Dick.pdf')

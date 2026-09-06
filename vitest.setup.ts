@@ -58,5 +58,23 @@ import { configure } from '@testing-library/dom'
  * the root's 15 s — or the test is killed before `waitFor` can report the
  * specific element it was waiting for, which is the whole value of the error.
  * 10 s sits under that with room, and a hang is still bounded.
+ *
+ * ⚠️ **AND IT DID NOT FIX THE FAILURE IT WAS RAISED FOR. SAYING SO HERE BECAUSE
+ * A CHANGE THAT KEEPS A FALSE REASON IS WORSE THAN THE BUG.** `Reader.test.tsx`
+ * §"gives a measured PDF a range transport" failed again at 10 045 ms — the new
+ * ceiling exactly, as it had failed at the old one exactly. Measured
+ * afterwards: that case passes in **79–101 ms** across ten runs and has never
+ * once finished anywhere in between. Bimodal like that is a HANG, not
+ * slowness, and no ceiling fixes a hang; a bigger one only makes the failure
+ * slower to arrive.
+ *
+ * The raise is KEPT anyway, on its own merits and not on that one: the 2 248 ms
+ * SidePane measurement above is real, 5 000 was about twice it, and the file
+ * next door records a sevenfold inflation under load. 10 s is honest headroom
+ * for a wait that is genuinely slow and progressing. It is not, and was never,
+ * a fix for a wait that is not progressing at all.
+ *
+ * The real defect is tracked in `dev-docs/NEXT.md` under known open items, and
+ * the assertion in `Reader.test.tsx` now names which of the two failures it hit.
  */
 configure({ asyncUtilTimeout: 10_000 })
