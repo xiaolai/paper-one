@@ -8,6 +8,28 @@ import type { CirclePort, FriendView } from '../lib/circlePort'
 import type { ListsPort, OwnListView } from '../lib/listsPort'
 
 /**
+ * Fire a subscription's listener, ONCE IT EXISTS.
+ *
+ * ⚠️ **`tell!()` ASSUMED THE SUBSCRIPTION HAD ALREADY HAPPENED, AND IT IS NOT
+ * WHAT THESE TESTS WAIT ON.** `tell` is assigned when the component's effect
+ * calls `subscribe`; the line above each call awaits a rendered ELEMENT, which
+ * is a different signal that can land first. When it does, the call is
+ * `TypeError: tell is not a function` — measured once in a full `pnpm verify`
+ * on 2026-09-06, and green in four isolated reruns afterwards, which is the
+ * signature of a race rather than a broken test.
+ *
+ * Waiting for the thing actually depended on costs nothing when it is already
+ * there and removes the race when it is not. Applied to every site rather than
+ * the one that fired: the other eleven are the same shape and had simply not
+ * lost the race yet.
+ */
+async function fire(get: () => (() => void) | null | undefined): Promise<void> {
+  await waitFor(() => expect(typeof get()).toBe('function'))
+  get()!()
+}
+
+
+/**
  * The circle panel — WI-22.D3's surface.
  *
  * What is proven here is the panel's PROMISES, not its layout: that opening it
@@ -602,7 +624,7 @@ describe('the reader’s own lists, on the Circle screen — WI-23.E1', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start list' }))
     await waitFor(() => expect(lists.create).toHaveBeenCalledWith('Whales'))
     own = [sea]
-    tell!()
+    await fire(() => tell)
     await screen.findByLabelText('Title of Sea books')
     expect(screen.queryByText(/No lists yet/u)).toBeNull()
   })
@@ -736,7 +758,7 @@ describe('every clause of the person row, the Friends view and the reader’s li
     fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
     await screen.findByText(/Paper could not read what Mo shared\. their shelf will not read/u)
     fails = false
-    tell!()
+    await fire(() => tell)
     await waitFor(() => expect(screen.queryByText(/could not read what Mo shared/u)).toBeNull())
   })
 
@@ -764,7 +786,7 @@ describe('every clause of the person row, the Friends view and the reader’s li
     render(<CirclePane port={withMo()} circle={circle} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByText('Dune')
     slow.reject(new Error('too late'))
     await new Promise((done) => setTimeout(done, 0))
@@ -843,7 +865,7 @@ describe('every clause of the person row, the Friends view and the reader’s li
     })
     render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={circleWith()} lists={racing} />)
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByLabelText('Title of Deserts')
     slow.resolve([one])
     await new Promise((done) => setTimeout(done, 0))
@@ -917,7 +939,7 @@ describe('the last clauses of the Circle screen — one row each', () => {
     })
     render(<CirclePane port={nobody()} circle={circleWith()} lists={lists} />)
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByLabelText('Title of Deserts')
     slow.reject(new Error('too late'))
     await new Promise((done) => setTimeout(done, 0))
@@ -938,7 +960,7 @@ describe('the last clauses of the Circle screen — one row each', () => {
     render(<CirclePane port={withMo()} circle={circle} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByText('Dune')
     slow.resolve(friendView({ shelf: [{ pub: 's9', title: 'Stale', author: '', language: 'en', own: null, device: null, cover: null }] }))
     await new Promise((done) => setTimeout(done, 0))
@@ -1156,7 +1178,7 @@ describe('the reader’s own lists, read', () => {
     expect(screen.queryByText(/No lists yet/u)).toBeNull()
     /* A later read that succeeds clears the trouble. */
     fail = false
-    tell!()
+    await fire(() => tell)
     await screen.findByLabelText('Title of Sea')
     expect(screen.queryByText(/could not read your lists/u)).toBeNull()
   })
@@ -1177,7 +1199,7 @@ describe('the reader’s own lists, read', () => {
     })
     render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={minimalCircle()} lists={lists} />)
     await screen.findByText(/holds your keys/u)
-    tell!()
+    await fire(() => tell)
     await screen.findByLabelText('Title of Newer')
     resolveFirst!([{ id: 'l1', title: 'Older', items: [] }])
     await new Promise((done) => setTimeout(done, 0))
@@ -1210,7 +1232,7 @@ describe('an act begun through a port the screen no longer holds', () => {
     const second = portWith({ people: vi.fn(() => Promise.resolve([ann, bea])) })
     view.rerender(<CirclePane port={second} />)
     await screen.findByText('Bea')
-    finish!()
+    await fire(() => finish)
     await new Promise((done) => setTimeout(done, 0))
     /* The old port was read once, at mount, and never again; the new one's roster stands. */
     expect(first.people).toHaveBeenCalledTimes(1)
@@ -1299,7 +1321,7 @@ describe('each section acts on its own — held apart', () => {
     expect((screen.getByRole('checkbox', { name: 'Show my shelf to Ann' }) as HTMLInputElement).disabled).toBe(false)
     expect((screen.getByRole('button', { name: /Add somebody/u }) as HTMLButtonElement).disabled).toBe(false)
     expect((screen.getByRole('button', { name: /Show my twelve words/u }) as HTMLButtonElement).disabled).toBe(false)
-    finish!()
+    await fire(() => finish)
   })
 
   it('says a list that would not rename beside that list — not beside the pairing — and leaves the other list usable', async () => {
@@ -1363,7 +1385,7 @@ describe('Start a circle begun through a port the screen no longer holds', () =>
     const second = portWith({ status: vi.fn(() => Promise.resolve(status({ hasIdentity: false, personId: null }))) })
     view.rerender(<CirclePane port={second} />)
     await waitFor(() => expect(second.status).toHaveBeenCalledTimes(1))
-    finish!()
+    await fire(() => finish)
     await new Promise((done) => setTimeout(done, 0))
     /* The old port was read once, at mount, and never again; the new port's state stands, and the button is free again. */
     expect(first.status).toHaveBeenCalledTimes(1)
