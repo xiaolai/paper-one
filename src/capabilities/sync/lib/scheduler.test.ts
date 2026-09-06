@@ -1,11 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { COMMIT_DEBOUNCE_MS, createSyncScheduler, type SchedulerTimers } from './scheduler'
+import {
+  COMMIT_DEBOUNCE_MS,
+  SYNC_EVERY_MS,
+  SYNC_RETRY_MS,
+  createSyncScheduler,
+  type SchedulerTimers,
+  type SyncOutcome,
+} from './scheduler'
 
 /**
  * WI-C.4 — the trigger logic, under a hand-driven clock: start runs once;
  * a burst of commits collapses to one run five seconds after the LAST;
  * visibility runs on visible only; overlapping triggers coalesce to one
  * follow-up; syncNow cancels the debounce; stop cancels everything.
+ *
+ * And since 2026-09-06, THE BACKSTOP: the cases below "the clock" are the ones
+ * that had no test because there was no clock — a satchel nobody touches never
+ * syncing again, and a retryable refusal never being retried. Both were
+ * measured on two real Macs before they were written down; see the module
+ * header.
  */
 
 /** Hand-driven timers: `advance` runs what is due. */
@@ -34,17 +47,18 @@ function fakeTimers(): SchedulerTimers & { advance(ms: number): void; now: numbe
   }
 }
 
-function world() {
+function world(bounds: { everyMs?: number; retryMs?: number } = {}) {
   const timers = fakeTimers()
   const runs: number[] = []
-  let release: (() => void) | null = null
+  let release: ((outcome: SyncOutcome) => void) | null = null
   const commitListeners = new Set<() => void>()
   let visible: 'visible' | 'hidden' = 'visible'
   const visibilityListeners = new Set<() => void>()
   const scheduler = createSyncScheduler({
+    ...bounds,
     run: () => {
       runs.push(timers.now)
-      return new Promise<void>((resolve) => {
+      return new Promise<SyncOutcome>((resolve) => {
         release = resolve
       })
     },
@@ -72,11 +86,16 @@ function world() {
       visible = state
       for (const fn of visibilityListeners) fn()
     },
-    finish: async () => {
-      release?.()
+    /** Resolve the run in flight. The OUTCOME is what arms the next tick, so
+     *  a test that cares about the clock has to say which one it means. */
+    finish: async (outcome: SyncOutcome = 'ok') => {
+      release?.(outcome)
       release = null
-      await Promise.resolve()
-      await Promise.resolve()
+      /* Enough turns for the await, the loop condition and the `finally` that
+         arms the backstop — the arming is the thing under test below, and a
+         flush that stopped one turn short would report every clock case as a
+         timer that never fired. */
+      for (let i = 0; i < 4; i += 1) await Promise.resolve()
     },
   }
 }
@@ -152,5 +171,118 @@ describe('the sync scheduler', () => {
     w.setVisible('visible')
     w.scheduler.syncNow()
     expect(w.runs).toHaveLength(1)
+  })
+  /* ── the clock ─────────────────────────────────────────────────────────
+     A satchel is the side that dials, and every other trigger in this file is
+     an event on THIS device. With nobody touching it there are none. */
+
+  it('runs again on the backstop period with no event of any kind', async () => {
+    const w = world()
+    w.scheduler.start()
+    await w.finish()
+    expect(w.runs).toHaveLength(1)
+    w.timers.advance(SYNC_EVERY_MS - 1)
+    expect(w.runs).toHaveLength(1) // not a second early
+    w.timers.advance(1)
+    expect(w.runs).toHaveLength(2)
+    expect(w.runs[1]).toBe(SYNC_EVERY_MS)
+  })
+
+  it('retries a FAILED session far sooner than the ordinary period', async () => {
+    const w = world()
+    w.scheduler.start()
+    await w.finish('failed')
+    w.timers.advance(SYNC_RETRY_MS - 1)
+    expect(w.runs).toHaveLength(1)
+    w.timers.advance(1)
+    /* The measured case: a satchel that dialled 1.2 s before the shelf's
+       journal was ready is told `not-ready`, retryable, and used to stay that
+       way for good. */
+    expect(w.runs).toHaveLength(2)
+    expect(w.runs[1]).toBe(SYNC_RETRY_MS)
+  })
+
+  it('doubles the retry after each failure and RESETS it on a success', async () => {
+    const w = world()
+    w.scheduler.start()
+
+    await w.finish('failed') // next tick: 20 s
+    w.timers.advance(SYNC_RETRY_MS)
+    expect(w.runs).toHaveLength(2)
+
+    await w.finish('failed') // next tick: 40 s — a shelf that is simply off
+    w.timers.advance(SYNC_RETRY_MS)
+    expect(w.runs).toHaveLength(2) // 20 s is no longer enough
+    w.timers.advance(SYNC_RETRY_MS)
+    expect(w.runs).toHaveLength(3)
+
+    await w.finish('ok') // the period, and the backoff is forgotten
+    w.timers.advance(SYNC_EVERY_MS)
+    expect(w.runs).toHaveLength(4)
+
+    await w.finish('failed')
+    w.timers.advance(SYNC_RETRY_MS)
+    /* THE RESET IS THE POINT. Without it a device that had a bad hour would
+       stay on a five-minute retry through the good one that followed. */
+    expect(w.runs).toHaveLength(5)
+  })
+
+  it('never backs off past the ordinary period', async () => {
+    const w = world({ everyMs: 80, retryMs: 20 })
+    w.scheduler.start()
+    for (const wait of [20, 40, 80, 80, 80]) {
+      await w.finish('failed')
+      w.timers.advance(wait - 1)
+      const before = w.runs.length
+      w.timers.advance(1)
+      expect(w.runs).toHaveLength(before + 1)
+    }
+  })
+
+  it('a real trigger supersedes a pending tick rather than racing it', async () => {
+    const w = world()
+    w.scheduler.start()
+    await w.finish()
+    w.timers.advance(SYNC_EVERY_MS - 1_000)
+    w.scheduler.syncNow() // an event, one second before the tick was due
+    expect(w.runs).toHaveLength(2)
+    await w.finish()
+    w.timers.advance(1_000)
+    /* The cancelled tick does not fire behind the run it was superseded by:
+       the clock is a backstop UNDER the events, not a second schedule. */
+    expect(w.runs).toHaveLength(2)
+  })
+
+  it('stop cancels the backstop as well as the debounce', async () => {
+    const w = world()
+    w.scheduler.start()
+    await w.finish()
+    w.scheduler.stop()
+    w.timers.advance(SYNC_EVERY_MS * 3)
+    expect(w.runs).toHaveLength(1)
+  })
+
+  it('a run that BREAKS its no-throw contract is retried, not swallowed', async () => {
+    const timers = fakeTimers()
+    const runs: number[] = []
+    let explode = true
+    const scheduler = createSyncScheduler({
+      run: () => {
+        runs.push(timers.now)
+        if (explode) return Promise.reject(new Error('run broke its contract'))
+        return Promise.resolve<SyncOutcome>('ok')
+      },
+      onLocalCommit: () => () => {},
+      timers,
+    })
+    scheduler.start()
+    for (let i = 0; i < 4; i += 1) await Promise.resolve()
+    expect(runs).toHaveLength(1)
+    explode = false
+    timers.advance(SYNC_RETRY_MS)
+    /* A scheduler that stopped scheduling because its callback threw would
+       turn one bad session into a device that never syncs again — the exact
+       failure the backstop exists to prevent, reintroduced inside it. */
+    expect(runs).toHaveLength(2)
   })
 })
