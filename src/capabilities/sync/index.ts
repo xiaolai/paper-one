@@ -28,7 +28,7 @@ import { SYNC_SERVICES, parseContentAnswer, type SyncRole } from './lib/protocol
 import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, unbindScheduler } from './lib/runtime'
 import { createDownloads, describeDownload } from './lib/downloads'
 import { describeArrival, dropArrival, readArrivals, recordArrival, type Arrival } from './lib/arrivals'
-import { createSyncScheduler, type SyncScheduler } from './lib/scheduler'
+import { createSyncScheduler, type SyncOutcome, type SyncScheduler } from './lib/scheduler'
 import { describeRefusal, describeSession, refusalKind, type RefusalNames } from './lib/status'
 import { createStorageModel, dropDownloadSize, recordDownloadSize, type StorageModel } from './ui/storageModel'
 import { StoragePane } from './ui/StoragePane'
@@ -941,7 +941,7 @@ export const sync: Capability = {
          * would otherwise stand under a green `ok`. */
         unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', detail: null, lastSyncAt: Date.now() }))
       } else {
-        const run = async (): Promise<void> => {
+        const run = async (): Promise<SyncOutcome> => {
           /* OWNED BY THIS RUNTIME: a session in flight through a teardown —
            * or across a restart — used to go on writing `syncStatus`, a
            * module slot, over the runtime that replaced it. The capture is
@@ -951,7 +951,26 @@ export const sync: Capability = {
           syncStatus.set({ state: 'syncing', detail: null })
           try {
             const summary = await withShelf((channel) => ledger.runSession(channel))
-            if (running !== owner) return
+            /* ⚠️ A SESSION THAT WORKED USED TO WRITE NOTHING AT ALL, and that
+               is not a cosmetic gap. `ledger.ts` makes no diagnostics call
+               anywhere and every line below this one is a failure path, so
+               `diagnostics.jsonl` recorded `sync.started` and then silence —
+               which is what a HEALTHY satchel looks like and also what a dead
+               one looks like. Phase 24's Stage B read that silence as a wedge
+               and spent three two-machine runs on it; the instrument could not
+               answer the question it was being asked.
+
+               Recorded BEFORE the ownership check, like the failure below it,
+               because the session happened whether or not the runtime that
+               started it is still the current one. */
+            api.diagnostics.info('sync.session-ok', {
+              pushed: summary.pushed,
+              pulledRows: summary.pulledRows,
+              pulledRemovals: summary.pulledRemovals,
+              pulledMarks: summary.pulledMarks,
+              refused: summary.refused.length,
+            })
+            if (running !== owner) return 'ok'
             /* A session that FINISHED with something refused is `ok` — the
                rest of the library moved — with the refusal in the detail, so
                the reader is told which book rather than shown a green line
@@ -970,24 +989,41 @@ export const sync: Capability = {
              * the same one `degrade` follows: whoever writes the module slot
              * re-reads ownership on the near side of the last await. */
             const names = await refusalNames()
-            if (running !== owner) return
+            if (running !== owner) return 'ok'
             syncStatus.set({
               state: 'ok',
               detail: describeSession(summary, names),
               lastSyncAt: Date.now(),
               lastSummary: { pushed: summary.pushed, pulledRows: summary.pulledRows },
             })
+            return 'ok'
           } catch (thrown) {
             api.diagnostics.warn('sync.session-failed', {
               kind: refusalKind(thrown),
               message: messageOf(thrown),
             })
-            if (running !== owner) return
+            if (running !== owner) return 'failed'
             await degrade(thrown)
+            /* THE OUTCOME IS WHAT ARMS THE NEXT TICK, and it is the half that
+               made `retryable: true` a promise nothing kept: `groupRefusal`
+               ends the session on a retryable refusal by design, and until the
+               scheduler had a clock, "ends" meant "for good". Reported failed
+               so the backstop comes back in twenty seconds rather than five
+               minutes — which is the difference between a satchel that lost a
+               startup race by 1.2 s recovering by itself and one that waits
+               for a human. */
+            return 'failed'
           }
         }
         scheduler = createSyncScheduler({
           run,
+          /* `run` above catches everything and reports it, so reaching this is
+             a defect in `run` rather than a failed session. The scheduler
+             retries either way; without this the only trace of a broken
+             callback was a sync that kept working and a bug nobody could see. */
+          onBroken: (cause: unknown) => {
+            api.diagnostics.warn('sync.run-threw', { message: messageOf(cause) })
+          },
           onLocalCommit: (listener) => openJournal.subscribe(listener),
           ...(typeof document !== 'undefined'
             ? {

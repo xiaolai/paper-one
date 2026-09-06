@@ -70,3 +70,26 @@ export { coverIn } from '../core/coverArt'
 export { tauriVaultFs } from '../core/vaultFsTauri'
 export type { CoverSource } from '../core/coverArt'
 
+/* ── THE READER IS NOT MOUNTED HERE YET ───────────────────────────────────
+   ⚠️ NINE READER EXPORTS SAT HERE UNDER A COMMENT SAYING "`MobileApp` mounts
+   `Reader`", AND IT DID NOT. `MobileApp.tsx` was not in that commit and still
+   passes `hasBook={false}`; nothing under `src/app/mobile/` referenced
+   `FoliateView`, `Contents`, `Marginalia` or `SearchPanel`. The comment
+   claimed the door's own rule was being followed — "one export per thing
+   mounted, not ten surfaces listed against a someday" — while listing exactly
+   ten surfaces against a someday.
+
+   The rule is in AGENTS.md and it is measured, not stylistic: a barrel's
+   re-exports evaluate WITH the barrel, so listing surfaces nothing mounts
+   loads all of them. On `ui/browser.ts` that cost 0.5% of function coverage.
+
+   So they are removed, and the commit that mounts `Reader` re-adds exactly the
+   ones it mounts — which is the rule working, not a step backwards.
+
+   ⚠️ AND WHEN THEY COME BACK: NOT SHARED WITH `ui/browser.ts`, deliberately.
+   The two doors exist so neither platform loads the other's surfaces, and
+   collapsing them the moment they overlap is how that property is lost — the
+   phone mounts no `PairScreen` and the browser mounts no native settings. Two
+   lists that happen to agree today are cheaper than one list that has to be
+   right for both forever. */
+

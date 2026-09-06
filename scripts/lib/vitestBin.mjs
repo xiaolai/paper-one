@@ -56,3 +56,33 @@ export function binEntryOf(manifest) {
   if (!entry) throw new Error('vitest declares no `bin` — cannot list tests')
   return entry
 }
+
+/**
+ * How long a `vitest list` may take before it is called hung.
+ *
+ * ⚠️ **A LIVENESS BOUND, NOT A BUDGET, and it has now failed a gate for being
+ * treated as the second thing.** Collecting the suite asserts nothing about
+ * how fast a machine is. The timeout exists so a Vitest that WEDGES fails
+ * `pnpm verify` in bounded time instead of hanging it forever — and for that
+ * job any finite number does, so it should sit far past any real machine
+ * rather than close to an observed one.
+ *
+ * It was 300 s in `check-test-ledger.mjs` and 120 s in `check-test-projects.mjs`,
+ * both of them a plausible multiple of a measured collection. On 2026-09-06 the
+ * first blew at 302.9 s on a developer machine at load average 286, and the
+ * step had passed in 151.8 s on the same machine hours earlier — a two-fold
+ * margin, eaten by contention that has no ceiling.
+ *
+ * ⚠️ **AND THE FAILURE IS INDISTINGUISHABLE FROM THE ONE THESE SCRIPTS EXIST
+ * TO CATCH.** Both `askVitest`s throw rather than reading an unanswerable
+ * question as "no tests" — which is right, and it means a bound that is merely
+ * TIGHT reports as `check-test-ledger: Error: spawnSync … ETIMEDOUT`, a line
+ * that reads like a broken config rather than a busy laptop.
+ *
+ * ⚠️ **SHARED FOR THE REASON `vitestBin` IS SHARED**, one paragraph up: this
+ * number was written twice, the cheaper of the two calls (`--filesOnly`) hid
+ * the defect by passing, and fixing only the one that failed today would leave
+ * the identical bug in the identical line of the other file. Two instances are
+ * a class, and a class gets one definition.
+ */
+export const VITEST_LIST_TIMEOUT_MS = 900_000

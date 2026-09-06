@@ -433,6 +433,14 @@ export type { TrashFs } from './core/bookTrash'
 /* The trash's listing, for a capability that must reach a person's files in a trashed book's folder too — `purgePerson`. */
 export { listTrash } from './core/bookTrash'
 export type { ContentExtension, KnownExtension, SyncLevel, VaultFs } from './core/bookVault'
+/* HOW A BOOK'S BYTES COME OFF THIS DEVICE'S OWN DISK — the four the phone's
+   reader needs to answer `RemoteContent` locally, where the browser client
+   answers the same contract over a WebSocket.
+   `readRangeOf` rather than a caller's own `readRange ?? readFile-and-slice`
+   for the reason its docstring gives: one place decides the bounds, and a
+   second copy gets the last chunk of a large book subtly wrong. */
+export { readOwnedBook, readRangeOf, storedBookName } from './core/bookVault'
+export { contentPathIn } from './core/bookFolder'
 
 /* ONE canonical serialisation, shared by sync's registers and the circle's
    signed bytes. In `core/` because a capability cannot import another's
@@ -445,6 +453,7 @@ export { canonicalJson } from './core/canonicalJson'
  * to be one of three strings is how an unknown value reaches a switch with no
  * case for it — see `app/web/wireRow.ts`. */
 export {
+  boundedMark,
   isPlaced,
   placedIn,
   unplacedIn,

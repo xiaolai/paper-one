@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
-import { vitestBin } from './lib/vitestBin.mjs'
+import { VITEST_LIST_TIMEOUT_MS, vitestBin } from './lib/vitestBin.mjs'
 
 /**
  * `pnpm test:ledger` — a test that disappears has to say so out loud.
@@ -114,7 +114,7 @@ export function askVitest(root) {
   const result = spawnSync(process.execPath, [bin, 'list', '--json', '--root', root], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 300_000,
+    timeout: VITEST_LIST_TIMEOUT_MS,
     maxBuffer: 64 * 1024 * 1024,
   })
   if (result.error) throw result.error

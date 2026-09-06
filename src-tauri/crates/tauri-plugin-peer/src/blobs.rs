@@ -913,21 +913,51 @@ mod tests {
     /// timeout exists so a transfer that never completes fails the suite in
     /// bounded time instead of hanging it forever.
     ///
-    /// It was 30 seconds, written out at nine call sites, and that is a number
-    /// small enough to be a performance assertion by accident. The heaviest of
-    /// these takes six to eleven seconds on an unloaded developer machine — a
-    /// three-to-five-fold margin, which a contended CI runner eats without
-    /// difficulty. Both 20 MB tests duly failed on a machine that was also
-    /// building a second copy of the tree, and passed three times out of three
-    /// once it was quiet.
+    /// AND IT MUST EXCEED EVERY PRODUCTION TIMEOUT IT COULD RACE.
+    /// `HEADER_TIMEOUT` is thirty seconds. A test bound of thirty seconds
+    /// awaiting an operation that stalls on the header is two timers started
+    /// together: which one wins decides whether the test reports the
+    /// interruption it is looking for or a bare elapsed error, and nothing
+    /// about the code decides it. That is a FLOOR, and it is the only
+    /// principled input this number has — held by the `const _` below rather
+    /// than by this paragraph.
     ///
-    /// AND IT MUST EXCEED EVERY PRODUCTION TIMEOUT IT COULD RACE, which is the
-    /// second reason and the one that would have bitten silently. `HEADER_TIMEOUT`
-    /// is thirty seconds. A test bound of thirty seconds awaiting an operation
-    /// that stalls on the header is two timers started together: which one wins
-    /// decides whether the test reports the interruption it is looking for or a
-    /// bare elapsed error, and nothing about the code decides it.
-    const TRANSFER_LIVENESS: Duration = Duration::from_secs(120);
+    /// ⚠️ **THERE IS NO CEILING, AND DERIVING ONE FROM OBSERVED RUNTIME IS THE
+    /// DEFECT THIS CONSTANT HAS NOW SHIPPED TWICE.** It was 30 seconds at nine
+    /// call sites; that failed, and the replacement was argued as *"the
+    /// heaviest takes six to eleven seconds unloaded — a three-to-five-fold
+    /// margin"*, which picked 120. On 2026-09-06 that failed too, in
+    /// `twenty_megabytes_arrive_intact_with_progress`, on a developer machine
+    /// at load average 139 running the whole workspace. Measured immediately
+    /// afterwards in isolation at load 39: **32.95 s** — three times the
+    /// "unloaded" figure the margin was computed from.
+    ///
+    /// A multiple of observed runtime is a THROUGHPUT ASSERTION wearing a
+    /// liveness name, and no multiple is safe, because contention has no
+    /// ceiling — 233 sibling tests and an unrelated desktop can slow this
+    /// arbitrarily and legitimately. Nothing here claims 20 MB moves in any
+    /// particular time. The bound's only other job is that a HUNG suite fails
+    /// rather than hangs, and for that ten minutes is exactly as good as two,
+    /// so it is set far past any real machine — the same reasoning, and the
+    /// same words, as `REACH_WITHIN` in `session.rs`, which is this crate's
+    /// other liveness ceiling and was separated from its measurement for this
+    /// reason.
+    const TRANSFER_LIVENESS: Duration = Duration::from_secs(600);
+
+    /// The floor above, made checkable. Lower `TRANSFER_LIVENESS` under either
+    /// production timeout and this fails the BUILD, rather than producing a
+    /// race between two timers that shows up as an occasional wrong error kind.
+    ///
+    /// ⚠️ **BOTH TIMEOUTS, NOT JUST THE HEADER ONE.** The first version of this
+    /// assertion checked `HEADER_TIMEOUT` alone while the paragraph above
+    /// promised "every production timeout it could race" — so a 31-second bound
+    /// would have compiled clean while sitting under the 60-second body idle
+    /// deadline, which is the other timer a stalled transfer runs against. A
+    /// guard narrower than the invariant it is written under is worse than no
+    /// guard, because it reads as though the whole invariant is held.
+    const _: () = assert!(TRANSFER_LIVENESS.as_secs() > HEADER_TIMEOUT.as_secs());
+    const _: () =
+        assert!(TRANSFER_LIVENESS.as_millis() > crate::node::BLOB_IDLE_TIMEOUT_MS as u128);
 
     async fn transfer_events(node: &mut TestNode) -> Vec<TransferProgress> {
         let mut out = Vec::new();
@@ -1158,7 +1188,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = timeout(Duration::from_secs(10), task)
+        let err = timeout(TRANSFER_LIVENESS, task)
             .await
             .unwrap()
             .unwrap()
@@ -1181,7 +1211,7 @@ mod tests {
         )
         .await
         .unwrap();
-        timeout(Duration::from_secs(10), task)
+        timeout(TRANSFER_LIVENESS, task)
             .await
             .unwrap()
             .unwrap()
@@ -1485,6 +1515,12 @@ mod tests {
         )
         .await
         .unwrap();
+        /* ⚠️ NOT `TRANSFER_LIVENESS`, AND NOT AN OVERSIGHT. Here the bound IS
+        the measurement: the assertion is that the 300 ms idle deadline set
+        above fires, and a ten-minute ceiling would let a transfer that never
+        drops pass by completing some other way. It races a production timeout
+        this test itself set to 300 ms, so the floor is met by a factor of
+        thirty. Leave it. */
         let err = timeout(Duration::from_secs(10), task)
             .await
             .expect("the idle deadline fires well within 10s")

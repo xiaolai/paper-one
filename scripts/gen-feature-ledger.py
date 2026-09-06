@@ -51,6 +51,10 @@ INFORMATIONAL_HEADERS = (
     # rows: three of them had no entry in the ledger at all, which is not a
     # shape the row-level log above can say.
     ['surface', 'landed', 'rows here before'],
+    # The 2026-09-06 pass's log, which is neither a row's drift nor a missing
+    # surface: a row that was FACTUALLY CURRENT and carried the wrong reading
+    # of its own evidence. What changed is the sentence, not the state.
+    ['the row said', 'what the source says'],
 )
 
 
