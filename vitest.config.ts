@@ -487,7 +487,39 @@ export default mergeConfig(
            * these tests assert is relaxed, and the other four projects — which
            * really are unit tests — keep the tighter bound.
            */
-          ...(project.name === 'scripts' ? { testTimeout: 60_000 } : {}),
+          /**
+           * ⚠️ **AND `app` GETS THE SAME 60 s, FOR THE SAME REASON ONE STEP
+           * ALONG.** Added 2026-09-06, when `Reader.test.tsx > applies the
+           * reader's stored preferences` failed `pnpm verify` at 16 323 ms
+           * against the 15 s root bound — one failure in 7 983.
+           *
+           * Measured immediately afterwards, the same test standalone:
+           * **2.26 s**. A seven-fold inflation, from v8 instrumentation and a
+           * load average of 270 on this ten-core Mac, against a test whose own
+           * work is two seconds.
+           *
+           * `Reader.test.tsx` mounts THE WHOLE READING SURFACE — foliate view,
+           * panes, settings, selection — twenty-three times in one file. That
+           * is no more a unit test than a file that spawns a CLI is, and the
+           * paragraph above applies to it verbatim: a hang detector sized for
+           * tests that touch a few modules makes the gate decide on machine
+           * load when it is pointed at something this large.
+           *
+           * ⚠️ **THE HONEST COST, because `app` is MIXED where `scripts` is
+           * not.** Most files here — `books`, `cards`, `marks`, `positions`,
+           * the socket adapters, the phone's local ones — really are unit
+           * tests over fakes and finish in milliseconds. They get the looser
+           * bound too, so a hang in one is now reported in 60 s rather than
+           * 15 s. That is the whole of the loss, and a hang is unbounded, so
+           * 60 s still catches one.
+           *
+           * Chosen over a `vi.setConfig` in each screen-mounting file — four
+           * of them today — because that is a second list, kept by hand, that
+           * drifts the moment a fifth screen gets a test. One decision in one
+           * place is the same call the `scripts` note above made after fixing
+           * two instances separately taught it the lesson.
+           */
+          ...(project.name === 'scripts' || project.name === 'app' ? { testTimeout: 60_000 } : {}),
         },
       })),
     },
