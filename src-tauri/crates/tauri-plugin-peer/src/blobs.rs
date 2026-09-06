@@ -944,10 +944,20 @@ mod tests {
     /// reason.
     const TRANSFER_LIVENESS: Duration = Duration::from_secs(600);
 
-    /// The floor above, made checkable. Lower `TRANSFER_LIVENESS` under
-    /// `HEADER_TIMEOUT` and this fails the BUILD, rather than producing a race
-    /// between two timers that shows up as an occasional wrong error kind.
+    /// The floor above, made checkable. Lower `TRANSFER_LIVENESS` under either
+    /// production timeout and this fails the BUILD, rather than producing a
+    /// race between two timers that shows up as an occasional wrong error kind.
+    ///
+    /// ⚠️ **BOTH TIMEOUTS, NOT JUST THE HEADER ONE.** The first version of this
+    /// assertion checked `HEADER_TIMEOUT` alone while the paragraph above
+    /// promised "every production timeout it could race" — so a 31-second bound
+    /// would have compiled clean while sitting under the 60-second body idle
+    /// deadline, which is the other timer a stalled transfer runs against. A
+    /// guard narrower than the invariant it is written under is worse than no
+    /// guard, because it reads as though the whole invariant is held.
     const _: () = assert!(TRANSFER_LIVENESS.as_secs() > HEADER_TIMEOUT.as_secs());
+    const _: () =
+        assert!(TRANSFER_LIVENESS.as_millis() > crate::node::BLOB_IDLE_TIMEOUT_MS as u128);
 
     async fn transfer_events(node: &mut TestNode) -> Vec<TransferProgress> {
         let mut out = Vec::new();

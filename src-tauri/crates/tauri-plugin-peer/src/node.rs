@@ -107,7 +107,7 @@ impl NodeConfig {
 /// The default idle deadline for a blob body: if no byte moves on the transfer
 /// stream within this window the stalled peer is dropped (finding H2). Held as
 /// milliseconds so a test can shorten it.
-const BLOB_IDLE_TIMEOUT_MS: u64 = 60_000;
+pub(crate) const BLOB_IDLE_TIMEOUT_MS: u64 = 60_000;
 
 pub struct Node {
     root: PathBuf,
