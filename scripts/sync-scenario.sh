@@ -423,6 +423,51 @@ app_quit() {
 # like one that did — and every convergence step after it then timed out
 # against a machine running nothing, which is six minutes to learn what one
 # `pgrep` answers.
+# RAISE THE WINDOW AFTER A LAUNCH, and this is not politeness.
+#
+# ⚠️ **AN APP LAUNCHED WHILE THE SCREEN IS LOCKED DOES NOT RESUME WHEN THE
+# SCREEN IS UNLOCKED.** Measured 2026-09-06, on the run that finally went green:
+#
+#   - the satchel's app was started over ssh while that Mac's screen was locked
+#   - the screen was then unlocked by hand
+#   - for the next TWO MINUTES, polled six times at 20 s, it fired no timer of
+#     any kind: the shelf had logged two `circle.fetch` rounds, the satchel
+#     none, its 30 s round was 6½ minutes overdue, peer contact was 33 hours
+#     stale and no sync session had been attempted
+#   - one `set frontmost` over ssh, and within FIFTEEN SECONDS it fired its
+#     first `circle.fetch`, made contact, and ran a session
+#
+# ⚠️ **THIS IS NOT THE SAME CLAIM AS "AN UNFOCUSED WINDOW STOPS TIMERS", AND
+# THAT ONE IS ALREADY REFUTED — by this script's own header, four lines of which
+# say a hidden webview is throttled to about 2 s over four minutes and that "an
+# earlier claim that it stops outright did not reproduce".** Both are true
+# because they are different states. Unfocused is throttled and recovers; the
+# post-lock state does not recover on its own, and nothing had ever tested it
+# because no previous run got past the lock to find out.
+#
+# The first version of this comment said "WebKit suspends timers in an occluded
+# window", which contradicted the header directly and would have written a guess
+# over a measurement — the failure this repository keeps recording.
+#
+# `open` launches the app but does not reliably front it, least of all over ssh
+# where there is no GUI session doing the asking. So every `app_start` here was
+# capable of leaving an app RUNNING and asleep, and `pgrep` cannot tell those
+# apart — which is why the check below said yes while the run timed out.
+app_raise() {
+  local pid_probe='pgrep -f "Paper.app/Contents/MacOS/" | head -1'
+  local script='tell application "System Events" to set frontmost of (first process whose unix id is PID) to true'
+  case "$1" in
+    shelf)
+      local pid; pid="$(sh -c "$pid_probe")"
+      [ -n "$pid" ] && osascript -e "${script/PID/$pid}" >/dev/null 2>&1 || true ;;
+    satchel)
+      # ⚠️ THE PID IS RESOLVED ON THE FAR SIDE. Interpolating a local one would
+      # raise whatever happens to hold that number over there.
+      remote_sh "pid=\$($pid_probe); [ -n \"\$pid\" ] && osascript -e \"${script/PID/\$pid}\" >/dev/null 2>&1 || true" ;;
+  esac
+  return 0
+}
+
 app_start() {
   case "$1" in
     shelf) open -a "${PAPER_SHELF_APP:-Paper}" >/dev/null 2>&1 || true ;;
@@ -430,6 +475,8 @@ app_start() {
                "open --env PAPER_ROLE=satchel -a \"\$HOME/$SATCHEL_APP\" >/dev/null 2>&1 || true" ;;
   esac
   sleep "$APP_SETTLE_S"
+  # AFTER THE SETTLE, so the window exists to be raised.
+  app_raise "$1"
   local up=no
   case "$1" in
     shelf) pgrep -f "$APP_PROCESS" >/dev/null 2>&1 && up=yes ;;
