@@ -454,17 +454,48 @@ app_quit() {
 # capable of leaving an app RUNNING and asleep, and `pgrep` cannot tell those
 # apart — which is why the check below said yes while the run timed out.
 app_raise() {
-  local pid_probe='pgrep -f "Paper.app/Contents/MacOS/" | head -1'
-  local script='tell application "System Events" to set frontmost of (first process whose unix id is PID) to true'
+  # ⚠️ **THE FIRST VERSION OF THE SATCHEL BRANCH NEVER WORKED, AND `|| true`
+  # HID IT.** It built the remote command by interpolating an AppleScript that
+  # contains its own double quotes into a double-quoted string, so the REMOTE
+  # shell saw the quotes around "System Events" as terminating the argument and
+  # osascript was handed two fragments:
+  #
+  #   23:23: syntax error: Expected end of line but found end of script. (-2741)
+  #
+  # Measured on the real machine. The failure went to /dev/null and the function
+  # returned 0, so a raise that did nothing was indistinguishable from one that
+  # worked — and the check that "verified" it was contaminated: the window had
+  # been raised by hand two minutes earlier, so it was already frontmost and the
+  # test could not have failed.
+  #
+  # The remote command is SINGLE-QUOTED here so nothing expands locally, and the
+  # AppleScript's own quotes are escaped for the remote shell. `$pid` is
+  # resolved on the far side — interpolating a local one would raise whatever
+  # happens to hold that number over there.
+  #
+  # Re-tested against an uncontaminated precondition: Finder made frontmost
+  # first and confirmed, then this, then Paper confirmed frontmost.
+  local rc=0
   case "$1" in
     shelf)
-      local pid; pid="$(sh -c "$pid_probe")"
-      [ -n "$pid" ] && osascript -e "${script/PID/$pid}" >/dev/null 2>&1 || true ;;
+      # Locally the expansion is safe: a parameter expansion's RESULT is not
+      # re-parsed for quotes, so the AppleScript's own quotes stay literal. It
+      # is only the string handed to another shell that breaks.
+      local script='tell application "System Events" to set frontmost of (first process whose unix id is PID) to true'
+      local pid; pid="$(pgrep -f "$APP_PROCESS" | head -1)"
+      if [ -n "$pid" ]; then
+        osascript -e "${script/PID/$pid}" >/dev/null 2>&1 || rc=$?
+      fi ;;
     satchel)
-      # ⚠️ THE PID IS RESOLVED ON THE FAR SIDE. Interpolating a local one would
-      # raise whatever happens to hold that number over there.
-      remote_sh "pid=\$($pid_probe); [ -n \"\$pid\" ] && osascript -e \"${script/PID/\$pid}\" >/dev/null 2>&1 || true" ;;
+      remote_sh 'pid=$(pgrep -f "Paper.app/Contents/MacOS/" | head -1); [ -n "$pid" ] && osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true"' >/dev/null 2>&1 || rc=$?
+      ;;
   esac
+  # NAMED, NOT SWALLOWED. A raise that fails leaves an app whose timers may be
+  # suspended, which is the whole reason this function exists — reporting it as
+  # a note beats discovering it six convergence timeouts later.
+  if [ "$rc" -ne 0 ]; then
+    log "  note  could not raise the $1's window (exit $rc); if it is occluded its timers may stay suspended"
+  fi
   return 0
 }
 
@@ -954,24 +985,70 @@ readonly PROBE_TRASH="${PROBE_BOOK//-/_}"
 # is not decoration — an empty or unprefixed argument here is an `rm -rf` with
 # a computed path, and the blast radius is the reader's trash.
 readonly TRASH_DIR='Library/Application Support/one.paper.reader/trash'
+# How many trash removals have failed. `trash_rm` returns 0 whatever happens —
+# it is called bare under `set -e` — so this is how a caller learns, and it is
+# what stops the housekeeping step below announcing a removal that did not
+# happen.
+trash_failures=0
 trash_rm() {
   # $1 = 'shelf' | 'satchel', $2 = trash directory name (underscored id)
   local side="$1" name="$2"
+
+  # ⚠️ **A PREFIX CHECK IS NOT A BASENAME CHECK, AND THE FIRST VERSION OF THIS
+  # GUARD WAS A PREFIX CHECK UNDER A COMMENT CALLING IT "not decoration".**
+  # It tested `case "$name" in "wi_11_7_"*)` and nothing else, so it accepted:
+  #
+  #   wi_11_7_x/../../../Desktop   -> $HOME/Library/Application Support/Desktop
+  #   wi_11_7_$(id -u)             -> evaluated by the REMOTE shell
+  #
+  # Both measured. The first escapes the trash directory an `rm -rf` is aimed
+  # at; the second is command substitution in a string this script hands to
+  # another machine's shell — which the `satchel()` helper two hundred lines up
+  # already warns about in as many words, and which this function then did.
+  #
+  # So the whole name is validated, not its first eight characters. Letters,
+  # digits and underscores only is exactly what `${id//-/_}` of a harness id can
+  # produce, and it makes traversal and substitution unrepresentable rather than
+  # merely unlikely. The empty string is refused with them.
+  # ⚠️ **A REFUSAL COUNTS.** These used to call `fail` alone, which moves the
+  # RUN's counter — and `--clean`'s verdict reads `clean_failures`, which
+  # `trash_failures` folds into. So a refused purge printed FAIL and exited 0,
+  # leaving the artefact behind while reporting a clean cleanup.
+  case "$name" in
+    ''|*[!A-Za-z0-9_]*)
+      trash_failures=$((trash_failures + 1))
+      fail "refusing a trash name that is not plain [A-Za-z0-9_]: ${name:-<empty>}"
+      return 0 ;;
+  esac
   case "$name" in
     "${SCENARIO_PREFIX//-/_}"*) ;;
-    # ⚠️ RETURNS 0, DELIBERATELY. `set -e` is on and this is called bare from
-    # the sweep loop, so a non-zero return here would abort the clean halfway
-    # through and leave the rest of the artefacts behind — turning a guard
-    # against one bad path into a failure to clean up any of the good ones.
-    # The refusal is a named failure in the transcript instead, and the entry
-    # is still on disk for a human to look at.
-    *) fail "refusing to remove a trash entry this run did not name: ${name:-<empty>}"; return 0 ;;
+    *)
+      trash_failures=$((trash_failures + 1))
+      fail "refusing to remove a trash entry this run did not name: $name"
+      return 0 ;;
   esac
+
+  # ⚠️ RETURNS 0 ON A REFUSAL, DELIBERATELY. `set -e` is on and this is called
+  # bare from the sweep loop, so a non-zero return would abort the clean halfway
+  # and leave the rest of the artefacts behind — a guard against one bad path
+  # turned into a failure to clean up the good ones. The refusal is a named
+  # failure in the transcript instead, and the entry stays on disk to be looked
+  # at.
+  #
+  # A REMOVAL THAT FAILS IS ALSO A NAMED FAILURE NOW. It used to end in
+  # `|| true` on the remote and an unchecked `rm` locally, while the caller
+  # reported the entry gone either way.
+  local rc=0
   if [ "$side" = shelf ]; then
-    rm -rf "$HOME/$TRASH_DIR/$name"
+    rm -rf "$HOME/$TRASH_DIR/$name" || rc=$?
   else
-    remote_sh "rm -rf \"\$HOME/$TRASH_DIR/$name\"" >/dev/null 2>&1 || true
+    remote_sh "rm -rf \"\$HOME/$TRASH_DIR/$name\"" >/dev/null 2>&1 || rc=$?
   fi
+  if [ "$rc" -ne 0 ]; then
+    trash_failures=$((trash_failures + 1))
+    fail "could not remove the $side trash entry $name (rm exited $rc)"
+  fi
+  return 0
 }
 
 # THE FIRST PRECONDITION: a CLI write must reach the journal, or nothing it
@@ -1118,17 +1195,59 @@ fi
 #
 # They are only ever CALLED from inside that block, after it sets
 # `clean_failures`, which is what `clean_one` counts into.
+# Returns 0 when the thing is GONE — removed, or not there to begin with — and
+# non-zero when it is still there. The caller needs to know: purging a trash
+# entry after a removal that FAILED deletes what a partial removal left behind.
 clean_one() {
   # $1 = human name, rest = command
   local what said; what="$1"; shift
   if said="$("$@" 2>&1)"; then
     pass "removed $what"
+    return 0
   elif printf '%s' "$said" | grep -qiE 'not found|no such|unknown (book|tag)'; then
     skip "$what was not there"
+    return 0
   else
     clean_failures=$((clean_failures + 1))
     fail "could not remove $what: $(printf '%s' "$said" | tr '\n' ' ' | cut -c1-160)"
+    return 1
   fi
+}
+
+# One listing, parsed STRICTLY, filtered to the harness's prefix.
+#
+# ⚠️ **A FAILED LISTING IS NOT AN EMPTY ONE.** Both sweeps used to end in
+# `2>/dev/null || true` around the whole pipeline, so a `paper` that could not
+# run, a malformed answer and a genuinely empty library all produced the same
+# empty string — and `--clean` then said "no scenario books" and exited 0 having
+# cleaned nothing. The parser exits 3 on a shape it does not recognise and the
+# caller distinguishes that from "none matched".
+#
+# $1 = side, $2 = noun ('book'|'tag'), $3 = the JSON field holding the identity.
+sweep_list() {
+  # $4.. are the prefixes to accept; defaults to `SCENARIO_PREFIX` alone.
+  local side="$1" noun="$2" field="$3" raw rc=0
+  shift 3
+  local prefixes=("$@")
+  [ "${#prefixes[@]}" -gt 0 ] || prefixes=("$SCENARIO_PREFIX")
+  raw="$("$side" "$noun" list --json 2>/dev/null)" || return 3
+  printf '%s' "$raw" | node -e '
+    let buf = ""
+    process.stdin.on("data", (d) => (buf += d))
+    process.stdin.on("end", () => {
+      const [field, ...prefixes] = process.argv.slice(1)
+      let rows
+      try { rows = JSON.parse(buf) } catch { process.exit(3) }
+      if (!Array.isArray(rows)) process.exit(3)
+      for (const row of rows) {
+        if (row === null || typeof row !== "object") process.exit(3)
+        const id = row[field]
+        if (typeof id !== "string") process.exit(3)
+        if (prefixes.some((prefix) => id.startsWith(prefix))) console.log(id)
+      }
+    })
+  ' "$field" "${prefixes[@]}" || rc=$?
+  return "$rc"
 }
 # ⚠️ **BY PREFIX, NOT BY THIS RUN'S OWN IDS.** `--clean` is invoked as its own
 # invocation — a separate process with a different `RUN_ID` — so naming
@@ -1140,56 +1259,101 @@ clean_one() {
 # because there is no such query and inventing one for a harness would be a
 # service row nothing else wants.
 sweep_books() {
-  # $1 = 'shelf' | 'satchel'
-  local side="$1" ids
-  ids="$("$side" book list --json 2>/dev/null | node -e '
-    let raw = ""
-    process.stdin.on("data", (d) => (raw += d))
-    process.stdin.on("end", () => {
-      let rows = []
-      try { rows = JSON.parse(raw) } catch { rows = [] }
-      if (!Array.isArray(rows)) rows = []
-      for (const row of rows) {
-        const id = row && typeof row.bookId === "string" ? row.bookId : ""
-        if (id.startsWith(process.argv[1])) console.log(id)
-      }
-    })
-  ' "$SCENARIO_PREFIX" 2>/dev/null || true)"
-  [ -n "$ids" ] || { skip "no scenario books on the $side"; return; }
+  local side="$1" ids rc=0
+  ids="$(sweep_list "$side" book bookId)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    clean_failures=$((clean_failures + 1))
+    fail "could not list the $side's books, so its scenario artefacts were NOT swept (exit $rc)"
+    return 0
+  fi
+  [ -n "$ids" ] || { skip "no scenario books on the $side"; return 0; }
   local id
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    clean_one "book $id on the $side" "$side" book remove "$id"
-    # THE TRASH ENTRY THE REMOVAL JUST MADE, which is the whole reason the
-    # ids became per-run. `PROBE_TRASH` is the precedent; a per-run id is
-    # safe to delete by path because nothing else can have written it.
-    trash_rm "$side" "${id//-/_}"
+    # ⚠️ **ONLY AFTER A CONFIRMED REMOVAL.** The trash entry is purged because
+    # the removal put it there; purging it when the removal FAILED deletes what
+    # a partial removal left behind, which is the one irreversible thing in this
+    # script. `clean_one` returns non-zero exactly when the book is still there.
+    if clean_one "book $id on the $side" "$side" book remove "$id"; then
+      trash_rm "$side" "${id//-/_}"
+    else
+      # ⚠️ **AND `sweep_trash` MUST BE TOLD, or this protection is theatre.**
+      # It runs afterwards and enumerates the trash, so without the hold list it
+      # deleted the very entry this branch had just preserved — measured, with
+      # "leaving the trash entry" and the deletion in the same transcript. Two
+      # fixes that each worked alone and cancelled out together.
+      # ⚠️ KEYED BY MACHINE, NOT JUST BY NAME. Keyed by the directory alone, a
+      # failed removal on the SHELF also suppressed the satchel's sweep of the
+      # same id — so an old trash copy over there survived a `--clean` that
+      # reported nothing wrong. The two machines hold their own copies and each
+      # is decided on its own evidence.
+      held_back="$held_back $side:${id//-/_}"
+      log "  note  leaving the trash entry for $id alone, because its removal failed"
+    fi
   done <<EOF
 $ids
 EOF
 }
+
 sweep_tags() {
-  local side="$1" names
-  names="$("$side" tag list --json 2>/dev/null | node -e '
-    let raw = ""
-    process.stdin.on("data", (d) => (raw += d))
-    process.stdin.on("end", () => {
-      let rows = []
-      try { rows = JSON.parse(raw) } catch { rows = [] }
-      if (!Array.isArray(rows)) rows = []
-      for (const row of rows) {
-        const name = row && typeof row.tag === "string" ? row.tag : ""
-        if (name.startsWith(process.argv[1])) console.log(name)
-      }
-    })
-  ' "$SCENARIO_PREFIX" 2>/dev/null || true)"
-  [ -n "$names" ] || { skip "no scenario tags on the $side"; return; }
+  local side="$1" names rc=0
+  names="$(sweep_list "$side" tag tag)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    clean_failures=$((clean_failures + 1))
+    fail "could not list the $side's tags, so its scenario tags were NOT swept (exit $rc)"
+    return 0
+  fi
+  [ -n "$names" ] || { skip "no scenario tags on the $side"; return 0; }
   local name
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    clean_one "tag $name on the $side" "$side" tag remove "$name"
+    clean_one "tag $name on the $side" "$side" tag remove "$name" || true
   done <<EOF
 $names
+EOF
+}
+
+# ⚠️ **`--clean` USED TO ENUMERATE ONLY LIVE BOOKS**, so anything an interrupted
+# run had already trashed was invisible to it — and those are exactly the
+# artefacts a crashed run leaves. `book remove` trashes rather than deletes, so
+# the failure mode is not hypothetical: a run killed after step 19 leaves its
+# book in the trash and nowhere else.
+#
+# `trash list` answers with the same `bookId` field the book listing does, so it
+# goes through the same strict parser. The directory name is the id with its
+# dashes underscored — the same derivation `SCENARIO_TRASH` uses — and
+# `trash_rm` validates it again before touching anything.
+# What `sweep_books` deliberately left in the trash, as `side:directory` pairs,
+# because a removal that failed means a partial removal may have put files
+# there. The SIDE is part of the key: the two machines hold their own copies.
+held_back=''
+
+sweep_trash() {
+  local side="$1" ids rc=0
+  # ⚠️ TWO SPELLINGS. A trash entry whose `book.json` will not read falls back
+  # to the underscored DIRECTORY name (`core/bookTrash.ts`), which the hyphenated
+  # prefix never matches — so the entries most likely to be left by a crashed run
+  # were the ones this sweep could not see.
+  ids="$(sweep_list "$side" trash bookId "$SCENARIO_PREFIX" "${SCENARIO_PREFIX//-/_}")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    clean_failures=$((clean_failures + 1))
+    fail "could not list the $side's trash, so trashed scenario artefacts were NOT swept (exit $rc)"
+    return 0
+  fi
+  [ -n "$ids" ] || { skip "no scenario books in the $side's trash"; return 0; }
+  local id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    local dir="${id//-/_}"
+    case " $held_back " in
+      *" $side:$dir "*)
+        skip "leaving the trashed $id alone — its removal failed earlier in this clean"
+        continue ;;
+    esac
+    log "  removing the trashed scenario book $id from the $side"
+    trash_rm "$side" "$dir"
+  done <<EOF
+$ids
 EOF
 }
 
@@ -1203,9 +1367,17 @@ if [ "$clean" -eq 1 ]; then
   sweep_tags satchel
   sweep_books shelf
   sweep_books satchel
+  # AFTER the live sweep, so a book this invocation just removed is collected
+  # here rather than left behind by it.
+  sweep_trash shelf
+  sweep_trash satchel
   app_start shelf
   app_start satchel
   log "Transcript: $out"
+  # TRASH FAILURES COUNT TOO. `trash_rm` keeps its own tally because it must
+  # return 0 under `set -e`; folding it in here is what stops `--clean` exiting
+  # 0 after failing to remove a directory.
+  clean_failures=$((clean_failures + trash_failures))
   if [ "$clean_failures" -gt 0 ]; then
     log ''
     log "  $clean_failures artefact(s) could not be removed — this run did NOT clean up."
@@ -1340,9 +1512,18 @@ fi
 # been proved to have crossed by this point, so nothing here can mask it.
 log ''
 log '## Housekeeping'
+before_housekeeping="$trash_failures"
 trash_rm shelf "$SCENARIO_TRASH"
 trash_rm satchel "$SCENARIO_TRASH"
-pass "the scenario book's trash entry is gone from both machines ($SCENARIO_TRASH)"
+# ⚠️ **THIS USED TO `pass` UNCONDITIONALLY**, while the removals it reports on
+# ended in `|| true` — so "gone from both machines" was a sentence the script
+# printed rather than a fact it had checked. `trash_rm` names each failure now,
+# and this step only claims success when it added none.
+if [ "$trash_failures" -eq "$before_housekeeping" ]; then
+  pass "the scenario book's trash entry is gone from both machines ($SCENARIO_TRASH)"
+else
+  fail "the scenario book's trash entry could not be removed from both machines ($SCENARIO_TRASH)"
+fi
 
 # --- the verdict ---------------------------------------------------------
 
