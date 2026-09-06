@@ -490,7 +490,19 @@ app_start() {
 }
 
 # One bidirectional pass: the satchel syncs on start, so restarting it is the
-# trigger. Cheaper than waiting out a debounce that may never fire.
+# trigger.
+#
+# ⚠️ THE REASON CHANGED UNDER THIS COMMENT, which used to end "cheaper than
+# waiting out a debounce that may never fire". Since 0.2.2 the satchel also has
+# a CLOCK — a backstop every 5 minutes after a success, a ladder from 20 s after
+# a failure — so a debounce that never fires is no longer the only alternative
+# and "may never fire" is no longer true of anything.
+#
+# The restart stays, and now for a better reason than it had: it is DETERMINISTIC
+# and immediate, where the clock would make every convergence step wait out a
+# period this script cannot see the start of. A run that instead relied on the
+# cadence would need `--timeout` above 300 s or it would be measuring its own
+# impatience — which is a separate, worthwhile run, and not this one.
 sync_pass() { app_quit satchel; app_start satchel; }
 
 mutate() {
