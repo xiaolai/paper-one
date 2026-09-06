@@ -384,6 +384,348 @@ describe('the predicates it converges on', () => {
     expect(text).not.toMatch(/grep[^\n]*journalSeq/)
   })
 
+  /* ── PER-RUN IDS, 2026-09-06 ─────────────────────────────────────────────
+   * A completed run used to make the next one impossible: step 19 removes the
+   * scenario book, `book remove` trashes rather than deletes, and the next
+   * run's `book add` was refused because the fixed id was in the trash.
+   * `--clean` could not undo it — it calls the very verb that created the
+   * entry — and `trash empty` is all-or-nothing by design. */
+  it('invents a per-run id for everything it creates, so a finished run does not block the next', () => {
+    /* The ids must be COMPUTED, not literals. A regex for the literal would
+       pass against the comment that explains why they are not literals, which
+       is the trap `codeOf` exists for — but `text` is already comment-free
+       here, so this asserts the assignment itself. */
+    expect(text).toMatch(/^readonly RUN_ID="\$\$-\$\(date \+%s\)"/m)
+    for (const name of ['SCENARIO_BOOK', 'SCENARIO_TAG', 'SCENARIO_TAG_RENAMED', 'SCENARIO_NOTE']) {
+      const line = text.match(new RegExp(`^readonly ${name}=.*$`, 'm'))?.[0] ?? ''
+      expect(line, `${name} must carry the run id`).toContain('$RUN_ID')
+    }
+    /* And none of them is the old fixed spelling. `wi-11-7-book` as a whole
+       word would still match `wi-11-7-book-$RUN_ID`, so the assertion is that
+       no assignment ENDS there. */
+    expect(text).not.toMatch(/^readonly SCENARIO_BOOK='wi-11-7-book'$/m)
+  })
+
+  it('sweeps --clean by prefix, because a per-run id cannot be named by a later invocation', () => {
+    /* THE PROPERTY THE FIXED IDS WERE BUYING, kept by another route. `--clean`
+       runs as its own process with its own RUN_ID, so naming this run's ids
+       would name a book it never created and miss every one a crashed run
+       left. Sweeping the prefix collects all of them. */
+    expect(text).toMatch(/^readonly SCENARIO_PREFIX='wi-11-7-'/m)
+    /* The filter lives in `sweep_list`, which both sweeps go through — one
+       parser rather than two copies of the same buffering and validation. */
+    expect(bodyOf(text, 'sweep_list')).toContain('$SCENARIO_PREFIX')
+    expect(bodyOf(text, 'sweep_books')).toContain('sweep_list')
+    expect(bodyOf(text, 'sweep_tags')).toContain('sweep_list')
+    expect(callsTo(text, 'sweep_books')).toBeGreaterThan(0)
+    expect(callsTo(text, 'sweep_tags')).toBeGreaterThan(0)
+  })
+
+  /**
+   * ⚠️ **THESE RUN `trash_rm`. THE ONES THEY REPLACE ONLY READ IT.**
+   *
+   * The previous version asserted that the guard's SOURCE contained
+   * `SCENARIO_PREFIX` and a `fail` and a `return 0` — all of which were true of
+   * a guard that accepted `wi_11_7_x/../../../Desktop` and
+   * `wi_11_7_$(id -u)`. It passed against the defect it was written to prevent,
+   * which is the check-that-cannot-fail class this file opens by naming.
+   *
+   * So the function is extracted and executed with `rm` and the remote shell
+   * replaced by recorders. A hostile name must be refused BEFORE either of them
+   * is reached — asserting the refusal message alone would pass on a guard that
+   * complains and deletes anyway.
+   */
+  /* ⚠️ SINGLE QUOTES, NOT `JSON.stringify`. The first version of this harness
+     interpolated the hostile name with `JSON.stringify`, which emits DOUBLE
+     quotes — so the shell ran `$(id -u)` before `trash_rm` ever saw it, and the
+     guard was blamed for a substitution the test itself performed. The same
+     defect the guard exists to prevent, reintroduced in the thing testing it. */
+  const sq = (s) => `'${String(s).replaceAll("'", `'\\''`)}'`
+
+  const trashHarness = (name, side = 'shelf', { rmExit = 0, sshExit = 0 } = {}) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'trashrm-'))
+    const body = bodyOf(codeOf(readFileSync(SCRIPT, 'utf8')), 'trash_rm')
+    const harness = [
+      'set -uo pipefail',
+      `HOME=${sq(dir)}`,
+      "readonly SCENARIO_PREFIX='wi-11-7-'",
+      "readonly TRASH_DIR='trash'",
+      'trash_failures=0',
+      `fail() { printf 'FAIL %s\n' "$*" >> ${JSON.stringify(path.join(dir, 'events'))}; }`,
+      `rm() { printf 'RM %s\n' "$*" >> ${JSON.stringify(path.join(dir, 'events'))}; return ${rmExit}; }`,
+      `remote_sh() { printf 'SSH %s\n' "$*" >> ${JSON.stringify(path.join(dir, 'events'))}; return ${sshExit}; }`,
+      body,
+      `trash_rm ${sq(side)} ${sq(name)}`,
+      `printf 'TRASH_FAILURES %s\n' "$trash_failures" >> ${JSON.stringify(path.join(dir, 'events'))}`,
+    ].join('\n')
+    const file = path.join(dir, 'h.sh')
+    writeFileSync(file, harness)
+    const res = spawnSync('bash', [file], { encoding: 'utf8', timeout: 30_000 })
+    const events = existsSync(path.join(dir, 'events'))
+      ? readFileSync(path.join(dir, 'events'), 'utf8')
+      : ''
+    rmSync(dir, { recursive: true, force: true })
+    return { events, code: res.status, err: res.stderr }
+  }
+
+  itRuns('refuses a traversing trash name without reaching rm or ssh', () => {
+    for (const hostile of ['wi_11_7_x/../../../Desktop', 'wi_11_7_a/b', '../wi_11_7_x']) {
+      const { events } = trashHarness(hostile)
+      expect(events, `${hostile} must be refused`).toMatch(/^FAIL /m)
+      expect(events, `${hostile} must not reach rm`).not.toMatch(/^RM /m)
+      expect(events, `${hostile} must not reach ssh`).not.toMatch(/^SSH /m)
+    }
+  })
+
+  itRuns('refuses a trash name carrying shell syntax, on the remote side too', () => {
+    /* THE REMOTE IS THE DANGEROUS ONE: the name is interpolated into a string
+       another machine's shell evaluates, so `$(...)` there is command
+       execution. `satchel()` two hundred lines up warns about exactly this. */
+    for (const hostile of ['wi_11_7_$(id -u)', 'wi_11_7_`id`', 'wi_11_7_a b', 'wi_11_7_a;id']) {
+      for (const side of ['shelf', 'satchel']) {
+        const { events } = trashHarness(hostile, side)
+        expect(events, `${hostile} on the ${side}`).toMatch(/^FAIL /m)
+        expect(events, `${hostile} on the ${side} must not delete`).not.toMatch(/^(RM|SSH) /m)
+      }
+    }
+  })
+
+  itRuns('refuses an empty name and one outside the harness prefix', () => {
+    for (const name of ['', 'other_book', 'wi_11_6_book']) {
+      const { events } = trashHarness(name)
+      expect(events, `${JSON.stringify(name)} must be refused`).toMatch(/^FAIL /m)
+      expect(events).not.toMatch(/^(RM|SSH) /m)
+    }
+  })
+
+  /**
+   * ⚠️ **A FAILED LISTING IS NOT AN EMPTY ONE, and both sweeps used to make it
+   * one.** They wrapped the whole pipeline in `2>/dev/null || true`, so a
+   * `paper` that could not run, a malformed answer and a genuinely empty
+   * library all produced the same empty string — and `--clean` then printed
+   * "no scenario books" and exited 0 having cleaned nothing. Asserting the
+   * source contained `SCENARIO_PREFIX` could not tell those apart, so this
+   * runs the sweep against each case.
+   */
+  const sweepHarness = (listing, { exit = 0 } = {}) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'sweep-'))
+    const code = codeOf(readFileSync(SCRIPT, 'utf8'))
+    const events = path.join(dir, 'events')
+    const harness = [
+      'set -uo pipefail',
+      "readonly SCENARIO_PREFIX='wi-11-7-'",
+      'clean_failures=0',
+      "held_back=''",
+      `fail() { printf 'FAIL %s\n' "$*" >> ${sq(events)}; }`,
+      `skip() { printf 'SKIP %s\n' "$*" >> ${sq(events)}; }`,
+      `pass() { printf 'PASS %s\n' "$*" >> ${sq(events)}; }`,
+      `log()  { printf 'LOG %s\n'  "$*" >> ${sq(events)}; }`,
+      `shelf() { printf '%s' ${sq(listing)}; return ${exit}; }`,
+      `clean_one() { printf 'REMOVE %s\n' "$*" >> ${sq(events)}; return 0; }`,
+      `trash_rm() { printf 'TRASH %s\n' "$*" >> ${sq(events)}; return 0; }`,
+      bodyOf(code, 'sweep_list'),
+      bodyOf(code, 'sweep_books'),
+      'sweep_books shelf',
+      `printf 'FAILURES %s\n' "$clean_failures" >> ${sq(events)}`,
+    ].join('\n')
+    const file = path.join(dir, 'h.sh')
+    writeFileSync(file, harness)
+    spawnSync('bash', [file], { encoding: 'utf8', timeout: 30_000 })
+    const out = existsSync(events) ? readFileSync(events, 'utf8') : ''
+    rmSync(dir, { recursive: true, force: true })
+    return out
+  }
+
+  itRuns('counts a failed listing as a failure, not as an empty library', () => {
+    const out = sweepHarness('', { exit: 1 })
+    expect(out, 'a listing that could not run must be a named failure').toMatch(/^FAIL /m)
+    expect(out, 'and must NOT read as "no scenario books"').not.toMatch(/^SKIP /m)
+    expect(out).toMatch(/^FAILURES [1-9]/m)
+  })
+
+  itRuns('counts malformed and unexpected JSON as a failure', () => {
+    for (const listing of ['not json at all', '{"books":[]}', '[3]', '[{"nope":1}]']) {
+      const out = sweepHarness(listing)
+      expect(out, `${listing} must fail`).toMatch(/^FAIL /m)
+      expect(out, `${listing} must not remove anything`).not.toMatch(/^REMOVE /m)
+    }
+  })
+
+  itRuns('treats a genuinely empty library as empty, and a match as a removal', () => {
+    /* THE TWO POSITIVES, without which every assertion above is satisfied by a
+       sweep that fails on everything. */
+    const empty = sweepHarness('[]')
+    expect(empty).toMatch(/^SKIP /m)
+    expect(empty).toMatch(/^FAILURES 0/m)
+
+    const matched = sweepHarness('[{"bookId":"wi-11-7-book-1"},{"bookId":"someone-elses-book"}]')
+    expect(matched).toMatch(/^REMOVE .*wi-11-7-book-1/m)
+    expect(matched, 'a book outside the prefix must be left alone').not.toMatch(/someone-elses-book/)
+    expect(matched, 'the trash entry follows a confirmed removal').toMatch(/^TRASH shelf wi_11_7_book_1/m)
+    expect(matched).toMatch(/^FAILURES 0/m)
+  })
+
+  itRuns('leaves the trash alone when the removal failed', () => {
+    /* THE IRREVERSIBLE ONE. Purging a trash entry after a removal that FAILED
+       deletes what a partial removal left behind. */
+    const dir = mkdtempSync(path.join(tmpdir(), 'sweepfail-'))
+    const code = codeOf(readFileSync(SCRIPT, 'utf8'))
+    const events = path.join(dir, 'events')
+    const harness = [
+      'set -uo pipefail',
+      "readonly SCENARIO_PREFIX='wi-11-7-'",
+      'clean_failures=0',
+      "held_back=''",
+      `fail() { printf 'FAIL %s\n' "$*" >> ${sq(events)}; }`,
+      `skip() { :; }`,
+      `pass() { :; }`,
+      `log()  { printf 'LOG %s\n' "$*" >> ${sq(events)}; }`,
+      `shelf() { printf '%s' '[{"bookId":"wi-11-7-book-1"}]'; }`,
+      `clean_one() { printf 'REMOVE %s\n' "$*" >> ${sq(events)}; return 1; }`,
+      `trash_rm() { printf 'TRASH %s\n' "$*" >> ${sq(events)}; return 0; }`,
+      bodyOf(code, 'sweep_list'),
+      bodyOf(code, 'sweep_books'),
+      'sweep_books shelf',
+    ].join('\n')
+    const file = path.join(dir, 'h.sh')
+    writeFileSync(file, harness)
+    spawnSync('bash', [file], { encoding: 'utf8', timeout: 30_000 })
+    const out = existsSync(events) ? readFileSync(events, 'utf8') : ''
+    rmSync(dir, { recursive: true, force: true })
+    expect(out, 'the removal was attempted').toMatch(/^REMOVE /m)
+    expect(out, 'and the trash was NOT purged after it failed').not.toMatch(/^TRASH /m)
+    expect(out).toMatch(/^LOG .*leaving the trash entry/m)
+  })
+
+  itRuns('holds a trash entry back per MACHINE, not per name', () => {
+    /* ⚠️ **THE HOLD LIST WAS KEYED BY DIRECTORY ALONE**, so a removal that
+       failed on the SHELF also suppressed the satchel's sweep of the same id —
+       and an old trash copy over there survived a `--clean` that reported
+       nothing wrong. The two machines hold their own copies and each is decided
+       on its own evidence. */
+    const dir = mkdtempSync(path.join(tmpdir(), 'held-'))
+    const code = codeOf(readFileSync(SCRIPT, 'utf8'))
+    const events = path.join(dir, 'e')
+    const harness = [
+      'set -uo pipefail',
+      "readonly SCENARIO_PREFIX='wi-11-7-'",
+      'clean_failures=0',
+      'trash_failures=0',
+      "held_back=''",
+      `fail() { printf 'FAIL %s\n' "$*" >> ${sq(events)}; }`,
+      `skip() { printf 'SKIP %s\n' "$*" >> ${sq(events)}; }`,
+      'pass() { :; }',
+      `log() { printf 'LOG %s\n' "$*" >> ${sq(events)}; }`,
+      // the shelf holds it live and its removal fails; the satchel has only an
+      // old trash copy, which nothing in this clean has any reason to keep.
+      `shelf() { case "$1 $2" in "book list") printf '%s' '[{"bookId":"wi-11-7-book-1"}]';; "trash list") printf '%s' '[]';; esac; }`,
+      `satchel() { case "$1 $2" in "book list") printf '%s' '[]';; "trash list") printf '%s' '[{"bookId":"wi-11-7-book-1"}]';; esac; }`,
+      `clean_one() { printf 'REMOVE %s\n' "$*" >> ${sq(events)}; return 1; }`,
+      `trash_rm() { printf 'TRASH_RM %s %s\n' "$1" "$2" >> ${sq(events)}; }`,
+      bodyOf(code, 'sweep_list'),
+      bodyOf(code, 'sweep_books'),
+      bodyOf(code, 'sweep_trash'),
+      'sweep_books shelf',
+      'sweep_trash shelf',
+      'sweep_trash satchel',
+    ].join('\n')
+    const file = path.join(dir, 'h.sh')
+    writeFileSync(file, harness)
+    spawnSync('bash', [file], { encoding: 'utf8', timeout: 30_000 })
+    const out = existsSync(events) ? readFileSync(events, 'utf8') : ''
+    rmSync(dir, { recursive: true, force: true })
+    expect(out, 'the shelf failure is held back').toMatch(/^LOG .*leaving the trash entry/m)
+    expect(out, "the satchel's own copy is still swept").toMatch(/^TRASH_RM satchel wi_11_7_book_1/m)
+    expect(out, 'and the shelf never purges what it held').not.toMatch(/^TRASH_RM shelf /m)
+  })
+
+  itRuns('counts a refusal, so --clean cannot report a clean cleanup after one', () => {
+    /* ⚠️ **THE REFUSAL REACHED THE TRANSCRIPT AND NOT THE VERDICT.** It called
+       `fail`, which moves the RUN's counter, while `--clean` reads
+       `clean_failures` — which `trash_failures` folds into. So a refused purge
+       printed FAIL, left the artefact behind, and exited 0. Asserting the FAIL
+       line alone cannot see that, which is why the COUNT is asserted. */
+    const out = trashHarness('wi_11_7_x/../../../Desktop')
+    expect(out.events).toMatch(/^FAIL /m)
+    expect(out.events, 'the refusal must reach the cleanup verdict').toMatch(/^TRASH_FAILURES [1-9]/m)
+  })
+
+  itRuns('counts a deletion that FAILED, on both sides', () => {
+    /* The stubs returned 0 unconditionally, so no test here had ever seen
+       `trash_rm` handle a failing `rm` — the path that used to end in `|| true`
+       and report success regardless. */
+    const local = trashHarness('wi_11_7_book_1', 'shelf', { rmExit: 1 })
+    expect(local.events).toMatch(/^RM /m)
+    expect(local.events, 'a failed local rm is a named failure').toMatch(/^FAIL /m)
+    expect(local.events).toMatch(/^TRASH_FAILURES [1-9]/m)
+
+    const remote = trashHarness('wi_11_7_book_1', 'satchel', { sshExit: 255 })
+    expect(remote.events).toMatch(/^SSH /m)
+    expect(remote.events, 'a failed remote rm is a named failure').toMatch(/^FAIL /m)
+    expect(remote.events).toMatch(/^TRASH_FAILURES [1-9]/m)
+  })
+
+  itRuns('removes a well-formed harness name, on both sides', () => {
+    /* THE POSITIVE, without which every assertion above is satisfied by a
+       function that refuses everything. */
+    const shelf = trashHarness('wi_11_7_book_4321_99', 'shelf')
+    expect(shelf.events).toMatch(/^RM /m)
+    expect(shelf.events).not.toMatch(/^FAIL /m)
+    const satchel = trashHarness('wi_11_7_book_4321_99', 'satchel')
+    expect(satchel.events).toMatch(/^SSH /m)
+    expect(satchel.events).not.toMatch(/^FAIL /m)
+  })
+
+  it('removes a trash entry only under its own prefix, and never aborts the sweep to do it', () => {
+    const body = bodyOf(text, 'trash_rm') ?? ''
+    /* AN `rm -rf` WITH A COMPUTED PATH. The guard is the whole safety story:
+       without it an empty or unprefixed argument reaches the reader's trash. */
+    expect(body).toContain('rm -rf')
+    expect(body).toContain('SCENARIO_PREFIX')
+    expect(body).toMatch(/fail "refusing to remove/)
+    /* AND RETURNS 0 ON THE REFUSAL. `set -e` is on and this is called bare
+       from the sweep loop, so a non-zero return would abort the clean halfway
+       and leave the rest behind — a guard against one bad path turned into a
+       failure to clean up the good ones. */
+    /* ⚠️ WAS A SINGLE-LINE REGEX, which broke the moment the refusal branch
+       grew a second statement (counting the failure). The PROPERTY is that the
+       refusal branch returns 0 — asserted over the branch, not over a layout. */
+    const refusal = body.slice(body.indexOf('refusing to remove'))
+    expect(refusal.slice(0, refusal.indexOf(';;'))).toContain('return 0')
+    /* The probe goes through the same helper rather than its own `rm -rf`. */
+    expect(text).not.toMatch(/rm -rf[^\n]*trash\/\$PROBE_TRASH/)
+  })
+
+  it('reads the satchel cursor as a DIAGNOSTIC, and never as a predicate', () => {
+    /* `sync.cursor` is the one number that says "behind": `since` is a seq in
+       the SHELF's space, where the two journals' own heads are independent
+       counters that cannot be compared. */
+    expect(bodyOf(text, 'cursor_line')).toContain('sync.cursor')
+    expect(callsTo(text, 'cursor_report')).toBeGreaterThan(0)
+    /* ⚠️ IT MUST NOT BECOME A PREDICATE. The quiet step reads the journal
+       FILE deliberately — two earlier drafts read a field through the CLI and
+       gave first a check that always passed and then one that could only ever
+       fail. So no `pass`/`fail` may be reached from the cursor helpers. */
+    for (const name of ['cursor_line', 'cursor_report']) {
+      const body = bodyOf(text, name) ?? ''
+      expect(body, `${name} must not decide a step`).not.toMatch(/\b(pass|fail)\s+["']/)
+    }
+  })
+
+  it('parses the settings store twice, because the settings are a JSON string inside it', () => {
+    /* MEASURED: `paper.settings.v1` holds a STRING containing
+       `{"version":1,"values":{…}}`. A single parse yields that string,
+       `.values` on it is undefined, and the probe would report "no cursor" on
+       a satchel that has one — the quiet wrong answer the helper exists to
+       prevent. */
+    const body = bodyOf(text, 'cursor_line') ?? ''
+    expect(body).toContain('paper.settings.v1')
+    expect(body).toMatch(/typeof held === "string" \? JSON\.parse\(held\)/)
+    /* A shelf legitimately has none — only a satchel dials — so absence there
+       must not read as a fault. */
+    expect(body).toContain('only a satchel dials')
+  })
+
   it('proves a removal by the not-found refusal, not by any non-zero exit', () => {
     /* IN THE PREDICATE'S OWN BODY. `text.toContain('not-found')` passed on
      * the word appearing anywhere in the file — including in the comment
@@ -438,7 +780,13 @@ describe('the predicates it converges on', () => {
      * from the probe's own id, whatever that id is. */
     expect(text).toContain('shelf book remove "$PROBE_BOOK"')
     expect(text).toMatch(/PROBE_TRASH="\$\{PROBE_BOOK\/\/-\/_\}"/)
-    expect(text).toContain('trash/$PROBE_TRASH')
+    /* ⚠️ WAS `toContain('trash/$PROBE_TRASH')`, an inline `rm -rf` that this
+     * file spelled out. The removal goes through `trash_rm` now — one guarded
+     * path shared with the `--clean` sweep, which refuses any name outside the
+     * harness's own prefix. The PROPERTY is unchanged and is what is asserted:
+     * the cleanup path is derived from the probe's own id, whatever that id
+     * is. What moved is where the `rm -rf` lives. */
+    expect(text).toContain('trash_rm shelf "$PROBE_TRASH"')
   })
 
   /* THE PRECONDITION THAT COST TWO FULL RUNS before anyone checked it. Every

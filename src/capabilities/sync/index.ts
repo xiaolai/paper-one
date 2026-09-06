@@ -45,7 +45,15 @@ import { StoragePane } from './ui/StoragePane'
  * build the ledger; and then, by role: a SHELF serves the `sync.*` handlers
  * on the peer router and marks itself ready; a SATCHEL starts the
  * scheduler — sync on start, on visibility, five seconds after the last
- * local commit of a burst, and on "Sync now".
+ * local commit of a burst, on "Sync now", and ON A CLOCK: a backstop every
+ * `SYNC_EVERY_MS` after a success, and a retry ladder from `SYNC_RETRY_MS`
+ * doubling to it after a failure.
+ *
+ * ⚠️ THE CLOCK WAS MISSING FROM THIS LIST until 2026-09-06, one release after
+ * it landed. It is not a minor omission: without it a satchel nobody touches
+ * syncs ONCE per launch, which is what a reader of these four lines would
+ * still conclude, and it is exactly the wrong conclusion phase 24 spent three
+ * two-machine runs on.
  *
  * The Capability's static surfaces delegate into runtime slots
  * (`lib/runtime.ts`): a registry validates the value before anything runs,

@@ -1,7 +1,11 @@
 import { configure } from '@testing-library/dom'
 
 /**
- * ⚠️ **`findBy*` AND `waitFor` GET 5 s, NOT THE LIBRARY'S DEFAULT 1 s.**
+ * ⚠️ **`findBy*` AND `waitFor` GET 10 s, NOT THE LIBRARY'S DEFAULT 1 s.**
+ *
+ * (It said 5 s until 2026-09-06 while the file configured 10 — a heading that
+ * disagreed with its own last line, which is how the paragraphs below came to
+ * argue for two different numbers at once.)
  *
  * Testing Library's 1 000 ms is a default chosen for no particular suite. This
  * one has UI that is genuinely asynchronous by design: `SearchPanel` debounces
@@ -33,7 +37,22 @@ import { configure } from '@testing-library/dom'
  * Configured here rather than per call site because 21 test files use these
  * helpers and a per-call `{ timeout }` is a thing each new one has to remember.
  *
- * ── 5 s → 10 s, 2026-09-06. THE THIRD INSTANCE, AND THE NUMBER WAS THE BUG ──
+ * ── 5 s → 10 s, 2026-09-06 ──────────────────────────────────────────────────
+ *
+ * ⚠️ **READ THIS PARAGRAPH AND NOT THE ONE ABOVE IT FOR THE CURRENT REASON.**
+ * The history is kept because it records two real measurements, but the live
+ * rule is short: this is a HANG CEILING and asserts nothing about speed. Its one
+ * hard constraint is to stay below the smallest `testTimeout` it can run under
+ * (the root's 15 s) so `waitFor` can name the element it was waiting for.
+ *
+ * ⚠️ **AND THE MEASUREMENTS BELOW ARE A FLOOR, NOT THE DERIVATION.** An earlier
+ * draft of this line said "not derived from any observed runtime", which reads
+ * as though the 2 248 ms and the sevenfold inflation recorded further down are
+ * irrelevant — they are not. They establish that anything near 5 s is too
+ * small. What must not happen is picking the value as a MULTIPLE of them, which
+ * is how 5 000 was arrived at and why it failed. Floor from measurement,
+ * ceiling from `testTimeout`, and nothing in between pretending to be precise.
+ *
  *
  * `src/app/web/Reader.test.tsx` §"gives a measured PDF a range transport"
  * failed `pnpm verify` at **5 100 ms** against this 5 000 ms ceiling — 26 of 26
@@ -58,5 +77,23 @@ import { configure } from '@testing-library/dom'
  * the root's 15 s — or the test is killed before `waitFor` can report the
  * specific element it was waiting for, which is the whole value of the error.
  * 10 s sits under that with room, and a hang is still bounded.
+ *
+ * ⚠️ **AND IT DID NOT FIX THE FAILURE IT WAS RAISED FOR. SAYING SO HERE BECAUSE
+ * A CHANGE THAT KEEPS A FALSE REASON IS WORSE THAN THE BUG.** `Reader.test.tsx`
+ * §"gives a measured PDF a range transport" failed again at 10 045 ms — the new
+ * ceiling exactly, as it had failed at the old one exactly. Measured
+ * afterwards: that case passes in **79–101 ms** across ten runs and has never
+ * once finished anywhere in between. Bimodal like that is a HANG, not
+ * slowness, and no ceiling fixes a hang; a bigger one only makes the failure
+ * slower to arrive.
+ *
+ * The raise is KEPT anyway, on its own merits and not on that one: the 2 248 ms
+ * SidePane measurement above is real, 5 000 was about twice it, and the file
+ * next door records a sevenfold inflation under load. 10 s is honest headroom
+ * for a wait that is genuinely slow and progressing. It is not, and was never,
+ * a fix for a wait that is not progressing at all.
+ *
+ * The real defect is tracked in `dev-docs/NEXT.md` under known open items, and
+ * the assertion in `Reader.test.tsx` now names which of the two failures it hit.
  */
 configure({ asyncUtilTimeout: 10_000 })

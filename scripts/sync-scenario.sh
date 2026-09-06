@@ -173,14 +173,48 @@ case "$REMOTE_PATH" in
   ''|*[!A-Za-z0-9._/:@\$\{\}-]*) echo "PAPER_REMOTE_PATH may use only letters, digits and . _ / : @ \$ { } - — got '$REMOTE_PATH'" >&2; exit 2 ;;
 esac
 
-# What this run creates. Fixed rather than random so a second run finds and
+# What this run creates.
+#
+# ⚠️ **UNIQUE PER RUN, AND THE COMMENT THIS REPLACES REASONED ABOUT ONLY HALF
+# THE CASES.** It read: "Fixed rather than random so a second run finds and
 # reuses what a failed first run left, and `--clean` always names the same
-# things.
-readonly SCENARIO_BOOK='wi-11-7-book'
-readonly SCENARIO_TAG='wi-11-7-tag'
-readonly SCENARIO_TAG_RENAMED='wi-11-7-renamed'
+# things." That is a correct argument about a FAILED first run, and it never
+# asked what a SUCCESSFUL one leaves.
+#
+# A successful run ends by removing the scenario book — step 19, which is the
+# point of the removal-converges step. `book remove` puts it in the trash, and
+# the NEXT run's `book add` is then refused with "book wi-11-7-book is in the
+# trash — restore it, or empty the trash first". So a run could only ever be
+# followed by another after a manual `rm` on BOTH machines, which is how phase
+# 24 found it.
+#
+# `--clean` cannot undo that: it calls `book remove`, the very verb that
+# created the trash entry. Nor can the API — `trash empty` takes a count and an
+# exact id list and demands the trash hold precisely those, an all-or-nothing
+# check that is right for a reader and leaves no way to purge one book from a
+# trash holding 1 261 others.
+#
+# `PROBE_BOOK` two hundred lines below has been per-run since the first real
+# run, for three reasons that all apply here too, and the argument was never
+# carried across.
+#
+# THE PREFIX IS WHAT KEEPS `--clean` HONEST. A per-run id cannot be named by a
+# later invocation, so `--clean` sweeps by `SCENARIO_PREFIX` instead — which is
+# strictly better than the fixed ids it replaces, because it also collects what
+# every EARLIER crashed run left behind rather than only the last one's.
+readonly RUN_ID="$$-$(date +%s)"
+readonly SCENARIO_PREFIX='wi-11-7-'
+readonly SCENARIO_BOOK="${SCENARIO_PREFIX}book-$RUN_ID"
+readonly SCENARIO_TAG="${SCENARIO_PREFIX}tag-$RUN_ID"
+readonly SCENARIO_TAG_RENAMED="${SCENARIO_PREFIX}renamed-$RUN_ID"
 readonly SCENARIO_CFI='epubcfi(/6/4!/4/2/1:0)'
-readonly SCENARIO_NOTE='wi-11-7 note from the satchel'
+# Per-run too, so a `mark list` grep cannot match a note an EARLIER run wrote
+# into a book that still exists — the same defect the probe's own comment
+# records as "the check reported on history rather than on what just happened".
+readonly SCENARIO_NOTE="wi-11-7 note from the satchel $RUN_ID"
+# The trash directory the removal step will create, named the way the vault
+# names it. Removed at the end of the run, exactly as `PROBE_TRASH` is.
+readonly SCENARIO_TRASH="${SCENARIO_BOOK//-/_}"
 
 remote=''
 timeout_s=90
@@ -389,6 +423,82 @@ app_quit() {
 # like one that did — and every convergence step after it then timed out
 # against a machine running nothing, which is six minutes to learn what one
 # `pgrep` answers.
+# RAISE THE WINDOW AFTER A LAUNCH, and this is not politeness.
+#
+# ⚠️ **AN APP LAUNCHED WHILE THE SCREEN IS LOCKED DOES NOT RESUME WHEN THE
+# SCREEN IS UNLOCKED.** Measured 2026-09-06, on the run that finally went green:
+#
+#   - the satchel's app was started over ssh while that Mac's screen was locked
+#   - the screen was then unlocked by hand
+#   - for the next TWO MINUTES, polled six times at 20 s, it fired no timer of
+#     any kind: the shelf had logged two `circle.fetch` rounds, the satchel
+#     none, its 30 s round was 6½ minutes overdue, peer contact was 33 hours
+#     stale and no sync session had been attempted
+#   - one `set frontmost` over ssh, and within FIFTEEN SECONDS it fired its
+#     first `circle.fetch`, made contact, and ran a session
+#
+# ⚠️ **THIS IS NOT THE SAME CLAIM AS "AN UNFOCUSED WINDOW STOPS TIMERS", AND
+# THAT ONE IS ALREADY REFUTED — by this script's own header, four lines of which
+# say a hidden webview is throttled to about 2 s over four minutes and that "an
+# earlier claim that it stops outright did not reproduce".** Both are true
+# because they are different states. Unfocused is throttled and recovers; the
+# post-lock state does not recover on its own, and nothing had ever tested it
+# because no previous run got past the lock to find out.
+#
+# The first version of this comment said "WebKit suspends timers in an occluded
+# window", which contradicted the header directly and would have written a guess
+# over a measurement — the failure this repository keeps recording.
+#
+# `open` launches the app but does not reliably front it, least of all over ssh
+# where there is no GUI session doing the asking. So every `app_start` here was
+# capable of leaving an app RUNNING and asleep, and `pgrep` cannot tell those
+# apart — which is why the check below said yes while the run timed out.
+app_raise() {
+  # ⚠️ **THE FIRST VERSION OF THE SATCHEL BRANCH NEVER WORKED, AND `|| true`
+  # HID IT.** It built the remote command by interpolating an AppleScript that
+  # contains its own double quotes into a double-quoted string, so the REMOTE
+  # shell saw the quotes around "System Events" as terminating the argument and
+  # osascript was handed two fragments:
+  #
+  #   23:23: syntax error: Expected end of line but found end of script. (-2741)
+  #
+  # Measured on the real machine. The failure went to /dev/null and the function
+  # returned 0, so a raise that did nothing was indistinguishable from one that
+  # worked — and the check that "verified" it was contaminated: the window had
+  # been raised by hand two minutes earlier, so it was already frontmost and the
+  # test could not have failed.
+  #
+  # The remote command is SINGLE-QUOTED here so nothing expands locally, and the
+  # AppleScript's own quotes are escaped for the remote shell. `$pid` is
+  # resolved on the far side — interpolating a local one would raise whatever
+  # happens to hold that number over there.
+  #
+  # Re-tested against an uncontaminated precondition: Finder made frontmost
+  # first and confirmed, then this, then Paper confirmed frontmost.
+  local rc=0
+  case "$1" in
+    shelf)
+      # Locally the expansion is safe: a parameter expansion's RESULT is not
+      # re-parsed for quotes, so the AppleScript's own quotes stay literal. It
+      # is only the string handed to another shell that breaks.
+      local script='tell application "System Events" to set frontmost of (first process whose unix id is PID) to true'
+      local pid; pid="$(pgrep -f "$APP_PROCESS" | head -1)"
+      if [ -n "$pid" ]; then
+        osascript -e "${script/PID/$pid}" >/dev/null 2>&1 || rc=$?
+      fi ;;
+    satchel)
+      remote_sh 'pid=$(pgrep -f "Paper.app/Contents/MacOS/" | head -1); [ -n "$pid" ] && osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true"' >/dev/null 2>&1 || rc=$?
+      ;;
+  esac
+  # NAMED, NOT SWALLOWED. A raise that fails leaves an app whose timers may be
+  # suspended, which is the whole reason this function exists — reporting it as
+  # a note beats discovering it six convergence timeouts later.
+  if [ "$rc" -ne 0 ]; then
+    log "  note  could not raise the $1's window (exit $rc); if it is occluded its timers may stay suspended"
+  fi
+  return 0
+}
+
 app_start() {
   case "$1" in
     shelf) open -a "${PAPER_SHELF_APP:-Paper}" >/dev/null 2>&1 || true ;;
@@ -396,6 +506,8 @@ app_start() {
                "open --env PAPER_ROLE=satchel -a \"\$HOME/$SATCHEL_APP\" >/dev/null 2>&1 || true" ;;
   esac
   sleep "$APP_SETTLE_S"
+  # AFTER THE SETTLE, so the window exists to be raised.
+  app_raise "$1"
   local up=no
   case "$1" in
     shelf) pgrep -f "$APP_PROCESS" >/dev/null 2>&1 && up=yes ;;
@@ -409,7 +521,19 @@ app_start() {
 }
 
 # One bidirectional pass: the satchel syncs on start, so restarting it is the
-# trigger. Cheaper than waiting out a debounce that may never fire.
+# trigger.
+#
+# ⚠️ THE REASON CHANGED UNDER THIS COMMENT, which used to end "cheaper than
+# waiting out a debounce that may never fire". Since 0.2.2 the satchel also has
+# a CLOCK — a backstop every 5 minutes after a success, a ladder from 20 s after
+# a failure — so a debounce that never fires is no longer the only alternative
+# and "may never fire" is no longer true of anything.
+#
+# The restart stays, and now for a better reason than it had: it is DETERMINISTIC
+# and immediate, where the clock would make every convergence step wait out a
+# period this script cannot see the start of. A run that instead relied on the
+# cadence would need `--timeout` above 300 s or it would be measuring its own
+# impatience — which is a separate, worthwhile run, and not this one.
 sync_pass() { app_quit satchel; app_start satchel; }
 
 mutate() {
@@ -482,6 +606,10 @@ converge() {
   # AND ASK BOTH APPS WHY, which is the half this harness never had. See
   # `diagnostics_tail`.
   diagnostics_tail
+  # AND HOW FAR THE SATCHEL GOT, which says whether this is a satchel still
+  # catching up or one that is caught up and never got the row. Two different
+  # bugs, one symptom, and until now nothing here could tell them apart.
+  cursor_report
   return 1
 }
 
@@ -534,6 +662,93 @@ diagnostics_tail() {
       log "$said"
       log '```'
     fi
+  done
+}
+
+# How far the satchel has actually got, from its own cursor.
+#
+# ⚠️ **THE ONE NUMBER THAT SAYS "BEHIND", AND NO RUN HAD EVER READ IT.** A
+# convergence timeout cannot distinguish a satchel that is still catching up
+# from one that is caught up and never received the row — two different bugs
+# with one symptom. Phase 24's Stage B reached for the journals instead and
+# reported the satchel "~13 700 entries behind" from `nextSeq` 10306 against
+# 24066. Those are two INDEPENDENT counters: each journal allocates
+# `seq: nextSeq++` under its own epoch, so the satchel's head counts the
+# satchel's own entries and bears no arithmetic relation to the shelf's. The
+# comparison measured nothing.
+#
+# `sync.cursor` is the real one — `{peerId, epoch, since}`, persisted by the
+# satchel after each durably applied page (`SYNC_CURSOR_SETTING` in
+# `capabilities/sync/lib/ledger.ts`). `since` is a seq in the SHELF's space,
+# so it is directly comparable with the shelf's head, which is the property
+# the journal heads do not have.
+#
+# ⚠️ **DIAGNOSTIC ONLY. IT IS NOT A PREDICATE AND MUST NOT BECOME ONE.** The
+# quiet step reads the journal FILE deliberately — see the two drafts named in
+# `sync-scenario.test.mjs`, one a check that always passed and one that could
+# only ever fail, both from reading a field through the CLI. This prints what
+# it found and asserts nothing.
+#
+# ⚠️ **AND A SHELF HAS NO CURSOR, WHICH IS NOT A FAULT.** Only a satchel dials
+# and only a satchel persists one. Absence on the shelf is the expected answer.
+readonly STORE='Library/Application Support/one.paper.reader/paper.store.v1.json'
+cursor_line() {
+  # $1 = 'shelf' | 'satchel'; prints one human line, never fails the run.
+  local side="$1" raw=''
+  if [ "$side" = shelf ]; then
+    raw="$(cat "$HOME/$STORE" 2>/dev/null || true)"
+  else
+    raw="$(remote_sh "cat \"\$HOME/$STORE\" 2>/dev/null || true")"
+  fi
+  if [ -z "$raw" ]; then
+    printf 'no settings store on the %s\n' "$side"
+    return 0
+  fi
+  # ⚠️ `paper.settings.v1` IS A JSON STRING INSIDE THE STORE, not an object —
+  # measured, and the reason this is parsed twice. A single parse yields a
+  # string, `.values` on it is undefined, and the probe would report "no
+  # cursor" on a satchel that has one. That is the quiet wrong answer this
+  # whole helper exists to stop being given.
+  printf '%s' "$raw" | node -e '
+    let buf = ""
+    process.stdin.on("data", (d) => (buf += d))
+    process.stdin.on("end", () => {
+      const side = process.argv[1]
+      let cursor
+      try {
+        const store = JSON.parse(buf)
+        const held = store["paper.settings.v1"]
+        const settings = typeof held === "string" ? JSON.parse(held) : (held ?? {})
+        cursor = (settings.values ?? {})["sync.cursor"]
+      } catch (cause) {
+        console.log(`the ${side} settings store would not parse: ${cause && cause.message}`)
+        return
+      }
+      if (cursor === undefined || cursor === null) {
+        console.log(
+          side === "shelf"
+            ? "no cursor on the shelf, which is expected — only a satchel dials"
+            : "NO CURSOR ON THE SATCHEL: it has never durably applied a page from this shelf",
+        )
+        return
+      }
+      const since = cursor.since
+      const epoch = cursor.epoch
+      const peer = typeof cursor.peerId === "string" ? cursor.peerId.slice(0, 12) : cursor.peerId
+      console.log(`${side} cursor: since=${since} epoch=${epoch} peer=${peer}`)
+    })
+  ' "$side" 2>/dev/null || printf 'could not read the %s cursor\n' "$side"
+}
+
+# Both sides' cursors, into the transcript. Called where `diagnostics_tail` is
+# called, and once in the preflight so a run STARTS with the number written
+# down — otherwise "behind" is only ever inferred after the fact.
+cursor_report() {
+  local side
+  log ''
+  log '  how far each side has got:'
+  for side in shelf satchel; do
+    log "    $(cursor_line "$side")"
   done
 }
 
@@ -757,6 +972,85 @@ readonly PEERS_FILE="$HOME/Library/Application Support/one.paper.reader/peer/pee
 readonly PROBE_BOOK="wi-11-7-journal-probe-$$-$(date +%s)"
 readonly PROBE_TRASH="${PROBE_BOOK//-/_}"
 
+# A trash directory, on either machine, by path.
+#
+# ⚠️ **BY PATH BECAUSE THE API CANNOT DO IT.** `trash empty` takes a count and
+# an exact id list and demands the trash hold precisely those — an
+# all-or-nothing check that is right for a reader and leaves no way to purge
+# one book from a trash holding 1 261 others. Removing the directory is the
+# only route, and it is safe for exactly the ids this harness invents: a
+# per-run id cannot name a book a reader owns.
+#
+# ⚠️ **NEVER CALL THIS WITH AN ID THIS SCRIPT DID NOT CREATE.** The guard below
+# is not decoration — an empty or unprefixed argument here is an `rm -rf` with
+# a computed path, and the blast radius is the reader's trash.
+readonly TRASH_DIR='Library/Application Support/one.paper.reader/trash'
+# How many trash removals have failed. `trash_rm` returns 0 whatever happens —
+# it is called bare under `set -e` — so this is how a caller learns, and it is
+# what stops the housekeeping step below announcing a removal that did not
+# happen.
+trash_failures=0
+trash_rm() {
+  # $1 = 'shelf' | 'satchel', $2 = trash directory name (underscored id)
+  local side="$1" name="$2"
+
+  # ⚠️ **A PREFIX CHECK IS NOT A BASENAME CHECK, AND THE FIRST VERSION OF THIS
+  # GUARD WAS A PREFIX CHECK UNDER A COMMENT CALLING IT "not decoration".**
+  # It tested `case "$name" in "wi_11_7_"*)` and nothing else, so it accepted:
+  #
+  #   wi_11_7_x/../../../Desktop   -> $HOME/Library/Application Support/Desktop
+  #   wi_11_7_$(id -u)             -> evaluated by the REMOTE shell
+  #
+  # Both measured. The first escapes the trash directory an `rm -rf` is aimed
+  # at; the second is command substitution in a string this script hands to
+  # another machine's shell — which the `satchel()` helper two hundred lines up
+  # already warns about in as many words, and which this function then did.
+  #
+  # So the whole name is validated, not its first eight characters. Letters,
+  # digits and underscores only is exactly what `${id//-/_}` of a harness id can
+  # produce, and it makes traversal and substitution unrepresentable rather than
+  # merely unlikely. The empty string is refused with them.
+  # ⚠️ **A REFUSAL COUNTS.** These used to call `fail` alone, which moves the
+  # RUN's counter — and `--clean`'s verdict reads `clean_failures`, which
+  # `trash_failures` folds into. So a refused purge printed FAIL and exited 0,
+  # leaving the artefact behind while reporting a clean cleanup.
+  case "$name" in
+    ''|*[!A-Za-z0-9_]*)
+      trash_failures=$((trash_failures + 1))
+      fail "refusing a trash name that is not plain [A-Za-z0-9_]: ${name:-<empty>}"
+      return 0 ;;
+  esac
+  case "$name" in
+    "${SCENARIO_PREFIX//-/_}"*) ;;
+    *)
+      trash_failures=$((trash_failures + 1))
+      fail "refusing to remove a trash entry this run did not name: $name"
+      return 0 ;;
+  esac
+
+  # ⚠️ RETURNS 0 ON A REFUSAL, DELIBERATELY. `set -e` is on and this is called
+  # bare from the sweep loop, so a non-zero return would abort the clean halfway
+  # and leave the rest of the artefacts behind — a guard against one bad path
+  # turned into a failure to clean up the good ones. The refusal is a named
+  # failure in the transcript instead, and the entry stays on disk to be looked
+  # at.
+  #
+  # A REMOVAL THAT FAILS IS ALSO A NAMED FAILURE NOW. It used to end in
+  # `|| true` on the remote and an unchecked `rm` locally, while the caller
+  # reported the entry gone either way.
+  local rc=0
+  if [ "$side" = shelf ]; then
+    rm -rf "$HOME/$TRASH_DIR/$name" || rc=$?
+  else
+    remote_sh "rm -rf \"\$HOME/$TRASH_DIR/$name\"" >/dev/null 2>&1 || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    trash_failures=$((trash_failures + 1))
+    fail "could not remove the $side trash entry $name (rm exited $rc)"
+  fi
+  return 0
+}
+
 # THE FIRST PRECONDITION: a CLI write must reach the journal, or nothing it
 # does can replicate. `paper` binds the sync journal at `bindRecorder` now
 # (WI-11.7), but only when `journal.dirty` is DOWN — a live journal always has
@@ -781,7 +1075,7 @@ probe_journaling() {
   [ -f "$JOURNAL_FILE" ] && seen=$(grep -c "$PROBE_BOOK" "$JOURNAL_FILE" 2>/dev/null || echo 0)
   if [ "$created" = yes ]; then
     shelf book remove "$PROBE_BOOK" >/dev/null 2>&1 || true
-    rm -rf "$HOME/Library/Application Support/one.paper.reader/trash/$PROBE_TRASH"
+    trash_rm shelf "$PROBE_TRASH"
   fi
   app_start shelf
   if [ "$created" != yes ]; then
@@ -891,31 +1185,199 @@ fi
 # non-zero exit so a caller cannot read "cleaned" off a status code that never
 # meant it. `book remove` on an id that is not there is NOT a failure — there
 # is nothing to remove, which is the desired end state.
+# The `--clean` sweep, at top level rather than nested inside the `if`.
+#
+# ⚠️ DEFINED HERE SO THE SHAPE IS READABLE AND CHECKABLE. A function
+# declared inside an `if` block is legal shell and invisible to anything
+# that reads this file line-anchored — including `sync-scenario.test.mjs`,
+# whose `bodyOf` looks for a definition at column zero. A helper nothing
+# can find the body of is a helper nothing can hold to its contract.
+#
+# They are only ever CALLED from inside that block, after it sets
+# `clean_failures`, which is what `clean_one` counts into.
+# Returns 0 when the thing is GONE — removed, or not there to begin with — and
+# non-zero when it is still there. The caller needs to know: purging a trash
+# entry after a removal that FAILED deletes what a partial removal left behind.
+clean_one() {
+  # $1 = human name, rest = command
+  local what said; what="$1"; shift
+  if said="$("$@" 2>&1)"; then
+    pass "removed $what"
+    return 0
+  elif printf '%s' "$said" | grep -qiE 'not found|no such|unknown (book|tag)'; then
+    skip "$what was not there"
+    return 0
+  else
+    clean_failures=$((clean_failures + 1))
+    fail "could not remove $what: $(printf '%s' "$said" | tr '\n' ' ' | cut -c1-160)"
+    return 1
+  fi
+}
+
+# One listing, parsed STRICTLY, filtered to the harness's prefix.
+#
+# ⚠️ **A FAILED LISTING IS NOT AN EMPTY ONE.** Both sweeps used to end in
+# `2>/dev/null || true` around the whole pipeline, so a `paper` that could not
+# run, a malformed answer and a genuinely empty library all produced the same
+# empty string — and `--clean` then said "no scenario books" and exited 0 having
+# cleaned nothing. The parser exits 3 on a shape it does not recognise and the
+# caller distinguishes that from "none matched".
+#
+# $1 = side, $2 = noun ('book'|'tag'), $3 = the JSON field holding the identity.
+sweep_list() {
+  # $4.. are the prefixes to accept; defaults to `SCENARIO_PREFIX` alone.
+  local side="$1" noun="$2" field="$3" raw rc=0
+  shift 3
+  local prefixes=("$@")
+  [ "${#prefixes[@]}" -gt 0 ] || prefixes=("$SCENARIO_PREFIX")
+  raw="$("$side" "$noun" list --json 2>/dev/null)" || return 3
+  printf '%s' "$raw" | node -e '
+    let buf = ""
+    process.stdin.on("data", (d) => (buf += d))
+    process.stdin.on("end", () => {
+      const [field, ...prefixes] = process.argv.slice(1)
+      let rows
+      try { rows = JSON.parse(buf) } catch { process.exit(3) }
+      if (!Array.isArray(rows)) process.exit(3)
+      for (const row of rows) {
+        if (row === null || typeof row !== "object") process.exit(3)
+        const id = row[field]
+        if (typeof id !== "string") process.exit(3)
+        if (prefixes.some((prefix) => id.startsWith(prefix))) console.log(id)
+      }
+    })
+  ' "$field" "${prefixes[@]}" || rc=$?
+  return "$rc"
+}
+# ⚠️ **BY PREFIX, NOT BY THIS RUN'S OWN IDS.** `--clean` is invoked as its own
+# invocation — a separate process with a different `RUN_ID` — so naming
+# `$SCENARIO_BOOK` here would name a book THIS invocation never created and
+# miss every one a crashed run did. Sweeping `wi-11-7-*` collects all of
+# them, which is what the fixed ids were trying and failing to buy.
+#
+# The listing is filtered HERE rather than by asking the CLI for a prefix,
+# because there is no such query and inventing one for a harness would be a
+# service row nothing else wants.
+sweep_books() {
+  local side="$1" ids rc=0
+  ids="$(sweep_list "$side" book bookId)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    clean_failures=$((clean_failures + 1))
+    fail "could not list the $side's books, so its scenario artefacts were NOT swept (exit $rc)"
+    return 0
+  fi
+  [ -n "$ids" ] || { skip "no scenario books on the $side"; return 0; }
+  local id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    # ⚠️ **ONLY AFTER A CONFIRMED REMOVAL.** The trash entry is purged because
+    # the removal put it there; purging it when the removal FAILED deletes what
+    # a partial removal left behind, which is the one irreversible thing in this
+    # script. `clean_one` returns non-zero exactly when the book is still there.
+    if clean_one "book $id on the $side" "$side" book remove "$id"; then
+      trash_rm "$side" "${id//-/_}"
+    else
+      # ⚠️ **AND `sweep_trash` MUST BE TOLD, or this protection is theatre.**
+      # It runs afterwards and enumerates the trash, so without the hold list it
+      # deleted the very entry this branch had just preserved — measured, with
+      # "leaving the trash entry" and the deletion in the same transcript. Two
+      # fixes that each worked alone and cancelled out together.
+      # ⚠️ KEYED BY MACHINE, NOT JUST BY NAME. Keyed by the directory alone, a
+      # failed removal on the SHELF also suppressed the satchel's sweep of the
+      # same id — so an old trash copy over there survived a `--clean` that
+      # reported nothing wrong. The two machines hold their own copies and each
+      # is decided on its own evidence.
+      held_back="$held_back $side:${id//-/_}"
+      log "  note  leaving the trash entry for $id alone, because its removal failed"
+    fi
+  done <<EOF
+$ids
+EOF
+}
+
+sweep_tags() {
+  local side="$1" names rc=0
+  names="$(sweep_list "$side" tag tag)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    clean_failures=$((clean_failures + 1))
+    fail "could not list the $side's tags, so its scenario tags were NOT swept (exit $rc)"
+    return 0
+  fi
+  [ -n "$names" ] || { skip "no scenario tags on the $side"; return 0; }
+  local name
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    clean_one "tag $name on the $side" "$side" tag remove "$name" || true
+  done <<EOF
+$names
+EOF
+}
+
+# ⚠️ **`--clean` USED TO ENUMERATE ONLY LIVE BOOKS**, so anything an interrupted
+# run had already trashed was invisible to it — and those are exactly the
+# artefacts a crashed run leaves. `book remove` trashes rather than deletes, so
+# the failure mode is not hypothetical: a run killed after step 19 leaves its
+# book in the trash and nowhere else.
+#
+# `trash list` answers with the same `bookId` field the book listing does, so it
+# goes through the same strict parser. The directory name is the id with its
+# dashes underscored — the same derivation `SCENARIO_TRASH` uses — and
+# `trash_rm` validates it again before touching anything.
+# What `sweep_books` deliberately left in the trash, as `side:directory` pairs,
+# because a removal that failed means a partial removal may have put files
+# there. The SIDE is part of the key: the two machines hold their own copies.
+held_back=''
+
+sweep_trash() {
+  local side="$1" ids rc=0
+  # ⚠️ TWO SPELLINGS. A trash entry whose `book.json` will not read falls back
+  # to the underscored DIRECTORY name (`core/bookTrash.ts`), which the hyphenated
+  # prefix never matches — so the entries most likely to be left by a crashed run
+  # were the ones this sweep could not see.
+  ids="$(sweep_list "$side" trash bookId "$SCENARIO_PREFIX" "${SCENARIO_PREFIX//-/_}")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    clean_failures=$((clean_failures + 1))
+    fail "could not list the $side's trash, so trashed scenario artefacts were NOT swept (exit $rc)"
+    return 0
+  fi
+  [ -n "$ids" ] || { skip "no scenario books in the $side's trash"; return 0; }
+  local id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    local dir="${id//-/_}"
+    case " $held_back " in
+      *" $side:$dir "*)
+        skip "leaving the trashed $id alone — its removal failed earlier in this clean"
+        continue ;;
+    esac
+    log "  removing the trashed scenario book $id from the $side"
+    trash_rm "$side" "$dir"
+  done <<EOF
+$ids
+EOF
+}
+
 if [ "$clean" -eq 1 ]; then
   log ''
   log '## Clean'
   app_quit shelf
   app_quit satchel
   clean_failures=0
-  clean_one() {
-    # $1 = human name, rest = command
-    local what said; what="$1"; shift
-    if said="$("$@" 2>&1)"; then
-      pass "removed $what"
-    elif printf '%s' "$said" | grep -qiE 'not found|no such|unknown (book|tag)'; then
-      skip "$what was not there"
-    else
-      clean_failures=$((clean_failures + 1))
-      fail "could not remove $what: $(printf '%s' "$said" | tr '\n' ' ' | cut -c1-160)"
-    fi
-  }
-  clean_one "the scenario tag on the shelf"        shelf tag remove "$SCENARIO_TAG"
-  clean_one "the renamed tag on the shelf"         shelf tag remove "$SCENARIO_TAG_RENAMED"
-  clean_one "the scenario book on the shelf"       shelf book remove "$SCENARIO_BOOK"
-  clean_one "the scenario book on the satchel"     satchel book remove "$SCENARIO_BOOK"
+  sweep_tags shelf
+  sweep_tags satchel
+  sweep_books shelf
+  sweep_books satchel
+  # AFTER the live sweep, so a book this invocation just removed is collected
+  # here rather than left behind by it.
+  sweep_trash shelf
+  sweep_trash satchel
   app_start shelf
   app_start satchel
   log "Transcript: $out"
+  # TRASH FAILURES COUNT TOO. `trash_rm` keeps its own tally because it must
+  # return 0 under `set -e`; folding it in here is what stops `--clean` exiting
+  # 0 after failing to remove a directory.
+  clean_failures=$((clean_failures + trash_failures))
   if [ "$clean_failures" -gt 0 ]; then
     log ''
     log "  $clean_failures artefact(s) could not be removed — this run did NOT clean up."
@@ -951,6 +1413,11 @@ if [ "$shelf_books" -gt 0 ] && [ "$satchel_books" -gt 0 ]; then
 else
   fail "a library read as empty — shelf $shelf_books, satchel $satchel_books"
 fi
+
+# WHERE THE SATCHEL STANDS BEFORE ANY OF THIS RUN'S MUTATIONS. Written down at
+# the start so "behind" is a comparison rather than an inference: a failure
+# below can be read against this line to see whether the cursor moved at all.
+cursor_report
 
 log ''
 log '## A book added on the shelf travels to the satchel'
@@ -1026,6 +1493,36 @@ elif [ "$first_shelf" = "$second_shelf" ] && [ "$first_satchel" = "$second_satch
   pass "both journals are unchanged over 10 quiet seconds (shelf $first_shelf B, satchel $first_satchel B)"
 else
   fail "a journal grew while nothing was editing: shelf $first_shelf->$second_shelf, satchel $first_satchel->$second_satchel"
+fi
+
+# --- housekeeping --------------------------------------------------------
+#
+# THE TRASH ENTRY THIS RUN CREATED ON PURPOSE. Step 19 removes the scenario
+# book, which is the mutation the removal-converges step is about — and
+# `book remove` trashes rather than deletes, so a run that does everything
+# right still leaves a book in the reader's visible trash. One per run, for
+# ever, on both machines.
+#
+# It is no longer a BLOCKER — that was the fixed id, and the ids are per-run
+# now — but "does not block the next run" is a lower bar than "leaves the
+# machine as it found it", and the probe two hundred lines up has held the
+# higher one since the first real run.
+#
+# Runs after the convergence assertions, never before: the removal has already
+# been proved to have crossed by this point, so nothing here can mask it.
+log ''
+log '## Housekeeping'
+before_housekeeping="$trash_failures"
+trash_rm shelf "$SCENARIO_TRASH"
+trash_rm satchel "$SCENARIO_TRASH"
+# ⚠️ **THIS USED TO `pass` UNCONDITIONALLY**, while the removals it reports on
+# ended in `|| true` — so "gone from both machines" was a sentence the script
+# printed rather than a fact it had checked. `trash_rm` names each failure now,
+# and this step only claims success when it added none.
+if [ "$trash_failures" -eq "$before_housekeeping" ]; then
+  pass "the scenario book's trash entry is gone from both machines ($SCENARIO_TRASH)"
+else
+  fail "the scenario book's trash entry could not be removed from both machines ($SCENARIO_TRASH)"
 fi
 
 # --- the verdict ---------------------------------------------------------

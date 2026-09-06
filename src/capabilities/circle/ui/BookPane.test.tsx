@@ -9,6 +9,28 @@ import { CAPABILITY_UI } from '../../../kernel'
 import { BookPane } from './BookPane'
 
 /**
+ * Fire a subscription's listener, ONCE IT EXISTS.
+ *
+ * ⚠️ **`tell!()` ASSUMED THE SUBSCRIPTION HAD ALREADY HAPPENED, AND IT IS NOT
+ * WHAT THESE TESTS WAIT ON.** `tell` is assigned when the component's effect
+ * calls `subscribe`; the line above each call awaits a rendered ELEMENT, which
+ * is a different signal that can land first. When it does, the call is
+ * `TypeError: tell is not a function` — measured once in a full `pnpm verify`
+ * on 2026-09-06, and green in four isolated reruns afterwards, which is the
+ * signature of a race rather than a broken test.
+ *
+ * Waiting for the thing actually depended on costs nothing when it is already
+ * there and removes the race when it is not. Applied to every site rather than
+ * the one that fired: the other eleven are the same shape and had simply not
+ * lost the race yet.
+ */
+async function fire(get: () => (() => void) | null | undefined): Promise<void> {
+  await waitFor(() => expect(typeof get()).toBe('function'))
+  get()!()
+}
+
+
+/**
  * The book's surface — WI-23.B4.
  *
  * What is proven: the reader's own controls write through the port, the
@@ -119,7 +141,7 @@ describe('the book pane', () => {
     const box = (await screen.findByRole('checkbox')) as HTMLInputElement
     expect(box.checked).toBe(false)
     publishing = true
-    tell!()
+    await fire(() => tell)
     await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true))
   })
 
@@ -217,7 +239,7 @@ describe('every clause of the pane — one row each', () => {
     )
     await screen.findByText(/not yet/u)
     fails = false
-    tell!()
+    await fire(() => tell)
     await screen.findByRole('checkbox')
     expect(screen.queryByText(/not yet/u)).toBeNull()
   })
@@ -236,7 +258,7 @@ describe('every clause of the pane — one row each', () => {
       }),
     )
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByRole('button', { name: 'Finished' })
     expect(pressed(['Finished'])).toEqual(['true'])
     /* The slow one lands with a different word, and then with a failure. */
@@ -258,7 +280,7 @@ describe('every clause of the pane — one row each', () => {
       }),
     )
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByRole('checkbox')
     late.reject(new Error('too late to matter'))
     await new Promise((done) => setTimeout(done, 0))
@@ -365,7 +387,7 @@ describe('the circle’s view of the book — WI-23.D1, D2, D3', () => {
     await screen.findByText(/Nobody in your circle/u)
     expect(screen.queryByText(/shelf unreadable/u)).toBeNull()
     fails = false
-    tell!()
+    await fire(() => tell)
     await screen.findByText('Alice has this.')
   })
 
@@ -432,7 +454,7 @@ describe('the reader’s own lists, beside the book — WI-23.E1', () => {
     await screen.findByText('Your lists')
     expect(screen.queryByRole('button', { name: /Put this book on/u })).toBeNull()
     own = [notOnIt]
-    tell!()
+    await fire(() => tell)
     fireEvent.click(await screen.findByRole('button', { name: 'Put this book on Deserts' }))
     await screen.findByText(/Start a circle to keep a list/u)
     cleanup()
@@ -538,7 +560,7 @@ describe('every clause of the circle’s view and the lists on the pane — one 
       }),
     )
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByText('Bob has this.')
     slow.resolve({ people: [{ person: 'a', name: 'Alice', has: true, status: null, stars: null, reviews: [] }], alsoRead: [] })
     await new Promise((done) => setTimeout(done, 0))
@@ -562,7 +584,7 @@ describe('every clause of the circle’s view and the lists on the pane — one 
       }),
     )
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByText('Bob has this.')
     late.reject(new Error('too late'))
     await new Promise((done) => setTimeout(done, 0))
@@ -603,7 +625,7 @@ describe('every clause of the circle’s view and the lists on the pane — one 
     })
     render(<BookPane bookId="book:moby" port={portWith()} circle={null} lists={racing} />)
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByRole('button', { name: 'Put this book on Deserts' })
     slow.resolve([{ id: 'aa', title: 'Sea', items: [] }])
     await new Promise((done) => setTimeout(done, 0))
@@ -684,7 +706,7 @@ describe('the last clauses of the pane — one row each', () => {
     })
     render(<BookPane bookId="book:moby" port={portWith()} circle={null} lists={lists} />)
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByRole('button', { name: 'Put this book on Deserts' })
     slow.reject(new Error('too late'))
     await new Promise((done) => setTimeout(done, 0))
@@ -794,7 +816,7 @@ describe('the pane’s state belongs to one book', () => {
     } as unknown as ListsPort
     render(<BookPane bookId="book:moby" port={portWith()} circle={null} lists={lists} />)
     await screen.findByRole('group', { name: 'Reading status' })
-    tell!()
+    await fire(() => tell)
     await screen.findByText('Newer')
     first.resolve([{ id: 'l1', title: 'Older', items: [] }])
     await new Promise((done) => setTimeout(done, 0))
@@ -941,7 +963,7 @@ describe('the pane, held to the letter', () => {
     render(<BookPane bookId="book:moby" port={portWith()} circle={null} lists={lists} />)
     await waitFor(() => expect(tell).not.toBeNull())
     /* The lists say something changed while the first read is still out: the second read lands first. */
-    tell!()
+    await fire(() => tell)
     await screen.findByRole('button', { name: 'Put this book on Dune reading' })
     await act(async () => {
       late.resolve([{ id: 'aa11', title: 'Sea books', items: [] } as unknown as OwnListView])
@@ -967,7 +989,7 @@ describe('the pane, held to the letter', () => {
     })
     render(<BookPane bookId="book:moby" port={portWith()} circle={null} lists={lists} />)
     await waitFor(() => expect(tell).not.toBeNull())
-    tell!()
+    await fire(() => tell)
     await screen.findByRole('button', { name: 'Put this book on Dune reading' })
     await act(async () => {
       fail(new Error('the old read fell over'))
@@ -1028,7 +1050,7 @@ describe('an act begun through a port the pane no longer holds', () => {
     const second = portWith(own({ status: 'finished' }))
     view.rerender(<BookPane bookId="book:moby" port={second} circle={null} />)
     await screen.findByRole('button', { name: 'Finished' })
-    finish!()
+    await fire(() => finish)
     await new Promise((done) => setTimeout(done, 0))
     /* The old port was read once, at mount, and never again. */
     expect(firstOwn).toHaveBeenCalledTimes(1)
