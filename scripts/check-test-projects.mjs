@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
-import { vitestBin } from './lib/vitestBin.mjs'
+import { VITEST_LIST_TIMEOUT_MS, vitestBin } from './lib/vitestBin.mjs'
 
 /**
  * `pnpm test:projects` — every test file belongs to exactly one Vitest project.
@@ -93,7 +93,7 @@ export function askVitest(root) {
   const result = spawnSync(process.execPath, [bin, 'list', '--filesOnly', '--json', '--root', root], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 120_000,
+    timeout: VITEST_LIST_TIMEOUT_MS,
   })
   if (result.error) throw result.error
   if (result.status !== 0) {
