@@ -195,12 +195,21 @@ describe('Reader', () => {
       onTimeout: (error) => {
         const keys = Object.keys(captured)
         const mocked = keys.some((k) => k !== 'sources')
+        const got = sourcesOf(captured).length
+        /* ⚠️ OBSERVATIONS FIRST, AND THE CAUSE ONLY AS A HYPOTHESIS. The first
+           version asserted "the doMock/resetModules race IS the cause", which
+           absent props do not establish — and it also read every timeout as
+           "no source arrived" when `toHaveLength` fails on too MANY just as
+           readily. Both are the same mistake this whole diagnostic exists to
+           stop: stating a conclusion the evidence does not carry. */
         error.message +=
-          `\n\nDIAGNOSTIC: the mocked FoliateView ${mocked ? 'DID' : 'DID NOT'} render ` +
-          `(captured keys: ${JSON.stringify(keys)}). ` +
-          (mocked
-            ? 'It rendered but was never handed a non-null source — look at Reader, not at the mock.'
-            : 'It never rendered, so the doMock/resetModules race in withView is the cause, not Reader.')
+          `\n\nOBSERVED: ${got} non-null source(s); the mocked FoliateView ` +
+          `${mocked ? 'DID' : 'did NOT'} render (captured keys: ${JSON.stringify(keys)}).` +
+          (got > 1
+            ? '\nThat is MORE than expected, not none — the wait timed out on an excess, so look at what re-rendered.'
+            : mocked
+              ? '\nIt rendered and was never handed a non-null source. HYPOTHESIS: look at Reader rather than at the mock.'
+              : '\nIt never rendered at all. HYPOTHESIS: withView\'s doMock/resetModules race was lost and the REAL FoliateView mounted — unproven, and worth confirming before acting on.')
         return error
       },
     })
