@@ -80,8 +80,13 @@ export function localPositions({ library, failed }: LocalPositionsDeps): Reading
          verb for un-setting a position on a record, and inventing one by
          writing an empty CFI would make `positionOf` answer a string that no
          renderer can resolve. A book with nowhere to be is a book whose record
-         is going away with it — see `forget`. */
-      if (cfi === null) return
+         is going away with it — see `forget`.
+         ⚠️ AND NEITHER IS THE EMPTY STRING, which this paragraph argued
+         against while the guard below tested only for null. An empty CFI is
+         exactly the unresolvable string it names, and it does not merely fail
+         to be read: it OVERWRITES the place the reader actually left. The
+         browser adapter rejects it; this one accepted it. */
+      if (cfi === null || cfi === '') return
       remember(bookId, cfi)
     },
 

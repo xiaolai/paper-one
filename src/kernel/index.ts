@@ -453,6 +453,7 @@ export { canonicalJson } from './core/canonicalJson'
  * to be one of three strings is how an unknown value reaches a switch with no
  * case for it — see `app/web/wireRow.ts`. */
 export {
+  boundedMark,
   isPlaced,
   placedIn,
   unplacedIn,

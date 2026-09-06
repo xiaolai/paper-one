@@ -49,7 +49,7 @@ describe('localContent', () => {
   })
 
   it('carries the extension and the hash off the record, and the size off the port', async () => {
-    const sizes = { contentBytes: async () => 4_096 } as unknown as SizePort
+    const sizes = { bytesAt: async () => 4_096 } as unknown as SizePort
     const content = localContent({
       fs: fsWith(new Uint8Array()),
       bookOf: () => record({ contentHash: 'abc123', hasContent: true }),
@@ -69,9 +69,61 @@ describe('localContent', () => {
   })
 
   it('a size port that throws degrades to null rather than failing the open', async () => {
-    const sizes = { contentBytes: async () => Promise.reject(new Error('no')) } as unknown as SizePort
+    const sizes = { bytesAt: async () => Promise.reject(new Error('no')) } as unknown as SizePort
     const content = localContent({ fs: fsWith(new Uint8Array()), bookOf: () => record(), sizes })
     expect((await content.locate('bk1')).size).toBeNull()
+  })
+
+  it('measures the file it will actually read, not whichever a separate walk likes', async () => {
+    /* THE FOURTH COPY OF ONE DEFECT. `content.locate` records what happens
+       when `ext` and `size` come from different walks — it "reported `azw3`
+       with the epub's byte count" — and three places were put on one list to
+       end it. This module was off that list in both directions.
+       The port is asked for a PATH here, so the assertion is that the path is
+       the one `readRange` uses: `content.epub`, from the record, and never
+       `content.azw3` because some other walk found it first. */
+    const asked: string[] = []
+    const sizes = {
+      bytesAt: async (path: string) => {
+        asked.push(path)
+        return 4_096
+      },
+      contentBytes: async () => {
+        throw new Error('locate must not choose the file by a second walk')
+      },
+    } as unknown as SizePort
+    const content = localContent({
+      fs: fsWith(new Uint8Array()),
+      bookOf: () => record({ hasContent: true }),
+      sizes,
+    })
+    expect((await content.locate('bk1')).size).toBe(4_096)
+    expect(asked).toEqual(['books/bk1/content.epub'])
+  })
+
+  it('reports the extension of a book known only by its format, not null', async () => {
+    /* A SYNCED PDF CARRIES `format` AND NO `ext`. `locate` read `entry.ext`
+       straight off the record and answered null, while `pathAndName` — through
+       `storedBookName` — read `content.pdf` perfectly well. A null ext is what
+       makes `useBookSource` give up ranged reads and pull a whole scanned book
+       into a phone's memory, so the two disagreeing was not cosmetic. */
+    /* Built without `record()`: the helper always sets `ext`, and under
+       `exactOptionalPropertyTypes` the absence of the field is a different
+       thing from the field set to undefined — which is exactly the state a
+       synced PDF arrives in. */
+    const noExt = {
+      bookId: 'bk1',
+      title: 'Moby-Dick',
+      author: 'Melville',
+      format: 'pdf',
+      hasContent: true,
+    } as unknown as IndexedBook
+    const content = localContent({
+      fs: fsWith(new Uint8Array()),
+      bookOf: () => noExt,
+      sizes: null,
+    })
+    expect((await content.locate('bk1')).ext).toBe('pdf')
   })
 
   it('treats a record written before hasContent existed as here, not as missing', async () => {
@@ -278,10 +330,18 @@ describe('localMarks', () => {
     expect(calls).toEqual(['remove m1 bk1', 'note m1 a note bk1'])
   })
 
-  it('refresh re-reads the OPEN book, and does nothing when there is none', () => {
+  it('refresh re-reads the open book AND the lists it shows, and does nothing when there is none', () => {
+    /* ⚠️ THIS ASSERTION USED TO BE `['open bk1']`, WHICH PINNED THE DEFECT.
+       `open` fills `snapshot.current`; every getter this adapter exposes reads
+       `snapshot.all`, which only `loadAll` fills — so "refresh" refreshed
+       nothing the reader was looking at. Both calls, in that order: `open` for
+       the queue-correct read of the open book, `loadAll` for the lists.
+       The second half of the test is unchanged and still load-bearing: with no
+       book open there is no screen to refresh, and a library scan there is
+       work for nothing. */
     const open = markStoreWith({ bookId: 'bk1' })
     localMarks({ marks: open.store }).refresh()
-    expect(open.calls).toEqual(['open bk1'])
+    expect(open.calls).toEqual(['open bk1', 'loadAll'])
 
     const shut = markStoreWith({ bookId: null })
     localMarks({ marks: shut.store }).refresh()

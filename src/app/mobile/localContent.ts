@@ -80,10 +80,34 @@ export function localContent({ fs, bookOf, sizes }: LocalContentDeps): RemoteCon
          means "not known to be missing" — treating it as false would hide
          every pre-flag book behind a "no copy" the folder disagrees with. */
       const here = entry.hasContent ?? true
-      const size = sizes === null ? null : await sizes.contentBytes(bookId).catch(() => null)
+      /* ⚠️ `ext` AND `size` MUST DESCRIBE ONE FILE, and this is the fourth
+         place in the tree to have to say so. `content.locate` records what
+         happens when they do not: it "reported `azw3` with the epub's byte
+         count — two fields describing two different files, in one answer about
+         one book", and three places were put on one list to end it.
+         This module was the fourth and was off the list in both directions:
+         `ext` came straight off the record while `size` came from
+         `SizePort.contentBytes`, which walks `CONTENT_EXTENSIONS` and picks
+         whichever it finds first — so a folder holding two content files
+         answered with one file's extension and the other's length.
+         `pathAndName` was ALREADY right and was the odd one out: it goes
+         through `storedBookName`, which falls back to `format` when the record
+         carries no `ext`. So a synced PDF known only by its format reported
+         `ext: null` here while `readRange` read `content.pdf` perfectly well —
+         and a null ext is what makes `useBookSource` abandon ranged reads and
+         pull a whole scanned book into a phone's memory.
+         Both halves now come from the ONE path this module actually reads. */
+      const found = pathAndName(bookId)
+      const ext = found === null ? (entry.ext ?? null) : found.name.slice(found.name.lastIndexOf('.') + 1)
+      /* `bytesAt`, not `contentBytes`: the port publishes it for exactly this
+         caller — one that has a PATH rather than a book — and it is the only
+         way to measure the file named above rather than the first one a
+         separate walk happens to like. */
+      const size =
+        sizes === null || found === null ? null : await sizes.bytesAt(found.path).catch(() => null)
       return {
         here,
-        ext: entry.ext ?? null,
+        ext,
         size,
         /* Computed by the peer plugin and never in TypeScript, so it is
            absent on a book this device has not hashed. */
