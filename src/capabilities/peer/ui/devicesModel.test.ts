@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fakeWire, linkWires } from '../lib/fakeWire.testkit'
 import { createPeerPort } from '../lib/port'
+import { inlineQrSvg } from '../../../kernel'
 import {
   READ_ONLY_GRANTS,
   ROLE_CHOICES,
@@ -15,7 +16,6 @@ import {
   describeReach,
   describeRole,
   shelfNameOf,
-  inlineQrSvg,
   pairingFault,
   grantsForWrite,
 } from './devicesModel'

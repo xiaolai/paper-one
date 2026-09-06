@@ -351,10 +351,6 @@ export interface DevicesModel {
  * usual untrusted-markup question — but it is exactly the assumption to check
  * if this ever renders a code that arrived from somewhere else.
  */
-export function inlineQrSvg(svg: string): string {
-  return svg.replace(/^\s*<\?xml[^?]*\?>\s*/i, '')
-}
-
 export function createDevicesModel({
   port,
 }: {

@@ -39,6 +39,14 @@ export const CAPABILITY_UI = Object.freeze({
   value: 'paper-cap-value',
   /** A wrapping sentence under a row, explaining the control above it. */
   hint: 'paper-cap-hint',
+  /**
+   * A recovery phrase, numbered, laid out to be written down.
+   *
+   * ⚠️ **NOT `code`.** That one is `user-select: all` so a pairing link can be
+   * taken in a click; a phrase rendered in it means one stray click selects the
+   * reader's root key. See the stylesheet.
+   */
+  phrase: 'paper-cap-phrase',
   /** A row of buttons offered together. */
   actions: 'paper-cap-actions',
   /**
