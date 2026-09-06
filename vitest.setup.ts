@@ -25,12 +25,38 @@ import { configure } from '@testing-library/dom'
  * that takes longer than the default assumed. Patching the instance leaves the
  * mechanism, and the mechanism has now produced two failures in two days.
  *
- * A hang is UNBOUNDED, so 5 s still catches one. Nothing about what any test
+ * A hang is UNBOUNDED, so this still catches one. Nothing about what any test
  * asserts is relaxed: `findBy*` resolves the moment the element appears, so a
  * fast machine pays nothing for this at all — the timeout is a ceiling, never a
  * wait.
  *
  * Configured here rather than per call site because 21 test files use these
  * helpers and a per-call `{ timeout }` is a thing each new one has to remember.
+ *
+ * ── 5 s → 10 s, 2026-09-06. THE THIRD INSTANCE, AND THE NUMBER WAS THE BUG ──
+ *
+ * `src/app/web/Reader.test.tsx` §"gives a measured PDF a range transport"
+ * failed `pnpm verify` at **5 100 ms** against this 5 000 ms ceiling — 26 of 26
+ * passing standalone at load average 29 immediately afterwards.
+ *
+ * ⚠️ **AND RAISING `testTimeout` TO 60 s FOR THE `app` PROJECT DID NOT HELP,
+ * WHICH IS THE PART WORTH KEEPING.** That landed hours earlier for exactly this
+ * class of failure. It cannot help a test that waits through `waitFor`: the two
+ * bounds are TWELVE TIMES APART and the smaller one fires first, so every
+ * screen-mounting test that waits for an element was still deciding on machine
+ * load with a 60 s budget it could never reach.
+ *
+ * The mechanism, which the paragraphs above got right in words and wrong in
+ * arithmetic: this is a HANG CEILING and asserts nothing about speed, so
+ * deriving it from an observed run makes it a throughput assertion. 5 000 was
+ * chosen as roughly twice a measured 2 248 ms — while `vitest.config.ts`, next
+ * door, records a **seven-fold** inflation under load on this same machine.
+ * Two documents in one repository budgeting 2x and measuring 7x.
+ *
+ * So it is not a multiple of anything observed. The only hard constraint is the
+ * CEILING: it must stay below the smallest `testTimeout` it can run under —
+ * the root's 15 s — or the test is killed before `waitFor` can report the
+ * specific element it was waiting for, which is the whole value of the error.
+ * 10 s sits under that with room, and a hang is still bounded.
  */
-configure({ asyncUtilTimeout: 5_000 })
+configure({ asyncUtilTimeout: 10_000 })
