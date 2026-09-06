@@ -70,3 +70,25 @@ export { coverIn } from '../core/coverArt'
 export { tauriVaultFs } from '../core/vaultFsTauri'
 export type { CoverSource } from '../core/coverArt'
 
+/* ── THE READER, mounted on the phone 2026-09-06 ──────────────────────────
+   Added together because they arrive together: `MobileApp` mounts `Reader`,
+   and `Reader` mounts all of these. That is still one export per thing
+   mounted, which is what this door's rule asks — not ten surfaces listed
+   against a someday.
+
+   ⚠️ THE SAME SET `ui/browser.ts` LISTS, and deliberately not shared with it.
+   The two doors exist so that neither platform loads the other's surfaces, and
+   collapsing them the moment they overlap is how that property gets lost — the
+   phone mounts no `PairScreen` and the browser mounts no native settings. Two
+   lists that happen to agree today are cheaper than one list that has to be
+   right for both forever. */
+export { FoliateView } from './reader/FoliateView'
+export { FootnotePopover } from './reader/FootnotePopover'
+export type { FootnoteRender, MarkAnchor, SelectionSnapshot } from './reader/session'
+export { Contents } from './pane/Contents'
+export { Marginalia } from './pane/Marginalia'
+export { SearchPanel } from './pane/SearchPanel'
+export type { SearchableBook } from './pane/SearchPanel'
+export type { SearchHit } from './hooks/useBook'
+export type { BookMeta } from '../core/bookMeta'
+
