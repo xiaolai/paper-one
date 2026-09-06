@@ -1017,6 +1017,13 @@ export const sync: Capability = {
         }
         scheduler = createSyncScheduler({
           run,
+          /* `run` above catches everything and reports it, so reaching this is
+             a defect in `run` rather than a failed session. The scheduler
+             retries either way; without this the only trace of a broken
+             callback was a sync that kept working and a bug nobody could see. */
+          onBroken: (cause: unknown) => {
+            api.diagnostics.warn('sync.run-threw', { message: messageOf(cause) })
+          },
           onLocalCommit: (listener) => openJournal.subscribe(listener),
           ...(typeof document !== 'undefined'
             ? {

@@ -285,4 +285,90 @@ describe('the sync scheduler', () => {
        failure the backstop exists to prevent, reintroduced inside it. */
     expect(runs).toHaveLength(2)
   })
+
+  it('reports a broken contract through onBroken rather than only retrying it', async () => {
+    /* RETRYING IS NOT THE SAME AS SAYING NOTHING. Reaching the catch at all
+       means `run` broke its own type, which is a defect in `run` — not a
+       failed sync. The scheduler stayed correct and the bug stayed invisible. */
+    const timers = fakeTimers()
+    const broken: unknown[] = []
+    const boom = new Error('run broke its contract')
+    const scheduler = createSyncScheduler({
+      run: () => Promise.reject(boom),
+      onLocalCommit: () => () => {},
+      onBroken: (cause) => void broken.push(cause),
+      timers,
+    })
+    scheduler.start()
+    for (let i = 0; i < 4; i += 1) await Promise.resolve()
+    expect(broken).toEqual([boom])
+  })
+
+  it('survives an onBroken that throws, because a reporter is not the scheduler', async () => {
+    const timers = fakeTimers()
+    const runs: number[] = []
+    const scheduler = createSyncScheduler({
+      run: () => {
+        runs.push(timers.now)
+        return Promise.reject(new Error('run broke its contract'))
+      },
+      onLocalCommit: () => () => {},
+      onBroken: () => {
+        throw new Error('the reporter is broken too')
+      },
+      timers,
+    })
+    scheduler.start()
+    for (let i = 0; i < 4; i += 1) await Promise.resolve()
+    expect(runs).toHaveLength(1)
+    timers.advance(SYNC_RETRY_MS)
+    /* The backstop still armed. A reporter taking the scheduler down with it
+       would be the swallowed-failure defect wearing the fix's clothes. */
+    expect(runs).toHaveLength(2)
+  })
+
+  it('a backstop that fires first does not leave a debounce to run a second session', async () => {
+    /* THE RACE THE MODULE'S OWN COMMENT DESCRIBES, in the direction it did not
+       handle. "A commit at 4m59s must not be followed by a second session one
+       second later for nothing" — but the cancel only ran when a real trigger
+       beat the clock. With the clock first, the commit's debounce survived and
+       fired four seconds after the session that had already carried it. */
+    const w = world()
+    w.scheduler.start()
+    await w.finish('ok') // arms the backstop at SYNC_EVERY_MS
+    w.timers.advance(SYNC_EVERY_MS - 1_000) // 4m59s
+    w.commit() // debounce due at 5m04s
+    expect(w.runs).toHaveLength(1)
+    w.timers.advance(1_000) // 5m00s — the BACKSTOP fires
+    expect(w.runs).toHaveLength(2)
+    await w.finish('ok')
+    w.timers.advance(COMMIT_DEBOUNCE_MS)
+    /* Two sessions, not three: the one the clock started subsumed the commit
+       that was still waiting. */
+    expect(w.runs).toHaveLength(2)
+  })
+
+  it('a success inside a coalesced run resets the backoff the next failure uses', async () => {
+    /* EVERY SESSION MOVES THE LADDER, NOT JUST THE LAST. Triggers coalesce, so
+       one run can be several sessions; reading only the final outcome dropped
+       the successes in between. Here: fail, fail (ladder 20 -> 40 -> 80), then
+       a coalesced run whose first session SUCCEEDS and whose second fails. The
+       success resets to 20, so the failure must arm 20 — not the 80 the old
+       code carried through untouched. */
+    const w = world()
+    w.scheduler.start()
+    await w.finish('failed') // arms 20s, ladder -> 40
+    w.timers.advance(SYNC_RETRY_MS)
+    await w.finish('failed') // arms 40s, ladder -> 80
+    w.timers.advance(SYNC_RETRY_MS * 2)
+    expect(w.runs).toHaveLength(3)
+    /* A commit lands DURING this session, so it coalesces into a second one. */
+    w.commit()
+    w.timers.advance(COMMIT_DEBOUNCE_MS)
+    await w.finish('ok') // first session of the run succeeds -> ladder back to 20
+    expect(w.runs).toHaveLength(4) // the coalesced follow-up started
+    await w.finish('failed') // and it fails
+    w.timers.advance(SYNC_RETRY_MS)
+    expect(w.runs).toHaveLength(5)
+  })
 })

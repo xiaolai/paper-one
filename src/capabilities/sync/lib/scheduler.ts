@@ -115,6 +115,16 @@ export interface SchedulerOptions {
     subscribe(listener: () => void): () => void
   }
   readonly debounceMs?: number
+  /**
+   * `run` threw, which its own type forbids.
+   *
+   * Optional because the scheduler must work without one — a test, a headless
+   * run — and because it reports a CONTRACT VIOLATION rather than a failed
+   * sync: a failure is `run`'s own to describe, and it already does. This
+   * fires only when `run` broke the promise not to throw, so a caller that
+   * binds it is told about a defect it would otherwise never see.
+   */
+  readonly onBroken?: (cause: unknown) => void
   /** The backstop period after a successful session. */
   readonly everyMs?: number
   /** The first backstop delay after a failed one, doubling to `everyMs`. */
@@ -134,6 +144,7 @@ export function createSyncScheduler({
   onLocalCommit,
   visibility,
   debounceMs = COMMIT_DEBOUNCE_MS,
+  onBroken,
   everyMs = SYNC_EVERY_MS,
   retryMs = SYNC_RETRY_MS,
   timers = REAL_TIMERS,
@@ -162,6 +173,12 @@ export function createSyncScheduler({
     }, ms)
   }
 
+  const cancelDebounce = (): void => {
+    if (debounce === null) return
+    timers.clearTimeout(debounce)
+    debounce = null
+  }
+
   const kick = (): void => {
     if (stopped) return
     if (running) {
@@ -173,30 +190,62 @@ export function createSyncScheduler({
        clock is a backstop under the events, so a commit at 4m59s must not be
        followed by a second session one second later for nothing. */
     cancelBackstop()
+    /* AND THE SAME RACE RUNS THE OTHER WAY, which the sentence above describes
+       and the first version did not handle: a commit at 4m59s arms a debounce
+       for 5m04s, the BACKSTOP fires first at 5m00s, and the debounce then runs
+       a second session four seconds later for a write the first one already
+       carried. Whatever starts a session subsumes every trigger already
+       waiting, so the pending debounce is cancelled here rather than only in
+       `syncNow`. A commit that lands DURING the run re-arms it, and is picked
+       up by that next session. */
+    cancelDebounce()
     void (async () => {
       let last: SyncOutcome = 'failed'
+      /* WHAT TO ARM IF THIS ENDS ON A FAILURE — the delay that failure earned,
+         captured when it happens rather than read off `backoff` at the end.
+         See `noteOutcome`. */
+      let nextIn = backoff
+      /* EVERY SESSION MOVES THE BACKOFF, NOT JUST THE LAST ONE. Triggers
+         coalesce into one follow-up, so a run can be several sessions, and
+         reading only the final outcome silently dropped every earlier one: a
+         success at 80s followed by a failure re-armed 80s, because the success
+         that should have reset the ladder to 20s was never seen. */
+      const noteOutcome = (outcome: SyncOutcome): void => {
+        if (outcome === 'ok') {
+          backoff = retryMs
+          return
+        }
+        nextIn = backoff
+        backoff = Math.min(backoff * 2, everyMs)
+      }
       try {
         do {
           again = false
           last = await run()
+          noteOutcome(last)
         } while (again && !stopped)
-      } catch {
+      } catch (cause) {
         /* `run` is contracted not to throw, and this is not trust in that
            contract. A scheduler that stops scheduling because its callback
            broke it would turn one bad session into a device that never syncs
            again — which is the exact failure the backstop exists to prevent,
            reintroduced inside the fix for it. Treated as a failed session, so
-           it is retried rather than swallowed. */
+           it is retried rather than swallowed.
+           ⚠️ BUT RETRYING IS NOT THE SAME AS SAYING NOTHING. Reaching here at
+           all means `run` broke its own contract, which is a defect in `run`
+           and not a failed sync; swallowing it left the scheduler correct and
+           the bug invisible. `onBroken` is how it gets said, and it is guarded
+           because a reporter that throws must not take the scheduler with it. */
         last = 'failed'
+        noteOutcome(last)
+        try {
+          onBroken?.(cause)
+        } catch {
+          /* Nothing left to report it to. */
+        }
       } finally {
         running = false
-        if (last === 'ok') {
-          backoff = retryMs
-          armBackstop(everyMs)
-        } else {
-          armBackstop(backoff)
-          backoff = Math.min(backoff * 2, everyMs)
-        }
+        armBackstop(last === 'ok' ? everyMs : nextIn)
       }
     })()
   }
@@ -224,18 +273,15 @@ export function createSyncScheduler({
       kick()
     },
     syncNow: () => {
-      if (debounce !== null) {
-        timers.clearTimeout(debounce)
-        debounce = null
-      }
+      /* `kick` cancels it too; doing it here as well keeps "sync now clears
+         the pending debounce" true even when a run is already in flight and
+         `kick` only sets `again`. */
+      cancelDebounce()
       kick()
     },
     stop: () => {
       stopped = true
-      if (debounce !== null) {
-        timers.clearTimeout(debounce)
-        debounce = null
-      }
+      cancelDebounce()
       cancelBackstop()
       for (const off of offs.splice(0)) off()
     },
