@@ -384,6 +384,86 @@ describe('the predicates it converges on', () => {
     expect(text).not.toMatch(/grep[^\n]*journalSeq/)
   })
 
+  /* ── PER-RUN IDS, 2026-09-06 ─────────────────────────────────────────────
+   * A completed run used to make the next one impossible: step 19 removes the
+   * scenario book, `book remove` trashes rather than deletes, and the next
+   * run's `book add` was refused because the fixed id was in the trash.
+   * `--clean` could not undo it — it calls the very verb that created the
+   * entry — and `trash empty` is all-or-nothing by design. */
+  it('invents a per-run id for everything it creates, so a finished run does not block the next', () => {
+    /* The ids must be COMPUTED, not literals. A regex for the literal would
+       pass against the comment that explains why they are not literals, which
+       is the trap `codeOf` exists for — but `text` is already comment-free
+       here, so this asserts the assignment itself. */
+    expect(text).toMatch(/^readonly RUN_ID="\$\$-\$\(date \+%s\)"/m)
+    for (const name of ['SCENARIO_BOOK', 'SCENARIO_TAG', 'SCENARIO_TAG_RENAMED', 'SCENARIO_NOTE']) {
+      const line = text.match(new RegExp(`^readonly ${name}=.*$`, 'm'))?.[0] ?? ''
+      expect(line, `${name} must carry the run id`).toContain('$RUN_ID')
+    }
+    /* And none of them is the old fixed spelling. `wi-11-7-book` as a whole
+       word would still match `wi-11-7-book-$RUN_ID`, so the assertion is that
+       no assignment ENDS there. */
+    expect(text).not.toMatch(/^readonly SCENARIO_BOOK='wi-11-7-book'$/m)
+  })
+
+  it('sweeps --clean by prefix, because a per-run id cannot be named by a later invocation', () => {
+    /* THE PROPERTY THE FIXED IDS WERE BUYING, kept by another route. `--clean`
+       runs as its own process with its own RUN_ID, so naming this run's ids
+       would name a book it never created and miss every one a crashed run
+       left. Sweeping the prefix collects all of them. */
+    expect(text).toMatch(/^readonly SCENARIO_PREFIX='wi-11-7-'/m)
+    expect(bodyOf(text, 'sweep_books')).toContain('$SCENARIO_PREFIX')
+    expect(bodyOf(text, 'sweep_tags')).toContain('$SCENARIO_PREFIX')
+    expect(callsTo(text, 'sweep_books')).toBeGreaterThan(0)
+    expect(callsTo(text, 'sweep_tags')).toBeGreaterThan(0)
+  })
+
+  it('removes a trash entry only under its own prefix, and never aborts the sweep to do it', () => {
+    const body = bodyOf(text, 'trash_rm') ?? ''
+    /* AN `rm -rf` WITH A COMPUTED PATH. The guard is the whole safety story:
+       without it an empty or unprefixed argument reaches the reader's trash. */
+    expect(body).toContain('rm -rf')
+    expect(body).toContain('SCENARIO_PREFIX')
+    expect(body).toMatch(/fail "refusing to remove/)
+    /* AND RETURNS 0 ON THE REFUSAL. `set -e` is on and this is called bare
+       from the sweep loop, so a non-zero return would abort the clean halfway
+       and leave the rest behind — a guard against one bad path turned into a
+       failure to clean up the good ones. */
+    expect(body).toMatch(/refusing to remove[^\n]*return 0/)
+    /* The probe goes through the same helper rather than its own `rm -rf`. */
+    expect(text).not.toMatch(/rm -rf[^\n]*trash\/\$PROBE_TRASH/)
+  })
+
+  it('reads the satchel cursor as a DIAGNOSTIC, and never as a predicate', () => {
+    /* `sync.cursor` is the one number that says "behind": `since` is a seq in
+       the SHELF's space, where the two journals' own heads are independent
+       counters that cannot be compared. */
+    expect(bodyOf(text, 'cursor_line')).toContain('sync.cursor')
+    expect(callsTo(text, 'cursor_report')).toBeGreaterThan(0)
+    /* ⚠️ IT MUST NOT BECOME A PREDICATE. The quiet step reads the journal
+       FILE deliberately — two earlier drafts read a field through the CLI and
+       gave first a check that always passed and then one that could only ever
+       fail. So no `pass`/`fail` may be reached from the cursor helpers. */
+    for (const name of ['cursor_line', 'cursor_report']) {
+      const body = bodyOf(text, name) ?? ''
+      expect(body, `${name} must not decide a step`).not.toMatch(/\b(pass|fail)\s+["']/)
+    }
+  })
+
+  it('parses the settings store twice, because the settings are a JSON string inside it', () => {
+    /* MEASURED: `paper.settings.v1` holds a STRING containing
+       `{"version":1,"values":{…}}`. A single parse yields that string,
+       `.values` on it is undefined, and the probe would report "no cursor" on
+       a satchel that has one — the quiet wrong answer the helper exists to
+       prevent. */
+    const body = bodyOf(text, 'cursor_line') ?? ''
+    expect(body).toContain('paper.settings.v1')
+    expect(body).toMatch(/typeof held === "string" \? JSON\.parse\(held\)/)
+    /* A shelf legitimately has none — only a satchel dials — so absence there
+       must not read as a fault. */
+    expect(body).toContain('only a satchel dials')
+  })
+
   it('proves a removal by the not-found refusal, not by any non-zero exit', () => {
     /* IN THE PREDICATE'S OWN BODY. `text.toContain('not-found')` passed on
      * the word appearing anywhere in the file — including in the comment
@@ -438,7 +518,13 @@ describe('the predicates it converges on', () => {
      * from the probe's own id, whatever that id is. */
     expect(text).toContain('shelf book remove "$PROBE_BOOK"')
     expect(text).toMatch(/PROBE_TRASH="\$\{PROBE_BOOK\/\/-\/_\}"/)
-    expect(text).toContain('trash/$PROBE_TRASH')
+    /* ⚠️ WAS `toContain('trash/$PROBE_TRASH')`, an inline `rm -rf` that this
+     * file spelled out. The removal goes through `trash_rm` now — one guarded
+     * path shared with the `--clean` sweep, which refuses any name outside the
+     * harness's own prefix. The PROPERTY is unchanged and is what is asserted:
+     * the cleanup path is derived from the probe's own id, whatever that id
+     * is. What moved is where the `rm -rf` lives. */
+    expect(text).toContain('trash_rm shelf "$PROBE_TRASH"')
   })
 
   /* THE PRECONDITION THAT COST TWO FULL RUNS before anyone checked it. Every
