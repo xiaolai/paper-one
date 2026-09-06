@@ -30,6 +30,18 @@ export interface Pairing {
   readonly sas: string | null
   /** I offered, and the link has not run out. */
   readonly offer: PairOffer | null
+  /** Whole seconds an offer has left, or null when there is none live. */
+  readonly secondsLeft: number | null
+  /**
+   * An offer of mine ran out without anybody using it.
+   *
+   * ⚠️ **THE LINK USED TO JUST VANISH.** `offer` is nulled by the expiry
+   * comparison below, so the screen silently fell back to "Add somebody" with
+   * no account of where the link went — and a reader who had already sent it
+   * had no way to learn it was dead. It was sent, refused as `expired`, and
+   * looked like the other person's fault.
+   */
+  readonly lapsed: boolean
   readonly link: string
   readonly setLink: (link: string) => void
   /** Why the last attempt did not finish — a result's verdict, or an act that failed. */
@@ -37,6 +49,16 @@ export interface Pairing {
   readonly busy: boolean
   readonly makeOffer: () => Promise<boolean>
   readonly stopOffering: () => Promise<boolean>
+  /**
+   * Back out of a join I started.
+   *
+   * ⚠️ **THE JOINER HAD NO WAY OUT AT ALL.** Once `sas` was set the screen
+   * showed six digits and nothing else — no button of any kind — so a reader
+   * whose friend had walked away from the other machine was stuck until they
+   * quit the app. Pairing has a human on each end and either of them can stop;
+   * only one of them could say so.
+   */
+  readonly stopJoining: () => Promise<boolean>
   readonly join: () => Promise<boolean>
   readonly confirm: (accept: boolean) => Promise<boolean>
 }
@@ -66,18 +88,27 @@ export function usePairing(port: PersonPort | null, refresh: () => Promise<void>
      reader having to touch anything. `Date.now()` in the render would only
      be read again on some other change. */
   const [now, setNow] = useState(() => Date.now())
+  /* ⚠️ **A TICK, NOT A SINGLE TIMER AT THE EXPIRY.** One `setTimeout` for the
+     whole life of the offer is enough to STOP drawing it, and that is all this
+     used to do — the reader got "It is good for a few minutes" and then, with
+     no warning, the link was gone. A second's resolution costs one timer and
+     lets the screen say how long is actually left, which is the difference
+     between sending a link confidently and sending a dead one. */
   useEffect(() => {
     if (offer === null) return
-    const left = offer.expiresAt - Date.now()
-    // Stryker disable all: the render compares `expiresAt` with `now` itself, so an offer already run out is never drawn whatever this arms; the branch and the cleanup only spare a timer.
-    if (left <= 0) {
-      setNow(Date.now())
-      return
-    }
-    const timer = setTimeout(() => setNow(Date.now()), left + 1)
-    return () => clearTimeout(timer)
+    // Stryker disable all: the render compares `expiresAt` with `now` itself, so an offer already run out is never drawn whatever this arms; the interval and its cleanup only spare a timer.
+    const tick = setInterval(() => setNow(Date.now()), 1000)
+    setNow(Date.now())
+    return () => clearInterval(tick)
     // Stryker restore all
   }, [offer])
+  /* Whether the LAST offer ran out rather than being used or withdrawn. Set by
+     the render's own comparison, cleared by anything that starts a new flow. */
+  const [lapsed, setLapsed] = useState(false)
+  const live = offer !== null && offer.expiresAt > now
+  useEffect(() => {
+    if (offer !== null && !live) setLapsed(true)
+  }, [offer, live])
   /* Which port the screen holds NOW: an act begun through an old port — the
      peer restarted while it was out — must not refresh through it after the
      new port's read, and put the old run's status and roster back. */
@@ -121,13 +152,16 @@ export function usePairing(port: PersonPort | null, refresh: () => Promise<void>
   return {
     pending,
     sas,
-    offer: offer !== null && offer.expiresAt > now ? offer : null,
+    offer: live ? offer : null,
+    secondsLeft: live && offer !== null ? Math.max(0, Math.ceil((offer.expiresAt - now) / 1000)) : null,
+    lapsed,
     link,
     setLink,
     trouble: trouble ?? verdict,
     busy,
     makeOffer: port === null ? none : () =>
       act(async () => {
+        setLapsed(false)
         const made = await port.offer()
         /* ⚠️ **THE WHOLE OFFER, NOT JUST THE LINK.** `expiresAt` was thrown
          * away, so a dead link went on being presented as usable: sending it
@@ -139,6 +173,12 @@ export function usePairing(port: PersonPort | null, refresh: () => Promise<void>
       act(async () => {
         await port.cancel()
         setOffer(null)
+        setLapsed(false)
+      }),
+    stopJoining: port === null ? none : () =>
+      act(async () => {
+        await port.cancel()
+        setSas(null)
       }),
     join: port === null ? none : () =>
       act(async () => {

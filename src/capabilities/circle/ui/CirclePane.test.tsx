@@ -268,6 +268,48 @@ describe('the circle panel', () => {
     await screen.findByText('481902')
   })
 
+  it('lets a joiner back out, because either end can stop', async () => {
+    /* ⚠️ **THIS STATE USED TO HAVE NO CONTROL OF ANY KIND.** Six digits and
+       nothing else, so a reader whose friend had walked away from the other
+       machine was stuck until they quit the app. Pairing has a human at each
+       end and either of them can change their mind; only one could say so. */
+    const join = vi.fn(() => Promise.resolve({ sas: '481902' }))
+    const cancel = vi.fn(() => Promise.resolve())
+    render(<CirclePane port={portWith({ join, cancel })} />)
+    await screen.findByText(/holds your keys/u)
+
+    fireEvent.change(screen.getByPlaceholderText(/paste a friend/u), { target: { value: 'paper://pair?s=zzz' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Join$/u })) })
+    await screen.findByText('481902')
+    /* And it says what is true while it waits: nothing has moved yet. */
+    expect(screen.getByText(/Nothing has been shared yet/u)).toBeTruthy()
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Never mind/u })) })
+    expect(cancel).toHaveBeenCalled()
+    expect(screen.queryByText('481902')).toBeNull()
+  })
+
+  it('tells the offerer that waiting is what success looks like so far', async () => {
+    /* ⚠️ **THE SCREEN SAID NOTHING WHILE IT WAITED**, which is the state a
+       reader spends the whole pairing in — and the roster's own "Nobody yet."
+       sits just below, reading as a verdict on the pairing rather than on the
+       circle. An offer nobody had used yet was indistinguishable from a failed
+       one. */
+    const offer = vi.fn(() => Promise.resolve({ url: 'paper://pair?s=abc', svg: '<svg/>', expiresAt: Date.now() + 300_000 }))
+    render(<CirclePane port={portWith({ offer })} />)
+    await screen.findByText(/holds your keys/u)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Add somebody/u })) })
+
+    expect(screen.getByText(/Nobody has used this link yet/u)).toBeTruthy()
+    expect(screen.getByText(/compare six digits/u)).toBeTruthy()
+    /* The remaining life, not "a few minutes" — the reader has to decide
+       whether the link they sent is still worth waiting on. */
+    expect(screen.getByText(/It stops working in \d+:\d\d/u)).toBeTruthy()
+    /* AND A WAY TO MOVE IT THAT IS NOT SELECTING THE TEXT, which is how a
+       pairing secret ends up in a screenshot or a chat window. */
+    expect(screen.getByRole('button', { name: /Copy link/u })).toBeTruthy()
+  })
+
   it('lets the other side answer, because pairing takes two', async () => {
     /* ⚠️ A flow that only OFFERED would work in exactly half of every pairing. */
     let fire: ((p: unknown) => void) | null = null
@@ -1039,8 +1081,19 @@ describe('a new person port', () => {
 })
 
 describe('the offer’s own clock', () => {
-  it('shows the link until the moment it expires, then takes it down with no other change', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  /* ⚠️ **THIS USED TO END "…with no other change", AND THE SILENCE WAS THE
+   * DEFECT.** The link vanished and the screen fell back to "Add somebody"
+   * with no account of where it had gone — so a reader who had already sent
+   * one could not tell a dead link from a friend who had not got round to it.
+   * A lapsed offer says so now, and this case asserts that it does.
+   *
+   * ⚠️ AND `setInterval` IS FAKED, because the pane ticks once a second to show
+   * how long is left. Faking only `setTimeout` left the clock stopped, so the
+   * offer never expired and the assertion below could not fail for the reason
+   * it claims. A test that fakes a different timer from the one the code uses
+   * is testing nothing. */
+  it('shows the link until the moment it expires, then says it ran out', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
     try {
       vi.setSystemTime(1_700_000_000_000)
       const offer = vi.fn(() => Promise.resolve({ url: 'paper://pair?s=soon', svg: '<svg/>', expiresAt: Date.now() + 1_000 }))
@@ -1060,11 +1113,12 @@ describe('the offer’s own clock', () => {
         await vi.advanceTimersByTimeAsync(999)
       })
       expect(screen.queryByText('paper://pair?s=soon')).not.toBeNull()
-      /* At expiry, the timer the pane armed takes it down. */
+      /* At expiry, the tick the pane armed takes it down — AND SAYS SO. */
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2)
+        await vi.advanceTimersByTimeAsync(1_100)
       })
       expect(screen.queryByText('paper://pair?s=soon')).toBeNull()
+      expect(screen.getByText(/ran out before anybody used it/u)).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }
