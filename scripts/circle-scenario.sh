@@ -1,0 +1,420 @@
+#!/usr/bin/env bash
+#
+# WI-24.C2 — the circle, crossed, and repeatably.
+#
+# The circle's equivalent of `sync-scenario.sh`, and it exists for the same
+# reason that one did: on 2026-09-07 a passage crossed between two machines for
+# the first time, BY HAND, and the run that finally happened found two defects
+# that a green `tsc`, a cross-language golden vector and a camelCase audit
+# aimed at that exact class had all passed over. A thing driven by hand once is
+# not evidence that it works; it is evidence that it worked once.
+#
+# ⚠️ **THIS IS NOT `sync-scenario.sh` WITH DIFFERENT NOUNS, AND THE DIFFERENCE
+# IS THE POINT.** Sync is shelf ⇄ satchel and is driven by `paper`, which
+# composes no circle capability and has no circle commands — checked, not
+# assumed: `serviceTable.ts` declares `book.*` and `mark.*` and nothing else.
+# So every mutation here goes through the MCP BRIDGE against the running app,
+# which means THIS machine must be a DEBUG build. A release build answers
+# nothing on the bridge port, and this script says so by name rather than
+# timing out.
+#
+# ## The shape
+#
+#   preflight   both apps up, both screens unlocked, BOTH ROLED SHELF, the
+#               circle pairing present on both, the fixture book on both, a
+#               publishing identity here, and the bridge answering
+#   mutate      share a passage on THIS machine, through the bridge
+#   converge    poll `books/<book>/circle/<person>.json` on the remote for the
+#               `pub` this run published
+#   negative    mute the publisher on a RECIPIENT and confirm the passage stops
+#               being DRAWN while its file stays — `drawsEntry`
+#
+# ## ⚠️ Two things that are not the same, and a harness that conflates them
+# ## proves the smaller one
+#
+# **A file appearing proves TRANSPORT.** It does not prove the relationship
+# record was consulted. `drawsEntry` is the half a transport test cannot see:
+# a build that ignored relationships entirely would pass every converge step
+# here and still draw the passages of somebody the reader has muted. That is
+# why the negative below is not optional garnish.
+#
+# **And the converge step must be able to FAIL.** `--falsify` quits the app on
+# the far end first and expects the convergence NOT to happen. A harness that
+# has never seen its own assertion fail is asserting a file it wrote itself —
+# WI-8.6's first run did exactly that and read the result as a pass.
+#
+# ## ⚠️ The bound is not a matter of taste
+#
+# The circle's fetch cadence is **half a minute after start, then every five
+# minutes** (`lib/cadence.ts`), and it subscribes to nothing — deliberately:
+# pull-on-open would leak the reader's sequence to the peer. So a timeout under
+# one full period measures this script's impatience and nothing else. The floor
+# below is compile-time, not advice.
+#
+# ## ⚠️ What a locked screen does, and why this refuses on it
+#
+# A locked far end suspends the webview: rounds report `skipped` with
+# `why: "asleep"`, the peer answers nothing, and every other signal says go.
+# Two evenings went into that before it was written down. The lock check is
+# `sync-scenario.sh`'s, unchanged on purpose — see `screen_lock_state` there
+# and `second-instance.sh`, which refuses on the same reading.
+#
+# Usage:
+#   scripts/circle-scenario.sh <user@host> [--timeout SECONDS] [--book ID]
+#                                          [--falsify] [--port N]
+#
+set -uo pipefail
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly DATA_DIR='Library/Application Support/one.paper.reader'
+readonly DIAGNOSTICS="$DATA_DIR/diagnostics.jsonl"
+
+die() { echo "$*" >&2; exit 2; }
+
+# ── arguments ──────────────────────────────────────────────────────────────
+
+remote=''
+book=''
+falsify=no
+port=31415
+# ⚠️ **ABOVE ONE FULL CADENCE PERIOD, AND THE FLOOR BELOW ENFORCES IT.** 300 s
+# is the period; a run bounded at 300 s can miss by a second and report a
+# defect that is a stopwatch. 420 s leaves two minutes of slack for a round
+# that lands late under load.
+timeout_s=420
+readonly CADENCE_PERIOD_S=300
+readonly TIMEOUT_FLOOR_S=330
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --timeout) timeout_s="${2:-}"; shift 2 || die 'usage: --timeout SECONDS' ;;
+    --book) book="${2:-}"; shift 2 || die 'usage: --book ID' ;;
+    --port) port="${2:-}"; shift 2 || die 'usage: --port N' ;;
+    --falsify) falsify=yes; shift ;;
+    -h|--help) sed -n '2,66p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) die "unknown option: $1" ;;
+    *) [ -n "$remote" ] && die 'one <user@host>, please'; remote="$1"; shift ;;
+  esac
+done
+
+[ -n "$remote" ] || die 'usage: scripts/circle-scenario.sh <user@host> [--timeout SECONDS] [--book ID] [--falsify]'
+case "$timeout_s" in (''|*[!0-9]*) die "--timeout takes whole seconds, not '$timeout_s'" ;; esac
+case "$port" in (''|*[!0-9]*) die "--port takes a number, not '$port'" ;; esac
+
+# ⚠️ **REFUSED, NOT CLAMPED.** Silently raising the number would leave the
+# operator believing they had bounded the run at what they asked for, and the
+# whole reason this floor exists is that the failure it prevents looks exactly
+# like a real defect.
+if [ "$timeout_s" -lt "$TIMEOUT_FLOOR_S" ]; then
+  die "--timeout $timeout_s is under the ${TIMEOUT_FLOOR_S}s floor: the circle's fetch cadence is one round every ${CADENCE_PERIOD_S}s, so a shorter bound measures this script's impatience rather than the app. Raise it, or accept that a failure here means nothing."
+fi
+
+# ── transcript ─────────────────────────────────────────────────────────────
+
+readonly RUN_ID="$$-$(date +%s)"
+mkdir -p "$REPO_ROOT/dev-docs/plans/evidence" 2>/dev/null || true
+out="$REPO_ROOT/dev-docs/plans/evidence/wi-24-c2-$(date -u +%Y%m%dT%H%M%SZ).md"
+: > "$out" 2>/dev/null || out=/dev/null
+
+log() { printf '%s\n' "$*" | tee -a "$out"; }
+
+step_no=0
+failures=0
+skipped=0
+pass() { step_no=$((step_no + 1)); log "  ok   [$step_no] $*"; }
+fail() { step_no=$((step_no + 1)); failures=$((failures + 1)); log "  FAIL [$step_no] $*"; }
+skip() { step_no=$((step_no + 1)); skipped=$((skipped + 1)); log "  skip [$step_no] $*"; }
+note() { log "  note  $*"; }
+
+log "# WI-24.C2 — the circle, crossed"
+log ""
+log "run       $RUN_ID"
+log "started   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+log "remote    $remote"
+log "timeout   ${timeout_s}s (cadence period ${CADENCE_PERIOD_S}s)"
+log "mode      $([ "$falsify" = yes ] && echo 'FALSIFIER — the convergence is expected to FAIL' || echo 'normal')"
+log ""
+
+# ── the two machines ───────────────────────────────────────────────────────
+
+remote_sh() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 "$remote" "$@"
+}
+
+# The bridge, against the app on THIS machine.
+#
+# ⚠️ **`circle-drive.mjs` IS THE ONLY THING THAT TOUCHES THE APP'S STATE.** This
+# script reads files and asks questions; every mutation goes through the app's
+# own UI over the bridge, because a harness that wrote `shared.json` itself
+# would be testing its own JSON writer. The one exception is `--falsify`, which
+# quits an app rather than changing one.
+drive() { node "$REPO_ROOT/scripts/circle-drive.mjs" --port "$port" "$@"; }
+
+# Whether the app is running, by process NAME.
+#
+# ⚠️ **`pgrep -x app`, AND NEITHER `-x Paper` NOR `-f <path>`.** The executable
+# is `Paper.app/Contents/MacOS/app`, so `pgrep -x Paper` matches NOTHING and
+# reports a stopped app whether or not one is running — which reads as a clean
+# result and, on 2026-09-07, let a deploy replace a bundle under two live
+# processes while `open` merely activated them. Fifteen minutes of a
+# two-machine run went to that. `-f` is safe here only because these are simple
+# commands that exec; inside a compound command it matches the shell asking.
+app_pids_local() { pgrep -x app 2>/dev/null; }
+app_pids_remote() { remote_sh 'pgrep -x app' 2>/dev/null; }
+
+# `sync-scenario.sh`'s reading, unchanged: the key ABSENT means a session that
+# has never locked, and an unreadable answer is refused rather than assumed
+# unlocked. A one-line `grep -q ...=Yes` fails OPEN on every one of those.
+readonly LOCK_PROBE='
+  if ioreg_out=$(ioreg -n Root -d1 -a 2>/dev/null); then
+    case "$ioreg_out" in
+      *CGSSessionScreenIsLocked*)
+        lock=$(printf "%s" "$ioreg_out" | grep -A1 CGSSessionScreenIsLocked)
+        case "$lock" in (*true*) echo yes ;; (*false*) echo no ;; (*) echo unknown ;; esac ;;
+      *) echo no ;;
+    esac
+  else
+    echo unknown
+  fi'
+screen_lock_state() {
+  if [ "$1" = local ]; then sh -c "$LOCK_PROBE"; else remote_sh "$LOCK_PROBE"; fi
+}
+
+# A JSON field out of a file on either machine, without assuming `jq`.
+read_json_local() { python3 -c "$1" 2>/dev/null; }
+read_json_remote() { remote_sh "python3 -c '$1'" 2>/dev/null; }
+
+# ── preflight ──────────────────────────────────────────────────────────────
+#
+# ⚠️ **REFUSES EARLY, AND EVERY ONE OF THESE COST A RUN.** A harness whose
+# preconditions are unchecked spends its timeout on them and then reports the
+# feature broken.
+
+log "## Preflight"
+
+if remote_sh true 2>/dev/null; then
+  pass "$remote answers over ssh"
+else
+  fail "$remote does not answer over ssh — nothing below can run"
+  log ""
+  log "**$failures failed**, $skipped skipped, $step_no steps."
+  exit 1
+fi
+
+local_pids="$(app_pids_local)"
+if [ -n "$local_pids" ]; then
+  pass "the app is running on this machine (pid $(echo "$local_pids" | head -1), up $(ps -o etime= -p "$(echo "$local_pids" | head -1)" | tr -d ' '))"
+else
+  fail "the app is NOT running on this machine — start it and re-run"
+fi
+
+remote_pids="$(app_pids_remote)"
+if [ -n "$remote_pids" ]; then
+  pass "the app is running on $remote (pid $(echo "$remote_pids" | head -1))"
+elif [ "$falsify" = yes ]; then
+  pass "the app is NOT running on $remote — which is what --falsify wants"
+else
+  fail "the app is NOT running on $remote — start it and re-run"
+fi
+
+for side in local remote; do
+  where=$([ "$side" = local ] && echo 'this machine' || echo "$remote")
+  case "$(screen_lock_state "$side")" in
+    no) pass "the screen is unlocked on $where" ;;
+    yes) fail "the screen is LOCKED on $where — the webview is suspended behind it, its fetch cadence does not run, and nothing will cross. Unlock it at that Mac." ;;
+    *) fail "the screen's lock state on $where could not be read — refused rather than assumed unlocked" ;;
+  esac
+done
+
+# ⚠️ **BOTH SHELF, AND THIS CONFLICTS WITH SYNC'S PRECONDITION.** The circle is
+# shelf ↔ shelf; sync is shelf ⇄ satchel. The same pair of machines cannot
+# satisfy both at once, which is why phase 24 runs Stage C after Stage B.
+local_role="$(cat "$HOME/$DATA_DIR/peer/role" 2>/dev/null || echo unset)"
+remote_role="$(remote_sh "cat \"\$HOME/$DATA_DIR/peer/role\" 2>/dev/null || echo unset")"
+[ "$local_role" = shelf ] && pass "this machine is roled shelf" \
+  || fail "this machine is roled '$local_role', and the circle is shelf ↔ shelf"
+[ "$remote_role" = shelf ] && pass "$remote is roled shelf" \
+  || fail "$remote is roled '$remote_role', and the circle is shelf ↔ shelf — sync's satchel role is the one that conflicts"
+
+# The pairing, and the grant that distinguishes a CIRCLE pairing from a device
+# one. A device pairing grants the sync services; only a circle pairing grants
+# `circle:read`, and both circle services are gated on it.
+readonly GRANT_PROBE='import json,sys;d=json.load(open(sys.argv[1]));print("yes" if any("circle:read" in (p.get("grants") or []) for p in d.get("peers",[])) else "no")'
+local_grant="$(python3 -c "$GRANT_PROBE" "$HOME/$DATA_DIR/peer/peers.json" 2>/dev/null || echo unreadable)"
+remote_grant="$(remote_sh "python3 -c '$GRANT_PROBE' \"\$HOME/$DATA_DIR/peer/peers.json\"" 2>/dev/null || echo unreadable)"
+[ "$local_grant" = yes ] && pass "this machine holds a circle pairing (circle:read)" \
+  || fail "this machine holds no circle pairing — grants say '$local_grant'. Pair as a circle first (WI-24.C1, once, by hand)"
+[ "$remote_grant" = yes ] && pass "$remote holds a circle pairing (circle:read)" \
+  || fail "$remote holds no circle pairing — grants say '$remote_grant'"
+
+log ""
+log "**$failures failed**, $skipped skipped, $step_no steps so far."
+log ""
+if [ "$failures" -gt 0 ]; then
+  log "Refused before mutating anything: a run against unmet preconditions reports the feature broken when the harness was."
+  exit 1
+fi
+
+log "Preflight clean."
+log ""
+
+# ── the bridge, and who we publish as ───────────────────────────────────────
+
+log "## Identity"
+
+identity="$(drive identity 2>&1)"
+if printf '%s' "$identity" | grep -q '"ok":true'; then
+  person="$(printf '%s' "$identity" | python3 -c 'import json,sys; print(json.load(sys.stdin)["person"])')"
+  pass "this device publishes as ${person:0:12}… (the bridge answers, so this is a debug build)"
+else
+  fail "the bridge could not say who this device publishes as: $(printf '%s' "$identity" | tr -d '\n' | cut -c1-220)"
+  log ""
+  log "**$failures failed**, $skipped skipped, $step_no steps."
+  exit 1
+fi
+
+# ── the falsifier ──────────────────────────────────────────────────────────
+#
+# ⚠️ **A HARNESS THAT HAS NEVER SEEN ITS OWN ASSERTION FAIL IS ASSERTING A FILE
+# IT WROTE ITSELF.** WI-8.6's first run did exactly that and read the result as
+# a pass. `--falsify` stops the far end and expects the convergence NOT to
+# happen; a green run in this mode is a BROKEN harness, and it says so.
+
+if [ "$falsify" = yes ]; then
+  note "falsifier: quitting the app on $remote so the converge step has nothing to answer it"
+  remote_sh 'osascript -e "quit app \"Paper\"" >/dev/null 2>&1 || true'
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "$(app_pids_remote)" ] && break
+    sleep 1
+  done
+  if [ -z "$(app_pids_remote)" ]; then
+    pass "the app on $remote is stopped — nothing over there can answer"
+  else
+    fail "could not stop the app on $remote; the falsifier cannot be trusted"
+  fi
+fi
+
+# ── mutate ─────────────────────────────────────────────────────────────────
+
+log ""
+log "## Mutate — share a passage on this machine, through the app's own control"
+
+[ -n "$book" ] || book='Uncovering The Logic of English'
+
+shared="$(drive share --title "$book" 2>&1)"
+if printf '%s' "$shared" | grep -q '"ok":true'; then
+  pass "shared a passage of $(printf '%q' "$book") through the Share control"
+else
+  fail "could not share a passage: $(printf '%s' "$shared" | tr -d '\n' | cut -c1-260)"
+  log ""
+  log "**$failures failed**, $skipped skipped, $step_no steps."
+  exit 1
+fi
+
+# The `pub` is the stable publication id, and it is what the far end must end
+# up holding. Read from the store rather than from the driver: the store is
+# what the app actually wrote, and a driver that reported an id the app never
+# persisted is the exact self-confirmation this harness exists to avoid.
+readonly PUB_PROBE='
+import json,pathlib,sys
+root = pathlib.Path.home()/"Library/Application Support/one.paper.reader/books"
+newest = None
+for f in root.glob("*/shared.json"):
+    d = json.load(open(f))
+    for pub in d.get("publications", []):
+        if newest is None or pub["at"] > newest[0]:
+            newest = (pub["at"], pub["pub"], f.parent.name)
+print(json.dumps({"pub": newest[1], "book": newest[2]}) if newest else "{}")'
+pub_row="$(python3 -c "$PUB_PROBE" 2>/dev/null)"
+pub="$(printf '%s' "$pub_row" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("pub",""))' 2>/dev/null)"
+pub_book="$(printf '%s' "$pub_row" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("book",""))' 2>/dev/null)"
+if [ -n "$pub" ]; then
+  pass "the store holds the publication: pub ${pub:0:12}… in $pub_book"
+else
+  fail "the app reported a share and the store holds no publication — nothing to converge on"
+  log ""
+  log "**$failures failed**, $skipped skipped, $step_no steps."
+  exit 1
+fi
+
+# ── converge ───────────────────────────────────────────────────────────────
+
+log ""
+log "## Converge — the far end must end up holding that pub"
+
+# ⚠️ **SEARCHED, NOT ADDRESSED BY BOOK ID.** The plan says to poll
+# `books/<bookId>/circle/<person>.json`, which assumes both machines call the
+# book the same thing. Matching in the circle is by WORK CLAIM and not by
+# `bookId` — two copies of one work can legitimately carry different ids — so
+# addressing the far end's file by THIS machine's id would report a defect on
+# any pair whose ids differ. The `pub` is unique, so looking for it under this
+# person's file is both stricter and portable.
+converged_probe() {
+  remote_sh "grep -rl '$pub' \"\$HOME/$DATA_DIR/books\"/*/circle/'$person'.json 2>/dev/null | head -1"
+}
+
+deadline=$(( $(date +%s) + timeout_s ))
+found=''
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  found="$(converged_probe 2>/dev/null)"
+  [ -n "$found" ] && break
+  sleep 10
+done
+
+if [ -n "$found" ]; then
+  if [ "$falsify" = yes ]; then
+    fail "THE FALSIFIER FAILED: the pub reached $remote with the app stopped over there. This harness is asserting something it wrote itself — do not trust a green run from it until this is explained."
+  else
+    pass "the passage crossed: $remote holds pub ${pub:0:12}… at ${found##*/books/}"
+  fi
+else
+  if [ "$falsify" = yes ]; then
+    pass "the passage did NOT cross with the far end stopped — the converge step can fail, so a pass from it means something"
+  else
+    fail "the passage did not reach $remote within ${timeout_s}s (cadence period ${CADENCE_PERIOD_S}s)"
+    note "the far end's last rounds, if it is recording them:"
+    remote_sh "tail -3 \"\$HOME/$DIAGNOSTICS\" 2>/dev/null" | while IFS= read -r line; do
+      log "        $(printf '%s' "$line" | cut -c1-260)"
+    done
+    note "turn its diagnostics on with: ssh $remote 'touch \"\$HOME/$DATA_DIR/diagnostics.on\"' and relaunch the app"
+  fi
+fi
+
+# ── the negative, which cannot be run ──────────────────────────────────────
+
+log ""
+log "## The negative — a muted person's passage stops being DRAWN, file intact"
+
+# ⚠️ **THIS STEP CANNOT PASS, AND THE REASON IS A PRODUCT GAP RATHER THAN A
+# HARNESS ONE.** WI-24.C2 asks for a mute, because a file appearing proves
+# TRANSPORT and says nothing about whether the relationship record was
+# consulted — `drawsEntry` is the half a transport test cannot see. Read
+# against the source on 2026-09-07:
+#
+#   - `drawsOverlays` is true for `'admitted'` and nothing else, so muted,
+#     blocked and exited all stop the drawing. That part works.
+#   - `'muted'` keeps the files: `defaultRetain` returns `keep` for it,
+#     deliberately — *"a reader who mutes is saying not right now"*.
+#   - **but nothing in the product ever WRITES `'muted'`.** It appears in
+#     `relationships.ts`'s `STATES` parser set and in comments, and in no
+#     control, no port operation and no command.
+#   - the one reachable transition is `'exited'`, whose default retain is
+#     `purge` — and `circlePort`'s exit then calls `purge()` and
+#     `forgetPeer()`. It DELETES the passage and the pairing, which is the
+#     opposite of "the file stays", and is not repeatable without a fresh
+#     pairing ceremony by hand.
+#
+# So the assertion cannot be made through the app until a mute exists. Writing
+# `relationship.json` from this script would assert nothing about the product —
+# it would test this harness's own JSON writer, which is the failure mode the
+# whole file is built to avoid.
+fail "no mute exists to drive: 'muted' is parsed and honoured but never written by any control or port operation, and 'exited' purges the file instead of keeping it. Transport is proved above; the relationship half is NOT, and this run is not full acceptance of WI-24.C2."
+
+log ""
+log "---"
+log ""
+log "**$failures failed**, $skipped skipped, $step_no steps."
+log ""
+log "transcript: $out"
+[ "$failures" -eq 0 ] || exit 1
+exit 0

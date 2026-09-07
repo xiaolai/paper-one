@@ -58,6 +58,10 @@ import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { inlineModules } from './lib/inline-ts.mjs'
+/* The bridge client lives in `lib/bridge.mjs` — this file held the only
+   copy until `circle-scenario.sh` needed the same round trip, and two
+   implementations of one wire protocol is how they stop matching. */
+import { connect, execute } from './lib/bridge.mjs'
 import {
   assertTransportable,
   buildSnippet,
@@ -71,8 +75,6 @@ import {
  *  the default collide; 31415 clears that window and vmark's 9323 by far. */
 const DEFAULT_PORT = 31415
 
-const CONNECT_TIMEOUT_MS = 8000
-const EXECUTE_TIMEOUT_MS = 30000
 
 /** The selection adapter, in dependency order: a module may only use names the
  *  modules before it export. Read from disk on every run — see
@@ -389,94 +391,6 @@ export function buildDomSnippet() {
 /* The bridge                                                                */
 /* ------------------------------------------------------------------------ */
 
-/**
- * A WebSocket to the plugin's bridge, or a rejection naming the port.
- *
- * The bridge speaks plain JSON over a WebSocket
- * (`tauri-plugin-mcp-bridge/src/websocket.rs`), so this needs no MCP client and
- * no npm dependency — Node has had a global `WebSocket` since v22.
- */
-function connect(port) {
-  return new Promise((resolve, reject) => {
-    let socket
-    try {
-      socket = new WebSocket('ws://127.0.0.1:' + port)
-    } catch (cause) {
-      reject(cause)
-      return
-    }
-    const timer = setTimeout(() => {
-      socket.close()
-      reject(new Error('no answer within ' + CONNECT_TIMEOUT_MS + ' ms'))
-    }, CONNECT_TIMEOUT_MS)
-    socket.addEventListener(
-      'open',
-      () => {
-        clearTimeout(timer)
-        resolve(socket)
-      },
-      { once: true },
-    )
-    socket.addEventListener(
-      'error',
-      () => {
-        clearTimeout(timer)
-        reject(new Error('the connection was refused or dropped'))
-      },
-      { once: true },
-    )
-  })
-}
-
-/**
- * One `execute_js` round trip.
- *
- * Responses are matched by id because the bridge also broadcasts events down
- * the same socket; a client that took the next message to arrive would read an
- * IPC event as its own answer. Every exit from here clears the listeners, so a
- * later message cannot resolve a settled call.
- */
-function execute(socket, script, label) {
-  return new Promise((resolve, reject) => {
-    const id = randomUUID()
-
-    function cleanup() {
-      clearTimeout(timer)
-      socket.removeEventListener('message', onMessage)
-      socket.removeEventListener('close', onClose)
-    }
-
-    const timer = setTimeout(() => {
-      cleanup()
-      reject(new Error(label + ': the webview did not answer within ' + EXECUTE_TIMEOUT_MS + ' ms'))
-    }, EXECUTE_TIMEOUT_MS)
-
-    const onMessage = (event) => {
-      let message
-      try {
-        message = JSON.parse(String(event.data))
-      } catch {
-        return
-      }
-      if (message === null || typeof message !== 'object' || message.id !== id) return
-      cleanup()
-      if (message.success !== true) {
-        reject(new Error(label + ': ' + String(message.error ?? 'the bridge reported failure with no reason')))
-        return
-      }
-      resolve(message.data)
-    }
-
-    const onClose = () => {
-      cleanup()
-      reject(new Error(label + ': the bridge closed the connection mid-run'))
-    }
-
-    socket.addEventListener('message', onMessage)
-    socket.addEventListener('close', onClose)
-    socket.send(JSON.stringify({ id, command: 'execute_js', args: { script } }))
-  })
-}
 
 /* ------------------------------------------------------------------------ */
 /* The run                                                                   */
