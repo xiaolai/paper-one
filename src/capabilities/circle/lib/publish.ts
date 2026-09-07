@@ -268,12 +268,67 @@ export async function readShared(fs: VaultFs, bookId: string): Promise<SharedFil
 /** The chain the first build sealed on — the only one there was before `SealedPage.v`. */
 const FIRST_CHAIN = 1
 
+/**
+ * Whether a boundary froze a delegation no verifier can read.
+ *
+ * ⚠️ **THE `sig` RENAME DOES NOT REACH A SEALED PAGE, AND WITHOUT THIS THE FIX
+ * IS HALF A FIX.** `SignedDelegation` serialised its signature as `signature`
+ * until 2026-09-07; `receive.ts` demands `sig` and refuses an object missing
+ * it, so every page from a Rust-signing device was refused. Renaming the field
+ * corrects what is minted TODAY — but a boundary keeps the delegation *as first
+ * served*, deliberately, and a page rebuilt from one still carries the dead
+ * spelling. A reader who shared before upgrading would keep a publication no
+ * friend can ever read, for ever, with nothing anywhere saying why.
+ *
+ * ⚠️ **AND REBUILDING IS SAFE HERE FOR ONE REASON THAT WILL NOT COME AGAIN.**
+ * `SealedPage` exists because a page rebuilt with today's roster is a DIFFERENT
+ * page — different bytes, different hash, and every recipient holding the old
+ * one refuses the next with `chain`. That cost is real whenever a recipient
+ * holds the page. Nobody holds these: a page whose delegation cannot be read is
+ * refused as `bad-delegation` before its own signature is checked, so no peer
+ * ever accepted one. The set of pages this drops is exactly the set no peer can
+ * have. Do NOT generalise this to a boundary anything might have accepted.
+ *
+ * An unparseable delegation goes the same way, for the same reason — it is
+ * equally unreadable, and rebuilding is the only thing that can help it.
+ */
+function unreadableDelegation(raw: unknown): boolean {
+  if (raw === undefined) return false
+  /* ⚠️ **A NON-STRING IS NOT THIS FUNCTION'S BUSINESS, AND DROPPING IT HID A
+     REAL CHECK.** `isSealedPage` refuses a boundary whose `delegation` is not a
+     string, and the first version of this migration quietly repaired that into
+     a valid row — turning a malformed store, which means something wrote
+     garbage, into a silent rebuild. A legacy SPELLING is a migration; a broken
+     TYPE is a defect, and the store must still refuse it loudly.
+     `publish.test.ts`'s "refuses a delegation that is an object" caught this. */
+  if (typeof raw !== 'string') return false
+  let held: unknown
+  try {
+    held = JSON.parse(raw)
+  } catch {
+    return true
+  }
+  if (typeof held !== 'object' || held === null || Array.isArray(held)) return true
+  /* The one member the rename moved. `isDelegation` refuses the object without
+     it, which is the whole of the defect this migrates past — the rest of the
+     shape is that parser's business and is checked there, on arrival. */
+  return typeof (held as Record<string, unknown>)['sig'] !== 'string'
+}
+
 /** A boundary as written before `v` existed, read onto the one chain it could be for; anything else, as it is. */
 function legacyBoundary(value: unknown): unknown {
   /* Stryker disable next-line ConditionalExpression: a non-object is refused by `isSealedPage` whether or not it is spread here. */
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
   const row = value as Record<string, unknown>
-  return row['v'] === undefined ? { ...row, v: FIRST_CHAIN } : row
+  const chained = row['v'] === undefined ? { ...row, v: FIRST_CHAIN } : row
+  if (!unreadableDelegation(chained['delegation'])) return chained
+  /* Dropped rather than corrected: `pageOver` reads `boundary.delegation ??
+     publisher.delegation`, so an absent one rebuilds with what this device
+     holds now — the path a boundary sealed before the field existed already
+     takes. There is nothing to correct it TO from here; the current delegation
+     is the publisher's to supply. */
+  const { delegation: _dropped, ...rest } = chained
+  return rest
 }
 
 function isPublishedRow(value: unknown): value is PublishedRow & Record<string, unknown> {

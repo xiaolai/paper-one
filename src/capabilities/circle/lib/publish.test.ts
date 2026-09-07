@@ -530,6 +530,86 @@ describe('reading and writing the publisher’s store', () => {
     expect(await readShared(fsWith(), BOOK)).toEqual(NOTHING_PUBLISHED)
   })
 
+  describe('a boundary that froze a delegation nothing can read', () => {
+    /* ⚠️ **THE HALF OF THE `sig` RENAME THAT IS NOT IN RUST.** `person.rs`
+       spelled a delegation's signature `signature` until 2026-09-07 and
+       `receive.ts` demands `sig`, so every page from a Rust-signing device was
+       refused. Renaming the field fixes what is minted today and CANNOT reach a
+       page already sealed — a boundary keeps the delegation as first served, on
+       purpose — so a reader who shared before upgrading would keep a
+       publication no friend can ever read, silently and for ever.
+
+       Rebuilding is safe for exactly these: a page whose delegation cannot be
+       parsed is refused before its signature is checked, so no peer ever held
+       one, so no chain can break. That is why the drop is narrow. */
+    const boundary = (delegation: unknown) => ({
+      device: DEVICE.id,
+      from: 1,
+      to: 2,
+      v: WIRE_VERSION,
+      ...(delegation === undefined ? {} : { delegation }),
+    })
+    const readBack = async (delegation: unknown) => {
+      const fs = fsWith({
+        [sharedPathIn(BOOK)]: JSON.stringify({ ...NOTHING_PUBLISHED, sealed: [boundary(delegation)] }),
+      })
+      const held = await readShared(fs, BOOK)
+      return held.sealed[0] as unknown as Record<string, unknown>
+    }
+    const live = JSON.stringify({
+      device: DEVICE.id,
+      notAfter: 2,
+      notBefore: 1,
+      person: PERSON.id,
+      roster: 0,
+      sig: 'a'.repeat(128),
+    })
+
+    it('drops the delegation so the page rebuilds with the one this device holds now', async () => {
+      /* `pageOver` reads `boundary.delegation ?? publisher.delegation`, so an
+         absent one takes the path a boundary sealed before the field existed
+         already took. Dropped rather than corrected: there is nothing here to
+         correct it to. */
+      const dead = JSON.stringify({
+        device: DEVICE.id,
+        notAfter: 2,
+        notBefore: 1,
+        person: PERSON.id,
+        roster: 0,
+        signature: 'a'.repeat(128),
+      })
+      expect(await readBack(dead)).not.toHaveProperty('delegation')
+    })
+
+    it('keeps a delegation that names `sig`, so a live boundary still reproduces byte for byte', async () => {
+      /* The other half, and the one that matters more: this must NOT rebuild
+         pages a peer already holds. A migration that dropped every delegation
+         would break every chain in the circle. */
+      expect(await readBack(live)).toHaveProperty('delegation', live)
+    })
+
+    it.each([
+      ['bytes that are not JSON', 'not json'],
+      ['a delegation that is not an object', JSON.stringify('delegation')],
+      ['a delegation that is a list', JSON.stringify([])],
+      ['a sig that is not a string', JSON.stringify({ sig: 7 })],
+    ])('drops %s, which is unreadable by the same argument', async (_name, value) => {
+      expect(await readBack(value)).not.toHaveProperty('delegation')
+    })
+
+    it('leaves a NON-STRING to the store parser, which refuses it', async () => {
+      /* A legacy spelling is a migration; a broken type is a defect. The first
+         version of this dropped both and so repaired a malformed store into a
+         valid one — see `unreadableDelegation`. The refusal itself is pinned by
+         "refuses a delegation that is an object" below. */
+      await expect(readBack({})).rejects.toThrow(/page boundaries/u)
+    })
+
+    it('leaves a boundary that never had one alone', async () => {
+      expect(await readBack(undefined)).not.toHaveProperty('delegation')
+    })
+  })
+
   it('writes on the book’s own lane, never one derived here', async () => {
     /* ⚠️ `folderOf` is MANY-TO-ONE, so a lane keyed on the raw id splits one
        directory across two lanes — and a rekeyed book has to stay on the lane
