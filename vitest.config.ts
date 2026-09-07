@@ -159,6 +159,18 @@ const COVERAGE_EXCLUDE = [
    * and a native import. */
   'src/main.tsx',
   'src/cli/main.ts',
+  /* A THIRD PROCESS ENTRY, on the same rule and for a sharper reason than the
+   * other two: `circle-drive.mjs` reads `process.argv`, writes to a real
+   * stream, sets an exit code AND needs a live WebSocket to a running app with
+   * a debug bridge. Nothing can call it from a test, so it counts as zero and
+   * says nothing about the code that matters.
+   *
+   * Everything it does beyond dispatch lives in `scripts/lib/circle-scripts.mjs`
+   * — every script it sends into the webview, and its argument parsing — which
+   * IS measured, at 63 tests. That split is the point: the builders were inside
+   * the entry until 2026-09-08, where two escaping defects reached a real run
+   * because nothing could compile them. */
+  'scripts/circle-drive.mjs',
 ]
 
 /**

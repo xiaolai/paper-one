@@ -1,10 +1,10 @@
 import { Script } from 'node:vm'
 import { describe, expect, it } from 'vitest'
-import { clickShare, filterShelf, moreSelector, openMatch, parse, rowState, shelfMatches, stateOfRow, withdrawRow } from './circle-drive.mjs'
+import { clickShare, filterShelf, flipSwitch, moreSelector, muteLabel, openMatch, parse, rowState, shelfLabel, shelfMatches, stateOfRow, withdrawRow } from './circle-scripts.mjs'
 
 /**
- * The scripts this driver sends into the webview, checked for the one thing
- * that actually went wrong: whether they PARSE.
+ * The scripts the circle driver sends into the webview, checked for the one
+ * thing that actually went wrong: whether they PARSE.
  *
  * ⚠️ **THIS IS THE TEST THAT WOULD HAVE SAVED THE MOST TIME AND WAS WRITTEN
  * LAST.** Two separate escaping mistakes shipped into these builders on
@@ -123,6 +123,53 @@ describe('the values actually reach the script', () => {
     const source = shelfMatches(title)
     expect(parses(source)).toBe(true)
     expect(source).toContain(JSON.stringify(moreSelector(title)))
+  })
+})
+
+describe('the per-person switches', () => {
+  /* Both switches on a roster row are driven through ONE builder. They were two
+     until WI-24.C3 needed the shelf one, and a second copy filtered differently
+     is how the two come to disagree about which control they mean. */
+  const NAMES = [
+    ['a plain name', 'Ann'],
+    ['a name with an apostrophe, which the label already contains one of', "O'Brien"],
+    ['a curly apostrophe', 'O’Brien'],
+    ['a double quote', 'The "Real" Ann'],
+    ['a backslash', 'Ann\\Bob'],
+    ['a dollar-brace', 'Ann ${x}'],
+  ]
+
+  it.each(NAMES)('builds a parseable mute flip for %s', (_what, name) => {
+    for (const on of [true, false]) expect(parses(flipSwitch(muteLabel(name), on))).toBe(true)
+  })
+
+  it.each(NAMES)('builds a parseable shelf flip for %s', (_what, name) => {
+    for (const on of [true, false]) expect(parses(flipSwitch(shelfLabel(name), on))).toBe(true)
+  })
+
+  it('names the two controls the way the UI does', () => {
+    /* If these drift from `RosterSection.tsx`, the driver clicks nothing and
+       reports "no switch labelled …" — which reads as a missing feature. */
+    expect(muteLabel('Ann')).toBe("Hold back Ann's passages")
+    expect(shelfLabel('Ann')).toBe('Show my shelf to Ann')
+  })
+
+  it('compares against the state it wants, so an already-correct switch is left alone', () => {
+    expect(flipSwitch(muteLabel('Ann'), true)).toContain('box.checked === true')
+    expect(flipSwitch(muteLabel('Ann'), false)).toContain('box.checked === false')
+  })
+
+  it('embeds a name as DATA, so a dollar-brace in it is inert', () => {
+    /* ⚠️ **NOT THE SAME CHECK AS "no `${` anywhere", AND THE FIRST VERSION OF
+       THIS TEST CONFLATED THEM.** The scripts above must carry no substitution
+       in CODE position — that was the defect that emitted `${...}` verbatim and
+       never parsed. A dollar-brace inside a QUOTED STRING is different: it is
+       somebody's display name, it is inert, and forbidding it would forbid a
+       legal name. What matters is that the name arrives as a string literal. */
+    const name = 'Ann ${x}'
+    const source = flipSwitch(shelfLabel(name), true)
+    expect(parses(source)).toBe(true)
+    expect(source).toContain(JSON.stringify(shelfLabel(name)))
   })
 })
 

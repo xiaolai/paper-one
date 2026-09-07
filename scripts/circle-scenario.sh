@@ -78,6 +78,8 @@ die() { echo "$*" >&2; exit 2; }
 remote=''
 book=''
 falsify=no
+shelf_half=no
+far_port=''
 port=31415
 # ⚠️ **THE DEFAULT SPANS TWO ROUNDS, NOT ONE, AND THAT IS A MEASURED CORRECTION.**
 # It was 420 s — one 300 s period plus slack — and a run failed on 2026-09-07
@@ -102,6 +104,8 @@ while [ $# -gt 0 ]; do
     --book) book="${2:-}"; shift 2 || die 'usage: --book ID' ;;
     --port) port="${2:-}"; shift 2 || die 'usage: --port N' ;;
     --falsify) falsify=yes; shift ;;
+    --shelf) shelf_half=yes; shift ;;
+    --far-port) far_port="${2:-}"; shift 2 || die 'usage: --far-port N' ;;
     -h|--help) sed -n '2,66p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) [ -n "$remote" ] && die 'one <user@host>, please'; remote="$1"; shift ;;
@@ -481,6 +485,19 @@ else
     pass "the passage did NOT cross with the far end stopped — the converge step can fail, so a pass from it means something"
   else
     fail "the passage did not reach $remote within ${watch_s}s (cadence period ${CADENCE_PERIOD_S}s, so that is $((watch_s / CADENCE_PERIOD_S)) full round(s))"
+    # ⚠️ **THE PREFLIGHT'S LOCK CHECK IS A SNAPSHOT, AND A RUN IS LONG ENOUGH TO
+    # OUTLIVE IT.** A screen that was unlocked at step 5 can idle out during a
+    # 13-minute converge; the far end then stops fetching, and the failure above
+    # reads as a protocol defect. Measured 2026-09-08 — the far screen re-locked
+    # mid-run and a shelf that should have crossed simply did not.
+    #
+    # Asked again ONLY on failure: it costs nothing on the happy path, and it is
+    # the difference between "the circle is broken" and "nobody is at that Mac".
+    case "$(screen_lock_state remote)" in
+      yes) note "AND THE SCREEN ON $remote IS LOCKED NOW — it was unlocked at preflight. Its webview is suspended, so this failure says nothing about the circle. Unlock it, and keep it awake (caffeinate -d) for a run this long." ;;
+      no)  note "the screen on $remote is still unlocked, so this failure is not that" ;;
+      *)   note "the screen's lock state on $remote could not be re-read" ;;
+    esac
     note "the far end's last rounds, if it is recording them:"
     remote_sh "tail -3 \"\$HOME/$DIAGNOSTICS\" 2>/dev/null" | while IFS= read -r line; do
       log "        $(printf '%s' "$line" | cut -c1-260)"
@@ -571,6 +588,119 @@ for f in root.glob("*/relationship.json"):
     pass "let $friend_name back — a mute is reversible, which is the whole difference from Remove"
   else
     fail "could not let $friend_name back, and the harness has left them held: $(printf '%s' "$back" | tr -d '\n' | cut -c1-200)"
+  fi
+fi
+
+# ── the shelf, and a jacket verified against its digest — WI-24.C3 ─────────
+#
+# Runs only with --shelf, because it changes a DISCLOSURE: the switch shows the
+# far end every book in this library, including ones nothing has been shared
+# from. That is a decision a reader makes, not one a harness makes on every run.
+#
+# ⚠️ **AN EMPTY SHELF AND A SWITCH THAT IS OFF ARE THE SAME ANSWER**, on purpose
+# — `fetchShelf`'s own note: *"a person the switch is off for answers exactly as
+# a reader who owns nothing does … an empty answer is an empty shelf, and
+# nothing is written for it."* So the ABSENCE of `shelf.json` proves nothing,
+# and this asserts a non-empty one landed.
+#
+# ⚠️ **AND A JACKET IS FETCHED WHEN A ROW IS SEEN, NOT DURING THE ROUND.**
+# `covers.ts` asks the publishing device only for a row that is actually drawn,
+# so waiting for covers after flipping a switch waits for ever. The far end has
+# to be driven to OPEN the friend's shelf — which needs a bridge over there, and
+# is why `--shelf` also needs `--far-port`.
+
+if [ "$shelf_half" = yes ]; then
+  log ""
+  log "## The shelf, and a jacket — WI-24.C3"
+
+  if [ -z "$far_port" ]; then
+    fail "--shelf needs --far-port N: a jacket is fetched only for a row that is DRAWN, so the far end must be driven to open the friend's shelf. Tunnel its bridge first: ssh -N -L N:127.0.0.1:31415 $remote"
+  else
+    ours="$(printf '%s' "$identity" | python3 -c 'import json,sys; print(json.load(sys.stdin)["person"])' 2>/dev/null)"
+    far_dir="\$HOME/$DATA_DIR/circle/$ours"
+
+    on="$(drive shelf --person "$friend_name" 2>&1)"
+    if printf '%s' "$on" | grep -q '"ok":true'; then
+      pass "turned the shelf switch on for $friend_name, through the control on the Circle screen"
+    else
+      fail "could not turn the shelf switch on: $(printf '%s' "$on" | tr -d '\n' | cut -c1-200)"
+    fi
+
+    deadline=$(( $(date +%s) + timeout_s ))
+    landed=''
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      landed="$(remote_sh "python3 -c \"
+import json,sys,pathlib
+p = pathlib.Path('$far_dir'.replace('\\\$HOME', str(pathlib.Path.home())))/'shelf.json'
+if not p.exists(): sys.exit(1)
+d = json.load(open(p))
+w = d.get('works') or []
+print(len(w))
+sys.exit(0 if w else 1)\"" 2>/dev/null)" && [ -n "$landed" ] && break
+      landed=''
+      sleep 15
+    done
+
+    if [ -n "$landed" ]; then
+      pass "the shelf crossed: $remote holds circle/<us>/shelf.json with $landed work(s) — a NON-EMPTY one, because an empty answer is indistinguishable from the switch being off"
+    else
+      fail "the shelf did not reach $remote within ${timeout_s}s, or arrived empty (which is the same answer as the switch being off)"
+      case "$(screen_lock_state remote)" in
+        yes) note "AND THE SCREEN ON $remote IS LOCKED NOW — its webview is suspended, so this says nothing about the circle" ;;
+        *) : ;;
+      esac
+    fi
+
+    # The jacket. Drawn rows are what trigger the fetch, so the far end opens
+    # the friend's shelf; then a verified cover appears under its own digest.
+    seen="$(node "$REPO_ROOT/scripts/circle-drive.mjs" --port "$far_port" friend 2>&1)"
+    if printf '%s' "$seen" | grep -q '"ok":true'; then
+      pass "opened our shelf on $remote, which is what asks for a jacket at all"
+    else
+      fail "could not open our shelf on $remote: $(printf '%s' "$seen" | tr -d '\n' | cut -c1-200)"
+    fi
+
+    deadline=$(( $(date +%s) + 240 ))
+    digest=''
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      digest="$(remote_sh "ls \"$far_dir/covers\" 2>/dev/null | head -1")"
+      [ -n "$digest" ] && break
+      sleep 10
+    done
+
+    if [ -z "$digest" ]; then
+      fail "no jacket was kept on $remote within 240s — nothing under circle/<us>/covers/"
+    else
+      # ⚠️ **THE FILENAME IS THE DIGEST, so re-hashing the bytes is what turns
+      # "a file appeared" into "it was VERIFIED".** A build that kept whatever
+      # arrived would put a file here too, named for the digest it was promised
+      # rather than the one it has.
+      # ⚠️ **BASE64 THROUGH ssh, NOT scp, AND THE REASON IS THE PATH.** Every
+      # remote path here carries a literal `$HOME` for the REMOTE shell to
+      # expand — which `remote_sh` does and `scp` does not: OpenSSH 9 moved scp
+      # onto SFTP, where nothing expands a shell variable. The first version
+      # copied nothing and failed as "could not read the kept jacket back",
+      # which reads as a missing file rather than a broken command. Piping the
+      # bytes through the same shell that resolves the path cannot disagree
+      # with it.
+      remote_sh "base64 < \"$far_dir/covers/$digest\"" 2>/dev/null | base64 -d > /tmp/paper-jacket.bin 2>/dev/null
+      if [ -s /tmp/paper-jacket.bin ]; then
+        got="$(node -e "
+import('@noble/hashes/blake3.js').then(async ({ blake3 }) => {
+  const { readFileSync } = await import('node:fs')
+  const b = blake3(new Uint8Array(readFileSync('/tmp/paper-jacket.bin')))
+  process.stdout.write(Buffer.from(b).toString('hex'))
+})" 2>/dev/null)"
+        if [ "$got" = "$digest" ]; then
+          pass "the jacket is VERIFIED, not merely present: blake3 of the kept bytes is ${digest:0:16}…, which is the name it is filed under"
+        else
+          fail "the kept jacket does NOT hash to its own name: filed as ${digest:0:16}…, hashes to ${got:0:16}…"
+        fi
+      else
+        fail "could not read the kept jacket back to hash it"
+      fi
+      rm -f /tmp/paper-jacket.bin
+    fi
   fi
 fi
 
