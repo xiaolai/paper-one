@@ -383,8 +383,15 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
     },
     cover: async (person, book, signal) => {
       if (book.cover === null || book.device === null) return null
+      /* ⚠️ **ASKED BEFORE QUEUEING, NOT ONLY AFTER A SLOT OPENS.** The abort was
+         checked inside the slot, so a request already abandoned still took its
+         place in the queue and waited out every transfer ahead of it, holding
+         its promise and captured book. A row scrolled past before its turn is
+         work nobody wants done; there is no reason to queue it at all. */
+      if (signal?.aborted) return null
       const { device, pub, cover } = book
       return inSlot(async () => {
+        /* And again on the way in: the wait may have been long. */
         if (signal?.aborted) return null
         try {
           /* Nothing fetched, nor answered from disk, for a person the record no
@@ -412,17 +419,21 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
       const book = books.find((one) => one.id === bookId)
       if (book === undefined) return EMPTY_VIEW
       /* Three independent reads per person, and the people independent of
-         each other: read together, not one round trip after another. */
-      const people = await Promise.all(
-        (await deps.people()).map(async (known) => {
-          const [relationship, shelf, held] = await Promise.all([
-            deps.relationship(known.person),
-            deps.heldShelf(known.person),
-            deps.heldOf(bookId, known.person),
-          ])
-          return { person: known.person, name: known.displayName, relationship, shelf, held }
-        }),
-      )
+         each other: read together, not one round trip after another.
+         ⚠️ **THROUGH THE SAME POOL `friend()` USES.** This was a bare
+         `Promise.all` over the roster, so a large circle opened three
+         filesystem reads per person all at once — and an overlapping
+         subscription refresh multiplied it, because nothing bounded the two
+         against each other. `friend()` was already bounded; `book()` is
+         reached on every book opened, which is more often. */
+      const people = await pooled(await deps.people(), async (known) => {
+        const [relationship, shelf, held] = await Promise.all([
+          deps.relationship(known.person),
+          deps.heldShelf(known.person),
+          deps.heldOf(bookId, known.person),
+        ])
+        return { person: known.person, name: known.displayName, relationship, shelf, held }
+      })
       return viewOf(book, books, people)
     },
     forget: (person) =>
@@ -448,10 +459,25 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
            the next hello from somebody just removed would be let straight back
            in, with nothing on disk to show what happened. */
         if (written.state !== 'exited') throw new Error(LOST_WRITE)
-        /* The purge is what says so — `purgePerson` tells `onChanged` as its
-           files go — so nothing is said twice here. */
-        await deps.purge(person, deps.books().map((book) => book.id))
-        await deps.forgetPeer(person)
+        /* ⚠️ **THE TRANSITION IS ANNOUNCED WHATEVER THE PURGE DOES.** The purge
+           was left to do the telling, on the reasoning that `purgePerson`
+           reports as its files go — but it is the LAST step of that dependency,
+           behind `covers.purge` and `listTrash`. Either can fail after the
+           record has already become `exited`, and then no listener is ever
+           woken: every subscribed view goes on drawing a person the reader has
+           removed, until something else happens to refresh it. The relationship
+           has changed by this line, so this line is where it is said. */
+        try {
+          await deps.purge(person, deps.books().map((book) => book.id))
+          await deps.forgetPeer(person)
+        } catch (cause) {
+          /* On the happy path `purgePerson` does the telling as its files go,
+             and telling again here would wake every subscriber twice for one
+             event. On a FAILURE it never reaches that step — so this is the
+             only line that can say the relationship ended. */
+          changed()
+          throw cause
+        }
       }),
     subscribe: listeners.subscribe,
     dispose: () => {

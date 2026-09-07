@@ -221,6 +221,30 @@ describe('slotsOf — the concurrency bound, where it can actually fail', () => 
   })
 })
 
+describe('forgetting when the purge fails', () => {
+  it('still tells subscribers, because the relationship has already ended', async () => {
+    /* ⚠️ **THE TELLING WAS LEFT ENTIRELY TO THE PURGE**, on the reasoning that
+       `purgePerson` reports as its files go. It does — but it is the LAST step
+       of that dependency, behind `covers.purge` and `listTrash`. Either can
+       fail after the record has become `exited`, and then no listener is ever
+       woken: every subscribed view goes on drawing somebody the reader has
+       removed, until something unrelated happens to refresh it. */
+    const { port } = world({ purge: vi.fn(() => Promise.reject(new Error('disk full'))) })
+    const told = vi.fn()
+    port.subscribe(told)
+    await expect(port.forget(BOB)).rejects.toThrow('disk full')
+    expect(told).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not tell twice on the happy path, where the purge already does', async () => {
+    const { port } = world()
+    const told = vi.fn()
+    port.subscribe(told)
+    await port.forget(BOB)
+    expect(told).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('a relationship write that LOSES the merge', () => {
   /* ⚠️ **`writeRelationship` MERGES, AND EVERY CALLER THREW ITS ANSWER AWAY.**
      Within one epoch `mergeRelationship` keeps whichever record has the later
