@@ -164,6 +164,7 @@ export {
 } from './core/diagnosticsLog'
 export type { DiagnosticEntry, DiagnosticLog, DiagnosticSpool } from './core/diagnosticsLog'
 export { CAPABILITY_UI, type CapabilityUiClass } from './core/capabilityUi'
+export { inlineQrSvg } from './core/qrSvg'
 /* EVERYTHING A CAPABILITY'S `start` ACQUIRED — see `core/capabilitySession.ts`. */
 export { openSession } from './core/capabilitySession'
 export type { CapabilitySession } from './core/capabilitySession'

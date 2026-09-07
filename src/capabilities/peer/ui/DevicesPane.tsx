@@ -1,5 +1,5 @@
 import { useState, useSyncExternalStore } from 'react'
-import { CAPABILITY_UI as ui } from '../../../kernel'
+import { CAPABILITY_UI as ui, inlineQrSvg } from '../../../kernel'
 import type { DevicesModel } from './devicesModel'
 import {
   ROLE_CHOICES,
@@ -9,7 +9,6 @@ import {
   describeReach,
   describeRole,
   grantsAreEnforceable,
-  inlineQrSvg,
   pairingFault,
   peerCanWrite,
   roleIsSettable,

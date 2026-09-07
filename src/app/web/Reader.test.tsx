@@ -44,6 +44,50 @@ Element.prototype.getBoundingClientRect = function (): DOMRect {
 }
 
 /**
+ * ⚠️ **ONE HOISTED STAND-IN, REPLACING EIGHT COPIES OF A RACY IDIOM.**
+ *
+ * Every site in this file used to do `vi.doMock` → `vi.resetModules()` →
+ * `await import('./Reader')`, and they were byte-identical apart from what they
+ * waited for afterwards. That idiom re-evaluates the module graph per test and
+ * depends on the mock winning a race against a registry the whole worker
+ * shares — so when it lost, the REAL `FoliateView` mounted, pushed nothing, and
+ * the wait sat there until the ceiling.
+ *
+ * Measured 2026-09-06: three failures at exactly whatever `asyncUtilTimeout`
+ * was (5 100 ms, 10 027 ms, 10 045 ms) against ten passes at 79–101 ms, with
+ * nothing in between — and only ever with BOTH many files and coverage, never
+ * alone, which fits a per-worker registry carrying state from what ran before.
+ *
+ * ⚠️ **THE CAUSE WAS NEVER PROVEN, AND THIS IS NOT SOLD AS A DIAGNOSIS.** What
+ * justifies it is that the pattern is fragile in a way the replacement is not:
+ * `vi.mock` is hoisted above the imports, so the `Reader` imported at the top
+ * of this file already has the stand-in — no re-evaluation, and no race to
+ * lose. Deterministic by construction rather than by argument.
+ */
+const view = vi.hoisted(() => ({
+  onProps: null as ((props: Record<string, unknown>) => void) | null,
+}))
+
+vi.mock('../../kernel/ui/reader/FoliateView', () => ({
+  FoliateView: (props: Record<string, unknown>) => {
+    view.onProps?.(props)
+    return null
+  },
+}))
+
+/** Send the stand-in's props into `captured` for the rest of this test. */
+function capturingInto(captured: Record<string, unknown>): void {
+  captured['sources'] ??= []
+  view.onProps = (props) => {
+    Object.assign(captured, props)
+    /* EVERY SOURCE, not just the last: the decision is "which one did it ever
+       hand over", and a re-render with `file: null` would otherwise erase the
+       answer. */
+    ;(captured['sources'] as unknown[]).push(props['file'])
+  }
+}
+
+/**
  * ⚠️ **WHAT `Reader` HANDS THE READER, CAPTURED — AND IT USED TO BE INVISIBLE.**
  *
  * `FoliateView` mounts a custom element and cannot render in jsdom, so several
@@ -57,24 +101,10 @@ Element.prototype.getBoundingClientRect = function (): DOMRect {
  * that records what it is given — the same idiom the page-intent tests below
  * already use, hoisted here so the source can be asserted rather than inferred.
  */
-async function withView(
-  render_: (Fresh: typeof Reader) => void,
-): Promise<Record<string, unknown>> {
-  const captured: Record<string, unknown> = {}
-  vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
-    FoliateView: (props: Record<string, unknown>) => {
-      Object.assign(captured, props)
-      /* EVERY SOURCE, not just the last: the decision is "which one did it ever
-         hand over", and a re-render with `file: null` would otherwise erase the
-         answer. */
-      ;(captured['sources'] as unknown[]).push(props['file'])
-      return null
-    },
-  }))
-  captured['sources'] = []
-  vi.resetModules()
-  const { Reader: Fresh } = await import('./Reader')
-  render_(Fresh)
+function withView(render_: (Fresh: typeof Reader) => void): Record<string, unknown> {
+  const captured: Record<string, unknown> = { sources: [] }
+  capturingInto(captured)
+  render_(Reader)
   return captured
 }
 
@@ -84,8 +114,10 @@ const sourcesOf = (captured: Record<string, unknown>) =>
 
 afterEach(() => {
   cleanup()
-  vi.doUnmock('../../kernel/ui/reader/FoliateView')
-  vi.resetModules()
+  /* The stand-in is hoisted and permanent; what is per-test is where it SENDS
+     props. Cleared so a listener from a finished test cannot be handed props by
+     a later render and quietly fill a `captured` nobody is reading. */
+  view.onProps = null
 })
 
 function shelf(facts: Partial<ContentFacts>) {
@@ -170,7 +202,7 @@ describe('Reader', () => {
    */
   it('gives a measured PDF a range transport and never fetches it whole', async () => {
     const { content, fileOf, readRange } = shelf({ ext: 'pdf', size: 614907 })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
     )
 
@@ -244,7 +276,7 @@ describe('Reader', () => {
       },
       fileOf: async () => new File([], 'x.pdf'),
     } as unknown as RemoteContent
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={failing} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
     )
     await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
@@ -291,7 +323,7 @@ describe('Reader', () => {
    */
   it('re-measures when the window changes size', async () => {
     const { content } = shelf({ ext: 'epub' })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
     )
     await waitFor(() => expect(captured['measure']).toBeTypeOf('number'))
@@ -333,7 +365,7 @@ describe('Reader', () => {
   it('opens a book where it was left', async () => {
     const positions = fakePositions({ one: { cfi: 'epubcfi(/6/4!/4/2/10)', at: 1 } })
     const { content } = shelf({ ext: 'epub' })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} />),
     )
     await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
@@ -354,7 +386,7 @@ describe('Reader', () => {
   it('starts at the beginning for a book it has never opened', async () => {
     const positions = fakePositions()
     const { content } = shelf({ ext: 'epub' })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} />),
     )
     await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
@@ -390,15 +422,9 @@ describe('Reader', () => {
 
     /* Reach the props FoliateView was handed, which is where the wiring lives —
        the component itself cannot open a book in jsdom. */
-    const captured: Record<string, unknown> = {}
-    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
-      FoliateView: (props: Record<string, unknown>) => {
-        Object.assign(captured, props)
-        return null
-      },
-    }))
-    vi.resetModules()
-    const { Reader: Fresh } = await import('./Reader')
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
     render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
     await waitFor(() => expect(captured['onNavigator']).toBeTypeOf('function'))
 
@@ -413,8 +439,6 @@ describe('Reader', () => {
     ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, null)
     expect(() => intent('next')).not.toThrow()
 
-    vi.doUnmock('../../kernel/ui/reader/FoliateView')
-    vi.resetModules()
   })
 
   /**
@@ -465,15 +489,9 @@ describe('Reader', () => {
       dispose: () => {},
     }
 
-    const captured: Record<string, unknown> = {}
-    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
-      FoliateView: (props: Record<string, unknown>) => {
-        Object.assign(captured, props)
-        return null
-      },
-    }))
-    vi.resetModules()
-    const { Reader: Fresh } = await import('./Reader')
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
     render(
       <Fresh
         content={content}
@@ -513,8 +531,6 @@ describe('Reader', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Notes' }))
     expect(screen.queryByLabelText('Search this book')).toBeNull()
 
-    vi.doUnmock('../../kernel/ui/reader/FoliateView')
-    vi.resetModules()
     vi.unstubAllGlobals()
   })
 
@@ -583,15 +599,9 @@ describe('Reader', () => {
       },
     })
 
-    const captured: Record<string, unknown> = {}
-    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
-      FoliateView: (props: Record<string, unknown>) => {
-        Object.assign(captured, props)
-        return null
-      },
-    }))
-    vi.resetModules()
-    const { Reader: Fresh } = await import('./Reader')
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
     render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
     await waitFor(() => expect(captured['theme']).toBeTypeOf('string'))
 
@@ -687,8 +697,6 @@ describe('Reader', () => {
       expect(keysWritten(), `nothing ever wrote ${setting.key}`).toContain(setting.key)
     }
 
-    vi.doUnmock('../../kernel/ui/reader/FoliateView')
-    vi.resetModules()
     vi.unstubAllGlobals()
   })
 
@@ -711,15 +719,9 @@ describe('Reader', () => {
       goTo: (target: string) => went.push(target),
     }
 
-    const captured: Record<string, unknown> = {}
-    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
-      FoliateView: (props: Record<string, unknown>) => {
-        Object.assign(captured, props)
-        return null
-      },
-    }))
-    vi.resetModules()
-    const { Reader: Fresh } = await import('./Reader')
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
     render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
     await waitFor(() => expect(captured['onToc']).toBeTypeOf('function'))
 
@@ -762,8 +764,6 @@ describe('Reader', () => {
        choice would hide the page the reader just asked for. */
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Chapter Two' })).toBeNull())
 
-    vi.doUnmock('../../kernel/ui/reader/FoliateView')
-    vi.resetModules()
   })
 
   /**
@@ -790,15 +790,9 @@ describe('Reader', () => {
    */
   it('says on the page when the renderer reports a failure', async () => {
     const { content } = shelf({ ext: 'epub' })
-    const captured: Record<string, unknown> = {}
-    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
-      FoliateView: (props: Record<string, unknown>) => {
-        Object.assign(captured, props)
-        return null
-      },
-    }))
-    vi.resetModules()
-    const { Reader: Fresh } = await import('./Reader')
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
     render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
     await waitFor(() => expect(captured['onError']).toBeTypeOf('function'))
 
@@ -814,8 +808,6 @@ describe('Reader', () => {
     fireEvent.click(screen.getByRole('button', { name: /dismiss/i }))
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
 
-    vi.doUnmock('../../kernel/ui/reader/FoliateView')
-    vi.resetModules()
   })
 
   it('turns the page from a tap on the book, and lets go of the document after', async () => {
@@ -828,15 +820,9 @@ describe('Reader', () => {
       goRight: () => seen.push('goRight'),
     }
 
-    const captured: Record<string, unknown> = {}
-    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
-      FoliateView: (props: Record<string, unknown>) => {
-        Object.assign(captured, props)
-        return null
-      },
-    }))
-    vi.resetModules()
-    const { Reader: Fresh } = await import('./Reader')
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
     render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
     await waitFor(() => expect(captured['onDocument']).toBeTypeOf('function'))
     ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
@@ -955,8 +941,6 @@ describe('Reader', () => {
     tapAt(10)
     expect(seen, 'the listener must be gone with the document').toEqual([])
 
-    vi.doUnmock('../../kernel/ui/reader/FoliateView')
-    vi.resetModules()
   })
 
   /**
@@ -983,15 +967,9 @@ describe('Reader', () => {
       goRight: () => seen.push('goRight'),
     }
 
-    const captured: Record<string, unknown> = {}
-    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
-      FoliateView: (props: Record<string, unknown>) => {
-        Object.assign(captured, props)
-        return null
-      },
-    }))
-    vi.resetModules()
-    const { Reader: Fresh } = await import('./Reader')
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
     render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
     await waitFor(() => expect(captured['onDocument']).toBeTypeOf('function'))
     ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
@@ -1030,8 +1008,6 @@ describe('Reader', () => {
     expect(seen, 'a tap on an ARIA widget must not also turn the page').toEqual([])
 
     ;(captured['onDocument'] as (g: number, d: Document | null) => void)(0, null)
-    vi.doUnmock('../../kernel/ui/reader/FoliateView')
-    vi.resetModules()
   })
 })
 
@@ -1063,7 +1039,7 @@ describe('a note the reader taps', () => {
   it('is given somewhere to render, and somewhere to be shown', async () => {
     const { content } = shelf({ ext: 'epub' })
     const mounts: (HTMLElement | null)[] = []
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
     )
     await waitFor(() => expect(captured['onNavigator']).toBeTypeOf('function'))
@@ -1093,7 +1069,7 @@ describe('a note the reader taps', () => {
 
   it('is drawn once the session says it has rendered one', async () => {
     const { content } = shelf({ ext: 'epub' })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
     )
     await waitFor(() => expect(captured['onFootnote']).toBeTypeOf('function'))
@@ -1137,7 +1113,7 @@ describe('Reader and the shelf’s copy of the position', () => {
     const positions = fakePositions({ one: { cfi: DEVICE, at: 1 } })
     const remote = remoteWith({ cfi: SHELF, progress: 0.5, at: 2 })
     const { content } = shelf({ ext: 'epub' })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
     )
     await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
@@ -1150,7 +1126,7 @@ describe('Reader and the shelf’s copy of the position', () => {
     const positions = fakePositions({ one: { cfi: DEVICE, at: 5 } })
     const remote = remoteWith({ cfi: SHELF, progress: 0.5, at: 2 })
     const { content } = shelf({ ext: 'epub' })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
     )
     await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
@@ -1167,7 +1143,7 @@ describe('Reader and the shelf’s copy of the position', () => {
       dispose: vi.fn(),
     }
     const { content } = shelf({ ext: 'epub' })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} remote={remote} />),
     )
     await waitFor(() => expect(remote.read).toHaveBeenCalled())
@@ -1182,7 +1158,7 @@ describe('Reader and the shelf’s copy of the position', () => {
     const positions = fakePositions({ one: { cfi: DEVICE, at: 1 } })
     const remote = remoteWith(new Error('the link is reconnecting'))
     const { content } = shelf({ ext: 'epub' })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
     )
     await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
@@ -1192,7 +1168,7 @@ describe('Reader and the shelf’s copy of the position', () => {
   it('reports a turn to the shelf — the phone turns a page, book.json on the shelf carries it', async () => {
     const remote = remoteWith(null)
     const { content } = shelf({ ext: 'epub' })
-    const captured = await withView((Fresh) =>
+    const captured = withView((Fresh) =>
       render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} remote={remote} />),
     )
     await waitFor(() => expect(captured['onRelocate']).toBeTypeOf('function'))

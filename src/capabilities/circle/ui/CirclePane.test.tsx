@@ -166,8 +166,25 @@ describe('the circle panel', () => {
       fireEvent.click(screen.getByRole('button', { name: /Show my twelve words/u }))
     })
 
-    await screen.findByText(/abandon abandon about/u)
+    /* ⚠️ **THE WORDS ARE SEPARATE ELEMENTS NOW, AND THAT IS THE POINT.** They
+       used to render as one `.paper-cap-code` blob, which is `user-select: all`
+       — a class written so a hundred-character pairing link could be taken in a
+       click, applied to the reader's root key. One stray click selected the
+       whole phrase, and a reader duly pasted it somewhere it should never go.
+       Numbered list items are read and transcribed, not grabbed. */
+    const words = await screen.findAllByRole('listitem')
+    expect(words.map((li) => li.textContent)).toEqual(['abandon', 'abandon', 'about'])
     expect(phrase).toHaveBeenCalledTimes(1)
+
+    /* AND THE CAUTION COMES FIRST. It used to sit UNDER the words, so a reader
+       learned what they were holding only after it was on screen — which is a
+       description of the accident rather than a warning against it. */
+    const caution = screen.getByText(/Anyone who has these twelve words is you/u)
+    expect(
+      caution.compareDocumentPosition(words[0]!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the warning must precede the words',
+    ).toBeTruthy()
+    expect(screen.getByText(/not a safe place/u)).toBeTruthy()
   })
 
   it('takes them off screen again', async () => {
@@ -176,13 +193,15 @@ describe('the circle panel', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Show my twelve words/u }))
     })
-    await screen.findByText(/abandon abandon abandon/u)
+    expect((await screen.findAllByRole('listitem')).length).toBeGreaterThan(0)
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Hide/u }))
+      fireEvent.click(screen.getByRole('button', { name: /Hide them/u }))
     })
 
-    await waitFor(() => expect(screen.queryByText(/abandon abandon abandon/u)).toBeNull())
+    /* Both halves go: the words AND the caution that belongs to them. */
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(0))
+    expect(screen.queryByText(/Anyone who has these twelve words is you/u)).toBeNull()
   })
 
   it('lists the people, and says what removing one does NOT do', async () => {
@@ -251,7 +270,15 @@ describe('the circle panel', () => {
     await act(async () => { fireEvent.click(add) })
 
     expect(offer).toHaveBeenCalledTimes(1)
-    await screen.findByText('paper://pair?s=abc')
+    /* ⚠️ **WAS `findByText('paper://pair?s=abc')`, WHICH PINNED THE DEFECT.**
+       The offer has always carried a QR — "it is what the other device scans" —
+       and this screen printed the URL instead: a hundred percent-encoded
+       characters carrying a key and the reader's LAN addresses, laid out as if
+       it were something to read. The link is now a copy button and a picture,
+       and the raw string appears only when copying fails. */
+    await screen.findByLabelText('Pairing QR code')
+    expect(screen.getByRole('button', { name: /Copy link/u })).toBeTruthy()
+    expect(screen.queryByText('paper://pair?s=abc'), 'the URL is not for reading').toBeNull()
   })
 
   it('joins a friend’s link and shows the digits to compare', async () => {
@@ -266,6 +293,52 @@ describe('the circle panel', () => {
     /* Trimmed: a link out of a chat app arrives with whitespace around it. */
     expect(join).toHaveBeenCalledWith('paper://pair?s=zzz')
     await screen.findByText('481902')
+  })
+
+  it('lets a joiner back out, because either end can stop', async () => {
+    /* ⚠️ **THIS STATE USED TO HAVE NO CONTROL OF ANY KIND.** Six digits and
+       nothing else, so a reader whose friend had walked away from the other
+       machine was stuck until they quit the app. Pairing has a human at each
+       end and either of them can change their mind; only one could say so. */
+    const join = vi.fn(() => Promise.resolve({ sas: '481902' }))
+    const cancel = vi.fn(() => Promise.resolve())
+    render(<CirclePane port={portWith({ join, cancel })} />)
+    await screen.findByText(/holds your keys/u)
+
+    fireEvent.change(screen.getByPlaceholderText(/paste a friend/u), { target: { value: 'paper://pair?s=zzz' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Join$/u })) })
+    await screen.findByText('481902')
+    /* And it says what is true while it waits: nothing has moved yet. */
+    expect(screen.getByText(/Nothing has been shared yet/u)).toBeTruthy()
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Never mind/u })) })
+    expect(cancel).toHaveBeenCalled()
+    expect(screen.queryByText('481902')).toBeNull()
+  })
+
+  it('tells the offerer that waiting is what success looks like so far', async () => {
+    /* ⚠️ **THE SCREEN SAID NOTHING WHILE IT WAITED**, which is the state a
+       reader spends the whole pairing in — and the roster's own "Nobody yet."
+       sits just below, reading as a verdict on the pairing rather than on the
+       circle. An offer nobody had used yet was indistinguishable from a failed
+       one. */
+    const offer = vi.fn(() => Promise.resolve({ url: 'paper://pair?s=abc', svg: '<svg/>', expiresAt: Date.now() + 300_000 }))
+    render(<CirclePane port={portWith({ offer })} />)
+    await screen.findByText(/holds your keys/u)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Add somebody/u })) })
+
+    expect(screen.getByText(/Nobody has used this yet/u)).toBeTruthy()
+    expect(screen.getByText(/compare six digits/u)).toBeTruthy()
+    /* The remaining life, not "a few minutes" — the reader has to decide
+       whether the link they sent is still worth waiting on. */
+    expect(screen.getByText(/It stops working in \d+:\d\d/u)).toBeTruthy()
+    /* AND A WAY TO MOVE IT THAT IS NOT SELECTING THE TEXT, which is how a
+       pairing secret ends up in a screenshot or a chat window. */
+    expect(screen.getByRole('button', { name: /Copy link/u })).toBeTruthy()
+    /* The picture is the point: two Macs cannot photograph each other, so the
+       button is the path between them — but a phone can, and the QR is what the
+       offer was built to carry. */
+    expect(screen.getByLabelText('Pairing QR code')).toBeTruthy()
   })
 
   it('lets the other side answer, because pairing takes two', async () => {
@@ -1039,8 +1112,19 @@ describe('a new person port', () => {
 })
 
 describe('the offer’s own clock', () => {
-  it('shows the link until the moment it expires, then takes it down with no other change', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  /* ⚠️ **THIS USED TO END "…with no other change", AND THE SILENCE WAS THE
+   * DEFECT.** The link vanished and the screen fell back to "Add somebody"
+   * with no account of where it had gone — so a reader who had already sent
+   * one could not tell a dead link from a friend who had not got round to it.
+   * A lapsed offer says so now, and this case asserts that it does.
+   *
+   * ⚠️ AND `setInterval` IS FAKED, because the pane ticks once a second to show
+   * how long is left. Faking only `setTimeout` left the clock stopped, so the
+   * offer never expired and the assertion below could not fail for the reason
+   * it claims. A test that fakes a different timer from the one the code uses
+   * is testing nothing. */
+  it('shows the link until the moment it expires, then says it ran out', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
     try {
       vi.setSystemTime(1_700_000_000_000)
       const offer = vi.fn(() => Promise.resolve({ url: 'paper://pair?s=soon', svg: '<svg/>', expiresAt: Date.now() + 1_000 }))
@@ -1054,17 +1138,21 @@ describe('the offer’s own clock', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0)
       })
-      expect(screen.getByText('paper://pair?s=soon')).toBeTruthy()
+      /* TRACKED BY THE QR, NOT THE URL. The raw link is no longer drawn — it
+         appears only when copying fails — so the picture is what "the offer is
+         on screen" now means. */
+      expect(screen.getByLabelText('Pairing QR code')).toBeTruthy()
       /* One millisecond short: still good. */
       await act(async () => {
         await vi.advanceTimersByTimeAsync(999)
       })
-      expect(screen.queryByText('paper://pair?s=soon')).not.toBeNull()
-      /* At expiry, the timer the pane armed takes it down. */
+      expect(screen.queryByLabelText('Pairing QR code')).not.toBeNull()
+      /* At expiry, the tick the pane armed takes it down — AND SAYS SO. */
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2)
+        await vi.advanceTimersByTimeAsync(1_100)
       })
-      expect(screen.queryByText('paper://pair?s=soon')).toBeNull()
+      expect(screen.queryByLabelText('Pairing QR code')).toBeNull()
+      expect(screen.getByText(/ran out before anybody used it/u)).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }

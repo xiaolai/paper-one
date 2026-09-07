@@ -323,7 +323,59 @@
   color: var(--muted);
   font-size: var(--text-micro);
   overflow-wrap: anywhere;
+  /* ⚠️ ONE CLICK TAKES THE WHOLE STRING, which is what a pairing link wants:
+     it is a hundred characters nobody can retype. It is emphatically NOT what a
+     recovery phrase wants — see `.paper-cap-phrase`, which exists because this
+     class was used for one. */
   user-select: all;
+}
+
+/**
+ * The twelve words, laid out to be COPIED ONTO PAPER rather than into a
+ * clipboard.
+ *
+ * ⚠️ **THE PHRASE USED TO RENDER AS `.paper-cap-code`, WHICH IS
+ * `user-select: all`.** A single click selected the reader's entire root key —
+ * the class had been written to make a hundred-character pairing URL grabbable,
+ * and the most dangerous secret in the product inherited it. The screen was
+ * optimised for copying the one thing its own warning says to write on paper,
+ * and a reader did exactly that.
+ *
+ * `user-select: text` is the difference between an accident and an intention: a
+ * password manager is a legitimate destination and still reachable by a
+ * deliberate drag; a stray click is not enough any more.
+ *
+ * Numbered, because a phrase is checked word by word against what you wrote
+ * down, and an unnumbered run of twelve is checked by squinting.
+ */
+.paper-cap-phrase {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-6) var(--space-10);
+  margin: var(--space-8) 0;
+  padding: var(--space-10);
+  border-radius: var(--radius-chip);
+  background: var(--wash);
+  user-select: text;
+}
+
+.paper-cap-phrase li {
+  display: flex;
+  gap: var(--space-6);
+  align-items: baseline;
+  font-size: var(--text-micro);
+  color: var(--ink);
+}
+
+.paper-cap-phrase li::before {
+  content: counter(list-item);
+  /* A SCALE STEP, NOT `1.4em`. Two digits of tabular numerals at the micro
+     size fit inside 16px, and the design system has a step for it — a raw
+     value here is a second opinion about spacing that nothing else shares. */
+  min-width: var(--space-16);
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .paper-cap-figure {

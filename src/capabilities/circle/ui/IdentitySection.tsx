@@ -81,13 +81,20 @@ export function IdentitySection({ port, status, refresh }: { readonly port: Pers
 
   return (
     <div className={CAPABILITY_UI.section}>
-      <div className={CAPABILITY_UI.row}>
-        <span className={CAPABILITY_UI.grow}>You</span>
-        <span className={CAPABILITY_UI.code}>{short(status.personId ?? '')}</span>
-      </div>
+      {/* ⚠️ **THE FIRST LINE USED TO BE "You — a55fdb3c…6e31".** A truncated
+          hash, in the most prominent row on the screen, under a label promising
+          identity. No reader thinks of themselves as a fingerprint, and nobody
+          arrived at this screen wanting one — it was there because it exists.
+          The meaningful fact goes first, and the fingerprint is labelled as
+          what it is actually FOR: telling two devices apart, or checking a
+          friend is looking at the same you. */}
       <div className={CAPABILITY_UI.row}>
         <span className={CAPABILITY_UI.grow}>This device</span>
         <span className={CAPABILITY_UI.value}>{status.role === 'home' ? 'holds your keys' : 'a signed-in device'}</span>
+      </div>
+      <div className={CAPABILITY_UI.row}>
+        <span className={CAPABILITY_UI.grow}>Your fingerprint</span>
+        <span className={CAPABILITY_UI.code}>{short(status.personId ?? '')}</span>
       </div>
 
       {status.atRisk ? (
@@ -124,16 +131,30 @@ export function IdentitySection({ port, status, refresh }: { readonly port: Pers
                 })
               }}
             >
-              {phrase === null ? 'Show my twelve words' : 'Hide'}
+              {phrase === null ? 'Show my twelve words' : 'Hide them'}
             </button>
           </div>
           {phrase === null ? null : (
             <>
-              <p className={CAPABILITY_UI.code}>{phrase}</p>
+              {/* ⚠️ **THE WARNING USED TO COME AFTER THE WORDS.** A reader
+                  pressed the button, the phrase appeared, and only underneath
+                  it did the screen explain that anyone holding these twelve
+                  words is them. By then it had been read, and — measured, on a
+                  real reader — selected and pasted somewhere it should never
+                  go. A caution is only a caution before the thing happens;
+                  after it, it is a description of the accident. */}
               <p className={CAPABILITY_UI.hint}>
-                These twelve words are your circle. Anyone who has them is you.
-                Write them on paper; a photograph is not a safe place.
+                Anyone who has these twelve words is you. Write them on paper.
+                A photograph, a chat window or a screenshot is not a safe place.
               </p>
+              {/* NUMBERED, AND NOT ONE-CLICK SELECTABLE — see
+                  `CAPABILITY_UI.phrase`. A phrase is checked word by word
+                  against what you wrote down. */}
+              <ol className={CAPABILITY_UI.phrase}>
+                {phrase.split(/\s+/u).filter((word) => word !== '').map((word, at) => (
+                  <li key={`${at}-${word}`}>{word}</li>
+                ))}
+              </ol>
             </>
           )}
         </>
