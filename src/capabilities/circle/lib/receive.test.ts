@@ -252,6 +252,36 @@ describe('the delegation a page carries', () => {
   it('reads a real one, so the refusals above are not vacuous', () => {
     expect(readDelegation(delegation(), PERSON.id, pageCrypto)).not.toBeNull()
   })
+
+  it('is the shape `person.rs` emits, which is the claim every test here rests on', () => {
+    /* ⚠️ **THE FIXTURE ABOVE SAYS "in the shape `person.rs` emits" AND
+       NOTHING CHECKED IT.** It was wrong. Rust called the signature field
+       `signature`; `isDelegation` demands `sig` and refuses any object with a
+       seventh member, so every page from a Rust-signing device was refused
+       before its signature was read — as `may-not-speak`, reported as
+       `bad-delegation`. Measured on two machines 2026-09-07: `accepted: 0`,
+       `refusedBecause: {'bad-delegation': 1}`.
+
+       Every other test in this file builds its delegation with `delegation()`,
+       so all of them passed. A suite this thorough about the shape it invented
+       cannot notice that the other language invented a different one — which
+       is what makes this the one assertion in the file that is not about
+       behaviour at all, but about the fixture being true.
+
+       ⚠️ **THE SAME SIX NAMES ARE PINNED IN RUST**, by
+       `a_delegation_is_wire_shaped` in `person.rs`, sorted the same way and
+       carrying the same warning. Neither list can move alone: this parser
+       refuses a seventh member, so a field added on one side does not degrade
+       gracefully, it silences the circle. */
+    expect(Object.keys(JSON.parse(delegation()) as object).sort()).toEqual([
+      'device',
+      'notAfter',
+      'notBefore',
+      'person',
+      'roster',
+      'sig',
+    ])
+  })
 })
 
 describe('every clause of the delegation shape', () => {

@@ -585,6 +585,35 @@ pub struct SignedDelegation {
     #[serde(flatten)]
     pub delegation: Delegation,
     /// Hex, 64 bytes.
+    ///
+    /// ⚠️ **ON THE WIRE IT IS `sig`, AND IT WAS `signature` UNTIL 2026-09-07.**
+    /// `wire.md` gives every signed object `sig` — the page's own shape is
+    /// `{ person, work, …, delegation, sig }` — and this one struct spelled it
+    /// out. The TypeScript verifier's parser is deliberately strict, six
+    /// members and no unknown ones (`receive.ts`, `isDelegation`), so a
+    /// delegation arriving as `signature` was not merely misread: it was
+    /// refused before its signature was ever checked, as `may-not-speak`, and
+    /// reported as `bad-delegation`.
+    ///
+    /// **EVERY page from a Rust-signing device was refused by EVERY TypeScript
+    /// verifier.** Measured 2026-09-07 on two machines: a published passage,
+    /// a full fetch round each way, `accepted: 0` and
+    /// `refusedBecause: {"bad-delegation": 1}`.
+    ///
+    /// ⚠️ **AND THE GOLDEN VECTOR COULD NOT SEE IT.**
+    /// `the_golden_vector_the_typescript_pins` exists for exactly this class
+    /// and pins the SIGNED BYTES — one seed, one message, one signature, the
+    /// same in both languages. It passes. The two languages agree perfectly
+    /// about the bytes and disagreed about the name of the field carrying
+    /// them, so the signature verified and was thrown away before verification.
+    /// A vector over what is signed says nothing about the envelope that
+    /// carries it; `a_delegation_is_wire_shaped` below is that missing half.
+    ///
+    /// `alias` keeps every `circle-mine.json` already on disk readable — the
+    /// signature covers hand-ordered bytes and never the field names, which is
+    /// what `the_signature_does_not_depend_on_what_serde_calls_the_fields`
+    /// established and what makes this rename safe.
+    #[serde(rename = "sig", alias = "signature")]
     pub signature: String,
 }
 
@@ -1562,20 +1591,61 @@ mod tests {
         let keychain = FakeKeychain::default();
         let dir = temp();
         ensure(&keychain, &dir).unwrap();
-        let json = serde_json::to_string(&custody(&keychain, &dir, 1, 0).unwrap()).unwrap();
+        assert_eq!(
+            wire_keys(&custody(&keychain, &dir, 1, 0).unwrap()),
+            [
+                "atRisk",
+                "canShowPhrase",
+                "circle",
+                "devices",
+                "hasIdentity",
+                "role"
+            ],
+        );
+    }
 
-        for camel in ["hasIdentity", "canShowPhrase", "atRisk"] {
-            assert!(json.contains(camel), "{json} is missing {camel}");
-        }
-        for snake in ["has_identity", "can_show_phrase", "at_risk"] {
-            assert!(!json.contains(snake), "{json} still carries {snake}");
-        }
+    /// The keys a value actually serialises to, sorted.
+    ///
+    /// ⚠️ **THE WHOLE SET, NEVER `json.contains(name)`.** A `contains` check can
+    /// only find a name somebody already suspected, which makes it exactly as
+    /// good as the audit that wrote it and no better. The defect below got past
+    /// one. Reading the key set asks the question the other way round — what IS
+    /// this, rather than does it have the bit I am thinking of — and that is the
+    /// only form that can report a field nobody thought about.
+    fn wire_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
+        let json = serde_json::to_value(value).expect("serialises");
+        let mut keys: Vec<String> = json
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
     }
 
     #[test]
-    fn a_signed_delegation_serialises_in_camel_case_too() {
-        /* The same trap, in the other struct that flattens — found by auditing
-        the whole surface rather than by being bitten a second time. */
+    fn a_delegation_is_wire_shaped() {
+        /* ⚠️ **A TEST STOOD HERE AND PASSED FOR AS LONG AS THE CIRCLE WAS
+        BROKEN.** It was called `a_signed_delegation_serialises_in_camel_case_too`
+        and it asserted `notBefore`, `notAfter`, and the absence of
+        `not_before` — the three names the camelCase audit had just changed. It
+        never asked what this object's keys ACTUALLY were. The signature field
+        was `signature`; `receive.ts` demands `sig`; nothing in either language
+        was looking at that name, so a delegation was refused before its
+        signature was ever checked and every page from a Rust-signing device
+        died at every TypeScript verifier. Measured on two machines 2026-09-07:
+        `accepted: 0`, `refusedBecause: {"bad-delegation": 1}`.
+
+        The camelCase audit is not what failed — `rename_all` cannot see a
+        SYNONYM, because `signature` is not snake_case and never was. What
+        failed is a check shaped so that only a suspected name could fail it.
+
+        ⚠️ **THESE SIX NAMES ARE `receive.ts`'s `isDelegation`, AND ITS
+        `MEMBERS = 6` IS THIS `len()`.** That parser refuses any object with a
+        seventh member, so the two are one statement in two languages: adding a
+        field here without adding it there does not degrade gracefully, it
+        refuses every page silently. Change one, change the other. */
         let keychain = FakeKeychain::default();
         let dir = temp();
         let (person, _) = ensure(&keychain, &dir).unwrap();
@@ -1591,11 +1661,36 @@ mod tests {
             },
         )
         .unwrap();
-        let json = serde_json::to_string(&signed).unwrap();
 
-        assert!(json.contains("notBefore"), "{json}");
-        assert!(json.contains("notAfter"), "{json}");
-        assert!(!json.contains("not_before"), "{json}");
+        assert_eq!(
+            wire_keys(&signed),
+            ["device", "notAfter", "notBefore", "person", "roster", "sig"],
+            "the six `isDelegation` admits, and nothing else",
+        );
+    }
+
+    #[test]
+    fn a_delegation_written_as_signature_is_still_readable() {
+        /* Every `circle-mine.json` already on disk spells it `signature`, and
+        the alias is what keeps those readable. Without it the rename is a
+        silent identity loss on upgrade: the file parses as garbage, the device
+        mints a new delegation, and the roster it was admitted under no longer
+        matches. */
+        let old = serde_json::json!({
+            "person": "aa".repeat(32),
+            "device": "bb".repeat(32),
+            "notBefore": 1,
+            "notAfter": 2,
+            "roster": 3,
+            "signature": "cc".repeat(64),
+        });
+        let read: SignedDelegation = serde_json::from_value(old).expect("the old spelling reads");
+        assert_eq!(read.signature, "cc".repeat(64));
+        // And it is re-emitted under the name the wire uses, not the one it arrived as.
+        assert_eq!(
+            wire_keys(&read),
+            ["device", "notAfter", "notBefore", "person", "roster", "sig"],
+        );
     }
 
     #[test]
