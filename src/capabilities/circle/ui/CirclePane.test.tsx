@@ -572,6 +572,50 @@ describe('the shelf switch and the Friends view — WI-23.C2 and C4', () => {
     expect(screen.getByText(/turning this off brings it back/u)).toBeTruthy()
   })
 
+  it('shows the switches even when the friend view cannot be read', async () => {
+    /* ⚠️ **ALL THREE ANSWERS WERE COMMITTED TOGETHER.** The switch reads and
+       the friend view were awaited in one `try`, so a single unreadable shelf
+       file threw before any of them landed — and a switch the reader had just
+       moved went on showing its old position because something else had
+       failed. They commit on their own now. */
+    let on = false
+    const circle = circleWith({
+      /* The switch MOVES partway through, so a stale value is visible as a
+         stale value rather than coinciding with the initial one. */
+      showsShelf: () => Promise.resolve(on),
+      muted: () => Promise.resolve(true),
+      friend: () => Promise.reject(new Error('that shelf will not read')),
+      setShowsShelf: vi.fn(() => Promise.resolve()),
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+    /* ⚠️ **THE SHELF MUST BE EXPANDED, or `friend()` is never called and the
+       coupling cannot bite.** The first version of this test did not expand it
+       and passed with the defect in place — measured. */
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    on = true
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' }))
+    await waitFor(() => expect(circle.setShowsShelf).toHaveBeenCalled())
+    await waitFor(() =>
+      expect((screen.getByRole('checkbox', { name: 'Show my shelf to Mo' }) as HTMLInputElement).checked).toBe(true),
+    )
+  })
+
+  it('clears what the old port loaded when the circle is replaced', async () => {
+    /* ⚠️ **CLEANUP ONLY UNSUBSCRIBED.** The values the old port had loaded kept
+       being drawn as though they belonged to the new one, and reads still in
+       flight stayed eligible to commit over it. */
+    const slow = circleWith({ showsShelf: () => Promise.resolve(true), muted: () => Promise.resolve(true) })
+    const { rerender } = render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={slow} />)
+    const on = (await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })) as HTMLInputElement
+    expect(on.checked).toBe(true)
+
+    /* A port that never answers: the row must not go on showing the old one's
+       values while it waits. */
+    const silent = circleWith({ showsShelf: () => new Promise<boolean>(() => {}), muted: () => new Promise<boolean>(() => {}) })
+    rerender(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={silent} />)
+    await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Show my shelf to Mo' })).toBeNull())
+  })
+
   it('draws a friend’s jacket beside their row once the port answers, and none for a row that names none — WI-23.C5', async () => {
   const cover = vi.fn((_person: string, book: { readonly pub: string }) => Promise.resolve(book.pub === 's1' ? 'data:image/jpeg;base64,AAAA' : null))
   const circle = circleWith({
