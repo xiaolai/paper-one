@@ -612,6 +612,7 @@ fn mint_mine(
             not_after: now - SKEW_MS + DELEGATION_MS,
             roster: roster.version.epoch,
         },
+        now_ms(),
     )?;
     let mine = Mine {
         roster: sign_roster(keychain, root_dir, roster)?,
@@ -1026,6 +1027,7 @@ mod tests {
                 not_after,
                 roster,
             },
+            now_ms(),
         )
         .unwrap();
         MINTED.with(|held| *held.borrow_mut() = Some((keychain, dir)));
@@ -1779,6 +1781,7 @@ mod tests {
                         not_after: NOW + 1_000_000,
                         roster: 0,
                     },
+                    now_ms(),
                 )
                 .unwrap(),
                 roster: after.roster,

@@ -535,6 +535,7 @@ pub async fn peer_person_delegate<R: Runtime>(
                 not_after,
                 roster,
             },
+            crate::circle::now_ms(),
         )
     })
     .await

@@ -119,6 +119,13 @@ const DEVICE_ID_HEX: usize = 64;
 /// agreeing, and this is the second time that distinction has cost something.
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
+/// How far ahead of this device's clock a delegation may start.
+///
+/// The same five minutes `circle::SKEW_MS` allows a RECEIVER for two machines
+/// disagreeing about the time. Named here rather than imported so the signer's
+/// bound cannot drift from the receiver's silently.
+const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+
 /// The entropy behind twelve words.
 const PHRASE_ENTROPY_BYTES: usize = 16;
 
@@ -645,6 +652,7 @@ pub fn sign_delegation(
     keychain: &dyn Keychain,
     root_dir: &Path,
     delegation: Delegation,
+    now: i64,
 ) -> Result<SignedDelegation> {
     /* ⚠️ **THE SIGNER CHECKS THE WINDOW; IT DOES NOT ACCEPT ONE ON TRUST.**
      * Every field here arrives from a caller, and the delegate command is
@@ -652,21 +660,6 @@ pub fn sign_delegation(
      * was one call away, and expiry is the one guarantee that survives a peer
      * who never connects again. A signer that will sign anything is not a
      * signer, it is an oracle. */
-    if delegation.not_after <= delegation.not_before {
-        return Err(Error::Identity(
-            "a delegation must end after it begins".into(),
-        ));
-    }
-    let lifetime = delegation
-        .not_after
-        .checked_sub(delegation.not_before)
-        .ok_or_else(|| Error::Identity("that delegation window is not a window".into()))?;
-    if lifetime > MAX_LIFETIME_MS {
-        return Err(Error::Identity(format!(
-            "a delegation may not run longer than {} days",
-            MAX_LIFETIME_MS / (24 * 60 * 60 * 1000)
-        )));
-    }
     /* ⚠️ **EVERY NUMBER THE WIRE CARRIES, AGAINST THE RANGE THE OTHER SIDE
      * ACCEPTS.** `isDelegation` refuses anything outside JavaScript's exact
      * integer range, so signing one produces a delegation no recipient can
@@ -682,6 +675,38 @@ pub fn sign_delegation(
                 "a delegation's {name} must be between 0 and {MAX_SAFE_INTEGER} — the range the wire's other side can hold exactly"
             )));
         }
+    }
+    if delegation.not_after <= delegation.not_before {
+        return Err(Error::Identity(
+            "a delegation must end after it begins".into(),
+        ));
+    }
+    let lifetime = delegation
+        .not_after
+        .checked_sub(delegation.not_before)
+        .ok_or_else(|| Error::Identity("that delegation window is not a window".into()))?;
+    if lifetime > MAX_LIFETIME_MS {
+        return Err(Error::Identity(format!(
+            "a delegation may not run longer than {} days",
+            MAX_LIFETIME_MS / (24 * 60 * 60 * 1000)
+        )));
+    }
+    /* ⚠️ **THE BACKSTOP CAPPED THE WINDOW'S LENGTH AND NOT WHERE IT SITS.**
+     * `peer_person_delegate` is reachable from the renderer and passed
+     * `not_before` straight through, so a device could mint a 90-day window
+     * starting a year out, and another starting the year after that — a
+     * stockpile of delegations that stay valid long after this device should
+     * have lost the authority to speak. A peer that misses the revocation
+     * accepts every one of them. "90 days" then describes each window's
+     * length and nothing about the horizon, which is not what a backstop is.
+     *
+     * The tolerance is `SKEW_MS`, the same five minutes `live()` already
+     * allows for two machines disagreeing about the clock — deliberately no
+     * more: it is what absorbs skew, not a window for issuing ahead. */
+    if delegation.not_before > now.saturating_add(CLOCK_SKEW_MS) {
+        return Err(Error::Identity(
+            "a delegation may not start in the future — the expiry backstop bounds the window's length, and this bounds where it sits".into(),
+        ));
     }
     /* The device is a key, not a label. An id that is not one produces a
     delegation nothing can ever match against a real endpoint — signed,
@@ -1021,6 +1046,10 @@ mod tests {
     /// person record that an `ensure` in another then refused to mint over.
     /// It failed once and passed the next three runs — the exact shape of a
     /// defect that gets written off as flakiness. `scratch` counts instead.
+    /// A fixed clock for the signer's "may not start in the future" bound.
+    /// Every delegation fixture below begins at or before this.
+    const NOW: i64 = 1_700_000_000_000;
+
     fn temp() -> PathBuf {
         let dir = crate::testutil::scratch("person");
         std::fs::create_dir_all(dir.join(PEER_DIR)).unwrap();
@@ -1188,9 +1217,16 @@ mod tests {
                 person,
                 device: "ab".repeat(32),
                 not_before: 0,
-                not_after: i64::MAX,
+                /* ⚠️ **INSIDE THE WIRE RANGE, ON PURPOSE.** This was `i64::MAX`,
+                 * which the wire-range check now refuses FIRST — so the test
+                 * would have gone on passing while no longer exercising the
+                 * backstop it is named for. The largest value the other side
+                 * can hold is still ~285 000 years, which is amply longer than
+                 * ninety days. */
+                not_after: MAX_SAFE_INTEGER,
                 roster: 1,
             },
+            NOW,
         )
         .unwrap_err();
         assert!(format!("{err}").contains("longer than"), "{err}");
@@ -1212,6 +1248,7 @@ mod tests {
                     not_after: after,
                     roster: 1,
                 },
+                NOW,
             )
             .unwrap_err();
             assert!(format!("{err}").contains("end after it begins"), "{err}");
@@ -1236,6 +1273,7 @@ mod tests {
                     not_after: 1_000,
                     roster: 1,
                 },
+                NOW,
             )
             .unwrap_err();
             assert!(format!("{err}").contains("endpoint key"), "{bad}: {err}");
@@ -1338,6 +1376,7 @@ mod tests {
                 not_after: 1,
                 roster: 1,
             },
+            NOW,
         )
         .unwrap_err();
         assert!(format!("{err}").contains("does not mint"));
@@ -1358,6 +1397,7 @@ mod tests {
                 not_after: 2_000,
                 roster: 3,
             },
+            NOW,
         )
         .unwrap();
         verify_delegation(&signed).unwrap();
@@ -1378,6 +1418,7 @@ mod tests {
                 not_after: 2_000,
                 roster: 3,
             },
+            NOW,
         )
         .unwrap();
         // The field a compromised leaf would most like to move.
@@ -1404,6 +1445,7 @@ mod tests {
                 not_after: 2_000,
                 roster: 3,
             },
+            NOW,
         )
         .unwrap();
         signed.delegation.roster = 4;
@@ -1426,6 +1468,7 @@ mod tests {
                 not_after: 1,
                 roster: 1,
             },
+            NOW,
         )
         .unwrap_err();
         assert!(format!("{err}").contains("different person"));
@@ -1662,6 +1705,59 @@ mod tests {
     }
 
     #[test]
+    fn a_delegation_may_not_be_stockpiled_into_the_future() {
+        /* ⚠️ **THE BACKSTOP BOUNDED THE WINDOW'S LENGTH AND NOT ITS HORIZON.**
+        `peer_person_delegate` is reachable from the renderer and passed
+        `not_before` through untouched, so this device could mint a 90-day
+        window starting a year out, then another the year after — a stockpile
+        that stays valid long after it should have lost the authority to speak,
+        and that any peer which misses the revocation will accept. "90 days"
+        described each window and nothing about how far ahead they could sit.
+
+        Five minutes of tolerance, which is `SKEW_MS` — what absorbs two
+        machines disagreeing about the clock, and deliberately not a window for
+        issuing ahead. */
+        let keychain = FakeKeychain::default();
+        let dir = temp();
+        let (person, _) = ensure(&keychain, &dir).unwrap();
+        let year = 365 * 24 * 60 * 60 * 1000;
+
+        let ahead = sign_delegation(
+            &keychain,
+            &dir,
+            Delegation {
+                person: person.clone(),
+                device: "ab".repeat(32),
+                not_before: NOW + year,
+                not_after: NOW + year + 1000,
+                roster: 1,
+            },
+            NOW,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{ahead}").contains("may not start in the future"),
+            "{ahead}"
+        );
+
+        /* And the skew itself is still allowed, or every device with a fast
+        clock would be unable to mint at all. */
+        assert!(sign_delegation(
+            &keychain,
+            &dir,
+            Delegation {
+                person,
+                device: "ab".repeat(32),
+                not_before: NOW + 60_000,
+                not_after: NOW + 120_000,
+                roster: 1,
+            },
+            NOW,
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn a_delegation_carries_no_number_the_other_side_cannot_hold() {
         /* ⚠️ **THE THIRD TIME THIS CLASS HAS COST SOMETHING, AND THE FIRST TIME
         IT IS ASSERTED.** `receive.ts`'s `isDelegation` ends with
@@ -1683,7 +1779,7 @@ mod tests {
             not_after: 2,
             roster: 3,
         };
-        assert!(sign_delegation(&keychain, &dir, good.clone()).is_ok());
+        assert!(sign_delegation(&keychain, &dir, good.clone(), NOW).is_ok());
 
         for bad in [
             Delegation {
@@ -1700,7 +1796,7 @@ mod tests {
                 ..good.clone()
             },
         ] {
-            let refused = sign_delegation(&keychain, &dir, bad).unwrap_err();
+            let refused = sign_delegation(&keychain, &dir, bad, NOW).unwrap_err();
             assert!(
                 format!("{refused}").contains("the range the wire's other side can hold exactly"),
                 "expected the wire-range refusal, got: {refused}"
@@ -1774,6 +1870,7 @@ mod tests {
                 not_after: 2,
                 roster: 3,
             },
+            NOW,
         )
         .unwrap();
 
