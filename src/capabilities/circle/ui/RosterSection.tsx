@@ -83,6 +83,7 @@ function PersonRow({
   const [friend, setFriend] = useState<FriendView | null>(null)
   const [open, setOpen] = useState(false)
   const [unread, setUnread] = useState<string | null>(null)
+  const [muted, setMuted] = useState(false)
   const read = useRef(0)
   /* The row's own act — the switch and Remove — busy and reported here. */
   const { busy, trouble, run } = useAction('That did not go through.')
@@ -98,9 +99,11 @@ function PersonRow({
     const mine = ++read.current
     try {
       const on = await circle.showsShelf(person.person)
+      const held = await circle.muted(person.person)
       const view = open ? await circle.friend(person.person) : null
       if (read.current !== mine) return
       setShows(on)
+      setMuted(held)
       setFriend(view)
       setUnread(null)
     } catch (cause) {
@@ -164,6 +167,36 @@ function PersonRow({
             {shows
               ? `${person.displayName} can see every book in your library, including ones you have shared nothing from.`
               : `${person.displayName} will be able to see every book in your library, including ones you have shared nothing from.`}
+          </p>
+          {/* ⚠️ **THE REVERSIBLE ANSWER, WHICH DID NOT EXIST.** `'muted'` was
+              modelled from the start — parsed, admitted by `acceptsTransport`,
+              and given `retain: 'keep'` on the stated reasoning that *"a reader
+              who mutes is saying not right now"* — and nothing ever wrote it.
+              So a reader who wanted one person off the page had one control,
+              Remove, which purges their passages and the pairing and needs a
+              fresh SAS ceremony to undo. A quiet preference and a severance
+              were the same button. */}
+          <label className={CAPABILITY_UI.row}>
+            <input
+              type="checkbox"
+              className={CAPABILITY_UI.toggle}
+              checked={muted}
+              disabled={busy}
+              aria-label={`Hold back ${person.displayName}'s passages`}
+              onChange={(e) => {
+                /* The shelf switch's reason: through the row's act, so two
+                   quick flips cannot resolve out of order and the state is
+                   read back once the write has landed. */
+                const on = e.target.checked
+                void run(() => circle.setMuted(person.person, on), look)
+              }}
+            />
+            <span className={CAPABILITY_UI.grow}>Hold back their passages</span>
+          </label>
+          <p className={CAPABILITY_UI.hint}>
+            {muted
+              ? `${person.displayName}'s passages are not drawn in your books. Nothing has been deleted — what they have shared is still here, and turning this off brings it back.`
+              : `${person.displayName}'s passages appear in your books, where the sentence is.`}
           </p>
         </>
       ) : null}

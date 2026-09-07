@@ -521,6 +521,8 @@ describe('the shelf switch and the Friends view — WI-23.C2 and C4', () => {
   const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
   const circleWith = (over: Partial<import('../lib/circlePort').CirclePort> = {}): import('../lib/circlePort').CirclePort => ({
     showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
     setShowsShelf: vi.fn(() => Promise.resolve()),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
@@ -545,6 +547,29 @@ describe('the shelf switch and the Friends view — WI-23.C2 and C4', () => {
     const box = (await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })) as HTMLInputElement
     expect(box.checked).toBe(true)
     expect(screen.getByText(/Mo can see every book in your library/u)).toBeTruthy()
+  })
+
+  it('offers holding a person back, off, saying their passages appear', async () => {
+    /* ⚠️ **THE CONTROL THAT DID NOT EXIST — WI-24.C2.** `'muted'` was modelled
+       from the start and never written by anything, so a reader who wanted one
+       person off the page had only Remove, which purges their passages AND the
+       pairing and needs a fresh SAS to undo. A quiet preference and a
+       severance were one button. */
+    const circle = circleWith({ setMuted: vi.fn(() => Promise.resolve()) })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+    const box = (await screen.findByRole('checkbox', { name: "Hold back Mo's passages" })) as HTMLInputElement
+    expect(box.checked).toBe(false)
+    expect(screen.getByText(/Mo's passages appear in your books, where the sentence is/u)).toBeTruthy()
+    fireEvent.click(box)
+    await waitFor(() => expect(circle.setMuted).toHaveBeenCalledWith(mo.person, true))
+  })
+
+  it('says NOTHING IS DELETED once they are held back, which is what separates it from Remove', async () => {
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circleWith({ muted: () => Promise.resolve(true) })} />)
+    const box = (await screen.findByRole('checkbox', { name: "Hold back Mo's passages" })) as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect(screen.getByText(/Nothing has been deleted/u)).toBeTruthy()
+    expect(screen.getByText(/turning this off brings it back/u)).toBeTruthy()
   })
 
   it('draws a friend’s jacket beside their row once the port answers, and none for a row that names none — WI-23.C5', async () => {
@@ -620,6 +645,8 @@ describe('the reader’s own lists, on the Circle screen — WI-23.E1', () => {
   const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
   const circleWith = (over: Partial<CirclePort> = {}): CirclePort => ({
     showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
     setShowsShelf: () => Promise.resolve(),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
@@ -744,6 +771,8 @@ describe('every clause of the person row, the Friends view and the reader’s li
   const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
   const circleWith = (over: Partial<CirclePort> = {}): CirclePort => ({
     showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
     setShowsShelf: () => Promise.resolve(),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
@@ -951,6 +980,8 @@ describe('the last clauses of the Circle screen — one row each', () => {
   const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
   const circleWith = (over: Partial<CirclePort> = {}): CirclePort => ({
     showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
     setShowsShelf: () => Promise.resolve(),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
@@ -1218,6 +1249,8 @@ describe('an act with nowhere of its own to put a failure', () => {
 /** A circle port with nothing in it, for a test about the pane's own acts. */
 const minimalCircleFor = (): CirclePort => ({
   showsShelf: () => Promise.resolve(false),
+  muted: () => Promise.resolve(false),
+  setMuted: () => Promise.resolve(),
   setShowsShelf: () => Promise.resolve(),
   friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
   cover: () => Promise.resolve(null),
@@ -1230,6 +1263,8 @@ describe('the reader’s own lists, read', () => {
   const minimalCircle = (): CirclePort =>
     ({
       showsShelf: () => Promise.resolve(false),
+      muted: () => Promise.resolve(false),
+      setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
       setShowsShelf: () => Promise.resolve(),
       friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),

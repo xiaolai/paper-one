@@ -299,6 +299,8 @@ describe('the circle’s view of the book — WI-23.D1, D2, D3', () => {
   const circleWith = (view: CircleView, over: Partial<CirclePort> = {}): CirclePort => ({
     showsShelf: () => Promise.resolve(false),
     setShowsShelf: () => Promise.resolve(),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
     cover: () => Promise.resolve(null),
     book: () => Promise.resolve(view),
@@ -468,6 +470,8 @@ describe('every clause of the circle’s view and the lists on the pane — one 
   const circleWith = (view: CircleView, over: Partial<CirclePort> = {}): CirclePort => ({
     showsShelf: () => Promise.resolve(false),
     setShowsShelf: () => Promise.resolve(),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
     cover: () => Promise.resolve(null),
     book: () => Promise.resolve(view),
@@ -638,6 +642,8 @@ describe('the last clauses of the pane — one row each', () => {
   const circleWith = (view: CircleView): CirclePort => ({
     showsShelf: () => Promise.resolve(false),
     setShowsShelf: () => Promise.resolve(),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
     cover: () => Promise.resolve(null),
     book: () => Promise.resolve(view),

@@ -88,6 +88,25 @@ export interface CirclePort {
   /** Whether this person is shown the reader's shelf. */
   showsShelf(person: string): Promise<boolean>
   setShowsShelf(person: string, on: boolean): Promise<void>
+  /**
+   * Whether this person's passages are held back from the page — WI-24.C2.
+   *
+   * ⚠️ **THE STATE WAS MODELLED AND UNREACHABLE.** `'muted'` has been in the
+   * parser's `STATES`, in `acceptsTransport` and in `defaultRetain` — which
+   * returns `keep` for it, deliberately: *"a reader who mutes is saying not
+   * right now"* — since relationships were designed. Nothing ever WROTE it.
+   * The only transition a reader could reach was `forget`, which purges the
+   * passages and the pairing, so "I would rather not see this person on the
+   * page today" had exactly one answer and it was irreversible.
+   *
+   * ⚠️ **MUTING DOES NOT STOP THE TRANSPORT, AND THAT IS THE DESIGN.**
+   * `acceptsTransport` admits a muted person, so their pages still arrive and
+   * their file stays whole; only `drawsOverlays` refuses them. Unmuting is a
+   * plain state change and NOT a re-admission — nothing was lost to restore,
+   * which is the whole difference between this and leaving.
+   */
+  muted(person: string): Promise<boolean>
+  setMuted(person: string, on: boolean): Promise<void>
   friend(person: string): Promise<FriendView>
   /**
    * A friend's jacket as a data URL — fetched lazily from the device that
@@ -274,6 +293,24 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
         /* Told only when the switch MOVED, as the contract says. */
         if (held.shelf === on) return
         await deps.writeRelationship(showShelf(held, on, deps.clock()))
+        changed()
+      }),
+    muted: async (person) => (await deps.relationship(person)).state === 'muted',
+    setMuted: (person, on) =>
+      inTurn(person, async () => {
+        /* `setShowsShelf`'s reason, unchanged: a record written for a person
+           the peer has already forgotten is a record nobody will read and a
+           decision nobody can undo. */
+        if (!(await deps.people()).some((one) => one.person === person)) throw new Error(NOT_IN_CIRCLE)
+        const held = await deps.relationship(person)
+        const wanted = on ? 'muted' : 'admitted'
+        /* Told only when it MOVED, as the contract says. */
+        if (held.state === wanted) return
+        /* ⚠️ **NO SECOND COPY OF THE RE-ADMISSION RULE HERE.** Unmuting a
+           blocked or exited person is a re-admission and `changeState` throws
+           on it — one rule, in the kernel, where `readmit` is. A guard written
+           beside it would be a second place for that decision to drift. */
+        await deps.writeRelationship(changeState(held, wanted, deps.clock()))
         changed()
       }),
     friend: async (person) => {

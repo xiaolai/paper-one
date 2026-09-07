@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { hlcOf, newRelationship, type Hlc, type Relationship } from '../../../kernel'
+import { acceptsTransport, drawsOverlays, hlcOf, newRelationship, type Hlc, type Relationship } from '../../../kernel'
 import { COVER_WIDTH, RECENT_LIMIT, circlePortOver, type CirclePortDeps, type FriendBook } from './circlePort'
 import { NOTHING_SHARED, type ForeignFile } from './store'
 
@@ -86,6 +86,78 @@ describe('the shelf switch, per person', () => {
     off()
     await port.setShowsShelf(BOB, false)
     expect(told).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('holding a person back — the mute that did not exist', () => {
+  /* ⚠️ **THE STATE WAS MODELLED AND UNREACHABLE UNTIL WI-24.C2.** `'muted'` was
+     in the parser's `STATES`, admitted by `acceptsTransport`, and given
+     `retain: 'keep'` by `defaultRetain` on its own stated reasoning — and no
+     control, port operation or command ever wrote it. It was found by trying
+     to run the circle's harness, whose acceptance needs a mute to prove the
+     relationship record is consulted at all. */
+
+  it('is off by default, holds them back, and lets them back', async () => {
+    const { port, deps } = world()
+    expect(await port.muted(BOB)).toBe(false)
+    await port.setMuted(BOB, true)
+    expect(await port.muted(BOB)).toBe(true)
+    expect(deps.writeRelationship).toHaveBeenCalledTimes(1)
+    /* Already held back: nothing written for saying so again. */
+    await port.setMuted(BOB, true)
+    expect(deps.writeRelationship).toHaveBeenCalledTimes(1)
+    await port.setMuted(BOB, false)
+    expect(await port.muted(BOB)).toBe(false)
+  })
+
+  it('KEEPS what they shared, which is the whole difference from Remove', async () => {
+    /* `defaultRetain` returns `keep` for muted and `purge` for exited. A mute
+       that purged would be a slower Remove, and the reader would have no way
+       to say "not right now" at all. */
+    const { port, records } = world()
+    await port.setMuted(BOB, true)
+    expect(records.get(BOB)).toMatchObject({ state: 'muted', retain: 'keep' })
+  })
+
+  it('stops their passages being DRAWN while the relationship still takes them', async () => {
+    /* The two halves that must not move together: `drawsOverlays` refuses a
+       muted person, `acceptsTransport` still admits them. A mute that closed
+       the transport would lose everything published while it was on, and
+       unmuting would show a hole rather than the passages. */
+    const { port, records } = world()
+    await port.setMuted(BOB, true)
+    const state = records.get(BOB)!.state
+    expect(drawsOverlays(state)).toBe(false)
+    expect(acceptsTransport(state)).toBe(true)
+  })
+
+  it('tells subscribers when it moves, and not when it does not', async () => {
+    const { port } = world()
+    const told = vi.fn()
+    const off = port.subscribe(told)
+    await port.setMuted(BOB, true)
+    expect(told).toHaveBeenCalledTimes(1)
+    await port.setMuted(BOB, true)
+    expect(told).toHaveBeenCalledTimes(1)
+    off()
+  })
+
+  it('refuses a person the peer no longer names', async () => {
+    /* `setShowsShelf`'s reason: a record written for somebody already gone is
+       a decision nobody can undo. */
+    const { port } = world()
+    await expect(port.setMuted('someone-else', true)).rejects.toThrow()
+  })
+
+  it('refuses to un-hold somebody who LEFT, because that is a re-admission', async () => {
+    /* ⚠️ **THE RULE LIVES IN `changeState`, AND THIS ASSERTS IT IS REACHED —
+       not that it is copied here.** Exited to admitted in the same epoch would
+       revive every entry the old epoch retained, which is exactly what
+       `readmit`'s new epoch prevents. A guard written beside this one would be
+       a second place for that decision to drift. */
+    const { port, records } = world()
+    records.set(BOB, { ...newRelationship(BOB, at(1)), state: 'exited' })
+    await expect(port.setMuted(BOB, false)).rejects.toThrow(/readmit/u)
   })
 })
 

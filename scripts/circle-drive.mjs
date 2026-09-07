@@ -16,7 +16,8 @@
  *   identity                     who this device publishes as
  *   marks --title <t>            the reader's own marks and their share state
  *   share --title <t>            share one unshared mark of that book
- *   drawn --person <hex>         whether that person's passages are DRAWN here
+ *   mute   --person <name>       hold that person's passages back
+ *   unmute --person <name>       let them be drawn again
  *
  * Exit codes: 0 did what was asked, 1 could not, 2 was asked wrongly.
  */
@@ -185,6 +186,40 @@ const rowState = (index) =>
   '  })\n' +
   '})()'
 
+/* The Circle screen, where the roster and its per-person switches live. */
+const TO_CIRCLE = `(() => {
+  const b = [...document.querySelectorAll('button,[role="button"]')].find((x) => (x.getAttribute('aria-label') || '').trim() === 'Circle')
+  if (!b) return JSON.stringify({ ok: false, why: 'no Circle control in the titlebar' })
+  b.click()
+  return JSON.stringify({ ok: true })
+})()`
+
+/** Every "hold back" switch on the Circle screen, by the name it names. */
+const MUTE_SWITCHES = `(() => {
+  const boxes = [...document.querySelectorAll('input[type="checkbox"]')]
+    .map((b) => ({ label: (b.getAttribute('aria-label') || '').trim(), checked: b.checked }))
+    .filter((b) => b.label.startsWith('Hold back '))
+  return JSON.stringify({ ok: true, boxes })
+})()`
+
+/**
+ * Flip the hold-back switch whose label names this person.
+ *
+ * ⚠️ **BY THE PERSON'S DISPLAY NAME, because that is what the switch says.**
+ * The roster row shows a name and a short fingerprint; the checkbox's
+ * accessible name is the reader-facing sentence, and driving the control a
+ * reader drives is the whole point of going through the UI.
+ */
+const flipMute = (name, on) =>
+  '(() => {\n' +
+  '  const want = ' + JSON.stringify('Hold back ' + name + "'s passages") + '\n' +
+  "  const box = [...document.querySelectorAll('input[type=\"checkbox\"]')].find((b) => (b.getAttribute('aria-label') || '').trim() === want)\n" +
+  "  if (!box) return JSON.stringify({ ok: false, why: 'no hold-back switch for ' + want })\n" +
+  '  if (box.checked === ' + JSON.stringify(Boolean(on)) + ') return JSON.stringify({ ok: true, already: true })\n' +
+  '  box.click()\n' +
+  '  return JSON.stringify({ ok: true })\n' +
+  '})()'
+
 const OPEN_MARGINALIA = `(() => {
   const tab = [...document.querySelectorAll('button,[role="button"]')].find((b) => (b.getAttribute('aria-label') || '').trim() === 'Marginalia')
   if (!tab) return JSON.stringify({ ok: false, why: 'no Marginalia tab — no book is open' })
@@ -307,7 +342,7 @@ async function reachMarginalia(socket, title) {
 async function main(argv) {
   const args = parse(argv)
   const command = args._[0]
-  if (!command) usage('a subcommand is required: identity | marks | share')
+  if (!command) usage('a subcommand is required: identity | marks | share | mute | unmute')
 
   let socket
   try {
@@ -325,6 +360,26 @@ async function main(argv) {
       const answer = await evaluate(socket, IDENTITY, 'identity')
       say(answer)
       process.exit(answer.ok ? 0 : 1)
+    }
+
+    if (command === 'mute' || command === 'unmute') {
+      if (!args.person) usage('--person <display name> is required')
+      const on = command === 'mute'
+      const at = await evaluate(socket, AT_SHELF, 'where are we')
+      if (at.shelf === undefined) usage('the app answered nothing sensible')
+      const toCircle = await act(socket, TO_CIRCLE, 'open the Circle screen', async () =>
+        (await evaluate(socket, MUTE_SWITCHES, 'find the switches')).boxes.length > 0)
+      if (!toCircle.ok) {
+        say(toCircle)
+        process.exit(1)
+      }
+      const flipped = await act(socket, flipMute(args.person, on), 'flip the hold-back switch', async () => {
+        const seen = await evaluate(socket, MUTE_SWITCHES, 'read the switches')
+        const box = seen.boxes.find((b) => b.label === `Hold back ${args.person}'s passages`)
+        return box !== undefined && box.checked === on
+      })
+      say(flipped.ok ? { ok: true, person: args.person, muted: on } : flipped)
+      process.exit(flipped.ok ? 0 : 1)
     }
 
     if (command !== 'marks' && command !== 'share') usage('unknown subcommand: ' + command)

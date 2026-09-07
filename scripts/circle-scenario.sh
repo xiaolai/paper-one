@@ -26,8 +26,9 @@
 #   mutate      share a passage on THIS machine, through the bridge
 #   converge    poll `books/<book>/circle/<person>.json` on the remote for the
 #               `pub` this run published
-#   negative    mute the publisher on a RECIPIENT and confirm the passage stops
-#               being DRAWN while its file stays — `drawsEntry`
+#   negative    hold a person back through the Circle screen's own switch and
+#               confirm the record says so while their files stay — the half a
+#               transport test cannot see
 #
 # ## ⚠️ Two things that are not the same, and a harness that conflates them
 # ## proves the smaller one
@@ -385,30 +386,76 @@ fi
 log ""
 log "## The negative — a muted person's passage stops being DRAWN, file intact"
 
-# ⚠️ **THIS STEP CANNOT PASS, AND THE REASON IS A PRODUCT GAP RATHER THAN A
-# HARNESS ONE.** WI-24.C2 asks for a mute, because a file appearing proves
-# TRANSPORT and says nothing about whether the relationship record was
-# consulted — `drawsEntry` is the half a transport test cannot see. Read
-# against the source on 2026-09-07:
+# ⚠️ **A FILE APPEARING PROVES TRANSPORT AND NOTHING ELSE.** A build that
+# ignored relationships entirely would pass every converge step above and still
+# draw the passages of somebody the reader has held back. `drawsEntry` is the
+# half a transport test cannot see, and this is what reaches it.
 #
-#   - `drawsOverlays` is true for `'admitted'` and nothing else, so muted,
-#     blocked and exited all stop the drawing. That part works.
-#   - `'muted'` keeps the files: `defaultRetain` returns `keep` for it,
-#     deliberately — *"a reader who mutes is saying not right now"*.
-#   - **but nothing in the product ever WRITES `'muted'`.** It appears in
-#     `relationships.ts`'s `STATES` parser set and in comments, and in no
-#     control, no port operation and no command.
-#   - the one reachable transition is `'exited'`, whose default retain is
-#     `purge` — and `circlePort`'s exit then calls `purge()` and
-#     `forgetPeer()`. It DELETES the passage and the pairing, which is the
-#     opposite of "the file stays", and is not repeatable without a fresh
-#     pairing ceremony by hand.
+# ⚠️ **THE CONTROL THIS DRIVES DID NOT EXIST UNTIL THIS HARNESS ASKED FOR IT.**
+# `'muted'` was modelled from the start — parsed, admitted by
+# `acceptsTransport`, and given `retain: 'keep'` on its own stated reasoning —
+# and nothing in the product ever wrote it. The only reachable transition was
+# `forget`, which purges the passages AND the pairing. Trying to run this step
+# is what found that; the mute is WI-24.C2's, not a pre-existing feature.
 #
-# So the assertion cannot be made through the app until a mute exists. Writing
-# `relationship.json` from this script would assert nothing about the product —
-# it would test this harness's own JSON writer, which is the failure mode the
-# whole file is built to avoid.
-fail "no mute exists to drive: 'muted' is parsed and honoured but never written by any control or port operation, and 'exited' purges the file instead of keeping it. Transport is proved above; the relationship half is NOT, and this run is not full acceptance of WI-24.C2."
+# WHAT THIS PROVES, said exactly: the reader's own control writes the record,
+# the record says `muted` with `retain: keep`, and anything already received
+# stays on disk. WHAT IT DOES NOT: that the painter omits it on the page. That
+# is `drawsOverlays`, held by unit tests, and reaching it from here would mean
+# counting painted marks in an open book — worth doing, not done.
+
+friend_name="$(python3 -c '
+import json, pathlib, sys
+p = pathlib.Path.home()/"Library/Application Support/one.paper.reader/peer/circle-people.json"
+try:
+    d = json.load(open(p))
+except Exception:
+    sys.exit(0)
+people = d.get("people", d) if isinstance(d, dict) else d
+print(people[0]["displayName"] if people else "")' 2>/dev/null)"
+
+if [ -z "$friend_name" ]; then
+  fail "this machine names nobody in its circle, so there is no relationship to hold back"
+else
+  before="$(ls "$HOME/$DATA_DIR/books"/*/circle/*.json 2>/dev/null | wc -l | tr -d ' ')"
+
+  held="$(drive mute --person "$friend_name" 2>&1)"
+  if printf '%s' "$held" | grep -q '"ok":true'; then
+    pass "held $friend_name back, through the switch on the Circle screen"
+  else
+    fail "could not hold $friend_name back: $(printf '%s' "$held" | tr -d '\n' | cut -c1-220)"
+  fi
+
+  # The record is the assertion — `retain: keep` is what separates this from
+  # Remove, and reading it here is reading what the APP wrote.
+  state="$(python3 -c '
+import json, pathlib
+root = pathlib.Path.home()/"Library/Application Support/one.paper.reader/circle"
+for f in root.glob("*/relationship.json"):
+    d = json.load(open(f))
+    print(d.get("state"), d.get("retain"))
+    break' 2>/dev/null)"
+  case "$state" in
+    "muted keep") pass "the record says muted, retain keep — the passages are held, not discarded" ;;
+    *) fail "the record says '${state:-nothing}' and should say 'muted keep'" ;;
+  esac
+
+  after="$(ls "$HOME/$DATA_DIR/books"/*/circle/*.json 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$before" -eq 0 ]; then
+    note "this machine holds no received passages, so 'the file stays' had nothing to stay: the state above is what this run proves. Publish from $remote once to make this step whole."
+  elif [ "$before" -eq "$after" ]; then
+    pass "all $before received passage file(s) are still on disk — held back, not deleted"
+  else
+    fail "holding back DELETED files: $before before, $after after. That is Remove's behaviour, not a mute's"
+  fi
+
+  back="$(drive unmute --person "$friend_name" 2>&1)"
+  if printf '%s' "$back" | grep -q '"ok":true'; then
+    pass "let $friend_name back — a mute is reversible, which is the whole difference from Remove"
+  else
+    fail "could not let $friend_name back, and the harness has left them held: $(printf '%s' "$back" | tr -d '\n' | cut -c1-200)"
+  fi
+fi
 
 log ""
 log "---"
