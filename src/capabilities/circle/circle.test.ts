@@ -427,7 +427,7 @@ describe('the overlay contribution', () => {
 
   const start = (fs: IndexFs) => {
     const disposable = circle.start!(
-      { onCleanup: () => {}, services: { hashes: () => null, fs, library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
+      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs, library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     return disposable
@@ -721,7 +721,7 @@ describe('the overlay contribution', () => {
   it('starts with no filesystem rather than failing', async () => {
     /* A composition with no filesystem — the browser client — means no shared
        passages, not a failed capability. */
-    const disposable = circle.start!({ onCleanup: () => {}, services: { hashes: () => null, fs: null } } as never, new AbortController().signal) as {
+    const disposable = circle.start!({ onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs: null } } as never, new AbortController().signal) as {
       dispose(): void
     }
     expect(await overlay.forBook({ bookId: BOOK, resolve: () => Promise.reject(new Error('x')) })).toEqual([])
@@ -789,6 +789,7 @@ describe('the share control contribution — WI-23.A1', () => {
     const disposable = circle.start!(
       {
         onCleanup: () => {},
+        diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) },
         services: {
           hashes: () => null,
           fs: fsWith(),
@@ -817,6 +818,7 @@ describe('the share control contribution — WI-23.A1', () => {
     const disposable = circle.start!(
       {
         onCleanup: () => {},
+        diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) },
         services: {
           fs,
           library: LIBRARY,
@@ -1353,7 +1355,7 @@ describe('the services a friend calls', () => {
     /* No peer has started here, so nobody's roster names the caller; that is
        the same answer as a person the switch is off for, on purpose. */
     const disposable = circle.start!(
-      { onCleanup: () => {}, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
+      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     try {
@@ -1377,7 +1379,7 @@ describe('the services a friend calls', () => {
 
   it('refuses a request this build cannot parse, rather than answering one', async () => {
     const disposable = circle.start!(
-      { onCleanup: () => {}, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
+      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     try {
@@ -1393,7 +1395,7 @@ describe('the services a friend calls', () => {
     /* ⚠️ **A HANDLER THAT OUTLIVED ITS RUN WOULD READ ANOTHER RUN'S SERVICES**,
        or a null. The teardown is guarded the way `held` is. */
     const disposable = circle.start!(
-      { onCleanup: () => {}, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
+      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     disposable.dispose()
@@ -1437,6 +1439,14 @@ describe('the fetch driver, as the capability runs it — WI-23.A2', () => {
      cadence module has no input a book could touch; this proves the
      capability gives it none either — the library's own change feed, which
      an open moves, is not something `start` subscribes the driver to. */
+  /* ⚠️ **`info` IS NOW CALLED AT START TOO**, by `circle.started`, so "was it
+     called at all" stopped meaning "did a round run". These count the ROUNDS,
+     which is what every assertion here was always trying to say — and a
+     narrower assertion that names the event is a better one regardless: the
+     old form passed for a capability that logged nothing whatsoever. */
+  const rounds = (info: { mock: { calls: unknown[][] } }) =>
+    info.mock.calls.filter((call) => call[0] === 'circle.fetch').length
+
   const started = (info = vi.fn()) => {
     const listeners = new Set<() => void>()
     const library = {
@@ -1466,11 +1476,47 @@ describe('the fetch driver, as the capability runs it — WI-23.A2', () => {
       /* "open a book": the library publishes a change (`openedAt` moved). */
       open()
       await vi.advanceTimersByTimeAsync(10_000)
-      expect(info).not.toHaveBeenCalled()
+      expect(rounds(info)).toBe(0)
       disposable.dispose()
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('says at start whether it can share at all, because half-started looks the same', () => {
+    /* ⚠️ **THE CIRCLE USED TO REPORT NOTHING UNTIL ITS FIRST ROUND** — five
+       minutes in, if it was going to speak at all. `peer.started` reports
+       `available` and `companion.started` reports `wired` for exactly this
+       reason. The state it exists for: with no filesystem the capability
+       starts, reports success, contributes an EMPTY share control, never
+       fetches, and says nothing — and a whole evening went into looking for a
+       Share button that could not exist, with no signal of any kind. */
+    const info = vi.fn()
+    const shares = circle.start!(
+      {
+        onCleanup: () => {},
+        diagnostics: { info, warn: vi.fn(), error: vi.fn(), child: () => ({}) },
+        services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' },
+      } as never,
+      new AbortController().signal,
+    ) as { dispose(): void }
+    expect(info).toHaveBeenCalledWith('circle.started', { shares: true, fetching: true })
+    shares.dispose()
+
+    const bare = vi.fn()
+    const none = circle.start!(
+      {
+        onCleanup: () => {},
+        diagnostics: { info: bare, warn: vi.fn(), error: vi.fn(), child: () => ({}) },
+        services: { hashes: () => null, fs: null },
+      } as never,
+      new AbortController().signal,
+    ) as { dispose(): void }
+    /* THE ONE THAT MATTERS: a composition with no filesystem is legitimate for
+       the browser client and is a defect anywhere else, and this is the only
+       place that says which one happened. */
+    expect(bare).toHaveBeenCalledWith('circle.started', { shares: false, fetching: false })
+    none.dispose()
   })
 
   it('runs a round on the cadence, reports it, and asks nobody with no peer', async () => {
@@ -1478,13 +1524,13 @@ describe('the fetch driver, as the capability runs it — WI-23.A2', () => {
     try {
       const { disposable, info } = started()
       await vi.advanceTimersByTimeAsync(30_000)
-      expect(info).toHaveBeenCalledTimes(1)
+      expect(rounds(info)).toBe(1)
       expect(info).toHaveBeenCalledWith('circle.fetch', expect.objectContaining({ asked: 0, calls: 0, accepted: 0 }))
       await vi.advanceTimersByTimeAsync(5 * 60_000)
-      expect(info).toHaveBeenCalledTimes(2)
+      expect(rounds(info)).toBe(2)
       disposable.dispose()
       await vi.advanceTimersByTimeAsync(60 * 60_000)
-      expect(info).toHaveBeenCalledTimes(2)
+      expect(rounds(info)).toBe(2)
     } finally {
       vi.useRealTimers()
     }
@@ -1499,7 +1545,7 @@ describe('the fetch driver, as the capability runs it — WI-23.A2', () => {
         new AbortController().signal,
       ) as { dispose(): void }
       await vi.advanceTimersByTimeAsync(60 * 60_000)
-      expect(info).not.toHaveBeenCalled()
+      expect(rounds(info)).toBe(0)
       disposable.dispose()
     } finally {
       vi.useRealTimers()
@@ -1511,7 +1557,11 @@ describe('the disposer on the kernel’s stack — round 3 #97', () => {
   it('is registered with onCleanup, and running it takes the run down', () => {
     const cleanups: (() => void)[] = []
     circle.start!(
-      { onCleanup: (dispose: () => void) => cleanups.push(dispose), services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
+      {
+        onCleanup: (dispose: () => void) => cleanups.push(dispose),
+        diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) },
+        services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' },
+      } as never,
       new AbortController().signal,
     )
     expect(cleanups).toHaveLength(1)

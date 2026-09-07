@@ -607,6 +607,28 @@ export const circle: Capability = {
       dispose()
       throw cause
     }
+    /**
+     * ⚠️ **SAY WHAT STARTED, BECAUSE HALF OF IT STARTING LOOKS THE SAME AS ALL
+     * OF IT.** `peer.started` reports `available` and `companion.started`
+     * reports `wired`, for exactly this reason; the circle reported nothing at
+     * all and only ever spoke on its first fetch — five minutes later, if it
+     * was going to speak.
+     *
+     * The state this exists for: `mine` is null when the composition has no
+     * filesystem, which is legitimate for the browser client and is NOT
+     * legitimate anywhere else. In that state the capability starts, reports
+     * success, contributes an EMPTY share control, never fetches, and says
+     * nothing. Measured 2026-09-07 on a debug build: half an hour spent looking
+     * for a Share button that could not exist, with no signal of any kind — the
+     * exact shape of "green is not evidence that anything happened".
+     *
+     * `shares` is therefore the fact worth reporting, not the fact that start
+     * returned.
+     */
+    ctx.diagnostics.info('circle.started', {
+      shares: mine !== null,
+      fetching: driver !== null,
+    })
     return {
       dispose: () => {
         dispose()
