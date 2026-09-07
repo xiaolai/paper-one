@@ -42,7 +42,7 @@ const PROJECTS: readonly Project[] = [
   {
     name: 'kernel-unit',
     include: ['src/kernel/**/*.test.{ts,tsx}', 'src/*.test.{ts,tsx}'],
-    exclude: ['src/kernel/**/*.contract.test.{ts,tsx}', 'src/kernel/**/*.envelope.test.ts'],
+    exclude: ['src/kernel/**/*.contract.test.{ts,tsx}', 'src/kernel/**/*.envelope.test.{ts,tsx}'],
   },
   /* `{ts,tsx}` like every other project's glob. A `.contract.test.tsx`
    matched the broad project instead of this one and ran without the
@@ -51,7 +51,7 @@ const PROJECTS: readonly Project[] = [
   {
     name: 'capabilities',
     include: ['src/capabilities/**/*.test.{ts,tsx}'],
-    exclude: ['src/capabilities/**/*.envelope.test.ts'],
+    exclude: ['src/capabilities/**/*.envelope.test.{ts,tsx}'],
   },
   /* The envelope's own suites, and — since phase 11 — the CLI's client
    * speaking to a router over the fake wire, which is the same protocol under
@@ -66,16 +66,16 @@ const PROJECTS: readonly Project[] = [
      * project quietly became one file. A suite that runs under the wrong
      * project's settings is the failure the note above this list describes. */
     include: [
-      'src/kernel/**/*.envelope.test.ts',
-      'src/capabilities/**/*.envelope.test.ts',
-      'src/cli/**/*.envelope.test.ts',
+      'src/kernel/**/*.envelope.test.{ts,tsx}',
+      'src/capabilities/**/*.envelope.test.{ts,tsx}',
+      'src/cli/**/*.envelope.test.{ts,tsx}',
     ],
   },
   { name: 'hosts', include: ['src/hosts/**/*.test.{ts,tsx}'] },
   {
     name: 'cli',
     include: ['src/cli/**/*.test.{ts,tsx}'],
-    exclude: ['src/cli/**/*.envelope.test.ts'],
+    exclude: ['src/cli/**/*.envelope.test.{ts,tsx}'],
   },
   { name: 'composition-contract', include: ['src/app/**/*.contract.test.{ts,tsx}'] },
   /* The composition root's own units — the boot orchestration extracted out of
@@ -133,12 +133,16 @@ const COVERAGE_INCLUDE = [
 /** On top of Vitest's own defaults (test files, config files, node_modules,
  *  dist), which setting `exclude` would otherwise replace. */
 const COVERAGE_EXCLUDE = [
+  /* ⚠️ **THIS ARRAY IS EMPTY IN VITEST 4.1.11, AND THE COMMENT SAID OTHERWISE.**
+   * It claimed the defaults "hold the test-file and declaration-file globs", so
+   * spreading them preserved a documented list. Measured: `coverageConfigDefaults.exclude`
+   * is `[]`. Vitest applies those exclusions LATER, during resolution — test
+   * files genuinely are absent from the report, checked — so the behaviour was
+   * right and the reasoning was not. The spread stays: it costs nothing and
+   * keeps this list correct if the defaults are ever repopulated. What it does
+   * NOT do is what the old comment credited it with. */
   ...coverageConfigDefaults.exclude,
-  /* Only what the defaults do NOT already cover: Vitest's own list holds the
-   * test-file and declaration-file globs, and repeating them here read as
-   * "these are ours to maintain" — so a future change to the defaults would
-   * look like a local decision. The three below are this repository's own
-   * conventions and belong to it. */
+  /* This repository's own conventions, which no default covers. */
   '**/*.testkit.{ts,tsx}',
   '**/*.selftest.mjs',
   '**/*.d.mts',
@@ -157,19 +161,30 @@ const COVERAGE_EXCLUDE = [
    * description of it. The handshake now lives in `src/app/shutdown.ts` with
    * its own suite; what remains here genuinely is wiring around a `document`
    * and a native import. */
-  'src/main.tsx',
-  'src/cli/main.ts',
-  /* A THIRD PROCESS ENTRY, on the same rule and for a sharper reason than the
-   * other two: `circle-drive.mjs` reads `process.argv`, writes to a real
-   * stream, sets an exit code AND needs a live WebSocket to a running app with
-   * a debug bridge. Nothing can call it from a test, so it counts as zero and
-   * says nothing about the code that matters.
+  /* ⚠️ **`src/main.tsx` IS NOT LISTED HERE, AND ITS ABSENCE IS THE POINT.** It
+   * was, with a long justification — and the entry did nothing: `COVERAGE_INCLUDE`
+   * has no root-level `src/*` pattern, so that file was never a candidate to
+   * exclude. A dead entry with a persuasive reason beside it is worse than no
+   * entry, because it tells the next reader that this list is what keeps the
+   * file unmeasured. What keeps it unmeasured is the include list above.
    *
-   * Everything it does beyond dispatch lives in `scripts/lib/circle-scripts.mjs`
-   * — every script it sends into the webview, and its argument parsing — which
-   * IS measured, at 63 tests. That split is the point: the builders were inside
-   * the entry until 2026-09-08, where two escaping defects reached a real run
-   * because nothing could compile them. */
+   * `src/cli/main.ts` DOES need excluding: `src/cli/**` matches it. */
+  'src/cli/main.ts',
+  /* A THIRD PROCESS ENTRY, on the same rule: `circle-drive.mjs` reads
+   * `process.argv`, writes to a real stream, sets an exit code and needs a live
+   * WebSocket to a running app with a debug bridge.
+   *
+   * ⚠️ **AND THE FIRST VERSION OF THIS EXCLUSION WAS NOT HONEST.** It claimed
+   * everything beyond dispatch had been extracted; the file still held `act` —
+   * a retry-and-observe loop — and `reachMarginalia`, four navigation steps
+   * with their own failure names. Both are pure control flow over two
+   * callbacks, and both were testable all along. An audit said so, and it was
+   * right: the exclusion was hiding logic rather than describing a shim.
+   *
+   * They live in `scripts/lib/circle-navigate.mjs` now, and the scripts and
+   * argument parsing in `scripts/lib/circle-scripts.mjs` — measured, together,
+   * at 118 tests. What is left here really is argv, a socket and an exit
+   * code. */
   'scripts/circle-drive.mjs',
 ]
 
