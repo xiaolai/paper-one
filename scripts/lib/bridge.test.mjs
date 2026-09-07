@@ -23,6 +23,9 @@ function fakeSocket() {
   return {
     sent: [],
     closed: false,
+    /* `WebSocket.OPEN`. Present so the guard in `execute` passes; the two
+       tests that need another state override it. */
+    readyState: 1,
     addEventListener(type, fn) {
       const held = listeners.get(type) ?? new Set()
       held.add(fn)
@@ -127,6 +130,28 @@ describe('execute — one round trip, matched by id', () => {
     const call = execute(socket, 'script', 'the label')
     vi.advanceTimersByTime(EXECUTE_TIMEOUT_MS)
     await expect(call).rejects.toThrow(new RegExp(`the label: the webview did not answer within ${EXECUTE_TIMEOUT_MS} ms`, 'u'))
+  })
+
+  it('refuses at once on a socket that is already closed, instead of blaming the webview', async () => {
+    /* ⚠️ **THIS COST 30 s AND POINTED AT THE WRONG THING.** Sending on a closed
+       socket does nothing and no `close` event is coming — it already fired —
+       so the call waited out the whole timeout and reported that the app did
+       not answer. */
+    const socket = { ...fakeSocket(), readyState: 3 }
+    await expect(execute(socket, 'script', 'the label')).rejects.toThrow(/the bridge connection is not open \(readyState 3\)/u)
+    expect(socket.sent).toHaveLength(0)
+  })
+
+  it('cleans up when send THROWS, rather than leaking both listeners and the timer', async () => {
+    /* The fake's `send` always succeeded, so this path had never run: an
+       exception rejected through the executor, which skips `cleanup()`. */
+    const socket = fakeSocket()
+    socket.send = () => {
+      throw new Error('socket is gone')
+    }
+    await expect(execute(socket, 'script', 'the label')).rejects.toThrow(/the label: could not send the script: socket is gone/u)
+    expect(socket.count('message')).toBe(0)
+    expect(socket.count('close')).toBe(0)
   })
 
   it('leaves no listener behind on either exit, so a later frame cannot resolve a settled call', async () => {

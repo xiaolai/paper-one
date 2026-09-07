@@ -1,6 +1,29 @@
 import { Script } from 'node:vm'
 import { describe, expect, it } from 'vitest'
-import { clickShare, filterShelf, flipSwitch, moreSelector, muteLabel, openMatch, parse, rowState, shelfLabel, shelfMatches, stateOfRow, withdrawRow } from './circle-scripts.mjs'
+import {
+  AT_SHELF,
+  FRIEND_SHELF_STATE,
+  IDENTITY,
+  OPEN_FRIEND_SHELF,
+  OPEN_MARGINALIA,
+  PERSON_SWITCHES,
+  READ_MARKS,
+  SHARE_FIRST_UNSHARED,
+  TO_CIRCLE,
+  TO_SHELF,
+  clickShare,
+  filterShelf,
+  flipSwitch,
+  moreSelector,
+  muteLabel,
+  openMatch,
+  parse,
+  rowState,
+  shelfLabel,
+  shelfMatches,
+  stateOfRow,
+  withdrawRow,
+} from './circle-scripts.mjs'
 
 /**
  * The scripts the circle driver sends into the webview, checked for the one
@@ -28,6 +51,16 @@ const QUOTES = [
   ['a newline, which real marks contain', 'ELIZABETH WAS ACCEPTED\n\n to Stanford'],
   ['a backtick, which would end a template literal', 'the `export` keyword'],
   ['a dollar-brace, which is the exact bug this file exists for', 'cost ${JSON.stringify(evil)} dollars'],
+  /* ⚠️ **THE FOUR `String.replace` READS IN A REPLACEMENT, AND THEY WERE THE
+     ONES MISSING.** This corpus had `${x}` — the bug already known — and none
+     of these, so a real defect shipped green: the builders used a plain string
+     replacement, and `$&`, `$$`, `` $` `` and `$'` each corrupted the quote or
+     produced a script the page could not parse. Chosen for the mechanism now,
+     not for the bug already found. */
+  ['a dollar-ampersand, which String.replace expands to the match', 'cost $& dollars'],
+  ['a double dollar, which collapses to one', 'cost $$ dollars'],
+  ['a dollar-backtick, which splices in the source before', 'cost $` dollars'],
+  ["a dollar-apostrophe, which splices in the source after", "cost $' dollars"],
   ['a script-closing sequence', 'end </script> here'],
 ]
 
@@ -64,6 +97,41 @@ describe('every script the driver sends is syntactically valid JavaScript', () =
   it.each([0, 1, 7])('builds a click script for row %i', (index) => {
     expect(parses(clickShare(index))).toBe(true)
     expect(parses(rowState(index))).toBe(true)
+  })
+})
+
+describe('the value survives the builder exactly', () => {
+  /* Parsing is not enough: a builder can emit a perfectly valid script that
+     addresses the WRONG row. `$&` did exactly that. */
+  it.each(QUOTES)('keeps %s intact through stateOfRow', (_what, quote) => {
+    expect(stateOfRow(quote)).toContain(JSON.stringify(quote))
+  })
+
+  it.each(QUOTES)('keeps %s intact through withdrawRow', (_what, quote) => {
+    expect(withdrawRow(quote)).toContain(JSON.stringify(quote))
+  })
+})
+
+describe('every FIXED script compiles too', () => {
+  /* ⚠️ **THE PARAMETERISED BUILDERS WERE THE ONLY THING CHECKED**, and the
+     driver sends ten constants that take no argument at all — `IDENTITY`,
+     `READ_MARKS`, `SHARE_FIRST_UNSHARED` and the rest. A syntax error in any of
+     them bypassed the guard entirely and would surface as the bridge's
+     `Script execution timeout`, which is the message that already cost three
+     wrong diagnoses. */
+  it.each([
+    ['AT_SHELF', AT_SHELF],
+    ['TO_SHELF', TO_SHELF],
+    ['TO_CIRCLE', TO_CIRCLE],
+    ['IDENTITY', IDENTITY],
+    ['READ_MARKS', READ_MARKS],
+    ['OPEN_MARGINALIA', OPEN_MARGINALIA],
+    ['PERSON_SWITCHES', PERSON_SWITCHES],
+    ['SHARE_FIRST_UNSHARED', SHARE_FIRST_UNSHARED],
+    ['OPEN_FRIEND_SHELF', OPEN_FRIEND_SHELF],
+    ['FRIEND_SHELF_STATE', FRIEND_SHELF_STATE],
+  ])('%s parses', (_name, source) => {
+    expect(parses(source)).toBe(true)
   })
 })
 

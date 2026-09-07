@@ -21,6 +21,9 @@
 
 import { randomUUID } from 'node:crypto'
 
+/** `WebSocket.OPEN`, named so a fake socket in a test need not carry the constant. */
+const OPEN = 1
+
 /**
  * The bridge port, pinned.
  *
@@ -112,9 +115,30 @@ export function execute(socket, script, label = 'execute_js') {
       reject(new Error(label + ': the bridge closed the connection mid-run'))
     }
 
+    /* ⚠️ **A CLOSED SOCKET SWALLOWS THE SEND AND BLAMES THE WEBVIEW.** Sending
+       on a socket that has already closed does nothing, no `close` event is
+       coming (it already fired), and the call sat out the full 30 s before
+       reporting that the app did not answer — which sent an investigation to
+       the app rather than to the connection. Refused at once, by name. */
+    if (socket.readyState !== undefined && socket.readyState !== OPEN) {
+      cleanup()
+      reject(new Error(label + ': the bridge connection is not open (readyState ' + socket.readyState + ')'))
+      return
+    }
+
     socket.addEventListener('message', onMessage)
     socket.addEventListener('close', onClose)
-    socket.send(JSON.stringify({ id, command: 'execute_js', args: { script } }))
+    /* ⚠️ **AND A THROWING `send` MUST NOT LEAK THE LISTENERS AND THE TIMER.**
+       An exception here rejected the promise through the executor, which skips
+       `cleanup()` entirely: both listeners and the 30 s timer stayed attached
+       to a socket nobody was waiting on any more, and the original error lost
+       its label. */
+    try {
+      socket.send(JSON.stringify({ id, command: 'execute_js', args: { script } }))
+    } catch (cause) {
+      cleanup()
+      reject(new Error(label + ': could not send the script: ' + String(cause && cause.message ? cause.message : cause)))
+    }
   })
 }
 

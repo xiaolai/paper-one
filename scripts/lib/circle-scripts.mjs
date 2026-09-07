@@ -168,8 +168,14 @@ export const controlAt = (index) => "[...document.querySelectorAll('[data-mark-c
  * where an index is not.
  */
 export const SHARE_FIRST_UNSHARED = `(() => {
-  const rows = [...document.querySelectorAll('[data-mark-control="circle:share"]')]
-  for (const control of rows) {
+  /* ⚠️ **UNIQUENESS IS CHECKED BEFORE THE CLICK, NOT AFTER.** The polling and
+     withdrawal scripts refuse an ambiguous quote — which is right — but this one
+     clicked first and let them discover the collision afterwards. The result was
+     the worst of both: the passage WAS published, the poll could not confirm it,
+     and the withdrawal refused to take it back, leaving a stranded publication
+     the next run then tripped over. Found by the audit's verify pass. */
+  const rows = []
+  for (const control of document.querySelectorAll('[data-mark-control="circle:share"]')) {
     let row = control
     for (let k = 0; k < 6 && row.parentElement; k++) {
       row = row.parentElement
@@ -179,20 +185,23 @@ export const SHARE_FIRST_UNSHARED = `(() => {
        others with a placeBook element. Sharing somebody else's row publishes a
        passage from a book the far end was never asked about. */
     if (row.querySelector('[class*="placeBook"]')) continue
-    const share = [...control.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'Share')
-    if (!share) continue
-    /* ⚠️ **THE HANDLE IS THE MARK'S OWN QUOTE, NOT THE ROW'S TEXT.** The row's
-       text CONTAINS the control, and the control is exactly what the click
-       changes — 'Share / Share with note' becomes 'Shared with your circle /
-       Withdraw'. Polling on the whole row therefore never matches again and
-       reports the row as gone. Measured: 'the row left the screen mid-publish'
-       on a row that had not moved at all. The quote does not change. */
     const jump = row.querySelector('[class*="noteJump"]')
     if (!jump) continue
-    share.click()
-    return JSON.stringify({ ok: true, quote: (jump.textContent || '').trim().slice(0, 120) })
+    rows.push({
+      control,
+      quote: (jump.textContent || '').trim().slice(0, 120),
+      share: [...control.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'Share'),
+    })
   }
-  return JSON.stringify({ ok: false, why: 'no unshared mark of the open book — withdraw one, or mark a fresh passage' })
+  const free = rows.filter((r) => r.share)
+  if (free.length === 0) return JSON.stringify({ ok: false, why: 'no unshared mark of the open book — withdraw one, or mark a fresh passage' })
+  for (const candidate of free) {
+    const clashes = rows.filter((r) => r.quote === candidate.quote).length
+    if (clashes > 1) continue
+    candidate.share.click()
+    return JSON.stringify({ ok: true, quote: candidate.quote })
+  }
+  return JSON.stringify({ ok: false, why: 'every unshared mark of this book shares its first 120 characters with another row, so nothing here can be polled or withdrawn unambiguously' })
 })()`
 
 /**
@@ -205,25 +214,51 @@ export const SHARE_FIRST_UNSHARED = `(() => {
  * token swapped in has neither failure mode, and reads as the script it is.
  */
 export const ROW_STATE = `(() => {
+  const matched = []
   for (const control of document.querySelectorAll('[data-mark-control="circle:share"]')) {
     let row = control
     for (let k = 0; k < 6 && row.parentElement; k++) {
       row = row.parentElement
       if ((row.textContent || '').length > (control.textContent || '').length + 20) break
     }
+    /* ⚠️ **THE OPEN BOOK ONLY, AND THE QUOTE IS NOT AN IDENTITY.** This matched
+       the first 120 characters of a passage across EVERY book Marginalia lists
+       — and it is cross-book — so a passage that begins the same way in another
+       book could be polled, or WITHDRAWN, instead of this one. placeBook is
+       the marker Marginalia puts on a row that is not the open book's; the
+       share path already skips them and these two did not. (No backticks in
+       this comment: it lives inside a template literal and one would end it.) */
+    if (row.querySelector('[class*="placeBook"]')) continue
     const jump = row.querySelector('[class*="noteJump"]')
     if (!jump) continue
     if ((jump.textContent || '').trim().slice(0, 120) !== __WANT__) continue
-    return JSON.stringify({
-      ok: true,
-      buttons: [...control.querySelectorAll('button')].map((b) => (b.textContent || '').trim()),
-      text: (control.textContent || '').trim().slice(0, 200),
-    })
+    matched.push(control)
+    continue
   }
-  return JSON.stringify({ ok: false, why: 'the row carrying that passage is no longer on screen' })
+  if (matched.length === 0) return JSON.stringify({ ok: false, why: 'the row carrying that passage is no longer on screen' })
+  if (matched.length > 1) return JSON.stringify({ ok: false, why: matched.length + ' rows of this book carry that passage — refusing rather than guessing which' })
+  const control = matched[0]
+  return JSON.stringify({
+    ok: true,
+    buttons: [...control.querySelectorAll('button')].map((b) => (b.textContent || '').trim()),
+    text: (control.textContent || '').trim().slice(0, 200),
+  })
 })()`
 
-export const stateOfRow = (quote) => ROW_STATE.replace('__WANT__', JSON.stringify(quote))
+/**
+ * ⚠️ **A FUNCTION REPLACEMENT, BECAUSE `String.replace` READS `$` IN THE
+ * REPLACEMENT.** A plain string second argument is not inserted literally:
+ * `$&` becomes the match, `$$` becomes one dollar, and `` $` `` / `$'` splice
+ * in the source either side. A passage containing any of them was corrupted or
+ * produced a SyntaxError the page could not parse. Measured 2026-09-08 — all
+ * four broke. The callback form is the only one that inserts exactly what it
+ * returns.
+ *
+ * ⚠️ **AND THE TEST CORPUS HAD `${x}` BUT NOT `$&`**, which is why this shipped
+ * green: the escaping cases were chosen for the bug already known rather than
+ * for the mechanism.
+ */
+export const stateOfRow = (quote) => ROW_STATE.replace('__WANT__', () => JSON.stringify(quote))
 
 /**
  * Withdraw the publication on the row carrying this quote.
@@ -236,24 +271,36 @@ export const stateOfRow = (quote) => ROW_STATE.replace('__WANT__', JSON.stringif
  * published leaves the library as it was found.
  */
 export const WITHDRAW_ROW = `(() => {
+  const matched = []
   for (const control of document.querySelectorAll('[data-mark-control="circle:share"]')) {
     let row = control
     for (let k = 0; k < 6 && row.parentElement; k++) {
       row = row.parentElement
       if ((row.textContent || '').length > (control.textContent || '').length + 20) break
     }
+    /* ⚠️ **THE OPEN BOOK ONLY, AND THE QUOTE IS NOT AN IDENTITY.** This matched
+       the first 120 characters of a passage across EVERY book Marginalia lists
+       — and it is cross-book — so a passage that begins the same way in another
+       book could be polled, or WITHDRAWN, instead of this one. placeBook is
+       the marker Marginalia puts on a row that is not the open book's; the
+       share path already skips them and these two did not. (No backticks in
+       this comment: it lives inside a template literal and one would end it.) */
+    if (row.querySelector('[class*="placeBook"]')) continue
     const jump = row.querySelector('[class*="noteJump"]')
     if (!jump) continue
     if ((jump.textContent || '').trim().slice(0, 120) !== __WANT__) continue
-    const button = [...control.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'Withdraw')
-    if (!button) return JSON.stringify({ ok: false, why: 'that row is not shared, so there is nothing to withdraw' })
-    button.click()
-    return JSON.stringify({ ok: true })
+    matched.push(control)
+    continue
   }
-  return JSON.stringify({ ok: false, why: 'no row carries that passage' })
+  if (matched.length === 0) return JSON.stringify({ ok: false, why: 'no row of this book carries that passage' })
+  if (matched.length > 1) return JSON.stringify({ ok: false, why: matched.length + ' rows of this book carry that passage — refusing to withdraw rather than guessing which' })
+  const button = [...matched[0].querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'Withdraw')
+  if (!button) return JSON.stringify({ ok: false, why: 'that row is not shared, so there is nothing to withdraw' })
+  button.click()
+  return JSON.stringify({ ok: true })
 })()`
 
-export const withdrawRow = (quote) => WITHDRAW_ROW.replace('__WANT__', JSON.stringify(quote))
+export const withdrawRow = (quote) => WITHDRAW_ROW.replace('__WANT__', () => JSON.stringify(quote))
 
 /** Click Share on one row. The WAIT is the caller's, in Node. */
 export const clickShare = (index) =>
@@ -314,8 +361,14 @@ export const PERSON_SWITCHES = `(() => {
 export const flipSwitch = (label, on) =>
   '(() => {\n' +
   '  const want = ' + JSON.stringify(label) + '\n' +
-  '  const box = [...document.querySelectorAll(\'input[type="checkbox"]\')].find((b) => (b.getAttribute(\'aria-label\') || \'\').trim() === want)\n' +
-  "  if (!box) return JSON.stringify({ ok: false, why: 'no switch labelled ' + want })\n" +
+  '  const all = [...document.querySelectorAll(\'input[type="checkbox"]\')].filter((b) => (b.getAttribute(\'aria-label\') || \'\').trim() === want)\n' +
+  "  if (all.length === 0) return JSON.stringify({ ok: false, why: 'no switch labelled ' + want })\n" +
+  /* ⚠️ **TWO PEOPLE CAN SHARE A DISPLAY NAME, AND THIS TOOK THE FIRST.** The
+     label is built from a name, not an identity, so showing a shelf to "Ann"
+     with two Anns in the circle disclosed the library to whichever row drew
+     first — and reported success. A disclosure is not a thing to guess at. */
+  "  if (all.length > 1) return JSON.stringify({ ok: false, why: all.length + ' people carry the label ' + want + ' — refusing rather than picking one' })\n" +
+  '  const box = all[0]\n' +
   '  if (box.checked === ' + JSON.stringify(Boolean(on)) + ') return JSON.stringify({ ok: true, already: true })\n' +
   '  box.click()\n' +
   '  return JSON.stringify({ ok: true })\n' +

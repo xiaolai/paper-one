@@ -141,6 +141,114 @@ fail() { step_no=$((step_no + 1)); failures=$((failures + 1)); log "  FAIL [$ste
 skip() { step_no=$((step_no + 1)); skipped=$((skipped + 1)); log "  skip [$step_no] $*"; }
 note() { log "  note  $*"; }
 
+# ⚠️ **DEFINED BEFORE THE TRAP THAT CALLS IT — BASH DOES NOT HOIST.** This
+# lived below the converge step, which is AFTER the falsifier can stop the
+# far end. Any early exit in between — a failed share, an ambiguous
+# publication count, a Ctrl-C — reached the trap and ran an undefined
+# command, leaving the remote stopped and the pair dead. A function is only
+# in scope from the line it is READ, and a trap can fire before that.
+
+# ⚠️ **THE FALSIFIER LEAVES THE PAIR UNUSABLE UNLESS IT RESTARTS *BOTH* ENDS.**
+# Measured 2026-09-07: after a `--falsify` run the next two normal runs failed
+# at this step — `circle.pages: timeout` one way, `asleep — timed out: session
+# hello` the other. Nothing to do with the circle; the peer session does not
+# survive one end vanishing and does not re-establish on its own.
+#
+# ⚠️ **AND THE FIRST FIX FOR THIS RESTARTED ONLY THE FAR END, WHICH IS HALF OF
+# IT.** That was written from watching the RESTARTED machine start fetching
+# again — which it does, within about 280 s — and concluding the pair had
+# recovered. It had not. The end that kept RUNNING is the one holding the dead
+# session, and it stays wedged: measured 2026-09-08, this machine timed out on
+# `session hello` for seventeen minutes after the far end was replaced and had
+# itself recovered. Restarting THIS end cleared it in 100 s.
+#
+# The note in `dev-docs` that both ends must restart was therefore right, and
+# the "narrower claim" recorded against it here was an over-read of one side's
+# recovery. Watching the side you just restarted tells you nothing about the
+# side you did not.
+# ⚠️ **A RESTART IS A NEW PID, NOT A LIVE PORT.** The first version asked `nc`
+# whether the bridge answered — and the OLD app's bridge answers perfectly well,
+# so a `quit` that silently failed produced "restarted BOTH" with nothing
+# restarted. It also ignored every `open` failure. That is the same
+# green-is-not-evidence defect this whole harness exists to avoid, written into
+# its own recovery path. Both ends must be seen to GO, and to come back as a
+# DIFFERENT process.
+restore_session() {
+  local ok=yes before_remote after_remote before_local after_local
+  before_remote="$(app_pids_remote | head -1)"
+  before_local="$(app_pids_local | head -1)"
+
+  remote_sh "osascript -e 'quit app \"Paper\"' >/dev/null 2>&1 || true"
+  for _ in $(seq 1 20); do [ -z "$(app_pids_remote)" ] && break; sleep 1; done
+  [ -z "$(app_pids_remote)" ] || { ok=no; note "the app on $remote did not quit"; }
+  remote_sh "open \"\$HOME/$SATCHEL_APP\" >/dev/null 2>&1 || open -a Paper >/dev/null 2>&1 || true"
+  for _ in $(seq 1 20); do [ -n "$(app_pids_remote)" ] && break; sleep 2; done
+  after_remote="$(app_pids_remote | head -1)"
+  if [ -z "$after_remote" ]; then ok=no; note "the app on $remote did not come back"
+  elif [ -n "$before_remote" ] && [ "$after_remote" = "$before_remote" ]; then
+    ok=no; note "the app on $remote has the same pid ($after_remote) — it never restarted"
+  fi
+
+  # ⚠️ **AND THIS END TOO, WHICH MEANS THE BRIDGE GOES AWAY AND COMES BACK.**
+  # Every later step drives the app through it, so the restart is not complete
+  # until the port answers again — returning early would fail the negative step
+  # against an app that is merely still booting.
+  osascript -e 'quit app "Paper"' >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do [ -z "$(app_pids_local)" ] && break; sleep 1; done
+  [ -z "$(app_pids_local)" ] || { ok=no; note "the app on this machine did not quit"; }
+  open "$HOME/${PAPER_LOCAL_APP:-Applications/Paper.app}" >/dev/null 2>&1 || open -a Paper >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do [ -n "$(app_pids_local)" ] && break; sleep 2; done
+  after_local="$(app_pids_local | head -1)"
+  if [ -z "$after_local" ]; then ok=no; note "the app on this machine did not come back"
+  elif [ -n "$before_local" ] && [ "$after_local" = "$before_local" ]; then
+    ok=no; note "the app here has the same pid ($after_local) — it never restarted"
+  fi
+  # The port LAST, and only as a readiness check on a process already proved new.
+  for _ in $(seq 1 30); do nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && break; sleep 2; done
+  nc -z 127.0.0.1 "$port" >/dev/null 2>&1 || { ok=no; note "the bridge never answered after the restart"; }
+  raise_window local
+  raise_window remote
+  [ "$ok" = yes ]
+}
+
+# ⚠️ **CLEANUP ON EVERY EXIT, BECAUSE THE MUTATIONS OUTLIVE A FAILED RUN.** A
+# `--falsify` run stops the far end; a share leaves a publication; a mute leaves
+# a person held back. Every early `exit` after those — and every Ctrl-C — used to
+# skip the steps that put them back, so a failed run handed the next one a dead
+# session, one fewer unshared mark, and a muted friend. Registered before the
+# first mutation, idempotent, and it says what it is undoing.
+harness_stopped_remote=no
+harness_published=''
+harness_muted=no
+# ⚠️ **A SIGNAL MUST NOT EXIT 0.** `$?` here is the status of whatever ran last,
+# so an interrupt arriving after a successful command exited SUCCESSFULLY —
+# a run killed halfway reported itself green. Measured by the audit's verify
+# pass on an isolated TERM.
+on_signal() { harness_signalled=yes; exit 130; }
+harness_signalled=no
+on_exit() {
+  local code=$?
+  [ "$harness_signalled" = yes ] && code=130
+  trap - EXIT INT TERM
+  if [ "$harness_stopped_remote" = yes ]; then
+    # BOTH ends: the peer session does not survive one end vanishing, and the
+    # end that kept RUNNING is the one left holding the dead session.
+    log "  note  cleanup: restarting BOTH apps — this run stopped the far end, and the near end holds a dead session"
+    restore_session >/dev/null 2>&1 || log "  note  cleanup: could not fully restore; start the apps by hand"
+  fi
+  if [ "$harness_muted" = yes ]; then
+    log "  note  cleanup: letting $friend_name back, which this run held back"
+    drive unmute --person "$friend_name" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$harness_published" ]; then
+    log "  note  cleanup: withdrawing this run's publication"
+    drive withdraw --title "$book" --quote "$harness_published" >/dev/null 2>&1 || true
+  fi
+  exit "$code"
+}
+trap on_exit EXIT
+trap on_signal INT TERM
+
 log "# WI-24.C2 — the circle, crossed"
 log ""
 log "run       $RUN_ID"
@@ -333,6 +441,11 @@ fi
 
 if [ "$falsify" = yes ]; then
   note "falsifier: quitting the app on $remote so the converge step has nothing to answer it"
+  # ⚠️ **ARMED BEFORE THE QUIT, NOT AFTER.** The flag the cleanup trap reads was
+  # added and never set — a silent no-op that left the trap's whole restore
+  # branch dead, so an early exit or a Ctrl-C still handed the next run a
+  # stopped far end. Found by the audit's verify pass, not by any run.
+  harness_stopped_remote=yes
   remote_sh 'osascript -e "quit app \"Paper\"" >/dev/null 2>&1 || true'
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -z "$(app_pids_remote)" ] && break
@@ -352,11 +465,33 @@ log "## Mutate — share a passage on this machine, through the app's own contro
 
 [ -n "$book" ] || book='Uncovering The Logic of English'
 
+# The `pub` is the stable publication id, and it is what the far end must end
+# up holding. Read from the store rather than from the driver: the store is
+# what the app actually wrote, and a driver that reported an id the app never
+# persisted is the exact self-confirmation this harness exists to avoid.
+#
+# ⚠️ **THE NEW ONE, NOT THE NEWEST ONE.** This took the highest `at` across
+# EVERY book — withdrawn publications included — so a clock skew, a concurrent
+# share, or a previously future-dated row could hand the converge step an id
+# that was already on the far end, and it would pass without anything crossing.
+# The ids present BEFORE the share are recorded, and the one that appears after
+# is the one this run published. Set difference cannot be fooled by a timestamp.
+readonly PUB_LIST='
+import json,pathlib
+root = pathlib.Path.home()/"Library/Application Support/one.paper.reader/books"
+for f in root.glob("*/shared.json"):
+    try: d = json.load(open(f))
+    except Exception: continue
+    for pub in d.get("publications", []):
+        print(pub["pub"], f.parent.name)'
+
+python3 -c "$PUB_LIST" > /tmp/paper-pubs-before.txt 2>/dev/null || : > /tmp/paper-pubs-before.txt
 shared="$(drive share --title "$book" 2>&1)"
 quote="$(printf '%s' "$shared" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("quote",""))
 except Exception: print("")' 2>/dev/null)"
 if printf '%s' "$shared" | grep -q '"ok":true'; then
+  harness_published="$quote"
   pass "shared a passage of $book through the Share control"
 else
   fail "could not share a passage: $(printf '%s' "$shared" | tr -d '\n' | cut -c1-260)"
@@ -365,23 +500,22 @@ else
   exit 1
 fi
 
-# The `pub` is the stable publication id, and it is what the far end must end
-# up holding. Read from the store rather than from the driver: the store is
-# what the app actually wrote, and a driver that reported an id the app never
-# persisted is the exact self-confirmation this harness exists to avoid.
-readonly PUB_PROBE='
-import json,pathlib,sys
-root = pathlib.Path.home()/"Library/Application Support/one.paper.reader/books"
-newest = None
-for f in root.glob("*/shared.json"):
-    d = json.load(open(f))
-    for pub in d.get("publications", []):
-        if newest is None or pub["at"] > newest[0]:
-            newest = (pub["at"], pub["pub"], f.parent.name)
-print(json.dumps({"pub": newest[1], "book": newest[2]}) if newest else "{}")'
-pub_row="$(python3 -c "$PUB_PROBE" 2>/dev/null)"
-pub="$(printf '%s' "$pub_row" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("pub",""))' 2>/dev/null)"
-pub_book="$(printf '%s' "$pub_row" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("book",""))' 2>/dev/null)"
+# ⚠️ **REFUSED WHEN MORE THAN ONE IS NEW.** Taking the first new id assumes this
+# run is the only thing publishing. A concurrent share — or a snapshot that
+# failed and left the "before" list empty — makes every id look new, and the
+# converge step would then wait on somebody else's publication. One new id is
+# the only unambiguous answer.
+new_pubs="$(python3 -c "$PUB_LIST" 2>/dev/null | grep -vxF -f /tmp/paper-pubs-before.txt 2>/dev/null)"
+new_count="$(printf '%s' "$new_pubs" | grep -c . || true)"
+pub_row=''
+if [ "$new_count" = 1 ]; then
+  pub_row="$new_pubs"
+elif [ "$new_count" -gt 1 ] 2>/dev/null; then
+  fail "$new_count publications appeared during this run — refusing to guess which one this share made"
+fi
+rm -f /tmp/paper-pubs-before.txt
+pub="$(printf '%s' "$pub_row" | awk '{print $1}')"
+pub_book="$(printf '%s' "$pub_row" | awk '{print $2}')"
 if [ -n "$pub" ]; then
   pass "the store holds the publication: pub ${pub:0:12}… in $pub_book"
 else
@@ -403,8 +537,27 @@ log "## Converge — the far end must end up holding that pub"
 # addressing the far end's file by THIS machine's id would report a defect on
 # any pair whose ids differ. The `pub` is unique, so looking for it under this
 # person's file is both stricter and portable.
+# ⚠️ **A TOMBSTONE IS NOT AN ARRIVAL, AND `grep` CANNOT TELL THEM APART.** This
+# matched the id ANYWHERE in the file — so a publication that crossed and was
+# then WITHDRAWN still satisfied "the passage crossed", because the id survives
+# in the `withdrawn` list. The harness would have gone green on a passage the
+# reader had taken back. It also matched a substring of a longer id.
+#
+# Parsed now, and the id must be a live entry. The exit code carries the three
+# states apart: 0 arrived, 1 not yet, 2 the file could not be read at all.
+readonly ENTRY_PROBE='
+import json,pathlib,sys
+person, pub = sys.argv[1], sys.argv[2]
+root = pathlib.Path.home()/"Library/Application Support/one.paper.reader/books"
+for f in root.glob("*/circle/" + person + ".json"):
+    try: d = json.load(open(f))
+    except Exception: sys.exit(2)
+    if any(e.get("pub") == pub for e in (d.get("entries") or [])):
+        print(f.parent.parent.name); sys.exit(0)
+# No file, or a file without that entry: not yet. Unreadable JSON exited 2 above.
+sys.exit(1)'
 converged_probe() {
-  remote_sh "grep -rl '$pub' \"\$HOME/$DATA_DIR/books\"/*/circle/'$person'.json 2>/dev/null | head -1"
+  remote_sh "python3 -c '$ENTRY_PROBE' '$person' '$pub'"
 }
 
 # ⚠️ **THE FALSIFIER NEEDS ONE PERIOD, NOT TWO, AND WAITING TWO IS NOT FREE.**
@@ -419,60 +572,25 @@ if [ "$falsify" = yes ] && [ "$watch_s" -gt "$((CADENCE_PERIOD_S + 120))" ]; the
   note "falsifier: watching ${watch_s}s — one full round, which is all a negative needs"
 fi
 
+# ⚠️ **AN UNREADABLE FAR END IS NOT AN ABSENT PASSAGE.** ssh errors were
+# swallowed and read as "not arrived", so `--falsify` passed just as happily
+# against a machine whose filesystem could not be read at all — asserting
+# nothing. The probe's exit code is kept: 0 arrived, 1 not yet, anything else is
+# a failure to OBSERVE, which is refused rather than counted either way.
 deadline=$(( $(date +%s) + watch_s ))
 found=''
+probe_broke=no
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  found="$(converged_probe 2>/dev/null)"
-  [ -n "$found" ] && break
+  found="$(converged_probe 2>/dev/null)"; rc=$?
+  case "$rc" in
+    0) [ -n "$found" ] && break ;;
+    1) : ;;
+    *) probe_broke=yes ;;
+  esac
+  found=''
   sleep 10
 done
 
-# ⚠️ **THE FALSIFIER LEAVES THE PAIR UNUSABLE UNLESS IT RESTARTS *BOTH* ENDS.**
-# Measured 2026-09-07: after a `--falsify` run the next two normal runs failed
-# at this step — `circle.pages: timeout` one way, `asleep — timed out: session
-# hello` the other. Nothing to do with the circle; the peer session does not
-# survive one end vanishing and does not re-establish on its own.
-#
-# ⚠️ **AND THE FIRST FIX FOR THIS RESTARTED ONLY THE FAR END, WHICH IS HALF OF
-# IT.** That was written from watching the RESTARTED machine start fetching
-# again — which it does, within about 280 s — and concluding the pair had
-# recovered. It had not. The end that kept RUNNING is the one holding the dead
-# session, and it stays wedged: measured 2026-09-08, this machine timed out on
-# `session hello` for seventeen minutes after the far end was replaced and had
-# itself recovered. Restarting THIS end cleared it in 100 s.
-#
-# The note in `dev-docs` that both ends must restart was therefore right, and
-# the "narrower claim" recorded against it here was an over-read of one side's
-# recovery. Watching the side you just restarted tells you nothing about the
-# side you did not.
-restore_session() {
-  local ok=yes
-  remote_sh "open \"\$HOME/$SATCHEL_APP\" >/dev/null 2>&1 || open -a Paper >/dev/null 2>&1 || true"
-  for _ in $(seq 1 15); do
-    [ -n "$(app_pids_remote)" ] && break
-    sleep 2
-  done
-  [ -n "$(app_pids_remote)" ] || ok=no
-
-  # ⚠️ **AND THIS END TOO, WHICH MEANS THE BRIDGE GOES AWAY AND COMES BACK.**
-  # Every later step drives the app through it, so the restart is not complete
-  # until the port answers again — returning early here would fail the negative
-  # step against an app that is merely still booting.
-  osascript -e 'quit app "Paper"' >/dev/null 2>&1 || true
-  for _ in $(seq 1 20); do
-    [ -z "$(app_pids_local)" ] && break
-    sleep 1
-  done
-  open "$HOME/${PAPER_LOCAL_APP:-Applications/Paper.app}" >/dev/null 2>&1 || open -a Paper >/dev/null 2>&1 || true
-  for _ in $(seq 1 30); do
-    nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && break
-    sleep 2
-  done
-  nc -z 127.0.0.1 "$port" >/dev/null 2>&1 || ok=no
-  raise_window local
-  raise_window remote
-  [ "$ok" = yes ]
-}
 
 if [ -n "$found" ]; then
   if [ "$falsify" = yes ]; then
@@ -481,7 +599,9 @@ if [ -n "$found" ]; then
     pass "the passage crossed: $remote holds pub ${pub:0:12}… at ${found##*/books/}"
   fi
 else
-  if [ "$falsify" = yes ]; then
+  if [ "$probe_broke" = yes ] && [ "$falsify" = yes ]; then
+    fail "the far end could not be READ during the falsifier, so its silence proves nothing — an unobservable machine is not an empty one"
+  elif [ "$falsify" = yes ]; then
     pass "the passage did NOT cross with the far end stopped — the converge step can fail, so a pass from it means something"
   else
     fail "the passage did not reach $remote within ${watch_s}s (cadence period ${CADENCE_PERIOD_S}s, so that is $((watch_s / CADENCE_PERIOD_S)) full round(s))"
@@ -509,6 +629,7 @@ fi
 # Whatever the verdict, the far end goes back the way it was found.
 if [ "$falsify" = yes ]; then
   if restore_session; then
+    harness_stopped_remote=no
     pass "restarted BOTH apps and the bridge answered again — the end that kept running holds the dead session, so restarting only the far one leaves the pair broken"
   else
     fail "could not restart both apps. THE PAIR IS LEFT BROKEN: every later run will fail at the converge step with 'session hello' timing out, for a reason that is this run's and not the circle's."
@@ -555,6 +676,7 @@ else
 
   held="$(drive mute --person "$friend_name" 2>&1)"
   if printf '%s' "$held" | grep -q '"ok":true'; then
+    harness_muted=yes
     pass "held $friend_name back, through the switch on the Circle screen"
   else
     fail "could not hold $friend_name back: $(printf '%s' "$held" | tr -d '\n' | cut -c1-220)"
@@ -585,6 +707,7 @@ for f in root.glob("*/relationship.json"):
 
   back="$(drive unmute --person "$friend_name" 2>&1)"
   if printf '%s' "$back" | grep -q '"ok":true'; then
+    harness_muted=no
     pass "let $friend_name back — a mute is reversible, which is the whole difference from Remove"
   else
     fail "could not let $friend_name back, and the harness has left them held: $(printf '%s' "$back" | tr -d '\n' | cut -c1-200)"
@@ -721,6 +844,7 @@ log "## Put it back"
 if [ -z "$quote" ]; then
   skip "nothing to withdraw — the share step did not name a passage"
 elif printf '%s' "$(drive withdraw --title "$book" --quote "$quote" 2>&1)" | grep -q '"ok":true'; then
+  harness_published=''
   pass "withdrew this run's publication, so the next run has a mark to use"
 else
   fail "could not withdraw this run's publication — the next run will find one fewer unshared mark, and eventually none"
