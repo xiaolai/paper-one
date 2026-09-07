@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { acceptsTransport, drawsOverlays, hlcOf, newRelationship, type Hlc, type Relationship } from '../../../kernel'
-import { COVER_WIDTH, RECENT_LIMIT, circlePortOver, type CirclePortDeps, type FriendBook } from './circlePort'
+import { COVER_WIDTH, RECENT_LIMIT, circlePortOver, slotsOf, type CirclePortDeps, type FriendBook } from './circlePort'
 import { NOTHING_SHARED, type ForeignFile } from './store'
 
 /**
@@ -158,6 +158,112 @@ describe('holding a person back — the mute that did not exist', () => {
     const { port, records } = world()
     records.set(BOB, { ...newRelationship(BOB, at(1)), state: 'exited' })
     await expect(port.setMuted(BOB, false)).rejects.toThrow(/readmit/u)
+  })
+})
+
+describe('slotsOf — the concurrency bound, where it can actually fail', () => {
+  /* ⚠️ **THIS WAS FIRST WRITTEN AGAINST `port.cover()` AND ASSERTED NOTHING.**
+     The breach needs a newcomer arriving exactly one microtask after a release
+     — after the `finally` frees the slot and wakes a waiter, before the waiter
+     resumes. `cover()`'s own awaits push every caller past that instant, so the
+     port-level test passed with the defect in place, twice, and I confirmed it
+     by reintroducing the bug. The bound belongs to this function; this is where
+     it can be tested. */
+  const runWith = async (limit: ReturnType<typeof slotsOf>) => {
+    let running = 0
+    let most = 0
+    const releases: (() => void)[] = []
+    const task = () =>
+      new Promise<void>((done) => {
+        running += 1
+        most = Math.max(most, running)
+        releases.push(() => {
+          running -= 1
+          done()
+        })
+      })
+    const busy = Array.from({ length: 4 }, () => limit(task))
+    const queued = limit(task)
+    await new Promise((done) => setTimeout(done, 0))
+
+    releases.shift()!()
+    /* EXACTLY ONE microtask: enough for the `finally` to free the slot and wake
+       the waiter, and not enough for the waiter to resume. `setTimeout(0)` is
+       far too coarse — the queue has drained by then, and even the defective
+       version holds. */
+    await Promise.resolve()
+    const newcomer = limit(task)
+    await new Promise((done) => setTimeout(done, 0))
+
+    while (releases.length > 0) {
+      releases.shift()!()
+      await new Promise((done) => setTimeout(done, 0))
+    }
+    await Promise.all([...busy, queued, newcomer])
+    return most
+  }
+
+  it('never runs more than its width, even across the gap a release opens', async () => {
+    expect(await runWith(slotsOf(4))).toBe(4)
+  })
+
+  it('runs them all, so the bound is not achieved by dropping work', async () => {
+    const limit = slotsOf(2)
+    const done: number[] = []
+    await Promise.all(Array.from({ length: 6 }, (_, i) => limit(async () => void done.push(i))))
+    expect(done.sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5])
+  })
+
+  it('frees the slot when a task THROWS, rather than leaking it', async () => {
+    const limit = slotsOf(1)
+    await expect(limit(() => Promise.reject(new Error('nope')))).rejects.toThrow('nope')
+    await expect(limit(() => Promise.resolve('after'))).resolves.toBe('after')
+  })
+})
+
+describe('a relationship write that LOSES the merge', () => {
+  /* ⚠️ **`writeRelationship` MERGES, AND EVERY CALLER THREW ITS ANSWER AWAY.**
+     Within one epoch `mergeRelationship` keeps whichever record has the later
+     `changedAt`, so a write can be persisted and have no effect. The callers
+     carried on as though it had taken. */
+
+  /** A store whose held record always wins — the losing-merge case, exactly. */
+  const stubborn = (held: Relationship) =>
+    world({
+      relationship: () => Promise.resolve(held),
+      writeRelationship: vi.fn(() => Promise.resolve(held)),
+    })
+
+  it('does NOT purge or forget the peer when the exit did not stand', async () => {
+    /* ⚠️ **THE ONE THAT MATTERS.** `forget` purged the files and told the peer
+       to forget the person while the record could still say `admitted` — which
+       is the state `admits()` re-admits on. Files gone, pairing gone, and the
+       door open to the next hello from somebody the reader had just removed. */
+    const admitted = newRelationship(BOB, at(9))
+    const { port, deps } = stubborn(admitted)
+    await expect(port.forget(BOB)).rejects.toThrow(/was not the one that stood/u)
+    expect(deps.purge).not.toHaveBeenCalled()
+    expect(deps.forgetPeer).not.toHaveBeenCalled()
+  })
+
+  it('refuses a shelf switch that did not stand, rather than reporting it moved', async () => {
+    const { port } = stubborn(newRelationship(BOB, at(9)))
+    await expect(port.setShowsShelf(BOB, true)).rejects.toThrow(/was not the one that stood/u)
+  })
+
+  it('refuses a hold-back that did not stand', async () => {
+    const { port } = stubborn(newRelationship(BOB, at(9)))
+    await expect(port.setMuted(BOB, true)).rejects.toThrow(/was not the one that stood/u)
+  })
+
+  it('tells nobody when the write lost, because nothing moved', async () => {
+    /* A listener woken for a change that did not happen sends every subscriber
+       to re-read state that is exactly as they left it. */
+    const { port } = stubborn(newRelationship(BOB, at(9)))
+    const told = vi.fn()
+    port.subscribe(told)
+    await port.setMuted(BOB, true).catch(() => {})
+    expect(told).not.toHaveBeenCalled()
   })
 })
 

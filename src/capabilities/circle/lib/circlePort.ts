@@ -155,6 +155,22 @@ export const RECENT_LIMIT = 30
 /** What a switch says for a person the peer no longer names. */
 export const NOT_IN_CIRCLE = 'That person is not in your circle.'
 
+/**
+ * A write the merge refused.
+ *
+ * ⚠️ **`writeRelationship` MERGES; IT DOES NOT OVERWRITE.** Within one epoch
+ * `mergeRelationship` keeps whichever record has the later `changedAt`, so a
+ * write can be persisted and have no effect — and every caller threw the
+ * returned record away and carried on as though it had taken. `forget` was the
+ * dangerous one: it purged the files and told the peer to forget the person
+ * while the stored record could still say `admitted`, which is exactly the
+ * state `admits()` re-admits on. Files gone, pairing gone, door open.
+ *
+ * The merge is RIGHT — a replica whose clock runs ahead must not be outvoted —
+ * so the fix is not to force the write but to notice when it loses.
+ */
+export const LOST_WRITE = 'That change was not the one that stood — something else wrote first. Try again.'
+
 const STATUS_WORDS: Readonly<Record<ReadingState, string>> = {
   want: 'wants to read',
   reading: 'is reading',
@@ -232,6 +248,46 @@ function listsOf(files: ReadonlyMap<string, ForeignFile>, index: ReturnType<type
   return lists.sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id))
 }
 
+/**
+ * At most `width` tasks at once; the rest wait their turn.
+ *
+ * ⚠️ **THE SLOT IS HANDED OVER, NOT RELEASED AND RE-TAKEN.** The first version
+ * decremented the count and then woke a waiter — and a woken waiter resumes on
+ * a LATER MICROTASK, so for exactly one microtask the count was below the
+ * truth. A caller arriving in that window saw a free slot and took it; the
+ * waiter then took one too, and both ran. Measured against a model of both
+ * versions: with the window, four became five.
+ *
+ * ⚠️ **AND THAT WINDOW IS UNREACHABLE THROUGH `cover()`.** Its own awaits push
+ * any caller past the one microtask that matters, which is why the existing
+ * `at most COVER_WIDTH at once` test held even with the defect in place. The
+ * bound belongs to this function, so this is where it is asserted — through the
+ * port, the assertion cannot fail.
+ *
+ * A waiter INHERITS the slot its predecessor held: the count rises only when a
+ * caller finds one free and falls only when nobody is queued. There is no
+ * window because there is no moment when the slot belongs to nobody.
+ */
+export function slotsOf(width: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let running = 0
+  const waiting: (() => void)[] = []
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    let inherited = false
+    if (running >= width) {
+      await new Promise<void>((go) => waiting.push(go))
+      inherited = true
+    }
+    if (!inherited) running += 1
+    try {
+      return await task()
+    } finally {
+      const next = waiting.shift()
+      if (next) next()
+      else running -= 1
+    }
+  }
+}
+
 export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): void; pendingTurns(): number } {
   const listeners = createListeners('circle')
   const changed = (): void => listeners.tell()
@@ -241,18 +297,7 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
      was hundreds of dials together, and a shelf hidden again left them all
      running. The rest wait their turn, and one abandoned before its turn is
      not dialled at all. */
-  let fetching = 0
-  const waiting: (() => void)[] = []
-  const inSlot = async <T>(task: () => Promise<T>): Promise<T> => {
-    if (fetching >= COVER_WIDTH) await new Promise<void>((go) => waiting.push(go))
-    fetching += 1
-    try {
-      return await task()
-    } finally {
-      fetching -= 1
-      waiting.shift()?.()
-    }
-  }
+  const inSlot = slotsOf(COVER_WIDTH)
 
   /* One queue per person for the switch: a read-check-write that two quick
      flips could interleave, so the later flip returned early against the
@@ -292,7 +337,8 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
         const held = await deps.relationship(person)
         /* Told only when the switch MOVED, as the contract says. */
         if (held.shelf === on) return
-        await deps.writeRelationship(showShelf(held, on, deps.clock()))
+        const written = await deps.writeRelationship(showShelf(held, on, deps.clock()))
+        if (written.shelf !== on) throw new Error(LOST_WRITE)
         changed()
       }),
     muted: async (person) => (await deps.relationship(person)).state === 'muted',
@@ -310,7 +356,8 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
            blocked or exited person is a re-admission and `changeState` throws
            on it — one rule, in the kernel, where `readmit` is. A guard written
            beside it would be a second place for that decision to drift. */
-        await deps.writeRelationship(changeState(held, wanted, deps.clock()))
+        const written = await deps.writeRelationship(changeState(held, wanted, deps.clock()))
+        if (written.state !== wanted) throw new Error(LOST_WRITE)
         changed()
       }),
     friend: async (person) => {
@@ -394,7 +441,13 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
            that would not forget them, or a keep queued behind the purge,
            finds a person who is exited and not the admitted default. Meeting
            them again is a pairing, and that is what re-admits them. */
-        await deps.writeRelationship(changeState(await deps.relationship(person), 'exited', deps.clock()))
+        const written = await deps.writeRelationship(changeState(await deps.relationship(person), 'exited', deps.clock()))
+        /* ⚠️ **NOTHING IS PURGED UNTIL THE EXIT IS THE RECORD THAT STANDS.** A
+           losing merge left the record `admitted` while the files were purged
+           and the peer forgotten — and `admits()` re-admits on `admitted`, so
+           the next hello from somebody just removed would be let straight back
+           in, with nothing on disk to show what happened. */
+        if (written.state !== 'exited') throw new Error(LOST_WRITE)
         /* The purge is what says so — `purgePerson` tells `onChanged` as its
            files go — so nothing is said twice here. */
         await deps.purge(person, deps.books().map((book) => book.id))
