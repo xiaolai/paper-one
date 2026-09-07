@@ -158,6 +158,22 @@ export interface RoundReport {
   /** Pages taken and kept. */
   readonly accepted: number
   readonly refusals: number
+  /**
+   * WHY the refused pages were refused, counted per reason.
+   *
+   * ⚠️ **`refusals` WAS AN UNLABELLED INTEGER, IN A PROTOCOL WHOSE WHOLE DESIGN
+   * IS REFUSING FOR THE RIGHT REASONS.** `takePages` already answers with a
+   * `Refusal[]` — twelve named kinds, `wrong-work` and `not-admitted` and
+   * `bad-signature` among them — and every call site reduced it to `.length`
+   * before it could be reported. A round that says `refusals: 1` says a page
+   * was rejected and nothing about whether that was the protocol working or
+   * the protocol broken, which are the only two things worth telling apart.
+   *
+   * Measured 2026-09-07: two machines, one published passage, `accepted: 0` on
+   * both sides and `refusals: 1` on one of them — and no way to tell which of
+   * the twelve it was without changing the code first. That is the cost.
+   */
+  readonly refusedBecause: Readonly<Record<string, number>>
   readonly skipped: readonly Skipped[]
 }
 
@@ -166,6 +182,8 @@ interface LogOutcome {
   readonly calls: number
   readonly accepted: number
   readonly refusals: number
+  /** Why, counted per reason — see `RoundReport.refusedBecause`. */
+  readonly refusedBecause: Readonly<Record<string, number>>
   /** The person's budget ran out: their round ends here. */
   readonly overBudget: boolean
   /**
@@ -181,12 +199,23 @@ interface LogOutcome {
   readonly stopped: boolean
 }
 
-const NOTHING_DONE: LogOutcome = { calls: 0, accepted: 0, refusals: 0, overBudget: false, stopped: false }
+const NOTHING_DONE: LogOutcome = { calls: 0, accepted: 0, refusals: 0, refusedBecause: {}, overBudget: false, stopped: false }
+
+/** Fold one reason tally into another. */
+const mergeWhy = (
+  a: Readonly<Record<string, number>>,
+  b: Readonly<Record<string, number>>,
+): Readonly<Record<string, number>> => {
+  const out: Record<string, number> = { ...a }
+  for (const [why, n] of Object.entries(b)) out[why] = (out[why] ?? 0) + n
+  return out
+}
 
 const sum = (a: LogOutcome, b: LogOutcome): LogOutcome => ({
   calls: a.calls + b.calls,
   accepted: a.accepted + b.accepted,
   refusals: a.refusals + b.refusals,
+  refusedBecause: mergeWhy(a.refusedBecause, b.refusedBecause),
   overBudget: a.overBudget || b.overBudget,
   stopped: a.stopped || b.stopped,
 })
@@ -204,7 +233,7 @@ const sum = (a: LogOutcome, b: LogOutcome): LogOutcome => ({
  * awake is reported asleep.
  */
 export async function fetchRound(ports: FetchPorts): Promise<RoundReport> {
-  const empty: RoundReport = { asked: 0, calls: 0, accepted: 0, refusals: 0, skipped: [] }
+  const empty: RoundReport = { asked: 0, calls: 0, accepted: 0, refusals: 0, refusedBecause: {}, skipped: [] }
   const mine = await ports.mine()
   /* No identity is the ordinary state of a reader who never shared, and it is
      not a failure — there is simply nobody to ask AS. */
@@ -230,7 +259,7 @@ export async function fetchRound(ports: FetchPorts): Promise<RoundReport> {
       skipped.push({ person: person.person, why: 'failed', detail: messageOf(cause) })
     }
   }
-  return { asked, calls: done.calls, accepted: done.accepted, refusals: done.refusals, skipped }
+  return { asked, calls: done.calls, accepted: done.accepted, refusals: done.refusals, refusedBecause: done.refusedBecause, skipped }
 }
 
 /**
@@ -385,7 +414,7 @@ interface LogFetch {
    * answered before the take — or `null` when the record no longer admits
    * the person by the time the keep would land.
    */
-  readonly take: (pages: readonly string[], epoch: number) => Promise<{ readonly accepted: number; readonly refusals: number } | null>
+  readonly take: (pages: readonly string[], epoch: number) => Promise<{ readonly accepted: number; readonly refusals: readonly string[] } | null>
   /**
    * When the FIRST answer is empty: whether the log is still served —
    * probing what is held, paying for the probe, and clearing what is no
@@ -414,7 +443,12 @@ async function fetchLog(ports: FetchPorts, person: PersonToFetch, admitted: () =
   let calls = 0
   let accepted = 0
   let refusals = 0
-  const outcome = (over: Partial<LogOutcome> = {}): LogOutcome => ({ calls, accepted, refusals, overBudget: false, stopped: false, ...over })
+  /* Counted per reason as they arrive — see `RoundReport.refusedBecause`. */
+  const refusedBecause: Record<string, number> = {}
+  const because = (kinds: readonly string[]): void => {
+    for (const why of kinds) refusedBecause[why] = (refusedBecause[why] ?? 0) + 1
+  }
+  const outcome = (over: Partial<LogOutcome> = {}): LogOutcome => ({ calls, accepted, refusals, refusedBecause, overBudget: false, stopped: false, ...over })
   for (let answers = 0; answers < MAX_ANSWERS_PER_LOG; answers++) {
     calls += 1
     const answer = await log.ask()
@@ -444,7 +478,8 @@ async function fetchLog(ports: FetchPorts, person: PersonToFetch, admitted: () =
     if (epoch === null) return outcome({ stopped: true })
     const taken = await log.take(answer.pages, epoch)
     if (taken === null) return outcome({ stopped: true })
-    refusals += taken.refusals
+    refusals += taken.refusals.length
+    because(taken.refusals)
     if (taken.accepted === 0) break
     accepted += taken.accepted
     if (!answer.more) break
@@ -487,7 +522,7 @@ async function fetchBooks(
       ask: () => askLog(session, CIRCLE_SERVICES.pages.name, { work, since: sinceOf(held, agreed), ...(agreed > 1 ? { v: agreed } : {}) }),
       take: async (pages, epoch) => {
         const taken = takePages(pages, work, person.person, ledgerFor(held, person, epoch), ports.crypto, ports.now(), agreed)
-        if (taken.accepted === 0) return { accepted: 0, refusals: taken.refusals.length }
+        if (taken.accepted === 0) return { accepted: 0, refusals: taken.refusals }
         held = taken.held
         /* Kept per answer, not per book: a round interrupted after the third
            answer has the first three on disk, cursor and all. COUNTED once
@@ -495,7 +530,7 @@ async function fetchBooks(
            call accepted. */
         if ((await admitted()) === null) return null
         await ports.keep(book.id, person.person, held, epoch)
-        return { accepted: taken.accepted, refusals: taken.refusals.length }
+        return { accepted: taken.accepted, refusals: taken.refusals }
       },
     })
     done = sum(done, outcome)
@@ -526,11 +561,11 @@ async function fetchShelf(
     ask: () => askLog(session, CIRCLE_SERVICES.shelf.name, { since: sinceOf(held, agreed), v: agreed }),
     take: async (pages, epoch) => {
       const taken = takePages(pages, SHELF_WORK, person.person, ledgerFor(held, person, epoch), ports.crypto, ports.now(), agreed)
-      if (taken.accepted === 0) return { accepted: 0, refusals: taken.refusals.length }
+      if (taken.accepted === 0) return { accepted: 0, refusals: taken.refusals }
       held = taken.held
       if ((await admitted()) === null) return null
       await ports.keepShelf(person.person, held, epoch)
-      return { accepted: taken.accepted, refusals: taken.refusals.length }
+      return { accepted: taken.accepted, refusals: taken.refusals }
     },
     probe: async (pay) => {
       /* Nothing held, or nothing held FROM THIS DEVICE: nothing to ask for again. */
@@ -661,14 +696,17 @@ async function fetchLists(
     },
     take: async (pages, epoch) => {
       const byList = new Map<string, string[]>()
-      let refusals = 0
+      /* NAMED, NOT COUNTED — see `RoundReport.refusedBecause`. A list page with
+         no id is refused for a reason of its own, and reporting it as an
+         anonymous tally is what made a whole round's `refusals: 1` unreadable. */
+      const refusals: string[] = []
       for (const raw of pages) {
         const id = listIdOfRaw(raw)
         /* Counted here rather than handed to `takePages`, which would refuse
            each under a claim that is not a list's — the same count, later. */
         // Stryker disable next-line all: as the note says — the count is the same by the other route.
         if (id === null) {
-          refusals += 1
+          refusals.push('unparseable')
           continue
         }
         /* A held list the window left out: served from its start, and the
@@ -683,7 +721,7 @@ async function fetchLists(
       for (const [id, raws] of byList) {
         const file = held.get(id) ?? NOTHING_SHARED
         const outcome = takePages(raws, listWork(id), person.person, ledgerFor(file, person, epoch), ports.crypto, ports.now(), agreed)
-        refusals += outcome.refusals.length
+        refusals.push(...outcome.refusals)
         if (outcome.accepted === 0) continue
         held.set(id, outcome.held)
         if ((await admitted()) === null) return null

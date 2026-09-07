@@ -276,6 +276,15 @@ describe('a passage shared on A appears in B', () => {
 
     expect(report.refusals).toBe(1)
     expect(report.accepted).toBe(0)
+    /* ⚠️ **AND WHY, NOT JUST HOW MANY.** `refusals: 1` says a page was rejected
+       and nothing about whether that is the protocol working or the protocol
+       broken — the only two things worth telling apart. `takePages` has always
+       answered with named kinds and every call site reduced them to `.length`
+       before anything could report them; on 2026-09-07 that cost a two-machine
+       round whose single refusal could not be identified without changing the
+       code first. A forged page is refused for its signature, and the report
+       now says so. */
+    expect(report.refusedBecause).toEqual({ 'bad-signature': 1 })
     expect(pagesCalls).toBe(1)
     expect(b.keep).not.toHaveBeenCalled()
   })
@@ -499,7 +508,7 @@ describe('who is asked, and who is not', () => {
     const dial = vi.fn(() => Promise.resolve(sessionTo(alice().serving)))
     const b = bob({ mine: () => Promise.resolve(null), dial })
     const report = await fetchRound(b.ports)
-    expect(report).toEqual({ asked: 0, calls: 0, accepted: 0, refusals: 0, skipped: [] })
+    expect(report).toEqual({ asked: 0, calls: 0, accepted: 0, refusals: 0, refusedBecause: {}, skipped: [] })
     expect(dial).not.toHaveBeenCalled()
   })
 
