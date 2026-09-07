@@ -53,7 +53,7 @@ use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 
 use bip39::{Language, Mnemonic};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -102,6 +102,22 @@ const MAX_LIFETIME_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 
 /// A device id is an iroh endpoint key: 64 lower-case hex characters.
 const DEVICE_ID_HEX: usize = 64;
+
+/// The largest integer JavaScript can hold exactly — `Number.MAX_SAFE_INTEGER`.
+///
+/// ⚠️ **THE WIRE IS A CONTRACT BETWEEN TWO LANGUAGES, AND ONLY ONE OF THEM WAS
+/// ENFORCING THIS ONE.** `receive.ts`'s `isDelegation` ends
+/// `['notBefore', 'notAfter', 'roster'].every((key) => Number.isSafeInteger(...))`,
+/// so a delegation carrying a larger number is refused there — while Rust
+/// signed it happily. The result is a delegation that is valid, correctly
+/// signed, and unusable by every recipient: the same shape of defect as
+/// `signature` vs `sig`, which cost this project every page it ever sent.
+///
+/// ⚠️ **AND THE GOLDEN VECTOR CANNOT SEE IT.** That test pins the signed BYTES
+/// — one seed, one message, one signature — and says nothing about which VALUES
+/// the two sides agree to accept. Bytes agreeing is not the same as rules
+/// agreeing, and this is the second time that distinction has cost something.
+const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 /// The entropy behind twelve words.
 const PHRASE_ENTROPY_BYTES: usize = 16;
@@ -651,6 +667,22 @@ pub fn sign_delegation(
             MAX_LIFETIME_MS / (24 * 60 * 60 * 1000)
         )));
     }
+    /* ⚠️ **EVERY NUMBER THE WIRE CARRIES, AGAINST THE RANGE THE OTHER SIDE
+     * ACCEPTS.** `isDelegation` refuses anything outside JavaScript's exact
+     * integer range, so signing one produces a delegation no recipient can
+     * use — correctly signed and permanently refused, with nothing anywhere
+     * naming the cause. Refused at the signer, where it is one line. */
+    for (name, value) in [
+        ("notBefore", delegation.not_before),
+        ("notAfter", delegation.not_after),
+        ("roster", delegation.roster as i64),
+    ] {
+        if !(0..=MAX_SAFE_INTEGER).contains(&value) {
+            return Err(Error::Identity(format!(
+                "a delegation's {name} must be between 0 and {MAX_SAFE_INTEGER} — the range the wire's other side can hold exactly"
+            )));
+        }
+    }
     /* The device is a key, not a label. An id that is not one produces a
     delegation nothing can ever match against a real endpoint — signed,
     valid, and meaningless. */
@@ -726,7 +758,13 @@ pub fn verify_as_person(person: &str, domain: &str, payload: &[u8], signature: &
     let sig_bytes: [u8; 64] = unhex(signature)
         .and_then(|b| b.try_into().ok())
         .ok_or_else(|| Error::Identity("that signature is not 64 bytes of hex".into()))?;
-    key.verify(
+    /* ⚠️ **`verify_strict`, BECAUSE THE OTHER SIDE IS STRICT.** `verify` accepts
+     * small-order and non-canonical public keys that `@noble/ed25519` refuses
+     * — `crypto.ts`'s `unusable` exists to reject exactly those — so a proof
+     * Rust called valid could be one TypeScript will not. The golden-vector
+     * test already used `verify_strict`, which means production and test
+     * disagreed about acceptance while agreeing about bytes. */
+    key.verify_strict(
         &domained(domain, payload),
         &Signature::from_bytes(&sig_bytes),
     )
@@ -744,17 +782,14 @@ fn domained(domain: &str, payload: &[u8]) -> Vec<u8> {
 
 /// Whether a signed delegation really was signed by the person it names.
 ///
-/// ⚠️ **NOT CALLED YET, AND DELIBERATELY NOT DELETED.** This is the RECEIVING
-/// half of WI-22.B1: a page arrives carrying its delegation, and checking it is
-/// what `checkPage`'s `maySpeak` parameter exists to be given. It is built and
-/// tested with the minting half because a signature format is one decision — a
-/// verifier written later, against the bytes rather than against the writer, is
-/// how the two come to disagree about field order and nobody finds out until a
-/// second device joins.
-#[allow(
-    dead_code,
-    reason = "the receiving half — consumed by WI-22.C1's page check"
-)]
+/// The RECEIVING half of WI-22.B1: a page arrives carrying its delegation, and
+/// this is what checks it.
+///
+/// ⚠️ **THIS SAID "NOT CALLED YET" AND CARRIED AN `allow(dead_code)` FOR IT.**
+/// `circle.rs`'s admission path calls it in production. A suppression that has
+/// outlived its reason is worse than none: it tells the compiler to stop
+/// reporting a fact, and it tells the next reader that a security check is
+/// inert when it is load-bearing.
 ///
 /// The person id IS the public key, so there is no key to look up and no
 /// directory to be out of date — checking the signature and checking the
@@ -772,7 +807,9 @@ pub fn verify_delegation(signed: &SignedDelegation) -> Result<()> {
     let sig_bytes: [u8; 64] = sig_bytes
         .try_into()
         .map_err(|_| Error::Identity("that signature is the wrong length".into()))?;
-    key.verify(
+    /* `verify_strict` for `verify_as_person`'s reason — the two verifiers must
+    not disagree with each other either. */
+    key.verify_strict(
         &signed.delegation.signed_bytes(),
         &Signature::from_bytes(&sig_bytes),
     )
@@ -1622,6 +1659,84 @@ mod tests {
             .collect();
         keys.sort();
         keys
+    }
+
+    #[test]
+    fn a_delegation_carries_no_number_the_other_side_cannot_hold() {
+        /* ⚠️ **THE THIRD TIME THIS CLASS HAS COST SOMETHING, AND THE FIRST TIME
+        IT IS ASSERTED.** `receive.ts`'s `isDelegation` ends with
+        `Number.isSafeInteger` over `notBefore`, `notAfter` and `roster`. Rust
+        signed larger values happily, so a delegation could be correctly signed
+        and refused by every recipient — exactly what `signature` vs `sig` did,
+        and exactly what the golden vector cannot see, because that pins the
+        signed BYTES and not the rules for which VALUES are allowed.
+
+        Bytes agreeing is not rules agreeing. */
+        const UNSAFE: i64 = 9_007_199_254_740_992; // MAX_SAFE_INTEGER + 1
+        let keychain = FakeKeychain::default();
+        let dir = temp();
+        let (person, _) = ensure(&keychain, &dir).unwrap();
+        let good = Delegation {
+            person: person.clone(),
+            device: "ab".repeat(32),
+            not_before: 1,
+            not_after: 2,
+            roster: 3,
+        };
+        assert!(sign_delegation(&keychain, &dir, good.clone()).is_ok());
+
+        for bad in [
+            Delegation {
+                not_before: UNSAFE,
+                not_after: UNSAFE + 1,
+                ..good.clone()
+            },
+            Delegation {
+                not_before: -1,
+                ..good.clone()
+            },
+            Delegation {
+                roster: u64::MAX,
+                ..good.clone()
+            },
+        ] {
+            let refused = sign_delegation(&keychain, &dir, bad).unwrap_err();
+            assert!(
+                format!("{refused}").contains("the range the wire's other side can hold exactly"),
+                "expected the wire-range refusal, got: {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_order_key_cannot_forge_a_person() {
+        /* ⚠️ **PRODUCTION USED `verify` WHILE THE GOLDEN VECTOR USED
+        `verify_strict`.** The test agreed with TypeScript and the shipping code
+        did not: `verify` is COFACTORED and accepts small-order public keys,
+        which `@noble/ed25519` refuses — `crypto.ts`'s `unusable` exists for
+        exactly them. So a proof Rust called valid was one no recipient would
+        accept.
+
+        ⚠️ **AND THE FIRST VERSION OF THIS TEST ASSERTED NOTHING.** It used an
+        arbitrary signature against the all-zero key, which fails under BOTH
+        verifiers — so it passed with `verify` in place and would have shipped
+        the change unguarded. Measured, then replaced.
+
+        THIS vector separates them, and was found by trying rather than by
+        reasoning: an order-8 public key, R the same point, S zero. The
+        cofactored equation is satisfied by torsion alone.
+
+            verify        -> true    (a forgery accepted)
+            verify_strict -> false
+
+        Anyone can construct it; there is no secret in it. That is the point. */
+        const ORDER_8: &str = "0100000000000000000000000000000000000000000000000000000000000000";
+        let forged = format!("{ORDER_8}{}", "00".repeat(32));
+        let refused = verify_as_person(ORDER_8, "paper/circle/roster/1", b"anything", &forged);
+        assert!(
+            refused.is_err(),
+            "a small-order key forged a person's signature — production is not using verify_strict"
+        );
     }
 
     #[test]
