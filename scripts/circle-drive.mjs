@@ -16,12 +16,14 @@
  *   identity                     who this device publishes as
  *   marks --title <t>            the reader's own marks and their share state
  *   share --title <t>            share one unshared mark of that book
+ *   withdraw --title <t> --quote <q>   take a publication back
  *   mute   --person <name>       hold that person's passages back
  *   unmute --person <name>       let them be drawn again
  *
  * Exit codes: 0 did what was asked, 1 could not, 2 was asked wrongly.
  */
 
+import { pathToFileURL } from 'node:url'
 import { connect, evaluate, DEFAULT_PORT } from './lib/bridge.mjs'
 
 /* ------------------------------------------------------------------------ */
@@ -119,12 +121,12 @@ const TO_SHELF = `(() => {
  * The title becomes a JSON string, which is already double-quoted and escaped
  * exactly the way an attribute selector wants it.
  */
-const moreSelector = (title) => 'button[aria-label^=' + JSON.stringify('More for ' + title.slice(0, 24)) + ']'
+export const moreSelector = (title) => 'button[aria-label^=' + JSON.stringify('More for ' + title.slice(0, 24)) + ']'
 
 const asJs = (value) => JSON.stringify(value)
 
 /** How many shelf cells match, read-only — the narrow step's confirmation. */
-const shelfMatches = (title) =>
+export const shelfMatches = (title) =>
   '(() => JSON.stringify({ cells: document.querySelectorAll(' + asJs(moreSelector(title)) + ').length }))()'
 
 /**
@@ -133,7 +135,7 @@ const shelfMatches = (title) =>
  * the viewport finds nothing and reads exactly like a book that is not in the
  * library.
  */
-const openMatch = (title) =>
+export const openMatch = (title) =>
   '(() => {\n' +
   '  const more = document.querySelector(' + asJs(moreSelector(title)) + ')\n' +
   "  if (!more) return JSON.stringify({ ok: false, why: 'no shelf row matched that title' })\n" +
@@ -151,7 +153,7 @@ const openMatch = (title) =>
  * the `input` event fires and the component re-renders with the OLD value. The
  * field looks right on screen and the list never narrows — a silent failure.
  */
-const filterShelf = (title) =>
+export const filterShelf = (title) =>
   '(() => {\n' +
   "  const input = document.querySelector('input[aria-label=\"Search the library\"]')\n" +
   "  if (!input) return JSON.stringify({ ok: false, why: 'no library search field on screen' })\n" +
@@ -163,8 +165,110 @@ const filterShelf = (title) =>
 
 const controlAt = (index) => "[...document.querySelectorAll('[data-mark-control=\"circle:share\"]')][" + Number(index) + ']'
 
+/**
+ * Find the first unshared row of the OPEN book and click its Share, in ONE
+ * round trip.
+ *
+ * ⚠️ **READING THE ROWS AND THEN CLICKING BY INDEX IS A RACE, AND IT LOST.**
+ * Marginalia re-renders whenever the store changes — which a fetch round does,
+ * on its own schedule — so an index read in one call can address a different
+ * row in the next. The first run of `circle-scenario.sh` failed with *"that row
+ * offers no Share button"*: the index was stale, not the button missing.
+ * Deciding and acting in the same script cannot be raced by anything.
+ *
+ * Returns the row's text, which is what the caller polls on — a stable handle
+ * where an index is not.
+ */
+const SHARE_FIRST_UNSHARED = `(() => {
+  const rows = [...document.querySelectorAll('[data-mark-control="circle:share"]')]
+  for (const control of rows) {
+    let row = control
+    for (let k = 0; k < 6 && row.parentElement; k++) {
+      row = row.parentElement
+      if ((row.textContent || '').length > (control.textContent || '').length + 20) break
+    }
+    /* Only the OPEN book's rows: Marginalia is cross-book and labels the
+       others with a placeBook element. Sharing somebody else's row publishes a
+       passage from a book the far end was never asked about. */
+    if (row.querySelector('[class*="placeBook"]')) continue
+    const share = [...control.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'Share')
+    if (!share) continue
+    /* ⚠️ **THE HANDLE IS THE MARK'S OWN QUOTE, NOT THE ROW'S TEXT.** The row's
+       text CONTAINS the control, and the control is exactly what the click
+       changes — 'Share / Share with note' becomes 'Shared with your circle /
+       Withdraw'. Polling on the whole row therefore never matches again and
+       reports the row as gone. Measured: 'the row left the screen mid-publish'
+       on a row that had not moved at all. The quote does not change. */
+    const jump = row.querySelector('[class*="noteJump"]')
+    if (!jump) continue
+    share.click()
+    return JSON.stringify({ ok: true, quote: (jump.textContent || '').trim().slice(0, 120) })
+  }
+  return JSON.stringify({ ok: false, why: 'no unshared mark of the open book — withdraw one, or mark a fresh passage' })
+})()`
+
+/**
+ * What the row carrying this quote says NOW — a handle the click cannot change.
+ *
+ * ⚠️ **A PLACEHOLDER, NOT NESTED ESCAPES.** Every parameterised script here was
+ * first built by concatenating quoted fragments, and the escaping went wrong
+ * twice in a row in opposite directions — once producing a literal `${...}` the
+ * page could not parse, once ending a string early on `\\"`. A template with a
+ * token swapped in has neither failure mode, and reads as the script it is.
+ */
+const ROW_STATE = `(() => {
+  for (const control of document.querySelectorAll('[data-mark-control="circle:share"]')) {
+    let row = control
+    for (let k = 0; k < 6 && row.parentElement; k++) {
+      row = row.parentElement
+      if ((row.textContent || '').length > (control.textContent || '').length + 20) break
+    }
+    const jump = row.querySelector('[class*="noteJump"]')
+    if (!jump) continue
+    if ((jump.textContent || '').trim().slice(0, 120) !== __WANT__) continue
+    return JSON.stringify({
+      ok: true,
+      buttons: [...control.querySelectorAll('button')].map((b) => (b.textContent || '').trim()),
+      text: (control.textContent || '').trim().slice(0, 200),
+    })
+  }
+  return JSON.stringify({ ok: false, why: 'the row carrying that passage is no longer on screen' })
+})()`
+
+export const stateOfRow = (quote) => ROW_STATE.replace('__WANT__', JSON.stringify(quote))
+
+/**
+ * Withdraw the publication on the row carrying this quote.
+ *
+ * ⚠️ **WITHOUT THIS THE HARNESS IS NOT REPEATABLE, AND IT TOOK FOUR RUNS TO
+ * NOTICE.** Each run consumes one unshared mark; the fourth reported *"no
+ * unshared mark of the open book"* and looked like a defect in the app. A
+ * harness that cannot be run twice is a harness nobody runs, which is exactly
+ * how the circle went unwatched for four phases. Withdrawing what the run
+ * published leaves the library as it was found.
+ */
+const WITHDRAW_ROW = `(() => {
+  for (const control of document.querySelectorAll('[data-mark-control="circle:share"]')) {
+    let row = control
+    for (let k = 0; k < 6 && row.parentElement; k++) {
+      row = row.parentElement
+      if ((row.textContent || '').length > (control.textContent || '').length + 20) break
+    }
+    const jump = row.querySelector('[class*="noteJump"]')
+    if (!jump) continue
+    if ((jump.textContent || '').trim().slice(0, 120) !== __WANT__) continue
+    const button = [...control.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'Withdraw')
+    if (!button) return JSON.stringify({ ok: false, why: 'that row is not shared, so there is nothing to withdraw' })
+    button.click()
+    return JSON.stringify({ ok: true })
+  }
+  return JSON.stringify({ ok: false, why: 'no row carries that passage' })
+})()`
+
+export const withdrawRow = (quote) => WITHDRAW_ROW.replace('__WANT__', JSON.stringify(quote))
+
 /** Click Share on one row. The WAIT is the caller's, in Node. */
-const clickShare = (index) =>
+export const clickShare = (index) =>
   '(() => {\n' +
   '  const control = ' + controlAt(index) + '\n' +
   "  if (!control) return JSON.stringify({ ok: false, why: 'that row is not on screen — the list moved under the driver' })\n" +
@@ -175,7 +279,7 @@ const clickShare = (index) =>
   '})()'
 
 /** What one row's control says NOW — the publish is async, so this is polled. */
-const rowState = (index) =>
+export const rowState = (index) =>
   '(() => {\n' +
   '  const control = ' + controlAt(index) + '\n' +
   "  if (!control) return JSON.stringify({ ok: false, why: 'the row left the screen mid-publish' })\n" +
@@ -275,13 +379,14 @@ function usage(message) {
   process.exit(2)
 }
 
-function parse(argv) {
+export function parse(argv) {
   const args = { _: [], port: DEFAULT_PORT }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--port') args.port = Number(argv[++i])
     else if (a === '--title') args.title = argv[++i]
     else if (a === '--person') args.person = argv[++i]
+    else if (a === '--quote') args.quote = argv[++i]
     else if (a.startsWith('--')) usage('unknown option: ' + a)
     else args._.push(a)
   }
@@ -365,10 +470,25 @@ async function main(argv) {
     if (command === 'mute' || command === 'unmute') {
       if (!args.person) usage('--person <display name> is required')
       const on = command === 'mute'
+      /* ⚠️ **THE CIRCLE CHIP IS ON THE SHELF, NOT IN THE READER.** It lives in
+         the titlebar of the library screen, so a mute attempted straight after
+         a share — which leaves the app in the reader with Marginalia open —
+         finds no control to click and reports the screen as never arriving.
+         Going to the shelf first is idempotent and costs one round trip. */
       const at = await evaluate(socket, AT_SHELF, 'where are we')
-      if (at.shelf === undefined) usage('the app answered nothing sensible')
+      if (at.shelf !== true) {
+        const back = await act(socket, TO_SHELF, 'go to the shelf', async () =>
+          (await evaluate(socket, AT_SHELF, 'where are we')).shelf === true)
+        if (!back.ok) {
+          say(back)
+          process.exit(1)
+        }
+      }
+      /* The switches are drawn only once the row's own read of the port has
+         answered (`switchReady`), so this waits for a switch and not for the
+         screen. */
       const toCircle = await act(socket, TO_CIRCLE, 'open the Circle screen', async () =>
-        (await evaluate(socket, MUTE_SWITCHES, 'find the switches')).boxes.length > 0)
+        (await evaluate(socket, MUTE_SWITCHES, 'find the switches')).boxes.length > 0, 20)
       if (!toCircle.ok) {
         say(toCircle)
         process.exit(1)
@@ -382,7 +502,7 @@ async function main(argv) {
       process.exit(flipped.ok ? 0 : 1)
     }
 
-    if (command !== 'marks' && command !== 'share') usage('unknown subcommand: ' + command)
+    if (command !== 'marks' && command !== 'share' && command !== 'withdraw') usage('unknown subcommand: ' + command)
     if (!args.title) usage('--title <book title> is required')
 
     const reached = await reachMarginalia(socket, args.title)
@@ -407,36 +527,42 @@ async function main(argv) {
       process.exit(0)
     }
 
+    if (command === 'withdraw') {
+      if (!args.quote) usage('--quote <the passage> is required')
+      const gone = await act(socket, withdrawRow(args.quote), 'withdraw the passage', async () => {
+        const now = await evaluate(socket, stateOfRow(args.quote), 'read the control')
+        return now.ok === true && now.buttons.includes('Share')
+      }, 60)
+      say(gone.ok ? { ok: true, quote: args.quote } : gone)
+      process.exit(gone.ok ? 0 : 1)
+    }
+
     if (mine.length === 0) {
       say({ ok: false, why: 'Marginalia lists no mark of ' + JSON.stringify(args.title) + ' — mark a passage in it first', rows: listed.rows.length })
       process.exit(1)
     }
-    const candidate = mine.find((r) => !r.shared)
-    if (!candidate) {
-      say({ ok: false, why: 'every mark of that book is already shared — withdraw one, or mark a fresh passage', ofThisBook: mine.length })
-      process.exit(1)
-    }
 
-    const clicked = await evaluate(socket, clickShare(candidate.i), 'click Share')
-    if (clicked && clicked.ok === false) {
+    /* Decided and clicked in one script — see SHARE_FIRST_UNSHARED. */
+    const clicked = await evaluate(socket, SHARE_FIRST_UNSHARED, 'share the first unshared passage')
+    if (!clicked.ok) {
       say(clicked)
       process.exit(1)
     }
 
-    /* ⚠️ **THE WAIT IS THE ASSERTION.** `click()` returns immediately and the
+    /* ⚠️ **THE WAIT IS THE ASSERTION.** The click resolves immediately and the
        publish is async — a driver that returned here would report success
        before anything was signed, and the converge step would then blame the
        far end for a page this machine never wrote. The control turning into
        `Withdraw` is the only local evidence the publication landed. */
     for (let i = 0; i < 60; i++) {
       await wait(500)
-      const now = await evaluate(socket, rowState(candidate.i), 'read the control')
+      const now = await evaluate(socket, stateOfRow(clicked.quote), 'read the control')
       if (!now.ok) {
         say(now)
         process.exit(1)
       }
       if (now.buttons.includes('Withdraw')) {
-        say({ ok: true, row: candidate.i, waitedMs: (i + 1) * 500, text: candidate.text })
+        say({ ok: true, waitedMs: (i + 1) * 500, quote: clicked.quote })
         process.exit(0)
       }
       if (/could not|failed|cannot/i.test(now.text)) {
@@ -458,4 +584,9 @@ async function main(argv) {
   }
 }
 
-await main(process.argv.slice(2))
+/* ⚠️ **GUARDED, SO THE TESTS CAN IMPORT THE BUILDERS.** A top-level `await
+   main()` runs the whole CLI — bridge connection and all — the moment anything
+   imports this file, which is how a unit test comes to need a running app. */
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main(process.argv.slice(2))
+}

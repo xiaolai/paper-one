@@ -69,6 +69,7 @@ set -uo pipefail
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly DATA_DIR='Library/Application Support/one.paper.reader'
 readonly DIAGNOSTICS="$DATA_DIR/diagnostics.jsonl"
+readonly SATCHEL_APP="${PAPER_SATCHEL_APP:-Applications/Paper.app}"
 
 die() { echo "$*" >&2; exit 2; }
 
@@ -78,11 +79,20 @@ remote=''
 book=''
 falsify=no
 port=31415
-# ⚠️ **ABOVE ONE FULL CADENCE PERIOD, AND THE FLOOR BELOW ENFORCES IT.** 300 s
-# is the period; a run bounded at 300 s can miss by a second and report a
-# defect that is a stopwatch. 420 s leaves two minutes of slack for a round
-# that lands late under load.
-timeout_s=420
+# ⚠️ **THE DEFAULT SPANS TWO ROUNDS, NOT ONE, AND THAT IS A MEASURED CORRECTION.**
+# It was 420 s — one 300 s period plus slack — and a run failed on 2026-09-07
+# with the far end reporting `circle.pages: timeout: nothing for 30000 ms`. One
+# round fell inside the window and that round transiently failed, so the harness
+# reported the passage as not crossing when it had never been answered for. A
+# bound of one period turns any single flaky round into a red run, which is the
+# fastest way to make a harness nobody believes.
+#
+# Two periods plus slack: a transient costs a delay rather than a failure, and a
+# real defect still fails because it fails EVERY round. The floor below stays at
+# one period, because `--timeout 400` is a legitimate deliberate question —
+# *did it arrive within a single round?* — and refusing it would be this script
+# deciding what the operator is allowed to measure.
+timeout_s=780
 readonly CADENCE_PERIOD_S=300
 readonly TIMEOUT_FLOOR_S=330
 
@@ -218,6 +228,32 @@ else
   fail "the app is NOT running on $remote — start it and re-run"
 fi
 
+# ⚠️ **RAISED, NOT MERELY CHECKED — AN UNLOCKED SCREEN IS NOT ENOUGH.** An app
+# that was running while its Mac's screen was LOCKED does not resume when the
+# screen is unlocked: it keeps every timer suspended until its window is raised,
+# and `pgrep` reports it healthy throughout. Measured on the sync run of
+# 2026-09-06 (no timer of any kind for two minutes after unlock, its 30 s round
+# 6½ minutes overdue) and again here on 2026-09-07. `sync-scenario.sh` raises
+# for exactly this reason; a circle run that skipped it would spend its whole
+# 420 s bound against an app that will not fetch, and report the protocol
+# broken.
+#
+# The remote AppleScript is SINGLE-quoted so its own double quotes survive ssh,
+# and `$pid` is resolved on the far side — the trap `app_raise` in
+# `sync-scenario.sh` records, which cost an hour there and produced a raise that
+# silently did nothing.
+raise_window() {
+  case "$1" in
+    local)
+      local pid; pid="$(pgrep -x app | head -1)"
+      [ -n "$pid" ] && osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1
+      ;;
+    remote)
+      remote_sh 'pid=$(pgrep -x app | head -1); [ -n "$pid" ] && osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true"' >/dev/null 2>&1
+      ;;
+  esac
+}
+
 for side in local remote; do
   where=$([ "$side" = local ] && echo 'this machine' || echo "$remote")
   case "$(screen_lock_state "$side")" in
@@ -247,6 +283,16 @@ remote_grant="$(remote_sh "python3 -c '$GRANT_PROBE' \"\$HOME/$DATA_DIR/peer/pee
   || fail "this machine holds no circle pairing — grants say '$local_grant'. Pair as a circle first (WI-24.C1, once, by hand)"
 [ "$remote_grant" = yes ] && pass "$remote holds a circle pairing (circle:read)" \
   || fail "$remote holds no circle pairing — grants say '$remote_grant'"
+
+# Both awake, both unlocked: wake the webviews before anything is measured.
+for side in local remote; do
+  where=$([ "$side" = local ] && echo 'this machine' || echo "$remote")
+  if raise_window "$side"; then
+    pass "raised the app's window on $where, so its timers are running"
+  else
+    fail "could not raise the app's window on $where — its fetch cadence may stay suspended and every wait below would then be measuring nothing"
+  fi
+done
 
 log ""
 log "**$failures failed**, $skipped skipped, $step_no steps so far."
@@ -303,8 +349,11 @@ log "## Mutate — share a passage on this machine, through the app's own contro
 [ -n "$book" ] || book='Uncovering The Logic of English'
 
 shared="$(drive share --title "$book" 2>&1)"
+quote="$(printf '%s' "$shared" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("quote",""))
+except Exception: print("")' 2>/dev/null)"
 if printf '%s' "$shared" | grep -q '"ok":true'; then
-  pass "shared a passage of $(printf '%q' "$book") through the Share control"
+  pass "shared a passage of $book through the Share control"
 else
   fail "could not share a passage: $(printf '%s' "$shared" | tr -d '\n' | cut -c1-260)"
   log ""
@@ -354,13 +403,49 @@ converged_probe() {
   remote_sh "grep -rl '$pub' \"\$HOME/$DATA_DIR/books\"/*/circle/'$person'.json 2>/dev/null | head -1"
 }
 
-deadline=$(( $(date +%s) + timeout_s ))
+# ⚠️ **THE FALSIFIER NEEDS ONE PERIOD, NOT TWO, AND WAITING TWO IS NOT FREE.**
+# A normal run spans two rounds so a single flaky one costs a delay rather than
+# a failure. The falsifier asserts the OPPOSITE — that nothing arrives — and a
+# second round adds no confidence to a negative while adding five minutes to
+# every run of it. Thirteen minutes to learn nothing new is how a check stops
+# being run, and an unrun falsifier is the same as not having one.
+watch_s="$timeout_s"
+if [ "$falsify" = yes ] && [ "$watch_s" -gt "$((CADENCE_PERIOD_S + 120))" ]; then
+  watch_s=$((CADENCE_PERIOD_S + 120))
+  note "falsifier: watching ${watch_s}s — one full round, which is all a negative needs"
+fi
+
+deadline=$(( $(date +%s) + watch_s ))
 found=''
 while [ "$(date +%s)" -lt "$deadline" ]; do
   found="$(converged_probe 2>/dev/null)"
   [ -n "$found" ] && break
   sleep 10
 done
+
+# ⚠️ **THE FALSIFIER LEAVES THE PAIR UNUSABLE UNLESS IT PUTS THE APP BACK, AND
+# IT DID NOT.** Measured 2026-09-07: after a `--falsify` run, the next TWO
+# normal runs failed at this very step — `circle.pages: timeout` on the far end,
+# `asleep — timed out: session hello` on this one, both directions dead. Nothing
+# to do with the circle; the session does not survive one end disappearing and
+# does not re-establish on its own. Restarting the far end alone recovered it,
+# in 280 s, and it then accepted the publication the failed run had orphaned.
+#
+# So a mode that stops an app must restart it, or it hands the next operator a
+# red run with a cause four steps upstream of where it shows.
+#
+# (`dev-docs`'s note that BOTH ends must restart is about ROLE CHURN —
+# shelf → satchel → shelf — which is a different and heavier case. A plain quit
+# and relaunch of one end is enough, measured here.)
+restore_far_end() {
+  remote_sh "open \"\$HOME/$SATCHEL_APP\" >/dev/null 2>&1 || open -a Paper >/dev/null 2>&1 || true"
+  for _ in $(seq 1 15); do
+    [ -n "$(app_pids_remote)" ] && break
+    sleep 2
+  done
+  raise_window remote
+  [ -n "$(app_pids_remote)" ]
+}
 
 if [ -n "$found" ]; then
   if [ "$falsify" = yes ]; then
@@ -372,7 +457,7 @@ else
   if [ "$falsify" = yes ]; then
     pass "the passage did NOT cross with the far end stopped — the converge step can fail, so a pass from it means something"
   else
-    fail "the passage did not reach $remote within ${timeout_s}s (cadence period ${CADENCE_PERIOD_S}s)"
+    fail "the passage did not reach $remote within ${watch_s}s (cadence period ${CADENCE_PERIOD_S}s, so that is $((watch_s / CADENCE_PERIOD_S)) full round(s))"
     note "the far end's last rounds, if it is recording them:"
     remote_sh "tail -3 \"\$HOME/$DIAGNOSTICS\" 2>/dev/null" | while IFS= read -r line; do
       log "        $(printf '%s' "$line" | cut -c1-260)"
@@ -381,7 +466,16 @@ else
   fi
 fi
 
-# ── the negative, which cannot be run ──────────────────────────────────────
+# Whatever the verdict, the far end goes back the way it was found.
+if [ "$falsify" = yes ]; then
+  if restore_far_end; then
+    pass "restarted the app on $remote — the session does not survive one end vanishing, and the next run would otherwise fail four steps from the cause"
+  else
+    fail "could not restart the app on $remote. THE PAIR IS LEFT BROKEN: every later run will fail at the converge step with 'session hello' timing out, for a reason that is this run's and not the circle's. Start it at that Mac."
+  fi
+fi
+
+# ── the negative ───────────────────────────────────────────────────────────
 
 log ""
 log "## The negative — a muted person's passage stops being DRAWN, file intact"
@@ -455,6 +549,28 @@ for f in root.glob("*/relationship.json"):
   else
     fail "could not let $friend_name back, and the harness has left them held: $(printf '%s' "$back" | tr -d '\n' | cut -c1-200)"
   fi
+fi
+
+# ── put it back ────────────────────────────────────────────────────────────
+#
+# ⚠️ **A HARNESS THAT CANNOT BE RUN TWICE IS ONE NOBODY RUNS.** Each run
+# consumes an unshared mark; the fourth reported *"no unshared mark of the open
+# book"* and read like a defect in the app. Withdrawing what this run published
+# leaves the library as it was found — and exercises `unshare`, which is real
+# behaviour and had no harness either.
+#
+# AFTER the converge, never before: withdrawing first would race the far end's
+# round and prove nothing about either.
+
+log ""
+log "## Put it back"
+
+if [ -z "$quote" ]; then
+  skip "nothing to withdraw — the share step did not name a passage"
+elif printf '%s' "$(drive withdraw --title "$book" --quote "$quote" 2>&1)" | grep -q '"ok":true'; then
+  pass "withdrew this run's publication, so the next run has a mark to use"
+else
+  fail "could not withdraw this run's publication — the next run will find one fewer unshared mark, and eventually none"
 fi
 
 log ""
