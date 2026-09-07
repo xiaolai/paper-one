@@ -425,21 +425,29 @@ async function reachMarginalia(socket, title) {
   const read = (script, label) => evaluate(socket, script, label)
   const atShelf = async () => (await read(AT_SHELF, 'where are we')).shelf === true
 
+  /* ⚠️ **A DEBUG BUILD IS NOT A RELEASE BUILD, AND THESE WAITS WERE TUNED
+     AGAINST ONE.** The defaults (6 s) were measured against the release app on
+     the machine running this script. Driving a DEBUG bundle over an ssh tunnel
+     — which is how the far end is reached, because the bridge is debug-only —
+     opening a book means parsing an EPUB with 1 962 rows on the shelf behind
+     it, and 6 s is not close. Both failures read as "the app never reached the
+     expected state", which is indistinguishable from a broken selector.
+     Patience costs nothing on success and only delays an honest failure. */
   if (!(await atShelf())) {
-    const back = await act(socket, TO_SHELF, 'go to the shelf', atShelf)
+    const back = await act(socket, TO_SHELF, 'go to the shelf', atShelf, 40)
     if (!back.ok) return back
   }
   const narrowed = await act(socket, filterShelf(title), 'narrow the shelf', async () =>
-    (await read(shelfMatches(title), 'count the matches')).cells > 0)
+    (await read(shelfMatches(title), 'count the matches')).cells > 0, 40)
   if (!narrowed.ok) return narrowed
 
   /* Leaving the shelf IS the confirmation that the book opened: the search
      field belongs to the library screen and the reader has none. */
-  const opened = await act(socket, openMatch(title), 'open the book', async () => !(await atShelf()))
+  const opened = await act(socket, openMatch(title), 'open the book', async () => !(await atShelf()), 120)
   if (!opened.ok) return opened
 
   const pane = await act(socket, OPEN_MARGINALIA, 'open Marginalia', async () =>
-    (await read(READ_MARKS, 'look for share controls')).rows.length > 0)
+    (await read(READ_MARKS, 'look for share controls')).rows.length > 0, 60)
   if (!pane.ok) return pane
   return { ok: true }
 }

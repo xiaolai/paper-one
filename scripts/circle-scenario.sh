@@ -423,28 +423,51 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   sleep 10
 done
 
-# ⚠️ **THE FALSIFIER LEAVES THE PAIR UNUSABLE UNLESS IT PUTS THE APP BACK, AND
-# IT DID NOT.** Measured 2026-09-07: after a `--falsify` run, the next TWO
-# normal runs failed at this very step — `circle.pages: timeout` on the far end,
-# `asleep — timed out: session hello` on this one, both directions dead. Nothing
-# to do with the circle; the session does not survive one end disappearing and
-# does not re-establish on its own. Restarting the far end alone recovered it,
-# in 280 s, and it then accepted the publication the failed run had orphaned.
+# ⚠️ **THE FALSIFIER LEAVES THE PAIR UNUSABLE UNLESS IT RESTARTS *BOTH* ENDS.**
+# Measured 2026-09-07: after a `--falsify` run the next two normal runs failed
+# at this step — `circle.pages: timeout` one way, `asleep — timed out: session
+# hello` the other. Nothing to do with the circle; the peer session does not
+# survive one end vanishing and does not re-establish on its own.
 #
-# So a mode that stops an app must restart it, or it hands the next operator a
-# red run with a cause four steps upstream of where it shows.
+# ⚠️ **AND THE FIRST FIX FOR THIS RESTARTED ONLY THE FAR END, WHICH IS HALF OF
+# IT.** That was written from watching the RESTARTED machine start fetching
+# again — which it does, within about 280 s — and concluding the pair had
+# recovered. It had not. The end that kept RUNNING is the one holding the dead
+# session, and it stays wedged: measured 2026-09-08, this machine timed out on
+# `session hello` for seventeen minutes after the far end was replaced and had
+# itself recovered. Restarting THIS end cleared it in 100 s.
 #
-# (`dev-docs`'s note that BOTH ends must restart is about ROLE CHURN —
-# shelf → satchel → shelf — which is a different and heavier case. A plain quit
-# and relaunch of one end is enough, measured here.)
-restore_far_end() {
+# The note in `dev-docs` that both ends must restart was therefore right, and
+# the "narrower claim" recorded against it here was an over-read of one side's
+# recovery. Watching the side you just restarted tells you nothing about the
+# side you did not.
+restore_session() {
+  local ok=yes
   remote_sh "open \"\$HOME/$SATCHEL_APP\" >/dev/null 2>&1 || open -a Paper >/dev/null 2>&1 || true"
   for _ in $(seq 1 15); do
     [ -n "$(app_pids_remote)" ] && break
     sleep 2
   done
+  [ -n "$(app_pids_remote)" ] || ok=no
+
+  # ⚠️ **AND THIS END TOO, WHICH MEANS THE BRIDGE GOES AWAY AND COMES BACK.**
+  # Every later step drives the app through it, so the restart is not complete
+  # until the port answers again — returning early here would fail the negative
+  # step against an app that is merely still booting.
+  osascript -e 'quit app "Paper"' >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    [ -z "$(app_pids_local)" ] && break
+    sleep 1
+  done
+  open "$HOME/${PAPER_LOCAL_APP:-Applications/Paper.app}" >/dev/null 2>&1 || open -a Paper >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  nc -z 127.0.0.1 "$port" >/dev/null 2>&1 || ok=no
+  raise_window local
   raise_window remote
-  [ -n "$(app_pids_remote)" ]
+  [ "$ok" = yes ]
 }
 
 if [ -n "$found" ]; then
@@ -468,10 +491,10 @@ fi
 
 # Whatever the verdict, the far end goes back the way it was found.
 if [ "$falsify" = yes ]; then
-  if restore_far_end; then
-    pass "restarted the app on $remote — the session does not survive one end vanishing, and the next run would otherwise fail four steps from the cause"
+  if restore_session; then
+    pass "restarted BOTH apps and the bridge answered again — the end that kept running holds the dead session, so restarting only the far one leaves the pair broken"
   else
-    fail "could not restart the app on $remote. THE PAIR IS LEFT BROKEN: every later run will fail at the converge step with 'session hello' timing out, for a reason that is this run's and not the circle's. Start it at that Mac."
+    fail "could not restart both apps. THE PAIR IS LEFT BROKEN: every later run will fail at the converge step with 'session hello' timing out, for a reason that is this run's and not the circle's."
   fi
 fi
 
