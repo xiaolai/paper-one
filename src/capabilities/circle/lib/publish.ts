@@ -309,14 +309,16 @@ const FIRST_CHAIN = 1
  * equally unreadable, and rebuilding is the only thing that can help it.
  */
 function unreadableDelegation(raw: unknown): boolean {
-  if (raw === undefined) return false
   /* ⚠️ **A NON-STRING IS NOT THIS FUNCTION'S BUSINESS, AND DROPPING IT HID A
      REAL CHECK.** `isSealedPage` refuses a boundary whose `delegation` is not a
      string, and the first version of this migration quietly repaired that into
      a valid row — turning a malformed store, which means something wrote
      garbage, into a silent rebuild. A legacy SPELLING is a migration; a broken
      TYPE is a defect, and the store must still refuse it loudly.
-     `publish.test.ts`'s "refuses a delegation that is an object" caught this. */
+     `publish.test.ts`'s "refuses a delegation that is an object" caught this.
+     ⚠️ This also answers for a boundary that never had a delegation at all: an
+     `if (raw === undefined) return false` stood above it and could not change
+     an answer, because `undefined` is not a string either. */
   if (typeof raw !== 'string') return false
   let held: unknown
   try {
@@ -324,7 +326,14 @@ function unreadableDelegation(raw: unknown): boolean {
   } catch {
     return true
   }
-  if (typeof held !== 'object' || held === null || Array.isArray(held)) return true
+  /* ⚠️ **ONLY `null` NEEDS ITS OWN ANSWER.** This read
+     `typeof held !== 'object' || held === null || Array.isArray(held)`, and
+     two of those three could not change one: a number, a string and a list all
+     reach the member read below, have no `sig`, and are refused there. `null`
+     is the one that would THROW on the read instead of answering. Removing the
+     other two also makes the `catch` above load-bearing, which it was not:
+     emptied, `held` stayed `undefined` and the `typeof` clause caught it. */
+  if (held === null) return true
   /* The one member the rename moved. `isDelegation` refuses the object without
      it, which is the whole of the defect this migrates past — the rest of the
      shape is that parser's business and is checked there, on arrival. */
@@ -835,15 +844,17 @@ export async function pagesOver(
      fallback is what makes an old store readable at all; what was missing is
      that the values it chose are then written down, so the second serve cannot
      differ from the first. */
-  const pin = (one: SealedPage): SealedPage =>
-    one.roster !== undefined && one.revocations !== undefined && one.work !== undefined
-      ? one
-      : {
-          ...one,
-          roster: one.roster ?? [...publisher.roster],
-          revocations: one.revocations ?? publisher.revocations,
-          work: one.work ?? { ...publisher.work, ids: [...publisher.work.ids], titles: [...publisher.work.titles] },
-        }
+  /* ⚠️ **UNCONDITIONALLY, BECAUSE THE GUARD COULD NOT CHANGE AN ANSWER.** It
+     read "already has all three? then as it is" and every field below falls
+     back with `??`, so the rebuilt row held the same values either way — only
+     its identity differed, and `pinnedByRef` keys on the ORIGINAL. A branch
+     nothing can tell from its other side is a claim the reader has to check. */
+  const pin = (one: SealedPage): Pinned => ({
+    ...one,
+    roster: one.roster ?? [...publisher.roster],
+    revocations: one.revocations ?? publisher.revocations,
+    work: one.work ?? { ...publisher.work, ids: [...publisher.work.ids], titles: [...publisher.work.titles] },
+  })
   const boundaries = asStored.map(pin)
   /* ⚠️ **THE WHOLE STORED LIST IS CARRIED BACK, NOT ONLY THIS CHAIN'S.**
      `streamOf` selects the boundaries of the version being SERVED, so
@@ -929,7 +940,7 @@ function streamOf(log: readonly Entry[], sealed: readonly SealedPage[], publishe
  * was a value with no meaning, which reads as though it had one.
  */
 async function renderPage(
-  boundary: SealedPage,
+  boundary: Pinned,
   bySeq: ReadonlyMap<number, Entry>,
   publisher: Publisher,
   version: number,
@@ -991,7 +1002,23 @@ export function boundedAnswer(bounds: Bounds): { readonly pages: readonly string
  * claim, the signature — is as long as this publisher makes it. A fixed
  * allowance fitted the roster it was written against and no other.
  */
-function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], publisher: Publisher, bounds: Bounds, version: number): readonly SealedPage[] {
+/**
+ * A boundary whose roster, revocations and claim are WRITTEN DOWN.
+ *
+ * ⚠️ **A TYPE RATHER THAN THREE `??`s AT THE PAGE.** `rebuilt` fell back to the
+ * publisher's live values for each of them, which was the whole of the defect
+ * `pin` exists to fix — and once `pin` ran over every stored boundary and
+ * `sealFresh` set all three on every new one, those fallbacks could not fire.
+ * Three dead clauses restating a rule enforced one level up. Said in the type,
+ * so a boundary that has not been pinned cannot reach a page.
+ */
+type Pinned = SealedPage & {
+  readonly roster: readonly string[]
+  readonly revocations: number
+  readonly work: WorkClaim
+}
+
+function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], publisher: Publisher, bounds: Bounds, version: number): readonly Pinned[] {
   const lastSealed = boundaries.reduce((top, one) => Math.max(top, one.to), 0)
   const fresh = mine.filter((entry) => entry.seq > lastSealed)
   const wireLimit = MAX_PAGE_CHARS - envelopeOf(publisher, version)
@@ -1015,6 +1042,12 @@ function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], pu
       }
       run.push(entry)
     }
+    /* ⚠️ Equivalent by the caller, and kept for the reader: `paginate` never
+       yields an empty group — it pushes a run only when it has one — so the
+       loop above always pushes at least once and `run` is never empty here.
+       Made unconditional, the only input that would tell the difference is one
+       that cannot arrive; left as it is, it says what has to be true. */
+    // Stryker disable next-line ConditionalExpression,EqualityOperator: unreachable with an empty run — see above.
     if (run.length > 0) out.push(run)
     return out
   }
@@ -1036,7 +1069,26 @@ function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], pu
        more pages. Only `MAX_PAGE_CHARS` makes a page unsendable, and that is
        the bound a recipient enforces. Checking the wrong one turned a
        deliberate test fixture into an error. */
-    const size = group.reduce((n, one) => n + wireBytesOf(canonicalJson(one)), 0)
+    /* ⚠️ **CHARACTERS, BECAUSE `wireLimit` IS IN CHARACTERS.** This summed
+       `wireBytesOf` — the UTF-8 bytes of the page's JSON-ESCAPED self, which is
+       what an ANSWER's frame costs — and compared it against
+       `MAX_PAGE_CHARS - envelope`, which `checkPage` measures as
+       `received.length`. Two different units, and the byte count runs about
+       2.8× the character count for CJK text: MEASURED, 112 characters of
+       Chinese weigh 318 bytes. So a 175 000-character Chinese passage — a page
+       of 175 000 characters against a limit of 524 288 — was refused as
+       unsendable, and the reader was told to withdraw a publication that would
+       have gone out perfectly well. The frame budget is a real bound and it is
+       enforced elsewhere, on the answer; it is not this one. */
+    const size = group.reduce((n, one) => n + canonicalJson(one).length, 0)
+    /* ⚠️ A group of more than one cannot be over: `paginate` keeps
+       `2 + sum(len) + (n - 1) <= budget` and `budget <= wireLimit`, so this sum
+       — which is that one less the brackets and the commas — is strictly under
+       it for every `n >= 2`. Stated rather than assumed, because with the byte
+       count above it was NOT true and this clause was quietly load-bearing
+       against the wrong measure. Kept because it is what makes `group[0]!`
+       below honest. */
+    // Stryker disable next-line ConditionalExpression: implied by `paginate`'s own bound — see above.
     if (group.length === 1 && size > wireLimit) {
       const only = group[0]!
       throw new Error(
@@ -1082,7 +1134,7 @@ function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], pu
  * by `checkPage` as malformed, which is the honest outcome for a store whose
  * rows have gone; it is not silently skipped over.)
  */
-function rebuilt(boundary: SealedPage, bySeq: ReadonlyMap<number, Entry>, publisher: Publisher, version: number, prevPageHash: string): Omit<Page, 'sig'> {
+function rebuilt(boundary: Pinned, bySeq: ReadonlyMap<number, Entry>, publisher: Publisher, version: number, prevPageHash: string): Omit<Page, 'sig'> {
   const group: Entry[] = []
   for (let seq = boundary.from; seq <= boundary.to; seq++) {
     const entry = bySeq.get(seq)
@@ -1104,16 +1156,17 @@ function rebuilt(boundary: SealedPage, bySeq: ReadonlyMap<number, Entry>, publis
   return {
     v: version,
     person: publisher.person,
-    work: boundary.work ?? publisher.work,
+    work: boundary.work,
     device: publisher.device,
     from: boundary.from,
     to: boundary.to,
     prevPageHash,
     entries: group,
-    /* As first served — see `SealedPage`. A boundary sealed before the
-       metadata was kept rebuilds with the current values, as it always did. */
-    roster: [...(boundary.roster ?? publisher.roster)],
-    revocations: boundary.revocations ?? publisher.revocations,
+    /* As first served — see `SealedPage` and `Pinned`. A boundary sealed
+       before the metadata was kept had it written down by `pin` on the way in,
+       so there is nothing to fall back to here. */
+    roster: [...boundary.roster],
+    revocations: boundary.revocations,
     delegation: boundary.delegation ?? publisher.delegation,
   }
 }
