@@ -514,6 +514,36 @@ const queueOf = (keys: string[] = []): WriteQueue => ({
 const LANE: LaneFor = (bookId) => `book:${bookId}`
 const BOOK = 'book:moby'
 
+describe('a sealed page that lost an entry', () => {
+  it('is refused rather than re-sent as a different page', async () => {
+    /* ⚠️ **THE REBUILD WOULD HAVE SUCCEEDED AND BROKEN EVERY CHAIN.** A store
+       that loses an entry inside a sealed page — a hand-edited file, a future
+       migration dropping a row — rebuilds `[1,2,3]` as `[1,3]`, and that page
+       PASSES `checkPage`, because gaps are legal: version filtering makes
+       legitimate ones. So it goes out signed and canonical with different
+       contents, a different hash, and a different `prevPageHash` for every
+       page after it. Every recipient's chain broken, from a store that read
+       cleanly. */
+    let held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('one'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    held = share(held, { markId: 'm2', passage: passage('two'), device: DEVICE.id }, 'p2', stamp(2, DEVICE.id)).held
+    held = share(held, { markId: 'm3', passage: passage('three'), device: DEVICE.id }, 'p3', stamp(3, DEVICE.id)).held
+    const sealed = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+    expect(sealed.held.sealed[0]).toMatchObject({ entries: 3 })
+
+    /* The middle publication vanishes from the store, its boundary untouched. */
+    const lost: SharedFile = { ...sealed.held, publications: sealed.held.publications.filter((row) => row.pub !== 'p2') }
+    await expect(pagesFor(lost, publisher(), {}, pageCrypto.hash)).rejects.toThrow(/refusing to re-send it as a different page/u)
+  })
+
+  it('serves a boundary sealed before the count was recorded, as it always did', async () => {
+    /* The count is absent on older stores; they cannot be checked and must not
+       be refused for it. */
+    const held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    const legacyBoundary: SharedFile = { ...held, sealed: [{ device: DEVICE.id, from: 1, to: 1, v: WIRE_VERSION }] }
+    await expect(pagesFor(legacyBoundary, publisher(), {}, pageCrypto.hash)).resolves.toBeDefined()
+  })
+})
+
 describe('a legacy boundary is pinned the first time it is served', () => {
   it('reproduces the same bytes after the roster changes', async () => {
     /* ⚠️ **IT REBUILT FROM LIVE STATE EVERY TIME.** A boundary sealed before

@@ -140,6 +140,22 @@ export interface SealedPage {
   readonly roster?: readonly string[]
   readonly revocations?: number
   readonly delegation?: string
+  /**
+   * How many entries this page held when it was sealed.
+   *
+   * ⚠️ **A RANGE IS NOT A MEMBERSHIP, AND THE RANGE WAS ALL THAT WAS STORED.**
+   * A store that loses an entry inside a sealed page — a file edited by hand, a
+   * row dropped by a future migration — rebuilds `[1,2,3]` as `[1,3]`, and the
+   * result passes `checkPage`, which permits gaps because version filtering
+   * makes legitimate ones. So a page ALREADY SENT is silently re-emitted with
+   * different contents, a different hash, and a different `prevPageHash` for
+   * every page after it: every recipient's chain broken, from a store that
+   * looked fine.
+   *
+   * Absent on a boundary sealed before this was recorded, which cannot be
+   * checked and is served as it always was.
+   */
+  readonly entries?: number
   /** The claim the page was signed under — a book whose metadata changed since would name a different one. */
   readonly work?: WorkClaim
 }
@@ -1008,6 +1024,8 @@ function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], pu
          from live metadata. A boundary whose claim changed would reproduce
          different bytes and break every recipient's chain. */
       work: { ...publisher.work, ids: [...publisher.work.ids], titles: [...publisher.work.titles] },
+      /* What this page IS, beside where it sits — see `SealedPage.entries`. */
+      entries: group.length,
     }
   })
   // Stryker restore OptionalChaining
@@ -1030,6 +1048,19 @@ function rebuilt(boundary: SealedPage, bySeq: ReadonlyMap<number, Entry>, publis
   for (let seq = boundary.from; seq <= boundary.to; seq++) {
     const entry = bySeq.get(seq)
     if (entry) group.push(entry)
+  }
+  /* ⚠️ **A PAGE THAT LOST AN ENTRY IS NOT THE PAGE THAT WAS SEALED.** Rebuilding
+     `[1,2,3]` as `[1,3]` produces a page `checkPage` ACCEPTS — gaps are legal,
+     because version filtering makes legitimate ones — so it goes out signed and
+     canonical with different contents, a different hash, and a different
+     `prevPageHash` for every page after it. Every recipient's chain broken,
+     from a store that read cleanly. Refused rather than re-emitted; the count
+     is absent on boundaries sealed before it was recorded, and those are served
+     as they always were. */
+  if (boundary.entries !== undefined && group.length !== boundary.entries) {
+    throw new Error(
+      `the sealed page ${boundary.from}–${boundary.to} held ${boundary.entries} entries and this store has ${group.length} — refusing to re-send it as a different page`,
+    )
   }
   return {
     v: version,
