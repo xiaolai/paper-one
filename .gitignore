@@ -56,6 +56,12 @@ error.log
 # Scratch space for companion HTML artifacts and working notes. Ignored whole,
 # with no exceptions: the manual gesture checklist was re-included here until
 # it was purged from the history, and nothing in dev-docs/ is tracked now.
+#
+# Publishing the feature ledger was set up on 2026-09-09 and REVERSED the same
+# day, before anything was committed — so the exception never existed and this
+# paragraph is again true as written. If it is tried again: `dev-docs/` has to
+# become `dev-docs/*` first, because git does not descend into an excluded
+# DIRECTORY and a `!` line under this one re-includes nothing and says nothing.
 dev-docs/
 
 # Design notes, for the same reason: working documents, not the repository's.
