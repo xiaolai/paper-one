@@ -67,13 +67,13 @@ const passage = (quote: string): Passage => ({
 })
 
 /** A delegation the person really signed, for `device`. */
-function delegationFor(device: string): string {
+function delegationFor(device: string, roster = 0): string {
   const body = {
     person: PERSON.id,
     device,
     notBefore: NOW - 1_000,
     notAfter: NOW + 1_000_000,
-    roster: 0,
+    roster,
   }
   const sig = bytesToHex(
     sign(utf8ToBytes(delegationBytes({ ...body, sig: '' } as SignedDelegation)), PERSON.secret),
@@ -1067,6 +1067,12 @@ describe('the book-level rows the store keeps — WI-23.B2', () => {
     /* ⚠️ Two entries at one `(device, seq)` is the collision the per-device
        key exists to make impossible — and the book-level rows are entries. */
     expect(nextSeqFor(rated(), DEVICE.id)).toBe(5)
+    /* ⚠️ **THE REVIEW AT 4 IS WHAT MADE IT 5, NOT THE RATING AT 3.** With both
+       present the rating could have been ignored entirely and the answer would
+       be the same, so the loop over the opinions had nothing holding it. A
+       rating that OWNS the highest sequence is what tells them apart. */
+    const ratingHighest: SharedFile = { ...rated(), reviews: [], opinions: [{ op: 'rate', stars: 4, device: DEVICE.id, seq: 7, at: stamp(7, DEVICE.id) }] }
+    expect(nextSeqFor(ratingHighest, DEVICE.id)).toBe(8)
     const withdrawn: SharedFile = {
       ...rated(),
       reviews: [{ ...rated().reviews[0]!, unreviewed: { seq: 9, at: stamp(9, DEVICE.id) } }],
@@ -1229,17 +1235,28 @@ describe('what a sealed page remembers — the roster it was signed with', () =>
     const first = await pagesFor(held, publisher(), {}, pageCrypto.hash)
     expect(first.pages).toHaveLength(1)
     expect(first.held.sealed[0]).toMatchObject({ roster: [DEVICE.id, PHONE.id], revocations: 0, delegation: delegationFor(DEVICE.id) })
-    /* A third device is paired: the roster grows and the delegation is re-minted. */
-    const grown = publisher({ roster: [DEVICE.id, PHONE.id, 'c'.repeat(64)], revocations: 1 })
+    /* A third device is paired: the roster grows and the delegation is
+       RE-MINTED — which this used to say and not do. `grown` changed the
+       roster and the revocation count and carried the SAME delegation, so a
+       rebuild that reached for the publisher's current one instead of the
+       boundary's would have produced identical bytes and passed. A delegation
+       under the new roster epoch, correctly signed, is what tells them apart. */
+    const reminted = delegationFor(DEVICE.id, 1)
+    expect(reminted).not.toBe(delegationFor(DEVICE.id))
+    const grown = publisher({ roster: [DEVICE.id, PHONE.id, 'c'.repeat(64)], revocations: 1, delegation: reminted })
     const again = await pagesFor(first.held, grown, {}, pageCrypto.hash)
     expect(again.pages[0]).toBe(first.pages[0])
+    /* The old page still carries the delegation it was sealed with. */
+    expect((JSON.parse(again.pages[0]!) as { delegation: string }).delegation).toBe(delegationFor(DEVICE.id))
     /* And a page cut after the change carries the new roster, chained to the old bytes. */
     const more = share(first.held, { markId: 'm3', passage: passage('third'), device: DEVICE.id }, 'pub3', stamp(3, DEVICE.id)).held
     const next = await pagesFor(more, grown, { [DEVICE.id]: 2 }, pageCrypto.hash)
     expect(next.pages).toHaveLength(1)
-    const page = JSON.parse(next.pages[0]!) as { roster: string[]; prevPageHash: string; revocations: number }
+    const page = JSON.parse(next.pages[0]!) as { roster: string[]; prevPageHash: string; revocations: number; delegation: string }
     expect(page.roster).toHaveLength(3)
     expect(page.revocations).toBe(1)
+    /* And the delegation of today, not the one the first page was sealed with. */
+    expect(page.delegation).toBe(reminted)
     expect(page.prevPageHash).toBe(pageCrypto.hash(first.pages[0]!))
   })
 
@@ -1325,6 +1342,40 @@ describe('changing the store as one step', () => {
     /* And the transform sees what is on disk, not a snapshot taken before. */
     const second = await updateShared(fs, queue, (id) => `lane:${id}`, 'book:x', (held) => share(held, { markId: 'm2', passage: passage('r'), device: DEVICE.id }, 'pub2', stamp(2, DEVICE.id)).held)
     expect(second.publications.map((one) => one.pub)).toEqual(['pub1', 'pub2'])
+  })
+
+  it('does not lose the first of two shares started at once', async () => {
+    /* ⚠️ **THE TEST ABOVE AWAITS EACH UPDATE BEFORE STARTING THE NEXT**, and
+       its queue runs a job the moment it is handed one — so the read could be
+       moved OUTSIDE the lane and every assertion in it would still hold. What
+       the lane is for is the case that never happens there: two updates in
+       flight at once. Read outside, both see an empty file, both mint a
+       publication at sequence 1, and whichever writes last is the only one
+       that survives — a share the reader made and Paper silently dropped.
+
+       A queue that actually serialises per lane, as the app's does. */
+    const fs = fakeFs({}) as unknown as VaultFs
+    const running = new Map<string, Promise<unknown>>()
+    const queue = {
+      append: (lane: string, job: () => Promise<void>) => {
+        const next = (running.get(lane) ?? Promise.resolve()).then(job)
+        running.set(lane, next.catch(() => undefined))
+        return next
+      },
+    } as never
+    const adding = (markId: string, pub: string) => (held: SharedFile) =>
+      share(held, { markId, passage: passage(markId), device: DEVICE.id }, pub, stamp(nextSeqFor(held, DEVICE.id), DEVICE.id)).held
+
+    await Promise.all([
+      updateShared(fs, queue, (id) => `lane:${id}`, 'book:x', adding('m1', 'pub1')),
+      updateShared(fs, queue, (id) => `lane:${id}`, 'book:x', adding('m2', 'pub2')),
+    ])
+
+    const held = await readShared(fs, 'book:x')
+    expect(held.publications.map((one) => one.pub).sort()).toEqual(['pub1', 'pub2'])
+    /* And at two different sequences, which is the other half: one file with
+       two entries at one `(device, seq)` is a store that fails its own read. */
+    expect(new Set(held.publications.map((one) => one.seq)).size).toBe(2)
   })
 })
 

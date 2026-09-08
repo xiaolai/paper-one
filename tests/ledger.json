@@ -2254,6 +2254,7 @@
     "src/capabilities/circle/lib/publish.test.ts > an entry too big for a page > is refused loudly rather than sealed into a page nobody can receive",
     "src/capabilities/circle/lib/publish.test.ts > an entry too big for a page > measures the page in CHARACTERS, so a Chinese passage that fits is sent",
     "src/capabilities/circle/lib/publish.test.ts > an entry too big for a page > takes an entry of EXACTLY the wire limit and refuses one character more",
+    "src/capabilities/circle/lib/publish.test.ts > changing the store as one step > does not lose the first of two shares started at once",
     "src/capabilities/circle/lib/publish.test.ts > changing the store as one step > reads inside the lane, writes only what changed, and hands back what it wrote",
     "src/capabilities/circle/lib/publish.test.ts > every clause of a boundary and a publication on disk — one row each > reads a boundary with its roster, revocations and delegation",
     "src/capabilities/circle/lib/publish.test.ts > every clause of a boundary and a publication on disk — one row each > reads a real boundary",
