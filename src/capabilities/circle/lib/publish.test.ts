@@ -514,6 +514,30 @@ const queueOf = (keys: string[] = []): WriteQueue => ({
 const LANE: LaneFor = (bookId) => `book:${bookId}`
 const BOOK = 'book:moby'
 
+describe('a legacy boundary is pinned the first time it is served', () => {
+  it('reproduces the same bytes after the roster changes', async () => {
+    /* ⚠️ **IT REBUILT FROM LIVE STATE EVERY TIME.** A boundary sealed before
+       roster, revocations and claim were recorded falls back to the
+       publisher's CURRENT values — so pairing a new device, or revoking one,
+       changed the bytes of pages already sent. Every recipient holding the old
+       page then refuses the next one with `chain`, for ever, with nothing
+       anywhere saying why.
+
+       The fallback is what makes an old store readable at all. What was
+       missing is that the values it picks are written down, so the SECOND
+       serve cannot differ from the first. */
+    const held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    /* A boundary as an older build wrote one: no roster, no revocations, no work. */
+    const legacy: SharedFile = { ...held, sealed: [{ device: DEVICE.id, from: 1, to: 1, v: WIRE_VERSION }] }
+
+    const first = await pagesFor(legacy, publisher(), {}, pageCrypto.hash)
+    /* Served once, the boundary now carries what it was rendered with. */
+    const laterRoster = { ...publisher(), roster: [...publisher().roster, 'ff'.repeat(32)], revocations: 3 }
+    const second = await pagesFor(first.held, laterRoster, {}, pageCrypto.hash)
+    expect(second.pages[0]).toBe(first.pages[0])
+  })
+})
+
 describe('an entry too big for a page', () => {
   it('is refused loudly rather than sealed into a page nobody can receive', async () => {
     /* ⚠️ **IT WAS SEALED ANYWAY, AND STOPPED THE STREAM FOR EVER.** `paginate`
@@ -1314,16 +1338,25 @@ describe('a store 0.1.3 wrote — boundaries with no chain version', () => {
     const v1 = await pagesFor(held, publisher(), {}, pageCrypto.hash, DEFAULT_BOUNDS, 1)
     expect(v1.pages).toHaveLength(1)
     expect(JSON.parse(v1.pages[0]!)).toMatchObject({ v: 1, from: 1, to: 2 })
-    /* Nothing new sealed: the boundary read IS the boundary served. */
-    expect(v1.held.sealed).toEqual(held.sealed)
+    /* Nothing new SEALED — the boundary read is the boundary served, not
+       re-cut — but it is now PINNED: a legacy boundary records the roster,
+       revocations and claim it was rendered with, so a later roster change
+       cannot alter the bytes of a page already sent. Range and chain
+       unchanged; metadata gained. */
+    expect(v1.held.sealed).toHaveLength(1)
+    expect(v1.held.sealed[0]).toMatchObject({ device: DEVICE.id, from: 1, to: 2, v: 1 })
+    expect(v1.held.sealed[0]).toHaveProperty('roster')
+    expect(v1.held.sealed[0]).toHaveProperty('revocations')
   })
 
   it('seals the v2 chain afresh beside it — two chains, as `SealedPage.v` says', async () => {
     const held = await readShared(legacy(), 'book:x')
     const v2 = await pagesFor(held, publisher(), {}, pageCrypto.hash, DEFAULT_BOUNDS, 2)
     expect(v2.pages).toHaveLength(1)
+    /* Two chains, side by side — and the v1 one is now pinned rather than
+       rebuilt from live state on every serve. */
     expect(v2.held.sealed).toEqual([
-      { device: DEVICE.id, from: 1, to: 2, v: 1 },
+      expect.objectContaining({ device: DEVICE.id, from: 1, to: 2, v: 1 }),
       expect.objectContaining({ device: DEVICE.id, from: 1, to: 2, v: 2 }),
     ])
   })

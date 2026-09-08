@@ -809,7 +809,34 @@ export async function pagesOver(
   /** Every boundary, the ones this call sealed appended. */
   readonly sealed: readonly SealedPage[]
 }> {
-  const { mine, boundaries } = streamOf(log, sealed, publisher, version)
+  const { mine, boundaries: asStored } = streamOf(log, sealed, publisher, version)
+  /* ⚠️ **A LEGACY BOUNDARY IS PINNED THE FIRST TIME IT IS SERVED, NOT REBUILT
+     FROM LIVE STATE EVERY TIME.** A boundary sealed before roster, revocations,
+     delegation and claim were recorded falls back to the publisher's CURRENT
+     values — so pairing a new device, or revoking one, changed the bytes of
+     pages already sent. Every recipient holding the old page then refuses the
+     next one with `chain`, for ever, and nothing anywhere says why. The
+     fallback is what makes an old store readable at all; what was missing is
+     that the values it chose are then written down, so the second serve cannot
+     differ from the first. */
+  const pin = (one: SealedPage): SealedPage =>
+    one.roster !== undefined && one.revocations !== undefined && one.work !== undefined
+      ? one
+      : {
+          ...one,
+          roster: one.roster ?? [...publisher.roster],
+          revocations: one.revocations ?? publisher.revocations,
+          work: one.work ?? { ...publisher.work, ids: [...publisher.work.ids], titles: [...publisher.work.titles] },
+        }
+  const boundaries = asStored.map(pin)
+  /* ⚠️ **THE WHOLE STORED LIST IS CARRIED BACK, NOT ONLY THIS CHAIN'S.**
+     `streamOf` selects the boundaries of the version being SERVED, so
+     returning those alone silently dropped every boundary belonging to the
+     other chain — a v1 store served over v2 would have lost its v1 history on
+     the next write. Caught by the two-chain test, which is exactly what it is
+     for. */
+  const pinnedByRef = new Map(asStored.map((one, i) => [one, boundaries[i]!]))
+  const allSealed = sealed.map((one) => pinnedByRef.get(one) ?? one)
   const bySeq = new Map(mine.map((entry) => [entry.seq, entry]))
   const sealedNow = sealFresh(mine, boundaries, publisher, bounds, version)
   const wanted = since[publisher.device] ?? 0
@@ -841,7 +868,11 @@ export async function pagesOver(
     }
   }
 
-  return { pages: answer.pages, more, sealed: [...sealed, ...sealedNow] }
+  /* ⚠️ **`boundaries`, NOT `sealed` — the PINNED list, not the one that came in.**
+     Returning the argument threw away the metadata a legacy boundary was just
+     rendered with, so the next serve fell back to live state all over again and
+     the pinning never persisted. */
+  return { pages: answer.pages, more, sealed: [...allSealed, ...sealedNow] }
 }
 
 /**
