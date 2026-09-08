@@ -503,6 +503,34 @@ pub fn run() {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
+                        /* ⚠️ **IROH LOGS ONE LINE PER UDP DATAGRAM AT `Info`,
+                         * AND THE DEFAULT 40 KB ROTATION THREW THE LOG AWAY
+                         * FASTER THAN IT COULD BE READ.** Measured 2026-09-08:
+                         * `Paper.log` held EIGHT SECONDS of history under an
+                         * app that had been up for three minutes, and two
+                         * thirds of its lines were `poll_send`. A pairing
+                         * retry logged a line, the line was rotated out before
+                         * anyone could read it, and its absence looked exactly
+                         * like the retry never firing — the same
+                         * silent-instrument defect as the accept loop it was
+                         * written to observe.
+                         *
+                         * ⚠️ **AND `level_for` DOES NOT FIX IT — MEASURED.**
+                         * `.level_for("iroh::socket::transports", Warn)` was
+                         * tried first and changed NOTHING: the lines kept
+                         * coming at `Info`. iroh logs through `tracing`, and
+                         * those records reach `log` by tracing's fallback,
+                         * which builds a record and logs it without the
+                         * per-target check `level_for` installs. The global
+                         * `.level` still bites, because tracing's fallback
+                         * does consult `log::max_level()` — but lowering that
+                         * would silence this app's own lines too, which are
+                         * the point.
+                         *
+                         * So the lever is RETENTION, not volume. 8 MB is
+                         * roughly two hours of a talkative peer session
+                         * instead of forty seconds. */
+                        .max_file_size(8_000_000)
                         .build(),
                 )?;
             }
