@@ -288,6 +288,12 @@ describe('every clause of the pane — one row each', () => {
 
     const late = deferred<OwnOpinion | null>()
     calls = 0
+    /* ⚠️ **THE LISTENER FROM THE UNMOUNTED PANE WAS STILL IN `tell`.** The
+       `waitFor` below would have been satisfied by it at once, so the second
+       scenario could begin against a subscription that no longer exists —
+       and its `fire` would notify nobody. Cleared, so the wait is for the new
+       pane's own subscription. The circle suite already does this. */
+    tell = null
     draw(
       portWith(own(), false, {
         own: () => (++calls === 1 ? late.promise : Promise.resolve(own())),
@@ -635,6 +641,29 @@ describe('every clause of the circle’s view and the lists on the pane — one 
     expect(screen.getByText(/Paper could not read your lists\. no lists dir/u)).toBeTruthy()
     cleanup()
 
+    /* ⚠️ **"KEEPS THE LAST ONES READ" HAD NOTHING TO KEEP.** The scenario above
+       fails on its FIRST read, so no list had ever been drawn and an
+       implementation that emptied the pane on every failure passed it. Here a
+       list is read, and then a refresh fails: the trouble is said AND the list
+       stays. */
+    let refusing = false
+    let told: (() => void) | null = null
+    const kept = listsWith([], {
+      lists: () => (refusing ? Promise.reject(new Error('the lists went away')) : Promise.resolve([{ id: 'aa', title: 'Sea', items: [] }])),
+      subscribe: (listener) => {
+        told = listener
+        return () => {}
+      },
+    })
+    render(<BookPane bookId="book:moby" port={portWith()} circle={null} lists={kept} />)
+    await screen.findByRole('button', { name: 'Put this book on Sea' })
+    refusing = true
+    await waitFor(() => expect(told).not.toBeNull())
+    await fire(() => told)
+    await screen.findByText(/the lists went away/u)
+    expect(screen.getByRole('button', { name: 'Put this book on Sea' })).toBeTruthy()
+    cleanup()
+
     const slow = deferred<OwnListView[]>()
     let calls = 0
     let tell: (() => void) | null = null
@@ -800,26 +829,45 @@ describe('the pane’s state belongs to one book', () => {
   })
 
   it('does not report, refresh or unbusy for an act begun on the previous book', async () => {
-    const pending = deferred<void>()
+    /* ⚠️ **THE SECOND BOOK USED TO HAVE NO ACT OF ITS OWN, so "still enabled"
+       was true of it before anything happened.** An implementation that
+       cleared the busy state of whatever book is on screen — the exact defect
+       named — produces that same enabled button, and the test could not tell
+       the two apart. The second book starts its own act now and must stay
+       disabled through the first one's failure, until ITS act settles. */
+    const first = deferred<void>()
+    const second = deferred<void>()
+    let acts = 0
     let reads = 0
     const port = portWith(own(), false, {
       own: () => {
         reads += 1
         return Promise.resolve(own())
       },
-      setStatus: vi.fn(() => pending.promise),
+      setStatus: vi.fn(() => (++acts === 1 ? first.promise : second.promise)),
     })
+    const reading = () => screen.getByRole('button', { name: 'Reading' }) as HTMLButtonElement
     const view = render(<BookPane bookId="book:moby" port={port} circle={null} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Reading' }))
-    expect((screen.getByRole('button', { name: 'Reading' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(reading().disabled).toBe(true)
+
     view.rerender(<BookPane bookId="book:dune" port={port} circle={null} />)
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Reading' }) as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(reading().disabled).toBe(false))
+    fireEvent.click(reading())
+    expect(reading().disabled).toBe(true)
+
     const before = reads
-    pending.reject(new Error('the first book would not save'))
+    first.reject(new Error('the first book would not save'))
     await flush()
+    /* Nothing said, nothing re-read — and the second book's own act is still
+       in flight, so its control is still held. */
     expect(screen.queryByText(/the first book would not save/u)).toBeNull()
     expect(reads).toBe(before)
-    expect((screen.getByRole('button', { name: 'Reading' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(reading().disabled).toBe(true)
+
+    second.resolve()
+    await flush()
+    expect(reading().disabled).toBe(false)
   })
 
   it('lets a newer lists answer stand when an older read lands after it, and clears its trouble', async () => {
@@ -947,7 +995,45 @@ describe('the pane, held to the letter', () => {
     expect((screen.getByRole('textbox', { name: 'Review' }) as HTMLTextAreaElement).value).toBe('about dune')
   })
 
-  it('keeps what was typed after the save was asked for, when the save lands late', async () => {
+  it('holds the review box while the save is in flight, and gives it back after', async () => {
+    /* ⚠️ **THE TEST BELOW TYPES INTO A DISABLED BOX**, which is not something a
+       reader can do — MEASURED: `disabled` is true from the click until the
+       save lands. So the reachable behaviour is this one: the box is held, and
+       what is typed once it comes back stands. */
+    const pending = deferred<void>()
+    /* A store that KEEPS what it was given, so what comes back after the save
+       is what was saved rather than the fixture's blank. */
+    let kept = own()
+    const port = portWith(kept, false, {
+      own: () => Promise.resolve(kept),
+      setReview: vi.fn((_bookId: string, text: string) => {
+        kept = own({ review: text })
+        return pending.promise
+      }),
+    })
+    render(<BookPane bookId="book:moby" port={port} circle={null} />)
+    const box = (await screen.findByRole('textbox', { name: 'Review' })) as HTMLTextAreaElement
+    fireEvent.change(box, { target: { value: 'about moby' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Keep review' }))
+    expect(box.disabled).toBe(true)
+
+    pending.resolve()
+    await flush()
+    const back = screen.getByRole('textbox', { name: 'Review' }) as HTMLTextAreaElement
+    expect(back.disabled).toBe(false)
+    expect(back.value).toBe('about moby')
+    fireEvent.change(back, { target: { value: 'about moby, and more' } })
+    expect((screen.getByRole('textbox', { name: 'Review' }) as HTMLTextAreaElement).value).toBe('about moby, and more')
+  })
+
+  it('keeps what a SYNTHETIC change wrote while the save was in flight, when it lands late', async () => {
+    /* ⚠️ **A SYNTHETIC EVENT, SAID SO PLAINLY.** The box is disabled while the
+       save is out, so `fireEvent.change` here is not a reader typing — it is
+       any other route to the same state: a paste handler, an extension, a
+       future revision of this pane that stops disabling the control. The
+       revision guard exists so a save landing afterwards does not overwrite
+       what is there, and this is the only way to reach it from a test. Named
+       for what it is rather than left looking like a user story. */
     const pending = deferred<void>()
     const port = portWith(own(), false, { setReview: vi.fn(() => pending.promise) })
     render(<BookPane bookId="book:moby" port={port} circle={null} />)

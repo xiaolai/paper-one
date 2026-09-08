@@ -1248,9 +1248,13 @@ describe('the offer’s own clock', () => {
         await vi.advanceTimersByTimeAsync(999)
       })
       expect(screen.queryByLabelText('Pairing QR code')).not.toBeNull()
-      /* At expiry, the tick the pane armed takes it down — AND SAYS SO. */
+      /* ⚠️ **AT EXPIRY, AND EXACTLY THERE.** This advanced 1 100 ms past the
+         999 — a full second past the moment being tested — so a comparison
+         that kept the offer alive AT its expiry would have been taken down by
+         the following tick and passed anyway. One millisecond is what
+         separates `>` from `>=` here. */
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_100)
+        await vi.advanceTimersByTimeAsync(1)
       })
       expect(screen.queryByLabelText('Pairing QR code')).toBeNull()
       expect(screen.getByText(/ran out before anybody used it/u)).toBeTruthy()
@@ -1274,7 +1278,17 @@ describe('the offer’s own clock', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0)
       })
+      /* ⚠️ **THE URL IS HIDDEN WHILE AN OFFER IS LIVE TOO**, so its absence
+         says nothing at all: a pane still showing a usable QR code and a copy
+         button for an offer that expired before it was drawn would pass this.
+         What has to be gone is the offer itself, and what has to be there is
+         the sentence saying why. */
       expect(screen.queryByText('paper://pair?s=old')).toBeNull()
+      expect(screen.queryByLabelText('Pairing QR code')).toBeNull()
+      expect(screen.queryByRole('button', { name: /Copy/u })).toBeNull()
+      expect(screen.getByText(/ran out before anybody used it/u)).toBeTruthy()
+      /* And another can be offered — an expired link is not a dead end. */
+      expect(screen.getByRole('button', { name: /Add somebody/u })).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }
