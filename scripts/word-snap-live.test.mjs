@@ -151,6 +151,46 @@ describe.skipIf(noConfig)('the live lane (skipped when this checkout has no .cla
 
 })
 
+describe('assertRan — the reports it used to accept', () => {
+  /* ⚠️ **EACH OF THESE PASSED, AND EACH IS A RUN THAT PROVED NOTHING.** The
+     counters `ran` and `expected` are numbers the PAGE reports about itself,
+     and nothing reconciled them with the entries — so an empty report with the
+     right numbers was clean, six entries under one id were clean, and a report
+     that declared itself failed was clean. In the file whose entire job is to
+     refuse a hollow run. */
+  const good = () => ({
+    engine: 'WebKit',
+    ran: CHECKS.length,
+    expected: CHECKS.length,
+    ok: true,
+    failures: 0,
+    checks: CHECKS.map((one) => ({ id: one.id, pass: true, detail: '' })),
+  })
+  const parity = (rows) => ({ rows: Array.from({ length: rows }, (_, i) => ({ id: i, same: true })) })
+
+  it('accepts a report that is complete and consistent', () => {
+    expect(assertRan(parity(3), good(), 3)).toEqual([])
+  })
+
+  it('refuses an EMPTY check list wearing the right counters', () => {
+    expect(assertRan(parity(3), { ...good(), checks: [] }, 3).join(' ')).toMatch(/carries 0|absent from the report/u)
+  })
+
+  it('refuses the same check reported more than once', () => {
+    const one = CHECKS[0]
+    const dom = { ...good(), checks: CHECKS.map(() => ({ id: one.id, pass: true, detail: '' })) }
+    expect(assertRan(parity(3), dom, 3).join(' ')).toMatch(/reported more than once/u)
+  })
+
+  it('refuses a report that declares itself failed even when every entry passed', () => {
+    expect(assertRan(parity(3), { ...good(), ok: false, failures: 2 }, 3).join(' ')).toMatch(/declares itself failed/u)
+  })
+
+  it('refuses an entry that is not a check at all', () => {
+    expect(assertRan(parity(3), { ...good(), checks: [null, ...good().checks.slice(1)] }, 3).join(' ')).toMatch(/not a check/u)
+  })
+})
+
 describe('word-snap-live — failing closed', () => {
   /* The lane's probe. It must work with no bridge, no app and no book —
    * otherwise the probe reports the lane broken on every machine where the app
