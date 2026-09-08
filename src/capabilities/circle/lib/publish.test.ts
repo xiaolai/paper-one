@@ -1,7 +1,7 @@
 import { getPublicKey, hashes, sign } from '@noble/ed25519'
 import { sha512 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { MAX_CLAIM_DIGESTS, SHELF_WORK, WIRE_VERSION, canonicalJson, makeHlc, type Entry, type Hlc, type Passage, type WorkClaim } from '../../../kernel'
 import { pageCrypto } from './crypto'
 import { delegationBytes, takePages, type Ledger, type SignedDelegation } from './receive'
@@ -513,6 +513,48 @@ const queueOf = (keys: string[] = []): WriteQueue => ({
 
 const LANE: LaneFor = (bookId) => `book:${bookId}`
 const BOOK = 'book:moby'
+
+describe('a request that is already caught up', () => {
+  it('signs NOTHING to say there is nothing new', async () => {
+    /* ⚠️ **IT SIGNED THE WHOLE CHAIN TO ANSWER AN EMPTY REQUEST.** The walk
+       starts at the first page because `prevPageHash` links every page a device
+       ever emitted — right when a page is going out, and there is none here. A
+       reader polling every five minutes re-signed their entire history each
+       time: one key operation per sealed page, per poll, for ever. */
+    let held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('one'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    held = share(held, { markId: 'm2', passage: passage('two'), device: DEVICE.id }, 'p2', stamp(2, DEVICE.id)).held
+    const sealed = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+    expect(sealed.pages.length).toBeGreaterThan(0)
+
+    const signer = publisher()
+    const signs = vi.spyOn(signer, 'sign')
+    const caught = await pagesFor(sealed.held, signer, { [DEVICE.id]: 99 }, pageCrypto.hash)
+    expect(caught.pages).toEqual([])
+    expect(signs).not.toHaveBeenCalled()
+  })
+})
+
+describe('a boundary the reader would refuse for its SPAN', () => {
+  it('is cut before the span reaches the limit', async () => {
+    /* ⚠️ **THE WRITER BOUNDED SIZE AND COUNT AND NOT THE RANGE.**
+       `isSealedPage` refuses a boundary whose `to - from` reaches
+       `MAX_BOUNDARY_SPAN` — and a page's entries need not be contiguous, since
+       filtering out another chain's leaves the survivors sparse. Two entries a
+       million sequences apart therefore sealed a boundary this build's own
+       reader rejects, and the store then failed its next read. */
+    let held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('near'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    /* A second publication far past the span, as a sparse log produces. */
+    const far = held.publications[0]!.seq + MAX_BOUNDARY_SPAN + 5
+    held = { ...held, publications: [...held.publications, { ...held.publications[0]!, markId: 'm2', pub: 'p2', seq: far }] }
+
+    const out = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+    for (const boundary of out.held.sealed) {
+      expect(boundary.to - boundary.from).toBeLessThan(MAX_BOUNDARY_SPAN)
+      /* And every sealed boundary is one this build would read back. */
+      expect(isSealedPage(boundary)).toBe(true)
+    }
+  })
+})
 
 describe('a sealed page that lost an entry', () => {
   it('is refused rather than re-sent as a different page', async () => {

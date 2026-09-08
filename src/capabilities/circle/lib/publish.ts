@@ -856,6 +856,16 @@ export async function pagesOver(
   const bySeq = new Map(mine.map((entry) => [entry.seq, entry]))
   const sealedNow = sealFresh(mine, boundaries, publisher, bounds, version)
   const wanted = since[publisher.device] ?? 0
+  /* ⚠️ **A CAUGHT-UP REQUEST SIGNED THE WHOLE CHAIN TO ANSWER "NOTHING NEW".**
+     The walk below starts at the first page because `prevPageHash` links every
+     page this device ever emitted, and a resumed page can only get its
+     predecessor's hash by walking from the beginning. That is right when a page
+     is going out — and there is no page going out here. A reader polling every
+     five minutes re-signed their entire history each time, for an empty answer:
+     a key operation per sealed page, per poll, for ever. Nothing beyond the
+     cursor means nothing to chain to. */
+  const anythingNew = [...boundaries, ...sealedNow].some((one) => one.to > wanted)
+  if (!anythingNew) return { pages: [], more: false, sealed: [...allSealed, ...sealedNow] }
   const answer = boundedAnswer(bounds)
   let prevPageHash = ''
   let more = false
@@ -986,8 +996,30 @@ function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], pu
   const fresh = mine.filter((entry) => entry.seq > lastSealed)
   const wireLimit = MAX_PAGE_CHARS - envelopeOf(publisher, version)
   const budget = Math.min(bounds.budget, wireLimit)
+  /* ⚠️ **THE READER ALSO BOUNDS THE SPAN, AND ONLY THE READER DID.**
+     `isSealedPage` refuses a boundary whose `to - from` reaches
+     `MAX_BOUNDARY_SPAN`, and pagination bounded size and count but never the
+     RANGE — which is not the same thing, because a page's entries need not be
+     contiguous: filtering out another chain's entries leaves the survivors
+     sparse. Two entries a million sequences apart therefore sealed a boundary
+     this build's own reader rejects, and the store then fails its next read.
+     Cut before the span reaches the limit; the fourth bound of one contract
+     the writer was enforcing three of. */
+  const withinSpan = (group: readonly Entry[]): readonly (readonly Entry[])[] => {
+    const out: Entry[][] = []
+    let run: Entry[] = []
+    for (const entry of group) {
+      if (run.length > 0 && entry.seq - run[0]!.seq >= MAX_BOUNDARY_SPAN) {
+        out.push(run)
+        run = []
+      }
+      run.push(entry)
+    }
+    if (run.length > 0) out.push(run)
+    return out
+  }
   // Stryker disable OptionalChaining
-  return paginate(fresh, budget).map((group) => {
+  return paginate(fresh, budget).flatMap(withinSpan).map((group) => {
     /* ⚠️ **AN ENTRY TOO BIG FOR A PAGE WAS SEALED INTO ONE ANYWAY.**
        `paginate` emits an oversized entry alone rather than dropping it —
        correct, since dropping would lose a publication silently — but nothing
@@ -1013,8 +1045,15 @@ function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], pu
     }
     return {
       device: publisher.device,
-      from: group[0]?.seq ?? 0,
-      to: group.at(-1)?.seq ?? 0,
+      /* ⚠️ **NOT `?? 0` — THAT MANUFACTURED AN INVALID BOUNDARY.** `paginate`
+         pushes only non-empty groups and `withinSpan` only non-empty runs, so
+         these cannot be undefined; the old fallbacks were unreachable and, if
+         that contract ever changed, would have sealed a boundary at sequence 0
+         — which `isSealedPage` refuses, making the store unreadable rather than
+         reporting the broken assumption. A non-null assertion states the
+         guarantee that actually holds. */
+      from: group[0]!.seq,
+      to: group.at(-1)!.seq,
       v: version,
       roster: [...publisher.roster],
       revocations: publisher.revocations,
