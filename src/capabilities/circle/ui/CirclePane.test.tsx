@@ -8,6 +8,24 @@ import type { CirclePort, FriendView } from '../lib/circlePort'
 import type { ListsPort, OwnListView } from '../lib/listsPort'
 
 /**
+ * Let React commit whatever the preceding line started.
+ *
+ * ⚠️ **`setTimeout(0)` IS NOT A REACT FLUSH, AND EVERY CALL SITE BELOW USED IT
+ * AS ONE.** A timer tick lets a promise settle; it does NOT guarantee React has
+ * processed the resulting state update, so an assertion after it can run
+ * against the PREVIOUS render — a stale-result test passing before the
+ * erroneous update it exists to catch has even been applied. Wrapping the same
+ * tick in `act` keeps whatever the timer was needed for and adds the guarantee
+ * that was missing.
+ */
+const flush = async (): Promise<void> => {
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 0))
+  })
+}
+
+
+/**
  * Fire a subscription's listener, ONCE IT EXISTS.
  *
  * ⚠️ **`tell!()` ASSUMED THE SUBSCRIPTION HAD ALREADY HAPPENED, AND IT IS NOT
@@ -434,7 +452,15 @@ describe('the circle panel', () => {
 
     await act(async () => settle[0]?.('the old secret words'))
 
-    expect(screen.queryByText('the old secret words')).toBeNull()
+    /* ⚠️ **THE WHOLE PHRASE IS NEVER ON SCREEN AS ONE STRING.**
+       `IdentitySection` renders it as an `<ol>` of one `<li>` per word, so
+       `queryByText('the old secret words')` matches NOTHING whether or not the
+       phrase is visible — and `toBeNull()` therefore passed either way. This
+       assertion could not fail. The words are what is on screen, so the words
+       are what must be absent. */
+    for (const word of 'the old secret words'.split(' ')) {
+      expect(screen.queryByText(word)).toBeNull()
+    }
   })
 
   it('says a pairing failed rather than showing it as finished', async () => {
@@ -935,7 +961,7 @@ describe('every clause of the person row, the Friends view and the reader’s li
     await fire(() => tell)
     await screen.findByText('Dune')
     slow.reject(new Error('too late'))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByText(/too late/u)).toBeNull()
     expect(screen.getByText('Dune')).toBeTruthy()
   })
@@ -1014,7 +1040,7 @@ describe('every clause of the person row, the Friends view and the reader’s li
     await fire(() => tell)
     await screen.findByLabelText('Title of Deserts')
     slow.resolve([one])
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByLabelText('Title of Sea')).toBeNull()
     expect(screen.getByLabelText('Title of Deserts')).toBeTruthy()
   })
@@ -1090,7 +1116,7 @@ describe('the last clauses of the Circle screen — one row each', () => {
     await fire(() => tell)
     await screen.findByLabelText('Title of Deserts')
     slow.reject(new Error('too late'))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.getByLabelText('Title of Deserts')).toBeTruthy()
   })
 
@@ -1111,7 +1137,7 @@ describe('the last clauses of the Circle screen — one row each', () => {
     await fire(() => tell)
     await screen.findByText('Dune')
     slow.resolve(friendView({ shelf: [{ pub: 's9', title: 'Stale', author: '', language: 'en', own: null, device: null, cover: null }] }))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByText('Stale')).toBeNull()
     expect(screen.getByText('Dune')).toBeTruthy()
   })
@@ -1369,7 +1395,7 @@ describe('the reader’s own lists, read', () => {
     await fire(() => tell)
     await screen.findByLabelText('Title of Newer')
     resolveFirst!([{ id: 'l1', title: 'Older', items: [] }])
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByLabelText('Title of Older')).toBeNull()
     expect(screen.getByLabelText('Title of Newer')).toBeTruthy()
   })
@@ -1400,7 +1426,7 @@ describe('an act begun through a port the screen no longer holds', () => {
     view.rerender(<CirclePane port={second} />)
     await screen.findByText('Bea')
     await fire(() => finish)
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     /* The old port was read once, at mount, and never again; the new one's roster stands. */
     expect(first.people).toHaveBeenCalledTimes(1)
     expect(second.people).toHaveBeenCalledTimes(1)
@@ -1434,7 +1460,7 @@ describe('a friend’s jackets, asked for when seen — WI-23.C5', () => {
       const { container } = render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
       fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
       await screen.findByText('Book s3')
-      await new Promise((done) => setTimeout(done, 0))
+      await flush()
       expect(cover).not.toHaveBeenCalled()
       expect(observed.map((one) => one.node.getAttribute('data-jacket-slot'))).toEqual(['s1', 's2', 's3'])
       /* Not intersecting is not seen. */
@@ -1553,7 +1579,7 @@ describe('Start a circle begun through a port the screen no longer holds', () =>
     view.rerender(<CirclePane port={second} />)
     await waitFor(() => expect(second.status).toHaveBeenCalledTimes(1))
     await fire(() => finish)
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     /* The old port was read once, at mount, and never again; the new port's state stands, and the button is free again. */
     expect(first.status).toHaveBeenCalledTimes(1)
     expect(second.status).toHaveBeenCalledTimes(1)
@@ -1579,8 +1605,16 @@ describe('Start a circle begun through a port the screen no longer holds', () =>
     view.rerender(<CirclePane port={second} />)
     await waitFor(() => expect(screen.getByRole('button', { name: /Show my twelve words/u })).toBeTruthy())
     finish!('the old secret words')
-    await new Promise((done) => setTimeout(done, 0))
-    expect(screen.queryByText('the old secret words')).toBeNull()
+    await flush()
+    /* ⚠️ **THE WHOLE PHRASE IS NEVER ON SCREEN AS ONE STRING.**
+       `IdentitySection` renders it as an `<ol>` of one `<li>` per word, so
+       `queryByText('the old secret words')` matches NOTHING whether or not the
+       phrase is visible — and `toBeNull()` therefore passed either way. This
+       assertion could not fail. The words are what is on screen, so the words
+       are what must be absent. */
+    for (const word of 'the old secret words'.split(' ')) {
+      expect(screen.queryByText(word)).toBeNull()
+    }
     expect(second.phrase).not.toHaveBeenCalled()
   })
 })

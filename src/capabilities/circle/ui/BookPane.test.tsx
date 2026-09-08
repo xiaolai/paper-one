@@ -9,6 +9,24 @@ import { CAPABILITY_UI } from '../../../kernel'
 import { BookPane } from './BookPane'
 
 /**
+ * Let React commit whatever the preceding line started.
+ *
+ * ⚠️ **`setTimeout(0)` IS NOT A REACT FLUSH, AND EVERY CALL SITE BELOW USED IT
+ * AS ONE.** A timer tick lets a promise settle; it does NOT guarantee React has
+ * processed the resulting state update, so an assertion after it can run
+ * against the PREVIOUS render — a stale-result test passing before the
+ * erroneous update it exists to catch has even been applied. Wrapping the same
+ * tick in `act` keeps whatever the timer was needed for and adds the guarantee
+ * that was missing.
+ */
+const flush = async (): Promise<void> => {
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 0))
+  })
+}
+
+
+/**
  * Fire a subscription's listener, ONCE IT EXISTS.
  *
  * ⚠️ **`tell!()` ASSUMED THE SUBSCRIPTION HAD ALREADY HAPPENED, AND IT IS NOT
@@ -263,7 +281,7 @@ describe('every clause of the pane — one row each', () => {
     expect(pressed(['Finished'])).toEqual(['true'])
     /* The slow one lands with a different word, and then with a failure. */
     slow.resolve(own({ status: 'want' }))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(pressed(['Finished'])).toEqual(['true'])
     expect(screen.queryByText(/could not read/u)).toBeNull()
     cleanup()
@@ -283,7 +301,7 @@ describe('every clause of the pane — one row each', () => {
     await fire(() => tell)
     await screen.findByRole('checkbox')
     late.reject(new Error('too late to matter'))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByText(/too late to matter/u)).toBeNull()
   })
 
@@ -567,7 +585,7 @@ describe('every clause of the circle’s view and the lists on the pane — one 
     await fire(() => tell)
     await screen.findByText('Bob has this.')
     slow.resolve({ people: [{ person: 'a', name: 'Alice', has: true, status: null, stars: null, reviews: [] }], alsoRead: [] })
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.getByText('Bob has this.')).toBeTruthy()
     expect(screen.queryByText('Alice has this.')).toBeNull()
     cleanup()
@@ -591,7 +609,7 @@ describe('every clause of the circle’s view and the lists on the pane — one 
     await fire(() => tell)
     await screen.findByText('Bob has this.')
     late.reject(new Error('too late'))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.getByText('Bob has this.')).toBeTruthy()
   })
 
@@ -632,7 +650,7 @@ describe('every clause of the circle’s view and the lists on the pane — one 
     await fire(() => tell)
     await screen.findByRole('button', { name: 'Put this book on Deserts' })
     slow.resolve([{ id: 'aa', title: 'Sea', items: [] }])
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByRole('button', { name: 'Put this book on Sea' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Put this book on Deserts' })).toBeTruthy()
   })
@@ -715,7 +733,7 @@ describe('the last clauses of the pane — one row each', () => {
     await fire(() => tell)
     await screen.findByRole('button', { name: 'Put this book on Deserts' })
     slow.reject(new Error('too late'))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.getByRole('button', { name: 'Put this book on Deserts' })).toBeTruthy()
   })
 })
@@ -798,7 +816,7 @@ describe('the pane’s state belongs to one book', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: 'Reading' }) as HTMLButtonElement).disabled).toBe(false))
     const before = reads
     pending.reject(new Error('the first book would not save'))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByText(/the first book would not save/u)).toBeNull()
     expect(reads).toBe(before)
     expect((screen.getByRole('button', { name: 'Reading' }) as HTMLButtonElement).disabled).toBe(false)
@@ -825,7 +843,7 @@ describe('the pane’s state belongs to one book', () => {
     await fire(() => tell)
     await screen.findByText('Newer')
     first.resolve([{ id: 'l1', title: 'Older', items: [] }])
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByText('Older')).toBeNull()
     expect(screen.getByText('Newer')).toBeTruthy()
   })
@@ -888,7 +906,7 @@ describe('the pane, held to the letter', () => {
     const view = render(<BookPane bookId="book:moby" port={port} circle={null} />)
     await screen.findByText(/moby will not read/u)
     view.rerender(<BookPane bookId="book:dune" port={port} circle={null} />)
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByText(/moby will not read/u)).toBeNull()
     slow.resolve(own())
     await screen.findByRole('group', { name: 'Reading status' })
@@ -910,7 +928,7 @@ describe('the pane, held to the letter', () => {
     await screen.findByRole('group', { name: 'Reading status' })
     const before = reads
     pending.resolve()
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(reads).toBe(before)
   })
 
@@ -925,7 +943,7 @@ describe('the pane, held to the letter', () => {
     const next = (await screen.findByRole('textbox', { name: 'Review' })) as HTMLTextAreaElement
     fireEvent.change(next, { target: { value: 'about dune' } })
     pending.resolve()
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect((screen.getByRole('textbox', { name: 'Review' }) as HTMLTextAreaElement).value).toBe('about dune')
   })
 
@@ -938,7 +956,7 @@ describe('the pane, held to the letter', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Keep review' }))
     fireEvent.change(box, { target: { value: 'about moby, and more' } })
     pending.resolve()
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect((screen.getByRole('textbox', { name: 'Review' }) as HTMLTextAreaElement).value).toBe('about moby, and more')
   })
 
@@ -1023,7 +1041,7 @@ describe('the pane, held to the letter', () => {
     view.rerender(<BookPane bookId="book:dune" port={portWith()} circle={null} lists={lists} />)
     await screen.findByLabelText('New list')
     created.resolve('l-late')
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(place).not.toHaveBeenCalled()
     cleanup()
     const quickCreate = vi.fn(() => Promise.resolve('l1'))
@@ -1057,7 +1075,7 @@ describe('an act begun through a port the pane no longer holds', () => {
     view.rerender(<BookPane bookId="book:moby" port={second} circle={null} />)
     await screen.findByRole('button', { name: 'Finished' })
     await fire(() => finish)
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     /* The old port was read once, at mount, and never again. */
     expect(firstOwn).toHaveBeenCalledTimes(1)
     expect(screen.getByRole('button', { name: 'Finished' }).getAttribute('aria-pressed')).toBe('true')
