@@ -6,6 +6,7 @@ import {
   compareItems,
   isCanonical,
   isPageShape,
+  resolved,
   type Entry,
   type ListItem,
   type Hlc,
@@ -281,7 +282,13 @@ export function takePages(
    * permanent and silent. `page.to` rather than the entries' own `seq`: a
    * boundary names the range the publisher SEALED, and `pagesFor` answers from
    * `since` by comparing boundaries — so the cursor has to be spoken in the
-   * same units. */
+   * same units.
+   *
+   * It only ever climbs, and `judge` is why: a page is accepted only when its
+   * `from` is past this cursor, and `checkPage` refuses a `to` below its own
+   * `from`. A `Math.max` stood here to say so, and once the range is enforced
+   * at the door it can no longer choose the other branch — a guard that cannot
+   * fire says nothing to a reader and nothing to a mutant. */
   let cursor: Record<string, number> = sameChain ? { ...ledger.held.cursor } : {}
   /* Stryker disable next-line ArrayDeclaration: only a verified page's entries
      are pushed here, and a seeded string is not an entry the fold would take. */
@@ -291,14 +298,14 @@ export function takePages(
   let accepted = 0
 
   for (const raw of raws) {
-    const refusal = judge(raw, work, person, ledger, heads, broken, crypto, now, version)
+    const refusal = judge(raw, work, person, ledger, heads, cursor, broken, crypto, now, version)
     if (typeof refusal === 'string') {
       refusals.push(refusal)
       continue
     }
     const { page } = refusal
     heads = { ...heads, [page.device]: chainHash(crypto, raw) }
-    cursor = { ...cursor, [page.device]: Math.max(cursor[page.device] ?? 0, page.to) }
+    cursor = { ...cursor, [page.device]: page.to }
     taken.push(...page.entries)
     accepted += 1
   }
@@ -314,6 +321,7 @@ function judge(
   person: string,
   ledger: Ledger,
   heads: Readonly<Record<string, string>>,
+  cursor: Readonly<Record<string, number>>,
   broken: Set<string>,
   crypto: PageCrypto,
   now: number,
@@ -360,6 +368,21 @@ function judge(
     if (refusal === 'chain' || refusal === 'bad-signature') broken.add(page.device)
     return refusal === 'may-not-speak' ? 'bad-delegation' : refusal
   }
+  /* ⚠️ **AND IT MUST SEAL A RANGE NOT ALREADY TAKEN.** The cursor says how far
+   * this device has been read; nothing held the device to it, so a page that
+   * chained forward could reach BACKWARD in sequence and re-say what a taken
+   * page had already said, with different words. MEASURED: page one carrying
+   * `rate 1` at seq 3, then a correctly chained page two carrying `rate 5` at
+   * seq 3 — accepted, no refusal, and the register that stood was whichever
+   * arrived first. Two recipients, two answers, for ever.
+   *
+   * A redelivery of the SAME page is already refused as `chain`, because the
+   * head has moved past it — so a page that chains is by construction a new
+   * page, and a new page carries new entries. `publish.ts` seals `[from, to]`
+   * and starts the next boundary at `to + 1`, so an honest publisher never
+   * emits one. `malformed` for `checkPage`'s own reason: the page lies about
+   * the range it seals. */
+  if (page.from <= (cursor[page.device] ?? 0)) return 'malformed'
   return { page }
 }
 
@@ -368,11 +391,27 @@ function judge(
  * Whether an incoming entry takes a held row's place: nothing held, or a
  * held row whose stamp the entry PRECEDES. A held row with no stamp — written
  * before stamps were kept — cannot be compared and stands.
+ *
+ * ⚠️ **THE THREE FIELDS ARE THREE SEPARATE ANSWERS, AND ONLY TWO OF THEM
+ * DECIDE ANYTHING.** All three were one condition and all seven of its mutants
+ * survived — nothing in the suite had ever handed this a row without a stamp.
+ * Two of them are live and now have a row each: `device` without `seq`, and
+ * `seq` without `device`, both of which the TYPE permits even though
+ * `hasStampOrNone` refuses them on the way in from disk. The third cannot
+ * change an answer, and is split onto its own line so it does not hide them.
  */
 function precedes(entry: Entry, held: { readonly at?: Hlc; readonly device?: string; readonly seq?: number } | undefined): boolean {
   if (held === undefined) return true
-  if (held.at === undefined || held.device === undefined || held.seq === undefined) return false
-  return compareEntries(entry, { at: held.at, device: held.device, seq: held.seq }) < 0
+  const { at, device, seq } = held
+  /* ⚠️ Cannot change an answer, and is not a candidate for deletion either:
+     `compareEntries` reads `at` first and answers 1 for a held row whose `at`
+     is missing — never -1 — so the row stands whether this returns or the
+     comparison runs. It is what lets the comparison below be reached with a
+     stamp rather than with `undefined` cast into an `Hlc`. */
+  // Stryker disable next-line all: equivalent by the comparison's own order — see above.
+  if (at === undefined) return false
+  if (device === undefined || seq === undefined) return false
+  return compareEntries(entry, { at, device, seq }) < 0
 }
 
 /**
@@ -382,6 +421,15 @@ function precedes(entry: Entry, held: { readonly at?: Hlc; readonly device?: str
  * `receive.test.ts` HOLDS THAT AS A PROPERTY.** A store keeps the FOLDED
  * result, not the log, so this has to agree with `fold` on every ordering — and
  * "agrees on the cases I thought of" is not the same claim.
+ *
+ * ⚠️ **IN ANY ORDER, AND IN ANY BATCHING THAT CAN ARRIVE — WHICH IS TWO
+ * CLAIMS, HELD BY TWO DIFFERENT THINGS.** Within a batch this resolves forks
+ * itself, below. ACROSS batches it cannot: nothing a `HeldRegister` keeps says
+ * which spelling the entry behind it had, so a fork split over two calls would
+ * be decided by which call came first. That split is refused instead, at
+ * `judge` — a page may not seal a range the cursor has already taken — and
+ * `receive.test.ts` proves the refusal rather than assuming it. The property
+ * therefore draws one entry per `(device, seq)`, which is what can arrive.
  *
  * ⚠️ **A DUPLICATE `pub` KEEPS THE ENTRY ALREADY HELD.** `fold` keeps the
  * earlier stamp so *"a redelivery cannot quietly move a passage up the reader's
@@ -395,6 +443,15 @@ export function applyEntries(
   epoch: number,
   receivedAt: number,
 ): ForeignFile {
+  /* ⚠️ **FORKS RESOLVED FIRST, AS `fold` AND `foldList` RESOLVE THEM.** Two
+     entries at one `(device, seq)` are a forgery or a corruption, and folded
+     in arrival order the first seen won: a recipient handed `rate 5` then
+     `rate 1` held five, one handed the same pair the other way held one, and
+     `fold` answered one to both — three answers to one log, for ever. The
+     kernel's two folds already begin here; this one did not, which made it a
+     SECOND rule rather than the same rule applied again. */
+  const entries = resolved(incoming)
+
   /* Five families, each folded by its own reducer over the same pages — so
      a kind added to one cannot reach into another's state, and each rule can
      be read on its own. The chain state — heads, cursor, version — is the
@@ -403,11 +460,11 @@ export function applyEntries(
     heads: held.heads,
     cursor: held.cursor,
     v: held.v,
-    ...foldPassages(held, incoming, person, epoch, receivedAt),
-    ...foldReviews(held, incoming, epoch),
-    ...foldShelf(held, incoming, epoch),
-    opinion: foldRegisters(held.opinion, incoming, epoch),
-    list: foldListState(held.list, incoming, epoch),
+    ...foldPassages(held, entries, person, epoch, receivedAt),
+    ...foldReviews(held, entries, epoch),
+    ...foldShelf(held, entries, epoch),
+    opinion: foldRegisters(held.opinion, entries, epoch),
+    list: foldListState(held.list, entries, epoch),
   }
 }
 
@@ -428,49 +485,71 @@ export function applyEntries(
  * other, for ever. The stored row keeps its stamp so the comparison is the
  * same one `fold` makes over the whole log; a row written before stamps were
  * kept stands.
+ *
+ * ⚠️ **THE TWO KINDS ARE READ BY MAPPINGS THAT RETURN `null`, NOT BY AN `op`
+ * COMPARED TO A VARIABLE.** `entry.op === kinds.publish` narrows nothing —
+ * TypeScript cannot follow a comparison to a value — so each caller ended in
+ * `: unreachable(entry)`, an arm no input reaches. That arm was three
+ * equivalent mutants and one uncovered string: nothing could tell the check
+ * from `true`, because nothing ever failed it. A mapping that answers `null`
+ * for another kind narrows where it is written and leaves no arm behind.
  */
 function foldPublications<T extends { readonly pub: string; readonly at?: Hlc; readonly device?: string; readonly seq?: number }>(
   heldRows: readonly T[],
   heldGone: readonly string[],
   incoming: readonly Entry[],
-  kinds: { readonly publish: Entry['op']; readonly withdraw: Entry['op'] },
-  rowOf: (entry: Entry & { readonly pub: string }) => T,
+  withdrawnPub: (entry: Entry) => string | null,
+  rowOf: (entry: Entry) => T | null,
 ): { readonly rows: readonly T[]; readonly gone: readonly string[] } {
   const gone = new Set(heldGone)
   const byPub = new Map(heldRows.map((one) => [one.pub, one]))
   for (const entry of incoming) {
-    if (!('pub' in entry)) continue
-    if (entry.op === kinds.withdraw) {
-      gone.add(entry.pub)
-      byPub.delete(entry.pub)
-    } else if (entry.op === kinds.publish) {
-      if (gone.has(entry.pub) || !precedes(entry, byPub.get(entry.pub))) continue
-      byPub.set(entry.pub, rowOf(entry))
+    const withdrawn = withdrawnPub(entry)
+    if (withdrawn !== null) {
+      gone.add(withdrawn)
+      byPub.delete(withdrawn)
+      continue
     }
+    const row = rowOf(entry)
+    if (row === null || gone.has(row.pub) || !precedes(entry, byPub.get(row.pub))) continue
+    byPub.set(row.pub, row)
   }
   return { rows: [...byPub.values()], gone: [...gone] }
 }
 
 function foldPassages(held: ForeignFile, incoming: readonly Entry[], person: string, epoch: number, receivedAt: number): Pick<ForeignFile, 'entries' | 'withdrawn'> {
-  const { rows, gone } = foldPublications(held.entries, held.withdrawn, incoming, { publish: 'share', withdraw: 'unshare' }, (entry) =>
-    entry.op === 'share'
-      ? { pub: entry.pub, person, passage: entry.passage, epoch, receivedAt, at: entry.at, device: entry.device, seq: entry.seq }
-      : unreachable(entry),
+  const { rows, gone } = foldPublications(
+    held.entries,
+    held.withdrawn,
+    incoming,
+    (entry) => (entry.op === 'unshare' ? entry.pub : null),
+    (entry) =>
+      entry.op === 'share'
+        ? { pub: entry.pub, person, passage: entry.passage, epoch, receivedAt, at: entry.at, device: entry.device, seq: entry.seq }
+        : null,
   )
   return { entries: rows, withdrawn: gone }
 }
 
 /** Its own withdrawal list, for `ForeignFile.unreviewed`'s reason: a tombstone withdraws only the kind it names. */
 function foldReviews(held: ForeignFile, incoming: readonly Entry[], epoch: number): Pick<ForeignFile, 'reviews' | 'unreviewed'> {
-  const { rows, gone } = foldPublications(held.reviews, held.unreviewed, incoming, { publish: 'review', withdraw: 'unreview' }, (entry) =>
-    entry.op === 'review' ? { pub: entry.pub, text: entry.text, at: entry.at, epoch, device: entry.device, seq: entry.seq } : unreachable(entry),
+  const { rows, gone } = foldPublications(
+    held.reviews,
+    held.unreviewed,
+    incoming,
+    (entry) => (entry.op === 'unreview' ? entry.pub : null),
+    (entry) => (entry.op === 'review' ? { pub: entry.pub, text: entry.text, at: entry.at, epoch, device: entry.device, seq: entry.seq } : null),
   )
   return { reviews: rows, unreviewed: gone }
 }
 
 function foldShelf(held: ForeignFile, incoming: readonly Entry[], epoch: number): Pick<ForeignFile, 'works' | 'unshelved'> {
-  const { rows, gone } = foldPublications(held.works, held.unshelved, incoming, { publish: 'shelf', withdraw: 'unshelf' }, (entry) =>
-    entry.op === 'shelf' ? { pub: entry.pub, work: entry.work, at: entry.at, device: entry.device, seq: entry.seq, epoch } : unreachable(entry),
+  const { rows, gone } = foldPublications(
+    held.works,
+    held.unshelved,
+    incoming,
+    (entry) => (entry.op === 'unshelf' ? entry.pub : null),
+    (entry) => (entry.op === 'shelf' ? { pub: entry.pub, work: entry.work, at: entry.at, device: entry.device, seq: entry.seq, epoch } : null),
   )
   return { works: rows, unshelved: gone }
 }
@@ -478,8 +557,15 @@ function foldShelf(held: ForeignFile, incoming: readonly Entry[], epoch: number)
 /**
  * ⚠️ **THE REGISTERS FOLD BY STAMP, NOT BY ARRIVAL** — WI-23.B5. The file
  * keeps the winning entry's stamp and `(device, seq)`, so the comparison here
- * is `fold`'s own, ties included, and applying pages one at a time answers
- * what folding the whole log would.
+ * is `fold`'s own and applying pages one at a time answers what folding the
+ * whole log would.
+ *
+ * ⚠️ **A TIE KEEPS WHAT IS HELD, AND THAT IS ONLY RIGHT BECAUSE `applyEntries`
+ * RESOLVED THE FORKS.** This comment used to claim the comparison was `fold`'s
+ * "ties included", which was the one case where it was not: `compareEntries`
+ * returns 0 only for two entries at one `(device, seq)`, and there `fold`
+ * keeps the lesser canonical spelling while this kept whichever came first.
+ * A batch reaching here has one entry per `(device, seq)`, so no tie remains.
  */
 function foldRegisters(held: HeldOpinion, incoming: readonly Entry[], epoch: number): HeldOpinion {
   let { status, stars, tags } = held
@@ -542,9 +628,23 @@ function foldListState(held: HeldList, incoming: readonly Entry[], epoch: number
         items.set(entry.pub, item)
         break
       }
-      /* Every other kind belongs to another family's reducer. */
-      default:
+      /* Every other kind belongs to another family's reducer. Named rather
+         than caught by a `default`, as `fold` and `foldList` name theirs: a
+         `default: break` is a mutant nothing can kill, because removing it
+         changes nothing, and it silently adopts whatever kind is added next.
+         ⚠️ `create` and `retitle` are ABOVE — this arm is the other nine. */
+      // Stryker disable all: nine arms of one decision — the type names them so a new kind lands here on purpose.
+      case 'share':
+      case 'unshare':
+      case 'status':
+      case 'rate':
+      case 'tag':
+      case 'review':
+      case 'unreview':
+      case 'shelf':
+      case 'unshelf':
         break
+      // Stryker restore all
     }
   }
   return {
@@ -555,12 +655,6 @@ function foldListState(held: HeldList, incoming: readonly Entry[], epoch: number
     items: [...items.values()].sort(compareItems),
     removed: [...removed],
   }
-}
-
-/** The arm `foldPublications` never reaches: it hands a reducer only the kind it named. */
-// Stryker disable next-line all: unreachable by construction — the reducer is called with the kind it asked for.
-function unreachable(entry: Entry): never {
-  throw new Error(`receive: a ${entry.op} handed to the wrong reducer`)
 }
 
 /** Whether an entry is a later word than the register held — `fold`'s rule. */

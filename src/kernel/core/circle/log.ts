@@ -401,8 +401,16 @@ export function mergeLogs(a: readonly Entry[], b: readonly Entry[]): readonly En
  * The entries with every fork resolved — ONE ENTRY PER (device, seq), chosen
  * the way `mergeLogs` chooses, so a fold over a raw list and a fold over the
  * merged one hold the same passage with the same words.
+ *
+ * ⚠️ **EXPORTED BECAUSE EVERY FOLD OF A LOG MUST RUN IT, AND ONE DID NOT.**
+ * `fold` and `foldList` both resolve first; `applyEntries` — the incremental
+ * fold in `receive.ts` that a store keeps the result of instead of the log —
+ * folded raw, so at one `(device, seq)` ARRIVAL ORDER decided. Two recipients
+ * handed `rate 5, rate 1` and `rate 1, rate 5` held five and one for ever,
+ * while `fold` answered one to both. Measured, not reasoned: the two paths
+ * were run against both orders and printed. This is the rule, in one place.
  */
-function resolved(entries: readonly Entry[]): readonly Entry[] {
+export function resolved(entries: readonly Entry[]): readonly Entry[] {
   const byKey = new Map<string, Entry>()
   for (const entry of entries) {
     const key = `${entry.device}#${entry.seq}`

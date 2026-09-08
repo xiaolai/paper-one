@@ -9,6 +9,7 @@ import {
   fold,
   foldList,
   makeHlc,
+  resolved,
   signedBytes,
   type Entry,
   type Page,
@@ -181,11 +182,19 @@ describe('a page that is everything it should be', () => {
     expect(backwards.refusals).toEqual(['malformed'])
   })
 
-  it('never moves the cursor backwards over a page already held', () => {
+  it('never moves the cursor backwards over a page already held — it REFUSES it', () => {
+    /* ⚠️ **THIS USED TO ASSERT THE PAGE WAS TAKEN**, on the strength of a
+       `Math.max` that kept the cursor at 9 afterwards. That held the cursor
+       still and let the page's ENTRIES in, which is how one device split a
+       fork across two batches and two recipients kept different words for
+       ever. A range already taken is refused now, so the cursor is held by
+       the same rule that holds the entries rather than by a second one. */
     const held: ForeignFile = { ...NOTHING_SHARED, cursor: { [DEVICE.id]: 9 }, v: WIRE_VERSION }
     const result = takePages([page({ from: 1, to: 1 })], WORK, PERSON.id, ledger({ held }), pageCrypto, NOW)
-    expect(result.accepted).toBe(1)
+    expect(result.refusals).toEqual(['malformed'])
+    expect(result.accepted).toBe(0)
     expect(result.held.cursor[DEVICE.id]).toBe(9)
+    expect(result.held.entries).toEqual([])
   })
 })
 
@@ -487,6 +496,51 @@ describe('the chain', () => {
     expect(take([second]).refusals).toEqual(['chain'])
   })
 
+
+  it('refuses a chained page that seals a range already taken — the cursor is a CONTRACT', () => {
+    /* ⚠️ **THE FORK RULE INSIDE A BATCH IS NOT ENOUGH IF A DEVICE CAN SPLIT A
+       FORK ACROSS TWO.** `applyEntries` resolves one `(device, seq)` to one
+       entry, but only over the entries it is handed at once. A device that
+       chains a SECOND page correctly and re-uses a sequence the first page
+       already sealed puts the two halves in two calls, and the one that stood
+       was whichever arrived first — the same permanent divergence, one level
+       up. MEASURED as accepted with no refusal before this check existed.
+
+       A redelivery of the same page is already refused as `chain` — the head
+       has moved past it — so a page that chains is a NEW page, and a new page
+       that reaches backward is lying about the range it seals. */
+    const stamp = stampFor(DEVICE.id, 7)
+    const rate = (stars: 1 | 5) => page({ from: 3, to: 3, entries: [{ op: 'rate', stars, device: DEVICE.id, seq: 3, at: stamp }] })
+    const first = take([rate(1)])
+    expect(first.refusals).toEqual([])
+    expect(first.held.cursor[DEVICE.id]).toBe(3)
+
+    const again = page({
+      from: 3,
+      to: 3,
+      prevPageHash: first.held.heads[DEVICE.id] as string,
+      entries: [{ op: 'rate', stars: 5, device: DEVICE.id, seq: 3, at: stamp }],
+    })
+    const second = takePages([again], WORK, PERSON.id, ledger({ held: first.held }), pageCrypto, NOW)
+    expect(second.refusals).toEqual(['malformed'])
+    expect(second.held.opinion.stars?.value).toBe(1)
+    /* And a refused page moves neither the head nor the cursor, so the next
+       request still asks for what has not been read. */
+    expect(second.held.cursor[DEVICE.id]).toBe(3)
+    expect(second.held.heads[DEVICE.id]).toBe(first.held.heads[DEVICE.id])
+  })
+
+  it('still takes the page that carries on from where the cursor stands', () => {
+    /* The positive case beside it: the check refuses a range already taken and
+       nothing else. Without this, refusing every page would pass the test
+       above. */
+    const first = take([page({ from: 1, to: 1, entries: [share('p1', 1)] })])
+    const next = page({ from: 2, to: 2, prevPageHash: first.held.heads[DEVICE.id] as string, entries: [share('p2', 2)] })
+    const second = takePages([next], WORK, PERSON.id, ledger({ held: first.held }), pageCrypto, NOW)
+    expect(second.refusals).toEqual([])
+    expect(second.held.cursor[DEVICE.id]).toBe(2)
+  })
+
   it('takes page two once page one has set the head', () => {
     const first = page({ entries: [share('p1', 1)] })
     const held = take([first]).held
@@ -671,18 +725,152 @@ describe('applying entries is folding them', () => {
     expect(a.opinion).toEqual(b.opinion)
   })
 
-  it('keeps the FIRST word at one (device, seq), and carries no register it never heard', () => {
-    /* A duplicate delivery or a forgery: every recipient keeps the same one,
-       the first. And a file with no `status` has no `status` KEY — a key
-       holding `undefined` would survive in memory and vanish on disk. */
-    const first: Entry = { op: 'rate', stars: 1, device: DEVICE.id, seq: 3, at: stampFor(DEVICE.id, 7) }
-    const forged: Entry = { ...first, stars: 5 }
-    const held = applyEntries(NOTHING_SHARED, [first, forged], PERSON.id, 1, NOW)
-    expect(held.opinion.stars?.value).toBe(1)
+  it('resolves a fork at one (device, seq) as `fold` does — the SAME word whichever lands first', () => {
+    /* ⚠️ **THIS TEST USED TO SAY "keeps the FIRST word", AND THAT WAS A REAL
+       DIVERGENCE HIDDEN BY ITS OWN FIXTURE.** Two entries at one
+       `(device, seq)` are a forgery or a corruption, and what matters is that
+       every recipient resolves them alike — `fold`'s `resolved` keeps the
+       lesser canonical spelling, arbitrary and the same everywhere. This
+       folded in arrival order instead. Putting `stars: 1` first satisfied both
+       rules at once, so the disagreement never showed. MEASURED before the
+       fix, both paths, both orders:
+
+           applyEntries [1,5] -> 1     fold [1,5] -> 1
+           applyEntries [5,1] -> 5     fold [5,1] -> 1
+
+       Three answers to one log. Reversing the pair is what makes this an
+       assertion rather than a coincidence. */
+    const one: Entry = { op: 'rate', stars: 1, device: DEVICE.id, seq: 3, at: stampFor(DEVICE.id, 7) }
+    const five: Entry = { ...one, stars: 5 }
+    const starsOf = (log: readonly Entry[]) => applyEntries(NOTHING_SHARED, log, PERSON.id, 1, NOW).opinion.stars?.value
+    expect(starsOf([one, five])).toBe(1)
+    expect(starsOf([five, one])).toBe(1)
+    /* And what it agrees WITH is named, so a change to either rule fails here
+       rather than drifting the two apart again. */
+    expect(starsOf([five, one])).toBe(fold([five, one]).stars?.value)
+    expect(starsOf([one, five])).toBe(fold([one, five]).stars?.value)
+  })
+
+  it('resolves a forked passage, review, shelf row and list placement the same way', () => {
+    /* The register was the instance the audit found; the fork rule is the
+       CLASS. Every family `applyEntries` folds shares one `(device, seq)`
+       key, so every one of them was deciding by arrival order — and each is
+       held here to `fold`'s answer, in both orders. */
+    const at = stampFor(DEVICE.id, 11)
+    const stamped = { device: DEVICE.id, seq: 4, at }
+    const forks: readonly (readonly [string, Entry, Entry])[] = [
+      [
+        'a passage',
+        { ...stamped, op: 'share', pub: 'p', passage: { quote: 'a', prefix: '', suffix: '', chapter: 'One' } },
+        { ...stamped, op: 'share', pub: 'p', passage: { quote: 'z', prefix: '', suffix: '', chapter: 'One' } },
+      ],
+      ['a review', { ...stamped, op: 'review', pub: 'r', text: 'a' }, { ...stamped, op: 'review', pub: 'r', text: 'z' }],
+      [
+        'a shelf row',
+        { ...stamped, op: 'shelf', pub: 's', work: { title: 'a', author: 'A', language: 'en' } },
+        { ...stamped, op: 'shelf', pub: 's', work: { title: 'z', author: 'A', language: 'en' } },
+      ],
+      [
+        'a placement',
+        { ...stamped, op: 'place', pub: 'i', work: { title: 'a', author: 'A', language: 'en' }, position: 1, note: 'a' },
+        { ...stamped, op: 'place', pub: 'i', work: { title: 'z', author: 'A', language: 'en' }, position: 2, note: 'z' },
+      ],
+      ['a title', { ...stamped, op: 'create', title: 'a' }, { ...stamped, op: 'retitle', title: 'z' }],
+    ]
+    for (const [what, a, b] of forks) {
+      const forward = applyEntries(NOTHING_SHARED, [a, b], PERSON.id, 1, NOW)
+      const backward = applyEntries(NOTHING_SHARED, [b, a], PERSON.id, 1, NOW)
+      expect(backward, what).toEqual(forward)
+      /* The kernel's fold is the specification; naming its answer is what
+         stops the two rules drifting apart a second time. */
+      const kept = resolved([a, b])
+      expect(kept, what).toEqual(resolved([b, a]))
+      expect(applyEntries(NOTHING_SHARED, kept, PERSON.id, 1, NOW), what).toEqual(forward)
+    }
+  })
+
+  it('keeps what is held when a fork is split across two calls — the tie does NOT replace', () => {
+    /* ⚠️ **THE TIE IS THE WHOLE OF THE FORK RULE, SO IT IS ASSERTED ON ITS
+       OWN.** `newer` is `> 0` and `precedes` is `< 0`; at an equal stamp both
+       answer "keep what is held". Loosened to `>=` / `<=` every redelivery
+       would rewrite the row it re-delivers, and a passage would move up the
+       reader's list each time a page arrived twice. A fork split over two
+       calls cannot arrive — `judge` refuses the second page — but this is the
+       comparison itself, and it is reachable directly. */
+    const stamp = stampFor(DEVICE.id, 7)
+    const five: Entry = { op: 'rate', stars: 5, device: DEVICE.id, seq: 3, at: stamp }
+    const one: Entry = { ...five, stars: 1 }
+    const held = applyEntries(applyEntries(NOTHING_SHARED, [five], PERSON.id, 1, NOW), [one], PERSON.id, 1, NOW)
+    expect(held.opinion.stars?.value).toBe(5)
+
+    /* And the same for a publication, whose comparison runs the other way. */
+    const first = share('p1', 4)
+    const second: Entry = {
+      op: 'share',
+      pub: 'p1',
+      device: DEVICE.id,
+      seq: 4,
+      at: stampFor(DEVICE.id, 4),
+      passage: { quote: 'a different passage', prefix: 'p', suffix: 's', chapter: 'One' },
+    }
+    const rows = applyEntries(applyEntries(NOTHING_SHARED, [first], PERSON.id, 1, NOW), [second], PERSON.id, 1, NOW)
+    expect(rows.entries.map((row) => row.passage.quote)).toEqual(['q-p1'])
+  })
+
+  it('leaves a row written before stamps were kept exactly where it is', () => {
+    /* ⚠️ **A ROW WITH NO `(device, seq)` CANNOT BE COMPARED, SO IT STANDS.**
+       `store.ts` takes the two BOTH OR NEITHER — `hasStampOrNone` — so this is
+       the only shape of stamp-less row there is. Without the guard the
+       comparison would run against `undefined` and an EARLIER entry would win,
+       which is why the incoming one here is earlier: a test using a later one
+       would pass with the guard deleted. */
+    const legacy: ForeignFile = {
+      ...NOTHING_SHARED,
+      entries: [{ pub: 'p1', person: PERSON.id, passage: { quote: 'as written', prefix: '', suffix: '', chapter: 'One' }, epoch: 1, receivedAt: NOW, at: stampFor(DEVICE.id, 9) }],
+    }
+    const earlier: Entry = {
+      op: 'share',
+      pub: 'p1',
+      device: DEVICE.id,
+      seq: 2,
+      at: stampFor(DEVICE.id, 1),
+      passage: { quote: 'q-p1', prefix: 'p', suffix: 's', chapter: 'One' },
+    }
+    const held = applyEntries(legacy, [earlier], PERSON.id, 1, NOW)
+    expect(held.entries.map((row) => row.passage.quote)).toEqual(['as written'])
+    expect(held.entries[0]?.device).toBeUndefined()
+
+    /* ⚠️ **AND HALF A STAMP IS NO STAMP — BOTH HALVES, SEPARATELY.**
+       `hasStampOrNone` refuses a row carrying one of `(device, seq)` on the
+       way in from disk, but the TYPE permits it and this is what a caller
+       inside the process could hand over. Each half needs its own row: with
+       only the pair tested, dropping either check from the guard changed
+       nothing and the mutant lived. Without the guard the comparison runs
+       against `undefined` and this EARLIER entry wins, which is the answer
+       that tells the two apart. */
+    const halves = [
+      { pub: 'p1', person: PERSON.id, passage: { quote: 'as written', prefix: '', suffix: '', chapter: 'One' }, epoch: 1, receivedAt: NOW, at: stampFor(DEVICE.id, 9), device: DEVICE.id },
+      { pub: 'p1', person: PERSON.id, passage: { quote: 'as written', prefix: '', suffix: '', chapter: 'One' }, epoch: 1, receivedAt: NOW, at: stampFor(DEVICE.id, 9), seq: 2 },
+    ]
+    for (const row of halves) {
+      const stood = applyEntries({ ...NOTHING_SHARED, entries: [row] }, [earlier], PERSON.id, 1, NOW)
+      expect(stood.entries.map((one) => one.passage.quote)).toEqual(['as written'])
+    }
+  })
+
+  it('carries no register it never heard', () => {
+    /* A file with no `status` has no `status` KEY — a key holding `undefined`
+       would survive in memory and vanish on disk. */
+    const rated: Entry = { op: 'rate', stars: 1, device: DEVICE.id, seq: 3, at: stampFor(DEVICE.id, 7) }
+    const held = applyEntries(NOTHING_SHARED, [rated], PERSON.id, 1, NOW)
     expect('status' in held.opinion).toBe(false)
     expect('tags' in held.opinion).toBe(false)
     expect('stars' in applyEntries(NOTHING_SHARED, [], PERSON.id, 1, NOW).opinion).toBe(false)
     expect('title' in applyEntries(NOTHING_SHARED, [], PERSON.id, 1, NOW).list).toBe(false)
+    /* And the list's `createdEpoch` the same way: a key holding `undefined`
+       reads back as absent through `toEqual` and vanishes on disk, so the two
+       have to be told apart by asking for the KEY. */
+    expect('createdEpoch' in applyEntries(NOTHING_SHARED, [], PERSON.id, 1, NOW).list).toBe(false)
   })
 
   it('holds a review, withdraws it by pub, and remembers a withdrawal that arrives first', () => {
@@ -723,6 +911,13 @@ describe('applying entries is folding them', () => {
       { minLength: 0, maxLength: 10 },
     )
     const build = ([kind, pub, at, device]: [number, string, number, string], i: number): Entry => {
+      /* ⚠️ **ONE ENTRY PER `(device, seq)` — WHICH IS WHAT CAN ARRIVE, NOT A
+         CONVENIENCE.** A fork is two entries at one sequence; `applyEntries`
+         resolves one within a batch, and a fork SPLIT across batches is
+         refused a page earlier by the cursor rule, so no interleaving of it
+         reaches here. Held separately, both of them, rather than left to this
+         generator — which for a long time could not build a fork at all and
+         so said nothing about the case where the two folds disagreed. */
       const seq = i + 1
       const stamped = { device, seq, at: stampFor(device, at) }
       switch (kind) {
