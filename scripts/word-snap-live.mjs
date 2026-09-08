@@ -232,6 +232,39 @@ try {
   };
   var quote = function (value) { return JSON.stringify(value); };
 
+  /*
+   * The two shapes of check this file makes, each written once.
+   *
+   * Both pairs below repeated their whole body — the selection, the two
+   * readings, the comparison and the formatting — differing only in which nodes
+   * they select and what they expect. Two copies of a formatting line is two
+   * places a detail string can stop matching what it reports.
+   */
+  var mergesAcross = function (nodes, raw, derived) {
+    return function () {
+      var ends = nodes();
+      sel.removeAllRanges();
+      sel.setBaseAndExtent(ends[0], ends[1], ends[2], ends[3]);
+      var range = sel.getRangeAt(0);
+      var was = range.toString();
+      var is = rangeText(range);
+      return {
+        pass: was === raw && is === derived,
+        detail: 'toString()=' + quote(was) + ' rangeText()=' + quote(is),
+      };
+    };
+  };
+
+  var oneWord = function (word) {
+    return function () {
+      var parts = segmentsOf(word);
+      return {
+        pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
+        detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
+      };
+    };
+  };
+
   var CHECKS = {
     'range-detach': function () {
       var a = textOf('pa');
@@ -289,61 +322,19 @@ try {
       };
     },
 
-    'block-merge': function () {
-      var a = textOf('pa');
-      var b = textOf('pb');
-      sel.removeAllRanges();
-      sel.setBaseAndExtent(a, 0, b, 10);
-      var range = sel.getRangeAt(0);
+    'block-merge': mergesAcross(function () { return [textOf('pa'), 0, textOf('pb'), 10]; }, 'all doneStart here', 'all done' + LF + 'Start here'),
 
-      var raw = range.toString();
-      var derived = rangeText(range);
-
-      return {
-        pass: raw === 'all doneStart here' && derived === 'all done' + LF + 'Start here',
-        detail: 'toString()=' + quote(raw) + ' rangeText()=' + quote(derived),
-      };
-    },
-
-    'br-merge': function () {
+    'br-merge': mergesAcross(function () {
       var line = doc.getElementById('pbr');
-      var one = line.firstChild;
-      var two = line.lastChild;
-      sel.removeAllRanges();
-      sel.setBaseAndExtent(one, 0, two, 3);
-      var range = sel.getRangeAt(0);
+      return [line.firstChild, 0, line.lastChild, 3];
+    }, 'onetwo', 'one' + LF + 'two'),
 
-      var raw = range.toString();
-      var derived = rangeText(range);
+    /* Asserted on BOUNDARIES, not on isWordLike. The flag is the divergence
+     * this repository already measured and deliberately never reads; failing
+     * on it would make this lane red on a healthy app. */
+    'soft-hyphen': oneWord('hyphen' + SOFT_HYPHEN + 'ation'),
 
-      return {
-        pass: raw === 'onetwo' && derived === 'one' + LF + 'two',
-        detail: 'toString()=' + quote(raw) + ' rangeText()=' + quote(derived),
-      };
-    },
-
-    'soft-hyphen': function () {
-      var word = 'hyphen' + SOFT_HYPHEN + 'ation';
-      var parts = segmentsOf(word);
-
-      /* Asserted on BOUNDARIES, not on isWordLike. The flag is the divergence
-       * this repository already measured and deliberately never reads; failing
-       * on it would make this lane red on a healthy app. */
-      return {
-        pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
-        detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
-      };
-    },
-
-    'word-joiner': function () {
-      var word = 'done' + WORD_JOINER + 'Start';
-      var parts = segmentsOf(word);
-
-      return {
-        pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
-        detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
-      };
-    },
+    'word-joiner': oneWord('done' + WORD_JOINER + 'Start'),
   };
 
   for (var i = 0; i < CHECK_IDS.length; i += 1) {
