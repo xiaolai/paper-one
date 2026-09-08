@@ -151,13 +151,28 @@ describe('the store', () => {
     expect(await peopleFor(fsWith(), BOOK)).toEqual([])
   })
 
-  it('round-trips what it wrote', async () => {
+  it('round-trips what it wrote, and SAYS that it wrote', async () => {
+    /* ⚠️ **THE ANSWER IS THE POINT OF THE FUNCTION, AND NOTHING READ IT.** It
+       returns whether the write COMMITTED — the admission guard turns a refusal
+       into a silent return, and every caller used to read that as a page
+       persisted. The flag could start `true`, or never be set, and this test
+       still passed: it looked at the file and never at the answer. */
     const fs = fsWith()
-    await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)
+    expect(await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, ADMITS)).toBe(true)
     expect(await readForeign(fs, BOOK, PERSON)).toEqual(shared([entry()]))
     /* The file name IS the id, because `safeId` is the identity on hex —
        which is what lets `readForeign` compare the claimed author exactly. */
     expect(await peopleFor(fs, BOOK)).toEqual([PERSON])
+  })
+
+  it('says it did NOT write when the person is no longer admitted, and leaves the file alone', async () => {
+    /* The other half of the same answer. A round that cannot tell a refused
+       write from a committed one reports work it has not done and advances its
+       cursor past bytes that are not on disk. */
+    const fs = fsWith()
+    const refuses = () => Promise.resolve(false)
+    expect(await writeForeign(fs, queueOf(), LANE, BOOK, PERSON, shared([entry()]), NOTED, refuses)).toBe(false)
+    expect(await readForeign(fs, BOOK, PERSON)).toEqual(shared([]))
   })
 
   it('THROWS on a file it cannot read, rather than answering empty', async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { acceptsTransport, drawsOverlays, hlcOf, newRelationship, type Hlc, type Relationship } from '../../../kernel'
-import { COVER_WIDTH, RECENT_LIMIT, circlePortOver, slotsOf, type CirclePortDeps, type FriendBook } from './circlePort'
+import { COVER_WIDTH, NOT_IN_CIRCLE, RECENT_LIMIT, circlePortOver, slotsOf, type CirclePortDeps, type FriendBook } from './circlePort'
 import { NOTHING_SHARED, type ForeignFile } from './store'
 
 /**
@@ -114,9 +114,31 @@ describe('holding a person back — the mute that did not exist', () => {
     /* `defaultRetain` returns `keep` for muted and `purge` for exited. A mute
        that purged would be a slower Remove, and the reader would have no way
        to say "not right now" at all. */
-    const { port, records } = world()
+    const { port, records, deps } = world()
     await port.setMuted(BOB, true)
     expect(records.get(BOB)).toMatchObject({ state: 'muted', retain: 'keep' })
+    /* ⚠️ **AND THE RECORD'S FIELD IS NOT THE WHOLE CLAIM.** `retain: 'keep'`
+       says what the record asks for; an implementation that ALSO purged, or
+       dropped the peer, would set the same field and pass — the fixtures hold
+       nothing for the purge to remove, so there is nothing else to notice. */
+    await port.setMuted(BOB, false)
+    expect(deps.purge).not.toHaveBeenCalled()
+    expect(deps.forgetPeer).not.toHaveBeenCalled()
+  })
+
+  it('refuses somebody who is not in the circle, and mutes one who is AMONG OTHERS', async () => {
+    /* ⚠️ **A ROSTER OF ONE CANNOT TELL `some` FROM `every`.** With a single
+       person who is the one named, "any of them is them" and "all of them are
+       them" agree — so the guard could be written either way and nothing here
+       would move. Two people is what separates them, and the guard has to hold
+       for the one that is present as well as refuse the one that is not. */
+    const CAROL = 'c0'.repeat(32)
+    const AWAY = 'd0'.repeat(32)
+    const { port, records } = world({ people: () => Promise.resolve([{ person: CAROL, displayName: 'Carol' }, { person: BOB, displayName: 'Bob' }]) })
+    await port.setMuted(BOB, true)
+    expect(records.get(BOB)).toMatchObject({ state: 'muted' })
+    await expect(port.setMuted(AWAY, true)).rejects.toThrow(NOT_IN_CIRCLE)
+    expect(records.get(AWAY)).toBeUndefined()
   })
 
   it('stops their passages being DRAWN while the relationship still takes them', async () => {
@@ -212,6 +234,35 @@ describe('slotsOf — the concurrency bound, where it can actually fail', () => 
     const done: number[] = []
     await Promise.all(Array.from({ length: 6 }, (_, i) => limit(async () => void done.push(i))))
     expect(done.sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5])
+  })
+
+  it('gives the slot back, so the pool is as free after a batch as before it', async () => {
+    /* ⚠️ **THE WAITER INHERITS THE SLOT IT WAS WOKEN FOR, AND MUST NOT TAKE A
+       SECOND.** Counting up on a waiter as well leaves the count permanently
+       above the truth: every task still RUNS, which is all the test above
+       checks, and the pool ends the batch full of slots nobody holds. The next
+       caller then waits for a release that will never come. */
+    const limit = slotsOf(2)
+    await Promise.all(Array.from({ length: 6 }, () => limit(() => Promise.resolve())))
+
+    let running = 0
+    let most = 0
+    const hold: (() => void)[] = []
+    const task = () =>
+      new Promise<void>((done) => {
+        running += 1
+        most = Math.max(most, running)
+        hold.push(() => {
+          running -= 1
+          done()
+        })
+      })
+    const after = [limit(task), limit(task)]
+    await new Promise((done) => setTimeout(done, 0))
+    /* Both start at once, because the six before them gave their slots back. */
+    expect(most).toBe(2)
+    while (hold.length > 0) hold.shift()!()
+    await Promise.all(after)
   })
 
   it('frees the slot when a task THROWS, rather than leaking it', async () => {
@@ -758,21 +809,61 @@ describe('a friend’s jackets, a few at a time — WI-23.C5', () => {
     expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH + 3)
   })
 
-  it('does not dial for a request abandoned before its turn, and answers it null', async () => {
-    const coverOf = vi.fn(() => Promise.resolve<Uint8Array | null>(null))
+  it('does not dial for a request abandoned before its turn, and answers it null WITHOUT waiting for a slot', async () => {
+    /* ⚠️ **THE COUNT OF DIALS CANNOT TELL THE TWO CHECKS APART.** The abort is
+       read again once a slot opens, so a request that queued and then found
+       itself abandoned also dials nothing — and this test, which released the
+       held slots before looking, passed with the pre-queue check deleted. What
+       the earlier check buys is that the request does not WAIT: it answers
+       while every slot is still occupied. */
+    const releases: (() => void)[] = []
+    const coverOf = vi.fn(() => new Promise<Uint8Array | null>((done) => releases.push(() => done(null))))
     const { port } = world({ coverOf })
-    /* Every slot taken, then one more that is abandoned before a slot frees. */
+    /* Every slot taken and held open, then one more that is abandoned. */
     const held = Array.from({ length: COVER_WIDTH }, (_, i) => port.cover(BOB, book(`s${i}`)))
+    await new Promise((done) => setTimeout(done, 0))
     const abandon = new AbortController()
-    const waiting = port.cover(BOB, book('late'), abandon.signal)
     abandon.abort()
-    await Promise.all(held)
+    const waiting = port.cover(BOB, book('late'), abandon.signal)
+    /* Answered with the pool still full — nothing has been released yet. */
     expect(await waiting).toBeNull()
+    expect(releases).toHaveLength(COVER_WIDTH)
+
+    while (releases.length > 0) releases.shift()!()
+    await Promise.all(held)
     expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
     /* Abandoned before it was even asked: null, no dial. */
     const gone = new AbortController()
     gone.abort()
     expect(await port.cover(BOB, book('never'), gone.signal)).toBeNull()
+    expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
+  })
+
+  it('drops a request abandoned WHILE it waits, once its slot opens', async () => {
+    /* ⚠️ **THE OTHER READ OF THE SIGNAL, AND IT NEEDS ITS OWN ROW.** The test
+       above aborts BEFORE the request queues, so the earlier check answers it
+       and this one is never the deciding read. A row scrolled past after it
+       queued is the case this exists for: the wait may be long, and the answer
+       is asked for again when the slot opens. */
+    const releases: (() => void)[] = []
+    const coverOf = vi.fn(() => new Promise<Uint8Array | null>((done) => releases.push(() => done(null))))
+    const { port } = world({ coverOf })
+    const held = Array.from({ length: COVER_WIDTH }, (_, i) => port.cover(BOB, book(`s${i}`)))
+    await new Promise((done) => setTimeout(done, 0))
+    const abandon = new AbortController()
+    const queued = port.cover(BOB, book('late'), abandon.signal)
+    await new Promise((done) => setTimeout(done, 0))
+    /* In the queue, not abandoned yet — the pool is full. */
+    expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
+
+    abandon.abort()
+    while (releases.length > 0) {
+      releases.shift()!()
+      await new Promise((done) => setTimeout(done, 0))
+    }
+    expect(await queued).toBeNull()
+    await Promise.all(held)
+    /* Its slot opened and it was let go rather than fetched. */
     expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
   })
 
@@ -794,9 +885,15 @@ describe('a friend’s jackets, a few at a time — WI-23.C5', () => {
 
   it('hands the row’s signal to the transfer, so abandoning the row can stop the bytes', async () => {
     const coverOf = vi.fn((_person: string, _device: string, _pub: string, _digest: string, _signal?: AbortSignal) => Promise.resolve(null))
-    const { port } = world({ coverOf })
+    const warn = vi.fn()
+    const { port } = world({ coverOf, warn })
     const abandon = new AbortController()
-    await port.cover(BOB, book('s1'), abandon.signal)
+    /* ⚠️ **NO JACKET IS NOT A FAILURE.** Read as bytes it is a type nobody can
+       name, which lands in the catch and is reported through the diagnostics —
+       a peer that simply has no cover for a book would file a warning per row
+       per refresh. Null in, null out, and nothing said. */
+    expect(await port.cover(BOB, book('s1'), abandon.signal)).toBeNull()
+    expect(warn).not.toHaveBeenCalled()
     expect(coverOf).toHaveBeenCalledTimes(1)
     expect(coverOf.mock.calls[0]![4]).toBe(abandon.signal)
   })

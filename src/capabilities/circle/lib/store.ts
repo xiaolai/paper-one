@@ -414,7 +414,7 @@ function readChain(held: Record<string, unknown>, where: string): Pick<ForeignFi
 function readPassages(held: Record<string, unknown>, person: string, where: string): { readonly rows: readonly ForeignEntry[]; readonly gone: readonly string[] } {
   const rows = held['entries']
   if (!Array.isArray(rows)) throw new Error(`circle file for ${where} has no entry list`)
-  const gone = readNames(held['withdrawn'], () => new Error(`circle file for ${where} has no withdrawal list`))
+  const gone = readNames(held['withdrawn'], `circle file for ${where} has no withdrawal list`)
   const kept: ForeignEntry[] = []
   for (const row of rows) {
     if (isForeignEntry(row, person)) kept.push(asShared(row))
@@ -440,14 +440,25 @@ function readTombstoned<T extends { readonly pub: string }>(
 ): { readonly rows: readonly T[]; readonly gone: readonly string[] } {
   const rows = held[rowsKey] === undefined ? [] : held[rowsKey]
   if (!Array.isArray(rows) || !rows.every(isRow)) throw new Error(`circle file for ${where} has ${rowsWhat} that will not read`)
-  const gone = readNames(held[goneKey] === undefined ? [] : held[goneKey], () => new Error(`circle file for ${where} has ${goneWhat} that will not read`))
+  const gone = readNames(held[goneKey] === undefined ? [] : held[goneKey], `circle file for ${where} has ${goneWhat} that will not read`)
   const hidden = new Set(gone)
   return { rows: (rows as readonly T[]).filter((one) => !hidden.has(one.pub)), gone }
 }
 
-/** A list of names — `pub`s withdrawn — deduplicated, or the error the caller names. */
-function readNames(value: unknown, refuse: () => Error): readonly string[] {
-  if (!Array.isArray(value) || !value.every((one) => typeof one === 'string')) throw refuse()
+/**
+ * A list of names — `pub`s withdrawn — deduplicated, or a refusal saying which
+ * list would not read.
+ *
+ * ⚠️ **THE MESSAGE, NOT A THUNK THAT BUILDS ONE.** It took `() => Error` and
+ * threw the result, so a thunk returning `undefined` threw `undefined` — and
+ * `expect(...).rejects.toThrow(/anything at all/)` PASSES against a rejection
+ * with `undefined` or `null`, MEASURED, whatever the pattern says. No test
+ * could have told either caller's message from no message. Given the string,
+ * the refusal is always an `Error` and a wrong message is a wrong `Error`,
+ * which `toThrow` does refuse.
+ */
+function readNames(value: unknown, refuse: string): readonly string[] {
+  if (!Array.isArray(value) || !value.every((one) => typeof one === 'string')) throw new Error(refuse)
   return [...new Set(value as string[])]
 }
 
