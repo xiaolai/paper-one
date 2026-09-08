@@ -38,20 +38,33 @@ interface Project {
   readonly exclude?: readonly string[]
 }
 
+/**
+ * The specialised suites' patterns, written ONCE.
+ *
+ * ⚠️ **EVERY ONE OF THESE APPEARED TWICE — in the specialised project's
+ * `include` and in the broad project's `exclude` — and the two had to be kept
+ * in step by hand.** They already fell out of step once, in the other
+ * direction: a `.contract.test.tsx` matched the broad project because the
+ * specialised one said `.ts` alone, and it RAN, under the wrong project's
+ * settings, silently. A pattern that decides two things is one pattern.
+ */
+const contractIn = (area: string) => `${area}/**/*.contract.test.{ts,tsx}`
+const envelopeIn = (area: string) => `${area}/**/*.envelope.test.{ts,tsx}`
+
 const PROJECTS: readonly Project[] = [
   {
     name: 'kernel-unit',
     include: ['src/kernel/**/*.test.{ts,tsx}', 'src/*.test.{ts,tsx}'],
-    exclude: ['src/kernel/**/*.contract.test.{ts,tsx}', 'src/kernel/**/*.envelope.test.{ts,tsx}'],
+    exclude: [contractIn('src/kernel'), envelopeIn('src/kernel')],
   },
   /* `{ts,tsx}` like every other project's glob. A `.contract.test.tsx`
    matched the broad project instead of this one and ran without the
    contract project's settings — silently, because it still ran. */
-  { name: 'kernel-contract', include: ['src/kernel/**/*.contract.test.{ts,tsx}'] },
+  { name: 'kernel-contract', include: [contractIn('src/kernel')] },
   {
     name: 'capabilities',
     include: ['src/capabilities/**/*.test.{ts,tsx}'],
-    exclude: ['src/capabilities/**/*.envelope.test.{ts,tsx}'],
+    exclude: [envelopeIn('src/capabilities')],
   },
   /* The envelope's own suites, and — since phase 11 — the CLI's client
    * speaking to a router over the fake wire, which is the same protocol under
@@ -65,25 +78,21 @@ const PROJECTS: readonly Project[] = [
      * dropped both files into `kernel-unit`, where they still ran and this
      * project quietly became one file. A suite that runs under the wrong
      * project's settings is the failure the note above this list describes. */
-    include: [
-      'src/kernel/**/*.envelope.test.{ts,tsx}',
-      'src/capabilities/**/*.envelope.test.{ts,tsx}',
-      'src/cli/**/*.envelope.test.{ts,tsx}',
-    ],
+    include: [envelopeIn('src/kernel'), envelopeIn('src/capabilities'), envelopeIn('src/cli')],
   },
   { name: 'hosts', include: ['src/hosts/**/*.test.{ts,tsx}'] },
   {
     name: 'cli',
     include: ['src/cli/**/*.test.{ts,tsx}'],
-    exclude: ['src/cli/**/*.envelope.test.{ts,tsx}'],
+    exclude: [envelopeIn('src/cli')],
   },
-  { name: 'composition-contract', include: ['src/app/**/*.contract.test.{ts,tsx}'] },
+  { name: 'composition-contract', include: [contractIn('src/app')] },
   /* The composition root's own units — the boot orchestration extracted out of
    * `main.tsx` so it CAN be tested. Distinct from the contract project above,
    * which is about what a composition may import; these are about what it
    * does. Without this project a `src/app/*.test.ts` matched nothing at all
    * and ran nowhere, which is the quietest way for a suite to be absent. */
-  { name: 'app', include: ['src/app/**/*.test.{ts,tsx}'], exclude: ['src/app/**/*.contract.test.{ts,tsx}'] },
+  { name: 'app', include: ['src/app/**/*.test.{ts,tsx}'], exclude: [contractIn('src/app')] },
   { name: 'scripts', include: ['scripts/**/*.test.mjs'] },
 ]
 
@@ -181,8 +190,13 @@ const COVERAGE_EXCLUDE = [
    * callbacks, and both were testable all along. An audit said so, and it was
    * right: the exclusion was hiding logic rather than describing a shim.
    *
-   * They live in `scripts/lib/circle-navigate.mjs` now, and the scripts and
-   * argument parsing in `scripts/lib/circle-scripts.mjs` — measured, together,
+   * They live in `scripts/lib/circle-navigate.mjs` now — `act`, the walk to
+   * Marginalia and the walk to the Circle screen, the last of which was
+   * WRITTEN TWICE in the entry and read by nothing because of this very
+   * exclusion — and the scripts and argument parsing in
+   * `scripts/lib/circle-scripts.mjs`, whose generated source is executed
+   * against a DOM in `circle-scripts.dom.test.mjs` rather than merely compiled.
+   * Measured, together,
    * at 118 tests. What is left here really is argv, a socket and an exit
    * code. */
   'scripts/circle-drive.mjs',

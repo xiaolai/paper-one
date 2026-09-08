@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { act, reachMarginalia } from './circle-navigate.mjs'
+import { act, reachCircle, reachMarginalia } from './circle-navigate.mjs'
 
 /**
  * The orchestration, against injected dependencies.
@@ -53,6 +53,76 @@ describe('act — the assertion is the observation, not the call returning', () 
        parsed — and swallowing hid that permanently. */
     const boom = new Error('Script execution timeout')
     await expect(act({ evaluate: () => Promise.reject(boom), wait: now }, 's', 'x', 'l', () => true)).rejects.toThrow(boom)
+  })
+})
+
+describe('reachCircle — the shelf first, then a row that has read its port', () => {
+  const scripts = { AT_SHELF: 'AT_SHELF', TO_SHELF: 'TO_SHELF', TO_CIRCLE: 'TO_CIRCLE', PERSON_SWITCHES: 'PERSON_SWITCHES' }
+
+  /** A fake app answering from `state`, recording what it was asked. */
+  const appWith = (state) => {
+    const asked = []
+    const labels = []
+    const evaluate = (_socket, script, label) => {
+      asked.push(script)
+      labels.push(label)
+      if (script === 'AT_SHELF') return Promise.resolve({ shelf: state.shelf })
+      if (script === 'PERSON_SWITCHES') return Promise.resolve({ boxes: state.boxes })
+      if (script === 'TO_SHELF') {
+        state.shelf = true
+        return Promise.resolve({ ok: true })
+      }
+      if (script === 'TO_CIRCLE') {
+        state.boxes = [{ label: 'Hold back Ann’s passages', checked: false }]
+        return Promise.resolve({ ok: true })
+      }
+      throw new Error('unexpected script: ' + script)
+    }
+    return { evaluate, asked, labels }
+  }
+
+  it('names every step it takes, as the walk to Marginalia does', async () => {
+    /* ⚠️ The label is the only thing a failing step can quote — see the note on
+       the same assertion for `reachMarginalia`. Every one of these could have
+       been the empty string. */
+    const app = appWith({ shelf: false, boxes: [] })
+    await reachCircle({ evaluate: app.evaluate, wait: now }, 's', scripts)
+    expect(app.labels).toEqual(expect.arrayContaining(['where are we', 'go to the shelf', 'open the Circle screen', 'find the switches']))
+    expect(app.labels.every((one) => typeof one === 'string' && one.length > 0)).toBe(true)
+  })
+
+  it('goes to the shelf first when the app is in the reader, then to the Circle', async () => {
+    /* ⚠️ **THE CIRCLE CHIP IS ON THE SHELF.** A switch flipped straight after a
+       share leaves the app in the reader, where there is no chip to click. */
+    const app = appWith({ shelf: false, boxes: [] })
+    expect(await reachCircle({ evaluate: app.evaluate, wait: now }, 's', scripts)).toMatchObject({ ok: true })
+    expect(app.asked).toContain('TO_SHELF')
+    expect(app.asked).toContain('TO_CIRCLE')
+  })
+
+  it('SKIPS the trip to the shelf when it is already there', async () => {
+    const app = appWith({ shelf: true, boxes: [] })
+    await reachCircle({ evaluate: app.evaluate, wait: now }, 's', scripts)
+    expect(app.asked).not.toContain('TO_SHELF')
+  })
+
+  it('stops at the shelf when the app never gets there, and does not open the Circle', async () => {
+    const app = appWith({ shelf: false, boxes: [] })
+    const evaluate = (socket, script) => (script === 'TO_SHELF' ? Promise.resolve({ ok: true }) : app.evaluate(socket, script))
+    const result = await reachCircle({ evaluate, wait: now }, 's', scripts)
+    expect(result.why).toMatch(/go to the shelf/u)
+    expect(app.asked).not.toContain('TO_CIRCLE')
+  })
+
+  it('waits for a SWITCH rather than for the screen, and names the step when none arrives', async () => {
+    /* ⚠️ The per-person switches are drawn only once the row's own read of the
+       port has answered, so a driver that acted on the screen's arrival acted
+       before there was anything to act on. */
+    const app = appWith({ shelf: true, boxes: [] })
+    const evaluate = (socket, script) => (script === 'TO_CIRCLE' ? Promise.resolve({ ok: true }) : app.evaluate(socket, script))
+    const result = await reachCircle({ evaluate, wait: now }, 's', scripts)
+    expect(result.ok).toBe(false)
+    expect(result.why).toMatch(/open the Circle screen/u)
   })
 })
 

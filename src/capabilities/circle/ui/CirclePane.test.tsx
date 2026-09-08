@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { KnownPerson, PersonPort, PersonStatus } from '../../peer'
@@ -257,22 +258,57 @@ describe('the circle panel', () => {
        the panel never settles, which is what "the Circle button does nothing"
        looks like from the outside. The earlier tests all passed ONE port object
        that never changed identity, so the fixture hid it. */
+    /* ⚠️ **TWO PORTS ACROSS ONE RERENDER IS NOT THE FEEDBACK.** This handed the
+       pane two objects by hand and allowed anything under six reads — so a pane
+       that re-read on every parent render passed, which is the shape the loop
+       is made of. The port is built INSIDE the host's render here, as the
+       screen's own `render(context)` builds it, and the host re-renders on its
+       own state five times: a fresh object each time, and the count must not
+       move. */
     let reads = 0
     const people = () => {
       reads += 1
       return Promise.resolve(noPeople)
     }
-    const { rerender } = render(<CirclePane port={portWith({ people })} />)
+    const Host = () => {
+      const [ticks, bump] = useState(0)
+      return (
+        <>
+          <button type="button" onClick={() => bump((n) => n + 1)}>
+            {`render again ${ticks}`}
+          </button>
+          <CirclePane port={portWith({ people })} />
+        </>
+      )
+    }
+    render(<Host />)
     await screen.findByText(/holds your keys/u)
+    /* Once, for the render that mounted it. */
+    expect(reads).toBe(1)
 
-    /* A re-render from the parent, exactly as the side pane does. */
-    rerender(<CirclePane port={portWith({ people })} />)
-    await screen.findByText(/holds your keys/u)
-    const settled = reads
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    for (let tick = 0; tick < 5; tick++) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /render again/u }))
+      })
+    }
+    expect(screen.getByRole('button', { name: /render again 5/u })).toBeTruthy()
+    /* ⚠️ **ONE READ PER PARENT RENDER, AND NOT ONE MORE.** The old bound was
+       `toBeLessThan(6)` over a single rerender — four spurious reads inside it,
+       and a runaway that happened to be slow would have passed. Six renders,
+       six reads: linear in what the parent did, which is the difference between
+       a pane that settles and one that feeds itself. */
+    expect(reads).toBe(6)
 
-    expect(reads).toBe(settled)
-    expect(reads).toBeLessThan(6)
+    /* And nothing happens after: no render, no read. This is the claim the
+       test's name makes. */
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(reads).toBe(6)
+
+    /* ⚠️ The app does not pay even this: `personPort()` memoises per wire, so
+       the screen's `render(context)` hands the same object back every time.
+       What is held here is that a host which does NOT is still survivable. */
   })
 
   it('offers a way to add somebody, which is what the empty state promises', async () => {

@@ -50,6 +50,39 @@ export async function act({ evaluate, wait }, socket, script, label, verify, tri
  * which is indistinguishable from a broken selector. Patience costs nothing on
  * success and only delays an honest failure.
  */
+/**
+ * Get to the Circle screen from wherever the app is, and wait for a row that
+ * has read its port.
+ *
+ * ⚠️ **THE CIRCLE CHIP IS ON THE SHELF, NOT IN THE READER.** It lives in the
+ * titlebar of the library screen, so a switch flipped straight after a share —
+ * which leaves the app in the reader with Marginalia open — finds no control
+ * to click and reports the screen as never arriving. Going to the shelf first
+ * is idempotent and costs one round trip.
+ *
+ * ⚠️ **AND IT WAITS FOR A SWITCH RATHER THAN FOR THE SCREEN.** The per-person
+ * switches are drawn only once the row's own read of the port has answered
+ * (`switchReady`), so a driver that acted on the screen's arrival acted before
+ * there was anything to act on.
+ *
+ * ⚠️ **WRITTEN TWICE IN `circle-drive.mjs`, WHERE NOTHING MEASURED IT.** The
+ * mute/shelf commands and the friend command each carried their own copy of
+ * these three steps — and the file is excluded from coverage as a process
+ * entry, so both copies were unread by any test. One copy, here.
+ */
+export async function reachCircle(deps, socket, scripts) {
+  const { evaluate } = deps
+  const { AT_SHELF, TO_SHELF, TO_CIRCLE, PERSON_SWITCHES } = scripts
+  const atShelf = async () => (await evaluate(socket, AT_SHELF, 'where are we')).shelf === true
+
+  if (!(await atShelf())) {
+    const back = await act(deps, socket, TO_SHELF, 'go to the shelf', atShelf, 40)
+    if (!back.ok) return back
+  }
+  return act(deps, socket, TO_CIRCLE, 'open the Circle screen', async () =>
+    (await evaluate(socket, PERSON_SWITCHES, 'find the switches')).boxes.length > 0, 40)
+}
+
 export async function reachMarginalia(deps, socket, title, scripts) {
   const { evaluate } = deps
   const { AT_SHELF, TO_SHELF, filterShelf, shelfMatches, openMatch, OPEN_MARGINALIA, READ_MARKS } = scripts

@@ -53,7 +53,7 @@ import {
   withdrawRow,
   parse,
 } from './lib/circle-scripts.mjs'
-import { act as actWith, reachMarginalia as reachWith } from './lib/circle-navigate.mjs'
+import { act as actWith, reachCircle as circleWith, reachMarginalia as reachWith } from './lib/circle-navigate.mjs'
 
 /* ------------------------------------------------------------------------ */
 /* Scripts evaluated in the webview                                          */
@@ -76,6 +76,7 @@ const DEPS = { evaluate, wait }
 const act = (socket, script, label, verify, tries) => actWith(DEPS, socket, script, label, verify, tries)
 const SCRIPTS = { AT_SHELF, TO_SHELF, filterShelf, shelfMatches, openMatch, OPEN_MARGINALIA, READ_MARKS }
 const reachMarginalia = (socket, title) => reachWith(DEPS, socket, title, SCRIPTS)
+const reachCircle = (socket) => circleWith(DEPS, socket, { AT_SHELF, TO_SHELF, TO_CIRCLE, PERSON_SWITCHES })
 
 async function main(argv) {
   let args
@@ -111,25 +112,7 @@ async function main(argv) {
       const on = command === 'mute' || command === 'shelf'
       const label = command === 'mute' || command === 'unmute' ? muteLabel(args.person) : shelfLabel(args.person)
 
-      /* ⚠️ **THE CIRCLE CHIP IS ON THE SHELF, NOT IN THE READER.** It lives in
-         the titlebar of the library screen, so a switch flipped straight after
-         a share — which leaves the app in the reader with Marginalia open —
-         finds no control to click and reports the screen as never arriving.
-         Going to the shelf first is idempotent and costs one round trip. */
-      const at = await evaluate(socket, AT_SHELF, 'where are we')
-      if (at.shelf !== true) {
-        const back = await act(socket, TO_SHELF, 'go to the shelf', async () =>
-          (await evaluate(socket, AT_SHELF, 'where are we')).shelf === true, 40)
-        if (!back.ok) {
-          say(back)
-          process.exit(1)
-        }
-      }
-      /* The switches are drawn only once the row's own read of the port has
-         answered (`switchReady`), so this waits for a switch and not for the
-         screen. */
-      const toCircle = await act(socket, TO_CIRCLE, 'open the Circle screen', async () =>
-        (await evaluate(socket, PERSON_SWITCHES, 'find the switches')).boxes.length > 0, 40)
+      const toCircle = await reachCircle(socket)
       if (!toCircle.ok) {
         say(toCircle)
         process.exit(1)
@@ -144,14 +127,7 @@ async function main(argv) {
     }
 
     if (command === 'friend') {
-      const at = await evaluate(socket, AT_SHELF, 'where are we')
-      if (at.shelf !== true) {
-        const back = await act(socket, TO_SHELF, 'go to the shelf', async () =>
-          (await evaluate(socket, AT_SHELF, 'where are we')).shelf === true, 40)
-        if (!back.ok) { say(back); process.exit(1) }
-      }
-      const toCircle = await act(socket, TO_CIRCLE, 'open the Circle screen', async () =>
-        (await evaluate(socket, PERSON_SWITCHES, 'find the switches')).boxes.length > 0, 40)
+      const toCircle = await reachCircle(socket)
       if (!toCircle.ok) { say(toCircle); process.exit(1) }
       const opened = await act(socket, OPEN_FRIEND_SHELF, "open the friend's shelf", async () =>
         (await evaluate(socket, FRIEND_SHELF_STATE, 'read the shelf')).showing === true, 40)
