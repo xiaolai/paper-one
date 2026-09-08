@@ -308,34 +308,73 @@ describe('every clause of the delegation shape', () => {
     roster: 0,
     sig: 'a'.repeat(128),
   })
-  const read = (value: unknown) =>
-    readDelegation(typeof value === 'string' ? value : canonicalJson(value), PERSON.id, pageCrypto)
+  /**
+   * ⚠️ **ALWAYS THROUGH `canonicalJson`, WHICH IT DID NOT USED TO BE.** This
+   * passed a string value straight through as the raw bytes, so the row named
+   * "a delegation that is a string" handed `readDelegation` the six letters
+   * `delegation` — not valid JSON, refused by the parse, and testing the row
+   * above it a second time. A JSON string is `"delegation"`, which parses, is
+   * canonical, and reaches the clause the row is about. Unparseable bytes have
+   * their own test now, because they are their own clause.
+   */
+  const read = (value: unknown) => readDelegation(canonicalJson(value), PERSON.id, pageCrypto)
+
+  it('refuses bytes that are not JSON at all', () => {
+    expect(readDelegation('not json', PERSON.id, pageCrypto)).toBeNull()
+  })
+
+  /**
+   * ⚠️ **THE SAME FIELDS, REALLY SIGNED — BECAUSE A BOGUS SIGNATURE REFUSES
+   * EVERY ROW BY ITSELF.** `body()` carried `sig: 'a'.repeat(128)`, so every
+   * case below was refused at `crypto.verify` whatever its shape was: an extra
+   * member, a fractional `notAfter` and a well-formed delegation were all
+   * `null` for ONE reason, and the clause each row names was never reached.
+   * Deleting `isDelegation` outright would not have failed one of them.
+   *
+   * `delegationBytes` is a join of six values through `String`, so it signs a
+   * malformed body as happily as a good one — which is what lets each row be
+   * bad in exactly one way. The rows about the signature itself keep their
+   * bogus one, and say so.
+   */
+  const signedBody = (fields: Record<string, unknown>) => ({
+    ...fields,
+    sig: signWith(PERSON.secret, delegationBytes({ ...fields, sig: '' } as unknown as SignedDelegation)),
+  })
+
+  it('ACCEPTS the body every row below is a mutation of', () => {
+    /* ⚠️ **THE KNOWN POSITIVE, AND WITHOUT IT THE WHOLE TABLE IS DECORATION.**
+       If `signedBody` signed the wrong bytes every row would be refused for
+       that reason instead, exactly as they were refused by the bogus signature
+       before — a table of twenty passing tests asserting nothing. This is the
+       row that fails if the helper breaks. */
+    expect(read(signedBody(body()))).not.toBeNull()
+  })
 
   const bad: readonly (readonly [string, unknown])[] = [
-    ['bytes that are not JSON', 'not json'],
     ['a delegation that is a list', []],
     ['a delegation that is a string', 'delegation'],
     ['a delegation that is a number', 7],
     ['a delegation that is null', null],
-    ['a member this build does not know', { ...body(), role: 'home' }],
-    ['a missing person', { ...body(), person: undefined }],
-    ['a missing device', { ...body(), device: undefined }],
+    ['a member this build does not know', signedBody({ ...body(), role: 'home' })],
+    ['a missing person', signedBody({ ...body(), person: undefined })],
+    ['a missing device', signedBody({ ...body(), device: undefined })],
+    ['a missing notBefore', signedBody({ ...body(), notBefore: undefined })],
+    ['a missing notAfter', signedBody({ ...body(), notAfter: undefined })],
+    ['a missing roster epoch', signedBody({ ...body(), roster: undefined })],
+    ['a person that is a number', signedBody({ ...body(), person: 1 })],
+    ['a device that is a number', signedBody({ ...body(), device: 1 })],
+    ['a fractional notBefore', signedBody({ ...body(), notBefore: 1.5 })],
+    ['a fractional notAfter', signedBody({ ...body(), notAfter: 1.5 })],
+    ['a fractional roster epoch', signedBody({ ...body(), roster: 1.5 })],
+    ['a notBefore that is a string', signedBody({ ...body(), notBefore: '1' })],
+    ['a roster epoch that is a string', signedBody({ ...body(), roster: '1' })],
+    /* The three about the signature keep a bad one, which IS the clause. */
     ['a missing signature', { ...body(), sig: undefined }],
-    ['a missing notBefore', { ...body(), notBefore: undefined }],
-    ['a missing notAfter', { ...body(), notAfter: undefined }],
-    ['a missing roster epoch', { ...body(), roster: undefined }],
-    ['a person that is a number', { ...body(), person: 1 }],
-    ['a device that is a number', { ...body(), device: 1 }],
     ['a signature that is a number', { ...body(), sig: 1 }],
-    ['a fractional notBefore', { ...body(), notBefore: 1.5 }],
-    ['a fractional notAfter', { ...body(), notAfter: 1.5 }],
-    ['a fractional roster epoch', { ...body(), roster: 1.5 }],
-    ['a notBefore that is a string', { ...body(), notBefore: '1' }],
-    ['a roster epoch that is a string', { ...body(), roster: '1' }],
-    /* Well-formed, signed by nobody — the shape is not the authority. */
     ['a signature nobody made', body()],
-    /* Well-formed and signed, for somebody else. */
-    ['a delegation naming another person', { ...body(), person: DEVICE.id }],
+    /* Signed by the person over its own bytes, and naming somebody else — so
+       the person check is what refuses it, not the signature. */
+    ['a delegation naming another person', signedBody({ ...body(), person: DEVICE.id })],
   ]
 
   for (const [what, value] of bad) {
@@ -350,26 +389,32 @@ describe('every clause of the delegation shape', () => {
        unknown member is a field the signer can use to mean something the
        verifier never saw. */
     const { roster: _gone, ...rest } = body()
-    expect(read({ ...rest, role: 0 })).toBeNull()
+    expect(read(signedBody({ ...rest, role: 0 }))).toBeNull()
   })
 
   it('refuses the six required members plus an extra', () => {
     /* And the NAMES alone are not the check either: every required name is
        present here, and there is a seventh. */
-    expect(read({ ...body(), extra: 1 })).toBeNull()
+    expect(read(signedBody({ ...body(), extra: 1 }))).toBeNull()
   })
 
   it('refuses a delegation missing SEVERAL members, not just one', () => {
     /* ⚠️ `every` and `some` are the same function on a one-element difference;
        a row missing two members is what tells "all present" from "any". */
-    expect(read({ person: PERSON.id, device: DEVICE.id })).toBeNull()
+    expect(read(signedBody({ person: PERSON.id, device: DEVICE.id }))).toBeNull()
   })
 
-  /** A delegation the person really signed over exactly these fields. */
+  /**
+   * A delegation the person really signed over exactly these fields.
+   *
+   * Returns the BODY, not its bytes: `read` canonicalises, and returning a
+   * string here meant it was serialised twice the moment `read` stopped
+   * passing strings through raw — which the suite caught, being the one case
+   * that asserts a body is ACCEPTED.
+   */
   const reallySigned = (over: Partial<SignedDelegation>) => {
     const fields = { ...body(), ...over }
-    const sig = signWith(PERSON.secret, delegationBytes({ ...fields, sig: '' }))
-    return canonicalJson({ ...fields, sig })
+    return { ...fields, sig: signWith(PERSON.secret, delegationBytes({ ...fields, sig: '' })) }
   }
 
   it('refuses a properly signed delegation whose window is not whole numbers', () => {
@@ -899,7 +944,21 @@ describe('applying entries is folding them', () => {
        interleaving, not for the cases somebody thought of. `fold` is the
        specification; this is the implementation that has to match it. Since
        WI-23.B1 the log has nine kinds and since WI-23.E1 fourteen, and the
-       property covers all of them — the list's five against `foldList`. */
+       property covers all of them — the list's five against `foldList`.
+
+       ⚠️ **AND IT USED TO VARY ONLY WHERE THE BATCHES WERE CUT.** Sorting the
+       cuts and slicing the log preserved the log's own order, so "every
+       interleaving" was one interleaving in every run — the entries always
+       arrived in the order they were built. The delivery order is drawn now,
+       and `fold` still reads the log as built, which is the point: the
+       specification does not care about order and the implementation must not
+       either.
+
+       ⚠️ **AND IT COMPARED ONLY THE `pub`s.** A publication's payload was a
+       function of its `pub`, so two shares of one `pub` carried the same
+       passage and keeping the wrong one was invisible — which is exactly the
+       case `precedes` exists for. Payloads differ per entry now and every
+       field both sides hold is compared, stamps included. */
     const pubs = ['a', 'b', 'c']
     const arb = fc.array(
       fc.tuple(
@@ -920,9 +979,12 @@ describe('applying entries is folding them', () => {
          so said nothing about the case where the two folds disagreed. */
       const seq = i + 1
       const stamped = { device, seq, at: stampFor(device, at) }
+      /* ⚠️ Per ENTRY, not per `pub`: two publications of one `pub` have to
+         differ or the duplicate rule cannot be seen to have chosen. */
+      const mark = `${pub}-${i}`
       switch (kind) {
         case 0:
-          return { ...stamped, op: 'share', pub, passage: { quote: `q-${pub}`, prefix: 'p', suffix: 's', chapter: 'One' } }
+          return { ...stamped, op: 'share', pub, passage: { quote: `q-${mark}`, prefix: 'p', suffix: 's', chapter: `chapter ${i}` } }
         case 1:
           return { ...stamped, op: 'unshare', pub }
         case 2:
@@ -930,21 +992,21 @@ describe('applying entries is folding them', () => {
         case 3:
           return { ...stamped, op: 'rate', stars: ((at % 5) + 1) as 1 | 2 | 3 | 4 | 5 }
         case 4:
-          return { ...stamped, op: 'tag', tags: [pub] }
+          return { ...stamped, op: 'tag', tags: [mark] }
         case 5:
-          return { ...stamped, op: 'review', pub, text: `text-${pub}` }
+          return { ...stamped, op: 'review', pub, text: `text-${mark}` }
         case 6:
           return { ...stamped, op: 'unreview', pub }
         case 7:
-          return { ...stamped, op: 'shelf', pub, work: { title: `book-${pub}`, author: 'A', language: 'en' } }
+          return { ...stamped, op: 'shelf', pub, work: { title: `book-${mark}`, author: `A${i}`, language: 'en' } }
         case 8:
           return { ...stamped, op: 'unshelf', pub }
         case 9:
-          return { ...stamped, op: 'create', title: `list-${pub}` }
+          return { ...stamped, op: 'create', title: `list-${mark}` }
         case 10:
-          return { ...stamped, op: 'retitle', title: `title-${at}` }
+          return { ...stamped, op: 'retitle', title: `title-${mark}` }
         case 11:
-          return { ...stamped, op: 'place', pub, work: { title: `book-${pub}`, author: 'A', language: 'en' }, position: at % 3, note: `n-${at}` }
+          return { ...stamped, op: 'place', pub, work: { title: `book-${mark}`, author: `A${i}`, language: 'en' }, position: at % 3, note: `n-${mark}` }
         case 12:
           return { ...stamped, op: 'remove', pub }
         default:
@@ -952,37 +1014,65 @@ describe('applying entries is folding them', () => {
       }
     }
 
+    /* Every field the two sides both hold, canonically — so a comparison
+       cannot pass by matching the one field that was easy to project. */
+    const sortedJson = (rows: readonly unknown[]) => rows.map((one) => canonicalJson(one)).sort()
+    const shareOf = (one: { readonly pub: string; readonly at?: unknown; readonly passage: unknown }) => ({ pub: one.pub, at: one.at, passage: one.passage })
+    const reviewOf = (one: { readonly pub: string; readonly at?: unknown; readonly text: string }) => ({ pub: one.pub, at: one.at, text: one.text })
+    const workOf = (one: { readonly pub: string; readonly at?: unknown; readonly work: unknown }) => ({ pub: one.pub, at: one.at, work: one.work })
+    const itemOf = (one: { readonly pub: string; readonly at?: unknown; readonly work: unknown; readonly position: number; readonly note?: string }) => ({
+      pub: one.pub,
+      at: one.at,
+      work: one.work,
+      position: one.position,
+      note: one.note,
+    })
+
     fc.assert(
-      fc.property(arb, fc.array(fc.integer({ min: 0, max: 9 }), { maxLength: 10 }), (rows, cuts) => {
-        const log: Entry[] = rows.map(build)
-        /* One shot, the specification. */
-        const folded = fold(log)
-        const list = foldList(log)
+      fc.property(
+        arb,
+        fc.array(fc.integer({ min: 0, max: 9 }), { maxLength: 10 }),
+        fc.array(fc.integer({ min: 0, max: 99 }), { minLength: 10, maxLength: 10 }),
+        (rows, cuts, order) => {
+          const log: Entry[] = rows.map(build)
+          /* One shot, the specification — over the log AS BUILT. */
+          const folded = fold(log)
+          const list = foldList(log)
 
-        /* Applied in batches, the way pages actually arrive. */
-        let held: ForeignFile = NOTHING_SHARED
-        let at = 0
-        for (const cut of [...cuts, log.length].sort((a, b) => a - b)) {
-          const slice = log.slice(at, Math.max(at, cut))
-          at = Math.max(at, cut)
-          held = applyEntries(held, slice, PERSON.id, 1, NOW)
-        }
-        held = applyEntries(held, log.slice(at), PERSON.id, 1, NOW)
+          /* Delivered in another order entirely, and cut into batches within
+             it. The keys are drawn, so shrinking reports the permutation. */
+          const delivered = log
+            .map((entry, i) => ({ entry, key: order[i] ?? 0, i }))
+            .sort((a, b) => a.key - b.key || a.i - b.i)
+            .map((one) => one.entry)
 
-        expect(held.entries.map((one) => one.pub).sort()).toEqual(folded.shares.map((one) => one.pub).sort())
-        expect(held.reviews.map((one) => `${one.pub}:${one.text}`).sort()).toEqual(
-          folded.reviews.map((one) => `${one.pub}:${one.text}`).sort(),
-        )
-        expect(held.works.map((one) => one.pub).sort()).toEqual(folded.shelf.map((one) => one.pub).sort())
-        expect(held.opinion.status?.value).toEqual(folded.status?.value)
-        expect(held.opinion.status?.at).toEqual(folded.status?.at)
-        expect(held.opinion.stars?.value).toEqual(folded.stars?.value)
-        expect(held.opinion.tags?.value).toEqual(folded.tags?.value)
-        expect(held.list.created).toBe(list.created)
-        expect(held.list.deleted).toBe(list.deleted)
-        expect(held.list.title?.value ?? '').toBe(list.title)
-        expect(held.list.items.map((one) => [one.pub, one.position, one.note])).toEqual(list.items.map((one) => [one.pub, one.position, one.note]))
-      }),
+          let held: ForeignFile = NOTHING_SHARED
+          let at = 0
+          for (const cut of [...cuts, delivered.length].sort((a, b) => a - b)) {
+            const slice = delivered.slice(at, Math.max(at, cut))
+            at = Math.max(at, cut)
+            held = applyEntries(held, slice, PERSON.id, 1, NOW)
+          }
+          held = applyEntries(held, delivered.slice(at), PERSON.id, 1, NOW)
+
+          expect(sortedJson(held.entries.map(shareOf))).toEqual(sortedJson(folded.shares.map(shareOf)))
+          expect(sortedJson(held.reviews.map(reviewOf))).toEqual(sortedJson(folded.reviews.map(reviewOf)))
+          expect(sortedJson(held.works.map(workOf))).toEqual(sortedJson(folded.shelf.map(workOf)))
+          expect(held.opinion.status?.value).toEqual(folded.status?.value)
+          expect(held.opinion.status?.at).toEqual(folded.status?.at)
+          expect(held.opinion.stars?.value).toEqual(folded.stars?.value)
+          expect(held.opinion.stars?.at).toEqual(folded.stars?.at)
+          expect(held.opinion.tags?.value).toEqual(folded.tags?.value)
+          expect(held.opinion.tags?.at).toEqual(folded.tags?.at)
+          expect(held.list.created).toBe(list.created)
+          expect(held.list.deleted).toBe(list.deleted)
+          expect(held.list.title?.value ?? '').toBe(list.title)
+          expect(held.list.items.map(itemOf)).toEqual(list.items.map(itemOf))
+          /* The tombstones too: a withdrawal is remembered for a `pub` never
+             seen, and only a list that survives redelivery proves it. */
+          expect(applyEntries(held, delivered, PERSON.id, 1, NOW).entries.map(shareOf)).toEqual(held.entries.map(shareOf))
+        },
+      ),
       { numRuns: 300 },
     )
   })
