@@ -405,23 +405,50 @@ describe('the Friends view', () => {
 
 describe('forgetting a person', () => {
   it('purges their files across every book before the peer forgets them, and says so', async () => {
-    const { port, deps, listeners } = world()
+    /* ⚠️ **RECORDING THE ORDER OF SYNCHRONOUS CALLS IS NOT THE SAME AS HOLDING
+       EACH STEP TO THE ONE BEFORE IT.** Every double here resolved at once, so
+       the three steps ran in order however the production code was written —
+       drop an `await` and the order recorded is identical, while a peer is
+       forgotten with its purge still in flight. Each step is held open here,
+       and the assertion is that the NEXT one has not started. */
+    const { port, deps, listeners, records } = world()
     const told = vi.fn()
     port.subscribe(told)
-    const order: string[] = []
+    /* A microtask turn, so a step that HAS started has started. */
+    const settle = () => new Promise((done) => setTimeout(done, 0))
+    const open = <T,>() => {
+      let go!: (value: T) => void
+      const promise = new Promise<T>((yes) => {
+        go = yes
+      })
+      return { promise, go }
+    }
+    const written = open<Relationship>()
+    const purged = open<void>()
+    ;(deps.writeRelationship as ReturnType<typeof vi.fn>).mockImplementation((record: Relationship) => {
+      records.set(record.person, record)
+      return written.promise
+    })
     ;(deps.purge as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      order.push('purge')
       /* The purge is what says so, as the real one does through `onChanged`. */
       for (const listener of listeners) listener()
-      return Promise.resolve()
+      return purged.promise
     })
-    ;(deps.forgetPeer as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      order.push('forget')
-      return Promise.resolve()
-    })
-    await port.forget(BOB)
-    expect(order).toEqual(['purge', 'forget'])
+    const gone = port.forget(BOB)
+    await settle()
+    /* The relationship write is still out, so nothing has been purged. */
+    expect(deps.purge).not.toHaveBeenCalled()
+    expect(deps.forgetPeer).not.toHaveBeenCalled()
+
+    written.go({ ...newRelationship(BOB, at(1)), state: 'exited', retain: 'purge' })
+    await settle()
+    /* Purging now, and the peer is NOT forgotten while it is out. */
     expect(deps.purge).toHaveBeenCalledWith(BOB, ['book:moby', 'book:dune'])
+    expect(deps.forgetPeer).not.toHaveBeenCalled()
+
+    purged.go()
+    await gone
+    expect(deps.forgetPeer).toHaveBeenCalledTimes(1)
     expect(told).toHaveBeenCalledTimes(1)
   })
 
@@ -698,9 +725,16 @@ describe('the switch and a forget, on one person’s turn', () => {
   })
 
   it('runs a flip queued behind a forget after the peer has forgotten them — and refuses it as such', async () => {
+    /* ⚠️ **A ROSTER OF ONE AND A `findIndex` THAT ANSWERS -1 IS A DOUBLE THAT
+       FORGETS THE WRONG PERSON HAPPILY.** `splice(-1, 1)` drops the LAST
+       entry, so `forgetPeer` called with any string at all removed Bob and the
+       queued flip was refused exactly as it should be — the argument was never
+       part of the test. Refused here, and named. */
     const { port, deps, people, records } = world()
     ;(deps.forgetPeer as ReturnType<typeof vi.fn>).mockImplementation((person: string) => {
-      people.splice(people.findIndex((one) => one.person === person), 1)
+      const at = people.findIndex((one) => one.person === person)
+      if (at < 0) throw new Error(`forgetPeer was given ${person}, who is not in the circle`)
+      people.splice(at, 1)
       return Promise.resolve()
     })
     const gone = port.forget(BOB)
@@ -709,6 +743,9 @@ describe('the switch and a forget, on one person’s turn', () => {
     await expect(flipped).rejects.toThrow(/not in your circle/u)
     /* The exited record stands, with no grant written over it. */
     expect(records.get(BOB)).toMatchObject({ state: 'exited', shelf: false })
+    /* And the peer that was forgotten is the one named. */
+    expect(deps.forgetPeer).toHaveBeenCalledTimes(1)
+    expect(deps.forgetPeer).toHaveBeenCalledWith(BOB)
   })
 
   it('lets go of a person’s turn once it has settled', async () => {

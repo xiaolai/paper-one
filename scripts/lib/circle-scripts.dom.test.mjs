@@ -100,10 +100,34 @@ describe('where am I, and how do I get back', () => {
 })
 
 describe('narrowing the shelf and opening a book', () => {
-  it('counts the cells a title matches, by the label PREFIX', () => {
-    html('<button aria-label="More for Moby-Dick, the whale">m</button><button aria-label="More for Dune">d</button>')
+  it('counts the cells a title matches, and only those', () => {
+    html('<button aria-label="More for Moby-Dick">m</button><button aria-label="More for Dune">d</button>')
     expect(run(shelfMatches('Moby-Dick')).cells).toBe(1)
     expect(run(shelfMatches('Nothing')).cells).toBe(0)
+  })
+
+  it('matches a title carrying a NEWLINE, a tab, a quote or a backslash', () => {
+    /* ⚠️ **THE TITLE USED TO BE PUT INTO THE CSS SELECTOR AS A JSON STRING.**
+       JSON escaping is not CSS escaping: a newline is `\n` in JSON and an
+       escaped `n` in a CSS string. MEASURED against a real DOM before the fix —
+       a button labelled for such a title matched ZERO selectors, its own
+       included, so the driver reported "the app never reached the expected
+       state" for a book whose title holds a line break. Quotes and backslashes
+       survived, which is why the escaping fixtures beside this found nothing.
+
+       ⚠️ AND EACH MUST MATCH ONLY ITSELF: a comparison loose enough to find
+       them all would pass the first half of this and open the wrong book. */
+    const titles = ['Moby\nDick', 'Moby\tDick', 'Moby "the" Dick', 'Moby\\Dick', 'Plain']
+    document.body.innerHTML = ''
+    for (const title of titles) {
+      const button = document.createElement('button')
+      button.setAttribute('aria-label', `More for ${title.slice(0, 24)}`)
+      document.body.append(button)
+    }
+    for (const title of titles) {
+      expect(run(shelfMatches(title)).cells, JSON.stringify(title)).toBe(1)
+    }
+    expect(run(shelfMatches('Nothing at all')).cells).toBe(0)
   })
 
   it('types the title through the NATIVE setter, so React sees it', () => {
@@ -116,6 +140,14 @@ describe('narrowing the shelf and opening a book', () => {
     expect(input.value).toBe('Moby-Dick')
     expect(heard).toHaveBeenCalledTimes(1)
     expect(heard.mock.calls[0][0].bubbles).toBe(true)
+  })
+
+  it('opens a row whose title carries a newline', () => {
+    html('<div class="cell"><button aria-label="More for Moby&#10;Dick">m</button><button aria-label="Open">o</button></div>')
+    const clicked = vi.fn()
+    document.querySelector('button[aria-label="Open"]').addEventListener('click', clicked)
+    expect(run(openMatch('Moby\nDick'))).toEqual({ ok: true })
+    expect(clicked).toHaveBeenCalledTimes(1)
   })
 
   it('names each step of opening a row that is not there', () => {

@@ -2,6 +2,7 @@ import { Script } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import {
   AT_SHELF,
+  MORE_BUTTONS,
   FRIEND_SHELF_STATE,
   IDENTITY,
   OPEN_FRIEND_SHELF,
@@ -14,7 +15,7 @@ import {
   clickShare,
   filterShelf,
   flipSwitch,
-  moreSelector,
+  moreLabel,
   muteLabel,
   openMatch,
   parse,
@@ -174,23 +175,25 @@ describe('the values actually reach the script', () => {
     expect(clickShare(4)).toContain('][4]')
   })
 
-  it('truncates a long title into the selector, because the label is a prefix match', () => {
-    /* `More for <title>` is what the shelf renders; matching the whole title
-       breaks on any book whose label the shelf itself shortens. */
+  it('truncates a long title into the label it compares against, because the shelf truncates it', () => {
+    /* `More for <title>` is what the shelf renders, cut to 24 characters;
+       comparing the whole title breaks on any book whose label is shortened. */
     const long = 'A Very Long Title That Goes On Well Past Any Reasonable Label Length'
-    expect(moreSelector(long)).toBe('button[aria-label^=' + JSON.stringify('More for ' + long.slice(0, 24)) + ']')
+    expect(moreLabel(long)).toBe('More for ' + long.slice(0, 24))
+    expect(shelfMatches(long)).toContain(JSON.stringify(moreLabel(long)))
   })
 
-  it('quotes a title containing a double quote so the selector stays one attribute', () => {
-    /* The selector is encoded TWICE — once into an attribute value, once into
-       the JS string that carries it — so asserting a hand-written escape
-       sequence here just re-implements the nesting and gets it wrong, which is
-       what the first version of this assertion did. Compare against the
-       builder's own output instead. */
+  it('carries a title with a quote in it as DATA, not as part of the selector', () => {
+    /* ⚠️ **THE TITLE IS NO LONGER IN THE SELECTOR AT ALL.** It used to be
+       spliced into a CSS attribute value through `JSON.stringify`, and JSON
+       escaping is not CSS escaping — `circle-scripts.dom.test.mjs` measures
+       what that cost. What travels now is the fixed prefix every row shares,
+       plus the label as a JavaScript string compared in the page. */
     const title = 'The "Best" Book'
     const source = shelfMatches(title)
     expect(parses(source)).toBe(true)
-    expect(source).toContain(JSON.stringify(moreSelector(title)))
+    expect(source).toContain(JSON.stringify(moreLabel(title)))
+    expect(source).toContain(JSON.stringify(MORE_BUTTONS))
   })
 })
 
@@ -249,6 +252,32 @@ describe('argument parsing', () => {
 
   it('defaults to the pinned bridge port', () => {
     expect(parse(['identity']).port).toBe(31415)
+  })
+
+  it('refuses an option with no value, and one whose value is the next option', () => {
+    /* ⚠️ **BOTH USED TO GO THROUGH.** A trailing `--title` set nothing and the
+       run went ahead against a book nobody named; `--title --person Ann` made
+       the title the six characters `--person` and `Ann` a positional. Measured
+       before the fix, both. */
+    expect(() => parse(['share', '--title'])).toThrow(/--title needs a value/u)
+    expect(() => parse(['share', '--person'])).toThrow(/--person needs a value/u)
+    expect(() => parse(['share', '--quote'])).toThrow(/--quote needs a value/u)
+    /* The port goes through the same refusal before its range is looked at, so
+       a trailing `--port` names itself rather than reporting `NaN`. */
+    expect(() => parse(['--port'])).toThrow(/--port needs a value/u)
+    expect(() => parse(['--port', '--title', 'A Book'])).toThrow(/--port needs a value, and --title is another option/u)
+    expect(() => parse(['share', '--title', '--person', 'Ann'])).toThrow(/--title needs a value, and --person is another option/u)
+  })
+
+  it('refuses a port that is not one', () => {
+    /* ⚠️ `Number('abc')` is `NaN`, and it was taken: `connect` then built
+       `ws://127.0.0.1:NaN`, whose refusal reads as "the bridge did not answer"
+       and sends the reading to the app rather than to the command line. */
+    for (const bad of ['abc', '-1', '0', '99999999', '31415.5']) {
+      expect(() => parse(['--port', bad]), bad).toThrow(/--port needs a number between 1 and 65535/u)
+    }
+    expect(parse(['--port', '65535']).port).toBe(65535)
+    expect(parse(['--port', '1']).port).toBe(1)
   })
 
   it('THROWS on a flag it does not know, naming it, and keeps bare words as words', () => {

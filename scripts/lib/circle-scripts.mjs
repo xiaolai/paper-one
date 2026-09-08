@@ -109,13 +109,41 @@ export const TO_SHELF = `(() => {
  * The title becomes a JSON string, which is already double-quoted and escaped
  * exactly the way an attribute selector wants it.
  */
-export const moreSelector = (title) => 'button[aria-label^=' + JSON.stringify('More for ' + title.slice(0, 24)) + ']'
+/**
+ * The label a shelf row's More button carries for a title.
+ *
+ * ⚠️ **CUT TO 24 CHARACTERS, BECAUSE THE APP CUTS IT.** The comparison below is
+ * a prefix one for that reason and no other.
+ */
+export const moreLabel = (title) => 'More for ' + title.slice(0, 24)
+
+/**
+ * Every More button on the shelf — indexed by the engine, and matched exactly
+ * in JavaScript afterwards.
+ *
+ * ⚠️ **THE TITLE USED TO GO INTO THE SELECTOR AS A JSON STRING, AND JSON
+ * ESCAPING IS NOT CSS ESCAPING.** A newline is `\n` in JSON and an escaped
+ * `n` in a CSS string; a tab is the same story. MEASURED against a real DOM: a
+ * button labelled for a title containing either matched ZERO selectors —
+ * including its own. So `shelfMatches` counted no cells and the driver reported
+ * "the app never reached the expected state", for a book whose title happens to
+ * hold a line break. Quotes and backslashes did survive, which is why the
+ * escaping fixtures found nothing.
+ *
+ * The prefix that is common to every row stays in the selector, so the engine
+ * still answers it from an index over 1 962 books; the part that varies is
+ * compared as a STRING, where the only escaping rule is JavaScript's own.
+ */
+export const MORE_BUTTONS = 'button[aria-label^="More for "]'
 
 export const asJs = (value) => JSON.stringify(value)
 
+/** The rows whose More button carries this title — as an expression. */
+const matching = (title) =>
+  '[...document.querySelectorAll(' + asJs(MORE_BUTTONS) + ')].filter(function (b) { return (b.getAttribute(\'aria-label\') || \'\') === ' + asJs(moreLabel(title)) + ' })'
+
 /** How many shelf cells match, read-only — the narrow step's confirmation. */
-export const shelfMatches = (title) =>
-  '(() => JSON.stringify({ cells: document.querySelectorAll(' + asJs(moreSelector(title)) + ').length }))()'
+export const shelfMatches = (title) => '(() => JSON.stringify({ cells: ' + matching(title) + '.length }))()'
 
 /**
  * ⚠️ **THE SHELF IS VIRTUALISED, so the row must be FILTERED into existence.**
@@ -125,7 +153,7 @@ export const shelfMatches = (title) =>
  */
 export const openMatch = (title) =>
   '(() => {\n' +
-  '  const more = document.querySelector(' + asJs(moreSelector(title)) + ')\n' +
+  '  const more = ' + matching(title) + '[0]\n' +
   "  if (!more) return JSON.stringify({ ok: false, why: 'no shelf row matched that title' })\n" +
   "  const cell = more.closest('[class*=\"cell\"]')\n" +
   "  if (!cell) return JSON.stringify({ ok: false, why: 'the matched row has no cell around it' })\n" +
@@ -447,14 +475,46 @@ export const READ_MARKS = `(() => {
   return JSON.stringify({ ok: true, rows })
 })()`
 
+/**
+ * The value an option was given, refused when there is none.
+ *
+ * ⚠️ **A TRAILING `--title` USED TO BE ACCEPTED SILENTLY**, and so did
+ * `--title --person Ann`: the next argument was taken whatever it was, so the
+ * title became the six characters `--person` and `Ann` became a positional.
+ * The run then went ahead against a book nobody named. An option that reaches
+ * for the next word has to say when there is not one, and a word beginning
+ * `--` is the next OPTION, not this one's value.
+ */
+function valueFor(name, value) {
+  if (value === undefined) throw new Error(`${name} needs a value`)
+  if (value.startsWith('--')) throw new Error(`${name} needs a value, and ${value} is another option`)
+  return value
+}
+
+/**
+ * A port a bridge can actually be listening on.
+ *
+ * ⚠️ **`Number('abc')` IS `NaN` AND WAS ACCEPTED.** `connect` then built
+ * `ws://127.0.0.1:NaN`, which fails as a refused connection — reported as "the
+ * bridge did not answer", which sends the reading to the app. So were `-1` and
+ * `99999999`, neither of which is a port.
+ */
+function portFor(value) {
+  const port = Number(valueFor('--port', value))
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`--port needs a number between 1 and 65535, not ${value}`)
+  }
+  return port
+}
+
 export function parse(argv) {
   const args = { _: [], port: DEFAULT_PORT }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--port') args.port = Number(argv[++i])
-    else if (a === '--title') args.title = argv[++i]
-    else if (a === '--person') args.person = argv[++i]
-    else if (a === '--quote') args.quote = argv[++i]
+    if (a === '--port') args.port = portFor(argv[++i])
+    else if (a === '--title') args.title = valueFor('--title', argv[++i])
+    else if (a === '--person') args.person = valueFor('--person', argv[++i])
+    else if (a === '--quote') args.quote = valueFor('--quote', argv[++i])
     /* ⚠️ **THROWS, IT DOES NOT EXIT.** This called `usage()`, which writes to
        stderr and calls `process.exit` — fine inside the entry it came from,
        and the reason it could not be tested there. A pure parser reports; the

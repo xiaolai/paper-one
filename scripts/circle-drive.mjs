@@ -44,7 +44,6 @@ import {
   controlAt,
   filterShelf,
   flipSwitch,
-  moreSelector,
   muteLabel,
   openMatch,
   rowState,

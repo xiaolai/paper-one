@@ -83,6 +83,25 @@ describe('execute — one round trip, matched by id', () => {
     await call
   })
 
+  it('gives two calls on one socket two ids, and answers each with its own', async () => {
+    /* ⚠️ **ONE PENDING CALL AT A TIME IS NOT WHAT THE IDS ARE FOR.** Every
+       test here started a call, answered it, and moved on — so a client that
+       used one constant id would have passed all of them and misrouted every
+       concurrent pair in the field, which is exactly the load-dependent
+       failure the id matching exists to prevent. Two in flight, answered in
+       REVERSE, each getting its own result. */
+    const socket = fakeSocket()
+    const first = execute(socket, 'one', 'a step')
+    const second = execute(socket, 'two', 'another step')
+    const [a, b] = socket.sent.map((one) => one.id)
+    expect(a).not.toBe(b)
+
+    socket.reply({ id: b, success: true, data: 'second' })
+    socket.reply({ id: a, success: true, data: 'first' })
+    expect(await first).toBe('first')
+    expect(await second).toBe('second')
+  })
+
   it('IGNORES a message carrying another id, which is what stops an event being read as an answer', async () => {
     const socket = fakeSocket()
     const call = execute(socket, 'script', 'label')
@@ -335,21 +354,34 @@ describe('evaluate — the answer, parsed', () => {
 })
 
 describe('connect — and the two ways it does not', () => {
-  const stubSocket = (behaviour) => {
+  /**
+   * ⚠️ **ONE FAKE, THE SAME ONE THE CALLS USE.** This was a second socket
+   * double with different manners: it OVERWROTE a listener rather than adding
+   * one, ignored `{ once: true }`, and had no `removeEventListener` at all —
+   * so the connection tests could not have noticed a change to how `connect`
+   * registers or removes them, and a legitimate change to that could fail
+   * against the substitute rather than against the code. It also took a
+   * `behaviour` callback nothing ever passed; the constructor-failure test
+   * builds its own class instead, which is what that parameter was for.
+   */
+  const stubSocket = () => {
     const made = []
     vi.stubGlobal(
       'WebSocket',
       class {
         constructor(url) {
+          const socket = fakeSocket()
+          Object.assign(this, socket)
+          /* Bound, because `fakeSocket`'s methods close over its own maps. */
+          for (const name of ['addEventListener', 'removeEventListener', 'emit', 'count', 'close', 'send', 'reply']) {
+            this[name] = socket[name].bind(socket)
+          }
           this.url = url
+          Object.defineProperty(this, 'closed', {
+            configurable: true,
+            get: () => socket.closed,
+          })
           made.push(this)
-          behaviour?.(this)
-        }
-        addEventListener(type, fn) {
-          this[type] = fn
-        }
-        close() {
-          this.closed = true
         }
       },
     )
@@ -359,7 +391,7 @@ describe('connect — and the two ways it does not', () => {
   it('resolves with the socket once it opens, on the port it was given', async () => {
     const made = stubSocket()
     const call = connect(4242)
-    made[0].open()
+    made[0].emit('open', {})
     await expect(call).resolves.toBe(made[0])
     expect(made[0].url).toBe('ws://127.0.0.1:4242')
   })
@@ -367,7 +399,7 @@ describe('connect — and the two ways it does not', () => {
   it('defaults to the pinned port when given none', async () => {
     const made = stubSocket()
     const call = connect()
-    made[0].open()
+    made[0].emit('open', {})
     await call
     expect(made[0].url).toBe('ws://127.0.0.1:31415')
   })
@@ -375,7 +407,7 @@ describe('connect — and the two ways it does not', () => {
   it('rejects namefully when the connection is refused', async () => {
     const made = stubSocket()
     const call = connect(4242)
-    made[0].error()
+    made[0].emit('error', {})
     await expect(call).rejects.toThrow(/the bridge on port 4242 refused or dropped the connection/u)
   })
 
