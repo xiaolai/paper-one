@@ -713,8 +713,8 @@ export async function writeForeign(
    * `writePersonFile`. Required, for `changed`'s reason.
    */
   admits: () => Promise<boolean>,
-): Promise<void> {
-  await writeOnLane(fs, queue, lane(bookId), circlePathIn(bookId, person), held, changed, admits)
+): Promise<boolean> {
+  return writeOnLane(fs, queue, lane(bookId), circlePathIn(bookId, person), held, changed, admits)
 }
 
 /**
@@ -745,14 +745,25 @@ async function writeOnLane(
   held: ForeignFile,
   changed: () => void,
   admits: () => Promise<boolean>,
-): Promise<void> {
+): Promise<boolean> {
+  /* ⚠️ **IT SAYS WHETHER IT WROTE, BECAUSE RESOLVING IS NOT COMMITTING.** The
+     admission guard turns a refusal into a silent return, and every caller read
+     that as a page persisted: a round could report `accepted: 3` having written
+     nothing at all, and advance its held cursor past pages that are not on
+     disk. The guard is right — a person un-admitted mid-round must not have
+     their pages kept — but a caller cannot account for what it is not told.
+     Same shape as `writeRelationship` merging and being treated as an
+     overwrite, which is the second time this has cost something. */
+  let wrote = false
   await queue.append(laneKey, async () => {
     if (!(await admits())) return
     await atomicWrite(fs, path, new TextEncoder().encode(JSON.stringify(held)))
+    wrote = true
   })
   /* AFTER the queued write, not inside it: a listener that re-reads would
      otherwise queue behind the very task it is reacting to. */
   changed()
+  return wrote
 }
 
 /**
@@ -823,8 +834,8 @@ export async function writeHeldList(
   held: ForeignFile,
   changed: () => void,
   admits: () => Promise<boolean>,
-): Promise<void> {
-  await writePersonFile(fs, queue, person, personListPathIn(person, listId), held, changed, admits)
+): Promise<boolean> {
+  return writePersonFile(fs, queue, person, personListPathIn(person, listId), held, changed, admits)
 }
 
 /** One of a person's files, replaced whole on the PERSON's lane — the lane their folder is purged on — and the caller told after. */
@@ -836,7 +847,7 @@ function writePersonFile(
   held: ForeignFile,
   changed: () => void,
   admits: () => Promise<boolean>,
-): Promise<void> {
+): Promise<boolean> {
   return writeOnLane(fs, queue, personFolderIn(person), path, held, changed, admits)
 }
 
@@ -853,6 +864,6 @@ export async function writeHeldShelf(
   held: ForeignFile,
   changed: () => void,
   admits: () => Promise<boolean>,
-): Promise<void> {
-  await writePersonFile(fs, queue, person, personShelfPathIn(person), held, changed, admits)
+): Promise<boolean> {
+  return writePersonFile(fs, queue, person, personShelfPathIn(person), held, changed, admits)
 }

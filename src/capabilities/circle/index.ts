@@ -752,7 +752,12 @@ function fetchPortsOver(fs: IndexFs, library: Library, writes: WriteQueue, ledge
          its folder is gone, and a keep would recreate it around one file. */
       library.getSnapshot().some((one) => one.bookId === bookId)
         ? writeForeign(fs as VaultFs, writes, (id) => library.lane(id), bookId, person, file, circleChanged, () => stillAdmits(fs as VaultFs, person, epoch))
-        : Promise.resolve(),
+        : /* ⚠️ **`false`, NOT A RESOLVED NOTHING.** A book removed mid-round is
+             correctly not written back into being — but resolving silently told
+             the round it HAD been kept, so those pages were counted as accepted
+             and the held cursor advanced past them. They are never asked for
+             again, and the report claimed work nobody did. */
+          Promise.resolve(false),
     heldShelf: (person) => readHeldShelf(fs as VaultFs, person),
     keepShelf: (person, file, epoch) => writeHeldShelf(fs as VaultFs, writes, person, file, circleChanged, () => stillAdmits(fs as VaultFs, person, epoch)),
     heldLists: (person) => readHeldLists(fs, person, warn),

@@ -103,13 +103,14 @@ export interface FetchPorts {
    * person no longer admitted in that epoch — the round's own re-check runs
    * before the lane is taken, and a purge can take it in between.
    */
-  readonly keep: (bookId: string, person: string, held: ForeignFile, epoch: number) => Promise<void>
+  /** Persist a book's foreign file. ⚠️ **ANSWERS WHETHER IT WROTE** — see the note on `take` below. */
+  readonly keep: (bookId: string, person: string, held: ForeignFile, epoch: number) => Promise<boolean>
   /** The person's SHELF as this device holds it, and where to put it — WI-23.C3. */
   readonly heldShelf: (person: string) => Promise<ForeignFile>
-  readonly keepShelf: (person: string, held: ForeignFile, epoch: number) => Promise<void>
+  readonly keepShelf: (person: string, held: ForeignFile, epoch: number) => Promise<boolean>
   /** The person's LISTS as this device holds them, by id, and where to put one — WI-23.E1. */
   readonly heldLists: (person: string) => Promise<ReadonlyMap<string, ForeignFile>>
-  readonly keepList: (person: string, listId: string, held: ForeignFile, epoch: number) => Promise<void>
+  readonly keepList: (person: string, listId: string, held: ForeignFile, epoch: number) => Promise<boolean>
   /**
    * Charge one answer to the person's budget — read, decided and committed
    * in ONE step by the ledger, so a jacket charged between two of a round's
@@ -454,8 +455,15 @@ async function fetchLog(ports: FetchPorts, person: PersonToFetch, admitted: () =
     const answer = await log.ask()
     if (answer === null) {
       /* An answer this build cannot read is one refusal for the log, and no
-         further question to a peer that answers in a shape we do not. */
+         further question to a peer that answers in a shape we do not.
+         ⚠️ **AND IT IS NAMED, LIKE EVERY OTHER REFUSAL.** This incremented the
+         COUNT alone, so a round could report `refusals: 1` with an empty
+         `refusedBecause` — which is exactly the state this capability's own
+         `refusedBecause` was built to end. One site was missed, and it is the
+         one reached when a peer answers in a shape this build cannot read: the
+         case where knowing the reason matters most. */
       refusals += 1
+      refusedBecause['unreadable-answer'] = (refusedBecause['unreadable-answer'] ?? 0) + 1
       break
     }
     if (answer.pages.length === 0) {
@@ -529,7 +537,13 @@ async function fetchBooks(
            kept: a page taken and not written is not a page the report may
            call accepted. */
         if ((await admitted()) === null) return null
-        await ports.keep(book.id, person.person, held, epoch)
+        /* ⚠️ **A RESOLVED WRITE IS NOT A COMMITTED WRITE.** The store's
+           admission guard turns a refusal into a silent return, so a page
+           refused mid-round was counted as accepted and the held cursor
+           advanced past bytes that are not on disk — the round reporting work
+           it had not done, and never asking for those pages again. Same shape
+           as a merged `writeRelationship` read as an overwrite. */
+        if (!(await ports.keep(book.id, person.person, held, epoch))) return { accepted: 0, refusals: [...taken.refusals, 'not-kept'] }
         return { accepted: taken.accepted, refusals: taken.refusals }
       },
     })
@@ -564,7 +578,8 @@ async function fetchShelf(
       if (taken.accepted === 0) return { accepted: 0, refusals: taken.refusals }
       held = taken.held
       if ((await admitted()) === null) return null
-      await ports.keepShelf(person.person, held, epoch)
+      /* `keep`'s reason, unchanged: counted once WRITTEN. */
+      if (!(await ports.keepShelf(person.person, held, epoch))) return { accepted: 0, refusals: [...taken.refusals, 'not-kept'] }
       return { accepted: taken.accepted, refusals: taken.refusals }
     },
     probe: async (pay) => {
@@ -739,8 +754,13 @@ async function fetchLists(
       let calls = 0
       for (const [id, file] of held) {
         if (file.cursor[device] === undefined) continue
-        calls += 1
+        /* ⚠️ **COUNTED WHERE THE CALL HAPPENS, NOT BEFORE THE DECISION TO MAKE
+           IT.** `calls` rose before the window check, so every list outside the
+           rotation window was counted as a request nobody made: 65 held lists
+           reported 67 calls against 66 real ones. A count that includes work
+           that did not happen is not a measurement of anything. */
         if (!window.has(id)) continue
+        calls += 1
         const probed = await stillServedAt(session, CIRCLE_SERVICES.lists.name, file, { list: id }, device, agreed, ports.crypto, pay)
         if (probed === 'over-budget') return { verdict: 'over-budget', calls }
         if (probed === 'served') continue

@@ -137,20 +137,24 @@ const alicePerson = (over: Partial<PersonToFetch> = {}): PersonToFetch => ({
 function bob(over: Partial<FetchPorts> = {}) {
   const held = new Map<string, ForeignFile>()
   const spend = new Map<string, Spend>()
+  /* ⚠️ **THE FAKES ANSWER `true`, BECAUSE THE PORT NOW SAYS WHETHER IT WROTE.**
+     A double that resolved `undefined` was indistinguishable from a store that
+     REFUSED the write, which is exactly the distinction the contract was
+     widened to carry. */
   const keep = vi.fn((bookId: string, person: string, file: ForeignFile) => {
     held.set(`${bookId}/${person}`, file)
-    return Promise.resolve()
+    return Promise.resolve(true)
   })
   const spent = vi.fn((person: string, next: Spend) => {
     spend.set(person, next)
   })
   const keepShelf = vi.fn((person: string, file: ForeignFile) => {
     held.set(`shelf/${person}`, file)
-    return Promise.resolve()
+    return Promise.resolve(true)
   })
   const keepList = vi.fn((person: string, listId: string, file: ForeignFile) => {
     held.set(`list/${person}/${listId}`, file)
-    return Promise.resolve()
+    return Promise.resolve(true)
   })
   const ports: FetchPorts = {
     mine: () => Promise.resolve({ person: BOB.id }),
@@ -578,6 +582,24 @@ describe('who is asked, and who is not', () => {
     expect((await fetchRound(b.ports)).skipped).toEqual([{ person: ALICE.id, why: 'refused-hello' }])
   })
 
+  it('does NOT count a page the store refused to keep, and names why', async () => {
+    /* ⚠️ **A RESOLVED WRITE IS NOT A COMMITTED WRITE.** `keepForeign`'s
+       admission guard turns a refusal into a silent return — right, because a
+       person un-admitted mid-round must not have their pages kept — and every
+       caller read that silence as a page persisted. The round reported work it
+       had not done AND advanced its held cursor past bytes that are not on
+       disk, so those pages are never asked for again. */
+    const a = alice()
+    a.shareOne('x')
+    const b = bob({
+      dial: () => Promise.resolve(sessionTo(a.serving)),
+      keep: vi.fn(() => Promise.resolve(false)),
+    })
+    const report = await fetchRound(b.ports)
+    expect(report.accepted).toBe(0)
+    expect(report.refusedBecause).toMatchObject({ 'not-kept': 1 })
+  })
+
   it('counts an answer this build cannot read as a refusal and asks no further', async () => {
     let pagesCalls = 0
     const session: Dialled = {
@@ -592,6 +614,12 @@ describe('who is asked, and who is not', () => {
     const b = bob({ dial: () => Promise.resolve(session) })
     const report = await fetchRound(b.ports)
     expect(report.refusals).toBe(1)
+    /* ⚠️ **THE REASON, NOT ONLY THE COUNT.** This site incremented `refusals`
+       and left `refusedBecause` empty, so a round could report a refusal it
+       could not name — the exact state `refusedBecause` was added to end. It
+       was the one site missed, and it is the one reached when a peer answers in
+       a shape this build cannot read: where the reason matters most. */
+    expect(report.refusedBecause).toEqual({ 'unreadable-answer': 1 })
     expect(pagesCalls).toBe(1)
     expect(b.keep).not.toHaveBeenCalled()
   })
@@ -1041,15 +1069,15 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
           },
           keep: () => {
             keptAt.push(asked)
-            return Promise.resolve()
+            return Promise.resolve(true)
           },
           keepShelf: () => {
             keptAt.push(asked)
-            return Promise.resolve()
+            return Promise.resolve(true)
           },
           keepList: () => {
             keptAt.push(asked)
-            return Promise.resolve()
+            return Promise.resolve(true)
           },
         })
         const report = await fetchRound(b.ports)
@@ -1125,15 +1153,15 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
           },
           keep: () => {
             keptAt.push(asked)
-            return Promise.resolve()
+            return Promise.resolve(true)
           },
           keepShelf: () => {
             keptAt.push(asked)
-            return Promise.resolve()
+            return Promise.resolve(true)
           },
           keepList: () => {
             keptAt.push(asked)
-            return Promise.resolve()
+            return Promise.resolve(true)
           },
         })
         const report = await fetchRound(b.ports)
