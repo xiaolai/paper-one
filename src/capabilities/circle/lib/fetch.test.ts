@@ -122,6 +122,34 @@ function sessionTo(serving: Serving, answering = ALICE.id): Dialled & { readonly
   return session
 }
 
+/**
+ * A session's `call`, dispatched BY NAME — and refusing a service it was given
+ * no answer for.
+ *
+ * ⚠️ **"HELLO, ELSE THE BOOK'S PAGES" ANSWERS THREE QUESTIONS WITH ONE
+ * ANSWER.** A round asks `hello`, then the book's `pages`, then `shelf`, then
+ * `lists`; a fake that branches only on `hello` hands the shelf request and
+ * the lists request a book-page answer built from a body that has no `work` in
+ * it. What comes back is a refusal or a skip in the middle of a scenario about
+ * something else, counted into `report.calls` and `report.accepted` and
+ * attributed to whatever the test was actually measuring. `sessionTo` above
+ * always dispatched by name; the fakes written beside it did not, and five of
+ * them were wrong in this way.
+ *
+ * Throwing is the point. A fake that answers a service nobody meant to
+ * exercise looks exactly like a fake that is complete.
+ */
+function answering(answers: Readonly<Record<string, (body: unknown) => unknown>>): Dialled['call'] {
+  return (service, body) => {
+    const answer = answers[service]
+    if (answer === undefined) throw new Error(`this session was given no answer for ${service}`)
+    return Promise.resolve(answer(body))
+  }
+}
+
+/** Empty pages, the answer a service gives when a test is not about it. */
+const nothing = () => ({ pages: [], more: false })
+
 /* ONE device to dial by default: every device that answers is dialled, and
    with the phone mapped to the laptop's session every count below would
    double. The tests about a second device name it. */
@@ -133,27 +161,41 @@ const alicePerson = (over: Partial<PersonToFetch> = {}): PersonToFetch => ({
   ...over,
 })
 
-/** Bob's side: a store per `(book, person)`, a spend ledger, and the ports. */
-function bob(over: Partial<FetchPorts> = {}) {
-  const held = new Map<string, ForeignFile>()
+/**
+ * Bob's side: a store per `(book, person)`, a spend ledger, and the ports.
+ *
+ * `seed` is what a previous run left on disk — see `relaunch`.
+ */
+function bob(over: Partial<FetchPorts> = {}, seed?: ReadonlyMap<string, ForeignFile>) {
+  const held = new Map<string, ForeignFile>(seed ?? [])
   const spend = new Map<string, Spend>()
   /* ⚠️ **THE FAKES ANSWER `true`, BECAUSE THE PORT NOW SAYS WHETHER IT WROTE.**
      A double that resolved `undefined` was indistinguishable from a store that
      REFUSED the write, which is exactly the distinction the contract was
      widened to carry. */
-  const keep = vi.fn((bookId: string, person: string, file: ForeignFile) => {
+  /* ⚠️ **AND THEY TAKE THE EPOCH, WHICH THEY USED TO DROP.** Every keep port
+     is `(…, held, epoch)` and all three doubles stopped one argument short, so
+     no test could see which epoch a write carried — and `fetch.ts` deliberately
+     passes a RE-READ epoch on two of its paths rather than the one it started
+     the round with. A double that ignores an argument makes the two
+     indistinguishable. Recorded here, asserted below. */
+  const epochs: { readonly what: string; readonly epoch: number }[] = []
+  const keep = vi.fn((bookId: string, person: string, file: ForeignFile, epoch: number) => {
     held.set(`${bookId}/${person}`, file)
+    epochs.push({ what: `book/${bookId}`, epoch })
     return Promise.resolve(true)
   })
   const spent = vi.fn((person: string, next: Spend) => {
     spend.set(person, next)
   })
-  const keepShelf = vi.fn((person: string, file: ForeignFile) => {
+  const keepShelf = vi.fn((person: string, file: ForeignFile, epoch: number) => {
     held.set(`shelf/${person}`, file)
+    epochs.push({ what: 'shelf', epoch })
     return Promise.resolve(true)
   })
-  const keepList = vi.fn((person: string, listId: string, file: ForeignFile) => {
+  const keepList = vi.fn((person: string, listId: string, file: ForeignFile, epoch: number) => {
     held.set(`list/${person}/${listId}`, file)
+    epochs.push({ what: `list/${listId}`, epoch })
     return Promise.resolve(true)
   })
   const ports: FetchPorts = {
@@ -186,6 +228,7 @@ function bob(over: Partial<FetchPorts> = {}) {
     held,
     keep,
     keepShelf,
+    epochs,
     spent,
     spend,
     fromAlice: () => held.get(`${MOBY.id}/${ALICE.id}`) ?? NOTHING_SHARED,
@@ -194,6 +237,19 @@ function bob(over: Partial<FetchPorts> = {}) {
     listOfAlice: (listId: string) => held.get(`list/${ALICE.id}/${listId}`) ?? NOTHING_SHARED,
   }
 }
+
+/**
+ * A FRESH recipient, reading only what the last one wrote to disk.
+ *
+ * ⚠️ **THROUGH JSON, WHICH IS THE WHOLE POINT.** The "relaunch falsifier"
+ * below used to call `fetchRound` twice on one recipient holding one live
+ * `Map`, so it proved that fetching twice fetches nothing the second time —
+ * not that a relaunched app knows where it got to. A cursor that lived only in
+ * memory, or a field that does not survive `JSON.stringify`, would have passed
+ * it. Round-tripping the store is what makes the claim the name makes.
+ */
+const relaunch = (previous: ReturnType<typeof bob>, over: Partial<FetchPorts> = {}) =>
+  bob(over, new Map(JSON.parse(JSON.stringify([...previous.held])) as readonly (readonly [string, ForeignFile])[]))
 
 describe('a passage shared on A appears in B', () => {
   it('reaches B’s file in one round, with B having opened nothing', async () => {
@@ -232,22 +288,31 @@ describe('a passage shared on A appears in B', () => {
     await fetchRound(b.ports)
     expect(b.keep).toHaveBeenCalledTimes(1)
 
-    const again = await fetchRound(b.ports)
+    /* A DIFFERENT recipient, holding only what the first wrote to disk. */
+    const after = relaunch(b, { dial: () => Promise.resolve(sessionTo(a.serving)) })
+    const again = await fetchRound(after.ports)
     expect(again.accepted).toBe(0)
     /* One call for the book's log, one for the shelf, one for the lists — all answered empty. */
     expect(again.calls).toBe(3)
-    expect(b.keep).toHaveBeenCalledTimes(1)
-    /* An empty answer costs nothing and charges nothing: the ledger was
-       written once, by the round that fetched something. */
-    expect(b.spent).toHaveBeenCalledTimes(1)
+    expect(after.keep).not.toHaveBeenCalled()
+    /* An empty answer costs nothing and charges nothing. */
+    expect(after.spent).not.toHaveBeenCalled()
+    /* And the cursor it read is the one the first round left. */
+    expect(after.fromAlice().cursor[ALICE_LAPTOP.id]).toBe(b.fromAlice().cursor[ALICE_LAPTOP.id])
   })
 
-  it('records entries under the relationship epoch the port names', async () => {
+  it('records entries under the relationship epoch the port names, and HANDS that epoch to every keep', async () => {
+    /* ⚠️ **THE SECOND HALF IS WHAT THE DOUBLES USED TO SWALLOW.** Each keep
+       port is `(…, held, epoch)` and the fakes took one argument fewer, so the
+       epoch a write carried was invisible — a store that refuses on an epoch
+       mismatch would have refused everything with nothing here to say so. */
     const a = alice()
     a.shareOne('x')
     const b = bob({ dial: () => Promise.resolve(sessionTo(a.serving)), relationship: () => Promise.resolve({ state: 'admitted', epoch: 4, changedAt: hlcOf(1) }) })
     await fetchRound(b.ports)
     expect(b.fromAlice().entries[0]!.epoch).toBe(4)
+    expect(b.epochs.length).toBeGreaterThan(0)
+    expect(b.epochs.map((one) => one.epoch)).toEqual(b.epochs.map(() => 4))
   })
 
   it('keeps nothing and asks no further when every page in an answer is refused', async () => {
@@ -314,14 +379,18 @@ describe('a passage shared on A appears in B', () => {
     await fetchRound(bob({ dial: () => Promise.resolve(sessionTo(a.serving)) }).ports)
     a.shareOne('second')
     const onePageAtATime: Dialled = {
-      call: async (service, body) => {
-        if (service === CIRCLE_SERVICES.hello.name) return welcome(body, ALICE.id)
-        const asked = body as { work: Publisher['work']; since: Record<string, number> }
-        const held = a.files.get(MOBY.id) ?? NOTHING_PUBLISHED
-        const built = await pagesFor(held, a.publisher(asked.work), asked.since, workDigest, { maxPages: 1, budget: DEFAULT_BOUNDS.budget })
-        a.files.set(MOBY.id, built.held)
-        return { pages: built.pages, more: built.more }
-      },
+      call: answering({
+        [CIRCLE_SERVICES.hello.name]: (body) => welcome(body, ALICE.id),
+        [CIRCLE_SERVICES.pages.name]: async (body) => {
+          const asked = body as { work: Publisher['work']; since: Record<string, number> }
+          const held = a.files.get(MOBY.id) ?? NOTHING_PUBLISHED
+          const built = await pagesFor(held, a.publisher(asked.work), asked.since, workDigest, { maxPages: 1, budget: DEFAULT_BOUNDS.budget })
+          a.files.set(MOBY.id, built.held)
+          return { pages: built.pages, more: built.more }
+        },
+        [CIRCLE_SERVICES.shelf.name]: nothing,
+        [CIRCLE_SERVICES.lists.name]: nothing,
+      }),
       close: () => Promise.resolve(),
     }
     const fresh = bob({ dial: () => Promise.resolve(onePageAtATime) })
@@ -333,6 +402,11 @@ describe('a passage shared on A appears in B', () => {
     expect(report.calls).toBe(4)
     expect(fresh.keep).toHaveBeenCalledTimes(2)
     expect(fresh.fromAlice().entries.map((one) => one.passage.quote)).toEqual(['first', 'second'])
+    /* ⚠️ **AND NOTHING WAS REFUSED OR SKIPPED ALONG THE WAY.** A count of what
+       worked says nothing about what else happened beside it: the fake used to
+       answer the shelf and the lists requests with a book's pages, which are
+       refusals, and this test read `accepted: 2` over the top of them. */
+    expect({ refusals: report.refusals, skipped: report.skipped }).toEqual({ refusals: 0, skipped: [] })
   })
 
   it('stops following `more` after the per-log cap, and picks up the rest next round', async () => {
@@ -343,12 +417,16 @@ describe('a passage shared on A appears in B', () => {
       await fetchRound(bob({ dial: () => Promise.resolve(sessionTo(a.serving)) }).ports)
     }
     const onePageAtATime: Dialled = {
-      call: async (service, body) => {
-        if (service === CIRCLE_SERVICES.hello.name) return welcome(body, ALICE.id)
-        const asked = body as { work: Publisher['work']; since: Record<string, number> }
-        const built = await pagesFor(a.files.get(MOBY.id)!, a.publisher(asked.work), asked.since, workDigest, { maxPages: 1, budget: DEFAULT_BOUNDS.budget })
-        return { pages: built.pages, more: built.more }
-      },
+      call: answering({
+        [CIRCLE_SERVICES.hello.name]: (body) => welcome(body, ALICE.id),
+        [CIRCLE_SERVICES.pages.name]: async (body) => {
+          const asked = body as { work: Publisher['work']; since: Record<string, number> }
+          const built = await pagesFor(a.files.get(MOBY.id)!, a.publisher(asked.work), asked.since, workDigest, { maxPages: 1, budget: DEFAULT_BOUNDS.budget })
+          return { pages: built.pages, more: built.more }
+        },
+        [CIRCLE_SERVICES.shelf.name]: nothing,
+        [CIRCLE_SERVICES.lists.name]: nothing,
+      }),
       close: () => Promise.resolve(),
     }
     const fresh = bob({ dial: () => Promise.resolve(onePageAtATime) })
@@ -357,6 +435,7 @@ describe('a passage shared on A appears in B', () => {
     /* The cap on the log, plus the one shelf call and the one lists call after it. */
     expect(first.calls).toBe(MAX_ANSWERS_PER_LOG + 2)
     expect(first.accepted).toBe(MAX_ANSWERS_PER_LOG)
+    expect({ refusals: first.refusals, skipped: first.skipped }).toEqual({ refusals: 0, skipped: [] })
     expect(fresh.fromAlice().entries).toHaveLength(MAX_ANSWERS_PER_LOG)
 
     const second = await fetchRound(fresh.ports)
@@ -366,19 +445,28 @@ describe('a passage shared on A appears in B', () => {
 })
 
 describe('which chain is asked for — WI-23.B2', () => {
-  /** A session that records every pages request it is asked. */
+  /**
+   * A session that records every PAGES request it is asked — and only those.
+   *
+   * ⚠️ It recorded every non-hello body and answered all of them with
+   * `answerPages`, so the shelf request and the lists request landed in
+   * `asked` beside the ones the tests below reason about, and were served a
+   * book's pages for a body with no `work` in it.
+   */
   function recording(serving: Serving, pages: { min: number; max: number }) {
     const asked: Record<string, unknown>[] = []
     const session: Dialled = {
-      call: async (service, body) => {
-        if (service === CIRCLE_SERVICES.hello.name) {
-          /* A peer that speaks exactly `pages`: its welcome is what such a
-             build would send, agreed re-derived on this side. */
-          return { proto: 1, pages, person: ALICE.id, agreed: Math.min(pages.max, 2) }
-        }
-        asked.push(body as Record<string, unknown>)
-        return answerPages(body, serving)
-      },
+      call: answering({
+        /* A peer that speaks exactly `pages`: its welcome is what such a
+           build would send, agreed re-derived on this side. */
+        [CIRCLE_SERVICES.hello.name]: () => ({ proto: 1, pages, person: ALICE.id, agreed: Math.min(pages.max, 2) }),
+        [CIRCLE_SERVICES.pages.name]: (body) => {
+          asked.push(body as Record<string, unknown>)
+          return answerPages(body, serving)
+        },
+        [CIRCLE_SERVICES.shelf.name]: nothing,
+        [CIRCLE_SERVICES.lists.name]: nothing,
+      }),
       close: () => Promise.resolve(),
     }
     return { session, asked }
@@ -446,11 +534,17 @@ describe('the shelf, after the books — WI-23.C1/C3', () => {
     const asked: string[] = []
     return {
       asked,
-      call: async (service, body) => {
+      /* ⚠️ The `lists` request used to fall through to `answerShelf`, which
+         answers a body it was not asked about — one more page in a scenario
+         about the shelf, counted as if the shelf had sent it. */
+      call: (service, body) => {
         asked.push(service)
-        if (service === CIRCLE_SERVICES.hello.name) return welcome(body, ALICE.id)
-        if (service === CIRCLE_SERVICES.pages.name) return answerPages(body, serving)
-        return answerShelf(body, serving, discloses)
+        return answering({
+          [CIRCLE_SERVICES.hello.name]: (one) => welcome(one, ALICE.id),
+          [CIRCLE_SERVICES.pages.name]: (one) => answerPages(one, serving),
+          [CIRCLE_SERVICES.shelf.name]: (one) => answerShelf(one, serving, discloses),
+          [CIRCLE_SERVICES.lists.name]: nothing,
+        })(service, body)
       },
       close: () => Promise.resolve(),
     }
@@ -483,6 +577,21 @@ describe('the shelf, after the books — WI-23.C1/C3', () => {
     expect(b.shelfOfAlice().works.map((one) => one.work.title)).toEqual(['Dune'])
   })
 
+  it('does NOT count a SHELF page the store refused to keep, and names why', async () => {
+    /* The books' keep had this test and the shelf's did not, so the shelf's
+       refusal path — its `not-kept`, and the refusals it is appended to — had
+       no covering test at all. Same defect, one log along. */
+    const a = aliceWithShelf(['Moby-Dick'])
+    const b = bob({
+      dial: () => Promise.resolve(sessionWithShelf(a.serving)),
+      keepShelf: vi.fn(() => Promise.resolve(false)),
+    })
+    const report = await fetchRound(b.ports)
+    expect(report.accepted).toBe(0)
+    expect(report.refusedBecause).toMatchObject({ 'not-kept': 1 })
+    expect(b.shelfOfAlice().works).toEqual([])
+  })
+
   it('holds nothing for a person the switch is off for, and cannot tell that from an empty shelf', async () => {
     const a = aliceWithShelf(['Moby-Dick'])
     const b = bob({ dial: () => Promise.resolve(sessionWithShelf(a.serving, false)) })
@@ -495,15 +604,78 @@ describe('the shelf, after the books — WI-23.C1/C3', () => {
     const a = aliceWithShelf(['Moby-Dick'])
     const asked: string[] = []
     const v1: Dialled = {
-      call: async (service, body) => {
+      call: (service, body) => {
         asked.push(service)
-        if (service === CIRCLE_SERVICES.hello.name) return { proto: 1, pages: { min: 1, max: 1 }, person: ALICE.id, agreed: 1 }
-        return answerPages(body, a.serving)
+        /* A v1 peer HAS no shelf or lists service, so being asked for one is
+           the failure this test is about — it must not be answered quietly. */
+        return answering({
+          [CIRCLE_SERVICES.hello.name]: () => ({ proto: 1, pages: { min: 1, max: 1 }, person: ALICE.id, agreed: 1 }),
+          [CIRCLE_SERVICES.pages.name]: (one) => answerPages(one, a.serving),
+        })(service, body)
       },
       close: () => Promise.resolve(),
     }
     await fetchRound(bob({ dial: () => Promise.resolve(v1) }).ports)
     expect(asked).not.toContain(CIRCLE_SERVICES.shelf.name)
+  })
+})
+
+describe('a person’s round ends at the log that ended it — the books after it are not asked', () => {
+  const DUNE: BookLike = { id: 'book:dune', title: 'Dune', author: 'Frank Herbert', identifier: 'isbn:9780441013593', languages: ['en'] }
+
+  /** Alice sharing a passage from BOTH books, and a recipient holding both. */
+  const two = () => {
+    const a = alice()
+    a.shareOne('from Moby')
+    const serving: Serving = {
+      ...a.serving,
+      books: [MOBY, DUNE],
+      shared: (bookId) => Promise.resolve(a.files.get(bookId) ?? NOTHING_PUBLISHED),
+    }
+    a.files.set(DUNE.id, share(NOTHING_PUBLISHED, { markId: 'd1', passage: passage('from Dune'), device: ALICE_LAPTOP.id }, 'pubd1', stamp(9, ALICE_LAPTOP.id)).held)
+    return { a, serving }
+  }
+
+  it('asks for BOTH books when nothing ends the round', async () => {
+    /* The control. Without it, "the second book was not asked for" is also
+       true of a round that never asks for a second book at all — which is
+       what made `if (…) return done` indistinguishable from `if (true)`. */
+    const { serving } = two()
+    const b = bob({ dial: () => Promise.resolve(sessionTo(serving)), books: () => [MOBY, DUNE] })
+    const report = await fetchRound(b.ports)
+    expect(report.accepted).toBe(2)
+    expect(b.keep.mock.calls.map((call) => call[0])).toEqual([MOBY.id, DUNE.id])
+  })
+
+  it('stops at the first book that spends the budget, and does not ask for the next', async () => {
+    const { serving } = two()
+    const b = bob({ dial: () => Promise.resolve(sessionTo(serving)), books: () => [MOBY, DUNE], charge: () => false })
+    const report = await fetchRound(b.ports)
+    expect(report.skipped).toEqual([{ person: ALICE.id, why: 'over-budget' }])
+    expect(b.keep).not.toHaveBeenCalled()
+  })
+
+  it('stops at the first book the record stops admitting during, and does not ask for the next', async () => {
+    /* ⚠️ **AND THIS IS THE OTHER HALF OF THE `||`.** With only the budget case
+       above, `overBudget || stopped` could be `overBudget && stopped` and
+       nothing would notice: the two flags were never set apart. */
+    const { serving } = two()
+    let asked = 0
+    const b = bob({
+      dial: () => Promise.resolve(sessionTo(serving)),
+      books: () => [MOBY, DUNE],
+      relationship: () => {
+        asked += 1
+        /* Admitted when the round starts; blocked by the time the first
+           book's pages are in hand. */
+        return Promise.resolve(asked <= 1 ? { state: 'admitted', epoch: 1, changedAt: hlcOf(1) } : { state: 'blocked', epoch: 1, changedAt: hlcOf(2) })
+      },
+    })
+    const report = await fetchRound(b.ports)
+    expect(report.skipped).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
+    expect(b.keep).not.toHaveBeenCalled()
+    /* The second book was never asked for: the round ended at the first. */
+    expect(report.calls).toBe(1)
   })
 })
 
@@ -522,6 +694,10 @@ describe('who is asked, and who is not', () => {
       const b = bob({ relationship: () => Promise.resolve({ state, epoch: 1, changedAt: hlcOf(1) }), dial })
       const report = await fetchRound(b.ports)
       expect(report.skipped).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
+      /* ⚠️ **AND NOT COUNTED AS ASKED.** `asked` is "people asked, at least
+         the hello", and nobody was dialled — a skip that still counted the
+         person as asked would say the round reached somebody it never did. */
+      expect(report.asked).toBe(0)
     }
     expect(dial).not.toHaveBeenCalled()
     /* And a MUTED person is still fetched from — muting stops the drawing,
@@ -533,7 +709,10 @@ describe('who is asked, and who is not', () => {
   it('skips a person none of whose devices this side may dial', async () => {
     const dial = vi.fn(() => Promise.resolve(sessionTo(alice().serving)))
     const unknown = bob({ dialable: () => Promise.resolve(new Set<string>()), dial })
-    expect((await fetchRound(unknown.ports)).skipped).toEqual([{ person: ALICE.id, why: 'no-device' }])
+    const none = await fetchRound(unknown.ports)
+    expect(none.skipped).toEqual([{ person: ALICE.id, why: 'no-device' }])
+    /* Nobody dialled, so nobody asked — see the note in the test above. */
+    expect(none.asked).toBe(0)
     /* A person met and not yet heard from has no devices at all. */
     const unheard = bob({ people: () => Promise.resolve([alicePerson({ devices: [] })]), dial })
     expect((await fetchRound(unheard.ports)).skipped).toEqual([{ person: ALICE.id, why: 'no-device' }])
@@ -656,6 +835,27 @@ describe('who is asked, and who is not', () => {
     expect(report.refusedBecause).toEqual({ 'unreadable-answer': 1 })
     expect(pagesCalls).toBe(1)
     expect(b.keep).not.toHaveBeenCalled()
+  })
+
+  it('adds up one reason across the logs that gave it', async () => {
+    /* ⚠️ **THE TALLY IS MERGED PER LOG, AND NOTHING EVER GAVE TWO LOGS THE
+       SAME REASON.** Every test named a single refusal, so the fold that adds
+       the counts could subtract them instead and answer the same thing: one
+       log, one reason, one. Two logs answering unreadably is what tells the
+       two apart. */
+    const unreadable = () => ({ pages: 'not a list', more: false })
+    const session: Dialled = {
+      call: answering({
+        [CIRCLE_SERVICES.hello.name]: (body) => welcome(body, ALICE.id),
+        [CIRCLE_SERVICES.pages.name]: unreadable,
+        [CIRCLE_SERVICES.shelf.name]: unreadable,
+        [CIRCLE_SERVICES.lists.name]: unreadable,
+      }),
+      close: () => Promise.resolve(),
+    }
+    const report = await fetchRound(bob({ dial: () => Promise.resolve(session) }).ports)
+    expect(report.refusals).toBe(3)
+    expect(report.refusedBecause).toEqual({ 'unreadable-answer': 3 })
   })
 
   it('reports a person whose file will not read, with the reason, and still asks the others', async () => {
@@ -799,6 +999,14 @@ describe('the lists, after the shelf — WI-23.E1', () => {
     const b = bob({ dial: () => Promise.resolve(session) })
     const report = await fetchRound(b.ports)
     expect(report.refusals).toBe(2)
+    /* ⚠️ **NAMED, NOT COUNTED** — the reason is the whole point of the tally,
+       and `refusals: 2` says a round refused twice without saying whether the
+       protocol worked or broke. Both of these are `unparseable`: bytes that are
+       not JSON, and a shelf page whose work claim carries no list id — neither
+       can be filed under a list, which is what the reason means here. Two of
+       one reason in one answer is also the only thing that tells the tally's
+       accumulator from an assignment. */
+    expect(report.refusedBecause).toEqual({ unparseable: 2 })
     expect(listsCalls).toBe(1)
     expect(b.keepList).not.toHaveBeenCalled()
   })
@@ -1034,6 +1242,62 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
     expect(report.calls).toBe(5)
   })
 
+  it('drops only the silent device’s stream from a list two devices served, and keeps the rest', async () => {
+    /* ⚠️ **THE ONLY LIST THAT EVER WENT SILENT HELD NOTHING**, so what happens
+       to a list with rows in it when ONE of two devices stops serving was
+       never run: `withoutStream`'s filters had no covering test at all and its
+       row test could be replaced by `true` with the suite still green. That
+       is the row that decides whether a laptop going quiet takes the phone's
+       placements with it — the exact failure the function's own comment says
+       it exists to prevent.
+
+       Cursors from both devices, and three shelf rows: the laptop's, the
+       phone's, and one written before rows were stamped — which can be
+       nobody's but the device that served it, and goes with it. The list's
+       items always carry a stamp, so there are two of those. The laptop
+       answers nothing to the probe; the phone is never probed, holding no
+       page of its own here. */
+    const work = { title: 'A', author: 'B', language: 'en' }
+    /* A list item always carries its stamp — `ListItem` requires it — so the
+       row written before rows were stamped can only be a shelf row. */
+    const item = (pub: string, device: string) => ({ pub, work, position: 1, note: '', at: stamp(1, device), device, seq: 1 })
+    const held: ForeignFile = {
+      ...NOTHING_SHARED,
+      v: 3,
+      cursor: { [ALICE_LAPTOP.id]: 3, [ALICE_PHONE.id]: 2 },
+      heads: { [ALICE_LAPTOP.id]: pageCrypto.hash('aa-last'), [ALICE_PHONE.id]: pageCrypto.hash('phone-last') },
+      works: [
+        { pub: 'w-laptop', work, at: stamp(1, ALICE_LAPTOP.id), device: ALICE_LAPTOP.id, seq: 1 },
+        { pub: 'w-phone', work, at: stamp(1, ALICE_PHONE.id), device: ALICE_PHONE.id, seq: 1 },
+        { pub: 'w-old', work, at: stamp(1, ALICE_LAPTOP.id) },
+      ],
+      list: { created: true, deleted: false, items: [item('i-laptop', ALICE_LAPTOP.id), item('i-phone', ALICE_PHONE.id)], removed: [] },
+    }
+    const session: Dialled = {
+      call: answering({
+        [CIRCLE_SERVICES.hello.name]: (body) => welcome(body, ALICE.id),
+        [CIRCLE_SERVICES.pages.name]: nothing,
+        [CIRCLE_SERVICES.shelf.name]: nothing,
+        /* Nothing new, and nothing to the probe either: the laptop has stopped. */
+        [CIRCLE_SERVICES.lists.name]: nothing,
+      }),
+      close: () => Promise.resolve(),
+    }
+    const b = bob({ dial: () => Promise.resolve(session), heldLists: () => Promise.resolve(new Map([['aa11', held]])) })
+    await fetchRound(b.ports)
+
+    expect(b.keepList).toHaveBeenCalledTimes(1)
+    const written = b.keepList.mock.calls[0]![2]
+    /* The phone's stream stands — its cursor, its head and its rows. */
+    expect(written.cursor).toEqual({ [ALICE_PHONE.id]: 2 })
+    expect(Object.keys(written.heads)).toEqual([ALICE_PHONE.id])
+    expect(written.works.map((one) => one.pub)).toEqual(['w-phone'])
+    expect(written.list.items.map((one) => one.pub)).toEqual(['i-phone'])
+    /* And it is NOT emptied: a file with another device's stream in it must
+       not be answered with `NOTHING_SHARED`. */
+    expect(written).not.toEqual(NOTHING_SHARED)
+  })
+
   it('counts a forged list page as a refusal and keeps nothing', async () => {
     const a = alice()
     a.ownLists.set('aa11', createList(NOTHING_LISTED, 'L', { device: ALICE_LAPTOP.id, at: stamp(60, ALICE_LAPTOP.id) }))
@@ -1089,35 +1353,67 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
     expect(b.shelfOfAlice().works).toHaveLength(MAX_ANSWERS_PER_LOG + 2)
   })
 
-  describe('a record that moves to another epoch mid-round, at every point it is asked', () => {
-    for (const reads of [1, 2, 3, 4, 5, 6, 7, 8]) {
-      it(`writes nothing more once the record read for the ${reads}th time names a new epoch`, async () => {
-        const { session } = aliceShowing()
-        let asked = 0
-        const keptAt: number[] = []
-        const b = bob({
-          dial: () => Promise.resolve(session),
-          relationship: () => {
-            asked += 1
-            return Promise.resolve(asked <= reads ? { state: 'admitted', epoch: 1, changedAt: hlcOf(1) } : { state: 'admitted', epoch: 2, changedAt: hlcOf(2) })
-          },
-          keep: () => {
-            keptAt.push(asked)
-            return Promise.resolve(true)
-          },
-          keepShelf: () => {
-            keptAt.push(asked)
-            return Promise.resolve(true)
-          },
-          keepList: () => {
-            keptAt.push(asked)
-            return Promise.resolve(true)
-          },
-        })
-        const report = await fetchRound(b.ports)
-        expect(report.skipped.filter((one) => one.why === 'over-budget')).toEqual([])
-        expect(keptAt.every((at) => at <= reads)).toBe(true)
+  it('writes nothing more once the record names a new epoch — at every point it is asked', async () => {
+    /* ⚠️ **THIS WAS EIGHT ROWS AND AT MOST ONE OF THEM ASSERTED ANYTHING.**
+       MEASURED, by printing what each row actually saw:
+
+           threshold 1  record read 2x  writes []
+           threshold 2  record read 3x  writes []
+           threshold 3  record read 4x  writes [3]
+           threshold 4  record read 5x  writes [3]
+           threshold 5  record read 5x  writes [3, 5]
+           threshold 6  record read 5x  writes [3, 5]     <- and 7, and 8
+
+       A round reads the relationship FIVE times, so thresholds 5 to 8 never
+       reach the second answer at all: four rows named "moves to another epoch"
+       in which the epoch does not move. And the assertion was
+       `keptAt.every((at) => at <= reads)`, which is TRUE OF AN EMPTY LIST — so
+       thresholds 1 and 2, the two that suppressed everything, asserted nothing
+       either. Six of eight rows passed for a reason unrelated to the claim.
+
+       The count is measured here rather than written down, because five is a
+       property of the round's shape and will move when the round does. */
+    const run = async (changeAfter: number) => {
+      const { session } = aliceShowing()
+      let asked = 0
+      const keptAt: number[] = []
+      const note = () => {
+        keptAt.push(asked)
+        return Promise.resolve(true)
+      }
+      const b = bob({
+        dial: () => Promise.resolve(session),
+        relationship: () => {
+          asked += 1
+          return Promise.resolve(
+            asked <= changeAfter ? { state: 'admitted', epoch: 1, changedAt: hlcOf(1) } : { state: 'admitted', epoch: 2, changedAt: hlcOf(2) },
+          )
+        },
+        keep: note,
+        keepShelf: note,
+        keepList: note,
       })
+      const report = await fetchRound(b.ports)
+      expect(report.skipped.filter((one) => one.why === 'over-budget')).toEqual([])
+      return { asked, keptAt }
+    }
+
+    /* The control: the epoch never moves, so every write the round would make
+       is made. It also says how many times the record is read, which is what
+       bounds the thresholds worth testing. */
+    const stable = await run(Number.MAX_SAFE_INTEGER)
+    expect(stable.keptAt.length).toBeGreaterThan(1)
+
+    for (let reads = 1; reads < stable.asked; reads++) {
+      const seen = await run(reads)
+      /* The change was REACHED — the record was read once more than the
+         threshold. This is what the four dead rows failed. */
+      expect(seen.asked, `threshold ${reads}`).toBeGreaterThan(reads)
+      /* Exactly the control's writes from before the change, and no others. */
+      expect(seen.keptAt, `threshold ${reads}`).toEqual(stable.keptAt.filter((at) => at <= reads))
+      /* And something WAS stopped. Without this an implementation that never
+         writes at all passes every threshold. */
+      expect(seen.keptAt.length, `threshold ${reads}`).toBeLessThan(stable.keptAt.length)
     }
   })
 
@@ -1152,58 +1448,108 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
   })
 
   describe('a shelf gone from the wire while the record stops admitting', () => {
-    it('drops nothing on this disk once the record no longer admits', async () => {
-      const { state, session } = aliceShowing()
+    it('drops nothing on this disk once the record no longer admits — with the probe really made', async () => {
+      /* ⚠️ **THE THRESHOLD WAS FIXED AT FOUR AND A ROUND READS THE RECORD
+         FIVE TIMES**, so the record went blocked INSIDE the first round and
+         the second round stopped at its opening read. The probe this test is
+         named for never happened: MEASURED, the second round made one
+         relationship read and no `circle.shelf` call at all. Everything the
+         test asserted afterwards was true of a round that did nothing.
+
+         Blocked one read INTO the second round now, computed from what the
+         first round actually used — and the probe is asserted to have been
+         made, so a threshold that lands in the wrong place fails here rather
+         than passing quietly. */
+      const { state, session, calls } = aliceShowing()
       let asked = 0
+      let blockFrom = Number.MAX_SAFE_INTEGER
       const b = bob({
         dial: () => Promise.resolve(session),
         relationship: () => {
           asked += 1
-          /* Admitted through the first round; then the record goes blocked as the second round probes. */
-          return Promise.resolve(asked <= 4 ? { state: 'admitted', epoch: 1, changedAt: hlcOf(1) } : { state: 'blocked', epoch: 1, changedAt: hlcOf(2) })
+          return Promise.resolve(
+            asked < blockFrom ? { state: 'admitted', epoch: 1, changedAt: hlcOf(1) } : { state: 'blocked', epoch: 1, changedAt: hlcOf(2) },
+          )
         },
       })
       await fetchRound(b.ports)
       expect(b.shelfOfAlice().works).toHaveLength(1)
+
       state.shown = false
+      blockFrom = asked + 2
       const keeps = b.keepShelf.mock.calls.length
-      await fetchRound(b.ports)
+      const shelfAsks = calls.filter((one) => one === CIRCLE_SERVICES.shelf.name).length
+      const before = calls.length
+      const second = await fetchRound(b.ports)
+
+      /* ⚠️ The probe was made — the shelf was asked TWICE in the second round,
+         once for its pages and once to ask whether the work is really gone. */
+      expect(calls.filter((one) => one === CIRCLE_SERVICES.shelf.name).length).toBeGreaterThan(shelfAsks + 1)
+      /* And nothing was written, because by then the record no longer admits. */
       expect(b.keepShelf.mock.calls.length).toBe(keeps)
       expect(b.shelfOfAlice().works).toHaveLength(1)
+      /* ⚠️ **AND THE ROUND SAYS SO.** Without this the probe's own verdict is
+         unread: `stopped` could be reported as `served` and the only visible
+         difference would be a write that does not happen for a second reason.
+         The person is skipped, and named `not-admitted`. */
+      expect(second.skipped).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
+      /* ⚠️ **AND THE ROUND ENDED THERE — THE LISTS WERE NEVER ASKED.** The
+         skip alone does not say which log ended it: the lists' own probe would
+         report the same thing one phase later, so a shelf probe that answered
+         "still served" when the record had stopped would look identical from
+         the report. The phase after it not running is what tells them apart. */
+      expect(calls.slice(before)).not.toContain(CIRCLE_SERVICES.lists.name)
     })
   })
 
-  describe('a record that stops admitting mid-round, at every point it is asked', () => {
-    for (const reads of [1, 2, 3, 4, 5, 6, 7, 8]) {
-      it(`writes nothing more once the record read for the ${reads}th time no longer admits, and never calls it a budget`, async () => {
-        const { session } = aliceShowing()
-        let asked = 0
-        const keptAt: number[] = []
-        const b = bob({
-          dial: () => Promise.resolve(session),
-          relationship: () => {
-            asked += 1
-            return Promise.resolve(asked <= reads ? { state: 'admitted', epoch: 1, changedAt: hlcOf(1) } : { state: 'blocked', epoch: 1, changedAt: hlcOf(2) })
-          },
-          keep: () => {
-            keptAt.push(asked)
-            return Promise.resolve(true)
-          },
-          keepShelf: () => {
-            keptAt.push(asked)
-            return Promise.resolve(true)
-          },
-          keepList: () => {
-            keptAt.push(asked)
-            return Promise.resolve(true)
-          },
-        })
-        const report = await fetchRound(b.ports)
-        expect(report.skipped.filter((one) => one.why === 'over-budget')).toEqual([])
-        expect(Number.isInteger(report.calls) && Number.isInteger(report.accepted) && Number.isInteger(report.refusals)).toBe(true)
-        /* Every write happened while the record still admitted. */
-        expect(keptAt.every((at) => at <= reads)).toBe(true)
+  it('writes nothing more once the record no longer admits — at every point it is asked, and never calls it a budget', async () => {
+    /* ⚠️ **THE SAME EIGHT ROWS, WITH THE SAME TWO WAYS OF PASSING FOR
+       NOTHING** — see the epoch test above, which measured them: a round reads
+       the record five times, so thresholds 5 to 8 never reach the blocked
+       answer, and `keptAt.every(...)` is true of the empty list the first two
+       thresholds produce. It also asserted that three counts were integers,
+       which is true of every report this function can return.
+
+       Measured against a control run in which the record keeps admitting, so
+       every threshold has to show BOTH that the block was reached and that it
+       stopped a write that would otherwise have happened. */
+    const run = async (blockFrom: number) => {
+      const { session } = aliceShowing()
+      let asked = 0
+      const keptAt: number[] = []
+      const note = () => {
+        keptAt.push(asked)
+        return Promise.resolve(true)
+      }
+      const b = bob({
+        dial: () => Promise.resolve(session),
+        relationship: () => {
+          asked += 1
+          return Promise.resolve(
+            asked <= blockFrom ? { state: 'admitted', epoch: 1, changedAt: hlcOf(1) } : { state: 'blocked', epoch: 1, changedAt: hlcOf(2) },
+          )
+        },
+        keep: note,
+        keepShelf: note,
+        keepList: note,
       })
+      const report = await fetchRound(b.ports)
+      /* ⚠️ A record that stopped admitting is never reported as a budget: the
+         two are different refusals and telling a reader the wrong one sends
+         them to look at a spend window that is fine. */
+      expect(report.skipped.filter((one) => one.why === 'over-budget')).toEqual([])
+      expect(report.accepted).toBeLessThanOrEqual(report.calls)
+      return { asked, keptAt }
+    }
+
+    const stable = await run(Number.MAX_SAFE_INTEGER)
+    expect(stable.keptAt.length).toBeGreaterThan(1)
+
+    for (let reads = 1; reads < stable.asked; reads++) {
+      const seen = await run(reads)
+      expect(seen.asked, `threshold ${reads}`).toBeGreaterThan(reads)
+      expect(seen.keptAt, `threshold ${reads}`).toEqual(stable.keptAt.filter((at) => at <= reads))
+      expect(seen.keptAt.length, `threshold ${reads}`).toBeLessThan(stable.keptAt.length)
     }
   })
 
@@ -1679,9 +2025,17 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
           return Promise.resolve(probes >= 1 ? BLOCKED : ADMITTED)
         },
       })
-      await fetchRound(c.ports)
+      const report = await fetchRound(c.ports)
       /* The one that went away under a person who was blocked at the probe is not written; the other, probed while still admitted, is. */
       expect(service === CIRCLE_SERVICES.shelf.name ? c.keepShelf : c.keepList).not.toHaveBeenCalled()
+      /* ⚠️ **AND THE PROBE'S VERDICT IS READ.** A write that does not happen
+         is the same picture whether the probe said "stopped" or said nothing
+         at all — so the reason has to be asserted too, or the verdict could be
+         any word and this would still pass. `calls` is checked because a
+         verdict object missing its count makes the round's total `NaN`, which
+         no other assertion here would notice. */
+      expect(report.skipped, service).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
+      expect(Number.isInteger(report.calls), service).toBe(true)
     }
   })
 
@@ -1772,6 +2126,180 @@ describe('every device of a person is asked — a device serves only its own str
 })
 
 describe('a lists request names at most what the peer’s parser reads', () => {
+  it('puts aside a page for a held list the window left out, and takes it when the window comes round', async () => {
+    /* ⚠️ **THE WINDOW'S FILTER HAD NO TEST THAT COULD FAIL.** A held list
+       outside the rotation is served from its START, and the start of a chain
+       this side already holds the head of can only be refused as a gap — so
+       such a page is put aside until the list's turn. The end-to-end test
+       beside this one never got a page for the excluded list into an answer at
+       all, so deleting the filter changed nothing it measured.
+
+       Alice owns exactly ONE list, so whatever she answers is that list's — and
+       Bob holds enough lists that it can be placed inside or outside his window
+       just by moving his clock. The same answer, taken or set aside. */
+    const by = (n: number) => ({ device: ALICE_LAPTOP.id, at: stamp(n, ALICE_LAPTOP.id) })
+    const ids = Array.from({ length: MAX_LISTS_PER_REQUEST + 2 }, (_, i) => i.toString(16).padStart(4, '0'))
+    const outside = ids.find((id) => !new Set(listWindowOf(ids, NOW)).has(id))!
+    const a = alice()
+    a.ownLists.set(outside, placeOnList(createList(NOTHING_LISTED, 'L', by(60)), { pub: 'i1', work: { title: 'T', author: 'A', language: 'en' }, position: 1, note: '' }, by(61)))
+    const session = (): Dialled => ({
+      call: answering({
+        [CIRCLE_SERVICES.hello.name]: (body) => welcome(body, ALICE.id),
+        [CIRCLE_SERVICES.pages.name]: (body) => answerPages(body, a.serving),
+        [CIRCLE_SERVICES.shelf.name]: nothing,
+        [CIRCLE_SERVICES.lists.name]: (body) => answerLists(body, a.serving, true),
+      }),
+      close: () => Promise.resolve(),
+    })
+    /* Held with a page already taken, so the list has a chain this side and
+       the peer's answer from the start is the one that must be set aside. */
+    const held = () => new Map(ids.map((id) => [id, { ...NOTHING_SHARED, v: 3 }] as const))
+
+    const out = bob({ dial: () => Promise.resolve(session()), heldLists: () => Promise.resolve(held()) })
+    await fetchRound(out.ports)
+    expect(out.keepList.mock.calls.map((call) => call[1] as string)).not.toContain(outside)
+
+    /* The same answer at a clock where the window HAS come round to it. */
+    const turn = ids.findIndex((id) => id === outside)
+    const at = Array.from({ length: ids.length }, (_, tick) => NOW + tick * LIST_WINDOW_ROTATES_MS).find((when) =>
+      new Set(listWindowOf(ids, when)).has(outside),
+    )!
+    const inside = bob({ dial: () => Promise.resolve(session()), heldLists: () => Promise.resolve(held()), now: () => at })
+    await fetchRound(inside.ports)
+    expect(inside.keepList.mock.calls.map((call) => call[1] as string), `turn ${turn}`).toContain(outside)
+  })
+
+  it('does not probe a shelf it holds nothing of, however far its cursor has come', async () => {
+    /* ⚠️ **TWO REASONS NOT TO PROBE, AND ONLY ONE HAD A TEST.** The probe is
+       skipped when nothing is held from this device — no cursor — and also
+       when nothing is held AT ALL. The second was never run: a shelf file with
+       a cursor and no works would have been probed, costing a call and a page
+       to ask whether an empty shelf is still empty. */
+    const asked: string[] = []
+    const session: Dialled = {
+      call: (service, body) => {
+        asked.push(service)
+        return answering({
+          [CIRCLE_SERVICES.hello.name]: (one) => welcome(one, ALICE.id),
+          [CIRCLE_SERVICES.pages.name]: nothing,
+          [CIRCLE_SERVICES.shelf.name]: nothing,
+          [CIRCLE_SERVICES.lists.name]: nothing,
+        })(service, body)
+      },
+      close: () => Promise.resolve(),
+    }
+    const b = bob({
+      dial: () => Promise.resolve(session),
+      /* A cursor from the dialled device, and no works. */
+      heldShelf: () => Promise.resolve({ ...NOTHING_SHARED, v: 3, cursor: { [ALICE_LAPTOP.id]: 4 }, heads: { [ALICE_LAPTOP.id]: pageCrypto.hash('x') } }),
+    })
+    const report = await fetchRound(b.ports)
+    expect(asked.filter((one) => one === CIRCLE_SERVICES.shelf.name)).toHaveLength(1)
+    expect(b.keepShelf).not.toHaveBeenCalled()
+    expect(report.skipped).toEqual([])
+  })
+
+  it('ends the round at the record, not at the pages, when a refused answer arrives after a block', async () => {
+    /* ⚠️ **THE RECORD IS RE-READ BEFORE THE PAGES ARE TAKEN, AND THAT CHECK
+       HAD NO TEST OF ITS OWN.** Every case that reached it also had the take's
+       own inner check refuse — same answer, one step later — so the outer one
+       could be deleted with nothing failing. A REFUSED page is what separates
+       them: the take returns its refusals without ever asking the record, so
+       only the outer check can end the round. */
+    const a = alice()
+    a.shareOne('x')
+    const forging: Serving = {
+      ...a.serving,
+      publisher: (work) =>
+        Promise.resolve({
+          ...a.publisher(work),
+          sign: (message) => Promise.resolve(bytesToHex(sign(utf8ToBytes(message), ALICE_PHONE.secret))),
+        }),
+    }
+    let asked = 0
+    const b = bob({
+      dial: () => Promise.resolve(sessionTo(forging)),
+      relationship: () => {
+        asked += 1
+        /* Admitted when the round starts; blocked by the time the answer is in hand. */
+        return Promise.resolve(asked <= 1 ? { state: 'admitted', epoch: 1, changedAt: hlcOf(1) } : { state: 'blocked', epoch: 1, changedAt: hlcOf(2) })
+      },
+    })
+    const report = await fetchRound(b.ports)
+    expect(report.skipped).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
+    /* The pages were never judged, so nothing was counted for or against them. */
+    expect(report.refusals).toBe(0)
+    expect(report.refusedBecause).toEqual({})
+    expect(b.keep).not.toHaveBeenCalled()
+  })
+
+  it('ends the round when only the roster EPOCH moved, the devices standing as they were', async () => {
+    /* ⚠️ **THE EPOCH CLAUSE WAS NEVER THE ONE THAT DECIDED.** Every roster test
+       changed the devices or the revocations too, so the check could have been
+       written without its first clause and answered the same. An epoch that
+       moved on its own is a roster this side has not seen — the devices happen
+       to match, and that is a coincidence, not a reason to trust it. */
+    const a = alice()
+    a.shareOne('x')
+    let asked = 0
+    const b = bob({
+      dial: () => Promise.resolve(sessionTo(a.serving)),
+      people: () => {
+        asked += 1
+        return Promise.resolve([alicePerson(asked >= 2 ? { roster: { epoch: 7 } } : {})])
+      },
+    })
+    const report = await fetchRound(b.ports)
+    expect(report.skipped).toEqual([{ person: ALICE.id, why: 'not-admitted' }])
+    expect(b.keep).not.toHaveBeenCalled()
+  })
+
+  it('probes only the held lists the window names', async () => {
+    /* ⚠️ The probe's own window check. A list outside the rotation is not
+       asked about either — asking would cost a call and a page for a list this
+       round is not taking from anyway. Two held lists with a cursor, one in
+       the window and one out: exactly one probe. */
+    const ids = Array.from({ length: MAX_LISTS_PER_REQUEST + 2 }, (_, i) => i.toString(16).padStart(4, '0'))
+    /* ⚠️ The window is taken over what is HELD, so two held lists are always
+       both inside it — the bound has to be crossed by the held map itself. */
+    const window = new Set(listWindowOf(ids, NOW))
+    const outside = ids.filter((id) => !window.has(id))
+    expect(outside).toHaveLength(2)
+    const withCursor = (head: string) => ({
+      ...NOTHING_SHARED,
+      v: 3,
+      cursor: { [ALICE_LAPTOP.id]: 2 },
+      heads: { [ALICE_LAPTOP.id]: pageCrypto.hash(head) },
+      list: { created: true, deleted: false, items: [], removed: [] },
+    })
+    const asked: Record<string, unknown>[] = []
+    const session: Dialled = {
+      call: answering({
+        [CIRCLE_SERVICES.hello.name]: (body) => welcome(body, ALICE.id),
+        [CIRCLE_SERVICES.pages.name]: nothing,
+        [CIRCLE_SERVICES.shelf.name]: nothing,
+        [CIRCLE_SERVICES.lists.name]: (body) => {
+          asked.push(body as Record<string, unknown>)
+          return nothing()
+        },
+      }),
+      close: () => Promise.resolve(),
+    }
+    const b = bob({
+      dial: () => Promise.resolve(session),
+      heldLists: () => Promise.resolve(new Map(ids.map((id) => [id, withCursor(`${id}-last`)] as const))),
+    })
+    const report = await fetchRound(b.ports)
+    /* The round's own ask, then one probe per WINDOWED list — not per held
+       list. Without the check the two outside it are probed as well, which is
+       two calls and two pages paid for a list the round is not taking from. */
+    expect(asked).toHaveLength(1 + MAX_LISTS_PER_REQUEST)
+    const probed = asked.slice(1).flatMap((one) => Object.keys((one as { since: Record<string, unknown> }).since))
+    expect(probed.sort()).toEqual([...window].sort())
+    expect(probed).not.toContain(outside[0])
+    expect(report.skipped).toEqual([])
+  })
+
   it('names the first MAX_LISTS_PER_REQUEST held lists by id, and asks the rest from their start', async () => {
     /* Sixty-five held lists made every lists request invalid, and list
        synchronisation stopped for good. */
@@ -1844,6 +2372,41 @@ describe('a lists request names at most what the peer’s parser reads', () => {
     expect(named.size).toBe(ids.length)
     /* Within the bound, every list, every time. */
     expect(listWindowOf(ids.slice(0, MAX_LISTS_PER_REQUEST), NOW)).toEqual([...ids.slice(0, MAX_LISTS_PER_REQUEST)].sort())
+  })
+
+  it('sorts what it is given, starts where the clock says, and names nothing twice', () => {
+    /* ⚠️ **THE ROTATION WAS ASSERTED ONLY AS "NOT THE SAME WINDOW".** That is
+       true of a great many wrong windows: the ids were generated already in
+       order so the sort could be deleted, and the start was never pinned to a
+       clock, so dividing by the cadence could become multiplying by it. */
+    const ids = Array.from({ length: MAX_LISTS_PER_REQUEST + 10 }, (_, i) => i.toString(16).padStart(4, '0'))
+    const sorted = [...ids].sort()
+
+    /* Held in any order, named in one. */
+    expect(listWindowOf([...ids].reverse(), 0)).toEqual(listWindowOf(ids, 0))
+    expect(listWindowOf([...ids].reverse(), 0)[0]).toBe(sorted[0])
+
+    /* At the epoch the window is the head of the list; one cadence on it
+       starts exactly one window further in. */
+    expect(listWindowOf(ids, 0)).toEqual(sorted.slice(0, MAX_LISTS_PER_REQUEST))
+    expect(listWindowOf(ids, LIST_WINDOW_ROTATES_MS)[0]).toBe(sorted[MAX_LISTS_PER_REQUEST % sorted.length])
+    /* And a moment before the next cadence is still the same window. */
+    expect(listWindowOf(ids, LIST_WINDOW_ROTATES_MS - 1)).toEqual(listWindowOf(ids, 0))
+
+    /* Every window is the bound's worth of DISTINCT lists, wrap included —
+       a wrap that re-read the head would name one list twice and leave
+       another unnamed for ever. */
+    for (let tick = 0; tick < sorted.length; tick++) {
+      const window = listWindowOf(ids, tick * LIST_WINDOW_ROTATES_MS)
+      expect(window, `tick ${tick}`).toHaveLength(MAX_LISTS_PER_REQUEST)
+      expect(new Set(window).size, `tick ${tick}`).toBe(MAX_LISTS_PER_REQUEST)
+    }
+
+    /* Fewer than the bound: every list, and STILL in sorted order — the early
+       return is what keeps the order, and without it a rotation would answer
+       the same ids beginning somewhere else. */
+    const few = ['c', 'a', 'b']
+    expect(listWindowOf(few, LIST_WINDOW_ROTATES_MS)).toEqual(['a', 'b', 'c'])
   })
 })
 
