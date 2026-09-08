@@ -1,7 +1,7 @@
 import { getPublicKey, hashes, sign } from '@noble/ed25519'
 import { sha512 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { MAX_CLAIM_DIGESTS, SHELF_WORK, WIRE_VERSION, canonicalJson, makeHlc, type Entry, type Hlc, type Passage, type WorkClaim } from '../../../kernel'
 import { pageCrypto } from './crypto'
 import { delegationBytes, takePages, type Ledger, type SignedDelegation } from './receive'
@@ -67,13 +67,13 @@ const passage = (quote: string): Passage => ({
 })
 
 /** A delegation the person really signed, for `device`. */
-function delegationFor(device: string): string {
+function delegationFor(device: string, roster = 0): string {
   const body = {
     person: PERSON.id,
     device,
     notBefore: NOW - 1_000,
     notAfter: NOW + 1_000_000,
-    roster: 0,
+    roster,
   }
   const sig = bytesToHex(
     sign(utf8ToBytes(delegationBytes({ ...body, sig: '' } as SignedDelegation)), PERSON.secret),
@@ -514,6 +514,290 @@ const queueOf = (keys: string[] = []): WriteQueue => ({
 const LANE: LaneFor = (bookId) => `book:${bookId}`
 const BOOK = 'book:moby'
 
+describe('a request that is already caught up', () => {
+  it('signs NOTHING to say there is nothing new', async () => {
+    /* ⚠️ **IT SIGNED THE WHOLE CHAIN TO ANSWER AN EMPTY REQUEST.** The walk
+       starts at the first page because `prevPageHash` links every page a device
+       ever emitted — right when a page is going out, and there is none here. A
+       reader polling every five minutes re-signed their entire history each
+       time: one key operation per sealed page, per poll, for ever. */
+    let held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('one'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    held = share(held, { markId: 'm2', passage: passage('two'), device: DEVICE.id }, 'p2', stamp(2, DEVICE.id)).held
+    const sealed = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+    expect(sealed.pages.length).toBeGreaterThan(0)
+
+    const signer = publisher()
+    const signs = vi.spyOn(signer, 'sign')
+    const caught = await pagesFor(sealed.held, signer, { [DEVICE.id]: 99 }, pageCrypto.hash)
+    expect(caught.pages).toEqual([])
+    expect(signs).not.toHaveBeenCalled()
+    /* ⚠️ **AND IT CARRIES THE SEALED LIST BACK.** The short-circuit returns
+       early, and returning `sealed: []` from it would erase every boundary the
+       store holds on the next write — the whole chain, on a poll that answered
+       nothing. Nothing read the field. */
+    expect(caught.held.sealed).toEqual(sealed.held.sealed)
+  })
+
+  it('asks from EXACTLY the last sequence sealed and is still told nothing', async () => {
+    /* ⚠️ **`> wanted`, NOT `>= wanted`, AND ONLY A CURSOR AT THE EDGE SAYS SO.**
+       The test above asks from 99, far past everything, where the two agree. A
+       reader whose cursor is exactly the last `to` has already been served that
+       page: answering it again re-signs the chain to re-send bytes they hold. */
+    let held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('one'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    held = share(held, { markId: 'm2', passage: passage('two'), device: DEVICE.id }, 'p2', stamp(2, DEVICE.id)).held
+    const sealed = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+    const last = Math.max(...sealed.held.sealed.map((one) => one.to))
+
+    const signer = publisher()
+    const signs = vi.spyOn(signer, 'sign')
+    const atEdge = await pagesFor(sealed.held, signer, { [DEVICE.id]: last }, pageCrypto.hash)
+    expect(atEdge.pages).toEqual([])
+    expect(signs).not.toHaveBeenCalled()
+    /* And one before it IS served, so the edge is the edge and not a refusal
+       of everything. */
+    const before = await pagesFor(sealed.held, publisher(), { [DEVICE.id]: last - 1 }, pageCrypto.hash)
+    expect(before.pages.length).toBeGreaterThan(0)
+  })
+})
+
+describe('a boundary the reader would refuse for its SPAN', () => {
+  it('is cut before the span reaches the limit', async () => {
+    /* ⚠️ **THE WRITER BOUNDED SIZE AND COUNT AND NOT THE RANGE.**
+       `isSealedPage` refuses a boundary whose `to - from` reaches
+       `MAX_BOUNDARY_SPAN` — and a page's entries need not be contiguous, since
+       filtering out another chain's leaves the survivors sparse. Two entries a
+       million sequences apart therefore sealed a boundary this build's own
+       reader rejects, and the store then failed its next read. */
+    let held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('near'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    /* A second publication far past the span, as a sparse log produces. */
+    const far = held.publications[0]!.seq + MAX_BOUNDARY_SPAN + 5
+    held = { ...held, publications: [...held.publications, { ...held.publications[0]!, markId: 'm2', pub: 'p2', seq: far }] }
+
+    const out = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+    for (const boundary of out.held.sealed) {
+      expect(boundary.to - boundary.from).toBeLessThan(MAX_BOUNDARY_SPAN)
+      /* And every sealed boundary is one this build would read back. */
+      expect(isSealedPage(boundary)).toBe(true)
+    }
+    /* ⚠️ **AND NOTHING WAS LOST IN THE CUTTING.** A splitter that dropped the
+       run it had just closed would satisfy every assertion above — the
+       boundaries it did keep are all within the span — and silently never
+       serve one of the two publications. */
+    expect(out.held.sealed.flatMap((one) => [one.from, one.to])).toContain(far)
+  })
+
+  it('cuts at EXACTLY the span, because that is the value the reader refuses', async () => {
+    /* ⚠️ **THE LIMIT IS `>=`, AND ONLY A FIXTURE AT THE LIMIT SAYS SO.** The
+       test above sits five past it, where `>` and `>=` agree. `isSealedPage`
+       refuses a boundary whose `to - from` REACHES `MAX_BOUNDARY_SPAN`, so a
+       pair exactly that far apart must be two boundaries — one apart, one
+       boundary. */
+    const atSpan = async (gap: number) => {
+      let held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('near'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+      const far = held.publications[0]!.seq + gap
+      held = { ...held, publications: [...held.publications, { ...held.publications[0]!, markId: 'm2', pub: 'p2', seq: far }] }
+      const out = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+      for (const boundary of out.held.sealed) expect(isSealedPage(boundary), `gap ${gap}`).toBe(true)
+      return out.held.sealed.length
+    }
+    expect(await atSpan(MAX_BOUNDARY_SPAN)).toBe(2)
+    expect(await atSpan(MAX_BOUNDARY_SPAN - 1)).toBe(1)
+  })
+})
+
+describe('a sealed page that lost an entry', () => {
+  it('is refused rather than re-sent as a different page', async () => {
+    /* ⚠️ **THE REBUILD WOULD HAVE SUCCEEDED AND BROKEN EVERY CHAIN.** A store
+       that loses an entry inside a sealed page — a hand-edited file, a future
+       migration dropping a row — rebuilds `[1,2,3]` as `[1,3]`, and that page
+       PASSES `checkPage`, because gaps are legal: version filtering makes
+       legitimate ones. So it goes out signed and canonical with different
+       contents, a different hash, and a different `prevPageHash` for every
+       page after it. Every recipient's chain broken, from a store that read
+       cleanly. */
+    let held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('one'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    held = share(held, { markId: 'm2', passage: passage('two'), device: DEVICE.id }, 'p2', stamp(2, DEVICE.id)).held
+    held = share(held, { markId: 'm3', passage: passage('three'), device: DEVICE.id }, 'p3', stamp(3, DEVICE.id)).held
+    const sealed = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+    expect(sealed.held.sealed[0]).toMatchObject({ entries: 3 })
+
+    /* The middle publication vanishes from the store, its boundary untouched. */
+    const lost: SharedFile = { ...sealed.held, publications: sealed.held.publications.filter((row) => row.pub !== 'p2') }
+    await expect(pagesFor(lost, publisher(), {}, pageCrypto.hash)).rejects.toThrow(/refusing to re-send it as a different page/u)
+  })
+
+  it('serves a boundary sealed before the count was recorded, as it always did', async () => {
+    /* The count is absent on older stores; they cannot be checked and must not
+       be refused for it. */
+    const held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    const legacyBoundary: SharedFile = { ...held, sealed: [{ device: DEVICE.id, from: 1, to: 1, v: WIRE_VERSION }] }
+    await expect(pagesFor(legacyBoundary, publisher(), {}, pageCrypto.hash)).resolves.toBeDefined()
+  })
+})
+
+describe('a legacy boundary is pinned the first time it is served', () => {
+  it('reproduces the same bytes after the roster changes', async () => {
+    /* ⚠️ **IT REBUILT FROM LIVE STATE EVERY TIME.** A boundary sealed before
+       roster, revocations and claim were recorded falls back to the
+       publisher's CURRENT values — so pairing a new device, or revoking one,
+       changed the bytes of pages already sent. Every recipient holding the old
+       page then refuses the next one with `chain`, for ever, with nothing
+       anywhere saying why.
+
+       The fallback is what makes an old store readable at all. What was
+       missing is that the values it picks are written down, so the SECOND
+       serve cannot differ from the first. */
+    const held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    /* A boundary as an older build wrote one: no roster, no revocations, no work. */
+    const legacy: SharedFile = { ...held, sealed: [{ device: DEVICE.id, from: 1, to: 1, v: WIRE_VERSION }] }
+
+    const first = await pagesFor(legacy, publisher(), {}, pageCrypto.hash)
+    /* Served once, the boundary now carries what it was rendered with. */
+    const laterRoster = { ...publisher(), roster: [...publisher().roster, 'ff'.repeat(32)], revocations: 3 }
+    const second = await pagesFor(first.held, laterRoster, {}, pageCrypto.hash)
+    expect(second.pages[0]).toBe(first.pages[0])
+  })
+
+  it('writes down each of the three fields, and pins a boundary missing only ONE of them', async () => {
+    /* ⚠️ **ONE FIXTURE MISSING ALL THREE CANNOT TELL THE GUARD'S CLAUSES
+       APART.** `roster !== undefined && revocations !== undefined && work
+       !== undefined` decides whether a boundary needs pinning; with only an
+       all-or-nothing fixture, any one of the three could be dropped from the
+       guard and a boundary missing just that field would be served unpinned —
+       for ever, because the pin is what stops the next serve differing. And
+       nothing read the pinned VALUES, so the claim could be written down with
+       its ids or its titles emptied. */
+    const held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    const mine = publisher()
+    const whole = { device: DEVICE.id, from: 1, to: 1, v: WIRE_VERSION, roster: [...mine.roster], revocations: mine.revocations, work: mine.work }
+
+    for (const missing of ['roster', 'revocations', 'work'] as const) {
+      const { [missing]: _gone, ...partial } = whole
+      const legacy: SharedFile = { ...held, sealed: [partial as SharedFile['sealed'][number]] }
+      const first = await pagesFor(legacy, mine, {}, pageCrypto.hash)
+      const pinned = first.held.sealed[0]!
+      expect(pinned.roster, missing).toEqual(mine.roster)
+      expect(pinned.revocations, missing).toBe(mine.revocations)
+      /* The claim in full — a pinned boundary with an empty `ids` names a
+         different work, and every page rebuilt from it addresses nothing. */
+      expect(pinned.work, missing).toEqual(mine.work)
+      expect(pinned.work?.ids, missing).toEqual(mine.work.ids)
+      expect(pinned.work?.titles, missing).toEqual(mine.work.titles)
+
+      /* And it reproduces after the publisher moves, which is the point. */
+      const later = { ...mine, roster: [...mine.roster, 'ff'.repeat(32)], revocations: mine.revocations + 3 }
+      const second = await pagesFor(first.held, later, {}, pageCrypto.hash)
+      expect(second.pages[0], missing).toBe(first.pages[0])
+    }
+  })
+})
+
+describe('an entry too big for a page', () => {
+  it('is refused loudly rather than sealed into a page nobody can receive', async () => {
+    /* ⚠️ **IT WAS SEALED ANYWAY, AND STOPPED THE STREAM FOR EVER.** `paginate`
+       emits an oversized entry ALONE rather than dropping it — right, since
+       dropping loses a publication silently — but nothing checked the result,
+       so the page went out over `MAX_PAGE_CHARS`, every recipient refused it,
+       and because pages are a chain every LATER page stayed stuck behind it.
+       Measured by the audit: a 524 289-character quote made a 525 161-character
+       page against a 524 288 limit.
+
+       The recovery is in the message, because a person reading it is the only
+       one who can take that publication back. */
+    const huge = passage('x'.repeat(MAX_PAGE_CHARS))
+    const held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: huge, device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    await expect(pagesFor(held, publisher(), {}, pageCrypto.hash)).rejects.toThrow(/it cannot be sent, and it blocks every later page/u)
+  })
+
+  it('takes an entry of EXACTLY the wire limit and refuses one character more', async () => {
+    /* ⚠️ **THE REFUSAL IS `>`, AND A HALF-MEGABYTE FIXTURE CANNOT SAY SO.** The
+       test above is far past the limit, where `>` and `>=` agree — so the bound
+       could have been loosened by one and turned the largest sendable entry
+       into an error nobody could act on. The two numbers come from the refusal
+       itself rather than being written down here, because both move with the
+       envelope. */
+    const sealing = async (quote: number) => {
+      const one = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'.repeat(quote)), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+      return pagesFor(one, publisher(), {}, pageCrypto.hash)
+    }
+    const refusal = await sealing(MAX_PAGE_CHARS).then(
+      () => null,
+      (cause: unknown) => (cause as Error).message,
+    )
+    const measured = /is (\d+) characters and a page holds (\d+)/u.exec(refusal ?? '')
+    expect(measured, refusal ?? 'it was not refused at all').not.toBeNull()
+    const [size, limit] = [Number(measured![1]), Number(measured![2])]
+    /* Every character of the quote is one character of the entry, so the rest
+       of the entry is a constant this arithmetic can lean on. */
+    const overhead = size - MAX_PAGE_CHARS
+
+    await expect(sealing(limit - overhead)).resolves.toMatchObject({ pages: expect.any(Array) })
+    await expect(sealing(limit - overhead + 1)).rejects.toThrow(/it cannot be sent/u)
+  })
+
+  it('measures the page in CHARACTERS, so a Chinese passage that fits is sent', async () => {
+    /* ⚠️ **THE LIMIT WAS COMPARED AGAINST A BYTE COUNT.** `wireLimit` is
+       `MAX_PAGE_CHARS` less the envelope, and `checkPage` measures a page as
+       `received.length` — characters. The guard summed `wireBytesOf`, the UTF-8
+       bytes of the page's JSON-escaped self, which is about 2.8× that for CJK
+       text. A passage well inside the limit was therefore refused as unsendable
+       and its reader told to withdraw it. Every fixture was ASCII, where the
+       two are within a rounding error of each other. */
+    const held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('海'.repeat(Math.floor(MAX_PAGE_CHARS / 3))), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    const out = await pagesFor(held, publisher(), {}, pageCrypto.hash)
+    expect(out.pages).toHaveLength(1)
+    /* And it is a page this build's own reader would take. */
+    expect(out.pages[0]!.length).toBeLessThanOrEqual(MAX_PAGE_CHARS)
+  })
+})
+
+describe('a publication id is an identity', () => {
+  it('refuses a second publication carrying an id the book already has', () => {
+    /* ⚠️ **NOTHING ENFORCED THIS, AND `unshare` PAID FOR IT.** Two rows sharing
+       a `pub` were each withdrawn at `nextSeqFor` against the SAME unchanged
+       store, so both took the same sequence — and the file that resulted fails
+       its own next read. A publication that cannot be withdrawn without
+       breaking the store it lives in. */
+    const once = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    expect(() => share(once, { markId: 'm2', passage: passage('y'), device: DEVICE.id }, 'p1', stamp(2, DEVICE.id))).toThrow(/already has a publication called p1/u)
+  })
+
+  it('withdraws the row NAMED, not the first one it comes to', () => {
+    /* ⚠️ **EVERY FIXTURE WITHDREW THE FIRST PUBLICATION.** With `pub1` always
+       the target, "the first row whose id matches" and "the first row at all"
+       are the same row — so the id check could be deleted and the wrong
+       passage would be taken back with nothing noticing. */
+    const held = unshare(twoShares(), 'pub2', DEVICE.id, stamp(3, DEVICE.id))
+    expect(held.publications.find((one) => one.pub === 'pub1')?.unshared).toBeUndefined()
+    expect(held.publications.find((one) => one.pub === 'pub2')?.unshared).toMatchObject({ seq: 3, device: DEVICE.id })
+  })
+
+  it('withdraws ONE row even in a store that already holds a duplicate', () => {
+    /* A file written before the check above must still be repairable: two
+       withdrawals at one sequence is what made it unreadable, so a store in
+       that state is mended a row at a time rather than by writing another
+       file nothing can load. */
+    const one = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    const doubled: SharedFile = { ...one, publications: [...one.publications, { ...one.publications[0]!, markId: 'm2' }] }
+    const after = unshare(doubled, 'p1', DEVICE.id, stamp(3, DEVICE.id))
+    expect(after.publications.filter((row) => row.unshared)).toHaveLength(1)
+  })
+})
+
+describe('a publication is a snapshot, not a view of the caller’s object', () => {
+  it('does not change when the passage it was made from is edited afterwards', async () => {
+    /* ⚠️ **THE CALLER'S OBJECT WAS STORED AS-IS.** Editing the mark afterwards
+       edited the PUBLICATION — a signed record of what was shared, changing
+       under a reader who had already shared it. `readonly` stops a write
+       through THIS reference and nothing through the caller's, which holds the
+       same object. */
+    const passage = { quote: 'as published', prefix: '', suffix: '', chapter: 'One' }
+    const { publication } = share(NOTHING_PUBLISHED, { markId: 'm1', passage, device: DEVICE.id }, 'p1', stamp(1, DEVICE.id))
+    passage.quote = 'edited afterwards'
+    expect(publication.passage.quote).toBe('as published')
+  })
+})
+
 describe('reading and writing the publisher’s store', () => {
   it('round-trips what it wrote, boundaries and all', async () => {
     /* ⚠️ **WITH AN EMPTY `sealed` THE ROW CHECK IS NEVER RUN** — `[].every()`
@@ -528,6 +812,90 @@ describe('reading and writing the publisher’s store', () => {
 
   it('reads nothing published for a book nobody has shared from', async () => {
     expect(await readShared(fsWith(), BOOK)).toEqual(NOTHING_PUBLISHED)
+  })
+
+  describe('a boundary that froze a delegation nothing can read', () => {
+    /* ⚠️ **THE HALF OF THE `sig` RENAME THAT IS NOT IN RUST.** `person.rs`
+       spelled a delegation's signature `signature` until 2026-09-07 and
+       `receive.ts` demands `sig`, so every page from a Rust-signing device was
+       refused. Renaming the field fixes what is minted today and CANNOT reach a
+       page already sealed — a boundary keeps the delegation as first served, on
+       purpose — so a reader who shared before upgrading would keep a
+       publication no friend can ever read, silently and for ever.
+
+       Rebuilding is safe for exactly these: a page whose delegation cannot be
+       parsed is refused before its signature is checked, so no peer ever held
+       one, so no chain can break. That is why the drop is narrow. */
+    const boundary = (delegation: unknown) => ({
+      device: DEVICE.id,
+      from: 1,
+      to: 2,
+      v: WIRE_VERSION,
+      ...(delegation === undefined ? {} : { delegation }),
+    })
+    const readBack = async (delegation: unknown) => {
+      const fs = fsWith({
+        [sharedPathIn(BOOK)]: JSON.stringify({ ...NOTHING_PUBLISHED, sealed: [boundary(delegation)] }),
+      })
+      const held = await readShared(fs, BOOK)
+      return held.sealed[0] as unknown as Record<string, unknown>
+    }
+    const live = JSON.stringify({
+      device: DEVICE.id,
+      notAfter: 2,
+      notBefore: 1,
+      person: PERSON.id,
+      roster: 0,
+      sig: 'a'.repeat(128),
+    })
+
+    it('drops the delegation so the page rebuilds with the one this device holds now', async () => {
+      /* `pageOver` reads `boundary.delegation ?? publisher.delegation`, so an
+         absent one takes the path a boundary sealed before the field existed
+         already took. Dropped rather than corrected: there is nothing here to
+         correct it to. */
+      const dead = JSON.stringify({
+        device: DEVICE.id,
+        notAfter: 2,
+        notBefore: 1,
+        person: PERSON.id,
+        roster: 0,
+        signature: 'a'.repeat(128),
+      })
+      expect(await readBack(dead)).not.toHaveProperty('delegation')
+    })
+
+    it('keeps a delegation that names `sig`, so a live boundary still reproduces byte for byte', async () => {
+      /* The other half, and the one that matters more: this must NOT rebuild
+         pages a peer already holds. A migration that dropped every delegation
+         would break every chain in the circle. */
+      expect(await readBack(live)).toHaveProperty('delegation', live)
+    })
+
+    it.each([
+      ['bytes that are not JSON', 'not json'],
+      ['a delegation that is not an object', JSON.stringify('delegation')],
+      ['a delegation that is a list', JSON.stringify([])],
+      /* ⚠️ `null` is the one shape that cannot simply fall through to the
+         member read: `null['sig']` throws rather than answering `undefined`. */
+      ['a delegation that is null', JSON.stringify(null)],
+      ['a delegation that is a number', JSON.stringify(7)],
+      ['a sig that is not a string', JSON.stringify({ sig: 7 })],
+    ])('drops %s, which is unreadable by the same argument', async (_name, value) => {
+      expect(await readBack(value)).not.toHaveProperty('delegation')
+    })
+
+    it('leaves a NON-STRING to the store parser, which refuses it', async () => {
+      /* A legacy spelling is a migration; a broken type is a defect. The first
+         version of this dropped both and so repaired a malformed store into a
+         valid one — see `unreadableDelegation`. The refusal itself is pinned by
+         "refuses a delegation that is an object" below. */
+      await expect(readBack({})).rejects.toThrow(/page boundaries/u)
+    })
+
+    it('leaves a boundary that never had one alone', async () => {
+      expect(await readBack(undefined)).not.toHaveProperty('delegation')
+    })
   })
 
   it('writes on the book’s own lane, never one derived here', async () => {
@@ -699,12 +1067,44 @@ describe('the book-level rows the store keeps — WI-23.B2', () => {
     /* ⚠️ Two entries at one `(device, seq)` is the collision the per-device
        key exists to make impossible — and the book-level rows are entries. */
     expect(nextSeqFor(rated(), DEVICE.id)).toBe(5)
+    /* ⚠️ **THE REVIEW AT 4 IS WHAT MADE IT 5, NOT THE RATING AT 3.** With both
+       present the rating could have been ignored entirely and the answer would
+       be the same, so the loop over the opinions had nothing holding it. A
+       rating that OWNS the highest sequence is what tells them apart. */
+    const ratingHighest: SharedFile = { ...rated(), reviews: [], opinions: [{ op: 'rate', stars: 4, device: DEVICE.id, seq: 7, at: stamp(7, DEVICE.id) }] }
+    expect(nextSeqFor(ratingHighest, DEVICE.id)).toBe(8)
     const withdrawn: SharedFile = {
       ...rated(),
       reviews: [{ ...rated().reviews[0]!, unreviewed: { seq: 9, at: stamp(9, DEVICE.id) } }],
     }
     expect(nextSeqFor(withdrawn, DEVICE.id)).toBe(10)
     expect(nextSeqFor(rated(), PHONE.id)).toBe(1)
+
+    /* ⚠️ **A WITHDRAWAL BELONGS TO THE STREAM IT WAS STAMPED IN, NOT THE ROW'S** —
+       for a PUBLICATION as well as a review. The laptop takes back what the
+       phone published, in the laptop's stream, and the phone's next sequence
+       must not be pushed past it. */
+    const shared = twoShares()
+    const crossed: SharedFile = {
+      ...shared,
+      publications: [{ ...shared.publications[0]!, device: PHONE.id, seq: 1, at: stamp(1, PHONE.id), unshared: { seq: 60, at: stamp(60, DEVICE.id), device: DEVICE.id } }],
+    }
+    expect(nextSeqFor(crossed, PHONE.id)).toBe(2)
+    expect(nextSeqFor(crossed, DEVICE.id)).toBe(61)
+
+    /* ⚠️ **A WITHDRAWAL BELONGS TO THE STREAM IT WAS STAMPED IN, NOT THE ROW'S.**
+       The laptop takes back what the phone published, in the LAPTOP's stream —
+       so the phone's next sequence must not be pushed past it. Every fixture
+       here withdrew in the same stream as the row, so `withdrawnBy(...) ===
+       device` could be replaced by `true` and no count moved. */
+    const acrossDevices: SharedFile = {
+      ...rated(),
+      reviews: [{ ...rated().reviews[0]!, device: PHONE.id, seq: 1, at: stamp(1, PHONE.id), unreviewed: { seq: 40, at: stamp(40, DEVICE.id), device: DEVICE.id } }],
+    }
+    /* The laptop's own rows still cap it at 5; the phone's is capped by its
+       own row, not by the laptop's withdrawal at 40. */
+    expect(nextSeqFor(acrossDevices, PHONE.id)).toBe(2)
+    expect(nextSeqFor(acrossDevices, DEVICE.id)).toBe(41)
   })
 
   it('refuses a publish switch that is not a boolean, null included', async () => {
@@ -774,6 +1174,12 @@ describe('the book-level rows the store keeps — WI-23.B2', () => {
       ['a review whose withdrawal has a fractional seq', [{ ...review(), unreviewed: { seq: 1.5, at: stamp(1, DEVICE.id) } }]],
       ['a review whose withdrawal has no stamp', [{ ...review(), unreviewed: { seq: 5 } }]],
       ['a review whose withdrawal is not after it', [{ ...review(), seq: 5, unreviewed: { seq: 5, at: stamp(2, DEVICE.id) } }]],
+      /* ⚠️ **AND THE SAME, WITH THE STREAM SAID OUT LOUD.** Every row above
+         leaves the withdrawal's `device` off, which takes the branch that never
+         looks at the row's own device — so the row's device could have been
+         read from any key at all and nothing here moved. A withdrawal stamped
+         in the row's OWN stream has to come after it. */
+      ['a review withdrawn in its own stream at a sequence not after it', [{ ...review(), seq: 5, unreviewed: { seq: 5, at: stamp(5, DEVICE.id), device: DEVICE.id } }]],
       ['a review carrying a field it does not name', [{ ...review(), extra: 1 }]],
       ['a list where only SOME are reviews', [review(), 'no']],
     ]
@@ -783,6 +1189,16 @@ describe('the book-level rows the store keeps — WI-23.B2', () => {
         await expect(readShared(fs, BOOK)).rejects.toThrow(/review list/u)
       })
     }
+    it('reads a review withdrawn in ANOTHER stream at any sequence, which is the positive of the row above', async () => {
+      /* The laptop takes back what the phone published: a different stream, so
+         the sequences do not have to climb past each other. Without this the
+         refusal above also passes for a checker that refuses every withdrawal
+         carrying a device. */
+      const reviews = [{ ...review(), seq: 5, unreviewed: { seq: 1, at: stamp(1, PHONE.id), device: PHONE.id } }]
+      const fs = fakeFs({ [sharedPathIn(BOOK)]: JSON.stringify({ publications: [], sealed: [], opinions: [], reviews }) }) as unknown as VaultFs
+      await expect(readShared(fs, BOOK)).resolves.toMatchObject({ reviews: [{ pub: 'rev1' }] })
+    })
+
     it('reads every good shape, so none of the above is vacuous', async () => {
       const opinions = [
         opinion(),
@@ -819,17 +1235,28 @@ describe('what a sealed page remembers — the roster it was signed with', () =>
     const first = await pagesFor(held, publisher(), {}, pageCrypto.hash)
     expect(first.pages).toHaveLength(1)
     expect(first.held.sealed[0]).toMatchObject({ roster: [DEVICE.id, PHONE.id], revocations: 0, delegation: delegationFor(DEVICE.id) })
-    /* A third device is paired: the roster grows and the delegation is re-minted. */
-    const grown = publisher({ roster: [DEVICE.id, PHONE.id, 'c'.repeat(64)], revocations: 1 })
+    /* A third device is paired: the roster grows and the delegation is
+       RE-MINTED — which this used to say and not do. `grown` changed the
+       roster and the revocation count and carried the SAME delegation, so a
+       rebuild that reached for the publisher's current one instead of the
+       boundary's would have produced identical bytes and passed. A delegation
+       under the new roster epoch, correctly signed, is what tells them apart. */
+    const reminted = delegationFor(DEVICE.id, 1)
+    expect(reminted).not.toBe(delegationFor(DEVICE.id))
+    const grown = publisher({ roster: [DEVICE.id, PHONE.id, 'c'.repeat(64)], revocations: 1, delegation: reminted })
     const again = await pagesFor(first.held, grown, {}, pageCrypto.hash)
     expect(again.pages[0]).toBe(first.pages[0])
+    /* The old page still carries the delegation it was sealed with. */
+    expect((JSON.parse(again.pages[0]!) as { delegation: string }).delegation).toBe(delegationFor(DEVICE.id))
     /* And a page cut after the change carries the new roster, chained to the old bytes. */
     const more = share(first.held, { markId: 'm3', passage: passage('third'), device: DEVICE.id }, 'pub3', stamp(3, DEVICE.id)).held
     const next = await pagesFor(more, grown, { [DEVICE.id]: 2 }, pageCrypto.hash)
     expect(next.pages).toHaveLength(1)
-    const page = JSON.parse(next.pages[0]!) as { roster: string[]; prevPageHash: string; revocations: number }
+    const page = JSON.parse(next.pages[0]!) as { roster: string[]; prevPageHash: string; revocations: number; delegation: string }
     expect(page.roster).toHaveLength(3)
     expect(page.revocations).toBe(1)
+    /* And the delegation of today, not the one the first page was sealed with. */
+    expect(page.delegation).toBe(reminted)
     expect(page.prevPageHash).toBe(pageCrypto.hash(first.pages[0]!))
   })
 
@@ -915,6 +1342,40 @@ describe('changing the store as one step', () => {
     /* And the transform sees what is on disk, not a snapshot taken before. */
     const second = await updateShared(fs, queue, (id) => `lane:${id}`, 'book:x', (held) => share(held, { markId: 'm2', passage: passage('r'), device: DEVICE.id }, 'pub2', stamp(2, DEVICE.id)).held)
     expect(second.publications.map((one) => one.pub)).toEqual(['pub1', 'pub2'])
+  })
+
+  it('does not lose the first of two shares started at once', async () => {
+    /* ⚠️ **THE TEST ABOVE AWAITS EACH UPDATE BEFORE STARTING THE NEXT**, and
+       its queue runs a job the moment it is handed one — so the read could be
+       moved OUTSIDE the lane and every assertion in it would still hold. What
+       the lane is for is the case that never happens there: two updates in
+       flight at once. Read outside, both see an empty file, both mint a
+       publication at sequence 1, and whichever writes last is the only one
+       that survives — a share the reader made and Paper silently dropped.
+
+       A queue that actually serialises per lane, as the app's does. */
+    const fs = fakeFs({}) as unknown as VaultFs
+    const running = new Map<string, Promise<unknown>>()
+    const queue = {
+      append: (lane: string, job: () => Promise<void>) => {
+        const next = (running.get(lane) ?? Promise.resolve()).then(job)
+        running.set(lane, next.catch(() => undefined))
+        return next
+      },
+    } as never
+    const adding = (markId: string, pub: string) => (held: SharedFile) =>
+      share(held, { markId, passage: passage(markId), device: DEVICE.id }, pub, stamp(nextSeqFor(held, DEVICE.id), DEVICE.id)).held
+
+    await Promise.all([
+      updateShared(fs, queue, (id) => `lane:${id}`, 'book:x', adding('m1', 'pub1')),
+      updateShared(fs, queue, (id) => `lane:${id}`, 'book:x', adding('m2', 'pub2')),
+    ])
+
+    const held = await readShared(fs, 'book:x')
+    expect(held.publications.map((one) => one.pub).sort()).toEqual(['pub1', 'pub2'])
+    /* And at two different sequences, which is the other half: one file with
+       two entries at one `(device, seq)` is a store that fails its own read. */
+    expect(new Set(held.publications.map((one) => one.seq)).size).toBe(2)
   })
 })
 
@@ -1179,16 +1640,25 @@ describe('a store 0.1.3 wrote — boundaries with no chain version', () => {
     const v1 = await pagesFor(held, publisher(), {}, pageCrypto.hash, DEFAULT_BOUNDS, 1)
     expect(v1.pages).toHaveLength(1)
     expect(JSON.parse(v1.pages[0]!)).toMatchObject({ v: 1, from: 1, to: 2 })
-    /* Nothing new sealed: the boundary read IS the boundary served. */
-    expect(v1.held.sealed).toEqual(held.sealed)
+    /* Nothing new SEALED — the boundary read is the boundary served, not
+       re-cut — but it is now PINNED: a legacy boundary records the roster,
+       revocations and claim it was rendered with, so a later roster change
+       cannot alter the bytes of a page already sent. Range and chain
+       unchanged; metadata gained. */
+    expect(v1.held.sealed).toHaveLength(1)
+    expect(v1.held.sealed[0]).toMatchObject({ device: DEVICE.id, from: 1, to: 2, v: 1 })
+    expect(v1.held.sealed[0]).toHaveProperty('roster')
+    expect(v1.held.sealed[0]).toHaveProperty('revocations')
   })
 
   it('seals the v2 chain afresh beside it — two chains, as `SealedPage.v` says', async () => {
     const held = await readShared(legacy(), 'book:x')
     const v2 = await pagesFor(held, publisher(), {}, pageCrypto.hash, DEFAULT_BOUNDS, 2)
     expect(v2.pages).toHaveLength(1)
+    /* Two chains, side by side — and the v1 one is now pinned rather than
+       rebuilt from live state on every serve. */
     expect(v2.held.sealed).toEqual([
-      { device: DEVICE.id, from: 1, to: 2, v: 1 },
+      expect.objectContaining({ device: DEVICE.id, from: 1, to: 2, v: 1 }),
       expect.objectContaining({ device: DEVICE.id, from: 1, to: 2, v: 2 }),
     ])
   })

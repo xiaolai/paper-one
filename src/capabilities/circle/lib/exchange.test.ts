@@ -39,6 +39,7 @@ import {
   type Serving,
   answerLists,
   answerShelf,
+  type Sealed,
 } from './exchange'
 import { CIRCLE_PROTO, CIRCLE_VERSION } from './protocol'
 import { NOTHING_PUBLISHED, nextSeqFor, share, wireBytesOf, type Publisher, type SharedFile } from './publish'
@@ -101,16 +102,41 @@ function published(): SharedFile {
   ).held
 }
 
+/**
+ * A serving transaction, as the store's queue runs one: read, step, write.
+ *
+ * ⚠️ **THE PAGES ARE CUT INSIDE IT.** `Serving` used to expose a read and a
+ * seal as two calls, and two requests around a new share could cut the same
+ * range two ways and disagree about what the first boundary was — see
+ * `Serving.withShared`. A double that reads and writes in two steps would not
+ * hold the fix it is testing.
+ */
+const transact = async <F, T>(read: () => F, write: (next: F) => void, step: (held: F) => Promise<Sealed<F, T>>): Promise<T> => {
+  const held = read()
+  const made = await step(held)
+  if (made.held !== held) write(made.held)
+  return made.answer
+}
+
+/** A store of one book's file, transacted — the default `withShared`. */
+const oneBook = (read: () => SharedFile, write: (next: SharedFile) => void = () => {}) =>
+  ((_bookId, step) => transact(read, write, step)) as Serving['withShared']
+
+/** A store of lists, transacted — the ids come from it and so do the rows. */
+const listsOf = (rows: readonly { id: string; held: ListFile }[], write: (id: string, next: ListFile) => void = () => {}): Partial<Serving> => ({
+  listIds: () => Promise.resolve(rows.map((one) => one.id)),
+  withList: (listId, step) => transact(() => rows.find((one) => one.id === listId)?.held ?? NOTHING_LISTED, (next) => write(listId, next), step),
+})
+
 function serving(over: Partial<Serving> = {}): Serving {
   return {
     books: [MOBY],
-    shared: () => Promise.resolve(published()),
-    seal: () => Promise.resolve(),
+    withShared: oneBook(published),
     publisher: () => Promise.resolve(publisher()),
     shelf: () => Promise.resolve(NOTHING_SHELVED),
-    sealShelf: () => Promise.resolve(),
-    lists: () => Promise.resolve([]),
-    sealList: () => Promise.resolve(),
+    withShelf: (step) => transact(() => NOTHING_SHELVED, () => {}, step),
+    listIds: () => Promise.resolve([]),
+    withList: (_listId, step) => transact(() => NOTHING_LISTED, () => {}, step),
     cover: () => Promise.resolve(null),
     ...over,
   }
@@ -123,6 +149,35 @@ const ask = (over: Record<string, unknown> = {}) => ({
   since: {},
   v: WIRE_VERSION,
   ...over,
+})
+
+describe('the fields a claim is made from', () => {
+  it('leaves out each field the book does not carry, and carries each it does', () => {
+    /* ⚠️ **EVERY FIXTURE WAS A WHOLE BOOK OR A BARE ONE.** Each of the four
+       fields is spread conditionally, and with nothing between the two
+       extremes any one of the conditions could be inverted or its value
+       dropped: a claim built without the identifier still matched by title,
+       and a claim built without the title still matched by identifier. A claim
+       is how a request names a book, so a field that quietly vanishes from it
+       is a request for something else.
+
+       The digests are the assertion, because a claim is digests: two books
+       differing in ONE field must not produce the same claim. */
+    const whole = { id: 'x', title: 'Moby-Dick', author: 'Herman Melville', identifier: 'isbn:9780142437247', languages: ['en'] }
+    const full = claimOf(whole)
+    expect(full.ids.length).toBeGreaterThan(0)
+    expect(full.titles.length).toBeGreaterThan(0)
+    expect(full.author).not.toBe('')
+    expect(full.language).toBe('en')
+
+    for (const missing of ['title', 'author', 'identifier', 'languages'] as const) {
+      const { [missing]: _gone, ...rest } = whole
+      expect(claimOf(rest as typeof whole), missing).not.toEqual(full)
+    }
+    /* And a book with none of them is a claim naming nothing, rather than a
+       claim naming `undefined`. */
+    expect(claimOf({ id: 'x' })).toEqual({ ids: [], titles: [], author: '', language: '' })
+  })
 })
 
 describe('which book a work claim means', () => {
@@ -259,7 +314,7 @@ describe('answering a request for pages', () => {
     /* ⚠️ **DELIBERATELY INDISTINGUISHABLE FROM THE CASE ABOVE.** Telling a peer
        "I have that book but have shared nothing" discloses the reader's library
        one request at a time. */
-    const empty = await answerPages(ask(), serving({ shared: () => Promise.resolve(NOTHING_PUBLISHED) }))
+    const empty = await answerPages(ask(), serving({ withShared: oneBook(() => NOTHING_PUBLISHED) }))
     const absent = await answerPages(
       ask({ work: claimOf({ id: 'y', title: 'Bleak House', author: 'Dickens', languages: ['en'] }) }),
       serving(),
@@ -282,20 +337,76 @@ describe('answering a request for pages', () => {
        boundary that was never recorded is re-paginated on the next fetch, and
        every recipient holding it then refuses the one after with `chain`. A
        boundary recorded and not served costs a round trip. */
-    const seal = vi.fn((_book: string, _held: SharedFile) => Promise.resolve())
-    const answer = await answerPages(ask(), serving({ seal }))
+    const wrote: SharedFile[] = []
+    const answer = await answerPages(ask(), serving({ withShared: oneBook(published, (next) => wrote.push(next)) }))
 
-    expect(seal).toHaveBeenCalledTimes(1)
-    const wrote = seal.mock.calls[0] as unknown as [string, SharedFile]
-    expect(wrote[1].sealed.length).toBeGreaterThan(0)
+    expect(wrote).toHaveLength(1)
+    expect(wrote[0]!.sealed.length).toBeGreaterThan(0)
     expect(answer?.pages.length).toBeGreaterThan(0)
   })
 
   it('does not write when there was nothing new to seal', async () => {
     const sealed = { ...published(), sealed: [{ device: DEVICE.id, from: 1, to: 1, v: WIRE_VERSION }] }
-    const seal = vi.fn((_book: string, _held: SharedFile) => Promise.resolve())
-    await answerPages(ask(), serving({ shared: () => Promise.resolve(sealed), seal }))
-    expect(seal).not.toHaveBeenCalled()
+    const wrote: SharedFile[] = []
+    await answerPages(ask(), serving({ withShared: oneBook(() => sealed, (next) => wrote.push(next)) }))
+    expect(wrote).toEqual([])
+  })
+})
+
+describe('two requests around one new share — the lost boundary', () => {
+  it('cuts the second page from the boundaries the first sealed, not from an empty list', async () => {
+    /* ⚠️ **THE PAGES WERE CUT OUTSIDE THE TRANSACTION THAT STORED THEM.**
+       `Serving` exposed a read and a seal as two calls, so two requests
+       arriving around a new share both read a file with no boundaries: one cut
+       `[1]` and sent it, the other cut `[1, 2]` and sent that, and whichever
+       wrote last decided what the store said the first boundary was. The
+       recipient holding the other page then has a head that no later page
+       chains to, and `checkPage` refuses everything after it as `chain` — for
+       ever, because the page it holds is never re-sent.
+
+       Here the two requests are interleaved deliberately: the second begins
+       while the first is still deciding. Through one lane the second sees the
+       first's boundary and continues the chain; through two calls it would not
+       have. */
+    const files = new Map<string, SharedFile>()
+    files.set(MOBY.id, published())
+    /* A queue of one lane, as the store's is. */
+    let lane: Promise<unknown> = Promise.resolve()
+    const serve = serving({
+      withShared: (bookId, step) => {
+        const mine = lane.then(async () => {
+          const held = files.get(bookId) ?? NOTHING_PUBLISHED
+          const made = await step(held)
+          if (made.held !== held) files.set(bookId, made.held)
+          return made.answer
+        })
+        lane = mine.catch(() => undefined)
+        return mine as never
+      },
+    })
+
+    const first = answerPages(ask(), serve)
+    /* A second share lands, and a second request with it, before the first has
+       finished deciding its boundary. */
+    files.set(MOBY.id, share(files.get(MOBY.id)!, { markId: 'm2', passage: { quote: 'two', prefix: '', suffix: '', chapter: 'One' }, device: DEVICE.id }, 'pub2', makeHlc(NOW + 1, 0, DEVICE.id.slice(0, 16))).held)
+    const second = answerPages(ask(), serve)
+    const [a, b] = await Promise.all([first, second])
+
+    /* The boundaries the store ended with cover every sequence exactly once
+       and in order — which is what `isSealedPage` and `chainOrder` require and
+       what a racing pair could not produce. */
+    const sealed = [...files.get(MOBY.id)!.sealed].sort((x, y) => x.from - y.from)
+    expect(sealed.length).toBeGreaterThan(0)
+    let previous = 0
+    for (const boundary of sealed) {
+      expect(boundary.from).toBe(previous + 1)
+      previous = boundary.to
+    }
+    /* And every page either request sent belongs to one of them. */
+    for (const page of [...(a?.pages ?? []), ...(b?.pages ?? [])]) {
+      const { from, to } = JSON.parse(page) as { from: number; to: number }
+      expect(sealed.some((one) => one.from === from && one.to === to), `page ${from}-${to}`).toBe(true)
+    }
   })
 })
 
@@ -315,11 +426,7 @@ describe('two chains, sealed separately — WI-23.B2', () => {
     let n = 0
     const serve = (): Serving =>
       serving({
-        shared: (bookId) => Promise.resolve(files.get(bookId) ?? NOTHING_PUBLISHED),
-        seal: (bookId, held) => {
-          files.set(bookId, held)
-          return Promise.resolve()
-        },
+        withShared: (bookId, step) => transact(() => files.get(bookId) ?? NOTHING_PUBLISHED, (next) => files.set(bookId, next), step),
       })
     return {
       files,
@@ -405,11 +512,19 @@ describe('two chains, sealed separately — WI-23.B2', () => {
 describe('answering a request for the shelf — WI-23.C1 and C2', () => {
   const shelfOf = (books: readonly { bookId: string; title: string; author: string }[]) =>
     syncShelf(NOTHING_SHELVED, books, DEVICE.id, makeHlc(NOW, 0, DEVICE.id.slice(0, 16)), () => `s${books.length}`)
-  const withShelf = (held: ShelfFile) => serving({ shelf: () => Promise.resolve(held), publisher: () => Promise.resolve({ ...publisher(), work: SHELF_WORK }) })
+  /* Named `shelved` and not `withShelf`: the port is called `withShelf`, and a
+     helper sharing its name is one an override can silently miss — this used
+     to set only the read port, so the transaction served an empty shelf. */
+  const shelved = (held: ShelfFile) =>
+    serving({
+      shelf: () => Promise.resolve(held),
+      withShelf: (step) => transact(() => held, () => {}, step),
+      publisher: () => Promise.resolve({ ...publisher(), work: SHELF_WORK }),
+    })
   const ask = (over: Record<string, unknown> = {}) => ({ since: {}, v: WIRE_VERSION, ...over })
 
   it('serves the shelf to a person the switch is on for, and a recipient takes it', async () => {
-    const answer = await answerShelf(ask(), withShelf(shelfOf([{ bookId: 'b1', title: 'Moby-Dick', author: 'Melville' }])), true)
+    const answer = await answerShelf(ask(), shelved(shelfOf([{ bookId: 'b1', title: 'Moby-Dick', author: 'Melville' }])), true)
     expect(answer?.pages.length).toBe(1)
     const taken = takePages(answer!.pages, SHELF_WORK, PERSON.id, { held: NOTHING_SHARED, devices: [DEVICE.id], revoked: [], epoch: 0, relationshipEpoch: 1, admitted: true }, pageCrypto, NOW, WIRE_VERSION)
     expect(taken.refusals).toEqual([])
@@ -417,22 +532,24 @@ describe('answering a request for the shelf — WI-23.C1 and C2', () => {
   })
 
   it('answers a person the switch is OFF for with bytes identical to a reader who owns nothing — the falsifier', async () => {
-    const off = await answerShelf(ask(), withShelf(shelfOf([{ bookId: 'b1', title: 'Moby-Dick', author: 'Melville' }])), false)
-    const empty = await answerShelf(ask(), withShelf(NOTHING_SHELVED), true)
+    const off = await answerShelf(ask(), shelved(shelfOf([{ bookId: 'b1', title: 'Moby-Dick', author: 'Melville' }])), false)
+    const empty = await answerShelf(ask(), shelved(NOTHING_SHELVED), true)
     expect(JSON.stringify(off)).toBe(JSON.stringify(empty))
     expect(off).toEqual({ pages: [], more: false })
   })
 
   it('does not read or seal the shelf for a person the switch is off for', async () => {
-    const shelf = vi.fn(() => Promise.resolve(shelfOf([{ bookId: 'b1', title: 'T', author: 'A' }])))
-    const sealShelf = vi.fn(() => Promise.resolve())
-    await answerShelf(ask(), serving({ shelf, sealShelf }), false)
-    expect(shelf).not.toHaveBeenCalled()
-    expect(sealShelf).not.toHaveBeenCalled()
+    const opened: string[] = []
+    const withShelf = vi.fn((step) => {
+      opened.push('read')
+      return transact(() => shelfOf([{ bookId: 'b1', title: 'T', author: 'A' }]), () => opened.push('write'), step)
+    }) as unknown as Serving['withShelf']
+    await answerShelf(ask(), serving({ withShelf }), false)
+    expect(opened).toEqual([])
   })
 
   it('refuses a request that names no version or a version with no shelf, and one this build cannot parse', async () => {
-    const held = withShelf(shelfOf([{ bookId: 'b1', title: 'T', author: 'A' }]))
+    const held = shelved(shelfOf([{ bookId: 'b1', title: 'T', author: 'A' }]))
     const { v: _none, ...unversioned } = ask()
     expect(await answerShelf(unversioned, held, true)).toBeNull()
     expect(await answerShelf(ask({ v: 1 }), held, true)).toBeNull()
@@ -442,14 +559,17 @@ describe('answering a request for the shelf — WI-23.C1 and C2', () => {
   })
 
   it('seals the boundaries before the pages go out, and not again when nothing is new', async () => {
-    const sealShelf = vi.fn((_held: ShelfFile) => Promise.resolve())
-    const held = shelfOf([{ bookId: 'b1', title: 'T', author: 'A' }])
-    const serve = serving({ shelf: () => Promise.resolve(held), sealShelf, publisher: () => Promise.resolve({ ...publisher(), work: SHELF_WORK }) })
-    await answerShelf(ask(), serve, true)
-    expect(sealShelf).toHaveBeenCalledTimes(1)
-    const sealed = sealShelf.mock.calls[0]![0]
-    await answerShelf(ask(), serving({ shelf: () => Promise.resolve(sealed), sealShelf, publisher: () => Promise.resolve({ ...publisher(), work: SHELF_WORK }) }), true)
-    expect(sealShelf).toHaveBeenCalledTimes(1)
+    const wrote: ShelfFile[] = []
+    const shelvedAs = (read: () => ShelfFile) =>
+      serving({
+        withShelf: (step) => transact(read, (next) => wrote.push(next), step),
+        publisher: () => Promise.resolve({ ...publisher(), work: SHELF_WORK }),
+      })
+    await answerShelf(ask(), shelvedAs(() => shelfOf([{ bookId: 'b1', title: 'T', author: 'A' }])), true)
+    expect(wrote).toHaveLength(1)
+    const sealed = wrote[0]!
+    await answerShelf(ask(), shelvedAs(() => sealed), true)
+    expect(wrote).toHaveLength(1)
   })
 })
 
@@ -458,7 +578,7 @@ describe('answering a request for the lists — WI-23.E1, under WI-23.C2’s swi
   const seaBooks = (): ListFile =>
     placeOnList(createList(NOTHING_LISTED, 'Sea books', by(1)), { pub: 'i1', work: { title: 'Moby-Dick', author: 'Melville', language: 'en' }, position: 1, note: 'start here' }, by(2))
   const withLists = (lists: readonly { id: string; held: ListFile }[], over: Partial<Serving> = {}) =>
-    serving({ lists: () => Promise.resolve(lists), publisher: (work) => Promise.resolve({ ...publisher(), work }), ...over })
+    serving({ ...listsOf(lists), publisher: (work) => Promise.resolve({ ...publisher(), work }), ...over })
   const ask = (over: Record<string, unknown> = {}) => ({ since: {}, v: WIRE_VERSION, ...over })
   const ledger = () => ({ held: NOTHING_SHARED, devices: [DEVICE.id], revoked: [], epoch: 0, relationshipEpoch: 1, admitted: true })
 
@@ -598,11 +718,17 @@ describe('answering a request for the lists — WI-23.E1, under WI-23.C2’s swi
   })
 
   it('does not read or seal a list for a person the switch is off for', async () => {
-    const lists = vi.fn(() => Promise.resolve([{ id: 'aa11', held: seaBooks() }]))
-    const sealList = vi.fn(() => Promise.resolve())
-    await answerLists(ask(), serving({ lists, sealList }), false)
-    expect(lists).not.toHaveBeenCalled()
-    expect(sealList).not.toHaveBeenCalled()
+    const touched: string[] = []
+    const listIds = vi.fn(() => {
+      touched.push('ids')
+      return Promise.resolve(['aa11'])
+    })
+    const withList = ((listId, step) => {
+      touched.push('open ' + listId)
+      return transact(seaBooks, () => touched.push('write'), step)
+    }) as Serving['withList']
+    await answerLists(ask(), serving({ listIds, withList }), false)
+    expect(touched).toEqual([])
   })
 
   it('asks from a cursor per list, and answers nothing for a list held in full', async () => {
@@ -628,16 +754,24 @@ describe('answering a request for the lists — WI-23.E1, under WI-23.C2’s swi
 
   it('seals each list’s boundaries before its pages go out, and not again when nothing is new', async () => {
     const sealed = new Map<string, ListFile>([['aa11', seaBooks()]])
-    const sealList = vi.fn((id: string, held: ListFile) => {
-      sealed.set(id, held)
-      return Promise.resolve()
+    const wrote: string[] = []
+    const serve = serving({
+      listIds: () => Promise.resolve([...sealed.keys()]),
+      withList: (listId, step) =>
+        transact(
+          () => sealed.get(listId) ?? NOTHING_LISTED,
+          (next) => {
+            wrote.push(listId)
+            sealed.set(listId, next)
+          },
+          step,
+        ),
+      publisher: (work) => Promise.resolve({ ...publisher(), work }),
     })
-    const serve = withLists([], { lists: () => Promise.resolve([...sealed].map(([id, held]) => ({ id, held }))), sealList })
     await answerLists(ask(), serve, true)
-    expect(sealList).toHaveBeenCalledTimes(1)
-    expect(sealList.mock.calls[0]![0]).toBe('aa11')
+    expect(wrote).toEqual(['aa11'])
     await answerLists(ask(), serve, true)
-    expect(sealList).toHaveBeenCalledTimes(1)
+    expect(wrote).toEqual(['aa11'])
   })
 
   it('caps one answer across lists and says there is more', async () => {
@@ -663,7 +797,7 @@ describe('every clause of the shelf and list answers — one row each', () => {
     for (let i = 0; i < 6; i++) {
       held = placeOnList(held, { pub: `i${i}`, work: { title: `Book ${i}`, author: 'A', language: 'en' }, position: i + 1, note: 'x'.repeat(200) }, by(i + 2))
     }
-    const serve = serving({ lists: () => Promise.resolve([{ id: 'aa11', held }]), publisher: (work) => Promise.resolve({ ...publisher(), work }) })
+    const serve = serving({ ...listsOf([{ id: 'aa11', held }]), publisher: (work) => Promise.resolve({ ...publisher(), work }) })
     const answer = await answerLists(ask(), serve, true, { maxPages: 1, budget: 1_200 })
     expect(answer?.pages).toHaveLength(1)
     expect(answer?.more).toBe(true)
@@ -671,9 +805,139 @@ describe('every clause of the shelf and list answers — one row each', () => {
 
   it('fills one answer to the cap exactly without saying there is more', async () => {
     const lists = Array.from({ length: MAX_PAGES_PER_ANSWER }, (_, i) => ({ id: `b${i.toString(16).padStart(3, '0')}`, held: createList(NOTHING_LISTED, `L${i}`, by(i + 1)) }))
-    const answer = await answerLists(ask(), serving({ lists: () => Promise.resolve(lists), publisher: (work) => Promise.resolve({ ...publisher(), work }) }), true)
+    const answer = await answerLists(ask(), serving({ ...listsOf(lists), publisher: (work) => Promise.resolve({ ...publisher(), work }) }), true)
     expect(answer?.pages).toHaveLength(MAX_PAGES_PER_ANSWER)
     expect(answer?.more).toBe(false)
+  })
+})
+
+describe('the answer’s BYTE budget, across the lists', () => {
+  const by = (n: number) => ({ device: DEVICE.id, at: makeHlc(NOW + n, 0, DEVICE.id.slice(0, 16)) })
+  const long = (seed: number): ListFile => {
+    let held = createList(NOTHING_LISTED, `L${seed}`, by(seed * 100))
+    /* ⚠️ **LONG ENOUGH TO CUT INTO SEVERAL PAGES**, or the room handed down
+       cannot be seen: a list that fits in one page fits whatever the budget
+       says, and `maxBytes - bytes` and `maxBytes + bytes` produce the same
+       single page. */
+    for (let i = 0; i < 24; i++) {
+      held = placeOnList(
+        held,
+        { pub: `i${seed}-${i}`, work: { title: `Book ${i}`, author: 'A', language: 'en' }, position: i + 1, note: 'x'.repeat(900) },
+        by(seed * 100 + i + 1),
+      )
+    }
+    return held
+  }
+  const four = () => ['aa11', 'bb22', 'cc33', 'dd44'].map((id, i) => ({ id, held: long(i + 1) }))
+  const watched = (rows: readonly { id: string; held: ListFile }[]) => {
+    const opened: string[] = []
+    let signed = 0
+    const serve = serving({
+      listIds: () => Promise.resolve(rows.map((one) => one.id)),
+      withList: (listId, step) => {
+        opened.push(listId)
+        return transact(() => rows.find((one) => one.id === listId)!.held, () => {}, step)
+      },
+      publisher: (work) =>
+        Promise.resolve({
+          ...publisher(),
+          work,
+          sign: (message: string) => {
+            signed += 1
+            return publisher().sign(message)
+          },
+        }),
+    })
+    return { opened, serve, signatures: () => signed }
+  }
+  const ask = (over: Record<string, unknown> = {}) => ({ since: {}, v: WIRE_VERSION, ...over })
+  /* A small page budget, so each list is SEVERAL pages: with the default one
+     the whole list fits in a single page and no bound below can be seen. */
+  const cut = { maxPages: 20, budget: 1_200 }
+  /** One page's worth of the answer's byte budget, measured rather than guessed. */
+  const onePage = async () => {
+    const whole = await answerLists(ask(), watched(four()).serve, true, cut)
+    expect(whole?.pages.length).toBeGreaterThan(2)
+    return wireBytesOf(whole!.pages[0]!)
+  }
+
+  it('stops OPENING lists once the bytes are spent, and says there is more', async () => {
+    /* ⚠️ **THE BUDGET IS TWO BOUNDS AND ONLY THE PAGE COUNT WAS TESTED.** A
+       caller with many lists could spend every byte of the frame on the first
+       and still have this side read, cut and SIGN pages for the rest — work
+       thrown away, and a key operation per page of it. The byte half of the
+       guard had no fixture at all: with `bytes >= maxBytes` deleted, every list
+       is opened however full the answer already is. */
+    const tight = watched(four())
+    const answer = await answerLists(ask(), tight.serve, true, { ...cut, maxChars: await onePage() })
+    expect(answer?.pages).toHaveLength(1)
+    expect(answer?.more).toBe(true)
+    /* Spent exactly, so nothing after the first is opened. */
+    expect(tight.opened).toEqual(['aa11'])
+  })
+
+  it('stops at the first list whose page will not fit, even when that list has nothing more', async () => {
+    /* ⚠️ **`more = true` INSIDE THE PAGE LOOP IS WHAT ENDS THE ANSWER**, and
+       every fixture hid it: a long list sets `more` again from its own
+       `built.more` one line later, so the flag was true either way and the
+       loop broke for the wrong reason. A SHORT list — one page, nothing after
+       it — has no `built.more` to fall back on. Without the assignment the
+       answer carries on opening lists it has no room for, signing a page for
+       each.
+
+       Two long lists fill the budget; the third is one page and does not fit;
+       the fourth must never be opened. */
+    const short = (seed: number): ListFile =>
+      placeOnList(
+        createList(NOTHING_LISTED, `S${seed}`, by(seed * 100)),
+        { pub: `s${seed}`, work: { title: 'T', author: 'A', language: 'en' }, position: 1, note: 'y'.repeat(400) },
+        by(seed * 100 + 1),
+      )
+    const rows = [
+      { id: 'aa11', held: long(1) },
+      { id: 'bb22', held: short(2) },
+      { id: 'cc33', held: short(3) },
+    ]
+    const one = await onePage()
+    const tight = watched(rows)
+    /* Room for one page and a little — enough that the second list is opened,
+       not enough that its page fits. */
+    const answer = await answerLists(ask(), tight.serve, true, { ...cut, maxChars: one + 10 })
+
+    expect(answer?.pages).toHaveLength(1)
+    expect(answer?.more).toBe(true)
+    expect(tight.opened).toEqual(['aa11', 'bb22'])
+  })
+
+  it('hands each list only the room that is LEFT, so nothing is signed to be thrown away', async () => {
+    /* ⚠️ **THE ROOM PASSED DOWN IS `maxBytes - bytes`, AND NOTHING READ IT.**
+       Handed the whole budget again — `maxBytes + bytes` — a later list walks
+       its chain further and SIGNS pages the answer has no room for. The answer
+       is the same either way, because the outer loop measures every page again
+       before sending it; what differs is the work. A signature is the most
+       expensive thing this path does, and counting them is the only way the
+       difference shows.
+
+       ⚠️ **AND ONE LIST IS ALWAYS CUT AND NOT SENT.** `pagesOver` lets a log's
+       first page through whatever the room says — a page has to be sendable on
+       its own — so the list the answer stops at is walked before this side
+       learns it does not fit. Bounded to one, because the loop then breaks. */
+    const one = await onePage()
+    const tight = watched(four())
+    const answer = await answerLists(ask(), tight.serve, true, { ...cut, maxChars: one * 2 + 1 })
+
+    expect(answer?.pages).toHaveLength(2)
+    expect(answer?.more).toBe(true)
+    /* The first list fills the answer; the second is opened, walked as far as
+       the ONE byte left allows, and sends nothing. The third and fourth are
+       never opened. */
+    expect(tight.opened).toEqual(['aa11', 'bb22'])
+    /* ⚠️ **FOUR SIGNATURES, AND THE WHOLE POINT IS THAT IT IS NOT FIVE.**
+       Handed the whole frame again instead of what is left, the second list
+       walks one page further and signs it — measured, 5 — and the answer is
+       byte for byte the same, because the outer loop weighs every page again.
+       Only the count of the most expensive operation on this path shows it. */
+    expect(tight.signatures()).toBe(4)
   })
 })
 
@@ -681,11 +945,16 @@ describe('the cap bounds the work, not only the wire', () => {
   it('cuts and seals nothing for a list past the cap', async () => {
     const by = (n: number) => ({ device: DEVICE.id, at: makeHlc(NOW + n, 0, DEVICE.id.slice(0, 16)) })
     const lists = Array.from({ length: MAX_PAGES_PER_ANSWER + 3 }, (_, i) => ({ id: `c${i.toString(16).padStart(3, '0')}`, held: createList(NOTHING_LISTED, `L${i}`, by(i + 1)) }))
-    const sealList = vi.fn(() => Promise.resolve())
-    const answer = await answerLists({ since: {}, v: WIRE_VERSION }, serving({ lists: () => Promise.resolve(lists), sealList, publisher: (work) => Promise.resolve({ ...publisher(), work }) }), true)
+    const wrote: string[] = []
+    const answer = await answerLists(
+      { since: {}, v: WIRE_VERSION },
+      serving({ ...listsOf(lists, (id) => wrote.push(id)), publisher: (work) => Promise.resolve({ ...publisher(), work }) }),
+      true,
+    )
     expect(answer?.pages).toHaveLength(MAX_PAGES_PER_ANSWER)
     expect(answer?.more).toBe(true)
-    expect(sealList).toHaveBeenCalledTimes(MAX_PAGES_PER_ANSWER)
+    /* Nothing cut or sealed for a list past the cap. */
+    expect(wrote).toHaveLength(MAX_PAGES_PER_ANSWER)
   })
 })
 

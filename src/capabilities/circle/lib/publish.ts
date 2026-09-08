@@ -140,6 +140,22 @@ export interface SealedPage {
   readonly roster?: readonly string[]
   readonly revocations?: number
   readonly delegation?: string
+  /**
+   * How many entries this page held when it was sealed.
+   *
+   * ⚠️ **A RANGE IS NOT A MEMBERSHIP, AND THE RANGE WAS ALL THAT WAS STORED.**
+   * A store that loses an entry inside a sealed page — a file edited by hand, a
+   * row dropped by a future migration — rebuilds `[1,2,3]` as `[1,3]`, and the
+   * result passes `checkPage`, which permits gaps because version filtering
+   * makes legitimate ones. So a page ALREADY SENT is silently re-emitted with
+   * different contents, a different hash, and a different `prevPageHash` for
+   * every page after it: every recipient's chain broken, from a store that
+   * looked fine.
+   *
+   * Absent on a boundary sealed before this was recorded, which cannot be
+   * checked and is served as it always was.
+   */
+  readonly entries?: number
   /** The claim the page was signed under — a book whose metadata changed since would name a different one. */
   readonly work?: WorkClaim
 }
@@ -268,12 +284,76 @@ export async function readShared(fs: VaultFs, bookId: string): Promise<SharedFil
 /** The chain the first build sealed on — the only one there was before `SealedPage.v`. */
 const FIRST_CHAIN = 1
 
+/**
+ * Whether a boundary froze a delegation no verifier can read.
+ *
+ * ⚠️ **THE `sig` RENAME DOES NOT REACH A SEALED PAGE, AND WITHOUT THIS THE FIX
+ * IS HALF A FIX.** `SignedDelegation` serialised its signature as `signature`
+ * until 2026-09-07; `receive.ts` demands `sig` and refuses an object missing
+ * it, so every page from a Rust-signing device was refused. Renaming the field
+ * corrects what is minted TODAY — but a boundary keeps the delegation *as first
+ * served*, deliberately, and a page rebuilt from one still carries the dead
+ * spelling. A reader who shared before upgrading would keep a publication no
+ * friend can ever read, for ever, with nothing anywhere saying why.
+ *
+ * ⚠️ **AND REBUILDING IS SAFE HERE FOR ONE REASON THAT WILL NOT COME AGAIN.**
+ * `SealedPage` exists because a page rebuilt with today's roster is a DIFFERENT
+ * page — different bytes, different hash, and every recipient holding the old
+ * one refuses the next with `chain`. That cost is real whenever a recipient
+ * holds the page. Nobody holds these: a page whose delegation cannot be read is
+ * refused as `bad-delegation` before its own signature is checked, so no peer
+ * ever accepted one. The set of pages this drops is exactly the set no peer can
+ * have. Do NOT generalise this to a boundary anything might have accepted.
+ *
+ * An unparseable delegation goes the same way, for the same reason — it is
+ * equally unreadable, and rebuilding is the only thing that can help it.
+ */
+function unreadableDelegation(raw: unknown): boolean {
+  /* ⚠️ **A NON-STRING IS NOT THIS FUNCTION'S BUSINESS, AND DROPPING IT HID A
+     REAL CHECK.** `isSealedPage` refuses a boundary whose `delegation` is not a
+     string, and the first version of this migration quietly repaired that into
+     a valid row — turning a malformed store, which means something wrote
+     garbage, into a silent rebuild. A legacy SPELLING is a migration; a broken
+     TYPE is a defect, and the store must still refuse it loudly.
+     `publish.test.ts`'s "refuses a delegation that is an object" caught this.
+     ⚠️ This also answers for a boundary that never had a delegation at all: an
+     `if (raw === undefined) return false` stood above it and could not change
+     an answer, because `undefined` is not a string either. */
+  if (typeof raw !== 'string') return false
+  let held: unknown
+  try {
+    held = JSON.parse(raw)
+  } catch {
+    return true
+  }
+  /* ⚠️ **ONLY `null` NEEDS ITS OWN ANSWER.** This read
+     `typeof held !== 'object' || held === null || Array.isArray(held)`, and
+     two of those three could not change one: a number, a string and a list all
+     reach the member read below, have no `sig`, and are refused there. `null`
+     is the one that would THROW on the read instead of answering. Removing the
+     other two also makes the `catch` above load-bearing, which it was not:
+     emptied, `held` stayed `undefined` and the `typeof` clause caught it. */
+  if (held === null) return true
+  /* The one member the rename moved. `isDelegation` refuses the object without
+     it, which is the whole of the defect this migrates past — the rest of the
+     shape is that parser's business and is checked there, on arrival. */
+  return typeof (held as Record<string, unknown>)['sig'] !== 'string'
+}
+
 /** A boundary as written before `v` existed, read onto the one chain it could be for; anything else, as it is. */
 function legacyBoundary(value: unknown): unknown {
   /* Stryker disable next-line ConditionalExpression: a non-object is refused by `isSealedPage` whether or not it is spread here. */
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
   const row = value as Record<string, unknown>
-  return row['v'] === undefined ? { ...row, v: FIRST_CHAIN } : row
+  const chained = row['v'] === undefined ? { ...row, v: FIRST_CHAIN } : row
+  if (!unreadableDelegation(chained['delegation'])) return chained
+  /* Dropped rather than corrected: `pageOver` reads `boundary.delegation ??
+     publisher.delegation`, so an absent one rebuilds with what this device
+     holds now — the path a boundary sealed before the field existed already
+     takes. There is nothing to correct it TO from here; the current delegation
+     is the publisher's to supply. */
+  const { delegation: _dropped, ...rest } = chained
+  return rest
 }
 
 function isPublishedRow(value: unknown): value is PublishedRow & Record<string, unknown> {
@@ -503,13 +583,27 @@ export function share(
   pub: string,
   at: Hlc,
 ): { readonly held: SharedFile; readonly publication: Publication } {
+  /* ⚠️ **A `pub` IS AN IDENTITY, AND NOTHING WAS ENFORCING IT.** Two rows
+     sharing one made `unshare` allocate the same sequence twice and wrote a
+     store that fails its own next read — a publication that cannot be
+     withdrawn without breaking the file it lives in. Refused where the id
+     enters, which is the only place it can still be refused cheaply. */
+  if (held.publications.some((row) => row.pub === pub)) {
+    throw new Error(`this book already has a publication called ${pub}`)
+  }
   const publication: Publication = {
     pub,
     markId: what.markId,
     device: what.device,
     seq: nextSeqFor(held, what.device),
     at,
-    passage: what.passage,
+    /* ⚠️ **COPIED, BECAUSE A SNAPSHOT THAT SHARES A REFERENCE IS NOT ONE.** The
+       caller's passage object was stored as-is, so editing the mark afterwards
+       edited the PUBLICATION — a signed record of what was shared, changing
+       under a reader who had already shared it. `readonly` in TypeScript stops
+       a write THROUGH THIS reference and nothing at all through the caller's,
+       which still holds the same object. */
+    passage: { ...what.passage },
   }
   return { held: { ...held, publications: [...held.publications, publication] }, publication }
 }
@@ -526,10 +620,19 @@ export function share(
  * taking it back, which need not be the one that published. See `Withdrawal`.
  */
 export function unshare(held: SharedFile, pub: string, device: string, at: Hlc): SharedFile {
+  /* ⚠️ **EXACTLY ONE ROW, BECAUSE EACH WOULD TAKE THE SAME SEQUENCE.** This
+     mapped over EVERY row carrying the id, and each computed `nextSeqFor`
+     against the same unchanged store — so two rows sharing a `pub` were
+     withdrawn at the same sequence, and the store then failed its own next
+     read. `share` refuses a duplicate id now, so this cannot arise from here;
+     a store already holding one is repaired by withdrawing one row at a time
+     rather than by writing a file nothing can load. */
+  let withdrawn = false
   return {
     ...held,
     publications: held.publications.map((row) => {
-      if (row.pub !== pub || row.unshared) return row
+      if (withdrawn || row.pub !== pub || row.unshared) return row
+      withdrawn = true
       return { ...row, unshared: { device, seq: nextSeqFor(held, device), at } }
     }),
   }
@@ -731,10 +834,49 @@ export async function pagesOver(
   /** Every boundary, the ones this call sealed appended. */
   readonly sealed: readonly SealedPage[]
 }> {
-  const { mine, boundaries } = streamOf(log, sealed, publisher, version)
+  const { mine, boundaries: asStored } = streamOf(log, sealed, publisher, version)
+  /* ⚠️ **A LEGACY BOUNDARY IS PINNED THE FIRST TIME IT IS SERVED, NOT REBUILT
+     FROM LIVE STATE EVERY TIME.** A boundary sealed before roster, revocations,
+     delegation and claim were recorded falls back to the publisher's CURRENT
+     values — so pairing a new device, or revoking one, changed the bytes of
+     pages already sent. Every recipient holding the old page then refuses the
+     next one with `chain`, for ever, and nothing anywhere says why. The
+     fallback is what makes an old store readable at all; what was missing is
+     that the values it chose are then written down, so the second serve cannot
+     differ from the first. */
+  /* ⚠️ **UNCONDITIONALLY, BECAUSE THE GUARD COULD NOT CHANGE AN ANSWER.** It
+     read "already has all three? then as it is" and every field below falls
+     back with `??`, so the rebuilt row held the same values either way — only
+     its identity differed, and `pinnedByRef` keys on the ORIGINAL. A branch
+     nothing can tell from its other side is a claim the reader has to check. */
+  const pin = (one: SealedPage): Pinned => ({
+    ...one,
+    roster: one.roster ?? [...publisher.roster],
+    revocations: one.revocations ?? publisher.revocations,
+    work: one.work ?? { ...publisher.work, ids: [...publisher.work.ids], titles: [...publisher.work.titles] },
+  })
+  const boundaries = asStored.map(pin)
+  /* ⚠️ **THE WHOLE STORED LIST IS CARRIED BACK, NOT ONLY THIS CHAIN'S.**
+     `streamOf` selects the boundaries of the version being SERVED, so
+     returning those alone silently dropped every boundary belonging to the
+     other chain — a v1 store served over v2 would have lost its v1 history on
+     the next write. Caught by the two-chain test, which is exactly what it is
+     for. */
+  const pinnedByRef = new Map(asStored.map((one, i) => [one, boundaries[i]!]))
+  const allSealed = sealed.map((one) => pinnedByRef.get(one) ?? one)
   const bySeq = new Map(mine.map((entry) => [entry.seq, entry]))
   const sealedNow = sealFresh(mine, boundaries, publisher, bounds, version)
   const wanted = since[publisher.device] ?? 0
+  /* ⚠️ **A CAUGHT-UP REQUEST SIGNED THE WHOLE CHAIN TO ANSWER "NOTHING NEW".**
+     The walk below starts at the first page because `prevPageHash` links every
+     page this device ever emitted, and a resumed page can only get its
+     predecessor's hash by walking from the beginning. That is right when a page
+     is going out — and there is no page going out here. A reader polling every
+     five minutes re-signed their entire history each time, for an empty answer:
+     a key operation per sealed page, per poll, for ever. Nothing beyond the
+     cursor means nothing to chain to. */
+  const anythingNew = [...boundaries, ...sealedNow].some((one) => one.to > wanted)
+  if (!anythingNew) return { pages: [], more: false, sealed: [...allSealed, ...sealedNow] }
   const answer = boundedAnswer(bounds)
   let prevPageHash = ''
   let more = false
@@ -763,7 +905,11 @@ export async function pagesOver(
     }
   }
 
-  return { pages: answer.pages, more, sealed: [...sealed, ...sealedNow] }
+  /* ⚠️ **`boundaries`, NOT `sealed` — the PINNED list, not the one that came in.**
+     Returning the argument threw away the metadata a legacy boundary was just
+     rendered with, so the next serve fell back to live state all over again and
+     the pinning never persisted. */
+  return { pages: answer.pages, more, sealed: [...allSealed, ...sealedNow] }
 }
 
 /**
@@ -794,7 +940,7 @@ function streamOf(log: readonly Entry[], sealed: readonly SealedPage[], publishe
  * was a value with no meaning, which reads as though it had one.
  */
 async function renderPage(
-  boundary: SealedPage,
+  boundary: Pinned,
   bySeq: ReadonlyMap<number, Entry>,
   publisher: Publisher,
   version: number,
@@ -856,21 +1002,123 @@ export function boundedAnswer(bounds: Bounds): { readonly pages: readonly string
  * claim, the signature — is as long as this publisher makes it. A fixed
  * allowance fitted the roster it was written against and no other.
  */
-function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], publisher: Publisher, bounds: Bounds, version: number): readonly SealedPage[] {
+/**
+ * A boundary whose roster, revocations and claim are WRITTEN DOWN.
+ *
+ * ⚠️ **A TYPE RATHER THAN THREE `??`s AT THE PAGE.** `rebuilt` fell back to the
+ * publisher's live values for each of them, which was the whole of the defect
+ * `pin` exists to fix — and once `pin` ran over every stored boundary and
+ * `sealFresh` set all three on every new one, those fallbacks could not fire.
+ * Three dead clauses restating a rule enforced one level up. Said in the type,
+ * so a boundary that has not been pinned cannot reach a page.
+ */
+type Pinned = SealedPage & {
+  readonly roster: readonly string[]
+  readonly revocations: number
+  readonly work: WorkClaim
+}
+
+function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], publisher: Publisher, bounds: Bounds, version: number): readonly Pinned[] {
   const lastSealed = boundaries.reduce((top, one) => Math.max(top, one.to), 0)
   const fresh = mine.filter((entry) => entry.seq > lastSealed)
-  const budget = Math.min(bounds.budget, MAX_PAGE_CHARS - envelopeOf(publisher, version))
+  const wireLimit = MAX_PAGE_CHARS - envelopeOf(publisher, version)
+  const budget = Math.min(bounds.budget, wireLimit)
+  /* ⚠️ **THE READER ALSO BOUNDS THE SPAN, AND ONLY THE READER DID.**
+     `isSealedPage` refuses a boundary whose `to - from` reaches
+     `MAX_BOUNDARY_SPAN`, and pagination bounded size and count but never the
+     RANGE — which is not the same thing, because a page's entries need not be
+     contiguous: filtering out another chain's entries leaves the survivors
+     sparse. Two entries a million sequences apart therefore sealed a boundary
+     this build's own reader rejects, and the store then fails its next read.
+     Cut before the span reaches the limit; the fourth bound of one contract
+     the writer was enforcing three of. */
+  const withinSpan = (group: readonly Entry[]): readonly (readonly Entry[])[] => {
+    const out: Entry[][] = []
+    let run: Entry[] = []
+    for (const entry of group) {
+      if (run.length > 0 && entry.seq - run[0]!.seq >= MAX_BOUNDARY_SPAN) {
+        out.push(run)
+        run = []
+      }
+      run.push(entry)
+    }
+    /* ⚠️ Equivalent by the caller, and kept for the reader: `paginate` never
+       yields an empty group — it pushes a run only when it has one — so the
+       loop above always pushes at least once and `run` is never empty here.
+       Made unconditional, the only input that would tell the difference is one
+       that cannot arrive; left as it is, it says what has to be true. */
+    // Stryker disable next-line ConditionalExpression,EqualityOperator: unreachable with an empty run — see above.
+    if (run.length > 0) out.push(run)
+    return out
+  }
   // Stryker disable OptionalChaining
-  return paginate(fresh, budget).map((group) => ({
-    device: publisher.device,
-    from: group[0]?.seq ?? 0,
-    to: group.at(-1)?.seq ?? 0,
-    v: version,
-    roster: [...publisher.roster],
-    revocations: publisher.revocations,
-    delegation: publisher.delegation,
-    work: publisher.work,
-  }))
+  return paginate(fresh, budget).flatMap(withinSpan).map((group) => {
+    /* ⚠️ **AN ENTRY TOO BIG FOR A PAGE WAS SEALED INTO ONE ANYWAY.**
+       `paginate` emits an oversized entry alone rather than dropping it —
+       correct, since dropping would lose a publication silently — but nothing
+       here checked the result, so the page went out over `MAX_PAGE_CHARS`,
+       every recipient refused it, and because pages are a chain EVERY LATER
+       PAGE stayed stuck behind it. A quote of 524 289 characters produced a
+       525 161-character page against a 524 288 limit, and the reader's whole
+       stream stopped there for ever, silently.
+       Refused loudly instead. The recovery is in the message, because a person
+       reading it is the only one who can take that publication back. */
+    /* ⚠️ **AGAINST THE WIRE LIMIT, NOT THE FRAME BUDGET.** `bounds.budget` is
+       how much this ANSWER may carry and is legitimately tiny — the tests set
+       it to 1 to force one entry per page, and a small budget simply means
+       more pages. Only `MAX_PAGE_CHARS` makes a page unsendable, and that is
+       the bound a recipient enforces. Checking the wrong one turned a
+       deliberate test fixture into an error. */
+    /* ⚠️ **CHARACTERS, BECAUSE `wireLimit` IS IN CHARACTERS.** This summed
+       `wireBytesOf` — the UTF-8 bytes of the page's JSON-ESCAPED self, which is
+       what an ANSWER's frame costs — and compared it against
+       `MAX_PAGE_CHARS - envelope`, which `checkPage` measures as
+       `received.length`. Two different units, and the byte count runs about
+       2.8× the character count for CJK text: MEASURED, 112 characters of
+       Chinese weigh 318 bytes. So a 175 000-character Chinese passage — a page
+       of 175 000 characters against a limit of 524 288 — was refused as
+       unsendable, and the reader was told to withdraw a publication that would
+       have gone out perfectly well. The frame budget is a real bound and it is
+       enforced elsewhere, on the answer; it is not this one. */
+    const size = group.reduce((n, one) => n + canonicalJson(one).length, 0)
+    /* ⚠️ A group of more than one cannot be over: `paginate` keeps
+       `2 + sum(len) + (n - 1) <= budget` and `budget <= wireLimit`, so this sum
+       — which is that one less the brackets and the commas — is strictly under
+       it for every `n >= 2`. Stated rather than assumed, because with the byte
+       count above it was NOT true and this clause was quietly load-bearing
+       against the wrong measure. Kept because it is what makes `group[0]!`
+       below honest. */
+    // Stryker disable next-line ConditionalExpression: implied by `paginate`'s own bound — see above.
+    if (group.length === 1 && size > wireLimit) {
+      const only = group[0]!
+      throw new Error(
+        `one entry (seq ${only.seq}) is ${size} characters and a page holds ${wireLimit} — it cannot be sent, and it blocks every later page. Withdraw that publication.`,
+      )
+    }
+    return {
+      device: publisher.device,
+      /* ⚠️ **NOT `?? 0` — THAT MANUFACTURED AN INVALID BOUNDARY.** `paginate`
+         pushes only non-empty groups and `withinSpan` only non-empty runs, so
+         these cannot be undefined; the old fallbacks were unreachable and, if
+         that contract ever changed, would have sealed a boundary at sequence 0
+         — which `isSealedPage` refuses, making the store unreadable rather than
+         reporting the broken assumption. A non-null assertion states the
+         guarantee that actually holds. */
+      from: group[0]!.seq,
+      to: group.at(-1)!.seq,
+      v: version,
+      roster: [...publisher.roster],
+      revocations: publisher.revocations,
+      delegation: publisher.delegation,
+      /* The claim is sealed INTO the boundary and must not move afterwards:
+         its arrays are the publisher's, and the publisher is rebuilt per round
+         from live metadata. A boundary whose claim changed would reproduce
+         different bytes and break every recipient's chain. */
+      work: { ...publisher.work, ids: [...publisher.work.ids], titles: [...publisher.work.titles] },
+      /* What this page IS, beside where it sits — see `SealedPage.entries`. */
+      entries: group.length,
+    }
+  })
   // Stryker restore OptionalChaining
 }
 
@@ -886,25 +1134,39 @@ function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], pu
  * by `checkPage` as malformed, which is the honest outcome for a store whose
  * rows have gone; it is not silently skipped over.)
  */
-function rebuilt(boundary: SealedPage, bySeq: ReadonlyMap<number, Entry>, publisher: Publisher, version: number, prevPageHash: string): Omit<Page, 'sig'> {
+function rebuilt(boundary: Pinned, bySeq: ReadonlyMap<number, Entry>, publisher: Publisher, version: number, prevPageHash: string): Omit<Page, 'sig'> {
   const group: Entry[] = []
   for (let seq = boundary.from; seq <= boundary.to; seq++) {
     const entry = bySeq.get(seq)
     if (entry) group.push(entry)
   }
+  /* ⚠️ **A PAGE THAT LOST AN ENTRY IS NOT THE PAGE THAT WAS SEALED.** Rebuilding
+     `[1,2,3]` as `[1,3]` produces a page `checkPage` ACCEPTS — gaps are legal,
+     because version filtering makes legitimate ones — so it goes out signed and
+     canonical with different contents, a different hash, and a different
+     `prevPageHash` for every page after it. Every recipient's chain broken,
+     from a store that read cleanly. Refused rather than re-emitted; the count
+     is absent on boundaries sealed before it was recorded, and those are served
+     as they always were. */
+  if (boundary.entries !== undefined && group.length !== boundary.entries) {
+    throw new Error(
+      `the sealed page ${boundary.from}–${boundary.to} held ${boundary.entries} entries and this store has ${group.length} — refusing to re-send it as a different page`,
+    )
+  }
   return {
     v: version,
     person: publisher.person,
-    work: boundary.work ?? publisher.work,
+    work: boundary.work,
     device: publisher.device,
     from: boundary.from,
     to: boundary.to,
     prevPageHash,
     entries: group,
-    /* As first served — see `SealedPage`. A boundary sealed before the
-       metadata was kept rebuilds with the current values, as it always did. */
-    roster: [...(boundary.roster ?? publisher.roster)],
-    revocations: boundary.revocations ?? publisher.revocations,
+    /* As first served — see `SealedPage` and `Pinned`. A boundary sealed
+       before the metadata was kept had it written down by `pin` on the way in,
+       so there is nothing to fall back to here. */
+    roster: [...boundary.roster],
+    revocations: boundary.revocations,
     delegation: boundary.delegation ?? publisher.delegation,
   }
 }

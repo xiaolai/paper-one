@@ -151,6 +151,46 @@ describe.skipIf(noConfig)('the live lane (skipped when this checkout has no .cla
 
 })
 
+describe('assertRan — the reports it used to accept', () => {
+  /* ⚠️ **EACH OF THESE PASSED, AND EACH IS A RUN THAT PROVED NOTHING.** The
+     counters `ran` and `expected` are numbers the PAGE reports about itself,
+     and nothing reconciled them with the entries — so an empty report with the
+     right numbers was clean, six entries under one id were clean, and a report
+     that declared itself failed was clean. In the file whose entire job is to
+     refuse a hollow run. */
+  const good = () => ({
+    engine: 'WebKit',
+    ran: CHECKS.length,
+    expected: CHECKS.length,
+    ok: true,
+    failures: 0,
+    checks: CHECKS.map((one) => ({ id: one.id, pass: true, detail: '' })),
+  })
+  const parity = (rows) => ({ rows: Array.from({ length: rows }, (_, i) => ({ id: i, same: true })) })
+
+  it('accepts a report that is complete and consistent', () => {
+    expect(assertRan(parity(3), good(), 3)).toEqual([])
+  })
+
+  it('refuses an EMPTY check list wearing the right counters', () => {
+    expect(assertRan(parity(3), { ...good(), checks: [] }, 3).join(' ')).toMatch(/carries 0|absent from the report/u)
+  })
+
+  it('refuses the same check reported more than once', () => {
+    const one = CHECKS[0]
+    const dom = { ...good(), checks: CHECKS.map(() => ({ id: one.id, pass: true, detail: '' })) }
+    expect(assertRan(parity(3), dom, 3).join(' ')).toMatch(/reported more than once/u)
+  })
+
+  it('refuses a report that declares itself failed even when every entry passed', () => {
+    expect(assertRan(parity(3), { ...good(), ok: false, failures: 2 }, 3).join(' ')).toMatch(/declares itself failed/u)
+  })
+
+  it('refuses an entry that is not a check at all', () => {
+    expect(assertRan(parity(3), { ...good(), checks: [null, ...good().checks.slice(1)] }, 3).join(' ')).toMatch(/not a check/u)
+  })
+})
+
 describe('word-snap-live — failing closed', () => {
   /* The lane's probe. It must work with no bridge, no app and no book —
    * otherwise the probe reports the lane broken on every machine where the app
@@ -327,6 +367,52 @@ describe('word-snap-live — the DOM-check snippet', () => {
    * survive UTF-8 at all. Both arrive from the inlined source, where escaping
    * is not an option because a comment is not a string.
    */
+  it('removes its fixture frame, however the run ends', async () => {
+    /* ⚠️ **EVERY OTHER TEST OF THE SNIPPET RUNS WITHOUT A DOM**, where it stops
+       at the first guard — which is the point of those, and leaves everything
+       past the guard unexecuted, the fixture iframe included. So the one thing
+       the snippet promises about its own housekeeping, that it never leaves an
+       off-screen frame behind, had nothing asserting it.
+
+       A jsdom window rather than the `jsdom` test environment: this file is
+       assembled from the app's source through `import.meta.url`, which under
+       that environment is not a file URL and cannot be read from. jsdom is not
+       WebKit and several checks will not pass in it — that is not what this
+       measures. What it measures is what the snippet LEAVES. */
+    const { JSDOM } = await import('jsdom')
+    const snippet = buildDomSnippet()
+
+    const clean = new JSDOM('<!doctype html><body></body>', { runScripts: 'outside-only' })
+    clean.window.eval(snippet)
+    expect(clean.window.document.querySelectorAll('iframe')).toHaveLength(0)
+
+    /* ⚠️ **AND WHEN THE FIXTURE ITSELF FAILS, WHICH IS THE CASE IT LEAKED.**
+       The cleanup used to begin after the fixture was built, so a throw from
+       the markup assignment, the selection or the checks table left the iframe
+       attached — with a selection inside it, which the next run inherits.
+       Injected by giving the frame's document a body whose `innerHTML`
+       refuses, the first thing the snippet does with it. */
+    const broken = new JSDOM('<!doctype html><body></body>', { runScripts: 'outside-only' })
+    const real = broken.window.document.createElement.bind(broken.window.document)
+    broken.window.document.createElement = (tag) => {
+      const made = real(tag)
+      if (tag !== 'iframe') return made
+      Object.defineProperty(made, 'contentDocument', {
+        configurable: true,
+        get: () => ({
+          body: {
+            set innerHTML(_value) {
+              throw new Error('the fixture would not build')
+            },
+          },
+        }),
+      })
+      return made
+    }
+    expect(() => broken.window.eval(snippet)).toThrow(/the fixture would not build/u)
+    expect(broken.window.document.querySelectorAll('iframe')).toHaveLength(0)
+  })
+
   it('carries nothing that would break at parse in transit', () => {
     const snippet = buildDomSnippet()
     const lineSeparator = String.fromCharCode(0x2028)

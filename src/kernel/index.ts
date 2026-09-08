@@ -360,7 +360,7 @@ export {
 } from './core/circle/page'
 export type { Page, PageCrypto, PageRefusal, SignedKind, VersionRange } from './core/circle/page'
 /* The log a page carries, and the fold that turns one into what is held. */
-export { READING_STATES, STARS, compacted, compareEntries, fold, mergeLogs, nextSeq } from './core/circle/log'
+export { READING_STATES, STARS, compacted, compareEntries, fold, mergeLogs, nextSeq, resolved } from './core/circle/log'
 export type {
   Entry,
   Folded,

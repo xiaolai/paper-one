@@ -11,6 +11,7 @@ import {
   type PageCrypto,
   type Relationship,
 } from '../../../kernel'
+import { CIRCLE_FETCH_EVERY_MS } from './cadence'
 import { claimOf, type BookLike } from './exchange'
 import {
   CIRCLE_PROTO,
@@ -103,13 +104,14 @@ export interface FetchPorts {
    * person no longer admitted in that epoch — the round's own re-check runs
    * before the lane is taken, and a purge can take it in between.
    */
-  readonly keep: (bookId: string, person: string, held: ForeignFile, epoch: number) => Promise<void>
+  /** Persist a book's foreign file. ⚠️ **ANSWERS WHETHER IT WROTE** — see the note on `take` below. */
+  readonly keep: (bookId: string, person: string, held: ForeignFile, epoch: number) => Promise<boolean>
   /** The person's SHELF as this device holds it, and where to put it — WI-23.C3. */
   readonly heldShelf: (person: string) => Promise<ForeignFile>
-  readonly keepShelf: (person: string, held: ForeignFile, epoch: number) => Promise<void>
+  readonly keepShelf: (person: string, held: ForeignFile, epoch: number) => Promise<boolean>
   /** The person's LISTS as this device holds them, by id, and where to put one — WI-23.E1. */
   readonly heldLists: (person: string) => Promise<ReadonlyMap<string, ForeignFile>>
-  readonly keepList: (person: string, listId: string, held: ForeignFile, epoch: number) => Promise<void>
+  readonly keepList: (person: string, listId: string, held: ForeignFile, epoch: number) => Promise<boolean>
   /**
    * Charge one answer to the person's budget — read, decided and committed
    * in ONE step by the ledger, so a jacket charged between two of a round's
@@ -158,6 +160,22 @@ export interface RoundReport {
   /** Pages taken and kept. */
   readonly accepted: number
   readonly refusals: number
+  /**
+   * WHY the refused pages were refused, counted per reason.
+   *
+   * ⚠️ **`refusals` WAS AN UNLABELLED INTEGER, IN A PROTOCOL WHOSE WHOLE DESIGN
+   * IS REFUSING FOR THE RIGHT REASONS.** `takePages` already answers with a
+   * `Refusal[]` — twelve named kinds, `wrong-work` and `not-admitted` and
+   * `bad-signature` among them — and every call site reduced it to `.length`
+   * before it could be reported. A round that says `refusals: 1` says a page
+   * was rejected and nothing about whether that was the protocol working or
+   * the protocol broken, which are the only two things worth telling apart.
+   *
+   * Measured 2026-09-07: two machines, one published passage, `accepted: 0` on
+   * both sides and `refusals: 1` on one of them — and no way to tell which of
+   * the twelve it was without changing the code first. That is the cost.
+   */
+  readonly refusedBecause: Readonly<Record<string, number>>
   readonly skipped: readonly Skipped[]
 }
 
@@ -166,6 +184,8 @@ interface LogOutcome {
   readonly calls: number
   readonly accepted: number
   readonly refusals: number
+  /** Why, counted per reason — see `RoundReport.refusedBecause`. */
+  readonly refusedBecause: Readonly<Record<string, number>>
   /** The person's budget ran out: their round ends here. */
   readonly overBudget: boolean
   /**
@@ -181,12 +201,23 @@ interface LogOutcome {
   readonly stopped: boolean
 }
 
-const NOTHING_DONE: LogOutcome = { calls: 0, accepted: 0, refusals: 0, overBudget: false, stopped: false }
+const NOTHING_DONE: LogOutcome = { calls: 0, accepted: 0, refusals: 0, refusedBecause: {}, overBudget: false, stopped: false }
+
+/** Fold one reason tally into another. */
+const mergeWhy = (
+  a: Readonly<Record<string, number>>,
+  b: Readonly<Record<string, number>>,
+): Readonly<Record<string, number>> => {
+  const out: Record<string, number> = { ...a }
+  for (const [why, n] of Object.entries(b)) out[why] = (out[why] ?? 0) + n
+  return out
+}
 
 const sum = (a: LogOutcome, b: LogOutcome): LogOutcome => ({
   calls: a.calls + b.calls,
   accepted: a.accepted + b.accepted,
   refusals: a.refusals + b.refusals,
+  refusedBecause: mergeWhy(a.refusedBecause, b.refusedBecause),
   overBudget: a.overBudget || b.overBudget,
   stopped: a.stopped || b.stopped,
 })
@@ -204,7 +235,7 @@ const sum = (a: LogOutcome, b: LogOutcome): LogOutcome => ({
  * awake is reported asleep.
  */
 export async function fetchRound(ports: FetchPorts): Promise<RoundReport> {
-  const empty: RoundReport = { asked: 0, calls: 0, accepted: 0, refusals: 0, skipped: [] }
+  const empty: RoundReport = { asked: 0, calls: 0, accepted: 0, refusals: 0, refusedBecause: {}, skipped: [] }
   const mine = await ports.mine()
   /* No identity is the ordinary state of a reader who never shared, and it is
      not a failure — there is simply nobody to ask AS. */
@@ -230,7 +261,7 @@ export async function fetchRound(ports: FetchPorts): Promise<RoundReport> {
       skipped.push({ person: person.person, why: 'failed', detail: messageOf(cause) })
     }
   }
-  return { asked, calls: done.calls, accepted: done.accepted, refusals: done.refusals, skipped }
+  return { asked, calls: done.calls, accepted: done.accepted, refusals: done.refusals, refusedBecause: done.refusedBecause, skipped }
 }
 
 /**
@@ -271,11 +302,17 @@ async function fetchPerson(
     return now.epoch
   }
   let done = NOTHING_DONE
-  let answered = 0
-  let welcomed = 0
+  /* ⚠️ **BOOLEANS, BECAUSE ONLY "ANY" IS EVER ASKED.** Both were counters and
+     both were compared to zero and nowhere else, so `+= 1` and `-= 1` gave the
+     same answer to every question either was asked — two mutants nothing could
+     kill, describing a count nothing counted. */
+  let answeredAny = false
+  let welcomedAny = false
   // Stryker disable next-line StringLiteral: never read — a device that would not answer overwrites it before it is reported.
   let asleep = 'no device to dial'
   let ended: Skip | null = null
+  /* The last failure past a dial, kept rather than returned: see the catch. */
+  let broke: string | null = null
   for (const device of candidates) {
     let session: Dialled
     try {
@@ -288,16 +325,20 @@ async function fetchPerson(
       asleep = messageOf(cause)
       continue
     }
-    answered += 1
+    answeredAny = true
     try {
       const outcome = await fetchFromDevice(ports, session, device, person, me, admitted)
       done = sum(done, outcome.done)
-      if (outcome.welcomed) welcomed += 1
+      if (outcome.welcomed) welcomedAny = true
       ended = outcome.ended
     } catch (cause) {
-      /* A failure past the dial is the person's, and they were ASKED: the
-         hello went out. Reported as failed, and their round ends here. */
-      return { done, asked: true, skipped: { person: person.person, why: 'failed', detail: messageOf(cause) } }
+      /* ⚠️ **A FAILURE PAST THE DIAL BELONGS TO THE DEVICE, NOT THE PERSON.**
+         This returned from the whole person's round, so one device that fails
+         every time — a laptop with a broken store, a peer stuck mid-upgrade —
+         starved every other device of theirs on every round for ever. A phone
+         that answers is not made unreachable by a laptop that does not.
+         Remembered, and reported only if NO device of theirs gets anywhere. */
+      broke = messageOf(cause)
     } finally {
       /* Said, not swallowed: a session that would not close is a
          transport problem the round can go on past, and the only
@@ -312,9 +353,27 @@ async function fetchPerson(
   }
   /* Asked, from the first device that answered — whatever the rest of the
      person's round did, the hello went out. */
-  if (answered === 0) return { done, asked: false, skipped: { person: person.person, why: 'asleep', detail: asleep } }
+  if (!answeredAny) return { done, asked: false, skipped: { person: person.person, why: 'asleep', detail: asleep } }
   if (ended !== null) return { done, asked: true, skipped: { person: person.person, why: ended } }
-  if (welcomed === 0) return { done, asked: true, skipped: { person: person.person, why: 'refused-hello' } }
+  if (!welcomedAny) {
+    /* ⚠️ **A DEVICE THAT BROKE PAST ITS HELLO DID NOT COUNT AS WELCOMING**,
+       whatever this comment used to say: `welcomedAny` is set only after
+       `fetchFromDevice` RETURNS, and one that throws never gets there. So this
+       is the branch a break lands in, and the broken device's reason is the
+       better answer of the two.
+
+       ⚠️ **WHICH MADE THE LINE THAT USED TO FOLLOW UNREACHABLE.** It read
+       `if (broke !== null && done === NOTHING_DONE)` — reference identity
+       against the initial value — and `done` is only ever reassigned by
+       `sum`, which builds a new object. So `welcomedAny` and `done !==
+       NOTHING_DONE` become true together, and no input could satisfy both
+       halves. Mutation testing reported it as covered by nothing at all.
+       Deleted rather than repaired: what it was for is done here.
+
+       A device that broke BESIDE one that served is deliberately not reported
+       — the round did its work, and the person is not skipped for it. */
+    return { done, asked: true, skipped: { person: person.person, why: broke === null ? 'refused-hello' : 'failed', ...(broke === null ? {} : { detail: broke }) } }
+  }
   return { done, asked: true, skipped: null }
 }
 
@@ -358,13 +417,25 @@ async function fetchFromDevice(
     ...(agreed >= 3 ? [() => fetchLists(ports, session, device, person, agreed, admitted)] : []),
   ]
   let done = NOTHING_DONE
+  let ended: 'over-budget' | 'not-admitted' | null = null
   for (const phase of phases) {
     const outcome = await phase()
     done = sum(done, outcome)
-    if (outcome.overBudget) return { done, welcomed: true, ended: 'over-budget' }
-    if (outcome.stopped) return { done, welcomed: true, ended: 'not-admitted' }
+    if (outcome.overBudget) {
+      ended = 'over-budget'
+      break
+    }
+    if (outcome.stopped) {
+      ended = 'not-admitted'
+      break
+    }
   }
-  return { done, welcomed: true, ended: null }
+  /* ⚠️ **WELCOMED, ONCE.** This was written three times over, and two of the
+     three could be flipped to `false` with nothing noticing: the caller reads
+     `ended` first and returns, so the flag on those two paths is never looked
+     at. Past the check above the answer is the same on every path, so it is
+     given in one place. */
+  return { done, welcomed: true, ended }
 }
 
 /**
@@ -372,7 +443,17 @@ async function fetchFromDevice(
  * person no longer admitted. `gone` is the probe's own business — it clears
  * what it holds before answering `served`.
  */
-type Probed = 'served' | 'over-budget' | 'stopped'
+/**
+ * How a probe ended a log's round, or `null` for the ordinary answer: still
+ * served, carry on.
+ *
+ * ⚠️ **`null` RATHER THAN `'served'`, BECAUSE NOTHING EVER READ `'served'`.**
+ * It was the implicit else of two comparisons, so the word could be replaced
+ * by any other string — the empty one included — and every test still passed.
+ * Three literals that no input could tell apart from three different literals
+ * are three claims the type was making and the code was not.
+ */
+type Probed = 'over-budget' | 'stopped'
 
 /** One log to fetch — what the three logs each supply to `fetchLog`. */
 interface LogFetch {
@@ -385,13 +466,13 @@ interface LogFetch {
    * answered before the take — or `null` when the record no longer admits
    * the person by the time the keep would land.
    */
-  readonly take: (pages: readonly string[], epoch: number) => Promise<{ readonly accepted: number; readonly refusals: number } | null>
+  readonly take: (pages: readonly string[], epoch: number) => Promise<{ readonly accepted: number; readonly refusals: readonly string[] } | null>
   /**
    * When the FIRST answer is empty: whether the log is still served —
    * probing what is held, paying for the probe, and clearing what is no
    * longer served. Absent for a log with nothing to probe.
    */
-  readonly probe?: (pay: (bytes: number) => boolean) => Promise<{ readonly verdict: Probed; readonly calls: number }>
+  readonly probe?: (pay: (bytes: number) => boolean) => Promise<{ readonly ended: Probed | null; readonly calls: number }>
 }
 
 /**
@@ -414,14 +495,30 @@ async function fetchLog(ports: FetchPorts, person: PersonToFetch, admitted: () =
   let calls = 0
   let accepted = 0
   let refusals = 0
-  const outcome = (over: Partial<LogOutcome> = {}): LogOutcome => ({ calls, accepted, refusals, overBudget: false, stopped: false, ...over })
+  /* Counted per reason as they arrive — see `RoundReport.refusedBecause`. */
+  const refusedBecause: Record<string, number> = {}
+  const because = (kinds: readonly string[]): void => {
+    for (const why of kinds) refusedBecause[why] = (refusedBecause[why] ?? 0) + 1
+  }
+  const outcome = (over: Partial<LogOutcome> = {}): LogOutcome => ({ calls, accepted, refusals, refusedBecause, overBudget: false, stopped: false, ...over })
   for (let answers = 0; answers < MAX_ANSWERS_PER_LOG; answers++) {
     calls += 1
     const answer = await log.ask()
     if (answer === null) {
       /* An answer this build cannot read is one refusal for the log, and no
-         further question to a peer that answers in a shape we do not. */
+         further question to a peer that answers in a shape we do not.
+         ⚠️ **AND IT IS NAMED, LIKE EVERY OTHER REFUSAL.** This incremented the
+         COUNT alone, so a round could report `refusals: 1` with an empty
+         `refusedBecause` — which is exactly the state this capability's own
+         `refusedBecause` was built to end. One site was missed, and it is the
+         one reached when a peer answers in a shape this build cannot read: the
+         case where knowing the reason matters most. */
       refusals += 1
+      /* Through `because`, like every other reason. Written out here as its
+         own read-modify-write, the READ could never see anything — this site
+         fires once and breaks — so the `?? 0` was a branch no input could
+         reach, and one accumulator became two. */
+      because(['unreadable-answer'])
       break
     }
     if (answer.pages.length === 0) {
@@ -431,8 +528,8 @@ async function fetchLog(ports: FetchPorts, person: PersonToFetch, admitted: () =
       if (answers === 0 && log.probe !== undefined) {
         const probed = await log.probe(pay)
         calls += probed.calls
-        if (probed.verdict === 'over-budget') return outcome({ overBudget: true })
-        if (probed.verdict === 'stopped') return outcome({ stopped: true })
+        if (probed.ended === 'over-budget') return outcome({ overBudget: true })
+        if (probed.ended === 'stopped') return outcome({ stopped: true })
       }
       break
     }
@@ -444,7 +541,8 @@ async function fetchLog(ports: FetchPorts, person: PersonToFetch, admitted: () =
     if (epoch === null) return outcome({ stopped: true })
     const taken = await log.take(answer.pages, epoch)
     if (taken === null) return outcome({ stopped: true })
-    refusals += taken.refusals
+    refusals += taken.refusals.length
+    because(taken.refusals)
     if (taken.accepted === 0) break
     accepted += taken.accepted
     if (!answer.more) break
@@ -487,15 +585,21 @@ async function fetchBooks(
       ask: () => askLog(session, CIRCLE_SERVICES.pages.name, { work, since: sinceOf(held, agreed), ...(agreed > 1 ? { v: agreed } : {}) }),
       take: async (pages, epoch) => {
         const taken = takePages(pages, work, person.person, ledgerFor(held, person, epoch), ports.crypto, ports.now(), agreed)
-        if (taken.accepted === 0) return { accepted: 0, refusals: taken.refusals.length }
+        if (taken.accepted === 0) return { accepted: 0, refusals: taken.refusals }
         held = taken.held
         /* Kept per answer, not per book: a round interrupted after the third
            answer has the first three on disk, cursor and all. COUNTED once
            kept: a page taken and not written is not a page the report may
            call accepted. */
         if ((await admitted()) === null) return null
-        await ports.keep(book.id, person.person, held, epoch)
-        return { accepted: taken.accepted, refusals: taken.refusals.length }
+        /* ⚠️ **A RESOLVED WRITE IS NOT A COMMITTED WRITE.** The store's
+           admission guard turns a refusal into a silent return, so a page
+           refused mid-round was counted as accepted and the held cursor
+           advanced past bytes that are not on disk — the round reporting work
+           it had not done, and never asking for those pages again. Same shape
+           as a merged `writeRelationship` read as an overwrite. */
+        if (!(await ports.keep(book.id, person.person, held, epoch))) return { accepted: 0, refusals: [...taken.refusals, 'not-kept'] }
+        return { accepted: taken.accepted, refusals: taken.refusals }
       },
     })
     done = sum(done, outcome)
@@ -526,24 +630,26 @@ async function fetchShelf(
     ask: () => askLog(session, CIRCLE_SERVICES.shelf.name, { since: sinceOf(held, agreed), v: agreed }),
     take: async (pages, epoch) => {
       const taken = takePages(pages, SHELF_WORK, person.person, ledgerFor(held, person, epoch), ports.crypto, ports.now(), agreed)
-      if (taken.accepted === 0) return { accepted: 0, refusals: taken.refusals.length }
+      if (taken.accepted === 0) return { accepted: 0, refusals: taken.refusals }
       held = taken.held
       if ((await admitted()) === null) return null
-      await ports.keepShelf(person.person, held, epoch)
-      return { accepted: taken.accepted, refusals: taken.refusals.length }
+      /* `keep`'s reason, unchanged: counted once WRITTEN. */
+      if (!(await ports.keepShelf(person.person, held, epoch))) return { accepted: 0, refusals: [...taken.refusals, 'not-kept'] }
+      return { accepted: taken.accepted, refusals: taken.refusals }
     },
     probe: async (pay) => {
       /* Nothing held, or nothing held FROM THIS DEVICE: nothing to ask for again. */
-      if (held.works.length === 0 || held.cursor[device] === undefined) return { verdict: 'served', calls: 0 }
-      const probed = await stillServedAt(session, CIRCLE_SERVICES.shelf.name, held, {}, device, agreed, ports.crypto, pay)
-      if (probed === 'over-budget') return { verdict: 'over-budget', calls: 1 }
+      const seq = held.cursor[device]
+      if (held.works.length === 0 || seq === undefined) return { ended: null, calls: 0 }
+      const probed = await stillServedAt(session, CIRCLE_SERVICES.shelf.name, held, {}, device, agreed, ports.crypto, seq, pay)
+      if (probed === 'over-budget') return { ended: 'over-budget', calls: 1 }
       if (probed === 'gone') {
         held = withoutStream(held, device)
         const still = await admitted()
-        if (still === null) return { verdict: 'stopped', calls: 1 }
+        if (still === null) return { ended: 'stopped', calls: 1 }
         await ports.keepShelf(person.person, held, still)
       }
-      return { verdict: 'served', calls: 1 }
+      return { ended: null, calls: 1 }
     },
   })
 }
@@ -591,15 +697,34 @@ function listIdOfRaw(raw: string): string | null {
  */
 export function listWindowOf(ids: readonly string[], now: number): readonly string[] {
   const sorted = [...ids].sort()
+  /* ⚠️ Stryker cannot tell `<=` from `<` here and neither can any input: at
+     exactly the bound the rotation below starts at
+     `(k * MAX_LISTS_PER_REQUEST) % MAX_LISTS_PER_REQUEST`, which is 0 for
+     every `k`, so both spellings answer the sorted list. Kept as `<=` because
+     it says what it means — within the bound, every list, every time. */
+  // Stryker disable next-line EqualityOperator: equivalent at the bound — see above.
   if (sorted.length <= MAX_LISTS_PER_REQUEST) return sorted
   /* A whole window on per cadence, not one list: every list is named within
-     as many rounds as there are windows over them. */
+     as many rounds as there are windows over them.
+     ⚠️ Taken from the list laid END TO END WITH ITSELF, so the wrap is one
+     slice rather than two joined. Written as two, the second could be the
+     whole list rather than its head with nothing noticing — the final
+     truncation never reaches the difference. */
   const start = ((Math.floor(now / LIST_WINDOW_ROTATES_MS) % sorted.length) * MAX_LISTS_PER_REQUEST) % sorted.length
-  return [...sorted.slice(start), ...sorted.slice(0, start)].slice(0, MAX_LISTS_PER_REQUEST)
+  return [...sorted, ...sorted].slice(start, start + MAX_LISTS_PER_REQUEST)
 }
 
-/** How often the window over a person's lists moves on — one cadence. */
-export const LIST_WINDOW_ROTATES_MS = 5 * 60_000
+/**
+ * How often the window over a person's lists moves on — ONE CADENCE.
+ *
+ * ⚠️ **THE SAME NUMBER AS THE CADENCE, AND IT WAS WRITTEN OUT TWICE.** The
+ * comment says "one cadence"; the value was an independent `5 * 60_000`, so
+ * changing how often a round runs would have left this at the old figure and
+ * quietly broken the relationship the comment asserts — every list still named
+ * "within as many rounds as there are windows", but no longer true. Taken from
+ * the cadence itself, the claim cannot come apart from the value.
+ */
+export const LIST_WINDOW_ROTATES_MS = CIRCLE_FETCH_EVERY_MS
 
 function cursorsOf(held: ReadonlyMap<string, ForeignFile>, window: readonly string[], agreed: number): Readonly<Record<string, Readonly<Record<string, number>>>> {
   const since: Record<string, Readonly<Record<string, number>>> = {}
@@ -661,14 +786,17 @@ async function fetchLists(
     },
     take: async (pages, epoch) => {
       const byList = new Map<string, string[]>()
-      let refusals = 0
+      /* NAMED, NOT COUNTED — see `RoundReport.refusedBecause`. A list page with
+         no id is refused for a reason of its own, and reporting it as an
+         anonymous tally is what made a whole round's `refusals: 1` unreadable. */
+      const refusals: string[] = []
       for (const raw of pages) {
         const id = listIdOfRaw(raw)
         /* Counted here rather than handed to `takePages`, which would refuse
            each under a claim that is not a list's — the same count, later. */
         // Stryker disable next-line all: as the note says — the count is the same by the other route.
         if (id === null) {
-          refusals += 1
+          refusals.push('unparseable')
           continue
         }
         /* A held list the window left out: served from its start, and the
@@ -683,7 +811,7 @@ async function fetchLists(
       for (const [id, raws] of byList) {
         const file = held.get(id) ?? NOTHING_SHARED
         const outcome = takePages(raws, listWork(id), person.person, ledgerFor(file, person, epoch), ports.crypto, ports.now(), agreed)
-        refusals += outcome.refusals.length
+        refusals.push(...outcome.refusals)
         if (outcome.accepted === 0) continue
         held.set(id, outcome.held)
         if ((await admitted()) === null) return null
@@ -700,17 +828,23 @@ async function fetchLists(
          not served, whichever chain. */
       let calls = 0
       for (const [id, file] of held) {
-        if (file.cursor[device] === undefined) continue
-        calls += 1
+        const seq = file.cursor[device]
+        if (seq === undefined) continue
+        /* ⚠️ **COUNTED WHERE THE CALL HAPPENS, NOT BEFORE THE DECISION TO MAKE
+           IT.** `calls` rose before the window check, so every list outside the
+           rotation window was counted as a request nobody made: 65 held lists
+           reported 67 calls against 66 real ones. A count that includes work
+           that did not happen is not a measurement of anything. */
         if (!window.has(id)) continue
-        const probed = await stillServedAt(session, CIRCLE_SERVICES.lists.name, file, { list: id }, device, agreed, ports.crypto, pay)
-        if (probed === 'over-budget') return { verdict: 'over-budget', calls }
+        calls += 1
+        const probed = await stillServedAt(session, CIRCLE_SERVICES.lists.name, file, { list: id }, device, agreed, ports.crypto, seq, pay)
+        if (probed === 'over-budget') return { ended: 'over-budget', calls }
         if (probed === 'served') continue
         const still = await admitted()
-        if (still === null) return { verdict: 'stopped', calls }
+        if (still === null) return { ended: 'stopped', calls }
         await ports.keepList(person.person, id, withoutStream(file, device), still)
       }
-      return { verdict: 'served', calls }
+      return { ended: null, calls }
     },
   })
 }
@@ -746,12 +880,19 @@ async function stillServedAt(
   device: string,
   agreed: number,
   crypto: PageCrypto,
+  /**
+   * How far this side has read the device's stream — from the CALLER, which
+   * has already decided there is one.
+   *
+   * ⚠️ It was read again in here, behind `if (seq === undefined) return
+   * 'served'`, and both callers refuse a device with no cursor before they get
+   * this far. A guard restating its caller's precondition is a branch no input
+   * can reach and one more thing the next reader has to prove is dead.
+   */
+  seq: number,
   /** Charge the probe's answer; false is a budget spent, and a probe unpaid for keeps what is held. */
   pay: (bytes: number) => boolean,
 ): Promise<ProbeAnswer> {
-  const seq = held.cursor[device]
-  // Stryker disable next-line StringLiteral: any word but 'gone' and 'over-budget' keeps what is held.
-  if (seq === undefined) return 'served'
   const before = { ...held.cursor, [device]: Math.max(0, seq - 1) }
   const since = name.list === undefined ? before : { [name.list]: before }
   const answer = await askLog(session, service, { since, v: agreed })

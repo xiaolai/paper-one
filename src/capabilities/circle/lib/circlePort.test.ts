@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { hlcOf, newRelationship, type Hlc, type Relationship } from '../../../kernel'
-import { COVER_WIDTH, RECENT_LIMIT, circlePortOver, type CirclePortDeps, type FriendBook } from './circlePort'
+import { acceptsTransport, drawsOverlays, hlcOf, newRelationship, type Hlc, type Relationship } from '../../../kernel'
+import { COVER_WIDTH, NOT_IN_CIRCLE, RECENT_LIMIT, circlePortOver, slotsOf, type CirclePortDeps, type FriendBook } from './circlePort'
 import { NOTHING_SHARED, type ForeignFile } from './store'
 
 /**
@@ -89,6 +89,259 @@ describe('the shelf switch, per person', () => {
   })
 })
 
+describe('holding a person back — the mute that did not exist', () => {
+  /* ⚠️ **THE STATE WAS MODELLED AND UNREACHABLE UNTIL WI-24.C2.** `'muted'` was
+     in the parser's `STATES`, admitted by `acceptsTransport`, and given
+     `retain: 'keep'` by `defaultRetain` on its own stated reasoning — and no
+     control, port operation or command ever wrote it. It was found by trying
+     to run the circle's harness, whose acceptance needs a mute to prove the
+     relationship record is consulted at all. */
+
+  it('is off by default, holds them back, and lets them back', async () => {
+    const { port, deps } = world()
+    expect(await port.muted(BOB)).toBe(false)
+    await port.setMuted(BOB, true)
+    expect(await port.muted(BOB)).toBe(true)
+    expect(deps.writeRelationship).toHaveBeenCalledTimes(1)
+    /* Already held back: nothing written for saying so again. */
+    await port.setMuted(BOB, true)
+    expect(deps.writeRelationship).toHaveBeenCalledTimes(1)
+    await port.setMuted(BOB, false)
+    expect(await port.muted(BOB)).toBe(false)
+  })
+
+  it('KEEPS what they shared, which is the whole difference from Remove', async () => {
+    /* `defaultRetain` returns `keep` for muted and `purge` for exited. A mute
+       that purged would be a slower Remove, and the reader would have no way
+       to say "not right now" at all. */
+    const { port, records, deps } = world()
+    await port.setMuted(BOB, true)
+    expect(records.get(BOB)).toMatchObject({ state: 'muted', retain: 'keep' })
+    /* ⚠️ **AND THE RECORD'S FIELD IS NOT THE WHOLE CLAIM.** `retain: 'keep'`
+       says what the record asks for; an implementation that ALSO purged, or
+       dropped the peer, would set the same field and pass — the fixtures hold
+       nothing for the purge to remove, so there is nothing else to notice. */
+    await port.setMuted(BOB, false)
+    expect(deps.purge).not.toHaveBeenCalled()
+    expect(deps.forgetPeer).not.toHaveBeenCalled()
+  })
+
+  it('refuses somebody who is not in the circle, and mutes one who is AMONG OTHERS', async () => {
+    /* ⚠️ **A ROSTER OF ONE CANNOT TELL `some` FROM `every`.** With a single
+       person who is the one named, "any of them is them" and "all of them are
+       them" agree — so the guard could be written either way and nothing here
+       would move. Two people is what separates them, and the guard has to hold
+       for the one that is present as well as refuse the one that is not. */
+    const CAROL = 'c0'.repeat(32)
+    const AWAY = 'd0'.repeat(32)
+    const { port, records } = world({ people: () => Promise.resolve([{ person: CAROL, displayName: 'Carol' }, { person: BOB, displayName: 'Bob' }]) })
+    await port.setMuted(BOB, true)
+    expect(records.get(BOB)).toMatchObject({ state: 'muted' })
+    await expect(port.setMuted(AWAY, true)).rejects.toThrow(NOT_IN_CIRCLE)
+    expect(records.get(AWAY)).toBeUndefined()
+  })
+
+  it('stops their passages being DRAWN while the relationship still takes them', async () => {
+    /* The two halves that must not move together: `drawsOverlays` refuses a
+       muted person, `acceptsTransport` still admits them. A mute that closed
+       the transport would lose everything published while it was on, and
+       unmuting would show a hole rather than the passages. */
+    const { port, records } = world()
+    await port.setMuted(BOB, true)
+    const state = records.get(BOB)!.state
+    expect(drawsOverlays(state)).toBe(false)
+    expect(acceptsTransport(state)).toBe(true)
+  })
+
+  it('tells subscribers when it moves, and not when it does not', async () => {
+    const { port } = world()
+    const told = vi.fn()
+    const off = port.subscribe(told)
+    await port.setMuted(BOB, true)
+    expect(told).toHaveBeenCalledTimes(1)
+    await port.setMuted(BOB, true)
+    expect(told).toHaveBeenCalledTimes(1)
+    off()
+  })
+
+  it('refuses a person the peer no longer names', async () => {
+    /* `setShowsShelf`'s reason: a record written for somebody already gone is
+       a decision nobody can undo. */
+    const { port } = world()
+    await expect(port.setMuted('someone-else', true)).rejects.toThrow()
+  })
+
+  it('refuses to un-hold somebody who LEFT, because that is a re-admission', async () => {
+    /* ⚠️ **THE RULE LIVES IN `changeState`, AND THIS ASSERTS IT IS REACHED —
+       not that it is copied here.** Exited to admitted in the same epoch would
+       revive every entry the old epoch retained, which is exactly what
+       `readmit`'s new epoch prevents. A guard written beside this one would be
+       a second place for that decision to drift. */
+    const { port, records } = world()
+    records.set(BOB, { ...newRelationship(BOB, at(1)), state: 'exited' })
+    await expect(port.setMuted(BOB, false)).rejects.toThrow(/readmit/u)
+  })
+})
+
+describe('slotsOf — the concurrency bound, where it can actually fail', () => {
+  /* ⚠️ **THIS WAS FIRST WRITTEN AGAINST `port.cover()` AND ASSERTED NOTHING.**
+     The breach needs a newcomer arriving exactly one microtask after a release
+     — after the `finally` frees the slot and wakes a waiter, before the waiter
+     resumes. `cover()`'s own awaits push every caller past that instant, so the
+     port-level test passed with the defect in place, twice, and I confirmed it
+     by reintroducing the bug. The bound belongs to this function; this is where
+     it can be tested. */
+  const runWith = async (limit: ReturnType<typeof slotsOf>) => {
+    let running = 0
+    let most = 0
+    const releases: (() => void)[] = []
+    const task = () =>
+      new Promise<void>((done) => {
+        running += 1
+        most = Math.max(most, running)
+        releases.push(() => {
+          running -= 1
+          done()
+        })
+      })
+    const busy = Array.from({ length: 4 }, () => limit(task))
+    const queued = limit(task)
+    await new Promise((done) => setTimeout(done, 0))
+
+    releases.shift()!()
+    /* EXACTLY ONE microtask: enough for the `finally` to free the slot and wake
+       the waiter, and not enough for the waiter to resume. `setTimeout(0)` is
+       far too coarse — the queue has drained by then, and even the defective
+       version holds. */
+    await Promise.resolve()
+    const newcomer = limit(task)
+    await new Promise((done) => setTimeout(done, 0))
+
+    while (releases.length > 0) {
+      releases.shift()!()
+      await new Promise((done) => setTimeout(done, 0))
+    }
+    await Promise.all([...busy, queued, newcomer])
+    return most
+  }
+
+  it('never runs more than its width, even across the gap a release opens', async () => {
+    expect(await runWith(slotsOf(4))).toBe(4)
+  })
+
+  it('runs them all, so the bound is not achieved by dropping work', async () => {
+    const limit = slotsOf(2)
+    const done: number[] = []
+    await Promise.all(Array.from({ length: 6 }, (_, i) => limit(async () => void done.push(i))))
+    expect(done.sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5])
+  })
+
+  it('gives the slot back, so the pool is as free after a batch as before it', async () => {
+    /* ⚠️ **THE WAITER INHERITS THE SLOT IT WAS WOKEN FOR, AND MUST NOT TAKE A
+       SECOND.** Counting up on a waiter as well leaves the count permanently
+       above the truth: every task still RUNS, which is all the test above
+       checks, and the pool ends the batch full of slots nobody holds. The next
+       caller then waits for a release that will never come. */
+    const limit = slotsOf(2)
+    await Promise.all(Array.from({ length: 6 }, () => limit(() => Promise.resolve())))
+
+    let running = 0
+    let most = 0
+    const hold: (() => void)[] = []
+    const task = () =>
+      new Promise<void>((done) => {
+        running += 1
+        most = Math.max(most, running)
+        hold.push(() => {
+          running -= 1
+          done()
+        })
+      })
+    const after = [limit(task), limit(task)]
+    await new Promise((done) => setTimeout(done, 0))
+    /* Both start at once, because the six before them gave their slots back. */
+    expect(most).toBe(2)
+    while (hold.length > 0) hold.shift()!()
+    await Promise.all(after)
+  })
+
+  it('frees the slot when a task THROWS, rather than leaking it', async () => {
+    const limit = slotsOf(1)
+    await expect(limit(() => Promise.reject(new Error('nope')))).rejects.toThrow('nope')
+    await expect(limit(() => Promise.resolve('after'))).resolves.toBe('after')
+  })
+})
+
+describe('forgetting when the purge fails', () => {
+  it('still tells subscribers, because the relationship has already ended', async () => {
+    /* ⚠️ **THE TELLING WAS LEFT ENTIRELY TO THE PURGE**, on the reasoning that
+       `purgePerson` reports as its files go. It does — but it is the LAST step
+       of that dependency, behind `covers.purge` and `listTrash`. Either can
+       fail after the record has become `exited`, and then no listener is ever
+       woken: every subscribed view goes on drawing somebody the reader has
+       removed, until something unrelated happens to refresh it. */
+    const { port } = world({ purge: vi.fn(() => Promise.reject(new Error('disk full'))) })
+    const told = vi.fn()
+    port.subscribe(told)
+    await expect(port.forget(BOB)).rejects.toThrow('disk full')
+    expect(told).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not tell twice on the happy path, where the purge already does', async () => {
+    const { port } = world()
+    const told = vi.fn()
+    port.subscribe(told)
+    await port.forget(BOB)
+    expect(told).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('a relationship write that LOSES the merge', () => {
+  /* ⚠️ **`writeRelationship` MERGES, AND EVERY CALLER THREW ITS ANSWER AWAY.**
+     Within one epoch `mergeRelationship` keeps whichever record has the later
+     `changedAt`, so a write can be persisted and have no effect. The callers
+     carried on as though it had taken. */
+
+  /** A store whose held record always wins — the losing-merge case, exactly. */
+  const stubborn = (held: Relationship) =>
+    world({
+      relationship: () => Promise.resolve(held),
+      writeRelationship: vi.fn(() => Promise.resolve(held)),
+    })
+
+  it('does NOT purge or forget the peer when the exit did not stand', async () => {
+    /* ⚠️ **THE ONE THAT MATTERS.** `forget` purged the files and told the peer
+       to forget the person while the record could still say `admitted` — which
+       is the state `admits()` re-admits on. Files gone, pairing gone, and the
+       door open to the next hello from somebody the reader had just removed. */
+    const admitted = newRelationship(BOB, at(9))
+    const { port, deps } = stubborn(admitted)
+    await expect(port.forget(BOB)).rejects.toThrow(/was not the one that stood/u)
+    expect(deps.purge).not.toHaveBeenCalled()
+    expect(deps.forgetPeer).not.toHaveBeenCalled()
+  })
+
+  it('refuses a shelf switch that did not stand, rather than reporting it moved', async () => {
+    const { port } = stubborn(newRelationship(BOB, at(9)))
+    await expect(port.setShowsShelf(BOB, true)).rejects.toThrow(/was not the one that stood/u)
+  })
+
+  it('refuses a hold-back that did not stand', async () => {
+    const { port } = stubborn(newRelationship(BOB, at(9)))
+    await expect(port.setMuted(BOB, true)).rejects.toThrow(/was not the one that stood/u)
+  })
+
+  it('tells nobody when the write lost, because nothing moved', async () => {
+    /* A listener woken for a change that did not happen sends every subscriber
+       to re-read state that is exactly as they left it. */
+    const { port } = stubborn(newRelationship(BOB, at(9)))
+    const told = vi.fn()
+    port.subscribe(told)
+    await port.setMuted(BOB, true).catch(() => {})
+    expect(told).not.toHaveBeenCalled()
+  })
+})
+
 describe('the Friends view', () => {
   const work = (pub: string, title: string, author: string, identifier?: string) => ({
     pub,
@@ -152,23 +405,50 @@ describe('the Friends view', () => {
 
 describe('forgetting a person', () => {
   it('purges their files across every book before the peer forgets them, and says so', async () => {
-    const { port, deps, listeners } = world()
+    /* ⚠️ **RECORDING THE ORDER OF SYNCHRONOUS CALLS IS NOT THE SAME AS HOLDING
+       EACH STEP TO THE ONE BEFORE IT.** Every double here resolved at once, so
+       the three steps ran in order however the production code was written —
+       drop an `await` and the order recorded is identical, while a peer is
+       forgotten with its purge still in flight. Each step is held open here,
+       and the assertion is that the NEXT one has not started. */
+    const { port, deps, listeners, records } = world()
     const told = vi.fn()
     port.subscribe(told)
-    const order: string[] = []
+    /* A microtask turn, so a step that HAS started has started. */
+    const settle = () => new Promise((done) => setTimeout(done, 0))
+    const open = <T,>() => {
+      let go!: (value: T) => void
+      const promise = new Promise<T>((yes) => {
+        go = yes
+      })
+      return { promise, go }
+    }
+    const written = open<Relationship>()
+    const purged = open<void>()
+    ;(deps.writeRelationship as ReturnType<typeof vi.fn>).mockImplementation((record: Relationship) => {
+      records.set(record.person, record)
+      return written.promise
+    })
     ;(deps.purge as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      order.push('purge')
       /* The purge is what says so, as the real one does through `onChanged`. */
       for (const listener of listeners) listener()
-      return Promise.resolve()
+      return purged.promise
     })
-    ;(deps.forgetPeer as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      order.push('forget')
-      return Promise.resolve()
-    })
-    await port.forget(BOB)
-    expect(order).toEqual(['purge', 'forget'])
+    const gone = port.forget(BOB)
+    await settle()
+    /* The relationship write is still out, so nothing has been purged. */
+    expect(deps.purge).not.toHaveBeenCalled()
+    expect(deps.forgetPeer).not.toHaveBeenCalled()
+
+    written.go({ ...newRelationship(BOB, at(1)), state: 'exited', retain: 'purge' })
+    await settle()
+    /* Purging now, and the peer is NOT forgotten while it is out. */
     expect(deps.purge).toHaveBeenCalledWith(BOB, ['book:moby', 'book:dune'])
+    expect(deps.forgetPeer).not.toHaveBeenCalled()
+
+    purged.go()
+    await gone
+    expect(deps.forgetPeer).toHaveBeenCalledTimes(1)
     expect(told).toHaveBeenCalledTimes(1)
   })
 
@@ -445,9 +725,16 @@ describe('the switch and a forget, on one person’s turn', () => {
   })
 
   it('runs a flip queued behind a forget after the peer has forgotten them — and refuses it as such', async () => {
+    /* ⚠️ **A ROSTER OF ONE AND A `findIndex` THAT ANSWERS -1 IS A DOUBLE THAT
+       FORGETS THE WRONG PERSON HAPPILY.** `splice(-1, 1)` drops the LAST
+       entry, so `forgetPeer` called with any string at all removed Bob and the
+       queued flip was refused exactly as it should be — the argument was never
+       part of the test. Refused here, and named. */
     const { port, deps, people, records } = world()
     ;(deps.forgetPeer as ReturnType<typeof vi.fn>).mockImplementation((person: string) => {
-      people.splice(people.findIndex((one) => one.person === person), 1)
+      const at = people.findIndex((one) => one.person === person)
+      if (at < 0) throw new Error(`forgetPeer was given ${person}, who is not in the circle`)
+      people.splice(at, 1)
       return Promise.resolve()
     })
     const gone = port.forget(BOB)
@@ -456,6 +743,9 @@ describe('the switch and a forget, on one person’s turn', () => {
     await expect(flipped).rejects.toThrow(/not in your circle/u)
     /* The exited record stands, with no grant written over it. */
     expect(records.get(BOB)).toMatchObject({ state: 'exited', shelf: false })
+    /* And the peer that was forgotten is the one named. */
+    expect(deps.forgetPeer).toHaveBeenCalledTimes(1)
+    expect(deps.forgetPeer).toHaveBeenCalledWith(BOB)
   })
 
   it('lets go of a person’s turn once it has settled', async () => {
@@ -556,21 +846,61 @@ describe('a friend’s jackets, a few at a time — WI-23.C5', () => {
     expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH + 3)
   })
 
-  it('does not dial for a request abandoned before its turn, and answers it null', async () => {
-    const coverOf = vi.fn(() => Promise.resolve<Uint8Array | null>(null))
+  it('does not dial for a request abandoned before its turn, and answers it null WITHOUT waiting for a slot', async () => {
+    /* ⚠️ **THE COUNT OF DIALS CANNOT TELL THE TWO CHECKS APART.** The abort is
+       read again once a slot opens, so a request that queued and then found
+       itself abandoned also dials nothing — and this test, which released the
+       held slots before looking, passed with the pre-queue check deleted. What
+       the earlier check buys is that the request does not WAIT: it answers
+       while every slot is still occupied. */
+    const releases: (() => void)[] = []
+    const coverOf = vi.fn(() => new Promise<Uint8Array | null>((done) => releases.push(() => done(null))))
     const { port } = world({ coverOf })
-    /* Every slot taken, then one more that is abandoned before a slot frees. */
+    /* Every slot taken and held open, then one more that is abandoned. */
     const held = Array.from({ length: COVER_WIDTH }, (_, i) => port.cover(BOB, book(`s${i}`)))
+    await new Promise((done) => setTimeout(done, 0))
     const abandon = new AbortController()
-    const waiting = port.cover(BOB, book('late'), abandon.signal)
     abandon.abort()
-    await Promise.all(held)
+    const waiting = port.cover(BOB, book('late'), abandon.signal)
+    /* Answered with the pool still full — nothing has been released yet. */
     expect(await waiting).toBeNull()
+    expect(releases).toHaveLength(COVER_WIDTH)
+
+    while (releases.length > 0) releases.shift()!()
+    await Promise.all(held)
     expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
     /* Abandoned before it was even asked: null, no dial. */
     const gone = new AbortController()
     gone.abort()
     expect(await port.cover(BOB, book('never'), gone.signal)).toBeNull()
+    expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
+  })
+
+  it('drops a request abandoned WHILE it waits, once its slot opens', async () => {
+    /* ⚠️ **THE OTHER READ OF THE SIGNAL, AND IT NEEDS ITS OWN ROW.** The test
+       above aborts BEFORE the request queues, so the earlier check answers it
+       and this one is never the deciding read. A row scrolled past after it
+       queued is the case this exists for: the wait may be long, and the answer
+       is asked for again when the slot opens. */
+    const releases: (() => void)[] = []
+    const coverOf = vi.fn(() => new Promise<Uint8Array | null>((done) => releases.push(() => done(null))))
+    const { port } = world({ coverOf })
+    const held = Array.from({ length: COVER_WIDTH }, (_, i) => port.cover(BOB, book(`s${i}`)))
+    await new Promise((done) => setTimeout(done, 0))
+    const abandon = new AbortController()
+    const queued = port.cover(BOB, book('late'), abandon.signal)
+    await new Promise((done) => setTimeout(done, 0))
+    /* In the queue, not abandoned yet — the pool is full. */
+    expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
+
+    abandon.abort()
+    while (releases.length > 0) {
+      releases.shift()!()
+      await new Promise((done) => setTimeout(done, 0))
+    }
+    expect(await queued).toBeNull()
+    await Promise.all(held)
+    /* Its slot opened and it was let go rather than fetched. */
     expect(coverOf).toHaveBeenCalledTimes(COVER_WIDTH)
   })
 
@@ -592,9 +922,15 @@ describe('a friend’s jackets, a few at a time — WI-23.C5', () => {
 
   it('hands the row’s signal to the transfer, so abandoning the row can stop the bytes', async () => {
     const coverOf = vi.fn((_person: string, _device: string, _pub: string, _digest: string, _signal?: AbortSignal) => Promise.resolve(null))
-    const { port } = world({ coverOf })
+    const warn = vi.fn()
+    const { port } = world({ coverOf, warn })
     const abandon = new AbortController()
-    await port.cover(BOB, book('s1'), abandon.signal)
+    /* ⚠️ **NO JACKET IS NOT A FAILURE.** Read as bytes it is a type nobody can
+       name, which lands in the catch and is reported through the diagnostics —
+       a peer that simply has no cover for a book would file a warning per row
+       per refresh. Null in, null out, and nothing said. */
+    expect(await port.cover(BOB, book('s1'), abandon.signal)).toBeNull()
+    expect(warn).not.toHaveBeenCalled()
     expect(coverOf).toHaveBeenCalledTimes(1)
     expect(coverOf.mock.calls[0]![4]).toBe(abandon.signal)
   })

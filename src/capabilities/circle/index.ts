@@ -30,7 +30,7 @@ import {
 } from '../../kernel'
 import { createElement } from 'react'
 import { peopleFor, readForeign, type ForeignFile } from './lib/store'
-import { answerCover, answerPages, welcome, type BookLike, type Serving } from './lib/exchange'
+import { answerCover, answerPages, welcome, type BookLike, type Sealed, type Serving } from './lib/exchange'
 import { COVER_CAP_SETTING, createCoverFetcher } from './lib/covers'
 import { readShared, updateShared, type Publisher } from './lib/publish'
 import { CIRCLE_SERVICES } from './lib/protocol'
@@ -137,7 +137,6 @@ async function annotationsFor(
   request: OverlayRequest,
 ): Promise<readonly ForeignAnnotation[]> {
   const entries = await entriesFor(held.fs, request.bookId, held.warn)
-  if (entries.length === 0) return []
 
   /* ⚠️ **KEYED BY PERSON AND PUB, AND IT WAS KEYED BY `pub` ALONE.** A `pub`
    * is minted by whoever shared the passage, so it is unique to that PERSON and
@@ -147,17 +146,25 @@ async function annotationsFor(
    * was drawn at Bob's sentence, and `foreignWeight` counted two readers of a
    * passage only one of them had marked. `overlayKey` already composes both
    * for exactly this reason; this is the same composition one step earlier. */
-  const pending = entries
-    .filter((entry) => entry.resolved === undefined)
-    .map((entry) => ({
-      id: overlayKey(entry),
-      quote: entry.passage.quote,
-      prefix: entry.passage.prefix,
-      suffix: entry.passage.suffix,
-    }))
+  /* ⚠️ **EVERY ENTRY, BECAUSE NONE OF THEM ARRIVES ANCHORED.** A
+     `.filter((entry) => entry.resolved === undefined)` stood here, and
+     `asShared` strips `resolved` from every row it reads back — a cached
+     anchor is a claim with no evidence and `store.ts` says so at length — so
+     the predicate was true of everything `entriesFor` can return. A filter
+     that cannot exclude anything reads as a rule being enforced somewhere it
+     is not; the rule is enforced on the way in from disk. */
+  const pending = entries.map((entry) => ({
+    id: overlayKey(entry),
+    quote: entry.passage.quote,
+    prefix: entry.passage.prefix,
+    suffix: entry.passage.suffix,
+  }))
 
   /* Only walk when there is something to walk FOR. A book whose entries are
-     all anchored already costs nothing on open. */
+     all anchored already costs nothing on open — and a book with NO entries
+     falls out here too, which is why the `entries.length === 0` short-circuit
+     that used to stand above is gone: it returned the same `[]` this does, one
+     step earlier, and nothing could tell the two apart. */
   /* ⚠️ **NO CAST HERE, AND THERE USED TO BE ONE.** `fresh.cfi as never` widened
      the resolver's answer back to whatever it happened to be, so the
      `ResolvedCfi` brand — the whole of WI-22.A1 — was bypassed at the one seam
@@ -752,7 +759,12 @@ function fetchPortsOver(fs: IndexFs, library: Library, writes: WriteQueue, ledge
          its folder is gone, and a keep would recreate it around one file. */
       library.getSnapshot().some((one) => one.bookId === bookId)
         ? writeForeign(fs as VaultFs, writes, (id) => library.lane(id), bookId, person, file, circleChanged, () => stillAdmits(fs as VaultFs, person, epoch))
-        : Promise.resolve(),
+        : /* ⚠️ **`false`, NOT A RESOLVED NOTHING.** A book removed mid-round is
+             correctly not written back into being — but resolving silently told
+             the round it HAD been kept, so those pages were counted as accepted
+             and the held cursor advanced past them. They are never asked for
+             again, and the report claimed work nobody did. */
+          Promise.resolve(false),
     heldShelf: (person) => readHeldShelf(fs as VaultFs, person),
     keepShelf: (person, file, epoch) => writeHeldShelf(fs as VaultFs, writes, person, file, circleChanged, () => stillAdmits(fs as VaultFs, person, epoch)),
     heldLists: (person) => readHeldLists(fs, person, warn),
@@ -790,6 +802,33 @@ interface RunningDeps {
 }
 
 /**
+ * Run one of the store's transactions and carry its ANSWER out.
+ *
+ * ⚠️ **THE PAGES ARE CUT INSIDE THE LANE, SO THEY HAVE TO LEAVE IT SOMEHOW.**
+ * `updateShared` and its two siblings answer with the file they wrote, which is
+ * not what a serve needs — it needs the pages it decided on while holding the
+ * file. Carried out as a value rather than assigned to a variable beside the
+ * call, so there is no moment where the pages exist and the boundaries that cut
+ * them do not.
+ *
+ * The count is the assertion: a queue that never ran the step, or ran it twice,
+ * is a defect that would otherwise surface as an empty answer.
+ */
+async function answering<F, T>(
+  update: (transform: (held: F) => Promise<F>) => Promise<F>,
+  step: (held: F) => Promise<Sealed<F, T>>,
+): Promise<T> {
+  const answers: T[] = []
+  await update(async (held) => {
+    const made = await step(held)
+    answers.push(made.answer)
+    return made.held
+  })
+  if (answers.length !== 1) throw new Error(`circle: a serving step ran ${answers.length} times, not once`)
+  return answers[0]!
+}
+
+/**
  * What the service handlers read — the serving side, over one run's stores.
  * Its own factory, so what a friend is SERVED can be read apart from what
  * the reader's own surfaces are handed.
@@ -807,20 +846,17 @@ function servingOver({ fs, library, writes }: Pick<RunningDeps, 'fs' | 'library'
   }
   return (): Serving => ({
     books: booksNow(),
-    shared: (bookId) => readShared(fs as VaultFs, bookId),
-    seal: (bookId, sealed) =>
-      /* ⚠️ **`library.lane`, NEVER A LANE DERIVED HERE.** `folderOf` is
-       * MANY-TO-ONE, so a lane keyed on the raw id splits one directory across
-       * two lanes — and a rekeyed book has to stay on the lane its earlier
-       * writes are still draining on. `Library.lane` says so in as many words,
-       * and `store.ts` already paid for deriving one.
-       *
-       * And a TRANSACTION, not a replacement: the boundaries were cut over the
-       * log as it was read, and only they are written — a share that landed
-       * on the file meanwhile is kept, and the boundaries still cover the
-       * sequences they were sealed over. */
-      // Stryker disable next-line ArrowFunction: the lane, handed through — the queue serialises on it; the tests' queue takes any.
-      updateShared(fs as VaultFs, writes, (id) => library.lane(id), bookId, (current) => ({ ...current, sealed: sealed.sealed })).then(() => undefined),
+    /* ⚠️ **`library.lane`, NEVER A LANE DERIVED HERE.** `folderOf` is
+     * MANY-TO-ONE, so a lane keyed on the raw id splits one directory across
+     * two lanes — and a rekeyed book has to stay on the lane its earlier
+     * writes are still draining on. `Library.lane` says so in as many words,
+     * and `store.ts` already paid for deriving one.
+     *
+     * The whole step runs on that lane — see `Serving.withShared`. It used to
+     * be a read outside and a merge inside, which kept a share that landed
+     * meanwhile and did NOT stop two requests cutting the same range two ways. */
+    // Stryker disable next-line ArrowFunction: the lane, handed through — the queue serialises on it; the tests' queue takes any.
+    withShared: (bookId, step) => answering((transform) => updateShared(fs as VaultFs, writes, (id) => library.lane(id), bookId, transform), step),
     publisher: async (work) => {
       const port = publishPort()
       if (!port) return null
@@ -828,17 +864,9 @@ function servingOver({ fs, library, writes }: Pick<RunningDeps, 'fs' | 'library'
       return identity ? publisherFor(work, identity, port) : null
     },
     shelf: () => readOwnShelf(fs as VaultFs),
-    /* Boundaries only, for `seal`'s reason. */
-    sealShelf: async (held) => {
-      await updateOwnShelf(fs as VaultFs, writes, (current) => ({ ...current, sealed: held.sealed }))
-    },
-    lists: async () => {
-      const ids = await ownListIds(fs)
-      return Promise.all(ids.map(async (id) => ({ id, held: await readOwnList(fs as VaultFs, id) })))
-    },
-    sealList: async (id, held) => {
-      await updateOwnList(fs as VaultFs, writes, id, (current) => ({ ...current, sealed: held.sealed }))
-    },
+    withShelf: (step) => answering((transform) => updateOwnShelf(fs as VaultFs, writes, transform), step),
+    listIds: () => ownListIds(fs),
+    withList: (listId, step) => answering((transform) => updateOwnList(fs as VaultFs, writes, listId, transform), step),
     /* The jacket the record's facts describe, read whole (WI-23.C5): a file
        that has gone, or changed size under its facts, answers null and the
        request is refused rather than served with the wrong bytes. */

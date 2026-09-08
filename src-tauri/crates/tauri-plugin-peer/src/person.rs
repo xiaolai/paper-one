@@ -53,7 +53,7 @@ use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 
 use bip39::{Language, Mnemonic};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -102,6 +102,29 @@ const MAX_LIFETIME_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 
 /// A device id is an iroh endpoint key: 64 lower-case hex characters.
 const DEVICE_ID_HEX: usize = 64;
+
+/// The largest integer JavaScript can hold exactly — `Number.MAX_SAFE_INTEGER`.
+///
+/// ⚠️ **THE WIRE IS A CONTRACT BETWEEN TWO LANGUAGES, AND ONLY ONE OF THEM WAS
+/// ENFORCING THIS ONE.** `receive.ts`'s `isDelegation` ends
+/// `['notBefore', 'notAfter', 'roster'].every((key) => Number.isSafeInteger(...))`,
+/// so a delegation carrying a larger number is refused there — while Rust
+/// signed it happily. The result is a delegation that is valid, correctly
+/// signed, and unusable by every recipient: the same shape of defect as
+/// `signature` vs `sig`, which cost this project every page it ever sent.
+///
+/// ⚠️ **AND THE GOLDEN VECTOR CANNOT SEE IT.** That test pins the signed BYTES
+/// — one seed, one message, one signature — and says nothing about which VALUES
+/// the two sides agree to accept. Bytes agreeing is not the same as rules
+/// agreeing, and this is the second time that distinction has cost something.
+const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// How far ahead of this device's clock a delegation may start.
+///
+/// The same five minutes `circle::SKEW_MS` allows a RECEIVER for two machines
+/// disagreeing about the time. Named here rather than imported so the signer's
+/// bound cannot drift from the receiver's silently.
+const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 
 /// The entropy behind twelve words.
 const PHRASE_ENTROPY_BYTES: usize = 16;
@@ -585,6 +608,35 @@ pub struct SignedDelegation {
     #[serde(flatten)]
     pub delegation: Delegation,
     /// Hex, 64 bytes.
+    ///
+    /// ⚠️ **ON THE WIRE IT IS `sig`, AND IT WAS `signature` UNTIL 2026-09-07.**
+    /// `wire.md` gives every signed object `sig` — the page's own shape is
+    /// `{ person, work, …, delegation, sig }` — and this one struct spelled it
+    /// out. The TypeScript verifier's parser is deliberately strict, six
+    /// members and no unknown ones (`receive.ts`, `isDelegation`), so a
+    /// delegation arriving as `signature` was not merely misread: it was
+    /// refused before its signature was ever checked, as `may-not-speak`, and
+    /// reported as `bad-delegation`.
+    ///
+    /// **EVERY page from a Rust-signing device was refused by EVERY TypeScript
+    /// verifier.** Measured 2026-09-07 on two machines: a published passage,
+    /// a full fetch round each way, `accepted: 0` and
+    /// `refusedBecause: {"bad-delegation": 1}`.
+    ///
+    /// ⚠️ **AND THE GOLDEN VECTOR COULD NOT SEE IT.**
+    /// `the_golden_vector_the_typescript_pins` exists for exactly this class
+    /// and pins the SIGNED BYTES — one seed, one message, one signature, the
+    /// same in both languages. It passes. The two languages agree perfectly
+    /// about the bytes and disagreed about the name of the field carrying
+    /// them, so the signature verified and was thrown away before verification.
+    /// A vector over what is signed says nothing about the envelope that
+    /// carries it; `a_delegation_is_wire_shaped` below is that missing half.
+    ///
+    /// `alias` keeps every `circle-mine.json` already on disk readable — the
+    /// signature covers hand-ordered bytes and never the field names, which is
+    /// what `the_signature_does_not_depend_on_what_serde_calls_the_fields`
+    /// established and what makes this rename safe.
+    #[serde(rename = "sig", alias = "signature")]
     pub signature: String,
 }
 
@@ -600,6 +652,7 @@ pub fn sign_delegation(
     keychain: &dyn Keychain,
     root_dir: &Path,
     delegation: Delegation,
+    now: i64,
 ) -> Result<SignedDelegation> {
     /* ⚠️ **THE SIGNER CHECKS THE WINDOW; IT DOES NOT ACCEPT ONE ON TRUST.**
      * Every field here arrives from a caller, and the delegate command is
@@ -607,6 +660,22 @@ pub fn sign_delegation(
      * was one call away, and expiry is the one guarantee that survives a peer
      * who never connects again. A signer that will sign anything is not a
      * signer, it is an oracle. */
+    /* ⚠️ **EVERY NUMBER THE WIRE CARRIES, AGAINST THE RANGE THE OTHER SIDE
+     * ACCEPTS.** `isDelegation` refuses anything outside JavaScript's exact
+     * integer range, so signing one produces a delegation no recipient can
+     * use — correctly signed and permanently refused, with nothing anywhere
+     * naming the cause. Refused at the signer, where it is one line. */
+    for (name, value) in [
+        ("notBefore", delegation.not_before),
+        ("notAfter", delegation.not_after),
+        ("roster", delegation.roster as i64),
+    ] {
+        if !(0..=MAX_SAFE_INTEGER).contains(&value) {
+            return Err(Error::Identity(format!(
+                "a delegation's {name} must be between 0 and {MAX_SAFE_INTEGER} — the range the wire's other side can hold exactly"
+            )));
+        }
+    }
     if delegation.not_after <= delegation.not_before {
         return Err(Error::Identity(
             "a delegation must end after it begins".into(),
@@ -622,6 +691,23 @@ pub fn sign_delegation(
             MAX_LIFETIME_MS / (24 * 60 * 60 * 1000)
         )));
     }
+    /* ⚠️ **THE BACKSTOP CAPPED THE WINDOW'S LENGTH AND NOT WHERE IT SITS.**
+     * `peer_person_delegate` is reachable from the renderer and passed
+     * `not_before` straight through, so a device could mint a 90-day window
+     * starting a year out, and another starting the year after that — a
+     * stockpile of delegations that stay valid long after this device should
+     * have lost the authority to speak. A peer that misses the revocation
+     * accepts every one of them. "90 days" then describes each window's
+     * length and nothing about the horizon, which is not what a backstop is.
+     *
+     * The tolerance is `SKEW_MS`, the same five minutes `live()` already
+     * allows for two machines disagreeing about the clock — deliberately no
+     * more: it is what absorbs skew, not a window for issuing ahead. */
+    if delegation.not_before > now.saturating_add(CLOCK_SKEW_MS) {
+        return Err(Error::Identity(
+            "a delegation may not start in the future — the expiry backstop bounds the window's length, and this bounds where it sits".into(),
+        ));
+    }
     /* The device is a key, not a label. An id that is not one produces a
     delegation nothing can ever match against a real endpoint — signed,
     valid, and meaningless. */
@@ -635,6 +721,17 @@ pub fn sign_delegation(
             "that device id is not an endpoint key".into(),
         ));
     }
+    /* ⚠️ **THE ROLE AND THE ROOT ARE READ UNDER ONE LOCK, AND THEY WERE NOT.**
+     * `forget` demotes the role and then deletes the root, in that order and
+     * under `ROOT_LOCK`, because only that order fails recoverably. Read
+     * without the lock, a signer could see `Home`, have `forget` run to
+     * completion beside it, and then read the root — which is still there
+     * until the keychain delete lands, and stays there for ever if that delete
+     * FAILS, which is the case the ordering deliberately leaves possible. The
+     * role gate is then decided on a role the device no longer has. Held
+     * across both reads and the signature, so a demotion either happens wholly
+     * before this delegation or wholly after it. */
+    let _held = hold_root();
     let role = device_role(root_dir)?
         .ok_or_else(|| Error::Identity("this device has no circle role".into()))?;
     if !role.may_mint() {
@@ -674,6 +771,9 @@ pub fn sign_as_person(
     domain: &str,
     payload: &[u8],
 ) -> Result<String> {
+    /* Under the lock, for `sign_delegation`'s reason: a role read before a
+    demotion and a root read after it is a signature a leaf produced. */
+    let _held = hold_root();
     let role = device_role(root_dir)?
         .ok_or_else(|| Error::Identity("this device has no circle role".into()))?;
     if !role.may_mint() {
@@ -697,7 +797,13 @@ pub fn verify_as_person(person: &str, domain: &str, payload: &[u8], signature: &
     let sig_bytes: [u8; 64] = unhex(signature)
         .and_then(|b| b.try_into().ok())
         .ok_or_else(|| Error::Identity("that signature is not 64 bytes of hex".into()))?;
-    key.verify(
+    /* ⚠️ **`verify_strict`, BECAUSE THE OTHER SIDE IS STRICT.** `verify` accepts
+     * small-order and non-canonical public keys that `@noble/ed25519` refuses
+     * — `crypto.ts`'s `unusable` exists to reject exactly those — so a proof
+     * Rust called valid could be one TypeScript will not. The golden-vector
+     * test already used `verify_strict`, which means production and test
+     * disagreed about acceptance while agreeing about bytes. */
+    key.verify_strict(
         &domained(domain, payload),
         &Signature::from_bytes(&sig_bytes),
     )
@@ -715,17 +821,14 @@ fn domained(domain: &str, payload: &[u8]) -> Vec<u8> {
 
 /// Whether a signed delegation really was signed by the person it names.
 ///
-/// ⚠️ **NOT CALLED YET, AND DELIBERATELY NOT DELETED.** This is the RECEIVING
-/// half of WI-22.B1: a page arrives carrying its delegation, and checking it is
-/// what `checkPage`'s `maySpeak` parameter exists to be given. It is built and
-/// tested with the minting half because a signature format is one decision — a
-/// verifier written later, against the bytes rather than against the writer, is
-/// how the two come to disagree about field order and nobody finds out until a
-/// second device joins.
-#[allow(
-    dead_code,
-    reason = "the receiving half — consumed by WI-22.C1's page check"
-)]
+/// The RECEIVING half of WI-22.B1: a page arrives carrying its delegation, and
+/// this is what checks it.
+///
+/// ⚠️ **THIS SAID "NOT CALLED YET" AND CARRIED AN `allow(dead_code)` FOR IT.**
+/// `circle.rs`'s admission path calls it in production. A suppression that has
+/// outlived its reason is worse than none: it tells the compiler to stop
+/// reporting a fact, and it tells the next reader that a security check is
+/// inert when it is load-bearing.
 ///
 /// The person id IS the public key, so there is no key to look up and no
 /// directory to be out of date — checking the signature and checking the
@@ -743,7 +846,9 @@ pub fn verify_delegation(signed: &SignedDelegation) -> Result<()> {
     let sig_bytes: [u8; 64] = sig_bytes
         .try_into()
         .map_err(|_| Error::Identity("that signature is the wrong length".into()))?;
-    key.verify(
+    /* `verify_strict` for `verify_as_person`'s reason — the two verifiers must
+    not disagree with each other either. */
+    key.verify_strict(
         &signed.delegation.signed_bytes(),
         &Signature::from_bytes(&sig_bytes),
     )
@@ -955,6 +1060,10 @@ mod tests {
     /// person record that an `ensure` in another then refused to mint over.
     /// It failed once and passed the next three runs — the exact shape of a
     /// defect that gets written off as flakiness. `scratch` counts instead.
+    /// A fixed clock for the signer's "may not start in the future" bound.
+    /// Every delegation fixture below begins at or before this.
+    const NOW: i64 = 1_700_000_000_000;
+
     fn temp() -> PathBuf {
         let dir = crate::testutil::scratch("person");
         std::fs::create_dir_all(dir.join(PEER_DIR)).unwrap();
@@ -1122,9 +1231,16 @@ mod tests {
                 person,
                 device: "ab".repeat(32),
                 not_before: 0,
-                not_after: i64::MAX,
+                /* ⚠️ **INSIDE THE WIRE RANGE, ON PURPOSE.** This was `i64::MAX`,
+                 * which the wire-range check now refuses FIRST — so the test
+                 * would have gone on passing while no longer exercising the
+                 * backstop it is named for. The largest value the other side
+                 * can hold is still ~285 000 years, which is amply longer than
+                 * ninety days. */
+                not_after: MAX_SAFE_INTEGER,
                 roster: 1,
             },
+            NOW,
         )
         .unwrap_err();
         assert!(format!("{err}").contains("longer than"), "{err}");
@@ -1146,6 +1262,7 @@ mod tests {
                     not_after: after,
                     roster: 1,
                 },
+                NOW,
             )
             .unwrap_err();
             assert!(format!("{err}").contains("end after it begins"), "{err}");
@@ -1170,6 +1287,7 @@ mod tests {
                     not_after: 1_000,
                     roster: 1,
                 },
+                NOW,
             )
             .unwrap_err();
             assert!(format!("{err}").contains("endpoint key"), "{bad}: {err}");
@@ -1272,6 +1390,7 @@ mod tests {
                 not_after: 1,
                 roster: 1,
             },
+            NOW,
         )
         .unwrap_err();
         assert!(format!("{err}").contains("does not mint"));
@@ -1292,6 +1411,7 @@ mod tests {
                 not_after: 2_000,
                 roster: 3,
             },
+            NOW,
         )
         .unwrap();
         verify_delegation(&signed).unwrap();
@@ -1312,6 +1432,7 @@ mod tests {
                 not_after: 2_000,
                 roster: 3,
             },
+            NOW,
         )
         .unwrap();
         // The field a compromised leaf would most like to move.
@@ -1338,6 +1459,7 @@ mod tests {
                 not_after: 2_000,
                 roster: 3,
             },
+            NOW,
         )
         .unwrap();
         signed.delegation.roster = 4;
@@ -1360,6 +1482,7 @@ mod tests {
                 not_after: 1,
                 roster: 1,
             },
+            NOW,
         )
         .unwrap_err();
         assert!(format!("{err}").contains("different person"));
@@ -1562,20 +1685,288 @@ mod tests {
         let keychain = FakeKeychain::default();
         let dir = temp();
         ensure(&keychain, &dir).unwrap();
-        let json = serde_json::to_string(&custody(&keychain, &dir, 1, 0).unwrap()).unwrap();
+        assert_eq!(
+            wire_keys(&custody(&keychain, &dir, 1, 0).unwrap()),
+            [
+                "atRisk",
+                "canShowPhrase",
+                "circle",
+                "devices",
+                "hasIdentity",
+                "role"
+            ],
+        );
+    }
 
-        for camel in ["hasIdentity", "canShowPhrase", "atRisk"] {
-            assert!(json.contains(camel), "{json} is missing {camel}");
+    /// The keys a value actually serialises to, sorted.
+    ///
+    /// ⚠️ **THE WHOLE SET, NEVER `json.contains(name)`.** A `contains` check can
+    /// only find a name somebody already suspected, which makes it exactly as
+    /// good as the audit that wrote it and no better. The defect below got past
+    /// one. Reading the key set asks the question the other way round — what IS
+    /// this, rather than does it have the bit I am thinking of — and that is the
+    /// only form that can report a field nobody thought about.
+    fn wire_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
+        let json = serde_json::to_value(value).expect("serialises");
+        let mut keys: Vec<String> = json
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// A keychain that pauses in the middle of a read, so a second caller can
+    /// be shown waiting outside the lock.
+    #[derive(Debug)]
+    struct PausingKeychain {
+        inner: FakeKeychain,
+        reading: std::sync::mpsc::SyncSender<()>,
+        go: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl Keychain for PausingKeychain {
+        fn read(&self, account: &str) -> Result<Option<String>> {
+            if account == ROOT_ACCOUNT {
+                self.reading.send(()).unwrap();
+                if let Some(go) = self.go.lock().unwrap().take() {
+                    go.recv().unwrap();
+                }
+            }
+            self.inner.read(account)
         }
-        for snake in ["has_identity", "can_show_phrase", "at_risk"] {
-            assert!(!json.contains(snake), "{json} still carries {snake}");
+        fn write(&self, account: &str, secret: &str) -> Result<()> {
+            self.inner.write(account, secret)
+        }
+        fn delete(&self, account: &str) -> Result<()> {
+            self.inner.delete(account)
         }
     }
 
     #[test]
-    fn a_signed_delegation_serialises_in_camel_case_too() {
-        /* The same trap, in the other struct that flattens — found by auditing
-        the whole surface rather than by being bitten a second time. */
+    fn a_signature_in_flight_holds_off_a_forgetting() {
+        /* ⚠️ **THE ROLE AND THE ROOT WERE READ WITHOUT THE LOCK.** `forget`
+        demotes the role and THEN deletes the root — that order on purpose,
+        because only it fails recoverably — and both signers read the role,
+        then the root, holding nothing. So a signer could pass the role gate as
+        `Home`, have a whole `forget` run beside it, and go on to read a root
+        that is still there: until the delete lands, and for ever if the delete
+        fails, which is the case the ordering deliberately leaves open. The
+        signature is then one a leaf produced.
+
+        No timing is asserted. The signer is paused INSIDE its root read; the
+        forgetting is started and given time to finish; the assertion is that
+        it has NOT, which cannot become true by waiting longer. */
+        let dir = temp();
+        let original = FakeKeychain::default();
+        let (person, _) = ensure(&original, &dir).unwrap();
+        /* The same secret, behind a keychain that pauses on the way to it. */
+        let seeded = FakeKeychain::default();
+        seeded
+            .write(ROOT_ACCOUNT, &original.read(ROOT_ACCOUNT).unwrap().unwrap())
+            .unwrap();
+        let (reading, reached) = std::sync::mpsc::sync_channel(1);
+        let (release, go) = std::sync::mpsc::sync_channel(1);
+        let paused = std::sync::Arc::new(PausingKeychain {
+            inner: seeded,
+            reading,
+            go: Mutex::new(Some(go)),
+        });
+
+        let signing = {
+            let keychain = std::sync::Arc::clone(&paused);
+            let dir = dir.clone();
+            let person = person.clone();
+            std::thread::spawn(move || {
+                sign_delegation(
+                    keychain.as_ref(),
+                    &dir,
+                    Delegation {
+                        person,
+                        device: "ab".repeat(32),
+                        not_before: NOW,
+                        not_after: NOW + 1000,
+                        roster: 1,
+                    },
+                    NOW,
+                )
+            })
+        };
+        reached.recv().unwrap();
+
+        let forgetting = {
+            let dir = dir.clone();
+            std::thread::spawn(move || forget(&FakeKeychain::default(), &dir))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !forgetting.is_finished(),
+            "the forgetting ran while a signature was in flight"
+        );
+        /* And the role it would have demoted is still the one the signer read. */
+        assert_eq!(device_role(&dir).unwrap(), Some(DeviceRole::Home));
+
+        release.send(()).unwrap();
+        assert!(signing.join().unwrap().is_ok());
+        forgetting.join().unwrap().unwrap();
+        assert_eq!(device_role(&dir).unwrap(), Some(DeviceRole::Leaf));
+    }
+
+    #[test]
+    fn a_delegation_may_not_be_stockpiled_into_the_future() {
+        /* ⚠️ **THE BACKSTOP BOUNDED THE WINDOW'S LENGTH AND NOT ITS HORIZON.**
+        `peer_person_delegate` is reachable from the renderer and passed
+        `not_before` through untouched, so this device could mint a 90-day
+        window starting a year out, then another the year after — a stockpile
+        that stays valid long after it should have lost the authority to speak,
+        and that any peer which misses the revocation will accept. "90 days"
+        described each window and nothing about how far ahead they could sit.
+
+        Five minutes of tolerance, which is `SKEW_MS` — what absorbs two
+        machines disagreeing about the clock, and deliberately not a window for
+        issuing ahead. */
+        let keychain = FakeKeychain::default();
+        let dir = temp();
+        let (person, _) = ensure(&keychain, &dir).unwrap();
+        let year = 365 * 24 * 60 * 60 * 1000;
+
+        let ahead = sign_delegation(
+            &keychain,
+            &dir,
+            Delegation {
+                person: person.clone(),
+                device: "ab".repeat(32),
+                not_before: NOW + year,
+                not_after: NOW + year + 1000,
+                roster: 1,
+            },
+            NOW,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{ahead}").contains("may not start in the future"),
+            "{ahead}"
+        );
+
+        /* And the skew itself is still allowed, or every device with a fast
+        clock would be unable to mint at all. */
+        assert!(sign_delegation(
+            &keychain,
+            &dir,
+            Delegation {
+                person,
+                device: "ab".repeat(32),
+                not_before: NOW + 60_000,
+                not_after: NOW + 120_000,
+                roster: 1,
+            },
+            NOW,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_delegation_carries_no_number_the_other_side_cannot_hold() {
+        /* ⚠️ **THE THIRD TIME THIS CLASS HAS COST SOMETHING, AND THE FIRST TIME
+        IT IS ASSERTED.** `receive.ts`'s `isDelegation` ends with
+        `Number.isSafeInteger` over `notBefore`, `notAfter` and `roster`. Rust
+        signed larger values happily, so a delegation could be correctly signed
+        and refused by every recipient — exactly what `signature` vs `sig` did,
+        and exactly what the golden vector cannot see, because that pins the
+        signed BYTES and not the rules for which VALUES are allowed.
+
+        Bytes agreeing is not rules agreeing. */
+        const UNSAFE: i64 = 9_007_199_254_740_992; // MAX_SAFE_INTEGER + 1
+        let keychain = FakeKeychain::default();
+        let dir = temp();
+        let (person, _) = ensure(&keychain, &dir).unwrap();
+        let good = Delegation {
+            person: person.clone(),
+            device: "ab".repeat(32),
+            not_before: 1,
+            not_after: 2,
+            roster: 3,
+        };
+        assert!(sign_delegation(&keychain, &dir, good.clone(), NOW).is_ok());
+
+        for bad in [
+            Delegation {
+                not_before: UNSAFE,
+                not_after: UNSAFE + 1,
+                ..good.clone()
+            },
+            Delegation {
+                not_before: -1,
+                ..good.clone()
+            },
+            Delegation {
+                roster: u64::MAX,
+                ..good.clone()
+            },
+        ] {
+            let refused = sign_delegation(&keychain, &dir, bad, NOW).unwrap_err();
+            assert!(
+                format!("{refused}").contains("the range the wire's other side can hold exactly"),
+                "expected the wire-range refusal, got: {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_order_key_cannot_forge_a_person() {
+        /* ⚠️ **PRODUCTION USED `verify` WHILE THE GOLDEN VECTOR USED
+        `verify_strict`.** The test agreed with TypeScript and the shipping code
+        did not: `verify` is COFACTORED and accepts small-order public keys,
+        which `@noble/ed25519` refuses — `crypto.ts`'s `unusable` exists for
+        exactly them. So a proof Rust called valid was one no recipient would
+        accept.
+
+        ⚠️ **AND THE FIRST VERSION OF THIS TEST ASSERTED NOTHING.** It used an
+        arbitrary signature against the all-zero key, which fails under BOTH
+        verifiers — so it passed with `verify` in place and would have shipped
+        the change unguarded. Measured, then replaced.
+
+        THIS vector separates them, and was found by trying rather than by
+        reasoning: an order-8 public key, R the same point, S zero. The
+        cofactored equation is satisfied by torsion alone.
+
+            verify        -> true    (a forgery accepted)
+            verify_strict -> false
+
+        Anyone can construct it; there is no secret in it. That is the point. */
+        const ORDER_8: &str = "0100000000000000000000000000000000000000000000000000000000000000";
+        let forged = format!("{ORDER_8}{}", "00".repeat(32));
+        let refused = verify_as_person(ORDER_8, "paper/circle/roster/1", b"anything", &forged);
+        assert!(
+            refused.is_err(),
+            "a small-order key forged a person's signature — production is not using verify_strict"
+        );
+    }
+
+    #[test]
+    fn a_delegation_is_wire_shaped() {
+        /* ⚠️ **A TEST STOOD HERE AND PASSED FOR AS LONG AS THE CIRCLE WAS
+        BROKEN.** It was called `a_signed_delegation_serialises_in_camel_case_too`
+        and it asserted `notBefore`, `notAfter`, and the absence of
+        `not_before` — the three names the camelCase audit had just changed. It
+        never asked what this object's keys ACTUALLY were. The signature field
+        was `signature`; `receive.ts` demands `sig`; nothing in either language
+        was looking at that name, so a delegation was refused before its
+        signature was ever checked and every page from a Rust-signing device
+        died at every TypeScript verifier. Measured on two machines 2026-09-07:
+        `accepted: 0`, `refusedBecause: {"bad-delegation": 1}`.
+
+        The camelCase audit is not what failed — `rename_all` cannot see a
+        SYNONYM, because `signature` is not snake_case and never was. What
+        failed is a check shaped so that only a suspected name could fail it.
+
+        ⚠️ **THESE SIX NAMES ARE `receive.ts`'s `isDelegation`, AND ITS
+        `MEMBERS = 6` IS THIS `len()`.** That parser refuses any object with a
+        seventh member, so the two are one statement in two languages: adding a
+        field here without adding it there does not degrade gracefully, it
+        refuses every page silently. Change one, change the other. */
         let keychain = FakeKeychain::default();
         let dir = temp();
         let (person, _) = ensure(&keychain, &dir).unwrap();
@@ -1589,13 +1980,39 @@ mod tests {
                 not_after: 2,
                 roster: 3,
             },
+            NOW,
         )
         .unwrap();
-        let json = serde_json::to_string(&signed).unwrap();
 
-        assert!(json.contains("notBefore"), "{json}");
-        assert!(json.contains("notAfter"), "{json}");
-        assert!(!json.contains("not_before"), "{json}");
+        assert_eq!(
+            wire_keys(&signed),
+            ["device", "notAfter", "notBefore", "person", "roster", "sig"],
+            "the six `isDelegation` admits, and nothing else",
+        );
+    }
+
+    #[test]
+    fn a_delegation_written_as_signature_is_still_readable() {
+        /* Every `circle-mine.json` already on disk spells it `signature`, and
+        the alias is what keeps those readable. Without it the rename is a
+        silent identity loss on upgrade: the file parses as garbage, the device
+        mints a new delegation, and the roster it was admitted under no longer
+        matches. */
+        let old = serde_json::json!({
+            "person": "aa".repeat(32),
+            "device": "bb".repeat(32),
+            "notBefore": 1,
+            "notAfter": 2,
+            "roster": 3,
+            "signature": "cc".repeat(64),
+        });
+        let read: SignedDelegation = serde_json::from_value(old).expect("the old spelling reads");
+        assert_eq!(read.signature, "cc".repeat(64));
+        // And it is re-emitted under the name the wire uses, not the one it arrived as.
+        assert_eq!(
+            wire_keys(&read),
+            ["device", "notAfter", "notBefore", "person", "roster", "sig"],
+        );
     }
 
     #[test]

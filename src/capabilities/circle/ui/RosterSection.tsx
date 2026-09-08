@@ -78,11 +78,21 @@ function PersonRow({
   readonly openBook?: (bookId: string) => void
 }) {
   const [shows, setShows] = useState<boolean | null>(null)
-  /* Stryker disable next-line all: the switch is read through the circle's port, so it is known only when there is one. */
+  /* ⚠️ **NARROWED FROM `disable all`, WHICH COVERED MORE THAN ITS REASON.** The
+     comment explains the `circle !== null` half — a switch read through the
+     port is unknowable without one — and said nothing about `shows !== null`,
+     which is the LOADING guard and is very much observable: without it the row
+     draws a switch in the wrong position while the first read is still in
+     flight. Suppressing every mutant of the line suppressed that one too.
+     Stryker disable next-line ConditionalExpression: the `circle !== null` half
+     — with no circle there is no port to read a switch through, so a row that
+     drew one would have nothing to put in it. The `shows !== null` half is
+     covered by "clears what the old port loaded when the circle is replaced". */
   const switchReady = circle !== null && shows !== null
   const [friend, setFriend] = useState<FriendView | null>(null)
   const [open, setOpen] = useState(false)
   const [unread, setUnread] = useState<string | null>(null)
+  const [muted, setMuted] = useState(false)
   const read = useRef(0)
   /* The row's own act — the switch and Remove — busy and reported here. */
   const { busy, trouble, run } = useAction('That did not go through.')
@@ -96,18 +106,62 @@ function PersonRow({
     if (circle === null) return
     /* Stryker disable next-line UpdateOperator: counting down tells reads apart as well as counting up. */
     const mine = ++read.current
+    /* ⚠️ **BOUND TO ITS SOURCE, NOT ONLY TO ITS ORDER.** The counter alone told
+       reads apart within one port; it could not tell a read of the OLD circle
+       from a read of the new one. A switch write holds the `look` it was made
+       with, so a write still in flight when the port is replaced completes,
+       calls that old `look`, and commits the old circle's answers over the new
+       one's. `port` is checked for the same reason a removal already checks
+       it. */
+    const held = circle
+    const stillMine = (): boolean => read.current === mine && circle === held && current.current === port
+
+    /* ⚠️ **THE SWITCHES COMMIT ON THEIR OWN.** All three answers were awaited
+       and then set together, so one unreadable shelf file threw before any of
+       them landed — and a switch the reader had just moved went on showing its
+       old position, because the failure was in something else entirely. */
     try {
-      const on = await circle.showsShelf(person.person)
-      const view = open ? await circle.friend(person.person) : null
-      if (read.current !== mine) return
+      const [on, quiet] = await Promise.all([held.showsShelf(person.person), held.muted(person.person)])
+      if (!stillMine()) return
       setShows(on)
-      setFriend(view)
+      setMuted(quiet)
       setUnread(null)
     } catch (cause) {
-      if (read.current !== mine) return
+      if (!stillMine()) return
+      setUnread(messageOf(cause))
+      return
+    }
+
+    if (!open) {
+      if (stillMine()) setFriend(null)
+      return
+    }
+    try {
+      const view = await held.friend(person.person)
+      if (!stillMine()) return
+      setFriend(view)
+    } catch (cause) {
+      if (!stillMine()) return
       setUnread(messageOf(cause))
     }
-  }, [circle, person.person, open])
+  }, [circle, person.person, open, port])
+
+  /* ⚠️ **A NEW SOURCE INVALIDATES WHAT THE OLD ONE LOADED.** Cleanup only
+     unsubscribed: anything in flight stayed eligible to commit, and the values
+     already on screen — a switch position, a friend's shelf — kept being drawn
+     as though they belonged to the new port. Bumping the counter retires every
+     read in flight, and clearing the state means the row shows nothing rather
+     than something from a port it no longer holds. */
+  useEffect(() => {
+    read.current += 1
+    setShows(null)
+    setMuted(false)
+    setFriend(null)
+    setUnread(null)
+    return () => {
+      read.current += 1
+    }
+  }, [circle, person.person])
 
   useEffect(() => {
     void look()
@@ -165,6 +219,36 @@ function PersonRow({
               ? `${person.displayName} can see every book in your library, including ones you have shared nothing from.`
               : `${person.displayName} will be able to see every book in your library, including ones you have shared nothing from.`}
           </p>
+          {/* ⚠️ **THE REVERSIBLE ANSWER, WHICH DID NOT EXIST.** `'muted'` was
+              modelled from the start — parsed, admitted by `acceptsTransport`,
+              and given `retain: 'keep'` on the stated reasoning that *"a reader
+              who mutes is saying not right now"* — and nothing ever wrote it.
+              So a reader who wanted one person off the page had one control,
+              Remove, which purges their passages and the pairing and needs a
+              fresh SAS ceremony to undo. A quiet preference and a severance
+              were the same button. */}
+          <label className={CAPABILITY_UI.row}>
+            <input
+              type="checkbox"
+              className={CAPABILITY_UI.toggle}
+              checked={muted}
+              disabled={busy}
+              aria-label={`Hold back ${person.displayName}'s passages`}
+              onChange={(e) => {
+                /* The shelf switch's reason: through the row's act, so two
+                   quick flips cannot resolve out of order and the state is
+                   read back once the write has landed. */
+                const on = e.target.checked
+                void run(() => circle.setMuted(person.person, on), look)
+              }}
+            />
+            <span className={CAPABILITY_UI.grow}>Hold back their passages</span>
+          </label>
+          <p className={CAPABILITY_UI.hint}>
+            {muted
+              ? `${person.displayName}'s passages are not drawn in your books. Nothing has been deleted — what they have shared is still here, and turning this off brings it back.`
+              : `${person.displayName}'s passages appear in your books, where the sentence is.`}
+          </p>
         </>
       ) : null}
       {open && friend !== null && circle !== null ? (
@@ -184,15 +268,27 @@ function Jacket({ port, person, book }: { readonly port: CirclePort; readonly pe
   const [url, setUrl] = useState<string | null>(null)
   const slot = useRef<HTMLSpanElement | null>(null)
   const seen = useVisible(slot)
+  /* ⚠️ **THE IDENTITY OF A JACKET IS FOUR FIELDS, NOT THE OBJECT HOLDING
+     THEM.** This depended on `book`, and `friend()` builds fresh objects on
+     every refresh — so any unrelated circle update (a switch moving, a fetch
+     round landing) gave every drawn row a new object reference, cleared the
+     picture it had already fetched and verified, aborted whatever was in
+     flight, and queued the same request again. Nothing about the jacket had
+     changed. These four are what decide which bytes are wanted; while they
+     hold, the image stays. */
+  const { pub, title, author, language, own, device, cover } = book
   useEffect(() => {
     setUrl(null)
-    if (!seen || book.cover === null || book.device === null) return
+    if (!seen || cover === null || device === null) return
     /* Abandoned when the row goes — hidden shelf, unmounted screen — so a
        request still waiting its turn is not dialled for a picture nobody
        will see, and one on its way is let go. The port answers null for one,
        never a rejection: a failure is its to report, through the diagnostics. */
     const abandon = new AbortController()
-    void port.cover(person, book, abandon.signal).then(
+    /* Rebuilt from the captured PRIMITIVES rather than closing over `book`, so
+       the dependency list below is exhaustive as written and needs no
+       suppression: nothing here can go stale that is not also listed. */
+    void port.cover(person, { pub, title, author, language, own, device, cover }, abandon.signal).then(
       (found) => {
         if (!abandon.signal.aborted) setUrl(found)
       },
@@ -201,7 +297,7 @@ function Jacket({ port, person, book }: { readonly port: CirclePort; readonly pe
     return () => {
       abandon.abort()
     }
-  }, [port, person, book, seen])
+  }, [port, person, pub, title, author, language, own, device, cover, seen])
   return (
     <span ref={slot} data-jacket-slot={book.pub}>
       {url === null ? null : <img src={url} alt="" width={24} height={36} data-jacket={book.pub} />}

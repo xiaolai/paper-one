@@ -37,6 +37,15 @@ pub struct Status {
     pub role: Role,
     /// Whether `peer_ready` has been called.
     pub ready: bool,
+    /// How many inbound connections never reached a protocol module.
+    ///
+    /// ⚠️ **READABLE BECAUSE THE RECEIVING SIDE HAD NOTHING TO SAY.** When a
+    /// pairing fails in the transport, the machine that was dialled is the
+    /// one that knows — and until this existed it could not be asked: a far
+    /// end that dropped the connection and one that was never dialled gave
+    /// identical answers to every command, log and event. A non-zero count
+    /// here is the difference between "nobody called" and "I hung up".
+    pub dropped_inbound: u64,
 }
 
 // ── status, role, root (WI-5.8) ───────────────────────────────────────────
@@ -57,6 +66,7 @@ pub async fn peer_status<R: Runtime>(
     Ok(Status {
         plugin_version: env!("CARGO_PKG_VERSION"),
         endpoint_id: node.id().to_string(),
+        dropped_inbound: node.dropped_inbound(),
         role: node.role(),
         ready: node.is_ready(),
     })
@@ -535,6 +545,7 @@ pub async fn peer_person_delegate<R: Runtime>(
                 not_after,
                 roster,
             },
+            crate::circle::now_ms(),
         )
     })
     .await

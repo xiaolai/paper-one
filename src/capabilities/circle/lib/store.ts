@@ -414,7 +414,7 @@ function readChain(held: Record<string, unknown>, where: string): Pick<ForeignFi
 function readPassages(held: Record<string, unknown>, person: string, where: string): { readonly rows: readonly ForeignEntry[]; readonly gone: readonly string[] } {
   const rows = held['entries']
   if (!Array.isArray(rows)) throw new Error(`circle file for ${where} has no entry list`)
-  const gone = readNames(held['withdrawn'], () => new Error(`circle file for ${where} has no withdrawal list`))
+  const gone = readNames(held['withdrawn'], `circle file for ${where} has no withdrawal list`)
   const kept: ForeignEntry[] = []
   for (const row of rows) {
     if (isForeignEntry(row, person)) kept.push(asShared(row))
@@ -440,14 +440,25 @@ function readTombstoned<T extends { readonly pub: string }>(
 ): { readonly rows: readonly T[]; readonly gone: readonly string[] } {
   const rows = held[rowsKey] === undefined ? [] : held[rowsKey]
   if (!Array.isArray(rows) || !rows.every(isRow)) throw new Error(`circle file for ${where} has ${rowsWhat} that will not read`)
-  const gone = readNames(held[goneKey] === undefined ? [] : held[goneKey], () => new Error(`circle file for ${where} has ${goneWhat} that will not read`))
+  const gone = readNames(held[goneKey] === undefined ? [] : held[goneKey], `circle file for ${where} has ${goneWhat} that will not read`)
   const hidden = new Set(gone)
   return { rows: (rows as readonly T[]).filter((one) => !hidden.has(one.pub)), gone }
 }
 
-/** A list of names — `pub`s withdrawn — deduplicated, or the error the caller names. */
-function readNames(value: unknown, refuse: () => Error): readonly string[] {
-  if (!Array.isArray(value) || !value.every((one) => typeof one === 'string')) throw refuse()
+/**
+ * A list of names — `pub`s withdrawn — deduplicated, or a refusal saying which
+ * list would not read.
+ *
+ * ⚠️ **THE MESSAGE, NOT A THUNK THAT BUILDS ONE.** It took `() => Error` and
+ * threw the result, so a thunk returning `undefined` threw `undefined` — and
+ * `expect(...).rejects.toThrow(/anything at all/)` PASSES against a rejection
+ * with `undefined` or `null`, MEASURED, whatever the pattern says. No test
+ * could have told either caller's message from no message. Given the string,
+ * the refusal is always an `Error` and a wrong message is a wrong `Error`,
+ * which `toThrow` does refuse.
+ */
+function readNames(value: unknown, refuse: string): readonly string[] {
+  if (!Array.isArray(value) || !value.every((one) => typeof one === 'string')) throw new Error(refuse)
   return [...new Set(value as string[])]
 }
 
@@ -593,12 +604,13 @@ function isEpoch(value: unknown): value is number {
  * keyed on `contentHash` (`reanchorCache.ts`, `useReanchor`); this one carries
  * no such key, so every value in it is a claim with no evidence.
  *
- * ⚠️ **AND IT IS THE ONE FIELD NOTHING DOWNSTREAM RE-EXAMINES.**
- * `annotationsFor` SKIPS the resolver for any entry that already has an anchor
- * (`entry.resolved === undefined` is the filter), so a wrong one is never
- * caught — it goes straight to the painter and draws somebody's claim over
- * text they never marked. That is the same hole as `fresh.cfi as never`,
- * reached through the file instead of through a cast.
+ * ⚠️ **AND IT WOULD BE THE ONE FIELD NOTHING DOWNSTREAM RE-EXAMINES.** An
+ * anchor that reached `annotationsFor` intact would go straight to the painter
+ * and draw somebody's claim over text they never marked — the same hole as
+ * `fresh.cfi as never`, reached through the file instead of through a cast.
+ * `annotationsFor` used to carry a matching filter, which this function makes
+ * unreachable: it is the only way an entry is read, and nothing it returns
+ * carries the field. The rule is enforced here, once.
  *
  * ⚠️ **DROPPED, NOT REFUSED.** Throwing the row away would lose a real passage
  * somebody shared over a stale optimisation. Without the field the entry goes
@@ -713,8 +725,8 @@ export async function writeForeign(
    * `writePersonFile`. Required, for `changed`'s reason.
    */
   admits: () => Promise<boolean>,
-): Promise<void> {
-  await writeOnLane(fs, queue, lane(bookId), circlePathIn(bookId, person), held, changed, admits)
+): Promise<boolean> {
+  return writeOnLane(fs, queue, lane(bookId), circlePathIn(bookId, person), held, changed, admits)
 }
 
 /**
@@ -745,14 +757,25 @@ async function writeOnLane(
   held: ForeignFile,
   changed: () => void,
   admits: () => Promise<boolean>,
-): Promise<void> {
+): Promise<boolean> {
+  /* ⚠️ **IT SAYS WHETHER IT WROTE, BECAUSE RESOLVING IS NOT COMMITTING.** The
+     admission guard turns a refusal into a silent return, and every caller read
+     that as a page persisted: a round could report `accepted: 3` having written
+     nothing at all, and advance its held cursor past pages that are not on
+     disk. The guard is right — a person un-admitted mid-round must not have
+     their pages kept — but a caller cannot account for what it is not told.
+     Same shape as `writeRelationship` merging and being treated as an
+     overwrite, which is the second time this has cost something. */
+  let wrote = false
   await queue.append(laneKey, async () => {
     if (!(await admits())) return
     await atomicWrite(fs, path, new TextEncoder().encode(JSON.stringify(held)))
+    wrote = true
   })
   /* AFTER the queued write, not inside it: a listener that re-reads would
      otherwise queue behind the very task it is reacting to. */
   changed()
+  return wrote
 }
 
 /**
@@ -823,8 +846,8 @@ export async function writeHeldList(
   held: ForeignFile,
   changed: () => void,
   admits: () => Promise<boolean>,
-): Promise<void> {
-  await writePersonFile(fs, queue, person, personListPathIn(person, listId), held, changed, admits)
+): Promise<boolean> {
+  return writePersonFile(fs, queue, person, personListPathIn(person, listId), held, changed, admits)
 }
 
 /** One of a person's files, replaced whole on the PERSON's lane — the lane their folder is purged on — and the caller told after. */
@@ -836,7 +859,7 @@ function writePersonFile(
   held: ForeignFile,
   changed: () => void,
   admits: () => Promise<boolean>,
-): Promise<void> {
+): Promise<boolean> {
   return writeOnLane(fs, queue, personFolderIn(person), path, held, changed, admits)
 }
 
@@ -853,6 +876,6 @@ export async function writeHeldShelf(
   held: ForeignFile,
   changed: () => void,
   admits: () => Promise<boolean>,
-): Promise<void> {
-  await writePersonFile(fs, queue, person, personShelfPathIn(person), held, changed, admits)
+): Promise<boolean> {
+  return writePersonFile(fs, queue, person, personShelfPathIn(person), held, changed, admits)
 }

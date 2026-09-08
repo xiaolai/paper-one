@@ -28,6 +28,9 @@ export interface PeerStatus {
   readonly endpointId: string
   readonly role: PeerRole
   readonly ready: boolean
+  /** How many inbound connections never reached a protocol module. Non-zero
+   *  is the difference between "nobody dialled me" and "I dropped it". */
+  readonly droppedInbound: number
 }
 
 /** One paired device, as `peer/peers.json` holds it. */

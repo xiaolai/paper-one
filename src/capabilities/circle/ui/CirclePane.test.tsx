@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { KnownPerson, PersonPort, PersonStatus } from '../../peer'
@@ -6,6 +7,24 @@ import { CAPABILITY_UI } from '../../../kernel'
 import { CirclePane } from './CirclePane'
 import type { CirclePort, FriendView } from '../lib/circlePort'
 import type { ListsPort, OwnListView } from '../lib/listsPort'
+
+/**
+ * Let React commit whatever the preceding line started.
+ *
+ * ⚠️ **`setTimeout(0)` IS NOT A REACT FLUSH, AND EVERY CALL SITE BELOW USED IT
+ * AS ONE.** A timer tick lets a promise settle; it does NOT guarantee React has
+ * processed the resulting state update, so an assertion after it can run
+ * against the PREVIOUS render — a stale-result test passing before the
+ * erroneous update it exists to catch has even been applied. Wrapping the same
+ * tick in `act` keeps whatever the timer was needed for and adds the guarantee
+ * that was missing.
+ */
+const flush = async (): Promise<void> => {
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 0))
+  })
+}
+
 
 /**
  * Fire a subscription's listener, ONCE IT EXISTS.
@@ -239,22 +258,57 @@ describe('the circle panel', () => {
        the panel never settles, which is what "the Circle button does nothing"
        looks like from the outside. The earlier tests all passed ONE port object
        that never changed identity, so the fixture hid it. */
+    /* ⚠️ **TWO PORTS ACROSS ONE RERENDER IS NOT THE FEEDBACK.** This handed the
+       pane two objects by hand and allowed anything under six reads — so a pane
+       that re-read on every parent render passed, which is the shape the loop
+       is made of. The port is built INSIDE the host's render here, as the
+       screen's own `render(context)` builds it, and the host re-renders on its
+       own state five times: a fresh object each time, and the count must not
+       move. */
     let reads = 0
     const people = () => {
       reads += 1
       return Promise.resolve(noPeople)
     }
-    const { rerender } = render(<CirclePane port={portWith({ people })} />)
+    const Host = () => {
+      const [ticks, bump] = useState(0)
+      return (
+        <>
+          <button type="button" onClick={() => bump((n) => n + 1)}>
+            {`render again ${ticks}`}
+          </button>
+          <CirclePane port={portWith({ people })} />
+        </>
+      )
+    }
+    render(<Host />)
     await screen.findByText(/holds your keys/u)
+    /* Once, for the render that mounted it. */
+    expect(reads).toBe(1)
 
-    /* A re-render from the parent, exactly as the side pane does. */
-    rerender(<CirclePane port={portWith({ people })} />)
-    await screen.findByText(/holds your keys/u)
-    const settled = reads
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    for (let tick = 0; tick < 5; tick++) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /render again/u }))
+      })
+    }
+    expect(screen.getByRole('button', { name: /render again 5/u })).toBeTruthy()
+    /* ⚠️ **ONE READ PER PARENT RENDER, AND NOT ONE MORE.** The old bound was
+       `toBeLessThan(6)` over a single rerender — four spurious reads inside it,
+       and a runaway that happened to be slow would have passed. Six renders,
+       six reads: linear in what the parent did, which is the difference between
+       a pane that settles and one that feeds itself. */
+    expect(reads).toBe(6)
 
-    expect(reads).toBe(settled)
-    expect(reads).toBeLessThan(6)
+    /* And nothing happens after: no render, no read. This is the claim the
+       test's name makes. */
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(reads).toBe(6)
+
+    /* ⚠️ The app does not pay even this: `personPort()` memoises per wire, so
+       the screen's `render(context)` hands the same object back every time.
+       What is held here is that a host which does NOT is still survivable. */
   })
 
   it('offers a way to add somebody, which is what the empty state promises', async () => {
@@ -434,7 +488,15 @@ describe('the circle panel', () => {
 
     await act(async () => settle[0]?.('the old secret words'))
 
-    expect(screen.queryByText('the old secret words')).toBeNull()
+    /* ⚠️ **THE WHOLE PHRASE IS NEVER ON SCREEN AS ONE STRING.**
+       `IdentitySection` renders it as an `<ol>` of one `<li>` per word, so
+       `queryByText('the old secret words')` matches NOTHING whether or not the
+       phrase is visible — and `toBeNull()` therefore passed either way. This
+       assertion could not fail. The words are what is on screen, so the words
+       are what must be absent. */
+    for (const word of 'the old secret words'.split(' ')) {
+      expect(screen.queryByText(word)).toBeNull()
+    }
   })
 
   it('says a pairing failed rather than showing it as finished', async () => {
@@ -458,6 +520,52 @@ describe('the circle panel', () => {
     await act(async () => listeners[0]?.({ ok: false, id: 'x', reason: 'bad-mac', kind: 'circle' }))
 
     await screen.findByText(/did not complete \(bad-mac\)/u)
+  })
+
+  it('ignores a joiner probe refused no-pending rather than clearing the request on screen', async () => {
+    /* ⚠️ A joiner opens a SECOND connection beside its first, because this
+       side sends nothing at all between receiving a hello and its human
+       answering — so a joiner cannot tell "you never heard me" from "your
+       human is still deciding". This side refuses that probe `no-pending`,
+       and every successful pairing now produces one. Acted on, it cleared the
+       six digits mid-comparison and told the reader the pairing had failed
+       while it was in fact about to succeed. */
+    const pendings: ((p: unknown) => void)[] = []
+    const results: ((r: unknown) => void)[] = []
+    render(
+      <CirclePane
+        port={portWith({
+          onPending: (fn: (p: never) => void) => {
+            pendings.push(fn as (p: unknown) => void)
+            return () => {}
+          },
+          onResult: (fn: (r: never) => void) => {
+            results.push(fn as (r: unknown) => void)
+            return () => {}
+          },
+        })}
+      />,
+    )
+    await screen.findByText(/holds your keys/u)
+
+    await act(async () =>
+      pendings[0]?.({
+        attemptId: 'the-attempt-on-screen',
+        id: 'friend',
+        name: 'Ada',
+        platform: 'macos',
+        sas: '314159',
+        kind: 'circle',
+      }),
+    )
+    await screen.findByText('314159')
+
+    /* The probe: no `attemptId`, because this side never claimed the offer
+       for it — it was already claimed by the connection being shown. */
+    await act(async () => results[0]?.({ ok: false, id: 'friend', reason: 'no-pending', kind: 'circle' }))
+
+    expect(screen.getByText('314159')).toBeTruthy()
+    expect(screen.queryByText(/did not complete/u)).toBeNull()
   })
 
   it('stops presenting a link that has already lapsed', async () => {
@@ -521,6 +629,8 @@ describe('the shelf switch and the Friends view — WI-23.C2 and C4', () => {
   const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
   const circleWith = (over: Partial<import('../lib/circlePort').CirclePort> = {}): import('../lib/circlePort').CirclePort => ({
     showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
     setShowsShelf: vi.fn(() => Promise.resolve()),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
@@ -545,6 +655,73 @@ describe('the shelf switch and the Friends view — WI-23.C2 and C4', () => {
     const box = (await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })) as HTMLInputElement
     expect(box.checked).toBe(true)
     expect(screen.getByText(/Mo can see every book in your library/u)).toBeTruthy()
+  })
+
+  it('offers holding a person back, off, saying their passages appear', async () => {
+    /* ⚠️ **THE CONTROL THAT DID NOT EXIST — WI-24.C2.** `'muted'` was modelled
+       from the start and never written by anything, so a reader who wanted one
+       person off the page had only Remove, which purges their passages AND the
+       pairing and needs a fresh SAS to undo. A quiet preference and a
+       severance were one button. */
+    const circle = circleWith({ setMuted: vi.fn(() => Promise.resolve()) })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+    const box = (await screen.findByRole('checkbox', { name: "Hold back Mo's passages" })) as HTMLInputElement
+    expect(box.checked).toBe(false)
+    expect(screen.getByText(/Mo's passages appear in your books, where the sentence is/u)).toBeTruthy()
+    fireEvent.click(box)
+    await waitFor(() => expect(circle.setMuted).toHaveBeenCalledWith(mo.person, true))
+  })
+
+  it('says NOTHING IS DELETED once they are held back, which is what separates it from Remove', async () => {
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circleWith({ muted: () => Promise.resolve(true) })} />)
+    const box = (await screen.findByRole('checkbox', { name: "Hold back Mo's passages" })) as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect(screen.getByText(/Nothing has been deleted/u)).toBeTruthy()
+    expect(screen.getByText(/turning this off brings it back/u)).toBeTruthy()
+  })
+
+  it('shows the switches even when the friend view cannot be read', async () => {
+    /* ⚠️ **ALL THREE ANSWERS WERE COMMITTED TOGETHER.** The switch reads and
+       the friend view were awaited in one `try`, so a single unreadable shelf
+       file threw before any of them landed — and a switch the reader had just
+       moved went on showing its old position because something else had
+       failed. They commit on their own now. */
+    let on = false
+    const circle = circleWith({
+      /* The switch MOVES partway through, so a stale value is visible as a
+         stale value rather than coinciding with the initial one. */
+      showsShelf: () => Promise.resolve(on),
+      muted: () => Promise.resolve(true),
+      friend: () => Promise.reject(new Error('that shelf will not read')),
+      setShowsShelf: vi.fn(() => Promise.resolve()),
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+    /* ⚠️ **THE SHELF MUST BE EXPANDED, or `friend()` is never called and the
+       coupling cannot bite.** The first version of this test did not expand it
+       and passed with the defect in place — measured. */
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    on = true
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' }))
+    await waitFor(() => expect(circle.setShowsShelf).toHaveBeenCalled())
+    await waitFor(() =>
+      expect((screen.getByRole('checkbox', { name: 'Show my shelf to Mo' }) as HTMLInputElement).checked).toBe(true),
+    )
+  })
+
+  it('clears what the old port loaded when the circle is replaced', async () => {
+    /* ⚠️ **CLEANUP ONLY UNSUBSCRIBED.** The values the old port had loaded kept
+       being drawn as though they belonged to the new one, and reads still in
+       flight stayed eligible to commit over it. */
+    const slow = circleWith({ showsShelf: () => Promise.resolve(true), muted: () => Promise.resolve(true) })
+    const { rerender } = render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={slow} />)
+    const on = (await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })) as HTMLInputElement
+    expect(on.checked).toBe(true)
+
+    /* A port that never answers: the row must not go on showing the old one's
+       values while it waits. */
+    const silent = circleWith({ showsShelf: () => new Promise<boolean>(() => {}), muted: () => new Promise<boolean>(() => {}) })
+    rerender(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={silent} />)
+    await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Show my shelf to Mo' })).toBeNull())
   })
 
   it('draws a friend’s jacket beside their row once the port answers, and none for a row that names none — WI-23.C5', async () => {
@@ -620,6 +797,8 @@ describe('the reader’s own lists, on the Circle screen — WI-23.E1', () => {
   const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
   const circleWith = (over: Partial<CirclePort> = {}): CirclePort => ({
     showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
     setShowsShelf: () => Promise.resolve(),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
@@ -744,6 +923,8 @@ describe('every clause of the person row, the Friends view and the reader’s li
   const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
   const circleWith = (over: Partial<CirclePort> = {}): CirclePort => ({
     showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
     setShowsShelf: () => Promise.resolve(),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
@@ -862,7 +1043,7 @@ describe('every clause of the person row, the Friends view and the reader’s li
     await fire(() => tell)
     await screen.findByText('Dune')
     slow.reject(new Error('too late'))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByText(/too late/u)).toBeNull()
     expect(screen.getByText('Dune')).toBeTruthy()
   })
@@ -941,7 +1122,7 @@ describe('every clause of the person row, the Friends view and the reader’s li
     await fire(() => tell)
     await screen.findByLabelText('Title of Deserts')
     slow.resolve([one])
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByLabelText('Title of Sea')).toBeNull()
     expect(screen.getByLabelText('Title of Deserts')).toBeTruthy()
   })
@@ -951,6 +1132,8 @@ describe('the last clauses of the Circle screen — one row each', () => {
   const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
   const circleWith = (over: Partial<CirclePort> = {}): CirclePort => ({
     showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
     setShowsShelf: () => Promise.resolve(),
     friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
@@ -1015,7 +1198,7 @@ describe('the last clauses of the Circle screen — one row each', () => {
     await fire(() => tell)
     await screen.findByLabelText('Title of Deserts')
     slow.reject(new Error('too late'))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.getByLabelText('Title of Deserts')).toBeTruthy()
   })
 
@@ -1036,7 +1219,7 @@ describe('the last clauses of the Circle screen — one row each', () => {
     await fire(() => tell)
     await screen.findByText('Dune')
     slow.resolve(friendView({ shelf: [{ pub: 's9', title: 'Stale', author: '', language: 'en', own: null, device: null, cover: null }] }))
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByText('Stale')).toBeNull()
     expect(screen.getByText('Dune')).toBeTruthy()
   })
@@ -1147,9 +1330,13 @@ describe('the offer’s own clock', () => {
         await vi.advanceTimersByTimeAsync(999)
       })
       expect(screen.queryByLabelText('Pairing QR code')).not.toBeNull()
-      /* At expiry, the tick the pane armed takes it down — AND SAYS SO. */
+      /* ⚠️ **AT EXPIRY, AND EXACTLY THERE.** This advanced 1 100 ms past the
+         999 — a full second past the moment being tested — so a comparison
+         that kept the offer alive AT its expiry would have been taken down by
+         the following tick and passed anyway. One millisecond is what
+         separates `>` from `>=` here. */
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_100)
+        await vi.advanceTimersByTimeAsync(1)
       })
       expect(screen.queryByLabelText('Pairing QR code')).toBeNull()
       expect(screen.getByText(/ran out before anybody used it/u)).toBeTruthy()
@@ -1173,7 +1360,17 @@ describe('the offer’s own clock', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0)
       })
+      /* ⚠️ **THE URL IS HIDDEN WHILE AN OFFER IS LIVE TOO**, so its absence
+         says nothing at all: a pane still showing a usable QR code and a copy
+         button for an offer that expired before it was drawn would pass this.
+         What has to be gone is the offer itself, and what has to be there is
+         the sentence saying why. */
       expect(screen.queryByText('paper://pair?s=old')).toBeNull()
+      expect(screen.queryByLabelText('Pairing QR code')).toBeNull()
+      expect(screen.queryByRole('button', { name: /Copy/u })).toBeNull()
+      expect(screen.getByText(/ran out before anybody used it/u)).toBeTruthy()
+      /* And another can be offered — an expired link is not a dead end. */
+      expect(screen.getByRole('button', { name: /Add somebody/u })).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }
@@ -1218,6 +1415,8 @@ describe('an act with nowhere of its own to put a failure', () => {
 /** A circle port with nothing in it, for a test about the pane's own acts. */
 const minimalCircleFor = (): CirclePort => ({
   showsShelf: () => Promise.resolve(false),
+  muted: () => Promise.resolve(false),
+  setMuted: () => Promise.resolve(),
   setShowsShelf: () => Promise.resolve(),
   friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
   cover: () => Promise.resolve(null),
@@ -1230,6 +1429,8 @@ describe('the reader’s own lists, read', () => {
   const minimalCircle = (): CirclePort =>
     ({
       showsShelf: () => Promise.resolve(false),
+      muted: () => Promise.resolve(false),
+      setMuted: () => Promise.resolve(),
     cover: () => Promise.resolve(null),
       setShowsShelf: () => Promise.resolve(),
       friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
@@ -1290,7 +1491,7 @@ describe('the reader’s own lists, read', () => {
     await fire(() => tell)
     await screen.findByLabelText('Title of Newer')
     resolveFirst!([{ id: 'l1', title: 'Older', items: [] }])
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     expect(screen.queryByLabelText('Title of Older')).toBeNull()
     expect(screen.getByLabelText('Title of Newer')).toBeTruthy()
   })
@@ -1321,7 +1522,7 @@ describe('an act begun through a port the screen no longer holds', () => {
     view.rerender(<CirclePane port={second} />)
     await screen.findByText('Bea')
     await fire(() => finish)
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     /* The old port was read once, at mount, and never again; the new one's roster stands. */
     expect(first.people).toHaveBeenCalledTimes(1)
     expect(second.people).toHaveBeenCalledTimes(1)
@@ -1355,7 +1556,7 @@ describe('a friend’s jackets, asked for when seen — WI-23.C5', () => {
       const { container } = render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
       fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
       await screen.findByText('Book s3')
-      await new Promise((done) => setTimeout(done, 0))
+      await flush()
       expect(cover).not.toHaveBeenCalled()
       expect(observed.map((one) => one.node.getAttribute('data-jacket-slot'))).toEqual(['s1', 's2', 's3'])
       /* Not intersecting is not seen. */
@@ -1474,7 +1675,7 @@ describe('Start a circle begun through a port the screen no longer holds', () =>
     view.rerender(<CirclePane port={second} />)
     await waitFor(() => expect(second.status).toHaveBeenCalledTimes(1))
     await fire(() => finish)
-    await new Promise((done) => setTimeout(done, 0))
+    await flush()
     /* The old port was read once, at mount, and never again; the new port's state stands, and the button is free again. */
     expect(first.status).toHaveBeenCalledTimes(1)
     expect(second.status).toHaveBeenCalledTimes(1)
@@ -1500,8 +1701,16 @@ describe('Start a circle begun through a port the screen no longer holds', () =>
     view.rerender(<CirclePane port={second} />)
     await waitFor(() => expect(screen.getByRole('button', { name: /Show my twelve words/u })).toBeTruthy())
     finish!('the old secret words')
-    await new Promise((done) => setTimeout(done, 0))
-    expect(screen.queryByText('the old secret words')).toBeNull()
+    await flush()
+    /* ⚠️ **THE WHOLE PHRASE IS NEVER ON SCREEN AS ONE STRING.**
+       `IdentitySection` renders it as an `<ol>` of one `<li>` per word, so
+       `queryByText('the old secret words')` matches NOTHING whether or not the
+       phrase is visible — and `toBeNull()` therefore passed either way. This
+       assertion could not fail. The words are what is on screen, so the words
+       are what must be absent. */
+    for (const word of 'the old secret words'.split(' ')) {
+      expect(screen.queryByText(word)).toBeNull()
+    }
     expect(second.phrase).not.toHaveBeenCalled()
   })
 })

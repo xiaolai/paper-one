@@ -14,7 +14,7 @@ import { DEFAULT_BOUNDS, pagesFor, wireBytesOf, type Bounds, type Publisher, typ
 import { liveShelfRows, shelfPagesFor, type ShelfFile } from './shelf'
 import { base64Of } from './base64'
 import { SHELF_WORK, listWork } from '../../../kernel'
-import { listPagesFor, type ListFile, type OwnList } from './lists'
+import { listPagesFor, type ListFile } from './lists'
 import { COVER_CHUNK_BYTES, MAX_ANSWER_CHARS, MAX_PAGES_PER_ANSWER, parseCoverRequest, parseListsRequest, type CoverAnswer } from './protocol'
 import { MAX_COVER_BYTES } from '../../../kernel'
 import { cutToField } from './workField'
@@ -59,6 +59,13 @@ export function claimOf(book: BookLike): WorkClaim {
       ...(book.title === undefined ? {} : { title: cutToField(book.title) }),
       ...(book.author === undefined ? {} : { author: cutToField(book.author) }),
       ...(book.identifier === undefined ? {} : { identifier: cutToField(book.identifier) }),
+      /* ⚠️ Equivalent, and required: `claimFor` reads `book.languages?.[0]`,
+         so a present-but-`undefined` member answers exactly as an absent one —
+         but `ClaimSource.languages` is optional under
+         `exactOptionalPropertyTypes`, which makes spreading `undefined` a
+         compile error. The three above are NOT equivalent: each passes its
+         value through `cutToField`, which an absent one must not reach. */
+      // Stryker disable next-line ConditionalExpression: equivalent — see above.
       ...(book.languages === undefined ? {} : { languages: book.languages }),
     },
     workDigest,
@@ -155,21 +162,53 @@ export function welcome(request: unknown, person: string): CircleWelcome | null 
 }
 
 /** Everything answering a page request needs, and nothing it does not. */
+/**
+ * What a serving step leaves behind: the file to write, and the answer to send.
+ *
+ * The answer is carried OUT of the transaction rather than captured in a
+ * variable beside it, so there is no moment where the pages exist and the
+ * boundaries that cut them do not.
+ */
+export interface Sealed<F, T> {
+  readonly held: F
+  readonly answer: T
+}
+
 export interface Serving {
   /** The books this device holds, for matching the claim. */
   readonly books: readonly BookLike[]
-  /** This reader's publications for a book, and the boundaries already sealed. */
-  readonly shared: (bookId: string) => Promise<SharedFile>
-  /** Write back what `pagesFor` sealed — see `SealedPage`. */
-  readonly seal: (bookId: string, held: SharedFile) => Promise<void>
+  /**
+   * Read a book's publications, seal what the request needs, and write the
+   * result — ALL ON THE BOOK'S OWN LANE, as one step.
+   *
+   * ⚠️ **CUTTING A PAGE OUTSIDE THE TRANSACTION THAT STORES IT IS A LOST
+   * WRITE, AND IT BREAKS A CHAIN FOR EVER.** This was `shared` and `seal`: a
+   * request read the file, decided its boundaries, and wrote them back in a
+   * separate step. Two requests around a new share both read a file with no
+   * boundaries; one cut `[1]` and sent it, the other cut `[1, 2]` and sent
+   * that, and whichever wrote last decided what the store said the first
+   * boundary was. The recipient holding the other page then has a head no
+   * later page chains to, and `checkPage` refuses everything after it with
+   * `chain` — silently, and permanently, because the page it holds will never
+   * be re-sent. The same defect as `writeRelationship` merged and read as an
+   * overwrite, one file along.
+   *
+   * The step runs INSIDE the queue, so a second request sees the first's
+   * boundaries and continues the chain rather than re-cutting it. Returning
+   * the file it was given writes nothing, which is what a request with no new
+   * boundary to seal should cost.
+   */
+  readonly withShared: <T>(bookId: string, step: (held: SharedFile) => Promise<Sealed<SharedFile, T>>) => Promise<T>
   /** Who this device is, and how it signs. */
   readonly publisher: (work: WorkClaim) => Promise<Publisher | null>
-  /** The reader's own shelf as published, and the boundaries sealed — WI-23.C1. */
+  /** The reader's own shelf, READ — the jacket request needs a row, not a seal. */
   readonly shelf: () => Promise<ShelfFile>
-  readonly sealShelf: (held: ShelfFile) => Promise<void>
-  /** The reader's own lists as published, and the boundaries sealed — WI-23.E1. */
-  readonly lists: () => Promise<readonly OwnList[]>
-  readonly sealList: (listId: string, held: ListFile) => Promise<void>
+  /** The reader's own shelf — `withShared`'s contract, on the shelf's lane. */
+  readonly withShelf: <T>(step: (held: ShelfFile) => Promise<Sealed<ShelfFile, T>>) => Promise<T>
+  /** Which lists this reader publishes — WI-23.E1. The rows come from `withList`. */
+  readonly listIds: () => Promise<readonly string[]>
+  /** One list — `withShared`'s contract, on the lists' lane. */
+  readonly withList: <T>(listId: string, step: (held: ListFile) => Promise<Sealed<ListFile, T>>) => Promise<T>
   /** The jacket this device holds for a book, measured — or null (WI-23.C5). */
   readonly cover: (bookId: string) => Promise<CoverSource | null>
 }
@@ -233,11 +272,15 @@ export async function answerShelf(request: unknown, serving: Serving, discloses:
   const publisher = await serving.publisher(SHELF_WORK)
   if (!publisher) return NOTHING
 
-  const held = await serving.shelf()
-  const built = await shelfPagesFor(held, publisher, asked.since, workDigest, bounds, asked.v)
-  /* Boundaries before pages, for `answerPages`'s reason. */
-  if (built.held.sealed.length !== held.sealed.length) await serving.sealShelf(built.held)
-  return { pages: built.pages, more: built.more }
+  /* Boundaries before pages, and both inside the shelf's lane — see
+     `Serving.withShared` for what cutting outside one costs. */
+  return serving.withShelf(async (held) => {
+    const built = await shelfPagesFor(held, publisher, asked.since, workDigest, bounds, asked.v)
+    return {
+      held: built.held.sealed.length === held.sealed.length ? held : built.held,
+      answer: { pages: built.pages, more: built.more },
+    }
+  })
 }
 
 /**
@@ -278,8 +321,8 @@ export async function answerLists(request: unknown, serving: Serving, discloses:
      they have never held takes the room that is left. */
   const rank = new Map(Object.keys(asked.since).map((id, at) => [id, at]))
   const unnamed = Number.MAX_SAFE_INTEGER
-  const lists = [...(await serving.lists())].sort((a, b) => (rank.get(a.id) ?? unnamed) - (rank.get(b.id) ?? unnamed))
-  for (const list of lists) {
+  const lists = [...(await serving.listIds())].sort((a, b) => (rank.get(a) ?? unnamed) - (rank.get(b) ?? unnamed))
+  for (const listId of lists) {
     /* ⚠️ **NOTHING IS CUT OR SIGNED FOR AN ANSWER THAT IS ALREADY FULL.** The
      * cap bounds the wire; it has to bound the work too, or a caller with
      * many lists makes this side sign pages it then throws away. */
@@ -287,11 +330,17 @@ export async function answerLists(request: unknown, serving: Serving, discloses:
       more = true
       break
     }
-    const publisher = await serving.publisher(listWork(list.id))
+    const publisher = await serving.publisher(listWork(listId))
     if (!publisher) return NOTHING
     const room = maxPages - pages.length
-    const built = await listPagesFor(list.held, publisher, asked.since[list.id] ?? {}, workDigest, { ...bounds, maxPages: room, maxChars: maxBytes - bytes }, asked.v)
-    if (built.held.sealed.length !== list.held.sealed.length) await serving.sealList(list.id, built.held)
+    /* Read, cut and written on the lists' lane as one step — `withShared`. */
+    const built = await serving.withList(listId, async (held) => {
+      const made = await listPagesFor(held, publisher, asked.since[listId] ?? {}, workDigest, { ...bounds, maxPages: room, maxChars: maxBytes - bytes }, asked.v)
+      return {
+        held: made.held.sealed.length === held.sealed.length ? held : made.held,
+        answer: { pages: made.pages, more: made.more },
+      }
+    })
     /* ⚠️ **PAGE BY PAGE AGAINST THE WHOLE ANSWER.** `pagesOver` lets a log's
        FIRST page through whatever the size budget says — a page has to be
        sendable on its own — so every list could put one page over what was
@@ -337,16 +386,21 @@ export async function answerPages(request: unknown, serving: Serving): Promise<P
      and saying so is not this exchange's business either. */
   if (!publisher) return { pages: [], more: false }
 
-  const held = await serving.shared(book.id)
-  /* The chain the CALLER negotiated — `PagesRequest.v` — and no other: a v1
-     peer handed a v2 page refuses it as `version`, and a v1 page cut from the
-     v2 boundaries is a page that reproduces under no chain at all. */
-  const built = await pagesFor(held, publisher, asked.since, workDigest, DEFAULT_BOUNDS, asked.v)
-  /* ⚠️ **THE SEALED BOUNDARIES ARE WRITTEN BEFORE THE PAGES GO OUT.** A page
-   * served under a boundary that was never recorded is a page the next fetch
-   * re-paginates — and every recipient holding it then refuses the one after
-   * with `chain`. Of the two orders only this one fails safe: a boundary
-   * recorded and not served is re-served, which costs a round trip. */
-  if (built.held.sealed.length !== held.sealed.length) await serving.seal(book.id, built.held)
-  return { pages: built.pages, more: built.more }
+  /* ⚠️ **THE SEALED BOUNDARIES ARE WRITTEN BEFORE THE PAGES GO OUT, AND THE
+   * CUT IS MADE INSIDE THE SAME TRANSACTION.** A page served under a boundary
+   * that was never recorded is a page the next fetch re-paginates — and every
+   * recipient holding it then refuses the one after with `chain`. Of the two
+   * orders only this one fails safe: a boundary recorded and not served is
+   * re-served, which costs a round trip. `Serving.withShared` says what
+   * deciding the boundary OUTSIDE the write cost. */
+  return serving.withShared(book.id, async (held) => {
+    /* The chain the CALLER negotiated — `PagesRequest.v` — and no other: a v1
+       peer handed a v2 page refuses it as `version`, and a v1 page cut from
+       the v2 boundaries is a page that reproduces under no chain at all. */
+    const built = await pagesFor(held, publisher, asked.since, workDigest, DEFAULT_BOUNDS, asked.v)
+    return {
+      held: built.held.sealed.length === held.sealed.length ? held : built.held,
+      answer: { pages: built.pages, more: built.more },
+    }
+  })
 }

@@ -491,7 +491,15 @@ export function paginate(entries: readonly Entry[], budget: number): readonly (r
     /* The comma is charged only between entries: a JSON list of n has n − 1. */
     // Stryker disable next-line EqualityOperator: charging the comma on the first entry instead of each one after it moves one character between two entries whose sum is what is measured.
     const cost = canonicalJson(entry).length + (current.length > 0 ? 1 : 0)
-    if (current.length > 0 && size + cost > budget) {
+    /* ⚠️ **BOTH BOUNDS THE READER ENFORCES, NOT JUST THE ONE.** `isPageShape`
+       refuses a page over `MAX_ENTRIES_PER_PAGE` as firmly as `checkPage`
+       refuses one over `MAX_PAGE_CHARS`, and this cut only on size — so a log
+       of many small entries produced a page the writer was happy with and
+       every recipient rejected. Measured by the audit: 5 000 rating entries in
+       449 491 characters, comfortably inside the byte budget and 904 entries
+       past the count. A writer that can emit what its own reader refuses has
+       not implemented the contract, only half of it. */
+    if (current.length > 0 && (size + cost > budget || current.length >= MAX_ENTRIES_PER_PAGE)) {
       pages.push(current)
       current = []
       size = 2

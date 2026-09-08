@@ -55,9 +55,12 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { inlineModules } from './lib/inline-ts.mjs'
+/* The bridge client lives in `lib/bridge.mjs` — this file held the only
+   copy until `circle-scenario.sh` needed the same round trip, and two
+   implementations of one wire protocol is how they stop matching. */
+import { connect, execute, DEFAULT_PORT } from './lib/bridge.mjs'
 import {
   assertTransportable,
   buildSnippet,
@@ -69,10 +72,7 @@ import {
 /** Pinned in `src-tauri/src/lib.rs` and in `AGENTS.md`. The plugin's own
  *  default is 9223 and it scans the next 100 ports, so two Tauri projects on
  *  the default collide; 31415 clears that window and vmark's 9323 by far. */
-const DEFAULT_PORT = 31415
 
-const CONNECT_TIMEOUT_MS = 8000
-const EXECUTE_TIMEOUT_MS = 30000
 
 /** The selection adapter, in dependency order: a module may only use names the
  *  modules before it export. Read from disk on every run — see
@@ -209,136 +209,134 @@ if (!doc || !win || !doc.body) {
   report.reason = 'the fixture iframe never produced a document to run against';
   return report;
 }
-doc.body.innerHTML = FIXTURE;
+/* ⚠️ **THE CLEANUP BEGINS HERE, AND IT USED TO BEGIN AFTER THE FIXTURE.**
+ * (No backticks in this comment: it lives inside a template literal.)
+ * Everything below — the markup assignment, the selection, the checks table —
+ * ran outside the cleanup, so a throw from any of it left an off-screen
+ * iframe attached with a selection inside it. The next run inherits both, and
+ * a selection nobody set is the one thing these checks cannot survive.
+ * Reproduced by making the markup assignment throw. */
+try {
+  doc.body.innerHTML = FIXTURE;
 
-var sel = win.getSelection();
-var textOf = function (id) {
-  var el = doc.getElementById(id);
-  return el ? el.firstChild : null;
-};
-var segmentsOf = function (text) {
-  var out = [];
-  var parts = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(text);
-  for (var part of parts) out.push({ text: part.segment, index: part.index, wordLike: !!part.isWordLike });
-  return out;
-};
-var quote = function (value) { return JSON.stringify(value); };
+  var sel = win.getSelection();
+  var textOf = function (id) {
+    var el = doc.getElementById(id);
+    return el ? el.firstChild : null;
+  };
+  var segmentsOf = function (text) {
+    var out = [];
+    var parts = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(text);
+    for (var part of parts) out.push({ text: part.segment, index: part.index, wordLike: !!part.isWordLike });
+    return out;
+  };
+  var quote = function (value) { return JSON.stringify(value); };
 
-var CHECKS = {
-  'range-detach': function () {
-    var a = textOf('pa');
-    var b = textOf('pb');
-    sel.removeAllRanges();
-    sel.setBaseAndExtent(a, 0, a, 8);
-
-    var captured = sel.getRangeAt(0);
-    var identicalBefore = captured === sel.getRangeAt(0);
-    var textBefore = captured.toString();
-
-    sel.setBaseAndExtent(b, 0, b, 5);
-    var identicalAfter = captured === sel.getRangeAt(0);
-    var textAfter = captured.toString();
-    var liveText = sel.getRangeAt(0).toString();
-
-    return {
-      pass:
-        identicalBefore === true &&
-        identicalAfter === false &&
-        textBefore === 'all done' &&
-        textAfter === 'all done' &&
-        liveText === 'Start',
-      detail:
-        'identical to getRangeAt(0) before=' + identicalBefore + ' after=' + identicalAfter +
-        ', captured text before=' + quote(textBefore) + ' after=' + quote(textAfter) +
-        ', live now=' + quote(liveText),
+  /*
+   * The two shapes of check this file makes, each written once.
+   *
+   * Both pairs below repeated their whole body — the selection, the two
+   * readings, the comparison and the formatting — differing only in which nodes
+   * they select and what they expect. Two copies of a formatting line is two
+   * places a detail string can stop matching what it reports.
+   */
+  var mergesAcross = function (nodes, raw, derived) {
+    return function () {
+      var ends = nodes();
+      sel.removeAllRanges();
+      sel.setBaseAndExtent(ends[0], ends[1], ends[2], ends[3]);
+      var range = sel.getRangeAt(0);
+      var was = range.toString();
+      var is = rangeText(range);
+      return {
+        pass: was === raw && is === derived,
+        detail: 'toString()=' + quote(was) + ' rangeText()=' + quote(is),
+      };
     };
-  },
+  };
 
-  'backward-direction': function () {
-    var fox = textOf('pfox');
-    /* Programmatic, and that is the whole limit of this check: anchor after
-     * focus is what a backward DRAG produces, but no harness can drag. */
-    sel.removeAllRanges();
-    sel.setBaseAndExtent(fox, 13, fox, 5);
-    var before = sel.toString();
-
-    var result = applySnap(sel);
-
-    return {
-      pass:
-        before === 'uick brow' &&
-        result.snapped === true &&
-        sel.toString() === 'quick brown' &&
-        sel.anchorNode === fox &&
-        sel.focusNode === fox &&
-        sel.anchorOffset === 15 &&
-        sel.focusOffset === 4,
-      detail:
-        'before=' + quote(before) + ' after=' + quote(sel.toString()) +
-        ', snapped=' + result.snapped +
-        ', anchor=' + sel.anchorOffset + ' focus=' + sel.focusOffset +
-        ' (backward means anchor > focus)',
+  var oneWord = function (word) {
+    return function () {
+      var parts = segmentsOf(word);
+      return {
+        pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
+        detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
+      };
     };
-  },
+  };
 
-  'block-merge': function () {
-    var a = textOf('pa');
-    var b = textOf('pb');
-    sel.removeAllRanges();
-    sel.setBaseAndExtent(a, 0, b, 10);
-    var range = sel.getRangeAt(0);
+  var CHECKS = {
+    'range-detach': function () {
+      var a = textOf('pa');
+      var b = textOf('pb');
+      sel.removeAllRanges();
+      sel.setBaseAndExtent(a, 0, a, 8);
 
-    var raw = range.toString();
-    var derived = rangeText(range);
+      var captured = sel.getRangeAt(0);
+      var identicalBefore = captured === sel.getRangeAt(0);
+      var textBefore = captured.toString();
 
-    return {
-      pass: raw === 'all doneStart here' && derived === 'all done' + LF + 'Start here',
-      detail: 'toString()=' + quote(raw) + ' rangeText()=' + quote(derived),
-    };
-  },
+      sel.setBaseAndExtent(b, 0, b, 5);
+      var identicalAfter = captured === sel.getRangeAt(0);
+      var textAfter = captured.toString();
+      var liveText = sel.getRangeAt(0).toString();
 
-  'br-merge': function () {
-    var line = doc.getElementById('pbr');
-    var one = line.firstChild;
-    var two = line.lastChild;
-    sel.removeAllRanges();
-    sel.setBaseAndExtent(one, 0, two, 3);
-    var range = sel.getRangeAt(0);
+      return {
+        pass:
+          identicalBefore === true &&
+          identicalAfter === false &&
+          textBefore === 'all done' &&
+          textAfter === 'all done' &&
+          liveText === 'Start',
+        detail:
+          'identical to getRangeAt(0) before=' + identicalBefore + ' after=' + identicalAfter +
+          ', captured text before=' + quote(textBefore) + ' after=' + quote(textAfter) +
+          ', live now=' + quote(liveText),
+      };
+    },
 
-    var raw = range.toString();
-    var derived = rangeText(range);
+    'backward-direction': function () {
+      var fox = textOf('pfox');
+      /* Programmatic, and that is the whole limit of this check: anchor after
+       * focus is what a backward DRAG produces, but no harness can drag. */
+      sel.removeAllRanges();
+      sel.setBaseAndExtent(fox, 13, fox, 5);
+      var before = sel.toString();
 
-    return {
-      pass: raw === 'onetwo' && derived === 'one' + LF + 'two',
-      detail: 'toString()=' + quote(raw) + ' rangeText()=' + quote(derived),
-    };
-  },
+      var result = applySnap(sel);
 
-  'soft-hyphen': function () {
-    var word = 'hyphen' + SOFT_HYPHEN + 'ation';
-    var parts = segmentsOf(word);
+      return {
+        pass:
+          before === 'uick brow' &&
+          result.snapped === true &&
+          sel.toString() === 'quick brown' &&
+          sel.anchorNode === fox &&
+          sel.focusNode === fox &&
+          sel.anchorOffset === 15 &&
+          sel.focusOffset === 4,
+        detail:
+          'before=' + quote(before) + ' after=' + quote(sel.toString()) +
+          ', snapped=' + result.snapped +
+          ', anchor=' + sel.anchorOffset + ' focus=' + sel.focusOffset +
+          ' (backward means anchor > focus)',
+      };
+    },
+
+    'block-merge': mergesAcross(function () { return [textOf('pa'), 0, textOf('pb'), 10]; }, 'all doneStart here', 'all done' + LF + 'Start here'),
+
+    'br-merge': mergesAcross(function () {
+      var line = doc.getElementById('pbr');
+      return [line.firstChild, 0, line.lastChild, 3];
+    }, 'onetwo', 'one' + LF + 'two'),
 
     /* Asserted on BOUNDARIES, not on isWordLike. The flag is the divergence
      * this repository already measured and deliberately never reads; failing
      * on it would make this lane red on a healthy app. */
-    return {
-      pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
-      detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
-    };
-  },
+    'soft-hyphen': oneWord('hyphen' + SOFT_HYPHEN + 'ation'),
 
-  'word-joiner': function () {
-    var word = 'done' + WORD_JOINER + 'Start';
-    var parts = segmentsOf(word);
+    'word-joiner': oneWord('done' + WORD_JOINER + 'Start'),
+  };
 
-    return {
-      pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
-      detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
-    };
-  },
-};
-
-try {
   for (var i = 0; i < CHECK_IDS.length; i += 1) {
     var id = CHECK_IDS[i];
     var outcome;
@@ -389,94 +387,6 @@ export function buildDomSnippet() {
 /* The bridge                                                                */
 /* ------------------------------------------------------------------------ */
 
-/**
- * A WebSocket to the plugin's bridge, or a rejection naming the port.
- *
- * The bridge speaks plain JSON over a WebSocket
- * (`tauri-plugin-mcp-bridge/src/websocket.rs`), so this needs no MCP client and
- * no npm dependency — Node has had a global `WebSocket` since v22.
- */
-function connect(port) {
-  return new Promise((resolve, reject) => {
-    let socket
-    try {
-      socket = new WebSocket('ws://127.0.0.1:' + port)
-    } catch (cause) {
-      reject(cause)
-      return
-    }
-    const timer = setTimeout(() => {
-      socket.close()
-      reject(new Error('no answer within ' + CONNECT_TIMEOUT_MS + ' ms'))
-    }, CONNECT_TIMEOUT_MS)
-    socket.addEventListener(
-      'open',
-      () => {
-        clearTimeout(timer)
-        resolve(socket)
-      },
-      { once: true },
-    )
-    socket.addEventListener(
-      'error',
-      () => {
-        clearTimeout(timer)
-        reject(new Error('the connection was refused or dropped'))
-      },
-      { once: true },
-    )
-  })
-}
-
-/**
- * One `execute_js` round trip.
- *
- * Responses are matched by id because the bridge also broadcasts events down
- * the same socket; a client that took the next message to arrive would read an
- * IPC event as its own answer. Every exit from here clears the listeners, so a
- * later message cannot resolve a settled call.
- */
-function execute(socket, script, label) {
-  return new Promise((resolve, reject) => {
-    const id = randomUUID()
-
-    function cleanup() {
-      clearTimeout(timer)
-      socket.removeEventListener('message', onMessage)
-      socket.removeEventListener('close', onClose)
-    }
-
-    const timer = setTimeout(() => {
-      cleanup()
-      reject(new Error(label + ': the webview did not answer within ' + EXECUTE_TIMEOUT_MS + ' ms'))
-    }, EXECUTE_TIMEOUT_MS)
-
-    const onMessage = (event) => {
-      let message
-      try {
-        message = JSON.parse(String(event.data))
-      } catch {
-        return
-      }
-      if (message === null || typeof message !== 'object' || message.id !== id) return
-      cleanup()
-      if (message.success !== true) {
-        reject(new Error(label + ': ' + String(message.error ?? 'the bridge reported failure with no reason')))
-        return
-      }
-      resolve(message.data)
-    }
-
-    const onClose = () => {
-      cleanup()
-      reject(new Error(label + ': the bridge closed the connection mid-run'))
-    }
-
-    socket.addEventListener('message', onMessage)
-    socket.addEventListener('close', onClose)
-    socket.send(JSON.stringify({ id, command: 'execute_js', args: { script } }))
-  })
-}
 
 /* ------------------------------------------------------------------------ */
 /* The run                                                                   */
@@ -516,10 +426,36 @@ export function assertRan(parity, dom, expectedRows) {
         CHECKS.length + ' defined here' + (dom.reason ? ' — ' + String(dom.reason) : ''),
     )
   }
+  /* ⚠️ **THE COUNTERS WERE TRUSTED AND THE ENTRIES WERE NOT RECONCILED WITH
+     THEM.** `dom.ran` and `dom.expected` are numbers the page reports about
+     itself, so a report with `checks: []` and the right counters passed
+     everything below; so did six entries all carrying ONE id; so did
+     `ok: false, failures: 2`, because nothing read either field. Every one of
+     those is a run that proved nothing and said it was clean — which is the
+     exact failure this whole file exists to prevent, in the file that exists
+     to prevent it.
+
+     The ENTRIES are the evidence. The counters are a claim about them. */
+  const seen = new Set()
   for (const check of dom.checks) {
-    if (check.pass !== true) {
-      problems.push(check.id + ': ' + String(check.detail))
+    if (check === null || typeof check !== 'object' || typeof check.id !== 'string') {
+      problems.push('the DOM report holds an entry that is not a check')
+      continue
     }
+    if (seen.has(check.id)) problems.push(check.id + ': reported more than once')
+    seen.add(check.id)
+    if (check.pass !== true) problems.push(check.id + ': ' + String(check.detail))
+  }
+  for (const declared of CHECKS) {
+    if (!seen.has(declared.id)) problems.push(declared.id + ': declared here and absent from the report')
+  }
+  if (dom.checks.length !== dom.ran) {
+    problems.push('the DOM report claims ' + dom.ran + ' checks ran and carries ' + dom.checks.length)
+  }
+  /* An explicit failure status is believed even when every entry passed: the
+     page knows something the entries do not carry. */
+  if (dom.ok === false || (typeof dom.failures === 'number' && dom.failures > 0)) {
+    problems.push('the DOM report declares itself failed (ok: ' + String(dom.ok) + ', failures: ' + String(dom.failures) + ')')
   }
   if (typeof dom.engine !== 'string' || dom.engine === '' || /no navigator/.test(dom.engine)) {
     problems.push('the DOM report carries no engine string — it did not run in a browser engine')
@@ -550,9 +486,34 @@ const USAGE = [
   'which is kept outside this repository.',
 ].join('\n')
 
+/**
+ * ⚠️ **A TRAILING FLAG IS A MISTAKE, NOT A DEFAULT.** `--port` with nothing
+ * after it returned `null`, which every caller read as "not given" — so a
+ * mistyped invocation connected to the default port and ran, reporting on
+ * something the operator did not ask for. An option named without a value is
+ * refused by name.
+ */
 function option(argv, name) {
   const at = argv.indexOf(name)
-  return at === -1 ? null : (argv[at + 1] ?? null)
+  if (at === -1) return null
+  const value = argv[at + 1]
+  if (value === undefined || value.startsWith('--')) throw new Error(name + ' needs a value')
+  return value
+}
+
+/**
+ * ⚠️ **AND AN UNKNOWN FLAG WAS IGNORED ENTIRELY**, so `--prot 9223` ran the
+ * whole suite against the default port and said nothing. A runner that
+ * silently does something other than what it was asked is worse than one that
+ * refuses.
+ */
+function refuseUnknown(argv, known) {
+  for (const [i, arg] of argv.entries()) {
+    if (!arg.startsWith('--')) continue
+    if (known.includes(arg)) continue
+    throw new Error('unknown option: ' + arg + ' (known: ' + known.join(', ') + ')')
+  }
+  return argv.length
 }
 
 async function main(argv) {
@@ -579,7 +540,22 @@ async function main(argv) {
     return 0
   }
 
-  const corpusPath = option(argv, '--corpus')
+  /* Refused BEFORE anything runs, so a mistyped flag cannot quietly produce a
+     report about something nobody asked for. */
+  try {
+    refuseUnknown(argv, ['--help', '--emit-dom', '--corpus', '--port'])
+  } catch (cause) {
+    process.stderr.write(String(cause.message) + '\n' + USAGE + '\n')
+    return 2
+  }
+
+  let corpusPath
+  try {
+    corpusPath = option(argv, '--corpus')
+  } catch (cause) {
+    process.stderr.write(String(cause.message) + '\n' + USAGE + '\n')
+    return 2
+  }
   let rows
   try {
     rows = corpusPath === null ? await loadCorpus() : readCorpusFile(corpusPath)
@@ -597,7 +573,13 @@ async function main(argv) {
     return 1
   }
 
-  const portRaw = option(argv, '--port')
+  let portRaw
+  try {
+    portRaw = option(argv, '--port')
+  } catch (cause) {
+    process.stderr.write(String(cause.message) + '\n' + USAGE + '\n')
+    return 2
+  }
   const port = portRaw === null ? DEFAULT_PORT : Number(portRaw)
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     process.stderr.write('word-snap-live: --port needs a port number, got ' + String(portRaw) + '\n')

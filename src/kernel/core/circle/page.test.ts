@@ -200,6 +200,27 @@ describe('checkPage', () => {
 })
 
 describe('paginate', () => {
+  it('cuts on the ENTRY COUNT too, not only on size — the reader enforces both', () => {
+    /* ⚠️ **THE WRITER COULD EMIT WHAT ITS OWN READER REFUSES.** `isPageShape`
+       caps a page at `MAX_ENTRIES_PER_PAGE` as firmly as `checkPage` caps its
+       characters, and this cut only on size: a log of many SMALL entries
+       produced a page every recipient rejected. Measured by the audit at 5 000
+       rating entries inside the byte budget and 904 past the count.
+
+       Deliberately tiny entries, so the size budget cannot be what cuts. */
+    const many = Array.from({ length: MAX_ENTRIES_PER_PAGE + 10 }, (_, i) => entry(`p${i}`, i + 1))
+    /* ⚠️ **A BUDGET THE SIZE BOUND CANNOT REACH, or this asserts nothing.** At
+       `MAX_PAGE_CHARS` these entries total just OVER the byte budget, so size
+       cuts the page first and the test passes with the count bound removed —
+       measured. A generous budget leaves the entry cap as the only thing that
+       can cut, which is the bound under test. */
+    const pages = paginate(many, MAX_PAGE_CHARS * 10)
+    expect(pages.length).toBeGreaterThan(1)
+    for (const page of pages) expect(page.length).toBeLessThanOrEqual(MAX_ENTRIES_PER_PAGE)
+    /* And nothing is dropped on the way: the bound is not met by losing work. */
+    expect(pages.reduce((n, page) => n + page.length, 0)).toBe(many.length)
+  })
+
   it('splits by encoded size, not by count', () => {
     /* ⚠️ A count is a proxy that is wrong for exactly the notes that matter.
        One long note and three bare highlights must not page the same way. */
@@ -687,10 +708,49 @@ describe('the entries a page carries belong to the log its claim names — WI-23
   const SHELF = { ids: ['paper.circle.shelf'], titles: [], author: '', language: '' }
   const LIST = { ids: ['paper.circle.list:aa11'], titles: [], author: '', language: '' }
 
-  it('takes each kind on its own log', () => {
-    expect(check(page())).toBeNull()
-    expect(check(page({ work: SHELF, entries: [shelved] }))).toBeNull()
-    expect(check(page({ work: LIST, entries: [placed] }))).toBeNull()
+  it('takes EVERY kind on its own log, and refuses each on the other two', () => {
+    /* ⚠️ **THIS CHECKED ONE KIND PER LOG, AND THERE ARE FOURTEEN.** A `share`,
+       a `shelf` and a `place` were taken; the other eleven were never offered
+       to the log they belong to, so ten of the names in `OPS_BY_LOG` could be
+       emptied — `unshare`, `rate`, `tag`, `review`, `unreview`, `unshelf`,
+       `create`, `retitle`, `remove`, `delete` — and every test still passed.
+       A set that lists what is allowed needs a row per member or it is a
+       comment. Each is offered to its own log, which must take it, and to the
+       other two, which must not. */
+    const stamped = { device: 'd1', seq: 1, at: hlcOf(1) }
+    const work = { title: 'T', author: 'A', language: 'en' }
+    const byLog: Readonly<Record<string, readonly Entry[]>> = {
+      work: [
+        { ...stamped, op: 'share', pub: 'p', passage: { quote: 'q', prefix: 'p', suffix: 's', chapter: 'Ch. 1' } },
+        { ...stamped, op: 'unshare', pub: 'p' },
+        { ...stamped, op: 'status', state: 'reading' },
+        { ...stamped, op: 'rate', stars: 4 },
+        { ...stamped, op: 'tag', tags: ['t'] },
+        { ...stamped, op: 'review', pub: 'r', text: 'a whale of a book' },
+        { ...stamped, op: 'unreview', pub: 'r' },
+      ],
+      shelf: [
+        { ...stamped, op: 'shelf', pub: 's', work },
+        { ...stamped, op: 'unshelf', pub: 's' },
+      ],
+      list: [
+        { ...stamped, op: 'create', title: 'L' },
+        { ...stamped, op: 'retitle', title: 'L2' },
+        { ...stamped, op: 'place', pub: 'x', work, position: 1, note: '' },
+        { ...stamped, op: 'remove', pub: 'x' },
+        { ...stamped, op: 'delete' },
+      ],
+    }
+    const claims = { work: page().work, shelf: SHELF, list: LIST } as const
+
+    for (const log of ['work', 'shelf', 'list'] as const) {
+      for (const one of byLog[log]!) {
+        expect(check(page({ work: claims[log], entries: [one] })), `${one.op} on its own ${log} log`).toBeNull()
+        for (const other of (['work', 'shelf', 'list'] as const).filter((name) => name !== log)) {
+          expect(check(page({ work: claims[other], entries: [one] })), `${one.op} on the ${other} log`).toBe('malformed')
+        }
+      }
+    }
   })
 
   it('refuses a shelf or list operation on a per-work page, a passage on the shelf’s, and a shelving on a list’s', () => {

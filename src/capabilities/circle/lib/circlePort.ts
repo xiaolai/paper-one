@@ -88,6 +88,25 @@ export interface CirclePort {
   /** Whether this person is shown the reader's shelf. */
   showsShelf(person: string): Promise<boolean>
   setShowsShelf(person: string, on: boolean): Promise<void>
+  /**
+   * Whether this person's passages are held back from the page — WI-24.C2.
+   *
+   * ⚠️ **THE STATE WAS MODELLED AND UNREACHABLE.** `'muted'` has been in the
+   * parser's `STATES`, in `acceptsTransport` and in `defaultRetain` — which
+   * returns `keep` for it, deliberately: *"a reader who mutes is saying not
+   * right now"* — since relationships were designed. Nothing ever WROTE it.
+   * The only transition a reader could reach was `forget`, which purges the
+   * passages and the pairing, so "I would rather not see this person on the
+   * page today" had exactly one answer and it was irreversible.
+   *
+   * ⚠️ **MUTING DOES NOT STOP THE TRANSPORT, AND THAT IS THE DESIGN.**
+   * `acceptsTransport` admits a muted person, so their pages still arrive and
+   * their file stays whole; only `drawsOverlays` refuses them. Unmuting is a
+   * plain state change and NOT a re-admission — nothing was lost to restore,
+   * which is the whole difference between this and leaving.
+   */
+  muted(person: string): Promise<boolean>
+  setMuted(person: string, on: boolean): Promise<void>
   friend(person: string): Promise<FriendView>
   /**
    * A friend's jacket as a data URL — fetched lazily from the device that
@@ -135,6 +154,22 @@ export const RECENT_LIMIT = 30
 
 /** What a switch says for a person the peer no longer names. */
 export const NOT_IN_CIRCLE = 'That person is not in your circle.'
+
+/**
+ * A write the merge refused.
+ *
+ * ⚠️ **`writeRelationship` MERGES; IT DOES NOT OVERWRITE.** Within one epoch
+ * `mergeRelationship` keeps whichever record has the later `changedAt`, so a
+ * write can be persisted and have no effect — and every caller threw the
+ * returned record away and carried on as though it had taken. `forget` was the
+ * dangerous one: it purged the files and told the peer to forget the person
+ * while the stored record could still say `admitted`, which is exactly the
+ * state `admits()` re-admits on. Files gone, pairing gone, door open.
+ *
+ * The merge is RIGHT — a replica whose clock runs ahead must not be outvoted —
+ * so the fix is not to force the write but to notice when it loses.
+ */
+export const LOST_WRITE = 'That change was not the one that stood — something else wrote first. Try again.'
 
 const STATUS_WORDS: Readonly<Record<ReadingState, string>> = {
   want: 'wants to read',
@@ -213,6 +248,46 @@ function listsOf(files: ReadonlyMap<string, ForeignFile>, index: ReturnType<type
   return lists.sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id))
 }
 
+/**
+ * At most `width` tasks at once; the rest wait their turn.
+ *
+ * ⚠️ **THE SLOT IS HANDED OVER, NOT RELEASED AND RE-TAKEN.** The first version
+ * decremented the count and then woke a waiter — and a woken waiter resumes on
+ * a LATER MICROTASK, so for exactly one microtask the count was below the
+ * truth. A caller arriving in that window saw a free slot and took it; the
+ * waiter then took one too, and both ran. Measured against a model of both
+ * versions: with the window, four became five.
+ *
+ * ⚠️ **AND THAT WINDOW IS UNREACHABLE THROUGH `cover()`.** Its own awaits push
+ * any caller past the one microtask that matters, which is why the existing
+ * `at most COVER_WIDTH at once` test held even with the defect in place. The
+ * bound belongs to this function, so this is where it is asserted — through the
+ * port, the assertion cannot fail.
+ *
+ * A waiter INHERITS the slot its predecessor held: the count rises only when a
+ * caller finds one free and falls only when nobody is queued. There is no
+ * window because there is no moment when the slot belongs to nobody.
+ */
+export function slotsOf(width: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let running = 0
+  const waiting: (() => void)[] = []
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    let inherited = false
+    if (running >= width) {
+      await new Promise<void>((go) => waiting.push(go))
+      inherited = true
+    }
+    if (!inherited) running += 1
+    try {
+      return await task()
+    } finally {
+      const next = waiting.shift()
+      if (next) next()
+      else running -= 1
+    }
+  }
+}
+
 export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): void; pendingTurns(): number } {
   const listeners = createListeners('circle')
   const changed = (): void => listeners.tell()
@@ -222,18 +297,7 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
      was hundreds of dials together, and a shelf hidden again left them all
      running. The rest wait their turn, and one abandoned before its turn is
      not dialled at all. */
-  let fetching = 0
-  const waiting: (() => void)[] = []
-  const inSlot = async <T>(task: () => Promise<T>): Promise<T> => {
-    if (fetching >= COVER_WIDTH) await new Promise<void>((go) => waiting.push(go))
-    fetching += 1
-    try {
-      return await task()
-    } finally {
-      fetching -= 1
-      waiting.shift()?.()
-    }
-  }
+  const inSlot = slotsOf(COVER_WIDTH)
 
   /* One queue per person for the switch: a read-check-write that two quick
      flips could interleave, so the later flip returned early against the
@@ -273,7 +337,27 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
         const held = await deps.relationship(person)
         /* Told only when the switch MOVED, as the contract says. */
         if (held.shelf === on) return
-        await deps.writeRelationship(showShelf(held, on, deps.clock()))
+        const written = await deps.writeRelationship(showShelf(held, on, deps.clock()))
+        if (written.shelf !== on) throw new Error(LOST_WRITE)
+        changed()
+      }),
+    muted: async (person) => (await deps.relationship(person)).state === 'muted',
+    setMuted: (person, on) =>
+      inTurn(person, async () => {
+        /* `setShowsShelf`'s reason, unchanged: a record written for a person
+           the peer has already forgotten is a record nobody will read and a
+           decision nobody can undo. */
+        if (!(await deps.people()).some((one) => one.person === person)) throw new Error(NOT_IN_CIRCLE)
+        const held = await deps.relationship(person)
+        const wanted = on ? 'muted' : 'admitted'
+        /* Told only when it MOVED, as the contract says. */
+        if (held.state === wanted) return
+        /* ⚠️ **NO SECOND COPY OF THE RE-ADMISSION RULE HERE.** Unmuting a
+           blocked or exited person is a re-admission and `changeState` throws
+           on it — one rule, in the kernel, where `readmit` is. A guard written
+           beside it would be a second place for that decision to drift. */
+        const written = await deps.writeRelationship(changeState(held, wanted, deps.clock()))
+        if (written.state !== wanted) throw new Error(LOST_WRITE)
         changed()
       }),
     friend: async (person) => {
@@ -299,8 +383,15 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
     },
     cover: async (person, book, signal) => {
       if (book.cover === null || book.device === null) return null
+      /* ⚠️ **ASKED BEFORE QUEUEING, NOT ONLY AFTER A SLOT OPENS.** The abort was
+         checked inside the slot, so a request already abandoned still took its
+         place in the queue and waited out every transfer ahead of it, holding
+         its promise and captured book. A row scrolled past before its turn is
+         work nobody wants done; there is no reason to queue it at all. */
+      if (signal?.aborted) return null
       const { device, pub, cover } = book
       return inSlot(async () => {
+        /* And again on the way in: the wait may have been long. */
         if (signal?.aborted) return null
         try {
           /* Nothing fetched, nor answered from disk, for a person the record no
@@ -328,17 +419,21 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
       const book = books.find((one) => one.id === bookId)
       if (book === undefined) return EMPTY_VIEW
       /* Three independent reads per person, and the people independent of
-         each other: read together, not one round trip after another. */
-      const people = await Promise.all(
-        (await deps.people()).map(async (known) => {
-          const [relationship, shelf, held] = await Promise.all([
-            deps.relationship(known.person),
-            deps.heldShelf(known.person),
-            deps.heldOf(bookId, known.person),
-          ])
-          return { person: known.person, name: known.displayName, relationship, shelf, held }
-        }),
-      )
+         each other: read together, not one round trip after another.
+         ⚠️ **THROUGH THE SAME POOL `friend()` USES.** This was a bare
+         `Promise.all` over the roster, so a large circle opened three
+         filesystem reads per person all at once — and an overlapping
+         subscription refresh multiplied it, because nothing bounded the two
+         against each other. `friend()` was already bounded; `book()` is
+         reached on every book opened, which is more often. */
+      const people = await pooled(await deps.people(), async (known) => {
+        const [relationship, shelf, held] = await Promise.all([
+          deps.relationship(known.person),
+          deps.heldShelf(known.person),
+          deps.heldOf(bookId, known.person),
+        ])
+        return { person: known.person, name: known.displayName, relationship, shelf, held }
+      })
       return viewOf(book, books, people)
     },
     forget: (person) =>
@@ -357,11 +452,32 @@ export function circlePortOver(deps: CirclePortDeps): CirclePort & { dispose(): 
            that would not forget them, or a keep queued behind the purge,
            finds a person who is exited and not the admitted default. Meeting
            them again is a pairing, and that is what re-admits them. */
-        await deps.writeRelationship(changeState(await deps.relationship(person), 'exited', deps.clock()))
-        /* The purge is what says so — `purgePerson` tells `onChanged` as its
-           files go — so nothing is said twice here. */
-        await deps.purge(person, deps.books().map((book) => book.id))
-        await deps.forgetPeer(person)
+        const written = await deps.writeRelationship(changeState(await deps.relationship(person), 'exited', deps.clock()))
+        /* ⚠️ **NOTHING IS PURGED UNTIL THE EXIT IS THE RECORD THAT STANDS.** A
+           losing merge left the record `admitted` while the files were purged
+           and the peer forgotten — and `admits()` re-admits on `admitted`, so
+           the next hello from somebody just removed would be let straight back
+           in, with nothing on disk to show what happened. */
+        if (written.state !== 'exited') throw new Error(LOST_WRITE)
+        /* ⚠️ **THE TRANSITION IS ANNOUNCED WHATEVER THE PURGE DOES.** The purge
+           was left to do the telling, on the reasoning that `purgePerson`
+           reports as its files go — but it is the LAST step of that dependency,
+           behind `covers.purge` and `listTrash`. Either can fail after the
+           record has already become `exited`, and then no listener is ever
+           woken: every subscribed view goes on drawing a person the reader has
+           removed, until something else happens to refresh it. The relationship
+           has changed by this line, so this line is where it is said. */
+        try {
+          await deps.purge(person, deps.books().map((book) => book.id))
+          await deps.forgetPeer(person)
+        } catch (cause) {
+          /* On the happy path `purgePerson` does the telling as its files go,
+             and telling again here would wake every subscriber twice for one
+             event. On a FAILURE it never reaches that step — so this is the
+             only line that can say the relationship ended. */
+          changed()
+          throw cause
+        }
       }),
     subscribe: listeners.subscribe,
     dispose: () => {

@@ -1,0 +1,229 @@
+/**
+ * The circle harness's hands: everything `circle-scenario.sh` does TO the app,
+ * done through the app's own UI over the MCP bridge.
+ *
+ * ⚠️ **THROUGH THE UI, NOT THROUGH THE STORE, AND THAT IS THE WHOLE POINT.** A
+ * harness that wrote `shared.json` itself would be testing its own JSON writer:
+ * the page a friend receives is SIGNED, and only the app can sign it. Every
+ * mutation here clicks the control a reader would click. The scenario script
+ * reads files to CHECK, and never to change.
+ *
+ * ⚠️ **DEBUG BUILDS ONLY.** The bridge plugin is compiled under a debug cfg, so
+ * a release build answers nothing on the port — `connect` says so by name.
+ *
+ * Subcommands, each printing one JSON object on stdout:
+ *
+ *   identity                     who this device publishes as
+ *   marks --title <t>            the reader's own marks and their share state
+ *   share --title <t>            share one unshared mark of that book
+ *   withdraw --title <t> --quote <q>   take a publication back
+ *   shelf  --person <name>       show them your shelf   (unshelf: stop)
+ *   mute   --person <name>       hold that person's passages back
+ *   unmute --person <name>       let them be drawn again
+ *
+ * Exit codes: 0 did what was asked, 1 could not, 2 was asked wrongly.
+ */
+
+import { pathToFileURL } from 'node:url'
+import { connect, evaluate, DEFAULT_PORT } from './lib/bridge.mjs'
+import {
+  AT_SHELF,
+  FRIEND_SHELF_STATE,
+  IDENTITY,
+  OPEN_FRIEND_SHELF,
+  OPEN_MARGINALIA,
+  PERSON_SWITCHES,
+  READ_MARKS,
+  ROW_STATE,
+  SHARE_FIRST_UNSHARED,
+  TO_CIRCLE,
+  TO_SHELF,
+  WITHDRAW_ROW,
+  asJs,
+  clickShare,
+  controlAt,
+  filterShelf,
+  flipSwitch,
+  muteLabel,
+  openMatch,
+  rowState,
+  shelfLabel,
+  shelfMatches,
+  stateOfRow,
+  withdrawRow,
+  parse,
+} from './lib/circle-scripts.mjs'
+import { act as actWith, reachCircle as circleWith, reachMarginalia as reachWith } from './lib/circle-navigate.mjs'
+
+/* ------------------------------------------------------------------------ */
+/* Scripts evaluated in the webview                                          */
+/* ------------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------------ */
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+function usage(message) {
+  process.stderr.write(message + '\nSee the header of scripts/circle-drive.mjs.\n')
+  process.exit(2)
+}
+
+const say = (value) => process.stdout.write(JSON.stringify(value) + '\n')
+
+/* The orchestration lives in `lib/circle-navigate.mjs`, where it is measured;
+   these two bind its injected dependencies to the real ones. */
+const DEPS = { evaluate, wait }
+const act = (socket, script, label, verify, tries) => actWith(DEPS, socket, script, label, verify, tries)
+const SCRIPTS = { AT_SHELF, TO_SHELF, filterShelf, shelfMatches, openMatch, OPEN_MARGINALIA, READ_MARKS }
+const reachMarginalia = (socket, title) => reachWith(DEPS, socket, title, SCRIPTS)
+const reachCircle = (socket) => circleWith(DEPS, socket, { AT_SHELF, TO_SHELF, TO_CIRCLE, PERSON_SWITCHES })
+
+async function main(argv) {
+  let args
+  try {
+    args = parse(argv)
+  } catch (cause) {
+    usage(cause.message)
+    return
+  }
+  const command = args._[0]
+  if (!command) usage('a subcommand is required: identity | marks | share | withdraw | mute | unmute | shelf | unshelf | friend')
+
+  let socket
+  try {
+    socket = await connect(args.port)
+  } catch (cause) {
+    /* ⚠️ NAMED, because "no bridge" and "no app" look identical from here and
+       they need different fixes — one is a release build, one is a stopped
+       app. The scenario script checks the process separately for that reason. */
+    say({ ok: false, why: 'the bridge did not answer: ' + cause.message + ' (a RELEASE build answers nothing on this port)' })
+    process.exit(1)
+  }
+
+  try {
+    if (command === 'identity') {
+      const answer = await evaluate(socket, IDENTITY, 'identity')
+      say(answer)
+      process.exit(answer.ok ? 0 : 1)
+    }
+
+    if (command === 'mute' || command === 'unmute' || command === 'shelf' || command === 'unshelf') {
+      if (!args.person) usage('--person <display name> is required')
+      const on = command === 'mute' || command === 'shelf'
+      const label = command === 'mute' || command === 'unmute' ? muteLabel(args.person) : shelfLabel(args.person)
+
+      const toCircle = await reachCircle(socket)
+      if (!toCircle.ok) {
+        say(toCircle)
+        process.exit(1)
+      }
+      const flipped = await act(socket, flipSwitch(label, on), 'flip the switch', async () => {
+        const seen = await evaluate(socket, PERSON_SWITCHES, 'read the switches')
+        const box = seen.boxes.find((b) => b.label === label)
+        return box !== undefined && box.checked === on
+      }, 40)
+      say(flipped.ok ? { ok: true, person: args.person, label, on } : flipped)
+      process.exit(flipped.ok ? 0 : 1)
+    }
+
+    if (command === 'friend') {
+      const toCircle = await reachCircle(socket)
+      if (!toCircle.ok) { say(toCircle); process.exit(1) }
+      const opened = await act(socket, OPEN_FRIEND_SHELF, "open the friend's shelf", async () =>
+        (await evaluate(socket, FRIEND_SHELF_STATE, 'read the shelf')).showing === true, 40)
+      if (!opened.ok) { say(opened); process.exit(1) }
+      /* Covers are fetched one at a time behind the drawn rows; give them a
+         window rather than reporting on the first frame. */
+      await wait(15000)
+      say({ ok: true, ...(await evaluate(socket, FRIEND_SHELF_STATE, 'read the shelf')) })
+      process.exit(0)
+    }
+
+    if (command !== 'marks' && command !== 'share' && command !== 'withdraw') usage('unknown subcommand: ' + command)
+    if (!args.title) usage('--title <book title> is required')
+
+    const reached = await reachMarginalia(socket, args.title)
+    if (!reached.ok) {
+      say(reached)
+      process.exit(1)
+    }
+    const listed = await evaluate(socket, READ_MARKS, 'read the marks')
+    if (!listed.ok) {
+      say(listed)
+      process.exit(1)
+    }
+    /* Only the OPEN book's rows — `otherBook` is null for exactly those.
+       Sharing "the first unshared row" without this publishes a passage from
+       whichever book Marginalia happened to list first, and the converge step
+       then waits for a `pub` under a work claim the far end was never asked
+       about. */
+    const mine = listed.rows.filter((r) => r.otherBook === null)
+
+    if (command === 'marks') {
+      say({ ok: true, ofThisBook: mine.length, rows: listed.rows })
+      process.exit(0)
+    }
+
+    if (command === 'withdraw') {
+      if (!args.quote) usage('--quote <the passage> is required')
+      const gone = await act(socket, withdrawRow(args.quote), 'withdraw the passage', async () => {
+        const now = await evaluate(socket, stateOfRow(args.quote), 'read the control')
+        return now.ok === true && now.buttons.includes('Share')
+      }, 60)
+      say(gone.ok ? { ok: true, quote: args.quote } : gone)
+      process.exit(gone.ok ? 0 : 1)
+    }
+
+    if (mine.length === 0) {
+      say({ ok: false, why: 'Marginalia lists no mark of ' + JSON.stringify(args.title) + ' — mark a passage in it first', rows: listed.rows.length })
+      process.exit(1)
+    }
+
+    /* Decided and clicked in one script — see SHARE_FIRST_UNSHARED. */
+    const clicked = await evaluate(socket, SHARE_FIRST_UNSHARED, 'share the first unshared passage')
+    if (!clicked.ok) {
+      say(clicked)
+      process.exit(1)
+    }
+
+    /* ⚠️ **THE WAIT IS THE ASSERTION.** The click resolves immediately and the
+       publish is async — a driver that returned here would report success
+       before anything was signed, and the converge step would then blame the
+       far end for a page this machine never wrote. The control turning into
+       `Withdraw` is the only local evidence the publication landed. */
+    for (let i = 0; i < 60; i++) {
+      await wait(500)
+      const now = await evaluate(socket, stateOfRow(clicked.quote), 'read the control')
+      if (!now.ok) {
+        say(now)
+        process.exit(1)
+      }
+      if (now.buttons.includes('Withdraw')) {
+        say({ ok: true, waitedMs: (i + 1) * 500, quote: clicked.quote })
+        process.exit(0)
+      }
+      if (/could not|failed|cannot/i.test(now.text)) {
+        say({ ok: false, why: 'the control reported: ' + now.text })
+        process.exit(1)
+      }
+    }
+    say({ ok: false, why: 'the control never became Withdraw — the publish did not land within 30s' })
+    process.exit(1)
+  } catch (cause) {
+    say({ ok: false, why: cause.message })
+    process.exit(1)
+  } finally {
+    try {
+      socket.close()
+    } catch {
+      /* closing a socket that already closed is not a failure of the run */
+    }
+  }
+}
+
+/* ⚠️ **GUARDED, SO THE TESTS CAN IMPORT THE BUILDERS.** A top-level `await
+   main()` runs the whole CLI — bridge connection and all — the moment anything
+   imports this file, which is how a unit test comes to need a running app. */
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main(process.argv.slice(2))
+}

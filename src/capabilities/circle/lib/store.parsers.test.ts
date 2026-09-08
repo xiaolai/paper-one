@@ -31,6 +31,33 @@ const entry = (over: Record<string, unknown> = {}, passage: Record<string, unkno
   ...over,
 })
 
+describe('a withdrawal list that will not read', () => {
+  /* ⚠️ **THE MESSAGE IS THE TEST — AND `toThrow` ALONE CANNOT HOLD IT.**
+     `readNames` used to take the error its caller wanted as a THUNK and throw
+     the result, so a thunk returning `undefined` threw `undefined`. MEASURED:
+     `expect(...).rejects.toThrow(/anything at all/)` PASSES against a rejection
+     with `undefined`, and against `null` too, whatever the pattern says — so no
+     assertion of this shape could tell either caller's message from no message.
+     It takes the string now and builds the `Error` itself, which is what makes
+     the patterns below able to fail. */
+  it.each([
+    ['a withdrawal list that is not a list', { withdrawn: 'p1' }, /has no withdrawal list/u],
+    ['a withdrawal list holding something that is not a name', { withdrawn: [1] }, /has no withdrawal list/u],
+    ['a review withdrawal list that is not a list', { unreviewed: 'r1' }, /has a review withdrawal list that will not read/u],
+    ['a shelf withdrawal list holding something that is not a name', { unshelved: [{}] }, /has a shelf withdrawal list that will not read/u],
+  ])('refuses %s', async (_what, over, says) => {
+    await expect(read(over)).rejects.toThrow(says)
+  })
+
+  it('says which list it was, not merely that one would not read', async () => {
+    /* The two messages apart, in one place: a shared pattern would pass with
+       either caller's thunk emptied. */
+    await expect(read({ withdrawn: 'p1' })).rejects.toThrow(/has no withdrawal list/u)
+    await expect(read({ unreviewed: 'r1' })).rejects.toThrow(/a review withdrawal list that will not read/u)
+    await expect(read({ withdrawn: 'p1' })).rejects.not.toThrow(/review/u)
+  })
+})
+
 describe('a held shelf row', () => {
   it('keeps a stamped row with its epoch and cover, and an unstamped one', async () => {
     const held = await read({ works: [work({ device: 'd1', seq: 2, epoch: 3, work: { title: 'T', author: 'A', language: 'en', cover: 'ab'.repeat(32) } }), work({ pub: 's2' })] })

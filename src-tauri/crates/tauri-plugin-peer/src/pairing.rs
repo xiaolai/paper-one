@@ -49,6 +49,38 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// The satchel waits the shelf's confirm window plus this much for the ack.
 const ACK_GRACE: Duration = Duration::from_secs(30);
+
+/// How many times a joiner dials ONE offer before giving up.
+///
+/// ⚠️ **BECAUSE THE DIAL IS LOSSY, NOT BECAUSE THE PROTOCOL IS.** MEASURED
+/// 2026-09-08 between two Macs each dual-homed on a single subnet: of 12
+/// dials, 10 paired in ~1.5 s and 2 died in the transport with the shelf
+/// never seeing a connection at all. Both ends logged iroh multipath churn
+/// (`failed closing path`); nothing in this file was involved.
+///
+/// The retry lives HERE and nowhere else on purpose. Pairing is the one
+/// exchange with no second chance — one-shot, a human watching, the offer
+/// single-use, and the first thing two readers ever do together. The
+/// circle's rounds run on a cadence and heal at the next one, so retrying
+/// there would only duplicate work.
+const PAIR_DIAL_ATTEMPTS: u32 = 3;
+
+/// How long the joiner waits before opening ANOTHER connection beside the one
+/// it already has.
+///
+/// ⚠️ **AN EXTRA CONNECTION ON EVERY SUCCESSFUL PAIRING IS THE PRICE, AND IT IS
+/// DELIBERATE.** The shelf sends nothing at all between receiving a hello and
+/// its human answering, so this side cannot tell "you never heard me" from
+/// "your human is still deciding" — the probe is the only way to ask. Five
+/// seconds is long enough that a shelf which did hear has nothing to gain from
+/// waiting longer, and short enough that a reader whose hello was lost waits
+/// five seconds instead of the 150 the ack deadline would cost them.
+///
+/// The losing probe is refused `no-pending`, which is harmless: the shelf's
+/// `claim` is single-shot and already proven single-winner under a hundred
+/// concurrent attempts. `usePairing` drops the stray result so it cannot
+/// disturb the request on screen.
+const PAIR_PROBE_PAUSE: Duration = Duration::from_secs(5);
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// After sending the ack the shelf waits this long for the satchel's commit —
 /// the second half of the two-sided commit (finding M8). A silent satchel is
@@ -411,7 +443,7 @@ impl PairKind {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PairHello {
     name: String,
     platform: String,
@@ -622,8 +654,18 @@ pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
 
 fn reason_of(err: &Error) -> String {
     match err {
+        /* A refusal's reason IS the wire word the other side sent — `bad-mac`,
+        `role-mismatch`, `no-pending` — and the UI and the tests both read it
+        verbatim. Nothing to add to it. */
         Error::PairingRefused(reason) => reason.clone(),
-        other => other.kind().to_owned(),
+        /* ⚠️ **THE KIND ALONE IS NOT A REASON.** This returned `err.kind()`,
+        so every transport failure reached the reader as the single word
+        "io" — "That pairing did not complete (io)" — while the message
+        that named the actual cause was discarded one line before the only
+        place it could have been read. MEASURED 2026-09-08: a pairing that
+        failed this way gave the same four characters whatever went wrong,
+        on both machines, in the UI and in the event. */
+        other => format!("{}: {other}", other.kind()),
     }
 }
 
@@ -952,13 +994,6 @@ pub async fn from_uri(
     What is NOT loosened: the role still decides the kind (below), the
     offerer still constrains the kind, and a satchel still cannot offer. */
     let shelf = uri.id;
-    let conn = timeout(
-        DIAL_TIMEOUT,
-        node.endpoint().connect(uri.endpoint_addr(), PAIR_ALPN),
-    )
-    .await
-    .map_err(|_| Error::Timeout("pair dial"))??;
-    let (mut send, mut recv) = conn.open_bi().await?;
     /* ⚠️ **THE JOINER'S OWN ROLE, NOT `Role::Satchel` — the third hard-coding.**
     `pairing.rs` fixed the role in three places and this was the one that
     made a shelf DIAL as a satchel, so `a_shelf_dialing_as_a_satchel_is_
@@ -986,18 +1021,121 @@ pub async fn from_uri(
             None
         },
     };
-    write_json(&mut send, &hello).await?;
-    // The send stream stays open: after the ack the satchel sends its commit on
-    // it, the second half of the two-sided commit (finding M8).
+    /* The FIRST attempt is made here and not in the task, so a shelf that
+    cannot be reached at all is still an error from `peer_pair_from_uri`
+    itself — the contract every caller and test was written against. */
+    let opened = dial(node, &uri, &hello).await?;
+    /* ⚠️ **ONE SAS FOR THE WHOLE ATTEMPT, EVERY RETRY INCLUDED.** Its three
+    inputs — the offer's secret, the shelf's id and this device's — are all
+    fixed before the first dial, so redialling cannot move the digits on
+    either screen. That is what makes a retry invisible to the two people
+    comparing them, and it is why the retry is allowed to be silent. */
     let sas = sas(&uri.secret, &shelf, &node.id());
 
     let node = node.clone();
-    let secret = uri.secret;
     let task = tokio::spawn(async move {
-        let result = finish(
-            &node, &conn, &mut send, &mut recv, shelf, &secret, grants, kind,
-        )
-        .await;
+        /* ⚠️ **PROBES IN PARALLEL, NOT REDIALS IN SEQUENCE, AND THE REASON IS
+        THAT THE DOMINANT FAILURE PRODUCES NO ERROR AT ALL.** A hello lost on
+        the way to the shelf leaves this side with a connection it believes
+        is healthy, waiting for an ack that will never come — for
+        `confirm_timeout + ACK_GRACE`, which is 150 seconds of a reader
+        looking at six digits. A sequential retry never fires, because
+        there is nothing to fire on.
+
+        MEASURED 2026-09-08 between two Macs each dual-homed on one subnet:
+        with a 60 s idle gap before each dial — which is what a real pairing
+        always is — 1 of 4 got through. Dialled back to back, keeping the
+        path warm, 10 to 11 of 12 did. The warm number is the one a harness
+        reports and the cold one is the one a person meets.
+
+        So the first connection is KEPT, and another is opened beside it. */
+        let mut open = Some(opened);
+        let mut set = tokio::task::JoinSet::new();
+        set.spawn(one_attempt(
+            Arc::clone(&node),
+            uri.clone(),
+            hello.clone(),
+            grants.clone(),
+            kind,
+            open.take(),
+        ));
+        let mut spawned = 1u32;
+        /* Stops the moment the shelf answers ANYONE: a settled outcome on any
+        connection means it has claimed the secret, so a further probe could
+        only be refused. */
+        let mut probing = true;
+        let mut settled: Option<Error> = None;
+        let mut sibling: Option<Error> = None;
+        let mut last: Option<Error> = None;
+        let mut next_probe = tokio::time::Instant::now() + PAIR_PROBE_PAUSE;
+
+        let result = loop {
+            tokio::select! {
+                joined = set.join_next(), if !set.is_empty() => {
+                    match joined {
+                        Some(Ok(Ok(record))) => break Ok(record),
+                        Some(Ok(Err(err))) => {
+                            if worth_redialling(&err) {
+                                /* The shelf never spoke on this one. If there
+                                is budget left, replace it AT ONCE rather
+                                than waiting out the probe timer. */
+                                if probing && spawned < PAIR_DIAL_ATTEMPTS {
+                                    log::info!("peer: a pairing hello went unanswered ({err}); opening another connection");
+                                    spawned += 1;
+                                    set.spawn(one_attempt(
+                                        Arc::clone(&node), uri.clone(), hello.clone(),
+                                        grants.clone(), kind, None,
+                                    ));
+                                }
+                                last = Some(err);
+                            } else if sibling_took_the_offer(&err) {
+                                /* ⚠️ **`no-pending` HERE IS GOOD NEWS, NOT A
+                                FAILURE, AND IT MUST NOT BE REPORTED.** It
+                                means a SIBLING connection got the hello
+                                through and the shelf is asking its human
+                                right now. Recorded as the outcome it would
+                                MASK the real one: `no_confirmation_in_time_
+                                refuses` would report `no-pending` in place
+                                of the shelf's own `timeout`, because the
+                                probe answers first and the connection the
+                                shelf is actually talking to answers last.
+                                Kept only as a last resort, for the case
+                                where the offer really is gone and every
+                                connection says so. */
+                                probing = false;
+                                if sibling.is_none() {
+                                    sibling = Some(err);
+                                }
+                            } else {
+                                probing = false;
+                                if settled.is_none() {
+                                    settled = Some(err);
+                                }
+                            }
+                        }
+                        Some(Err(join)) => {
+                            last = Some(Error::PairingRefused(format!("pairing task: {join}")));
+                        }
+                        None => {}
+                    }
+                    if set.is_empty() && (!probing || spawned >= PAIR_DIAL_ATTEMPTS) {
+                        break Err(settled
+                            .or(last)
+                            .or(sibling)
+                            .unwrap_or(Error::Timeout("pair ack")));
+                    }
+                }
+                _ = tokio::time::sleep_until(next_probe), if probing && spawned < PAIR_DIAL_ATTEMPTS => {
+                    next_probe += PAIR_PROBE_PAUSE;
+                    spawned += 1;
+                    log::info!("peer: the shelf has not answered yet; opening a second connection beside the first");
+                    set.spawn(one_attempt(
+                        Arc::clone(&node), uri.clone(), hello.clone(),
+                        grants.clone(), kind, None,
+                    ));
+                }
+            }
+        };
         node.emit(PeerEvent::PairingResult(match &result {
             Ok(record) => PairingResult {
                 ok: true,
@@ -1023,33 +1161,122 @@ pub async fn from_uri(
                 attempt_id: None,
             },
         }));
-        conn.close(VarInt::from_u32(0), b"done");
+        /* Each attempt closes its own connection; `set` dropping aborts any
+        probe still waiting on a shelf that has already answered elsewhere. */
         result
     });
     Ok((PairStart { sas }, task))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn finish(
+/// One attempt at the wire: dial the shelf, open the stream, send the hello.
+/// Every step here happens BEFORE the shelf has claimed the offer's secret,
+/// which is exactly what makes doing it more than once safe.
+async fn dial(
+    node: &Node,
+    uri: &PairUri,
+    hello: &PairHello,
+) -> Result<(Connection, SendStream, iroh::endpoint::RecvStream)> {
+    let conn = timeout(
+        DIAL_TIMEOUT,
+        node.endpoint().connect(uri.endpoint_addr(), PAIR_ALPN),
+    )
+    .await
+    .map_err(|_| Error::Timeout("pair dial"))??;
+    let (mut send, recv) = conn.open_bi().await?;
+    write_json(&mut send, hello).await?;
+    // The send stream stays open: after the ack the satchel sends its commit on
+    // it, the second half of the two-sided commit (finding M8).
+    Ok((conn, send, recv))
+}
+
+/// One whole attempt on its own connection: dial, hello, ack, commit.
+///
+/// ⚠️ **SEVERAL OF THESE RUN AT ONCE AGAINST ONE OFFER, AND THAT IS SAFE
+/// BECAUSE THE SECRET IS SINGLE-SHOT.** The shelf's `claim` consumes it under
+/// a lock and hands it to exactly one caller;
+/// `one_hundred_concurrent_attempts_with_one_secret_pair_exactly_once` is the
+/// measurement of that, and it already covers a far more hostile case than
+/// three connections from the same joiner. Every loser is refused
+/// `no-pending` without the offer being touched.
+async fn one_attempt(
+    node: Arc<Node>,
+    uri: PairUri,
+    hello: PairHello,
+    grants: Vec<String>,
+    kind: PairKind,
+    /* The first attempt hands over the connection `from_uri` already opened,
+    so the dial that reported the SAS is the one that carries the hello. */
+    opened: Option<(Connection, SendStream, iroh::endpoint::RecvStream)>,
+) -> Result<PeerRecord> {
+    let (conn, mut send, mut recv) = match opened {
+        Some(open) => open,
+        None => dial(&node, &uri, &hello).await?,
+    };
+    let ack = read_ack(&node, &conn, &mut recv).await?;
+    let out = finish(&node, ack, &mut send, uri.id, &uri.secret, grants, kind).await;
+    conn.close(VarInt::from_u32(0), b"done");
+    out
+}
+
+/// Wait for the shelf's answer. Its `Err` is the only thing a retry is ever
+/// decided from, so what that error can mean is the whole safety argument —
+/// see [`worth_redialling`].
+async fn read_ack(
     node: &Node,
     conn: &Connection,
-    send: &mut SendStream,
     recv: &mut iroh::endpoint::RecvStream,
+) -> Result<PairAck> {
+    match timeout(node.confirm_timeout + ACK_GRACE, read_json(recv)).await {
+        Ok(Ok(ack)) => Ok(ack),
+        Ok(Err(err)) => Err(closed_reason(conn)
+            .map(Error::PairingRefused)
+            .unwrap_or(err)),
+        Err(_) => Err(Error::Timeout("pair ack")),
+    }
+}
+
+/// Whether a failed attempt left the shelf's offer untouched, so that dialling
+/// again is a retry rather than a second, doomed pairing.
+///
+/// ⚠️ **THE OFFER'S SECRET IS SINGLE-SHOT, AND THAT IS THE ENTIRE CONSTRAINT.**
+/// The moment the shelf CLAIMS it — which is the moment it puts six digits in
+/// front of a human — the secret is spent, and a redial is refused as
+/// `no-pending`, burning an offer that was still going to work. So a retry is
+/// made only while the shelf has said NOTHING AT ALL. Every case below is one
+/// where it has spoken, or where speaking again cannot help.
+/// Whether this failure means one of THIS joiner's own sibling connections
+/// already got the hello through. The offer's secret is claimed once, so every
+/// connection after the winner is refused `no-pending` — which is a sign the
+/// pairing is alive, and the one refusal that must never reach the reader.
+fn sibling_took_the_offer(err: &Error) -> bool {
+    matches!(err, Error::PairingRefused(reason) if reason == "no-pending")
+}
+
+fn worth_redialling(err: &Error) -> bool {
+    !matches!(
+        err,
+        /* The shelf answered — an ack, or a close carrying a reason. It has
+        claimed the secret, so there is nothing left to dial for. */
+        Error::PairingRefused(_)
+            /* The human did not answer in time. Dialling again only puts the
+            same question in front of the same absent person. */
+            | Error::Timeout("pair ack")
+    )
+}
+
+async fn finish(
+    node: &Node,
+    /* Read by `read_ack` rather than here, because whether it ARRIVED is what
+    decides a retry, and that decision belongs outside this function: past
+    this line the shelf has spoken and nothing is retryable any more. */
+    ack: PairAck,
+    send: &mut SendStream,
     shelf: EndpointId,
     secret: &Secret,
     grants: Vec<String>,
     // Which kind this attempt was — only a circle exchanges a person.
     kind: PairKind,
 ) -> Result<PeerRecord> {
-    let ack: PairAck = match timeout(node.confirm_timeout + ACK_GRACE, read_json(recv)).await {
-        Ok(Ok(ack)) => ack,
-        Ok(Err(err)) => {
-            return Err(closed_reason(conn)
-                .map(Error::PairingRefused)
-                .unwrap_or(err))
-        }
-        Err(_) => return Err(Error::Timeout("pair ack")),
-    };
     if !ack.ok {
         return Err(Error::PairingRefused(
             ack.reason.unwrap_or_else(|| "refused".into()),
@@ -1144,6 +1371,31 @@ mod tests {
         assert!(code.chars().all(|c| c.is_ascii_digit()));
         assert_eq!(code, sas(&s, &shelf, &satchel));
         assert_ne!(code, sas(&[8u8; 16], &shelf, &satchel));
+    }
+
+    #[test]
+    fn a_transport_failure_reports_its_message_and_not_just_its_kind() {
+        /* ⚠️ EVERY transport failure has the same kind, so the kind alone told
+        a reader nothing: "That pairing did not complete (io)" was the whole
+        report whatever had gone wrong. */
+        let err = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "the stream was reset by the peer",
+        ));
+        let reason = reason_of(&err);
+        assert!(
+            reason.contains("the stream was reset by the peer"),
+            "the cause must survive into the reason: {reason}"
+        );
+        assert_ne!(reason, err.kind(), "the kind alone is not a reason");
+
+        /* A refusal is different and must stay verbatim: its reason is the
+        word the other side put on the wire, and both the UI and the
+        protocol tests match on it exactly. */
+        assert_eq!(
+            reason_of(&Error::PairingRefused("bad-mac".into())),
+            "bad-mac"
+        );
     }
 
     #[test]
@@ -1912,8 +2164,286 @@ mod tests {
         .expect("a decision within 5s");
         assert!(result.is_err(), "pair/0 must not connect");
         assert!(shelf.node.list_peers().is_empty());
+        /* ⚠️ **AND THE SHELF MUST HAVE NOTICED.** The refusal happens inside
+        `accept_loop`, which used to drop it with a bare `return`: no event,
+        no log, no count. A far end that was dialled and a far end that was
+        never dialled produced byte-identical evidence, which is what made
+        an intermittent pairing failure unreadable from the receiving side. */
+        let mut counted = false;
+        for _ in 0..50 {
+            if shelf.node.dropped_inbound() > 0 {
+                counted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            counted,
+            "the shelf must count an inbound connection it dropped"
+        );
         raw.close().await;
         shelf.close().await;
+    }
+
+    /// What the fake shelf does once it has read the hello.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        /// Reset the stream, having said nothing. The MEASURED failure.
+        Silent,
+        /// Send a refusal ack — the shelf answered, so the secret is spent.
+        Refuse,
+        /// Close the connection carrying a reason. Also the shelf answering,
+        /// but it arrives as an `Err` and so is the case that actually
+        /// consults `worth_redialling`.
+        CloseWithReason,
+        /// Hold the FIRST connection open saying nothing — indistinguishable,
+        /// on the wire, from a shelf whose human has not answered yet and
+        /// from a shelf that never received the hello at all — and answer
+        /// the second properly. The measured failure, and the whole reason
+        /// the probe exists.
+        SilentThenAck,
+    }
+
+    /// A shelf that is not a `Node`: it answers the pairing ALPN however the
+    /// test asks and COUNTS how many times it was dialled. The count is the
+    /// whole instrument — nothing else can tell one attempt from three.
+    async fn fake_shelf(
+        answer: Answer,
+    ) -> (Endpoint, Arc<std::sync::atomic::AtomicUsize>, PairUri) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ep = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![PAIR_ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let dials = Arc::new(AtomicUsize::new(0));
+        let me = ep.id();
+        {
+            let ep = ep.clone();
+            let dials = Arc::clone(&dials);
+            tokio::spawn(async move {
+                while let Some(incoming) = ep.accept().await {
+                    let me = me;
+                    let dials = Arc::clone(&dials);
+                    tokio::spawn(async move {
+                        let Ok(accepting) = incoming.accept() else {
+                            return;
+                        };
+                        let Ok(conn) = accepting.await else { return };
+                        let Ok((mut send, mut recv)) = conn.accept_bi().await else {
+                            return;
+                        };
+                        // Read the hello, so the joiner's write completes just
+                        // as it would against a real shelf.
+                        if read_json::<_, PairHello>(&mut recv).await.is_err() {
+                            return;
+                        }
+                        let nth = dials.fetch_add(1, Ordering::SeqCst) + 1;
+                        match answer {
+                            Answer::SilentThenAck if nth == 1 => {
+                                /* Held OPEN, not closed: a close carries a
+                                reason and would read as the shelf having
+                                spoken, which stops the probing this test
+                                is here to observe. */
+                                tokio::time::sleep(Duration::from_secs(30)).await;
+                            }
+                            Answer::SilentThenAck => {
+                                let ack = PairAck {
+                                    ok: true,
+                                    reason: None,
+                                    name: Some("Desk".into()),
+                                    platform: Some("test".into()),
+                                    role: Some(Role::Shelf),
+                                    mac_ack: Some(
+                                        ack_mac(&secret(), &conn.remote_id(), &me)
+                                            .to_hex()
+                                            .to_string(),
+                                    ),
+                                    person: None,
+                                };
+                                let _ = write_json(&mut send, &ack).await;
+                                flush(&mut send).await;
+                                tokio::time::sleep(Duration::from_millis(400)).await;
+                            }
+                            Answer::Refuse => {
+                                let ack = PairAck {
+                                    ok: false,
+                                    reason: Some("bad-mac".into()),
+                                    name: None,
+                                    platform: None,
+                                    role: None,
+                                    mac_ack: None,
+                                    person: None,
+                                };
+                                let _ = write_json(&mut send, &ack).await;
+                                flush(&mut send).await;
+                            }
+                            Answer::CloseWithReason => {
+                                conn.close(VarInt::from_u32(1), b"no-pending");
+                            }
+                            /* ⚠️ **RESET, NOT CLOSE, AND THE DIFFERENCE IS THE
+                            TEST.** Closing carries an application reason,
+                            which reads as the shelf having SPOKEN and is
+                            deliberately not retried. What is reproduced
+                            here is the MEASURED failure: the stream dies
+                            with nothing said at all. */
+                            Answer::Silent => {
+                                let _ = send.reset(VarInt::from_u32(1));
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                    });
+                }
+            });
+        }
+        let addr = ep.addr();
+        let uri = PairUri {
+            id: ep.id(),
+            addrs: addr.ip_addrs().copied().collect(),
+            relay: None,
+            secret: secret(),
+            expires_at: (SystemTime::now() + PAIR_TTL)
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+        (ep, dials, uri)
+    }
+
+    #[tokio::test]
+    async fn a_shelf_that_says_nothing_is_dialled_again_rather_than_given_up_on() {
+        use std::sync::atomic::Ordering;
+        /* The measured failure: the dial lands, the hello goes out, and the
+        stream dies with the shelf never having answered — 2 of 12 dials
+        between two dual-homed Macs. One-shot, that is a reader told their
+        pairing failed when nothing was wrong with it. */
+        let (ep, dials, uri) = fake_shelf(Answer::Silent).await;
+        let joiner = TestNode::start("pair-retry-joiner", Role::Satchel).await;
+        let (start, task) = from_uri(&joiner.node, &uri.to_uri(), Some("Phone".into()), vec![])
+            .await
+            .expect("the first dial gets away");
+
+        /* ⚠️ **THE DIGITS MUST NOT DEPEND ON WHICH CONNECTION CARRIED THEM.**
+        This is what lets the retry be silent: all three inputs are fixed
+        before the first dial, so redialling cannot move what either human
+        is reading off their screen. */
+        assert_eq!(
+            start.sas,
+            sas(&uri.secret, &uri.id, &joiner.node.id()),
+            "the SAS comes from the offer and the two ids, nothing per-connection"
+        );
+
+        assert!(
+            task.await.unwrap().is_err(),
+            "three silent dials still fail"
+        );
+        /* ⚠️ **A LITERAL 3, NOT `PAIR_DIAL_ATTEMPTS`.** Written against the
+        constant this assertion moves with it and can never fail: setting
+        the constant to 1 made the expectation 1 and the test still passed.
+        Verified by reverting — it fails now. */
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            3,
+            "a shelf that says nothing must be dialled again, not given up on"
+        );
+        ep.close().await;
+        joiner.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_hello_the_shelf_never_heard_is_rescued_by_the_probe_beside_it() {
+        use std::sync::atomic::Ordering;
+        /* ⚠️ **THE CASE THE WHOLE PROBE EXISTS FOR, AND THE ONE A SEQUENTIAL
+        RETRY CANNOT REACH.** A hello lost on the way to the shelf leaves
+        this side holding a connection it believes is healthy, waiting on an
+        ack that will never come — 150 s of a reader watching six digits.
+        There is no error to retry on. The only way to ask is to open
+        another connection beside the first and see if THAT one is heard.
+
+        The fake shelf here holds the first connection open and says
+        nothing, which on the wire is exactly what a shelf whose human is
+        still deciding looks like. That indistinguishability is the point:
+        the joiner cannot tell, so it asks. */
+        let (ep, dials, uri) = fake_shelf(Answer::SilentThenAck).await;
+        let joiner = TestNode::start("pair-probe-joiner", Role::Satchel).await;
+        let (_start, task) = from_uri(&joiner.node, &uri.to_uri(), Some("Phone".into()), vec![])
+            .await
+            .expect("the first dial gets away");
+
+        let record = task
+            .await
+            .unwrap()
+            .expect("the probe beside the silent connection pairs");
+        assert_eq!(record.name, "Desk");
+        assert_eq!(record.role, Role::Shelf);
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            2,
+            "one silent connection, one probe that was heard"
+        );
+        assert_eq!(joiner.node.list_peers(), vec![record]);
+        ep.close().await;
+        joiner.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_never_dialled_again_because_the_offer_is_already_spent() {
+        use std::sync::atomic::Ordering;
+        /* ⚠️ **THE SAFETY HALF OF THE RETRY, AND THE ONE THAT COULD DO HARM.**
+        A shelf that ANSWERS has claimed the single-shot secret. Dialling
+        again would be refused as `no-pending` and would burn an offer the
+        reader could otherwise still accept — turning one recoverable
+        failure into a dead offer. */
+        let (ep, dials, uri) = fake_shelf(Answer::Refuse).await;
+        let joiner = TestNode::start("pair-refuse-joiner", Role::Satchel).await;
+        let (_start, task) = from_uri(&joiner.node, &uri.to_uri(), Some("Phone".into()), vec![])
+            .await
+            .expect("the first dial gets away");
+
+        let err = task.await.unwrap().unwrap_err();
+        assert_eq!(err.kind(), "pairingRefused");
+        assert!(
+            err.to_string().contains("bad-mac"),
+            "the shelf's own word survives: {err}"
+        );
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            1,
+            "a shelf that answered has spent the secret; dialling again burns the offer"
+        );
+        ep.close().await;
+        joiner.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_shelf_that_hangs_up_with_a_reason_has_spoken_and_is_not_dialled_again() {
+        use std::sync::atomic::Ordering;
+        /* ⚠️ **THIS IS THE CASE `worth_redialling` EXISTS FOR, and the refusal
+        test above does NOT cover it.** A refusal ACK comes back as a
+        successful read, so the loop breaks on it without ever consulting
+        the gate. A shelf that hangs up carrying a reason arrives as an
+        `Err` instead — indistinguishable, at that point, from the
+        transport dying — and only the gate keeps it from being retried. */
+        let (ep, dials, uri) = fake_shelf(Answer::CloseWithReason).await;
+        let joiner = TestNode::start("pair-closed-joiner", Role::Satchel).await;
+        let (_start, task) = from_uri(&joiner.node, &uri.to_uri(), Some("Phone".into()), vec![])
+            .await
+            .expect("the first dial gets away");
+
+        let err = task.await.unwrap().unwrap_err();
+        assert_eq!(err.kind(), "pairingRefused");
+        assert!(
+            err.to_string().contains("no-pending"),
+            "the reason the shelf hung up with survives: {err}"
+        );
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            1,
+            "the shelf spoke; retrying would dial an offer that is already spent"
+        );
+        ep.close().await;
+        joiner.close().await;
     }
 
     #[tokio::test]
