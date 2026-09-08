@@ -200,6 +200,27 @@ describe('checkPage', () => {
 })
 
 describe('paginate', () => {
+  it('cuts on the ENTRY COUNT too, not only on size — the reader enforces both', () => {
+    /* ⚠️ **THE WRITER COULD EMIT WHAT ITS OWN READER REFUSES.** `isPageShape`
+       caps a page at `MAX_ENTRIES_PER_PAGE` as firmly as `checkPage` caps its
+       characters, and this cut only on size: a log of many SMALL entries
+       produced a page every recipient rejected. Measured by the audit at 5 000
+       rating entries inside the byte budget and 904 past the count.
+
+       Deliberately tiny entries, so the size budget cannot be what cuts. */
+    const many = Array.from({ length: MAX_ENTRIES_PER_PAGE + 10 }, (_, i) => entry(`p${i}`, i + 1))
+    /* ⚠️ **A BUDGET THE SIZE BOUND CANNOT REACH, or this asserts nothing.** At
+       `MAX_PAGE_CHARS` these entries total just OVER the byte budget, so size
+       cuts the page first and the test passes with the count bound removed —
+       measured. A generous budget leaves the entry cap as the only thing that
+       can cut, which is the bound under test. */
+    const pages = paginate(many, MAX_PAGE_CHARS * 10)
+    expect(pages.length).toBeGreaterThan(1)
+    for (const page of pages) expect(page.length).toBeLessThanOrEqual(MAX_ENTRIES_PER_PAGE)
+    /* And nothing is dropped on the way: the bound is not met by losing work. */
+    expect(pages.reduce((n, page) => n + page.length, 0)).toBe(many.length)
+  })
+
   it('splits by encoded size, not by count', () => {
     /* ⚠️ A count is a proxy that is wrong for exactly the notes that matter.
        One long note and three bare highlights must not page the same way. */
