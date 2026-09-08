@@ -1021,6 +1021,7 @@
     "scripts/word-snap-live.test.mjs > word-snap-live — the DOM-check snippet > declares exactly the checks the runner expects",
     "scripts/word-snap-live.test.mjs > word-snap-live — the DOM-check snippet > fails closed in an engine with no DOM rather than reporting a clean sweep",
     "scripts/word-snap-live.test.mjs > word-snap-live — the DOM-check snippet > is a different snippet from the corpus parity one, and both are non-empty",
+    "scripts/word-snap-live.test.mjs > word-snap-live — the DOM-check snippet > removes its fixture frame, however the run ends",
     "scripts/word-snap-live.test.mjs > word-snap-live — what it concludes from a report > accepts a complete, passing pair",
     "scripts/word-snap-live.test.mjs > word-snap-live — what it concludes from a report > names the check that failed, and its detail",
     "scripts/word-snap-live.test.mjs > word-snap-live — what it concludes from a report > rejects a DOM report that declares fewer checks than are defined here",

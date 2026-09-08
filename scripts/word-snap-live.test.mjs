@@ -367,6 +367,52 @@ describe('word-snap-live — the DOM-check snippet', () => {
    * survive UTF-8 at all. Both arrive from the inlined source, where escaping
    * is not an option because a comment is not a string.
    */
+  it('removes its fixture frame, however the run ends', async () => {
+    /* ⚠️ **EVERY OTHER TEST OF THE SNIPPET RUNS WITHOUT A DOM**, where it stops
+       at the first guard — which is the point of those, and leaves everything
+       past the guard unexecuted, the fixture iframe included. So the one thing
+       the snippet promises about its own housekeeping, that it never leaves an
+       off-screen frame behind, had nothing asserting it.
+
+       A jsdom window rather than the `jsdom` test environment: this file is
+       assembled from the app's source through `import.meta.url`, which under
+       that environment is not a file URL and cannot be read from. jsdom is not
+       WebKit and several checks will not pass in it — that is not what this
+       measures. What it measures is what the snippet LEAVES. */
+    const { JSDOM } = await import('jsdom')
+    const snippet = buildDomSnippet()
+
+    const clean = new JSDOM('<!doctype html><body></body>', { runScripts: 'outside-only' })
+    clean.window.eval(snippet)
+    expect(clean.window.document.querySelectorAll('iframe')).toHaveLength(0)
+
+    /* ⚠️ **AND WHEN THE FIXTURE ITSELF FAILS, WHICH IS THE CASE IT LEAKED.**
+       The cleanup used to begin after the fixture was built, so a throw from
+       the markup assignment, the selection or the checks table left the iframe
+       attached — with a selection inside it, which the next run inherits.
+       Injected by giving the frame's document a body whose `innerHTML`
+       refuses, the first thing the snippet does with it. */
+    const broken = new JSDOM('<!doctype html><body></body>', { runScripts: 'outside-only' })
+    const real = broken.window.document.createElement.bind(broken.window.document)
+    broken.window.document.createElement = (tag) => {
+      const made = real(tag)
+      if (tag !== 'iframe') return made
+      Object.defineProperty(made, 'contentDocument', {
+        configurable: true,
+        get: () => ({
+          body: {
+            set innerHTML(_value) {
+              throw new Error('the fixture would not build')
+            },
+          },
+        }),
+      })
+      return made
+    }
+    expect(() => broken.window.eval(snippet)).toThrow(/the fixture would not build/u)
+    expect(broken.window.document.querySelectorAll('iframe')).toHaveLength(0)
+  })
+
   it('carries nothing that would break at parse in transit', () => {
     const snippet = buildDomSnippet()
     const lineSeparator = String.fromCharCode(0x2028)

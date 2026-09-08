@@ -209,136 +209,143 @@ if (!doc || !win || !doc.body) {
   report.reason = 'the fixture iframe never produced a document to run against';
   return report;
 }
-doc.body.innerHTML = FIXTURE;
-
-var sel = win.getSelection();
-var textOf = function (id) {
-  var el = doc.getElementById(id);
-  return el ? el.firstChild : null;
-};
-var segmentsOf = function (text) {
-  var out = [];
-  var parts = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(text);
-  for (var part of parts) out.push({ text: part.segment, index: part.index, wordLike: !!part.isWordLike });
-  return out;
-};
-var quote = function (value) { return JSON.stringify(value); };
-
-var CHECKS = {
-  'range-detach': function () {
-    var a = textOf('pa');
-    var b = textOf('pb');
-    sel.removeAllRanges();
-    sel.setBaseAndExtent(a, 0, a, 8);
-
-    var captured = sel.getRangeAt(0);
-    var identicalBefore = captured === sel.getRangeAt(0);
-    var textBefore = captured.toString();
-
-    sel.setBaseAndExtent(b, 0, b, 5);
-    var identicalAfter = captured === sel.getRangeAt(0);
-    var textAfter = captured.toString();
-    var liveText = sel.getRangeAt(0).toString();
-
-    return {
-      pass:
-        identicalBefore === true &&
-        identicalAfter === false &&
-        textBefore === 'all done' &&
-        textAfter === 'all done' &&
-        liveText === 'Start',
-      detail:
-        'identical to getRangeAt(0) before=' + identicalBefore + ' after=' + identicalAfter +
-        ', captured text before=' + quote(textBefore) + ' after=' + quote(textAfter) +
-        ', live now=' + quote(liveText),
-    };
-  },
-
-  'backward-direction': function () {
-    var fox = textOf('pfox');
-    /* Programmatic, and that is the whole limit of this check: anchor after
-     * focus is what a backward DRAG produces, but no harness can drag. */
-    sel.removeAllRanges();
-    sel.setBaseAndExtent(fox, 13, fox, 5);
-    var before = sel.toString();
-
-    var result = applySnap(sel);
-
-    return {
-      pass:
-        before === 'uick brow' &&
-        result.snapped === true &&
-        sel.toString() === 'quick brown' &&
-        sel.anchorNode === fox &&
-        sel.focusNode === fox &&
-        sel.anchorOffset === 15 &&
-        sel.focusOffset === 4,
-      detail:
-        'before=' + quote(before) + ' after=' + quote(sel.toString()) +
-        ', snapped=' + result.snapped +
-        ', anchor=' + sel.anchorOffset + ' focus=' + sel.focusOffset +
-        ' (backward means anchor > focus)',
-    };
-  },
-
-  'block-merge': function () {
-    var a = textOf('pa');
-    var b = textOf('pb');
-    sel.removeAllRanges();
-    sel.setBaseAndExtent(a, 0, b, 10);
-    var range = sel.getRangeAt(0);
-
-    var raw = range.toString();
-    var derived = rangeText(range);
-
-    return {
-      pass: raw === 'all doneStart here' && derived === 'all done' + LF + 'Start here',
-      detail: 'toString()=' + quote(raw) + ' rangeText()=' + quote(derived),
-    };
-  },
-
-  'br-merge': function () {
-    var line = doc.getElementById('pbr');
-    var one = line.firstChild;
-    var two = line.lastChild;
-    sel.removeAllRanges();
-    sel.setBaseAndExtent(one, 0, two, 3);
-    var range = sel.getRangeAt(0);
-
-    var raw = range.toString();
-    var derived = rangeText(range);
-
-    return {
-      pass: raw === 'onetwo' && derived === 'one' + LF + 'two',
-      detail: 'toString()=' + quote(raw) + ' rangeText()=' + quote(derived),
-    };
-  },
-
-  'soft-hyphen': function () {
-    var word = 'hyphen' + SOFT_HYPHEN + 'ation';
-    var parts = segmentsOf(word);
-
-    /* Asserted on BOUNDARIES, not on isWordLike. The flag is the divergence
-     * this repository already measured and deliberately never reads; failing
-     * on it would make this lane red on a healthy app. */
-    return {
-      pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
-      detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
-    };
-  },
-
-  'word-joiner': function () {
-    var word = 'done' + WORD_JOINER + 'Start';
-    var parts = segmentsOf(word);
-
-    return {
-      pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
-      detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
-    };
-  },
-};
-
+/* ⚠️ **THE CLEANUP BEGINS HERE, AND IT USED TO BEGIN AFTER THE FIXTURE.**
+ * (No backticks in this comment: it lives inside a template literal.)
+ * Everything below — the markup assignment, the selection, the checks table —
+ * ran outside the cleanup, so a throw from any of it left an off-screen
+ * iframe attached with a selection inside it. The next run inherits both, and
+ * a selection nobody set is the one thing these checks cannot survive.
+ * Reproduced by making the markup assignment throw. */
 try {
+  doc.body.innerHTML = FIXTURE;
+
+  var sel = win.getSelection();
+  var textOf = function (id) {
+    var el = doc.getElementById(id);
+    return el ? el.firstChild : null;
+  };
+  var segmentsOf = function (text) {
+    var out = [];
+    var parts = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(text);
+    for (var part of parts) out.push({ text: part.segment, index: part.index, wordLike: !!part.isWordLike });
+    return out;
+  };
+  var quote = function (value) { return JSON.stringify(value); };
+
+  var CHECKS = {
+    'range-detach': function () {
+      var a = textOf('pa');
+      var b = textOf('pb');
+      sel.removeAllRanges();
+      sel.setBaseAndExtent(a, 0, a, 8);
+
+      var captured = sel.getRangeAt(0);
+      var identicalBefore = captured === sel.getRangeAt(0);
+      var textBefore = captured.toString();
+
+      sel.setBaseAndExtent(b, 0, b, 5);
+      var identicalAfter = captured === sel.getRangeAt(0);
+      var textAfter = captured.toString();
+      var liveText = sel.getRangeAt(0).toString();
+
+      return {
+        pass:
+          identicalBefore === true &&
+          identicalAfter === false &&
+          textBefore === 'all done' &&
+          textAfter === 'all done' &&
+          liveText === 'Start',
+        detail:
+          'identical to getRangeAt(0) before=' + identicalBefore + ' after=' + identicalAfter +
+          ', captured text before=' + quote(textBefore) + ' after=' + quote(textAfter) +
+          ', live now=' + quote(liveText),
+      };
+    },
+
+    'backward-direction': function () {
+      var fox = textOf('pfox');
+      /* Programmatic, and that is the whole limit of this check: anchor after
+       * focus is what a backward DRAG produces, but no harness can drag. */
+      sel.removeAllRanges();
+      sel.setBaseAndExtent(fox, 13, fox, 5);
+      var before = sel.toString();
+
+      var result = applySnap(sel);
+
+      return {
+        pass:
+          before === 'uick brow' &&
+          result.snapped === true &&
+          sel.toString() === 'quick brown' &&
+          sel.anchorNode === fox &&
+          sel.focusNode === fox &&
+          sel.anchorOffset === 15 &&
+          sel.focusOffset === 4,
+        detail:
+          'before=' + quote(before) + ' after=' + quote(sel.toString()) +
+          ', snapped=' + result.snapped +
+          ', anchor=' + sel.anchorOffset + ' focus=' + sel.focusOffset +
+          ' (backward means anchor > focus)',
+      };
+    },
+
+    'block-merge': function () {
+      var a = textOf('pa');
+      var b = textOf('pb');
+      sel.removeAllRanges();
+      sel.setBaseAndExtent(a, 0, b, 10);
+      var range = sel.getRangeAt(0);
+
+      var raw = range.toString();
+      var derived = rangeText(range);
+
+      return {
+        pass: raw === 'all doneStart here' && derived === 'all done' + LF + 'Start here',
+        detail: 'toString()=' + quote(raw) + ' rangeText()=' + quote(derived),
+      };
+    },
+
+    'br-merge': function () {
+      var line = doc.getElementById('pbr');
+      var one = line.firstChild;
+      var two = line.lastChild;
+      sel.removeAllRanges();
+      sel.setBaseAndExtent(one, 0, two, 3);
+      var range = sel.getRangeAt(0);
+
+      var raw = range.toString();
+      var derived = rangeText(range);
+
+      return {
+        pass: raw === 'onetwo' && derived === 'one' + LF + 'two',
+        detail: 'toString()=' + quote(raw) + ' rangeText()=' + quote(derived),
+      };
+    },
+
+    'soft-hyphen': function () {
+      var word = 'hyphen' + SOFT_HYPHEN + 'ation';
+      var parts = segmentsOf(word);
+
+      /* Asserted on BOUNDARIES, not on isWordLike. The flag is the divergence
+       * this repository already measured and deliberately never reads; failing
+       * on it would make this lane red on a healthy app. */
+      return {
+        pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
+        detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
+      };
+    },
+
+    'word-joiner': function () {
+      var word = 'done' + WORD_JOINER + 'Start';
+      var parts = segmentsOf(word);
+
+      return {
+        pass: parts.length === 1 && parts[0].text === word && parts[0].index === 0,
+        detail: 'segments=' + quote(parts.map(function (p) { return [p.text, p.index, p.wordLike]; })),
+      };
+    },
+  };
+
   for (var i = 0; i < CHECK_IDS.length; i += 1) {
     var id = CHECK_IDS[i];
     var outcome;

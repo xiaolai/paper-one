@@ -721,6 +721,17 @@ pub fn sign_delegation(
             "that device id is not an endpoint key".into(),
         ));
     }
+    /* ⚠️ **THE ROLE AND THE ROOT ARE READ UNDER ONE LOCK, AND THEY WERE NOT.**
+     * `forget` demotes the role and then deletes the root, in that order and
+     * under `ROOT_LOCK`, because only that order fails recoverably. Read
+     * without the lock, a signer could see `Home`, have `forget` run to
+     * completion beside it, and then read the root — which is still there
+     * until the keychain delete lands, and stays there for ever if that delete
+     * FAILS, which is the case the ordering deliberately leaves possible. The
+     * role gate is then decided on a role the device no longer has. Held
+     * across both reads and the signature, so a demotion either happens wholly
+     * before this delegation or wholly after it. */
+    let _held = hold_root();
     let role = device_role(root_dir)?
         .ok_or_else(|| Error::Identity("this device has no circle role".into()))?;
     if !role.may_mint() {
@@ -760,6 +771,9 @@ pub fn sign_as_person(
     domain: &str,
     payload: &[u8],
 ) -> Result<String> {
+    /* Under the lock, for `sign_delegation`'s reason: a role read before a
+    demotion and a root read after it is a signature a leaf produced. */
+    let _held = hold_root();
     let role = device_role(root_dir)?
         .ok_or_else(|| Error::Identity("this device has no circle role".into()))?;
     if !role.may_mint() {
@@ -1702,6 +1716,102 @@ mod tests {
             .collect();
         keys.sort();
         keys
+    }
+
+    /// A keychain that pauses in the middle of a read, so a second caller can
+    /// be shown waiting outside the lock.
+    #[derive(Debug)]
+    struct PausingKeychain {
+        inner: FakeKeychain,
+        reading: std::sync::mpsc::SyncSender<()>,
+        go: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl Keychain for PausingKeychain {
+        fn read(&self, account: &str) -> Result<Option<String>> {
+            if account == ROOT_ACCOUNT {
+                self.reading.send(()).unwrap();
+                if let Some(go) = self.go.lock().unwrap().take() {
+                    go.recv().unwrap();
+                }
+            }
+            self.inner.read(account)
+        }
+        fn write(&self, account: &str, secret: &str) -> Result<()> {
+            self.inner.write(account, secret)
+        }
+        fn delete(&self, account: &str) -> Result<()> {
+            self.inner.delete(account)
+        }
+    }
+
+    #[test]
+    fn a_signature_in_flight_holds_off_a_forgetting() {
+        /* ⚠️ **THE ROLE AND THE ROOT WERE READ WITHOUT THE LOCK.** `forget`
+        demotes the role and THEN deletes the root — that order on purpose,
+        because only it fails recoverably — and both signers read the role,
+        then the root, holding nothing. So a signer could pass the role gate as
+        `Home`, have a whole `forget` run beside it, and go on to read a root
+        that is still there: until the delete lands, and for ever if the delete
+        fails, which is the case the ordering deliberately leaves open. The
+        signature is then one a leaf produced.
+
+        No timing is asserted. The signer is paused INSIDE its root read; the
+        forgetting is started and given time to finish; the assertion is that
+        it has NOT, which cannot become true by waiting longer. */
+        let dir = temp();
+        let original = FakeKeychain::default();
+        let (person, _) = ensure(&original, &dir).unwrap();
+        /* The same secret, behind a keychain that pauses on the way to it. */
+        let seeded = FakeKeychain::default();
+        seeded
+            .write(ROOT_ACCOUNT, &original.read(ROOT_ACCOUNT).unwrap().unwrap())
+            .unwrap();
+        let (reading, reached) = std::sync::mpsc::sync_channel(1);
+        let (release, go) = std::sync::mpsc::sync_channel(1);
+        let paused = std::sync::Arc::new(PausingKeychain {
+            inner: seeded,
+            reading,
+            go: Mutex::new(Some(go)),
+        });
+
+        let signing = {
+            let keychain = std::sync::Arc::clone(&paused);
+            let dir = dir.clone();
+            let person = person.clone();
+            std::thread::spawn(move || {
+                sign_delegation(
+                    keychain.as_ref(),
+                    &dir,
+                    Delegation {
+                        person,
+                        device: "ab".repeat(32),
+                        not_before: NOW,
+                        not_after: NOW + 1000,
+                        roster: 1,
+                    },
+                    NOW,
+                )
+            })
+        };
+        reached.recv().unwrap();
+
+        let forgetting = {
+            let dir = dir.clone();
+            std::thread::spawn(move || forget(&FakeKeychain::default(), &dir))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !forgetting.is_finished(),
+            "the forgetting ran while a signature was in flight"
+        );
+        /* And the role it would have demoted is still the one the signer read. */
+        assert_eq!(device_role(&dir).unwrap(), Some(DeviceRole::Home));
+
+        release.send(()).unwrap();
+        assert!(signing.join().unwrap().is_ok());
+        forgetting.join().unwrap().unwrap();
+        assert_eq!(device_role(&dir).unwrap(), Some(DeviceRole::Leaf));
     }
 
     #[test]
