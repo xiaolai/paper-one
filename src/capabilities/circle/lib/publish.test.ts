@@ -514,6 +514,43 @@ const queueOf = (keys: string[] = []): WriteQueue => ({
 const LANE: LaneFor = (bookId) => `book:${bookId}`
 const BOOK = 'book:moby'
 
+describe('a publication id is an identity', () => {
+  it('refuses a second publication carrying an id the book already has', () => {
+    /* ⚠️ **NOTHING ENFORCED THIS, AND `unshare` PAID FOR IT.** Two rows sharing
+       a `pub` were each withdrawn at `nextSeqFor` against the SAME unchanged
+       store, so both took the same sequence — and the file that resulted fails
+       its own next read. A publication that cannot be withdrawn without
+       breaking the store it lives in. */
+    const once = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    expect(() => share(once, { markId: 'm2', passage: passage('y'), device: DEVICE.id }, 'p1', stamp(2, DEVICE.id))).toThrow(/already has a publication called p1/u)
+  })
+
+  it('withdraws ONE row even in a store that already holds a duplicate', () => {
+    /* A file written before the check above must still be repairable: two
+       withdrawals at one sequence is what made it unreadable, so a store in
+       that state is mended a row at a time rather than by writing another
+       file nothing can load. */
+    const one = share(NOTHING_PUBLISHED, { markId: 'm1', passage: passage('x'), device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    const doubled: SharedFile = { ...one, publications: [...one.publications, { ...one.publications[0]!, markId: 'm2' }] }
+    const after = unshare(doubled, 'p1', DEVICE.id, stamp(3, DEVICE.id))
+    expect(after.publications.filter((row) => row.unshared)).toHaveLength(1)
+  })
+})
+
+describe('a publication is a snapshot, not a view of the caller’s object', () => {
+  it('does not change when the passage it was made from is edited afterwards', async () => {
+    /* ⚠️ **THE CALLER'S OBJECT WAS STORED AS-IS.** Editing the mark afterwards
+       edited the PUBLICATION — a signed record of what was shared, changing
+       under a reader who had already shared it. `readonly` stops a write
+       through THIS reference and nothing through the caller's, which holds the
+       same object. */
+    const passage = { quote: 'as published', prefix: '', suffix: '', chapter: 'One' }
+    const { publication } = share(NOTHING_PUBLISHED, { markId: 'm1', passage, device: DEVICE.id }, 'p1', stamp(1, DEVICE.id))
+    passage.quote = 'edited afterwards'
+    expect(publication.passage.quote).toBe('as published')
+  })
+})
+
 describe('reading and writing the publisher’s store', () => {
   it('round-trips what it wrote, boundaries and all', async () => {
     /* ⚠️ **WITH AN EMPTY `sealed` THE ROW CHECK IS NEVER RUN** — `[].every()`

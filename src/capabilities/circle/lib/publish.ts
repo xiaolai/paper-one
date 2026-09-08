@@ -558,13 +558,27 @@ export function share(
   pub: string,
   at: Hlc,
 ): { readonly held: SharedFile; readonly publication: Publication } {
+  /* ⚠️ **A `pub` IS AN IDENTITY, AND NOTHING WAS ENFORCING IT.** Two rows
+     sharing one made `unshare` allocate the same sequence twice and wrote a
+     store that fails its own next read — a publication that cannot be
+     withdrawn without breaking the file it lives in. Refused where the id
+     enters, which is the only place it can still be refused cheaply. */
+  if (held.publications.some((row) => row.pub === pub)) {
+    throw new Error(`this book already has a publication called ${pub}`)
+  }
   const publication: Publication = {
     pub,
     markId: what.markId,
     device: what.device,
     seq: nextSeqFor(held, what.device),
     at,
-    passage: what.passage,
+    /* ⚠️ **COPIED, BECAUSE A SNAPSHOT THAT SHARES A REFERENCE IS NOT ONE.** The
+       caller's passage object was stored as-is, so editing the mark afterwards
+       edited the PUBLICATION — a signed record of what was shared, changing
+       under a reader who had already shared it. `readonly` in TypeScript stops
+       a write THROUGH THIS reference and nothing at all through the caller's,
+       which still holds the same object. */
+    passage: { ...what.passage },
   }
   return { held: { ...held, publications: [...held.publications, publication] }, publication }
 }
@@ -581,10 +595,19 @@ export function share(
  * taking it back, which need not be the one that published. See `Withdrawal`.
  */
 export function unshare(held: SharedFile, pub: string, device: string, at: Hlc): SharedFile {
+  /* ⚠️ **EXACTLY ONE ROW, BECAUSE EACH WOULD TAKE THE SAME SEQUENCE.** This
+     mapped over EVERY row carrying the id, and each computed `nextSeqFor`
+     against the same unchanged store — so two rows sharing a `pub` were
+     withdrawn at the same sequence, and the store then failed its own next
+     read. `share` refuses a duplicate id now, so this cannot arise from here;
+     a store already holding one is repaired by withdrawing one row at a time
+     rather than by writing a file nothing can load. */
+  let withdrawn = false
   return {
     ...held,
     publications: held.publications.map((row) => {
-      if (row.pub !== pub || row.unshared) return row
+      if (withdrawn || row.pub !== pub || row.unshared) return row
+      withdrawn = true
       return { ...row, unshared: { device, seq: nextSeqFor(held, device), at } }
     }),
   }
@@ -924,7 +947,11 @@ function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], pu
     roster: [...publisher.roster],
     revocations: publisher.revocations,
     delegation: publisher.delegation,
-    work: publisher.work,
+    /* The claim is sealed INTO the boundary and must not move afterwards, for
+       the same reason: its arrays are the publisher's, and the publisher is
+       rebuilt per round from live metadata. A boundary whose claim changed
+       would reproduce different bytes and break every recipient's chain. */
+    work: { ...publisher.work, ids: [...publisher.work.ids], titles: [...publisher.work.titles] },
   }))
   // Stryker restore OptionalChaining
 }
