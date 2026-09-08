@@ -6,7 +6,7 @@ import { CIRCLE_PROTO, CIRCLE_SERVICES, CIRCLE_VERSION } from './lib/protocol'
 import { readOwnShelf, syncShelf, updateOwnShelf } from './lib/shelf'
 import { NOTHING_SHARED, writeForeign, writeHeldList } from './lib/store'
 import { NOTHING_LISTED, createList, readOwnList, updateOwnList } from './lib/lists'
-import { share, updateShared } from './lib/publish'
+import { readShared, share, updateShared } from './lib/publish'
 
 /**
  * The capability's wiring to the peer — the module slots `peerPort`,
@@ -137,6 +137,23 @@ describe('the hello a friend sends', () => {
   })
 })
 
+describe('a service called when the capability is not running', () => {
+  it('says so, rather than answering from a torn-down run', async () => {
+    /* ⚠️ **NOTHING HAD EVER CALLED A HANDLER OUTSIDE A RUN.** Each captures
+       `running` when the handlers are built, so a teardown between the capture
+       and the call leaves `run` null — and the guard that names it had no
+       covering test at all, message included. A handler that answered anyway
+       would be answering through a port the run no longer owns. */
+    slots.publish = null
+    slots.person = null
+    const run = started(fakeFs() as unknown as IndexFs)
+    run.dispose()
+    for (const name of [CIRCLE_SERVICES.hello.name, CIRCLE_SERVICES.pages.name, CIRCLE_SERVICES.shelf.name, CIRCLE_SERVICES.lists.name, CIRCLE_SERVICES.cover.name]) {
+      await expect(call(name, {}), name).rejects.toThrow(/circle has not started/u)
+    }
+  })
+})
+
 describe('the shelf, disclosed by the caller’s device', () => {
   it('serves a device the roster names, and nothing to a revoked one, an unknown one, or under a block', async () => {
     const fs = fakeFs({ [relationshipPathIn(ALICE)]: relationship() }) as unknown as IndexFs
@@ -213,6 +230,33 @@ describe('the reader’s own shelf, published at start', () => {
     } finally {
       run.dispose()
       slots.publish = null
+    }
+  })
+
+  it('writes NO shelf at all on a device with no person identity', async () => {
+    /* ⚠️ **A SHELF NEEDS A DEVICE TO SIGN IT AS.** With no identity the pass
+       must stop before it measures a jacket or writes a row — every entry it
+       wrote would be stamped for a device that does not exist yet, and the
+       identity minted later would find a shelf it never published. Nothing had
+       ever run the pass without one: the guard could be deleted and the suite
+       stayed green because every fixture supplies a publisher. */
+    const fs = fakeFs({ 'books/book_moby/cover.jpg': 'jacket bytes' }) as unknown as IndexFs
+    slots.publish = null
+    const hashFile = vi.fn(() => Promise.resolve({ blake3: 'ef'.repeat(32), size: 12 }))
+    const run = started(fs, [{ bookId: 'book:moby', title: 'Moby-Dick', author: 'Herman Melville' }], { hashFile })
+    try {
+      await settled()
+      expect((await readOwnShelf(fs)).works).toEqual([])
+      /* ⚠️ **AND IT IS A NO-OP, NOT A REPORTED FAILURE.** An empty shelf is
+         also what a pass that ran the whole way and THREW on the missing
+         device leaves behind — the file alone cannot tell the guard from no
+         guard. Having no identity yet is the ordinary state of a fresh
+         install; a warning per library change for it would be noise the one
+         real failure then hides in. */
+      expect(hashFile).not.toHaveBeenCalled()
+      expect(run.warn).not.toHaveBeenCalledWith('circle.shelf.publish-failed', expect.anything())
+    } finally {
+      run.dispose()
     }
   })
 })
@@ -379,10 +423,20 @@ describe('what a friend is served of the reader’s own lists and passages', () 
       expect(lists.pages.length).toBeGreaterThan(0)
       expect((await readOwnList(fs, 'aa11')).sealed.length).toBeGreaterThan(0)
       const ask = { work: claimOf({ id: 'book:moby', title: 'Moby-Dick', author: 'Herman Melville', identifier: 'isbn:9780142437247', languages: ['en'] }), since: {}, v: 3 }
-      const pages = (await call(CIRCLE_SERVICES.pages.name, ask)) as { pages: unknown[] }
+      const pages = (await call(CIRCLE_SERVICES.pages.name, ask)) as { pages: string[] }
       expect(pages.pages.length).toBeGreaterThan(0)
       /* Sealed on the way out: the same ask again re-serves the same page. */
       expect(((await call(CIRCLE_SERVICES.pages.name, ask)) as { pages: unknown[] }).pages).toEqual(pages.pages)
+      /* ⚠️ **AND THE SEAL REACHED THE FILE.** Re-serving the same bytes is what
+         a deterministic `pagesFor` does whether or not anything was written —
+         so `seal: () => undefined` passed the line above. The boundaries on
+         disk are the part that only a real seal produces. */
+      expect((await readShared(fs as never, 'book:moby')).sealed.length).toBeGreaterThan(0)
+      /* ⚠️ **AND THE PAGE NAMES THE ROSTER IT WAS SIGNED UNDER.** Served with
+         an empty one, every recipient refuses the page as `may-not-speak` —
+         and nothing here read the field. */
+      const served = JSON.parse(pages.pages[0]!) as { roster: readonly string[]; device: string }
+      expect(served.roster).toContain(served.device)
     } finally {
       run.dispose()
       slots.publish = null

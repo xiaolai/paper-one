@@ -604,12 +604,13 @@ function isEpoch(value: unknown): value is number {
  * keyed on `contentHash` (`reanchorCache.ts`, `useReanchor`); this one carries
  * no such key, so every value in it is a claim with no evidence.
  *
- * ⚠️ **AND IT IS THE ONE FIELD NOTHING DOWNSTREAM RE-EXAMINES.**
- * `annotationsFor` SKIPS the resolver for any entry that already has an anchor
- * (`entry.resolved === undefined` is the filter), so a wrong one is never
- * caught — it goes straight to the painter and draws somebody's claim over
- * text they never marked. That is the same hole as `fresh.cfi as never`,
- * reached through the file instead of through a cast.
+ * ⚠️ **AND IT WOULD BE THE ONE FIELD NOTHING DOWNSTREAM RE-EXAMINES.** An
+ * anchor that reached `annotationsFor` intact would go straight to the painter
+ * and draw somebody's claim over text they never marked — the same hole as
+ * `fresh.cfi as never`, reached through the file instead of through a cast.
+ * `annotationsFor` used to carry a matching filter, which this function makes
+ * unreachable: it is the only way an entry is read, and nothing it returns
+ * carries the field. The rule is enforced here, once.
  *
  * ⚠️ **DROPPED, NOT REFUSED.** Throwing the row away would lose a real passage
  * somebody shared over a stale optimisation. Without the field the entry goes

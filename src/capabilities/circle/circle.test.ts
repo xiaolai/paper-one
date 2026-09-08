@@ -469,6 +469,37 @@ describe('the overlay contribution', () => {
     disposable.dispose()
   })
 
+  it('asks the resolver for every passage held, cached anchor or not, and not at all when there are none', async () => {
+    /* ⚠️ **NOTHING EVER READ WHAT THE RESOLVER WAS ASKED FOR.** A book with
+       nothing to walk for must not open the resolver at all, and the answer is
+       the same shape either way — so only the CALL distinguishes them, and no
+       test looked at it. */
+    const one = entry({ person: PERSON })
+    const anchored = { ...entry({ person: PERSON }), pub: 'pub2', resolved: { cfi: 'epubcfi(/6/4!/4/2)', sectionIndex: 0 } }
+    const fileWith = (entries: readonly unknown[]) =>
+      fsWith({ [circlePathIn(BOOK, PERSON)]: JSON.stringify({ entries, withdrawn: [], heads: {}, cursor: {}, v: 1 }) })
+
+    /* ⚠️ A cached anchor is dropped on the way IN — `readForeign` refuses to
+       trust one — so BOTH passages are pending, the one that arrived with an
+       anchor included. That is the assertion: the anchor on disk buys nothing,
+       and the passage carrying it is re-walked like any other. */
+    const both = start(fileWith([one, anchored]))
+    const asked = placesEverything()
+    await overlay.forBook({ bookId: BOOK, resolve: asked })
+    expect(asked).toHaveBeenCalledTimes(1)
+    expect((asked.mock.calls[0]![0] as readonly { id: string }[]).map((p) => p.id).sort()).toEqual(
+      [one, anchored].map((e) => `circle:${PERSON}:${e.pub}`).sort(),
+    )
+    both.dispose()
+
+    /* And a book nobody has shared from opens no resolver. */
+    const empty = start(fileWith([]))
+    const never = placesEverything()
+    expect(await overlay.forBook({ bookId: BOOK, resolve: never })).toEqual([])
+    expect(never).not.toHaveBeenCalled()
+    empty.dispose()
+  })
+
   it('answers nothing before the capability has started', async () => {
     expect(await overlay.forBook({ bookId: BOOK, resolve: () => Promise.reject(new Error('no')) })).toEqual(
       [],
@@ -506,6 +537,13 @@ describe('the overlay contribution', () => {
     expect(drawn[0]!.cfi).toBe('epubcfi(/6/4!/4/2)')
     expect(drawn[0]!.quote).toBe('Call me Ishmael')
     expect(drawn[0]!.readers).toBe(1)
+    /* ⚠️ **AND THE NAME IT IS DRAWN UNDER.** There is no roster here, so the
+       person's own id is the only name there is — shown as a claim, never as
+       a name Paper has checked. Nothing read the field, so the function that
+       supplies it could have answered `undefined` and the painter would have
+       drawn a mark attributed to nobody. */
+    expect(drawn[0]!.person).toBe(PERSON)
+    expect(drawn[0]!.author).toBe(PERSON)
     disposable.dispose()
   })
 
@@ -756,6 +794,12 @@ describe('through the real composition', () => {
     const { capabilities } = await import('../../app/composition.desktop')
 
     expect(capabilities.map((one) => one.id)).toContain('circle')
+    /* ⚠️ **THE MANIFEST'S OWN FIELDS, ASSERTED.** `requires` could be emptied
+       and the screen's label blanked with nothing here noticing: the stub below
+       is supplied by hand, so a composition that no longer ASKS for `peer`
+       still gets it, and no test read the label a reader sees on the rail. */
+    expect(circle.requires).toEqual(['peer'])
+    expect(circle.screens?.map((one) => [one.id, one.label])).toEqual([['circle:circle', 'Circle']])
 
     /* A STUB `peer`, because `circle` declares it in `requires` and the real
        one binds a Tauri plugin this test has no business starting. What is

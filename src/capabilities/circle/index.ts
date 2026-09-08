@@ -137,7 +137,6 @@ async function annotationsFor(
   request: OverlayRequest,
 ): Promise<readonly ForeignAnnotation[]> {
   const entries = await entriesFor(held.fs, request.bookId, held.warn)
-  if (entries.length === 0) return []
 
   /* ⚠️ **KEYED BY PERSON AND PUB, AND IT WAS KEYED BY `pub` ALONE.** A `pub`
    * is minted by whoever shared the passage, so it is unique to that PERSON and
@@ -147,17 +146,25 @@ async function annotationsFor(
    * was drawn at Bob's sentence, and `foreignWeight` counted two readers of a
    * passage only one of them had marked. `overlayKey` already composes both
    * for exactly this reason; this is the same composition one step earlier. */
-  const pending = entries
-    .filter((entry) => entry.resolved === undefined)
-    .map((entry) => ({
-      id: overlayKey(entry),
-      quote: entry.passage.quote,
-      prefix: entry.passage.prefix,
-      suffix: entry.passage.suffix,
-    }))
+  /* ⚠️ **EVERY ENTRY, BECAUSE NONE OF THEM ARRIVES ANCHORED.** A
+     `.filter((entry) => entry.resolved === undefined)` stood here, and
+     `asShared` strips `resolved` from every row it reads back — a cached
+     anchor is a claim with no evidence and `store.ts` says so at length — so
+     the predicate was true of everything `entriesFor` can return. A filter
+     that cannot exclude anything reads as a rule being enforced somewhere it
+     is not; the rule is enforced on the way in from disk. */
+  const pending = entries.map((entry) => ({
+    id: overlayKey(entry),
+    quote: entry.passage.quote,
+    prefix: entry.passage.prefix,
+    suffix: entry.passage.suffix,
+  }))
 
   /* Only walk when there is something to walk FOR. A book whose entries are
-     all anchored already costs nothing on open. */
+     all anchored already costs nothing on open — and a book with NO entries
+     falls out here too, which is why the `entries.length === 0` short-circuit
+     that used to stand above is gone: it returned the same `[]` this does, one
+     step earlier, and nothing could tell the two apart. */
   /* ⚠️ **NO CAST HERE, AND THERE USED TO BE ONE.** `fresh.cfi as never` widened
      the resolver's answer back to whatever it happened to be, so the
      `ResolvedCfi` brand — the whole of WI-22.A1 — was bypassed at the one seam
