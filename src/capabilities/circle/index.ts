@@ -30,7 +30,7 @@ import {
 } from '../../kernel'
 import { createElement } from 'react'
 import { peopleFor, readForeign, type ForeignFile } from './lib/store'
-import { answerCover, answerPages, welcome, type BookLike, type Serving } from './lib/exchange'
+import { answerCover, answerPages, welcome, type BookLike, type Sealed, type Serving } from './lib/exchange'
 import { COVER_CAP_SETTING, createCoverFetcher } from './lib/covers'
 import { readShared, updateShared, type Publisher } from './lib/publish'
 import { CIRCLE_SERVICES } from './lib/protocol'
@@ -802,6 +802,33 @@ interface RunningDeps {
 }
 
 /**
+ * Run one of the store's transactions and carry its ANSWER out.
+ *
+ * ⚠️ **THE PAGES ARE CUT INSIDE THE LANE, SO THEY HAVE TO LEAVE IT SOMEHOW.**
+ * `updateShared` and its two siblings answer with the file they wrote, which is
+ * not what a serve needs — it needs the pages it decided on while holding the
+ * file. Carried out as a value rather than assigned to a variable beside the
+ * call, so there is no moment where the pages exist and the boundaries that cut
+ * them do not.
+ *
+ * The count is the assertion: a queue that never ran the step, or ran it twice,
+ * is a defect that would otherwise surface as an empty answer.
+ */
+async function answering<F, T>(
+  update: (transform: (held: F) => Promise<F>) => Promise<F>,
+  step: (held: F) => Promise<Sealed<F, T>>,
+): Promise<T> {
+  const answers: T[] = []
+  await update(async (held) => {
+    const made = await step(held)
+    answers.push(made.answer)
+    return made.held
+  })
+  if (answers.length !== 1) throw new Error(`circle: a serving step ran ${answers.length} times, not once`)
+  return answers[0]!
+}
+
+/**
  * What the service handlers read — the serving side, over one run's stores.
  * Its own factory, so what a friend is SERVED can be read apart from what
  * the reader's own surfaces are handed.
@@ -819,20 +846,17 @@ function servingOver({ fs, library, writes }: Pick<RunningDeps, 'fs' | 'library'
   }
   return (): Serving => ({
     books: booksNow(),
-    shared: (bookId) => readShared(fs as VaultFs, bookId),
-    seal: (bookId, sealed) =>
-      /* ⚠️ **`library.lane`, NEVER A LANE DERIVED HERE.** `folderOf` is
-       * MANY-TO-ONE, so a lane keyed on the raw id splits one directory across
-       * two lanes — and a rekeyed book has to stay on the lane its earlier
-       * writes are still draining on. `Library.lane` says so in as many words,
-       * and `store.ts` already paid for deriving one.
-       *
-       * And a TRANSACTION, not a replacement: the boundaries were cut over the
-       * log as it was read, and only they are written — a share that landed
-       * on the file meanwhile is kept, and the boundaries still cover the
-       * sequences they were sealed over. */
-      // Stryker disable next-line ArrowFunction: the lane, handed through — the queue serialises on it; the tests' queue takes any.
-      updateShared(fs as VaultFs, writes, (id) => library.lane(id), bookId, (current) => ({ ...current, sealed: sealed.sealed })).then(() => undefined),
+    /* ⚠️ **`library.lane`, NEVER A LANE DERIVED HERE.** `folderOf` is
+     * MANY-TO-ONE, so a lane keyed on the raw id splits one directory across
+     * two lanes — and a rekeyed book has to stay on the lane its earlier
+     * writes are still draining on. `Library.lane` says so in as many words,
+     * and `store.ts` already paid for deriving one.
+     *
+     * The whole step runs on that lane — see `Serving.withShared`. It used to
+     * be a read outside and a merge inside, which kept a share that landed
+     * meanwhile and did NOT stop two requests cutting the same range two ways. */
+    // Stryker disable next-line ArrowFunction: the lane, handed through — the queue serialises on it; the tests' queue takes any.
+    withShared: (bookId, step) => answering((transform) => updateShared(fs as VaultFs, writes, (id) => library.lane(id), bookId, transform), step),
     publisher: async (work) => {
       const port = publishPort()
       if (!port) return null
@@ -840,17 +864,9 @@ function servingOver({ fs, library, writes }: Pick<RunningDeps, 'fs' | 'library'
       return identity ? publisherFor(work, identity, port) : null
     },
     shelf: () => readOwnShelf(fs as VaultFs),
-    /* Boundaries only, for `seal`'s reason. */
-    sealShelf: async (held) => {
-      await updateOwnShelf(fs as VaultFs, writes, (current) => ({ ...current, sealed: held.sealed }))
-    },
-    lists: async () => {
-      const ids = await ownListIds(fs)
-      return Promise.all(ids.map(async (id) => ({ id, held: await readOwnList(fs as VaultFs, id) })))
-    },
-    sealList: async (id, held) => {
-      await updateOwnList(fs as VaultFs, writes, id, (current) => ({ ...current, sealed: held.sealed }))
-    },
+    withShelf: (step) => answering((transform) => updateOwnShelf(fs as VaultFs, writes, transform), step),
+    listIds: () => ownListIds(fs),
+    withList: (listId, step) => answering((transform) => updateOwnList(fs as VaultFs, writes, listId, transform), step),
     /* The jacket the record's facts describe, read whole (WI-23.C5): a file
        that has gone, or changed size under its facts, answers null and the
        request is refused rather than served with the wrong bytes. */

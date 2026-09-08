@@ -9,7 +9,7 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import { describe, expect, it, vi } from 'vitest'
 import { NOTHING_SPENT, canonicalJson, charge, makeHlc, type Hlc, type Passage, type Spend, hlcOf } from '../../../kernel'
 import { pageCrypto } from './crypto'
-import { answerLists, answerPages, answerShelf, welcome, workDigest, type BookLike, type Serving } from './exchange'
+import { answerLists, answerPages, answerShelf, welcome, workDigest, type BookLike, type Sealed, type Serving } from './exchange'
 import { LIST_WINDOW_ROTATES_MS, MAX_ANSWERS_PER_LOG, fetchRound, listWindowOf, type Dialled, type FetchPorts, type PersonToFetch } from './fetch'
 import { CIRCLE_SERVICES, MAX_LISTS_PER_REQUEST, parseListsRequest } from './protocol'
 import { DEFAULT_BOUNDS, NOTHING_PUBLISHED, pagesFor, share, type Publisher, type SharedFile } from './publish'
@@ -53,6 +53,21 @@ function delegationFor(person: typeof ALICE, device: string): string {
 /** The one work both shelves hold — same claim on both sides. */
 const MOBY: BookLike = { id: 'book:moby', title: 'Moby-Dick', author: 'Herman Melville', identifier: 'isbn:9780142437247', languages: ['en'] }
 
+/**
+ * A serving transaction, as the store's queue runs one: read, step, write.
+ *
+ * ⚠️ **THE PAGES ARE CUT INSIDE IT.** `Serving` used to expose a read and a
+ * seal as two calls, and two requests around a new share could cut the same
+ * range two ways — see `Serving.withShared`. A double that reads and writes in
+ * two steps would not hold the fix it is testing.
+ */
+const transact = async <F, T>(read: () => F, write: (next: F) => void, step: (held: F) => Promise<Sealed<F, T>>): Promise<T> => {
+  const held = read()
+  const made = await step(held)
+  if (made.held !== held) write(made.held)
+  return made.answer
+}
+
 /** Alice's publishing side: a store, a shelf of one book, and her laptop's key. */
 function alice() {
   const files = new Map<string, SharedFile>()
@@ -69,19 +84,12 @@ function alice() {
   })
   const serving: Serving = {
     books: [MOBY],
-    shared: (bookId) => Promise.resolve(files.get(bookId) ?? NOTHING_PUBLISHED),
-    seal: (bookId, held) => {
-      files.set(bookId, held)
-      return Promise.resolve()
-    },
+    withShared: (bookId, step) => transact(() => files.get(bookId) ?? NOTHING_PUBLISHED, (next) => files.set(bookId, next), step),
     publisher: (work) => Promise.resolve(publisher(work)),
     shelf: () => Promise.resolve(NOTHING_SHELVED),
-    sealShelf: () => Promise.resolve(),
-    lists: () => Promise.resolve(lists()),
-    sealList: (id, held) => {
-      ownLists.set(id, held)
-      return Promise.resolve()
-    },
+    withShelf: (step) => transact(() => NOTHING_SHELVED, () => {}, step),
+    listIds: () => Promise.resolve(lists().map((one) => one.id)),
+    withList: (listId, step) => transact(() => ownLists.get(listId) ?? NOTHING_LISTED, (next) => ownLists.set(listId, next), step),
     cover: () => Promise.resolve(null),
   }
   let seq = 0
@@ -520,10 +528,9 @@ describe('the shelf, after the books — WI-23.C1/C3', () => {
     const serving: Serving = {
       ...a.serving,
       shelf: () => Promise.resolve(shelf),
-      sealShelf: (held) => {
-        shelf = held
-        return Promise.resolve()
-      },
+      withShelf: (step) => transact(() => shelf, (next) => {
+        shelf = next
+      }, step),
     }
     return { ...a, serving, reshelve: (next: readonly string[]) => {
       shelf = syncShelf(shelf, next.map((title, i) => ({ bookId: `book:${i}`, title, author: 'A', languages: ['en'] })), ALICE_LAPTOP.id, stamp(60, ALICE_LAPTOP.id), () => `r${Math.random()}`)
@@ -630,7 +637,7 @@ describe('a person’s round ends at the log that ended it — the books after i
     const serving: Serving = {
       ...a.serving,
       books: [MOBY, DUNE],
-      shared: (bookId) => Promise.resolve(a.files.get(bookId) ?? NOTHING_PUBLISHED),
+      withShared: (bookId, step) => transact(() => a.files.get(bookId) ?? NOTHING_PUBLISHED, (next) => a.files.set(bookId, next), step),
     }
     a.files.set(DUNE.id, share(NOTHING_PUBLISHED, { markId: 'd1', passage: passage('from Dune'), device: ALICE_LAPTOP.id }, 'pubd1', stamp(9, ALICE_LAPTOP.id)).held)
     return { a, serving }
@@ -981,7 +988,7 @@ describe('the lists, after the shelf — WI-23.E1', () => {
   it('refuses a page that is not a list’s, keeps nothing, and asks no further', async () => {
     const a = alice()
     const shelf = syncShelf(NOTHING_SHELVED, [{ bookId: 'b', title: 'Moby-Dick', author: 'A', languages: ['en'] }], ALICE_LAPTOP.id, stamp(50, ALICE_LAPTOP.id), () => 's1')
-    const shelfPage = (await answerShelf({ since: {}, v: 3 }, { ...a.serving, shelf: () => Promise.resolve(shelf), sealShelf: () => Promise.resolve() }, true))!.pages
+    const shelfPage = (await answerShelf({ since: {}, v: 3 }, { ...a.serving, shelf: () => Promise.resolve(shelf), withShelf: (step) => transact(() => shelf, () => {}, step) }, true))!.pages
     expect(shelfPage).toHaveLength(1)
     let listsCalls = 0
     const session: Dialled = {
@@ -1041,10 +1048,9 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
     const serving: Serving = {
       ...a.serving,
       shelf: () => Promise.resolve(shelf),
-      sealShelf: (held) => {
-        shelf = held
-        return Promise.resolve()
-      },
+      withShelf: (step) => transact(() => shelf, (next) => {
+        shelf = next
+      }, step),
     }
     a.ownLists.set('aa11', createList(NOTHING_LISTED, 'Sea books', by(60)))
     const state = { shown: true }
@@ -1331,10 +1337,9 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
     const serving: Serving = {
       ...a.serving,
       shelf: () => Promise.resolve(shelf),
-      sealShelf: (held) => {
-        shelf = held
-        return Promise.resolve()
-      },
+      withShelf: (step) => transact(() => shelf, (next) => {
+        shelf = next
+      }, step),
     }
     const session: Dialled = {
       call: (service, body) => {
@@ -1596,10 +1601,9 @@ describe('every clause of the shelf and the list fetches — one row each', () =
     const serving: Serving = {
       ...a.serving,
       shelf: () => Promise.resolve(shelf),
-      sealShelf: (held) => {
-        shelf = held
-        return Promise.resolve()
-      },
+      withShelf: (step) => transact(() => shelf, (next) => {
+        shelf = next
+      }, step),
     }
     let sea = createList(NOTHING_LISTED, 'Sea books', by(60))
     /* A note long enough that a bounded answer carries one placement per page. */
@@ -1846,10 +1850,9 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
     const serving: Serving = {
       ...a.serving,
       shelf: () => Promise.resolve(shelf),
-      sealShelf: (held) => {
-        shelf = held
-        return Promise.resolve()
-      },
+      withShelf: (step) => transact(() => shelf, (next) => {
+        shelf = next
+      }, step),
     }
     if (withList) a.ownLists.set('aa11', createList(NOTHING_LISTED, 'Sea books', { device: ALICE_LAPTOP.id, at: stamp(60, ALICE_LAPTOP.id) }))
     return { a, serving }

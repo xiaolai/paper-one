@@ -86,7 +86,10 @@ const alice = (over: Partial<{ devices: readonly string[]; revoked: readonly str
   revoked: [],
   ...over,
 })
-const writes: WriteQueue = { append: (_lane, job) => job() } as WriteQueue
+let swallowWrites = false
+/* ⚠️ A queue that does not run its task is a store that never opened the file
+   — the shape `answering` refuses rather than answering an empty page. */
+const writes: WriteQueue = { append: (_lane, job) => (swallowWrites ? Promise.resolve() : job()) } as WriteQueue
 const BOOKS = [
   { bookId: 'book:moby', title: 'Moby-Dick', author: 'Herman Melville', identifier: 'isbn:9780142437247', languages: ['en'] },
   { bookId: 'book:bare', title: 'Untitled' },
@@ -133,6 +136,32 @@ describe('the hello a friend sends', () => {
     } finally {
       run.dispose()
       slots.publish = null
+    }
+  })
+})
+
+describe('a store that does not run the step it was given', () => {
+  it('says so, rather than answering with no pages', async () => {
+    /* ⚠️ **THE PAGES ARE CUT INSIDE THE WRITE TRANSACTION**, so a queue that
+       drops its task leaves the serve with nothing to answer — and the honest
+       report of that is not `{ pages: [] }`, which means "nothing new" and
+       tells the caller to stop asking. The count is the assertion: never run,
+       or run twice, is a defect in the store rather than an empty log. */
+    const fs = fakeFs({ [relationshipPathIn(ALICE)]: relationship() }) as unknown as IndexFs
+    const passage = { quote: 'Call me Ishmael', prefix: '', suffix: '', chapter: 'One' }
+    await updateShared(fs, writes, (id) => id, 'book:moby', (held) => share(held, { markId: 'm1', passage, device: MY_DEVICE }, 'pub1', hlcOf(5)).held)
+    slots.publish = publishing()
+    slots.person = { people: () => Promise.resolve([alice()]) }
+    const run = started(fs)
+    swallowWrites = true
+    try {
+      const ask = { work: claimOf({ id: 'book:moby', title: 'Moby-Dick', author: 'Herman Melville', identifier: 'isbn:9780142437247', languages: ['en'] }), since: {}, v: 3 }
+      await expect(call(CIRCLE_SERVICES.pages.name, ask)).rejects.toThrow(/a serving step ran 0 times, not once/u)
+    } finally {
+      swallowWrites = false
+      run.dispose()
+      slots.publish = null
+      slots.person = null
     }
   })
 })
