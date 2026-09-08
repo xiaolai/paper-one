@@ -55,6 +55,12 @@ INFORMATIONAL_HEADERS = (
     # surface: a row that was FACTUALLY CURRENT and carried the wrong reading
     # of its own evidence. What changed is the sentence, not the state.
     ['the row said', 'what the source says'],
+    # The 2026-09-09 pass's log, and a fourth shape again: a row that CLAIMED
+    # MORE THAN HAD BEEN OBSERVED. Not drift (nothing moved under it), not a
+    # missing surface, and not a misread of evidence — the evidence was green
+    # and said nothing about the case that mattered. Distinct enough to name,
+    # because the three above would each file it under the wrong lesson.
+    ['row', 'what it said', 'what was true'],
 )
 
 
