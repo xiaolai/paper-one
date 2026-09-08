@@ -127,6 +127,10 @@ pub struct Node {
     pub(crate) hello_limit: Arc<Semaphore>,
     /// Idle deadline (ms) for a blob body transfer.
     blob_idle_timeout_ms: AtomicU64,
+    /// Inbound connections that never reached a protocol module. Counted
+    /// because the two ways one can be lost used to be bare `return`s: no
+    /// event, no log, nothing to read afterwards. See `accept_loop`.
+    dropped_inbound: AtomicU64,
     ready: AtomicBool,
     sink: EventSink,
     pub(crate) confirm_timeout: Duration,
@@ -294,6 +298,7 @@ impl Node {
             blob_serve_limit: Arc::new(Semaphore::new(MAX_BLOB_STREAMS)),
             hello_limit: Arc::new(Semaphore::new(circle::MAX_HELLOS)),
             blob_idle_timeout_ms: AtomicU64::new(BLOB_IDLE_TIMEOUT_MS),
+            dropped_inbound: AtomicU64::new(0),
             ready: AtomicBool::new(false),
             sink: config.sink,
             confirm_timeout: config.confirm_timeout,
@@ -321,6 +326,18 @@ impl Node {
 
     pub fn id(&self) -> EndpointId {
         self.endpoint.id()
+    }
+
+    /// Record — loudly — an inbound connection that never reached a protocol
+    /// module, and say at which stage it was lost.
+    fn drop_inbound(&self, from: &str, stage: &str, err: &dyn std::fmt::Display) {
+        self.dropped_inbound.fetch_add(1, Ordering::Relaxed);
+        log::warn!("peer: dropped an inbound connection from {from} at {stage}: {err}");
+    }
+
+    /// How many inbound connections never reached a protocol module.
+    pub(crate) fn dropped_inbound(&self) -> u64 {
+        self.dropped_inbound.load(Ordering::Relaxed)
     }
 
     pub fn role(&self) -> Role {
@@ -449,15 +466,34 @@ async fn accept_loop(node: Weak<Node>, endpoint: Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
         let Some(node) = node.upgrade() else { break };
         tokio::spawn(async move {
-            let Ok(accepting) = incoming.accept() else {
-                return;
+            let from = format!("{:?}", incoming.remote_addr());
+            /* ⚠️ **BOTH ARMS WERE A BARE `return`, WHICH IS WHY A PAIRING THAT
+            NEVER ARRIVED LOOKED EXACTLY LIKE ONE NEVER SENT.** A connection
+            lost here reaches no protocol module, so nothing emits, nothing
+            logs, and the far end has no record of any kind that it was
+            dialled — the joiner sees only its own transport error.
+
+            MEASURED 2026-09-08: a circle pairing between two Macs failed
+            intermittently (2 of 12 dials), and on every failure the
+            receiving machine's log, its diagnostics ring and its UI were
+            all completely silent. Three evenings went to explanations that
+            could not be checked because the one side that knew said
+            nothing. The count is here so a silent drop is still countable
+            when the log has rotated. */
+            let accepting = match incoming.accept() {
+                Ok(accepting) => accepting,
+                Err(err) => return node.drop_inbound(&from, "accept", &err),
             };
-            let Ok(conn) = accepting.await else {
-                return;
+            let conn = match accepting.await {
+                Ok(conn) => conn,
+                Err(err) => return node.drop_inbound(&from, "handshake", &err),
             };
             dispatch(node, conn).await;
         });
     }
+    /* The endpoint has closed. Silent, this is indistinguishable from a node
+    nobody ever dials — every inbound protocol simply stops working. */
+    log::warn!("peer: the accept loop has stopped; this endpoint answers nothing from now on");
 }
 
 async fn dispatch(node: Arc<Node>, conn: Connection) {

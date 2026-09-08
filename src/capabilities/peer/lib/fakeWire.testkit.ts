@@ -181,7 +181,7 @@ class FakeWireImpl implements FakeWire {
   /* ------------------------------------------------------------- commands */
 
   async status(): Promise<PeerStatus> {
-    return { pluginVersion: 'fake', endpointId: this.id, role: this.roleOf, ready: this.isReady }
+    return { pluginVersion: 'fake', endpointId: this.id, role: this.roleOf, ready: this.isReady, droppedInbound: 0 }
   }
 
   async localRole(): Promise<PeerRole> {

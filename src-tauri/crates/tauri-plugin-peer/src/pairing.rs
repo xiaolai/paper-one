@@ -622,8 +622,18 @@ pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
 
 fn reason_of(err: &Error) -> String {
     match err {
+        /* A refusal's reason IS the wire word the other side sent — `bad-mac`,
+        `role-mismatch`, `no-pending` — and the UI and the tests both read it
+        verbatim. Nothing to add to it. */
         Error::PairingRefused(reason) => reason.clone(),
-        other => other.kind().to_owned(),
+        /* ⚠️ **THE KIND ALONE IS NOT A REASON.** This returned `err.kind()`,
+        so every transport failure reached the reader as the single word
+        "io" — "That pairing did not complete (io)" — while the message
+        that named the actual cause was discarded one line before the only
+        place it could have been read. MEASURED 2026-09-08: a pairing that
+        failed this way gave the same four characters whatever went wrong,
+        on both machines, in the UI and in the event. */
+        other => format!("{}: {other}", other.kind()),
     }
 }
 
@@ -1144,6 +1154,31 @@ mod tests {
         assert!(code.chars().all(|c| c.is_ascii_digit()));
         assert_eq!(code, sas(&s, &shelf, &satchel));
         assert_ne!(code, sas(&[8u8; 16], &shelf, &satchel));
+    }
+
+    #[test]
+    fn a_transport_failure_reports_its_message_and_not_just_its_kind() {
+        /* ⚠️ EVERY transport failure has the same kind, so the kind alone told
+        a reader nothing: "That pairing did not complete (io)" was the whole
+        report whatever had gone wrong. */
+        let err = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "the stream was reset by the peer",
+        ));
+        let reason = reason_of(&err);
+        assert!(
+            reason.contains("the stream was reset by the peer"),
+            "the cause must survive into the reason: {reason}"
+        );
+        assert_ne!(reason, err.kind(), "the kind alone is not a reason");
+
+        /* A refusal is different and must stay verbatim: its reason is the
+        word the other side put on the wire, and both the UI and the
+        protocol tests match on it exactly. */
+        assert_eq!(
+            reason_of(&Error::PairingRefused("bad-mac".into())),
+            "bad-mac"
+        );
     }
 
     #[test]
@@ -1912,6 +1947,23 @@ mod tests {
         .expect("a decision within 5s");
         assert!(result.is_err(), "pair/0 must not connect");
         assert!(shelf.node.list_peers().is_empty());
+        /* ⚠️ **AND THE SHELF MUST HAVE NOTICED.** The refusal happens inside
+        `accept_loop`, which used to drop it with a bare `return`: no event,
+        no log, no count. A far end that was dialled and a far end that was
+        never dialled produced byte-identical evidence, which is what made
+        an intermittent pairing failure unreadable from the receiving side. */
+        let mut counted = false;
+        for _ in 0..50 {
+            if shelf.node.dropped_inbound() > 0 {
+                counted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            counted,
+            "the shelf must count an inbound connection it dropped"
+        );
         raw.close().await;
         shelf.close().await;
     }
