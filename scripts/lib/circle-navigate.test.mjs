@@ -26,9 +26,14 @@ describe('act — the assertion is the observation, not the call returning', () 
   })
 
   it('gives up by NAME rather than hanging, when the app never arrives', async () => {
-    const result = await act({ evaluate: () => Promise.resolve({ ok: true }), wait: now }, 's', 'x', 'open the pane', () => false, 3)
+    const verify = vi.fn(() => false)
+    const result = await act({ evaluate: () => Promise.resolve({ ok: true }), wait: now }, 's', 'x', 'open the pane', verify, 3)
     expect(result.ok).toBe(false)
     expect(result.why).toMatch(/open the pane: the script ran and the app never reached the expected state/u)
+    /* ⚠️ **EXACTLY THE TRIES IT WAS GIVEN.** Nothing counted the polls, so the
+       loop could run one past its bound — which on the real waits is another
+       half-second per step, on every step, on a run that is already failing. */
+    expect(verify).toHaveBeenCalledTimes(3)
   })
 
   it('returns the script’s OWN refusal without polling at all', async () => {
@@ -65,8 +70,10 @@ describe('reachMarginalia — every step names its own failure', () => {
   /** A fake app: answers each script from `state`, and records what it was asked. */
   const appWith = (state) => {
     const asked = []
-    const evaluate = (_socket, script) => {
+    const labels = []
+    const evaluate = (_socket, script, label) => {
       asked.push(script)
+      labels.push(label)
       if (script === 'AT_SHELF') return Promise.resolve({ shelf: state.shelf })
       if (script.startsWith('matches:')) return Promise.resolve({ cells: state.cells })
       if (script === 'READ_MARKS') return Promise.resolve({ rows: state.rows })
@@ -76,7 +83,7 @@ describe('reachMarginalia — every step names its own failure', () => {
       if (script === 'OPEN_MARGINALIA') { state.rows = [{}]; return Promise.resolve({ ok: true }) }
       throw new Error('unexpected script: ' + script)
     }
-    return { evaluate, asked }
+    return { evaluate, asked, labels }
   }
 
   it('walks shelf → filter → open → Marginalia when it starts in the reader', async () => {
@@ -87,6 +94,33 @@ describe('reachMarginalia — every step names its own failure', () => {
     expect(app.asked).toContain('filter:A Book')
     expect(app.asked).toContain('open:A Book')
     expect(app.asked).toContain('OPEN_MARGINALIA')
+  })
+
+  it('names every step it takes, because the label is the only thing a failure can quote', async () => {
+    /* ⚠️ **NOTHING READ THE LABELS.** Each is handed to `evaluate` and put in
+       the message a failing step returns, and every one of them could have been
+       the empty string with the suite still green — leaving a two-machine run
+       reporting `: the script ran and the app never reached the expected state`
+       with no way to tell which step that was. */
+    const app = appWith({ shelf: false, cells: 0, rows: [] })
+    await reachMarginalia({ evaluate: app.evaluate, wait: now }, 's', 'A Book', scripts)
+    expect(app.labels).toEqual(
+      expect.arrayContaining(['where are we', 'go to the shelf', 'narrow the shelf', 'count the matches', 'open the book', 'open Marginalia', 'look for share controls']),
+    )
+    expect(app.labels.every((one) => typeof one === 'string' && one.length > 0)).toBe(true)
+  })
+
+  it('stops at the trip to the shelf when the app never gets there', async () => {
+    /* The FIRST step's own failure. Every other row here starts at the shelf or
+       reaches it, so `if (!back.ok) return back` could be deleted and the walk
+       would carry on into steps whose preconditions were never met — each
+       reporting its own confusing failure about a state nobody established. */
+    const app = appWith({ shelf: false, cells: 0, rows: [] })
+    const evaluate = (socket, script) => (script === 'TO_SHELF' ? Promise.resolve({ ok: true }) : app.evaluate(socket, script))
+    const result = await reachMarginalia({ evaluate, wait: now }, 's', 'A Book', scripts)
+    expect(result.ok).toBe(false)
+    expect(result.why).toMatch(/go to the shelf/u)
+    expect(app.asked).not.toContain('filter:A Book')
   })
 
   it('SKIPS the trip to the shelf when it is already there — the step is idempotent', async () => {

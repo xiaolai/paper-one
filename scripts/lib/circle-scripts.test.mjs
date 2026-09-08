@@ -250,4 +250,17 @@ describe('argument parsing', () => {
   it('defaults to the pinned bridge port', () => {
     expect(parse(['identity']).port).toBe(31415)
   })
+
+  it('THROWS on a flag it does not know, naming it, and keeps bare words as words', () => {
+    /* ⚠️ **NOTHING HAD EVER PASSED AN UNKNOWN FLAG.** The refusal and its
+       message were both uncovered, so `--persn` would have been collected as a
+       positional argument and the run would have gone ahead against the wrong
+       person — or the message could have been empty. It throws rather than
+       exiting because a pure parser reports and the process entry decides what
+       a report costs. */
+    expect(() => parse(['share', '--persn', 'Ann'])).toThrow(/^unknown option: --persn$/u)
+    expect(parse(['share', 'and', 'another'])._).toEqual(['share', 'and', 'another'])
+    /* A lone dash is a word, not a flag: only `--` starts one. */
+    expect(parse(['-x'])._).toEqual(['-x'])
+  })
 })

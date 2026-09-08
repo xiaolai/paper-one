@@ -101,7 +101,13 @@ export function execute(socket, script, label = 'execute_js') {
       } catch {
         return
       }
-      if (message === null || typeof message !== 'object' || message.id !== id) return
+      /* ⚠️ **`typeof message !== 'object'` CANNOT CHANGE AN ANSWER AND USED TO
+         STAND HERE.** A number, a string and a list all read `.id` as
+         `undefined`, which is not this call's id, so they are ignored by the
+         line's last clause anyway. `null` is the one that would THROW on the
+         read — and it is what makes the `catch` above load-bearing rather than
+         a second spelling of the same refusal. */
+      if (message === null || message.id !== id) return
       cleanup()
       if (message.success !== true) {
         reject(new Error(label + ': ' + String(message.error ?? 'the bridge reported failure with no reason')))

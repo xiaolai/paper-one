@@ -26,9 +26,16 @@ function fakeSocket() {
     /* `WebSocket.OPEN`. Present so the guard in `execute` passes; the two
        tests that need another state override it. */
     readyState: 1,
-    addEventListener(type, fn) {
+    /* ⚠️ **`{ once: true }` IS HONOURED HERE, OR ASSERTING IT MEANS NOTHING.**
+       The fake used to ignore the option, so a listener registered once and a
+       listener registered for ever were the same thing to every count below. */
+    addEventListener(type, fn, options) {
       const held = listeners.get(type) ?? new Set()
-      held.add(fn)
+      const wrapped = options && options.once ? (event) => {
+        held.delete(wrapped)
+        fn(event)
+      } : fn
+      held.add(wrapped)
       listeners.set(type, held)
     },
     removeEventListener(type, fn) {
@@ -164,6 +171,129 @@ describe('execute — one round trip, matched by id', () => {
   })
 })
 
+describe('the label a failure is quoted under', () => {
+  it('falls back to the command\u2019s own name when the caller gives none', async () => {
+    /* ⚠️ **NO TEST HAD EVER OMITTED THE LABEL.** Both defaults were uncovered
+       outright, so `execute_js` could have been the empty string and a harness
+       failure would read `: the bridge closed the connection mid-run` with
+       nothing saying which call it was. */
+    const socket = fakeSocket()
+    const call = execute(socket, 'x')
+    socket.reply({ id: lastId(socket), success: false, error: 'no' })
+    await expect(call).rejects.toThrow(/^execute_js: no$/u)
+
+    const parsing = evaluate(socket, 'x')
+    socket.reply({ id: lastId(socket), success: true, data: 'not json' })
+    await expect(parsing).rejects.toThrow(/^execute_js: the webview answered something that is not JSON/u)
+  })
+
+  it('names the SEND failure by what actually went wrong, thrown object or not', async () => {
+    /* ⚠️ `cause && cause.message ? cause.message : cause` — a `send` that
+       throws a bare string has no `message`, and reading one off it would put
+       `undefined` in the error where the complaint should be. Every fixture
+       threw an `Error`. */
+    const socket = fakeSocket()
+    socket.send = () => {
+      throw 'the socket is in a bad state'
+    }
+    await expect(execute(socket, 'x', 'a step')).rejects.toThrow(/a step: could not send the script: the socket is in a bad state/u)
+  })
+
+  it('sends on a socket that does not report a readyState at all', async () => {
+    /* ⚠️ **THE GUARD IS `!== undefined &&`, AND EVERY FAKE HAD ONE.** A
+       transport that does not expose `readyState` is not a closed transport,
+       and refusing it would have made the client unusable against one. */
+    const socket = fakeSocket()
+    delete socket.readyState
+    const call = execute(socket, 'x', 'a step')
+    expect(socket.sent).toHaveLength(1)
+    socket.reply({ id: lastId(socket), success: true, data: '1' })
+    await expect(call).resolves.toBe('1')
+  })
+})
+
+describe('what every exit leaves behind', () => {
+  /* ⚠️ **A LEAKED TIMER IS A HARNESS THAT DOES NOT EXIT.** Every path through
+     `execute` clears its 30-second timer through `cleanup`, and nothing counted
+     them: each `clearTimeout` could be deleted and the suite stayed green while
+     a scenario script hung half a minute past its last call, on every call. */
+  const settled = async (drive) => {
+    vi.useFakeTimers()
+    const socket = fakeSocket()
+    const call = execute(socket, 'x', 'a step')
+    await Promise.resolve()
+    await drive(socket, call)
+    expect(vi.getTimerCount(), 'timers left running').toBe(0)
+    expect(socket.count('message'), 'message listeners left attached').toBe(0)
+    expect(socket.count('close'), 'close listeners left attached').toBe(0)
+  }
+
+  it('clears the timer and both listeners when the answer arrives', async () => {
+    await settled(async (socket, call) => {
+      socket.reply({ id: lastId(socket), success: true, data: '1' })
+      await call
+    })
+  })
+
+  it('clears them when the bridge reports failure', async () => {
+    await settled(async (socket, call) => {
+      socket.reply({ id: lastId(socket), success: false, error: 'no' })
+      await expect(call).rejects.toThrow(/a step: no/u)
+    })
+  })
+
+  it('clears them when the socket closes mid-call', async () => {
+    await settled(async (socket, call) => {
+      socket.emit('close', {})
+      await expect(call).rejects.toThrow(/closed the connection mid-run/u)
+    })
+  })
+
+  it('clears them when the call TIMES OUT — the path that installs them longest', async () => {
+    await settled(async (_socket, call) => {
+      const waiting = expect(call).rejects.toThrow(/did not answer within/u)
+      await vi.advanceTimersByTimeAsync(EXECUTE_TIMEOUT_MS + 1)
+      await waiting
+    })
+  })
+
+  it('clears them when the socket is already closed', async () => {
+    vi.useFakeTimers()
+    const socket = { ...fakeSocket(), readyState: 3 }
+    await expect(execute(socket, 'x', 'a step')).rejects.toThrow(/is not open \(readyState 3\)/u)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(socket.count('message')).toBe(0)
+  })
+
+  it('leaves nothing running once connect has opened, or been refused', async () => {
+    /* The connect timer is a 15-second one, and its two listeners are `once`.
+       Left attached, a scenario that opens a socket per step accumulates both. */
+    for (const event of ['open', 'error']) {
+      vi.useFakeTimers()
+      const socket = fakeSocket()
+      vi.stubGlobal('WebSocket', function () {
+        return socket
+      })
+      const opening = connect(31415)
+      await Promise.resolve()
+      socket.emit(event, {})
+      await opening.catch(() => {})
+      /* The timer is gone, so nothing fires half a minute later. */
+      expect(vi.getTimerCount(), event).toBe(0)
+      /* And the listener that FIRED took itself off — the other never fired,
+         and a settled promise ignores it if it ever does. */
+      expect(socket.count(event), event).toBe(0)
+      /* The socket is NOT closed by a timeout that no longer applies: without
+         the `clearTimeout` the connection would be dropped under a run that
+         had already opened it. */
+      await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS + 1)
+      expect(socket.closed, event).toBe(false)
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('evaluate — the answer, parsed', () => {
   it('parses a JSON answer', async () => {
     const socket = fakeSocket()
@@ -177,6 +307,20 @@ describe('evaluate — the answer, parsed', () => {
     const call = evaluate(socket, 'script', 'label')
     socket.reply({ id: lastId(socket), success: true, data: { ok: true } })
     await expect(call).resolves.toEqual({ ok: true })
+  })
+
+  it('TRUNCATES a very long non-JSON answer, so one bad frame is not the whole log', async () => {
+    /* ⚠️ **THE SLICE HAD NO TEST.** A webview that answers with a whole page of
+       HTML puts every character of it into an error a scenario script prints —
+       and every fixture here was a few characters long, so the bound could be
+       deleted with nothing noticing. */
+    const socket = fakeSocket()
+    const call = evaluate(socket, 'x', 'a step')
+    socket.reply({ id: lastId(socket), success: true, data: 'z'.repeat(2000) })
+    const cause = await call.then(() => null, (one) => one)
+    expect(cause).toBeInstanceOf(Error)
+    expect(cause.message).toContain('z'.repeat(400))
+    expect(cause.message).not.toContain('z'.repeat(401))
   })
 
   it('KEEPS THE RAW TEXT when the answer is not JSON, because that text is the complaint', async () => {
