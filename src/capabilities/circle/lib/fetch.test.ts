@@ -582,6 +582,40 @@ describe('who is asked, and who is not', () => {
     expect((await fetchRound(b.ports)).skipped).toEqual([{ person: ALICE.id, why: 'refused-hello' }])
   })
 
+  it('goes on to the next DEVICE when one of them fails past its hello', async () => {
+    /* ⚠️ **ONE BROKEN DEVICE USED TO END THE WHOLE PERSON'S ROUND.** A failure
+       past the dial returned immediately, so a laptop that fails every time —
+       a broken store, a peer stuck mid-upgrade — starved a healthy phone on
+       every round, for ever. A phone that answers is not made unreachable by a
+       laptop that does not. */
+    const a = alice()
+    a.shareOne('from the phone')
+    const good = sessionTo(a.serving)
+    const dialled: string[] = []
+    const b = bob({
+      /* Alice's roster must NAME both devices, or only one is a candidate and
+         the test cannot show the second being reached. */
+      people: () => Promise.resolve([alicePerson({ devices: [ALICE_LAPTOP.id, ALICE_PHONE.id] })]),
+      dial: (device: string) => {
+        dialled.push(device)
+        /* The laptop is asked first and breaks past its hello. */
+        if (device === ALICE_LAPTOP.id) {
+          return Promise.resolve<Dialled>({
+            call: (service, body) =>
+              service === CIRCLE_SERVICES.hello.name ? Promise.resolve(welcome(body, ALICE.id)) : Promise.reject(new Error('that store will not read')),
+            close: () => Promise.resolve(),
+          })
+        }
+        return Promise.resolve(good)
+      },
+    })
+    const report = await fetchRound(b.ports)
+    expect(dialled).toContain(ALICE_PHONE.id)
+    expect(report.accepted).toBeGreaterThan(0)
+    /* And the person is NOT skipped: one device served them. */
+    expect(report.skipped).toEqual([])
+  })
+
   it('does NOT count a page the store refused to keep, and names why', async () => {
     /* ⚠️ **A RESOLVED WRITE IS NOT A COMMITTED WRITE.** `keepForeign`'s
        admission guard turns a refusal into a silent return — right, because a

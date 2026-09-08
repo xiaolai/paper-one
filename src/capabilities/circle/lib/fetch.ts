@@ -11,6 +11,7 @@ import {
   type PageCrypto,
   type Relationship,
 } from '../../../kernel'
+import { CIRCLE_FETCH_EVERY_MS } from './cadence'
 import { claimOf, type BookLike } from './exchange'
 import {
   CIRCLE_PROTO,
@@ -306,6 +307,8 @@ async function fetchPerson(
   // Stryker disable next-line StringLiteral: never read — a device that would not answer overwrites it before it is reported.
   let asleep = 'no device to dial'
   let ended: Skip | null = null
+  /* The last failure past a dial, kept rather than returned: see the catch. */
+  let broke: string | null = null
   for (const device of candidates) {
     let session: Dialled
     try {
@@ -325,9 +328,13 @@ async function fetchPerson(
       if (outcome.welcomed) welcomed += 1
       ended = outcome.ended
     } catch (cause) {
-      /* A failure past the dial is the person's, and they were ASKED: the
-         hello went out. Reported as failed, and their round ends here. */
-      return { done, asked: true, skipped: { person: person.person, why: 'failed', detail: messageOf(cause) } }
+      /* ⚠️ **A FAILURE PAST THE DIAL BELONGS TO THE DEVICE, NOT THE PERSON.**
+         This returned from the whole person's round, so one device that fails
+         every time — a laptop with a broken store, a peer stuck mid-upgrade —
+         starved every other device of theirs on every round for ever. A phone
+         that answers is not made unreachable by a laptop that does not.
+         Remembered, and reported only if NO device of theirs gets anywhere. */
+      broke = messageOf(cause)
     } finally {
       /* Said, not swallowed: a session that would not close is a
          transport problem the round can go on past, and the only
@@ -344,7 +351,16 @@ async function fetchPerson(
      person's round did, the hello went out. */
   if (answered === 0) return { done, asked: false, skipped: { person: person.person, why: 'asleep', detail: asleep } }
   if (ended !== null) return { done, asked: true, skipped: { person: person.person, why: ended } }
-  if (welcomed === 0) return { done, asked: true, skipped: { person: person.person, why: 'refused-hello' } }
+  if (welcomed === 0) {
+    /* A device that broke past its hello DID welcome us, so this is reached
+       only when none did — and then the broken one's reason is the better
+       answer of the two. */
+    return { done, asked: true, skipped: { person: person.person, why: broke === null ? 'refused-hello' : 'failed', ...(broke === null ? {} : { detail: broke }) } }
+  }
+  /* One device broke and another served: the round did its work, and the
+     failure is the device's to report rather than the person's to be skipped
+     for. */
+  if (broke !== null && done === NOTHING_DONE) return { done, asked: true, skipped: { person: person.person, why: 'failed', detail: broke } }
   return { done, asked: true, skipped: null }
 }
 
@@ -648,8 +664,17 @@ export function listWindowOf(ids: readonly string[], now: number): readonly stri
   return [...sorted.slice(start), ...sorted.slice(0, start)].slice(0, MAX_LISTS_PER_REQUEST)
 }
 
-/** How often the window over a person's lists moves on — one cadence. */
-export const LIST_WINDOW_ROTATES_MS = 5 * 60_000
+/**
+ * How often the window over a person's lists moves on — ONE CADENCE.
+ *
+ * ⚠️ **THE SAME NUMBER AS THE CADENCE, AND IT WAS WRITTEN OUT TWICE.** The
+ * comment says "one cadence"; the value was an independent `5 * 60_000`, so
+ * changing how often a round runs would have left this at the old figure and
+ * quietly broken the relationship the comment asserts — every list still named
+ * "within as many rounds as there are windows", but no longer true. Taken from
+ * the cadence itself, the claim cannot come apart from the value.
+ */
+export const LIST_WINDOW_ROTATES_MS = CIRCLE_FETCH_EVERY_MS
 
 function cursorsOf(held: ReadonlyMap<string, ForeignFile>, window: readonly string[], agreed: number): Readonly<Record<string, Readonly<Record<string, number>>>> {
   const since: Record<string, Readonly<Record<string, number>>> = {}
