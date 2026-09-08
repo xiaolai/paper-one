@@ -522,6 +522,52 @@ describe('the circle panel', () => {
     await screen.findByText(/did not complete \(bad-mac\)/u)
   })
 
+  it('ignores a joiner probe refused no-pending rather than clearing the request on screen', async () => {
+    /* ⚠️ A joiner opens a SECOND connection beside its first, because this
+       side sends nothing at all between receiving a hello and its human
+       answering — so a joiner cannot tell "you never heard me" from "your
+       human is still deciding". This side refuses that probe `no-pending`,
+       and every successful pairing now produces one. Acted on, it cleared the
+       six digits mid-comparison and told the reader the pairing had failed
+       while it was in fact about to succeed. */
+    const pendings: ((p: unknown) => void)[] = []
+    const results: ((r: unknown) => void)[] = []
+    render(
+      <CirclePane
+        port={portWith({
+          onPending: (fn: (p: never) => void) => {
+            pendings.push(fn as (p: unknown) => void)
+            return () => {}
+          },
+          onResult: (fn: (r: never) => void) => {
+            results.push(fn as (r: unknown) => void)
+            return () => {}
+          },
+        })}
+      />,
+    )
+    await screen.findByText(/holds your keys/u)
+
+    await act(async () =>
+      pendings[0]?.({
+        attemptId: 'the-attempt-on-screen',
+        id: 'friend',
+        name: 'Ada',
+        platform: 'macos',
+        sas: '314159',
+        kind: 'circle',
+      }),
+    )
+    await screen.findByText('314159')
+
+    /* The probe: no `attemptId`, because this side never claimed the offer
+       for it — it was already claimed by the connection being shown. */
+    await act(async () => results[0]?.({ ok: false, id: 'friend', reason: 'no-pending', kind: 'circle' }))
+
+    expect(screen.getByText('314159')).toBeTruthy()
+    expect(screen.queryByText(/did not complete/u)).toBeNull()
+  })
+
   it('stops presenting a link that has already lapsed', async () => {
     /* ⚠️ `expiresAt` was discarded. Sending a dead link produces an `expired`
        refusal, and the reader could not make another without first stopping
