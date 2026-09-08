@@ -937,22 +937,48 @@ export function boundedAnswer(bounds: Bounds): { readonly pages: readonly string
 function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], publisher: Publisher, bounds: Bounds, version: number): readonly SealedPage[] {
   const lastSealed = boundaries.reduce((top, one) => Math.max(top, one.to), 0)
   const fresh = mine.filter((entry) => entry.seq > lastSealed)
-  const budget = Math.min(bounds.budget, MAX_PAGE_CHARS - envelopeOf(publisher, version))
+  const wireLimit = MAX_PAGE_CHARS - envelopeOf(publisher, version)
+  const budget = Math.min(bounds.budget, wireLimit)
   // Stryker disable OptionalChaining
-  return paginate(fresh, budget).map((group) => ({
-    device: publisher.device,
-    from: group[0]?.seq ?? 0,
-    to: group.at(-1)?.seq ?? 0,
-    v: version,
-    roster: [...publisher.roster],
-    revocations: publisher.revocations,
-    delegation: publisher.delegation,
-    /* The claim is sealed INTO the boundary and must not move afterwards, for
-       the same reason: its arrays are the publisher's, and the publisher is
-       rebuilt per round from live metadata. A boundary whose claim changed
-       would reproduce different bytes and break every recipient's chain. */
-    work: { ...publisher.work, ids: [...publisher.work.ids], titles: [...publisher.work.titles] },
-  }))
+  return paginate(fresh, budget).map((group) => {
+    /* ⚠️ **AN ENTRY TOO BIG FOR A PAGE WAS SEALED INTO ONE ANYWAY.**
+       `paginate` emits an oversized entry alone rather than dropping it —
+       correct, since dropping would lose a publication silently — but nothing
+       here checked the result, so the page went out over `MAX_PAGE_CHARS`,
+       every recipient refused it, and because pages are a chain EVERY LATER
+       PAGE stayed stuck behind it. A quote of 524 289 characters produced a
+       525 161-character page against a 524 288 limit, and the reader's whole
+       stream stopped there for ever, silently.
+       Refused loudly instead. The recovery is in the message, because a person
+       reading it is the only one who can take that publication back. */
+    /* ⚠️ **AGAINST THE WIRE LIMIT, NOT THE FRAME BUDGET.** `bounds.budget` is
+       how much this ANSWER may carry and is legitimately tiny — the tests set
+       it to 1 to force one entry per page, and a small budget simply means
+       more pages. Only `MAX_PAGE_CHARS` makes a page unsendable, and that is
+       the bound a recipient enforces. Checking the wrong one turned a
+       deliberate test fixture into an error. */
+    const size = group.reduce((n, one) => n + wireBytesOf(canonicalJson(one)), 0)
+    if (group.length === 1 && size > wireLimit) {
+      const only = group[0]!
+      throw new Error(
+        `one entry (seq ${only.seq}) is ${size} characters and a page holds ${wireLimit} — it cannot be sent, and it blocks every later page. Withdraw that publication.`,
+      )
+    }
+    return {
+      device: publisher.device,
+      from: group[0]?.seq ?? 0,
+      to: group.at(-1)?.seq ?? 0,
+      v: version,
+      roster: [...publisher.roster],
+      revocations: publisher.revocations,
+      delegation: publisher.delegation,
+      /* The claim is sealed INTO the boundary and must not move afterwards:
+         its arrays are the publisher's, and the publisher is rebuilt per round
+         from live metadata. A boundary whose claim changed would reproduce
+         different bytes and break every recipient's chain. */
+      work: { ...publisher.work, ids: [...publisher.work.ids], titles: [...publisher.work.titles] },
+    }
+  })
   // Stryker restore OptionalChaining
 }
 

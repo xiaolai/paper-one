@@ -514,6 +514,24 @@ const queueOf = (keys: string[] = []): WriteQueue => ({
 const LANE: LaneFor = (bookId) => `book:${bookId}`
 const BOOK = 'book:moby'
 
+describe('an entry too big for a page', () => {
+  it('is refused loudly rather than sealed into a page nobody can receive', async () => {
+    /* ⚠️ **IT WAS SEALED ANYWAY, AND STOPPED THE STREAM FOR EVER.** `paginate`
+       emits an oversized entry ALONE rather than dropping it — right, since
+       dropping loses a publication silently — but nothing checked the result,
+       so the page went out over `MAX_PAGE_CHARS`, every recipient refused it,
+       and because pages are a chain every LATER page stayed stuck behind it.
+       Measured by the audit: a 524 289-character quote made a 525 161-character
+       page against a 524 288 limit.
+
+       The recovery is in the message, because a person reading it is the only
+       one who can take that publication back. */
+    const huge = passage('x'.repeat(MAX_PAGE_CHARS))
+    const held = share(NOTHING_PUBLISHED, { markId: 'm1', passage: huge, device: DEVICE.id }, 'p1', stamp(1, DEVICE.id)).held
+    await expect(pagesFor(held, publisher(), {}, pageCrypto.hash)).rejects.toThrow(/it cannot be sent, and it blocks every later page/u)
+  })
+})
+
 describe('a publication id is an identity', () => {
   it('refuses a second publication carrying an id the book already has', () => {
     /* ⚠️ **NOTHING ENFORCED THIS, AND `unshare` PAID FOR IT.** Two rows sharing
