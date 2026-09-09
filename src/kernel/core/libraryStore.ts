@@ -1,3 +1,4 @@
+import { notifyAll } from './notify'
 import { messageOf } from './messageOf'
 import {
   atomicWrite,
@@ -806,9 +807,7 @@ export function createLibrary({
 
   /** Tell every subscriber to re-read. Its own function because not every
    *  change is a change to the LIST — the undo offer moves on its own. */
-  const notify = () => {
-    for (const listener of [...listeners]) listener()
-  }
+  const notify = () => notifyAll(listeners, 'library')
 
   const publish = (next: readonly IndexedBook[]) => {
     books = next
@@ -1109,7 +1108,16 @@ export function createLibrary({
           try {
             await queue.append(lane, async () => {
               const live = resolveId(key)
-              const truth = await readBook(target, live)
+              /* ⚠️ **THIS CALLER ASKS A WEAKER QUESTION THAN `readBook` NOW
+               * ANSWERS, DELIBERATELY.** `readBook` distinguishes "no such
+               * book" from "the read failed", because a caller that responds to
+               * absence by WRITING must not act on a transient error. This one
+               * writes nothing: it asks whether anything readable can back an
+               * optimistic row, and the comment below is explicit that a record
+               * it CANNOT READ backs it no better than one that is not there.
+               * Dropping the row and omitting the folder claim makes the next
+               * launch rescan, which is the conservative answer for both. */
+              const truth = await readBook(target, live).catch(() => null)
               if (truth) {
                 reconcile(live, truth)
                 await measureContent(target, live)
@@ -1477,6 +1485,10 @@ export function createLibrary({
        * into it and writing that back put a stale record over a newer one:
        * opening a book could undo the tag applied just before the last quit.
        * The record is the truth; the row is a view of it. */
+      /* ⚠️ **UNREADABLE MUST NOT READ AS "NO RECORD ON DISK" HERE**, because
+         what follows folds the in-memory row in and WRITES it — the exact
+         shape that put a stale record over a newer one. A read that failed is
+         raised; a book that is genuinely absent is `null` as before. */
       const onDisk = await readBook(target, live)
       /* BOTH ARE THE READER'S, so neither wins outright — see `mergeStranded`.
        * Treating the stranded copy as authoritative threw away a tag applied
@@ -1762,13 +1774,20 @@ export function createLibrary({
          * exactly the state this restore exists to complete. A record with no
          * stored id predates ids being stored and is addressed by its folder,
          * the same reading `add` gives it. */
-        const live = await readBook(target, bookId)
-        if (live !== null && live.bookId !== undefined && live.bookId !== bookId) {
-          outcome = { state: 'mismatch', bookId: live.bookId }
+        /* ⚠️ **UNREADABLE IS AN OUTCOME HERE, NOT AN EXCEPTION**, and it has
+         * its own `conflict` refusal naming the file to look at. `readBook`
+         * throws for it now, so the throw is turned back into that outcome —
+         * and the second read that used to work out which case this was, an
+         * `exists` after a `null`, is gone with the window between them. */
+        let live: BookRecord | null
+        try {
+          live = await readBook(target, bookId)
+        } catch {
+          outcome = { state: 'unreadable', at: 'shelf' }
           return
         }
-        if (live === null && (await target.exists(recordPath(bookId)).catch(() => true))) {
-          outcome = { state: 'unreadable', at: 'shelf' }
+        if (live !== null && live.bookId !== undefined && live.bookId !== bookId) {
+          outcome = { state: 'mismatch', bookId: live.bookId }
           return
         }
       }
@@ -1784,7 +1803,10 @@ export function createLibrary({
          * removal's — the `live` half of the LWW pair (`presence.ts`). */
         await settlePresence(target, bookId, 'live', clock())
         await rescueStrandedMarks(target, bookId)
-        const record = await readBook(target, bookId)
+        /* The weaker question: this folds the restored record's facts into the
+           row, and a record it cannot read has no facts to fold. The restore
+           itself has already happened and must not be reported as failed. */
+        const record = await readBook(target, bookId).catch(() => null)
         if (!record) return
         const hasContent = await hasContentFile(target, bookId)
         // Absent rather than false when the folder could not be listed — see
@@ -2000,11 +2022,22 @@ export function createLibrary({
           bookId,
           {
             before: async (target, live) => {
-              const truth = await readBook(target, live)
-              if (!truth) {
-                if (await target.exists(recordPath(live))) failures.push(new Error(`book.json for ${live} is there but could not be read`))
+              /* ⚠️ **THE SECOND READ THAT ASKED "WAS IT REALLY ABSENT?" IS
+               * GONE.** `readBook` answers that itself now — `null` only for a
+               * book that is not there, and a THROW naming which kind of damage
+               * otherwise. Its message is kept rather than replaced: "does not
+               * parse" and "could not be read" are different facts, and this
+               * used to report both as the second one. */
+              let truth: BookRecord | null
+              try {
+                truth = await readBook(target, live)
+              } catch (cause) {
+                failures.push(cause instanceof Error ? cause : new Error(String(cause)))
                 return 'refuse'
               }
+              /* Genuinely gone: nothing to take the tag off, and no failure to
+                 report — a removal is not owed a book nobody has. */
+              if (!truth) return 'refuse'
               if (!(truth.tags ?? []).some((held) => tagKey(held) === key)) return 'refuse'
               changed.add(bookId)
               return 'go'
@@ -2501,7 +2534,15 @@ export function createLibrary({
           noteFailed(resolveId(row.bookId), 'record', cause, list)
           await queue.append(laneFor(row.bookId), async () => {
             const live = resolveId(row.bookId)
-            const truth = await readBook(target, live)
+            /* ⚠️ **THE WEAKER QUESTION, AS AT THE OTHER REPAIR.** `readBook`
+             * now separates "no such book" from "the read failed", which is
+             * what a caller that WRITES needs. This one writes nothing, and the
+             * comment below is explicit that a record it cannot read backs the
+             * row no better than one that is not there. Letting the read throw
+             * here would also replace the ORIGINAL failure with the repair's —
+             * which the note above says must not happen, since the cause was
+             * published before the repair ran. */
+            const truth = await readBook(target, live).catch(() => null)
             if (truth) {
               reconcile(live, truth)
               return

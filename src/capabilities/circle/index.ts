@@ -7,7 +7,7 @@ import {
   folderOf,
   listTrash,
   messageOf,
-  overlayKey,
+  overlayKeyOf,
   publishableCover,
   readmit,
   type Capability,
@@ -154,7 +154,7 @@ async function annotationsFor(
      that cannot exclude anything reads as a rule being enforced somewhere it
      is not; the rule is enforced on the way in from disk. */
   const pending = entries.map((entry) => ({
-    id: overlayKey(entry),
+    id: overlayKeyOf('circle', entry.person, entry.pub),
     quote: entry.passage.quote,
     prefix: entry.passage.prefix,
     suffix: entry.passage.suffix,
@@ -177,7 +177,7 @@ async function annotationsFor(
   }
 
   const anchored = entries.map((entry) => {
-    const fresh = found.get(overlayKey(entry))
+    const fresh = found.get(overlayKeyOf('circle', entry.person, entry.pub))
     return fresh
       ? { ...entry, resolved: { cfi: fresh.cfi, sectionIndex: fresh.sectionIndex } }
       : entry
@@ -564,7 +564,38 @@ export const circle: Capability = {
        at all. `dispose` is idempotent, so the same function serves both. */
     let offShelf: (() => void) | null = null
     let offIdentity: (() => void) | null = null
+    /* ⚠️ **THE ONE THING THE PUBLIC CAPABILITY MAY ASK THE CIRCLE**, and it
+     * asks through the kernel rather than by importing it — iOS composes
+     * `public` with no circle at all. What it buys is the strongest privacy
+     * warning in the app: publishing, under a pseudonym, words already sent to
+     * the circle lets anybody in both audiences match the quote and learn who
+     * the pseudonym is. `linksVoiceToPerson` decides that; before this it was
+     * always handed an empty list. See `bindPrivateAudience`.
+     *
+     * ⚠️ **WITHDRAWN PUBLICATIONS COUNT, AND THAT IS NOT AN OVERSIGHT.** The
+     * question is not "is this passage out now" but "has the circle ever seen
+     * these exact words from me" — and a withdrawal does not un-tell anybody
+     * who already read it. Filtering them would quietly narrow the warning to
+     * the case where the reader has not yet changed their mind.
+     *
+     * A read failure is an empty list rather than a throw: this runs while a
+     * reader is trying to publish, and an unreadable circle file must not
+     * become an error on the public path. It understates the warning, which is
+     * the one direction that matters — so it is logged. */
+    const audience = ctx.services.bindPrivateAudience(async (bookId) => {
+      if (fs === null) return []
+      try {
+        const shared = await readShared(fs as VaultFs, bookId)
+        return shared.publications.map((one) => one.passage)
+      } catch (cause) {
+        mine?.warn('circle.private-audience-unreadable', { bookId, message: messageOf(cause) })
+        return []
+      }
+    })
     const dispose = (): void => {
+      /* ONE cleanup for the run, so the kernel's stack holds one disposer
+         for this capability — `circle.test.ts` asserts exactly that. */
+      audience.dispose()
       driver?.stop()
       offPairing?.()
       offShelf?.()

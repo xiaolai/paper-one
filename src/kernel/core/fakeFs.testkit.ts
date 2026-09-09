@@ -30,7 +30,15 @@ export function fakeFs(files: Record<string, string> = {}): FakeFs {
     },
     readFile: async (path) => {
       const bytes = store.get(path)
-      if (!bytes) throw new Error('missing')
+      /* ⚠️ **THE WORDING IS LOAD-BEARING, AND IT USED TO BE `missing`.** No
+         real filesystem says that. `isMissingFile` is how the kernel tells a
+         book that is not there from a read that FAILED — the distinction that
+         decides whether a caller may write over what it could not read — and it
+         has only the message to go on, because Tauri's fs errors carry no code.
+         A fake whose absence looks like nothing real is a fake that cannot
+         exercise the rule, and every test using it would pass whichever way the
+         rule went. */
+      if (!bytes) throw new Error(`no such file: ${path}`)
       return bytes
     },
     writeFile: async (path, bytes) => void store.set(path, bytes),

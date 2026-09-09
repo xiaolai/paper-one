@@ -247,20 +247,29 @@ describe('a guarded restore', () => {
   })
 
   it('refuses when it cannot tell whether the live folder holds a record', async () => {
-    /* Fail closed. A stat that will not answer says nothing about whose book
+    /* Fail closed. A read that will not answer says nothing about whose book
        the folder holds, and a guard that cannot establish identity must not
-       proceed as though it had. */
+       proceed as though it had.
+
+       ⚠️ **THE FAILURE IS INDUCED ON THE READ, AND IT USED TO BE ON A STAT.**
+       The guard asked `readBook` and then `exists` to work out whether a
+       `null` meant absent or damaged; `readBook` answers that itself now, so
+       there is no second stat to fail — and a fixture that breaks an operation
+       the code no longer performs asserts nothing. Same property, induced
+       through the call the guard actually makes. */
     const { fs, library } = shelf({ 'trash/book_a/book.json': JSON.stringify(record('book_a')) })
-    const exists = fs.exists.bind(fs)
-    fs.exists = async (path) => {
+    const readFile = fs.readFile.bind(fs)
+    fs.readFile = async (path: string) => {
       if (path === 'books/book_a/book.json') throw new Error('EIO')
-      return exists(path)
+      return readFile(path)
     }
     expect(await library.restore('book_a', { onlyThisBook: true })).toEqual({
       state: 'unreadable',
       at: 'shelf',
     })
-    fs.exists = exists
+    fs.readFile = readFile
+    /* The trash copy is untouched: a refused restore leaves what it would
+       have restored exactly where it was. */
     expect(await fs.exists('trash/book_a/book.json')).toBe(true)
   })
 

@@ -13,6 +13,9 @@ import {
   type PagePublisher,
   type PeerWire,
   type PersonStatus,
+  type SharedBook,
+  type ShareService,
+  type VoiceStatus,
   type WirePeer,
 } from './lib/wire'
 import { createDevicesModel, type DevicesModel } from './ui/devicesModel'
@@ -188,6 +191,108 @@ export function publishPortOver(held: PeerWire): PublishPort {
     sign: (message) => held.pageSign(message),
   }
   publishPorts.set(held, port)
+  return port
+}
+
+/**
+ * What publishing publicly needs from this device — phase 25.
+ *
+ * ⚠️ **A SEPARATE PORT FROM `PublishPort`, AND THE NAMES BEING ALIKE IS THE
+ * RISK.** `PublishPort` signs a CIRCLE page with the device's endpoint key and
+ * speaks only to admitted people. Nothing here signs anything and nothing here
+ * knows who anybody is: it is content-addressed, it answers strangers, and it
+ * rides a second endpoint on a second key. Handing one where the other is
+ * wanted must not typecheck, which is why they share no member.
+ *
+ * ⚠️ **AND EVERY METHOD BUT `offered` STARTS THE SHARE ENDPOINT.** See the
+ * wire. A surface that refreshes on a timer refreshes `offered`.
+ *
+ * `null` before `peer` has started, and on a composition without it — the
+ * browser client, which has no plugin and therefore no way to publish.
+ */
+export interface SharePort {
+  /** What this machine offers publicly. Reads a file; starts nothing. */
+  offered(): Promise<readonly SharedBook[]>
+  /** Offer a book's bytes. Publication, and it cannot be undone. */
+  offerBytes(folder: string, name: string, hash: string): Promise<void>
+  /** Offer annotations for a book without offering the book. */
+  offerNotes(hash: string): Promise<void>
+  /** Stop offering. Withdrawing `notes` deletes the records held. */
+  withdraw(hash: string, service: ShareService): Promise<void>
+  /** Publish one annotation record for a book. */
+  publishNote(hash: string, record: string): Promise<number>
+  /** Who else claims to serve this hash. A hint, never a roster. */
+  resolve(hash: string, service: ShareService): Promise<readonly string[]>
+  /** Fetch a book into `books/<folder>/<name>`. See the wire for why `folder` matters. */
+  fetch(hash: string, folder: string, name: string, providers?: readonly string[]): Promise<number>
+}
+
+/**
+ * The voice — phase 26's signing key, and the second confined signer.
+ *
+ * ⚠️ **A SEPARATE PORT FROM `PublishPort` AND FROM `SharePort`, AND THE THREE
+ * BEING NEIGHBOURS IS THE RISK.** `PublishPort` signs a CIRCLE page with the
+ * endpoint key. `SharePort` moves bytes and knows no keys. This signs PUBLIC
+ * envelopes with a key that opens no connections and is never derived from the
+ * person root. They share no member, so handing one where another is wanted
+ * does not typecheck.
+ */
+export interface VoicePort {
+  /** This device's voice, its sequence, and the keys it still holds. */
+  status(): Promise<VoiceStatus>
+  /** The next sequence, persisted before it is answered. */
+  nextSeq(): Promise<number>
+  /** Sign a public envelope. Rust refuses anything that is not one. */
+  sign(message: string, voice?: string): Promise<string>
+  /** Rotate, keeping the old key until `until`. */
+  rotate(until: number): Promise<VoiceStatus>
+  /** Forget retired keys whose retention has run out. */
+  sweep(now: number): Promise<number>
+}
+
+export function voicePort(): VoicePort | null {
+  const held = wire
+  return held === null ? null : voicePortOver(held)
+}
+
+/** ONE PORT PER WIRE — `publishPorts`' reason, and the same weak keying. */
+const voicePorts = new WeakMap<PeerWire, VoicePort>()
+
+export function voicePortOver(held: PeerWire): VoicePort {
+  const known = voicePorts.get(held)
+  if (known !== undefined) return known
+  const port: VoicePort = {
+    status: () => held.voiceStatus(),
+    nextSeq: () => held.voiceNextSeq(),
+    sign: (message, voice) => held.voiceSign(message, voice),
+    rotate: (until) => held.voiceRotate(until),
+    sweep: (now) => held.voiceSweep(now),
+  }
+  voicePorts.set(held, port)
+  return port
+}
+
+export function sharePort(): SharePort | null {
+  const held = wire
+  return held === null ? null : sharePortOver(held)
+}
+
+/** ONE PORT PER WIRE — `publishPorts`' reason, and the same weak keying. */
+const sharePorts = new WeakMap<PeerWire, SharePort>()
+
+export function sharePortOver(held: PeerWire): SharePort {
+  const known = sharePorts.get(held)
+  if (known !== undefined) return known
+  const port: SharePort = {
+    offered: () => held.shareOffered(),
+    offerBytes: (folder, name, hash) => held.shareOfferBytes(folder, name, hash),
+    offerNotes: (hash) => held.shareOfferNotes(hash),
+    withdraw: (hash, service) => held.shareWithdraw(hash, service),
+    publishNote: (hash, record) => held.sharePublishNote(hash, record),
+    resolve: (hash, service) => held.shareResolve(hash, service),
+    fetch: (hash, folder, name, providers) => held.shareFetch(hash, folder, name, providers),
+  }
+  sharePorts.set(held, port)
   return port
 }
 
@@ -612,6 +717,10 @@ export type {
   SessionClosed,
   SessionFrames,
   SessionOpen,
+  RetiredVoice,
+  SharedBook,
+  ShareService,
+  VoiceStatus,
   TransferProgress,
   Unsubscribe,
   WirePeer,

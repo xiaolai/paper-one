@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { writeQueue } from './writeQueue'
+import { MAX_APPENDED, MAX_APPENDED_SHARED, WriteQueueFull, writeQueue } from './writeQueue'
 
 /**
  * Two writes to one file must not overlap, because they share a temporary path.
@@ -18,6 +18,69 @@ const defer = () => {
 }
 
 describe('writeQueue', () => {
+  /* ⚠️ **A TASK THAT ENQUEUES ON ITS OWN KEY USED TO START A SECOND DRAIN.**
+     `running.set(key, drain(key))` evaluates the call first, and an async body
+     runs synchronously to its first `await` — which is the task itself. So the
+     task ran with the key unregistered, and an enqueue from inside it saw no
+     drain and started one. Two drains on one key is the single thing this queue
+     exists to prevent, and if the second finished first it cleared the
+     registration the first was still using, so `idle()` never returned.
+
+     The inner enqueue is SYNCHRONOUS, inside the task body, which is the only
+     shape that reaches the window. */
+  it('a task that enqueues on its own key does not start a second drain', async () => {
+    const queue = writeQueue()
+    const order: string[] = []
+    let inner: Promise<void> | null = null
+
+    await queue.append('book_a', async () => {
+      order.push('outer:start')
+      /* No await before this: the whole point is that it happens while the
+         outer task is still the running one. */
+      inner = queue.append('book_a', async () => {
+        order.push('inner')
+      })
+      await Promise.resolve()
+      order.push('outer:end')
+    })
+    await inner
+    await queue.idle()
+
+    expect(order, 'the inner task interleaved with the outer one').toEqual([
+      'outer:start',
+      'outer:end',
+      'inner',
+    ])
+  })
+
+  /* The other half of the same defect: the second drain's `running.delete`
+     removed a registration the first drain still owned, so the queue reported
+     work in flight for ever.
+     
+     ⚠️ **THIS ONE IS A GUARD, NOT A REPRODUCTION, AND SAYS SO.** Reverting the
+     fix does NOT fail it — the hang needs the second drain to finish first,
+     which this shape does not force. The test above is what actually catches
+     the defect. Kept because a queue that stops settling is the worst failure
+     it has and the cheapest to assert; recorded as a guard so nobody reads a
+     green tick here as evidence the ordering is right.
+     
+     The timeout is a liveness bound, not a performance assertion: `idle()`
+     here settles in microtasks, and two seconds only distinguishes "settles"
+     from "never". */
+  it('settles idle after a task enqueues on its own key', async () => {
+    const queue = writeQueue()
+    let inner: Promise<void> | null = null
+    await queue.append('book_a', async () => {
+      inner = queue.append('book_a', async () => {})
+    })
+    await inner
+    const settled = await Promise.race([
+      queue.idle().then(() => 'idle'),
+      new Promise((go) => setTimeout(() => go('hung'), 2_000)),
+    ])
+    expect(settled, 'idle() never returned — a stale key was left registered').toBe('idle')
+  })
+
   it('runs one task at a time for a key', async () => {
     const q = writeQueue()
     const first = defer()
@@ -198,5 +261,115 @@ describe('writeQueue', () => {
       }).catch(() => {})
       await expect(q.idle()).resolves.toBeUndefined()
     })
+  })
+})
+
+describe('the appended line is bounded — WI-26.7', () => {
+  it('refuses past the cap rather than growing', () => {
+    /* ⚠️ **`append` HAD NO LENGTH LIMIT AND `push` DOES NOT NEED ONE.** A
+       `replace` supersedes its predecessor, so its line is one deep however
+       fast they arrive; an `append` supersedes nothing, deliberately. That was
+       safe while every caller was the reader and stops being safe the moment a
+       caller is a stranger's arrival rate. */
+    const queue = writeQueue()
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    /* One running, then the line fills behind it. */
+    const running = queue.append('book', () => held)
+    const waiting: Promise<void>[] = []
+    for (let i = 0; i < MAX_APPENDED; i += 1) waiting.push(queue.append('book', () => Promise.resolve()))
+    const refused = queue.append('book', () => Promise.resolve())
+    release()
+    return Promise.all([
+      expect(refused).rejects.toBeInstanceOf(WriteQueueFull),
+      running,
+      ...waiting,
+    ])
+  })
+
+  it('says which key was full, so a caller can report it', () => {
+    const queue = writeQueue()
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const running = queue.append('book:42', () => held)
+    const waiting = Array.from({ length: MAX_APPENDED }, () => queue.append('book:42', () => Promise.resolve()))
+    const refused = queue.append('book:42', () => Promise.resolve()).catch((error: unknown) => error)
+    release()
+    return refused.then((error) => {
+      expect((error as WriteQueueFull).key).toBe('book:42')
+      expect((error as Error).message).toContain('book:42')
+      return Promise.all([running, ...waiting])
+    })
+  })
+
+  it('leaves room again once the line drains', () => {
+    const queue = writeQueue()
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const running = queue.append('book', () => held)
+    const waiting = Array.from({ length: MAX_APPENDED }, () => queue.append('book', () => Promise.resolve()))
+    release()
+    return Promise.all([running, ...waiting])
+      .then(() => queue.idle())
+      .then(() => queue.append('book', () => Promise.resolve()))
+  })
+
+  it('does not bound another key, and does not bound push', () => {
+    /* One flooded book must not stop the reader's other books saving, and a
+       `replace` line cannot exceed one waiting task anyway. */
+    const queue = writeQueue()
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const running = queue.append('flooded', () => held)
+    const waiting = Array.from({ length: MAX_APPENDED }, () => queue.append('flooded', () => Promise.resolve()))
+    const elsewhere = queue.append('quiet', () => Promise.resolve())
+    const replaces = Array.from({ length: MAX_APPENDED + 10 }, () => queue.push('flooded', () => Promise.resolve()))
+    release()
+    return Promise.all([elsewhere, running, ...waiting, ...replaces])
+  })
+})
+
+describe('the shared lane refuses before the reader’s own writing does', () => {
+  const fill = (queue: ReturnType<typeof writeQueue>, n: number, mode: 'append' | 'appendShared') =>
+    Array.from({ length: n }, () => queue[mode]('book', () => Promise.resolve()))
+
+  it('leaves room for a private edit when a flood has taken its share', async () => {
+    /* ⚠️ **MEASURED BY AUDIT: ONE CAP FOR BOTH MEANT FILLING A BOOK'S QUEUE
+       WITH PUBLIC TASKS MADE THE NEXT PRIVATE EDIT REJECT** — WI-26.7's
+       objective inverted. */
+    const queue = writeQueue()
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const running = queue.append('book', () => held)
+    const flood = fill(queue, MAX_APPENDED_SHARED, 'appendShared')
+    const refusedPublic = queue.appendShared('book', () => Promise.resolve()).catch((e: unknown) => e)
+    /* The reader's own edit still goes in. */
+    const mine = queue.append('book', () => Promise.resolve())
+    release()
+    expect(await refusedPublic).toBeInstanceOf(WriteQueueFull)
+    await Promise.all([running, mine, ...flood])
+  })
+
+  it('still refuses a private edit once the WHOLE line is full', () => {
+    const queue = writeQueue()
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const running = queue.append('book', () => held)
+    const waiting = fill(queue, MAX_APPENDED, 'append')
+    const refused = queue.append('book', () => Promise.resolve())
+    release()
+    return Promise.all([expect(refused).rejects.toBeInstanceOf(WriteQueueFull), running, ...waiting])
   })
 })

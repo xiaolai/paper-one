@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-share-withdraw"
+description = "Enables the peer_share_withdraw command without any pre-configured scope."
+commands.allow = ["peer_share_withdraw"]
+
+[[permission]]
+identifier = "deny-peer-share-withdraw"
+description = "Denies the peer_share_withdraw command without any pre-configured scope."
+commands.deny = ["peer_share_withdraw"]

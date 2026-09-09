@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-voice-status"
+description = "Enables the peer_voice_status command without any pre-configured scope."
+commands.allow = ["peer_voice_status"]
+
+[[permission]]
+identifier = "deny-peer-voice-status"
+description = "Denies the peer_voice_status command without any pre-configured scope."
+commands.deny = ["peer_voice_status"]

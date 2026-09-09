@@ -43,6 +43,13 @@ const queueOf = (keys: string[] = []): WriteQueue => ({
     keys.push(key)
     return task()
   },
+  /* The public layer's half of the same line — see `MAX_APPENDED_SHARED`.
+     Serialisation is not what these tests are about, so it behaves as
+     `append` does here. */
+  appendShared: (key, task) => {
+    keys.push(key)
+    return task()
+  },
   push: (key, task) => {
     keys.push(key)
     return task()
@@ -442,7 +449,7 @@ describe('the overlay contribution', () => {
 
   const start = (fs: IndexFs) => {
     const disposable = circle.start!(
-      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs, library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
+      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs, library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     return disposable
@@ -536,14 +543,14 @@ describe('the overlay contribution', () => {
     expect(drawn).toHaveLength(1)
     expect(drawn[0]!.cfi).toBe('epubcfi(/6/4!/4/2)')
     expect(drawn[0]!.quote).toBe('Call me Ishmael')
-    expect(drawn[0]!.readers).toBe(1)
+    expect(drawn[0]!.people).toEqual([PERSON])
     /* ⚠️ **AND THE NAME IT IS DRAWN UNDER.** There is no roster here, so the
        person's own id is the only name there is — shown as a claim, never as
        a name Paper has checked. Nothing read the field, so the function that
        supplies it could have answered `undefined` and the painter would have
        drawn a mark attributed to nobody. */
     expect(drawn[0]!.person).toBe(PERSON)
-    expect(drawn[0]!.author).toBe(PERSON)
+    expect(drawn[0]!.opinions[0]!.author).toBe(PERSON)
     disposable.dispose()
   })
 
@@ -601,7 +608,7 @@ describe('the overlay contribution', () => {
     /* Both land at ONE anchor, which is the case: two people, one sentence. */
     const drawn = await overlay.forBook({ bookId: BOOK, resolve: placesEverything() })
     expect(drawn).toHaveLength(1)
-    expect(drawn[0]!.readers).toBe(2)
+    expect(drawn[0]!.people).toHaveLength(2)
     disposable.dispose()
   })
 
@@ -647,7 +654,7 @@ describe('the overlay contribution', () => {
 
     /* Two people, two different passages, two marks — never one of weight 2. */
     expect(drawn).toHaveLength(2)
-    expect(drawn.map((one) => one.readers)).toEqual([1, 1])
+    expect(drawn.map((one) => one.people.length)).toEqual([1, 1])
     expect(new Set(drawn.map((one) => one.cfi)).size).toBe(2)
     disposable.dispose()
   })
@@ -774,7 +781,7 @@ describe('the overlay contribution', () => {
   it('starts with no filesystem rather than failing', async () => {
     /* A composition with no filesystem — the browser client — means no shared
        passages, not a failed capability. */
-    const disposable = circle.start!({ onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs: null } } as never, new AbortController().signal) as {
+    const disposable = circle.start!({ onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs: null } } as never, new AbortController().signal) as {
       dispose(): void
     }
     expect(await overlay.forBook({ bookId: BOOK, resolve: () => Promise.reject(new Error('x')) })).toEqual([])
@@ -849,7 +856,7 @@ describe('the share control contribution — WI-23.A1', () => {
       {
         onCleanup: () => {},
         diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) },
-        services: {
+        services: { bindPrivateAudience: () => ({ dispose: () => {} }),
           hashes: () => null,
           fs: fsWith(),
           library: LIBRARY,
@@ -878,7 +885,7 @@ describe('the share control contribution — WI-23.A1', () => {
       {
         onCleanup: () => {},
         diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) },
-        services: {
+        services: { bindPrivateAudience: () => ({ dispose: () => {} }),
           fs,
           library: LIBRARY,
           writes: queueOf(),
@@ -1414,7 +1421,7 @@ describe('the services a friend calls', () => {
     /* No peer has started here, so nobody's roster names the caller; that is
        the same answer as a person the switch is off for, on purpose. */
     const disposable = circle.start!(
-      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
+      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     try {
@@ -1438,7 +1445,7 @@ describe('the services a friend calls', () => {
 
   it('refuses a request this build cannot parse, rather than answering one', async () => {
     const disposable = circle.start!(
-      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
+      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     try {
@@ -1454,7 +1461,7 @@ describe('the services a friend calls', () => {
     /* ⚠️ **A HANDLER THAT OUTLIVED ITS RUN WOULD READ ANOTHER RUN'S SERVICES**,
        or a null. The teardown is guarded the way `held` is. */
     const disposable = circle.start!(
-      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
+      { onCleanup: () => {}, diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) }, services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf() } } as never,
       new AbortController().signal,
     ) as { dispose(): void }
     disposable.dispose()
@@ -1519,7 +1526,7 @@ describe('the fetch driver, as the capability runs it — WI-23.A2', () => {
     const disposable = circle.start!(
       {
         onCleanup: () => {},
-        services: { hashes: () => null, fs: fsWith(), library, writes: queueOf(), clock: () => 'stamp' },
+        services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs: fsWith(), library, writes: queueOf(), clock: () => 'stamp' },
         diagnostics: { info, warn: vi.fn(), error: vi.fn(), child: () => ({}) },
       } as never,
       new AbortController().signal,
@@ -1555,7 +1562,7 @@ describe('the fetch driver, as the capability runs it — WI-23.A2', () => {
       {
         onCleanup: () => {},
         diagnostics: { info, warn: vi.fn(), error: vi.fn(), child: () => ({}) },
-        services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' },
+        services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' },
       } as never,
       new AbortController().signal,
     ) as { dispose(): void }
@@ -1567,7 +1574,7 @@ describe('the fetch driver, as the capability runs it — WI-23.A2', () => {
       {
         onCleanup: () => {},
         diagnostics: { info: bare, warn: vi.fn(), error: vi.fn(), child: () => ({}) },
-        services: { hashes: () => null, fs: null },
+        services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs: null },
       } as never,
       new AbortController().signal,
     ) as { dispose(): void }
@@ -1600,7 +1607,7 @@ describe('the fetch driver, as the capability runs it — WI-23.A2', () => {
     try {
       const info = vi.fn()
       const disposable = circle.start!(
-        { onCleanup: () => {}, services: { hashes: () => null, fs: null }, diagnostics: { info, warn: vi.fn(), error: vi.fn(), child: () => ({}) } } as never,
+        { onCleanup: () => {}, services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs: null }, diagnostics: { info, warn: vi.fn(), error: vi.fn(), child: () => ({}) } } as never,
         new AbortController().signal,
       ) as { dispose(): void }
       await vi.advanceTimersByTimeAsync(60 * 60_000)
@@ -1619,7 +1626,7 @@ describe('the disposer on the kernel’s stack — round 3 #97', () => {
       {
         onCleanup: (dispose: () => void) => cleanups.push(dispose),
         diagnostics: { info: () => {}, warn: () => {}, error: () => {}, child: () => ({}) },
-        services: { hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' },
+        services: { bindPrivateAudience: () => ({ dispose: () => {} }), hashes: () => null, fs: fsWith(), library: LIBRARY, writes: queueOf(), clock: () => 'stamp' },
       } as never,
       new AbortController().signal,
     )

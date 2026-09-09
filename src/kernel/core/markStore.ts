@@ -1,3 +1,4 @@
+import { notifyAll } from './notify'
 import { canonicalJson } from './canonicalJson'
 import { folderOf, marksPathIn, readMarks, trashOf, writeMarks } from './bookFolder'
 import type { ResolvedCfi } from './resolvedCfi'
@@ -477,17 +478,12 @@ export function createMarkStore({
       unreadable: openId !== null && unreadableId === openId,
       scanFailed,
     }
-    for (const listener of [...listeners]) {
-      /* EACH ON ITS OWN. One throwing subscriber used to stop every later
-       * one — and, called from the optimistic half of `applyTo`, stopped the
-       * disk write behind it; called after a successful write, its throw was
-       * then classified as a persistence failure by the catch around it. */
-      try {
-        listener()
-      } catch (cause) {
-        console.error('Paper: a marks subscriber threw', cause)
-      }
-    }
+    /* EACH ON ITS OWN. One throwing subscriber used to stop every later one —
+     * and, called from the optimistic half of `applyTo`, stopped the disk
+     * write behind it; called after a successful write, its throw was then
+     * classified as a persistence failure by the catch around it. That is
+     * `notifyAll`'s whole reason, and this file is where it was learnt. */
+    notifyAll(listeners, 'marks')
   }
 
   /**

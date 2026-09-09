@@ -345,7 +345,7 @@ pub async fn hash_file(root: &Path, folder: &str, name: &str) -> Result<HashResu
     hash_path(target.path()).await
 }
 
-async fn hash_path(path: &Path) -> Result<HashResult> {
+pub(crate) async fn hash_path(path: &Path) -> Result<HashResult> {
     let mut file = open_read_no_follow(path).await?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; CHUNK];

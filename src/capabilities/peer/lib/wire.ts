@@ -295,6 +295,126 @@ export interface PeerWire {
    * that was on disk the whole time is the thing this exists to stop.
    */
   circleRoster(): Promise<readonly string[] | null>
+
+  /* ── public sharing, phase 25 ─────────────────────────────────────────
+   *
+   * ⚠️ **THESE ARE NOT CIRCLE COMMANDS AND MUST NOT BE MISTAKEN FOR THEM.**
+   * The circle denies unless a person is admitted; the public layer is
+   * content-addressed and answers anybody who has the hash. They ride a
+   * SECOND endpoint on a second key (`share.key`, port 47822) so that the
+   * circle's identity never enters a public content index.
+   *
+   * ⚠️ **AND EVERY ONE BUT `shareOffered` STARTS THAT ENDPOINT.** Binding a
+   * second UDP port, loading a second key and opening a blob store is what
+   * the first call costs. A surface that polls must poll `shareOffered`,
+   * which reads a file.
+   */
+
+  /** What this machine offers publicly. Reads a file; starts nothing. */
+  shareOffered(): Promise<readonly SharedBook[]>
+  /**
+   * Offer a book's BYTES to anybody who has its hash.
+   *
+   * ⚠️ **PUBLICATION, AND IT CANNOT BE UNDONE.** The book is announced into a
+   * global index; withdrawing stops this machine serving and does not un-tell.
+   * Rejects when the file's own digest is not the `hash` given, which is the
+   * guard that keeps a book from being offered under a name it does not have.
+   */
+  shareOfferBytes(folder: string, name: string, hash: string): Promise<void>
+  /**
+   * Offer public annotations for a book WITHOUT offering the book.
+   *
+   * ⚠️ **THE COMMON CASE, NOT THE EXCEPTION** — a reader publishes notes on a
+   * book they have no right to redistribute. Nothing is imported and the
+   * bytes switch is untouched.
+   */
+  shareOfferNotes(hash: string): Promise<void>
+  /**
+   * Stop offering one book over one service.
+   *
+   * Withdrawing `notes` DELETES the annotation records this machine holds for
+   * that book; `SharedBook.noteCount` is what a confirmation should say.
+   */
+  shareWithdraw(hash: string, service: ShareService): Promise<void>
+  /** Publish one annotation record. Its envelope is the caller's business. */
+  sharePublishNote(hash: string, record: string): Promise<number>
+  /** Who else claims to serve this hash. Never trusted — a hint, not a roster. */
+  shareResolve(hash: string, service: ShareService): Promise<readonly string[]>
+  /**
+   * Fetch a book by its hash into `books/<folder>/<name>`, and answer its size.
+   *
+   * ⚠️ **`folder` IS THE CALLER'S ANSWER TO "IS THIS THE BOOK I ALREADY
+   * HAVE?"** `mayAdoptIdentity` decides that and the decision IS the folder:
+   * bytes whose digest disagrees with a held book's go into a folder of their
+   * own rather than over it. Rust cannot check this — it has no library to
+   * consult — so passing a held book's folder for bytes that are not that book
+   * is exactly the defect WI-25.4 exists to prevent.
+   *
+   * `providers` empty asks discovery. Rejects rather than half-writing: a
+   * fetch whose file does not hash to `hash` is removed before this rejects.
+   */
+  shareFetch(hash: string, folder: string, name: string, providers?: readonly string[]): Promise<number>
+
+  /* ── the voice, phase 26 ──────────────────────────────────────────────
+   *
+   * ⚠️ **A SECOND SIGNING KEY, AND THE SECOND CONFINED SIGNING COMMAND.**
+   * `pageSign` signs circle pages with the ENDPOINT key; `voiceSign` signs
+   * public envelopes with the VOICE key, and Rust refuses each anything that
+   * is not its own domain. Neither can be made to sign the other's bytes.
+   */
+
+  /** This device's voice, its sequence, and the keys it still holds. */
+  voiceStatus(): Promise<VoiceStatus>
+  /**
+   * The next sequence to publish at, persisted before it is answered.
+   *
+   * ⚠️ **A REUSED SEQUENCE IS AN EQUIVOCATION BY THE PUBLIC FOLD'S OWN RULE**,
+   * and it drops both envelopes — the voice erases its own annotations from
+   * every reader who saw both.
+   */
+  voiceNextSeq(): Promise<number>
+  /** Sign a public envelope. `voice` names a retired key, or the current one. */
+  voiceSign(message: string, voice?: string): Promise<string>
+  /** Rotate, keeping the old key until `until` so its work can be withdrawn. */
+  voiceRotate(until: number): Promise<VoiceStatus>
+  /** Forget retired keys whose retention has run out. */
+  voiceSweep(now: number): Promise<number>
+}
+
+/** A key kept past its rotation, and the moment it may go. */
+export interface RetiredVoice {
+  readonly voice: string
+  /** Epoch milliseconds: past this, nothing it signed can still be valid. */
+  readonly until: number
+}
+
+/** This device's voice, as `peer_voice_status` reports it. */
+export interface VoiceStatus {
+  readonly voice: string
+  readonly seq: number
+  readonly retired: readonly RetiredVoice[]
+}
+
+/** Which of the share endpoint's two independent services. */
+export type ShareService = 'bytes' | 'notes'
+
+/** One book this machine offers publicly, as `peer_share_offered` reports it. */
+export interface SharedBook {
+  /** The book's `contentHash` — its network name. */
+  readonly hash: string
+  readonly bytes: boolean
+  readonly notes: boolean
+  /** How many annotation records this machine holds for it. */
+  /**
+   * How many public annotations this device holds for the book.
+   *
+   * ⚠️ **`null` IS "COULD NOT BE COUNTED", AND IT USED TO BE `0`.** The
+   * confirmation before stopping publication says what will be deleted, and an
+   * annotation file that would not read reported none — so the reader was told
+   * nothing would be lost precisely when the device could not tell. Absent is a
+   * different sentence, and `PublicPane` says it.
+   */
+  readonly noteCount: number | null
 }
 
 /** The device's publishing identity, as `peer_circle_mine` reports it. */
@@ -494,6 +614,21 @@ export function tauriWire(): PeerWire {
     pageSign: (message) => invoke(command('peer_page_sign'), { message }),
     circleMine: () => invoke(command('peer_circle_mine')),
     circleRoster: () => invoke(command('peer_circle_roster')),
+
+    shareOffered: () => invoke(command('peer_share_offered')),
+    shareOfferBytes: (folder, name, hash) => invoke(command('peer_share_offer_bytes'), { folder, name, hash }),
+    shareOfferNotes: (hash) => invoke(command('peer_share_offer_notes'), { hash }),
+    shareWithdraw: (hash, service) => invoke(command('peer_share_withdraw'), { hash, service }),
+    sharePublishNote: (hash, record) => invoke(command('peer_share_publish_note'), { hash, record }),
+    shareResolve: (hash, service) => invoke(command('peer_share_resolve'), { hash, service }),
+    shareFetch: (hash, folder, name, providers) =>
+      invoke(command('peer_share_fetch'), { hash, folder, name, providers: providers === undefined ? null : [...providers] }),
+
+    voiceStatus: () => invoke(command('peer_voice_status')),
+    voiceNextSeq: () => invoke(command('peer_voice_next_seq')),
+    voiceSign: (message, voice) => invoke(command('peer_voice_sign'), { message, voice: voice ?? null }),
+    voiceRotate: (until) => invoke(command('peer_voice_rotate'), { until }),
+    voiceSweep: (now) => invoke(command('peer_voice_sweep'), { now }),
 
     sessionRecv: async (sessionId, max) => {
       const frames = await invoke<number[][]>(command('peer_session_recv'), { sessionId, max: max ?? null })

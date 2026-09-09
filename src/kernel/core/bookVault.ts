@@ -257,3 +257,29 @@ export async function readOwnedBook(
    * shows it when a book declares no title, and neither wants a hash. */
   return new File([bytes as BlobPart], name)
 }
+
+/**
+ * Whether a filesystem failure means "there is no such file".
+ *
+ * ⚠️ **ABSENT AND UNREADABLE ARE DIFFERENT ANSWERS, AND COLLAPSING THEM IS THE
+ * MOST DESTRUCTIVE THING A READER CAN DO.** `readMarks` records it in those
+ * words: a momentary read failure that loads nothing means the next write puts
+ * that nothing on disk over everything the reader had. `readBook` had the same
+ * shape — `catch { return null }` — so an unreadable `book.json` was
+ * indistinguishable from a book that was never there, and the add path would
+ * replace a reader's tags and position with fresh metadata.
+ *
+ * ⚠️ **ONE COPY, BECAUSE THERE WERE ALREADY TWO.** `voicePort` and
+ * `publicStore` each grew their own; a third would have made the predicate that
+ * decides "is this data loss?" a thing three files disagree about quietly.
+ *
+ * ⚠️ **A MESSAGE TEST, WHICH IS A COMPROMISE AND SAYS SO.** Tauri's fs errors
+ * arrive as `Error` with a formatted message rather than a typed code, and the
+ * browser's are different again. Matching text is what is available; the
+ * consequence of a miss is a THROW where `null` was wanted, which is the safe
+ * direction — loud rather than lossy.
+ */
+export function isMissingFile(cause: unknown): boolean {
+  const message = cause instanceof Error ? cause.message : String(cause)
+  return /not found|no such file|ENOENT/iu.test(message)
+}

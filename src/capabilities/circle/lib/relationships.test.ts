@@ -14,6 +14,7 @@ import { purgePerson, readRelationship, writeRelationship } from './relationship
 const PERSON = 'a1'.repeat(32)
 const queue = (): WriteQueue => ({
   append: (_key, task) => task(),
+  appendShared: (_key, task) => task(),
   push: (_key, task) => task(),
   idle: () => Promise.resolve(),
 })

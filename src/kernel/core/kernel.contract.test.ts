@@ -822,7 +822,12 @@ describe('removeBlob — the closed-name delete twin of the blob port (WI-10.2)'
   it('refuses to delete a cover whose record is there and will not read, and says so — no facts left for a file that is gone', async () => {
     const w = blobWorld()
     w.fs.store.set(recordPath(BOOK), new TextEncoder().encode('not json at all'))
-    await expect(w.kernel.removeBlob(BOOK, 'cover.jpg')).rejects.toThrow(/could not be read/u)
+    /* The clause this fixture actually causes. A record that is PRESENT and
+       unparseable is damage; a read that fails outright is a different fact
+       with its own sentence. They shared one message until the two were
+       separated, so a pattern matching the shared wording could not tell which
+       check had fired. */
+    await expect(w.kernel.removeBlob(BOOK, 'cover.jpg')).rejects.toThrow(/does not parse/u)
     expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(true)
   })
 

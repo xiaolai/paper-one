@@ -23,6 +23,8 @@ use crate::peers::PeerRecord;
 use crate::person::{self, Custody, OsKeychain, PersonId};
 use crate::role::{local_role, set_stored_role, Role};
 use crate::session;
+use crate::share::policy::{SharePolicy, ShareService};
+use crate::share::ContentHash;
 use crate::state::PeerState;
 
 /// What `peer_status` returns.
@@ -73,9 +75,15 @@ pub async fn peer_status<R: Runtime>(
 }
 
 /// This device's role, decided in Rust.
+/// ⚠️ **ASYNC AND OFF-THREAD, BECAUSE IT TOUCHES THE DISK.** A synchronous
+/// `#[tauri::command]` runs on the thread that dispatches commands, so a read
+/// waiting on slow or unresponsive storage stops EVERY other command — the app
+/// stops answering, and nothing in it names a file as the reason. The work here
+/// is small and the failure it prevents is not.
 #[tauri::command]
-pub fn peer_local_role<R: Runtime>(app: AppHandle<R>) -> Result<Role> {
-    local_role(&data_root(&app)?)
+pub async fn peer_local_role<R: Runtime>(app: AppHandle<R>) -> Result<Role> {
+    let root = data_root(&app)?;
+    off_thread(move || local_role(&root)).await
 }
 
 /// Record which side of a pairing this device is, for the next launch.
@@ -88,9 +96,12 @@ pub fn peer_local_role<R: Runtime>(app: AppHandle<R>) -> Result<Role> {
 ///
 /// A phone ignores this by construction: `local_role` lets the build target
 /// win outright, so a stored `shelf` on a mobile build changes nothing.
+/// Off the command thread for the reason `peer_local_role` records — and this
+/// one WRITES and `sync_all`s, which is the slower half.
 #[tauri::command]
-pub fn peer_set_local_role<R: Runtime>(app: AppHandle<R>, role: Role) -> Result<()> {
-    set_stored_role(&data_root(&app)?, role)
+pub async fn peer_set_local_role<R: Runtime>(app: AppHandle<R>, role: Role) -> Result<()> {
+    let root = data_root(&app)?;
+    off_thread(move || set_stored_role(&root, role)).await
 }
 
 /// The storage root, as a string the webview can join paths onto. Exists on
@@ -423,7 +434,7 @@ mod tests {
 /// moves it to the async runtime, and then a blocking call inside it stalls a
 /// runtime worker instead of the main thread — better, and still wrong. The
 /// work is genuinely blocking, so it belongs on a thread meant for that.
-async fn off_thread<T, F>(work: F) -> Result<T>
+pub(crate) async fn off_thread<T, F>(work: F) -> Result<T>
 where
     F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
@@ -717,13 +728,28 @@ pub async fn peer_circle_revoke<R: Runtime>(
         .await?;
     }
     /* Locally too. `PeerUnknown` is the ordinary case — a device of this
-    person's that this machine never paired with directly. */
-    match node.forget_peer(&device) {
-        Ok(()) | Err(Error::PeerUnknown(_)) => {}
-        Err(err) => return Err(err),
-    }
-    node.keeper_wake.notify_waiters();
-    Ok(())
+    person's that this machine never paired with directly.
+
+    ⚠️ **THE KEEPER IS WOKEN WHETHER OR NOT THIS SUCCEEDS, AND IT USED TO BE
+    SKIPPED.** The roster revocation above has already COMMITTED by this point;
+    returning early past the wake left the round that acts on it waiting for its
+    next scheduled pass — six hours — over a revocation the reader was told had
+    happened. The local failure is still raised, so the caller learns cleanup is
+    incomplete; what must not also be lost is the part that succeeded. */
+    let forgotten = match node.forget_peer(&device) {
+        Ok(()) | Err(Error::PeerUnknown(_)) => Ok(()),
+        Err(err) => Err(err),
+    };
+    /* ⚠️ **`notify_one`, NOT `notify_waiters`.** `Notify::notify_waiters` wakes
+     * only tasks ALREADY parked at `notified()`, and the keeper spends most of
+     * its life inside a round rather than at that line — so a revocation made
+     * while it was working was dropped, and the comment at `keeper.rs`'s select
+     * (*"A revocation made HERE does not wait six hours to be told"*) was
+     * false. `notify_one` stores a permit when nobody is waiting, so the next
+     * `notified()` returns at once. `session.rs` already uses it, which is what
+     * shows the difference was known and missed here. Found by audit. */
+    node.keeper_wake.notify_one();
+    forgotten
 }
 
 /// Rename somebody already in the circle.
@@ -752,17 +778,22 @@ pub async fn peer_circle_remember<R: Runtime>(
 ) -> Result<()> {
     let root = data_root(&app)?;
     off_thread(move || {
-        let mut people = circle::known_people(&root)?;
-        let known = people
-            .iter_mut()
-            .find(|k| k.person == person)
-            .ok_or_else(|| {
-                Error::Identity(
-                    "that person is not in this circle — people are added by pairing".into(),
-                )
-            })?;
-        known.display_name = display_name;
-        circle::set_known_people(&root, &people)
+        /* One transaction: the read and the write are the same critical
+         * section, so a rename cannot be built on a snapshot a revocation has
+         * already moved past. See `circle::update_known_people`. */
+        circle::update_known_people(&root, |people| {
+            let known = people
+                .iter_mut()
+                .find(|k| k.person == person)
+                .ok_or_else(|| {
+                    Error::Identity(
+                        "that person is not in this circle — people are added by pairing".into(),
+                    )
+                })?;
+            known.display_name = display_name;
+            Ok(())
+        })
+        .map(|_| ())
     })
     .await
 }
@@ -778,11 +809,310 @@ pub async fn peer_circle_remember<R: Runtime>(
 pub async fn peer_circle_forget<R: Runtime>(app: AppHandle<R>, person: String) -> Result<()> {
     let root = data_root(&app)?;
     off_thread(move || {
-        let people: Vec<KnownPerson> = circle::known_people(&root)?
-            .into_iter()
-            .filter(|k| k.person != person)
-            .collect();
-        circle::set_known_people(&root, &people)
+        circle::update_known_people(&root, |people| {
+            people.retain(|k| k.person != person);
+            Ok(())
+        })
+        .map(|_| ())
     })
     .await
+}
+
+// ── public sharing, phase 25 ──────────────────────────────────────────────
+//
+// ⚠️ **EVERY ONE OF THESE STARTS THE SHARE ENDPOINT, WHICH IS WHY THERE IS NO
+// STATUS POLL AMONG THEM.** `PeerState::share_node` binds a second UDP port,
+// loads a second key and opens a blob store on first use. A surface that
+// polled a `share_status` on every render would start all of that for a reader
+// who has never published anything — the exact cost the lazy start exists to
+// avoid. What a surface may read cheaply is `peer_share_offered`, which reads
+// the policy FILE and starts nothing.
+
+/// What this machine offers publicly, read from disk without starting anything.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedBook {
+    /// The book's `contentHash`.
+    pub hash: String,
+    /// Whether the bytes are offered.
+    pub bytes: bool,
+    /// Whether public annotations are offered. Independent of `bytes` — see
+    /// `share::policy`.
+    pub notes: bool,
+    /// How many public annotations this machine holds for the book.
+    ///
+    /// ⚠️ **A COUNT THE READER CAN SEE BEFORE TURNING THE SWITCH OFF.**
+    /// Withdrawing `notes` deletes them (`ShareNode::withdraw`), and a
+    /// confirmation that cannot say how many is a confirmation nobody can
+    /// give informed consent to.
+    /// How many public annotations this device holds for the book.
+    ///
+    /// ⚠️ **`None` IS "COULD NOT BE COUNTED", NOT ZERO.** The surface uses this
+    /// to tell a reader what stopping publication will DELETE, and an
+    /// unreadable file used to report zero — telling them nothing would be lost
+    /// over the one file we could not read. A book with no annotations is
+    /// `Some(0)`; a file that would not read is absent.
+    pub note_count: Option<u64>,
+}
+
+/// Everything this machine offers publicly.
+///
+/// ⚠️ **READS THE FILE, NEVER THE NODE.** A surface that has to start a UDP
+/// endpoint to draw a list of switches is a surface that turns "look at my
+/// settings" into "join a public network".
+#[tauri::command]
+pub async fn peer_share_offered<R: Runtime>(app: AppHandle<R>) -> Result<Vec<SharedBook>> {
+    let root = data_root(&app)?;
+    off_thread(move || {
+        let policy = SharePolicy::load(&root)?;
+        let mut rows: std::collections::BTreeMap<String, SharedBook> = Default::default();
+        for service in ShareService::ALL {
+            for hash in policy.offered(service) {
+                /* ⚠️ **COUNTED ONCE PER BOOK, NOT ONCE PER SERVICE.** A book
+                 * offering both bytes and notes had its whole annotation file
+                 * read and counted twice, and the second result was thrown away
+                 * because the map entry already existed. */
+                let row = rows.entry(hash.to_string()).or_insert_with(|| SharedBook {
+                    hash: hash.to_string(),
+                    bytes: false,
+                    notes: false,
+                    /* ⚠️ **UNREADABLE IS NOT ZERO.** `unwrap_or(0)` turned a
+                     * damaged or unreadable annotation file into "no
+                     * annotations" — and this count is what the surface uses to
+                     * tell the reader what stopping publication will DELETE.
+                     * Saying nothing will be lost, over a file we could not
+                     * read, is the one wrong answer. A missing file is
+                     * genuinely zero and `count` already reports that; anything
+                     * else is left absent so the surface can say it does not
+                     * know. */
+                    note_count: match crate::share::notes::count(&root, &hash) {
+                        Ok(held) => Some(held),
+                        Err(err) => {
+                            log::warn!(
+                                "peer: the public annotations for {hash} could not be counted: {err}"
+                            );
+                            None
+                        }
+                    },
+                });
+                match service {
+                    ShareService::Bytes => row.bytes = true,
+                    ShareService::Notes => row.notes = true,
+                }
+            }
+        }
+        Ok(rows.into_values().collect())
+    })
+    .await
+}
+
+/// Offer a book's BYTES to anyone who has its hash.
+///
+/// ⚠️ **THIS IS PUBLICATION AND IT CANNOT BE UNDONE.** The book is announced
+/// into a global index, and anybody who reads that index has read it.
+/// `peer_share_withdraw` stops this machine serving; it does not un-tell.
+#[tauri::command]
+pub async fn peer_share_offer_bytes<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, PeerState>,
+    folder: String,
+    name: String,
+    hash: String,
+) -> Result<()> {
+    /* ⚠️ **PARSED BEFORE THE ENDPOINT STARTS, NOT AFTER.** `share_node` binds a
+     * UDP port, loads a key and opens the blob store — `share/mod.rs`'s header
+     * is explicit that none of that happens "until a reader turns a book on".
+     * Validating afterwards meant a malformed hash from any caller did all of
+     * it and then failed, so an invalid request had persistent and network side
+     * effects. Cheapest refusal first, which is `checkPage`'s rule and the same
+     * one `answer` follows two files over. */
+    let hash = ContentHash::parse(&hash)?;
+    let share = state.share_node(&app).await?;
+    share.offer_bytes(&folder, &name, &hash).await
+}
+
+/// Offer public annotations for a book WITHOUT offering the book.
+#[tauri::command]
+pub async fn peer_share_offer_notes<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, PeerState>,
+    hash: String,
+) -> Result<()> {
+    /* ⚠️ **PARSED BEFORE THE ENDPOINT STARTS, NOT AFTER.** `share_node` binds a
+     * UDP port, loads a key and opens the blob store — `share/mod.rs`'s header
+     * is explicit that none of that happens "until a reader turns a book on".
+     * Validating afterwards meant a malformed hash from any caller did all of
+     * it and then failed, so an invalid request had persistent and network side
+     * effects. Cheapest refusal first, which is `checkPage`'s rule and the same
+     * one `answer` follows two files over. */
+    let hash = ContentHash::parse(&hash)?;
+    let share = state.share_node(&app).await?;
+    share.offer_notes(&hash).await
+}
+
+/// Stop offering one book over one service.
+#[tauri::command]
+pub async fn peer_share_withdraw<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, PeerState>,
+    hash: String,
+    service: ShareService,
+) -> Result<()> {
+    /* ⚠️ **PARSED BEFORE THE ENDPOINT STARTS, NOT AFTER.** `share_node` binds a
+     * UDP port, loads a key and opens the blob store — `share/mod.rs`'s header
+     * is explicit that none of that happens "until a reader turns a book on".
+     * Validating afterwards meant a malformed hash from any caller did all of
+     * it and then failed, so an invalid request had persistent and network side
+     * effects. Cheapest refusal first, which is `checkPage`'s rule and the same
+     * one `answer` follows two files over. */
+    let hash = ContentHash::parse(&hash)?;
+    let share = state.share_node(&app).await?;
+    share.withdraw(&hash, service).await
+}
+
+/// Publish one public annotation record for a book.
+///
+/// ⚠️ **THE RECORD IS OPAQUE HERE.** Its envelope, its signature and its
+/// ordering are phase 26's, in TypeScript; this plugin stores a line and
+/// serves it, and refuses only what would break the file (a newline, an empty
+/// or oversized record, a book already at its cap).
+#[tauri::command]
+pub async fn peer_share_publish_note<R: Runtime>(
+    app: AppHandle<R>,
+    hash: String,
+    record: String,
+) -> Result<u64> {
+    let root = data_root(&app)?;
+    off_thread(move || {
+        let hash = ContentHash::parse(&hash)?;
+        crate::share::notes::append(&root, &hash, record.as_bytes())
+    })
+    .await
+}
+
+/// Fetch a book by its hash and write it into the library.
+///
+/// ⚠️ **`folder` AND `name` ARE THE CALLER'S ANSWER TO "IS THIS THE BOOK I
+/// ALREADY HAVE?"** `mayAdoptIdentity` in `publicShare.ts` decides that, and
+/// the decision IS the folder: a fetched file whose digest disagrees with the
+/// held book's goes into a folder of its own rather than over it. Passing the
+/// held book's folder for bytes that are not the held book is the defect
+/// WI-25.4 exists to prevent, and this command cannot detect it — it has no
+/// library to consult.
+///
+/// `providers` may be empty, in which case discovery is asked.
+#[tauri::command]
+pub async fn peer_share_fetch<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, PeerState>,
+    hash: String,
+    folder: String,
+    name: String,
+    providers: Option<Vec<String>>,
+) -> Result<u64> {
+    /* ⚠️ **EVERY ARGUMENT IS VALIDATED BEFORE THE ENDPOINT STARTS.**
+     * `share_node` binds a UDP port and opens the blob store, and `share/mod.rs`
+     * says none of that happens until a reader turns a book on — so a malformed
+     * hash, or a provider id that is not one, used to do all of it and then
+     * fail. The providers are parsed here too, for the same reason: a caller's
+     * typo should not be a network side effect. */
+    let hash = ContentHash::parse(&hash)?;
+    /* Bare ids, with no address hints: a provider named by a caller — a
+     * friend's answer, a ticket — is resolved by iroh's own address lookup.
+     * The DHT path inside `fetch_book` attaches the hints it announced, which
+     * is where an address is worth having. */
+    let mut ids = Vec::new();
+    for one in providers.unwrap_or_default() {
+        ids.push(iroh::EndpointAddr::from(crate::node::parse_peer_id(&one)?));
+    }
+    let share = state.share_node(&app).await?;
+    share.fetch_book(&hash, &ids, &folder, &name).await
+}
+
+/// Who else claims to serve this book, over this service.
+#[tauri::command]
+pub async fn peer_share_resolve<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, PeerState>,
+    hash: String,
+    service: ShareService,
+) -> Result<Vec<String>> {
+    /* ⚠️ **PARSED BEFORE THE ENDPOINT STARTS, NOT AFTER.** `share_node` binds a
+     * UDP port, loads a key and opens the blob store — `share/mod.rs`'s header
+     * is explicit that none of that happens "until a reader turns a book on".
+     * Validating afterwards meant a malformed hash from any caller did all of
+     * it and then failed, so an invalid request had persistent and network side
+     * effects. Cheapest refusal first, which is `checkPage`'s rule and the same
+     * one `answer` follows two files over. */
+    let hash = ContentHash::parse(&hash)?;
+    let share = state.share_node(&app).await?;
+    let found = share.resolve(&hash, service).await?;
+    Ok(found.providers.iter().map(|id| id.to_string()).collect())
+}
+
+// ── the voice, phase 26 ───────────────────────────────────────────────────
+//
+// ⚠️ **A SECOND SIGNING KEY, AND THE SECOND CONFINED SIGNING COMMAND.**
+// `peer_page_sign` signs `paper.circle.<v>.page\n…` with the ENDPOINT key;
+// `peer_voice_sign` signs `paper.public.<v>.envelope\n…` with the VOICE key.
+// The two domains cannot overlap, so neither key can be made to sign the
+// other's bytes — which is what stops a public annotation being replayed as a
+// circle page and the reverse.
+//
+// None of these starts the share endpoint: a voice is a key and a counter on
+// disk, and a reader who publishes an annotation locally has not yet joined
+// anything.
+
+/// This device's voice, its sequence, and the keys it still holds.
+#[tauri::command]
+pub async fn peer_voice_status<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<crate::share::voice::VoiceStatus> {
+    let root = data_root(&app)?;
+    off_thread(move || crate::share::voice::status(&root)).await
+}
+
+/// The next sequence to publish at.
+///
+/// ⚠️ **PERSISTED BEFORE IT IS ANSWERED.** A crash between the two costs a
+/// skipped sequence, which nothing minds; the other order costs a REUSED one,
+/// which the public fold treats as equivocation and drops — taking the voice's
+/// own annotations with it.
+#[tauri::command]
+pub async fn peer_voice_next_seq<R: Runtime>(app: AppHandle<R>) -> Result<u64> {
+    let root = data_root(&app)?;
+    off_thread(move || crate::share::voice::next_seq(&root)).await
+}
+
+/// Sign a public envelope. `voice` names a retired key, or the current one.
+#[tauri::command]
+pub async fn peer_voice_sign<R: Runtime>(
+    app: AppHandle<R>,
+    message: String,
+    voice: Option<String>,
+) -> Result<String> {
+    let root = data_root(&app)?;
+    off_thread(move || crate::share::voice::sign(&root, &message, voice.as_deref())).await
+}
+
+/// Rotate the voice, keeping the old key until `until`.
+///
+/// ⚠️ **`until` IS WHEN THE OLD KEY MAY GO, AND THE CALLER OWES IT A REAL
+/// NUMBER.** Everything the old voice published carries a signed expiry; the
+/// retention has to outlast the latest of them, or a publication becomes
+/// unwithdrawable while it is still valid.
+#[tauri::command]
+pub async fn peer_voice_rotate<R: Runtime>(
+    app: AppHandle<R>,
+    until: i64,
+) -> Result<crate::share::voice::VoiceStatus> {
+    let root = data_root(&app)?;
+    off_thread(move || crate::share::voice::rotate(&root, until)).await
+}
+
+/// Forget retired keys whose retention has run out.
+#[tauri::command]
+pub async fn peer_voice_sweep<R: Runtime>(app: AppHandle<R>, now: i64) -> Result<usize> {
+    let root = data_root(&app)?;
+    off_thread(move || crate::share::voice::sweep(&root, now)).await
 }

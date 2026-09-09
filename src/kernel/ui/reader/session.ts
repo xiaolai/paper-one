@@ -15,7 +15,7 @@ import {
 } from 'foliate-js/footnotes.js'
 import type { AskPassage } from '../../core/companion'
 import type { ResolvedCfi } from './reanchor'
-import { foreignWeight } from '../../core/circle/foreign'
+import { foreignWeight, type OverlayAudience } from '../../core/circle/foreign'
 import { reanchorPass, type PassOutcome, type PendingMark } from './reanchorPass'
 import { screenPassages } from './passages'
 import { rangeBoxInHost, type HostRect } from './coordinates'
@@ -229,12 +229,27 @@ export interface ForeignAnchor {
    */
   readonly key: string
   /**
+   * Whether this came from the reader's circle or from the public layer.
+   *
+   * ⚠️ **A STRANGER'S MARK WAS DRAWN EXACTLY AS A FRIEND'S.** The public
+   * capability said "stranger" by prefixing the person id it produced, which
+   * `useOverlays` then dropped — so `attachForeign` labelled every one of them
+   * with the circle's painter kind and the reader could not tell a passage
+   * somebody they admitted had marked from one anybody at all had. Provenance
+   * the reader is meant to SEE has to reach the painter. Found by audit.
+   */
+  readonly audience: OverlayAudience
+  /**
    * How many readers marked this passage — see `foreignWeight`.
    *
-   * Weight carries multiplicity because colour cannot: there is ONE neutral
-   * hue for every foreign mark, so the only channel left is how heavy the rule
-   * is. That is what makes *"4 of 11 readers marked this"* legible without a
-   * click, which WI-22.D2's falsifier asks for.
+   * Weight carries multiplicity because colour cannot WITHIN one audience:
+   * there is one neutral hue for every friend, so the only channel left is how
+   * heavy the rule is. That is what makes *"4 of 11 readers marked this"*
+   * legible without a click, which WI-22.D2's falsifier asks for.
+   *
+   * ⚠️ **A PUBLIC MARK CANNOT RAMP ON UNBOUND VOICES**, because keys are free
+   * — `readersAmong` floors at one and an unbound voice adds no identity, so a
+   * thousand of them still draw as one.
    */
   readonly readers: number
 }
@@ -286,6 +301,18 @@ export interface MarkPalette {
    * `readers` says how many, through weight.
    */
   readonly foreign: string
+  /**
+   * The hue a mark from OUTSIDE the circle is drawn in — one, for everybody.
+   *
+   * ⚠️ **QUIETER THAN `foreign`, AND THAT IS THE DECISION.** A friend had to
+   * be admitted; a stranger needs only a key, and keys are free. So the public
+   * layer is the one an attacker can fill, and a treatment that competed with
+   * the reader's own marks would make filling it worth doing. Same SHAPE as a
+   * friend's rule, because a second shape would compete with the companion's
+   * wave — hue is the channel, exactly as it already is between the companion
+   * and a friend.
+   */
+  readonly stranger: string
 }
 
 /**
@@ -1370,7 +1397,7 @@ export class ReaderSession {
         drawn()
         return
       }
-      if (kind === FOREIGN_KIND) {
+      if (kind === FOREIGN_KIND || kind === PUBLIC_KIND) {
         /* ⚠️ **AN UNDERLINE, IN ONE HUE, WITH WEIGHT CARRYING MULTIPLICITY.**
          * The reader's three tints say what THEY meant by a passage; a
          * friend's mark must not claim that vocabulary, so it gets none of
@@ -1382,8 +1409,15 @@ export class ReaderSession {
          * one sentence and fills stack illegibly. Weight is then the only
          * channel left, which is what makes "4 of 11 readers marked this"
          * readable without a click. */
+        /* ⚠️ **AND A STRANGER'S IS QUIETER THAN A FRIEND'S, NOT LOUDER.**
+         * `palette.stranger` is the only channel that separates them — the
+         * shape is the same rule, because a second shape would compete with
+         * the companion's wave — and it is the more recessive of the two on
+         * every theme. A passage somebody you admitted marked is worth more
+         * of your attention than one anybody at all did, and free keys mean
+         * the public layer is the one an attacker can fill. */
         detail.draw(painters.underline, {
-          color: palette.foreign,
+          color: kind === PUBLIC_KIND ? palette.stranger : palette.foreign,
           width: foreignWeight(readersOf(detail.annotation?.['readers'])),
           writingMode,
         })
@@ -3153,6 +3187,18 @@ function annotationFor(
 const FOREIGN_KIND = 'circle'
 
 /**
+ * The `kind` a PUBLIC mark carries through foliate.
+ *
+ * ⚠️ **A SECOND KIND RATHER THAN A FIELD ON THE FIRST**, because `kind` is
+ * what the draw handler's whitelist is written over and what foliate
+ * round-trips untyped. A treatment chosen from an extra property would have to
+ * be read defensively at the painter — the reason `tintOf` and `styleOf` exist
+ * — and a value that failed to round-trip would silently draw a stranger's
+ * mark as a friend's, which is the defect this exists to fix.
+ */
+const PUBLIC_KIND = 'public'
+
+/**
  * What the painter will draw, asked as a WHITELIST.
  *
  * ⚠️ The handler's own note explains why this is not "anything that is not the
@@ -3161,7 +3207,7 @@ const FOREIGN_KIND = 'circle'
  * whitelist by one entry keeps that property; widening the *stored* kinds
  * would not.
  */
-const PAINTABLE_KINDS: readonly string[] = [...ANNOTATION_KINDS, FOREIGN_KIND]
+const PAINTABLE_KINDS: readonly string[] = [...ANNOTATION_KINDS, FOREIGN_KIND, PUBLIC_KIND]
 
 /**
  * How many readers a foreign annotation claims, read defensively.
@@ -3228,7 +3274,7 @@ async function attachForeign(view: View, anchor: ForeignAnchor, remove = false):
       {
         value: anchor.cfi,
         key: anchor.key,
-        kind: FOREIGN_KIND,
+        kind: anchor.audience === 'public' ? PUBLIC_KIND : FOREIGN_KIND,
         readers: anchor.readers,
       },
       remove,

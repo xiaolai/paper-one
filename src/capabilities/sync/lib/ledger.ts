@@ -6,10 +6,10 @@ import {
   defineSetting,
   folderOf,
   mergeCards,
+  messageOf,
   readBook,
   readMarks,
   readPresence,
-  recordPath,
   isContentExtension,
   validMarks,
   type BookRecord,
@@ -329,15 +329,20 @@ export function createLedger({
   }
   const ownRecord = async (book: string): Promise<BookRecord | null> => {
     if (!fs) return null
-    const record = await readBook(fs, book)
-    if (record !== null) return record
-    /* `readBook` answers null for gone AND for broken. Present but
-     * unreadable is a row this device CANNOT SERVE — never one it does not
-     * have. Retryable: a repaired file resumes exactly where this stopped. */
-    if (await fs.exists(recordPath(book))) {
-      throw refuse('unreadable', `book.json for ${book} is there but could not be read`, true)
+    /* Present but unreadable is a row this device CANNOT SERVE — never one it
+     * does not have. Retryable: a repaired file resumes exactly where this
+     * stopped.
+     *
+     * ⚠️ **`readBook` MAKES THE DISTINCTION NOW, so the second read that used
+     * to work out which case this was is gone.** It answered `null` for gone
+     * AND for broken, and this asked `exists` afterwards to tell them apart —
+     * one extra round trip, and a window in which the file could appear or
+     * vanish between the two. */
+    try {
+      return await readBook(fs, book)
+    } catch (cause) {
+      throw refuse('unreadable', messageOf(cause), true)
     }
-    return null
   }
   const rowOf = (book: string) => library.getSnapshot().find((one) => one.bookId === book)
 

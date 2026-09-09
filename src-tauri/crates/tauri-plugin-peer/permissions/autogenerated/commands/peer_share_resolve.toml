@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-share-resolve"
+description = "Enables the peer_share_resolve command without any pre-configured scope."
+commands.allow = ["peer_share_resolve"]
+
+[[permission]]
+identifier = "deny-peer-share-resolve"
+description = "Denies the peer_share_resolve command without any pre-configured scope."
+commands.deny = ["peer_share_resolve"]

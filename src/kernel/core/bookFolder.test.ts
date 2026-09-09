@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { asHlc, hlcOf } from './hlc'
 import { storedBookName, type VaultFs } from './bookVault'
 import { workKey } from './workKey'
@@ -18,6 +18,7 @@ import {
   parseRecord,
   readBook,
   readMarks,
+  MAX_RECORD_FIELD,
   recordFromMeta,
   recordPath,
   setTag,
@@ -689,6 +690,28 @@ describe('readMarks', () => {
  * live one carries on being used. Taking either side whole loses the other's
  * work, which is a fresh way to lose the thing the rescue exists to save.
  */
+describe('recordFromMeta bounds what it returns, as the parser bounds what it reads', () => {
+  it('agrees with parseRecord about a long title and a long list', () => {
+    /* ⚠️ **THE RECORD USED TO DISAGREE WITH ITSELF ACROSS A RELOAD.** This
+       projection wrote whatever the book declared, and `parseRecord` slices
+       prose at `MAX_RECORD_FIELD` and a declared list at 64 — so a 501-
+       character title was returned whole, written whole, and came back one
+       character shorter, with nothing in between saying so. The identifier was
+       already bounded here for this reason; the rest were not. */
+    const fresh = recordFromMeta({
+      title: 'T'.repeat(MAX_RECORD_FIELD + 1),
+      author: 'A'.repeat(MAX_RECORD_FIELD + 1),
+      publisher: 'P'.repeat(MAX_RECORD_FIELD + 1),
+      subjects: Array.from({ length: 65 }, (_, i) => `subject-${i}`),
+      languages: Array.from({ length: 65 }, (_, i) => `lang-${i}`),
+    })
+    const reloaded = parseRecord(JSON.stringify(fresh))
+    expect(reloaded).toEqual(fresh)
+    expect(fresh.title).toHaveLength(MAX_RECORD_FIELD)
+    expect(fresh.subjects).toHaveLength(64)
+  })
+})
+
 describe('mergeStranded', () => {
   const stranded = book({ tags: ['Sea'], position: 'epubcfi(/6/4)', progress: 0.3, addedAt: 10 })
 
@@ -740,6 +763,41 @@ describe('mergeStranded', () => {
     const merged = mergeStranded(stranded, book())
     expect(merged.position).toBe('epubcfi(/6/4)')
     expect(merged.progress).toBe(0.3)
+  })
+
+  it('never splits a position from its own stamp, or from its own progress', () => {
+    /* ⚠️ **THREE FIELDS, ONE READ, CHOSEN SEPARATELY.** `positionAt` is
+       documented as the position group's stamp and simply rode through the
+       spread from the live record, while `position` and `progress` each fell
+       back independently. So a live record with progress but no position
+       produced the stranded side's position beside the live side's progress,
+       dated by a write neither was part of — a place in the book nobody read
+       to. */
+    const at = hlcOf(70)
+    const recovered = mergeStranded(book({ position: 'epubcfi(/6/4)', progress: 0.3, positionAt: hlcOf(10) }), book({ positionAt: at }))
+    expect(recovered.position).toBe('epubcfi(/6/4)')
+    expect(recovered.progress).toBe(0.3)
+    expect(recovered.positionAt).toEqual(hlcOf(10))
+
+    /* A live record holding only PROGRESS owns the group: the stranded
+       position does not join it. */
+    const liveProgress = mergeStranded(book({ position: 'epubcfi(/6/4)', progress: 0.3, positionAt: hlcOf(10) }), book({ progress: 0.9, positionAt: at }))
+    expect(liveProgress).not.toHaveProperty('position')
+    expect(liveProgress.progress).toBe(0.9)
+    expect(liveProgress.positionAt).toEqual(at)
+  })
+
+  it('never splits `finished` from `finishedAt` either', () => {
+    /* The same rule, the other register. A legacy flag recovered from the
+       stranded side used to be dated by the live record's last write. */
+    const recovered = mergeStranded(book({ finished: true, finishedAt: hlcOf(10) }), book({ finishedAt: hlcOf(90) }))
+    expect(recovered.finished).toBe(true)
+    expect(recovered.finishedAt).toEqual(hlcOf(10))
+    /* And a status that wins brings its own side's stamp. */
+    const reading = { state: 'reading' as const, at: hlcOf(40) }
+    const byStatus = mergeStranded(book({ status: reading, finishedAt: hlcOf(30) }), book({ finished: true, finishedAt: hlcOf(90) }))
+    expect(byStatus.finished).toBe(false)
+    expect(byStatus.finishedAt).toEqual(hlcOf(30))
   })
 
   it('is finished if either says so', () => {
@@ -795,6 +853,49 @@ describe('mergeStranded', () => {
  * replay it from.
  */
 describe('updateBook on a record that will not read', () => {
+  /* ⚠️ **`null` MEANT TWO THINGS, AND ONE OF THEM WAS DATA LOSS.** `readBook`
+     answered `null` for a book that is not there AND for one it could not
+     read, so every caller that responds to absence by WRITING would replace a
+     reader's record — their tags, their position — on the strength of a busy
+     disk. `readMarks` calls the same collapse the most destructive line it ever
+     had. These three assertions are the distinction; without them a future
+     `catch { return null }` restores the defect and every other test still
+     passes. */
+  describe('readBook tells absence from damage', () => {
+    it('answers null for a book that is not there', async () => {
+      expect(await readBook(fakeFs({}), 'book_a')).toBeNull()
+    })
+
+    it('THROWS when the record is there and the read fails', async () => {
+      const fs = fakeFs({ [recordPath('book_a')]: '{}' })
+      const wrapped = {
+        ...fs,
+        readFile: async (path: string) => {
+          if (path === recordPath('book_a')) throw new Error('EIO')
+          return fs.readFile(path)
+        },
+      }
+      const cause = await readBook(wrapped, 'book_a').then(
+        () => null,
+        (why: unknown) => why,
+      )
+      expect(cause, 'a failed read was reported as a book that does not exist').toBeInstanceOf(Error)
+      expect((cause as Error).message).toMatch(/EIO/u)
+    })
+
+    it('THROWS when the record is there and will not parse', async () => {
+      const fs = fakeFs({ [recordPath('book_a')]: 'not json at all' })
+      const cause = await readBook(fs, 'book_a').then(
+        () => null,
+        (why: unknown) => why,
+      )
+      expect(cause, 'damage was reported as a book that does not exist').toBeInstanceOf(Error)
+      /* The clause's own words: damage and an unreadable device are different
+         facts and must not share a message. */
+      expect((cause as Error).message).toMatch(/does not parse/u)
+    })
+  })
+
   it('throws rather than quietly doing nothing', async () => {
     const fs = fakeFs({ [recordPath('book_a')]: 'half a write' })
     await expect(updateBook(fs, 'book_a', (r) => ({ ...r, finished: true }))).rejects.toThrow(
@@ -1253,5 +1354,59 @@ describe('the tag register cap', () => {
     expect(() => setTag(full(4096) as never, 'brand-new', true, hlcOf(2))).toThrow(/at most 4096 tag registers/u)
     expect(() => setTag(full(4096) as never, 't0', false, hlcOf(2))).not.toThrow()
     expect(() => setTag(full(4095) as never, 'brand-new', true, hlcOf(2))).not.toThrow()
+  })
+
+  it('keeps the most RECENT registers past the cap, and says it cut them', () => {
+    /* ⚠️ **THE CAP KEPT THE ALPHABETICALLY LUCKIEST, IN SILENCE.** Merging two
+       valid, disjoint full clocks could erase every tag from one of them —
+       whether a reader keeps a tag depended on how it is spelled — and a
+       REMOVAL register dropped that way lets a deleted tag come back the next
+       time the two are merged. Past the bound something must go; what is fixed
+       is what goes, and that anybody is told. */
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      /* Two disjoint full clocks: the `a-` side is early and the `z-` side is
+         late, so alphabetical order and recency order disagree completely —
+         which is the point. */
+      const half = (prefix: string, at: number) =>
+        Object.fromEntries(
+          Array.from({ length: 4096 }, (_, i) => [
+            `${prefix}${i}`,
+            { at: hlcOf(at), on: true, spelling: `${prefix}${i}` },
+          ]),
+        )
+      const merged = mergeStranded(
+        { title: 'T', author: '', tagClock: half('a-', 1) } as never,
+        { title: 'T', author: '', tagClock: half('z-', 2) } as never,
+      )
+      const keys = Object.keys(merged.tagClock!)
+      expect(keys).toHaveLength(4096)
+      expect(keys.every((one) => one.startsWith('z-'))).toBe(true)
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('cuts a read clock the same way, so a write and a read cannot disagree', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const over = Object.fromEntries(
+        Array.from({ length: 4100 }, (_, i) => [
+          `t${i}`,
+          { at: hlcOf(i), on: true, spelling: `t${i}` },
+        ]),
+      )
+      const read = parseRecord(JSON.stringify({ title: 'T', author: 'A', tagClock: over }))
+      expect(Object.keys(read!.tagClock!)).toHaveLength(4096)
+      /* The four EARLIEST went, not the four alphabetically first. */
+      expect(read!.tagClock!['t0']).toBeUndefined()
+      expect(read!.tagClock!['t4099']).toBeDefined()
+      /* And reading the result back changes nothing. */
+      const again = parseRecord(JSON.stringify(read))
+      expect(again!.tagClock).toEqual(read!.tagClock)
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

@@ -889,36 +889,37 @@ async fn person_for_pairing(node: &Node) -> Option<String> {
 /// write is a circle entry the reader can add again, not a reason to throw the
 /// pairing away. Reported so the failure is not silent.
 fn remember_person(node: &Node, person: &str, display_name: &str, device: &str) {
-    use crate::circle::{known_people, set_known_people, KnownPerson, Version};
+    use crate::circle::{update_known_people, KnownPerson, Version};
     let root = node.root();
-    let mut people = match known_people(root) {
-        Ok(people) => people,
-        Err(err) => {
-            log::warn!("circle: could not read the people file: {err}");
-            return;
+    /* ⚠️ **ONE TRANSACTION: the "already there?" test and the push are the same
+     * critical section.** Read separately, two pairings completing together
+     * both saw the person absent and the second write dropped the first — and
+     * the same gap let a hello's roster update be erased by a pairing landing
+     * beside it. See `circle::update_known_people`. */
+    let recorded = update_known_people(root, |people| {
+        if people.iter().any(|k| k.person == person) {
+            return Ok(());
         }
-    };
-    if people.iter().any(|k| k.person == person) {
-        return;
-    }
-    people.push(KnownPerson {
-        person: person.to_owned(),
-        display_name: display_name.to_owned(),
-        /* The empty roster: anything they present next is newer, which is
-        right — the first hello is where their roster comes from. */
-        roster: Version { epoch: 0, hlc: 0 },
-        /* Nothing heard from them yet, so no roster to fingerprint. */
-        roster_hash: String::new(),
-        revoked: Vec::new(),
-        /* ⚠️ **THE ONE DEVICE THIS READER KNOWS IS THEIRS.** It came across a
-         * channel two humans compared six digits over, which is the strongest
-         * evidence in the system — stronger than any later roster. Seeding it
-         * is what lets this person revoke THIS device later and have it acted
-         * on; `KnownPerson::devices` explains why a revocation that is not
-         * bound to its issuer is an eviction primitive for anybody. */
-        devices: vec![device.to_owned()],
+        people.push(KnownPerson {
+            person: person.to_owned(),
+            display_name: display_name.to_owned(),
+            /* The empty roster: anything they present next is newer, which is
+            right — the first hello is where their roster comes from. */
+            roster: Version { epoch: 0, hlc: 0 },
+            /* Nothing heard from them yet, so no roster to fingerprint. */
+            roster_hash: String::new(),
+            revoked: Vec::new(),
+            /* ⚠️ **THE ONE DEVICE THIS READER KNOWS IS THEIRS.** It came across a
+             * channel two humans compared six digits over, which is the strongest
+             * evidence in the system — stronger than any later roster. Seeding it
+             * is what lets this person revoke THIS device later and have it acted
+             * on; `KnownPerson::devices` explains why a revocation that is not
+             * bound to its issuer is an eviction primitive for anybody. */
+            devices: vec![device.to_owned()],
+        });
+        Ok(())
     });
-    if let Err(err) = set_known_people(root, &people) {
+    if let Err(err) = recorded {
         log::warn!("circle: could not record {person}: {err}");
     }
 }

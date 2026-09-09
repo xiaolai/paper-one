@@ -104,7 +104,7 @@ export interface RemoteBooks {
 /* Shared with the other stores — see `wireRow.ts`, which was extracted when
  * `marks.ts` and `cards.ts` turned out to be casting where this file reads. */
 import { byFirstId, num, str, strings } from './wireRow'
-import { READING_STATES, STARS, isContentHash, isHlc, messageOf, type ReadingState, type Stars } from '../../kernel'
+import { READING_STATES, STARS, isContentHash, isHlc, messageOf, notifyAll, type ReadingState, type Stars } from '../../kernel'
 
 /** The formats `services/rows.ts` can send. Anything else reads as unknown. */
 const FORMATS = new Set(['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin'])
@@ -245,7 +245,7 @@ export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
   const listeners = new Set<() => void>()
 
   const publish = () => {
-    for (const listener of [...listeners]) listener()
+    notifyAll(listeners, 'web books')
   }
 
   const setStatus = (next: BooksStatus) => {

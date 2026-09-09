@@ -7,6 +7,8 @@ import {
   offersShare,
   offersUnshare,
   overlayKey,
+  overlayKeyOf,
+  readersAmong,
   shareAbsentBecause,
   type ForeignEntry,
   type Publishability,
@@ -54,17 +56,29 @@ describe('WI-22.D1 — what reaches the painter', () => {
        and the last writer won. `Overlayer.add` already takes a key separate
        from the range; the fork keys on `annotation.key ?? annotation.value`,
        and this is what Paper passes. */
-    expect(overlayKey({ person: 'alice', pub: 'p1' })).not.toBe(
-      overlayKey({ person: 'bob', pub: 'p1' }),
-    )
-    expect(overlayKey({ person: 'alice', pub: 'p1' })).not.toBe(
-      overlayKey({ person: 'alice', pub: 'p2' }),
+    const keyed = (person: string, pub: string) =>
+      overlayKey({ person, opinions: [{ pub, audience: 'circle' as const, author: person }] })
+    expect(keyed('alice', 'p1')).not.toBe(keyed('bob', 'p1'))
+    expect(keyed('alice', 'p1')).not.toBe(keyed('alice', 'p2'))
+    /* The composed spelling and the pre-annotation one are the SAME key —
+       the resolver asks with the second and the painter is handed the first,
+       so a drift between them silently anchors nothing. */
+    expect(keyed('alice', 'p1')).toBe(overlayKeyOf('circle', 'alice', 'p1'))
+  })
+
+  it('keys a stranger apart from a friend who shares a publication id', () => {
+    /* ⚠️ **A VOICE ID AND A PERSON ID ARE BOTH 64 HEX.** Without the audience
+       segment the two layers key onto one another's marks — which is what the
+       public capability's own `public:` literal used to prevent, in a second
+       definition of this namespace that could have moved without this one. */
+    expect(overlayKeyOf('public', 'a'.repeat(64), 'p1')).not.toBe(
+      overlayKeyOf('circle', 'a'.repeat(64), 'p1'),
     )
   })
 
   it('shows the roster name as a claim, and it is never Paper verdict', () => {
     const [annotation] = drawable([entry()], named, always)
-    expect(annotation!.author).toBe('Name of alice')
+    expect(annotation!.opinions[0]!.author).toBe('Name of alice')
   })
 })
 
@@ -79,7 +93,8 @@ describe('WI-22.D2 — a friend mark must not look like yours', () => {
     )
     const drawn = drawable(four, named, always)
     expect(drawn).toHaveLength(1)
-    expect(drawn[0]!.readers).toBe(4)
+    expect(drawn[0]!.people).toEqual(['alice', 'bob', 'carol', 'dan'])
+    expect(readersAmong(drawn[0]!.people)).toBe(4)
   })
 
   it('keeps passages at different anchors separate', () => {
@@ -99,7 +114,7 @@ describe('WI-22.D2 — a friend mark must not look like yours', () => {
       named,
       always,
     )
-    expect(withSecond[0]!.pub).toBe(first[0]!.pub)
+    expect(withSecond[0]!.opinions[0]!.pub).toBe(first[0]!.opinions[0]!.pub)
   })
 
   it('ramps weight and then flattens', () => {
@@ -199,9 +214,41 @@ describe('the last clauses of publishability and the overlay — one row each', 
 
   it('carries a note only when the passage has one', () => {
     const [bare] = drawable([entry()], named, always)
-    expect('note' in bare!).toBe(false)
+    expect('note' in bare!.opinions[0]!).toBe(false)
     const [noted] = drawable([entry({ passage: { quote: 'q', prefix: 'p', suffix: 's', chapter: 'c', note: 'mine' } })], named, always)
-    expect(noted!.note).toBe('mine')
+    expect(noted!.opinions[0]!.note).toBe('mine')
+  })
+
+  it('keeps every publication’s words at one anchor, not just the first', () => {
+    /* ⚠️ **GROUPING IS FOR THE WEIGHT, NOT FOR THE WORDS.** Two readers who
+       marked the same sentence wrote two notes; the mark is one heavier rule
+       and the notes are two. This dropped the second silently — it was parsed,
+       admitted, anchored, and then discarded by the grouping. */
+    const passage = (note: string) => ({ quote: 'q', prefix: 'p', suffix: 's', chapter: 'c', note })
+    const [both] = drawable(
+      [
+        entry({ pub: 'p1', passage: passage('mine') }),
+        entry({ pub: 'p2', person: 'bob', passage: passage('and mine') }),
+      ],
+      named,
+      always,
+    )
+    expect(both!.opinions.map((one) => one.note)).toEqual(['mine', 'and mine'])
+    expect(both!.opinions.map((one) => one.author)).toEqual(['Name of alice', 'Name of bob'])
+  })
+
+  it('keeps both notes when ONE person marked the same passage twice', () => {
+    /* The count says one reader and there are still two notes — the case that
+       made the loss invisible, because the row was dropped for the right
+       reason (a reader already counted) and took the words with it. */
+    const passage = (note: string) => ({ quote: 'q', prefix: 'p', suffix: 's', chapter: 'c', note })
+    const [one] = drawable(
+      [entry({ pub: 'p1', passage: passage('first') }), entry({ pub: 'p2', passage: passage('second') })],
+      named,
+      always,
+    )
+    expect(one!.people).toEqual(['alice'])
+    expect(one!.opinions.map((each) => each.note)).toEqual(['first', 'second'])
   })
 })
 
@@ -209,9 +256,21 @@ describe('readers are people, not entries', () => {
   it('counts one person once however many passages they placed at the anchor, and two people twice', () => {
     const one = drawable([entry(), entry({ pub: 'pub2' })], named, always)
     expect(one).toHaveLength(1)
-    expect(one[0]!.readers).toBe(1)
+    expect(one[0]!.people).toEqual(['alice'])
     const two = drawable([entry(), entry({ pub: 'pub2', person: 'bob' })], named, always)
-    expect(two[0]!.readers).toBe(2)
+    expect(two[0]!.people).toEqual(['alice', 'bob'])
+  })
+})
+
+describe('nobody identifiable is one reader, never none', () => {
+  it('floors an empty set at one, because a mark on the page had somebody behind it', () => {
+    /* ⚠️ **AND ONE IS ALSO THE CEILING FOR THAT CASE.** An anchor a thousand
+       unbound voices marked carries no identities at all — `reconcile` leaves
+       every one of them out — so the floor is what draws it and the count
+       cannot be inflated by minting keys. */
+    expect(readersAmong([])).toBe(1)
+    expect(readersAmong(['alice'])).toBe(1)
+    expect(readersAmong(['alice', 'bob'])).toBe(2)
   })
 })
 

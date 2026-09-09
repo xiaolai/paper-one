@@ -54,6 +54,22 @@ const COMMANDS: &[&str] = &[
     "peer_circle_remember",
     "peer_circle_revoke",
     "peer_circle_forget",
+    // Phase 25 — public sharing. `peer_share_offered` reads the policy file
+    // and starts nothing; every other one starts the share endpoint.
+    "peer_share_offered",
+    "peer_share_offer_bytes",
+    "peer_share_offer_notes",
+    "peer_share_withdraw",
+    "peer_share_publish_note",
+    "peer_share_resolve",
+    "peer_share_fetch",
+    // Phase 26 — the voice: a second signing key, confined to public
+    // envelopes the way `peer_page_sign` is confined to circle pages.
+    "peer_voice_status",
+    "peer_voice_next_seq",
+    "peer_voice_sign",
+    "peer_voice_rotate",
+    "peer_voice_sweep",
 ];
 
 fn main() {

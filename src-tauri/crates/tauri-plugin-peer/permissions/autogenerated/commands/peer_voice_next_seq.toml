@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-voice-next-seq"
+description = "Enables the peer_voice_next_seq command without any pre-configured scope."
+commands.allow = ["peer_voice_next_seq"]
+
+[[permission]]
+identifier = "deny-peer-voice-next-seq"
+description = "Denies the peer_voice_next_seq command without any pre-configured scope."
+commands.deny = ["peer_voice_next_seq"]

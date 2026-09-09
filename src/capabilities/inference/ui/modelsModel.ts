@@ -1,4 +1,4 @@
-import { messageOf } from '../../../kernel'
+import { messageOf, notifyAll } from '../../../kernel'
 import type { SettingsStore } from '../../../kernel'
 import { createGenerations } from '../../../kernel'
 import type { Controller, InferenceSnapshot, ReportFailure, RuntimeState } from '../lib/controller'
@@ -232,7 +232,7 @@ export function createModelsModel({ controller, plugin, settings, report, audio 
   const generations = createGenerations()
 
   const emit = (): void => {
-    for (const listener of [...listeners]) listener()
+    notifyAll(listeners, 'models')
   }
 
   /* One cached object per state, so `useSyncExternalStore` sees a stable

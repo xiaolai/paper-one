@@ -213,8 +213,42 @@ pub trait Keychain: Send + Sync + fmt::Debug {
 #[derive(Debug)]
 pub struct OsKeychain;
 
+/// The platforms this build has a real credential store for.
+///
+/// ⚠️ **KEYRING'S DEFAULT WHEN NOTHING IS CONFIGURED IS A MOCK, AND A MOCK
+/// LOSES THE PERSON ROOT WITHOUT SAYING SO.** `Cargo.toml` enables
+/// `apple-native`, `windows-native` and `sync-secret-service` — there is no
+/// Android backend among them, and keyring 3 falls back to an in-memory store
+/// that is scoped to the `Entry`. Every method below makes a FRESH entry, so a
+/// write there reports success into a store that is dropped on the next line
+/// and the following read finds nothing. The root that identifies the reader to
+/// their circle would vanish between two calls, silently, for ever. Found by
+/// audit.
+///
+/// ⚠️ **REFUSED RATHER THAN EMULATED.** A file beside the key is not an
+/// answer: `tauri-plugin-inference` already wrote down that the only honest
+/// durable store is the keychain, and `identity.rs` keeps `peer/` out of
+/// backups precisely because a plaintext sibling is not one. Giving Android a
+/// real backend is a change to what this app stores where, which is a decision
+/// rather than a defect fix — and until it is made, saying so is better than a
+/// store that forgets. Android composes `peer`, `sync` and `public`, none of
+/// which needs this; the person commands are reachable and now answer honestly.
+const HAS_CREDENTIAL_STORE: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux"
+));
+
 impl OsKeychain {
     fn entry(account: &str) -> Result<keyring::Entry> {
+        if !HAS_CREDENTIAL_STORE {
+            return Err(Error::Identity(
+                "this platform has no credential store this build can use, so a person root \
+                 cannot be kept here; nothing was stored"
+                    .into(),
+            ));
+        }
         keyring::Entry::new(KEYCHAIN_SERVICE, account)
             .map_err(|e| Error::Identity(format!("keychain unavailable: {e}")))
     }
@@ -303,7 +337,7 @@ pub struct PersonId(String);
 
 impl PersonId {
     fn of(key: &VerifyingKey) -> Self {
-        Self(hex(key.as_bytes()))
+        Self(crate::keyfile::hex(key.as_bytes()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -315,14 +349,6 @@ impl fmt::Display for PersonId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
 }
 
 /// Where the device role is written.
@@ -750,7 +776,7 @@ pub fn sign_delegation(
     let signature: Signature = key.sign(&delegation.signed_bytes());
     Ok(SignedDelegation {
         delegation,
-        signature: hex(&signature.to_bytes()),
+        signature: crate::keyfile::hex(&signature.to_bytes()),
     })
 }
 
@@ -784,7 +810,7 @@ pub fn sign_as_person(
     let phrase = root(keychain)?
         .ok_or_else(|| Error::Identity("this device does not hold the person root".into()))?;
     let signature: Signature = phrase.signing_key().sign(&domained(domain, payload));
-    Ok(hex(&signature.to_bytes()))
+    Ok(crate::keyfile::hex(&signature.to_bytes()))
 }
 
 /// Whether `person` really signed those bytes under that domain.
@@ -1020,6 +1046,49 @@ pub(crate) mod testkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⚠️ **THE FEATURE LIST AND THIS CONSTANT MUST AGREE, AND NOTHING ELSE
+    /// CHECKS THAT.** `Cargo.toml` enables `apple-native`, `windows-native` and
+    /// `sync-secret-service`; if a backend is added or dropped there and this
+    /// is not updated, the mismatch is silent in exactly the direction that
+    /// hurts — a platform believed to have a store, writing into a mock that
+    /// forgets the person root between two calls.
+    #[test]
+    fn this_platform_agrees_with_the_backends_the_manifest_enables() {
+        let manifest = include_str!("../Cargo.toml");
+        let keyring = manifest
+            .split("keyring = {")
+            .nth(1)
+            .expect("the manifest still depends on keyring");
+        let block = &keyring[..keyring.find('}').expect("the keyring block is closed")];
+
+        let expected = cfg!(target_os = "macos") && block.contains("apple-native")
+            || cfg!(target_os = "ios") && block.contains("apple-native")
+            || cfg!(target_os = "windows") && block.contains("windows-native")
+            || cfg!(target_os = "linux") && block.contains("secret-service");
+        assert_eq!(
+            HAS_CREDENTIAL_STORE, expected,
+            "the manifest's keyring backends and HAS_CREDENTIAL_STORE disagree about this platform"
+        );
+    }
+
+    /// The other half, so the refusal cannot be satisfied by refusing
+    /// everywhere: where a backend IS configured, an entry is obtainable.
+    ///
+    /// `cfg`-gated rather than asserted — `HAS_CREDENTIAL_STORE` is a `const`,
+    /// so asserting it compiles to `assert!(true)` here and to a test that
+    /// always fails on a platform without one. Clippy's constant-assertion lint
+    /// is what pointed that out.
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn a_platform_with_a_store_can_open_an_entry() {
+        assert!(OsKeychain::entry("paper-test-account").is_ok());
+    }
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -1663,8 +1732,14 @@ mod tests {
         let seed: [u8; 32] = unhex(SEED).unwrap().try_into().unwrap();
         let key = SigningKey::from_bytes(&seed);
 
-        assert_eq!(hex(key.verifying_key().as_bytes()), PUBLIC_KEY);
-        assert_eq!(hex(&key.sign(MESSAGE.as_bytes()).to_bytes()), SIGNATURE);
+        assert_eq!(
+            crate::keyfile::hex(key.verifying_key().as_bytes()),
+            PUBLIC_KEY
+        );
+        assert_eq!(
+            crate::keyfile::hex(&key.sign(MESSAGE.as_bytes()).to_bytes()),
+            SIGNATURE
+        );
 
         /* And it verifies the way `verify_as_person` would — the path the
         receiving side actually takes, not just the signing one. */

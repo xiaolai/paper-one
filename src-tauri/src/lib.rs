@@ -59,6 +59,23 @@ fn mcp_bridge_port() -> u16 {
 #[cfg(feature = "desktop")]
 const TRAY_QUIT_ID: &str = "paper-tray-quit";
 
+/// Emitted once this process is entitled to touch the library.
+///
+/// ⚠️ **A STRING, SO THIS FILE NAMES NO PLUGIN.** Plugins are initialised
+/// before this crate's `setup`, where the library lock is taken — so a plugin's
+/// launch work would otherwise run in a process the lock is about to refuse,
+/// and a second Paper was deleting `.part` staging files out of the holder's
+/// library. Telling them by calling into one would make that plugin
+/// unremovable: `capability:remove` refuses a `lib.rs` still naming a crate
+/// after its `.plugin()` line is cut, and `removal.test.mjs` holds it to that.
+///
+/// ⚠️ **THE SPELLING IS DUPLICATED ON PURPOSE AND CHECKED BY A TEST.** The
+/// listener side is `tauri_plugin_peer::LIBRARY_HELD_EVENT`; the two cannot
+/// import from each other without recreating the coupling this avoids, so
+/// `scripts/library-held-event.test.mjs` asserts the literals agree. A silent
+/// drift here is a plugin that waits for ever.
+const LIBRARY_HELD: &str = "paper://library-held";
+
 /// Put the menu-bar icon up and make it toggle the window.
 ///
 /// The asset is named `tray-iconTemplate@2x.png` deliberately: macOS keys the
@@ -591,6 +608,16 @@ pub fn run() {
              * directory is refused rather than racing the first's trash sweep,
              * and a crashed holder on this host is reclaimed. The refusal is a
              * native dialog: there is no webview yet to draw one. */
+            /* ⚠️ **A BUILD WITH NO LIBRARY LOCK OPENS THE GATE AT ONCE.** The
+             * lock is `desktop`-only: a phone has no second Paper to race and
+             * nothing to wait for, so a gate left shut there is a device that
+             * never sweeps its `.part` files and never resumes what it offers.
+             * The desktop branch below opens it once `lock::acquire` answers.
+             * Both live in THIS crate, because `desktop` is this crate's
+             * feature — the plugin cannot ask about it and must not guess. */
+            #[cfg(not(feature = "desktop"))]
+            let _ = tauri::Emitter::emit(app, LIBRARY_HELD, ());
+
             #[cfg(feature = "desktop")]
             {
                 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -603,6 +630,19 @@ pub fn run() {
                             root.display()
                         );
                         tauri::Manager::manage(app, held);
+                        /* ⚠️ **PLUGINS WAIT FOR THIS, AND THEY USED TO START
+                         * WITHOUT IT.** Tauri initialises plugins before this
+                         * `setup` runs, so a plugin's launch work happened in a
+                         * process the lock had not yet judged — a second Paper
+                         * about to be refused was deleting `.part` staging files
+                         * out of the holder's library. Nothing that touches the
+                         * library runs until this is emitted.
+                         *
+                         * ⚠️ **AN EVENT, SO THIS FILE NAMES NO PLUGIN.**
+                         * `capability:remove` refuses a `lib.rs` that still
+                         * references a crate after its `.plugin()` line is cut,
+                         * and `removal.test.mjs` holds it to that. */
+                        let _ = tauri::Emitter::emit(app, LIBRARY_HELD, ());
                     }
                     Err(refused) => {
                         let (title, body) = lock::refusal_text(&refused, &root);

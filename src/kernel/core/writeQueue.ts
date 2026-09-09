@@ -36,6 +36,21 @@ export interface WriteQueue {
    */
   append: (key: string, task: Task) => Promise<void>
   /**
+   * Run after everything already queued, and NEVER at the cost of the reader's
+   * own writing.
+   *
+   * ⚠️ **THE CAP `append` GAINED TREATED PUBLIC ARRIVALS AND THE READER'S OWN
+   * EDITS IDENTICALLY**, so filling a book's queue with public tasks made the
+   * next private edit reject — the exact objective WI-26.7 states, inverted.
+   * Found by audit. A task queued through here is refused earlier, at
+   * {@link MAX_APPENDED_SHARED}, which leaves the rest of the line for `append`
+   * and `push`.
+   *
+   * The lane is still SHARED, deliberately: a public write on an unrelated
+   * queue races rekeying and deletion. What is not shared is the whole of it.
+   */
+  appendShared: (key: string, task: Task) => Promise<void>
+  /**
    * Resolves when nothing is running or waiting, on any key.
    *
    * For the one moment that cannot be deferred: the window closing. Everything
@@ -56,7 +71,52 @@ interface Waiting {
   readonly mode: Mode
 }
 
-type Mode = 'replace' | 'append'
+type Mode = 'replace' | 'append' | 'shared'
+
+/**
+ * The most appended tasks one key may have waiting — WI-26.7.
+ *
+ * ⚠️ **`append` HAD NO LENGTH LIMIT, AND `push` DOES NOT NEED ONE.** A
+ * `replace` supersedes its predecessor, so a line of them is at most one deep
+ * however fast they arrive; an `append` supersedes nothing, deliberately, so
+ * the line is as long as the caller makes it. That was safe while every caller
+ * was the reader — a tag, then finished, then a position — and stops being safe
+ * the moment a caller is a STRANGER's arrival rate.
+ *
+ * Public annotations arrive on the book's lane (they must: a public write on an
+ * unrelated queue races rekeying and deletion), so a flood of them is a flood
+ * of appended tasks on the same key the reader's own note is waiting on. The
+ * cap is what keeps the reader's write from being scheduled behind an
+ * attacker's thousand.
+ *
+ * ⚠️ **AND THE REFUSAL IS THE POINT — A QUEUE THAT GROWS INSTEAD OF REFUSING IS
+ * NOT A BOUND.** The task is not run and its promise REJECTS, so the caller
+ * finds out. A version that dropped it silently would be the same defect
+ * wearing an answer.
+ *
+ * Two hundred and fifty-six is far past any sequence of acts a reader performs
+ * on one book and far under anything that costs memory.
+ */
+export const MAX_APPENDED = 256
+
+/**
+ * The most SHARED-LANE tasks one key may have waiting — the public layer's
+ * share of `MAX_APPENDED`.
+ *
+ * ⚠️ **RESERVING THE REST FOR THE READER IS THE WHOLE POINT.** Half the line
+ * is far more than a flood needs to make progress and leaves a hundred and
+ * twenty-eight places no stranger can take, which is what "the reader's own
+ * note is not scheduled behind an attacker's thousand" has to mean.
+ */
+export const MAX_APPENDED_SHARED = MAX_APPENDED / 2
+
+/** What `append` rejects with when a key's line is full. */
+export class WriteQueueFull extends Error {
+  constructor(readonly key: string) {
+    super(`writeQueue: ${key} already has ${MAX_APPENDED} writes waiting`)
+    this.name = 'WriteQueueFull'
+  }
+}
 
 export function writeQueue(): WriteQueue {
   /** What is running, per key. */
@@ -98,6 +158,23 @@ export function writeQueue(): WriteQueue {
       const settle = (failure?: { error: unknown }) =>
         failure ? reject(failure.error as Error) : resolve()
       const line = pending.get(key) ?? []
+      /* ⚠️ **CHECKED BEFORE THE TASK IS ENQUEUED, NOT AFTER.** A bound that
+         ran later would have already taken the memory it exists to refuse —
+         `importLimits.ts`'s rule, on a queue rather than on a read. A
+         `replace` line cannot exceed one waiting task plus however many
+         appends are ahead of it, so only the appended ones are counted.
+
+         ⚠️ **AND A SHARED-LANE TASK IS REFUSED EARLIER THAN THE READER'S OWN.**
+         One cap for both meant a book's queue filled with public arrivals made
+         the reader's next edit reject — WI-26.7's objective inverted, found by
+         audit. `appendShared` gets half the line; the other half is the
+         reader's and no stranger can take it. */
+      const waitingAppends = line.filter((one) => one.mode === 'append' || one.mode === 'shared').length
+      const cap = mode === 'shared' ? MAX_APPENDED_SHARED : MAX_APPENDED
+      if (mode !== 'replace' && waitingAppends >= cap) {
+        reject(new WriteQueueFull(key))
+        return
+      }
       if (mode === 'replace') {
         /* ONLY OTHER WHOLE-STATE WRITES ARE SUPERSEDED. Clearing the line
          * outright also threw away appended tasks — and those READ the file and
@@ -112,19 +189,47 @@ export function writeQueue(): WriteQueue {
         for (const waiting of line) {
           if (waiting.mode === 'replace') waiting.settle()
         }
-        const kept = line.filter((waiting) => waiting.mode === 'append')
+        const kept = line.filter((waiting) => waiting.mode !== 'replace')
         line.length = 0
         line.push(...kept)
       }
       line.push({ task, settle, mode })
       pending.set(key, line)
       if (running.has(key)) return
-      running.set(key, drain(key))
+      /* ⚠️ **THE KEY IS REGISTERED BEFORE THE FIRST TASK RUNS, AND IT WAS
+         NOT.** This read `running.set(key, drain(key))`, which evaluates the
+         CALL first — and an `async` body runs synchronously up to its first
+         `await`. That await is `await next.task()`, so the task was already
+         running while the key was still unregistered. A task that synchronously
+         enqueued another write on the same key therefore saw
+         `running.has(key)` as false and started a SECOND drain: two drains
+         interleaving on one key, which is the single thing this queue exists to
+         prevent. If the second finished first it also ran `running.delete(key)`,
+         leaving the outer promise registered under a key nothing would ever
+         clear — every later write for that book queued behind it and `idle()`
+         never returned. Found by audit.
+
+         ⚠️ **AND THE DRAIN IS NOT DELAYED TO ACHIEVE THAT.** Starting it a
+         microtask later also registers the key in time, and changes which
+         tasks are supersedable: the first task no longer begins synchronously,
+         so a `push` arriving immediately after can replace work that had
+         already started. Three of this file's own tests say so. The key is
+         CLAIMED synchronously with a placeholder instead, and the real drain
+         starts in the same tick it always did. */
+      let ran: () => void = () => {}
+      running.set(
+        key,
+        new Promise<void>((done) => {
+          ran = done
+        }),
+      )
+      void drain(key).finally(ran)
     })
 
   return {
     push: (key, task) => enqueue(key, task, 'replace'),
     append: (key, task) => enqueue(key, task, 'append'),
+    appendShared: (key, task) => enqueue(key, task, 'shared'),
     async idle() {
       /* LOOPED, because draining one key can enqueue another — the library
        * writes a book's record and then the index, on a different key, from

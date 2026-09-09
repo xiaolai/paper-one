@@ -11,6 +11,19 @@ WI-22.B1, whose root key never leaves the keychain except as the twelve words a
 reader asked to see.
 Every path the plugin touches is validated to lie inside the data root, and
 every session is accepted only from a persisted peer.
+
+And public sharing (phase 25): what this machine offers by content hash, the
+two independent switches per book (its bytes, and public annotations about it),
+publishing one annotation record, and asking who else serves a hash. Offering
+anything is PUBLICATION into a global index and cannot be undone; withdrawing
+stops this machine serving and does not un-tell. Default off, per book, per
+service, and asked again on every request.
+
+And the voice (phase 26): the key a reader publishes to strangers under, its
+durable sequence, rotation with the old key retained so what it published can
+still be withdrawn, and signing. The signing command is confined to
+`paper.public.<version>.envelope` bytes exactly as `peer_page_sign` is confined
+to circle pages, so neither key can be made to sign the other's.
 """
 permissions = [
     "allow-peer-status",
@@ -46,4 +59,16 @@ permissions = [
     "allow-peer-circle-remember",
     "allow-peer-circle-revoke",
     "allow-peer-circle-forget",
+    "allow-peer-share-offered",
+    "allow-peer-share-offer-bytes",
+    "allow-peer-share-offer-notes",
+    "allow-peer-share-withdraw",
+    "allow-peer-share-publish-note",
+    "allow-peer-share-resolve",
+    "allow-peer-share-fetch",
+    "allow-peer-voice-status",
+    "allow-peer-voice-next-seq",
+    "allow-peer-voice-sign",
+    "allow-peer-voice-rotate",
+    "allow-peer-voice-sweep",
 ]

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { overlayKey, type ForeignAnnotation } from '../../core/circle/foreign'
+import { overlayKey, readersAmong, type ForeignAnnotation } from '../../core/circle/foreign'
 import type { OverlayContribution, ResolvePort } from '../../core/circle/overlay'
 import type { ForeignAnchor } from '../reader/session'
 
@@ -135,7 +135,7 @@ export function useOverlays(deps: OverlayDeps): readonly ForeignAnchor[] {
       )
       const commit = () => {
         if (!live || request.current !== mine) return
-        const collected = answers.flat().map(anchorFor)
+        const collected = reconciled(answers.flat())
         const next: Held = { stamp, anchors: collected.length === 0 ? NONE : collected }
         /* ⚠️ **AN UNCHANGED ANSWER MUST NOT BE A NEW STATE.** Every `ask` used
          * to allocate, so re-rendering was unconditional — and a host that
@@ -227,6 +227,7 @@ function showsTheSame(prev: Held, next: Held): boolean {
       one.key === other.key &&
       one.cfi === other.cfi &&
       one.sectionIndex === other.sectionIndex &&
+      one.audience === other.audience &&
       one.readers === other.readers
     )
   })
@@ -242,19 +243,63 @@ function safely(off: () => void): void {
 }
 
 /**
- * A contributed annotation as the painter's door takes it.
+ * Every contribution's annotations, reconciled across them and keyed for the
+ * painter's door.
  *
  * ⚠️ **THE KEY IS COMPOSED HERE and not by the contributor**, so `n` readers on
  * one passage are `n` overlay entries whatever a capability chose to call
  * things. `review.md`'s overlay blocker 1 is the collapse this prevents, and
  * leaving the key to the contributor would make the fix depend on every one of
  * them getting it right.
+ *
+ * ⚠️ **AND THE COUNT IS TAKEN HERE, FOR THE REASON THE KEY IS.** This used to
+ * be `answers.flat().map(...)` — every contribution's annotations laid end to
+ * end, each carrying its own `readers`. Nothing reconciled ACROSS them, so one
+ * person who marked a passage in the circle and also published a bound voice
+ * at it arrived twice, claiming one reader each, and was drawn as two people.
+ * Each contribution can only dedupe within its own input; the union is the
+ * host's, because the host is the only thing that sees both. WI-26.6 states
+ * the rule and named this function as the place it was missing.
+ *
+ * ⚠️ **THE FIRST CONTRIBUTION AT AN ANCHOR OWNS THE KEY AND THE TREATMENT**,
+ * and contributions arrive in the composition's order — so a passage a friend
+ * marked is drawn as a friend's even when a stranger marked it too, and the
+ * stranger's words are kept on the merged entry rather than drawn as a second
+ * identical rule over the first.
  */
-function anchorFor(annotation: ForeignAnnotation): ForeignAnchor {
-  return {
-    cfi: annotation.cfi,
-    sectionIndex: annotation.sectionIndex,
-    key: overlayKey(annotation),
-    readers: annotation.readers,
+function reconciled(annotations: readonly ForeignAnnotation[]): readonly ForeignAnchor[] {
+  const byAnchor = new Map<string, { anchor: ForeignAnchor; people: Set<string> }>()
+  for (const annotation of annotations) {
+    /* ⚠️ **A CONTRIBUTION IS A CAPABILITY, AND THIS HOST NEVER LETS ONE OF
+       THEM COST THE READER THE OTHERS' MARKS.** `opinions` is declared
+       non-empty and `overlayKey` throws on an empty one — correctly, since
+       there is no key to compose — but the throw would land in `commit`,
+       outside the per-contribution catch, and take every other contributor's
+       marks off the page with it. Skipped and said out loud instead. */
+    const first = annotation.opinions[0]
+    if (first === undefined) {
+      console.warn('Paper: an overlay contribution offered an annotation with no publication', annotation)
+      continue
+    }
+    const at = `${annotation.sectionIndex}#${annotation.cfi}`
+    const seen = byAnchor.get(at)
+    if (seen !== undefined) {
+      for (const person of annotation.people) seen.people.add(person)
+      continue
+    }
+    byAnchor.set(at, {
+      people: new Set(annotation.people),
+      anchor: {
+        cfi: annotation.cfi,
+        sectionIndex: annotation.sectionIndex,
+        key: overlayKey(annotation),
+        audience: first.audience,
+        readers: 0,
+      },
+    })
   }
+  return [...byAnchor.values()].map(({ anchor, people }) => ({
+    ...anchor,
+    readers: readersAmong([...people]),
+  }))
 }

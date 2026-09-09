@@ -117,6 +117,50 @@ keyring = { version = "3", features = [
     "windows-native",
     "sync-secret-service",
 ] }
+# Verified range transfer on the SHARE endpoint — phase 25, WI-25.3. It carries
+# `bao-tree` 0.16, which is the BLAKE3 verified streaming that makes a chunk
+# trustworthy AS IT LANDS rather than after the whole file; that is the whole
+# reason it is here, and `share/acceptance.rs` measures it by corrupting one
+# provider's file after import and requiring the fetch from the honest one to
+# still complete.
+#
+# ⚠️ **IT DEPENDS ON `iroh = "1.0.0"`, THE SAME MAJOR LINE AS THE PINNED 1.0.3**,
+# so it resolves to ONE iroh rather than pulling a second. Checked by running
+# it, not by reading: `cargo add` reported 26 new packages and no second iroh.
+#
+# `default-features = false` drops `rpc`, which would pull `noq` and an irpc
+# endpoint this plugin has no use for — the store is reached in-process. Kept:
+# `fs-store`, because a public store must survive a restart, and because
+# `ImportMode::TryReference` lets a book be served from the vault in place
+# rather than copied into a second library.
+#
+# The old `blobs.rs` path is UNTOUCHED. It answers a different question — this
+# file, from a peer I know — with its own auth, resume and budgets. Converging
+# them is a later decision.
+iroh-blobs = { version = "0.103", default-features = false, features = ["fs-store"] }
+# hash → provider, over the BitTorrent mainline DHT — WI-25.7.
+#
+# ⚠️ **NOTHING OPENS A DHT SOCKET UNTIL A READER OFFERS A BOOK.** Joining means
+# bootstrapping against public routers and publishing this machine's address
+# against a book's topic; it is the loudest thing the app does, so it is behind
+# `SharePolicy` (default off, per book, per service) and behind a lazy
+# `OnceCell`. `ShareConfig.dht` is `false` in every test.
+#
+# `default-features = false` with `async` only: `full` is `async` today and a
+# feature that grows is a feature that grows silently. `mainline::Testnet` —
+# a handful of nodes on loopback — is what turned an untestable spike into five
+# passing tests, and it comes with the crate rather than with a feature.
+#
+# ⚠️ **IT WANTS `ed25519-dalek = "3.0.0-pre.1"` AND WE PIN `"3"`**, which
+# unifies: `cargo add` reported 8 new packages and no second dalek. A second
+# copy of the signing crate would be two verifiers behind one `SecretKey`.
+mainline = { version = "8", default-features = false, features = ["async"] }
+# `StreamExt::next()` over `mainline`'s `GetStream`. ALREADY IN THE TREE — it is
+# `mainline`'s own dependency under the `async` feature — so this adds a direct
+# path to a crate that was being compiled anyway rather than a new one, which is
+# the same argument `ed25519-dalek` above makes for itself. The alternative was
+# hand-polling a `Stream` at two call sites.
+futures-lite = { version = "2", default-features = false, features = ["std"] }
 
 # `O_NOFOLLOW` for the blob file opens, so a planted final-component symlink
 # fails the open rather than being followed out of the data root. Unix only;

@@ -19,6 +19,10 @@ import type {
   TransferProgress,
   Unsubscribe,
   WirePeer,
+  RetiredVoice,
+  SharedBook,
+  ShareService,
+  VoiceStatus,
 } from './wire'
 
 /**
@@ -553,6 +557,156 @@ class FakeWireImpl implements FakeWire {
     let hash = 0
     for (const ch of message) hash = (hash * 31 + ch.codePointAt(0)!) >>> 0
     return Promise.resolve(hash.toString(16).padStart(8, '0').repeat(16))
+  }
+
+  /* ── public sharing, phase 25 ─────────────────────────────────────────
+   *
+   * ⚠️ **THE FAKE ENFORCES DEFAULT-OFF AND THE TWO-SWITCH SPLIT**, because a
+   * fake that quietly said yes would let a caller pass its tests while
+   * implementing exactly the conflation WI-25.9 exists to prevent — offering a
+   * book's bytes as a side effect of publishing an opinion about it.
+   *
+   * It does NOT fake the network. `shareResolve` answers whatever a test put
+   * in `providers`: a fake DHT is a fake nobody could trust, and the real one
+   * is measured in `share/dht.rs` against `mainline::Testnet`.
+   */
+
+  /** What this fake offers publicly. Keyed by content hash. */
+  offered = new Map<string, { bytes: boolean; notes: boolean; records: string[]; unreadable?: boolean }>()
+
+  /** What `shareResolve` answers, per `<hash>:<service>`. */
+  providers = new Map<string, readonly string[]>()
+
+  private switches(hash: string): { bytes: boolean; notes: boolean; records: string[]; unreadable?: boolean } {
+    const held = this.offered.get(hash)
+    if (held !== undefined) return held
+    const fresh = { bytes: false, notes: false, records: [] as string[] }
+    this.offered.set(hash, fresh)
+    return fresh
+  }
+
+  shareOffered(): Promise<readonly SharedBook[]> {
+    return Promise.resolve(
+      [...this.offered.entries()]
+        .filter(([, held]) => held.bytes || held.notes)
+        .map(([hash, held]) => ({
+          hash,
+          bytes: held.bytes,
+          notes: held.notes,
+          /* `null` models an annotation file the device could not read — the
+             case the real command reports when `notes::count` fails. */
+          noteCount: held.unreadable === true ? null : held.records.length,
+        })),
+    )
+  }
+
+  /** What `shareOfferBytes` was asked to offer, in order. */
+  offeredBytes: { readonly folder: string; readonly name: string; readonly hash: string }[] = []
+
+  shareOfferBytes(folder: string, name: string, hash: string): Promise<void> {
+    this.offeredBytes.push({ folder, name, hash })
+    this.switches(hash).bytes = true
+    return Promise.resolve()
+  }
+
+  shareOfferNotes(hash: string): Promise<void> {
+    /* ⚠️ **`bytes` IS NOT TOUCHED.** The one line this fake exists to get
+       right — see the block comment above. */
+    this.switches(hash).notes = true
+    return Promise.resolve()
+  }
+
+  shareWithdraw(hash: string, service: ShareService): Promise<void> {
+    const held = this.switches(hash)
+    if (service === 'bytes') held.bytes = false
+    else {
+      held.notes = false
+      /* Withdrawing notes DELETES the records, as the real command does. */
+      held.records = []
+    }
+    return Promise.resolve()
+  }
+
+  sharePublishNote(hash: string, record: string): Promise<number> {
+    const held = this.switches(hash)
+    held.records.push(record)
+    return Promise.resolve(held.records.length)
+  }
+
+  shareResolve(hash: string, service: ShareService): Promise<readonly string[]> {
+    return Promise.resolve(this.providers.get(`${hash}:${service}`) ?? [])
+  }
+
+  /** Every fetch this fake was asked for, in order — the folder above all. */
+  fetched: { readonly hash: string; readonly folder: string; readonly name: string }[] = []
+
+  /** Bytes the fake pretends each hash is worth. Absent means nobody serves it. */
+  fetchable = new Map<string, number>()
+
+  /* ── the voice, phase 26 ──────────────────────────────────────────────
+   *
+   * ⚠️ **THE FAKE ENFORCES THE DOMAIN THE REAL ONE DOES**, for `pageSign`'s
+   * reason: a fake that signs anything lets a caller reach production with
+   * bytes Rust will refuse, and the failure lands on a reader rather than in
+   * this suite. The two domains cannot overlap, which is the property being
+   * kept true here as well as there.
+   */
+
+  /** This fake's voice, and its durable sequence. */
+  voice = 'v'.repeat(64)
+  private voiceSeq = 0
+  retiredVoices: RetiredVoice[] = []
+
+  /** What this fake was asked to sign under the voice key. */
+  voiceSigned: { readonly message: string; readonly voice: string | undefined }[] = []
+
+  voiceStatus(): Promise<VoiceStatus> {
+    return Promise.resolve({ voice: this.voice, seq: this.voiceSeq, retired: [...this.retiredVoices] })
+  }
+
+  voiceNextSeq(): Promise<number> {
+    this.voiceSeq += 1
+    return Promise.resolve(this.voiceSeq)
+  }
+
+  voiceSign(message: string, voice?: string): Promise<string> {
+    if (!/^paper\.public\.\d+\.envelope\n/u.test(message)) {
+      return Promise.reject(new Error('a voice signs public envelopes and nothing else'))
+    }
+    if (voice !== undefined && voice !== this.voice && !this.retiredVoices.some((one) => one.voice === voice)) {
+      return Promise.reject(new Error("this device no longer holds that voice's key"))
+    }
+    this.voiceSigned.push({ message, voice })
+    let hash = 0
+    for (const ch of message) hash = (hash * 33 + ch.codePointAt(0)!) >>> 0
+    return Promise.resolve(hash.toString(16).padStart(8, '0').repeat(16))
+  }
+
+  voiceRotate(until: number): Promise<VoiceStatus> {
+    /* Retain first, then replace — the order the real one takes, and the one
+       WI-26.3 names the failure of. */
+    this.retiredVoices.push({ voice: this.voice, until })
+    this.voice = `${this.retiredVoices.length}`.padStart(64, '0')
+    /* And the sequence does NOT reset. */
+    return this.voiceStatus()
+  }
+
+  voiceSweep(now: number): Promise<number> {
+    const before = this.retiredVoices.length
+    this.retiredVoices = this.retiredVoices.filter((one) => one.until > now)
+    return Promise.resolve(before - this.retiredVoices.length)
+  }
+
+  shareFetch(hash: string, folder: string, name: string): Promise<number> {
+    /* ⚠️ **THE FAKE RECORDS THE FOLDER, BECAUSE THE FOLDER IS THE DECISION.**
+       A test of the adoption guard asserts WHERE the bytes were told to land;
+       a fake that only recorded the hash could not tell a correct import from
+       one that overwrote an annotated book. */
+    this.fetched.push({ hash, folder, name })
+    const size = this.fetchable.get(hash)
+    return size === undefined
+      ? Promise.reject(new Error(`nobody could be found who serves ${hash}`))
+      : Promise.resolve(size)
   }
 }
 

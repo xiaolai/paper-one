@@ -1,3 +1,4 @@
+import { notifyAll } from './notify'
 import { CARDS_STORAGE_KEY, addCard, byNewest, liveCards, parseCards, removeCard, type Card, type NewCard } from './cards'
 import { hlcOf, type Hlc } from './hlc'
 import { rekeyBook } from './idMigration'
@@ -150,15 +151,9 @@ export function createCards({
   let snapshot: CardSnapshot = { all: liveCards(all), persistent }
   const publish = () => {
     snapshot = { all: liveCards(all), persistent }
-    for (const listener of [...listeners]) {
-      /* Isolated: a throwing subscriber must not stop later listeners, nor —
-       * mid-mutation — abort the persist that follows this notification. */
-      try {
-        listener()
-      } catch {
-        /* A listener's failure is its own; the store's write still happens. */
-      }
-    }
+    /* Isolated: a throwing subscriber must not stop later listeners, nor —
+       mid-mutation — abort the persist that follows this notification. */
+    notifyAll(listeners, 'cards')
   }
 
   /**

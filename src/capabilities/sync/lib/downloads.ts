@@ -1,3 +1,4 @@
+import { notifyAll } from '../../../kernel'
 /**
  * What is being fetched right now, per book — the store behind the shelf row's
  * activity line.
@@ -45,7 +46,7 @@ export function createDownloads(): Downloads {
   const active = new Map<string, Downloading>()
   const listeners = new Set<() => void>()
   const publish = () => {
-    for (const listener of [...listeners]) listener()
+    notifyAll(listeners, 'downloads')
   }
 
   return {

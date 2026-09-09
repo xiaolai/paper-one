@@ -1,4 +1,5 @@
 import { messageOf } from './messageOf'
+import type { PublicPassage } from './public/envelope'
 import type { IndexFs, IndexedBook } from './bookIndex'
 import type { Disposable, ServiceContribution } from './capability'
 import { createCards, type CardStorage, type Cards } from './cardStore'
@@ -135,6 +136,43 @@ export interface KernelServices {
    */
   bindServiceHost(host: ServiceHost): Disposable
   /**
+   * Bind the PRIVATE-AUDIENCE port — what this reader has already sent to an
+   * audience that is not the public one. The circle binds it at composition.
+   *
+   * ⚠️ **THIS EXISTS BECAUSE THE STRONGEST PRIVACY WARNING IN THE APP COULD
+   * NEVER FIRE.** `linksVoiceToPerson` detects a reader about to publish, under
+   * a pseudonym, words they have already shared with their circle — identical
+   * quote, prefix and suffix, so anybody in both audiences can match them and
+   * learn who the pseudonym is. It was written, tested, and handed an empty
+   * list by the only caller in the running app, so it always answered `false`.
+   * Found by audit, and it is the third rule in this phase to be reachable only
+   * from its own tests.
+   *
+   * ⚠️ **A PORT RATHER THAN A `requires`, BECAUSE iOS COMPOSES `public` WITHOUT
+   * `circle`.** Making public depend on circle would break that build, and it
+   * would be false besides: a reader with no circle has shared nothing
+   * privately, so the empty default is the RIGHT answer there rather than a
+   * degraded one. This is the same shape as `bindServiceHost` for the same
+   * reason — a capability's knowledge, offered to another that must not import
+   * it, with an honest default when nobody offers.
+   *
+   * Returns the same restoring, idempotent disposer as the other binders.
+   */
+  bindPrivateAudience(port: PrivateAudience): Disposable
+  /**
+   * The passages this reader has already shared privately for one book.
+   *
+   * Empty when nothing is bound, which is every build with no circle and every
+   * reader who has shared nothing.
+   *
+   * ⚠️ **ASYNC, BECAUSE THE ANSWER IS ON DISK.** The circle keeps this in a
+   * file per book; a synchronous port would force it to hold a cache whose only
+   * consumer is this, and a stale cache here understates the warning — which is
+   * the one direction this must not fail in. The disclosure is a step the
+   * reader opens, so there is a moment to load it in.
+   */
+  sharedPrivately(bookId: string): Promise<readonly PublicPassage[]>
+  /**
    * Bind the DEVICE port — the peer capability's view of who is paired
    * (phase 11). Late-bound and once-at-a-time like the recorder, with the
    * same restoring disposer. Until bound, `devices()` is null and `device.*`
@@ -237,6 +275,16 @@ export interface KernelServices {
  * transport are.
  */
 export type ServiceHost = (services: readonly ServiceContribution[]) => Disposable | Promise<Disposable>
+
+/**
+ * What a reader has already sent to a private audience — see
+ * {@link KernelServices.bindPrivateAudience}.
+ *
+ * Synchronous, because it is asked while a disclosure is being drawn, and the
+ * alternative is a control that renders before it knows what to warn about.
+ * The circle keeps this in memory anyway.
+ */
+export type PrivateAudience = (bookId: string) => Promise<readonly PublicPassage[]>
 
 export interface KernelServicesOptions {
   /** The library's filesystem, or null outside Tauri. */
@@ -614,6 +662,13 @@ export function createKernelServices({
   const recorderSlot = exclusiveSlot<MutationRecorder>('bindRecorder: the recorder port is already bound', recorder)
   const recorderPort = routedRecorder(recorderSlot, recorder)
   const clockSlot = exclusiveSlot<() => Hlc>('bindClock: the clock port is already bound', clock ?? monotonicClock())
+  /* Empty is the honest default, not a degraded one: a build with no circle
+     composed — every phone — has no private audience, and a reader who has
+     shared nothing has shared nothing. See `bindPrivateAudience`. */
+  const privateAudienceSlot = exclusiveSlot<PrivateAudience>(
+    'bindPrivateAudience: the private-audience port is already bound',
+    () => Promise.resolve([]),
+  )
   const clockPort = () => clockSlot.get()()
 
   const NOOP_DISPOSABLE: Disposable = { dispose: () => {} }
@@ -734,6 +789,8 @@ export function createKernelServices({
     removeBlob: (bookId, name) => removeBlob({ fs, library, recorder: recorderPort }, bookId, name),
     bindRecorder: (next) => recorderSlot.bind(next),
     bindClock: (next) => clockSlot.bind(next),
+    bindPrivateAudience: (next) => privateAudienceSlot.bind(next),
+    sharedPrivately: (bookId) => privateAudienceSlot.get()(bookId),
     clock: clockPort,
     bindServiceHost: (next) => {
       /* A fresh object per bind — see the Set's own note. Two binds of one

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-share-offered"
+description = "Enables the peer_share_offered command without any pre-configured scope."
+commands.allow = ["peer_share_offered"]
+
+[[permission]]
+identifier = "deny-peer-share-offered"
+description = "Denies the peer_share_offered command without any pre-configured scope."
+commands.deny = ["peer_share_offered"]

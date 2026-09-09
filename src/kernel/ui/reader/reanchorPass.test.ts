@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import { CORPUS_BUILDS, CORPUS_PASSAGES, type BuildId } from '../../core/markCorpus.testkit'
+import { MIN_CONFIDENCE, distinguishable } from './reanchor'
+import { ANCHOR_PER_TASK } from '../../core/public/bounds'
 import { decide, reanchorPass, type PassDeps, type PendingMark } from './reanchorPass'
 import { recordPath } from '../../core/bookFolder'
 import { fakeFs } from '../../core/indexFsFake.testkit'
@@ -165,6 +167,204 @@ describe('the re-anchoring pass', () => {
     })
     /* Between, not before each — five sections are four gaps. */
     expect(breathe).toHaveBeenCalledTimes(4)
+  })
+
+  it('hands the main thread back INSIDE a section too — WI-26.7', async () => {
+    /* ⚠️ **YIELDING BETWEEN SECTIONS BOUNDS THE PASS AT (MARKS × ONE SECTION),
+       NOT AT ONE SECTION.** That was fine while the marks were the reader's own
+       and a handful of friends'. Public annotations are published by strangers
+       with free keys, so the same inner loop is however many a flood published,
+       per section, in one uninterruptible task. */
+    const many = Array.from({ length: ANCHOR_PER_TASK * 3 }, (_, i) => ({
+      id: `ghost-${i}`,
+      quote: 'absent',
+      prefix: '',
+      suffix: '',
+    }))
+    const breathe = vi.fn(() => Promise.resolve())
+    await reanchorPass(many, {
+      sections: 2,
+      documentFor: (index) => Promise.resolve(docOf('gutenberg', index)),
+      live: () => true,
+      breathe,
+    })
+    /* One gap between the two sections, plus the inner slices — the point is
+       that it is a function of the MARK count, which it was not before. */
+    expect(breathe.mock.calls.length).toBeGreaterThan(4)
+  })
+
+  it('yields in batches of exactly ANCHOR_PER_TASK, not one more', async () => {
+    /* ⚠️ **RESETTING THE COUNTER TO ZERO LEFT THE CURRENT MARK UNCOUNTED**, so
+       the batches were 64 and then 65 for ever after — the bound off by one
+       against the number it is named for, in the direction of more work per
+       task. Measured on ONE section so the between-section gaps do not hide
+       it: with `n` marks the inner yields are `floor((n - 1) / n_per_task)`. */
+    const perTask = ANCHOR_PER_TASK
+    const marks = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({ id: `ghost-${i}`, quote: 'absent', prefix: '', suffix: '' }))
+    const yieldsFor = async (count: number): Promise<number> => {
+      const breathe = vi.fn(() => Promise.resolve())
+      await reanchorPass(marks(count), {
+        sections: 1,
+        documentFor: (index) => Promise.resolve(docOf('gutenberg', index)),
+        live: () => true,
+        breathe,
+      })
+      return breathe.mock.calls.length
+    }
+    /* Exactly one batch's worth: the scan does not yield, and the selection
+       loop that follows it does not either. */
+    expect(await yieldsFor(perTask)).toBe(0)
+    /* One more mark than a batch holds: one yield in the scan, one in the
+       selection. Off by one and the 65th mark would still be in the first. */
+    expect(await yieldsFor(perTask + 1)).toBe(2)
+    expect(await yieldsFor(perTask * 2 + 1)).toBe(4)
+  })
+
+  it('hands the main thread back while CHOOSING as well as while scanning', async () => {
+    /* ⚠️ **THE SELECTION LOOP WAS THE ONE PLACE THAT DID NOT YIELD.**
+       Everything before it is sliced and cancellable because the mark count is
+       a number a stranger chooses — and then every one of those marks was
+       decided in a single synchronous task, ignoring a reader who had already
+       closed the book. */
+    const many = Array.from({ length: ANCHOR_PER_TASK * 4 }, (_, i) => ({
+      id: `ghost-${i}`,
+      quote: 'absent',
+      prefix: '',
+      suffix: '',
+    }))
+    let breaths = 0
+    /* A book with no text at all, so the SCAN yields nothing: the section is
+       skipped for an empty index and every breath counted here belongs to the
+       loop that chooses. */
+    const outcome = await reanchorPass(many, {
+      sections: 1,
+      documentFor: () => Promise.resolve(new DOMParser().parseFromString('<html><body></body></html>', 'text/html').body),
+      live: () => breaths < 2,
+      breathe: () => {
+        breaths += 1
+        return Promise.resolve()
+      },
+    })
+    expect(breaths).toBeGreaterThan(0)
+    /* And it STOPS when the reader closes the book, rather than finishing the
+       list it is in. */
+    expect(outcome.complete).toBe(false)
+    expect(outcome.missed).toEqual([])
+  })
+
+  it('keeps two candidates for a mark and still places the best of many', async () => {
+    /* ⚠️ **A CANDIDATE PER MATCHING SECTION, TO ANSWER A QUESTION THAT NEEDS
+       TWO.** The retained list grew as marks × sections — a number both halves
+       of which a stranger influences — while `decide` sorts and looks at the
+       top two. Measured through the ANSWER: keeping the best two must place
+       exactly what keeping all of them placed, INCLUDING when the winner
+       arrives last, which is what a naive "keep the first two" would lose. */
+    const parse = (body: string): Node =>
+      new DOMParser().parseFromString(`<html><body>${body}</body></html>`, 'text/html').body
+    /* The same quote in five sections. Only the last carries the stored
+       context, so it is the best by a wide margin and every earlier one is a
+       runner-up worth nothing. */
+    const sections = [
+      '<p>elsewhere zebra elsewhere</p>',
+      '<p>nothing zebra nothing</p>',
+      '<p>other zebra other</p>',
+      '<p>another zebra another</p>',
+      '<p>before the zebra and after</p>',
+    ]
+    const outcome = await reanchorPass(
+      [{ id: 'late', quote: 'zebra', prefix: 'before the ', suffix: ' and after' }],
+      {
+        sections: sections.length,
+        documentFor: (index) => Promise.resolve(parse(sections[index]!)),
+        live: () => true,
+        breathe: () => Promise.resolve(),
+      },
+    )
+    expect(outcome.missed).toEqual([])
+    expect(outcome.found).toHaveLength(1)
+    expect(outcome.found[0]?.sectionIndex).toBe(4)
+  })
+
+  it('refuses when the best two are too close, at either layer', async () => {
+    /* ⚠️ **ONE POLICY, AND THERE WERE TWO COPIES OF IT.** `reanchorPass` held
+       `AMBIGUITY_MARGIN` and `MIN_AGREEMENT` beside a comment saying they were
+       the same numbers as `reanchor`'s for the same reason, with nothing
+       holding the pair together. `distinguishable` is the question asked once:
+       is there evidence at all, and is there a gap between the best of it and
+       the rest. */
+    expect(distinguishable(0.9, 0.88)).toBe(false)
+    expect(distinguishable(0.4, 0.05)).toBe(true)
+    /* A passage with no stored context scores 0 everywhere, and a gap between
+       two amounts of nothing is still nothing. */
+    expect(distinguishable(0.2, 0)).toBe(false)
+    /* No runner-up at all: `-1` clears the margin by construction, because a
+       lone candidate is not being chosen BETWEEN. */
+    expect(distinguishable(MIN_CONFIDENCE, -1)).toBe(true)
+  })
+
+  it('stops matching a mark once a section has refused it', async () => {
+    /* ⚠️ **`undecidable` IS PERMANENT AND WAS RE-EARNED EVERY SECTION.** One
+       section saying "it might well be here" settles the mark for the whole
+       walk, and every later section still ran the full quote search and
+       context scoring for it before throwing the answer away.
+
+       Measured through the YIELDS, because the matching is internal and the
+       breath counter counts exactly the marks that were matched: a skipped
+       mark costs no slice. Its own sections rather than the corpus, so the
+       arithmetic below is the test's and cannot move under it. */
+    const parse = (body: string): Node =>
+      new DOMParser().parseFromString(`<html><body>${body}</body></html>`, 'text/html').body
+    /* Twice in the first section with nothing to tell the two apart, once in
+       each of the others — so the first refuses the mark and the rest would
+       each have offered a candidate. */
+    const sections = ['<p>zebra</p><p>zebra</p>', '<p>zebra</p>', '<p>zebra</p>']
+    const many = Array.from({ length: ANCHOR_PER_TASK * 3 }, (_, i) => ({
+      id: `twice-${i}`,
+      quote: 'zebra',
+      prefix: '',
+      suffix: '',
+    }))
+    const breathe = vi.fn(() => Promise.resolve())
+    const outcome = await reanchorPass(many, {
+      sections: sections.length,
+      documentFor: (index) => Promise.resolve(parse(sections[index]!)),
+      live: () => true,
+      breathe,
+    })
+    expect(outcome.found).toEqual([])
+    expect(outcome.missed).toHaveLength(many.length)
+    /* The first section matches all 192 and yields twice; the two after it
+       match none and cost only their between-section gap; the loop that
+       chooses yields twice. Matching them again in every section is four
+       more. */
+    expect(breathe.mock.calls.length).toBe(6)
+  })
+
+  it('stops inside a section when the reader closes the book — WI-26.7', async () => {
+    /* A cancelled load must stop doing work, not finish the batch it is in.
+       The `live()` check after the inner yield is what makes that true; without
+       it the pass would run every one of a flood's marks against the section it
+       had already loaded. */
+    const many = Array.from({ length: ANCHOR_PER_TASK * 5 }, (_, i) => ({
+      id: `ghost-${i}`,
+      quote: 'absent',
+      prefix: '',
+      suffix: '',
+    }))
+    let breaths = 0
+    const outcome = await reanchorPass(many, {
+      sections: 4,
+      documentFor: (index) => Promise.resolve(docOf('gutenberg', Math.min(index, 2))),
+      /* Alive until the first inner yield, then gone. */
+      live: () => breaths < 1,
+      breathe: () => {
+        breaths += 1
+        return Promise.resolve()
+      },
+    })
+    expect(outcome.complete).toBe(false)
+    expect(breaths).toBeLessThan(4)
   })
 
   it('walks EVERY section even after a hit, because a later one may be better', async () => {

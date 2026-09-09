@@ -454,7 +454,55 @@ pub fn known_people(root: &Path) -> Result<Vec<KnownPerson>> {
     }
 }
 
+/// The roster's per-root lock — see [`update_known_people`].
+///
+/// ⚠️ **KEYED BY ROOT, NOT GLOBAL**, and a PROCESS lock rather than a file
+/// lock. Same shape and same limits as `share::voice::lock_for`, which records
+/// the reasoning: two data roots are two installations with nothing to
+/// serialise between them, and a second Paper on one root is outside what this
+/// covers.
+fn people_lock(root: &Path) -> &'static std::sync::Mutex<()> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, &'static std::sync::Mutex<()>>>,
+    > = std::sync::OnceLock::new();
+    let locks = LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut held = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    held.entry(root.to_path_buf())
+        .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
+}
+
+/// Read the circle, change it, and write it back as ONE transaction.
+///
+/// ⚠️ **EVERY WRITER READ AND REPLACED THE WHOLE LIST WITH NOTHING HOLDING THE
+/// GAP.** Four of them — forget, rename, the roster update on an incoming
+/// hello, and recording a newly paired person — each did
+/// `known_people` → change → `set_known_people`. Two overlapping calls both
+/// read the same snapshot and the second write erased the first: a revocation
+/// could be undone by a rename landing beside it, and a person forgotten in one
+/// call could be resurrected by a hello arriving in another. Found by audit.
+///
+/// The file write is already atomic; what was missing is that READ and WRITE
+/// are one critical section. A caller that only reads still uses
+/// [`known_people`] directly — a stale read is a stale read, and no lock fixes
+/// that; what must not happen is a stale read being written back.
+pub fn update_known_people(
+    root: &Path,
+    change: impl FnOnce(&mut Vec<KnownPerson>) -> Result<()>,
+) -> Result<Vec<KnownPerson>> {
+    let lock = people_lock(root);
+    let _held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut people = known_people(root)?;
+    change(&mut people)?;
+    set_known_people(root, &people)?;
+    Ok(people)
+}
+
 /// Replace the known-people file.
+///
+/// ⚠️ **A BARE REPLACE. USE [`update_known_people`] FOR ANY CHANGE THAT DEPENDS
+/// ON WHAT IS ALREADY THERE**, which is every change outside a test fixture.
 pub fn set_known_people(root: &Path, people: &[KnownPerson]) -> Result<()> {
     let text = serde_json::to_string_pretty(people)
         .map_err(|e| Error::Identity(format!("could not write the circle: {e}")))?;
@@ -921,29 +969,36 @@ async fn decide(
             }
         }
         if let Some(version) = roster {
-            let mut people = known.clone();
+            /* ⚠️ **RE-READ INSIDE THE TRANSACTION, NOT CLONED FROM `known`.**
+             * `known` was read at the top of this function, before the hello
+             * was verified and before anything else in it ran; writing a change
+             * built on that snapshot is what let a hello undo a revocation
+             * made in the meantime. `update_known_people` hands over the list
+             * as it is NOW, under the lock that holds until the write. */
             let mut evict: Vec<String> = Vec::new();
-            if let Some(entry) = people.iter_mut().find(|k| &k.person == person) {
-                entry.roster = version;
-                entry.roster_hash = roster_hash(&hello.roster.roster.devices);
-                /* ⚠️ **THE PREVIOUS DEVICE SET, READ BEFORE IT IS REPLACED.** A
-                 * revocation is a statement about YOUR OWN devices, and the
-                 * only thing that makes that enforceable is remembering which
-                 * devices this person ever vouched for. Acting on the list
-                 * unchecked would let anybody in the circle name any device id
-                 * — this reader's own laptop included — and have it evicted. */
-                let theirs = std::mem::take(&mut entry.devices);
-                for revoked in &hello.roster.roster.revocations {
-                    if !entry.revoked.contains(revoked) {
-                        entry.revoked.push(revoked.clone());
-                        if theirs.iter().any(|d| d == revoked) {
-                            evict.push(revoked.clone());
+            update_known_people(&root, |people| {
+                if let Some(entry) = people.iter_mut().find(|k| &k.person == person) {
+                    entry.roster = version;
+                    entry.roster_hash = roster_hash(&hello.roster.roster.devices);
+                    /* ⚠️ **THE PREVIOUS DEVICE SET, READ BEFORE IT IS REPLACED.** A
+                     * revocation is a statement about YOUR OWN devices, and the
+                     * only thing that makes that enforceable is remembering which
+                     * devices this person ever vouched for. Acting on the list
+                     * unchecked would let anybody in the circle name any device id
+                     * — this reader's own laptop included — and have it evicted. */
+                    let theirs = std::mem::take(&mut entry.devices);
+                    for revoked in &hello.roster.roster.revocations {
+                        if !entry.revoked.contains(revoked) {
+                            entry.revoked.push(revoked.clone());
+                            if theirs.iter().any(|d| d == revoked) {
+                                evict.push(revoked.clone());
+                            }
                         }
                     }
+                    entry.devices = hello.roster.roster.devices.clone();
                 }
-                entry.devices = hello.roster.roster.devices.clone();
-            }
-            set_known_people(&root, &people)?;
+                Ok(())
+            })?;
             /* ⚠️ **RECORDING A REVOCATION IS NOT ACTING ON ONE.** This appended
              * to `revoked` and stopped — so the revoked device kept its entry
              * in `peers.json` and any session it already held stayed open. It
@@ -1114,6 +1169,51 @@ mod tests {
             roster_hash: roster_hash(&devices.iter().map(|d| (*d).to_string()).collect::<Vec<_>>()),
             ..met(person, epoch, hlc)
         }
+    }
+
+    /// ⚠️ **EVERY ROSTER WRITER READ AND REPLACED THE WHOLE LIST WITH NOTHING
+    /// HOLDING THE GAP.** Four of them did `known_people` → change →
+    /// `set_known_people`, so two overlapping changes both read the same
+    /// snapshot and the second write erased the first. A revocation could be
+    /// undone by a rename landing beside it. Found by audit.
+    ///
+    /// Threads rather than a contrived interleaving: the defect is a real race
+    /// and this is the shape that exhibits it. Every one of the changes below
+    /// must survive, whatever order they run in.
+    #[test]
+    fn overlapping_roster_changes_do_not_erase_each_other() {
+        let root = crate::testutil::scratch("circle-roster-race");
+        set_known_people(&root, &[]).unwrap();
+
+        let mut hands = Vec::new();
+        for i in 0..8 {
+            let root = root.clone();
+            hands.push(std::thread::spawn(move || {
+                update_known_people(&root, |people| {
+                    people.push(KnownPerson {
+                        person: format!("{i:064}"),
+                        display_name: format!("person {i}"),
+                        roster: Version { epoch: 0, hlc: 0 },
+                        roster_hash: String::new(),
+                        revoked: Vec::new(),
+                        devices: Vec::new(),
+                    });
+                    Ok(())
+                })
+                .unwrap();
+            }));
+        }
+        for hand in hands {
+            hand.join().expect("a writer panicked");
+        }
+
+        let people = known_people(&root).unwrap();
+        assert_eq!(
+            people.len(),
+            8,
+            "a concurrent write erased another's change: {:?}",
+            people.iter().map(|k| &k.display_name).collect::<Vec<_>>()
+        );
     }
 
     #[test]

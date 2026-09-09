@@ -29,7 +29,7 @@
  */
 
 import type { SyncLevel, VaultFs } from './bookVault'
-import { extensionFor } from './bookVault'
+import { extensionFor, isMissingFile } from './bookVault'
 import { isFormat, type Format, type NamedSource } from './formats'
 import { compareHlc, hlcOf, isHlc, type Hlc } from './hlc'
 import { TAG_MAX, normalizeTag, tagKey } from './tags'
@@ -413,6 +413,31 @@ export const circleFolderIn = (bookId: string): string => `${folderOf(bookId)}/c
  */
 export const sharedPathIn = (bookId: string): string => `${folderOf(bookId)}/shared.json`
 
+/**
+ * Public annotations this device holds for a book — phase 26.
+ *
+ * ⚠️ **BESIDE `circle/`, NEVER INSIDE IT, AND THE RULE IS NOT TIDINESS.**
+ * `peopleFor` lists `circle/` and reads every `*.json` in it as a PERSON, so a
+ * stranger's file put there would appear in the reader's circle as somebody
+ * they had never met. Worse than the `shared.json` case that taught the same
+ * lesson: this one's contents are chosen by strangers.
+ *
+ * ⚠️ **AND THE SEPARATION IS THE PHASE'S CENTRAL RULE.** Public and circle
+ * share no authorization, no storage and no wire type: the circle denies unless
+ * a person is admitted, the public layer allows unless a voice is blocked, and
+ * a single directory serving both is where the wrong default becomes invisible.
+ *
+ * `.jsonl`, not `.json`: what is stored is the received bytes of each envelope,
+ * VERBATIM, one per line. There is no separately mutable projection to move the
+ * hole into — what is stored, what is relayed and what is rendered are one
+ * string.
+ *
+ * In the book's folder, so it goes when the book does and takes the book's
+ * write lane — which it must: a public write on an unrelated queue races
+ * rekeying and deletion.
+ */
+export const publicPathIn = (bookId: string): string => `${folderOf(bookId)}/public.jsonl`
+
 /* ── the circle's own folder, outside every book — WI-23.C3 ─────────────
  *
  * ⚠️ **THE FIRST CIRCLE FILES NOT UNDER A BOOK.** Every circle file until now
@@ -426,6 +451,31 @@ export const sharedPathIn = (bookId: string): string => `${folderOf(bookId)}/sha
  * Removing a person purges `circle/<person>/` whole, with their per-book
  * files (`relationships.md` §"Retained data"). */
 export const CIRCLE_DIR = 'circle'
+
+/* ── the public layer's own folder, outside every book — phase 26 ───────
+ *
+ * ⚠️ **NOT UNDER `circle/`, AND THE RULE IS THE PHASE'S CENTRAL ONE.** Public
+ * and circle share no authorization and no storage: the circle denies unless a
+ * person is admitted, the public layer allows unless a voice is blocked, and
+ * one directory serving both is where the wrong default becomes invisible.
+ * `peopleFor` also lists `circle/` and reads every `*.json` in it as a PERSON,
+ * so a file of voices put there would appear in the reader's circle as people
+ * they never met.
+ *
+ * Held annotations still live in the BOOK's folder (`publicPathIn`) because
+ * they are about a book. What is here is what is not about any one book: the
+ * reader's decisions about voices. */
+export const PUBLIC_DIR = 'public'
+
+/**
+ * The reader's own decisions about voices — which belong to people they know,
+ * and which they have stopped hearing. WI-26.5.
+ *
+ * ⚠️ **LOCAL, AND NEVER PUBLISHED.** A binding says *"this pseudonym is my
+ * friend"*, which is the one fact the whole phase exists to keep off the wire.
+ * It is written here, read here, and has no publisher.
+ */
+export const VOICE_DECISIONS_PATH = `${PUBLIC_DIR}/voices.json`
 /** The reader's OWN shelf as published — the publisher's store for the shelf log. */
 export const OWN_SHELF_PATH = `${CIRCLE_DIR}/shelf.json`
 /** Everything held about one person that is not about a book. */
@@ -599,10 +649,13 @@ function readTagClock(raw: unknown): TagClock | undefined {
   /* VALIDATED FIRST, CAPPED SECOND. Capping the raw keys let alphabetically
    * earlier junk consume the slots and push valid registers out — tag loss
    * on the next write. The cap counts registers that are registers. */
-  const keys = Object.keys(raw).sort()
-  let kept = 0
-  for (const key of keys) {
-    if (kept >= MAX_TAGS) break
+  /* ⚠️ **VALIDATED FIRST, CAPPED SECOND — AND THE CAP IS NOW BY RECENCY.**
+     Capping the raw keys let alphabetically earlier junk consume the slots and
+     push valid registers out. Capping the VALID ones alphabetically was the
+     same defect one step later: whether a reader keeps a tag depended on how
+     it is spelled, and a removal register dropped that way lets a deleted tag
+     come back on the next merge. See `capRegisters`. */
+  for (const key of Object.keys(raw)) {
     const value = (raw as Record<string, unknown>)[key]
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
     const entry = value as Record<string, unknown>
@@ -623,9 +676,45 @@ function readTagClock(raw: unknown): TagClock | undefined {
     if (!isHlc(entry['at'])) continue
     if (typeof entry['on'] !== 'boolean') continue
     clock[key] = { at: entry['at'], on: entry['on'], spelling }
-    kept += 1
   }
-  return clock
+  return capRegisters(clock)
+}
+
+/**
+ * A tag clock cut to the bound, keeping the reader's MOST RECENT work.
+ *
+ * ⚠️ **THE CAP USED TO KEEP THE ALPHABETICALLY LUCKIEST, IN SILENCE.** Both
+ * the reader and the rescue merge sorted keys and took the first `MAX_TAGS` —
+ * so merging two valid, disjoint full clocks could erase every tag from one of
+ * them, and a REMOVAL register dropped that way lets a deleted tag come back
+ * the next time the two are merged. Which registers survive was decided by
+ * spelling.
+ *
+ * ⚠️ **AND PAST THE BOUND SOMETHING MUST GO — THIS DOES NOT PRETEND
+ * OTHERWISE.** `MAX_TAGS` is 4 096, a bound that exists because this parses a
+ * file a reader can edit by hand and far past what any writer produces; a
+ * clock over it was not written by this app. What is fixed is WHAT goes and
+ * whether anyone is told: the newest registers stand, which is the reader's
+ * latest decision about each tag, and a removal is by construction newer than
+ * the addition it undoes. The cut is announced rather than silent.
+ *
+ * Ties break by key so two devices cut the same clock the same way, and the
+ * result is ROUND-TRIP STABLE: a capped clock is exactly `MAX_TAGS` registers,
+ * so the next read caps nothing and cannot disagree with this one.
+ */
+function capRegisters(clock: Record<string, TagClockEntry>): TagClock {
+  const keys = Object.keys(clock)
+  if (keys.length <= MAX_TAGS) return clock
+  console.warn(
+    `Paper: a book's tag clock holds ${keys.length} registers; keeping the ${MAX_TAGS} most recent`,
+  )
+  const order = keys.sort((a, b) => {
+    const byTime = compareHlc(clock[b]!.at, clock[a]!.at)
+    return byTime !== 0 ? byTime : a < b ? -1 : 1
+  })
+  const capped: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
+  for (const key of order.slice(0, MAX_TAGS)) capped[key] = clock[key]!
+  return capped
 }
 
 /**
@@ -648,107 +737,161 @@ export function parseRecord(raw: string | null): BookRecord | null {
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
   const r = parsed as Record<string, unknown>
-  // A book with no title at all is still a book — the filename stands in — so
-  // this is the one field that falls back rather than failing the record.
-  const title = text(r['title']) ?? ''
-  /* The tag clock, if the record carries one — and when it does, the clock is
-   * the truth about the reader's tags and `tags` is DERIVED from it, because
-   * a list cannot say "removed" and the register can. The stored list still
-   * stands for every record without a clock, which is every record a phase-4
-   * build wrote. */
-  const clock = readTagClock(r['tagClock'])
-  const derivedTags = clock ? tagsFromClock(clock) : undefined
-  const status = readStatus(r['status'])
-  const review = readReview(r['review'])
-  const coverFacts = parseCoverFacts(r['coverFacts'])
   return {
-    /* NEVER CUT: an id sliced to five hundred characters is a different
-     * identity, and everything after it would target a different folder. */
-    ...(typeof r['bookId'] === 'string' && r['bookId'] !== '' && r['bookId'].length <= MAX_FIELD ? { bookId: r['bookId'] } : {}),
-    title,
+    ...bookMetaOf(r),
+    ...readerStateOf(r),
+    ...deviceStateOf(r),
+  }
+}
+
+/**
+ * One optional field, validated ONCE.
+ *
+ * ⚠️ **EVERY OPTIONAL FIELD USED TO CALL ITS VALIDATOR TWICE** — once as the
+ * condition and once as the value, with a `!` to reassure the compiler that
+ * the second call agreed with the first. `text` slices and `list` filters,
+ * allocates and re-slices, so a record with sixty subjects walked and copied
+ * them twice for one field; and nothing but convention held the two calls to
+ * the same arguments. `list(r['languages'])` beside `list(r['subjects'])!` is
+ * a typo away from a record whose languages are its subjects, and the
+ * compiler would have accepted it. Found by audit.
+ */
+function keep<K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } {
+  return (value === undefined ? {} : { [key]: value }) as { [P in K]?: V }
+}
+
+/**
+ * What the BOOK says about itself — the fields a parse writes and a merge
+ * treats as the book's own account.
+ *
+ * ⚠️ **`bookId` AND `identifier` ARE NEVER CUT**: an id sliced to five hundred
+ * characters is a different identity, everything after it would target a
+ * different folder, and two long identifiers sharing a prefix would compare
+ * equal after a write/read cycle. Over the bound the field is DROPPED, which
+ * reads as "this book declares none" and a re-parse can recover.
+ * Trimmed-empty is absent too: the field's contract is absent-never-empty, and
+ * a record of three spaces would otherwise satisfy `identifier ?`.
+ */
+function bookMetaOf(r: Record<string, unknown>): Partial<BookRecord> & Pick<BookRecord, 'title' | 'author'> {
+  const bookId = typeof r['bookId'] === 'string' && r['bookId'] !== '' && r['bookId'].length <= MAX_FIELD ? r['bookId'] : undefined
+  const identifier =
+    typeof r['identifier'] === 'string' && r['identifier'].trim() !== '' && r['identifier'].length <= MAX_FIELD
+      ? r['identifier']
+      : undefined
+  return {
+    ...keep('bookId', bookId),
+    // A book with no title at all is still a book — the filename stands in — so
+    // this is the one field that falls back rather than failing the record.
+    title: text(r['title']) ?? '',
     author: text(r['author']) ?? '',
-    /* ⚠️ **NEVER CUT, for `bookId`'s reason one field down**: an identity
-     * sliced to five hundred characters is a DIFFERENT identity, and two long
-     * identifiers sharing a prefix would compare equal after a write/read
-     * cycle — `recordFromMeta` writes the whole value, so the truncation would
-     * appear only on reload. Over the bound the field is dropped, which reads
-     * as "this book declares none" and is recoverable by a re-parse.
-     * Trimmed-empty is absent too: the field's contract is absent-never-empty,
-     * and a record of three spaces would otherwise satisfy `identifier ?`. */
-    ...(typeof r['identifier'] === 'string' &&
-    r['identifier'].trim() !== '' &&
-    r['identifier'].length <= MAX_FIELD
-      ? { identifier: r['identifier'] }
-      : {}),
-    ...(text(r['sortAs']) ? { sortAs: text(r['sortAs'])! } : {}),
-    ...(text(r['series']) ? { series: text(r['series'])! } : {}),
-    ...(num(r['seriesIndex']) === undefined ? {} : { seriesIndex: num(r['seriesIndex'])! }),
-    ...(text(r['publisher']) ? { publisher: text(r['publisher'])! } : {}),
-    ...(text(r['published']) ? { published: text(r['published'])! } : {}),
-    ...(list(r['languages']) ? { languages: list(r['languages'])! } : {}),
-    ...(list(r['subjects']) ? { subjects: list(r['subjects'])! } : {}),
-    ...(clock
-      ? { tagClock: clock, ...(derivedTags!.length ? { tags: derivedTags! } : {}) }
-      : readTags(r['tags'], MAX_TAGS)
-        ? { tags: readTags(r['tags'], MAX_TAGS)! }
-        : {}),
-    /* NOT `text`, which SLICES. See `MAX_POSITION`: a shortened CFI is not a
-     * rougher position, it is a broken one, and it used to overwrite the good
-     * value on the next merge. Over the bound the field is dropped, so the book
-     * opens at the beginning — recoverable — instead of at a corrupted anchor. */
-    ...(typeof r['position'] === 'string' &&
-    r['position'] !== '' &&
-    r['position'].length <= MAX_POSITION
-      ? { position: r['position'] }
-      : {}),
-    // Clamped, not merely checked finite: a hand-edited `progress: 4` would draw
-    // a bar four times the width of its track.
-    ...(num(r['progress']) === undefined
-      ? {}
-      : { progress: Math.min(1, Math.max(0, num(r['progress'])!)) }),
-    /* ⚠️ `finished` IS DERIVED FROM `status` WHEN THERE IS ONE, so the two
-     * cannot disagree on a read. A record from before `status` keeps what it
-     * stored. */
-    ...(status
-      ? { status, finished: status.state === 'finished' }
-      : typeof r['finished'] === 'boolean'
-        ? { finished: r['finished'] }
-        : {}),
-    /* A rating is one of five integers or it is not a rating; its stamp is
-     * dropped ALONE when malformed, like every other register stamp below. */
-    ...(isStars(r['rating']) ? { rating: r['rating'] } : {}),
-    ...(isHlc(r['ratingAt']) ? { ratingAt: r['ratingAt'] } : {}),
-    ...(review ? { review } : {}),
-    ...(num(r['addedAt']) === undefined ? {} : { addedAt: num(r['addedAt'])! }),
-    ...(num(r['openedAt']) === undefined ? {} : { openedAt: num(r['openedAt'])! }),
+    ...keep('identifier', identifier),
+    ...keep('sortAs', text(r['sortAs'])),
+    ...keep('series', text(r['series'])),
+    ...keep('seriesIndex', num(r['seriesIndex'])),
+    ...keep('publisher', text(r['publisher'])),
+    ...keep('published', text(r['published'])),
+    ...keep('languages', list(r['languages'])),
+    ...keep('subjects', list(r['subjects'])),
     /* A timestamp, so BOUNDED: non-negative and finite, or dropped — the
-     * merge orders the metadata group by this number, and a hand-edited
-     * negative "parse time" would outrank... nothing, but claim a parse
-     * that never happened. Dropped, the record reads "never parsed", which
-     * is the honest floor. */
-    ...(num(r['parsedAt']) === undefined || num(r['parsedAt'])! < 0 ? {} : { parsedAt: num(r['parsedAt'])! }),
+       merge orders the metadata group by this number, and a hand-edited
+       negative "parse time" would claim a parse that never happened. Dropped,
+       the record reads "never parsed", which is the honest floor. */
+    ...keep('parsedAt', nonNegative(num(r['parsedAt']))),
     /* Bounded the same way and for a sharper reason: a hand-edited schema
        ABOVE `META_SCHEMA` would tell the pass this record is newer than the
        code, and the book would never be re-parsed again by any future
        backfill. Clamped to what this build can actually have written. */
-    ...(num(r['metaSchema']) === undefined || num(r['metaSchema'])! < 0
-      ? {}
-      : { metaSchema: Math.min(META_SCHEMA, Math.floor(num(r['metaSchema'])!)) }),
+    ...keep('metaSchema', schemaOf(num(r['metaSchema']))),
+  }
+}
+
+/** A finite number that is not negative, or `undefined` — never one moved. */
+function nonNegative(value: number | undefined): number | undefined {
+  return value === undefined || value < 0 ? undefined : value
+}
+
+/** A stored schema number, clamped to what this build can have written. */
+function schemaOf(value: number | undefined): number | undefined {
+  return value === undefined || value < 0 ? undefined : Math.min(META_SCHEMA, Math.floor(value))
+}
+
+/**
+ * What the READER has done with it — tags, position, opinion, and the ledger
+ * stamps that date them.
+ *
+ * ⚠️ Each register is dropped ALONE when malformed: a stamp somebody edited
+ * must not cost the record its position, and a record from before the ledger
+ * simply has none of these.
+ */
+function readerStateOf(r: Record<string, unknown>): Partial<BookRecord> {
+  /* The tag clock, if the record carries one — and when it does, the clock is
+     the truth about the reader's tags and `tags` is DERIVED from it, because a
+     list cannot say "removed" and the register can. The stored list still
+     stands for every record without a clock, which is every record a phase-4
+     build wrote. */
+  const clock = readTagClock(r['tagClock'])
+  const derived = clock ? tagsFromClock(clock) : undefined
+  const stored = clock ? undefined : readTags(r['tags'], MAX_TAGS)
+  const tags = derived ?? stored
+  const status = readStatus(r['status'])
+  const review = readReview(r['review'])
+  return {
+    ...keep('tagClock', clock),
+    ...keep('tags', tags !== undefined && tags.length > 0 ? tags : undefined),
+    /* NOT `text`, which SLICES. See `MAX_POSITION`: a shortened CFI is not a
+       rougher position, it is a broken one, and it used to overwrite the good
+       value on the next merge. Over the bound the field is dropped, so the book
+       opens at the beginning — recoverable — instead of at a corrupted anchor. */
+    ...keep(
+      'position',
+      typeof r['position'] === 'string' && r['position'] !== '' && r['position'].length <= MAX_POSITION
+        ? r['position']
+        : undefined,
+    ),
+    // Clamped, not merely checked finite: a hand-edited `progress: 4` would draw
+    // a bar four times the width of its track.
+    ...keep('progress', progressOf(num(r['progress']))),
+    /* ⚠️ `finished` IS DERIVED FROM `status` WHEN THERE IS ONE, so the two
+       cannot disagree on a read. A record from before `status` keeps what it
+       stored. */
+    ...(status
+      ? { status, finished: status.state === 'finished' }
+      : keep('finished', typeof r['finished'] === 'boolean' ? r['finished'] : undefined)),
+    /* A rating is one of five integers or it is not a rating; its stamp is
+       dropped ALONE when malformed, like every other register stamp. */
+    ...keep('rating', isStars(r['rating']) ? r['rating'] : undefined),
+    ...keep('ratingAt', isHlc(r['ratingAt']) ? r['ratingAt'] : undefined),
+    ...keep('review', review),
+    ...keep('positionAt', isHlc(r['positionAt']) ? r['positionAt'] : undefined),
+    ...keep('finishedAt', isHlc(r['finishedAt']) ? r['finishedAt'] : undefined),
+    ...keep('addedAt', num(r['addedAt'])),
+    ...keep('openedAt', num(r['openedAt'])),
+  }
+}
+
+/** A progress fraction inside its track, or nothing. */
+function progressOf(value: number | undefined): number | undefined {
+  return value === undefined ? undefined : Math.min(1, Math.max(0, value))
+}
+
+/**
+ * What THIS COPY is — where the file came from, how it is stored, what it
+ * hashes to. See `DEVICE_LOCAL_FIELDS`: a macOS path replicated onto a phone
+ * is meaningless, so anything that syncs a book strips these.
+ */
+function deviceStateOf(r: Record<string, unknown>): Partial<BookRecord> {
+  return {
     /* NOT `text`, which SLICES — see `MAX_ORIGIN`. A shortened path or URL is
-     * not a rougher way back, it is a broken one, and it survived the next merge
-     * to be written over the good value. */
-    ...(typeof r['origin'] === 'string' && r['origin'] && r['origin'].length <= MAX_ORIGIN
-      ? { origin: r['origin'] }
-      : {}),
-    ...(text(r['ext'], 8) ? { ext: text(r['ext'], 8)! } : {}),
-    /* The ledger's registers. Each is dropped ALONE when malformed — a stamp
-     * somebody edited must not cost the record its position, and a record
-     * from before the ledger simply has none of these. */
-    ...(isHlc(r['positionAt']) ? { positionAt: r['positionAt'] } : {}),
-    ...(isHlc(r['finishedAt']) ? { finishedAt: r['finishedAt'] } : {}),
-    ...(isContentHash(r['contentHash']) ? { contentHash: r['contentHash'] } : {}),
-    ...(isFormat(r['format']) ? { format: r['format'] } : {}),
-    ...(coverFacts === undefined ? {} : { coverFacts }),
+       not a rougher way back, it is a broken one, and it survived the next
+       merge to be written over the good value. */
+    ...keep(
+      'origin',
+      typeof r['origin'] === 'string' && r['origin'] !== '' && r['origin'].length <= MAX_ORIGIN ? r['origin'] : undefined,
+    ),
+    ...keep('ext', text(r['ext'], 8)),
+    ...keep('contentHash', isContentHash(r['contentHash']) ? r['contentHash'] : undefined),
+    ...keep('format', isFormat(r['format']) ? r['format'] : undefined),
+    ...keep('coverFacts', parseCoverFacts(r['coverFacts'])),
   }
 }
 
@@ -787,12 +930,31 @@ function readReview(value: unknown): BookRecord['review'] | undefined {
 }
 
 export async function readBook(fs: VaultFs, bookId: string): Promise<BookRecord | null> {
+  let bytes: Uint8Array
   try {
-    const bytes = await fs.readFile(recordPath(bookId))
-    return parseRecord(new TextDecoder().decode(bytes))
-  } catch {
-    return null
+    bytes = await fs.readFile(recordPath(bookId))
+  } catch (cause) {
+    /* ⚠️ **`null` IS "THERE IS NO BOOK", NOT "SOMETHING WENT WRONG".** This was
+       `catch { return null }`, so a busy disk, a permission error and a book
+       that does not exist were one answer — and the callers that respond to
+       "no book" by WRITING one then replaced a reader's record with fresh
+       metadata, losing their tags and their position with no error anywhere.
+       `updateBook` had already grown a re-check to compensate for exactly this;
+       fixing it here means every caller gets the distinction rather than each
+       one remembering to ask twice. */
+    if (isMissingFile(cause)) return null
+    throw cause
   }
+  /* ⚠️ **A RECORD THAT WILL NOT PARSE IS NOT ABSENCE EITHER, AND
+     `parseRecord` ANSWERS BOTH WITH `null`.** The read above succeeded, so the
+     file is THERE — a `null` here means its contents are damaged, which is this
+     device's own doing and never a fresh start. Returning `null` would put the
+     collapse straight back one line below where it was removed. */
+  const record = parseRecord(new TextDecoder().decode(bytes))
+  if (record === null) {
+    throw new Error(`book.json for ${bookId} is there but does not parse`)
+  }
+  return record
 }
 
 /**
@@ -883,8 +1045,11 @@ export async function atomicWrite(
  * `applyLookup` were seven ways to write one field to one book, each with its
  * own identity check and its own persistence path.
  *
- * Returns false when the book is not there, which is not an error: a write
- * racing a removal should do nothing rather than recreate the folder.
+ * Answers with NOTHING when the book is not there, which is not an error: a
+ * write racing a removal should do nothing rather than recreate the folder.
+ * (This said *"returns false"* long after it stopped returning a boolean — see
+ * the `@returns` note below, which is the current contract and explains why it
+ * changed. Found by audit.)
  */
 /**
  * @returns The record now on disk, or null when there was no book to change —
@@ -908,18 +1073,22 @@ export async function updateBook(
    * written. It is the discriminator for the check below: a trash entry that
    * appears while this call is running is a removal that happened in between. */
   const trashedBefore = await fs.exists(trashOf(bookId))
-  const current = await readBook(fs, bookId)
-  if (!current) {
-    /* PRESENT BUT UNREADABLE IS NOT ABSENT. `readBook` answers both with null,
-     * and returning false here reported "the book is gone, nothing to do" — so
-     * the tag the reader had just typed was dropped with no error anywhere and
-     * nothing to replay it. Gone is false; broken throws, and the caller says
-     * it could not save. */
-    if (await fs.exists(recordPath(bookId))) {
-      throw new Error(`book.json for ${bookId} is there but could not be read`)
-    }
-    return null
-  }
+  /* PRESENT BUT UNREADABLE IS NOT ABSENT. Gone is `null` and the caller does
+   * nothing; broken THROWS, and the caller says it could not save — otherwise
+   * the tag the reader had just typed is dropped with no error anywhere and
+   * nothing to replay it.
+   *
+   * ⚠️ **THE DISTINCTION IS `readBook`'s NOW, AND IT USED TO BE A SECOND READ
+   * HERE.** This asked `fs.exists(recordPath)` after the fact to work out which
+   * case it was in, because `readBook` collapsed both to `null`. That re-check
+   * is gone: the answer arrives from the read itself, so there is one round
+   * trip instead of two and no window between them in which the file can
+   * appear or vanish. What is kept is the MESSAGE — it names the book and the
+   * file, where the underlying error is a bare `EIO`. */
+  const current = await readBook(fs, bookId).catch((cause: unknown) => {
+    throw new Error(`book.json for ${bookId} is there but could not be read`, { cause })
+  })
+  if (!current) return null
   const next = change(current)
   if (next === current) return current
   await writeBook(fs, bookId, next, level)
@@ -961,10 +1130,60 @@ export async function updateBook(
  * status, as `parseRecord` derives it, so the two cannot disagree; the legacy
  * OR of two flags only where neither side has a status.
  */
-function finishedOf(stranded: BookRecord, live: BookRecord): { finished?: boolean } {
+function finishedOf(stranded: BookRecord, live: BookRecord): { finished?: boolean; finishedAt?: Hlc } {
   const status = live.status ?? stranded.status
-  if (status !== undefined) return { finished: status.state === 'finished' }
-  return stranded.finished || live.finished ? { finished: true } : {}
+  /* ⚠️ **AND ITS STAMP COMES FROM THE SIDE THE FLAG DID**, which it did not.
+     `finishedAt` rode through the spread from the live record, so a legacy
+     `finished: true` recovered from the stranded side was dated by whatever
+     the live record last wrote — or by nothing at all, which is worse: a fact
+     with no stamp loses every later merge against one that has one. The same
+     rule `ratingOf` states, which is why that one was written and this was
+     not. Found by audit. */
+  if (status !== undefined) {
+    const side = live.status !== undefined ? live : stranded
+    return { finished: status.state === 'finished', ...stamp('finishedAt', side) }
+  }
+  if (live.finished) return { finished: true, ...stamp('finishedAt', live) }
+  if (stranded.finished) return { finished: true, ...stamp('finishedAt', stranded) }
+  return {}
+}
+
+/** One optional stamp, carried only when the side it belongs to has it. */
+function stamp<K extends 'positionAt' | 'finishedAt' | 'ratingAt'>(
+  key: K,
+  side: BookRecord,
+): { [P in K]?: Hlc } {
+  const at = side[key]
+  return (at === undefined ? {} : { [key]: at }) as { [P in K]?: Hlc }
+}
+
+/**
+ * The position register the merged record carries — position, progress and
+ * their shared stamp, all from ONE side.
+ *
+ * ⚠️ **THREE FIELDS, ONE READ, AND THEY WERE CHOSEN SEPARATELY.** `position`
+ * and `progress` each took the live value or fell back to the stranded one,
+ * and `positionAt` — documented as *"the position group's stamp"* — simply
+ * rode through the spread from the live record. So a live record with a
+ * progress but no position produced a stranded position beside live progress:
+ * a place in the book nobody ever read to, dated by a write it was not part
+ * of. `ratingOf` above states the rule this needed. Found by audit.
+ *
+ * The live side wins WHEN IT HAS THE GROUP AT ALL, because reading moves
+ * forwards and the live record is where the reading happened.
+ */
+function positionOf(
+  stranded: BookRecord,
+  live: BookRecord,
+): { position?: string | null; progress?: number; positionAt?: Hlc } {
+  const has = (one: BookRecord) => one.position !== undefined || one.progress !== undefined
+  const side = has(live) ? live : has(stranded) ? stranded : undefined
+  if (side === undefined) return {}
+  return {
+    ...(side.position === undefined ? {} : { position: side.position }),
+    ...(side.progress === undefined ? {} : { progress: side.progress }),
+    ...stamp('positionAt', side),
+  }
 }
 
 /**
@@ -977,7 +1196,7 @@ function finishedOf(stranded: BookRecord, live: BookRecord): { finished?: boolea
 function ratingOf(stranded: BookRecord, live: BookRecord): { rating?: Stars; ratingAt?: Hlc } {
   const side = live.rating !== undefined ? live : stranded.rating !== undefined ? stranded : undefined
   if (side === undefined) return {}
-  return { rating: side.rating!, ...(side.ratingAt === undefined ? {} : { ratingAt: side.ratingAt }) }
+  return { rating: side.rating!, ...stamp('ratingAt', side) }
 }
 
 export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecord {
@@ -1001,6 +1220,10 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
     tags: _tags,
     tagClock: _clock,
     finished: _finished,
+    finishedAt: _finishedAt,
+    position: _position,
+    progress: _progress,
+    positionAt: _positionAt,
     status: _status,
     rating: _rating,
     ratingAt: _ratingAt,
@@ -1019,12 +1242,11 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
     ...rest,
     ...(clock ? { tagClock: clock } : {}),
     ...(tags.length ? { tags } : {}),
-    ...(live.position ?? stranded.position ? { position: live.position ?? stranded.position! } : {}),
-    ...((live.progress ?? stranded.progress) === undefined
-      ? {}
-      : { progress: live.progress ?? stranded.progress! }),
+    /* Position, progress and their shared stamp move together, from one side. */
+    ...positionOf(stranded, live),
     /* `finished` follows the status that wins — one fact, not two — and the
-     * legacy OR of two flags only where neither side has a status. */
+     * legacy OR of two flags only where neither side has a status. Its stamp
+     * comes from the side the flag did. */
     ...finishedOf(stranded, live),
     /* The reader's own opinion of the book, live side first — the record
      * the reader kept using is the one whose opinion is current. The
@@ -1054,15 +1276,10 @@ function mergeTagClocks(a: TagClock | undefined, b: TagClock | undefined): TagCl
       if (held === undefined || compareHlc(entry.at, held.at) >= 0) merged[key] = entry
     }
   }
-  /* ROUND-TRIP STABLE: two full clocks merge to twice `MAX_TAGS`, and the
-   * next read would keep the first `MAX_TAGS` by key and drop the rest
-   * silently. The same deterministic rule is applied here, so what is
-   * written is what will be read. */
-  const keys = Object.keys(merged).sort()
-  if (keys.length <= MAX_TAGS) return merged
-  const capped: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
-  for (const key of keys.slice(0, MAX_TAGS)) capped[key] = merged[key]!
-  return capped
+  /* ROUND-TRIP STABLE: two full clocks merge to twice `MAX_TAGS`, and the read
+   * applies the same rule — so what is written is what will be read. One
+   * definition of that rule, which there were two of. See `capRegisters`. */
+  return capRegisters(merged)
 }
 
 /**
@@ -1075,9 +1292,18 @@ function mergeTagClocks(a: TagClock | undefined, b: TagClock | undefined): TagCl
  * route had reached it first, and nothing would ever compare the two.
  *
  * Every field is omitted when the book declares nothing, rather than written
- * empty: `mergeParsed` treats what it is given as the book's own account of
- * itself, so an empty string here is the book SAYING it has no publisher, and
- * that would overwrite one the reader's record already had.
+ * empty: an empty string here would be the book SAYING it has no publisher.
+ *
+ * ⚠️ **OMITTING IT DOES NOT PRESERVE WHAT THE READER'S RECORD HELD, AND THIS
+ * CLAIMED IT DID.** `mergeParsed` starts from `parsed` and re-adds only the
+ * fields that are the READER'S — tags, position, opinion, origin — so a
+ * publisher the previous record had and this parse omits is GONE from the
+ * merged record either way. What omission actually buys is that the field is
+ * absent rather than empty, which is the difference between "not known" and
+ * "declared as nothing" for everything downstream that tests `publisher ?`.
+ * The book is the authority on its own metadata, and a re-parse of a book
+ * whose publisher was dropped from the file is a re-parse that says so. Found
+ * by audit.
  *
  * It deliberately does NOT carry `title` and `author` conditionally — those two
  * are `BookRecord`'s only required fields and a parse always has an answer for
@@ -1104,9 +1330,17 @@ export function recordFromMeta(
   },
   source?: NamedSource,
 ): BookRecord {
+  /* ⚠️ **THE SAME BOUNDS THE PARSER APPLIES, OR THE RECORD DISAGREES WITH
+     ITSELF ACROSS A RELOAD.** `parseRecord` slices prose at `MAX_FIELD` and a
+     declared list at `MAX_LIST`; this wrote whatever the book declared. So a
+     501-character title was returned to the caller whole, written whole, and
+     came back 500 characters long on the next read — and 65 subjects came back
+     as 64. The identifier was already bounded here for exactly this reason,
+     with the comment below explaining it, and the rest of the fields were not.
+     One projection means one set of bounds. Found by audit. */
   return {
-    title: titleAsParsed(meta.title, source),
-    author: meta.author,
+    title: text(titleAsParsed(meta.title, source)) ?? '',
+    author: text(meta.author) ?? '',
     /* THE SCHEMA THE PARSE WROTE, stamped by every route that parses. See
      * `META_SCHEMA`: `parsedAt` alone cannot say WHICH fields a parse knew
      * about, so a library parsed before `identifier` existed is
@@ -1122,15 +1356,13 @@ export function recordFromMeta(
     ...(meta.identifier && meta.identifier.trim() !== '' && meta.identifier.length <= MAX_FIELD
       ? { identifier: meta.identifier }
       : {}),
-    ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
-    ...(meta.series ? { series: meta.series } : {}),
-    ...(meta.seriesIndex === null || meta.seriesIndex === undefined
-      ? {}
-      : { seriesIndex: meta.seriesIndex }),
-    ...(meta.subjects?.length ? { subjects: meta.subjects } : {}),
-    ...(meta.publisher ? { publisher: meta.publisher } : {}),
-    ...(meta.published ? { published: meta.published } : {}),
-    ...(meta.languages?.length ? { languages: meta.languages } : {}),
+    ...keep('sortAs', text(meta.sortAs)),
+    ...keep('series', text(meta.series)),
+    ...keep('seriesIndex', meta.seriesIndex === null ? undefined : num(meta.seriesIndex)),
+    ...keep('subjects', list(meta.subjects)),
+    ...keep('publisher', text(meta.publisher)),
+    ...keep('published', text(meta.published)),
+    ...keep('languages', list(meta.languages)),
   }
 }
 

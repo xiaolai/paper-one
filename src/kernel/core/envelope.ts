@@ -1,3 +1,4 @@
+import { notifyAll } from './notify'
 import { messageOf } from './messageOf'
 import type { ServiceContext, ServiceContribution } from './capability'
 
@@ -980,13 +981,7 @@ export function createRouter(options: RouterOptions): Router {
         /* After the aborts, so a listener that tears the session down sees
          * the handlers already gone; each on its own, so one that throws
          * cannot keep the next from hearing. */
-        for (const listener of [...closed]) {
-          try {
-            listener()
-          } catch {
-            /* A listener's failure is its own; the close still happened. */
-          }
-        }
+        notifyAll(closed, 'session-close')
         closed.clear()
       }
 

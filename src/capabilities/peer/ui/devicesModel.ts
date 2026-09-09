@@ -1,4 +1,4 @@
-import { messageOf } from '../../../kernel'
+import { messageOf, notifyAll } from '../../../kernel'
 import type { PeerPort } from '../lib/port'
 import type {
   PairOffer,
@@ -371,7 +371,7 @@ export function createDevicesModel({
   const listeners = new Set<() => void>()
   const publish = (next: Partial<DevicesSnapshot>) => {
     snapshot = { ...snapshot, ...next }
-    for (const listener of [...listeners]) listener()
+    notifyAll(listeners, 'devices')
   }
   const offs: Unsubscribe[] = []
   if (port) {

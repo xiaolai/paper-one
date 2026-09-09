@@ -1,4 +1,4 @@
-import { CARD_KINDS, type Card, type CardRow } from '../../kernel'
+import { CARD_KINDS, notifyAll, type Card, type CardRow } from '../../kernel'
 import { byFirstId, id, num, oneOf, str } from './wireRow'
 import type { ShelfChannel } from './channel'
 
@@ -121,7 +121,7 @@ export function createRemoteCards(channel: ShelfChannel): CardsStore {
   let live = true
   const listeners = new Set<() => void>()
   const changed = (): void => {
-    for (const l of listeners) l()
+    notifyAll(listeners, 'web cards')
   }
 
   /* WHICH REFRESH IS THE CURRENT ONE — the same guard `marks.ts` and `books.ts`

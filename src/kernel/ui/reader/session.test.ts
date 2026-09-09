@@ -242,7 +242,7 @@ function fakeView(overrides: FakeViewOptions = {}): FakeView {
 const PALETTE: MarkPalette = {
   fill: { yellow: '#F3E6C0', green: '#D1EED3', purple: '#F2E0FF' },
   rule: { yellow: '#E0BE55', green: '#85D288', purple: '#DDAFFF' },
-  companion: '#9E5A16', foreign: '#teal',
+  companion: '#9E5A16', foreign: '#teal', stranger: '#grey',
 }
 
 function callbacks(
@@ -1610,6 +1610,7 @@ describe('ReaderSession marks', () => {
     ['a reader’s rule', { kind: 'highlight', tint: 'purple', style: 'underline' }],
     ['the companion’s wave', { kind: 'companion' }],
     ['a friend’s underline', { kind: 'circle', readers: 1 }],
+    ['a stranger’s underline', { kind: 'public', readers: 1 }],
   ])('tells the painter which way the text runs — %s', async (_what, annotation) => {
     /* ⚠️ **foliate's `underline`, `strikethrough` and `squiggly` each READ
        `writingMode`** and put the rule on the block's far edge — under the
@@ -1619,6 +1620,18 @@ describe('ReaderSession marks', () => {
     expect(await optionsFor(annotation, 'vertical-rl')).toMatchObject({
       writingMode: 'vertical-rl',
     })
+  })
+
+  it('draws a stranger’s mark in its own hue, not a friend’s', async () => {
+    /* ⚠️ **THE WHOLE OF WI-22.D2's FALSIFIER, ONE AUDIENCE OUT.** *"If you
+       cannot tell them apart without clicking, this is not done."* A public
+       annotation used to reach `attachForeign` with the circle's painter kind,
+       so a passage anybody at all had marked was drawn exactly as one somebody
+       the reader admitted had. Same shape — a second shape would compete with
+       the companion's wave — and a quieter hue, because the public layer is
+       the one free keys can fill. */
+    expect(await optionsFor({ kind: 'public', readers: 1 }, 'horizontal-tb')).toMatchObject({ color: '#grey' })
+    expect(await optionsFor({ kind: 'circle', readers: 1 }, 'horizontal-tb')).toMatchObject({ color: '#teal' })
   })
 
   it('measures the writing mode where the words are, not where the book declares it', async () => {
@@ -1740,7 +1753,7 @@ describe('ReaderSession marks', () => {
     cb.getPalette = () => ({
       fill: { yellow: '#4A3B18', green: '#2C4230', purple: '#433851' },
       rule: { yellow: '#8A6E2C', green: '#4B7D4D', purple: '#85659D' },
-      companion: '#D9A25E', foreign: '#teal',
+      companion: '#D9A25E', foreign: '#teal', stranger: '#grey',
     })
     const session = new ReaderSession(fakeHost(), cb)
     await session.start('book.epub', deps(view))
@@ -3868,6 +3881,7 @@ describe('a foreign mark (WI-22.D2)', () => {
     cfi: resolvedCfiForTesting('epubcfi(/6/4!/4/2)'),
     sectionIndex: 0,
     key: 'circle:alice:pub1',
+    audience: 'circle',
     readers: 1,
     ...over,
   })

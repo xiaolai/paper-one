@@ -26,8 +26,60 @@ use crate::error::{Error, Result};
 
 /// The subdirectory of the data root that holds device-private state.
 pub const PEER_DIR: &str = "peer";
-const KEY_FILE: &str = "identity.key";
-const KEY_LEN: usize = 32;
+
+/// Which endpoint's key a path is for.
+///
+/// ⚠️ **A CLOSED SET, BECAUSE THE VALUE IS JOINED ONTO A DIRECTORY.** This was a
+/// `&str` guarded by `debug_assert!`, which is absent from release builds — so
+/// the check that stopped a caller naming `../../something` existed only where
+/// nobody runs. Two variants, two filenames, and no way to express a third
+/// without editing this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointKey {
+    /// The circle endpoint: identity-addressed, mutual consent.
+    ///
+    /// ⚠️ **"NEVER ANNOUNCED TO ANYONE WHO HAS NOT BEEN INTRODUCED" WAS
+    /// WRITTEN HERE AND IS FALSE.** This endpoint IS advertised over mDNS on
+    /// the local network — `endpoint.rs` records the decision (WI-25.8) and why
+    /// it cannot be otherwise: mDNS discovery is symmetric, so a Paper that
+    /// advertises nothing resolves nothing, and the LAN path goes with it. What
+    /// is actually true is narrower and still worth having: this key never
+    /// enters a public CONTENT index, and a stranger who fetched a book cannot
+    /// try circle protocols against the key that served it. Found by audit.
+    Circle,
+    /// The share endpoint: content-addressed, anybody who holds a hash.
+    Share,
+}
+
+impl EndpointKey {
+    fn file_name(self) -> &'static str {
+        match self {
+            EndpointKey::Circle => CIRCLE_KEY_FILE,
+            EndpointKey::Share => SHARE_KEY_FILE,
+        }
+    }
+}
+
+pub const CIRCLE_KEY_FILE: &str = "identity.key";
+
+/// The SHARE endpoint's key — WI-25.1.
+///
+/// ⚠️ **A SECOND KEYPAIR IS THE WHOLE POINT, NOT AN IMPLEMENTATION DETAIL.**
+/// The share endpoint is content-addressed and announced; the circle endpoint
+/// is identity-addressed and private. One key for both would put the circle's
+/// identity into a public content index, and would let a stranger who fetched
+/// a book attempt circle protocols against the key that served it.
+///
+/// It gets this module's whole discipline — private temp sibling, hard-linked
+/// into place, 0600, `peer/` excluded from backup — because a share key that
+/// changes identity under a restart is a provider every stored address hint
+/// points at and nobody can reach.
+///
+/// ⚠️ **AND WHAT THE SPLIT DOES NOT BUY IS ANONYMITY.** Both endpoints resolve
+/// to the same addresses, so IP-level correlation of "same machine" stays
+/// trivial. Said here because a reader of this constant is exactly the person
+/// about to assume otherwise.
+pub const SHARE_KEY_FILE: &str = "share.key";
 
 /// The marker Time Machine reads: the on-disk form of Foundation's
 /// `NSURLIsExcludedFromBackupKey` (`CSBackupSetItemExcluded` without
@@ -39,14 +91,33 @@ const BACKUP_EXCLUDE_XATTR: &str = "com.apple.metadata:com_apple_backup_excludeI
 #[cfg(target_os = "macos")]
 const BACKUP_EXCLUDE_VALUE: &[u8] = b"com.apple.backupd";
 
-/// `<root>/peer/identity.key`.
-pub fn key_path(root: &Path) -> PathBuf {
-    root.join(PEER_DIR).join(KEY_FILE)
+/// `<root>/peer/<file>`, for one of the two key files named above.
+///
+/// ⚠️ **THE NAME IS A TYPE, AND IT USED TO BE A `&str` WITH A DEBUG
+/// ASSERTION.** It is joined straight onto `peer/`, so a caller-supplied name
+/// is a path traversal wearing a key's clothes — and `debug_assert!` compiles
+/// to nothing in the build readers actually run. The two names this module owns
+/// are the only two values [`EndpointKey`] has, so a third means adding a
+/// variant here rather than passing a string from somewhere else.
+pub fn key_path_named(root: &Path, file: EndpointKey) -> PathBuf {
+    let file = file.file_name();
+    root.join(PEER_DIR).join(file)
 }
 
-/// Load the key, or generate and persist one if there is none.
+/// Load the circle endpoint's key, or generate and persist one if there is none.
 pub fn load_or_create(root: &Path) -> Result<SecretKey> {
-    let path = key_path(root);
+    load_or_create_named(root, EndpointKey::Circle)
+}
+
+/// Load one endpoint's key, or generate and persist one if there is none.
+///
+/// ⚠️ **THE DISCIPLINE IS THE FUNCTION, WHICH IS WHY THE SHARE KEY GOES THROUGH
+/// IT RATHER THAN BESIDE IT.** Everything below — the backup exclusion set on
+/// every load, the non-clobbering install, the refusal to overwrite a
+/// wrong-length file, mode 0600 — was learned once and is worth exactly nothing
+/// to a second key file that reimplements two thirds of it.
+pub fn load_or_create_named(root: &Path, file: EndpointKey) -> Result<SecretKey> {
+    let path = key_path_named(root, file);
     /* The exclusion goes on FIRST, before any key exists to back up: a
      * freshly written key that predates the marker is one Time Machine pass
      * away from being cloned, and a CORRUPT key used to return early past
@@ -54,10 +125,21 @@ pub fn load_or_create(root: &Path) -> Result<SecretKey> {
      * install that exists today wrote `peer/` before this marker did, and
      * loading is what reaches them. */
     let dir = root.join(PEER_DIR);
+    let fresh = !dir.exists();
     std::fs::create_dir_all(&dir)?;
+    /* ⚠️ **THE NEW DIRECTORY'S OWN ENTRY IS PERSISTED, NOT ONLY WHAT GOES IN
+     * IT.** `install_new` fsyncs `peer/` so the key's name survives a crash —
+     * but on a FRESH install `peer/` is itself a new entry in `root`, and
+     * nothing synced that. A power cut could therefore lose the directory and
+     * every key inside it while each individual write reported success. Only on
+     * creation: syncing the library root on every load would be a fsync per
+     * launch for a directory that has not changed. */
+    if fresh {
+        crate::keyfile::sync_dir(root)?;
+    }
     exclude_from_backup(&dir);
     let key = match std::fs::metadata(&path) {
-        Ok(meta) => load(&path, meta.len())?,
+        Ok(meta) => crate::keyfile::load(&path, meta.len())?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let fresh = SecretKey::generate();
             match write_new(&path, &fresh)? {
@@ -67,7 +149,7 @@ pub fn load_or_create(root: &Path) -> Result<SecretKey> {
                  * id, and a caller that went on using the key it made would
                  * be a second peer wearing the same install — the file says
                  * who this machine is, not whoever wrote last. */
-                Installed::Theirs => load(&path, std::fs::metadata(&path)?.len())?,
+                Installed::Theirs => crate::keyfile::load(&path, std::fs::metadata(&path)?.len())?,
             }
         }
         Err(err) => return Err(err.into()),
@@ -166,46 +248,17 @@ pub fn sign_page(root: &Path, message: &str) -> Result<String> {
         ));
     }
     let key = load_or_create(root)?;
-    Ok(hex(&key.sign(message.as_bytes()).to_bytes()))
-}
-
-/// Lower-case hex. `person.rs` has its own; this module may not import from it
-/// (it is the lower layer), and eight lines is cheaper than a shared crate.
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from_digit((byte >> 4) as u32, 16).expect("a nibble is a hex digit"));
-        out.push(char::from_digit((byte & 0x0f) as u32, 16).expect("a nibble is a hex digit"));
-    }
-    out
-}
-
-fn load(path: &Path, len: u64) -> Result<SecretKey> {
-    if len != KEY_LEN as u64 {
-        return Err(Error::IdentityCorrupt {
-            path: path.to_path_buf(),
-            len,
-        });
-    }
-    let bytes = std::fs::read(path)?;
-    let bytes: [u8; KEY_LEN] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::IdentityCorrupt {
-            path: path.to_path_buf(),
-            len: bytes.len() as u64,
-        })?;
-    tighten_permissions(path)?;
-    Ok(SecretKey::from_bytes(&bytes))
+    Ok(crate::keyfile::hex(
+        &key.sign(message.as_bytes()).to_bytes(),
+    ))
 }
 
 /// Which key ended up at the path — see [`write_new`].
-enum Installed {
-    /// The one this call generated.
-    Ours,
-    /// Another writer's, published while this one was writing.
-    Theirs,
-}
+///
+/// One definition, in `keyfile.rs`: this module and `share/voice.rs` both
+/// install keys, and two enums saying the same thing is how the two installers
+/// drifted apart in the first place.
+use crate::keyfile::Installed;
 
 /// Write `key` to a private temp file and install it WITHOUT CLOBBERING.
 ///
@@ -219,95 +272,13 @@ enum Installed {
 /// `hard_link` to install, which is atomic and EXCLUSIVE on POSIX and NTFS
 /// (the library lock publishes the same way, `src/lock.rs`). A loser
 /// discovers it lost instead of overwriting a winner.
+/* ⚠️ **THE INSTALLER LIVES IN `keyfile.rs` NOW.** `share/voice.rs` had grown a
+ * near-copy of this function that was missing the directory sync below — the
+ * drift this module's own header warns about, arriving exactly as predicted.
+ * One writer, both callers. What stays here is what an ENDPOINT key means:
+ * the backup exclusion, and the rule that a loser takes the winner's identity. */
 fn write_new(path: &Path, key: &SecretKey) -> Result<Installed> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let dir = path.parent().expect("key path has a parent");
-    std::fs::create_dir_all(dir)?;
-    /* PRIVATE TO THIS WRITER: pid and a sequence number. A relic left under
-     * this name can only be a dead process's — a live one with this pid is
-     * this process, and the sequence never repeats within it — so removing
-     * it and retrying is safe, which was not true of the shared name. The
-     * create is EXCLUSIVE either way: a truncating `create(true)` would
-     * follow a stale symlink and would reuse a stale file's looser mode,
-     * since `mode(0o600)` applies only to a file the open itself creates. */
-    let tmp = path.with_extension(format!(
-        "key.{}.{}.tmp",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = (|| -> Result<()> {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut file = match opts.open(&tmp) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::fs::remove_file(&tmp)?;
-                opts.open(&tmp)?
-            }
-            Err(err) => return Err(err.into()),
-        };
-        use std::io::Write;
-        file.write_all(&key.to_bytes())?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if let Err(err) = written {
-        /* The temp holds PRIVATE KEY MATERIAL; a failure must not leave it. */
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err);
-    }
-    let installed = std::fs::hard_link(&tmp, path);
-    // The name is published (or somebody else's is); either way this
-    // writer's temp — key material — goes.
-    let _ = std::fs::remove_file(&tmp);
-    match installed {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Ok(Installed::Theirs)
-        }
-        Err(err) => return Err(err.into()),
-    }
-    tighten_permissions(path)?;
-    /* Persist the new directory entry. Best-effort ONLY where the platform
-     * cannot do it — Windows cannot open a directory as a file — but a Unix
-     * failure is LOGGED: the comment used to claim the link was persisted
-     * while every failure vanished into an `if let`. */
-    match std::fs::File::open(dir) {
-        Ok(dir_file) => {
-            if let Err(err) = dir_file.sync_all() {
-                log::warn!("peer: could not persist the identity's directory entry: {err}");
-            }
-        }
-        Err(err) => {
-            #[cfg(unix)]
-            log::warn!("peer: could not open {} to sync it: {err}", dir.display());
-            #[cfg(not(unix))]
-            let _ = err;
-        }
-    }
-    Ok(Installed::Ours)
-}
-
-#[cfg(unix)]
-fn tighten_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::metadata(path)?.permissions();
-    if perms.mode() & 0o777 != 0o600 {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn tighten_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+    crate::keyfile::install_new(path, key)
 }
 
 #[cfg(test)]
@@ -319,13 +290,25 @@ mod tests {
     fn a_fresh_root_gets_a_key_and_the_file() {
         let dir = ScratchDir::new("identity-fresh");
         let key = load_or_create(dir.path()).unwrap();
-        let path = key_path(dir.path());
+        let path = key_path_named(dir.path(), EndpointKey::Circle);
         assert!(path.is_file());
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 32);
         assert_eq!(std::fs::read(&path).unwrap(), key.to_bytes());
+        /* ⚠️ **THIS CHECKED A NAME NOTHING WRITES ANY MORE.** The temp file
+        was `identity.key.tmp` once; it carries a pid and a sequence now
+        (`keyfile::install_new`), so asserting the old spelling was asserting
+        that a file nobody creates does not exist — a test that passes however
+        much key material is left behind. Enumerate instead: what matters is
+        that NO temp survives, whatever it is called. */
+        let leftovers: Vec<String> = std::fs::read_dir(path.parent().expect("a key has a parent"))
+            .expect("the peer directory")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
         assert!(
-            !path.with_extension("key.tmp").exists(),
-            "temp file cleaned up"
+            leftovers.is_empty(),
+            "key material was left behind in temp files: {leftovers:?}"
         );
     }
 
@@ -336,7 +319,7 @@ mod tests {
     #[test]
     fn a_key_that_appeared_first_is_taken_rather_than_overwritten() {
         let dir = ScratchDir::new("identity-race");
-        let path = key_path(dir.path());
+        let path = key_path_named(dir.path(), EndpointKey::Circle);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let winner = SecretKey::generate();
         std::fs::write(&path, winner.to_bytes()).unwrap();
@@ -393,7 +376,7 @@ mod tests {
     #[test]
     fn a_wrong_length_file_is_a_typed_error_and_is_left_alone() {
         let dir = ScratchDir::new("identity-corrupt");
-        let path = key_path(dir.path());
+        let path = key_path_named(dir.path(), EndpointKey::Circle);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"short").unwrap();
         let err = load_or_create(dir.path()).unwrap_err();
@@ -408,7 +391,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = ScratchDir::new("identity-mode");
         load_or_create(dir.path()).unwrap();
-        let mode = std::fs::metadata(key_path(dir.path()))
+        let mode = std::fs::metadata(key_path_named(dir.path(), EndpointKey::Circle))
             .unwrap()
             .permissions()
             .mode();
@@ -475,7 +458,7 @@ mod tests {
         // marker was; loading, not only creating, is what reaches them.
         let dir = ScratchDir::new("identity-backup-existing");
         let key = SecretKey::generate();
-        let path = key_path(dir.path());
+        let path = key_path_named(dir.path(), EndpointKey::Circle);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, key.to_bytes()).unwrap();
         let peer_dir = dir.path().join(PEER_DIR);
@@ -494,7 +477,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = ScratchDir::new("identity-loose");
         let key = SecretKey::generate();
-        let path = key_path(dir.path());
+        let path = key_path_named(dir.path(), EndpointKey::Circle);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, key.to_bytes()).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -582,8 +565,8 @@ mod tests {
         AFTER IT.** The signature then verifies nowhere, and the symptom is
         "some pages fail" — the ones whose signature happens to contain a byte
         below 0x10, which is most of them, sometimes. */
-        assert_eq!(hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
-        assert_eq!(hex(&[]), "");
+        assert_eq!(crate::keyfile::hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
+        assert_eq!(crate::keyfile::hex(&[]), "");
     }
 
     fn parse_sig(hex: &str) -> iroh::Signature {

@@ -62,6 +62,18 @@
       ]
     },
     {
+      "id": "public",
+      "requires": [
+        "peer"
+      ],
+      "ts": "public",
+      "platforms": [
+        "desktop",
+        "ios",
+        "android"
+      ]
+    },
+    {
       "id": "webhost",
       "requires": [
         "peer"

@@ -1,5 +1,5 @@
 import type { SettingsStore } from '../../../kernel'
-import { createGenerations, messageOf } from '../../../kernel'
+import { createGenerations, messageOf, notifyAll } from '../../../kernel'
 import type { Depth } from '../../inference'
 import { reasonOf, type InferencePort, type Probe, type Route } from '../../inference'
 import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
@@ -238,7 +238,7 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
 
   const invalidate = (): void => {
     cached = null
-    for (const listener of [...listeners]) listener()
+    notifyAll(listeners, 'routes')
   }
   const unsubscribeSettings = settings.subscribe(invalidate)
 

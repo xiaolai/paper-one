@@ -1,3 +1,4 @@
+import { notifyAll } from './notify'
 import { MARK_TINTS, READER_STYLES, type MarkStorage, type MarkStyle, type MarkTint } from './marks'
 import {
   BRIGHTNESS,
@@ -202,15 +203,7 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
    * notifier, two callers, and no third copy to forget. Found by the verify
    * pass on the fix for the first.
    */
-  const notify = (): void => {
-    for (const listener of [...listeners]) {
-      try {
-        listener()
-      } catch (thrown) {
-        console.error('Paper: a settings subscriber threw while being notified', thrown)
-      }
-    }
-  }
+  const notify = (): void => notifyAll(listeners, 'settings')
 
   /**
    * Whether a write would change anything, without ever throwing.

@@ -504,6 +504,11 @@ const queueOf = (keys: string[] = []): WriteQueue => ({
     keys.push(key)
     return task()
   },
+  /* The public layer's half of the same line — see `MAX_APPENDED_SHARED`. */
+  appendShared: (key, task) => {
+    keys.push(key)
+    return task()
+  },
   push: (key, task) => {
     keys.push(key)
     return task()

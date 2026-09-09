@@ -144,9 +144,16 @@ export async function finishPendingRemovals(fs: TrashFs): Promise<string[]> {
     if (entry.state !== 'removed') continue
     try {
       if (!(await fs.exists(folderOf(bookId)))) continue
-      const record = await readBook(fs, bookId)
       /* A folder with no readable record still moves: there is nothing to
-       * say it is newer than the removal, and the trash keeps it either way. */
+       * say it is newer than the removal, and the trash keeps it either way.
+       *
+       * ⚠️ **THE `catch` BELOW WOULD OTHERWISE SKIP IT.** `readBook` now
+       * throws for a record that is present and damaged, and this loop's
+       * catch-and-continue would turn that into "leave the folder alone" —
+       * the opposite of what the line above promises. The weaker question is
+       * asked explicitly: what matters here is whether anything says the book
+       * is NEWER than the removal, and an unreadable record says nothing. */
+      const record = await readBook(fs, bookId).catch(() => null)
       if (record && recordStamp(record) > entry.at) continue
       if (await trashBook(fs, bookId)) finished.push(bookId)
     } catch {

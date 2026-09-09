@@ -1,4 +1,4 @@
-import { ENVELOPE_ERRORS, ServiceCallError } from '../../../kernel'
+import { ENVELOPE_ERRORS, ServiceCallError, notifyAll } from '../../../kernel'
 
 /**
  * The sync STATUS store — one snapshot, `getSnapshot`/`subscribe`, no React
@@ -44,7 +44,7 @@ export function createSyncStatus(): SyncStatusStore {
     },
     set: (next) => {
       snapshot = { ...snapshot, ...next }
-      for (const listener of [...listeners]) listener()
+      notifyAll(listeners, 'sync status')
     },
   }
 }

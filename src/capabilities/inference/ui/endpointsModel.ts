@@ -1,4 +1,4 @@
-import { messageOf } from '../../../kernel'
+import { messageOf, notifyAll } from '../../../kernel'
 import { createGenerations } from '../../../kernel'
 import type { ReportFailure } from '../lib/controller'
 import type { Endpoint, InferencePlugin, KeyState } from '../lib/plugin'
@@ -225,7 +225,7 @@ export function createEndpointsModel({ plugin, report }: EndpointsModelOptions):
 
   const invalidate = (): void => {
     cached = null
-    for (const listener of [...listeners]) listener()
+    notifyAll(listeners, 'endpoints')
   }
 
   const build = (): EndpointsSnapshot =>

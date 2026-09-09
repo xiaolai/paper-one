@@ -109,7 +109,7 @@ function started(fs: IndexFs, books: readonly Record<string, unknown>[] = BOOKS,
   const disposable = circle.start!(
     {
       onCleanup: () => {},
-      services: { fs, library: library(books), writes, clock: () => hlcOf(7), hashes: () => hashes },
+      services: { bindPrivateAudience: () => ({ dispose: () => {} }), fs, library: library(books), writes, clock: () => hlcOf(7), hashes: () => hashes },
       diagnostics: { info, warn, error: vi.fn(), child: () => ({}) },
     } as never,
     new AbortController().signal,
@@ -531,7 +531,7 @@ describe('the shelf carries a jacket’s digest — WI-23.C5', () => {
     const disposable = circle.start!(
       {
         onCleanup: () => {},
-        services: { fs, library: lib, writes, clock: () => hlcOf(7), hashes: () => ({ hashFile }) },
+        services: { bindPrivateAudience: () => ({ dispose: () => {} }), fs, library: lib, writes, clock: () => hlcOf(7), hashes: () => ({ hashFile }) },
         diagnostics: { info, warn: vi.fn(), error: vi.fn(), child: () => ({}) },
       } as never,
       new AbortController().signal,

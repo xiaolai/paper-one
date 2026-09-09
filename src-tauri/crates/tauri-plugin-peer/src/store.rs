@@ -106,11 +106,30 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         )));
     }
 
-    /* The rename is durable only once the directory entry is. Best effort:
-    a filesystem that will not open a directory (Windows) has still done
-    the atomic part, and failing the write over it would be worse. */
+    /* The rename is durable only once the directory entry is.
+     *
+     * ⚠️ **A DIRECTORY THAT WILL NOT OPEN AND A SYNC THAT FAILS ARE DIFFERENT
+     * FACTS, AND THIS SWALLOWED BOTH.** The accommodation is for platforms
+     * where a directory is not openable as a file (Windows): there the atomic
+     * rename has still happened, and failing the write over an operation the
+     * platform does not offer would be worse. That says nothing about a sync
+     * that was attempted and FAILED — a full disk, a failing device, a
+     * read-only remount. Reporting success there tells the caller the write is
+     * durable when it is not, and the callers that matter here go on to
+     * destroy something on the strength of it (see `voice::rotate`).
+     *
+     * `AGENTS.md` records the same rule for `screen_lock_state`: distinguish
+     * ABSENT from UNREADABLE, and refuse the second rather than assuming. */
+    /* `if let`, not `match`: the `Err` arm is deliberately empty — a platform
+     * that does not open directories has still done the atomic rename — and
+     * clippy is right that a one-armed match says that less clearly. */
     if let Ok(handle) = std::fs::File::open(dir) {
-        let _ = handle.sync_all();
+        handle.sync_all().map_err(|e| {
+            Error::Identity(format!(
+                "could not persist the directory entry for {}: {e}",
+                path.display()
+            ))
+        })?;
     }
     Ok(())
 }

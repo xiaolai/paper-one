@@ -1,4 +1,4 @@
-import { atomicWrite, messageOf, type IndexFs, type KernelServices } from '../../../kernel'
+import { atomicWrite, messageOf, notifyAll, type IndexFs, type KernelServices } from '../../../kernel'
 import { COVER_CAP_SETTING, type CoverCache } from '../lib/coverCache'
 import type { SyncStatus, SyncStatusStore } from '../lib/status'
 
@@ -185,7 +185,7 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
   const listeners = new Set<() => void>()
   const publish = (next: Partial<StorageSnapshot>) => {
     snapshot = { ...snapshot, ...next }
-    for (const listener of [...listeners]) listener()
+    notifyAll(listeners, 'storage')
   }
 
   /**

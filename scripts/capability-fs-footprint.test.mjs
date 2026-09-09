@@ -121,6 +121,26 @@ const UNREADABLE = [
     what: 'a write method destructured off its object',
     pattern: /\b(?:const|let|var)\s*\{[^}]*\b(?:writeFile|appendFile|removeDir|remove|rename|mkdir)\b[^}]*\}\s*=/,
   },
+  {
+    /* ⚠️ **AND THIS ONE ACTUALLY HAPPENED**, in `voicePort.ts`, unnoticed.
+       The helper scan reads the receiver as a bare identifier followed by a
+       comma, so `atomicWrite(fs as VaultFs, path, bytes)` matched nothing and
+       the write simply was not in the footprint — the exact silent-shrinking
+       failure `stripComments` above is written at length to prevent, arriving
+       by a second door. The cast was dead (`IndexFs extends VaultFs`), which
+       is what makes refusing the form cheap: pass the handle. */
+    what: 'a path-writing helper whose handle is an expression rather than a plain name',
+    /* ⚠️ **`\s` IS THE FIRST ALTERNATIVE IN THE LOOKAHEAD, AND WITHOUT IT THIS
+       REFUSES CORRECT CODE.** `\s*` is greedy but it BACKTRACKS, so against a
+       multi-line `atomicWrite(\n  fs,` the engine gives back one space at a
+       time until the lookahead is staring at whitespace — where `[\w$]+` cannot
+       match, the negative lookahead succeeds, and a perfectly readable call is
+       reported as unreadable. JS has no possessive quantifier to forbid that;
+       failing the lookahead on leftover whitespace does the same job. Caught by
+       running this pattern over the whole tree rather than over the one file it
+       was written for. */
+    pattern: /\b(?:atomicWrite|notePresence|writePresence)\(\s*(?!\s|[\w$]+\s*,)/,
+  },
 ]
 
 /** The first argument of a call, given the text after its `(` — walks
@@ -242,6 +262,58 @@ const REVIEWED_FOOTPRINT = [
      they take part in the circle or not. */
   'circle/lib/publish.ts atomicWrite(fs, sharedPathIn(bookId))',
   'circle/lib/store.ts fs.remove(path)',
+  /* -- public -- annotations from STRANGERS, beside the circle's and never in
+   * it. Phase 26.
+   *
+   * ⚠️ **THE REVIEW, and this one is the least trusted write any capability
+   * makes.** The circle's files come from people the reader admitted; these
+   * come from anybody who knows a book's hash. Four things make it narrow
+   * enough to allow:
+   *
+   *  - **One shape of path, built by the kernel.** `publicPathIn(bookId)` is
+   *    `books/<safeId(bookId)>/public.jsonl`, and this capability cannot name
+   *    another file with it. Nothing a stranger sends reaches the path at all —
+   *    the voice, the publication id and the book hash are CONTENTS, never
+   *    segments, which is the difference from `circlePathIn` and the reason
+   *    there is one file per book rather than one per author.
+   *  - **It is not under `circle/`.** `peopleFor` lists that folder and reads
+   *    every `*.json` in it as a PERSON, so a stranger's file put there would
+   *    appear in the reader's circle as somebody they never met. The same trap
+   *    `shared.json` was moved out of, with a worse blast radius.
+   *  - **Every line is verified on the way out as well as on the way in.**
+   *    Phase 26's finding #1 is that the circle's disk loader checks neither a
+   *    signature nor a roster, and was safe only because the network receiver
+   *    refused strangers upstream. There is no upstream here, so `readPublic`
+   *    re-verifies against the bytes that were signed.
+   *  - **It is bounded.** `keepWithin` caps what one book retains, in files and
+   *    in bytes, and `MAX_APPENDED` caps the queue it writes through — so a
+   *    flood fills a quota rather than a disk, and cannot schedule the reader's
+   *    own note behind a thousand of its own.
+   *
+   * `services.fs` in `index.ts` is the read side: the overlay reads that one
+   * file to draw. It writes nothing. */
+  'public/index.ts services.fs',
+  'public/lib/publicStore.ts atomicWrite(fs, publicPathIn(bookId))',
+  /* ⚠️ **THE ONE PUBLIC FILE THAT IS NOT ABOUT A BOOK — WI-26.5.**
+     `public/voices.json` holds what THIS reader has decided about other
+     people's pseudonyms: which voice belongs to which friend, and which voices
+     and people are blocked. Three things make it reviewable:
+
+      - **It is the phase's secret, and it has no publisher.** A binding is the
+        single fact phase 26 exists to keep off the wire — it says a pseudonym
+        is a named friend. There is no wire type for it, nothing reads it into
+        an envelope, and it lives OUTSIDE `circle/` precisely so `peopleFor`
+        cannot mistake a voice for a person.
+      - **One path, one lane, one writer.** The name is a constant, not a
+        template, so no caller can widen it; every change is read-fold-write
+        inside `public:voices`, so two callers cannot fold from one snapshot
+        and have the second erase the first.
+      - **It is bounded.** `MAX_DECISIONS` caps each of the three lists, and a
+        write past the cap throws rather than truncating silently.
+
+     Absent means empty; unreadable THROWS. Collapsing those two is how a
+     reader's whole decision file gets overwritten with nothing. */
+  'public/lib/voicePort.ts atomicWrite(fs, VOICE_DECISIONS_PATH)',
   /* ⚠️ **THE FIRST CIRCLE FILES OUTSIDE A BOOK — WI-23.C1 and C3, and this
      entry is the review the plan says the gate exists for.** Three shapes,
      all under `circle/`, which is the capability's own namespace and the one

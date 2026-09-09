@@ -53,6 +53,39 @@ function world(ids: readonly string[], titles: Record<string, string> = {}) {
   return { fs, library, refuse: (id: string, on: boolean) => (on ? refused.add(id) : refused.delete(id)) }
 }
 
+/* ⚠️ **`safeId` IS MANY-TO-ONE, AND THE WHOLE SHELF DEPENDS ON THAT NOT
+   MATTERING.** `folderOf` maps every non-alphanumeric character to `_`, so
+   `book:abc` and `book_abc` name ONE directory. Three separate places already
+   defend against it — `add` matches by folder, `removeBlob` refuses an id the
+   shelf does not own, and `restore` compares the stored id — and nothing
+   asserted the invariant those defences exist to keep.
+
+   Making the folder collision-free instead would rename every folder in every
+   existing library, which is a migration rather than a fix and is not a call
+   this test can make. What it can do is make a regression loud: if two rows
+   ever share a folder, the guards above are guarding nothing. */
+describe('two ids that name one folder are one book', () => {
+  it('does not put a second row on the shelf for a folder already held', async () => {
+    const { library } = world([])
+    await library.add('book:abc', { title: 'first', author: '' })
+    await library.add('book_abc', { title: 'second', author: '' })
+
+    const rows = library.getSnapshot()
+    expect(rows, 'two rows share one directory, so a write to either reaches both').toHaveLength(1)
+    /* And the id that survives is the one most recently supplied, stamped into
+       the record — so `update`, `remove` and `positionOf` all agree from here
+       rather than one of them holding an alias that matches nothing. */
+    expect(rows[0]?.bookId).toBe('book_abc')
+  })
+
+  it('keeps one row however the two spellings are ordered', async () => {
+    const { library } = world([])
+    await library.add('book_abc', { title: 'first', author: '' })
+    await library.add('book:abc', { title: 'second', author: '' })
+    expect(library.getSnapshot()).toHaveLength(1)
+  })
+})
+
 describe('a write that does not land', () => {
   it('is published as the last failure, naming the book, and the store stops being persistent', async () => {
     const { library, refuse } = world(['book_a'], { book_a: 'Moby-Dick' })
@@ -431,7 +464,13 @@ describe('the undo offer and a write that fails', () => {
     const { fs, library } = world(['book_a', 'book_b'])
     await library.tagBooks(['book_a', 'book_b'], ['Sea'])
     fs.store.set(`${BOOKS_DIR}/book_b/book.json`, new TextEncoder().encode('not json at all'))
-    await expect(library.removeTag('Sea')).rejects.toThrow(/book_b is there but could not be read/u)
+    /* ⚠️ **THE CLAUSE'S OWN WORDS, AND THERE ARE NOW TWO OF THEM.** This file
+       is present and unparseable, which is DAMAGE; a read that fails outright
+       is a different fact with its own sentence ("could not be read"). They
+       used to share one message, and `AGENTS.md` records what that costs: a
+       pattern matching a shared prefix cannot tell which check fired, so a
+       mutant skipping one survives on the other's wording. */
+    await expect(library.removeTag('Sea')).rejects.toThrow(/book_b is there but does not parse/u)
     const written = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_a/book.json`)!)) as { tags?: string[] }
     expect(written.tags ?? []).not.toContain('Sea')
     expect(library.lastRemoval()).toMatchObject({ tag: 'Sea', bookIds: ['book_a'] })

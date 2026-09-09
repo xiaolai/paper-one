@@ -220,6 +220,30 @@ pub enum Error {
     /// A transfer into that target is already running.
     #[error("a transfer into {0} is already running")]
     TransferBusy(String),
+
+    // ── public sharing (phase 25) ───────────────────────────────────────
+    /// `peer/share/offered.json` — or one of the annotation files beside it —
+    /// exists and is not what this build writes.
+    ///
+    /// ⚠️ **SEPARATE FROM `PeersMalformed` BECAUSE THE SAFE READING IS THE
+    /// OPPOSITE ONE.** A malformed peer list must never be read as "this
+    /// reader knows nobody", because the next write would make it true. A
+    /// malformed sharing policy read as "nothing is offered" is the SAFE
+    /// direction — it serves strangers less, not more — which is why
+    /// `SharePolicy::load_or_refuse_all` may swallow this one and nothing may
+    /// swallow that one.
+    #[error("public sharing state {} is not readable: {why}", path.display())]
+    ShareMalformed { path: PathBuf, why: String },
+
+    /// A public request or offer was refused, with the reason.
+    ///
+    /// ⚠️ **THE MESSAGE IS FOR THIS MACHINE'S OWN READER, NEVER FOR THE WIRE.**
+    /// A stranger is answered by `NotesAnswer::refused`, which says one
+    /// sentence whatever happened — a refusal that names which check failed is
+    /// an oracle, and the checks here include "does this machine hold that
+    /// book".
+    #[error("{0}")]
+    ShareRefused(String),
 }
 
 impl Error {
@@ -269,6 +293,8 @@ impl Error {
             Error::BlobTooLarge { .. } => "blobTooLarge",
             Error::BlobInterrupted { .. } => "blobInterrupted",
             Error::TransferBusy(_) => "transferBusy",
+            Error::ShareMalformed { .. } => "shareMalformed",
+            Error::ShareRefused(_) => "shareRefused",
         }
     }
 }

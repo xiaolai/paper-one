@@ -2,7 +2,7 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolvedCfiForTesting } from '../../core/resolvedCfi.testkit'
-import type { ForeignAnnotation } from '../../core/circle/foreign'
+import type { ForeignAnnotation, OverlayAudience } from '../../core/circle/foreign'
 import type { OverlayContribution } from '../../core/circle/overlay'
 import { useOverlays, type OverlayDeps } from './useOverlays'
 
@@ -10,16 +10,35 @@ import { useOverlays, type OverlayDeps } from './useOverlays'
 
 afterEach(cleanup)
 
-const annotation = (over: Partial<ForeignAnnotation> = {}): ForeignAnnotation => ({
-  pub: 'pub1',
-  person: 'alice',
-  author: 'alice',
-  cfi: resolvedCfiForTesting('epubcfi(/6/4!/4/2)'),
-  sectionIndex: 1,
-  quote: 'Call me Ishmael',
-  readers: 1,
-  ...over,
-})
+/**
+ * One contributed annotation.
+ *
+ * ⚠️ **THE ANCHOR FOLLOWS THE PUBLICATION UNLESS A TEST SAYS OTHERWISE**, and
+ * it used to be one fixed CFI for every fixture. The host now RECONCILES by
+ * anchor, so a shared default CFI silently made every multi-annotation test a
+ * test of merging — the opposite of what most of them are about. `at` is how a
+ * test asks two annotations to land on the same passage.
+ */
+const annotation = (
+  over: {
+    pub?: string
+    person?: string
+    at?: string
+    audience?: OverlayAudience
+    people?: readonly string[]
+  } = {},
+): ForeignAnnotation => {
+  const pub = over.pub ?? 'pub1'
+  const person = over.person ?? 'alice'
+  return {
+    person,
+    cfi: resolvedCfiForTesting(over.at ?? `epubcfi(/6/4!/4/${pub})`),
+    sectionIndex: 1,
+    quote: 'Call me Ishmael',
+    opinions: [{ pub, audience: over.audience ?? 'circle', author: person }],
+    people: over.people ?? [person],
+  }
+}
 
 const contribution = (
   id: string,
@@ -64,17 +83,80 @@ describe('useOverlays', () => {
   it('composes the overlay key itself, so one reader cannot collapse another', async () => {
     /* ⚠️ **`review.md`'s overlay blocker 1.** Leaving the key to the
        contributor would make the fix depend on every capability getting it
-       right; composing it here makes `n` readers `n` entries by construction. */
+       right; composing it here makes passages that differ differ by
+       construction, whatever a capability chose to call things. */
     const both = contribution('a:x', () =>
       Promise.resolve([
-        annotation({ pub: 'same', person: 'alice' }),
-        annotation({ pub: 'same', person: 'bob' }),
+        annotation({ pub: 'same', person: 'alice', at: 'cfiA' }),
+        annotation({ pub: 'same', person: 'bob', at: 'cfiB' }),
       ]),
     )
     const { result } = renderHook(() => useOverlays(deps({ contributions: [both] })))
 
     await waitFor(() => expect(result.current).toHaveLength(2))
     expect(new Set(result.current.map((one) => one.key)).size).toBe(2)
+  })
+
+  it('counts one person once when two contributions both carry them — WI-26.6', async () => {
+    /* ⚠️ **THE HOST IS THE ONLY THING THAT SEES BOTH CHANNELS.** A capability
+       can dedupe within its own answer and no further, so one person who
+       marked a passage in the circle AND published a bound voice at it used to
+       arrive as two annotations claiming one reader each — flattened end to
+       end and drawn as two people at one sentence. */
+    const circle = contribution('circle:x', () =>
+      Promise.resolve([annotation({ pub: 'c1', person: 'alice', at: 'shared' })]),
+    )
+    const publicly = contribution('public:x', () =>
+      Promise.resolve([
+        annotation({ pub: 'v1', person: 'voice1', at: 'shared', audience: 'public', people: ['alice'] }),
+      ]),
+    )
+    const { result } = renderHook(() => useOverlays(deps({ contributions: [circle, publicly] })))
+
+    await waitFor(() => expect(result.current).toHaveLength(1))
+    expect(result.current[0]?.readers).toBe(1)
+    /* ⚠️ **AND THE FIRST CONTRIBUTION OWNS THE TREATMENT**, which is the
+       composition's order — so a passage a friend marked is drawn as a
+       friend's even when a stranger marked it too. The public layer cannot
+       add a mark where the circle already draws one, which is worth having on
+       its own: keys are free, and an attacker cannot make a friend's passage
+       look busier than it is. */
+    expect(result.current[0]?.audience).toBe('circle')
+    expect(result.current[0]?.key).toBe('circle:alice:c1')
+  })
+
+  it('draws a stranger as a stranger where no friend marked the passage', async () => {
+    const publicly = contribution('public:x', () =>
+      Promise.resolve([annotation({ pub: 'v1', person: 'voice1', audience: 'public', people: [] })]),
+    )
+    const { result } = renderHook(() => useOverlays(deps({ contributions: [publicly] })))
+
+    await waitFor(() => expect(result.current).toHaveLength(1))
+    expect(result.current[0]?.audience).toBe('public')
+    /* Nobody identifiable is ONE reader, never none — a zero would ramp the
+       weight below the lightest rule and draw nothing at all. */
+    expect(result.current[0]?.readers).toBe(1)
+  })
+
+  it('skips an annotation with no publication rather than losing every other contributor', async () => {
+    /* ⚠️ `opinions` is declared non-empty and `overlayKey` throws on an empty
+       one — correctly, there is no key to compose. The throw would land in the
+       commit, OUTSIDE the per-contribution catch, and take the other
+       contributors' marks off the page with it. */
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const broken = contribution('bad:x', () =>
+        Promise.resolve([{ ...annotation({ pub: 'x' }), opinions: [] }]),
+      )
+      const good = contribution('good:x', () => Promise.resolve([annotation({ pub: 'ok' })]))
+      const { result } = renderHook(() => useOverlays(deps({ contributions: [broken, good] })))
+
+      await waitFor(() => expect(result.current).toHaveLength(1))
+      expect(result.current[0]?.key).toBe('circle:alice:ok')
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('re-asks when a contribution signals, rather than taking a payload', async () => {

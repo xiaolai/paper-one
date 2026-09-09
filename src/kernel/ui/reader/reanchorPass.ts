@@ -1,4 +1,13 @@
-import { cfiFor, indexText, reanchorIn, type ForeignPassage, type ResolvedCfi } from './reanchor'
+import { ANCHOR_PER_TASK } from '../../core/public/bounds'
+import {
+  cfiFor,
+  distinguishable,
+  indexText,
+  reanchorIn,
+  type ForeignPassage,
+  type ResolvedCfi,
+  type TextIndex,
+} from './reanchor'
 
 /**
  * WI-22.A2 — **the pass that makes an unplaced mark reachable.**
@@ -50,6 +59,14 @@ import { cfiFor, indexText, reanchorIn, type ForeignPassage, type ResolvedCfi } 
  * Neither is optional and neither has a default that skips: a caller that
  * supplies neither gets a pass that never yields, which is why both are
  * required rather than `?`.
+ *
+ * ⚠️ **AND THE INNER LOOP YIELDS TOO, WHICH IT DID NOT — WI-26.7.** Yielding
+ * between SECTIONS bounds the pass at (marks × one section) rather than at one
+ * section, and that was fine while the marks were the reader's own and a
+ * handful of friends'. Public annotations are published by strangers with free
+ * keys, so the same inner loop is however many a flood published, per section,
+ * in one uninterruptible task. `ANCHOR_PER_TASK` is the slice; the count of
+ * marks is now a number an attacker chooses and the task length is not.
  */
 
 /** A mark waiting for a home — its passage, and the id the store knows it by. */
@@ -111,35 +128,47 @@ export interface PassOutcome {
 const NOTHING: readonly Placement[] = []
 const NO_IDS: readonly string[] = []
 
-/**
- * How much better the best section has to agree than the runner-up before a
- * passage found in two of them is placed at all.
- *
- * ⚠️ **THE WHOLE-BOOK AMBIGUITY RULE, and the pass shipped without one.**
- * `reanchor`'s *"ONE CANDIDATE NEEDS NO CONTEXT"* is correct WITHIN a document —
- * there is nothing to choose between — and a sweep inherits it as a
- * first-hit-wins rule across the book. `docs/design/circle/review.md` states the
- * failure exactly: *"wrong context around 'the whale' in section 1, matching
- * context in section 20; a first-hit sweep picks section 1 and reports
- * confidence."* That is a mark drawn on the wrong words, which is the defect the
- * whole phase exists to remove.
- *
- * So a passage found in more than one section is placed only when one of them is
- * clearly better. A MARGIN rather than a threshold, because the question is
- * comparative: two sections agreeing 0.9 and 0.88 is a coin toss dressed as
- * evidence, while 0.4 against 0.05 is a real answer. `MIN_AGREEMENT` is the
- * floor beneath the margin — evidence has to exist before a gap between two
- * amounts of it means anything, and a passage with no stored context scores 0
- * everywhere and is refused here rather than guessed at.
- */
-const AMBIGUITY_MARGIN = 0.2
-const MIN_AGREEMENT = 0.25
+/* ⚠️ **THE WHOLE-BOOK AMBIGUITY RULE, AND ITS TWO NUMBERS LIVE IN
+   `reanchor.ts` NOW.** `AMBIGUITY_MARGIN = 0.2` and `MIN_AGREEMENT = 0.25`
+   stood here, byte-identical to that module's `MIN_MARGIN` and
+   `MIN_CONFIDENCE` and beside a comment admitting they were the same number
+   for the same reason. Nothing held the pair together, so a change to one made
+   within-section and across-section selection disagree about one question.
+   `distinguishable` is that question, asked once. Found by audit.
+
+   What the rule IS, since this is the module it was written for:
+   `reanchor`'s *"ONE CANDIDATE NEEDS NO CONTEXT"* is correct WITHIN a document
+   — there is nothing to choose between — and a sweep inherits it as a
+   first-hit-wins rule across the book. `docs/design/circle/review.md` states
+   the failure exactly: *"wrong context around 'the whale' in section 1,
+   matching context in section 20; a first-hit sweep picks section 1 and
+   reports confidence."* That is a mark drawn on the wrong words, which is the
+   defect the whole phase exists to remove. */
 
 /** One place a passage could be, with the evidence for it. */
 interface Candidate {
   readonly cfi: ResolvedCfi
   readonly sectionIndex: number
   readonly agreement: number
+}
+
+/**
+ * The best two candidates so far, and nothing else.
+ *
+ * ⚠️ **EVERY MATCHING SECTION USED TO BE KEPT, AND SELECTION LOOKS AT TWO.**
+ * The list grew as marks × sections — a number both halves of which a stranger
+ * influences — to answer a question that needs the top score and the runner-up.
+ * The two kept here are the two `decide` would have sorted to the front, ties
+ * included: a candidate equal to the best becomes the RUNNER-UP rather than
+ * displacing it, which is what a stable sort does with equal keys. Found by
+ * audit.
+ */
+function keepBest(at: readonly Candidate[], one: Candidate): Candidate[] {
+  const [best, next] = at
+  if (best === undefined) return [one]
+  if (one.agreement > best.agreement) return [one, best]
+  if (next === undefined || one.agreement > next.agreement) return [best, one]
+  return [...at]
 }
 
 /**
@@ -156,18 +185,144 @@ export function decide(candidates: readonly Candidate[]): Candidate | null {
   if (candidates.length === 1) return candidates[0]!
   const [best, next] = [...candidates].sort((a, b) => b.agreement - a.agreement)
   if (!best || !next) return null
-  if (best.agreement < MIN_AGREEMENT) return null
-  return best.agreement - next.agreement >= AMBIGUITY_MARGIN ? best : null
+  return distinguishable(best.agreement, next.agreement) ? best : null
 }
 
 /**
- * Walk the book for every pending mark, stopping early when all are placed.
+ * Walk EVERY section for every pending mark, then choose.
  *
- * Never throws for a section that will not parse: a shelf is full of files
- * Paper did not write, and a pass that stops at the first bad section places
- * nothing after it — `enrichOne`'s reasoning, and the same answer. A section
- * that fails is a section with no hits.
+ * ⚠️ **THE SENTENCE HERE USED TO SAY THE OPPOSITE OF WHAT THIS DOES, TWICE.**
+ * It said the walk stops *"early when all are placed"* — it does not, and
+ * cannot: a candidate in section 3 is only the answer once section 20 has been
+ * ruled out, which is `AMBIGUITY_MARGIN`'s whole argument. And it said a
+ * section that will not parse is *"a section with no hits"* — it is not; a
+ * failed load returns `complete: false` immediately, because carrying on would
+ * let the caller cache *"this passage is not in these bytes"* for a passage
+ * sitting in the one section nobody could read. Both claims described an
+ * earlier version and outlived it. Found by audit.
+ *
+ * What it does: index each section once, offer every still-decidable mark to
+ * it, keep the best two candidates per mark, and place a mark only where the
+ * book can distinguish one of them. It yields between sections and inside the
+ * mark loop, and every outcome after an interrupted walk is `complete: false`
+ * with nothing placed.
  */
+/**
+ * What a walk has learnt so far — carried between sections rather than closed
+ * over, so the per-section step can be read on its own.
+ */
+interface Held {
+  /** The best two candidates per mark. See {@link keepBest}. */
+  readonly candidates: Map<string, Candidate[]>
+  /** Marks some section refused to choose for. Permanent once added. */
+  readonly undecidable: Set<string>
+}
+
+/**
+ * Offer one indexed section to every mark still worth asking about.
+ *
+ * `false` when the reader closed the book mid-batch — the caller turns that
+ * into the one early exit, because an interrupted walk may place nothing.
+ */
+async function offerSection(
+  index_: TextIndex,
+  index: number,
+  pending: readonly PendingMark[],
+  held: Held,
+  deps: PassDeps,
+): Promise<boolean> {
+  let sinceBreath = 0
+  for (const mark of pending) {
+    /* ⚠️ **A MARK ALREADY REFUSED IS NOT MATCHED AGAIN.** `undecidable` is
+       permanent — one section saying *"it might well be here"* settles the
+       mark as unplaceable for the whole walk — and every later section still
+       ran the full quote search and context scoring for it, then threw the
+       answer away. On a flooded book that is the expensive step, repeated for
+       marks whose outcome is already fixed. Found by audit. */
+    if (held.undecidable.has(mark.id)) continue
+    /* ⚠️ **THE COUNT OF MARKS IS A NUMBER A STRANGER CHOOSES.** See the
+       header. Asked BEFORE the work for `live()`'s reason: a check afterwards
+       still pays for the mark the reader has already navigated away from. */
+    sinceBreath += 1
+    if (sinceBreath > ANCHOR_PER_TASK) {
+      /* ⚠️ **ONE, NOT ZERO — THE MARK ABOUT TO BE DONE IS THIS BATCH'S
+         FIRST.** Resetting to zero left the current mark uncounted, so the
+         batches were 64 and then 65 for ever after: the bound was off by one
+         against the number it is named for, quietly and in the direction of
+         more work per task. Found by audit. */
+      sinceBreath = 1
+      await deps.breathe()
+      if (!deps.live()) return false
+    }
+    const hit = reanchorIn(index_, mark)
+    if (hit.kind === 'absent') continue
+    /* ⚠️ **A SECTION THAT COULD NOT CHOOSE DISQUALIFIES THE WHOLE MARK.**
+       `reanchorIn` used to answer `null` for both "not here" and "here several
+       times and the context cannot say which", and this loop skipped both — so
+       a section saying *"it might well be here"* contributed NOTHING, and a
+       lone candidate from somewhere else then looked unique and got placed.
+       The evidence pointing away from the answer was the evidence being
+       discarded.
+
+       Refusing the mark outright rather than merely ignoring that section is
+       the same posture `decide` takes for a near tie: where the book cannot
+       say, an unplaced mark that says so is better than a highlight on the
+       likelier of two passages. */
+    if (hit.kind === 'ambiguous') {
+      held.undecidable.add(mark.id)
+      /* Its candidates can never be chosen now, and holding them costs a whole
+         book's worth of memory for an answer that is already `null`. */
+      held.candidates.delete(mark.id)
+      continue
+    }
+    /* The cfi is composed NOW, while the range's nodes are still in a live
+       document. The next section replaces it, and a Range kept across that is
+       a pair of references into a document nobody holds. */
+    const one = { cfi: cfiFor(index, hit.range), sectionIndex: index, agreement: hit.agreement }
+    held.candidates.set(mark.id, keepBest(held.candidates.get(mark.id) ?? [], one))
+  }
+  return true
+}
+
+/**
+ * Turn a finished walk into placements and misses.
+ *
+ * ⚠️ **THIS YIELDS TOO, AND IT USED TO BE THE ONE PLACE THAT DID NOT.**
+ * Everything before it is sliced and cancellable because the mark count is a
+ * number a stranger chooses — and then every one of those marks was decided in
+ * a single synchronous task, holding the main thread for the whole of it and
+ * ignoring a reader who had already closed the book. The work per mark is
+ * small; the number of them is not, which is the argument the scan already
+ * makes. `null` when the reader left mid-batch. Found by audit.
+ */
+async function chosen(
+  pending: readonly PendingMark[],
+  held: Held,
+  deps: PassDeps,
+): Promise<{ found: Placement[]; missed: string[] } | null> {
+  const found: Placement[] = []
+  const missed: string[] = []
+  let sinceBreath = 0
+  for (const mark of pending) {
+    sinceBreath += 1
+    if (sinceBreath > ANCHOR_PER_TASK) {
+      sinceBreath = 1
+      await deps.breathe()
+      if (!deps.live()) return null
+    }
+    const one = held.undecidable.has(mark.id) ? null : decide(held.candidates.get(mark.id) ?? [])
+    if (one) found.push({ id: mark.id, cfi: one.cfi, sectionIndex: one.sectionIndex })
+    /* ⚠️ **AMBIGUOUS IS REPORTED AS MISSED, and the two are genuinely
+       different questions with one right answer.** "Not in this build" and "in
+       two places and the context cannot say which" both mean DO NOT PLACE, and
+       both are established facts about these exact bytes — so both are worth
+       remembering rather than re-walking on the next open. What must never
+       happen is placing one, which is what a first-hit sweep did. */
+    else missed.push(mark.id)
+  }
+  return { found, missed }
+}
+
 export async function reanchorPass(
   pending: readonly PendingMark[],
   deps: PassDeps,
@@ -192,9 +347,7 @@ export async function reanchorPass(
    *
    * The plan's cost budget already assumes a full walk: *"a cold section costs
    * 3.46 ms and forty of them ~139 ms; that is fine as a one-off after open"*. */
-  const candidates = new Map<string, Candidate[]>()
-  /* Marks some section refused to choose for. See the loop below. */
-  const undecidable = new Set<string>()
+  const held: Held = { candidates: new Map(), undecidable: new Set() }
   let walked = 0
 
   /* ⚠️ **AN INTERRUPTED WALK PLACES NOTHING, and it used to place what it had
@@ -262,53 +415,17 @@ export async function reanchorPass(
     walked += 1
     if (index_.text === '') continue
 
-    for (const mark of pending) {
-      const hit = reanchorIn(index_, mark)
-      if (hit.kind === 'absent') continue
-      /* ⚠️ **A SECTION THAT COULD NOT CHOOSE DISQUALIFIES THE WHOLE MARK.**
-       * `reanchorIn` used to answer `null` for both "not here" and "here
-       * several times and the context cannot say which", and this loop skipped
-       * both — so a section saying *"it might well be here"* contributed
-       * NOTHING, and a lone candidate from somewhere else then looked unique
-       * and got placed. The evidence pointing away from the answer was the
-       * evidence being discarded.
-       *
-       * Refusing the mark outright rather than merely ignoring that section is
-       * the same posture `decide` takes for a near tie: where the book cannot
-       * say, an unplaced mark that says so is better than a highlight on the
-       * likelier of two passages. */
-      if (hit.kind === 'ambiguous') {
-        undecidable.add(mark.id)
-        continue
-      }
-      /* The cfi is composed NOW, while the range's nodes are still in a live
-       * document. The next section replaces it, and a Range kept across that is
-       * a pair of references into a document nobody holds. */
-      const at = candidates.get(mark.id) ?? []
-      at.push({ cfi: cfiFor(index, hit.range), sectionIndex: index, agreement: hit.agreement })
-      candidates.set(mark.id, at)
-    }
+    if (!(await offerSection(index_, index, pending, held, deps))) return cutShort()
   }
 
-  const found: Placement[] = []
-  const missed: string[] = []
-  for (const mark of pending) {
-    const chosen = undecidable.has(mark.id) ? null : decide(candidates.get(mark.id) ?? [])
-    if (chosen) found.push({ id: mark.id, cfi: chosen.cfi, sectionIndex: chosen.sectionIndex })
-    /* ⚠️ **AMBIGUOUS IS REPORTED AS MISSED, and the two are genuinely
-     * different questions with one right answer.** "Not in this build" and
-     * "in two places and the context cannot say which" both mean DO NOT PLACE,
-     * and both are established facts about these exact bytes — so both are
-     * worth remembering rather than re-walking on the next open. What must
-     * never happen is placing one, which is what a first-hit sweep did. */
-    else missed.push(mark.id)
-  }
+  const answer = await chosen(pending, held, deps)
+  if (answer === null) return cutShort()
 
   return {
-    found,
+    found: answer.found,
     /* Only now — every section looked at. A walk cut short returns above with
-     * `complete: false` and an empty `missed`. */
-    missed,
+       `complete: false` and an empty `missed`. */
+    missed: answer.missed,
     complete: true,
     walked,
   }

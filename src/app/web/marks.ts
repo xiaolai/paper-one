@@ -5,6 +5,7 @@ import {
   MARK_TINTS,
   isAnnotation,
   isBookmark,
+  notifyAll,
   type Annotation,
   type Placed,
   type Bookmark,
@@ -269,7 +270,7 @@ export function createRemoteMarks(channel: ShelfChannel): MarksStore {
   let live = true
   const listeners = new Set<() => void>()
   const changed = (): void => {
-    for (const l of listeners) l()
+    notifyAll(listeners, 'web marks')
   }
 
   /* SPLIT ONCE PER CHANGE, not per render. `getSnapshot`'s contract is identity

@@ -31,6 +31,7 @@ export type { BookPatch, Library, LibraryOptions, RekeyOutcome, RemoteRow } from
 /* The one reader of a rejection's text. In the kernel because a capability
    cannot import another capability's, which is how three broken copies of it
    came to exist — see the module's own header. */
+export { notifyAll } from './core/notify'
 export { messageOf } from './core/messageOf'
 export { createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
@@ -300,7 +301,7 @@ export { breathe, restThenBreathe } from './core/breath'
    had grown a private counter; see `core/generations.ts`. */
 export { createGenerations } from './core/generations'
 export type { Generations } from './core/generations'
-export { writeQueue } from './core/writeQueue'
+export { MAX_APPENDED, MAX_APPENDED_SHARED, WriteQueueFull, writeQueue } from './core/writeQueue'
 export type { WriteQueue } from './core/writeQueue'
 /* The circle's own store lives beside `marks.json` and never inside it — see
    `circlePathIn`. The paths are the kernel's because the folder layout is. */
@@ -316,9 +317,96 @@ export {
   personListsDirIn,
   personListPathIn,
   relationshipPathIn,
+  publicPathIn,
   sharedPathIn,
+  PUBLIC_DIR,
+  VOICE_DECISIONS_PATH,
 } from './core/bookFolder'
-export type { ForeignAnnotation, ForeignEntry } from './core/circle/foreign'
+/* Public sharing — phase 25. Pure, browser-safe, and deliberately NOT under
+   `circle/`: public and circle share no authorization and no storage, and a
+   module that sat beside the circle's would be the first place that blurs. */
+export {
+  adopts,
+  folderForFetch,
+  mayAdoptIdentity,
+  mayPublishNotes,
+  offerAbsentBecause,
+  offerabilityOf,
+  planShareImport,
+} from './core/publicShare'
+export type { AdoptionVerdict, HeldBook, Offerable, PublicOfferability, ShareImport } from './core/publicShare'
+/* Phase 26 — public annotations. Pure, browser-safe, and under `core/public/`
+   rather than `core/circle/`: they share no authorization, no storage and no
+   wire type, and a module sitting beside the circle's is the first place that
+   blurs. The crypto is INJECTED for `page.ts`'s reason. */
+export {
+  DEFAULT_LIFETIME_MS,
+  MAX_CLOCK_SKEW_MS,
+  MAX_ENVELOPE_BYTES,
+  MAX_LIFETIME_MS,
+  byteLengthOf,
+  PUBLIC_OPS,
+  PUBLIC_SUPPORTED,
+  PUBLIC_VERSION,
+  isPublicEnvelopeShape,
+  mintNote,
+  mintPublicationId,
+  mintUnnote,
+  publicSignedBytes,
+  readPublicEnvelope,
+  sealPublic,
+} from './core/public/envelope'
+export type { Minting, PublicCrypto, PublicEnvelope, PublicPassage, PublicRefusal, Unsealed, Unsigned } from './core/public/envelope'
+export {
+  EMPTY_PUBLIC_FILE,
+  comparePublic,
+  foldPublic,
+  publicationKey,
+  sequenceKey,
+} from './core/public/order'
+export type { Delivered, KeptEnvelope, PublicFile, PublicHeld, PublicWithdrawal } from './core/public/order'
+export {
+  PUBLIC_DISCLOSURE,
+  PUBLIC_LINKS_DISCLOSURE,
+  afterPublishing,
+  afterWithdrawing,
+  disclosureFor,
+  linksVoiceToPerson,
+  mayPublish,
+} from './core/public/publish'
+export type { Audience, PublishRefusal, PublishRequest, Published } from './core/public/publish'
+export {
+  NO_DECISIONS,
+  bind,
+  blockPerson,
+  blockVoice,
+  isWellFormed,
+  personOf,
+  standingOf,
+  unbind,
+  unblockPerson,
+  unblockVoice,
+  voicesOf,
+} from './core/public/binding'
+export type { BindingRefusal, VoiceBinding, VoiceDecisions, VoiceStanding } from './core/public/binding'
+export { PUBLIC_WEIGHT, reconcile } from './core/public/presentation'
+export type { AnchorWeight, Contributor } from './core/public/presentation'
+export {
+  ANCHOR_PER_TASK,
+  DEFAULT_PUBLIC_BOUNDS,
+  MAX_BOOKS_WITH_PUBLIC,
+  MAX_HELD_BYTES_PER_BOOK,
+  MAX_HELD_PER_BOOK,
+  MAX_TASK_MS,
+  VERIFY_PER_TASK,
+  admitsAnotherBook,
+  hasRoom,
+  keepWithin,
+  sizeOf,
+  sliceFor,
+} from './core/public/bounds'
+export type { PublicBounds, Weighed } from './core/public/bounds'
+export type { ForeignAnnotation, ForeignEntry, ForeignOpinion, OverlayAudience } from './core/circle/foreign'
 /* The overlay seam's vocabulary — a capability implementing one needs to name
    the request it is handed and the resolver inside it. */
 export type {
@@ -332,9 +420,11 @@ export type {
 export {
   drawable,
   foreignWeight,
+  readersAmong,
   offersShare,
   offersUnshare,
   overlayKey,
+  overlayKeyOf,
   shareAbsentBecause,
 } from './core/circle/foreign'
 export type { Publishability } from './core/circle/foreign'

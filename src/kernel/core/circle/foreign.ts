@@ -76,23 +76,63 @@ export interface ForeignEntry {
  * either (`log.ts`), so there is nothing to ignore — which is the point.
  */
 export interface ForeignAnnotation {
-  readonly pub: string
   readonly person: string
-  /** The person's own signed claim, from the roster. Never Paper's verdict. */
-  readonly author: string
   readonly cfi: ResolvedCfi
   readonly sectionIndex: number
   readonly quote: string
-  readonly note?: string
   /**
-   * How many people marked this passage — 1 for one reader.
+   * Every publication anchored here, in arrival order. NEVER EMPTY, and the
+   * first one owns the overlay key and the treatment.
    *
-   * ⚠️ **THE FEATURE'S CENTRAL CASE, and the painter used to collapse it.**
-   * *"4 of 11 readers marked this."* `review.md`'s overlay blocker 1:
-   * `addAnnotation` keys the Overlayer on the annotation's value, so several
-   * readers at one CFI became one entry and the last writer won.
+   * ⚠️ **THIS WAS ONE `pub`, ONE `author` AND ONE `note`, AND GROUPING THREW
+   * THE REST AWAY.** Marks are grouped by anchor because four readers on one
+   * sentence must be one heavier underline rather than four stacked ones —
+   * but the grouping kept only the FIRST row's words, so a second reader's
+   * note at the same passage was parsed, verified, anchored and then silently
+   * dropped. The weight and the words are different questions: group the
+   * first, keep all of the second. Found by audit, in both this function and
+   * the public overlay that copied its shape.
    */
-  readonly readers: number
+  readonly opinions: readonly ForeignOpinion[]
+  /**
+   * The distinct PEOPLE behind those publications, so the weight can be
+   * reconciled ACROSS contributions rather than within one.
+   *
+   * ⚠️ **A COUNT CANNOT BE RECONCILED; A SET CAN.** This used to be
+   * `readers: number`, and the overlay host merely flattened every
+   * contribution — so one person who marked a passage in the circle AND
+   * published a bound voice at it arrived as two annotations claiming one
+   * reader each, and was drawn as two people. Identities survive to the host,
+   * which unions them and only then takes a count.
+   *
+   * ⚠️ **EMPTY IS A LEGITIMATE ANSWER AND IS NOT ZERO READERS.** A public
+   * annotation from a voice nobody has bound is somebody, and is nobody
+   * IDENTIFIABLE: it draws at the floor of one and adds nothing to a count,
+   * which is what stops free keys manufacturing readers.
+   */
+  readonly people: readonly string[]
+}
+
+/** Which layer an annotation reached the reader through. */
+export type OverlayAudience = 'circle' | 'public'
+
+/**
+ * One publication's own words at a passage.
+ *
+ * ⚠️ **`audience` IS A FIELD BECAUSE IT WAS AN ENCODING.** The public layer
+ * used to say "stranger" by prefixing the person id with `public:` — a value
+ * no 64-hex person id can collide with, which made the two safe to key apart
+ * and told the PAINTER nothing at all: `attachForeign` labelled every one of
+ * them with the circle's painter kind, so a stranger's mark was drawn exactly
+ * as a friend's. Provenance the reader is meant to see cannot live in a string
+ * prefix that only the producer reads. Found by audit.
+ */
+export interface ForeignOpinion {
+  readonly pub: string
+  readonly audience: OverlayAudience
+  /** The publisher's own claim, from the roster. Never Paper's verdict. */
+  readonly author: string
+  readonly note?: string
 }
 
 /**
@@ -109,8 +149,26 @@ export interface ForeignAnnotation {
  * Person AND publication, because one reader may share one passage twice — two
  * publications, and an `unshare` names exactly one of them.
  */
-export function overlayKey(annotation: Pick<ForeignAnnotation, 'person' | 'pub'>): string {
-  return `circle:${annotation.person}:${annotation.pub}`
+export function overlayKey(annotation: Pick<ForeignAnnotation, 'person' | 'opinions'>): string {
+  const first = annotation.opinions[0]
+  if (first === undefined) throw new Error('circle: an annotation with no publication cannot be keyed')
+  return overlayKeyOf(first.audience, annotation.person, first.pub)
+}
+
+/**
+ * The same key, composed before an annotation exists — the resolver asks for
+ * one passage per PUBLICATION, and grouping happens after it answers.
+ *
+ * ⚠️ **THE AUDIENCE IS THE FIRST SEGMENT, AND IT IS WHAT KEEPS THE TWO LAYERS
+ * APART.** This used to be the literal `circle:` here and a second literal
+ * `public:` in the public capability's own `publicOverlayKey` — two
+ * definitions of one namespace, either of which could have moved without the
+ * other. The segment is not decoration: a voice id and a person id are both 64
+ * hex, so without it a stranger and a friend sharing a publication id key onto
+ * one another's marks. Found by audit.
+ */
+export function overlayKeyOf(audience: OverlayAudience, person: string, pub: string): string {
+  return `${audience}:${person}:${pub}`
 }
 
 /**
@@ -130,40 +188,48 @@ export function drawable(
   authorOf: (person: string) => string,
   admits: (person: string, epoch: number) => boolean,
 ): readonly ForeignAnnotation[] {
-  const byAnchor = new Map<string, ForeignAnnotation>()
-  /* Who has marked each anchor: a reader who shared the same words twice is
-     one reader, and the weight says how many PEOPLE, not how many rows. */
-  const readersAt = new Map<string, Set<string>>()
+  const byAnchor = new Map<string, { at: ForeignAnnotation; people: Set<string>; opinions: ForeignOpinion[] }>()
   for (const entry of entries) {
     if (!entry.resolved) continue
     if (!admits(entry.person, entry.epoch)) continue
     const at = `${entry.resolved.sectionIndex}#${entry.resolved.cfi}`
+    const opinion: ForeignOpinion = {
+      pub: entry.pub,
+      audience: 'circle',
+      author: authorOf(entry.person),
+      ...(entry.passage.note === undefined ? {} : { note: entry.passage.note }),
+    }
     const seen = byAnchor.get(at)
     if (seen) {
-      /* One more reader on the same words, if it is a new one. The FIRST
-         entry keeps the key, so a redraw does not move which publication the
-         mark is filed under. */
-      const people = readersAt.get(at)!
-      // Stryker disable next-line ConditionalExpression: adding a reader the set holds changes neither the set nor the count it is drawn from.
-      if (!people.has(entry.person)) {
-        people.add(entry.person)
-        byAnchor.set(at, { ...seen, readers: people.size })
-      }
+      /* ⚠️ **THE WORDS ARE KEPT EVEN WHEN THE READER IS NOT NEW.** One person
+         who shared the same passage twice is one reader — the weight says how
+         many PEOPLE, not how many rows — and they are still two notes. The
+         count and the notes were one decision here, and dropping the row
+         dropped both. */
+      seen.opinions.push(opinion)
+      seen.people.add(entry.person)
       continue
     }
-    readersAt.set(at, new Set([entry.person]))
+    /* The FIRST entry keeps the key, so a redraw does not move which
+       publication the mark is filed under. */
     byAnchor.set(at, {
-      pub: entry.pub,
-      person: entry.person,
-      author: authorOf(entry.person),
-      cfi: entry.resolved.cfi,
-      sectionIndex: entry.resolved.sectionIndex,
-      quote: entry.passage.quote,
-      ...(entry.passage.note === undefined ? {} : { note: entry.passage.note }),
-      readers: 1,
+      people: new Set([entry.person]),
+      opinions: [opinion],
+      at: {
+        person: entry.person,
+        cfi: entry.resolved.cfi,
+        sectionIndex: entry.resolved.sectionIndex,
+        quote: entry.passage.quote,
+        opinions: [],
+        people: [],
+      },
     })
   }
-  return [...byAnchor.values()]
+  return [...byAnchor.values()].map(({ at, people, opinions }) => ({
+    ...at,
+    opinions,
+    people: [...people],
+  }))
 }
 
 /**
@@ -180,6 +246,20 @@ export function drawable(
  * Ramps and then flattens: the difference between one reader and three is worth
  * showing, and between eleven and twelve is not.
  */
+/**
+ * How many readers a set of identities is worth, with the floor that says a
+ * mark on the page had somebody behind it.
+ *
+ * ⚠️ **NOBODY IDENTIFIABLE IS ONE, NEVER ZERO.** A public annotation from an
+ * unbound voice names no person, and a zero would ramp the weight below the
+ * lightest rule and draw nothing where a stranger had marked something. One is
+ * also the CEILING for that case, which is the property `PUBLIC_WEIGHT` is
+ * about: a thousand free keys are still one.
+ */
+export function readersAmong(people: readonly string[]): number {
+  return Math.max(1, people.length)
+}
+
 export const FOREIGN_WEIGHTS = [1, 1.5, 2, 2.5, 3] as const
 
 export function foreignWeight(readers: number): number {

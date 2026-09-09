@@ -383,19 +383,43 @@ function indexOfString(text: string): string {
 const CONTEXT = 32
 
 /** How much of the context must agree when the quote occurs more than once. */
-const MIN_CONFIDENCE = 0.25
+export const MIN_CONFIDENCE = 0.25
 
 /**
  * How much better the winning occurrence must agree than the runner-up.
  *
- * The twin of `reanchorPass`'s `AMBIGUITY_MARGIN`, and the same number for the
- * same reason: the question — *is there enough evidence to prefer one place
- * over another* — does not change because the two places are in one document
- * rather than two. Kept as separate constants because the modules are separate
- * and neither should reach into the other for a policy; if they ever need to
- * differ, they can.
+ * ⚠️ **ONE DEFINITION, AND THERE WERE TWO.** `reanchorPass` carried its own
+ * `AMBIGUITY_MARGIN = 0.2` and `MIN_AGREEMENT = 0.25` beside a comment saying
+ * they were *"the same number for the same reason"* and *"kept as separate
+ * constants … if they ever need to differ, they can"*. That reads as a policy
+ * and behaves as a coin toss: nothing held the pair together, so a change to
+ * one made section-level and book-level selection disagree about a question
+ * they answer identically — *is there enough evidence to prefer one place over
+ * another* — and the disagreement would show up as a mark that one layer
+ * refuses and the other places. If they ever do need to differ, the argument
+ * for differing belongs at that point, not pre-installed as a duplicate.
+ * Found by audit.
  */
-const MIN_MARGIN = 0.2
+export const MIN_MARGIN = 0.2
+
+/**
+ * Whether the best of several candidates is distinguishable from the next.
+ *
+ * ⚠️ **A THRESHOLD DOES NOT SAY THE WINNER IS DISTINGUISHABLE.** Two
+ * candidates scoring 0.90 and 0.88 both clear the floor, and the one that wins
+ * does so by document order — a hundredth of a point is a tie in everything but
+ * arithmetic. So there are two questions and both have to be answered: does
+ * evidence exist at all, and is there a gap between the best of it and the
+ * rest. The floor beneath the margin matters because a passage with no stored
+ * context scores 0 everywhere, and a gap between two amounts of nothing is
+ * still nothing.
+ *
+ * `runnerUp` is `-1` when there is no second candidate, which clears the margin
+ * by construction — a lone candidate is not being chosen BETWEEN.
+ */
+export function distinguishable(best: number, runnerUp: number): boolean {
+  return best >= MIN_CONFIDENCE && best - runnerUp >= MIN_MARGIN
+}
 
 /**
  * Where a foreign passage sits in this rendered document, or null.
@@ -479,21 +503,10 @@ export function reanchorIn(index: TextIndex, passage: ForeignPassage): Resolutio
   /* ONE CANDIDATE NEEDS NO CONTEXT. With a single exact occurrence there is
      nothing to choose between, and refusing it for want of context would lose
      every passage whose surroundings the other build happens to have reset. */
-  if (at.length > 1) {
-    if (bestScore < MIN_CONFIDENCE) return { kind: 'ambiguous', occurrences: at.length }
-    /* ⚠️ **A THRESHOLD DOES NOT SAY THE WINNER IS DISTINGUISHABLE, and this
-     * used to stop at the threshold.** Two occurrences scoring 0.90 and 0.88
-     * both clear `MIN_CONFIDENCE`, and the one that won did so by DOCUMENT
-     * ORDER — `>` keeps the earlier on a tie, and a hundredth of a point is a
-     * tie in everything but arithmetic. That is a highlight placed on the
-     * likelier of two sentences, which is the failure the hard quote-equality
-     * gate above exists to refuse.
-     *
-     * The same rule `reanchorPass.decide` applies BETWEEN sections, applied
-     * here between occurrences within one. Both are the same question — is
-     * there enough evidence to prefer one place over another — and it was
-     * answered in two different ways, one of them by accident. */
-    if (bestScore - runnerUp < MIN_MARGIN) return { kind: 'ambiguous', occurrences: at.length }
+  /* The same predicate `reanchorPass.decide` applies BETWEEN sections, applied
+     here between occurrences within one — see `distinguishable`. */
+  if (at.length > 1 && !distinguishable(bestScore, runnerUp)) {
+    return { kind: 'ambiguous', occurrences: at.length }
   }
 
   const last = best + quote.length - 1
