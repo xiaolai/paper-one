@@ -14,7 +14,15 @@ import type { PublicPassage } from './envelope'
  * says so outright: disabling public publishing entirely would pass that test.
  * What has to hold is that each audience is reached by its own explicit act,
  * that an act changes ONE audience, and that the disclosure was shown before
- * the public one — which is what {@link publicAct} makes checkable.
+ * the public one.
+ *
+ * ⚠️ **THAT SENTENCE USED TO END "which is what `publicAct` makes checkable",
+ * AND THERE IS NO `publicAct` ANYWHERE.** The boundary that actually enforces
+ * it is `publishPort.publish`, which asks {@link mayPublish} before it mints
+ * and refuses without an acknowledgement — and `PublishControl`, which cannot
+ * publish before the reader has answered the disclosure step. Naming a symbol
+ * that does not exist sends a reader looking for the enforcement in a file
+ * that is not there. Found by audit.
  *
  * PURE. No storage, no transport, no clock.
  */
@@ -46,10 +54,19 @@ export const PUBLIC_DISCLOSURE =
 export const PUBLIC_LINKS_DISCLOSURE =
   'You have already shared these exact words with your circle. Anyone in both places can tell that the same person wrote both.'
 
-/** One publication a reader is about to make. */
+/**
+ * One publication a reader is about to make.
+ *
+ * ⚠️ **NO `passage`, AND IT USED TO BE REQUIRED AND NEVER READ.** `mayPublish`
+ * asks two questions — which audience, and did the reader answer the
+ * disclosure — and neither depends on the words. A required field nothing
+ * consults implies a per-passage check that does not happen, and made every
+ * caller carry a passage to a function with no use for one. What IS
+ * passage-specific is `linksVoiceToPerson`, which takes the passage directly.
+ * Found by audit.
+ */
 export interface PublishRequest {
   readonly audience: Audience
-  readonly passage: PublicPassage
   /**
    * Whether the reader saw and accepted the disclosure for THIS act.
    *
@@ -77,26 +94,17 @@ export function mayPublish(request: PublishRequest): PublishRefusal | null {
   return request.acknowledged ? null : 'needs-disclosure'
 }
 
-/** The two audiences a passage is currently in, on this device. */
-export interface Published {
-  readonly circle: boolean
-  readonly public: boolean
-}
-
-/**
- * What the audiences become after one act.
- *
- * ⚠️ **ONE ACT CHANGES ONE AUDIENCE, AND THIS IS WHERE THAT IS TRUE OR NOT.**
- * The mirror WI-26.4 forbids would be a line here that set both.
- */
-export function afterPublishing(held: Published, audience: Audience): Published {
-  return audience === 'circle' ? { ...held, circle: true } : { ...held, public: true }
-}
-
-/** What the audiences become after taking one back. */
-export function afterWithdrawing(held: Published, audience: Audience): Published {
-  return audience === 'circle' ? { ...held, circle: false } : { ...held, public: false }
-}
+/* ⚠️ **`Published`, `afterPublishing` AND `afterWithdrawing` STOOD HERE AND
+   NOTHING CALLED THEM.** They modelled "which audiences is this passage in"
+   as a pure transition — `afterPublishing(held, audience)` setting exactly one
+   field — and the comment claimed *"this is where that is true or not"*. It
+   was not: no surface and no port ever held a `Published` value, so the mirror
+   WI-26.4 forbids could have been written in `publishPort` without these ever
+   being consulted. A one-line transition function is not where an invariant
+   lives; the invariant lives at the two ports that each reach ONE audience,
+   and `publishPort.test.ts` asserts that each act changes its own and not the
+   other. The name `Published` now belongs to `publishPort`'s receipt, which is
+   a thing callers do hold. Found by audit. */
 
 /**
  * The disclosure to show before a public act, given what the circle already

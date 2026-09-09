@@ -86,16 +86,19 @@ export interface PublicHeld {
   readonly expires: number
 }
 
-/** One accepted envelope, as this device keeps it. */
-export interface KeptEnvelope {
-  /** The canonical bytes that were signed. Verbatim, always. */
-  readonly received: string
-  readonly voice: string
-  readonly pub: string
-  readonly seq: number
-  readonly at: number
-  readonly expires: number
-  readonly op: 'note' | 'unnote'
+/**
+ * One accepted envelope, as this device keeps it.
+ *
+ * ⚠️ **IT EXTENDS `PublicHeld` RATHER THAN RESTATING IT.** The six fields were
+ * written out twice, and the two declarations meant exactly one thing that a
+ * type can say for itself: everything the reader keeps is a held row, plus
+ * which operation it was. A field added to one and not the other compiles
+ * cleanly and diverges silently. `op` comes from the ENVELOPE's own union, so
+ * a third operation reaches this type without being retyped here. Found by
+ * audit.
+ */
+export interface KeptEnvelope extends PublicHeld {
+  readonly op: PublicEnvelope['op']
 }
 
 /** Everything one book's public annotations amount to on this device. */
@@ -210,121 +213,15 @@ export function foldPublic(held: PublicFile, arriving: readonly Delivered[], now
      side expires and is pruned it is no longer detectable at all, so forgetting
      the record would let the survivor revive. A withdrawal needs no such
      memory: the `unnote` itself is retained while it matters. */
-  const withdrawn = new Map<string, number>()
   const equivocated = new Map(held.equivocated.filter((one) => one.until > now).map((one) => [one.key, one.until]))
+  const all = surviving(held, arriving, now)
 
-  /* Everything this device has accepted, plus what has just arrived. Held
-     envelopes come back through the same path as new ones, so a reload and a
-     live delivery reach the same state. */
-  const candidates: KeptEnvelope[] = [...held.kept, ...arriving.map(keptOf)]
-  /* ⚠️ **A WITHDRAWAL MUST OUTLIVE THE NOTE IT SUPPRESSES, AND PRUNING IT BY
-     ITS OWN EXPIRY DID NOT.** The derived `withdrawn` map below already takes
-     the later of the two (see the note there) — but that map is DERIVED, and
-     deliberately not stored: what persists is `kept`, the signed envelopes. So
-     an `unnote` with a shorter lifetime than the note it took back was dropped
-     from `kept` while the note was still live, and the next load had no
-     evidence left to re-derive the suppression from. The withdrawn note came
-     back. Reproduced by audit.
-       Bounded exactly as WI-26.3 requires: the horizon is the later of two
-     SIGNED expiries, so it is still a number the publisher chose and still
-     inside `MAX_LIFETIME_MS`. Nothing is retained on the strength of anything
-     unsigned. */
-  /* ⚠️ **FROM WHAT IS ALREADY HELD, NEVER FROM WHAT IS ARRIVING.** Taking
-     arriving notes into the horizon makes a withdrawal's retention extendable
-     by anyone who publishes under the same id again — each new note pushes the
-     forget-point out, and the suppression state stops being bounded, which is
-     the exact property WI-26.3 exists to guarantee. It also contradicts the
-     rule directly below: once a withdrawal has expired, a note may use that id
-     again. What a withdrawal must outlive is the note it is ALREADY
-     suppressing, and that note is by definition one this device already holds. */
-  const noteExpiry = new Map<string, number>()
-  for (const one of held.kept) {
-    if (one.op !== 'note') continue
-    const key = publicationKey(one.voice, one.pub)
-    noteExpiry.set(key, Math.max(one.expires, noteExpiry.get(key) ?? 0))
-  }
-  const forgetAt = (one: KeptEnvelope): number =>
-    one.op === 'unnote'
-      ? Math.max(one.expires, noteExpiry.get(publicationKey(one.voice, one.pub)) ?? 0)
-      : one.expires
-  const all: KeptEnvelope[] = candidates.filter((one) => forgetAt(one) > now)
-
-  /* ── pass one: WHO EQUIVOCATED ────────────────────────────────────────
-   *
-   * ⚠️ **CONFLICTS ARE RESOLVED BEFORE ANY EFFECT IS APPLIED, AND THEY USED TO
-   * BE RESOLVED AS THEY ARRIVED.** Measured: `[note(p,1), unnote(p,2),
-   * note(q,2)]` withdrew `p`, and swapping the last two left `p` visible —
-   * because in one order the withdrawal took effect before its own sequence
-   * was found to be equivocated, and in the other it never took effect at all.
-   * Detecting an equivocation removes the publications; it cannot undo an
-   * effect already applied. So nothing is applied until every conflict is
-   * known. */
-  /* ⚠️ **THE HORIZON IS ACCUMULATED IN THE SAME PASS THAT GROUPS.** It used to
-     re-scan every envelope for each conflicting sequence — quadratic over a
-     count an attacker chooses, synchronously, on the reader's thread, and worst
-     exactly when a voice is equivocating hardest. One pass carries both. */
-  const bytesAt = new Map<string, { spellings: Set<string>; until: number }>()
-  for (const one of all) {
-    const key = sequenceKey(one.voice, one.seq)
-    const held = bytesAt.get(key)
-    if (held === undefined) {
-      bytesAt.set(key, { spellings: new Set([one.received]), until: one.expires })
-      continue
-    }
-    held.spellings.add(one.received)
-    held.until = Math.max(held.until, one.expires)
-  }
-  for (const [key, seen] of bytesAt) {
-    if (seen.spellings.size < 2) continue
-    /* Remembered until the LAST of the conflicting envelopes would have
-       expired anyway — after that no valid envelope can carry the sequence
-       and the record is dead weight. */
-    equivocated.set(key, Math.max(seen.until, equivocated.get(key) ?? 0))
-  }
-  const honest = all.filter((one) => !equivocated.has(sequenceKey(one.voice, one.seq)))
-
-  /* ── pass two: WHAT WAS TAKEN BACK ────────────────────────────────────
-   *
-   * Withdrawals first, and all of them, so a publication's fate does not
-   * depend on whether its withdrawal happened to be earlier in the list. */
-  for (const one of honest) {
-    if (one.op !== 'unnote') continue
-    const key = publicationKey(one.voice, one.pub)
-    withdrawn.set(key, Math.max(one.expires, withdrawn.get(key) ?? 0))
-  }
-  /* ⚠️ **AND THE SUPPRESSION OUTLIVES THE NOTE, NOT ONLY THE WITHDRAWAL.** A
-     short-lived `unnote` for a long-lived `note` used to be forgotten while
-     the note was still valid, so the note came back — the exact replay
-     WI-26.3 exists to prevent, arriving through the expiry rather than around
-     it. Every note this device has seen for a withdrawn publication extends
-     its suppression to cover itself. */
-  for (const one of honest) {
-    if (one.op !== 'note') continue
-    const key = publicationKey(one.voice, one.pub)
-    const until = withdrawn.get(key)
-    if (until !== undefined) withdrawn.set(key, Math.max(until, one.expires))
-  }
-
-  /* ── pass three: WHAT IS LIVE ─────────────────────────────────────────── */
-  const byPub = new Map<string, PublicHeld>()
-  for (const one of honest) {
-    if (one.op !== 'note') continue
-    const key = publicationKey(one.voice, one.pub)
-    if (withdrawn.has(key)) continue
-    const standing = byPub.get(key)
-    /* On a duplicate `pub` from one voice the EARLIER sequence stands, so a
-       redelivery cannot quietly move a passage up the reader's list and two
-       replicas folding in different orders hold the same words. */
-    if (standing !== undefined && standing.seq <= one.seq) continue
-    byPub.set(key, {
-      received: one.received,
-      voice: one.voice,
-      pub: one.pub,
-      seq: one.seq,
-      at: one.at,
-      expires: one.expires,
-    })
-  }
+  /* Three passes, in this order and for a stated reason each: a conflict has
+     to be known before any effect is applied, and a withdrawal has to be known
+     before a publication is called live. */
+  const honest = withoutEquivocation(all, equivocated)
+  const withdrawn = suppressionsIn(honest)
+  const byPub = liveIn(honest, withdrawn)
 
   return {
     /* ⚠️ **EVERY ACCEPTED ENVELOPE IS KEPT, INCLUDING THE EQUIVOCATING PAIRS.**
@@ -338,6 +235,146 @@ export function foldPublic(held: PublicFile, arriving: readonly Delivered[], now
     withdrawn: [...withdrawn].map(([key, until]) => ({ key, until })).sort(byKey),
     equivocated: [...equivocated].map(([key, until]) => ({ key, until })).sort(byKey),
   }
+}
+
+/**
+ * Everything still worth evaluating: what is held, plus what has arrived,
+ * minus whatever has outlived its purpose.
+ *
+ * ⚠️ **EXPIRED STATE IS PRUNED BEFORE ANYTHING IS EVALUATED, AND IT USED TO BE
+ * PRUNED AFTER.** An expired withdrawal suppressed an arriving note on the
+ * first fold and permitted the same note if an empty fold had run first — so
+ * whether a publication appeared depended on how many times the caller had
+ * folded, which is not a rule.
+ *
+ * ⚠️ **A WITHDRAWAL MUST OUTLIVE THE NOTE IT SUPPRESSES, AND PRUNING IT BY ITS
+ * OWN EXPIRY DID NOT.** The `withdrawn` map is DERIVED and deliberately not
+ * stored: what persists is `kept`, the signed envelopes. So an `unnote` with a
+ * shorter lifetime than the note it took back was dropped from `kept` while
+ * the note was still live, and the next load had no evidence left to re-derive
+ * the suppression from. The withdrawn note came back. Reproduced by audit.
+ * Bounded exactly as WI-26.3 requires: the horizon is the later of two SIGNED
+ * expiries, so it is still a number the publisher chose and still inside
+ * `MAX_LIFETIME_MS`.
+ *
+ * ⚠️ **FROM WHAT IS ALREADY HELD, NEVER FROM WHAT IS ARRIVING.** Taking
+ * arriving notes into the horizon makes a withdrawal's retention extendable by
+ * anyone who publishes under the same id again — each new note pushes the
+ * forget-point out, and the suppression state stops being bounded, which is
+ * the exact property WI-26.3 exists to guarantee.
+ */
+function surviving(held: PublicFile, arriving: readonly Delivered[], now: number): KeptEnvelope[] {
+  const noteExpiry = new Map<string, number>()
+  for (const one of held.kept) {
+    if (one.op !== 'note') continue
+    const key = publicationKey(one.voice, one.pub)
+    noteExpiry.set(key, Math.max(one.expires, noteExpiry.get(key) ?? 0))
+  }
+  const forgetAt = (one: KeptEnvelope): number =>
+    one.op === 'unnote'
+      ? Math.max(one.expires, noteExpiry.get(publicationKey(one.voice, one.pub)) ?? 0)
+      : one.expires
+  /* Held envelopes come back through the same path as new ones, so a reload
+     and a live delivery reach the same state. */
+  const candidates: KeptEnvelope[] = [...held.kept, ...arriving.map(keptOf)]
+  return candidates.filter((one) => forgetAt(one) > now)
+}
+
+/**
+ * Pass one — WHO EQUIVOCATED, and everything that survives it.
+ *
+ * ⚠️ **CONFLICTS ARE RESOLVED BEFORE ANY EFFECT IS APPLIED, AND THEY USED TO BE
+ * RESOLVED AS THEY ARRIVED.** Measured: `[note(p,1), unnote(p,2), note(q,2)]`
+ * withdrew `p`, and swapping the last two left `p` visible — because in one
+ * order the withdrawal took effect before its own sequence was found to be
+ * equivocated, and in the other it never took effect at all. Detecting an
+ * equivocation removes the publications; it cannot undo an effect already
+ * applied.
+ *
+ * ⚠️ **THE HORIZON IS ACCUMULATED IN THE SAME PASS THAT GROUPS.** It used to
+ * re-scan every envelope for each conflicting sequence — quadratic over a count
+ * an attacker chooses, synchronously, on the reader's thread, and worst exactly
+ * when a voice is equivocating hardest.
+ *
+ * `equivocated` is MUTATED: the record outlives the envelopes, because a
+ * conflict is detected by seeing two spellings of one sequence and becomes
+ * undetectable once either side is pruned. A withdrawal needs no such memory —
+ * the `unnote` itself is retained while it matters.
+ */
+function withoutEquivocation(all: readonly KeptEnvelope[], equivocated: Map<string, number>): KeptEnvelope[] {
+  const bytesAt = new Map<string, { spellings: Set<string>; until: number }>()
+  for (const one of all) {
+    const key = sequenceKey(one.voice, one.seq)
+    const seen = bytesAt.get(key)
+    if (seen === undefined) {
+      bytesAt.set(key, { spellings: new Set([one.received]), until: one.expires })
+      continue
+    }
+    seen.spellings.add(one.received)
+    seen.until = Math.max(seen.until, one.expires)
+  }
+  for (const [key, seen] of bytesAt) {
+    if (seen.spellings.size < 2) continue
+    /* Remembered until the LAST of the conflicting envelopes would have expired
+       anyway — after that no valid envelope can carry the sequence and the
+       record is dead weight. */
+    equivocated.set(key, Math.max(seen.until, equivocated.get(key) ?? 0))
+  }
+  return all.filter((one) => !equivocated.has(sequenceKey(one.voice, one.seq)))
+}
+
+/**
+ * Pass two — WHAT WAS TAKEN BACK, and until when.
+ *
+ * Withdrawals first, and all of them, so a publication's fate does not depend
+ * on whether its withdrawal happened to be earlier in the list.
+ *
+ * ⚠️ **AND THE SUPPRESSION OUTLIVES THE NOTE, NOT ONLY THE WITHDRAWAL.** A
+ * short-lived `unnote` for a long-lived `note` used to be forgotten while the
+ * note was still valid, so the note came back — the exact replay WI-26.3
+ * exists to prevent, arriving through the expiry rather than around it.
+ */
+function suppressionsIn(honest: readonly KeptEnvelope[]): Map<string, number> {
+  const withdrawn = new Map<string, number>()
+  for (const one of honest) {
+    if (one.op !== 'unnote') continue
+    const key = publicationKey(one.voice, one.pub)
+    withdrawn.set(key, Math.max(one.expires, withdrawn.get(key) ?? 0))
+  }
+  for (const one of honest) {
+    if (one.op !== 'note') continue
+    const key = publicationKey(one.voice, one.pub)
+    const until = withdrawn.get(key)
+    if (until !== undefined) withdrawn.set(key, Math.max(until, one.expires))
+  }
+  return withdrawn
+}
+
+/**
+ * Pass three — WHAT IS LIVE, one publication per id.
+ *
+ * On a duplicate `pub` from one voice the EARLIER sequence stands, so a
+ * redelivery cannot quietly move a passage up the reader's list and two
+ * replicas folding in different orders hold the same words.
+ */
+function liveIn(honest: readonly KeptEnvelope[], withdrawn: ReadonlyMap<string, number>): Map<string, PublicHeld> {
+  const byPub = new Map<string, PublicHeld>()
+  for (const one of honest) {
+    if (one.op !== 'note') continue
+    const key = publicationKey(one.voice, one.pub)
+    if (withdrawn.has(key)) continue
+    const standing = byPub.get(key)
+    if (standing !== undefined && standing.seq <= one.seq) continue
+    byPub.set(key, {
+      received: one.received,
+      voice: one.voice,
+      pub: one.pub,
+      seq: one.seq,
+      at: one.at,
+      expires: one.expires,
+    })
+  }
+  return byPub
 }
 
 /** One `KeptEnvelope` per distinct line. */

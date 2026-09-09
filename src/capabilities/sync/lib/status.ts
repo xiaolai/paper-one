@@ -178,7 +178,7 @@ const DISK_FULL = /no space left|enospc|quota(?:\s|_)?exceeded|disk full/i
 export function refusalKind(thrown: unknown): RefusalKind {
   if (thrown instanceof ServiceCallError) return KIND_BY_CODE[thrown.error.code] ?? 'unknown'
   if (typeof thrown === 'object' && thrown !== null) {
-    const value = thrown as { code?: unknown; kind?: unknown; message?: unknown; name?: unknown }
+    const value = thrown as { code?: unknown; kind?: unknown; message?: unknown; name?: unknown; reason?: unknown }
     const message = typeof value.message === 'string' ? value.message : ''
     /* A code we KNOW answers at once. One we do not — `ENOSPC` off the
      * filesystem, say — used to answer `unknown` here, before the disk-full
@@ -189,9 +189,16 @@ export function refusalKind(thrown: unknown): RefusalKind {
     }
     if (typeof value.kind === 'string') {
       if (value.kind === 'sessionRefused') {
-        if (/revoked|unknown-peer/.test(message)) return 'revoked'
-        if (/role-mismatch/.test(message)) return 'role-mismatch'
-        if (/not-ready/.test(message)) return 'not-ready'
+        /* ⚠️ **THE TOKEN IS A FIELD NOW, AND IT WAS A REGEX OVER THE HUMAN
+         * SENTENCE.** `/revoked|unknown-peer/.test(message)` meant rewording
+         * "session refused: …" in Rust silently reclassified a revoked device
+         * as an unknown failure, with nothing anywhere to say so — a wire
+         * contract enforced by prose. `Error::reason` carries the peer's own
+         * token; see its note. Found by audit. */
+        const reason = typeof value.reason === 'string' ? value.reason : ''
+        if (reason === 'revoked' || reason === 'unknown-peer') return 'revoked'
+        if (reason === 'role-mismatch') return 'role-mismatch'
+        if (reason === 'not-ready') return 'not-ready'
         /* The peer WAS reached — it refused. A reason this build does not
          * know is `unknown`, never "isn't reachable", which is false. */
         return 'unknown'

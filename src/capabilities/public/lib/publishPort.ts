@@ -1,4 +1,5 @@
 import {
+  notifyAll,
   disclosureFor,
   isContentHash,
   linksVoiceToPerson,
@@ -13,6 +14,18 @@ import {
   type PublicPassage,
 } from '../../../kernel'
 import type { SharePort, VoicePort } from '../../peer'
+
+/**
+ * Tell the capability something moved, without letting it undo what moved.
+ *
+ * ⚠️ **A THROWING `changed` REJECTED A PUBLICATION THAT HAD ALREADY LANDED**,
+ * and took the returned publication id with it — so the reader saw a failure,
+ * pressed the button again, and published the same passage twice under two
+ * ids. The record is on disk and served by then; a listener that cannot cope
+ * with that is its own problem. The withdrawal path had the same shape. See
+ * `notifyAll`, which is where this class is written down.
+ */
+const announce = (changed: () => void): void => notifyAll([changed], 'publication')
 
 /**
  * Saying something publicly — phase 26's writing side.
@@ -117,12 +130,23 @@ export function publishPortOver(
       /* ⚠️ **THE GATE IS HERE, NOT ONLY WHERE THE BUTTON IS DRAWN.** A surface
          that showed the sentence is a surface; this is the boundary, and the
          two disagree exactly when a caller forgets. */
-      const refusal = mayPublish({ audience: 'public', passage: act.passage, acknowledged: act.acknowledged })
+      const refusal = mayPublish({ audience: 'public', acknowledged: act.acknowledged })
       if (refusal !== null) {
         throw new Error('This has not been published: the disclosure was not shown.')
       }
       const book = nameOf(act.bookId)
       const { voice: mine, share: out } = ports()
+      /* ⚠️ **A NOTE PUBLISHED FOR A BOOK NOBODY SERVES REACHES NOBODY, AND
+         THIS REPORTED SUCCESS.** The plugin's `publish_note` appends a line and
+         nothing more — the serve path checks the policy per request, so a book
+         whose notes are not offered answers "nothing here" to every asker for
+         ever. The reader was told they had published. Checked here rather than
+         offered automatically: offering is itself a publication and cannot be
+         a side effect of writing a sentence. Found by audit. */
+      const serves = await out.offered()
+      if (!serves.some((one) => one.hash === book && one.notes)) {
+        throw new Error('Turn on “Publish notes” for this book first — nothing published now could be fetched.')
+      }
       const who = await mine.status()
       /* ⚠️ **THE SEQUENCE COMES FROM THE PLUGIN, WHICH PERSISTS IT BEFORE
          ANSWERING.** Deriving one from what is already published would reuse
@@ -139,7 +163,7 @@ export function publishPortOver(
          same rule on the path that mints. Found by audit. */
       const sig = await mine.sign(unsigned.signedBytes, who.voice)
       await out.publishNote(book, sealPublic(unsigned, sig))
-      changed()
+      announce(changed)
       return { pub, voice: who.voice, seq }
     },
 
@@ -155,7 +179,7 @@ export function publishPortOver(
          recipient refuses, because the signature is not the publication's. */
       const sig = await mine.sign(unsigned.signedBytes, published.voice)
       await out.publishNote(book, sealPublic(unsigned, sig))
-      changed()
+      announce(changed)
     },
 
     async voice() {

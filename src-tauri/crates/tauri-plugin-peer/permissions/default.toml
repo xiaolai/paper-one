@@ -66,6 +66,7 @@ permissions = [
     "allow-peer-share-publish-note",
     "allow-peer-share-resolve",
     "allow-peer-share-fetch",
+    "allow-peer-share-fetch-notes",
     "allow-peer-voice-status",
     "allow-peer-voice-next-seq",
     "allow-peer-voice-sign",

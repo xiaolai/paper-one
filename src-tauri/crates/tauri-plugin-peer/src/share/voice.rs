@@ -71,6 +71,12 @@ const PUBLIC_DOMAIN: &str = "paper.public.";
 /// takes a non-clobbering install for exactly that case. The sequence has no
 /// equivalent, which is stated rather than fixed — one reader, one machine, one
 /// app is the shape this design is for.
+/// ⚠️ **LEAKED, AND KEYED BY ROOT — WHICH IS WHY THAT IS FINE HERE.** One
+/// entry per data root: one in production, a handful across a test run. A lock
+/// that could be dropped while somebody held it would be no lock at all.
+/// `share/notes.rs` copied this shape keyed by `(root, BOOK)`, where the bound
+/// is every book a device has ever touched, and had to stop leaking; keying is
+/// the whole difference.
 fn lock_for(root: &Path) -> &'static Mutex<()> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
     let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));

@@ -65,6 +65,7 @@ to circle pages, so neither key can be made to sign the other's.
 - `allow-peer-share-publish-note`
 - `allow-peer-share-resolve`
 - `allow-peer-share-fetch`
+- `allow-peer-share-fetch-notes`
 - `allow-peer-voice-status`
 - `allow-peer-voice-next-seq`
 - `allow-peer-voice-sign`
@@ -934,6 +935,32 @@ Enables the peer_share_fetch command without any pre-configured scope.
 <td>
 
 Denies the peer_share_fetch command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-share-fetch-notes`
+
+</td>
+<td>
+
+Enables the peer_share_fetch_notes command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-share-fetch-notes`
+
+</td>
+<td>
+
+Denies the peer_share_fetch_notes command without any pre-configured scope.
 
 </td>
 </tr>

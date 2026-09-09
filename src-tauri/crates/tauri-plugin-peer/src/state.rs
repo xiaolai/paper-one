@@ -52,6 +52,19 @@ pub struct PeerState {
     /// only wakes tasks ALREADY waiting, which is the same trap the circle
     /// keeper's `notify_waiters` fell into.
     library_held: Arc<std::sync::atomic::AtomicBool>,
+    /// The share-resumption task setup detaches, so exit can stop it.
+    ///
+    /// ⚠️ **IT WAS DETACHED AND `close()` COULD NOT SEE IT.** The task waits
+    /// for the library gate and then starts the share endpoint; `close()`
+    /// looks at the `OnceCell`s, so a resumption still INITIALISING at exit
+    /// was invisible — it finished binding a UDP port and opening a blob store
+    /// after cleanup had run, and nothing ever closed it. Found by audit.
+    resuming: Mutex<Option<JoinHandle<()>>>,
+    /// Set by [`close`](PeerState::close), so nothing starts an endpoint after
+    /// it. Aborting the task above is not enough on its own: abort takes
+    /// effect at the next await point, and the one it is inside may be the
+    /// bind itself.
+    closing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for PeerState {
@@ -113,13 +126,41 @@ impl PeerState {
     /// of that. Every command that reaches it is one a reader asked for — or
     /// [`resume_share`](Self::resume_share), which asks the file first.
     pub async fn share_node<R: Runtime>(&self, app: &AppHandle<R>) -> Result<Arc<ShareNode>> {
-        self.share
+        /* ⚠️ **NOT AFTER `close()`.** Binding a second UDP port and opening a
+         * blob store during shutdown leaves both behind: `close()` has already
+         * looked at the cell. Refused rather than started. */
+        if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::error::Error::ShareRefused(
+                "this device is shutting down".into(),
+            ));
+        }
+        let started = self
+            .share
             .get_or_try_init(|| async {
                 let root = data_root(app)?;
                 ShareNode::start(ShareConfig::for_app(root)).await
             })
             .await
-            .cloned()
+            .cloned()?;
+        /* Checked again on the way out: `close()` may have run while the bind
+        above was in flight, and the cell it inspected was still empty. */
+        if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
+            started.close().await;
+            return Err(crate::error::Error::ShareRefused(
+                "this device is shutting down".into(),
+            ));
+        }
+        Ok(started)
+    }
+
+    /// The share-resumption task, so exit can stop it — see [`resuming`].
+    pub fn resume_with(&self, task: JoinHandle<()>) {
+        let replaced = self
+            .resuming
+            .lock()
+            .expect("resuming is never poisoned")
+            .replace(task);
+        debug_assert!(replaced.is_none(), "resume_with has ONE caller: setup");
     }
 
     /// A task the node must not start before. Setup schedules the `.part`
@@ -216,6 +257,22 @@ impl PeerState {
     /// Close the node if it was ever started. Waits for the QUIC close to go
     /// out, so peers see a clean close instead of an idle timeout.
     pub async fn close(&self) {
+        /* ⚠️ **THE FLAG FIRST, THEN THE TASK, THEN THE CELLS.** A resumption
+         * that is still initialising is not in a cell yet, so closing the
+         * cells alone left an endpoint that finished starting after cleanup.
+         * The flag stops a new one; the abort stops the one in flight; and
+         * `share_node` re-checks the flag after its bind so a task that got
+         * past the first check closes what it built. Found by audit. */
+        self.closing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(task) = self
+            .resuming
+            .lock()
+            .expect("resuming is never poisoned")
+            .take()
+        {
+            task.abort();
+        }
         if let Some(node) = self.node.get() {
             node.close().await;
         }

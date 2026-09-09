@@ -28,6 +28,7 @@
 use std::path::{Path, PathBuf};
 
 use iroh::endpoint::{Connection, VarInt};
+use iroh::{Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
 use tokio::time::{timeout, Duration};
 
@@ -102,21 +103,42 @@ fn notes_dir(root: &Path) -> PathBuf {
 
 /// One lock per `(root, book)`, so a publication is one transaction.
 ///
-/// Leaked deliberately, as `voice.rs`'s is: the map is bounded by how many
-/// books a device has ever published to, each entry is a `Mutex<()>`, and a
-/// lock that could be dropped while somebody held it would be no lock at all.
-fn book_lock(root: &Path, hash: &ContentHash) -> &'static std::sync::Mutex<()> {
+/// ⚠️ **IT LEAKED ONE MUTEX PER BOOK, FOR EVER, AND IT WAS COPIED FROM A CASE
+/// WHERE THAT IS FINE.** `voice.rs` and `circle.rs` keep the same map keyed by
+/// ROOT — one entry per data root, which is one in production and a handful in
+/// tests, and their comments say so. This one is keyed by `(root, BOOK)`, so
+/// the bound is "every book this device has ever touched" — including a book
+/// it refused, since the entry was allocated before the record was validated,
+/// and including one it merely forgot. Nothing was ever released. Found by
+/// audit.
+///
+/// An `Arc` handed to the caller with a `Weak` left in the map: while anybody
+/// holds it, everybody gets the SAME mutex — which is the whole point — and
+/// when the last holder drops it the entry becomes dead and the next call
+/// sweeps it. Two callers that do not overlap get different mutexes, which
+/// costs nothing: there was no contention to serialise.
+fn book_lock(root: &Path, hash: &ContentHash) -> std::sync::Arc<std::sync::Mutex<()>> {
     /// The map, named so the type reads and clippy is satisfied at once.
     type BookLocks = std::sync::Mutex<
-        std::collections::HashMap<(PathBuf, String), &'static std::sync::Mutex<()>>,
+        std::collections::HashMap<(PathBuf, String), std::sync::Weak<std::sync::Mutex<()>>>,
     >;
     static LOCKS: std::sync::OnceLock<BookLocks> = std::sync::OnceLock::new();
     let locks = LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut held = locks
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    held.entry((root.to_path_buf(), hash.as_str().to_owned()))
-        .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
+    let key = (root.to_path_buf(), hash.as_str().to_owned());
+    if let Some(live) = held.get(&key).and_then(std::sync::Weak::upgrade) {
+        return live;
+    }
+    /* Swept here rather than on drop: a `Drop` impl would need the map's lock
+    while the last `Arc` is going, which is a lock taken from inside a drop
+    — and the sweep is a walk over a map bounded by what is CURRENTLY in
+    flight plus whatever has just finished. */
+    held.retain(|_, weak| weak.strong_count() > 0);
+    let fresh = std::sync::Arc::new(std::sync::Mutex::new(()));
+    held.insert(key, std::sync::Arc::downgrade(&fresh));
+    fresh
 }
 
 /// `<root>/peer/share/notes/<hash>.jsonl`.
@@ -130,7 +152,7 @@ fn notes_path(root: &Path, hash: &ContentHash) -> PathBuf {
 }
 
 /// What a stranger asks for.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotesRequest {
     /// The wire version. Refused rather than ignored when unknown.
     pub v: u32,
@@ -173,7 +195,7 @@ fn generation_of(records: &[Vec<u8>]) -> u64 {
 }
 
 /// The header that precedes the records, or the refusal that replaces them.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotesAnswer {
     pub v: u32,
@@ -197,8 +219,14 @@ pub struct NotesAnswer {
     /// names which check failed is an oracle, and here the checks include
     /// "does this machine hold that book at all", which is precisely what a
     /// stranger must not be able to enumerate.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub why: Option<&'static str>,
+    ///
+    /// ⚠️ **A `String` AND NOT A `&'static str`, SO THE ASKER CAN READ IT.**
+    /// The client half of this protocol deserialises the same type — one
+    /// definition, because a second one is a definition that can drift — and a
+    /// borrowed static cannot be deserialised from a transient frame. One
+    /// allocation per refusal, and refusals are the cheap path anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 impl NotesAnswer {
@@ -216,7 +244,7 @@ impl NotesAnswer {
             count: 0,
             next: 0,
             more: false,
-            why: Some("nothing here"),
+            why: Some("nothing here".into()),
         }
     }
 }
@@ -508,15 +536,164 @@ async fn answer(
     if !policy.allows(&hash, ShareService::Notes) {
         return refuse(send).await;
     }
+    /* The cursor, the generation and the byte cap — see `page_of`. */
+    let page = page_of(&records, &request);
+    let (carried, next, generation) = (page.carried, page.next, page.generation);
+    frame::write_json(
+        send,
+        &NotesAnswer {
+            v: NOTES_VERSION,
+            ok: true,
+            generation,
+            count: carried.len() as u64,
+            next,
+            more: (next as usize) < records.len(),
+            why: None,
+        },
+    )
+    .await?;
+    for record in carried {
+        frame::write_frame(send, record).await?;
+    }
+    Ok(())
+}
+
+/// What one round of asking a provider brought back.
+///
+/// ⚠️ **A CURSOR, NOT JUST RECORDS.** The answer is capped at
+/// [`MAX_RECORDS_PER_ANSWER`], so a book with more than that takes several
+/// rounds — and a count alone is not a cursor across a `forget`, which is what
+/// `generation` is for. The caller stores both and sends them back.
+#[derive(Debug, Clone)]
+pub struct FetchedNotes {
+    /// The records, verbatim as they were signed. NEVER parsed here: this
+    /// crate has no idea what a public envelope is, and the verification —
+    /// signature, expiry, block list, bounds — is the kernel's.
+    pub records: Vec<Vec<u8>>,
+    /// What to send as `since` next time.
+    pub next: u64,
+    /// Which history that count belongs to.
+    pub generation: u64,
+    /// Whether the provider still has more past `next`.
+    pub more: bool,
+}
+
+/// Ask one provider for a book's public annotations.
+///
+/// ⚠️ **THIS IS THE HALF THAT WAS MISSING, AND ITS ABSENCE MADE THE WHOLE
+/// FEATURE UNREACHABLE.** `serve` above has answered since phase 26 and
+/// nothing on any device asked — so `public.jsonl`, the store the overlay
+/// reads, had no production writer at all and an ordinary reader never saw a
+/// stranger's annotation. Found by audit.
+///
+/// ⚠️ **EVERY BOUND HERE IS THE ASKER'S OWN.** The header is a claim by a
+/// machine we know nothing about: its `count` is capped at what the protocol
+/// permits before a single frame is read, each frame is capped at
+/// [`MAX_RECORD`], and the read is under a deadline. A provider that promises
+/// four billion records must cost us one refusal, not four billion
+/// allocations.
+pub(crate) async fn ask_one(
+    endpoint: &Endpoint,
+    provider: EndpointAddr,
+    hash: &ContentHash,
+    since: u64,
+    generation: Option<u64>,
+) -> Result<FetchedNotes> {
+    let conn = endpoint
+        .connect(provider, NOTES_ALPN)
+        .await
+        .map_err(|err| Error::ShareRefused(format!("that provider would not talk: {err}")))?;
+    let exchange = timeout(EXCHANGE_TIMEOUT, async {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|err| {
+            Error::ShareRefused(format!("that provider closed the stream: {err}"))
+        })?;
+        frame::write_json(
+            &mut send,
+            &NotesRequest {
+                v: NOTES_VERSION,
+                hash: hash.as_str().to_owned(),
+                since,
+                generation,
+            },
+        )
+        .await?;
+        /* The server reads one request per stream and answers; without the
+         * finish it waits for a frame that is never coming. */
+        crate::pairing::flush(&mut send).await;
+        let header = frame::read_capped(&mut recv, MAX_REQUEST)
+            .await?
+            .ok_or_else(|| Error::FrameMalformed("the provider sent no answer".into()))?;
+        let answer: NotesAnswer = serde_json::from_slice(&header)
+            .map_err(|err| Error::FrameMalformed(err.to_string()))?;
+        if answer.v != NOTES_VERSION {
+            return Err(Error::ShareRefused(format!(
+                "that provider speaks version {} of the notes protocol",
+                answer.v
+            )));
+        }
+        if !answer.ok {
+            /* ⚠️ **ONE SENTENCE, AND IT IS THE PROVIDER'S.** `refuse` says the
+             * same thing whatever failed, deliberately — see its own note — so
+             * there is nothing here to interpret and nothing to retry
+             * differently. */
+            return Err(Error::ShareRefused(format!(
+                "that provider has nothing for {hash}"
+            )));
+        }
+        /* ⚠️ **THE COUNT IS A STRANGER'S NUMBER.** Capped at what the protocol
+         * allows before anything is allocated for it. */
+        let promised = usize::try_from(answer.count)
+            .unwrap_or(usize::MAX)
+            .min(MAX_RECORDS_PER_ANSWER);
+        let mut records = Vec::with_capacity(promised);
+        for _ in 0..promised {
+            let Some(frame) = frame::read_capped(&mut recv, MAX_RECORD as u32).await? else {
+                return Err(Error::FrameMalformed(
+                    "the provider stopped before the records it promised".into(),
+                ));
+            };
+            records.push(frame.to_vec());
+        }
+        Ok(FetchedNotes {
+            records,
+            next: answer.next,
+            generation: answer.generation,
+            more: answer.more,
+        })
+    })
+    .await;
+    conn.close(VarInt::from_u32(0), b"done");
+    match exchange {
+        Ok(result) => result,
+        Err(_) => Err(Error::ShareRefused(
+            "that provider did not answer in time".into(),
+        )),
+    }
+}
+
+/// One page of a book's records, chosen from the reader's cursor.
+///
+/// ⚠️ **EXTRACTED SO PAGINATION CAN BE TESTED WITHOUT A TRANSPORT.** `answer`
+/// combined parsing, authorization, rate accounting, the disk read, this, and
+/// serialisation — so the only way to ask "what does `since` past the end
+/// return?" was to stand up two endpoints. Every rule below is a decision
+/// about what a stranger is sent, and each is one line. Found by audit.
+struct Page<'a> {
+    carried: Vec<&'a Vec<u8>>,
+    next: u64,
+    generation: u64,
+}
+
+fn page_of<'a>(records: &'a [Vec<u8>], request: &NotesRequest) -> Page<'a> {
     /* ⚠️ **A COUNT-ONLY CURSOR SURVIVES A `forget` AND SILENTLY SKIPS.** The
      * file is deleted and a new history begins; a client holding `since: 1`
      * then never sees the new first record, for ever, and nothing anywhere
      * reports it. The generation is derived from the FIRST record — stable
      * across appends by construction, since the file is append-only, and
-     * different after a recreation unless the new history genuinely starts with
-     * the same bytes, in which case the cursor really is still valid. A client
-     * that does not send one is served exactly as before. */
-    let generation = generation_of(&records);
+     * different after a recreation unless the new history genuinely starts
+     * with the same bytes, in which case the cursor really is still valid. A
+     * client that does not send one is served exactly as before. */
+    let generation = generation_of(records);
     let from = match request.generation {
         Some(theirs) if theirs != generation => 0,
         _ => usize::try_from(request.since)
@@ -526,30 +703,21 @@ async fn answer(
     let mut carried: Vec<&Vec<u8>> = Vec::new();
     let mut carried_bytes = 0usize;
     for record in records.iter().skip(from).take(MAX_RECORDS_PER_ANSWER) {
+        /* One record past the byte cap ends the page — unless it is the FIRST,
+        because a page of nothing makes no progress and the client would ask
+        again for ever. */
         if carried_bytes + record.len() > MAX_ANSWER_BYTES && !carried.is_empty() {
             break;
         }
         carried_bytes += record.len();
         carried.push(record);
     }
-    let next = from + carried.len();
-    frame::write_json(
-        send,
-        &NotesAnswer {
-            v: NOTES_VERSION,
-            ok: true,
-            generation,
-            count: carried.len() as u64,
-            next: next as u64,
-            more: next < records.len(),
-            why: None,
-        },
-    )
-    .await?;
-    for record in carried {
-        frame::write_frame(send, record).await?;
+    let next = (from + carried.len()) as u64;
+    Page {
+        carried,
+        next,
+        generation,
     }
-    Ok(())
 }
 
 /// The one answer a stranger gets when the answer is no.
@@ -566,6 +734,91 @@ async fn refuse(send: &mut iroh::endpoint::SendStream) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testutil::ScratchDir;
+
+    /// Pagination, without a transport — which is why `page_of` exists.
+    ///
+    /// ⚠️ **THESE RULES WERE INSIDE AN 88-LINE `answer`**, so asking "what
+    /// does a cursor past the end return?" meant standing up two endpoints.
+    #[test]
+    fn a_page_is_the_cursor_the_caps_and_the_generation() {
+        let records: Vec<Vec<u8>> = (0..300)
+            .map(|n| format!("{{\"n\":{n}}}").into_bytes())
+            .collect();
+        let asking = |since: u64, generation: Option<u64>| NotesRequest {
+            v: NOTES_VERSION,
+            hash: "ab".repeat(32),
+            since,
+            generation,
+        };
+
+        /* At most one answer's worth, whatever is held. */
+        let first = page_of(&records, &asking(0, None));
+        assert_eq!(first.carried.len(), MAX_RECORDS_PER_ANSWER);
+        assert_eq!(first.next, MAX_RECORDS_PER_ANSWER as u64);
+        assert_eq!(first.carried[0], &records[0]);
+
+        /* The cursor resumes where it said it would. */
+        let second = page_of(&records, &asking(first.next, Some(first.generation)));
+        assert_eq!(second.carried.len(), 300 - MAX_RECORDS_PER_ANSWER);
+        assert_eq!(second.next, 300);
+
+        /* Past the end is empty, not a panic and not a restart. */
+        let past = page_of(&records, &asking(9_999, Some(first.generation)));
+        assert!(past.carried.is_empty());
+        assert_eq!(past.next, 300);
+
+        /* ⚠️ **A COUNT-ONLY CURSOR SURVIVES A `forget` AND SILENTLY SKIPS.** A
+        generation that disagrees resets to the beginning rather than
+        skipping that many records of a history it never saw. */
+        let other = page_of(&records, &asking(200, Some(first.generation ^ 1)));
+        assert_eq!(
+            other.carried[0], &records[0],
+            "a stale cursor skipped a new history"
+        );
+
+        /* An empty history has generation zero — there is nothing to be a
+        cursor into. */
+        assert_eq!(page_of(&[], &asking(0, None)).generation, 0);
+    }
+
+    /// ⚠️ **ONE MUTEX PER BOOK WAS LEAKED FOR EVER**, and an entry was
+    /// allocated before the record was even validated — so a flood of refused
+    /// appends grew the map without publishing anything.
+    ///
+    /// Measured on the LOCK ITSELF rather than on the map's size: the tests in
+    /// this module run in parallel and legitimately hold locks of their own,
+    /// so a count is somebody else's business. What this asserts is the
+    /// property the map is supposed to have — that it keeps nothing alive.
+    #[test]
+    fn a_finished_book_does_not_keep_its_lock() {
+        let dir = crate::testutil::scratch("notes-lock-map");
+        let one = hash(21);
+        let watching = {
+            let held = book_lock(&dir, &one);
+            std::sync::Arc::downgrade(&held)
+        };
+        assert!(
+            watching.upgrade().is_none(),
+            "the lock map kept a book's mutex alive after the last holder finished"
+        );
+        /* And the entry itself goes on the next call, rather than sitting dead
+        in the map for ever. */
+        drop(book_lock(&dir, &hash(22)));
+    }
+
+    /// And two callers that DO overlap still share one lock, which is the
+    /// whole reason the map exists.
+    #[test]
+    fn two_holders_of_one_book_share_a_lock() {
+        let dir = crate::testutil::scratch("notes-lock-shared");
+        let one = hash(9);
+        let first = book_lock(&dir, &one);
+        let second = book_lock(&dir, &one);
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "two publications to one book took different locks"
+        );
+    }
 
     fn hash(byte: u8) -> ContentHash {
         ContentHash::parse(&format!("{byte:02x}").repeat(32)).unwrap()

@@ -349,11 +349,76 @@ mod tests {
     /// permissions rather than the omission. `peer_set_local_role` already
     /// paid for this once: registered and hand-permissioned, absent from
     /// `COMMANDS`, green until the next clean regeneration.
+    /// ⚠️ **EVERY PARSER HERE READS CODE WITH THE COMMENTS TAKEN OUT.** They
+    /// did not, and the first documentation change that mentioned a marker
+    /// broke the check: a doc comment on `init` naming the handler macro made
+    /// `find` land in prose, and the brackets it then read were a parenthesis
+    /// in an English sentence. A source scanner that cannot tell code from
+    /// commentary makes harmless documentation a build failure — and, worse,
+    /// could make a real omission pass by matching a mention of it. Found by
+    /// audit, by walking into it.
+    /// Source with every comment replaced by whitespace.
+    ///
+    /// ⚠️ **LINE COUNTS AND OFFSETS ARE PRESERVED**, so a failure still points
+    /// somewhere real. Doc comments (`///`, `//!`) and block comments both go;
+    /// string literals stay, because a command name inside one is a value this
+    /// crate might genuinely be using. Nesting is handled: Rust's block
+    /// comments nest, and treating them as flat would end the first one early
+    /// and leak code back in.
+    fn without_comments(source: &str) -> String {
+        let bytes: Vec<char> = source.chars().collect();
+        let mut out = String::with_capacity(source.len());
+        let mut at = 0usize;
+        let mut depth = 0usize;
+        while at < bytes.len() {
+            let two =
+                |i: usize| -> Option<(char, char)> { Some((*bytes.get(i)?, *bytes.get(i + 1)?)) };
+            if depth > 0 {
+                match two(at) {
+                    Some(('/', '*')) => {
+                        depth += 1;
+                        out.push_str("  ");
+                        at += 2;
+                        continue;
+                    }
+                    Some(('*', '/')) => {
+                        depth -= 1;
+                        out.push_str("  ");
+                        at += 2;
+                        continue;
+                    }
+                    _ => {}
+                }
+                out.push(if bytes[at] == '\n' { '\n' } else { ' ' });
+                at += 1;
+                continue;
+            }
+            match two(at) {
+                Some(('/', '*')) => {
+                    depth = 1;
+                    out.push_str("  ");
+                    at += 2;
+                }
+                Some(('/', '/')) => {
+                    while at < bytes.len() && bytes[at] != '\n' {
+                        out.push(' ');
+                        at += 1;
+                    }
+                }
+                _ => {
+                    out.push(bytes[at]);
+                    at += 1;
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn lists_agree() {
-        let declared = quoted_after(&read("build.rs"), "const COMMANDS");
+        let declared = quoted_after(&without_comments(&read("build.rs")), "const COMMANDS");
 
-        let lib = read("src/lib.rs");
+        let lib = without_comments(&read("src/lib.rs"));
         let start = lib.find("generate_handler!").expect("a handler list");
         let open = lib[start..].find('[').expect("a list") + start;
         let close = lib[open..].find(']').expect("a closed list") + open;
@@ -380,7 +445,7 @@ mod tests {
         /* Every public fn in this file IS a command — `pub fn` and
          * `pub async fn` both; `paper_data_root` carries no `peer_` prefix,
          * so the collection is by visibility, not by name shape. */
-        let source = read("src/commands.rs");
+        let source = without_comments(&read("src/commands.rs"));
         let mut implemented: BTreeSet<String> = BTreeSet::new();
         for marker in ["pub async fn ", "pub fn "] {
             for (at, m) in source.match_indices(marker) {
@@ -389,7 +454,9 @@ mod tests {
                 let name = rest[..end].trim();
                 /* Identifiers only: this test lives in the file it reads, so
                  * its own marker LITERALS match themselves — the quotes and
-                 * braces around them are what this filter drops. */
+                 * braces around them are what this filter drops. Comments are
+                 * already gone; string literals are not, which is what this
+                 * still guards. */
                 if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     implemented.insert(name.to_owned());
                 }
@@ -1027,6 +1094,67 @@ pub async fn peer_share_fetch<R: Runtime>(
     }
     let share = state.share_node(&app).await?;
     share.fetch_book(&hash, &ids, &folder, &name).await
+}
+
+/// Ask a provider for a book's public annotations — phase 26's receiving half.
+///
+/// ⚠️ **THE RECORDS COME BACK UNVERIFIED, AND THAT IS DELIBERATE.** This
+/// plugin does not know what a public envelope is. Every check that matters —
+/// the signature, the expiry, the reader's block list, the storage caps — is
+/// the kernel's `readPublicEnvelope`, and a second verifier here would be a
+/// second thing to keep in step with the first. What this returns is bytes a
+/// stranger sent, and the caller must treat them as such.
+///
+/// ⚠️ **AND THEY ARE STRINGS, SO A NON-UTF-8 RECORD IS REFUSED HERE.** A
+/// public annotation is a JSON line by construction; anything else could not
+/// have been signed by a Paper. Refusing at the boundary keeps the caller from
+/// having to decide what a lossy decode means.
+///
+/// `since` and `generation` are the cursor the previous answer returned. Both
+/// are needed: a count alone silently skips a whole history after the
+/// publisher withdraws everything and starts again.
+#[tauri::command]
+pub async fn peer_share_fetch_notes<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, PeerState>,
+    hash: String,
+    providers: Option<Vec<String>>,
+    since: Option<u64>,
+    generation: Option<u64>,
+) -> Result<FetchedNotes> {
+    /* Every argument validated before `share_node` binds a port — the same
+    ordering `peer_share_fetch` states at length. */
+    let hash = ContentHash::parse(&hash)?;
+    let mut ids = Vec::new();
+    for one in providers.unwrap_or_default() {
+        ids.push(iroh::EndpointAddr::from(crate::node::parse_peer_id(&one)?));
+    }
+    let share = state.share_node(&app).await?;
+    let answer = share
+        .fetch_notes(&hash, &ids, since.unwrap_or(0), generation)
+        .await?;
+    let mut records = Vec::with_capacity(answer.records.len());
+    for one in answer.records {
+        records.push(String::from_utf8(one).map_err(|_| {
+            Error::ShareRefused("that provider sent something that is not text".into())
+        })?);
+    }
+    Ok(FetchedNotes {
+        records,
+        next: answer.next,
+        generation: answer.generation,
+        more: answer.more,
+    })
+}
+
+/// One round of asking, as the app sees it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchedNotes {
+    pub records: Vec<String>,
+    pub next: u64,
+    pub generation: u64,
+    pub more: bool,
 }
 
 /// Who else claims to serve this book, over this service.

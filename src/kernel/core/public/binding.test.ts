@@ -145,4 +145,20 @@ describe('persistence is the caller’s, and the shape survives a round trip', (
     expect(standingOf(VOICE, back)).toBe('bound')
     expect(standingOf(OTHER_VOICE, back)).toBe('blocked')
   })
+
+  it('does not let a MALFORMED record claim a voice nothing else thinks is claimed', async () => {
+    /* ⚠️ **`bind` ASKED `find` DIRECTLY WHILE EVERY LOOKUP FILTERED.** A
+       damaged row made the voice a `stranger` everywhere and `already-claimed`
+       here — a binding the reader could not make, could not see the reason
+       for, and could not clear, because `unbind` removes by voice and the row
+       was still there afterwards to refuse the next attempt. */
+    const damaged = { voice: VOICE, person: OTHER_PERSON, assertedBy: PERSON, at: 1 } as VoiceBinding
+    const decisions = { bindings: [damaged], blockedVoices: [], blockedPeople: [] }
+    /* Every lookup already ignores it. */
+    expect(standingOf(VOICE, decisions)).toBe('stranger')
+    expect(personOf(VOICE, decisions)).toBeNull()
+    /* So it cannot be a claim against a valid binding either. */
+    const outcome = bind(decisions, { voice: VOICE, person: PERSON, assertedBy: PERSON, at: 2 })
+    expect(typeof outcome, 'a record no lookup trusts refused a valid binding').not.toBe('string')
+  })
 })

@@ -13,6 +13,7 @@ import {
   type PagePublisher,
   type PeerWire,
   type PersonStatus,
+  type FetchedNotes,
   type SharedBook,
   type ShareService,
   type VoiceStatus,
@@ -225,6 +226,19 @@ export interface SharePort {
   resolve(hash: string, service: ShareService): Promise<readonly string[]>
   /** Fetch a book into `books/<folder>/<name>`. See the wire for why `folder` matters. */
   fetch(hash: string, folder: string, name: string, providers?: readonly string[]): Promise<number>
+  /**
+   * Ask a provider for a book's public annotations — phase 26's receiving
+   * half, and the one that was missing.
+   *
+   * ⚠️ **WHAT COMES BACK IS UNVERIFIED.** The plugin knows nothing about
+   * public envelopes; every check is the kernel's, through `writePublic`.
+   */
+  fetchNotes(
+    hash: string,
+    providers?: readonly string[],
+    since?: number,
+    generation?: number,
+  ): Promise<FetchedNotes>
 }
 
 /**
@@ -291,6 +305,7 @@ export function sharePortOver(held: PeerWire): SharePort {
     publishNote: (hash, record) => held.sharePublishNote(hash, record),
     resolve: (hash, service) => held.shareResolve(hash, service),
     fetch: (hash, folder, name, providers) => held.shareFetch(hash, folder, name, providers),
+    fetchNotes: (hash, providers, since, generation) => held.shareFetchNotes(hash, providers, since, generation),
   }
   sharePorts.set(held, port)
   return port
@@ -718,6 +733,7 @@ export type {
   SessionFrames,
   SessionOpen,
   RetiredVoice,
+  FetchedNotes,
   SharedBook,
   ShareService,
   VoiceStatus,

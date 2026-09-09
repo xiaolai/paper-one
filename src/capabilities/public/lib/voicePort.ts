@@ -5,6 +5,7 @@ import {
   bind,
   blockPerson,
   blockVoice,
+  isMissingFile,
   isWellFormed,
   notifyAll,
   personOf,
@@ -91,6 +92,90 @@ interface Stored {
 
 const VERSION = 1
 
+/**
+ * The stored file, read back — PURE, so what it refuses can be measured
+ * without a filesystem.
+ *
+ * ⚠️ **THIS WAS INSIDE THE FACTORY, WHICH IS WHY IT COULD ONLY BE TESTED
+ * THROUGH ONE.** It reads no instance state: the bytes go in and the decisions
+ * come out. Every refusal below is a decision about DATA LOSS, and the one
+ * thing a test of it must be able to do is hand it a damaged file.
+ *
+ * ⚠️ **A MALFORMED BINDING IS DROPPED, NOT TRUSTED, AND NOT FATAL.** It cannot
+ * change an answer — `standingOf` filters by `isWellFormed` too — so refusing
+ * the whole file over one would lose every decision beside it. The file is
+ * this device's own, so a bad row is a bug of ours rather than somebody else's
+ * input, which is why the malformed VERSION is fatal and this is not.
+ */
+export function decisionsFrom(text: string): VoiceDecisions {
+  const parsed: unknown = JSON.parse(text)
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error(`public: ${VOICE_DECISIONS_PATH} is not a record of decisions`)
+  }
+  const held = parsed as Partial<Stored>
+  if (held.v !== VERSION) {
+    throw new Error(`public: ${VOICE_DECISIONS_PATH} is version ${String(held.v)}, not ${VERSION}`)
+  }
+  const bindings = (Array.isArray(held.bindings) ? held.bindings : []).filter(isWellFormed)
+  /* ⚠️ **A COLLECTION THAT IS NOT A LIST IS DAMAGE, NOT AN EMPTY LIST.** A
+     missing or mistyped `blockedVoices` read as `[]`, which silently stops
+     every silence applying — and the next change writes that emptiness over
+     the original, so the reader's blocks are gone for good and nothing ever
+     said so. Dropping one malformed ROW is deliberate and stays (see above);
+     losing a whole collection is the file being damaged, and this file is this
+     device's own. Found by audit. */
+  const listOf = (value: unknown, name: string): readonly string[] => {
+    if (value === undefined) return []
+    if (!Array.isArray(value)) {
+      throw new Error(`public: ${VOICE_DECISIONS_PATH} has a ${name} list that will not read`)
+    }
+    return value.filter((one): one is string => typeof one === 'string')
+  }
+  const blockedVoices = listOf(held.blockedVoices, 'blocked voices')
+  const blockedPeople = listOf(held.blockedPeople, 'blocked people')
+  /* ⚠️ **OVER THE CAP IS ALSO DAMAGE.** `change` refuses to WRITE more than
+     `MAX_DECISIONS`, so a file holding more was not written by this build.
+     Silently truncating it stopped the dropped blocks applying and then made
+     the truncation permanent on the next change — the same shape as the
+     collection above, one bound further out. */
+  if (bindings.length > MAX_DECISIONS || blockedVoices.length > MAX_DECISIONS || blockedPeople.length > MAX_DECISIONS) {
+    throw new Error(`public: ${VOICE_DECISIONS_PATH} holds more decisions than this build will keep`)
+  }
+  return { bindings, blockedVoices, blockedPeople }
+}
+
+/**
+ * Whether two sets of decisions say the same thing.
+ *
+ * ⚠️ **A NO-OP USED TO REWRITE THE WHOLE FILE AND TELL EVERYBODY.** Blocking a
+ * voice that is already blocked wrote the same bytes back, refreshed every
+ * pane, and could report a WRITE FAILURE for a change that did not need
+ * making — a disk error surfaced to the reader as "your silence did not take"
+ * when the silence was already in place. Found by audit.
+ *
+ * Order-sensitive on purpose: these lists are the reader's own and the fold
+ * keeps their order, so a reordering IS a change worth persisting.
+ */
+function sameDecisions(a: VoiceDecisions, b: VoiceDecisions): boolean {
+  const sameList = (one: readonly string[], other: readonly string[]) =>
+    one.length === other.length && one.every((each, at) => each === other[at])
+  return (
+    sameList(a.blockedVoices, b.blockedVoices) &&
+    sameList(a.blockedPeople, b.blockedPeople) &&
+    a.bindings.length === b.bindings.length &&
+    a.bindings.every((each, at) => {
+      const twin = b.bindings[at]
+      return (
+        twin !== undefined &&
+        each.voice === twin.voice &&
+        each.person === twin.person &&
+        each.assertedBy === twin.assertedBy &&
+        each.at === twin.at
+      )
+    })
+  )
+}
+
 export function voiceDecisionsPortOver(
   fs: IndexFs,
   queue: WriteQueue,
@@ -111,53 +196,10 @@ export function voiceDecisionsPortOver(
     try {
       text = new TextDecoder().decode(await fs.readFile(VOICE_DECISIONS_PATH))
     } catch (cause) {
-      if (isMissing(cause)) return NO_DECISIONS
+      if (isMissingFile(cause)) return NO_DECISIONS
       throw cause
     }
-    const parsed: unknown = JSON.parse(text)
-    if (typeof parsed !== 'object' || parsed === null) {
-      throw new Error(`public: ${VOICE_DECISIONS_PATH} is not a record of decisions`)
-    }
-    const held = parsed as Partial<Stored>
-    if (held.v !== VERSION) {
-      throw new Error(`public: ${VOICE_DECISIONS_PATH} is version ${String(held.v)}, not ${VERSION}`)
-    }
-    /* ⚠️ **A MALFORMED BINDING IS DROPPED, NOT TRUSTED, AND NOT FATAL.** It
-       cannot change an answer — `standingOf` filters by `isWellFormed` too —
-       so refusing the whole file over one would lose every decision beside it.
-       The file is this device's own, so a bad row is a bug of ours rather than
-       somebody else's input, which is why the malformed VERSION above is fatal
-       and this is not. */
-    const bindings = (Array.isArray(held.bindings) ? held.bindings : []).filter(isWellFormed)
-    /* ⚠️ **A COLLECTION THAT IS NOT A LIST IS DAMAGE, NOT AN EMPTY LIST.** A
-       missing or mistyped `blockedVoices` read as `[]`, which silently stops
-       every silence applying — and the next change writes that emptiness over
-       the original, so the reader's blocks are gone for good and nothing ever
-       said so. Dropping one malformed ROW is deliberate and stays (see above);
-       losing a whole collection is the file being damaged, and this file is
-       this device's own. Found by audit. */
-    const listOf = (value: unknown, name: string): readonly string[] => {
-      if (value === undefined) return []
-      if (!Array.isArray(value)) {
-        throw new Error(`public: ${VOICE_DECISIONS_PATH} has a ${name} list that will not read`)
-      }
-      return value.filter((one): one is string => typeof one === 'string')
-    }
-    const blockedVoices = listOf(held.blockedVoices, 'blocked voices')
-    const blockedPeople = listOf(held.blockedPeople, 'blocked people')
-    /* ⚠️ **OVER THE CAP IS ALSO DAMAGE.** `change` refuses to WRITE more than
-       `MAX_DECISIONS`, so a file holding more was not written by this build.
-       Silently truncating it stopped the dropped blocks applying and then made
-       the truncation permanent on the next change — the same shape as the
-       collection above, one bound further out. */
-    if (
-      bindings.length > MAX_DECISIONS ||
-      blockedVoices.length > MAX_DECISIONS ||
-      blockedPeople.length > MAX_DECISIONS
-    ) {
-      throw new Error(`public: ${VOICE_DECISIONS_PATH} holds more decisions than this build will keep`)
-    }
-    return { bindings, blockedVoices, blockedPeople }
+    return decisionsFrom(text)
   }
 
   /**
@@ -170,11 +212,17 @@ export function voiceDecisionsPortOver(
    */
   const change = async (apply: (held: VoiceDecisions) => VoiceDecisions | BindingRefusal): Promise<BindingRefusal | null> => {
     let refusal: BindingRefusal | null = null
+    let unchanged = false
     await queue.append(LANE, async () => {
       const held = await read()
       const next = apply(held)
       if (typeof next === 'string') {
         refusal = next
+        return
+      }
+      /* Nothing to write and nobody to tell — see `sameDecisions`. */
+      if (sameDecisions(held, next)) {
+        unchanged = true
         return
       }
       if (
@@ -193,7 +241,7 @@ export function voiceDecisionsPortOver(
          gate that exists to enumerate exactly this. */
       await atomicWrite(fs, VOICE_DECISIONS_PATH, bytes)
     })
-    if (refusal === null) tell()
+    if (refusal === null && !unchanged) tell()
     return refusal
   }
 
@@ -202,11 +250,24 @@ export function voiceDecisionsPortOver(
     standing: async (voice) => standingOf(voice, await read()),
     person: async (voice) => personOf(voice, await read()),
     voicesOf: async (person) => voicesOf(person, await read()),
-    bind: (binding) =>
-      change((held) => {
-        const outcome = bind(held, binding)
+    bind: (binding) => {
+      /* ⚠️ **COPIED HERE, BEFORE ANYTHING IS QUEUED.** `change` waits for the
+         lane and then reads the file, so the caller's object was held across
+         two awaits — and `readonly` on the interface stops nothing, since the
+         caller keeps its own reference to the same object. Mutating it in
+         between changed what was validated and what was written. Found by
+         audit. */
+      const mine: VoiceBinding = {
+        voice: binding.voice,
+        person: binding.person,
+        assertedBy: binding.assertedBy,
+        at: binding.at,
+      }
+      return change((held) => {
+        const outcome = bind(held, mine)
         return typeof outcome === 'string' ? outcome : outcome.decisions
-      }),
+      })
+    },
     unbind: async (voice) => {
       await change((held) => unbind(held, voice))
     },
@@ -232,7 +293,8 @@ export function voiceDecisionsPortOver(
 }
 
 /** Whether a filesystem failure is "there is no such file". */
-function isMissing(cause: unknown): boolean {
-  const message = cause instanceof Error ? cause.message : String(cause)
-  return /not found|no such file|ENOENT/iu.test(message)
-}
+/* ⚠️ **`isMissing` STOOD HERE AND `isMissingFile` IS THE KERNEL'S.** The
+   kernel's own copy says *"one copy, because there were already two"* — and
+   the two it meant were this one and `publicStore`'s, neither of which was
+   ever removed. Three definitions of "is this data loss?", byte-identical and
+   free to drift. Found by audit. */

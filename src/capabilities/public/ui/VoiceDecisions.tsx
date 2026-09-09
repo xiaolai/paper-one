@@ -38,7 +38,38 @@ function shortly(id: string): string {
   return id.slice(0, 12)
 }
 
-export function VoiceDecisionsControl({ heard, port }: VoiceDecisionsProps) {
+/**
+ * One silence, with the two states it has.
+ *
+ * ⚠️ **FOUR NEAR-IDENTICAL BUTTON BRANCHES STOOD HERE**, differing in a label,
+ * an operation and — the part that matters — WHICH CLASS THEY CARRIED. The
+ * silencing half is `buttonDanger` and the un-silencing half is not, which is
+ * a rule about what a destructive control looks like; written out four times
+ * it is a rule three of them could stop following without anything noticing.
+ * `capabilityStyle.contract.test.ts` already walks this file for a modifier
+ * travelling without its base class, and this is the same rule from the other
+ * end. Found by audit.
+ *
+ * ⚠️ **`silenced` DECIDES THE TREATMENT, NOT THE CALLER.** Taking a colour as a
+ * prop would put the decision back at each call site, which is exactly what
+ * was wrong with the four copies.
+ */
+/**
+ * The subscription, the reads and the actions — everything this control DOES,
+ * apart from drawing.
+ *
+ * ⚠️ **EXTRACTED FROM A COMPONENT THAT DID ALL OF IT INLINE.** Lifecycle,
+ * ordering, error state and four kinds of row were one function, so a
+ * state-transition defect — and there have been three here — could only be
+ * looked for by reading the whole thing. What is left in the component is
+ * which rows exist and what they say. Found by audit.
+ */
+function useVoiceDecisions(port: VoiceDecisionsPort | null): {
+  readonly decisions: VoiceDecisions | null
+  readonly trouble: string | null
+  readonly busy: boolean
+  readonly act: (run: () => Promise<unknown>) => void
+} {
   const [decisions, setDecisions] = useState<VoiceDecisions | null>(null)
   const [trouble, setTrouble] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -71,14 +102,67 @@ export function VoiceDecisionsControl({ heard, port }: VoiceDecisionsProps) {
   useEffect(() => {
     /* ⚠️ **THE PREVIOUS PORT'S ANSWERS ARE NOT THIS PORT'S.** Without this the
        control kept drawing the old device's decisions until the new read
-       landed — and for ever if it failed. `undefined`-like nulling is the same
-       "not looked yet" state the first render has. */
+       landed — and for ever if it failed. Nulling is the same "not looked yet"
+       state the first render has. */
     setDecisions(null)
     setTrouble(null)
     latest.current += 1
     refresh()
     return port?.subscribe(refresh)
   }, [port, refresh])
+
+  /* One action, one shape: run it, report what went wrong, and let the port's
+     own subscription bring the new state back rather than setting it here. Two
+     paths to the same state is how a surface starts disagreeing with its
+     store. */
+  const act = useCallback((run: () => Promise<unknown>): void => {
+    setBusy(true)
+    setTrouble(null)
+    run()
+      .catch((cause: unknown) => setTrouble(messageOf(cause)))
+      .finally(() => setBusy(false))
+  }, [])
+
+  return { decisions, trouble, busy, act }
+}
+
+function SilenceToggle({
+  silenced,
+  busy,
+  silence,
+  hear,
+  onSilence,
+  onHear,
+}: {
+  readonly silenced: boolean
+  readonly busy: boolean
+  /** What the button says when it will silence. */
+  readonly silence: string
+  /** What it says when it will stop silencing. */
+  readonly hear: string
+  readonly onSilence: () => void
+  readonly onHear: () => void
+}) {
+  return silenced ? (
+    <button type="button" className={CAPABILITY_UI.button} disabled={busy} onClick={onHear}>
+      {hear}
+    </button>
+  ) : (
+    <button
+      type="button"
+      /* ⚠️ **A MODIFIER NEVER TRAVELS WITHOUT THE CLASS IT MODIFIES** —
+         `buttonDanger` alone is a colour with no button under it. */
+      className={`${CAPABILITY_UI.button} ${CAPABILITY_UI.buttonDanger}`}
+      disabled={busy}
+      onClick={onSilence}
+    >
+      {silence}
+    </button>
+  )
+}
+
+export function VoiceDecisionsControl({ heard, port }: VoiceDecisionsProps) {
+  const { decisions, trouble, busy, act } = useVoiceDecisions(port)
 
   if (port === null) return null
   /* ⚠️ **UNREADABLE IS SAID, NOT DRAWN AS EMPTY.** `voicePort.decisions`
@@ -94,18 +178,6 @@ export function VoiceDecisionsControl({ heard, port }: VoiceDecisionsProps) {
         <p className={CAPABILITY_UI.hint}>Paper could not read what you have decided about other people’s voices, so none of it is being applied. {trouble}</p>
       </div>
     )
-  }
-
-  /* One action, one shape: run it, report what went wrong, and let the port's
-     own subscription bring the new state back rather than setting it here. Two
-     paths to the same state is how a surface starts disagreeing with its
-     store. */
-  const act = (run: () => Promise<unknown>): void => {
-    setBusy(true)
-    setTrouble(null)
-    run()
-      .catch((cause: unknown) => setTrouble(messageOf(cause)))
-      .finally(() => setBusy(false))
   }
 
   /* ⚠️ **INDEXED, NOT SEARCHED THREE DEEP.** This was
@@ -169,43 +241,23 @@ export function VoiceDecisionsControl({ heard, port }: VoiceDecisionsProps) {
               </span>
             </div>
             <div className={CAPABILITY_UI.actions}>
-              {silencedByVoice ? (
-                <button
-                  type="button"
-                  className={CAPABILITY_UI.button}
-                  disabled={busy}
-                  onClick={() => act(() => port.unblockVoice(voice))}
-                >
-                  Hear this voice again
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className={`${CAPABILITY_UI.button} ${CAPABILITY_UI.buttonDanger}`}
-                  disabled={busy}
-                  onClick={() => act(() => port.blockVoice(voice))}
-                >
-                  Silence this voice
-                </button>
-              )}
-              {person === undefined ? null : silencedByPerson ? (
-                <button
-                  type="button"
-                  className={CAPABILITY_UI.button}
-                  disabled={busy}
-                  onClick={() => act(() => port.unblockPerson(person))}
-                >
-                  Hear {shortly(person)} again
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className={`${CAPABILITY_UI.button} ${CAPABILITY_UI.buttonDanger}`}
-                  disabled={busy}
-                  onClick={() => act(() => port.blockPerson(person))}
-                >
-                  Silence everything from them
-                </button>
+              <SilenceToggle
+                silenced={silencedByVoice}
+                busy={busy}
+                silence="Silence this voice"
+                hear="Hear this voice again"
+                onSilence={() => act(() => port.blockVoice(voice))}
+                onHear={() => act(() => port.unblockVoice(voice))}
+              />
+              {person === undefined ? null : (
+                <SilenceToggle
+                  silenced={silencedByPerson}
+                  busy={busy}
+                  silence="Silence everything from them"
+                  hear={`Hear ${shortly(person)} again`}
+                  onSilence={() => act(() => port.blockPerson(person))}
+                  onHear={() => act(() => port.unblockPerson(person))}
+                />
               )}
               {person === undefined ? null : (
                 <button

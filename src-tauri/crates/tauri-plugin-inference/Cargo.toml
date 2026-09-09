@@ -142,11 +142,18 @@ log = "0.4"
 # exactly that shape, and so does a fresh clone. Fetching first (a `cargo
 # fetch` step, or the notices call dropping `--offline`) is what unblocks
 # this, and neither lives in this directory.
-keyring = { version = "3", features = [
-    "apple-native",
-    "windows-native",
-    "sync-secret-service",
-] }
+#
+# ⚠️ **`crypto-rust` IS ON THE LIST NOW, AND THE MEASURED BLOCKER IS GONE.**
+# The paragraph above recorded it as blocked because the notices check ran
+# `cargo metadata --offline --locked`, and `--offline` exits 101 on any
+# lockfile package missing from the local registry. `refresh-rust-notices.mjs`
+# no longer passes `--offline` — its own header says so in as many words, and
+# the answer it produces is committed as `scripts/lib/rust-crates.json` for the
+# suite that runs before any cargo step. So the trade the comment described no
+# longer exists, and what was left standing was a reader's secret crossing the
+# session D-Bus in the clear on Linux. A blocker that has been removed
+# elsewhere has to be re-checked where it was recorded. Found by audit.
+keyring = { workspace = true }
 
 # The supervised child's process GROUP, so a SIGTERM reaches the backends
 # `lemond` spawns and not just `lemond` itself — see `daemon.rs`. Unix only;

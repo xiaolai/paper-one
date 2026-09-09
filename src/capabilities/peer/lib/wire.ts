@@ -304,10 +304,17 @@ export interface PeerWire {
    * SECOND endpoint on a second key (`share.key`, port 47822) so that the
    * circle's identity never enters a public content index.
    *
-   * ⚠️ **AND EVERY ONE BUT `shareOffered` STARTS THAT ENDPOINT.** Binding a
-   * second UDP port, loading a second key and opening a blob store is what
-   * the first call costs. A surface that polls must poll `shareOffered`,
-   * which reads a file.
+   * ⚠️ **TWO OF THESE TOUCH ONLY THE DISK; THE REST START THAT ENDPOINT.**
+   * Binding a second UDP port, loading a second key and opening a blob store
+   * is what the first network call costs. The two local ones are
+   * `shareOffered`, which reads the policy file, and `sharePublishNote`,
+   * which appends a line to this book's own annotation file — the plugin's
+   * command for it never asks for a node. A surface that polls must poll
+   * `shareOffered`.
+   *
+   * (This said *"every one but `shareOffered`"*, which was wrong about
+   * `sharePublishNote` — so writing a public note read as a network act with
+   * a UDP bind behind it. Found by audit.)
    */
 
   /** What this machine offers publicly. Reads a file; starts nothing. */
@@ -354,6 +361,24 @@ export interface PeerWire {
    * fetch whose file does not hash to `hash` is removed before this rejects.
    */
   shareFetch(hash: string, folder: string, name: string, providers?: readonly string[]): Promise<number>
+  /**
+   * Ask a provider for a book's public annotations.
+   *
+   * ⚠️ **THE RECORDS COME BACK UNVERIFIED.** The plugin does not know what a
+   * public envelope is; the signature, the expiry, the reader's block list and
+   * the storage caps are the kernel's `readPublicEnvelope`. These are bytes a
+   * stranger sent.
+   *
+   * The cursor is `since` AND `generation` together: a count alone silently
+   * skips a whole history after a publisher withdraws everything and starts
+   * again.
+   */
+  shareFetchNotes(
+    hash: string,
+    providers?: readonly string[],
+    since?: number,
+    generation?: number,
+  ): Promise<FetchedNotes>
 
   /* ── the voice, phase 26 ──────────────────────────────────────────────
    *
@@ -415,6 +440,23 @@ export interface SharedBook {
    * different sentence, and `PublicPane` says it.
    */
   readonly noteCount: number | null
+}
+
+/**
+ * One round of asking a provider for a book's public annotations.
+ *
+ * ⚠️ **THE ANSWER IS CAPPED, SO A BOOK WITH MANY RECORDS TAKES SEVERAL
+ * ROUNDS.** `more` says whether to come back; `next` and `generation` are the
+ * cursor to come back with. Storing `next` alone silently skips a whole
+ * history after the publisher withdraws everything and starts again, which is
+ * what the generation exists to catch.
+ */
+export interface FetchedNotes {
+  /** The records verbatim, as they were signed. NOT verified — see the wire. */
+  readonly records: readonly string[]
+  readonly next: number
+  readonly generation: number
+  readonly more: boolean
 }
 
 /** The device's publishing identity, as `peer_circle_mine` reports it. */
@@ -565,9 +607,16 @@ function subscription<T>(registrations: Registrations, event: string, fn: (paylo
        `pending` settles quietly and only `unlisten()` itself throwing is a
        leak worth a line. */
     void pending.then(
-      (unlisten) => {
+      /* ⚠️ **`unlisten()` RETURNS A PROMISE, AND THE `try` DID NOT SEE IT.**
+         Tauri's `UnlistenFn` is `() => void` in the types and async in the
+         installed implementation, so a rejection escaped this catch entirely
+         and arrived as an unhandled rejection with no line anywhere —
+         reproduced by audit. `await` inside the handler is what puts the
+         rejection back inside the `try`; a synchronous `unlisten` is awaited
+         harmlessly. */
+      async (unlisten) => {
         try {
-          unlisten()
+          await unlisten()
         } catch (thrown: unknown) {
           console.warn(`peer: could not unsubscribe from "${event}"`, thrown)
         }
@@ -623,6 +672,13 @@ export function tauriWire(): PeerWire {
     shareResolve: (hash, service) => invoke(command('peer_share_resolve'), { hash, service }),
     shareFetch: (hash, folder, name, providers) =>
       invoke(command('peer_share_fetch'), { hash, folder, name, providers: providers === undefined ? null : [...providers] }),
+    shareFetchNotes: (hash, providers, since, generation) =>
+      invoke(command('peer_share_fetch_notes'), {
+        hash,
+        providers: providers === undefined ? null : [...providers],
+        since: since ?? null,
+        generation: generation ?? null,
+      }),
 
     voiceStatus: () => invoke(command('peer_voice_status')),
     voiceNextSeq: () => invoke(command('peer_voice_next_seq')),

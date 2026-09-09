@@ -193,3 +193,29 @@ android = ["tauri-plugin-peer/android"]
 [workspace]
 members = ["crates/*"]
 resolver = "2"
+
+# ⚠️ **ONE DECLARATION, BECAUSE TWO PLUGINS WERE KEEPING IT IN STEP BY HAND.**
+# The peer transport and the inference plugin both store a secret in the
+# platform credential store, and both carried the same version and the same
+# feature list with comments in each telling the next reader to copy any change
+# to the other. Two manifests naming different feature sets for one crate is
+# how a unification surprise arrives — which is what those comments said, and
+# what nothing enforced. The measurement stays with the plugin that made it;
+# this is where the answer lives. Found by audit.
+#
+# ⚠️ **NEITHER PLUGIN IS NAMED HERE, AND THAT IS NOT STYLE.**
+# `scripts/lib/removal.test.mjs` cuts every path dependency out of this
+# manifest and requires the crate's NAME to be gone from the text — a plugin
+# has to stay removable, and a comment mentioning one keeps it present after
+# its dependency line is cut. Found by walking into it.
+#
+# `crypto-rust` is what encrypts the Linux Secret Service session. Without it
+# keyring passes `EncryptionType::Plain` and a secret crosses the session
+# D-Bus in the clear.
+[workspace.dependencies]
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }

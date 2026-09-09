@@ -110,10 +110,25 @@ export const MAX_APPENDED = 256
  */
 export const MAX_APPENDED_SHARED = MAX_APPENDED / 2
 
-/** What `append` rejects with when a key's line is full. */
+/**
+ * What `append` rejects with when a key's line is full.
+ *
+ * ⚠️ **IT USED TO NAME THE WRONG NUMBER, ALWAYS.** The message was built from
+ * `MAX_APPENDED` whatever the caller was — so a shared-lane task refused at
+ * 128 reported *"already has 256 writes waiting"*, which is not true of the
+ * queue and not the bound that refused it. A reader looking at that message
+ * would go looking for 128 phantom tasks. The count and the bound that applied
+ * both travel now. Found by audit.
+ */
 export class WriteQueueFull extends Error {
-  constructor(readonly key: string) {
-    super(`writeQueue: ${key} already has ${MAX_APPENDED} writes waiting`)
+  constructor(
+    readonly key: string,
+    /** How many were actually waiting. */
+    readonly waiting: number,
+    /** The bound this caller was refused against — half for a shared lane. */
+    readonly cap: number,
+  ) {
+    super(`writeQueue: ${key} already has ${waiting} writes waiting, of the ${cap} this caller may queue`)
     this.name = 'WriteQueueFull'
   }
 }
@@ -172,7 +187,7 @@ export function writeQueue(): WriteQueue {
       const waitingAppends = line.filter((one) => one.mode === 'append' || one.mode === 'shared').length
       const cap = mode === 'shared' ? MAX_APPENDED_SHARED : MAX_APPENDED
       if (mode !== 'replace' && waitingAppends >= cap) {
-        reject(new WriteQueueFull(key))
+        reject(new WriteQueueFull(key, waitingAppends, cap))
         return
       }
       if (mode === 'replace') {

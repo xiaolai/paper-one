@@ -31,7 +31,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -105,7 +105,13 @@ impl Switches {
 }
 
 /// The file. `v` first, so a future shape can be told from this one.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// ⚠️ **NO `#[derive(Default)]`, BECAUSE ITS DEFAULT WAS VERSION ZERO.** Two
+/// places built the empty state by hand with `v: VERSION` while a third
+/// spelling — the derived `Default` — produced a record `load` would refuse as
+/// *"version 0 is not 1"*. Three ways to say "nothing offered", one of them
+/// wrong, and nothing stopping a caller reaching for it. Found by audit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Offered {
     v: u32,
     /// Keyed by the book's `contentHash` — BLAKE3 of the whole file, lower-case
@@ -116,6 +122,16 @@ struct Offered {
 }
 
 const VERSION: u32 = 1;
+
+impl Offered {
+    /// Nothing offered, at the version this build writes.
+    fn empty() -> Self {
+        Self {
+            v: VERSION,
+            books: BTreeMap::new(),
+        }
+    }
+}
 
 /// The most books one machine may offer.
 ///
@@ -145,6 +161,21 @@ pub struct SharePolicy {
     /* `RwLock`, not `Mutex`: `allows` is on the serve path of every request
      * and `set` is a human act. Readers must not queue behind each other. */
     state: RwLock<Offered>,
+    /// One writer at a time, and NOT the state lock.
+    ///
+    /// ⚠️ **`set` USED TO HOLD THE STATE'S WRITE LOCK ACROSS `to_vec_pretty`,
+    /// A TEMP FILE, A `write`, TWO `fsync`s AND A `rename`.** `allows` is
+    /// asked once per request on the serve path, and a `RwLock`'s readers
+    /// queue behind a waiting writer — so every stranger's request, on every
+    /// open connection, blocked on this machine's disk while one book was
+    /// switched on. The comment above says readers must not queue behind each
+    /// other; they were queueing behind an fsync. Found by audit.
+    ///
+    /// Two locks rather than one, and the ORDER OF OPERATIONS is what makes
+    /// them safe: this one is taken first and held for the whole
+    /// read-modify-write, so two writers cannot interleave and lose an update;
+    /// the state lock is taken twice, briefly, and never across I/O.
+    writing: Mutex<()>,
     /// Whether the empty state above is a real "nothing offered" or a file
     /// this build could not read — see [`SharePolicy::set`].
     ///
@@ -157,6 +188,50 @@ pub struct SharePolicy {
     /// whole policy — every other offer gone, and the corrupt file that a human
     /// might have repaired gone with it. Found by audit.
     readable: bool,
+}
+
+/// The policy a file's bytes describe, or why they are not one.
+///
+/// ⚠️ **EVERY REFUSAL NAMES THE FILE.** `load` used to inline all of this, and
+/// one branch escaped the pattern: `ContentHash::parse` answers
+/// `ShareRefused`, which carries no path — so a key that was not a hash was
+/// reported in a different SHAPE from every other kind of corruption in the
+/// same file, and the one thing a reader needs (which file to look at) was the
+/// thing it dropped. Found by audit.
+///
+/// Split out so `load` is filesystem handling and this is validation; the
+/// order of the checks is unchanged and deliberate.
+fn parsed_policy(path: &Path, bytes: &[u8]) -> Result<Offered> {
+    let parsed: Offered = serde_json::from_slice(bytes).map_err(|err| Error::ShareMalformed {
+        path: path.to_path_buf(),
+        why: err.to_string(),
+    })?;
+    if parsed.v != VERSION {
+        return Err(Error::ShareMalformed {
+            path: path.to_path_buf(),
+            why: format!("version {} is not {VERSION}", parsed.v),
+        });
+    }
+    /* A key that is not a content hash is refused rather than ignored: it can
+     * never match a request, so keeping it would be storage for a decision
+     * that can never apply — and a malformed key is evidence the file was
+     * written by something that is not this code. */
+    for key in parsed.books.keys() {
+        ContentHash::parse(key).map_err(|err| Error::ShareMalformed {
+            path: path.to_path_buf(),
+            why: format!("{key:?} is not a content hash: {err}"),
+        })?;
+    }
+    if parsed.books.len() > MAX_OFFERED_BOOKS {
+        return Err(Error::ShareMalformed {
+            path: path.to_path_buf(),
+            why: format!(
+                "{} books offered, more than the {MAX_OFFERED_BOOKS} this build reads",
+                parsed.books.len()
+            ),
+        });
+    }
+    Ok(parsed)
 }
 
 impl SharePolicy {
@@ -195,46 +270,14 @@ impl SharePolicy {
             _ => {}
         }
         let state = match std::fs::read(&path) {
-            Ok(bytes) => {
-                let parsed: Offered =
-                    serde_json::from_slice(&bytes).map_err(|err| Error::ShareMalformed {
-                        path: path.clone(),
-                        why: err.to_string(),
-                    })?;
-                if parsed.v != VERSION {
-                    return Err(Error::ShareMalformed {
-                        path,
-                        why: format!("version {} is not {VERSION}", parsed.v),
-                    });
-                }
-                /* A key that is not a content hash is refused rather than
-                 * ignored: it can never match a request, so keeping it would
-                 * be storage for a decision that can never apply — and a
-                 * malformed key is evidence the file was written by something
-                 * that is not this code. */
-                for key in parsed.books.keys() {
-                    ContentHash::parse(key)?;
-                }
-                if parsed.books.len() > MAX_OFFERED_BOOKS {
-                    return Err(Error::ShareMalformed {
-                        path,
-                        why: format!(
-                            "{} books offered, more than the {MAX_OFFERED_BOOKS} this build reads",
-                            parsed.books.len()
-                        ),
-                    });
-                }
-                parsed
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Offered {
-                v: VERSION,
-                books: BTreeMap::new(),
-            },
+            Ok(bytes) => parsed_policy(&path, &bytes)?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Offered::empty(),
             Err(err) => return Err(err.into()),
         };
         Ok(Self {
             path,
             state: RwLock::new(state),
+            writing: Mutex::new(()),
             /* A file that read, or one that is genuinely absent. Both are a
              * policy this build understands and may write back. */
             readable: true,
@@ -260,10 +303,8 @@ impl SharePolicy {
                 );
                 Self {
                     path: policy_path(root),
-                    state: RwLock::new(Offered {
-                        v: VERSION,
-                        books: BTreeMap::new(),
-                    }),
+                    state: RwLock::new(Offered::empty()),
+                    writing: Mutex::new(()),
                     /* Serve nothing AND write nothing — see the field. */
                     readable: false,
                 }
@@ -308,11 +349,17 @@ impl SharePolicy {
                 self.path.display()
             )));
         }
-        let mut held = self
+        /* ⚠️ **THE WRITER LOCK, NOT THE STATE LOCK — SEE THE FIELD.** Held for
+         * the whole read-modify-write so two writers cannot lose an update;
+         * the state lock is taken twice below and never across the disk. */
+        let _writing = self.writing.lock().map_err(|_| {
+            Error::ShareRefused("the sharing policy writer lock is poisoned".into())
+        })?;
+        let mut next = self
             .state
-            .write()
-            .map_err(|_| Error::ShareRefused("the sharing policy lock is poisoned".into()))?;
-        let mut next = held.clone();
+            .read()
+            .map_err(|_| Error::ShareRefused("the sharing policy lock is poisoned".into()))?
+            .clone();
         let entry = next.books.entry(hash.as_str().to_owned()).or_default();
         entry.set(service, on);
         /* A book with nothing offered is REMOVED rather than stored as two
@@ -328,8 +375,13 @@ impl SharePolicy {
         }
         let bytes =
             serde_json::to_vec_pretty(&next).map_err(|err| Error::ShareRefused(err.to_string()))?;
+        /* No lock on `state` here: a stranger's request may be asking `allows`
+        while this fsyncs, and it must not wait for it. */
         write_atomic(&self.path, &bytes)?;
-        *held = next;
+        *self
+            .state
+            .write()
+            .map_err(|_| Error::ShareRefused("the sharing policy lock is poisoned".into()))? = next;
         Ok(())
     }
 
@@ -348,13 +400,12 @@ impl SharePolicy {
             .collect()
     }
 
-    /// Both switches for one book, for the surface that draws them.
-    pub fn switches(&self, hash: &ContentHash) -> [(ShareService, bool); 2] {
-        [
-            (ShareService::Bytes, self.allows(hash, ShareService::Bytes)),
-            (ShareService::Notes, self.allows(hash, ShareService::Notes)),
-        ]
-    }
+    /* ⚠️ **`switches(hash)` STOOD HERE AND NOTHING CALLED IT.** It answered
+    both services for one book — *"for the surface that draws them"* — and
+    the surface does not ask per book: `peer_share_offered` builds every
+    row from `offered(service)`, which is one pass over the map rather than
+    two lookups per book. A convenience with no consumer is a second way to
+    ask a question, free to answer it differently. Found by audit. */
 }
 
 #[cfg(test)]
@@ -516,5 +567,68 @@ mod tests {
         std::fs::create_dir_all(share_dir(dir.path())).unwrap();
         std::fs::write(policy_path(dir.path()), br#"{"v":2,"books":{}}"#).unwrap();
         assert!(SharePolicy::load(dir.path()).is_err());
+    }
+
+    /// ⚠️ **`set` HELD THE STATE'S WRITE LOCK ACROSS THE WHOLE DISK WRITE.**
+    /// `allows` is asked once per request on the serve path, and a `RwLock`'s
+    /// readers queue behind a waiting writer — so every stranger's request on
+    /// every open connection blocked on this machine's fsync while one book
+    /// was switched on. Measured as the property that matters: a read
+    /// completes while a write is in flight.
+    #[test]
+    fn a_reader_does_not_wait_for_a_writer_s_disk() {
+        let dir = crate::testutil::scratch("policy-reader-not-blocked");
+        let policy = std::sync::Arc::new(SharePolicy::load(&dir).unwrap());
+        policy.set(&hash(1), ShareService::Bytes, true).unwrap();
+
+        /* A writer that is inside `write_atomic` cannot be paused from here, so
+        the property is measured the other way round: hold the STATE's read
+        lock — which is what `allows` takes — and show that a write still
+        completes. Under the old shape the writer needed the state's write
+        lock for its whole run and this would deadlock until the read was
+        dropped; the reader would then have been the one waiting in the real
+        direction, for the same reason. */
+        let held = policy.state.read().unwrap();
+        let mine = std::sync::Arc::clone(&policy);
+        let writer = std::thread::spawn(move || mine.set(&hash(2), ShareService::Notes, true));
+        /* The write's disk half is done before it asks for the state lock. */
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            held.books.contains_key(hash(1).as_str()),
+            "the read lock stopped being a read lock"
+        );
+        drop(held);
+        writer.join().unwrap().unwrap();
+        assert!(policy.allows(&hash(2), ShareService::Notes));
+    }
+
+    /// Two writers do not lose an update, which is what the writer lock is for.
+    #[test]
+    fn two_writers_do_not_lose_an_update() {
+        let dir = crate::testutil::scratch("policy-two-writers");
+        let policy = std::sync::Arc::new(SharePolicy::load(&dir).unwrap());
+        let mut hands = Vec::new();
+        for n in 0..8u8 {
+            let mine = std::sync::Arc::clone(&policy);
+            hands.push(std::thread::spawn(move || {
+                mine.set(&hash(n + 1), ShareService::Bytes, true)
+            }));
+        }
+        for hand in hands {
+            hand.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            policy.offered(ShareService::Bytes).len(),
+            8,
+            "two writers read the same state and one overwrote the other"
+        );
+        /* And what is on disk agrees, since that is what survives a restart. */
+        assert_eq!(
+            SharePolicy::load(&dir)
+                .unwrap()
+                .offered(ShareService::Bytes)
+                .len(),
+            8
+        );
     }
 }

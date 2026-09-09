@@ -489,7 +489,20 @@ export function createPeerPort(wire: PeerWire): PeerPort {
           if (transferId === null) early.push(event)
           else judge(event)
         })
-        wire.blobFetch(request).then(
+        /* ⚠️ **THE LISTENER IS SUBSCRIBED SYNCHRONOUSLY AND ATTACHED LATER.**
+           `subscription` returns at once and Tauri's `listen` resolves its
+           registration in a later turn, so starting the transfer immediately
+           opened a window in which the plugin could finish — or fail — before
+           anything was attached to hear it. A missed terminal event leaves
+           this promise pending for ever, which reaches the reader as a
+           download that never finishes and never errors. `whenListening` is
+           the wire's own answer to that and two other callers already await
+           it; this one did not. Found by audit.
+
+           Optional, because the fake wire has no registration to wait for. */
+        void Promise.resolve(wire.whenListening?.())
+          .then(() => wire.blobFetch(request))
+          .then(
           (id) => {
             transferId = id
             for (const event of early.splice(0)) judge(event)

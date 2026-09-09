@@ -68,6 +68,15 @@ function fakeShare(): SharePort & {
       fetches.push({ hash, folder, name })
       return Promise.resolve(1)
     },
+    /** What a provider will answer with, per hash. Empty means "nobody". */
+    fetchable: new Map<string, string[]>(),
+    fetchNotes: (hash: string, _providers?: readonly string[], since?: number) => {
+      const held = (port as unknown as { fetchable: Map<string, string[]> }).fetchable.get(hash)
+      if (held === undefined) return Promise.reject(new Error(`that provider has nothing for ${hash}`))
+      const from = since ?? 0
+      const records = held.slice(from)
+      return Promise.resolve({ records, next: from + records.length, generation: 1, more: false })
+    },
   }
   return port
 }

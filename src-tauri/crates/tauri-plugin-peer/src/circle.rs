@@ -461,6 +461,9 @@ pub fn known_people(root: &Path) -> Result<Vec<KnownPerson>> {
 /// the reasoning: two data roots are two installations with nothing to
 /// serialise between them, and a second Paper on one root is outside what this
 /// covers.
+/// ⚠️ **LEAKED, AND KEYED BY ROOT — see `share/voice.rs`'s note.** One entry
+/// per data root is bounded; the same shape keyed by `(root, book)` was not,
+/// and `share/notes.rs` records what that cost.
 fn people_lock(root: &Path) -> &'static std::sync::Mutex<()> {
     static LOCKS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<PathBuf, &'static std::sync::Mutex<()>>>,

@@ -22,7 +22,7 @@
  * | Several voices, one person | yes: a reader rotates a voice (WI-26.3) and both may be live at once |
  * | One voice, several people | no: the second assertion is refused, because two people claiming one key is a claim at most one of them can support |
  * | Removal | the reader's own act, and it takes only that binding |
- * | Blocking the person | takes every binding they asserted with it |
+ * | Blocking the person | KEEPS every binding, and silences the voices they name |
  *
  * PURE. No storage and no clock: the caller supplies the records and the time.
  */
@@ -102,15 +102,30 @@ export function isWellFormed(binding: VoiceBinding): boolean {
  */
 export function standingOf(voice: string, decisions: VoiceDecisions): VoiceStanding {
   if (decisions.blockedVoices.includes(voice)) return 'blocked'
-  const bound = decisions.bindings.filter(isWellFormed).find((one) => one.voice === voice)
+  const bound = claimOn(voice, decisions)
   if (bound === undefined) return 'stranger'
   return decisions.blockedPeople.includes(bound.person) ? 'blocked' : 'bound'
 }
 
 /** The person a voice is bound to, or `null`. Never a guess. */
 export function personOf(voice: string, decisions: VoiceDecisions): string | null {
-  const bound = decisions.bindings.filter(isWellFormed).find((one) => one.voice === voice)
+  const bound = claimOn(voice, decisions)
   return bound === undefined || decisions.blockedPeople.includes(bound.person) ? null : bound.person
+}
+
+/**
+ * The WELL-FORMED binding on a voice, if there is one.
+ *
+ * ⚠️ **ONE DEFINITION OF "IS THIS VOICE CLAIMED?", AND THERE WERE THREE.**
+ * `standingOf` and `personOf` each spelled out `filter(isWellFormed).find(…)`,
+ * allocating a copy of every binding to find one — and `bind` did not filter
+ * at all, which is worse than duplication: a malformed record that every
+ * lookup ignores was still treated as a CLAIM, so a voice reported as
+ * `stranger` refused a valid binding as `already-claimed` and nothing could
+ * clear it. Found by audit.
+ */
+function claimOn(voice: string, decisions: VoiceDecisions): VoiceBinding | undefined {
+  return decisions.bindings.find((one) => one.voice === voice && isWellFormed(one))
 }
 
 /** Why a binding was not recorded. `null` when it was. */
@@ -134,7 +149,13 @@ export function bind(
   if (!isWellFormed(binding)) {
     return binding.assertedBy !== binding.person ? 'not-theirs' : 'malformed'
   }
-  const claimed = decisions.bindings.find((one) => one.voice === binding.voice && one.person !== binding.person)
+  /* ⚠️ **A MALFORMED RECORD IS NOT A CLAIM**, and this asked `find` directly.
+     Every lookup filters by `isWellFormed`, so a damaged row made a voice
+     `stranger` everywhere AND `already-claimed` here — a binding the reader
+     could not make and could not see the reason for. `claimOn` is the one
+     definition. Found by audit. */
+  const held = claimOn(binding.voice, decisions)
+  const claimed = held !== undefined && held.person !== binding.person ? held : undefined
   /* ⚠️ **ONE VOICE, ONE PERSON.** Two people claiming one key is a claim at
      most one of them can support, and taking the newer would let anybody
      overwrite a true binding by asserting a false one later. */

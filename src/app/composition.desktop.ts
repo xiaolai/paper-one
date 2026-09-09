@@ -33,12 +33,20 @@ import { webhost } from '../capabilities/webhost'
  * build of it, so the mobile compositions do not list them. */
 /* `webhost` last, and after `peer`, which it declares in `requires`.
  *
- * ⚠️ THE REASON GIVEN HERE WAS "it needs peer's envelope", and the envelope
- * moved to the kernel in phase 19 — `webhost` imports it from there, like
- * everything else. What the `requires` still buys is ORDER: `peer` binds the
- * service host the shelf serves through, and a webhost started before it would
- * have nothing to hand a browser. Stating the spent reason kept an
- * unnecessary-looking coupling looking necessary for the wrong cause.
+ * ⚠️ **THE REASON HERE HAS NOW BEEN WRONG TWICE.** It first said *"it needs
+ * peer's envelope"*, and the envelope moved to the kernel in phase 19. It was
+ * then corrected to *"peer binds the service host the shelf serves through"* —
+ * also untrue: `webhost` binds its OWN service host, and `composeCapabilities`
+ * serves every bound host once, AFTER every capability has started. Neither
+ * capability can start too early for the other. Found by audit.
+ *
+ * What the `requires` buys is the ORDER OF THE LIST, which is what a reader of
+ * this file is looking at: the transport that carries the circle comes before
+ * the transport that carries a browser, and a build that drops `peer` drops
+ * `webhost` with it rather than leaving a shelf serving a library nothing
+ * replicates. That is a composition decision and not a startup dependency, and
+ * saying so is the difference between a coupling somebody can evaluate and one
+ * they have to take on trust.
  *
  * DESKTOP ONLY: a phone is a satchel, never a shelf, and has nothing to
  * serve. */

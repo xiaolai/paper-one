@@ -1,5 +1,6 @@
 import { grantCovers } from './grants'
 import type {
+  FetchedNotes,
   PagePublisher,
   KnownPerson,
   PairKind,
@@ -707,6 +708,34 @@ class FakeWireImpl implements FakeWire {
     return size === undefined
       ? Promise.reject(new Error(`nobody could be found who serves ${hash}`))
       : Promise.resolve(size)
+  }
+
+  /** What each hash's provider will answer with, in arrival order. */
+  notesAvailable = new Map<string, string[]>()
+  /** Every ask, so a test can see the cursor a caller sent. */
+  notesAsked: { hash: string; since: number; generation: number | undefined }[] = []
+
+  shareFetchNotes(
+    hash: string,
+    _providers?: readonly string[],
+    since?: number,
+    generation?: number,
+  ): Promise<FetchedNotes> {
+    const from = since ?? 0
+    this.notesAsked.push({ hash, since: from, generation })
+    const held = this.notesAvailable.get(hash)
+    if (held === undefined) {
+      return Promise.reject(new Error(`that provider has nothing for ${hash}`))
+    }
+    const records = held.slice(from)
+    return Promise.resolve({
+      records,
+      next: from + records.length,
+      /* One history, so one generation — a fake that changed it on every call
+         would make every cursor look stale. */
+      generation: held.length === 0 ? 0 : 1,
+      more: false,
+    })
   }
 }
 

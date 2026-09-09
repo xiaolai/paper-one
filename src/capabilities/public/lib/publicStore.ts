@@ -6,6 +6,7 @@ import {
   atomicWrite,
   breathe,
   MAX_TASK_MS,
+  isMissingFile,
   foldPublic,
   hasRoom,
   keepWithin,
@@ -144,7 +145,7 @@ export async function readPublic(
   } catch (cause) {
     /* Absent is empty — the ordinary state of almost every book. Anything else
        throws, for `readMarks`'s reason. */
-    if (isMissing(cause)) return { file: EMPTY_PUBLIC_FILE, refused: {} }
+    if (isMissingFile(cause)) return { file: EMPTY_PUBLIC_FILE, refused: {} }
     throw cause
   }
   /* ⚠️ **BEFORE THE DECODE, WHICH IS BEFORE THE SECOND ALLOCATION.** See
@@ -377,7 +378,7 @@ const byLine = (kept: readonly KeptEnvelope[], one: Weighed): KeptEnvelope =>
    `Uint8Array` the filesystem hands back, which is cheaper than either. */
 
 /** Whether a filesystem failure is "there is no such file". */
-function isMissing(cause: unknown): boolean {
-  const message = cause instanceof Error ? cause.message : String(cause)
-  return /not found|no such file|ENOENT/iu.test(message)
-}
+/* ⚠️ **`isMissing` STOOD HERE TOO.** Three definitions of "is this data
+   loss?" — this one, `voicePort`'s and the kernel's `isMissingFile`, whose own
+   header says *"one copy, because there were already two"* and names these
+   two. Neither was removed when it was written. Found by audit. */

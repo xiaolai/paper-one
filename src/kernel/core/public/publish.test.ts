@@ -2,60 +2,35 @@ import { describe, expect, it } from 'vitest'
 import {
   PUBLIC_DISCLOSURE,
   PUBLIC_LINKS_DISCLOSURE,
-  afterPublishing,
-  afterWithdrawing,
   disclosureFor,
   linksVoiceToPerson,
   mayPublish,
-  type Audience,
-  type Published,
 } from './publish'
 
 const passage = { quote: 'a sentence', prefix: 'before ', suffix: ' after', chapter: 'One' }
-const NEITHER: Published = { circle: false, public: false }
 
 describe('mayPublish', () => {
   it('lets a circle publication through without a confirmation', () => {
     /* A reader sharing with people they chose has already made that decision,
        and a prompt on every passage is one readers learn to dismiss. */
-    expect(mayPublish({ audience: 'circle', passage, acknowledged: false })).toBeNull()
+    expect(mayPublish({ audience: 'circle', acknowledged: false })).toBeNull()
   })
 
   it('refuses a public publication the reader has not been told about', () => {
-    expect(mayPublish({ audience: 'public', passage, acknowledged: false })).toBe('needs-disclosure')
-    expect(mayPublish({ audience: 'public', passage, acknowledged: true })).toBeNull()
+    expect(mayPublish({ audience: 'public', acknowledged: false })).toBe('needs-disclosure')
+    expect(mayPublish({ audience: 'public', acknowledged: true })).toBeNull()
   })
 })
 
-describe('one act changes one audience', () => {
-  it('publishing to the circle leaves the public audience alone, and the reverse', () => {
-    /* ⚠️ **THE MIRROR WI-26.4 FORBIDS WOULD BE A LINE HERE THAT SET BOTH.**
-       And "no code path causes it" is not the property — disabling public
-       publishing entirely would pass that. What is asserted is that each act
-       reaches its own audience and only its own. */
-    expect(afterPublishing(NEITHER, 'circle')).toEqual({ circle: true, public: false })
-    expect(afterPublishing(NEITHER, 'public')).toEqual({ circle: false, public: true })
-  })
-
-  it('reaches both audiences only through two acts', () => {
-    const both = afterPublishing(afterPublishing(NEITHER, 'circle'), 'public')
-    expect(both).toEqual({ circle: true, public: true })
-  })
-
-  it('withdrawing from one leaves the other', () => {
-    const both: Published = { circle: true, public: true }
-    expect(afterWithdrawing(both, 'public')).toEqual({ circle: true, public: false })
-    expect(afterWithdrawing(both, 'circle')).toEqual({ circle: false, public: true })
-  })
-
-  it('is idempotent, so a retried act is not a second publication', () => {
-    const audiences: readonly Audience[] = ['circle', 'public']
-    for (const audience of audiences) {
-      const once = afterPublishing(NEITHER, audience)
-      expect(afterPublishing(once, audience)).toEqual(once)
-    }
-  })
-})
+/* ⚠️ **"ONE ACT CHANGES ONE AUDIENCE" IS ASSERTED AT THE PORTS NOW, NOT
+   HERE.** This block drove `afterPublishing` and `afterWithdrawing` — two
+   one-line transitions over a `Published` record that no surface and no port
+   ever held. So it measured a model of the rule rather than the rule: the
+   mirror WI-26.4 forbids could have been written in `publishPort` with every
+   assertion here still green. `publishPort.test.ts` holds it against the
+   thing that publishes — *"has no method that takes two audiences"*, and a
+   public act that writes to the public store and nowhere else. Found by
+   audit. */
 
 describe('disclosureFor', () => {
   it('says nothing before a circle act', () => {

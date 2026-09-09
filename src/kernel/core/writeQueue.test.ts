@@ -372,4 +372,34 @@ describe('the shared lane refuses before the reader’s own writing does', () =>
     release()
     return Promise.all([expect(refused).rejects.toBeInstanceOf(WriteQueueFull), running, ...waiting])
   })
+
+  it('names the count and the bound that actually refused it', async () => {
+    /* ⚠️ **THE MESSAGE NAMED `MAX_APPENDED` WHATEVER REFUSED THE CALLER**, so a
+       shared-lane task turned away at 128 reported "already has 256 writes
+       waiting" — a number that was not the queue's and not the bound. */
+    const queue = writeQueue()
+    let release = (): void => {}
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const running = queue.append('book:1', () => blocked)
+    const waiting: Promise<unknown>[] = []
+    for (let i = 0; i < MAX_APPENDED_SHARED; i += 1) {
+      waiting.push(queue.appendShared('book:1', () => Promise.resolve()))
+    }
+    const refused = await queue.appendShared('book:1', () => Promise.resolve()).then(
+      () => null,
+      (cause: unknown) => cause,
+    )
+    expect(refused).toBeInstanceOf(WriteQueueFull)
+    expect((refused as WriteQueueFull).waiting).toBe(MAX_APPENDED_SHARED)
+    expect((refused as WriteQueueFull).cap).toBe(MAX_APPENDED_SHARED)
+    expect((refused as WriteQueueFull).message).toContain(`${MAX_APPENDED_SHARED} writes waiting`)
+    expect((refused as WriteQueueFull).message, 'the reader’s own bound was named').not.toContain(
+      `${MAX_APPENDED} writes waiting`,
+    )
+    release()
+    await running
+    await Promise.all(waiting)
+  })
 })

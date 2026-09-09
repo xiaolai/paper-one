@@ -243,4 +243,40 @@ describe('the store is bounded', () => {
     await expect(port.blockVoice(VOICE)).rejects.toThrow(/decisions it will keep/u)
     await queue.idle()
   })
+
+  it('writes nothing and tells nobody when the decision is already made', async () => {
+    /* ⚠️ **A NO-OP REWROTE THE WHOLE FILE AND REFRESHED EVERY PANE.** Blocking
+       a voice that is already blocked wrote the same bytes back — and could
+       report a WRITE FAILURE for a change that did not need making, which
+       reaches the reader as "your silence did not take" when it is already in
+       place. */
+    const { files, port, queue } = portOn()
+    await port.blockVoice(VOICE)
+    await queue.idle()
+    const before = files.get(VOICE_DECISIONS_PATH)
+    let told = 0
+    port.subscribe(() => {
+      told += 1
+    })
+    /* The same block again, and a binding that is already held. */
+    await port.blockVoice(VOICE)
+    await queue.idle()
+    expect(told, 'a change that changed nothing was announced').toBe(0)
+    expect(files.get(VOICE_DECISIONS_PATH), 'the file was rewritten for nothing').toBe(before)
+  })
+
+  it('copies the binding it is handed, so mutating it afterwards changes nothing', async () => {
+    /* ⚠️ **THE CALLER'S OBJECT WAS HELD ACROSS THE QUEUE AND THE READ.**
+       `readonly` on the interface stops nothing: the caller keeps its own
+       reference, and mutating it in between changed what was validated and
+       what was written. */
+    const { port, queue } = portOn()
+    const binding = { voice: VOICE, person: PERSON, assertedBy: PERSON, at: 1 }
+    const pending = port.bind(binding)
+    binding.voice = 'ff'.repeat(32)
+    binding.person = 'ee'.repeat(32)
+    await pending
+    await queue.idle()
+    expect(await port.person(VOICE), 'the binding was changed under the port').toBe(PERSON)
+  })
 })

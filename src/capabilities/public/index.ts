@@ -18,7 +18,7 @@ import { publicAnnotationsFor } from './lib/overlay'
 import { publicPortOver, type PublicPort } from './lib/publicPort'
 import { publishPortOver, type PublishPublicPort } from './lib/publishPort'
 import { voiceDecisionsPortOver, type VoiceDecisionsPort } from './lib/voicePort'
-import { readPublic } from './lib/publicStore'
+import { readPublic, writePublic, type StoreFs } from './lib/publicStore'
 import { publicCrypto } from './lib/crypto'
 import { PublicPane } from './ui/PublicPane'
 import { PublishControl } from './ui/PublishControl'
@@ -57,6 +57,8 @@ interface Running {
   readonly voices: VoiceDecisionsPort | null
   readonly library: Library
   readonly fs: IndexFs | null
+  /** The write queue and its lanes — what `writePublic` takes. */
+  readonly writes: Pick<StoreFs, 'queue' | 'lane'>
   readonly warn: (event: string, fields: Record<string, unknown>) => void
   /** What the reader has already shared privately — the kernel's port, which
       the circle binds when it is composed and which answers empty when it is
@@ -113,6 +115,77 @@ async function annotationsFor(held: Running, request: OverlayRequest): Promise<r
 }
 
 /**
+ * How many rounds of asking one call will do.
+ *
+ * ⚠️ **A PROVIDER'S ANSWER IS CAPPED, SO A FULL BOOK TAKES SEVERAL.** The cap
+ * is 256 records and a book retains at most 512, so three rounds covers any
+ * book this device would keep — and the bound is here rather than "until
+ * `more` is false" because `more` is a stranger's claim and a hostile provider
+ * would otherwise hold this loop for as long as it liked.
+ */
+const NOTE_ROUNDS = 4
+
+/**
+ * Ask whoever serves this book for its public annotations, and keep what
+ * verifies — phase 26's receiving half.
+ *
+ * ⚠️ **THIS DID NOT EXIST, AND WITHOUT IT THE WHOLE FEATURE WAS UNREACHABLE.**
+ * The overlay reads `public.jsonl`; `writePublic` is what fills it; and until
+ * now nothing in the app called `writePublic` at all. The plugin has answered
+ * `paper/share-notes/1` since the phase landed and no device ever asked, so an
+ * ordinary reader never saw a stranger's annotation. Found by audit.
+ *
+ * ⚠️ **THE PROVIDER IS NOT TRUSTED FOR ANYTHING.** What comes back is bytes;
+ * `writePublic` is the door, and it checks the signature, the book, the
+ * expiry, the reader's block list, the equivocation record and the storage
+ * bounds. A provider that sends a thousand junk lines spends a thousand
+ * refusals and changes nothing — which is the same posture the DHT's own note
+ * takes: *"the provider index is a bulletin board, not a roster"*.
+ *
+ * ⚠️ **AND IT ASKS FROM ZERO EVERY TIME, DELIBERATELY.** A stored cursor is a
+ * second thing to keep consistent with the file, and a cursor that drifts
+ * skips records permanently — the exact failure `generation` exists to catch
+ * one layer down. Asking again is bandwidth on a reader's own explicit
+ * request; every record already held is refused as a duplicate before it
+ * reaches the bounds.
+ */
+async function receiveNotes(held: Running, bookId: string): Promise<number> {
+  const { fs, voices } = held
+  if (fs === null || voices === null) return 0
+  const book = held.library.getSnapshot().find((one) => one.bookId === bookId)
+  if (book === undefined || !isContentHash(book.contentHash)) return 0
+  const share = sharePort()
+  if (share === null) return 0
+  const hash = book.contentHash
+  /* Who to ask. The index is a hint and never a roster, so an empty answer is
+     "nobody advertised", not "nobody has it" — and `fetchNotes` falls back to
+     discovery itself when the list is empty. */
+  const providers = await share.resolve(hash, 'notes').catch(() => [] as readonly string[])
+  const decisions = await voices.decisions()
+  const blocked = (voice: string): boolean => standingOf(voice, decisions) === 'blocked'
+  let taken = 0
+  let since = 0
+  let generation: number | undefined
+  for (let round = 0; round < NOTE_ROUNDS; round += 1) {
+    const answer = await share.fetchNotes(hash, providers, since, generation)
+    if (answer.records.length > 0) {
+      const written = await writePublic(fs, held.writes, bookId, hash, answer.records, publicCrypto, Date.now(), blocked)
+      for (const [why, count] of Object.entries(written.refused)) {
+        held.warn('public.refused', { bookId, why, count })
+      }
+      taken += answer.records.length
+    }
+    if (!answer.more) break
+    since = answer.next
+    generation = answer.generation
+  }
+  /* The overlay re-asks rather than being pushed to — `OverlayContribution`'s
+     rule — so the signal is what makes what just landed visible. */
+  notifyAll(held.listeners, 'public')
+  return taken
+}
+
+/**
  * The voices one book's file actually carried — WI-26.5's surface needs a list
  * before a reader can decide about one.
  *
@@ -143,20 +216,14 @@ async function voicesHeardOn(held: Running, bookId: string): Promise<readonly st
 
 let running: Running | null = null
 
-/** The port, for a surface. `null` before `start`. */
-export function publicPort(): PublicPort | null {
-  return running?.port ?? null
-}
-
-/** Minting and publishing, for a surface. `null` before `start`. */
-export function publishPublicPort(): PublishPublicPort | null {
-  return running?.publishing ?? null
-}
-
-/** The reader's decisions about voices. `null` before `start`, and without an fs. */
-export function voiceDecisionsPort(): VoiceDecisionsPort | null {
-  return running?.voices ?? null
-}
+/* ⚠️ **THREE ACCESSORS STOOD HERE AND NOTHING CALLED ANY OF THEM.**
+   `publicPort()`, `publishPublicPort()` and `voiceDecisionsPort()` each
+   answered `running?.<field> ?? null`, and every render site reads `running`
+   directly — which is what the `?? null` in each `render` above is. So they
+   were an abstraction over a field, exported, never used, and free to
+   disagree with the thing they wrapped. `sharePort()` and `voicePort()` in the
+   peer capability look like these and are NOT the same shape: those cross a
+   capability boundary, which is a reason. Found by audit. */
 
 /**
  * ⚠️ **DECLARED ONCE, AT MODULE LEVEL, AND THAT IS LOAD-BEARING.** The pane
@@ -167,6 +234,18 @@ export function voiceDecisionsPort(): VoiceDecisionsPort | null {
  */
 const heardOn = (bookId: string): Promise<readonly string[]> =>
   running === null ? Promise.resolve([]) : voicesHeardOn(running, bookId)
+
+/**
+ * Ask for this book's public annotations, on the reader's own say-so.
+ *
+ * ⚠️ **ON A CONTROL AND NEVER ON A TIMER OR AN OPEN.** Asking is a network act
+ * that tells whoever answers that this device is interested in this book, and
+ * doing it automatically would make opening a book a broadcast. The reader
+ * decides, per book, each time — which is the same posture `PublishControl`
+ * takes for the other direction.
+ */
+const lookForNotes = (bookId: string): Promise<number> =>
+  running === null ? Promise.resolve(0) : receiveNotes(running, bookId)
 
 /**
  * What this reader has already shared privately about one book, as a thunk the
@@ -185,6 +264,74 @@ function sharedWithCircleFor(bookId: string): () => Promise<readonly PublicPassa
     running === null ? Promise.resolve([]) : running.sharedPrivately(bookId)
   sharedThunks.set(bookId, made)
   return made
+}
+
+/**
+ * Everything one run of this capability owns, wired together.
+ *
+ * ⚠️ **EXTRACTED FROM `start`, WHICH DID FIVE THINGS AT ONCE**: it built the
+ * notifier, constructed three ports, assembled the shared state, installed it
+ * and defined the disposal — so which of them owned the listeners, and which
+ * of the three ports could tell them, could only be worked out by reading all
+ * fifty lines. `start` now installs and disposes; this decides what a run IS.
+ * Found by audit.
+ */
+function runningOver(ctx: CapabilityContext): Running {
+  const listeners = new Set<() => void>()
+  const tell = (): void => {
+    /* A SIGNAL, not a payload: the kernel re-asks `forBook`, so there is one
+       path for "what should be drawn" rather than two that can disagree —
+       `OverlayContribution.subscribe`'s rule.
+
+       ⚠️ **AND EACH SUBSCRIBER ON ITS OWN.** A throwing listener stopped every
+       later one AND travelled back into the change that had already been
+       written — so a publication that landed on disk reported failure. See
+       `notifyAll`, which is where that class is written down. */
+    notifyAll(listeners, 'public')
+  }
+  /**
+   * One port's "something moved": say so in the log, then tell the overlay.
+   *
+   * ⚠️ **A FACTORY, BECAUSE THERE WERE THREE COPIES OF IT.** Each port took a
+   * callback that logged an event and then told the overlay, and the three
+   * differed only in the event's name.
+   */
+  const changed =
+    (event: string) =>
+    (): void => {
+      ctx.diagnostics.info(event)
+      tell()
+    }
+  return {
+    library: ctx.services.library,
+    fs: ctx.services.fs,
+    writes: { queue: ctx.services.writes, lane: (bookId: string) => ctx.services.library.lane(bookId) },
+    /* ⚠️ **`null` WITHOUT A FILESYSTEM, AND THE OVERLAY ALREADY STANDS DOWN
+       THERE.** `annotationsFor` returns early on `fs === null`, which is the
+       same condition — a browser client has neither. */
+    voices:
+      ctx.services.fs === null
+        ? null
+        : voiceDecisionsPortOver(ctx.services.fs, ctx.services.writes, changed('public.decisions-changed')),
+    publishing: publishPortOver(
+      ctx.services.library,
+      () => voicePort(),
+      () => sharePort(),
+      () => Date.now(),
+      changed('public.published'),
+    ),
+    warn: (event, fields) => ctx.diagnostics.warn(event, fields),
+    sharedPrivately: (bookId) => ctx.services.sharedPrivately(bookId),
+    listeners,
+    port: publicPortOver(
+      ctx.services.library,
+      /* Read per call, not captured: `peer` may be composed and this
+         capability still started before its wire exists, and a port captured
+         as `null` would stay null for the run. */
+      () => sharePort(),
+      changed('public.changed'),
+    ),
+  }
 }
 
 export const publicSharing: Capability = {
@@ -244,6 +391,7 @@ export const publicSharing: Capability = {
           port: running?.port ?? null,
           voices: running?.voices ?? null,
           heardOn: heardOn,
+          lookForNotes: lookForNotes,
         }),
       /* Stryker restore all */
     },
@@ -262,58 +410,7 @@ export const publicSharing: Capability = {
     },
   ],
   start(ctx: CapabilityContext): Disposable {
-    const listeners = new Set<() => void>()
-    const tell = (): void => {
-      /* A SIGNAL, not a payload: the kernel re-asks `forBook`, so there is one
-         path for "what should be drawn" rather than two that can disagree —
-         `OverlayContribution.subscribe`'s rule.
-
-         ⚠️ **AND EACH SUBSCRIBER ON ITS OWN.** A throwing listener stopped
-         every later one AND travelled back into the change that had already
-         been written — so a publication that landed on disk reported failure.
-         See `notifyAll`, which is where that class is written down. */
-      notifyAll(listeners, 'public')
-    }
-    /** One port's "something moved": say so in the log, then tell the overlay. */
-    const changed =
-      (event: string) =>
-      (): void => {
-        ctx.diagnostics.info(event)
-        tell()
-      }
-    const mine: Running = {
-      library: ctx.services.library,
-      fs: ctx.services.fs,
-      /* ⚠️ **`null` WITHOUT A FILESYSTEM, AND THE OVERLAY ALREADY STANDS DOWN
-         THERE.** `annotationsFor` returns early on `fs === null`, which is the
-         same condition — a browser client has neither. */
-      voices:
-        ctx.services.fs === null
-          ? null
-          : /* ⚠️ **THREE COPIES OF ONE SEQUENCE.** Each port took a callback
-               that logged an event and then told the overlay, and the three
-               differed only in the event's name — which is a factory, not a
-               pattern to keep writing out. */
-            voiceDecisionsPortOver(ctx.services.fs, ctx.services.writes, changed('public.decisions-changed')),
-      publishing: publishPortOver(
-        ctx.services.library,
-        () => voicePort(),
-        () => sharePort(),
-        () => Date.now(),
-        changed('public.published'),
-      ),
-      warn: (event, fields) => ctx.diagnostics.warn(event, fields),
-      sharedPrivately: (bookId) => ctx.services.sharedPrivately(bookId),
-      listeners,
-      port: publicPortOver(
-        ctx.services.library,
-        /* Read per call, not captured: `peer` may be composed and this
-           capability still started before its wire exists, and a port captured
-           as `null` would stay null for the run. */
-        () => sharePort(),
-        changed('public.changed'),
-      ),
-    }
+    const mine = runningOver(ctx)
     running = mine
     return {
       /* Safe to call twice, and it only clears a run that is still THIS one:

@@ -6,9 +6,25 @@
 //! `one.paper.reader/pair/1`, an allow-listed accept loop on
 //! `one.paper.reader/peer/1` with a per-session inbox drained after
 //! `peer_ready`, and blob streams with resume and BLAKE3 verification into
-//! validated targets under `books/` — policy-free: it knows nothing of
-//! books, journals or services, never writes a book's own files, and checks
-//! no grant but `blob:read` for the bytes it serves itself.
+//! validated targets under `books/`.
+//!
+//! ⚠️ **"POLICY-FREE, CHECKS NO GRANT BUT `blob:read`" WAS TRUE OF PHASE B AND
+//! IS NOT TRUE NOW.** Three later phases put authorization decisions in this
+//! crate, and a crate header that understates what it decides is a header that
+//! sends a reviewer to the wrong file:
+//!
+//! - **The circle** (phase 22) admits by ROSTER: `circle/` refuses a device
+//!   whose person is not admitted, and revocation is enforced per request.
+//! - **Public sharing** (phase 25) has `SharePolicy` — per book, per service,
+//!   default off — asked on EVERY request rather than per connection, plus
+//!   `ShareBounds`, which is a rate and concurrency policy of its own.
+//! - **Public annotations** (phase 26) hold a second signing key, serve a
+//!   book's annotation file to strangers, and ask that policy again.
+//!
+//! What is still true, and is the part worth keeping: it knows nothing of
+//! books, journals or services as the app models them, and it never writes a
+//! book's own files. What it decides is WHO MAY HAVE BYTES, in three
+//! different ways, and it is where to look for that. Found by audit.
 //!
 //! Registered from the app's `lib.rs` as `.plugin(tauri_plugin_peer::init())`
 //! on every platform; the ACL grant is `peer:default`.
@@ -61,10 +77,42 @@ pub use state::PeerState;
 /// process the lock is about to refuse. See `PeerState::hold_library`.
 pub const LIBRARY_HELD_EVENT: &str = "paper://library-held";
 
+/// Said when this device has public offers and the share endpoint would not
+/// start — see the resumption task.
+///
+/// ⚠️ **A LOG LINE IS NOT AN OBSERVABLE FAILURE.** A release build installs no
+/// Rust logger at all (`src-tauri/src/lib.rs` pins the level under
+/// `cfg!(debug_assertions)`), so the only record of a failed resumption went
+/// nowhere — while the Publish pane, which reads the POLICY FILE, went on
+/// showing the book as offered. The reader saw "offered" with nothing serving
+/// it. Found by audit.
+pub const SHARE_RESUME_FAILED_EVENT: &str = "paper://share-resume-failed";
+
+/// How long exit waits for a polite goodbye before leaving it to the OS.
+///
+/// ⚠️ **THERE WAS NO DEADLINE, AND `Exit` BLOCKS THE MAIN THREAD.** The
+/// shutdown chain includes the router's and the blob store's own, so one
+/// stalled operation made the application unquittable — it had to be killed.
+/// Past this the sockets close with the process and the peers time out, which
+/// is what closing politely avoids and is strictly better than not quitting.
+const EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 use tauri::plugin::{Builder, TauriPlugin};
-use tauri::{Listener, Manager, RunEvent, Runtime};
+use tauri::{Emitter, Listener, Manager, RunEvent, Runtime};
 
 /// The plugin. Manages a [`PeerState`] and closes its node on exit.
+///
+/// ⚠️ **THE COMMAND INVENTORY IS IN THREE PLACES AND STAYS THERE.** This
+/// handler list, `build.rs`'s `COMMANDS`, and `permissions/default.toml` each
+/// name every command, and `commands.rs`'s `lists_agree` fails the build when
+/// they disagree. Generating one from another is what an audit asked for, and
+/// it is not available: `tauri::generate_handler!` needs the paths as literal
+/// tokens at expansion time, and `build.rs` runs BEFORE the crate is compiled
+/// — so neither list can be derived from the other without a third artifact
+/// (a shared `include!`d file) that would itself become the fourth place to
+/// keep in step. `commands.rs`'s own header records the same conclusion for
+/// the same reason. The test is the mechanism; the repetition is the cost of
+/// the macro, and it is bounded and loud.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("peer")
         .invoke_handler(tauri::generate_handler![
@@ -107,6 +155,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::peer_share_withdraw,
             commands::peer_share_publish_note,
             commands::peer_share_resolve,
+            commands::peer_share_fetch_notes,
             commands::peer_share_fetch,
             commands::peer_voice_status,
             commands::peer_voice_next_seq,
@@ -180,21 +229,38 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
              * it was. Spawned rather than awaited: setup runs before the
              * window, and binding a UDP port is not something a reader should
              * wait behind. */
+            /* ⚠️ **TRACKED, NOT DETACHED — SEE `PeerState::resuming`.** This
+             * was a bare `spawn`, and `close()` only inspects the `OnceCell`s:
+             * a resumption still INITIALISING at exit was invisible to it and
+             * finished binding a UDP port after cleanup had run. */
             let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let state = handle.state::<PeerState>();
-                /* The share endpoint opens the blob store and binds a port —
-                 * neither belongs to a process that does not hold the library.
-                 * Same reason as the sweep above. */
-                state.library_granted().await;
-                match state.resume_share(&handle).await {
-                    Ok(true) => log::info!("peer: the share endpoint resumed for this device's offers"),
-                    Ok(false) => {}
-                    Err(err) => log::warn!(
-                        "peer: this device has public offers and the share endpoint did not start: {err}"
-                    ),
-                }
-            });
+            app.state::<PeerState>()
+                .resume_with(tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<PeerState>();
+                    /* The share endpoint opens the blob store and binds a port —
+                     * neither belongs to a process that does not hold the library.
+                     * Same reason as the sweep above. */
+                    state.library_granted().await;
+                    match state.resume_share(&handle).await {
+                        Ok(true) => {
+                            log::info!("peer: the share endpoint resumed for this device's offers")
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            /* ⚠️ **A WARNING IS NOT AN OBSERVABLE FAILURE, AND A
+                             * RELEASE BUILD INSTALLS NO RUST LOGGER AT ALL.** The
+                             * Publish pane reads the POLICY FILE, which still says
+                             * the book is offered — so a reader saw "offered" with
+                             * nothing serving it and no way to find out. The event
+                             * is what a surface can hear; `peer_share_offered`
+                             * carries the same fact for a surface that asks. */
+                            log::warn!(
+                                "peer: this device has public offers and the share endpoint did not start: {err}"
+                            );
+                            let _ = handle.emit(SHARE_RESUME_FAILED_EVENT, err.to_string());
+                        }
+                    }
+                }));
             Ok(())
         })
         .on_event(|app, event| {
@@ -202,8 +268,24 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 // A QUIC endpoint that just vanishes leaves its peers to time
                 // out; closing sends CONNECTION_CLOSE. `Exit` runs on the main
                 // thread outside the async runtime, so blocking here is fine.
+                /* ⚠️ **UNDER A DEADLINE, AND IT HAD NONE.** The chain includes
+                 * the router's and the blob store's own shutdowns; a stalled
+                 * one blocked the MAIN THREAD for ever, which is an
+                 * application that cannot be quit and has to be killed. A
+                 * goodbye is worth waiting a moment for and is not worth
+                 * hanging on: past the deadline the sockets are closed by the
+                 * operating system anyway, and the peers time out — which is
+                 * exactly the outcome closing politely was avoiding, reached
+                 * only in the case where the polite path is broken. */
                 let state = app.state::<PeerState>();
-                tauri::async_runtime::block_on(state.close());
+                let closed = tauri::async_runtime::block_on(async {
+                    tokio::time::timeout(EXIT_DEADLINE, state.close()).await
+                });
+                if closed.is_err() {
+                    log::warn!(
+                        "peer: shutdown did not finish within {EXIT_DEADLINE:?}; leaving the rest to the operating system"
+                    );
+                }
             }
         })
         .build()

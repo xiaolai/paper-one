@@ -39,13 +39,26 @@ export interface PublicPaneProps {
   readonly voices?: VoiceDecisionsProps['port']
   /** The voices this book has actually carried. Asked when the pane opens. */
   readonly heardOn?: (bookId: string) => Promise<readonly string[]>
+  /**
+   * Ask whoever serves this book for other people's notes about it.
+   *
+   * ⚠️ **A CONTROL, NEVER AN AUTOMATIC ASK.** Asking tells whoever answers
+   * that this device is interested in this book, so doing it on open would
+   * make opening a book a broadcast. Answers how many records arrived, which
+   * is what the sentence below reports — not how many were KEPT, because a
+   * record can be refused for a dozen reasons and naming them here would be
+   * an oracle for whoever sent them.
+   */
+  readonly lookForNotes?: (bookId: string) => Promise<number>
 }
 
-export function PublicPane({ bookId, port, voices = null, heardOn }: PublicPaneProps) {
+export function PublicPane({ bookId, port, voices = null, heardOn, lookForNotes }: PublicPaneProps) {
   const [heard, setHeard] = useState<readonly string[]>([])
   const [state, setState] = useState<PublicBookState | null | undefined>(undefined)
   const [trouble, setTrouble] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  /** How many records the last ask brought back — `null` before any ask. */
+  const [looked, setLooked] = useState<number | null>(null)
 
   const refresh = useCallback(() => {
     if (port === null || bookId === null) return
@@ -95,6 +108,9 @@ export function PublicPane({ bookId, port, voices = null, heardOn }: PublicPaneP
   useEffect(() => {
     setState(undefined)
     setTrouble(null)
+    /* A count belongs to the book it was asked for. Left standing, "3 arrived"
+       follows the reader to the next book and describes it. */
+    setLooked(null)
     const cancel = refresh()
     /* The port tells us when an offer landed; the read is re-run rather than
        the answer pushed, so there is one path for "what is published" instead
@@ -208,6 +224,35 @@ export function PublicPane({ bookId, port, voices = null, heardOn }: PublicPaneP
         <p className={CAPABILITY_UI.hint}>Publishing notes does not offer the book itself.</p>
       ) : (
         <p className={CAPABILITY_UI.hint}>Paper has not finished reading this file’s fingerprint yet.</p>
+      )}
+
+      {lookForNotes === undefined ? null : (
+        <div className={CAPABILITY_UI.row}>
+          <span className={CAPABILITY_UI.grow}>Other people’s notes</span>
+          <button
+            type="button"
+            className={CAPABILITY_UI.button}
+            disabled={busy}
+            onClick={act(async () => {
+              const arrived = await lookForNotes(bookId)
+              setLooked(arrived)
+            })}
+          >
+            Look for some
+          </button>
+        </div>
+      )}
+      {looked === null ? null : (
+        <p className={CAPABILITY_UI.hint}>
+          {/* ⚠️ **WHAT ARRIVED, NOT WHAT WAS KEPT.** A record can be refused
+              for a dozen reasons — a bad signature, an expiry, a voice this
+              reader silenced — and naming which would tell whoever sent it
+              exactly what to change. Nothing at all is the ordinary answer:
+              almost nobody publishes about almost any book. */}
+          {looked === 0
+            ? 'Nobody who answered has published anything about this book.'
+            : `${looked} arrived. Whatever checked out is on the page.`}
+        </p>
       )}
 
       <VoiceDecisionsControl heard={heard} port={voices} />

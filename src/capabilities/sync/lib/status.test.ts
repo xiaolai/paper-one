@@ -63,10 +63,17 @@ describe('classifying what a session threw', () => {
     [{ code: 'unreadable', retryable: true, message: 'book.json is there but could not be read' }, 'unreadable'],
     [{ code: 'unsupported', retryable: false, message: 'the shelf speaks sync [2, 2]' }, 'unsupported'],
     // The peer plugin's errors are `{kind, message}`; a refused session names its reason in the message.
-    [{ kind: 'sessionRefused', message: 'session refused: revoked' }, 'revoked'],
-    [{ kind: 'sessionRefused', message: 'session refused: unknown-peer' }, 'revoked'],
-    [{ kind: 'sessionRefused', message: 'session refused: role-mismatch' }, 'role-mismatch'],
-    [{ kind: 'sessionRefused', message: 'session refused: not-ready' }, 'not-ready'],
+    /* ⚠️ **THE TOKEN IS A FIELD, AND THESE USED TO MATCH IT IN THE
+       SENTENCE.** Rewording the Rust message silently reclassified a revoked
+       device as an unknown failure; the message is kept in each case so that
+       reading one still makes sense, and it is no longer what decides. */
+    [{ kind: 'sessionRefused', reason: 'revoked', message: 'session refused: revoked' }, 'revoked'],
+    [{ kind: 'sessionRefused', reason: 'unknown-peer', message: 'session refused: unknown-peer' }, 'revoked'],
+    [{ kind: 'sessionRefused', reason: 'role-mismatch', message: 'session refused: role-mismatch' }, 'role-mismatch'],
+    [{ kind: 'sessionRefused', reason: 'not-ready', message: 'session refused: not-ready' }, 'not-ready'],
+    /* A message that still says the word and carries no token is UNKNOWN, not
+       revoked: the classification is the field's now, and only the field's. */
+    [{ kind: 'sessionRefused', message: 'session refused: revoked' }, 'unknown'],
     [{ kind: 'roleMismatch', message: 'expected shelf, got satchel' }, 'role-mismatch'],
     [{ kind: 'peerUnknown', message: 'no peer x' }, 'unpaired'],
     [{ kind: 'iroh', message: 'peer unreachable' }, 'unreachable'],

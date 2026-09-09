@@ -98,10 +98,13 @@ impl Topic {
     /// a shorter context and a longer hash. The same reasoning `signedBytes`
     /// applies to the circle's signatures, one layer down.
     pub fn derive(hash: &ContentHash, service: ShareService) -> Self {
-        let seed = blake3::derive_key(index_context(service), hash.bytes().as_slice());
+        /* `bytes()` decodes the hex, so calling it twice did thirty-two byte
+        conversions twice for one derivation. Once. */
+        let bytes = hash.bytes();
+        let seed = blake3::derive_key(index_context(service), bytes.as_slice());
         let signer = mainline::SigningKey::from_bytes(&seed);
         let target = MutableItem::target_from_key(&signer.verifying_key().to_bytes(), None);
-        let peers = blake3::derive_key(peers_context(service), hash.bytes().as_slice());
+        let peers = blake3::derive_key(peers_context(service), bytes.as_slice());
         let mut twenty = [0u8; 20];
         twenty.copy_from_slice(&peers[..20]);
         Self {
@@ -257,6 +260,56 @@ mod tests {
             first.public_signer().to_bytes(),
             second.public_signer().to_bytes()
         );
+    }
+
+    /// ⚠️ **THE ADDRESSES ARE A WIRE FORMAT, AND THIS IS THE VECTOR.**
+    ///
+    /// The test above compares `derive` with ITSELF, so it can say "in this
+    /// build" and cannot say "in the next one" — changing a context string or
+    /// the derivation would move every address in the world while it stayed
+    /// green, and two builds of Paper would silently stop finding each other.
+    /// That looks like a network fault and is a version skew. Found by audit.
+    ///
+    /// A publisher and a searcher meet at a number they each compute from the
+    /// book's hash alone: nothing negotiates it and nothing reports a
+    /// mismatch. Changing the derivation deliberately means changing these
+    /// constants AND knowing that every earlier build stops meeting this one.
+    #[test]
+    fn the_derivation_is_pinned_so_two_builds_meet() {
+        let bytes = Topic::derive(&hash(A), ShareService::Bytes);
+        assert_eq!(
+            hex(bytes.target().as_bytes()),
+            "46757239477d8eb50f816f867cb9e7b61f389c67",
+            "the BEP 44 address for a book's bytes moved"
+        );
+        assert_eq!(
+            hex(bytes.info_hash().as_bytes()),
+            "c863d60cdbfb73d56c57943f50bb3f4b02c4c4a9",
+            "the announce_peer info-hash for a book's bytes moved"
+        );
+        let notes = Topic::derive(&hash(A), ShareService::Notes);
+        assert_eq!(
+            hex(notes.target().as_bytes()),
+            "7c2f918f8fe59f0d6e0f1942ededf3c5494dd9b4",
+            "the BEP 44 address for a book's notes moved"
+        );
+        assert_eq!(
+            hex(notes.info_hash().as_bytes()),
+            "99d68baff8cab9eb34f8568df18b884ff6f05549",
+            "the announce_peer info-hash for a book's notes moved"
+        );
+        /* And the signing key the mutable item is published under, which is
+        what a searcher verifies the record against. */
+        assert_eq!(
+            hex(&bytes.public_signer().to_bytes()),
+            "1c701ba73255f36db20f33713ec08d8aeb26c0e49e87959e35dea4ff5cbb1050",
+            "the key a book's provider record is published under moved"
+        );
+    }
+
+    /// Lower-case hex, for the pinned vector above.
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[test]

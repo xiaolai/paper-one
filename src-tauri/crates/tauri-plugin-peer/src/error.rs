@@ -299,11 +299,36 @@ impl Error {
     }
 }
 
+impl Error {
+    /// The refusal token a peer gave, when the failure carries one.
+    ///
+    /// ⚠️ **THIS TRAVELLED ONLY INSIDE `message`, AND THE APP READ IT WITH A
+    /// REGEX.** `sync/lib/status.ts` matched `/revoked|unknown-peer/` against
+    /// the human sentence to decide what to tell the reader — so rewording
+    /// *"session refused: …"* would silently reclassify a revoked device as an
+    /// unknown failure, and nothing anywhere would say so. A token the wire
+    /// carries as its own field is a contract; a substring of a sentence is
+    /// not. Found by audit.
+    ///
+    /// `None` for every failure that has no such token, which is most of them
+    /// — the kind and the message are the whole answer there.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Error::SessionRefused(why) | Error::PairingRefused(why) => Some(why.as_str()),
+            _ => None,
+        }
+    }
+}
+
 impl Serialize for Error {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("Error", 2)?;
+        let mut state = serializer.serialize_struct("Error", 3)?;
         state.serialize_field("kind", self.kind())?;
         state.serialize_field("message", &self.to_string())?;
+        /* Always present, so a caller can tell "this build sends no reason"
+        from "this failure has none" by the field being null rather than
+        absent. */
+        state.serialize_field("reason", &self.reason())?;
         state.end()
     }
 }
@@ -408,22 +433,84 @@ mod tests {
         ];
         let unique: std::collections::BTreeSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());
-        // The wrapped-foreign variants named in the comment above, by
-        // inspection of `kind()` — folded into the same uniqueness check, so
-        // a new variant that reuses one of THEIR tags fails here too instead
-        // of hiding behind "cannot be constructed".
-        let foreign = [
-            "bind",
-            "tauri",
-            "connect",
-            "connection",
-            "streamWrite",
-            "streamRead",
-            "streamReadExact",
-            "streamClosed",
+        /* ⚠️ **THE FOREIGN TAGS ARE READ OUT OF `kind()`, NOT WRITTEN OUT
+        AGAIN.** They were eight string literals here, so changing a real
+        variant's tag to collide with one of them left this green — the list
+        was a copy of the answer rather than the answer. Reading the source of
+        `kind()` is what makes it the same list. Found by audit. */
+        let source = include_str!("error.rs");
+        let arms = source
+            .split("fn kind(&self)")
+            .nth(1)
+            .expect("kind() is in this file");
+        let arms = &arms[..arms.find("\n    }").expect("kind() ends")];
+        let mut tags: Vec<&str> = Vec::new();
+        for line in arms.lines() {
+            let Some(at) = line.find("=> \"") else {
+                continue;
+            };
+            let rest = &line[at + 4..];
+            let Some(end) = rest.find('"') else { continue };
+            tags.push(&rest[..end]);
+        }
+        assert!(
+            tags.len() > all.len(),
+            "kind() names {} tags and {} were constructed; the walk found nothing",
+            tags.len(),
+            all.len()
+        );
+        let every: std::collections::BTreeSet<&str> = tags.iter().copied().collect();
+        assert_eq!(
+            every.len(),
+            tags.len(),
+            "two variants answer with the same kind: {tags:?}"
+        );
+        /* Every constructed variant's tag is one `kind()` names — so the walk
+        above is reading the right function and not, say, a comment. */
+        for one in all {
+            assert!(
+                every.contains(one),
+                "{one} is not a tag kind() answers with"
+            );
+        }
+    }
+
+    /// ⚠️ **`every_kind_is_distinct` USED TO OMIT THREE VARIANTS**, so a
+    /// collision involving `Identity`, `ShareMalformed` or `ShareRefused`
+    /// passed unnoticed. They are constructed here rather than trusted to the
+    /// source walk, because a tag that no variant can produce is not a tag.
+    #[test]
+    fn the_later_variants_are_distinct_too() {
+        let all = [
+            Error::Identity(String::new()).kind(),
+            Error::ShareMalformed {
+                path: PathBuf::new(),
+                why: String::new(),
+            }
+            .kind(),
+            Error::ShareRefused(String::new()).kind(),
         ];
-        let with_foreign: std::collections::BTreeSet<&str> =
-            all.iter().copied().chain(foreign).collect();
-        assert_eq!(with_foreign.len(), all.len() + foreign.len());
+        let unique: std::collections::BTreeSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len());
+    }
+
+    /// ⚠️ **A REFUSAL TOKEN TRAVELLED ONLY INSIDE THE HUMAN SENTENCE.**
+    /// `sync/lib/status.ts` matched it with a regex, so rewording the sentence
+    /// would silently reclassify a revoked device as an unknown failure.
+    #[test]
+    fn a_refusal_carries_its_reason_as_a_field() {
+        let refused = Error::SessionRefused("unknown-peer".into());
+        let json = serde_json::to_value(&refused).expect("an error serialises");
+        assert_eq!(json["kind"], "sessionRefused");
+        assert_eq!(json["reason"], "unknown-peer");
+        assert_eq!(
+            Error::PairingRefused("bad-mac".into()).reason(),
+            Some("bad-mac")
+        );
+        /* Present and null for a failure with no token, so a caller can tell
+        that from a build that sends no reason at all. */
+        let other = serde_json::to_value(Error::TooManySessions).expect("an error serialises");
+        assert!(other.get("reason").is_some());
+        assert!(other["reason"].is_null());
     }
 }

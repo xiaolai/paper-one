@@ -716,6 +716,61 @@ impl ShareNode {
             .collect()
     }
 
+    /// Ask for a book's public annotations — the asking half of
+    /// `paper/share-notes/1`.
+    ///
+    /// ⚠️ **THIS HALF DID NOT EXIST, AND WITHOUT IT PHASE 26 COULD PUBLISH AND
+    /// NEVER RECEIVE.** `notes::serve` has answered since the phase landed and
+    /// no device ever asked, so the store the reader's overlay reads had no
+    /// production writer and an ordinary reader saw nobody else's annotations
+    /// at all. Found by audit.
+    ///
+    /// ⚠️ **THE RECORDS ARE RETURNED UNPARSED, WHICH IS THE POINT.** This
+    /// crate does not know what a public envelope is: the signature, the
+    /// expiry, the block list and the storage bounds are all the kernel's, and
+    /// a plugin that verified them would be a second verifier to keep in step
+    /// with the first. What lands here is bytes a stranger sent.
+    ///
+    /// Providers are tried in order and discovery follows them, exactly as
+    /// `fetch_book` does and for the same reason: a caller who holds a working
+    /// provider should not pay for a round trip, and a stale one should not
+    /// take the book off the network.
+    pub async fn fetch_notes(
+        &self,
+        hash: &ContentHash,
+        providers: &[EndpointAddr],
+        since: u64,
+        generation: Option<u64>,
+    ) -> Result<notes::FetchedNotes> {
+        let supplied = !providers.is_empty();
+        let mut queue: Vec<EndpointAddr> = providers.to_vec();
+        if queue.is_empty() {
+            queue = self.discovered(hash).await;
+        }
+        if queue.is_empty() {
+            return Err(Error::ShareRefused(format!(
+                "nobody could be found who serves notes for {hash}"
+            )));
+        }
+        let mut asked_discovery = !supplied;
+        let mut last: Option<String> = None;
+        while let Some(provider) = queue.pop() {
+            let who = provider.id;
+            match notes::ask_one(&self.endpoint, provider, hash, since, generation).await {
+                Ok(answer) => return Ok(answer),
+                Err(err) => last = Some(format!("{who}: {err}")),
+            }
+            if queue.is_empty() && !asked_discovery {
+                asked_discovery = true;
+                queue = self.discovered(hash).await;
+            }
+        }
+        Err(Error::ShareRefused(format!(
+            "no provider could serve notes for {hash}{}",
+            last.map(|why| format!(" ({why})")).unwrap_or_default()
+        )))
+    }
+
     /// Who else claims to serve this, over this service.
     pub async fn resolve(&self, hash: &ContentHash, service: ShareService) -> Result<Found> {
         let Some(dht) = self.dht().await else {

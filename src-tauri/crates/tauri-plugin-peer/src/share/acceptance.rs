@@ -108,7 +108,7 @@ impl Stranger {
         send.finish().map_err(|err| err.to_string())?;
         let answer: NotesAnswer = read_answer(&mut recv).await?;
         if !answer.ok {
-            return Err(answer.why.unwrap_or("refused").to_owned());
+            return Err(answer.why.unwrap_or_else(|| "refused".into()));
         }
         let mut out = Vec::new();
         for _ in 0..answer.count {
@@ -126,23 +126,20 @@ impl Stranger {
     }
 }
 
-/// `NotesAnswer` is serialize-only on the server; the stranger parses the
-/// fields it needs.
+/// The answer, parsed by the type that wrote it.
+///
+/// ⚠️ **THIS WAS A HAND-ROLLED FIELD-BY-FIELD PARSER**, because `NotesAnswer`
+/// was serialize-only — a second reading of one wire format, in a test, where
+/// a field the server renamed would have gone on being read under its old
+/// name and the test would have kept passing. The type derives `Deserialize`
+/// now, for the client half that phase 26 was missing, so the stranger reads
+/// what the server wrote.
 async fn read_answer(recv: &mut iroh::endpoint::RecvStream) -> Result<NotesAnswer, String> {
     let frame = crate::frame::read_frame(recv)
         .await
         .map_err(|err| err.to_string())?
         .ok_or("the stream ended before the answer")?;
-    let value: serde_json::Value = serde_json::from_slice(&frame).map_err(|err| err.to_string())?;
-    Ok(NotesAnswer {
-        v: value["v"].as_u64().unwrap_or(0) as u32,
-        ok: value["ok"].as_bool().unwrap_or(false),
-        generation: value["gen"].as_u64().unwrap_or(0),
-        count: value["count"].as_u64().unwrap_or(0),
-        next: value["next"].as_u64().unwrap_or(0),
-        more: value["more"].as_bool().unwrap_or(false),
-        why: value["why"].as_str().map(|_| "refused"),
-    })
+    serde_json::from_slice(&frame).map_err(|err| err.to_string())
 }
 
 /// A book big enough that a range request is a range request: two BLAKE3
@@ -1252,6 +1249,91 @@ async fn an_unoffered_book_and_an_unknown_one_answer_alike() {
 
     stranger.close().await;
     share.close().await;
+}
+
+/// The half phase 26 shipped without: one Paper ASKING another for a book's
+/// public annotations, through the same client an app command uses.
+///
+/// ⚠️ **EVERY TEST ABOVE ASKS WITH A HAND-BUILT `Stranger`, WHICH IS WHY THE
+/// MISSING CLIENT WENT UNNOTICED FOR A WHOLE PHASE.** The server was measured
+/// against a stranger written in the test file; no code path in the app could
+/// make the request at all, so `public.jsonl` — the store the reader's overlay
+/// draws from — had no production writer and a reader never saw anybody else's
+/// annotation. This test asks with `ShareNode::fetch_notes`, which is what the
+/// command calls. Found by audit.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_paper_can_ask_another_for_a_book_s_notes() {
+    let server = TestShare::start("share-notes-client-server").await;
+    let asker = TestShare::start("share-notes-client-asker").await;
+    let hash = server.write_book("book", "content.epub", &a_book(23));
+    server.node.offer_notes(&hash).await.unwrap();
+    for n in 0..3 {
+        crate::share::notes::append(
+            server.node.root(),
+            &hash,
+            format!("{{\"n\":{n}}}").as_bytes(),
+        )
+        .unwrap();
+    }
+
+    let at = server.node.endpoint().addr();
+    let first = asker
+        .node
+        .fetch_notes(&hash, std::slice::from_ref(&at), 0, None)
+        .await
+        .expect("the provider answered");
+    assert_eq!(first.records.len(), 3, "the records did not arrive");
+    assert_eq!(first.records[0], br#"{"n":0}"#.to_vec());
+    assert_eq!(first.next, 3);
+    assert!(!first.more);
+
+    /* The cursor the answer returned brings back nothing until there is
+    something new — the reason `since` and `gen` travel together. */
+    let again = asker
+        .node
+        .fetch_notes(
+            &hash,
+            std::slice::from_ref(&at),
+            first.next,
+            Some(first.generation),
+        )
+        .await
+        .expect("the provider answered again");
+    assert!(again.records.is_empty(), "the same records came back twice");
+
+    crate::share::notes::append(server.node.root(), &hash, br#"{"n":3}"#).unwrap();
+    let third = asker
+        .node
+        .fetch_notes(
+            &hash,
+            std::slice::from_ref(&at),
+            first.next,
+            Some(first.generation),
+        )
+        .await
+        .expect("the provider answered a third time");
+    assert_eq!(third.records, vec![br#"{"n":3}"#.to_vec()]);
+
+    /* ⚠️ **AND A WITHDRAWAL REACHES THE ASKER.** The refusal is the same
+    sentence whatever the reason, so what is asserted is that it IS a refusal —
+    a client that treated one as an empty answer would silently keep showing
+    annotations the publisher had taken back. */
+    server
+        .node
+        .withdraw(&hash, ShareService::Notes)
+        .await
+        .unwrap();
+    assert!(
+        asker
+            .node
+            .fetch_notes(&hash, std::slice::from_ref(&at), 0, None)
+            .await
+            .is_err(),
+        "a withdrawn book still served its notes"
+    );
+
+    asker.close().await;
+    server.close().await;
 }
 
 /// The request cursor: a stranger that already holds some records asks for the

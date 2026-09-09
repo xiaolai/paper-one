@@ -1055,11 +1055,17 @@ mod tests {
     /// forgets the person root between two calls.
     #[test]
     fn this_platform_agrees_with_the_backends_the_manifest_enables() {
-        let manifest = include_str!("../Cargo.toml");
+        /* ⚠️ **THE WORKSPACE MANIFEST, BECAUSE THE FEATURES MOVED THERE.**
+        Two plugins were keeping one feature list in step by hand; it is
+        declared once under `[workspace.dependencies]` now, and this crate's
+        own line is `keyring = { workspace = true }` — which names no
+        backend at all, so reading it here would have made this test agree
+        with nothing. */
+        let manifest = include_str!("../../../Cargo.toml");
         let keyring = manifest
             .split("keyring = {")
             .nth(1)
-            .expect("the manifest still depends on keyring");
+            .expect("the workspace still declares keyring");
         let block = &keyring[..keyring.find('}').expect("the keyring block is closed")];
 
         let expected = cfg!(target_os = "macos") && block.contains("apple-native")

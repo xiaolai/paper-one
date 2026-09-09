@@ -38,23 +38,25 @@ import type { PageCrypto } from '../../../kernel'
  * a refusal. A throw there is not a refusal; it is an unhandled rejection in
  * the middle of a transfer. Wired at module scope so it cannot be forgotten by
  * a caller, and asserted below so it cannot be silently undone by a version
- * bump that renames the slot.
+ * bump that renames the slot — which is what the known-answer test below the
+ * assignment does, and what the comparison that used to stand there could
+ * not. See the note there.
  */
 hashes.sha512 = sha512
 
-/* A build in which the line above stopped taking is a build where every
-   signature check throws. Cheap, once, at load.
+/* ⚠️ **A GUARD STOOD HERE AND IT COULD NOT DETECT THE THING IT NAMED.**
+   `if (hashes.sha512 !== sha512) throw` compares a WRITABLE property with the
+   value assigned to it on the line above, so it is true by construction. The
+   failure it claimed to catch — a version bump that RENAMES the slot — makes
+   the assignment create an unused property and leaves the comparison passing,
+   while every verify throws `hashes.sha512 not set` at the first real
+   envelope. A check that cannot fail for its own stated reason is worse than
+   none: it reads as coverage. Found by audit.
 
-   The branch cannot be reached from a test: reaching it means the library has
-   renamed the slot, which is the version bump this exists to catch and not
-   something a fixture can arrange. The cost of keeping it is one comparison at
-   import; the cost of not having it is every page refused, at run time, with a
-   message about SHA-512. */
-// Stryker disable all
-if (hashes.sha512 !== sha512) {
-  throw new Error('Paper: @noble/ed25519 did not accept the SHA-512 binding')
-}
-// Stryker restore all
+   What replaces it is a KNOWN-ANSWER test — a real signature, verified
+   against a pinned public key and message, in `crypto.test.ts`. A renamed
+   slot fails it at build time, which is when a version bump is looked at,
+   and it costs nothing at import. */
 
 /** 64 lower-case hex characters, and nothing else. */
 const KEY_HEX = 64

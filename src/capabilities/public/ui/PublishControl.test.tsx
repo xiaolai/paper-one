@@ -134,4 +134,83 @@ describe('the publish control', () => {
     expect(button('Publish to anyone'), 'the second act skipped its disclosure').toBeNull()
     expect(button('Publish…')).not.toBeNull()
   })
+
+  it('does not claim a NEW passage was published when the old one’s answer lands', async () => {
+    /* ⚠️ **THE STATE SURVIVED THE PASSAGE CHANGING, AND `done` IS THE
+       DANGEROUS ONE.** A publication started for A and settling after the
+       reader moved to B set `done` — so B's control said "Published. It cannot
+       be recalled" about something nobody had published. */
+    let settle: (published: { pub: string; voice: string; seq: number }) => void = () => {}
+    const port = portWith({
+      publish: vi.fn(
+        () =>
+          new Promise<{ pub: string; voice: string; seq: number }>((resolve) => {
+            settle = resolve
+          }),
+      ),
+    })
+    const other: PublicPassage = { quote: 'somewhere else', prefix: '', suffix: '', chapter: 'Two' }
+    const view = render(<PublishControl bookId="book:1" passage={PASSAGE} port={port} />)
+    button('Publish…')?.click()
+    await waitFor(() => expect(button('Publish to anyone')).not.toBeNull())
+    button('Publish to anyone')?.click()
+
+    /* The reader moves to another passage while the first is in flight. */
+    view.rerender(<PublishControl bookId="book:1" passage={other} port={port} />)
+    await waitFor(() => expect(button('Publish…')).not.toBeNull())
+    settle({ pub: 'p1', voice: 'be'.repeat(32), seq: 1 })
+    await waitFor(() => expect(button('Publish…')).not.toBeNull())
+
+    expect(
+      screen.queryByText(/Published\. It cannot be recalled/u),
+      'a passage nobody published was reported as published',
+    ).toBeNull()
+  })
+
+  it('keeps a listener’s failure out of the publication’s error report', async () => {
+    /* ⚠️ **THE CALLBACK RAN INSIDE THE `then`**, so its throw landed in the
+       catch — after `done` was already true, which hid the message behind the
+       success branch and reported a failure that had not happened. */
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const port = portWith()
+      render(
+        <PublishControl
+          bookId="book:1"
+          passage={PASSAGE}
+          port={port}
+          onPublished={() => {
+            throw new Error('this listener is broken')
+          }}
+        />,
+      )
+      button('Publish…')?.click()
+      await waitFor(() => expect(button('Publish to anyone')).not.toBeNull())
+      button('Publish to anyone')?.click()
+      await waitFor(() => expect(screen.queryByText(/Published\. It cannot be recalled/u)).not.toBeNull())
+      expect(screen.queryByText(/this listener is broken/u), 'the listener’s failure was reported as the publication’s').toBeNull()
+      expect(error).toHaveBeenCalled()
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  it('clears the last attempt’s error when the step is closed and reopened', async () => {
+    /* Cancel cleared only `asked`, so reopening the disclosure showed the
+       previous failure above a button nobody had pressed yet. */
+    const port = portWith({ publish: vi.fn(() => Promise.reject(new Error('the voice is not ready'))) })
+    render(<PublishControl bookId="book:1" passage={PASSAGE} port={port} />)
+    button('Publish…')?.click()
+    await waitFor(() => expect(button('Publish to anyone')).not.toBeNull())
+    button('Publish to anyone')?.click()
+    await waitFor(() => expect(screen.queryByText(/the voice is not ready/u)).not.toBeNull())
+
+    button('Cancel')?.click()
+    await waitFor(() => expect(button('Publish…')).not.toBeNull())
+    expect(screen.queryByText(/the voice is not ready/u), 'the error outlived the step it belonged to').toBeNull()
+
+    button('Publish…')?.click()
+    await waitFor(() => expect(button('Publish to anyone')).not.toBeNull())
+    expect(screen.queryByText(/the voice is not ready/u)).toBeNull()
+  })
 })

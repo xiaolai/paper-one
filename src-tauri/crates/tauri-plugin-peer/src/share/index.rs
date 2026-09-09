@@ -60,10 +60,7 @@ impl ProviderIndex {
         for chunk in body.chunks_exact(ID_LEN).take(MAX_PROVIDERS) {
             let mut id = [0u8; ID_LEN];
             id.copy_from_slice(chunk);
-            /* An all-zero id is the ed25519 identity point and cannot be
-             * dialled; `crypto.ts` records what accepting one costs one layer
-             * up. Dropped here so nothing downstream has to know. */
-            if id != [0u8; ID_LEN] && !ids.contains(&id) {
+            if usable(&id) && !ids.contains(&id) {
                 ids.push(id);
             }
         }
@@ -94,7 +91,18 @@ impl ProviderIndex {
     /// So can a vandal by writing an empty record once. See `topic.rs`: the
     /// index is availability, not authority, and `announce_peer` is the
     /// independent second signal for exactly this reason.
+    ///
+    /// ⚠️ **AN UNUSABLE ID IS NOT ADDED, AND IT USED TO BE.** `decode` dropped
+    /// one and this did not, so `with([0; 32])` produced a record that lost an
+    /// entry on its own round trip — and on a FULL record it evicted a real
+    /// provider to make room for a byte string nobody can dial. One predicate
+    /// now, in all three places. Found by audit.
     pub fn with(&self, id: [u8; ID_LEN]) -> ProviderIndex {
+        if !usable(&id) {
+            return ProviderIndex {
+                ids: self.ids.clone(),
+            };
+        }
         let mut ids = Vec::with_capacity(self.ids.len() + 1);
         ids.push(id);
         for held in &self.ids {
@@ -125,7 +133,15 @@ impl ProviderIndex {
         self.ids.is_empty()
     }
 
-    /// The ids as iroh endpoint ids, dropping any that are not valid keys.
+    /// The ids as iroh endpoint ids.
+    ///
+    /// ⚠️ **THIS USED TO BE THE THIRD ANSWER TO "IS THIS A PROVIDER?"** and it
+    /// was the strictest of the three, so `is_empty()` said "somebody is
+    /// listed" while this returned nothing — and `dht.rs` skipped its
+    /// empty-provider diagnostic on a record that named no reachable provider
+    /// at all. Every id held has already passed [`usable`], so nothing is
+    /// dropped here; the `filter_map` stays because `from_bytes` returns a
+    /// `Result` and a panic on the lookup path is not a trade worth making.
     pub fn endpoint_ids(&self) -> Vec<iroh::EndpointId> {
         self.ids()
             .iter()
@@ -134,12 +150,43 @@ impl ProviderIndex {
     }
 }
 
+/// Whether these bytes name a provider anybody could dial.
+///
+/// ⚠️ **THREE PLACES DECIDED THIS AND THEY DISAGREED.** `decode` rejected the
+/// all-zero id and nothing else; `with` rejected nothing, so a record could
+/// lose an entry on its own round trip and evict a real provider to make room
+/// for one nobody can use; `endpoint_ids` rejected whatever
+/// `EndpointId::from_bytes` refused, so `is_empty()` and the provider list
+/// answered differently about the same record. Found by audit.
+///
+/// ⚠️ **AND "ALL ZEROES IS THE IDENTITY POINT" WAS WRONG.** The identity
+/// encodes as `[1, 0, …, 0]`; thirty-two zero bytes is a point of ORDER FOUR.
+/// Both are in the small-order subgroup, and both — with the other six — are
+/// keys whose signatures verify against messages nobody signed, which is to
+/// say providers no dial can reach. `VerifyingKey::is_weak` is the library's
+/// own name for that set, and it is the same check `crypto.ts` makes one layer
+/// up with `isSmallOrder`.
+fn usable(id: &[u8; ID_LEN]) -> bool {
+    ed25519_dalek::VerifyingKey::from_bytes(id).is_ok_and(|key| !key.is_weak())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A real, dialable endpoint id, deterministic in `byte`.
+    ///
+    /// ⚠️ **THIS WAS `[byte; 32]`, WHICH IS NOT A KEY.** Thirty-two copies of
+    /// one byte is almost never a valid Ed25519 point, so every assertion
+    /// below was made about ids no `EndpointId::from_bytes` would accept —
+    /// which is exactly how `decode`, `with` and `endpoint_ids` came to
+    /// disagree about what a provider is without any test noticing. A seed
+    /// through the signing key gives a valid public key and stays
+    /// deterministic. */
     fn id(byte: u8) -> [u8; ID_LEN] {
-        [byte; ID_LEN]
+        ed25519_dalek::SigningKey::from_bytes(&[byte.wrapping_add(1); ID_LEN])
+            .verifying_key()
+            .to_bytes()
     }
 
     #[test]
@@ -184,10 +231,10 @@ mod tests {
 
     #[test]
     /* Named "announcing_again" rather than "re_announcing": the commit guard
-       reads `re_` followed by twenty-four word characters as a Resend API key,
-       and it is a BLOCKING rule that no allow-file can exempt — correctly, for
-       a rule about credentials. A test name is the cheap side of that
-       trade. */
+    reads `re_` followed by twenty-four word characters as a Resend API key,
+    and it is a BLOCKING rule that no allow-file can exempt — correctly, for
+    a rule about credentials. A test name is the cheap side of that
+    trade. */
     fn announcing_again_moves_an_entry_to_the_front_rather_than_duplicating_it() {
         let index = ProviderIndex::default().with(id(1)).with(id(2)).with(id(1));
         assert_eq!(index.ids(), &[id(1), id(2)]);
@@ -233,15 +280,64 @@ mod tests {
     }
 
     #[test]
-    fn an_all_zero_id_is_dropped() {
-        /* ⚠️ **THE IDENTITY POINT — `crypto.ts` measured what accepting one
-        costs one layer up**: `verify(0…0, anything, 0…0)` answers TRUE. Here it
-        is merely undialable, but a value that cannot be a provider has no
-        business taking one of thirty-one slots. */
+    fn a_weak_key_is_dropped_however_it_arrives() {
+        /* ⚠️ **`crypto.ts` MEASURED WHAT ACCEPTING ONE COSTS ONE LAYER UP**:
+        `verify(0…0, anything, 0…0)` answers TRUE. Here it is merely undialable,
+        but a value that cannot be a provider has no business taking one of
+        thirty-one slots.
+
+        ⚠️ **AND ALL ZEROES IS NOT THE IDENTITY, WHICH IS WHY THIS TESTS
+        BOTH.** The identity encodes as `[1, 0, …, 0]`; thirty-two zeroes is a
+        point of order four. The old check named the wrong one and let the
+        other through, along with six more small-order keys and every byte
+        string that is not a point at all. */
+        let weak: [[u8; ID_LEN]; 3] = [
+            [0u8; ID_LEN],
+            {
+                let mut one = [0u8; ID_LEN];
+                one[0] = 1;
+                one
+            },
+            /* Not a point at all: the old `decode` kept this, `with` kept it,
+            and `endpoint_ids` silently dropped it. */
+            [2u8; ID_LEN],
+        ];
+        for bad in weak {
+            let mut wire = MAGIC.to_vec();
+            wire.extend_from_slice(&bad);
+            wire.extend_from_slice(&id(7));
+            assert_eq!(
+                ProviderIndex::decode(&wire).ids(),
+                &[id(7)],
+                "an unusable id survived decoding: {bad:?}"
+            );
+            /* ⚠️ **AND `with` MUST AGREE WITH `decode`.** It did not: adding
+            one produced a record that lost an entry on its own round trip,
+            and on a full record it evicted a real provider first. */
+            let held = ProviderIndex::default().with(id(7));
+            assert_eq!(
+                held.with(bad).ids(),
+                &[id(7)],
+                "an unusable id was added: {bad:?}"
+            );
+        }
+    }
+
+    /// ⚠️ **`is_empty()` AND `endpoint_ids()` MUST ANSWER ABOUT THE SAME
+    /// RECORD.** They did not: an id that decoded but was not a dialable key
+    /// left `is_empty()` false and `endpoint_ids()` empty, so `dht.rs` skipped
+    /// its empty-provider diagnostic for a record naming nobody reachable.
+    #[test]
+    fn what_is_listed_is_what_can_be_dialled() {
         let mut wire = MAGIC.to_vec();
-        wire.extend_from_slice(&[0u8; ID_LEN]);
-        wire.extend_from_slice(&id(7));
-        assert_eq!(ProviderIndex::decode(&wire).ids(), &[id(7)]);
+        wire.extend_from_slice(&[2u8; ID_LEN]);
+        let index = ProviderIndex::decode(&wire);
+        assert!(index.is_empty(), "an undialable id counted as a provider");
+        assert!(index.endpoint_ids().is_empty());
+
+        let real = ProviderIndex::default().with(id(3));
+        assert!(!real.is_empty());
+        assert_eq!(real.endpoint_ids().len(), real.ids().len());
     }
 
     #[test]

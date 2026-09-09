@@ -3,9 +3,19 @@
  * `src/kernel/` may import (`.dependency-cruiser.cjs`, rule
  * `kernel-public-entry-only`), with the exemptions that rule names: the
  * browser client under `src/app/web/` reaches `ui/browser` and `core/metrics`
- * directly, because this barrel re-exports modules that import `@tauri-apps`
- * and a web bundle may carry none of them. Those exemptions are written
- * beside the rule, with the reason; they are not a licence for anyone else.
+ * directly. Those exemptions are written beside the rule, with the reason;
+ * they are not a licence for anyone else.
+ *
+ * ⚠️ **THE REASON GIVEN FOR THEM WAS THAT THIS BARREL PULLS IN `@tauri-apps`,
+ * AND IT DOES NOT.** `pnpm browser:check` holds this exact module and passes:
+ * every platform binding was split out of the kernel (`vaultFsTauri.ts` from
+ * `bookVault.ts` is the pattern), which is what made the kernel reachable from
+ * a browser at all. What the exemptions are really for is WEIGHT and REACT: a
+ * barrel's re-exports evaluate with the barrel, so a web bundle that wanted
+ * two surfaces would load every one of them, and `ui/browser` is the entry
+ * that grows one export at a time for that reason. A rationale that names a
+ * blocker which no longer exists is one somebody will remove the exemption
+ * over. Found by audit.
  *
  * NOTHING REACT. What is here is the non-React kernel: the services a
  * composition root builds and a capability's `start` receives, the ports a
@@ -32,6 +42,7 @@ export type { BookPatch, Library, LibraryOptions, RekeyOutcome, RemoteRow } from
    cannot import another capability's, which is how three broken copies of it
    came to exist — see the module's own header. */
 export { notifyAll } from './core/notify'
+export { isMissingFile } from './core/bookVault'
 export { messageOf } from './core/messageOf'
 export { createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
@@ -190,9 +201,16 @@ export { NOT_CONFIGURED, NOT_CONFIGURED_REASON, UNKNOWN_CITATION_NOTE } from './
 export type { AnswerEnd, AskContext, AskPassage, Citation, CompanionProvider } from './core/companion'
 /* ⚠️ `NO_GLOSS` IS NOT RE-EXPORTED. It is the port's unbound default and it is
  * `services.ts`'s to install, not a capability's to reach for — and an audit
- * confirmed no capability ever did. A barrel's re-exports evaluate with the
- * barrel, so an unused one is loaded rather than free. The TYPES stay: they
- * are what a capability implements to bind the port. */
+ * confirmed no capability ever did. The TYPES stay: they are what a capability
+ * implements to bind the port.
+ *
+ * ⚠️ **THIS ALSO CLAIMED A LOADING SAVING, AND THERE IS NONE.** `core/gloss`
+ * is imported by `core/services.ts`, which this barrel re-exports a few lines
+ * above — so the module is in the graph either way and dropping one name from
+ * it saves nothing at all. What the omission buys is the API boundary, which
+ * is reason enough on its own; the saving was a second reason that was not
+ * true, and a false reason attached to a correct decision is how the decision
+ * gets reversed when somebody checks it. Found by audit. */
 export type { GlossContext, GlossProvider } from './core/gloss'
 /* WHAT A BOOK'S LINK MAY DO TO THE HOST, decided once and in one place.
  *
@@ -368,13 +386,11 @@ export type { Delivered, KeptEnvelope, PublicFile, PublicHeld, PublicWithdrawal 
 export {
   PUBLIC_DISCLOSURE,
   PUBLIC_LINKS_DISCLOSURE,
-  afterPublishing,
-  afterWithdrawing,
   disclosureFor,
   linksVoiceToPerson,
   mayPublish,
 } from './core/public/publish'
-export type { Audience, PublishRefusal, PublishRequest, Published } from './core/public/publish'
+export type { Audience, PublishRefusal, PublishRequest } from './core/public/publish'
 export {
   NO_DECISIONS,
   bind,

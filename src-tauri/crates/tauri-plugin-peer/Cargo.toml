@@ -87,11 +87,18 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 #
 # `ed25519-dalek` is ALREADY IN THE TREE (iroh's own signatures resolve to it),
 # so this adds a direct path to a crate that was being compiled anyway rather
-# than a new one. `rand_core` for minting from the OS CSPRNG; `zeroize` so a
-# secret does not outlive its scope in freed memory. Not `serde`: a key is
-# carried as bytes at the one seam that needs it, and deriving Serialize on a
-# signing key is how one ends up in a log line.
-ed25519-dalek = { version = "3", features = ["rand_core", "zeroize"] }
+# than a new one. `zeroize` so a secret does not outlive its scope in freed
+# memory. Not `serde`: a key is carried as bytes at the one seam that needs it,
+# and deriving Serialize on a signing key is how one ends up in a log line.
+#
+# ⚠️ **`rand_core` WAS ON THIS LIST AND NOTHING USED IT.** The comment said it
+# was "for minting from the OS CSPRNG", and this crate mints nothing that way:
+# every signing key is `SigningKey::from_bytes` over a seed, and the seed comes
+# from `rand::random` — `person.rs` states that choice at length and records an
+# earlier draft that reached for `OsRng` and did not compile. A feature nobody
+# needs still widens the graph and still has to be understood by the next
+# reader. Found by audit.
+ed25519-dalek = { version = "3", features = ["zeroize"] }
 # Twelve words — `identity.md` §"The shape". 128 bits, not 256: *"Twenty-four
 # words is Bitcoin's paranoia budget; the prize here is joining a reading
 # circle."* `default-features = false` keeps the other ten wordlists out; the
@@ -112,11 +119,18 @@ bip39 = { version = "2", default-features = false, features = ["std", "zeroize"]
 # `check-third-party-notices`'s `cargo metadata --offline --locked`. Two
 # manifests naming different feature sets for one crate is also how a
 # unification surprise arrives. Read that note before changing this one.
-keyring = { version = "3", features = [
-    "apple-native",
-    "windows-native",
-    "sync-secret-service",
-] }
+#
+# ⚠️ **`crypto-rust` IS ON THE LIST NOW, AND THE MEASURED BLOCKER IS GONE.**
+# It was recorded as blocked because the notices check ran `cargo metadata
+# --offline --locked`, and `--offline` exits 101 on any lockfile package
+# missing from the local registry. `refresh-rust-notices.mjs` no longer passes
+# `--offline` — its own header says so in as many words — and the answer is
+# committed as `scripts/lib/rust-crates.json` for the suite that runs before
+# any cargo step. So the trade that comment described no longer exists, and
+# what was left standing was a reader's RECOVERY PHRASE crossing the session
+# D-Bus in the clear on Linux. A blocker removed elsewhere has to be
+# re-checked where it was recorded. Found by audit.
+keyring = { workspace = true }
 # Verified range transfer on the SHARE endpoint — phase 25, WI-25.3. It carries
 # `bao-tree` 0.16, which is the BLAKE3 verified streaming that makes a chunk
 # trustworthy AS IT LANDS rather than after the whole file; that is the whole
@@ -140,11 +154,18 @@ keyring = { version = "3", features = [
 iroh-blobs = { version = "0.103", default-features = false, features = ["fs-store"] }
 # hash → provider, over the BitTorrent mainline DHT — WI-25.7.
 #
-# ⚠️ **NOTHING OPENS A DHT SOCKET UNTIL A READER OFFERS A BOOK.** Joining means
-# bootstrapping against public routers and publishing this machine's address
-# against a book's topic; it is the loudest thing the app does, so it is behind
-# `SharePolicy` (default off, per book, per service) and behind a lazy
-# `OnceCell`. `ShareConfig.dht` is `false` in every test.
+# ⚠️ **NOTHING OPENS A DHT SOCKET UNTIL A READER OFFERS A BOOK *OR LOOKS ONE
+# UP*.** Joining means bootstrapping against public routers, and it happens on
+# the first call to `ShareNode::dht()` — which is `announce`, `withdraw` AND
+# `resolve`. Searching is as loud as publishing in the sense that matters here:
+# it puts this machine on those routers. This comment named only publication,
+# which reads as a promise that a reader who never offers anything never joins,
+# and `peer_share_resolve` is a command a surface can call. Found by audit.
+#
+# What IS true is that it is lazy and opt-in: behind a lazy `OnceCell`, and
+# `ShareConfig.dht` is `false` in every test — nothing in `cargo test` touches
+# the real DHT, which `AGENTS.md` states as a rule. Publication is additionally
+# behind `SharePolicy` (default off, per book, per service).
 #
 # `default-features = false` with `async` only: `full` is `async` today and a
 # feature that grows is a feature that grows silently. `mainline::Testnet` —

@@ -116,10 +116,18 @@ pub struct Advertised {
     /// The endpoint id published on the LAN, or `None` when mDNS is off.
     ///
     /// ⚠️ **THIS IS THE WHOLE DISCLOSURE, AND IT IS THE ONLY ONE.** iroh's
-    /// mDNS service publishes the endpoint id and the endpoint's own direct
-    /// addresses. It is handed nothing else: no person id, no roster, no book
-    /// hash, no title, no reader's name. There is no field on
-    /// `MdnsAddressLookup::builder()` that could carry one.
+    /// mDNS service publishes the endpoint id, the endpoint's own direct
+    /// addresses, and — with `iroh-mdns-address-lookup` 0.4.0's default
+    /// `publish_relay_url` — its FIRST RELAY URL. It is handed nothing else:
+    /// no person id, no roster, no book hash, no title, no reader's name.
+    /// There is no field on `MdnsAddressLookup::builder()` that could carry
+    /// one.
+    ///
+    /// ⚠️ **THE RELAY URL WAS MISSING FROM THAT LIST.** An observer on the LAN
+    /// learns which relay this machine is homed to, which is a fact about
+    /// where it is and who it is likely reachable through — not a secret, and
+    /// not nothing. A disclosure that claims to be complete has to be. Found
+    /// by audit.
     pub endpoint_id: Option<String>,
     /// The mDNS service name. ⚠️ **iroh's DEFAULT, DELIBERATELY, FOR BOTH
     /// ENDPOINTS.** A service name of Paper's own would let a stranger on a
@@ -131,6 +139,21 @@ pub struct Advertised {
 }
 
 /// iroh's own default mDNS service name — see [`Advertised::service_name`].
+///
+/// ⚠️ **IT WAS A COPY OF THE DEPENDENCY'S DEFAULT THAT REGISTRATION NEVER
+/// USED.** `MdnsAddressLookup::builder()` was not told a service name, so this
+/// was what Paper BELIEVED iroh published under rather than what it did — and
+/// the test compared the reported name with this same constant, so an upstream
+/// change would have moved the real name while both sides went on agreeing.
+/// `advertise` passes it now, which makes the constant a fact. Found by audit.
+///
+/// ⚠️ **AND THAT MOVES ONE RISK TO ANOTHER, DELIBERATELY.** Pinned, Paper
+/// keeps saying `irohv1` if iroh's own default ever moves — which would make a
+/// Paper install the odd one out on a LAN, the thing this value exists to
+/// avoid. The dependency's constant is private, so nothing can check it from
+/// here. **On an `iroh-mdns-address-lookup` bump, read its `N0_SERVICE_NAME`
+/// and match it**; that is a decision for the bump, where somebody is looking,
+/// rather than a default that changes underneath a claim.
 pub const MDNS_SERVICE_NAME: &str = "irohv1";
 
 /// What [`bind`] answers: the endpoint and what it tells the LAN.
@@ -153,6 +176,27 @@ pub struct Bound {
 /// it does, because the share endpoint's bind failure costs the share endpoint
 /// a stable port and costs the circle endpoint nothing at all.
 pub async fn bind(config: EndpointConfig) -> Result<Bound> {
+    /* ⚠️ **THE FALLBACK IS THE ONLY DECISION HERE, AND IT USED TO BE THE
+     * FOURTH THING IN A SIXTY-THREE-LINE FUNCTION.** Builder configuration,
+     * an address-error conversion, the nested retry, mDNS registration and a
+     * diagnostic task shared one body — so the policy a reader comes to this
+     * file for was the hardest part of it to find. Three named pieces, one
+     * sentence each. Found by audit. */
+    let label = config.label;
+    let mdns = config.discovery.mdns;
+    let endpoint = bound_endpoint(config).await?;
+    let advertised = register_mdns(&endpoint, mdns, label);
+    report_addresses(endpoint.clone(), label);
+    Ok(Bound {
+        endpoint,
+        advertised,
+    })
+}
+
+/// The endpoint itself: the fixed port if it is free, an ephemeral one if not.
+///
+/// ⚠️ **FALLS BACK RATHER THAN FAILING** — see [`bind`], which states why.
+async fn bound_endpoint(config: EndpointConfig) -> Result<Endpoint> {
     let EndpointConfig {
         secret,
         alpns,
@@ -161,60 +205,61 @@ pub async fn bind(config: EndpointConfig) -> Result<Bound> {
         discovery,
         label,
     } = config;
-
-    // Rebuilt rather than cloned because `bind()` consumes the builder, and
-    // the fixed port needs a second attempt when it is already taken.
-    // Captured by value so the closure stays `Fn` and can run twice; the
-    // fallback below is the second call.
-    let build = |port: Option<u16>| {
-        let mut builder = if discovery.n0_dns {
-            Endpoint::builder(presets::N0)
-        } else {
-            Endpoint::builder(presets::Minimal)
-        };
-        builder = builder
-            .secret_key(secret.clone())
-            .alpns(alpns.clone())
-            .relay_mode(relay_mode.clone());
-        match port {
-            // v4 only: `bind_addr` replaces the unspecified bind for THAT
-            // family, so v6 keeps its ephemeral one and a machine with no
-            // IPv4 is not left without an endpoint.
-            Some(port) => builder
-                .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
-                // Unreachable for a literal `0.0.0.0:PORT`, and mapped
-                // rather than unwrapped anyway: a panic here would take
-                // the whole app down for a bind address it chose itself.
-                .map_err(|err| {
-                    Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("peer: bad bind address: {err}"),
-                    ))
-                }),
-            None => Ok(builder),
-        }
-    };
-
-    let endpoint = match bind_port {
+    let build =
+        |port: Option<u16>| builder_for(&secret, &alpns, &relay_mode, discovery.n0_dns, port);
+    match bind_port {
         Some(port) => match build(Some(port))?.bind().await {
-            Ok(endpoint) => endpoint,
+            Ok(endpoint) => Ok(endpoint),
             Err(err) => {
                 log::warn!(
                     "peer: the {label} endpoint could not take UDP port {port} ({err}); falling back to an \
                      ephemeral port, so a peer that cannot reach discovery will not find it"
                 );
-                build(None)?.bind().await?
+                Ok(build(None)?.bind().await?)
             }
         },
-        None => build(None)?.bind().await?,
-    };
+        None => Ok(build(None)?.bind().await?),
+    }
+}
 
-    let advertised = register_mdns(&endpoint, discovery.mdns, label);
-    report_addresses(endpoint.clone(), label);
-    Ok(Bound {
-        endpoint,
-        advertised,
-    })
+/// One configured builder.
+///
+/// ⚠️ **REBUILT RATHER THAN CLONED**, because `bind()` consumes the builder and
+/// the fixed port needs a second attempt when it is already taken. Everything
+/// is taken by reference and cloned inside, so the caller can call it twice.
+fn builder_for(
+    secret: &SecretKey,
+    alpns: &[Vec<u8>],
+    relay_mode: &RelayMode,
+    n0_dns: bool,
+    port: Option<u16>,
+) -> Result<iroh::endpoint::Builder> {
+    let mut builder = if n0_dns {
+        Endpoint::builder(presets::N0)
+    } else {
+        Endpoint::builder(presets::Minimal)
+    };
+    builder = builder
+        .secret_key(secret.clone())
+        .alpns(alpns.to_vec())
+        .relay_mode(relay_mode.clone());
+    match port {
+        /* v4 only: `bind_addr` replaces the unspecified bind for THAT family,
+        so v6 keeps its ephemeral one and a machine with no IPv4 is not left
+        without an endpoint. */
+        Some(port) => builder
+            .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+            /* Unreachable for a literal `0.0.0.0:PORT`, and mapped rather than
+            unwrapped anyway: a panic here would take the whole app down for
+            a bind address it chose itself. */
+            .map_err(|err| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("peer: bad bind address: {err}"),
+                ))
+            }),
+        None => Ok(builder),
+    }
 }
 
 /// Put this endpoint on the LAN, and say what that discloses.
@@ -243,7 +288,16 @@ fn register_mdns(endpoint: &Endpoint, wanted: bool, label: &str) -> Advertised {
      * to mDNS on this LAN sees TWO endpoint ids from this machine and their
      * addresses. Not one — two, from today. They see no person id, no book
      * hash and no name, because nothing here is given one. */
-    match iroh_mdns_address_lookup::MdnsAddressLookup::builder().build(endpoint.id()) {
+    /* ⚠️ **THE NAME IS PASSED, NOT ASSUMED.** `MDNS_SERVICE_NAME` used to be
+     * a copy of the dependency's default that registration never mentioned —
+     * so `Advertised::service_name` reported what Paper BELIEVED iroh
+     * published under, and an upstream change would have moved the real name
+     * while the constant and the test went on agreeing with each other. Passed
+     * explicitly, the constant is what is actually used. Found by audit. */
+    match iroh_mdns_address_lookup::MdnsAddressLookup::builder()
+        .service_name(MDNS_SERVICE_NAME)
+        .build(endpoint.id())
+    {
         Ok(mdns) => match endpoint.address_lookup() {
             Ok(services) => {
                 services.add(mdns);
@@ -277,9 +331,31 @@ fn register_mdns(endpoint: &Endpoint, wanted: bool, label: &str) -> Advertised {
 /// publishes, so an empty list is the difference between an endpoint that can
 /// be reached and one that cannot — and it is invisible from every other
 /// signal the app produces.
+///
+/// ⚠️ **IT LETS GO THE MOMENT THE ENDPOINT CLOSES, BECAUSE A CLONE HELD THE
+/// UDP SOCKET OPEN.** This slept five seconds holding an `Endpoint` clone. In
+/// the pinned iroh 1.0.3 the socket stays bound until every clone is dropped,
+/// `close()` included — so a shutdown inside those five seconds left the port
+/// occupied, and a relaunch fell back to an ephemeral port for a reason
+/// nothing reported. The fixed ports are the whole point of `APP_BIND_PORT`
+/// and `SHARE_BIND_PORT`. A diagnostic must not be able to cost them, so it
+/// races the sleep against the endpoint's own `closed()`. Found by audit.
 fn report_addresses(endpoint: Endpoint, label: &'static str) {
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        /* ⚠️ **THE CLONE IS DROPPED THE MOMENT THE ENDPOINT CLOSES, NOT FIVE
+         * SECONDS LATER.** `select` on `closed()` rather than sleeping through
+         * it: whichever arrives first, this task ends and its clone goes. A
+         * plain sleep meant a shutdown inside the window kept the socket bound
+         * until it finished. */
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(5)) => {}
+            _ = endpoint.closed() => {
+                log::debug!(
+                    "peer: the {label} endpoint closed before its addresses were reported"
+                );
+                return;
+            }
+        }
         let addr = endpoint.addr();
         let ips: Vec<String> = addr.ip_addrs().map(|a| a.to_string()).collect();
         let relays: Vec<String> = addr.relay_urls().map(|r| r.to_string()).collect();
@@ -360,15 +436,55 @@ mod tests {
         })
         .await
         .expect("an endpoint binds");
-        /* A machine that refuses multicast advertises nothing, and that is a
-        legitimate answer here rather than a failure — see the doc comment. */
-        if let Some(advertised) = bound.advertised.endpoint_id.as_deref() {
-            assert_eq!(advertised, id, "the endpoint id, and it is the only value");
+        /* ⚠️ **THE `None` BRANCH USED TO SKIP EVERY ASSERTION**, so this
+        measured nothing at all on a machine that refuses multicast — and a
+        detector that finds nothing looks exactly like a clean result. What
+        decides is whether THIS machine can build an mDNS service, which is
+        answerable here without joining a multicast group: if it can,
+        registration must have produced the id; if it cannot, it must have
+        produced nothing. Either way something is asserted. Found by audit.
+
+        ⚠️ **AND WHAT STOPS THE REGISTRATION BEING DELETED IS THE COMPILER,
+        NOT THIS TEST.** `services.add(mdns)` returns nothing and adds nothing
+        observable in-process, so no assertion here can tell a registered
+        service from an unregistered one. Removing the call leaves `mdns`
+        unused, which `cargo clippy -- -D warnings` refuses to compile —
+        verified by doing it. Saying so is better than implying this covers
+        it. */
+        let can_advertise = iroh_mdns_address_lookup::MdnsAddressLookup::builder()
+            .build(bound.endpoint.id())
+            .is_ok();
+        if can_advertise {
             assert_eq!(
-                bound.advertised.service_name, MDNS_SERVICE_NAME,
-                "iroh's own service name, so a Paper install is not fingerprintable on a LAN"
+                bound.advertised.endpoint_id.as_deref(),
+                Some(id.as_str()),
+                "this machine can advertise and the endpoint was not registered"
+            );
+        } else {
+            assert_eq!(
+                bound.advertised.endpoint_id, None,
+                "an endpoint that could not build an mDNS service claimed to advertise"
             );
         }
+        /* And whatever it advertises, it advertises under IROH'S name — so a
+        Paper install is not fingerprintable on a LAN. */
+        assert_eq!(bound.advertised.service_name, MDNS_SERVICE_NAME);
         bound.endpoint.close().await;
+    }
+
+    /// ⚠️ **`MDNS_SERVICE_NAME` IS A COPY OF THE DEPENDENCY'S DEFAULT AND
+    /// REGISTRATION NEVER PASSES IT.** So the constant is what Paper BELIEVES
+    /// iroh publishes under, and the test above compared the reported name
+    /// with that same constant — an upstream change would have moved the real
+    /// name while both sides went on agreeing. This holds the constant to the
+    /// dependency instead. Found by audit.
+    #[test]
+    fn the_service_name_is_the_one_registration_passes() {
+        /* The dependency's own constant is private, so this cannot be checked
+        against it from here — see `MDNS_SERVICE_NAME`, which records what
+        to do at an `iroh-mdns-address-lookup` bump. What IS held is that
+        the value Paper reports is the value Paper passes, which is what
+        made the old spelling a belief rather than a fact. */
+        assert_eq!(MDNS_SERVICE_NAME, "irohv1");
     }
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   PUBLIC_DISCLOSURE,
   PUBLIC_LINKS_DISCLOSURE,
@@ -59,13 +59,23 @@ function fakeVoice() {
 }
 
 /** A share port that records the lines it was told to publish. */
-function fakeShare() {
+function fakeShare(offers: readonly SharedBook[] = [{ hash: HASH, bytes: false, notes: true, noteCount: 0 }]) {
   const published: { hash: string; record: string }[] = []
-  const port: SharePort & { readonly published: typeof published } = {
+  const port: SharePort & { readonly published: typeof published; readonly offers: string[] } = {
     published,
-    offered: () => Promise.resolve([] as SharedBook[]),
-    offerBytes: () => Promise.resolve(),
-    offerNotes: () => Promise.resolve(),
+    /* ⚠️ **THE BOOK'S NOTES ARE OFFERED BY DEFAULT HERE, BECAUSE THE PORT NOW
+       REFUSES OTHERWISE.** A note published for a book nobody serves reaches
+       nobody, and the port used to report success — see its own comment. */
+    offered: () => Promise.resolve([...offers] as SharedBook[]),
+    offers: [] as string[],
+    offerBytes: (_f: string, _n: string, hash: string) => {
+      port.offers.push(hash)
+      return Promise.resolve()
+    },
+    offerNotes: (hash: string) => {
+      port.offers.push(hash)
+      return Promise.resolve()
+    },
     withdraw: (_h: string, _s: ShareService) => Promise.resolve(),
     publishNote: (hash: string, record: string) => {
       published.push({ hash, record })
@@ -73,14 +83,15 @@ function fakeShare() {
     },
     resolve: () => Promise.resolve([]),
     fetch: () => Promise.resolve(1),
+    fetchNotes: () => Promise.reject(new Error('no provider')),
   }
   return port
 }
 
-const portWith = (voice = fakeVoice(), share = fakeShare(), books = [book()]) => ({
+const portWith = (voice = fakeVoice(), share = fakeShare(), books = [book()], changed = () => {}) => ({
   voice,
   share,
-  port: publishPortOver(libraryOf(books), () => voice, () => share, () => NOW, () => {}),
+  port: publishPortOver(libraryOf(books), () => voice, () => share, () => NOW, changed),
 })
 
 describe('the disclosure', () => {
@@ -199,5 +210,56 @@ describe('nothing here mirrors a circle act', () => {
     const { port } = portWith()
     expect(Object.keys(port).sort()).toEqual(['disclosure', 'publish', 'voice', 'withdraw'])
     expect(port.publish.length).toBe(1)
+  })
+
+  it('reaches the public store and nothing else', async () => {
+    /* ⚠️ **THE PROPERTY WI-26.4 ASKS FOR, AGAINST THE THING THAT PUBLISHES.**
+       It used to be asserted over `afterPublishing` — a one-line transition on
+       a record no port ever held — so the mirror could have been written here
+       with that test still green. What a public act may touch is the share
+       port's notes for THIS book, and the voice that signs them. */
+    const share = fakeShare()
+    const voice = fakeVoice()
+    const { port } = portWith(voice, share)
+    await port.publish({ bookId: 'book:1', passage, acknowledged: true })
+    expect(share.published.map((one) => one.hash), 'a public act reached another book').toEqual([HASH])
+    /* And nothing offered anything on the reader's behalf: turning a book on
+       is its own act, which is why publishing REFUSES when it is off. */
+    expect(share.offers ?? [], 'a public act offered something nobody asked to offer').toEqual([])
+  })
+
+  it('refuses to publish a note for a book whose notes nobody serves', async () => {
+    /* ⚠️ **THE PLUGIN APPENDS A LINE AND NOTHING MORE.** The serve path checks
+       the policy per request, so a book whose notes are not offered answers
+       "nothing here" to every asker for ever — and the reader was told they
+       had published. Refused rather than offered automatically: offering is
+       itself a publication and cannot be a side effect of writing a
+       sentence. */
+    const share = fakeShare([])
+    const { port } = portWith(fakeVoice(), share)
+    await expect(port.publish({ bookId: 'book:1', passage, acknowledged: true })).rejects.toThrow(
+      /Publish notes/u,
+    )
+    expect(share.published, 'a note was written for a book nobody serves').toEqual([])
+  })
+
+  it('keeps a listener’s failure out of a publication that has landed', async () => {
+    /* ⚠️ **A THROWING `changed` REJECTED A PUBLICATION THAT WAS ALREADY ON
+       DISK**, and took the returned publication id with it — so the reader saw
+       a failure, pressed the button again, and published the same passage
+       twice under two ids. */
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const share = fakeShare()
+      const { port } = portWith(fakeVoice(), share, [book()], () => {
+        throw new Error('this listener is broken')
+      })
+      const out = await port.publish({ bookId: 'book:1', passage, acknowledged: true })
+      expect(out.pub, 'the publication id was lost with the listener').toBeTypeOf('string')
+      expect(share.published).toHaveLength(1)
+      expect(error).toHaveBeenCalled()
+    } finally {
+      error.mockRestore()
+    }
   })
 })

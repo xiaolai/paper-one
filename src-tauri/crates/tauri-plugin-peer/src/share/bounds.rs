@@ -133,7 +133,7 @@ struct Spend {
     /// The window's start and what has been spent in it, under ONE lock.
     ///
     /// ⚠️ **TWO ATOMICS WERE A RACE, AND IT HANDED OUT FREE WINDOWS.** The
-    /// rollover moved `since_ms` and then zeroed `bytes` as separate steps, so
+    /// rollover moved the window's start and then zeroed `bytes` as separate steps, so
     /// another thread could observe the new window between them, charge into
     /// it, and have that charge erased by the first thread's `store(0)`. Found
     /// by audit. A `Mutex` on two integers is not a cost worth measuring; a
@@ -144,8 +144,15 @@ struct Spend {
 
 #[derive(Debug, Clone, Copy)]
 struct Window {
-    /// Milliseconds since [`Spend::origin`], of the window's start.
-    since_ms: u64,
+    /// NANOSECONDS since [`Spend::origin`], of the window's start.
+    ///
+    /// ⚠️ **MILLISECONDS HERE HAD THE SAME DEFECT AS [`Reserved::until_ns`],
+    /// AND FOR THE SAME REASON.** `Duration::as_millis()` truncates, so a
+    /// window shorter than a millisecond became zero — and a zero-length
+    /// window has always just ended, so the allowance reset before every
+    /// charge and the byte budget bounded nothing. `u128` because `as_nanos`
+    /// answers one, and a window a caller configures may be any `Duration`.
+    since_ns: u128,
     bytes: u64,
 }
 
@@ -179,13 +186,39 @@ struct Reserved {
 }
 
 impl ShareBounds {
+    /// ⚠️ **A CONCURRENCY LIMIT PAST WHAT `Semaphore` ACCEPTS USED TO PANIC
+    /// HERE.** `Semaphore::new` panics above [`Semaphore::MAX_PERMITS`], and
+    /// these numbers come from a configuration record — so a value nobody
+    /// typed took the whole plugin down at construction, before anything could
+    /// report it. Clamped, not raised: `MAX_PERMITS` is the largest number
+    /// this primitive can express, so a limit past it is not a limit that was
+    /// being enforced anyway, and clamping to it is the only value that
+    /// preserves the caller's intent (as many as possible). Said out loud,
+    /// because a silently changed bound is the thing this file exists to stop.
+    /// Found by audit.
     pub fn new(limits: ShareLimits) -> Self {
+        let permits = |asked: usize, what: &str| -> usize {
+            if asked <= Semaphore::MAX_PERMITS {
+                return asked;
+            }
+            log::warn!(
+                "peer: {what} was configured at {asked}, past the {} a semaphore can hold; using that",
+                Semaphore::MAX_PERMITS
+            );
+            Semaphore::MAX_PERMITS
+        };
         Self {
-            transfers: Arc::new(Semaphore::new(limits.concurrent_transfers)),
-            connections: Arc::new(Semaphore::new(limits.concurrent_connections)),
+            transfers: Arc::new(Semaphore::new(permits(
+                limits.concurrent_transfers,
+                "concurrent transfers",
+            ))),
+            connections: Arc::new(Semaphore::new(permits(
+                limits.concurrent_connections,
+                "concurrent connections",
+            ))),
             spent: Arc::new(Spend {
                 window: Mutex::new(Window {
-                    since_ms: 0,
+                    since_ns: 0,
                     bytes: 0,
                 }),
                 origin: std::time::Instant::now(),
@@ -239,16 +272,29 @@ impl ShareBounds {
     /// transfer is the only one that matters.
     pub fn charge(&self, bytes: u64) -> std::result::Result<(), Refused> {
         self.with_window(|window| {
-            /* Saturating, because the alternative is that a wrapped counter
-             * reads as an empty window. A machine that has genuinely served
-             * 2^64 bytes is not a case to be exact about; it is a case to
-             * refuse. */
-            window.bytes = window.bytes.saturating_add(bytes);
-            if window.bytes > self.limits.bytes_per_window {
-                Err(Refused::Bytes)
-            } else {
-                Ok(())
+            /* ⚠️ **A REFUSED CHARGE USED TO SPEND THE ALLOWANCE ANYWAY.** The
+             * counter was advanced first and the limit checked afterwards, so
+             * one oversized request permanently consumed everything left in
+             * the window: 600 charged against 1 000, then a refused 600, and
+             * the counter reads 1 200 — a one-byte read is refused for the
+             * rest of the window with 400 bytes unspent. A stranger could
+             * therefore close a reader's window with requests that were never
+             * served. Reproduced by audit. The proposal is tested BEFORE it is
+             * committed, under the same lock.
+             *
+             * ⚠️ **AND `checked_add`, NOT `saturating_add`.** Saturating at
+             * `u64::MAX` compares `MAX > MAX` — false — so with a limit of
+             * `u64::MAX` an overflowing charge SUCCEEDED, for ever, which is
+             * the opposite of what the comment here used to promise. An
+             * overflow is refused and the counter is left where it was. */
+            let Some(proposed) = window.bytes.checked_add(bytes) else {
+                return Err(Refused::Bytes);
+            };
+            if proposed > self.limits.bytes_per_window {
+                return Err(Refused::Bytes);
             }
+            window.bytes = proposed;
+            Ok(())
         })
     }
 
@@ -288,13 +334,40 @@ impl ShareBounds {
         Duration::from_nanos(start.saturating_sub(now_ns))
     }
 
+    /// How far ahead of the origin the shared reservation clock stands.
+    ///
+    /// ⚠️ **TEST-ONLY, AND IT EXISTS SO THE RATE TESTS STOP MEASURING THE
+    /// MACHINE.** `read_delay` answers `reservation - now`, so every assertion
+    /// about it is really an assertion about how long the test itself took —
+    /// a scheduler pause between two calls silently eats the delay, and the
+    /// tests said so in their own comments. What the limiter GUARANTEES is
+    /// that N bytes advance this clock by what N bytes are worth, and that is
+    /// wall-clock independent. Found by audit.
+    #[cfg(test)]
+    fn reserved_ns(&self) -> u64 {
+        *self
+            .reserved
+            .until_ns
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+    }
+
     /// Run `act` against the current window, rolling it over first.
     ///
     /// ⚠️ **THE ROLL AND THE CHARGE ARE ONE CRITICAL SECTION.** Separating them
     /// is the race this replaced — see [`Spend::window`].
     fn with_window<T>(&self, act: impl FnOnce(&mut Window) -> T) -> T {
-        let now_ms = self.spent.origin.elapsed().as_millis() as u64;
-        let window_ms = self.limits.window.as_millis() as u64;
+        /* ⚠️ **NANOSECONDS, FOR `Reserved::until_ns`'s REASON ONE FIELD
+         * OVER.** `Duration::as_millis()` truncates, so a window under a
+         * millisecond — or any window whose length is not a whole number of
+         * them — became ZERO, and `elapsed >= 0` is true on every call: the
+         * allowance reset before every single charge and bounded nothing at
+         * all. A very long window could also wrap the `as u64` cast on the way
+         * down. Nanoseconds from a process-lifetime origin cannot overflow in
+         * any run, and `u128` is what `as_nanos` already answers. Found by
+         * audit, and it is the same defect the rate limiter had. */
+        let now_ns = self.spent.origin.elapsed().as_nanos();
+        let window_ns = self.limits.window.as_nanos();
         /* A poisoned lock means a caller panicked mid-charge. The counters are
          * two integers with no invariant between them beyond this function, so
          * carrying on with the held value is right — and refusing every
@@ -304,8 +377,12 @@ impl ShareBounds {
             .window
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        if now_ms.saturating_sub(window.since_ms) >= window_ms {
-            window.since_ms = now_ms;
+        /* A window of zero length is one that has always just ended, which is
+        "no allowance is retained between calls" and is a legitimate — if
+        odd — configuration. It is NOT what a truncated millisecond used to
+        produce accidentally. */
+        if now_ns.saturating_sub(window.since_ns) >= window_ns {
+            window.since_ns = now_ns;
             window.bytes = 0;
         }
         act(&mut window)
@@ -405,11 +482,20 @@ mod tests {
             Duration::ZERO,
             "an idle machine waits"
         );
-        /* The second caller waits for the first's second, not for its own. */
-        let next = bounds.read_delay(500);
-        assert!(
-            next >= Duration::from_millis(900) && next <= Duration::from_millis(1000),
-            "the second reader did not queue behind the first: {next:?}"
+        /* ⚠️ **THE RESERVATION, NOT THE RETURNED DELAY.** The delay is
+        `reservation - now`, so the band this used to assert — 900 to 1 000 ms
+        — is really a bound on how long the two lines above took, and a
+        loaded machine fails it for nothing. At 1 000 B/s, 1 000 bytes is
+        exactly one second and 500 more is half of one. */
+        let after_first = bounds.reserved_ns();
+        let _ = bounds.read_delay(500);
+        /* The DELTA is exact; the absolute value carries however far into the
+        process the first call happened to land, which is the machine
+        again. At 1 000 B/s, 500 bytes is half a second. */
+        assert_eq!(
+            bounds.reserved_ns() - after_first,
+            500_000_000,
+            "the second reader did not queue behind the first"
         );
     }
 
@@ -455,16 +541,31 @@ mod tests {
     /// than one chunk.
     #[test]
     fn a_book_of_chunks_accumulates_the_time_its_bytes_are_worth() {
+        /* ⚠️ **MEASURED ON THE RESERVATION CLOCK, NOT ON THE RETURNED
+        DELAY.** `read_delay` answers `reservation - now`, so asserting on it
+        asserts how long this test took to run: a scheduler pause of 60 ms
+        between the calls subtracts 60 ms from the answer, and the assertion
+        fails for a reason that has nothing to do with the limiter. What the
+        limiter guarantees is that N bytes advance the shared clock by what N
+        bytes are worth, and that is exact arithmetic. Found by audit. */
         let bounds = ShareBounds::new(ShareLimits::default());
         const CHUNK: u64 = 16 * 1024;
         const CHUNKS: u64 = 1_024; // 16 MiB, one second's worth at the default rate.
-        let mut last = Duration::ZERO;
+                                   /* One priming call puts the shared clock ahead of the present, so
+                                   every delta after it is exactly the cost of its bytes — no `now` in
+                                   the arithmetic at all. */
+        let _ = bounds.read_delay(CHUNK);
+        let before = bounds.reserved_ns();
         for _ in 0..CHUNKS {
-            last = bounds.read_delay(CHUNK);
+            let _ = bounds.read_delay(CHUNK);
         }
-        assert!(
-            last >= Duration::from_millis(950),
-            "16 MiB of chunks at 16 MiB/s reserved {last:?}, not about a second"
+        let cost =
+            CHUNK as u128 * 1_000_000_000 / ShareLimits::default().read_bytes_per_second as u128;
+        let want = (cost * CHUNKS as u128) as u64;
+        assert_eq!(
+            bounds.reserved_ns() - before,
+            want,
+            "16 MiB of chunks at 16 MiB/s did not reserve the {want} ns its bytes are worth"
         );
     }
 
@@ -522,10 +623,108 @@ mod tests {
         for hand in hands {
             hand.join().unwrap();
         }
-        /* The window is a millisecond, so most charges roll away — what is
-        asserted is that the counter is a coherent number rather than a value
-        two threads raced to write. */
-        assert!(bounds.charged_bytes() <= 1600);
+        /* ⚠️ **THIS ASSERTED `<= 1600` AND SO PASSED WHEN EVERY CHARGE WAS
+        LOST**, which is the exact defect it is named for — a charge erased by
+        another thread's rollover. An upper bound cannot detect a loss. Found
+        by audit. What is asserted now is that the counter is a number some
+        interleaving could produce: at least one charge survived (the last one
+        cannot have been rolled away by anybody, because nothing ran after
+        it), and no more than everything charged. */
+        let held = bounds.charged_bytes();
+        assert!(
+            (1..=1600).contains(&held),
+            "a rollover erased the charges made into the new window: {held}"
+        );
+    }
+
+    /// The lost-update half, WITHOUT a rollover to hide behind.
+    ///
+    /// ⚠️ **A WINDOW THAT NEVER ROLLS MAKES THE ARITHMETIC EXACT.** The test
+    /// above cannot say a number, because a millisecond window rolls an
+    /// unknown number of times while eight threads run — which is why it was
+    /// written as an upper bound, and why the upper bound proved nothing. Here
+    /// every charge lands in one window and the answer is 1 600 or the mutex
+    /// is not doing its job.
+    #[test]
+    fn no_charge_is_lost_when_threads_charge_together() {
+        let bounds = std::sync::Arc::new(ShareBounds::new(ShareLimits {
+            bytes_per_window: u64::MAX,
+            window: Duration::from_secs(3600),
+            ..small().limits()
+        }));
+        let mut hands = Vec::new();
+        for _ in 0..8 {
+            let mine = std::sync::Arc::clone(&bounds);
+            hands.push(std::thread::spawn(move || {
+                for _ in 0..200 {
+                    mine.charge(1).expect("the allowance is u64::MAX");
+                }
+            }));
+        }
+        for hand in hands {
+            hand.join().unwrap();
+        }
+        assert_eq!(bounds.charged_bytes(), 1600, "a charge was lost");
+    }
+
+    /// ⚠️ **A REFUSED CHARGE USED TO SPEND THE ALLOWANCE ANYWAY.**
+    #[test]
+    fn a_refused_charge_leaves_the_allowance_where_it_was() {
+        let bounds = small(); // 1 000 bytes per window
+        assert!(bounds.charge(600).is_ok());
+        assert!(
+            bounds.charge(600).is_err(),
+            "600 more than 600 of 1 000 fits"
+        );
+        assert_eq!(
+            bounds.charged_bytes(),
+            600,
+            "a refused request spent the window it was refused from"
+        );
+        assert!(
+            bounds.charge(400).is_ok(),
+            "the four hundred bytes left in the window were unreachable"
+        );
+    }
+
+    /// ⚠️ **`saturating_add` MADE AN OVERFLOWING CHARGE SUCCEED FOR EVER.**
+    /// With the allowance at `u64::MAX` the counter saturates to `u64::MAX`
+    /// and `MAX > MAX` is false, so every further charge was admitted — the
+    /// opposite of what `charge`'s own comment promised.
+    #[test]
+    fn an_overflowing_charge_is_refused_rather_than_saturated() {
+        let bounds = ShareBounds::new(ShareLimits {
+            bytes_per_window: u64::MAX,
+            window: Duration::from_secs(3600),
+            ..small().limits()
+        });
+        assert!(bounds.charge(u64::MAX - 1).is_ok());
+        assert!(
+            bounds.charge(2).is_err(),
+            "an overflowing charge was admitted"
+        );
+        assert_eq!(
+            bounds.charged_bytes(),
+            u64::MAX - 1,
+            "the refused charge moved the counter"
+        );
+    }
+
+    /// ⚠️ **A SUB-MILLISECOND WINDOW BECAME ZERO AND RESET BEFORE EVERY
+    /// CHARGE.** `Duration::as_millis()` truncates, so the byte budget bounded
+    /// nothing at all for any window shorter than a millisecond.
+    #[test]
+    fn a_window_shorter_than_a_millisecond_still_bounds_the_bytes() {
+        let bounds = ShareBounds::new(ShareLimits {
+            bytes_per_window: 1000,
+            window: Duration::from_micros(500),
+            ..small().limits()
+        });
+        assert!(bounds.charge(1000).is_ok());
+        assert!(
+            bounds.charge(1).is_err(),
+            "a sub-millisecond window reset the allowance before the charge"
+        );
     }
 
     #[test]
