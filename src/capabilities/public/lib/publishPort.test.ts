@@ -81,6 +81,7 @@ function fakeShare(offers: readonly SharedBook[] = [{ hash: HASH, bytes: false, 
       published.push({ hash, record })
       return Promise.resolve(published.length)
     },
+    shareId: () => Promise.resolve('fake-share-id'),
     resolve: () => Promise.resolve([]),
     fetch: () => Promise.resolve(1),
     fetchNotes: () => Promise.reject(new Error('no provider')),

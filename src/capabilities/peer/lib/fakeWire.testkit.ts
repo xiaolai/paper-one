@@ -634,6 +634,11 @@ class FakeWireImpl implements FakeWire {
     return Promise.resolve(held.records.length)
   }
 
+  /** A stable id, so a test that shows it can assert on the text. */
+  shareId(): Promise<string> {
+    return Promise.resolve('fake-share-endpoint-id')
+  }
+
   shareResolve(hash: string, service: ShareService): Promise<readonly string[]> {
     return Promise.resolve(this.providers.get(`${hash}:${service}`) ?? [])
   }

@@ -59,6 +59,7 @@ permissions = [
     "allow-peer-circle-remember",
     "allow-peer-circle-revoke",
     "allow-peer-circle-forget",
+    "allow-peer-share-id",
     "allow-peer-share-offered",
     "allow-peer-share-offer-bytes",
     "allow-peer-share-offer-notes",

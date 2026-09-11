@@ -876,6 +876,21 @@ async fn a_connection_may_make_more_requests_than_the_transfer_bound_allows_at_o
 /// deletes it before exporting. Interleaved, one destroys the other's export,
 /// or swaps the file between its hash check and its rename. The staging dance
 /// exists to close exactly that window; without a claim it opened a wider one.
+///
+/// ⚠️ **THIS WAS FLAKY AT ABOUT ONE RUN IN TEN, AND THE ANSWER WAS NOT TO
+/// WEAKEN IT.** The claim used to be taken inside `export_verified`, which runs
+/// at the END of both of `fetch_book`'s paths — so whether the second fetch was
+/// refused depended on whether it reached that short window before the first
+/// left it, and the two paths are wildly uneven because a book already in the
+/// store skips the transfer entirely. Measured 2026-09-11: 2 failures in 17
+/// runs, both of them TWO successes over one destination.
+///
+/// `fetch_book` now claims the destination at entry, before either path. There
+/// is no `await` between the function's first line and the claim, so a second
+/// concurrent call cannot be polled into the gap: it always finds the claim
+/// held and is refused by name. That makes this assertion deterministic rather
+/// than likely — 20 consecutive runs after the change. If it ever flakes again,
+/// the claim's span is what moved; do not relax the count.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_fetches_into_one_destination_do_not_share_a_staging_file() {
     let share = TestShare::start("share-fetch-race").await;

@@ -346,6 +346,8 @@ export interface PeerWire {
   /** Publish one annotation record. Its envelope is the caller's business. */
   sharePublishNote(hash: string, record: string): Promise<number>
   /** Who else claims to serve this hash. Never trusted — a hint, not a roster. */
+  /** This device's share endpoint id. Reads a key file; binds nothing. */
+  shareId(): Promise<string>
   shareResolve(hash: string, service: ShareService): Promise<readonly string[]>
   /**
    * Fetch a book by its hash into `books/<folder>/<name>`, and answer its size.
@@ -669,6 +671,7 @@ export function tauriWire(): PeerWire {
     shareOfferNotes: (hash) => invoke(command('peer_share_offer_notes'), { hash }),
     shareWithdraw: (hash, service) => invoke(command('peer_share_withdraw'), { hash, service }),
     sharePublishNote: (hash, record) => invoke(command('peer_share_publish_note'), { hash, record }),
+    shareId: () => invoke(command('peer_share_id')),
     shareResolve: (hash, service) => invoke(command('peer_share_resolve'), { hash, service }),
     shareFetch: (hash, folder, name, providers) =>
       invoke(command('peer_share_fetch'), { hash, folder, name, providers: providers === undefined ? null : [...providers] }),

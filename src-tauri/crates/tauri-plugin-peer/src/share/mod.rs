@@ -117,6 +117,49 @@ pub struct ShareConfig {
     pub dht: bool,
 }
 
+/// The environment variable a harness sets to run without announcing.
+///
+/// ⚠️ **THIS EXISTS BECAUSE THE PUBLIC LAYER COULD NOT BE DRIVEN AT ALL.**
+/// Every row of the ledger's public section was evidenced by tests in one
+/// process, and the reason was not only an absent harness: `for_app` hardcoded
+/// `dht: true`, so the first thing any end-to-end run would do is announce a
+/// real machine against a real book into a global, permanently queryable
+/// index. This repository forbids its own tests from touching the real DHT —
+/// a whole section of `AGENTS.md` says so — and gave a harness no way to obey
+/// the same rule. Added 2026-09-11, as the first work item of
+/// `public-scenario.sh` rather than as a convenience.
+#[cfg(any(debug_assertions, test))]
+pub const NO_DHT_ENV: &str = "PAPER_TEST_NO_DHT";
+
+/// Whether this process may announce, given the environment.
+///
+/// PURE AND TOTAL, so it can be measured without setting a process-wide
+/// variable in a threaded test runner.
+///
+/// ⚠️ **ABSENT MEANS ON, WHICH IS THE SHIPPED BEHAVIOUR AND THE UNSAFE
+/// DIRECTION FOR A HARNESS.** A misspelled variable therefore announces. That
+/// is deliberate — the default must be what a reader gets — and it is exactly
+/// why `ShareNode::start` LOGS the resolved state instead of trusting it:
+/// `public-scenario.sh` refuses to press Offer until it has read `dht=off` out
+/// of `Paper.log` on that machine. A flag nobody can read back is a flag that
+/// is assumed, and the thing being assumed here cannot be undone.
+#[cfg(any(debug_assertions, test))]
+pub fn dht_wanted(asked_off: Option<&std::ffi::OsStr>) -> bool {
+    asked_off.is_none()
+}
+
+#[cfg(debug_assertions)]
+fn dht_for_app() -> bool {
+    dht_wanted(std::env::var_os(NO_DHT_ENV).as_deref())
+}
+
+/// ⚠️ **COMPILED OUT OF RELEASE**, on `paper-data-root`'s precedent: a shipped
+/// build must not be steerable by the environment it happens to start in.
+#[cfg(not(debug_assertions))]
+fn dht_for_app() -> bool {
+    true
+}
+
 impl ShareConfig {
     pub fn for_app(root: PathBuf) -> Self {
         Self {
@@ -128,7 +171,7 @@ impl ShareConfig {
             },
             bind_port: Some(SHARE_BIND_PORT),
             limits: ShareLimits::default(),
-            dht: true,
+            dht: dht_for_app(),
         }
     }
 }
@@ -221,6 +264,15 @@ impl std::fmt::Debug for ShareNode {
 impl ShareNode {
     /// Bind the share endpoint, open the store, and start answering.
     pub async fn start(config: ShareConfig) -> Result<Arc<ShareNode>> {
+        /* ⚠️ **SAID OUT LOUD, BECAUSE THE HARNESS ASSERTS ON IT.** An announce
+         * cannot be undone, so "we meant to turn it off" is not a thing a run
+         * may assume. `public-scenario.sh` greps this line and refuses to press
+         * Offer without it. Logged before anything binds, so a run that dies
+         * during startup still says which way it was going. */
+        log::info!(
+            "peer: share endpoint dht={}",
+            if config.dht { "on" } else { "off" }
+        );
         let secret = identity::load_or_create_named(&config.root, identity::EndpointKey::Share)?;
         let policy = Arc::new(SharePolicy::load_or_refuse_all(&config.root));
         let bounds = ShareBounds::new(config.limits);
@@ -484,6 +536,44 @@ impl ShareNode {
         name: &str,
     ) -> Result<u64> {
         let target = BlobTarget::resolve(&self.root, folder, name, Access::Write)?;
+
+        /* ⚠️ **THE DESTINATION IS CLAIMED FOR THE WHOLE FETCH, AND IT USED TO
+         * BE CLAIMED ONLY FOR THE EXPORT.** The claim lived in
+         * `export_verified`, which runs at the END of both paths below — so
+         * whether a second fetch into the same destination was refused
+         * depended on whether it reached that window before the first left it.
+         * The two paths make the window wildly uneven: a book already in the
+         * store skips the transfer entirely and arrives almost at once, while
+         * a transferring fetch takes as long as the network does.
+         *
+         * The result was a test that failed about one run in ten with two
+         * successes over one destination — the exact outcome
+         * `two_fetches_into_one_destination_do_not_share_a_staging_file` exists
+         * to forbid. Measured 2026-09-11: 2 failures in 17 runs.
+         *
+         * Claimed here, mutual exclusion covers entry to completion, so the
+         * second fetch is refused deterministically rather than according to
+         * how fast the first one finished. `export_verified` no longer claims;
+         * it is private and both of its call sites are below this line. */
+        let staging = target.part_path();
+        let claimed = {
+            let mut running = self
+                .fetching
+                .lock()
+                .unwrap_or_else(|held| held.into_inner());
+            running.insert(staging.clone())
+        };
+        if !claimed {
+            return Err(Error::ShareRefused(format!(
+                "a fetch into {} is already running",
+                staging.display()
+            )));
+        }
+        let _claim = Fetching {
+            node: self,
+            target: staging,
+        };
+
         let blob = iroh_blobs::Hash::from_bytes(hash.bytes());
         /* ⚠️ **A BOOK THIS DEVICE ALREADY HOLDS NEEDS NOBODY.** Every fetch used
          * to require a provider — discovery, then a connection — before asking
@@ -525,9 +615,18 @@ impl ShareNode {
          * opposite was happening. Discovery runs only if every supplied
          * provider failed, so the round trip is still not paid for by a caller
          * whose own provider works. */
-        let mut queue = candidates;
+        /* ⚠️ **CONSUMED FROM THE FRONT, AND `pop()` TOOK IT FROM THE BACK.**
+         * A caller's provider list is ORDERED — `receiveNotes` puts a device
+         * the reader was told about ahead of whatever the index advertised —
+         * and `Vec::pop` reversed exactly that, so the named device was tried
+         * LAST and an advertised stranger first. It went unnoticed because the
+         * only run that exercised it had the DHT off, which makes the
+         * advertised half empty and the two orders identical. Found by an
+         * independent audit, 2026-09-11, in BOTH loops: one defect, two sites,
+         * fixed together. */
+        let mut queue: std::collections::VecDeque<EndpointAddr> = candidates.into_iter().collect();
         let mut asked_discovery = !supplied;
-        while let Some(provider) = queue.pop() {
+        while let Some(provider) = queue.pop_front() {
             let who = provider.id;
             /* ⚠️ **EVERY PROVIDER IS TRIED, AND A BAD ONE COSTS ONLY ITS OWN
              * ATTEMPT.** WI-25.3's acceptance: a provider serving one bad chunk
@@ -562,7 +661,7 @@ impl ShareNode {
             /* Every supplied provider has now failed. Ask the index once. */
             if queue.is_empty() && !asked_discovery {
                 asked_discovery = true;
-                queue = self.discovered(hash).await;
+                queue = self.discovered(hash).await.into_iter().collect();
             }
         }
         if !landed {
@@ -617,24 +716,10 @@ impl ShareNode {
          * `planShareImport` narrows the exposure — a fetch reaches an existing
          * folder only when the held record names that exact digest — but does
          * not remove it. */
+        /* The destination is already claimed by `fetch_book`, which is this
+        function's only caller and takes it before either path — see the
+        note there for why it is not taken here. */
         let staging = target.part_path();
-        let claimed = {
-            let mut running = self
-                .fetching
-                .lock()
-                .unwrap_or_else(|held| held.into_inner());
-            running.insert(staging.clone())
-        };
-        if !claimed {
-            return Err(Error::ShareRefused(format!(
-                "a fetch into {} is already running",
-                staging.display()
-            )));
-        }
-        let _claim = Fetching {
-            node: self,
-            target: staging.clone(),
-        };
         /* ⚠️ **EXPORTED TO A STAGING SIBLING, THEN PROMOTED.** Writing
          * straight to `content.*` means an interrupted export — a full disk, a
          * cancelled fetch, a hash that then disagrees — leaves a truncated
@@ -743,18 +828,28 @@ impl ShareNode {
         generation: Option<u64>,
     ) -> Result<notes::FetchedNotes> {
         let supplied = !providers.is_empty();
-        let mut queue: Vec<EndpointAddr> = providers.to_vec();
+        let mut queue: std::collections::VecDeque<EndpointAddr> =
+            providers.iter().cloned().collect();
         if queue.is_empty() {
-            queue = self.discovered(hash).await;
+            queue = self.discovered(hash).await.into_iter().collect();
         }
         if queue.is_empty() {
             return Err(Error::ShareRefused(format!(
                 "nobody could be found who serves notes for {hash}"
             )));
         }
+        /* ⚠️ **CONSUMED FROM THE FRONT, AND `pop()` TOOK IT FROM THE BACK.**
+         * A caller's provider list is ORDERED — `receiveNotes` puts a device
+         * the reader was told about ahead of whatever the index advertised —
+         * and `Vec::pop` reversed exactly that, so the named device was tried
+         * LAST and an advertised stranger first. It went unnoticed because the
+         * only run that exercised it had the DHT off, which makes the
+         * advertised half empty and the two orders identical. Found by an
+         * independent audit, 2026-09-11, in BOTH loops: one defect, two sites,
+         * fixed together. */
         let mut asked_discovery = !supplied;
         let mut last: Option<String> = None;
-        while let Some(provider) = queue.pop() {
+        while let Some(provider) = queue.pop_front() {
             let who = provider.id;
             match notes::ask_one(&self.endpoint, provider, hash, since, generation).await {
                 Ok(answer) => return Ok(answer),
@@ -762,7 +857,7 @@ impl ShareNode {
             }
             if queue.is_empty() && !asked_discovery {
                 asked_discovery = true;
-                queue = self.discovered(hash).await;
+                queue = self.discovered(hash).await.into_iter().collect();
             }
         }
         Err(Error::ShareRefused(format!(
@@ -1152,6 +1247,72 @@ impl ProtocolHandler for NotesProtocol {
         )
         .await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod dht_switch {
+    //! The harness's off switch, measured rather than assumed.
+    //!
+    //! ⚠️ **THE DECISION IS TESTED, NOT THE ENVIRONMENT.** `dht_wanted` takes
+    //! the value instead of reading `std::env` so these cases cannot race a
+    //! threaded runner — one test setting a process-wide variable while
+    //! another reads it is a flake that appears under `--test-threads` and
+    //! nowhere else. `paper-data-root` splits `resolve` from `data_root` for
+    //! the same reason.
+
+    use super::{dht_wanted, ShareConfig, NO_DHT_ENV};
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    #[test]
+    fn absent_means_the_dht_is_on_because_that_is_what_a_reader_gets() {
+        assert!(dht_wanted(None));
+    }
+
+    #[test]
+    fn any_value_at_all_turns_it_off_including_an_empty_one() {
+        /* `PAPER_TEST_NO_DHT=` is a variable that IS set, and a harness that
+        exported it meant it. Requiring a particular word would make the
+        empty spelling announce, which is the direction that cannot be
+        undone. */
+        assert!(!dht_wanted(Some(OsStr::new(""))));
+        assert!(!dht_wanted(Some(OsStr::new("1"))));
+        assert!(!dht_wanted(Some(OsStr::new("no"))));
+    }
+
+    #[test]
+    fn the_variable_is_named_once() {
+        /* The scenario script greps for this spelling. Two copies of a name
+        drift; this asserts the one the code uses. */
+        assert_eq!(NO_DHT_ENV, "PAPER_TEST_NO_DHT");
+    }
+
+    /// Puts `NO_DHT_ENV` back however the body leaves — including by panic.
+    ///
+    /// ⚠️ **THE FIRST VERSION RESTORED ON THE LAST LINE**, so a failing
+    /// assertion left the variable removed for every test that ran afterwards
+    /// in the same process — turning one red test into an unrelated cascade
+    /// and hiding the real one. Found by an independent audit, 2026-09-11.
+    struct EnvGuard(Option<std::ffi::OsString>);
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var(NO_DHT_ENV, value) },
+                None => unsafe { std::env::remove_var(NO_DHT_ENV) },
+            }
+        }
+    }
+
+    #[test]
+    fn a_debug_build_with_nothing_set_still_announces() {
+        /* The whole default, end to end through `for_app` rather than through
+        the helper — so a future edit that stops consulting `dht_for_app`
+        fails here rather than silently shipping a non-announcing app. */
+        let _restore = EnvGuard(std::env::var_os(NO_DHT_ENV));
+        unsafe { std::env::remove_var(NO_DHT_ENV) };
+        assert!(ShareConfig::for_app(PathBuf::from("/tmp/paper-dht-switch")).dht);
     }
 }
 

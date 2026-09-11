@@ -49,16 +49,52 @@ export interface PublicPaneProps {
    * record can be refused for a dozen reasons and naming them here would be
    * an oracle for whoever sent them.
    */
-  readonly lookForNotes?: (bookId: string) => Promise<number>
+  readonly lookForNotes?: (bookId: string, named?: readonly string[]) => Promise<number>
+  /**
+   * This device's share endpoint id — shown so the reader can hand it over.
+   *
+   * ⚠️ **WITHOUT THIS THE LAYER HAS TWO STATES AND ONE OF THEM IS PERMANENT
+   * PUBLICATION.** The DHT is the only route from a book's hash to a provider,
+   * so a reader who will not announce could not be found at all. An id given
+   * out of band — the way a phone number is — is the other route, and it is
+   * the one that works between two people who already know each other.
+   */
+  readonly shareId?: () => Promise<string>
 }
 
-export function PublicPane({ bookId, port, voices = null, heardOn, lookForNotes }: PublicPaneProps) {
+export function PublicPane({ bookId, port, voices = null, heardOn, lookForNotes, shareId }: PublicPaneProps) {
   const [heard, setHeard] = useState<readonly string[]>([])
   const [state, setState] = useState<PublicBookState | null | undefined>(undefined)
   const [trouble, setTrouble] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   /** How many records the last ask brought back — `null` before any ask. */
   const [looked, setLooked] = useState<number | null>(null)
+  /** A device id the reader was given out of band, or empty for "whoever advertised". */
+  const [askWho, setAskWho] = useState('')
+  /** This device's own share id, so the reader can hand it over. `null` until read. */
+  const [mine, setMine] = useState<string | null>(null)
+
+  /* ⚠️ **READ ONCE, AND ONLY WHEN THERE IS SOMETHING TO READ IT FOR.** The
+     command reads a key file and binds nothing, but a pane that asked on every
+     render would still be asking a plugin a question whose answer cannot
+     change while the app runs. */
+  useEffect(() => {
+    if (shareId === undefined) return
+    let live = true
+    shareId().then(
+      (id) => {
+        if (live) setMine(id)
+      },
+      () => {
+        /* A device that cannot say where it is still publishes and still
+           fetches; the sentence simply does not appear. Nothing here is worth
+           a visible failure. */
+      },
+    )
+    return () => {
+      live = false
+    }
+  }, [shareId])
 
   const refresh = useCallback(() => {
     if (port === null || bookId === null) return
@@ -227,20 +263,41 @@ export function PublicPane({ bookId, port, voices = null, heardOn, lookForNotes 
       )}
 
       {lookForNotes === undefined ? null : (
-        <div className={CAPABILITY_UI.row}>
-          <span className={CAPABILITY_UI.grow}>Other people’s notes</span>
-          <button
-            type="button"
-            className={CAPABILITY_UI.button}
-            disabled={busy}
-            onClick={act(async () => {
-              const arrived = await lookForNotes(bookId)
-              setLooked(arrived)
-            })}
-          >
-            Look for some
-          </button>
-        </div>
+        <>
+          <div className={CAPABILITY_UI.row}>
+            <span className={CAPABILITY_UI.grow}>Other people’s notes</span>
+            <button
+              type="button"
+              className={CAPABILITY_UI.button}
+              disabled={busy}
+              onClick={act(async () => {
+                const arrived = await lookForNotes(bookId, askWho.trim() === '' ? [] : [askWho.trim()])
+                setLooked(arrived)
+              })}
+            >
+              Look for some
+            </button>
+          </div>
+          {/* ⚠️ **THE ONLY ROUTE THAT DOES NOT REQUIRE PUBLISHING A HOME
+              ADDRESS.** The provider index is the DHT and nothing else turns a
+              hash into a provider, so a reader who has not announced can only
+              be found by somebody they told. Optional, and empty means "ask
+              whoever advertised" exactly as before. */}
+          <input
+            type="text"
+            className={CAPABILITY_UI.field}
+            value={askWho}
+            placeholder="…or a device id somebody gave you"
+            aria-label="A device id to ask"
+            onChange={(event) => setAskWho(event.target.value)}
+          />
+          {mine === null ? null : (
+            <p className={CAPABILITY_UI.hint}>
+              Ask somebody to look for yours at <code>{mine}</code>. It says where to reach this device and nothing
+              about which books it holds.
+            </p>
+          )}
+        </>
       )}
       {looked === null ? null : (
         <p className={CAPABILITY_UI.hint}>

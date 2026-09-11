@@ -922,6 +922,44 @@ pub struct SharedBook {
     pub note_count: Option<u64>,
 }
 
+/// This device's SHARE endpoint id — where to ask it for a book's notes.
+///
+/// ⚠️ **THIS EXISTS BECAUSE THE LAYER HAD EXACTLY TWO STATES: ANNOUNCE TO THE
+/// WHOLE INTERNET, OR FIND NOBODY.** `ShareNode::discovered` returns an empty
+/// list the moment the DHT is off, and the DHT is the only thing that turns a
+/// content hash into a provider — mDNS publishes an endpoint id and its
+/// addresses and has no field that could carry a hash (`endpoint.rs`), and
+/// share discovery is global by decision (WI-25.7). So two people on one LAN,
+/// or two machines a reader owns, could not reach each other at all without
+/// putting a book's hash and a home address into a permanent public index.
+///
+/// `peer_share_fetch_notes` has ALWAYS taken an explicit `providers` list. What
+/// was missing was any way for a device to say where it can be asked. This is
+/// that, and it is the whole of it: an id a reader can hand to somebody they
+/// already trust, out of band, the way they would a phone number.
+///
+/// ⚠️ **READS THE KEY, NEVER THE NODE — `peer_share_offered`'s rule.** The id
+/// is the public half of `peer/share.key`, so answering costs a file read and
+/// binds no UDP port. Asking "where can I be reached" must not be the thing
+/// that puts this machine on a network.
+///
+/// ⚠️ **AND IT DISCLOSES NOTHING THE LAN DOES NOT ALREADY SEE.** The same id is
+/// mDNS-advertised to every machine on the network (WI-25.8). What it does not
+/// carry, and must never be extended to carry, is which books this device
+/// holds: the share protocol answers for an unoffered book exactly as it does
+/// for one this machine has never held, so that a stranger cannot enumerate a
+/// library by asking.
+#[tauri::command]
+pub async fn peer_share_id<R: Runtime>(app: AppHandle<R>) -> Result<String> {
+    let root = data_root(&app)?;
+    off_thread(move || {
+        let secret =
+            crate::identity::load_or_create_named(&root, crate::identity::EndpointKey::Share)?;
+        Ok(secret.public().to_string())
+    })
+    .await
+}
+
 /// Everything this machine offers publicly.
 ///
 /// ⚠️ **READS THE FILE, NEVER THE NODE.** A surface that has to start a UDP

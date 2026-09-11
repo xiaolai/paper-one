@@ -283,6 +283,35 @@ const REVIEWED_WRITES: Readonly<Record<string, ReviewedWrites>> = {
       /^books\/[A-Za-z0-9_]+\/circle$/u,
     ],
   },
+  /* ⚠️ **THIS ENTRY WAS MISSING AND THE RECEIVING HALF COULD NOT STORE A
+   * SINGLE RECORD.** `publicPathIn` puts a stranger's annotations in the
+   * book's own folder, deliberately — `bookFolder.ts` says so in as many
+   * words — and `public` had no review here, so every `writePublic` was
+   * refused by the namespace guard with *"capability \"public\" may only
+   * writeAtomic under \"public/\""*. Phase 26's whole display half was
+   * therefore unreachable in the running app.
+   *
+   * ⚠️ **AND NOTHING COULD SEE IT.** `publicStore.test.ts` supplies its own
+   * fs, and `share/acceptance.rs` proves the transport between two endpoints
+   * in one process — neither goes through `scopeFs`. It took two real Macs:
+   * the records arrived, the fetch reported them, and the store stayed empty
+   * while the pane printed the refusal as a trouble line nobody was reading.
+   * Found 2026-09-11 by the first green run of `scripts/public-scenario.sh`.
+   *
+   * The shapes are `circle`'s, narrowed to the one file: a public store per
+   * book and the book's own folder to put it in. `public/` itself needs no
+   * shape — it is the capability's own prefix. */
+  public: {
+    files: [
+      /* `publicPathIn`: what strangers said about this book, beside the
+         reader's marks and never in them. */
+      /^books\/[A-Za-z0-9_]+\/public\.jsonl(?:\.writing)?$/u,
+    ],
+    dirs: [
+      /* Only the book's folder. A public write never makes a subdirectory. */
+      /^books\/[A-Za-z0-9_]+$/u,
+    ],
+  },
 }
 
 export function scopeFs(fs: KernelServices['fs'], capId: string): KernelServices['fs'] {

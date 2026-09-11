@@ -97,6 +97,7 @@ pub const SHARE_RESUME_FAILED_EVENT: &str = "paper://share-resume-failed";
 /// is what closing politely avoids and is strictly better than not quitting.
 const EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
+use std::time::Duration;
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Emitter, Listener, Manager, RunEvent, Runtime};
 
@@ -113,6 +114,17 @@ use tauri::{Emitter, Listener, Manager, RunEvent, Runtime};
 /// keep in step. `commands.rs`'s own header records the same conclusion for
 /// the same reason. The test is the mechanism; the repetition is the cost of
 /// the macro, and it is bounded and loud.
+/// How long the `.part` sweep waits for `app.manage` before giving up.
+///
+/// Far past any real interleaving — the two lines are microseconds apart in a
+/// build that works — so its only job is that a state which is never managed
+/// reports that instead of waiting forever. Housekeeping must not be the
+/// reason an app fails to start.
+const MANAGE_WAIT: Duration = Duration::from_secs(10);
+
+/// How often it asks. Short enough that the sweep is not delayed by the wait.
+const MANAGE_POLL: Duration = Duration::from_millis(5);
+
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("peer")
         .invoke_handler(tauri::generate_handler![
@@ -149,6 +161,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::peer_circle_revoke,
             commands::peer_circle_remember,
             commands::peer_circle_forget,
+            commands::peer_share_id,
             commands::peer_share_offered,
             commands::peer_share_offer_bytes,
             commands::peer_share_offer_notes,
@@ -187,6 +200,41 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                      * will call `hold_library` on. */
                     let handle = app.clone();
                     state.start_after(tauri::async_runtime::spawn(async move {
+                        /* ⚠️ **WAIT FOR `manage`, DO NOT ASSUME IT — AND THE
+                         * COMMENT ABOVE ASSUMED IT.** It said *"this task runs
+                         * after `app.manage` below"*, and nothing made that
+                         * true: `spawn` can be polled before setup reaches the
+                         * `app.manage(state)` line thirty lines down, and on
+                         * two Macs it won that race EVERY time. `state()`
+                         * panics when the type is not managed yet, the panic
+                         * is caught and reported as a WARN, and the result is
+                         * that `sweep_abandoned_parts` NEVER RUNS — silently,
+                         * on every launch, since the sweep was added.
+                         *
+                         * Measured 2026-09-11 while building
+                         * `public-scenario.sh`: three launches on
+                         * a second Mac and one here, four for four, including
+                         * unmodified 0.3.2 bundle. The log line is
+                         * *"peer: the .part sweep did not finish: task N
+                         * panicked with message \"state() called before
+                         * manage() for tauri_plugin_peer::state::PeerState\""*.
+                         *
+                         * `try_state` asks instead of asserting. Bounded, so a
+                         * build that never manages the state reports that
+                         * rather than spinning or hanging: the sweep is
+                         * housekeeping and must never be the reason an app
+                         * fails to start. */
+                        let mut waited = Duration::ZERO;
+                        while handle.try_state::<PeerState>().is_none() {
+                            if waited >= MANAGE_WAIT {
+                                log::warn!(
+                                    "peer: the .part sweep gave up waiting {MANAGE_WAIT:?} for PeerState to be managed"
+                                );
+                                return;
+                            }
+                            tokio::time::sleep(MANAGE_POLL).await;
+                            waited += MANAGE_POLL;
+                        }
                         handle.state::<PeerState>().library_granted().await;
                         tauri::async_runtime::spawn_blocking(move || {
                             blobs::sweep_abandoned_parts(&root, std::time::SystemTime::now()).log();
@@ -216,6 +264,41 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             {
                 let handle = app.clone();
                 app.listen(LIBRARY_HELD_EVENT, move |_| {
+                    /* ⚠️ **THE ANNOUNCE DECISION, SAID HERE AND NOT IN THE
+                     * APP'S `setup`, AND NOT IN THIS PLUGIN'S EITHER.** An
+                     * announce puts this machine's address, against a book's
+                     * content hash, into a global and permanently queryable
+                     * index, so it must be readable BEFORE anything touches a
+                     * control. Three placements were tried and two were wrong:
+                     *
+                     * `ShareNode::start` — the share endpoint starts LAZILY,
+                     * on the first command that offers or resolves, so the
+                     * line arrived only after the act it exists to gate.
+                     *
+                     * This plugin's own `setup` — Tauri initialises plugins
+                     * BEFORE the application's, `tauri_plugin_log` among them,
+                     * so a `log::` call there has no logger yet and is
+                     * discarded in silence. Measured: this plugin's later
+                     * ASYNC lines reach `Paper.log` and a synchronous one
+                     * from `setup` never did.
+                     *
+                     * The app's own `setup` — it works, and it made
+                     * `src-tauri/src/lib.rs` name `tauri_plugin_peer` outside
+                     * its `.plugin()` line, which is the coupling that makes
+                     * this plugin unremovable (see the note above). Found by
+                     * an independent audit the same day it was written.
+                     *
+                     * This listener is all three at once: inside the plugin,
+                     * after every plugin is initialised, and before a reader
+                     * can reach a control. */
+                    log::info!(
+                        "peer: share endpoint dht={}",
+                        if crate::share::ShareConfig::for_app(std::path::PathBuf::new()).dht {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    );
                     handle.state::<PeerState>().hold_library();
                 });
             }

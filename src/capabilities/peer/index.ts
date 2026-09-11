@@ -222,6 +222,16 @@ export interface SharePort {
   withdraw(hash: string, service: ShareService): Promise<void>
   /** Publish one annotation record for a book. */
   publishNote(hash: string, record: string): Promise<number>
+  /**
+   * This device's share endpoint id — where to tell somebody to ask.
+   *
+   * ⚠️ **THE ANSWER TO A LAYER THAT COULD ONLY ANNOUNCE OR FIND NOBODY.**
+   * `resolve` is the DHT and the DHT is the only hash→provider route there is,
+   * so with announcing off `fetchNotes` finds nobody — on a LAN or anywhere.
+   * This is the out-of-band half: an id a reader hands to somebody they
+   * already trust. Reads a key file; starts nothing.
+   */
+  shareId(): Promise<string>
   /** Who else claims to serve this hash. A hint, never a roster. */
   resolve(hash: string, service: ShareService): Promise<readonly string[]>
   /** Fetch a book into `books/<folder>/<name>`. See the wire for why `folder` matters. */
@@ -303,6 +313,7 @@ export function sharePortOver(held: PeerWire): SharePort {
     offerNotes: (hash) => held.shareOfferNotes(hash),
     withdraw: (hash, service) => held.shareWithdraw(hash, service),
     publishNote: (hash, record) => held.sharePublishNote(hash, record),
+    shareId: () => held.shareId(),
     resolve: (hash, service) => held.shareResolve(hash, service),
     fetch: (hash, folder, name, providers) => held.shareFetch(hash, folder, name, providers),
     fetchNotes: (hash, providers, since, generation) => held.shareFetchNotes(hash, providers, since, generation),

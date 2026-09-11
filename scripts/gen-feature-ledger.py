@@ -61,6 +61,26 @@ INFORMATIONAL_HEADERS = (
     # and said nothing about the case that mattered. Distinct enough to name,
     # because the three above would each file it under the wrong lesson.
     ['row', 'what it said', 'what was true'],
+    # The 2026-09-11 pass's two logs. The first is the CLEAN half — the
+    # mechanical checks that came back with nothing — which no previous pass
+    # wrote down, and without which the findings below it read as whatever
+    # happened to be noticed rather than as the residue of a sweep.
+    ['check', 'result'],
+    # The second is a fifth shape: a claim that was true of ONE SURFACE and
+    # written about the app. Not drift, because nothing moved under it; not a
+    # missing surface, because the row exists; not an overclaim against
+    # evidence, because the evidence is real and is about the desktop. The
+    # columns say where the claim lives rather than which row it is, because
+    # two of the five are section headers and one is a paragraph in Part 3.
+    ['#', 'where', 'what it said', 'what is true'],
+    # The Companion header's own table: the rows an ordinary reader reaches
+    # despite a blanket sentence saying none of them can be.
+    ['row', 'where an ordinary reader meets it'],
+    # The 2026-09-11 run's own log: what was READ out of the running app and
+    # what it answered. Not a row, not a surface, not a drift — a measurement
+    # taken from inside a book's document, which is where the two mechanisms
+    # this ledger names are either true or not.
+    ['what was read', 'what it answered'],
 )
 
 

@@ -32,6 +32,64 @@ function rawFs() {
   return fs as unknown as NonNullable<KernelServices['fs']> & typeof fs
 }
 
+describe('the public layer’s reviewed write', () => {
+  /**
+   * ⚠️ **THIS SHIPPED BROKEN AND NO TEST IN THE TREE COULD SEE IT.**
+   * `publicPathIn` writes a stranger's annotations into the book's own folder,
+   * and `public` had no review entry — so every `writePublic` was refused with
+   * *"capability \"public\" may only writeAtomic under \"public/\""*, which
+   * made the whole display half of phase 26 unreachable in a running app.
+   *
+   * `publicStore.test.ts` supplies its own fs and `share/acceptance.rs` proves
+   * the transport inside one process; neither goes through `scopeFs`. It took
+   * two real Macs to find, on 2026-09-11, and the pane had been printing the
+   * refusal the whole time.
+   */
+  const bytes = new Uint8Array([1])
+  const OK = ['books/book_abc/public.jsonl', 'books/book_abc/public.jsonl.writing', 'public/voices.json']
+  const NOT = [
+    /* A public write never reaches the reader's own writing, nor the circle's
+       store, nor a book's bytes. */
+    'books/book_abc/marks.json',
+    'books/book_abc/shared.json',
+    'books/book_abc/circle/aa11.json',
+    'books/book_abc/content.epub',
+    'books/book_abc/public.jsonl/../marks.json',
+    'trash/book_abc/public.jsonl',
+  ]
+
+  it('lets the public layer write the one file its review names, atomically and otherwise', async () => {
+    const fs = rawFs()
+    const scoped = scopeFs(fs, 'public')!
+    for (const path of OK) {
+      await expect(scoped.writeFile(path, bytes)).resolves.toBeUndefined()
+      await expect(scoped.writeAtomic!(path, bytes, 'full')).resolves.toBeUndefined()
+    }
+    /* The fallback path makes the parent first — see the circle's note. */
+    await expect(scoped.mkdir('books/book_abc')).resolves.toBeUndefined()
+  })
+
+  it('refuses it everything else under books/, and refuses another capability its shape', async () => {
+    const scoped = scopeFs(rawFs(), 'public')!
+    for (const path of NOT) {
+      await expect(scoped.writeFile(path, bytes)).rejects.toThrow(/may only writeFile under "public\/"/u)
+      await expect(scoped.writeAtomic!(path, bytes, 'full')).rejects.toThrow(/may only writeAtomic/u)
+    }
+    const circle = scopeFs(rawFs(), 'circle')!
+    await expect(circle.writeFile('books/book_abc/public.jsonl', bytes)).rejects.toThrow(
+      /may only writeFile under "circle\/"/u,
+    )
+  })
+
+  it('does not let it make a book’s subdirectory', async () => {
+    /* `dirs` is the book's folder and nothing under it: a public store is one
+       file, so a capability that could make `books/<id>/anything` would have
+       been reviewed for more than it needs. */
+    const scoped = scopeFs(rawFs(), 'public')!
+    await expect(scoped.mkdir('books/book_abc/public')).rejects.toThrow(/may only mkdir under "public\/"/u)
+  })
+})
+
 describe('the circle’s two reviewed write shapes', () => {
   const OK = ['books/book_abc/circle/aa11bb22.json', 'books/book_abc/shared.json', 'books/book_abc/shared.json.writing', 'circle/aa11/shelf.json']
   const NOT = [

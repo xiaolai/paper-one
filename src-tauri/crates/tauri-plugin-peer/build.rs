@@ -85,6 +85,7 @@ const COMMANDS: &[&str] = &[
     //
     // (This said "every other one", which was wrong about publishing a note —
     // so writing one read as a network act. Found by audit.)
+    "peer_share_id",
     "peer_share_offered",
     "peer_share_offer_bytes",
     "peer_share_offer_notes",

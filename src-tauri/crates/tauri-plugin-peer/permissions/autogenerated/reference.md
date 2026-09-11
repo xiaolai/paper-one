@@ -58,6 +58,7 @@ to circle pages, so neither key can be made to sign the other's.
 - `allow-peer-circle-remember`
 - `allow-peer-circle-revoke`
 - `allow-peer-circle-forget`
+- `allow-peer-share-id`
 - `allow-peer-share-offered`
 - `allow-peer-share-offer-bytes`
 - `allow-peer-share-offer-notes`
@@ -961,6 +962,32 @@ Enables the peer_share_fetch_notes command without any pre-configured scope.
 <td>
 
 Denies the peer_share_fetch_notes command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-share-id`
+
+</td>
+<td>
+
+Enables the peer_share_id command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-share-id`
+
+</td>
+<td>
+
+Denies the peer_share_id command without any pre-configured scope.
 
 </td>
 </tr>

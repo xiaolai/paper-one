@@ -149,7 +149,7 @@ const NOTE_ROUNDS = 4
  * request; every record already held is refused as a duplicate before it
  * reaches the bounds.
  */
-async function receiveNotes(held: Running, bookId: string): Promise<number> {
+async function receiveNotes(held: Running, bookId: string, named: readonly string[] = []): Promise<number> {
   const { fs, voices } = held
   if (fs === null || voices === null) return 0
   const book = held.library.getSnapshot().find((one) => one.bookId === bookId)
@@ -158,9 +158,21 @@ async function receiveNotes(held: Running, bookId: string): Promise<number> {
   if (share === null) return 0
   const hash = book.contentHash
   /* Who to ask. The index is a hint and never a roster, so an empty answer is
-     "nobody advertised", not "nobody has it" — and `fetchNotes` falls back to
-     discovery itself when the list is empty. */
-  const providers = await share.resolve(hash, 'notes').catch(() => [] as readonly string[])
+     "nobody advertised", not "nobody has it".
+
+     ⚠️ **AND THE FALLBACK THIS COMMENT USED TO PROMISE DOES NOT EXIST.** It
+     said `fetchNotes` "falls back to discovery itself when the list is empty",
+     which is true and is a fallback TO THE DHT: `ShareNode::discovered`
+     returns an empty vector the moment `dht()` is `None`. So with announcing
+     off — which is the only way to use this layer without writing a home
+     address into a permanent public index — an empty list means nobody, on a
+     LAN or anywhere. Measured 2026-09-11 between two Macs on one network.
+
+     `named` is the way out, and it is out-of-band by design: a reader hands
+     somebody their share id the way they would a phone number, and it is
+     tried BEFORE the index rather than instead of it, so the two compose. */
+  const advertised = await share.resolve(hash, 'notes').catch(() => [] as readonly string[])
+  const providers = [...named, ...advertised.filter((one) => !named.includes(one))]
   const decisions = await voices.decisions()
   const blocked = (voice: string): boolean => standingOf(voice, decisions) === 'blocked'
   let taken = 0
@@ -244,8 +256,20 @@ const heardOn = (bookId: string): Promise<readonly string[]> =>
  * decides, per book, each time — which is the same posture `PublishControl`
  * takes for the other direction.
  */
-const lookForNotes = (bookId: string): Promise<number> =>
-  running === null ? Promise.resolve(0) : receiveNotes(running, bookId)
+/**
+ * This device's share endpoint id, for the pane to show.
+ *
+ * A thunk rather than a value because the capability may not be running, and
+ * a stable one because `PublicPane` keys an effect on it — a fresh closure per
+ * render would re-ask the plugin on every paint.
+ */
+const shareIdOfThisDevice = (): Promise<string> => {
+  const port = sharePort()
+  return port === null ? Promise.reject(new Error('the peer capability is not running')) : port.shareId()
+}
+
+const lookForNotes = (bookId: string, named: readonly string[] = []): Promise<number> =>
+  running === null ? Promise.resolve(0) : receiveNotes(running, bookId, named)
 
 /**
  * What this reader has already shared privately about one book, as a thunk the
@@ -392,6 +416,7 @@ export const publicSharing: Capability = {
           voices: running?.voices ?? null,
           heardOn: heardOn,
           lookForNotes: lookForNotes,
+          shareId: shareIdOfThisDevice,
         }),
       /* Stryker restore all */
     },

@@ -63,6 +63,7 @@ function fakeShare(): SharePort & {
       return Promise.resolve()
     },
     publishNote: () => Promise.resolve(1),
+    shareId: () => Promise.resolve('fake-share-id'),
     resolve: () => Promise.resolve([]),
     fetch: (hash: string, folder: string, name: string) => {
       fetches.push({ hash, folder, name })
