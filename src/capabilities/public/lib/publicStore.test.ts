@@ -323,6 +323,25 @@ describe('writePublic — one queued transaction', () => {
      evicting one, wrong about the cost — so twelve thousand of them took the
      file past what its own reader accepts, and every later load refused it
      whole. That loses every REAL suppression too, and never recovers. */
+  /* ⚠️ **A CEILING THAT IS A FRACTION OF THE TEST'S OWN RUNTIME IS A THROUGHPUT
+     ASSERTION.** These two tests sign, write and re-verify thousands of envelopes
+     on purpose, and their sizes are measured rather than chosen — 12 000 is where
+     `MAX_STORED_BYTES_PER_BOOK` falls, and a smaller flood passes with the bound
+     removed. At rest they take 8.1 s and 3.2 s against the project's 15 s, so
+     they run with a 1.9x and 4.7x margin while `vitest.config.ts` records a
+     SEVEN-FOLD inflation under load. Both duly timed out in `pnpm test:coverage`
+     on 2026-09-10 while passing in isolation — measured at 8.0 s and 2.9 s WITH
+     coverage, so instrumentation is not the cost and contention is.
+
+     60 s is not a multiple of the runtime; it is the same bound the `scripts` and
+     `app` projects already carry and its only job is that a genuine hang fails
+     rather than hangs. This is the class `blobs.rs`'s `TRANSFER_LIVENESS` and
+     `vitest.setup.ts`'s `asyncUtilTimeout` were both fixed under: **contention
+     has no ceiling, so no multiple of observed runtime is safe.**
+
+     ⚠️ **DO NOT "FIX" THIS BY SHRINKING THE FLOOD.** The count is the assertion. */
+  const FLOOD_TIMEOUT_MS = 60_000
+
   it('bounds withdrawals that suppress nothing, so a flood cannot brick the book', async () => {
     const files = new Map<string, string>()
     const fs = fakeFs(files)
@@ -399,7 +418,7 @@ describe('writePublic — one queued transaction', () => {
       read?.file.held.map((one) => one.pub),
       'a book showing nothing refused a new annotation, because its suppression record filled the note cap',
     ).toEqual(['fresh'])
-  })
+ }, FLOOD_TIMEOUT_MS)
 
   it('measures a book’s retained bytes in UTF-8, so Chinese text cannot overshoot the budget threefold', async () => {
     const files = new Map<string, string>()
@@ -430,7 +449,7 @@ describe('writePublic — one queued transaction', () => {
        would pass for a reason that has nothing to do with the unit. */
     expect(back.file.held.length).toBeLessThan(MAX_HELD_PER_BOOK)
     expect(back.file.held.length).toBeGreaterThan(0)
-  })
+ }, FLOOD_TIMEOUT_MS)
 })
 
 describe('the book an envelope names', () => {

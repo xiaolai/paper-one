@@ -37,16 +37,31 @@ export const STEPS = Object.freeze([
   { name: 'css:tokens', cmd: 'pnpm', args: ['css:tokens'] },
   { name: 'browser:check', cmd: 'pnpm', args: ['browser:check'] },
   { name: 'directives:check', cmd: 'pnpm', args: ['directives:check'] },
-  /* THE FEATURE-LEDGER GATE IS GONE, and this note is what is left of it.
-   * It read `dev-docs/feature-ledger.md` and `dev-docs/library-ledger.md` and checked
-   * that every path claim named a file that exists — the Where column being a
-   * claim about the filesystem, answered by the filesystem. Both ledgers moved
-   * out of the repository with the rest of `dev-docs/`, so the gate had no input
-   * on a clean checkout and was removed rather than made conditional on an
-   * untracked path, which is the failure this repository has already had.
+  /* THE FEATURE-LEDGER GATE CAME BACK ON 2026-09-10, IN TWO HALVES, AND ONLY
+   * ONE OF THEM RUNS EVERYWHERE.
    *
-   * NOTHING REPLACES IT. Stale rows in those ledgers are now caught by nobody.
+   * The old `features:check` read both ledgers and checked that every path
+   * claim named a file that exists. It was deleted in `a1f256f` when both
+   * ledgers moved into gitignored `dev-docs/` — correct at the time, because a
+   * gate with no input on a clean checkout that passes anyway is worse than no
+   * gate. For five weeks nothing replaced it, and the 2026-09-10 audit is what
+   * that cost: eight findings, the largest being fifteen shipped reading
+   * settings with no ledger row at all.
+   *
+   * ⚠️ **WHAT `ledger:check` BUYS, STATED NARROWLY.** It guards THE MACHINE
+   * THAT WRITES THE LEDGER — where every one of those eight findings was
+   * introduced — and it does NOT guard a clone. On a checkout without
+   * `dev-docs/` it skips and says so in one line naming `.gitignore:65`, rather
+   * than passing quietly; `pnpm ledger:check --require` turns that skip into a
+   * failure for anywhere that should have the documents. Do not read a green
+   * CI run as evidence that the ledgers are current: on CI this step SKIPS.
+   *
+   * The half that does bind CI is `scripts/surfaces.mjs`, which is tracked and
+   * whose test runs under `test:coverage` on every checkout — so a registry
+   * cannot change shape unnoticed even where no ledger exists. That split is
+   * the whole design, and it is why this is a step rather than a note.
    */
+  { name: 'ledger:check', cmd: 'pnpm', args: ['ledger:check'] },
   { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
   /* `boundaries:selftest` IS NOT A STEP, AND THE CASES DID NOT STOP RUNNING.
    *

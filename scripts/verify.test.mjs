@@ -42,6 +42,13 @@ describe('the steps', () => {
       'css:tokens',
       'browser:check',
       'directives:check',
+      /* ⚠️ THIS STEP SKIPS ON CI AND THAT IS THE DESIGN, NOT A BUG. `dev-docs/`
+         is gitignored whole, so a clean checkout has no ledger to check; it
+         prints one line naming `.gitignore:65` rather than passing quietly,
+         which is the difference between this and the gate `a1f256f` deleted.
+         What binds CI is `scripts/surfaces.mjs`, whose test runs under
+         `test:coverage` everywhere. */
+      'ledger:check',
       'boundaries',
       'test:projects',
       'test:ledger',

@@ -32,6 +32,7 @@
     "test:projects": "node scripts/check-test-projects.mjs",
     "corpus": "node scripts/scan-corpus.mjs",
     "test:ledger": "node scripts/check-test-ledger.mjs",
+    "ledger:check": "node scripts/check-ledger.mjs",
     "boundaries": "node scripts/check-boundaries.mjs",
     "boundaries:selftest": "node scripts/check-boundaries.selftest.mjs",
     "boundaries:decls": "node scripts/check-kernel-declarations.mjs",
