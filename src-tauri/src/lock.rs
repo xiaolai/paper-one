@@ -359,7 +359,22 @@ pub fn acquire_with(dir: &Path, command: &str, liveness: &Liveness) -> Result<Da
 fn publish(path: &Path, owner: &Owner) -> io::Result<()> {
     let tmp = path.with_file_name(format!(".{LOCK_FILE}.{}", owner.token));
     let bytes = serde_json::to_vec(owner).map_err(io::Error::other)?;
-    fs::write(&tmp, bytes)?;
+    /* ⚠️ **DURABLE BEFORE IT IS VISIBLE, AND `fs::write` IS NOT.** The other
+     * half of this one protocol — `hosts/node/lock.ts`'s `publish` — syncs the
+     * handle before it links, and says why in as many words: *"a record that
+     * can be linked into place and then lost to a power cut is an empty lock
+     * file with a name — the shape this protocol exists to never produce."*
+     * This side wrote and linked. `is_empty` below exists to cope with exactly
+     * that shape, which is the downstream handling of a cause that did not need
+     * to happen; a reader whose machine lost power mid-acquisition met
+     * `Refused::Unreadable` on the next launch. Two implementations of one
+     * protocol, and only one of them was durable. Found by audit. */
+    {
+        use std::io::Write as _;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
     let linked = fs::hard_link(&tmp, path);
     let _ = fs::remove_file(&tmp);
     linked
@@ -483,6 +498,41 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("paper-lock-{name}-{}", fresh_token()));
         fs::create_dir_all(&dir).unwrap();
         Scratch(dir)
+    }
+
+    #[test]
+    fn the_record_is_on_disk_before_the_name_points_at_it() {
+        // ⚠️ **`fs::write` DOES NOT SYNC, AND THE OTHER HALF OF THIS PROTOCOL
+        // DOES.** `hosts/node/lock.ts`'s `publish` syncs the handle before it
+        // links, and says why in as many words: a record that can be linked
+        // into place and then lost to a power cut is an empty lock file with a
+        // name — the shape this protocol exists to never produce. `is_empty`
+        // below exists to cope with exactly that, which is the downstream
+        // handling of a cause that did not need to happen. Two implementations
+        // of one protocol, and only one was durable.
+        //
+        // The sync itself is not observable from a test — neither side has one
+        // for it, and a power cut is not a fixture. What IS observable is the
+        // whole record landing under the lock's own name with nothing left
+        // beside it, which is what the write must produce either way.
+        let dir = scratch("publish");
+        let path = dir.join(LOCK_FILE);
+        let owner = record(1234, "here", "a-token");
+        publish(&path, &owner).unwrap();
+
+        let read = read_owner(&path).expect("the record parses");
+        assert_eq!(read.pid, owner.pid);
+        assert!(!is_empty(&path), "the record landed empty");
+        let siblings: Vec<_> = fs::read_dir(&*dir)
+            .unwrap()
+            .filter_map(|one| one.ok())
+            .map(|one| one.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != LOCK_FILE)
+            .collect();
+        assert!(
+            siblings.is_empty(),
+            "the temp name was left behind: {siblings:?}"
+        );
     }
 
     /// A pid that runs and an OS with no opinion on identity — the check

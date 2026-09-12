@@ -125,7 +125,16 @@ pub fn set_stored_role(root: &Path, role: Role) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
+    /* ⚠️ **ONE TEMP NAME IS A NAME TWO WRITERS SHARE.** This was `role.tmp`
+     * flat, so two `set_local_role` calls in flight — a double-click on the
+     * Devices pane is enough, and nothing here is behind a lock the way
+     * `PeerStore` is — wrote into one file and renamed it twice. The result is
+     * the torn read this function's own header refuses: *"a half-written role
+     * read at the next launch is a device that silently changed sides."* The
+     * app's library lock already takes the answer, naming its temp after the
+     * token that owns it; this names it after the role being written, which is
+     * the only thing that distinguishes two racing calls. Found by audit. */
+    let tmp = path.with_extension(format!("{}.tmp", role_word(role)));
     /* SYNCED BEFORE THE RENAME, which is the half `std::fs::write` does not
      * do — and the half this function's own comment claimed by citing
      * `peers.rs`, which does exactly this (`f.sync_all()` before its rename).
@@ -318,8 +327,44 @@ mod tests {
         set_stored_role(&dir, Role::Satchel).unwrap();
         assert_eq!(std::fs::read_to_string(role_path(&dir)).unwrap(), "satchel");
         assert!(
-            !role_path(&dir).with_extension("tmp").exists(),
+            !role_path(&dir).with_extension("satchel.tmp").exists(),
             "the temp sibling was renamed, not left"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_roles_do_not_write_through_one_temp_name() {
+        // ⚠️ **A SINGLE `role.tmp` IS A NAME TWO WRITERS SHARE.** Nothing here
+        // is behind a lock the way `PeerStore` is, so two `set_local_role`
+        // calls in flight — a double-click on the Devices pane is enough —
+        // opened one file, truncated each other's bytes and renamed it twice.
+        // The result is the torn read `set_stored_role`'s own header refuses:
+        // a half-written role read at the next launch is a device that
+        // silently changed sides. Asserted through the observable end of it: a
+        // write for one role leaves a write in progress for the other
+        // untouched, which a shared name cannot do.
+        let dir = std::env::temp_dir().join(format!("paper-role-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        set_stored_role(&dir, Role::Shelf).unwrap();
+        // A write for `shelf` that never finished, as a concurrent one looks
+        // from here.
+        let mid_write = role_path(&dir).with_extension("shelf.tmp");
+        std::fs::write(&mid_write, b"shel").unwrap();
+
+        set_stored_role(&dir, Role::Satchel).unwrap();
+        assert_eq!(
+            stored_role(&dir),
+            Some(Role::Satchel),
+            "the other role's write did not land"
+        );
+        assert_eq!(
+            std::fs::read(&mid_write).unwrap(),
+            b"shel",
+            "one role's write consumed the other's temp file"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
