@@ -106,6 +106,29 @@ export function MobileApp({
      reason at all. */
   const [notice, setNotice] = useState<string | null>(bootNotice)
 
+  /**
+   * ⚠️ **TAPPING A BOOK DID NOTHING AT ALL, SILENTLY.** Both `onOpen`s here
+   * were `() => {}`: a cover on the shelf, a cover in the Continue strip, and
+   * the Reading tab (which `TabBar` redirects to Library while `hasBook` is
+   * false) were three controls that could not act. Eight lines below, this file
+   * states the rule they broke — *"the screen draws no control it cannot act
+   * on"* — and it is why `onAddBooks` and `importing` are absent rather than
+   * inert.
+   *
+   * The covers cannot simply go: they ARE the Library screen, and a shelf that
+   * draws nothing would be a worse answer than one that cannot be opened from.
+   * So the tap is answered. Nothing here invents a reader — mounting one on a
+   * phone is the mobile-reader work, and `localContent`/`localMarks`/
+   * `localPositions` are the data half of it, written and mounted by nothing —
+   * but a reader who taps a book now learns why it did not open instead of
+   * concluding the app is broken.
+   *
+   * Through the notice `Library` already renders and already dismisses, rather
+   * than a second surface for one sentence.
+   */
+  const cannotOpenYet = () =>
+    setNotice('Reading on the phone is not ready yet — this build syncs your shelf and its notes.')
+
   return (
     <div className={styles.shell} ref={setHost} data-theme={theme}>
       {tab === 'library' && (
@@ -113,7 +136,7 @@ export function MobileApp({
           {/* THE WHOLE SHELF, not a pre-selected slice — `recentlyOpened`
               inside the strip is the one selection, and it draws nothing when
               nothing qualifies. */}
-          <ContinueStrip books={library.books} onOpen={() => {}} coverFor={deviceCovers} />
+          <ContinueStrip books={library.books} onOpen={cannotOpenYet} coverFor={deviceCovers} />
           {/* THE SHELF GETS A POSITIONED BOX OF ITS OWN, which the Continue
               strip does not sit inside — `Library` is `position: absolute;
               inset: 0`, so without this it covers the strip above it. */}
@@ -123,7 +146,7 @@ export function MobileApp({
               coverFor={deviceCovers}
               platform={platform}
               shelfUnread={shelfUnread}
-              onOpen={() => {}}
+              onOpen={cannotOpenYet}
               libraryQuery={query}
               onQueryChange={setQuery}
               /* THE PHONE DESIGN IS A LIST. `Library` defaults to `grid`, which

@@ -31,12 +31,14 @@ const EMPTY_COMPOSITION = {
   [Symbol.dispose]: () => {},
 } as unknown as Composition
 
-function mount() {
+function mount(initialBooks: readonly { bookId: string; title: string; author: string; addedAt: number }[] = []) {
   /* NO FILESYSTEM AND NO STORAGE. Both are legal — a browser has neither, and
      `createKernelServices` is built to answer for that — so this mounts the
      shell in the state a phone reaches before any book has been carried onto
-     it, which is also what the simulator shows. */
-  const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+     it, which is also what the simulator shows.
+     `initialBooks` is for the one case that needs a shelf with something on
+     it: the tap below. */
+  const services = createKernelServices({ fs: null, storage: null, initialBooks: initialBooks as never })
   return render(<MobileApp services={services} shelfUnread={false} composition={EMPTY_COMPOSITION} />)
 }
 
@@ -101,6 +103,25 @@ describe('the phone shell', () => {
        nothing at all would pass a smoke test and show a blank tab. */
     expect(screen.getByRole('heading', { name: tab })).not.toBeNull()
     expect(screen.getByRole('button', { name: tab }).getAttribute('aria-current')).toBe('page')
+  })
+
+  /**
+   * ⚠️ **TAPPING A BOOK DID NOTHING AT ALL, SILENTLY.** Both `onOpen`s were
+   * `() => {}` — the shelf's covers and the Continue strip's — so a reader tapped
+   * a book and the screen did not move, which reads as a broken app rather than
+   * an unfinished one. `MobileApp` states the rule eight lines from the defect:
+   * "the screen draws no control it cannot act on".
+   *
+   * The covers cannot go, because they ARE the Library screen. So the tap is
+   * answered, through the notice `Library` already renders.
+   */
+  it('answers a tap on a book rather than swallowing it', async () => {
+    const moby = { bookId: 'book:m', title: 'Moby-Dick', author: 'Melville', addedAt: 1 }
+    mount([moby])
+    /* The row the shelf drew for it — the phone's Library is a list. */
+    const row = screen.getByTitle('Open Moby-Dick')
+    fireEvent.click(row)
+    expect(await screen.findByText(/not ready yet/u)).toBeTruthy()
   })
 
   /* NO WINDOW CHROME. The shell drew a 52px overlay titlebar and three traffic

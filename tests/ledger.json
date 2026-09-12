@@ -1329,6 +1329,7 @@
     "src/app/composition.contract.test.ts > the platform compositions > desktop declares a distinct order for every settings section",
     "src/app/composition.contract.test.ts > the platform compositions > ios composes exactly the manifest set for that platform",
     "src/app/composition.contract.test.ts > the platform compositions > ios declares a distinct order for every settings section",
+    "src/app/mobile/MobileApp.render.test.tsx > the phone shell > answers a tap on a book rather than swallowing it",
     "src/app/mobile/MobileApp.render.test.tsx > the phone shell > draws no titlebar of its own",
     "src/app/mobile/MobileApp.render.test.tsx > the phone shell > draws the tabs the design names, less any panel that is not finished",
     "src/app/mobile/MobileApp.render.test.tsx > the phone shell > opens on the Library",
