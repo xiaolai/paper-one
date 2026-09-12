@@ -142,12 +142,21 @@ function bookOf(req: unknown): string | null {
  * binds nothing), and `book.position` is REFUSED for any other book, before
  * its handler runs. Every other service passes through untouched.
  */
-function boundToOpenedBook(services: readonly ServiceContribution[], openedBy: Map<string, string>): ServiceContribution[] {
+function boundToOpenedBook(
+  services: readonly ServiceContribution[],
+  openedBy: Map<string, string>,
+  /* ⚠️ **A PARAMETER, BECAUSE IT WAS A CLOSURE VARIABLE NOTHING COULD PRUNE.**
+   * `latest` was created here, so `close` — which clears `openedBy` for exactly
+   * the reason given at it, a reused session id inheriting the last browser's
+   * binding — could not reach it. One integer per session that ever opened a
+   * book accumulated for the life of the app, and the two maps keyed by the
+   * same thing disagreed about which sessions existed. */
+  latest: Map<string, number>,
+): ServiceContribution[] {
   /* The NEWEST locate owns the binding, by the order the requests were MADE:
    * two locates in flight used to bind in completion order, so a slow older
    * one could land last and re-point the write at the book the browser had
    * already left. */
-  const latest = new Map<string, number>()
   return services.map((service) => {
     if (service.name === OPENS_A_BOOK) {
       return {
@@ -210,6 +219,8 @@ export function servePipe(options: PumpOptions): Pump {
   }
   /** Session → the book it opened last. Dropped with the session. */
   const openedBy = new Map<string, string>()
+  /* Beside `openedBy` and pruned with it — see `boundToOpenedBook`. */
+  const latestLocate = new Map<string, number>()
 
   /* THE KERNEL'S OWN READS, not a list kept here and NOT EVERY `:read` THERE
    * IS. `readServices()` is the table's own split, so a service added to the
@@ -221,7 +232,7 @@ export function servePipe(options: PumpOptions): Pump {
    * spelling alone would have let it through. Plus the one write, by its
    * exact spelling. */
   const router = createRouter({
-    services: boundToOpenedBook([...services], openedBy),
+    services: boundToOpenedBook([...services], openedBy, latestLocate),
     hasGrant: (_session, grant) => WEB_READS.has(grant) || grant === POSITION_GRANT,
     ...(options.maxOutboundBytes === undefined ? {} : { maxOutboundBytes: options.maxOutboundBytes }),
   })
@@ -340,8 +351,11 @@ export function servePipe(options: PumpOptions): Pump {
     held.connection.disconnect()
     live.delete(session)
     /* And the book it had opened. A session id the plugin reuses must not
-       inherit a binding from the browser that held it before. */
+       inherit a binding from the browser that held it before. BOTH maps: the
+       locate counter is keyed by the same session and was never cleared, so it
+       grew by one entry per browser for the life of the app. */
     openedBy.delete(String(session))
+    latestLocate.delete(String(session))
   }
 
   const reconcile = async () => {

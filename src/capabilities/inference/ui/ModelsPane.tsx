@@ -138,10 +138,13 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
           setting that nothing read — no spawn flag, no daemon config, no
           unload policy consumed it — so it was a control that did nothing
           and said otherwise. It comes back with its consumer, as a `<label>`
-          so the text toggles it and a screen reader can name it. */}
-      <div className={ui.hint}>
-        Off frees the memory a few minutes after you stop asking.
-      </div>
+          so the text toggles it and a screen reader can name it.
+
+          ⚠️ **AND ITS CAPTION OUTLIVED IT.** "Off frees the memory a few
+          minutes after you stop asking" was still drawn here, unconditionally,
+          between `Test voice` and `Memory` — a sentence about switching
+          something off, with no switch anywhere near it. The removal took the
+          control and left the label; it goes with the rest. */}
 
       <div className={ui.row}>
         <span className={ui.grow}>Memory</span>

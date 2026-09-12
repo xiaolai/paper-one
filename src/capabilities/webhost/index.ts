@@ -69,10 +69,26 @@ export const webhost: Capability = {
 
   start(api, signal): Disposable {
     /* TEARDOWN REGISTERED BEFORE ANYTHING IS ACQUIRED, the order `peer`'s own
-     * `start` uses: a failure part-way through leaves nothing running. */
+     * `start` uses: a failure part-way through leaves nothing running.
+     *
+     * ⚠️ **IT STOPPED WHATEVER `pump` HELD, NOT ITS OWN.** `pump` is module
+     * state and this closure ran on teardown, so with two live compositions —
+     * a test that starts a second before stopping the first, and the shape
+     * `renderSlot.test.ts` records for `inference` and `companion`: "the second
+     * overwrote the first, and then stopping the SECOND…" — A's stop reached
+     * into B's pump and stopped it. Every connected browser then had its frames
+     * drained by nothing, with no error anywhere, because a stopped pump is
+     * exactly as quiet as an idle one.
+     *
+     * The inner disposer twenty lines below already guarded this
+     * (`if (pump === running)`); this one did not, which is why the defect
+     * survived. `webhost` was also the one capability of the three never
+     * converted to `createRenderSlot` and the one with no `index.test.ts`. */
+    let mine: Pump | null = null
     const stop = () => {
-      pump?.stop()
-      pump = null
+      mine?.stop()
+      if (pump === mine) pump = null
+      mine = null
       host?.dispose()
       host = null
     }
@@ -95,10 +111,12 @@ export const webhost: Capability = {
           }),
       })
       const running = pump
+      mine = running
       return {
         dispose: () => {
           running.stop()
           if (pump === running) pump = null
+          if (mine === running) mine = null
         },
       }
     })

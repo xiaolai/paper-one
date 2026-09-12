@@ -4182,6 +4182,7 @@
     "src/capabilities/sync/ui/storageModel.test.ts > the storage model > shows everything when there is little, and says the count once",
     "src/capabilities/sync/ui/storageModel.test.ts > the storage model > the download ledger round-trips and tolerates junk",
     "src/capabilities/sync/ui/storageModel.test.ts > the storage model > throws rather than reading an unreadable ledger as an empty one",
+    "src/capabilities/webhost/index.test.ts > two live compositions of the webhost > each teardown stops its own pump, so stopping both leaves nothing polling",
     "src/capabilities/webhost/lib/pump.test.ts > a grant a capability contributes > is refused over the web even when it is spelled as a read",
     "src/capabilities/webhost/lib/pump.test.ts > a router that hung up on its own > lets go of the session, so the next reconciliation serves the browser afresh",
     "src/capabilities/webhost/lib/pump.test.ts > audit-fix round 1 — the pump > a reporter that throws does not strand the session, and the loop reports the plugin failure once",

@@ -280,7 +280,15 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
       let found: Probe
       try {
         found = await port.probe()
-      } catch {
+      } catch (thrown) {
+        /* ⚠️ **REPORTED, AND THIS WAS A BARE `catch`.** An empty probe is drawn
+           as "no routes", which is also what a working machine with nothing
+           installed looks like — so an unregistered command, a dead plugin or a
+           refused spawn was indistinguishable from the ordinary empty case, and
+           the log said nothing either. `report` is already a declared option and
+           `signIn` below uses it. The ANSWER is unchanged: a probe that failed
+           offers nothing, which is the safe reading. */
+        report?.('companion.probe-failed', { message: messageOf(thrown) })
         found = { routes: [], runtimeVersion: null }
       }
       /* Superseded, or the pane closed while the children ran. Either way this

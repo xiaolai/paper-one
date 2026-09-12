@@ -1,6 +1,6 @@
 import { messageOf } from '../../../kernel'
 import type { ReportFailure } from '../lib/controller'
-import { mintRequestId, type InferencePlugin } from '../lib/plugin'
+import { cancelRequest, mintRequestId, type InferencePlugin } from '../lib/plugin'
 
 /**
  * `Test voice` — one utterance at a time, with one place it ends.
@@ -169,7 +169,15 @@ export function createVoiceTester({
     /* BOTH, which is what WI-15.9's acceptance names: "cancelling
        mid-utterance stops both the audio and the request". Stopping only the
        audio would leave the daemon synthesising into nothing. */
-    if (requestId !== null) void plugin.cancel(requestId).catch(() => {})
+    /* ⚠️ **THROUGH `cancelRequest`, AND THIS WAS A FOURTH HAND-WRITTEN
+       `.catch(() => {})`.** That helper exists because the same swallow was
+       written twice and fixing one copy left the other; its header says "two
+       call sites of one shape is a class, not two bugs", and `controller.ts`
+       records removing a third. This was the fourth, in a file that already has
+       `report` destructured and uses it twice. A cancel refused for anything
+       but `requestUnknown` means the daemon is still synthesising for a reader
+       who pressed Stop. */
+    if (requestId !== null) cancelRequest(plugin, requestId, report)
     release()
     state = 'idle'
     if (!disposed) changed()

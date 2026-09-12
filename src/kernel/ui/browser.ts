@@ -123,3 +123,18 @@ export type { CoverSource } from '../core/coverArt'
  * this hook since §05 landed; the same one is used here rather than a second
  * `matchMedia` that can disagree with it. */
 export { usePrefersDark } from './platform'
+
+/* THE BANNER FOR AN ERROR NOTHING ELSE WILL SHOW.
+ *
+ * ⚠️ **THE BROWSER CLIENT HAD NO FATAL HANDLER AND IS THE ONE CLIENT WITH NO
+ * DEVTOOLS.** `main.tsx` and `main.mobile.tsx` both install these; `main.web.tsx`
+ * did not, so a render throw in the shelf or the reader — or any unhandled
+ * rejection — left a blank page and said nothing anywhere. On a phone browser
+ * there is no console to open and no log to read.
+ *
+ * It could not simply be imported: the only other export of it is `ui/boot.ts`,
+ * which is the NATIVE boot and says in its own header that it must never become
+ * the browser's. The module itself is browser-safe — `check-browser-safe`
+ * reports it clean — so the export belongs here, added in the change that mounts
+ * it, which is the rule this file states about itself. */
+export { installFatalHandlers } from '../core/reportFatal'

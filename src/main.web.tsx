@@ -52,7 +52,7 @@ import { capabilities } from 'virtual:paper-composition'
  * geometry as plain arithmetic. `.dependency-cruiser.cjs` allows this one
  * module to a composition root, with that reason written beside the rule. */
 import { applyMetrics } from './kernel/core/metrics'
-import { Cards, Library } from './kernel/ui/browser'
+import { Cards, Library, installFatalHandlers } from './kernel/ui/browser'
 import { browserSettings } from './app/web/settings'
 import type { BookAction, IndexedBook } from './kernel'
 
@@ -638,6 +638,13 @@ if (capabilities.length > 0) {
  * rest: a browser tab has no titlebar and no window controls, and the table
  * says so with zeros. */
 applyMetrics(document.documentElement, 'web')
+
+/* ⚠️ **BEFORE THE MOUNT, AND THE BROWSER CLIENT HAD NONE AT ALL.** `main.tsx`
+ * and `main.mobile.tsx` both do this; this root did not, so a render throw or an
+ * unhandled rejection left a blank page with nothing said — on the one client
+ * with no devtools to open and no `Paper.log` to read. Installed before
+ * `createRoot` so a throw during the first render is caught by it. */
+installFatalHandlers()
 
 const root = document.getElementById('root')
 if (root === null) throw new Error('Paper: no #root to mount into')
