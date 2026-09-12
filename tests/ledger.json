@@ -444,6 +444,7 @@
     "scripts/gen-feature-ledger.test.mjs > the ledger’s Markdown table parser > splits on a delimiter that follows an escaped backslash",
     "scripts/gen-feature-ledger.test.mjs > the ledger’s Markdown table parser > still carries the cell the parser was originally written for",
     "scripts/gen-feature-ledger.test.mjs > the ledger’s Markdown table parser > treats the outer pipes as optional and an empty cell as a cell",
+    "scripts/kernel-entry.test.mjs > the kernel's public entry > re-exports no module that nothing imports a name from",
     "scripts/lib/architecture.test.mjs > constants > C-1 the exported constants are frozen and the patterns carry no flags",
     "scripts/lib/architecture.test.mjs > constants > C-2 every finding code but MANIFEST_MISSING is claimed by a case, and every claim was honoured",
     "scripts/lib/architecture.test.mjs > createFsProbe > PR-1 answers for an existing directory and file, and false for the other kind",

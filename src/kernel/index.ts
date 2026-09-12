@@ -31,6 +31,22 @@
  * that reaches into a capability cannot cross this line unnoticed. (That scan
  * is textual and reads doc comments too — which is why nothing here spells
  * the forbidden path.)
+ *
+ * ⚠️ **AN EXPORT NOBODY IMPORTS COSTS A MODULE LOAD ONLY WHEN NOTHING ELSE
+ * HERE ALREADY LOADS THAT MODULE — AND MOST DO.** An audit counted two hundred
+ * names in this file with no importer and read them as weight; measured, the
+ * weight was two modules. `core/cardStore` and `core/formats` were each here
+ * for names nothing outside the kernel ever asked for, while every other
+ * unimported name sits beside one that is imported, in a module the barrel
+ * loads anyway. Both are gone; the rest stay, because they are a declared
+ * contract rather than a cost, and shrinking a contract on the grounds that
+ * today's capabilities happen not to use it is a different decision from
+ * removing dead weight.
+ *
+ * `kernel-entry.test.mjs` is what keeps the distinction: it re-derives the
+ * measurement rather than trusting the sentence above, so a clause added for a
+ * module nothing else loads is a finding on the day it lands. A number written
+ * here would have a half-life; the test does not.
  */
 
 /* The services, and the factory a composition root calls once. */
@@ -47,8 +63,6 @@ export { messageOf } from './core/messageOf'
 export { createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
 export type { UnplacedMark } from './core/marks'
-export { createCard, createCards } from './core/cardStore'
-export type { CardSnapshot, CardStorage, Cards, CardsOptions } from './core/cardStore'
 
 /* The contribution API — what a capability is — and the registry that composes a set of them. */
 export type {
@@ -534,8 +548,6 @@ export {
   writePresence,
 } from './core/presence'
 export type { Presence, PresenceEntry, PresenceState } from './core/presence'
-export { FORMATS, formatOf, isFormat, sniffFormat } from './core/formats'
-export type { Format } from './core/formats'
 export type { TrashFs } from './core/bookTrash'
 /* The trash's listing, for a capability that must reach a person's files in a trashed book's folder too — `purgePerson`. */
 export { listTrash } from './core/bookTrash'
