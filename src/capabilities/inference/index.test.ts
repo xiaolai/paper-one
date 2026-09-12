@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { NOOP_DIAGNOSTICS, createKernelServices, scopeSettings, type SettingsStore } from '../../kernel'
+import { NOOP_DIAGNOSTICS, createKernelServices, scopeSettings } from '../../kernel'
 import { inference } from './index'
 import { inferencePlugin } from './lib/plugin'
+import type { ModelsModel } from './ui/modelsModel'
 
 /**
  * ⚠️ THE `inferenceDownloadLine()` CASE THAT WAS HERE TESTED A DEAD EXPORT.
@@ -18,15 +19,18 @@ import { inferencePlugin } from './lib/plugin'
  * TEARDOWN ACTUALLY TEARS DOWN.
  *
  * `stop()` disposed the controller and left the models model attached: only
- * the tests ever called `ModelsModel.dispose`, so in the running app the
- * settings subscription, an `Audio` element, a blob URL and any voice request
- * in flight survived every restart of the capability and accumulated. A leak
- * whose individual instances are all small is one that nothing notices until
- * there are hundreds of them.
+ * the tests ever called `ModelsModel.dispose`, so in the running app an
+ * `Audio` element, a blob URL and any voice request in flight survived every
+ * restart of the capability and accumulated. A leak whose individual instances
+ * are all small is one that nothing notices until there are hundreds of them.
  *
- * The settings subscription is the observable end of it: the model takes one
- * when it is built, so counting subscribers across a start/stop pair says
- * whether the model was disposed without reaching inside it.
+ * ⚠️ **THE OBSERVABLE USED TO BE A SETTINGS SUBSCRIPTION, AND THE MODEL NEVER
+ * READ A SETTING.** Counting subscribers on a store nothing consults measured
+ * the model's constructor and not its teardown, and it kept a required
+ * dependency alive for the sake of the measurement. The model itself is
+ * reachable — the contributed section renders it as a prop — so what the
+ * teardown is asked for now is the thing that actually stops: a disposed model
+ * tells its listeners nothing, whatever it is asked to refresh.
  */
 describe('starting and stopping the capability', () => {
   /**
@@ -141,35 +145,25 @@ describe('starting and stopping the capability', () => {
     }
   })
 
-  it('detaches everything it attached, the models model included', () => {
-    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
-    const scoped = scopeSettings(services.settings, 'inference')
-    let subscribers = 0
-    const settings: SettingsStore = {
-      ...scoped,
-      subscribe: (listener) => {
-        subscribers += 1
-        const off = scoped.subscribe(listener)
-        return () => {
-          subscribers -= 1
-          off()
-        }
-      },
-    }
-    const controller = new AbortController()
-    const handle = inference.start?.(
-      {
-        services,
-        settings,
-        diagnostics: NOOP_DIAGNOSTICS,
-        onCleanup: () => {},
-      },
-      controller.signal,
-    )
-    if (handle === undefined || handle instanceof Promise) throw new Error('start returned no synchronous handle')
-    expect(subscribers, 'the models model never subscribed, so this proves nothing').toBeGreaterThan(0)
+  it('detaches everything it attached, the models model included', async () => {
+    const section = inference.settings?.find((one) => one.id === 'inference:models')
+    const handle = started()
+    const drawn = section?.render({ bookId: null }) as { readonly props: { readonly model: ModelsModel } } | null
+    const model = drawn?.props.model
+    if (model === undefined) throw new Error('the section drew no model to observe')
+
+    let told = 0
+    model.subscribe(() => {
+      told += 1
+    })
+    /* NON-VACUOUS: a live model tells its listeners when a refresh lands, so
+       the silence below is the disposal and not a model that never speaks. */
+    await model.refresh()
+    expect(told, 'a running model told nobody, so the check below proves nothing').toBeGreaterThan(0)
 
     handle.dispose()
-    expect(subscribers, 'a subscription outlived the capability that took it').toBe(0)
+    told = 0
+    await model.refresh()
+    expect(told, 'the models model outlived the capability that built it').toBe(0)
   })
 })

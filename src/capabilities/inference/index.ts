@@ -249,17 +249,14 @@ export const inference: Capability = {
       if (running === myRunning) running = null
     })
 
-    const models = createModelsModel({
-      controller,
-      plugin,
-      settings: api.settings,
-      report,
-    })
+    const models = createModelsModel({ controller, plugin, report })
     /* ⚠️ THE MODEL IS DISPOSED TOO. Only the tests ever called this, so in the
-       running app a settings subscription, an `Audio` element, a blob URL and
-       any voice request in flight survived every teardown and accumulated
-       across restarts — a leak that is invisible because each one on its own
-       is small. Owning it is what makes forgetting it impossible. */
+       running app an `Audio` element, a blob URL and any voice request in
+       flight survived every teardown and accumulated across restarts — a leak
+       that is invisible because each one on its own is small. Owning it is
+       what makes forgetting it impossible. (This listed a settings
+       subscription first, and that subscription is gone: the model never read
+       a setting, and the capability declares none.) */
     session.own('modelsModel', () => models.dispose())
     const showing = section.hold(models)
     session.own('section', () => showing.dispose())

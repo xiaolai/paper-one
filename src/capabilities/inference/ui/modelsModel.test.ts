@@ -295,25 +295,16 @@ describe('the models store', () => {
     }
   }
 
-  /**
-   * THE REAL GUARD, and this is the whole reason these tests exist in this
-   * shape.
-   *
-   * `scopeSettings` confines a capability to its own `<id>.` namespace at
-   * every door. Handing the store in raw — which is what an earlier version
-   * of this suite did — makes every assertion here pass over a pane that
-   * throws `namespace` on its first render in the running app, which is
-   * exactly what happened once already.
-   */
-  function wiring() {
-    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
-    return { settings: scopeSettings(services.settings, 'inference') }
-  }
+  /* ⚠️ **`wiring()` STOOD HERE AND BUILT A WHOLE `KernelServices` FOR A
+     DEPENDENCY THE MODEL NEVER READ.** `createModelsModel` took a
+     `SettingsStore`, subscribed to it, and called `get` on it nowhere; the
+     inference capability declares no setting at all — `defineSetting` appears
+     nowhere under it — so the scoped handle every case below constructed could
+     not have read anything that exists. */
 
-  it('folds the settings and the plugin readings into the controller snapshot', async () => {
+  it('folds the plugin readings into the controller snapshot', async () => {
     const { controller } = fakeController({ models: [model({ id: 'a', installed: true })] })
-    const { settings } = wiring()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings })
+    const models = createModelsModel({ controller, plugin: fakePlugin() })
     await models.refresh()
     const snap = models.getSnapshot()
     expect(snap.models).toHaveLength(1)
@@ -341,7 +332,6 @@ describe('the models store', () => {
     const models = createModelsModel({
       controller: world.controller,
       plugin,
-      ...wiring(),
       report: (event) => void events.push(event),
     })
     await expect(models.refresh()).resolves.toBeUndefined()
@@ -378,7 +368,7 @@ describe('the models store', () => {
         return { residentBytes: mine === 0 ? 111 : 222, modelLoaded: null }
       },
     })
-    const models = createModelsModel({ controller: world.controller, plugin, ...wiring() })
+    const models = createModelsModel({ controller: world.controller, plugin })
 
     const older = models.refresh()
     const newer = models.refresh()
@@ -394,7 +384,7 @@ describe('the models store', () => {
 
   it('keeps one snapshot object until something changes', async () => {
     const { controller, notify } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
+    const models = createModelsModel({ controller, plugin: fakePlugin() })
     await models.refresh()
     const before = models.getSnapshot()
     expect(models.getSnapshot()).toBe(before)
@@ -407,7 +397,7 @@ describe('the models store', () => {
 
   it('notifies subscribers, and stops on unsubscribe', () => {
     const { controller, notify } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
+    const models = createModelsModel({ controller, plugin: fakePlugin() })
     let seen = 0
     const stop = models.subscribe(() => void (seen += 1))
     notify()
@@ -426,35 +416,23 @@ describe('the models store', () => {
    * just fires into an empty set, and the count stays at zero either way. The
    * unsubscribe has to be observed at the source.
    */
-  it('detaches from the controller and the settings on dispose', () => {
+  it('detaches from the controller on dispose', () => {
+    /* ⚠️ **THIS COUNTED A SETTINGS SUBSCRIPTION TOO, AND THAT SUBSCRIPTION WAS
+       THE EVIDENCE OF THE LEAK RATHER THAN THE LEAK.** The model took a
+       settings store it never read. What it genuinely attaches is the
+       controller, and that is what is counted here, at the source. */
     const world = fakeController()
-    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
-    let settingsSubscribers = 0
-    const scoped = scopeSettings(services.settings, 'inference')
-    const settings = {
-      ...scoped,
-      subscribe: (listener: () => void) => {
-        settingsSubscribers += 1
-        const off = scoped.subscribe(listener)
-        return () => {
-          settingsSubscribers -= 1
-          off()
-        }
-      },
-    }
-    const models = createModelsModel({ controller: world.controller, plugin: fakePlugin(), settings })
+    const models = createModelsModel({ controller: world.controller, plugin: fakePlugin() })
     expect(world.subscribers()).toBe(1)
-    expect(settingsSubscribers).toBe(1)
 
     models.dispose()
     expect(world.unsubscribes(), 'the controller subscription outlived the model').toBe(1)
     expect(world.subscribers()).toBe(0)
-    expect(settingsSubscribers, 'the settings subscription outlived the model').toBe(0)
   })
 
   it('does not notify after dispose', () => {
     const { controller, notify } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
+    const models = createModelsModel({ controller, plugin: fakePlugin() })
     let seen = 0
     models.subscribe(() => void (seen += 1))
     models.dispose()
@@ -464,7 +442,7 @@ describe('the models store', () => {
 
   it('passes install, cancel and uninstall straight through to the controller', async () => {
     const world = fakeController()
-    const models = createModelsModel({ controller: world.controller, plugin: fakePlugin(), ...wiring() })
+    const models = createModelsModel({ controller: world.controller, plugin: fakePlugin() })
     await expect(models.install('a')).resolves.toBe(true)
     models.cancelInstall()
     await expect(models.uninstall('a')).resolves.toBe(true)
@@ -484,7 +462,7 @@ describe('the models store', () => {
   it('stops a voice test before removing the model it is playing through', async () => {
     const world = fakeController({ models: [model({ id: 'kokoro', modality: 'speech', installed: true })] })
     const plugin = fakePlugin()
-    const models = createModelsModel({ controller: world.controller, plugin, ...wiring(), audio: silentAudio() })
+    const models = createModelsModel({ controller: world.controller, plugin, audio: silentAudio() })
     await models.testVoice()
     expect(models.getSnapshot().voiceTest).toBe('speaking')
 
@@ -501,7 +479,6 @@ describe('the models store', () => {
     const models = createModelsModel({
       controller: world.controller,
       plugin: fakePlugin(),
-      ...wiring(),
       audio: silentAudio(),
     })
     await models.testVoice()
@@ -511,14 +488,17 @@ describe('the models store', () => {
   })
 
 
-  /* THE REGRESSION, NAMED. `getSnapshot` is what `useSyncExternalStore` calls
-     on mount, and it reads settings through the scoped handle. Reading
-     anything outside `inference.` there throws `namespace` — under the real
-     guard, this is what says so. */
-  it('builds a snapshot without touching another capability’s namespace', () => {
-    const { settings } = wiring()
+  /* ⚠️ **THIS NAMED A REGRESSION THAT CAN NO LONGER HAPPEN.** It said
+     `getSnapshot` *"reads settings through the scoped handle"*, and that
+     reading outside `inference.` throws `namespace`. It read no settings even
+     then, and the model holds no settings store at all now — a stronger
+     guarantee than the case claimed to give, and one the compiler keeps rather
+     than a test. What the body actually exercises is worth keeping under its
+     own name: the pane calls `getSnapshot` on mount, before any `refresh` has
+     resolved, so the first snapshot has to be answerable from nothing. */
+  it('answers a snapshot before anything has been refreshed', () => {
     const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings })
+    const models = createModelsModel({ controller, plugin: fakePlugin() })
     expect(() => models.getSnapshot()).not.toThrow()
     models.dispose()
   })
@@ -528,7 +508,7 @@ describe('the models store', () => {
      may not exist yet. */
   it('stops a voice test that never started, without throwing', () => {
     const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
+    const models = createModelsModel({ controller, plugin: fakePlugin() })
     expect(() => models.stopVoice()).not.toThrow()
     expect(models.getSnapshot().voiceTest).toBe('idle')
     models.dispose()
@@ -540,7 +520,7 @@ describe('the models store', () => {
   it('does nothing when no speech model is installed', async () => {
     const world = fakeController({ models: [model({ id: 'qwen', installed: true })] })
     const plugin = fakePlugin()
-    const models = createModelsModel({ controller: world.controller, plugin, ...wiring() })
+    const models = createModelsModel({ controller: world.controller, plugin })
     await models.testVoice()
     expect(models.getSnapshot().voiceTest).toBe('idle')
     expect(world.ensureReady).not.toHaveBeenCalled()

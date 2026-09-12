@@ -196,7 +196,16 @@ export function modelAction(
 export interface ModelsModelOptions {
   readonly controller: Controller
   readonly plugin: InferencePlugin
-  readonly settings: SettingsStore
+  /* ⚠️ **NO `settings`, AND IT WAS REQUIRED.** This model took a
+   * `SettingsStore`, subscribed to it and never read it — `settings.get` is
+   * called nowhere in this file, and the snapshot is the controller's plus a
+   * models directory, a memory figure and the voice-test state, none of which
+   * is a preference. The inference capability declares NO setting at all:
+   * `defineSetting` appears nowhere under it, so the scoped handle could not
+   * have read anything that exists. What the subscription bought was a cache
+   * invalidation and a re-render of the models pane on every settings write in
+   * the app, for a snapshot that cannot change because of one — and a required
+   * dependency every caller and every test had to construct. Found by audit. */
   /**
    * Told when a best-effort read fails.
    *
@@ -220,7 +229,7 @@ export interface ModelsModelOptions {
 }
 
 
-export function createModelsModel({ controller, plugin, settings, report, audio }: ModelsModelOptions): ModelsModel {
+export function createModelsModel({ controller, plugin, report, audio }: ModelsModelOptions): ModelsModel {
   const listeners = new Set<() => void>()
   let modelsDir: string | null = null
   let residentBytes: number | null = null
@@ -244,7 +253,6 @@ export function createModelsModel({ controller, plugin, settings, report, audio 
     emit()
   }
   const unsubscribeController = controller.subscribe(invalidate)
-  const unsubscribeSettings = settings.subscribe(invalidate)
 
   const voice = createVoiceTester({
     plugin,
@@ -326,7 +334,6 @@ export function createModelsModel({ controller, plugin, settings, report, audio 
       disposed = true
       voice.dispose()
       unsubscribeController()
-      unsubscribeSettings()
       listeners.clear()
     },
   }
