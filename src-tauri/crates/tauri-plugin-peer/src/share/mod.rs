@@ -643,7 +643,22 @@ impl ShareNode {
              * contributes and the next one resumes rather than restarting. */
             let attempt =
                 timeout(PROVIDER_TIMEOUT, async {
-                    let conn = self.endpoint.connect(provider, iroh_blobs::ALPN).await?;
+                    /* Through the one door, so the DIAL is bounded separately
+                       from the transfer. `PROVIDER_TIMEOUT` is ten minutes
+                       because a book is large; thirty seconds of it is all a
+                       machine gets to answer the phone. */
+                    let conn = crate::endpoint::dial(
+                        &self.endpoint,
+                        provider,
+                        iroh_blobs::ALPN,
+                        crate::endpoint::DIAL_TIMEOUT,
+                    )
+                    .await
+                    .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                        Box::new(Error::ShareRefused(
+                            "that provider did not answer a dial in time".into(),
+                        ))
+                    })??;
                     self.store.remote().fetch(conn, blob).await.map_err(
                         |err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) },
                     )?;

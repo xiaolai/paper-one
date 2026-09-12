@@ -46,7 +46,10 @@ pub const PAIR_TTL: Duration = Duration::from_secs(300);
 /// How long the shelf waits for the human after showing the SAS.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
-const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+/* `DIAL_TIMEOUT` was declared here too, at the same thirty seconds as
+   `session.rs`'s. It is `endpoint::DIAL_TIMEOUT` now — one answer to "how long
+   do we wait for a machine that may be asleep", read by everything that
+   dials. */
 /// The satchel waits the shelf's confirm window plus this much for the ack.
 const ACK_GRACE: Duration = Duration::from_secs(30);
 
@@ -1274,12 +1277,16 @@ async fn dial(
     uri: &PairUri,
     hello: &PairHello,
 ) -> Result<(Connection, SendStream, iroh::endpoint::RecvStream)> {
-    let conn = timeout(
-        DIAL_TIMEOUT,
-        node.endpoint().connect(uri.endpoint_addr(), PAIR_ALPN),
+    /* `crate::endpoint::dial`, spelled in full because this function is called
+       `dial` too — the transport's one door, under the crate's one deadline. */
+    let conn = crate::endpoint::dial(
+        node.endpoint(),
+        uri.endpoint_addr(),
+        PAIR_ALPN,
+        crate::endpoint::DIAL_TIMEOUT,
     )
     .await
-    .map_err(|_| Error::Timeout("pair dial"))??;
+    .ok_or(Error::Timeout("pair dial"))??;
     let (mut send, recv) = conn.open_bi().await?;
     write_json(&mut send, hello).await?;
     // The send stream stays open: after the ack the satchel sends its commit on

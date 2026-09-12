@@ -37,7 +37,8 @@ use crate::role::Role;
 
 pub const PEER_ALPN: &[u8] = b"one.paper.reader/peer/1";
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
-const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+/* `DIAL_TIMEOUT` is `endpoint::DIAL_TIMEOUT` now — one answer to "how long do
+   we wait for a machine that may be asleep", read by everything that dials. */
 /// Frames the inbox holds before the reader stops pulling from the wire — a
 /// secondary bound that keeps a flood of tiny (even empty) frames from growing
 /// the queue without bound. The byte budget below is the real memory ceiling.
@@ -467,13 +468,14 @@ pub async fn connect(node: &Arc<Node>, peer_id: &str, hello: Value) -> Result<u6
         .cloned()
         .ok_or_else(|| Error::PeerUnknown(peer_id.to_owned()))?;
     let hello = build_hello(node.role(), hello)?;
-    let conn = timeout(
-        DIAL_TIMEOUT,
-        node.endpoint()
-            .connect(endpoint_addr(id, &record.last_addrs), PEER_ALPN),
+    let conn = crate::endpoint::dial(
+        node.endpoint(),
+        endpoint_addr(id, &record.last_addrs),
+        PEER_ALPN,
+        crate::endpoint::DIAL_TIMEOUT,
     )
     .await
-    .map_err(|_| Error::Timeout("session dial"))??;
+    .ok_or(Error::Timeout("session dial"))??;
 
     let exchange = async {
         let (mut send, mut recv) = conn.open_bi().await?;

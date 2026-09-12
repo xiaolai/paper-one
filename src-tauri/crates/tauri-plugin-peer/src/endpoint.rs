@@ -18,10 +18,48 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;
 
-use iroh::endpoint::presets;
-use iroh::{Endpoint, RelayMode, SecretKey};
+use iroh::endpoint::{presets, ConnectError, Connection};
+use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+use tokio::time::timeout;
 
 use crate::error::{Error, Result};
+
+/// How long a dial to a paired peer or a provider may take.
+///
+/// ⚠️ **THIS STOOD IN `session.rs` AND WAS THE SESSION'S ALONE.** It is the
+/// same decision wherever this crate dials — how long to wait for a machine
+/// that may be asleep, behind a proxy, or gone — and a second constant spelling
+/// the same thirty seconds is a second thing to move. `circle::introduce` keeps
+/// its own tighter bound on purpose, and says so there; what it does not do is
+/// re-declare this one.
+pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Dial one endpoint under a deadline — **THE ONLY PLACE THIS CRATE CALLS
+/// `Endpoint::connect`**, and `dial_is_the_only_door` is what keeps it so.
+///
+/// ⚠️ **A DIAL WITH NO DEADLINE HANGS THE CALLER AND EVERY CANDIDATE BEHIND
+/// IT.** `ShareNode::fetch_book` learned this once already — its own comment
+/// records a provider that connected and stalled taking a book off the network
+/// for a reader who had four other sources — and `notes::ask_one`, written
+/// later and looping over providers in exactly the same way, dialled with no
+/// bound at all. Everything after its connect was under a deadline, which is
+/// what made the gap easy to miss: the one wait nobody had bounded was the
+/// first. A reader pressing "Look for some" waited on it with no way to stop.
+///
+/// The deadline is the caller's, because they are not all the same question:
+/// the circle's door is dialled on a tighter one than a stranger's provider.
+/// So is the sentence for a dial that ran out, which is why this answers `None`
+/// rather than inventing an error — three call sites already had their own
+/// words for "nobody answered", and they read differently to a reader dialling
+/// a friend and to one asking a stranger for a book.
+pub(crate) async fn dial(
+    endpoint: &Endpoint,
+    addr: impl Into<EndpointAddr>,
+    alpn: &[u8],
+    within: Duration,
+) -> Option<std::result::Result<Connection, ConnectError>> {
+    timeout(within, endpoint.connect(addr, alpn)).await.ok()
+}
 
 /// How an endpoint finds peers beyond the address hints it already has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,5 +530,100 @@ mod tests {
         the value Paper reports is the value Paper passes, which is what
         made the old spelling a belief rather than a fact. */
         assert_eq!(MDNS_SERVICE_NAME, "irohv1");
+    }
+
+    /// ⚠️ **ONE DOOR, BECAUSE THE ONE THAT WAS MISSING A DEADLINE LOOKED
+    /// EXACTLY LIKE THE THREE THAT HAD ONE.** `session::connect`,
+    /// `pairing::dial` and `circle::introduce` each wrapped their own
+    /// `Endpoint::connect` in their own `timeout` with their own constant — two
+    /// of those constants being the same thirty seconds written twice — and
+    /// `notes::ask_one`, written later, wrapped everything AFTER its connect
+    /// and left the connect itself unbounded. A reader pressing "Look for some"
+    /// waited on it with nothing to stop it, and every later provider in the
+    /// queue waited behind it.
+    ///
+    /// A rule spelled at four call sites is a rule the fifth call site does not
+    /// have. This is what makes a fifth one loud: `dial` is the only production
+    /// code in this crate that may name `Endpoint::connect`, and the deadline
+    /// is a parameter so a caller that needs a tighter one still goes through
+    /// the door rather than around it.
+    #[test]
+    fn dial_is_the_only_door() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        /* NON-VACUOUS: a walk that found nothing would pass silently, which is
+           the failure this whole test exists to make loud. */
+        assert!(
+            files.len() > 10,
+            "the source walk found {} files, so it scanned nothing",
+            files.len()
+        );
+        /* ⚠️ **A WHOLE FILE CAN BE TEST CODE WITH NO `#[cfg(test)]` IN IT.**
+           `share/acceptance.rs` is a thousand lines of dialling and carries no
+           attribute of its own — the gate is `#[cfg(test)] mod acceptance;` in
+           `share/mod.rs`. Read the DECLARATIONS rather than assuming the file
+           says so about itself, or the first version of this test reports a
+           whole test suite as production code, which is what it did. */
+        let mut test_only = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).expect("a source file reads");
+            for part in text.split("#[cfg(test)]").skip(1) {
+                let Some(rest) = part.trim_start().strip_prefix("mod ") else {
+                    continue;
+                };
+                let Some(name) = rest.split(';').next().filter(|one| !one.contains('{')) else {
+                    continue;
+                };
+                test_only.push(name.trim().to_owned());
+            }
+        }
+        assert!(
+            test_only.iter().any(|one| one == "acceptance"),
+            "the test-only module scan found none, so it is excluding nothing: {test_only:?}"
+        );
+        let mut offenders = Vec::new();
+        for file in &files {
+            let stem = file.file_stem().map(|one| one.to_string_lossy().into_owned());
+            if stem.is_some_and(|one| test_only.contains(&one)) {
+                continue;
+            }
+            let text = std::fs::read_to_string(file).expect("a source file reads");
+            /* And within a production file, everything from its first
+               `#[cfg(test)]` on is test code — a test dialling however it likes
+               is fine. */
+            let production = match text.find("#[cfg(test)]") {
+                Some(at) => &text[..at],
+                None => &text[..],
+            };
+            if !production.contains(".connect(") {
+                continue;
+            }
+            if file.file_name().is_some_and(|name| name == "endpoint.rs") {
+                continue;
+            }
+            offenders.push(file.display().to_string());
+        }
+        assert!(
+            offenders.is_empty(),
+            "these dial without going through `endpoint::dial`, so their deadline is theirs to forget: {offenders:?}"
+        );
+        /* And the door itself is still ONE door. Counted over this file's own
+           production half, because the assertions above name `.connect(` in
+           their messages and would otherwise count themselves. */
+        let here = include_str!("endpoint.rs");
+        let door = &here[..here.find("#[cfg(test)]").expect("this file has tests")];
+        assert_eq!(door.matches(".connect(").count(), 1, "`dial` grew a second connect");
+    }
+
+    fn walk(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("the source tree reads") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                walk(&path, into);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                into.push(path);
+            }
+        }
     }
 }

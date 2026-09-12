@@ -599,9 +599,18 @@ pub(crate) async fn ask_one(
     since: u64,
     generation: Option<u64>,
 ) -> Result<FetchedNotes> {
-    let conn = endpoint
-        .connect(provider, NOTES_ALPN)
+    /* ⚠️ **THE DIAL HAD NO DEADLINE, AND EVERYTHING AFTER IT DID.** That is
+     * what made it easy to miss: the stream, the write, the header and every
+     * record were under `EXCHANGE_TIMEOUT`, and the one wait nobody had bounded
+     * was the first. `fetch_notes` walks providers exactly as `fetch_book`
+     * does, so an unresponsive one held the whole queue — the defect
+     * `fetch_book`'s own comment records being fixed there, at the sibling
+     * site, arriving here through the half that was written later. A reader
+     * pressing "Look for some" waited on it with nothing to stop it. Found by
+     * audit. */
+    let conn = crate::endpoint::dial(endpoint, provider, NOTES_ALPN, crate::endpoint::DIAL_TIMEOUT)
         .await
+        .ok_or_else(|| Error::ShareRefused("that provider did not answer a dial in time".into()))?
         .map_err(|err| Error::ShareRefused(format!("that provider would not talk: {err}")))?;
     let exchange = timeout(EXCHANGE_TIMEOUT, async {
         let (mut send, mut recv) = conn.open_bi().await.map_err(|err| {

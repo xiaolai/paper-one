@@ -828,13 +828,18 @@ pub async fn introduce(
     .await
     .map_err(|e| Error::Identity(format!("the introduction was dropped: {e}")))??;
 
-    let conn = timeout(
-        HELLO_TIMEOUT,
-        node.endpoint().connect(addr, CIRCLE_HELLO_ALPN),
-    )
-    .await
-    .map_err(|_| Error::Timeout("dialling the circle door"))?
-    .map_err(|e| Error::Identity(format!("could not reach that device: {e}")))?;
+    /* ⚠️ **`HELLO_TIMEOUT`, NOT `endpoint::DIAL_TIMEOUT`, AND THE TIGHTER
+     * NUMBER IS DELIBERATE.** A joiner keeps its first connection and opens
+     * another beside it after five seconds precisely because a cold path
+     * usually loses the first hello (`AGENTS.md`, measured on two Macs); the
+     * door's own bound is part of that timing and is not the same decision as
+     * how long to wait for a paired peer or a provider. Stated here rather
+     * than left as a coincidence, because the two constants no longer look
+     * alike. */
+    let conn = crate::endpoint::dial(node.endpoint(), addr, CIRCLE_HELLO_ALPN, HELLO_TIMEOUT)
+        .await
+        .ok_or(Error::Timeout("dialling the circle door"))?
+        .map_err(|e| Error::Identity(format!("could not reach that device: {e}")))?;
 
     let spoke = say_hello(&conn, &hello).await;
     /* Closed either way, and with a reason: an introduction that is dropped
