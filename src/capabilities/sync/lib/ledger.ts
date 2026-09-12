@@ -748,6 +748,24 @@ export function createLedger({
     if (wantsBytes && (group.contentHash === undefined || fetchBlob === undefined)) {
       throw refuse('content-unavailable', `push for ${group.book} claims content but sent no verifiable way to fetch it`, true)
     }
+    /* ⚠️ **AND A SIZE, WHICH IS THE HALF THAT WEDGED EVERY SESSION.** The fetch
+     * below passed `group.size ?? 0`, and `blobs.rs` refuses a transfer whose
+     * body length disagrees with the expected one — so a group with no size
+     * could only ever fail, and it failed as a plain `Error`. The envelope
+     * carries that as `internal`, which is SESSION-LEVEL: the push rethrew, the
+     * session ended, and outbox order put the same book first next time. One
+     * unmeasurable file therefore stopped the pair syncing at all, permanently,
+     * with "couldn't understand each other" as the only symptom.
+     *
+     * `buildGroup` omits the size when `contentFacts` could not hash the copy —
+     * a file that is not under `contentBlobName(record)`, or a `hashFile` that
+     * refused — and falls back to the record's stored hash, so a group can
+     * advertise content it cannot measure. Refused BY NAME here, which is a
+     * per-group refusal the session survives: the row stays pushable, the rest
+     * of the books move, and the reader is told which book and why. */
+    if (wantsBytes && group.size === undefined) {
+      throw refuse('content-unavailable', `push for ${group.book} claims content but sent no size to verify the transfer against`, true)
+    }
     const needsBytes = wantsBytes
 
     /* The REMOTE-REMOVAL path (#13) is applied on its own, OUTSIDE the fenced
@@ -822,7 +840,15 @@ export function createLedger({
        * the `refreshContent` commit is the remote-origin record of the
        * landing. */
       const name = contentBlobName({ format: group.format })
-      await fetchBlob!(peer, folder, { name, size: group.size ?? 0, hash: group.contentHash as string })
+      /* ⚠️ **NO `?? 0` HERE ANY MORE.** That default is what turned a group
+       * with no size into a transfer `blobs.rs` could only refuse, as a plain
+       * error the envelope carried as session-killing `internal`. The guard
+       * above refuses such a group by name, so reaching this line with no size
+       * would be a contradiction — and one worth saying out loud rather than
+       * papering over with a zero that cannot match any real file. */
+      const size = group.size
+      if (size === undefined) throw refuse('content-unavailable', `push for ${group.book} reached the fetch with no size`, true)
+      await fetchBlob!(peer, folder, { name, size, hash: group.contentHash as string })
       await applyRemote([{ keys: [{ book: group.book, what: 'content' }], run: () => library.refreshContent(group.book) }])
       /* THE READER IS TOLD WHERE IT CAME FROM, and this is the only moment
        * that knows: the merge above has the book, the session has the peer,
@@ -981,9 +1007,15 @@ export function createLedger({
     return groups
   }
 
-  const buildGroup = async (book: string, revs: Partial<Record<Pushable, number>>): Promise<PushGroup> => {
+  /** The group to offer, and whether its BYTES were held back — see the
+   *  unmeasurable-content note inside. */
+  const buildGroup = async (
+    book: string,
+    revs: Partial<Record<Pushable, number>>,
+  ): Promise<{ group: PushGroup; withheld: boolean }> => {
+    let withheld = false
     if (book === '') {
-      return { book, revs, cards: ownCards(), hasContent: false }
+      return { group: { book, revs, cards: ownCards(), hasContent: false }, withheld: false }
     }
     const record = await ownRecord(book)
     const row = rowOf(book)
@@ -1029,6 +1061,27 @@ export function createLedger({
         group.contentHash = facts.hash
         if (facts.size > 0) group.size = facts.size
       }
+      /* ⚠️ **BYTES THAT CANNOT BE MEASURED ARE NOT ADVERTISED, AND THIS IS THE
+       * RULE THE PARAGRAPH BELOW ALREADY STATES.** `contentFacts` falls back to
+       * the record's stored hash with a size of zero when it cannot hash the
+       * copy — a file that is not under `contentBlobName(record)`, or a
+       * `hashFile` that refused — so a group could advertise content it had no
+       * measurement for. The shelf then fetched it, `blobs.rs` refused the
+       * transfer on the length, and the refusal came back RETRYABLE, which
+       * `groupRefusal` deliberately lets END THE SESSION. Outbox order put the
+       * same book first next time, so the pair never synced again: one
+       * unmeasurable file, both machines, permanently, and "couldn't understand
+       * each other" as the only symptom.
+       *
+       * Left in the outbox instead — visible, and for a session that can carry
+       * it — exactly as an unreadable record rev is. The shelf's own guard
+       * refuses such a group too, for a peer that did not do this. */
+      if (group.size === undefined) {
+        delete group.contentHash
+        delete group.format
+        group.hasContent = false
+        withheld = true
+      }
       /* THE SAME PROBE `handleContent` USES — both names, jpg then webp. This
        * asked for `cover.jpg` alone, so a legacy WebP jacket was never
        * offered on a push while the content service happily served it. */
@@ -1045,7 +1098,7 @@ export function createLedger({
     const intent = group.removed !== undefined || group.live !== undefined
     if (revs.record !== undefined && group.record === undefined && !intent) delete revs.record
     if (revs.removed !== undefined && !intent) delete revs.removed
-    return group
+    return { group, withheld }
   }
 
   /** A jacket beside the bytes, whichever of the kernel's cover names it
@@ -1097,7 +1150,19 @@ export function createLedger({
   const pushAll = async (channel: SyncChannel, outcome: SessionOutcome): Promise<number> => {
     let pushed = 0
     for (const [book, revs] of outboxGroups()) {
-      const group = await buildGroup(book, revs)
+      const { group, withheld } = await buildGroup(book, revs)
+      /* ⚠️ **BYTES HELD BACK ARE REPORTED, NOT DROPPED IN SILENCE.** `content`
+       * is not a pushable rev — it moves as a blob, advertised by
+       * `hasContent` — so a group that stops offering it leaves nothing in the
+       * outbox to show for it. Recorded as a refusal of THIS book, which is
+       * what puts it in the status line, while the session carries on. */
+      if (withheld) {
+        outcome.refused.push({
+          kind: 'content',
+          book,
+          message: `the bytes for ${book} could not be measured on this device, so they were not offered`,
+        })
+      }
       /* Every rev this group had was one it could not back (see
        * `buildGroup`); nothing to offer this session. */
       if (Object.keys(group.revs).length === 0) continue

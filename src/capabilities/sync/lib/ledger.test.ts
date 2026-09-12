@@ -1172,6 +1172,58 @@ describe('carried findings — removals, content facts, and covers', () => {
     expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:y')
   })
 
+  /**
+   * ⚠️ **ONE UNMEASURABLE BOOK STOPPED THE PAIR SYNCING AT ALL, PERMANENTLY.**
+   *
+   * `buildGroup` omits the size whenever `contentFacts` cannot hash the copy —
+   * bytes not under `contentBlobName(record)`, or a `hashFile` that refuses —
+   * while still sending the record's stored hash. The fetch then passed
+   * `group.size ?? 0`, and `blobs.rs` refuses a transfer whose body length
+   * disagrees with the expected one, so it could only fail: as a plain `Error`,
+   * which the envelope carries as `internal`, which is session-level. `pushAll`
+   * rethrew, the session ended, and outbox order put the same book first every
+   * time. The reader's only symptom was "couldn't understand each other".
+   *
+   * Driven end to end rather than at the handler, because the property is that
+   * the SESSION SURVIVES — a refusal code alone does not say that, and the set
+   * that decides it is private to the module.
+   */
+  it('a book whose bytes cannot be measured is refused alone, and the rest of the session still runs', async () => {
+    const { shelf, satchel, session } = await makeWorld()
+    const bytes = new TextEncoder().encode('the readable bytes')
+    for (const id of ['book:lost', 'book:fine']) {
+      await satchel.services.library.add(id, { ...rec(id), ext: 'epub', format: 'epub' })
+      await satchel.services.library.keepContent(id, 'content.epub', new Blob([bytes]))
+      await satchel.services.library.refreshContent(id)
+    }
+    /* The one file the satchel cannot measure. `hashFile` is the seam
+       `contentFacts` uses, and a refusal there is what produces a group with a
+       hash and no size. */
+    const real = satchel.wire.hashFile.bind(satchel.wire)
+    satchel.wire.hashFile = async (folder: string, name: string) => {
+      if (folder === 'book_lost') throw new Error('the plugin would not hash it')
+      return real(folder, name)
+    }
+
+    const summary = await session()
+    /* THE SESSION FINISHED. Before the fix this rejected, and every later
+       session rejected at the same book. */
+    expect(summary.pushed).toBeGreaterThan(0)
+    /* The healthy book crossed... */
+    expect(shelf.fs.store.get('books/book_fine/content.epub')).toEqual(bytes)
+    /* ...and the unmeasurable one's bytes did not. */
+    expect(shelf.fs.store.has('books/book_lost/content.epub')).toBe(false)
+    /* AND THE READER IS TOLD WHICH BOOK. `content` is not a pushable rev — it
+       moves as a blob — so a group that stops offering it leaves nothing in the
+       outbox to show for it, and holding it back silently would be its own
+       defect. The session reports it instead, which is what the status line
+       reads. */
+    expect(summary.refused.map((one) => ({ kind: one.kind, book: one.book }))).toContainEqual({
+      kind: 'content',
+      book: 'book:lost',
+    })
+  })
+
   it('#16 a shelf with bytes but no stored hash hashes them, and refuses a conflicting push', async () => {
     const { shelf } = await makeWorld()
     await shelf.services.library.add('book:z', { ...rec('Zeta'), ext: 'epub', format: 'epub' })
