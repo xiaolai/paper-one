@@ -154,7 +154,12 @@ export function usePairing(port: PersonPort | null, refresh: () => Promise<void>
       setVerdict(
         result.ok
           ? null
-          : result.reason === undefined
+          : /* ⚠️ **`== null`, BECAUSE THE WIRE SENDS `null` AND THIS TESTED FOR
+               `undefined`.** Rust's `Option<String>` serialises as `null`, so
+               the branch that says "did not complete" without a reason was
+               unreachable and a reasonless refusal would have read "(null)" to
+               the reader. See `PairingResult.reason`. */
+            (result.reason ?? null) === null
             ? 'That pairing did not complete.'
             : `That pairing did not complete (${result.reason}).`,
       )

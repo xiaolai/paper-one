@@ -97,13 +97,24 @@ export interface PairingResult {
    * ignores the other's events.
    */
   readonly kind: PairKind
-  /** Which attempt this is the result of; absent on the joining side. */
-  readonly attemptId?: string
+  /**
+   * Which attempt this is the result of.
+   *
+   * ⚠️ **`null`, NOT ABSENT, AND THIS SAID "absent on the joining side".** Rust
+   * carries `Option<String>` and `serde_json` writes `null` for `None`, so a
+   * consumer testing `=== undefined` tests something that never happens. It is
+   * `null` on every refusal reachable BEFORE the claim — `expired`, `bad-mac`,
+   * `role-mismatch`, `no-pending`, `name-too-long`, the hello timeout — because
+   * there is no attempt yet to name, which is exactly when a surface most needs
+   * to know the event is not about the attempt it is showing.
+   */
+  readonly attemptId?: string | null
   readonly id: string
-  readonly name?: string
-  readonly platform?: string
-  readonly role?: PeerRole
-  readonly reason?: string
+  readonly name?: string | null
+  readonly platform?: string | null
+  readonly role?: PeerRole | null
+  /** The refusal's own word. `null` on success, for the same reason as above. */
+  readonly reason?: string | null
 }
 
 export interface SessionOpen {

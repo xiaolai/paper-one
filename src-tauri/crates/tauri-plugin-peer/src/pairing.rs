@@ -227,6 +227,27 @@ impl PairingState {
         inner.confirm = None;
     }
 
+    /// What the offer on the table is FOR, if there is one.
+    ///
+    /// ⚠️ **EVERY REFUSAL BEFORE THE CLAIM USED TO BE REPORTED AS `Device`.**
+    /// `Attempt::default()` is `PairKind::Device`, and `serve_inner` only
+    /// learned the kind after `claim` succeeded — so `expired`, `bad-mac`,
+    /// `role-mismatch`, `no-pending`, `name-too-long` and the hello timeout all
+    /// emitted `PairingResult { kind: Device, attempt_id: None }` whatever the
+    /// offer had been. Both surfaces route on that field (`peer/index.ts`
+    /// splits the stream by it, and `devicesModel` and `usePairing` each ignore
+    /// the other's), so a CIRCLE offer that expired was reported to the Devices
+    /// pane and never reached the panel showing the six digits.
+    ///
+    /// Read from the OFFER rather than from the hello: the offerer constrains
+    /// the kind — see `Pending::kind` — so taking it from a caller that has not
+    /// yet proved anything would let a hostile hello choose which of the
+    /// reader's panels hears about the refusal.
+    fn pending_kind(&self) -> Option<PairKind> {
+        let inner = self.inner.lock().expect("pairing lock");
+        inner.pending.as_ref().map(|pending| pending.kind)
+    }
+
     /// Take the confirmation sender, but only if the caller named the current
     /// attempt. REQUIRED: an unbound confirmation approved whichever attempt
     /// happened to be pending — exactly the stale/pre-played approval the
@@ -731,6 +752,13 @@ async fn serve_inner(
     attempt: &mut Attempt,
 ) -> Result<Option<PeerRecord>> {
     let remote = conn.remote_id();
+    /* ⚠️ **THE KIND IS TAKEN FROM THE OFFER FIRST, BEFORE ANYTHING CAN BE
+    REFUSED.** See `PairingState::pending_kind`: this used to be learned only
+    after a successful `claim`, so every earlier refusal — and the hello timeout
+    — reported `Device` by default and a circle attempt's failure was delivered
+    to the wrong panel. `None` when no offer is pending, which is the one case
+    where no surface is waiting to hear. */
+    attempt.kind = node.pairing.pending_kind().unwrap_or_default();
     let (mut send, mut recv) = timeout(HELLO_TIMEOUT, conn.accept_bi())
         .await
         .map_err(|_| Error::Timeout("pair hello"))??;
@@ -790,8 +818,9 @@ async fn serve_inner(
     }
 
     /* Recorded before the event, so every later result — including a refusal
-    from the timeout below — can name the attempt it belongs to. */
-    attempt.kind = hello.kind;
+    from the timeout below — can name the attempt it belongs to. The kind is
+    already set, from the offer, at the top of this function; `hello.kind` has
+    just been checked equal to it. */
     attempt.id = Some(attempt_id.clone());
 
     node.emit(PeerEvent::PairingPending(PairingPending {
@@ -1833,6 +1862,54 @@ mod tests {
         raw.close().await;
         shelf.close().await;
         satchel.close().await;
+    }
+
+    /**
+     * ⚠️ **A CIRCLE OFFER'S REFUSAL WAS DELIVERED TO THE DEVICES PANE.**
+     * `Attempt::default()` is `PairKind::Device` and `serve_inner` learned the
+     * kind only after a successful `claim`, so every refusal reachable before
+     * it reported `Device`: `expired`, `bad-mac`, `role-mismatch`,
+     * `no-pending`, `name-too-long`, and the hello timeout. Both TypeScript
+     * surfaces route on that field and each ignores the other's kind, so the
+     * panel showing six digits never heard that its own attempt had failed —
+     * it sat there until the 150 s ack deadline while the Devices pane
+     * announced a failure about nothing it was doing.
+     *
+     * Driven with a WRONG MAC because that is the shortest path to a pre-claim
+     * refusal; the property is about the kind on the way out, not about which
+     * check refused.
+     */
+    #[tokio::test]
+    async fn a_circle_offers_refusal_is_reported_as_a_circle_attempt() {
+        let mut shelf = TestNode::start("pair-kind-shelf", Role::Shelf).await;
+        let joiner = TestNode::start("pair-kind-joiner", Role::Shelf).await;
+        /* A CIRCLE offer: shelf offers, shelf joins. */
+        let offer = begin(&shelf.node, None, PairKind::Circle).unwrap();
+        let mut uri = PairUri::parse(&offer.url).unwrap();
+        uri.secret[0] ^= 1;
+
+        let (_, task) = from_uri(&joiner.node, &uri.to_uri(), None, vec![])
+            .await
+            .unwrap();
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("bad-mac"), "{err}");
+
+        let ev = shelf
+            .next_event_where(|e| matches!(e, PeerEvent::PairingResult(_)))
+            .await;
+        let PeerEvent::PairingResult(result) = ev else {
+            unreachable!()
+        };
+        assert!(!result.ok);
+        assert_eq!(result.reason.as_deref(), Some("bad-mac"));
+        assert_eq!(
+            result.kind,
+            PairKind::Circle,
+            "a refusal must name the kind of offer it refused, or no surface can bind it"
+        );
+
+        shelf.close().await;
+        joiner.close().await;
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ import {
   type ServiceHandler,
   type Setting,
 } from '../../kernel'
-import { peerPort, registerSyncNow, type PeerPort } from '../peer'
+import { peerPort, readRole, registerSyncNow, type PeerPort } from '../peer'
 import { createClock, ensureDeviceId, isHlc, type Hlc } from './lib/clock'
 import { createBackfill } from './lib/backfill'
 import { stampMeasured, unstampUnlessVerified } from './lib/coverStamps'
@@ -754,13 +754,26 @@ export const sync: Capability = {
 
     if (fs && journal && port) {
       const openJournal = journal
-      const role: SyncRole = await port.localRole().catch((error: unknown) => {
-        /* The shelf fallback serves nothing extra and schedules nothing —
-         * the safe side — but a role that could not be read is a fact the
-         * log must carry, not a silent guess. */
-        api.diagnostics.warn('sync.role-unknown', { message: messageOf(error) })
-        return 'shelf' as SyncRole
-      })
+      /* ⚠️ **THROUGH `readRole`, WHICH RETRIES — THIS ASKED ONCE.** `peer`'s
+       * own reader exists because the plugin can answer late: `devicePort.test`
+       * has a case named "retries a plugin that is not ready yet, rather than
+       * concluding satchel". Sync asked `localRole()` once and turned ANY
+       * failure into `'shelf'`, and it is the FIRST caller after the plugin
+       * registers — the most likely moment to meet that transient.
+       *
+       * The cost of getting it wrong is a whole session: a satchel bound as a
+       * shelf runs no scheduler, offers no Download or Evict, answers "a shelf
+       * answers satchels" to its own shelf, and reports `idle`. Nothing retries,
+       * because nothing failed. That is the class peer already fixed, re-opened
+       * one capability along.
+       *
+       * `null` — every retry exhausted — still lands on `'shelf'`: it serves
+       * nothing extra and schedules nothing, which is the safe side of a fact
+       * this device could not establish. `readRole` has already warned by then,
+       * naming the tries, so the log distinguishes "could not find out" from
+       * "is a shelf" even though the binding cannot. */
+      const role: SyncRole =
+        (await readRole(port, () => stopped, api.diagnostics)) ?? 'shelf'
       if (abortedDuringStart()) throw new Error('sync: start aborted while the role was being read')
       boundRole = bindRole(role)
       /* THE ARRIVALS MAP IS CLAIMED HERE, before the role branch, because

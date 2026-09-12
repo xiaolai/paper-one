@@ -183,6 +183,21 @@ describe('device.forget', () => {
     expect(await devicePortOver(plugin([])).forget('nobody')).toBe(false)
   })
 
+  /**
+   * ⚠️ **THE SAME QUESTION, PUT TO THE FAKE WIRE RATHER THAN TO A MOCK WRITTEN
+   * HERE.** `plugin()` above is a hand-written stand-in that refuses an unknown
+   * id because this file made it so; `fakeWire` is the shared model of the
+   * plugin, and it used to DELETE SILENTLY — so the behaviour every other
+   * suite's wire showed disagreed with both `PeerStore::remove` ("a forget that
+   * did nothing is visible") and with the mock three lines up. A port rule
+   * verified only against a mock invented beside it is a rule verified against
+   * nothing.
+   */
+  it('answers false through the shared fake wire too, not only through a local mock', async () => {
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-forget' })
+    expect(await devicePortOver(wire).forget('nobody')).toBe(false)
+  })
+
   it('carries an unrelated plugin failure through rather than reporting false', async () => {
     const backing = plugin()
     const broken = {
@@ -252,6 +267,47 @@ describe('readRole', () => {
 
   it('answers the role when the plugin is ready', async () => {
     expect(await readRole({ localRole: async () => 'shelf' }, () => false, quiet)).toBe('shelf')
+  })
+
+  /**
+   * ⚠️ **AND EVERY CAPABILITY HAS TO ASK THROUGH IT, WHICH `sync` DID NOT.**
+   * The retry above existed, was tested, and `sync/index.ts` still called
+   * `port.localRole()` once and turned any failure into `'shelf'` — as the
+   * FIRST caller after the plugin registers, which is the likeliest moment to
+   * meet the transient this whole function is for. One late answer bound a
+   * satchel as a shelf for the session: no scheduler, no Download or Evict,
+   * `idle` status, and nothing to retry because nothing had failed.
+   *
+   * Written over the SOURCE rather than as a behavioural case because there is
+   * no capability-level harness that starts `sync` against a fake port, and a
+   * rule about "which function every caller must use" is a fact about the tree
+   * either way. `readRole`'s own definition is the single exception.
+   */
+  it('is the only way any capability reads the role — nothing calls localRole() directly', async () => {
+    const { readFileSync, readdirSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const root = new URL('../../../src/capabilities/', import.meta.url).pathname
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const at = join(dir, entry.name)
+        if (entry.isDirectory()) return walk(at)
+        return /\.tsx?$/.test(entry.name) && !/\.test\.|\.testkit\./.test(entry.name) ? [at] : []
+      })
+    const files = walk(root)
+    /* NON-VACUOUS: a walk that found nothing would pass in silence. */
+    expect(files.length).toBeGreaterThan(30)
+
+    const offenders = files
+      .filter((file) => !file.endsWith('/peer/index.ts'))
+      .filter((file) => !file.includes('/peer/lib/'))
+      .filter((file) => {
+        /* Comments stripped, or this test's own explanation of the defect —
+           and the one in `sync/index.ts` — would count as a call. */
+        const text = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
+        return /\blocalRole\s*\(\s*\)/.test(text)
+      })
+      .map((file) => file.slice(root.length))
+    expect(offenders).toEqual([])
   })
 
   it('retries a plugin that is not ready yet, rather than concluding satchel', async () => {

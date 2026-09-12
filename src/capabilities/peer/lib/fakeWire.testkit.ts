@@ -224,7 +224,16 @@ class FakeWireImpl implements FakeWire {
     return [...this.peers.values()]
   }
 
+  /* ⚠️ **AN UNKNOWN ID IS AN ERROR, AND THIS WAS SILENT.** `PeerStore::remove`
+     refuses one with `PeerUnknown`, and says why in its own comment: "a forget
+     that did nothing is visible". The fake swallowed it, so `devicePortOver`'s
+     `forget → false` path — the one that reports a forget which removed nothing
+     — could only be reached with a hand-written mock, which is how a port
+     behaviour comes to be tested against something other than the wire it
+     stands for. `setGrants` beside it has always refused; these two disagreed
+     about the same missing peer. */
   async forgetPeer(id: string): Promise<void> {
+    if (!this.peers.has(id)) throw peerError('peerUnknown', `no peer ${id}`)
     this.peers.delete(id)
     for (const session of this.sessions.values()) {
       if (session.peerId === id) this.closeSession(session, 'revoked')
@@ -280,9 +289,15 @@ class FakeWireImpl implements FakeWire {
     const satchel = pending.satchel
     if (!accept) {
       const kind = this.offerKind
-      const refusal: PairingResult = { ok: false, id: this.id, reason: 'refused', kind }
+      const refusal: PairingResult = { ok: false, id: this.id, reason: 'refused', kind, attemptId: pending.attemptId }
       satchel.emit('pairing-result', refusal)
-      this.emit('pairing-result', { ok: false, id: satchel.id, reason: 'refused', kind })
+      /* ⚠️ **NOTHING BACK TO THE OFFERER, AND THIS EMITTED A `refused`.** The
+         real shelf answers a human's "no" with `Ok(None)`: it writes the ack
+         and closes, and `serve` emits only on `Ok(Some)` or `Err`. So the
+         offerer-side "Pairing did not finish: refused" that DevicesPane could
+         draw existed in this fake alone — the reader who pressed Refuse was
+         being told their own refusal had failed. A fake that invents an event
+         teaches every test above it a protocol that does not exist. */
       return null
     }
     const record: WirePeer = {
@@ -307,8 +322,14 @@ class FakeWireImpl implements FakeWire {
       lastAddrs: [],
     })
     const kind = this.offerKind
-    satchel.emit('pairing-result', { ok: true, id: this.id, name: this.name, platform: 'test', role: 'shelf', kind })
-    this.emit('pairing-result', { ok: true, id: satchel.id, name: pending.name, platform: 'test', role: 'satchel', kind })
+    /* ⚠️ **`attemptId` ON BOTH, AND IT WAS ON NEITHER.** The real `serve`
+       carries `attempt.id` into every result it emits after the claim, and both
+       consumers use it to tell their own attempt's outcome from a stray one.
+       Without it here, a filter that is correct against the real wire looks
+       broken against the fake — which is the wrong way round for a fake to be
+       wrong. */
+    satchel.emit('pairing-result', { ok: true, id: this.id, name: this.name, platform: 'test', role: 'shelf', kind, attemptId: pending.attemptId })
+    this.emit('pairing-result', { ok: true, id: satchel.id, name: pending.name, platform: 'test', role: 'satchel', kind, attemptId: pending.attemptId })
     return record
   }
 
@@ -318,6 +339,22 @@ class FakeWireImpl implements FakeWire {
     const shelf = this.links.get(parsed[1] as string)
     if (!shelf || !this.online) throw peerError('iroh', 'shelf unreachable')
     if (!shelf.offer || shelf.offer.secret !== parsed[2]) throw peerError('noPendingPairing', 'no such offer')
+    /* ⚠️ **THE CLAIM IS SINGLE-SHOT, AND THIS OVERWROTE `pending`.** Two
+       joiners could both be pending against one offer here, which the real
+       `PairingState::claim` makes impossible — the secret is consumed by the
+       first hello and every later one is refused `no-pending`.
+
+       That is not a detail: it is how the JOINER'S PROBE behaves. A joiner
+       cannot tell "you never heard me" from "your human is still deciding", so
+       it opens a second connection after `PAIR_PROBE_PAUSE` and the shelf
+       refuses that one — which means EVERY successful pairing produces a
+       `no-pending` result on the offering side. This fake emitted none, so the
+       filter that stops that refusal wiping the six digits mid-comparison could
+       not be tested at all, on either surface. */
+    if (shelf.pending !== null) {
+      shelf.emit('pairing-result', { ok: false, id: this.id, reason: 'no-pending', kind: shelf.offerKind })
+      throw peerError('noPendingPairing', 'that offer has already been claimed')
+    }
     const sas = '000000'
     const attemptId = `att-${this.id}`
     shelf.pending = { satchel: this, name: name ?? this.name, grants: grants ?? [], attemptId }

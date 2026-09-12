@@ -87,6 +87,26 @@ describe('the devices model', () => {
     const pending = shelf.getSnapshot().pending
     expect(pending?.id).toBe('satchel-dev')
 
+    /**
+     * ⚠️ **THE PROBE'S REFUSAL USED TO WIPE THE SIX DIGITS MID-COMPARISON.**
+     *
+     * A joiner cannot tell "you never heard me" from "your human is still
+     * deciding" — the shelf sends nothing between the two — so it opens a
+     * second connection after five seconds, and this side refuses that one
+     * `no-pending`. Every successful pairing therefore produces one.
+     *
+     * `usePairing` has dropped it since the probe was added; this surface read
+     * the same stream and did not, so five seconds into reading the code out
+     * the row vanished and the reader was told "Pairing did not finish:
+     * no-pending" about a pairing that was about to succeed. Asserted here,
+     * with the confirmation still outstanding, because that is the window the
+     * human is actually in.
+     */
+    await satchel.pairWithCode(offer!.url).catch(() => {})
+    await tick()
+    expect(shelf.getSnapshot().pending?.id, 'the probe must not clear the attempt on screen').toBe('satchel-dev')
+    expect(shelf.getSnapshot().lastResult, 'nor report a failure about it').toBeNull()
+
     await shelf.confirmPairing(true)
     await tick()
     await tick()
