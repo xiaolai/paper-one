@@ -463,6 +463,11 @@ export const publicSharing: Capability = {
       /* Safe to call twice, and it only clears a run that is still THIS one:
          a start that raced a stop would otherwise take down its successor. */
       dispose: () => {
+        /* ⚠️ **THE PORT IS LET GO OF, AND IT USED TO BE DROPPED.** It holds a
+           subscription to the plugin's share-resume event; clearing the module
+           slot leaves that attached to a run that has ended. Before the port
+           listened to anything, dropping it was complete. */
+        mine.port.dispose()
         if (running === mine) running = null
       },
     }

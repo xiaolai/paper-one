@@ -249,6 +249,19 @@ export interface SharePort {
     since?: number,
     generation?: number,
   ): Promise<FetchedNotes>
+  /**
+   * Told when this device has public offers and the share endpoint would not
+   * start at launch. The argument is the plugin's own sentence.
+   *
+   * ⚠️ **THE PLUGIN HAS EMITTED THIS SINCE IT WAS WRITTEN AND NOTHING HEARD
+   * IT.** Its own comment says a log line is not an observable failure — a
+   * release build installs no Rust logger — and then the listening half was
+   * never written, so the failure was as silent as before with one more
+   * constant to read. Meanwhile `offered()` reads the POLICY FILE, which still
+   * says the book is offered, so the reader saw "offered" over an endpoint that
+   * had not started. Found by audit.
+   */
+  onResumeFailed(fn: (why: string) => void): () => void
 }
 
 /**
@@ -317,6 +330,7 @@ export function sharePortOver(held: PeerWire): SharePort {
     resolve: (hash, service) => held.shareResolve(hash, service),
     fetch: (hash, folder, name, providers) => held.shareFetch(hash, folder, name, providers),
     fetchNotes: (hash, providers, since, generation) => held.shareFetchNotes(hash, providers, since, generation),
+    onResumeFailed: (fn) => held.onShareResumeFailed(fn),
   }
   sharePorts.set(held, port)
   return port

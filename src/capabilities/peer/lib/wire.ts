@@ -232,6 +232,21 @@ export interface PeerWire {
   whenListening?(): Promise<void>
   onSessionFrames(fn: (event: SessionFrames) => void): Unsubscribe
   onTransfer(fn: (event: TransferProgress) => void): Unsubscribe
+  /**
+   * Said when this device has public offers and the share endpoint would not
+   * start — `tauri_plugin_peer::SHARE_RESUME_FAILED_EVENT`.
+   *
+   * ⚠️ **THE PLUGIN HAS EMITTED THIS AND NOTHING HAS EVER HEARD IT.** Its own
+   * comment says the event exists because *"a log line is not an observable
+   * failure"* — a release build installs no Rust logger at all — and then no
+   * listener was written on this side, so the fix ended where the last one
+   * did: in a place a reader cannot reach. The Publish pane reads the POLICY
+   * FILE, which still says the book is offered, so a reader saw "offered" with
+   * nothing serving it. Found by audit.
+   *
+   * The payload is the plugin's own sentence.
+   */
+  onShareResumeFailed(fn: (why: string) => void): Unsubscribe
 
   /* ── the person identity and the circle roster (WI-22.B1/B3) ──────────
    *
@@ -716,6 +731,12 @@ export function tauriWire(): PeerWire {
     whenListening: () => whenListeningOf(registrations),
     onSessionFrames: (fn) => subscription(registrations, 'peer://session-frames', fn),
     onTransfer: (fn) => subscription(registrations, 'peer://transfer', fn),
+    /* ⚠️ **`paper://`, NOT `peer://` — THE ONE EVENT IN THIS FILE THAT IS NOT
+       THE PLUGIN'S OWN PREFIX.** `SHARE_RESUME_FAILED_EVENT` is declared beside
+       `LIBRARY_HELD_EVENT` in the plugin's `lib.rs`, which the HOST emits, and
+       both are spelled `paper://`. A listener on the wrong prefix attaches
+       cleanly and hears nothing, which is this whole finding a second time. */
+    onShareResumeFailed: (fn) => subscription(registrations, 'paper://share-resume-failed', fn),
   }
 }
 

@@ -186,9 +186,26 @@ export function PublicPane({ bookId, port, voices = null, heardOn, lookForNotes,
   }
 
   const withdraw = (service: ShareService) => act(() => port.withdraw(bookId, service))
+  /* ⚠️ **READ AT RENDER, NOT HELD IN STATE.** The port remembers it, the port
+     tells this pane when it changes (`subscribe` above), and a second copy here
+     is a second thing to keep in step with the first. */
+  const notServing = port.notServingBecause()
 
   return (
     <div className={CAPABILITY_UI.section}>
+      {/* ⚠️ **ABOVE EVERY SWITCH, BECAUSE IT CONTRADICTS ALL OF THEM.** The
+          switches below are read from the policy FILE and the endpoint is a
+          process: with the share endpoint stopped, every one of them goes on
+          saying "offered" while this device serves nobody. The plugin has
+          emitted `paper://share-resume-failed` for exactly this since it was
+          written, and until now nothing listened — so the sentence meant to
+          reach a reader reached nobody, and the pane's cheerful account of what
+          was being offered was the only thing they could see. Found by audit. */}
+      {notServing === null ? null : (
+        <p className={CAPABILITY_UI.hint}>
+          Nothing below is being served: this device could not start sharing when it launched. {notServing}
+        </p>
+      )}
       <div className={CAPABILITY_UI.row}>
         <span className={CAPABILITY_UI.grow}>The file itself</span>
         {state.bytes ? (

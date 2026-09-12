@@ -86,6 +86,11 @@ vi.mock('../peer', () => ({
         more: false,
       })
     },
+    /* The seam the public port subscribes to when it is built. A mock missing
+       it makes `start` throw, which is a mock the compiler cannot check — this
+       module is replaced whole by `vi.mock`, so `SharePort` holds nothing
+       here. */
+    onResumeFailed: () => () => {},
   }),
   voicePort: () => null,
 }))

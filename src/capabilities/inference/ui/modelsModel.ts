@@ -1,5 +1,4 @@
 import { messageOf, notifyAll } from '../../../kernel'
-import type { SettingsStore } from '../../../kernel'
 import { createGenerations } from '../../../kernel'
 import type { Controller, InferenceSnapshot, ReportFailure, RuntimeState } from '../lib/controller'
 import type { InferencePlugin } from '../lib/plugin'

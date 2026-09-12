@@ -71,8 +71,29 @@ export interface PublicPort {
    * would then believe.
    */
   importBook(hash: string, ext: string, providers?: readonly string[]): Promise<ShareImport>
+  /**
+   * Why this device is serving nothing, whatever the switches below say, or
+   * `null` when nothing is wrong.
+   *
+   * ⚠️ **THE SWITCHES ARE READ FROM A FILE AND THE ENDPOINT IS A PROCESS.**
+   * `offered()` reads the policy on disk and starts nothing — deliberately, so
+   * a surface does not bind a UDP port for a reader who has never published —
+   * which means it goes on saying "offered" after the share endpoint has failed
+   * to start. The plugin emits `paper://share-resume-failed` for exactly this
+   * and nothing on this side had ever listened, so the sentence that was meant
+   * to reach a reader reached nobody. Found by audit.
+   */
+  notServingBecause(): string | null
   /** Something changed. Returns its own unsubscribe. */
   subscribe(listener: () => void): () => void
+  /**
+   * Let go of what this port attached.
+   *
+   * ⚠️ **THE PORT SUBSCRIBES TO THE PLUGIN NOW, SO IT HAS SOMETHING TO LET GO
+   * OF.** Every other member here is a call; this one is a registration that
+   * would otherwise outlive the run that made it and accumulate over restarts,
+   * which is the leak `inference` had for months in a different capability. */
+  dispose(): void
 }
 
 /**
@@ -144,6 +165,10 @@ function candidateFor(books: readonly IndexedBook[], hash: string): IndexedBook 
 
 export function publicPortOver(library: Library, share: () => SharePort | null, changed: () => void): PublicPort {
   const listeners = new Set<() => void>()
+  /* The plugin's own sentence, held until something clears it — and nothing
+     does, because the endpoint is resumed once at launch. A reader who fixes
+     whatever stopped it relaunches, which is the only thing that retries. */
+  let notServing: string | null = null
   /**
    * The share port, or the one sentence that says why there is not one.
    *
@@ -169,7 +194,25 @@ export function publicPortOver(library: Library, share: () => SharePort | null, 
   const bookOf = (bookId: string): IndexedBook | undefined =>
     library.getSnapshot().find((book) => book.bookId === bookId)
 
+  /* ⚠️ **SUBSCRIBED WHERE THE PORT IS BUILT, NOT WHERE IT IS DRAWN.** The
+     event fires once, at launch, long before any pane mounts; a listener
+     attached by a surface would miss it and then report nothing wrong. The
+     port outlives every render of the pane, which is why it is the thing that
+     remembers. `share()` resolves per call for `mustShare`'s reason, so a
+     composition whose peer wire is not up yet simply has nothing to hear —
+     and that is also a device with no share endpoint to fail. */
+  const heard = share()?.onResumeFailed((why) => {
+    notServing = why
+    tell()
+  })
+
   return {
+    dispose: () => {
+      heard?.()
+      listeners.clear()
+    },
+    notServingBecause: () => notServing,
+
     async forBook(bookId) {
       const book = bookOf(bookId)
       if (book === undefined) return null

@@ -57,6 +57,7 @@ type Listeners = {
   'session-closed': Set<(e: SessionClosed) => void>
   'session-frames': Set<(e: SessionFrames) => void>
   transfer: Set<(e: TransferProgress) => void>
+  'share-resume-failed': Set<(why: string) => void>
 }
 
 export interface FakeWireOptions {
@@ -127,6 +128,7 @@ class FakeWireImpl implements FakeWire {
     'session-closed': new Set(),
     'session-frames': new Set(),
     transfer: new Set(),
+    'share-resume-failed': new Set(),
   }
 
   constructor({ role, endpointId, name }: FakeWireOptions) {
@@ -483,6 +485,21 @@ class FakeWireImpl implements FakeWire {
   }
   onTransfer(fn: (e: TransferProgress) => void): Unsubscribe {
     return this.on('transfer', fn)
+  }
+  onShareResumeFailed(fn: (why: string) => void): Unsubscribe {
+    return this.on('share-resume-failed', fn)
+  }
+
+  /**
+   * The plugin saying this device has public offers and the share endpoint
+   * would not start.
+   *
+   * ⚠️ **A SEAM THAT ONLY A TEST CALLS, AND IT EARNS ITS PLACE.** Nothing in
+   * this fake can make the real failure happen — it has no endpoint to fail to
+   * bind — and the behaviour under test is what the SURFACE does when it hears
+   * this, which went untested for as long as no surface heard it at all. */
+  failShareResume(why: string): void {
+    this.emit('share-resume-failed', why)
   }
 
   /* ── the person identity and the circle (WI-22.B1/B3) ────────────────

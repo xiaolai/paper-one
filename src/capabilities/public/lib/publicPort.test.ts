@@ -78,6 +78,10 @@ function fakeShare(): SharePort & {
       const records = held.slice(from)
       return Promise.resolve({ records, next: from + records.length, generation: 1, more: false })
     },
+    /* The seam the port subscribes to at launch. A fake that answered nothing
+       would make `publicPortOver` throw where the real wire simply has no
+       failure to report. */
+    onResumeFailed: () => () => {},
   }
   return port
 }
@@ -303,6 +307,49 @@ describe('offerNotes and the device-wide book quota', () => {
     const port = publicPortOver(libraryOf([book()]), () => share, () => {})
     await port.offerNotes('book:1')
     expect(share.notes).toEqual([HASH])
+  })
+})
+
+describe('the share endpoint failing to start', () => {
+  /**
+   * ⚠️ **THE PLUGIN HAS EMITTED THIS SINCE IT WAS WRITTEN AND NOTHING HEARD
+   * IT.** `SHARE_RESUME_FAILED_EVENT` exists because *"a log line is not an
+   * observable failure"* — a release build installs no Rust logger at all —
+   * and the listening half was never written, so the fix ended where the
+   * problem was: nowhere a reader could reach. `offered()` reads the POLICY
+   * FILE and goes on saying the book is offered, so the pane's account of what
+   * this device was serving stayed cheerful over an endpoint that had not
+   * started. Found by audit.
+   */
+  it('is remembered by the port and told to whoever is drawing', async () => {
+    const share = fakeShare()
+    let tell: ((why: string) => void) | null = null
+    share.onResumeFailed = (fn) => {
+      tell = fn
+      return () => {
+        tell = null
+      }
+    }
+    let told = 0
+    const port = publicPortOver(libraryOf([book()]), () => share, () => {})
+    port.subscribe(() => {
+      told += 1
+    })
+    /* NON-VACUOUS: nothing is wrong until something goes wrong. */
+    expect(port.notServingBecause()).toBeNull()
+
+    /* SUBSCRIBED WHEN THE PORT WAS BUILT, which is the point: the event fires
+       once at launch, long before any pane mounts. */
+    expect(tell, 'the port never subscribed, so it could not have heard').not.toBeNull()
+    tell!('the share port is in use')
+
+    expect(port.notServingBecause()).toBe('the share port is in use')
+    expect(told, 'nobody drawing was told, so the pane would not redraw').toBeGreaterThan(0)
+
+    /* And it lets go: a registration that outlives the run accumulates over
+       restarts, which is the leak this project has already had once. */
+    port.dispose()
+    expect(tell).toBeNull()
   })
 })
 

@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createKernelServices, scopeSettings } from '../../../kernel'
 import type { Controller, InferenceSnapshot, RuntimeState } from '../lib/controller'
 import type { ModelRow, ResourceUsage } from '../lib/plugin'
 import type { AudioSink } from './voiceTest'

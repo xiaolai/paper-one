@@ -85,6 +85,7 @@ function fakeShare(offers: readonly SharedBook[] = [{ hash: HASH, bytes: false, 
     resolve: () => Promise.resolve([]),
     fetch: () => Promise.resolve(1),
     fetchNotes: () => Promise.reject(new Error('no provider')),
+    onResumeFailed: () => () => {},
   }
   return port
 }
