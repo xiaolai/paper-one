@@ -1,6 +1,7 @@
 import {
   WIRE_VERSION,
   chainHash,
+  checkDelegation,
   checkPage,
   compareEntries,
   compareItems,
@@ -210,26 +211,29 @@ export interface Taken {
 function canSpeak(page: Page, ledger: Ledger, now: number, crypto: PageCrypto): boolean {
   const delegation = readDelegation(page.delegation, page.person, crypto)
   if (!delegation) return false
-  /* The delegation must name the device that signed the page. Without this a
-     device could present somebody else's valid delegation and sign with its
-     own key. */
-  if (delegation.device !== page.device) return false
-  /* ⚠️ **NO TOLERANCE ON EXPIRY, AND FIVE MINUTES ON `notBefore`** —
-     `identity.md` is explicit that the asymmetry is the point: a tolerance on
-     expiry is an extension granted to exactly the device you are stopping. */
-  if (now + SKEW_MS < delegation.notBefore) return false
-  if (now >= delegation.notAfter) return false
-  /* A delegation minted under an older roster generation is stale: a
-     succession is how a person disowns everything issued before it. */
-  if (delegation.roster < ledger.epoch) return false
-  /* The roster this side HOLDS, not the one the page carries. */
+  /* ⚠️ **THE KERNEL'S RULE, AND THIS FILE USED TO SPELL IT OUT AGAIN.** Four
+   * of the five checks stood here in full — the device the delegation names,
+   * the `notBefore` tolerance, the `notAfter` that gets none, and the stale
+   * epoch — under a `const SKEW_MS` whose own comment said it *"mirrors
+   * `identity.ts`"*. A copy that announces it is a copy is still a copy: the
+   * asymmetry `identity.md` insists on lives in one constant, and a second
+   * spelling of it cannot move when the first does. What made the duplication
+   * look unavoidable is that this is the WIRE delegation `person.rs` emits —
+   * six fields, and the epoch spelled `roster` — and not the kernel's
+   * `Delegation`. `checkDelegation` now asks for `Liveness`, the five fields it
+   * actually reads, so the rename is the whole of the adaptation and nothing
+   * has to be invented to satisfy a type. Found by audit. */
+  if (checkDelegation({ ...delegation, epoch: delegation.roster }, page.person, page.device, ledger.epoch, now)) {
+    return false
+  }
+  /* The two `maySpeak` adds, over the roster this side HOLDS rather than the
+     one the page carries. Not `maySpeak` itself: it reads a `Roster` and a
+     `RevocationList`, which are the shapes this device keeps for its OWN
+     person, and the ledger is what this side holds about somebody else. */
   if (!ledger.devices.includes(page.device)) return false
   if (ledger.revoked.includes(page.device)) return false
   return true
 }
-
-/** ±5 minutes on `notBefore`, and none on `notAfter`. Mirrors `identity.ts`. */
-const SKEW_MS = 5 * 60 * 1000
 
 /**
  * Take what can be taken from a batch of pages.

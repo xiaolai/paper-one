@@ -4,6 +4,7 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
 import {
+  SKEW_MS,
   WIRE_VERSION,
   canonicalJson,
   fold,
@@ -221,19 +222,28 @@ describe('the delegation a page carries', () => {
     expect(take([page({ delegation: expired })]).refusals).toEqual(['bad-delegation'])
   })
 
-  it('is forgiven five minutes of clock skew before it starts, and no more', () => {
-    const soon = delegation({ notBefore: NOW + 4 * 60 * 1000 })
+  it('is forgiven the kernel’s clock skew before it starts, and no more', () => {
+    /* ⚠️ **DERIVED FROM `SKEW_MS`, NOT FROM `5 * 60 * 1000` — AND IT WAS THE
+       LITERAL.** This module carried its own copy of the allowance under a
+       comment saying it *"mirrors `identity.ts`"*, and these cases spelled the
+       number a third time. The rule is the kernel's now; a test written to a
+       literal would go on passing against a second constant reintroduced here,
+       which is precisely the drift that has to be loud. What the number IS
+       belongs to `identity.test.ts`, which pins it against `identity.md`. */
+    const soon = delegation({ notBefore: NOW + SKEW_MS - 1 })
     expect(take([page({ delegation: soon })]).accepted).toBe(1)
-    const later = delegation({ notBefore: NOW + 6 * 60 * 1000 })
+    const later = delegation({ notBefore: NOW + SKEW_MS + 1 })
     expect(take([page({ delegation: later })]).refusals).toEqual(['bad-delegation'])
+    /* NON-VACUOUS: an allowance of zero would make both lines above trivial. */
+    expect(SKEW_MS).toBeGreaterThan(0)
   })
 
-  it('accepts a delegation starting EXACTLY five minutes from now', () => {
+  it('accepts a delegation starting EXACTLY at the allowance', () => {
     /* ⚠️ **THE BOUNDARY, WHICH `<` AND `<=` DISAGREE ABOUT AND NOTHING ELSE
-       DOES.** Five minutes is the allowance, so the instant five minutes away
-       is inside it — off by one here is an hour of a new device's pages
-       refused for no reason anybody can see. */
-    const edge = delegation({ notBefore: NOW + 5 * 60 * 1000 })
+       DOES.** The allowance is inclusive, so the instant it names is inside it
+       — off by one here is an hour of a new device's pages refused for no
+       reason anybody can see. */
+    const edge = delegation({ notBefore: NOW + SKEW_MS })
     expect(take([page({ delegation: edge })]).accepted).toBe(1)
   })
 

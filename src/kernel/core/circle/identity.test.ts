@@ -143,6 +143,13 @@ describe('WI-22.B2 — expiry is the real revocation', () => {
        hour refused; a tolerance on expiry is an extension granted to exactly
        the device you are trying to stop. */
     const d = delegation()
+    /* ⚠️ **THE NUMBER ITSELF, AND NOTHING HELD IT.** Every test of the skew
+       — here and in the circle's receiver — derives its instants from
+       `SKEW_MS`, so the allowance could have been changed to five seconds and
+       every one of them would still have passed. Five minutes is a decision
+       `identity.md` records, not an implementation detail, and a constant
+       nobody asserts is a decision anybody can move in silence. */
+    expect(SKEW_MS, 'the clock-skew allowance is five minutes — identity.md').toBe(5 * 60 * 1000)
     expect(checkDelegation(d, 'alice', 'leaf1', 1, d.notBefore - SKEW_MS + 1)).toBeNull()
     expect(checkDelegation(d, 'alice', 'leaf1', 1, d.notBefore - SKEW_MS - 1)).toBe('not-yet')
     expect(checkDelegation(d, 'alice', 'leaf1', 1, d.notAfter - 1)).toBeNull()

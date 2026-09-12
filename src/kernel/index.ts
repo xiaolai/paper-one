@@ -504,7 +504,7 @@ export {
 } from './core/circle/relationships'
 export type { Relationship, RelationshipState, Retain } from './core/circle/relationships'
 /* Whether the device that signed a page may still speak for its person. */
-export { checkDelegation, maySpeak, shouldRenew } from './core/circle/identity'
+export { SKEW_MS, checkDelegation, maySpeak, shouldRenew, type Liveness } from './core/circle/identity'
 export type { Delegation as CircleDelegation } from './core/circle/identity'
 export { tagKey } from './core/tags'
 

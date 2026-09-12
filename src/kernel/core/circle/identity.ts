@@ -117,6 +117,20 @@ export interface Delegation {
 export type DelegationRefusal = 'not-yet' | 'expired' | 'wrong-person' | 'wrong-device' | 'stale-epoch'
 
 /**
+ * The five fields deciding a delegation's liveness — and nothing else.
+ *
+ * ⚠️ **NARROWED FROM `Delegation` SO THE ONE RULE CAN JUDGE THE WIRE SHAPE
+ * TOO.** The circle receives a delegation `person.rs` emits, which carries six
+ * fields and spells the epoch `roster`; it is not this module's `Delegation`
+ * and never will be. `receive.ts` therefore spelled all five checks out a
+ * second time, with its own `SKEW_MS` under a comment saying it *"mirrors
+ * `identity.ts`"* — a copy that announces it is a copy and still cannot move
+ * when the original does. Asking for only what is read lets the wire shape in
+ * without inventing the `v` and `role` it does not have.
+ */
+export type Liveness = Pick<Delegation, 'person' | 'device' | 'notBefore' | 'notAfter' | 'epoch'>
+
+/**
  * Whether a delegation is live for this device, at this moment, in this epoch.
  *
  * ⚠️ **THE RECEIVER'S CLOCK, at receipt.** There is no trusted time source in
@@ -128,7 +142,7 @@ export type DelegationRefusal = 'not-yet' | 'expired' | 'wrong-person' | 'wrong-
  * that accepts P accepts Q.
  */
 export function checkDelegation(
-  delegation: Delegation,
+  delegation: Liveness,
   person: string,
   device: string,
   epoch: number,
