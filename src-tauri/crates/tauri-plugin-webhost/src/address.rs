@@ -118,34 +118,57 @@ fn ask(program: &str, args: &[&str]) -> Option<String> {
         .spawn()
         .ok()?;
 
+    /* ⚠️ **THE PIPE IS DRAINED WHILE THE CHILD RUNS, AND IT WAS NOT.** This
+     * waited for exit first and only then read `stdout`, which deadlocks on
+     * any output larger than the pipe buffer (64 KiB on macOS): `tailscale`
+     * blocks writing, this loop blocks waiting for an exit that cannot come,
+     * and five seconds later the child is killed and the answer discarded.
+     * Every one of the four `CANDIDATES` meets the same wall, so a reader with
+     * a working tailnet is told they have none — after a twenty-second stall on
+     * a blocking thread.
+     *
+     * It is not a hypothetical size: `status --json` carries a record per node,
+     * and this machine's is 22.7 KB with a handful of peers. Three times that
+     * many and the pane starts lying.
+     *
+     * A reader thread is the smallest fix that keeps the deadline. `wait_with_output`
+     * drains and waits together but has no timeout, which is the hang the
+     * paragraph above removed; taking the pipe into a thread keeps both. */
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut stdout, &mut text)
+            .ok()
+            .map(|_| text)
+    });
+
     /* WAITED FOR WITH A DEADLINE, and killed past it. `output()` waits for ever
      * — there is no timeout on it — so a hung `tailscale` was a thread this
      * process never got back. */
     let deadline = std::time::Instant::now() + ASK_TIMEOUT;
-    loop {
+    let ok = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                break;
-            }
+            Ok(Some(status)) => break status.success(),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return None;
+                    break false;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            Err(_) => return None,
+            Err(_) => break false,
         }
-    }
+    };
 
-    let mut stdout = child.stdout.take()?;
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut stdout, &mut text).ok()?;
-    Some(text)
+    /* JOINED EITHER WAY. The child has exited or been killed, so the pipe is
+     * closed and the read has ended; leaving the thread detached would leak one
+     * per call. Its bytes are dropped unless the child succeeded. */
+    let text = reader.join().ok().flatten();
+    if !ok {
+        return None;
+    }
+    text
 }
 
 /// The `tailscale` binary, wherever it is.
@@ -382,6 +405,36 @@ mod tests {
     use super::*;
 
     const STATUS: &str = r#"{"Version":"1.2","Self":{"ID":"n1","HostName":"studio","DNSName":"studio.tail1234.ts.net.","OS":"macOS"},"Peer":{}}"#;
+
+    /// ⚠️ **`ask` DEADLOCKED ON ANY OUTPUT LARGER THAN THE PIPE BUFFER.** It
+    /// waited for the child to exit and only then read `stdout`, so a writer
+    /// that filled the buffer (64 KiB on macOS) blocked — and this waited for an
+    /// exit that could not come, killed the child at `ASK_TIMEOUT`, and threw
+    /// the answer away. All four `CANDIDATES` hit it, so a reader with a
+    /// working tailnet was told they had none after a twenty-second stall.
+    ///
+    /// 200 KB, which is comfortably past every platform's buffer and about nine
+    /// times what `tailscale status --json` reports on this machine today.
+    /// Driven through `sh` rather than `tailscale` so the case is reproducible
+    /// on a machine that has no tailnet — the bug is in the plumbing, not in
+    /// what is being asked.
+    #[test]
+    fn reads_a_child_whose_output_is_larger_than_the_pipe_buffer() {
+        let answer = ask("sh", &["-c", "yes abcdefghij | head -c 200000"]);
+        let text = answer.expect("a child that writes 200 KB must not deadlock");
+        assert_eq!(
+            text.len(),
+            200_000,
+            "the whole of it, not one buffer's worth"
+        );
+    }
+
+    /// A non-zero exit is still `None`, and the bytes it wrote are discarded —
+    /// the drain must not turn a failure into an answer.
+    #[test]
+    fn a_child_that_fails_answers_nothing_however_much_it_printed() {
+        assert_eq!(ask("sh", &["-c", "echo plenty; exit 3"]), None);
+    }
 
     #[test]
     fn a_dns_name_loses_its_trailing_dot() {

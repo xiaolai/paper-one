@@ -402,6 +402,63 @@ pub fn run() {
         );
     }
 
+    /* ⚠️ **THE LOGGER, AND IT HAS TO BE HERE RATHER THAN IN `setup`.**
+     *
+     * It sat inside `.setup()` — first within it, which was already a fix: it
+     * had been below the lock block, the one place in `setup` that can refuse
+     * to start, so `log::error!("lock: …")` went nowhere on every platform and
+     * the one message saying why Paper would not open was lost. Measured on a
+     * Linux box: five lines against 193 on a clean start, no error among them,
+     * and a window that never painted.
+     *
+     * ⚠️ **BUT EVERY PLUGIN'S OWN `setup` RUNS BEFORE THE APP'S.** So being
+     * first inside `setup` is still after fs, dialog, persisted-scope,
+     * window-state, inference, webhost and peer have each run theirs — and
+     * `tauri-plugin-webhost` `log::error!`s from inside its setup when it moves
+     * a corrupt `sessions.json` aside. The `log` crate discards records with no
+     * logger installed, so every phone was signed out and `Paper.log` carried
+     * no line saying why. Registered on the BUILDER, it is installed before any
+     * other plugin's setup can speak.
+     *
+     * After `single_instance` and nothing else: that one must stay first — see
+     * its note — and a second process that installs a logger and then exits
+     * costs nothing. */
+    if cfg!(debug_assertions) {
+        builder = builder.plugin(
+            tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Info)
+                /* ⚠️ **IROH LOGS ONE LINE PER UDP DATAGRAM AT `Info`,
+                 * AND THE DEFAULT 40 KB ROTATION THREW THE LOG AWAY
+                 * FASTER THAN IT COULD BE READ.** Measured 2026-09-08:
+                 * `Paper.log` held EIGHT SECONDS of history under an
+                 * app that had been up for three minutes, and two
+                 * thirds of its lines were `poll_send`. A pairing
+                 * retry logged a line, the line was rotated out before
+                 * anyone could read it, and its absence looked exactly
+                 * like the retry never firing — the same
+                 * silent-instrument defect as the accept loop it was
+                 * written to observe.
+                 *
+                 * ⚠️ **AND `level_for` DOES NOT FIX IT — MEASURED.**
+                 * `.level_for("iroh::socket::transports", Warn)` was
+                 * tried first and changed NOTHING: the lines kept
+                 * coming at `Info`. iroh logs through `tracing`, and
+                 * those records reach `log` by tracing's fallback,
+                 * which builds a record and logs it without the
+                 * per-target check `level_for` installs. The global
+                 * `.level` still bites, because tracing's fallback
+                 * does consult `log::max_level()` — but lowering that
+                 * would silence this app's own lines too, which are
+                 * the point.
+                 *
+                 * So the lever is RETENTION, not volume. 8 MB is
+                 * roughly two hours of a talkative peer session
+                 * instead of forty seconds. */
+                .max_file_size(8_000_000)
+                .build(),
+        );
+    }
+
     builder = builder
         /* This application's own commands. Unlike a plugin's, they are not
         gated by the capability file — an app command is reachable from the
@@ -505,53 +562,6 @@ pub fn run() {
         // `peer:default` in capabilities/default.json.
         .plugin(tauri_plugin_peer::init())
         .setup(|app| {
-            /* ⚠️ **THE LOGGER FIRST, AND THAT ORDER IS THE WHOLE POINT.** This
-             * sat BELOW the lock block, which is the only place in `setup`
-             * that can refuse to start — and `tauri_plugin_log` is the only
-             * logger anywhere in this tree. So `log::error!("lock: …")` was
-             * emitted with nothing attached to record it, and the one message
-             * that says why Paper would not open went nowhere, on every
-             * platform, every time. Measured on a Linux box: five lines in the
-             * log against 193 on a clean start, no error among them, and a
-             * window that never painted.
-             *
-             * Anything that can refuse must be registered after this. */
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        /* ⚠️ **IROH LOGS ONE LINE PER UDP DATAGRAM AT `Info`,
-                         * AND THE DEFAULT 40 KB ROTATION THREW THE LOG AWAY
-                         * FASTER THAN IT COULD BE READ.** Measured 2026-09-08:
-                         * `Paper.log` held EIGHT SECONDS of history under an
-                         * app that had been up for three minutes, and two
-                         * thirds of its lines were `poll_send`. A pairing
-                         * retry logged a line, the line was rotated out before
-                         * anyone could read it, and its absence looked exactly
-                         * like the retry never firing — the same
-                         * silent-instrument defect as the accept loop it was
-                         * written to observe.
-                         *
-                         * ⚠️ **AND `level_for` DOES NOT FIX IT — MEASURED.**
-                         * `.level_for("iroh::socket::transports", Warn)` was
-                         * tried first and changed NOTHING: the lines kept
-                         * coming at `Info`. iroh logs through `tracing`, and
-                         * those records reach `log` by tracing's fallback,
-                         * which builds a record and logs it without the
-                         * per-target check `level_for` installs. The global
-                         * `.level` still bites, because tracing's fallback
-                         * does consult `log::max_level()` — but lowering that
-                         * would silence this app's own lines too, which are
-                         * the point.
-                         *
-                         * So the lever is RETENTION, not volume. 8 MB is
-                         * roughly two hours of a talkative peer session
-                         * instead of forty seconds. */
-                        .max_file_size(8_000_000)
-                        .build(),
-                )?;
-            }
-
             /* THE AUTOMATION BRIDGE'S OWN COMMANDS, GRANTED AT RUNTIME.
              *
              * ⚠️ **THE PLUGIN WAS REGISTERED AND NEVER PERMITTED**, and the

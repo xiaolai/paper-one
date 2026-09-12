@@ -260,7 +260,30 @@ impl EndpointStore {
         // file that `read` would then refuse, locking the reader out of an
         // endpoint list they can no longer edit.
         let tmp = self.path.with_extension("json.part");
-        std::fs::write(&tmp, text)?;
+        /* ⚠️ **AND FSYNCED, WHICH IT WAS NOT.** `std::fs::write` returns once
+         * the bytes are in the page cache, so a rename could reach the disk
+         * ahead of the contents it publishes: power lost in that window leaves
+         * a zero-length `endpoints.json`, which `read` refuses as
+         * `ManifestMalformed`, which `provisioning` propagates, which
+         * `ensure_started` `?`s — so the daemon will not start at all, for the
+         * LOCAL model too, until somebody deletes the file by hand. The header
+         * two lines up says the write-then-rename exists to stop exactly that
+         * lockout; without the barrier it only stops the torn-write half of it.
+         *
+         * ⚠️ **A SECOND COPY OF `peer::store::write_atomic`, DELIBERATELY.**
+         * That function does this correctly and is `pub` — within its own
+         * crate. Reaching across would make `tauri-plugin-inference` depend on
+         * `tauri-plugin-peer` for a filesystem primitive, which is a dependency
+         * edge between two capabilities that otherwise share nothing; the app
+         * crate's `atomic.rs` is equally out of reach, and one function is not
+         * worth a fourth crate. Recorded so the next reader knows there are two
+         * and which is the reference. */
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+        }
         /* ONE RENAME, ON EVERY PLATFORM. This used to fall back to
          * remove-then-rename on Windows, on the belief that `rename` there
          * cannot replace an existing file — so every update after the first
@@ -276,6 +299,16 @@ impl EndpointStore {
         if let Err(err) = std::fs::rename(&tmp, &self.path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(err.into());
+        }
+        /* The rename is durable only once the DIRECTORY entry is — the same
+         * second half `peer::store::write_atomic` documents. `if let`, so a
+         * platform that cannot open a directory as a file (Windows) still has
+         * the atomic rename; a sync that was attempted and failed is a
+         * different fact and is reported. */
+        if let Some(parent) = self.path.parent() {
+            if let Ok(handle) = std::fs::File::open(parent) {
+                handle.sync_all()?;
+            }
         }
         Ok(())
     }

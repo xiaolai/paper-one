@@ -215,6 +215,38 @@ pub fn watch<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
+/// Admit the launch's paths to the fs scope, so the webview's read can succeed.
+///
+/// ⚠️ **THIS GRANTS MORE THAN THE READ IT IS FOR, AND THE PLUGIN'S OWN CODE IS
+/// WHERE THAT IS DECIDED.** `tauri-plugin-fs`'s `resolve_path` admits a path
+/// when `fs_scope.scope.is_allowed(..) || scope.is_allowed(..)` — the RUNTIME
+/// scope this writes into, OR the per-command scope from `capabilities/`. So an
+/// entry here satisfies every fs command, including the three
+/// `capabilities/default.json` deliberately pins to `$APPDATA/**`
+/// (`fs:allow-write-file`, `fs:allow-remove`, `fs:allow-rename`) and the
+/// unscoped `fs:allow-write-text-file`. A double-clicked book is therefore
+/// writable and removable from the webview, not merely readable — and
+/// `tauri-plugin-persisted-scope` restores these entries at every launch, so it
+/// stays that way for the life of the install.
+///
+/// ⚠️ **WHAT IS NOT THE FIX.** Dropping persisted-scope is not: its remaining
+/// job is the pre-vault migration, documented at its registration in `lib.rs`
+/// with an exit condition that has not arrived. Narrowing the capability file is
+/// not either: the runtime scope is checked with `||`, so a command scope cannot
+/// take back what this grants. `is_forbidden` runs first on both scopes, but a
+/// `forbid` entry is equally global and would block the read this exists for.
+///
+/// The fix is to stop using the fs scope for these paths at all — read them
+/// through a command of this crate's own, which can refuse any path the shell
+/// did not hand over, the way `open_external` validates its own argument. That
+/// replaces the launch-open read path on both sides and is a change worth
+/// verifying against a running app rather than inferring, so it is written down
+/// here rather than half-made.
+///
+/// What limits it meanwhile: a book's own scripts cannot reach `invoke` —
+/// `bookScripts.ts` strips them and the CSP pins `frame-src blob:` — so the
+/// exposure is to a defect in Paper's own code handling a reader-supplied path,
+/// not to book content.
 fn allow_in_scope<R: Runtime>(app: &AppHandle<R>, paths: &[PathBuf]) {
     use tauri_plugin_fs::FsExt;
     let scope = app.fs_scope();
