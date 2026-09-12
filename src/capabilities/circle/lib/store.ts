@@ -1,3 +1,4 @@
+import { isReceivedWork } from './workField'
 import {
   READING_STATES,
   STARS,
@@ -510,17 +511,14 @@ function isHeldWork(value: unknown): value is HeldWork {
   const row = value as Record<string, unknown>
   if (typeof row['pub'] !== 'string' || row['pub'] === '' || !isHlc(row['at']) || !hasStampOrNone(row)) return false
   if (row['epoch'] !== undefined && !isEpoch(row['epoch'])) return false
-  const work = row['work']
-  if (typeof work !== 'object' || work === null || Array.isArray(work)) return false
-  const named = work as Record<string, unknown>
-  return (
-    typeof named['title'] === 'string' &&
-    typeof named['author'] === 'string' &&
-    typeof named['language'] === 'string' &&
-    (named['identifier'] === undefined || typeof named['identifier'] === 'string') &&
-    // Stryker disable next-line ConditionalExpression: a non-string never matches the digest pattern; the type check spells out what the pattern already refuses.
-    (named['cover'] === undefined || (typeof named['cover'] === 'string' && /^[0-9a-f]{64}$/u.test(named['cover'])))
-  )
+  /* ⚠️ **THE WEAKEST OF THREE PARSERS FOR ONE SHAPE, AND THE ONE FACING OTHER
+     PEOPLE'S DATA.** `shelf.ts` and `lists.ts` each held key exactness and the
+     field bound; this held neither, which is the wrong way round for a
+     difference nobody had decided on. `isReceivedWork` is the shared shape, and
+     it deliberately carries the exactness and NOT the bound — see its own note
+     for why a long title from a peer must not make this device's held file
+     unreadable to itself. Found by audit. */
+  return isReceivedWork(row['work'])
 }
 
 /** A register's identity — stamp, device and sequence — as every one carries it. */

@@ -927,6 +927,26 @@ export function createMarkStore({
       if (!rewrote && fresh.length === 0) return prev
       return [...mine, ...fresh]
     }, undefined, prepare)
+    /* ⚠️ **AND THE OLD ID GOES FROM MEMORY TOO, WHICH IT DID NOT.** `applyTo`
+     * rebuilds the cross-book list as *the target's new marks, plus everything
+     * that is not the target's* — and a row still carrying `from` is not the
+     * target's, so every rekeyed mark stayed in `all` beside its rewritten
+     * copy. Notes draws from `all`, so the reader saw each of their own
+     * highlights TWICE: once under the new book and once under a book that no
+     * longer exists, which is the exact symptom the paragraph above says this
+     * function was written to remove. It cleared itself on the next `loadAll`
+     * and not before.
+     *
+     * Nothing is lost by dropping them. Every mark of `from` is in the target's
+     * list either way — rewritten in place when the folder was already renamed,
+     * or merged from the old folder when it was not — which is what the two
+     * halves above are for. Published, because a list that changed silently is
+     * a Notes pane that redraws on the next unrelated edit. Found by audit. */
+    const without = all.filter((mark) => mark.bookId !== from)
+    if (without.length !== all.length) {
+      all = without
+      publish()
+    }
   }
 
   const mergeRemote: MarkStore['mergeRemote'] = (bookId, incoming) => {

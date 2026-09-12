@@ -1,4 +1,4 @@
-import { MAX_WORK_FIELD, cutToField } from './workField'
+import { cutToField, hasOnly, isPublishableWork } from './workField'
 import {
   OWN_SHELF_PATH,
   atomicWrite,
@@ -264,13 +264,13 @@ function isShelfRow(value: unknown): value is ShelfRow {
      refuses a page carrying a field the schema does not name, so a row
      accepted here with one would be a page every recipient refuses. */
   if (!hasOnly(row, ['pub', 'bookId', 'work', 'device', 'seq', 'at', 'unshelved'])) return false
-  const named = work as Record<string, unknown>
-  if (!hasOnly(named, ['title', 'author', 'language', 'identifier', 'cover'])) return false
-  if (!isText(named['title']) || !isText(named['author']) || !isText(named['language'])) return false
-  if (named['identifier'] !== undefined && !isText(named['identifier'])) return false
-  /* A cover is a digest, and a store row with anything else in its place would be a page every recipient refuses. */
-  // Stryker disable next-line ConditionalExpression: a non-string never matches the digest pattern; the type check spells out what the pattern already refuses.
-  if (named['cover'] !== undefined && !(typeof named['cover'] === 'string' && COVER_DIGEST.test(named['cover']))) return false
+  /* ⚠️ **ONE PARSER FOR A WORK, AND THERE WERE THREE.** This block, `lists.ts`
+     and `store.ts` each spelled out the five fields, the bound and the digest —
+     and the received side, the one reading what other people sent, held the
+     weakest version of all three. `isPublishableWork` is the whole of it now;
+     the difference between what this device writes and what it accepts is
+     named there rather than left as a drift. */
+  if (!isPublishableWork(work)) return false
   /* A removal is a withdrawal, held to the one rule a passage's and a
      review's are — EXACTLY its fields included, so a field written by a later
      build is refused here rather than dropped on the next write. */
@@ -294,8 +294,8 @@ function reusesSequence(works: readonly ShelfRow[]): boolean {
 /** The lane the circle's own folder writes on — not a book's, and not a person's. */
 export const OWN_SHELF_LANE = 'circle'
 
-const hasOnly = (value: Record<string, unknown>, allowed: readonly string[]): boolean => Object.keys(value).every((key) => allowed.includes(key))
-const isText = (value: unknown): value is string => typeof value === 'string' && value.length <= MAX_WORK_FIELD
+/* `hasOnly` is `workField`'s now — it was declared here and in `lists.ts`, two
+   copies of one sentence. `isText` went with the work parser that used it. */
 
 /**
  * Change the published shelf as one step on its lane — read, transform,

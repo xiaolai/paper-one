@@ -59,7 +59,7 @@ export interface OwnList {
  */
 export const MAX_LIST_TITLE = 200
 export const MAX_LIST_NOTE = 2_000
-import { MAX_WORK_FIELD } from './workField'
+import { MAX_WORK_FIELD, hasOnly, isPublishableWork } from './workField'
 export { MAX_WORK_FIELD }
 
 /** One past the highest sequence this device has used on the list's log. */
@@ -182,7 +182,9 @@ export async function ownListIds(fs: IndexFs): Promise<readonly string[]> {
   /* Stryker restore LogicalOperator,StringLiteral */
 }
 
-const hasOnly = (value: Record<string, unknown>, allowed: readonly string[]): boolean => Object.keys(value).every((key) => allowed.includes(key))
+/* `hasOnly` is `workField`'s — it stood here and in `shelf.ts`. `isText` stays,
+   because the bounds BELOW a work's are this file's own: a list's title and a
+   list item's note have their own limits and are not work fields. */
 const isText = (value: unknown, most: number): value is string => typeof value === 'string' && value.length <= most
 
 /**
@@ -191,19 +193,11 @@ const isText = (value: unknown, most: number): value is string => typeof value =
  * with one would be a page every recipient refuses — for ever, since the
  * chain behind it cannot move.
  */
-function isWork(value: unknown): value is ShelvedWork {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const named = value as Record<string, unknown>
-  return (
-    hasOnly(named, ['title', 'author', 'language', 'identifier', 'cover']) &&
-    isText(named['title'], MAX_WORK_FIELD) &&
-    isText(named['author'], MAX_WORK_FIELD) &&
-    isText(named['language'], MAX_WORK_FIELD) &&
-    (named['identifier'] === undefined || isText(named['identifier'], MAX_WORK_FIELD)) &&
-    // Stryker disable next-line ConditionalExpression: a non-string never matches the digest pattern; the type check spells out what the pattern already refuses.
-    (named['cover'] === undefined || (typeof named['cover'] === 'string' && /^[0-9a-f]{64}$/u.test(named['cover'])))
-  )
-}
+/* ⚠️ **ONE PARSER FOR A WORK, AND THERE WERE THREE.** See
+   `workField.isPublishableWork`: this block, `shelf.ts`'s and `store.ts`'s each
+   spelled out the same five fields, and the received side held the weakest
+   version of all three. */
+const isWork = (value: unknown): value is ShelvedWork => isPublishableWork(value)
 
 const STAMP = ['op', 'device', 'seq', 'at']
 

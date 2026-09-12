@@ -714,3 +714,40 @@ describe('the record’s bounds at the store', () => {
     }
   })
 })
+
+describe('carrying marks onto a new book id', () => {
+  /**
+   * ⚠️ **THE OLD ID SURVIVED IN THE CROSS-BOOK LIST, SO NOTES DREW EVERY MARK
+   * TWICE.** `applyTo` rebuilds that list as *the target's new marks, plus
+   * everything that is not the target's* — and a row still carrying the old id
+   * is not the target's, so each rewritten highlight stayed beside its own
+   * copy: once under the new book, once under a book that no longer exists.
+   * That second one is the exact symptom `rekey` was written to remove, and it
+   * cleared itself on the next `loadAll` and not before. Found by audit.
+   */
+  it('leaves no row under the old id in the cross-book list', async () => {
+    const OLD = 'file:old'
+    const NEW = 'book:new'
+    const fs = libraryWith(NEW)
+    /* The library got here first: the folder is renamed and `marks.json` is
+       already the new book's, with the OLD id still written inside every row —
+       which is the ordinary case the two halves of `rekey` exist for. */
+    fs.store.set(
+      marksPathIn(NEW),
+      new TextEncoder().encode(JSON.stringify([{ ...highlight(), id: 'm1', bookId: OLD }])),
+    )
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    await marks.loadAll()
+    /* NON-VACUOUS: the row really is under the old id to begin with, so the
+       rekey below has something to carry. */
+    expect(marks.getSnapshot().all.map((one) => one.bookId)).toEqual([OLD])
+
+    await marks.rekey(OLD, NEW)
+
+    expect(
+      marks.getSnapshot().all.map((one) => one.bookId),
+      'the mark was listed under the new book AND under the book that no longer exists',
+    ).toEqual([NEW])
+    expect(marks.getSnapshot().all.map((one) => one.id)).toEqual(['m1'])
+  })
+})

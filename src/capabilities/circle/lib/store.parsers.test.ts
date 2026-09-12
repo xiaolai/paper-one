@@ -76,8 +76,29 @@ describe('a held shelf row', () => {
     ['a cover with a character past the digest', work({ work: { title: 'T', author: 'A', language: 'en', cover: `${'ab'.repeat(32)}x` } })],
     ['a cover with a character before the digest', work({ work: { title: 'T', author: 'A', language: 'en', cover: `x${'ab'.repeat(32)}` } })],
     ['a numeric cover', work({ work: { title: 'T', author: 'A', language: 'en', cover: 1 } })],
+    /* ⚠️ **THIS SIDE ACCEPTED A FIELD THE SCHEMA DOES NOT NAME, AND THE OTHER
+       TWO PARSERS OF THE SAME SHAPE DID NOT.** `shelf.ts` and `lists.ts` each
+       held key exactness; the received side — the one reading what other people
+       sent — held neither that nor the field bound, which is the wrong way
+       round for a difference nobody had decided on. The wire refuses a sixth
+       field too, so a row with one got here by somebody editing this disk,
+       which is the case a store's own reader exists for. Found by audit. */
+    ['a work with a field the schema does not name', work({ work: { title: 'T', author: 'A', language: 'en', blurb: 'x' } })],
   ])('refuses %s as a shelf that will not read', async (_what, row) => {
     await expect(read({ works: [row] })).rejects.toThrow(/has a shelf that will not read/u)
+  })
+
+  it('keeps a long title from a peer rather than making its own file unreadable', async () => {
+    /* ⚠️ **AND THE BOUND IS DELIBERATELY NOT HERE, WHICH IS THE HALF THAT LOOKS
+       LIKE THE OMISSION.** A field too long is CUT by whoever publishes it, and
+       a peer that did not cut has sent a page this device already accepted on
+       the wire. Refusing the row would leave that page accepted and its row
+       unreadable for ever — the permanent stall `shelf.ts`'s own parser warns
+       about from the other side. A stranger's long title costs bytes; a refusal
+       costs the chain. */
+    const long = 'x'.repeat(5_000)
+    const held = await read({ works: [work({ work: { title: long, author: 'A', language: 'en' } })] })
+    expect(held.works[0]?.work.title).toBe(long)
   })
 })
 
