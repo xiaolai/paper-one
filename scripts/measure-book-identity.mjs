@@ -4,6 +4,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, s
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fold } from '../src/kernel/core/tags.ts'
+import { isProcessEntry } from './lib/entry.mjs'
 
 /**
  * `node scripts/measure-book-identity.mjs` — does the `file:` key mean what the
@@ -339,7 +340,7 @@ export function report(totals, { json = false, at } = {}) {
 }
 
 /* The CLI. Nothing above this line reads a flag or prints. */
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '')) {
+if (isProcessEntry(import.meta)) {
   const argv = process.argv.slice(2)
   /* A flag written without a value is an ERROR, never a silent default — see
      `scan-corpus.mjs`, where `--limit` with nothing after it scanned zero books

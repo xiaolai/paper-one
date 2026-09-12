@@ -55,7 +55,7 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
+import { isProcessEntry } from './lib/entry.mjs'
 import { inlineModules } from './lib/inline-ts.mjs'
 /* The bridge client lives in `lib/bridge.mjs` — this file held the only
    copy until `circle-scenario.sh` needed the same round trip, and two
@@ -646,8 +646,7 @@ async function main(argv) {
   return 1
 }
 
-const entry = process.argv[1]
-if (entry !== undefined && pathToFileURL(entry).href === import.meta.url) {
+if (isProcessEntry(import.meta)) {
   main(process.argv.slice(2)).then(
     (code) => {
       process.exitCode = code

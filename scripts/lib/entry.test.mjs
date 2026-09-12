@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import { isProcessEntry } from './entry.mjs'
@@ -101,5 +101,52 @@ describe('isProcessEntry', () => {
     } finally {
       process.argv[1] = saved
     }
+  })
+
+  /**
+   * ⚠️ **THE ASSERTION THIS HELPER EXISTED WITHOUT FOR THE WHOLE OF ITS LIFE.**
+   *
+   * `isProcessEntry` was written, documented and tested, and then eleven
+   * scripts went on hand-rolling the guard beside it — including two that
+   * `pnpm verify` runs. `check-dead-css.mjs` and `check-inert-directives.mjs`
+   * compared `process.argv[1]` to `fileURLToPath(import.meta.url)` textually,
+   * so through any symlinked path (macOS `/tmp`, `/var`, a scratch copy, a
+   * worktree) both printed NOTHING and exited 0. A gate that scans no files
+   * and a gate that finds none are the same two lines of output apart, and
+   * neither is distinguishable from the outside by its exit code.
+   *
+   * Two of the eleven were worse in the other direction:
+   * `import.meta.url.endsWith(argv[1].split('/').pop())` matches on BASENAME,
+   * so any process whose entry merely ends in the same filename ran an
+   * imported module's `main()`.
+   *
+   * The rule is the narrow one that admits no judgement: after the fix,
+   * NOTHING under `scripts/` reads `process.argv[1]` except this helper. That
+   * is the only legitimate reason to want it — every other use is a guard
+   * being written a twelfth time. `process.argv.slice(2)` (the flags) is
+   * untouched by this and is what a script should read instead.
+   */
+  it('E-6 no script hand-rolls the entry guard — `process.argv[1]` is read only here', () => {
+    const scripts = fileURLToPath(new URL('..', import.meta.url))
+    const walk = (dir) =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+        const at = join(dir, e.name)
+        if (e.isDirectory()) return e.name === 'node_modules' || e.name === 'fixtures' ? [] : walk(at)
+        return e.name.endsWith('.mjs') ? [at] : []
+      })
+
+    const self = fileURLToPath(import.meta.url)
+    const helper = fileURLToPath(new URL('./entry.mjs', import.meta.url))
+    const files = walk(scripts)
+    /* NON-VACUOUS. A walk that found nothing would pass this silently, which
+       is the exact failure shape the test exists to refuse. */
+    expect(files.length).toBeGreaterThan(50)
+
+    const offenders = files
+      .filter((file) => file !== self && file !== helper)
+      .filter((file) => /process\.argv\s*\[\s*1\s*\]/.test(readFileSync(file, 'utf8')))
+      .map((file) => relative(scripts, file).split('\\').join('/'))
+
+    expect(offenders).toEqual([])
   })
 })

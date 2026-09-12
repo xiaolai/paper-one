@@ -24,7 +24,7 @@
  * Exit codes: 0 did what was asked, 1 could not, 2 was asked wrongly.
  */
 
-import { pathToFileURL } from 'node:url'
+import { isProcessEntry } from './lib/entry.mjs'
 import { connect, evaluate, DEFAULT_PORT } from './lib/bridge.mjs'
 import {
   AT_SHELF,
@@ -224,6 +224,6 @@ async function main(argv) {
 /* ⚠️ **GUARDED, SO THE TESTS CAN IMPORT THE BUILDERS.** A top-level `await
    main()` runs the whole CLI — bridge connection and all — the moment anything
    imports this file, which is how a unit test comes to need a running app. */
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isProcessEntry(import.meta)) {
   await main(process.argv.slice(2))
 }

@@ -39,7 +39,7 @@
 
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
-import { pathToFileURL } from 'node:url'
+import { isProcessEntry } from './lib/entry.mjs'
 import { inlineModules } from './lib/inline-ts.mjs'
 import { assertTransportable } from './word-snap-parity.mjs'
 
@@ -432,8 +432,7 @@ async function main(argv) {
   return 1
 }
 
-const entry = process.argv[1]
-if (entry !== undefined && pathToFileURL(entry).href === import.meta.url) {
+if (isProcessEntry(import.meta)) {
   main(process.argv.slice(2)).then(
     (code) => {
       process.exitCode = code

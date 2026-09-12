@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { UNREADABLE, readMatching } from './lib/zip.mjs'
+import { isProcessEntry } from './lib/entry.mjs'
 import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -556,7 +557,7 @@ export function report(totals, { json = false, at } = {}) {
 }
 
 /* The CLI. Nothing above this line reads a flag or prints. */
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '')) {
+if (isProcessEntry(import.meta)) {
   const argv = process.argv.slice(2)
   /**
    * A flag's value, and a flag written without one is an ERROR.

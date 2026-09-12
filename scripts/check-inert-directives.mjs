@@ -2,6 +2,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { extname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isProcessEntry } from './lib/entry.mjs'
 
 /**
  * `pnpm directives:check` — no suppression comment for a tool that never runs.
@@ -89,7 +90,7 @@ export function inertDirectives(root, roots = ROOTS) {
   return { found, live: [...live] }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isProcessEntry(import.meta)) {
   const { found, live } = inertDirectives(REPO)
   for (const { file, line, tool } of found) {
     process.stdout.write(`${file}:${line}  suppresses ${tool}, which this repo does not run\n`)

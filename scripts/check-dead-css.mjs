@@ -2,6 +2,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { extname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isProcessEntry } from './lib/entry.mjs'
 
 /**
  * `pnpm css:check` — every class in a CSS module has a consumer.
@@ -111,7 +112,7 @@ export function deadClasses(root, roots = ROOTS) {
    used to run the scan and print its summary as a side effect, so the gate's
    own test emitted the repository's result in the middle of its output — and
    an importer that only wanted `deadClasses` paid for a full walk of `src`. */
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isProcessEntry(import.meta)) {
   const { dead, modules, used } = deadClasses(REPO)
   for (const { file, name, line } of dead) {
     process.stdout.write(`${file}:${line}  .${name} — no source names \`styles.${name}\`\n`)

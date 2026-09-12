@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { writeZip } from './lib/zip.mjs'
+import { isProcessEntry } from './lib/entry.mjs'
 
 /**
  * WI-24.A1 — one minimal book per format Paper's picker offers.
@@ -428,4 +429,4 @@ function main() {
    a regenerated fixture that changed them fails instead of agreeing with
    itself. The exports remain because they are the seam a future check would
    use to rebuild and compare. */
-if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(main())
+if (isProcessEntry(import.meta)) process.exit(main())
