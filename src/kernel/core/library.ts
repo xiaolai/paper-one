@@ -612,5 +612,28 @@ export type ReadingStatus = StatusTerm
  */
 export function statusOf(book: IndexedBook): ReadingStatus {
   if (book.finished) return 'finished'
+  /* ⚠️ **THE DECLARED STATE WINS OVER THE INFERRED ONE, AND IT WAS IGNORED.**
+   * `book.set --status` writes a `status` register (`serviceTable.ts`;
+   * `libraryStore.patchWith` stamps it and keeps `finished` in step), and
+   * nothing read it: not the shelf, not `is:` — so `paper book set --status
+   * reading <id>` on an unopened book answered `reading` from `book.get` while
+   * every surface said "unread" and `is:reading` excluded it. A register that
+   * only its own writer can see is a setting that does nothing.
+   *
+   * ⚠️ **AND THE TWO VOCABULARIES ARE NOT THE SAME LIST.** Stored is
+   * `want | reading | finished` (`READING_STATES`, the circle's); displayed is
+   * `reading | unread | finished` (`STATUSES`, which the `is:` regex is built
+   * from). `want` has no display term and `unread` has no stored one, because
+   * they are different questions: `unread` is DERIVED (nothing read yet) and
+   * `want` is DECLARED (I mean to read this). A wanted book is an unread one,
+   * so `want` shows as `unread` — which needs no fourth `is:` term and loses
+   * nothing a reader can see. `finished` is handled above, by `finished`
+   * itself, which `patchWith` refuses to let disagree with the register.
+   *
+   * The derivation still answers for every book nobody has declared anything
+   * about, which is almost all of them. */
+  const declared = book.status?.state
+  if (declared === 'reading') return 'reading'
+  if (declared === 'want') return 'unread'
   return book.position ? 'reading' : 'unread'
 }

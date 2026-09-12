@@ -416,6 +416,32 @@ describe('statusOf', () => {
     expect(statusOf(entry({ position: 'epubcfi(/6/4)' }))).toBe('reading')
   })
 
+  /**
+   * ⚠️ **`book.set --status` WROTE A REGISTER NOTHING READ.** `serviceTable.ts`
+   * declares it, `libraryStore.patchWith` stamps it and keeps `finished` in
+   * step — and `statusOf` derived the answer from `position` alone, so the
+   * shelf, the row and `is:` all disagreed with `book.get` about the same book.
+   * A setting only its own writer can see is a setting that does nothing.
+   */
+  it('lets a declared state win over the one a position implies', () => {
+    const at = { ms: 1, counter: 0, device: 'd' } as never
+    /* Declared reading, never opened: the case the CLI's own `--status` is for. */
+    expect(statusOf(entry({ status: { state: 'reading', at } }))).toBe('reading')
+    /* Declared want, with a position: the reader is resetting their intent, and
+       the declaration is the newer fact. */
+    expect(statusOf(entry({ position: 'epubcfi(/6/4)', status: { state: 'want', at } }))).toBe('unread')
+  })
+
+  /* `want` HAS NO DISPLAY TERM, and does not need one. Stored is
+     `want | reading | finished`; displayed is `reading | unread | finished`,
+     which is what the `is:` regex is built from. The two lists differ because
+     the questions do — `unread` is derived, `want` is declared — and a wanted
+     book is an unread one, so nothing a reader can see is lost. */
+  it('shows a wanted book as unread rather than inventing a fourth term', () => {
+    const at = { ms: 1, counter: 0, device: 'd' } as never
+    expect(statusOf(entry({ status: { state: 'want', at } }))).toBe('unread')
+  })
+
   it('is finished when the reader says so, whatever the fraction', () => {
     expect(statusOf(entry({ position: 'x', progress: 0.94, finished: true }))).toBe('finished')
   })

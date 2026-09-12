@@ -129,14 +129,27 @@ export const companion: Capability = {
     const unbindCompanion = api.services.bindCompanion(boundProvider)
     session.own('unbindCompanion', () => unbindCompanion.dispose())
 
-    /* PROBED ONCE AT START, so the answer above EXISTS before the panel's
-     * first render. WI-15.10 refuses a probe on a timer — four child
-     * processes behind a shut pane is a reader's battery spent on a question
-     * nobody asked — and this is not one: it is the single question the
-     * Companion panel asks the moment it opens, and without it the panel's
-     * first answer is a false negative. Unawaited, and a failure leaves the
-     * snapshot empty, which reads as "nothing chosen" exactly as before. */
-    void routes.refresh()
+    /* ⚠️ **NOT PROBED AT START ANY MORE, AND THE ARGUMENT FOR IT WAS THE
+     * ARGUMENT AGAINST IT.** This ran `routes.refresh()` on every launch so
+     * "the answer EXISTS before the panel's first render", reasoning that
+     * WI-15.10's refusal of a probe on a timer did not apply because this is
+     * "the single question the Companion panel asks the moment it opens".
+     *
+     * The panel cannot be opened. `companion` is in `UNFINISHED_PANE_IDS`, so
+     * `SidePane` is the only mount of it and `paneFits` refuses it unless the
+     * reader has found ⌘⌃⌥D — and `probe.rs` spawns up to FOUR short-lived
+     * child processes with five-second timeouts each time. That is exactly the
+     * cost WI-15.10 refused: a reader's battery spent on a question nobody
+     * asked, behind a pane that is not merely shut but unreachable.
+     *
+     * Nothing is lost when it does open: `CompanionPane` refreshes on mount,
+     * with the model's generation guard making StrictMode's double call
+     * harmless, and the Settings section mounts its body only when its
+     * `PaneGroup` is opened. The first answer arrives a moment later instead of
+     * having been paid for at every launch by every reader.
+     *
+     * When the panel ships, this is not what to restore: the pane's own mount
+     * already asks, and a launch-time probe would be a second asker. */
 
     api.diagnostics.info('companion.started', { wired: true })
     return { dispose: session.stop }
