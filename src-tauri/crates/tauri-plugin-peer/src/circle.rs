@@ -918,10 +918,35 @@ pub(crate) async fn serve(node: std::sync::Arc<crate::node::Node>, conn: Connect
      * `false`, and answering keeps the two indistinguishable from outside. */
     let admitted = match timeout(HELLO_TIMEOUT, conn.accept_bi()).await {
         Ok(Ok((mut send, mut recv))) => {
-            let admitted = matches!(
-                decide(&node, &conn, &mut recv).await,
-                Ok(Decision::Admit { .. })
-            );
+            /* ⚠️ **THE REASON WAS COMPUTED AND THROWN AWAY.** This was a
+             * `matches!(…, Ok(Decision::Admit { .. }))`, which discards the
+             * `Refuse(_)` payload — and [`Refusal`] exists, in its own words,
+             * because "a peer this reader has never met" and "a peer whose
+             * delegation cannot be verified" are different events and "the
+             * surface that shows them needs to tell them apart". Nothing showed
+             * them: a friend refused as `RosterTie` or `BadSignature` left no
+             * trace of any kind on the refusing machine, which is the silent
+             * far end that cost three evenings of false explanations.
+             *
+             * Logged rather than emitted, deliberately. It must not reach the
+             * PEER — [`Ack`] carries a bare boolean so a stranger cannot probe
+             * this reader's circle one dial at a time — and `Paper.log` is
+             * where the far end's own operator can read it. */
+            let outcome = decide(&node, &conn, &mut recv).await;
+            let admitted = matches!(outcome, Ok(Decision::Admit { .. }));
+            match &outcome {
+                Ok(Decision::Refuse(why)) => {
+                    log::info!(
+                        "circle: refused an introduction from {}: {why:?}",
+                        conn.remote_id()
+                    )
+                }
+                Err(err) => log::warn!(
+                    "circle: an introduction from {} could not be read: {err}",
+                    conn.remote_id()
+                ),
+                Ok(Decision::Admit { .. }) => {}
+            }
             let _ = crate::frame::write_json(&mut send, &Ack { admitted }).await;
             /* ⚠️ **FLUSHED BEFORE THE CLOSE BELOW, AND IT WAS NOT.** `finish`
              * alone only says "no more bytes"; the `conn.close` that follows

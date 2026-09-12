@@ -173,7 +173,19 @@ async function receiveNotes(held: Running, bookId: string, named: readonly strin
      `named` is the way out, and it is out-of-band by design: a reader hands
      somebody their share id the way they would a phone number, and it is
      tried BEFORE the index rather than instead of it, so the two compose. */
-  const advertised = await share.resolve(hash, 'notes').catch(() => [] as readonly string[])
+  /* ⚠️ **A FAILED LOOKUP AND AN EMPTY INDEX READ IDENTICALLY, AND THIS SAID
+     NOTHING ABOUT THE DIFFERENCE.** `.catch(() => [])` folded a share endpoint
+     that never started, a DHT socket that refused and a lookup that timed out
+     into the same answer the paragraph above says means "nobody advertised". So
+     "Look for some" reported "Nobody who answered has published anything" over a
+     layer that had not asked anybody — the shape three evenings of a silent far
+     end went to. Named through `held.warn`, which is `ctx.diagnostics.warn`, so
+     `diagnostics.jsonl` carries it on a release build where nothing else can be
+     asked. The ANSWER is unchanged: an unreachable index is still nobody. */
+  const advertised = await share.resolve(hash, 'notes').catch((thrown: unknown) => {
+    held.warn('public.resolve-failed', { book: bookId, message: messageOf(thrown) })
+    return [] as readonly string[]
+  })
   const providers = [...named, ...advertised.filter((one) => !named.includes(one))]
   const decisions = await voices.decisions()
   const blocked = (voice: string): boolean => standingOf(voice, decisions) === 'blocked'

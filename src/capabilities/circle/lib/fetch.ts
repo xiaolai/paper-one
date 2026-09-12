@@ -813,9 +813,25 @@ async function fetchLists(
         const outcome = takePages(raws, listWork(id), person.person, ledgerFor(file, person, epoch), ports.crypto, ports.now(), agreed)
         refusals.push(...outcome.refusals)
         if (outcome.accepted === 0) continue
-        held.set(id, outcome.held)
         if ((await admitted()) === null) return null
-        await ports.keepList(person.person, id, outcome.held, epoch)
+        /* ⚠️ **THE BOOLEAN WAS DISCARDED HERE, AND ITS TWO SIBLINGS CHECK IT.**
+           `writeOnLane` returns `false` when the store's admission guard turns
+           the write into a silent return — a person un-admitted between
+           `admitted()` above and the queued write — and the books and shelf
+           lanes both refuse `'not-kept'` on exactly that. This one advanced the
+           in-memory `held` cursor and counted the pages as accepted, so the
+           round reported work it had not done and never asked for those pages
+           again: the same shape the comment beside `keep` says was fixed, left
+           unfixed one lane along.
+
+           `held.set` moved BELOW the write for the same reason: the map is the
+           cursor the next `ask` in this round sends, so advancing it before the
+           write is what let a refusal advance it. */
+        if (!(await ports.keepList(person.person, id, outcome.held, epoch))) {
+          refusals.push('not-kept')
+          continue
+        }
+        held.set(id, outcome.held)
         /* Counted per list, once kept — a later list's refusal must not uncount an earlier one's pages already on disk. */
         accepted += outcome.accepted
       }

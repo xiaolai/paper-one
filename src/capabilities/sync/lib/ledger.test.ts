@@ -53,6 +53,8 @@ interface Stack {
   readonly ledger: Ledger
   readonly wire: FakeWire
   readonly port: PeerPort
+  /** Every peer whose hello this stack ANSWERED — see `LedgerOptions.onServed`. */
+  readonly served: string[]
 }
 
 const flatStorage = () => {
@@ -106,6 +108,7 @@ async function makeStack(
   wire.landBlob = async (folder, name, bytes) => {
     await fs.writeFile(`books/${folder}/${name}`, bytes)
   }
+  const served: string[] = []
   const ledger = createLedger({
     services,
     journal,
@@ -116,8 +119,9 @@ async function makeStack(
       port.fetchBlob({ peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash }),
     hashFile: (folder, name) => wire.hashFile(folder, name),
     pageLimit: 3,
+    onServed: (peer) => served.push(peer),
   })
-  return { fs, storage, clock, journal, journalQueue, services, ledger, wire, port }
+  return { fs, storage, clock, journal, journalQueue, services, ledger, wire, port, served }
 }
 
 interface World {
@@ -949,6 +953,42 @@ describe('carried findings — removals, content facts, and covers', () => {
         code: 'unsupported',
         message: expect.stringMatching(/\[2, 2\].*\[5, 5\]/),
       })
+    })
+
+    /**
+     * ⚠️ **THE SHELF STAMPED "Last synced" WHEN A SESSION OPENED.** It does not
+     * initiate, so `onSessionOpen` was the only signal it had — and that fires
+     * on the TRANSPORT, before the grant is checked, before these version
+     * ranges are compared, and before `requireReady`. A satchel refused
+     * `unsupported` or `not-ready` therefore turned the Storage line green and
+     * wrote a fresh time under "Last synced", for an exchange that never
+     * happened. `DevicesPane` already refuses to call `lastSeenAt` "last
+     * synced" for the same reason.
+     *
+     * Driven through the refusal above, because that is the case the stamp was
+     * wrong about — a hello that is answered and one that is refused differ in
+     * exactly this callback now.
+     */
+    it('(i) tells its host it served a satchel only when the hello was answered', async () => {
+      const { shelf } = await makeWorld()
+      const hello = shelf.ledger.services().find((one) => one.name === 'sync.hello')!
+      const refused = {
+        proto: SYNC_PROTO,
+        journalFormat: SYNC_JOURNAL_FORMAT,
+        services: { sync: [2, 2] },
+        device: 'bbbbbbbbbbbbbbbb',
+        role: 'satchel',
+        clock: makeHlc(1, 0, 'bbbbbbbbbbbbbbbb'),
+      }
+      await expect(hello.handler(refused as never, asCtx(hello.handler))).rejects.toMatchObject({
+        code: 'unsupported',
+      })
+      expect(shelf.served, 'a refused hello is not a sync').toEqual([])
+
+      /* The same shelf, a hello it can answer. */
+      const accepted = { ...refused, services: { sync: SYNC_VERSION } }
+      await hello.handler(accepted as never, asCtx(hello.handler))
+      expect(shelf.served, 'and an answered one names the peer it served').toEqual(['satchel-x'])
     })
 
     it('(i) a welcome speaking [2, 2] is refused by the satchel — typed, naming both ranges', async () => {

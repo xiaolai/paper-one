@@ -1,6 +1,6 @@
 import { blake3 } from '@noble/hashes/blake3.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
-import { MAX_COVER_BYTES, atomicWrite, defineSetting, personFolderIn, type Setting, type VaultFs } from '../../../kernel'
+import { MAX_COVER_BYTES, atomicWrite, defineSetting, messageOf, personFolderIn, type Setting, type VaultFs } from '../../../kernel'
 import { bytesOfBase64 } from './base64'
 import type { Dialled } from './fetch'
 import { CIRCLE_SERVICES, parseCoverAnswer } from './protocol'
@@ -53,6 +53,17 @@ export interface CoverFetchDeps {
   readonly charge: (person: string, bytes: number) => boolean
   readonly now: () => number
   readonly capBytes: () => number
+  /**
+   * Report a jacket that could not be fetched.
+   *
+   * ⚠️ **OPTIONAL, AND IT EXISTS BECAUSE `circle.cover-failed` COULD NEVER
+   * FIRE.** `circlePort` wraps the fetch in a `catch` that warns under that
+   * name, and the fetch folded every rejection to `null` one layer down — so a
+   * refused dial, a transport error and a peer that simply holds no jacket were
+   * one answer, a row drew nothing, and the diagnostics ring said nothing. The
+   * ANSWER stays `null`; only the reason travels.
+   */
+  readonly warn?: (event: string, fields: Record<string, unknown>) => void
 }
 
 export interface CoverFetcher {
@@ -345,7 +356,17 @@ export function createCoverFetcher(deps: CoverFetchDeps): CoverFetcher {
         const fence = cache.fenceOf(person)
         const kept = await cache.take(person, digest, fence)
         if (kept !== null) return kept
-        const bytes = await fetchOne(deps, person, device, pub, digest, abandon.signal).catch(() => null)
+        /* ⚠️ **FOLDED TO `null` HERE, WHICH IS WHY `circle.cover-failed` NEVER
+           FIRED.** `circlePort` wraps this call in a `catch` that warns
+           `circle.cover-failed`, and nothing ever reached it: a refused dial, a
+           transport error and a peer that simply has no jacket all arrived as
+           `null`, so a row drew nothing and the diagnostics ring said nothing
+           either. The ANSWER stays `null` — a missing jacket is not worth
+           failing a round over — and the reason is reported on the way past. */
+        const bytes = await fetchOne(deps, person, device, pub, digest, abandon.signal).catch((thrown: unknown) => {
+          deps.warn?.('circle.cover-fetch-failed', { person, digest, message: messageOf(thrown) })
+          return null
+        })
         if (bytes === null) return null
         return (await cache.keep(person, digest, bytes, fence)) ? bytes : null
       })().finally(() => inFlight.delete(key))

@@ -268,7 +268,19 @@ async function runDownload(bookId: string): Promise<void> {
       /* ON THE BOOK'S LANE, so an eviction queued right behind the download
        * cannot lose the race to this write and leave a size entry for bytes
        * that are gone. `dropDownloadSize` queues on the same lane. */
-      if (fs) await held.writes.append(held.lane(bookId), () => recordDownloadSize(fs, bookId, size)).catch(() => {})
+      /* ⚠️ **NAMED, AND THIS WAS `.catch(() => {})`.** The size ledger IS the
+       * list Settings → Storage evicts from, so a write that failed left a
+       * downloaded book with no way to evict it and nothing anywhere saying
+       * why. The download itself still counts as done — the bytes are on disk,
+       * which is what the reader asked for — so this reports rather than
+       * throws. */
+      if (fs) {
+        await held.writes
+          .append(held.lane(bookId), () => recordDownloadSize(fs, bookId, size))
+          .catch((thrown: unknown) => {
+            warn?.('sync.download-size-unrecorded', { book: bookId, message: messageOf(thrown) })
+          })
+      }
       /* The jacket, best-effort — a cover that will not come costs nothing. */
       await held.coverCache?.ensure(bookId).catch(() => {})
     })
@@ -830,6 +842,12 @@ export const sync: Capability = {
               })
             }
           })(),
+        /* THE SHELF'S "last synced", and the only honest moment it has. It
+           does not initiate, so there is no session of its own to finish; a
+           satchel's hello getting past the grant, the protocol comparison and
+           `requireReady` is the point at which the two sides have agreed they
+           can sync. See `onSessionOpen` above for what this replaced. */
+        onServed: () => syncStatus.set({ state: 'ok', detail: null, lastSyncAt: Date.now() }),
       })
       myHandlers = new Map(ledger.services().map((service) => [service.name, service.handler]))
       handlers = myHandlers
@@ -959,8 +977,17 @@ export const sync: Capability = {
             })
         }
         /* `detail: null` with the state: a degraded sentence left from before
-         * would otherwise stand under a green `ok`. */
-        unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', detail: null, lastSyncAt: Date.now() }))
+         * would otherwise stand under a green `ok`.
+         *
+         * ⚠️ **AND NO `lastSyncAt` HERE, WHICH IS WHAT THIS USED TO WRITE.** A
+         * session opening is the transport saying a connection exists — the
+         * grant is unchecked, the protocol versions uncompared, the baseline
+         * possibly still building. A satchel refused `not-ready` or
+         * `unsupported` still opened a session, so the Storage line went green
+         * and claimed a fresh "Last synced" for an exchange that never
+         * happened. The stamp moved to `onServed`, which `handleHello` calls
+         * after every refusal. */
+        unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', detail: null }))
       } else {
         const run = async (): Promise<SyncOutcome> => {
           /* OWNED BY THIS RUNTIME: a session in flight through a teardown —

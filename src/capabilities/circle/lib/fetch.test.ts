@@ -972,6 +972,28 @@ describe('the lists, after the shelf — WI-23.E1', () => {
     expect(b.keepList).toHaveBeenCalledTimes(2)
   })
 
+  it('does NOT count a LIST page the store refused to keep, and names why', async () => {
+    /* ⚠️ **THE THIRD LANE, AND THE ONLY ONE THAT STILL DISCARDED THE ANSWER.**
+       The books' keep and the shelf's each have this case above; the lists'
+       call was `await ports.keepList(…)` with the boolean thrown away, so a
+       refusal counted as accepted AND advanced the in-memory cursor the next
+       `ask` in the same round sends — the round reporting work it had not done
+       and never asking for those pages again. Same defect, one log along, which
+       is exactly what the shelf's own comment says about the books'. */
+    const a = aliceWithLists()
+    const b = bob({
+      dial: () => Promise.resolve(sessionTo(a.serving)),
+      keepList: vi.fn(() => Promise.resolve(false)),
+    })
+    const report = await fetchRound(b.ports)
+    expect(report.accepted).toBe(0)
+    expect(report.refusedBecause).toMatchObject({ 'not-kept': 2 })
+    /* AND THE CURSOR DID NOT MOVE, which is the half a count alone would miss:
+       a second round must ask for the same pages again. */
+    const again = await fetchRound(b.ports)
+    expect(again.refusedBecause).toMatchObject({ 'not-kept': 2 })
+  })
+
   it('discovers a list made after the first round, and follows a retitle on one it holds', async () => {
     const a = aliceWithLists()
     const b = bob({ dial: () => Promise.resolve(sessionTo(a.serving)) })

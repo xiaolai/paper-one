@@ -986,6 +986,11 @@ function circleReadsOver({ fs, library, writes, clock, warn, ledger, settings, o
     charge: (person, bytes) => ledger.charge(person, 'cover', bytes, Date.now()),
     now: () => Date.now(),
     capBytes: () => settings.get(COVER_CAP_SETTING) * 1024 * 1024,
+    /* So a jacket that could not be fetched says why. The fetch folds every
+       rejection to `null` — deliberately, a missing cover is not worth failing
+       a round over — which meant the `circle.cover-failed` warn below this
+       could never fire. See `CoverFetchDeps.warn`. */
+    warn,
   })
   const circle = circlePortOver({
     clock,

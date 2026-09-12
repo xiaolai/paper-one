@@ -130,6 +130,23 @@ export interface LedgerOptions {
    * contained — the contract above is unchanged.
    */
   readonly onArrived?: (bookId: string, peerId: string) => void | Promise<void>
+
+  /**
+   * A satchel completed a sync HANDSHAKE with this shelf.
+   *
+   * ⚠️ **THE SHELF USED TO STAMP "last synced" ON `onSessionOpen`**, which is
+   * the transport saying a connection exists — before the grant is checked,
+   * before the protocol versions are compared, and before `requireReady`. A
+   * satchel refused `not-ready`, `unsupported` or `forbidden` therefore turned
+   * the Storage line green and wrote a fresh time under "Last synced". The
+   * shelf does not initiate, so that stamp was the only thing it had, and it
+   * meant strictly less than it said.
+   *
+   * Called from `handleHello` AFTER every refusal, so it fires exactly when
+   * two sides have agreed they can sync. `DevicesPane` already refuses to call
+   * `lastSeenAt` "last synced" for the same reason.
+   */
+  readonly onServed?: (peer: string) => void
 }
 
 export interface SyncSummary {
@@ -306,6 +323,7 @@ export function createLedger({
   hashFile,
   pageLimit = DEFAULT_PAGE_LIMIT,
   onArrived,
+  onServed,
 }: LedgerOptions): Ledger {
   if (!Number.isInteger(pageLimit) || pageLimit < 1) {
     throw new Error(`createLedger: pageLimit must be a positive integer, not ${JSON.stringify(pageLimit)}`)
@@ -645,7 +663,7 @@ export function createLedger({
     return epoch
   }
 
-  const handleHello = async (raw: unknown): Promise<unknown> => {
+  const handleHello = async (raw: unknown, peer: string): Promise<unknown> => {
     const hello = parseSyncHello(raw)
     if (hello === null) throw refuse('malformed', 'not a sync hello')
     if (hello.proto !== SYNC_PROTO) throw refuse('unsupported', `proto ${hello.proto} is not ${SYNC_PROTO}`)
@@ -658,6 +676,8 @@ export function createLedger({
     if (hello.role !== 'satchel') throw refuse('unsupported', `a ${role} serves satchels, not another ${hello.role}`)
     const epoch = requireReady()
     clock.witness(hello.clock)
+    /* AFTER every refusal above, which is the whole point — see `onServed`. */
+    onServed?.(peer)
     return {
       clock: clock.now(),
       epoch,
@@ -1428,7 +1448,7 @@ export function createLedger({
 
   return {
     services: () => [
-      { name: SYNC_SERVICES.hello.name, grant: SYNC_SERVICES.hello.grant, handler: (req) => handleHello(req) },
+      { name: SYNC_SERVICES.hello.name, grant: SYNC_SERVICES.hello.grant, handler: (req, ctx) => handleHello(req, ctx.peer) },
       { name: SYNC_SERVICES.push.name, grant: SYNC_SERVICES.push.grant, handler: (req, ctx) => handlePush(req, ctx.peer) },
       { name: SYNC_SERVICES.pull.name, grant: SYNC_SERVICES.pull.grant, handler: (req) => handlePull(req) },
       { name: SYNC_SERVICES.marks.name, grant: SYNC_SERVICES.marks.grant, handler: (req) => handleMarks(req) },
