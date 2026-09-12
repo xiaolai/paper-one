@@ -49,6 +49,30 @@ pub const CIRCLE_HELLO_ALPN: &[u8] = b"paper/circle-hello/1";
 /// The most a hello may be, checked before the body is read.
 pub const MAX_HELLO: u32 = 64 * 1024;
 
+/// What a device admitted at this door is granted.
+///
+/// ⚠️ **IT WAS `Vec::new()`, SO THE DOOR ADMITTED AND GRANTED NOTHING.** Every
+/// circle service is gated on `circle:read` — `circle/lib/protocol.ts`'s
+/// `CIRCLE_SERVICES` names it on all five, the envelope router enforces it
+/// through `hasGrant`, and a served session copies the record's grants
+/// verbatim. So a friend's second laptop introduced itself, was admitted, was
+/// written into `peers.json`, opened a session — and had every `circle.hello`,
+/// `circle.pages`, `circle.shelf`, `circle.lists` and `circle.cover` refused
+/// `forbidden`. The whole promise of this door (see the module header: "the
+/// dial is retried and proceeds unchanged") was unmet, and `keeper.rs`'s test
+/// could not see it because it asserts only that the record EXISTS.
+///
+/// ⚠️ **AND IT IS A SECOND SPELLING OF A STRING TYPESCRIPT OWNS.** The pairing
+/// path never needed one: grants arrive as an argument from
+/// `peer/index.ts:395-396`, which passes `['circle:read']` for both halves of a
+/// circle pairing. This door has no caller to take them from — it is reached
+/// from an inbound connection, not from a command — so the constant lives here,
+/// named, with its counterpart written down. `a_door_admitted_device_may_read`
+/// below is what holds the two together: it asks `grant_covers` the question
+/// the router asks, so a rename on either side fails a test rather than
+/// silently refusing every request.
+const ADMITTED_GRANTS: [&str; 1] = ["circle:read"];
+
 /// The most introductions one node serves at once.
 ///
 /// ⚠️ **THIS IS THE ONLY DOOR AN UNKNOWN ENDPOINT MAY SAY ANYTHING ON**, and it
@@ -964,7 +988,13 @@ async fn decide(
                     name,
                     platform: String::new(),
                     role: crate::role::Role::Shelf,
-                    grants: Vec::new(),
+                    /* See [`ADMITTED_GRANTS`]. This was `Vec::new()`, which
+                     * admitted the device and then had every circle service
+                     * refuse it. */
+                    grants: ADMITTED_GRANTS
+                        .iter()
+                        .map(|one| (*one).to_string())
+                        .collect(),
                     paired_at: now,
                     last_seen_at: now,
                     last_addrs: Vec::new(),

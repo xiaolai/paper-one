@@ -279,7 +279,31 @@ mod tests {
         assert_eq!(done.greeted, 1, "alice was not greeted");
         assert_eq!(done.admitted, 1, "alice did not admit bob");
         /* And the admission is real: the ordinary ALPN can be dialled now. */
-        assert!(alice.node.peers().get(&bob.node.id().to_string()).is_some());
+        let granted: Vec<String> = {
+            let store = alice.node.peers();
+            store
+                .get(&bob.node.id().to_string())
+                .unwrap()
+                .grants
+                .clone()
+        };
+
+        /* ⚠️ **`is_some()` WAS THE WHOLE ASSERTION, AND IT PASSED OVER A DEVICE
+         * THAT COULD DO NOTHING.** The record was inserted with `grants:
+         * Vec::new()`, so bob was admitted, written to disk, and then refused
+         * `forbidden` on every circle service — which is every service the door
+         * exists to unblock. A record's EXISTENCE is not an admission; what it
+         * may ask for is.
+         *
+         * Asked through `grant_covers`, the same function the envelope router
+         * asks, and against the service name `circle/lib/protocol.ts` gates on.
+         * A rename on either side lands here. */
+        assert!(
+            granted
+                .iter()
+                .any(|one| crate::peers::grant_covers(one, "circle:read")),
+            "a door-admitted device must be able to read the circle, not merely exist: {granted:?}"
+        );
         alice.close().await;
         bob.close().await;
     }

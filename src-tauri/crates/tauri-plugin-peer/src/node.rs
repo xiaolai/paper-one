@@ -79,8 +79,17 @@ pub struct Node {
     pub(crate) transfers: Transfers,
     /// Caps concurrent blob-serve tasks so a peer cannot open unbounded streams.
     pub(crate) blob_serve_limit: Arc<Semaphore>,
-    /// Caps concurrent introductions — the one door a STRANGER may knock on.
-    /// See `circle::MAX_HELLOS`.
+    /// Caps concurrent introductions. See `circle::MAX_HELLOS`.
+    ///
+    /// ⚠️ **THIS SAID "the one door a STRANGER may knock on", AND THERE ARE
+    /// TWO.** `dispatch` below also hands every inbound `PAIR_ALPN` connection
+    /// to `pairing::serve`, which until now read its hello under the 4 MiB
+    /// TRANSPORT cap — and this sentence, naming this semaphore as the guard for
+    /// that whole class, is a plausible reason nobody looked. The pair door is
+    /// bounded by `pairing::MAX_HELLO` instead of by a semaphore, and
+    /// `pairing.rs` states why: its pre-claim work is a bounded parse and one
+    /// constant-time compare, where a circle hello costs a file read and two
+    /// ed25519 verifications, so only one of the two amplifies.
     pub(crate) hello_limit: Arc<Semaphore>,
     /// Idle deadline (ms) for a blob body transfer.
     blob_idle_timeout_ms: AtomicU64,

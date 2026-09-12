@@ -87,6 +87,60 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// dropped and the shelf rolls back; a reset arrives sooner.
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The most a pair hello may be, checked before the body is read.
+///
+/// ⚠️ **THIS DOOR READ UNDER THE 4 MiB TRANSPORT CAP UNTIL NOW, AND A STRANGER
+/// MAY KNOCK ON IT.** `serve_inner` went straight from `accept_bi` to
+/// `read_json`, which is `read_frame`, which is `MAX_FRAME` — and
+/// `frame::read_capped` allocates `vec![0u8; len]` on the LENGTH PREFIX alone,
+/// before a byte of body arrives and long before the MAC is checked. Two
+/// hundred connections sending nothing but `0x00400000` held 800 MiB for
+/// `HELLO_TIMEOUT`, repeatable indefinitely, from anybody who can reach the
+/// endpoint — and both endpoints are advertised on the LAN by design (WI-25.8).
+///
+/// `circle::MAX_HELLO` is the same number for the same reason and says so; a
+/// `PairHello` is a name, a platform, a role, a kind, a hex MAC and an optional
+/// person id, so 64 KiB is already orders of magnitude more than the shape
+/// needs. The FIELDS are bounded separately — see `NAME_MAX` — because a frame
+/// cap bounds the whole hello and this record's name is persisted and shown.
+pub const MAX_HELLO: u32 = 64 * 1024;
+const _: () = assert!(MAX_HELLO < crate::frame::MAX_FRAME);
+
+/* ⚠️ **AND DELIBERATELY NO CONCURRENCY BOUND HERE, WHICH IS NOT THE CIRCLE
+ * DOOR'S ANSWER.** `circle::MAX_HELLOS` caps introductions at eight, and
+ * `node.rs` used to describe that semaphore as guarding "the one door a
+ * STRANGER may knock on" — a sentence written while this door had neither a
+ * semaphore nor a frame cap, and probably the reason nobody looked.
+ *
+ * The frame cap above is the fix; a semaphore here would be a worse trade, and
+ * the deciding difference is AMPLIFICATION. `circle::MAX_HELLOS` states its
+ * own reason: each circle hello costs "a file read and TWO ed25519
+ * verifications before anything can refuse it, so the work is amplified on the
+ * defender's side". This door's pre-claim work is a bounded `serde_json` parse
+ * and `claim`'s constant-time compare of sixteen bytes — no disk, no
+ * signature, nothing amplified.
+ *
+ * So eight permits would buy a 512 KiB bound in place of a 12.8 MiB one, and
+ * sell something real for it: eight connections that declare a length and then
+ * send nothing would close the door for `HELLO_TIMEOUT` at a time, repeatably
+ * and almost free, and the reader trying to add their phone gets a refusal that
+ * names nothing. Pairing is the one thing that cannot be retried from a
+ * different angle.
+ *
+ * What remains after the cap is per-connection QUIC state, which is iroh's to
+ * govern and is identical for every ALPN it accepts —
+ * `one_hundred_concurrent_attempts_with_one_secret_pair_exactly_once` drives a
+ * hundred simultaneous claims through here and is the measurement that this
+ * door is safe wide open once the frame is bounded. */
+
+/// The most a joiner's `name` or `platform` may be, in bytes.
+///
+/// Bounded because both are PERSISTED into `peers.json` and emitted in
+/// `PairingPending` before the human decides, so they reach a screen and a file
+/// from a caller that has not yet proved anything. The frame cap above bounds
+/// them to 64 KiB, which is a bound and not a sane one for a device name.
+const NAME_MAX: usize = 128;
+
 pub type Secret = [u8; 16];
 
 // ── state ─────────────────────────────────────────────────────────────────
@@ -680,9 +734,18 @@ async fn serve_inner(
     let (mut send, mut recv) = timeout(HELLO_TIMEOUT, conn.accept_bi())
         .await
         .map_err(|_| Error::Timeout("pair hello"))??;
-    let hello: PairHello = timeout(HELLO_TIMEOUT, read_json(&mut recv))
-        .await
-        .map_err(|_| Error::Timeout("pair hello"))??;
+    /* ⚠️ **BOUNDED BEFORE PARSED**, the same way `circle::decide` is: this was
+    `read_json`, which reads under the 4 MiB TRANSPORT cap, and the length
+    prefix alone decides the allocation. See [`MAX_HELLO`]. */
+    let body = timeout(
+        HELLO_TIMEOUT,
+        crate::frame::read_capped(&mut recv, MAX_HELLO),
+    )
+    .await
+    .map_err(|_| Error::Timeout("pair hello"))??
+    .ok_or_else(|| Error::FrameMalformed("the pair hello was empty".into()))?;
+    let hello: PairHello = serde_json::from_slice(&body)
+        .map_err(|e| Error::FrameMalformed(format!("the pair hello does not parse: {e}")))?;
 
     /* ⚠️ **STILL A WHITELIST, per kind.** `hello.kind.joiner()` is a satchel for
     a device pairing and a shelf for a circle one; anything else is refused
@@ -692,6 +755,11 @@ async fn serve_inner(
     against a shelf too old to know the word is refused on `role` there. */
     if hello.role != hello.kind.joiner() {
         return refuse(&mut send, "role-mismatch").await;
+    }
+    /* Refused before the MAC, because these are the two fields that reach a
+    file and a screen from a caller that has proved nothing — see [`NAME_MAX`]. */
+    if hello.name.len() > NAME_MAX || hello.platform.len() > NAME_MAX {
+        return refuse(&mut send, "name-too-long").await;
     }
     let Some(mac) = parse_mac(&hello.mac) else {
         return refuse(&mut send, "bad-mac").await;
@@ -1614,6 +1682,155 @@ mod tests {
             .unwrap();
         task.await.unwrap().unwrap();
         assert_eq!(shelf.node.list_peers().len(), 1);
+        shelf.close().await;
+        satchel.close().await;
+    }
+
+    /// A bare endpoint on the pair door, for the two cases below: both are
+    /// about what an UNAUTHENTICATED caller can make this side do, so neither
+    /// can go through `from_uri`, which builds a well-formed hello.
+    async fn raw_dial(uri: &PairUri) -> (Endpoint, iroh::endpoint::Connection) {
+        let raw = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let conn = raw.connect(uri.endpoint_addr(), PAIR_ALPN).await.unwrap();
+        (raw, conn)
+    }
+
+    /**
+     * ⚠️ **THE PAIR DOOR READ UNDER THE 4 MiB TRANSPORT CAP AND A STRANGER MAY
+     * KNOCK ON IT.** `frame::read_capped` allocates `vec![0u8; len]` on the
+     * declared length alone, so a connection sending nothing but the four bytes
+     * `0x00400000` cost four megabytes for `HELLO_TIMEOUT` — before the MAC was
+     * looked at, from anybody who can reach the endpoint, and both endpoints
+     * are advertised on the LAN deliberately (WI-25.8).
+     *
+     * ASSERTED ON THE REASON, NOT ON TIMING. Uncapped, this same attempt also
+     * ends in an error — a 15-second `timeout: pair hello` while the shelf
+     * waits for a body that never comes. The cap is what makes it
+     * `frameTooLarge` instead, and the message carries the max, so the
+     * assertion names the bound rather than inferring it from a stopwatch. The
+     * repo's own rule about deriving a bound from observed runtime is why.
+     */
+    #[tokio::test]
+    async fn a_hello_declaring_more_than_the_cap_is_refused_before_it_is_read() {
+        let mut shelf = TestNode::start("pair-huge-shelf", Role::Shelf).await;
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
+        let uri = PairUri::parse(&offer.url).unwrap();
+
+        let (raw, conn) = raw_dial(&uri).await;
+        let (mut send, _recv) = conn.open_bi().await.unwrap();
+        /* The length prefix ALONE — no body follows, which is the whole point:
+        the allocation used to happen on this promise. */
+        use tokio::io::AsyncWriteExt as _;
+        send.write_all(&(MAX_HELLO + 1).to_be_bytes())
+            .await
+            .unwrap();
+        send.flush().await.unwrap();
+
+        let ev = shelf
+            .next_event_where(|e| matches!(e, PeerEvent::PairingResult(_)))
+            .await;
+        let PeerEvent::PairingResult(result) = ev else {
+            unreachable!()
+        };
+        assert!(!result.ok);
+        let reason = result.reason.unwrap_or_default();
+        assert!(reason.starts_with("frameTooLarge"), "{reason}");
+        /* The bound in the message is this door's, not the transport's. */
+        assert!(reason.contains(&MAX_HELLO.to_string()), "{reason}");
+
+        /* And it cost the offer nothing — the secret is unspent, so the real
+        joiner still pairs. A refusal that consumed the offer would turn one
+        hostile frame into a denial of the whole pairing. */
+        let satchel = TestNode::start("pair-huge-satchel", Role::Satchel).await;
+        let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
+            .await
+            .unwrap();
+        let ev = shelf
+            .next_event_where(|e| matches!(e, PeerEvent::PairingPending(_)))
+            .await;
+        let PeerEvent::PairingPending(pending) = ev else {
+            unreachable!()
+        };
+        confirm(&shelf.node, true, vec![], pending.attempt_id)
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(shelf.node.list_peers().len(), 1);
+
+        raw.close().await;
+        shelf.close().await;
+        satchel.close().await;
+    }
+
+    /// `name` and `platform` reach `peers.json` and a `PairingPending` event
+    /// before the human has decided anything, so they are bounded by
+    /// [`NAME_MAX`] and not merely by the frame. Refused BEFORE the MAC, so a
+    /// hostile name costs no compare.
+    #[tokio::test]
+    async fn an_overlong_name_is_refused_and_never_reaches_the_store() {
+        let mut shelf = TestNode::start("pair-longname-shelf", Role::Shelf).await;
+        let offer = begin(&shelf.node, None, PairKind::Device).unwrap();
+        let uri = PairUri::parse(&offer.url).unwrap();
+        let shelf_id = shelf.node.id();
+
+        let (raw, conn) = raw_dial(&uri).await;
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        write_json(
+            &mut send,
+            &PairHello {
+                name: "n".repeat(NAME_MAX + 1),
+                platform: "test".into(),
+                role: Role::Satchel,
+                kind: PairKind::Device,
+                /* A VALID mac, so the refusal cannot be attributed to it. */
+                mac: pair_mac(&uri.secret, &shelf_id, &raw.id())
+                    .to_hex()
+                    .to_string(),
+                person: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let ack: PairAck = read_json(&mut recv).await.unwrap();
+        assert!(!ack.ok);
+        assert!(shelf.node.list_peers().is_empty());
+        let ev = shelf
+            .next_event_where(|e| matches!(e, PeerEvent::PairingResult(_)))
+            .await;
+        assert!(
+            matches!(&ev, PeerEvent::PairingResult(r) if !r.ok && r.reason.as_deref() == Some("name-too-long")),
+            "{ev:?}"
+        );
+        /* REFUSED AHEAD OF THE CLAIM, and this is how that is observable: the
+        secret is unspent, so a legitimate joiner still pairs on the same
+        offer. Checked rather than asserted on internal state, because the
+        property that matters is what the next reader can do. */
+        let satchel = TestNode::start("pair-longname-satchel", Role::Satchel).await;
+        let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
+            .await
+            .unwrap();
+        let ev = shelf
+            .next_event_where(|e| matches!(e, PeerEvent::PairingPending(_)))
+            .await;
+        let PeerEvent::PairingPending(pending) = ev else {
+            unreachable!()
+        };
+        /* The name that reached the human is not the hostile one. */
+        assert!(pending.name.len() <= NAME_MAX, "{}", pending.name.len());
+        confirm(&shelf.node, true, vec![], pending.attempt_id)
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(shelf.node.list_peers().len(), 1);
+
+        raw.close().await;
         shelf.close().await;
         satchel.close().await;
     }
