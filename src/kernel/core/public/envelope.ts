@@ -352,9 +352,21 @@ function checkPublicEnvelope(
   if (envelope.expires > now + MAX_LIFETIME_MS + MAX_CLOCK_SKEW_MS) return 'expired'
   if (envelope.expires - envelope.at > MAX_LIFETIME_MS) return 'expired'
   if (envelope.expires <= now) return 'expired'
-  /* Before the signature, because it is cheaper and a blocked voice is refused
-     whatever it signed. */
-  if (blocked(envelope.voice)) return 'blocked'
+  /* Before the signature, because it is cheaper and a blocked voice's
+     PUBLICATION is refused whatever it signed.
+
+     ⚠️ **A WITHDRAWAL IS NOT REFUSED ON THIS GROUND, AND THE ASYMMETRY IS THE
+     WHOLE OF IT.** Silencing is a decision to hear LESS of a voice, and this
+     was the one rule that could make it do the opposite. Suppression is keyed
+     `<voice>#<pub>` and equivocation `<voice>#<seq>` — `suppressionsIn` and
+     `withoutEquivocation` read no other voice's — so an `unnote` can only ever
+     take back a publication of its OWN voice, and can never hide anybody
+     else's. Refusing one because the reader silenced its author therefore
+     drops that author's "take it back" and leaves the note it took back
+     standing, which is exactly the direction `takePublic` already refuses to
+     fail in at the capacity bound: *"the reader's 'take it back' is exactly
+     what must not be droppable"*. Found by audit. */
+  if (envelope.op === 'note' && blocked(envelope.voice)) return 'blocked'
   if (!crypto.verify(envelope.voice, publicSignedBytes(envelope.v, envelope), envelope.sig)) return 'bad-signature'
   return null
 }

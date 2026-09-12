@@ -92,10 +92,13 @@ async function annotationsFor(held: Running, request: OverlayRequest): Promise<r
     const book = held.library.getSnapshot().find((one) => one.bookId === request.bookId)
     if (book === undefined || !isContentHash(book.contentHash)) return []
     const decisions = await voices.decisions()
-    /* ⚠️ **A BLOCKED VOICE IS REFUSED BEFORE ITS SIGNATURE IS CHECKED.**
-       `checkPublicEnvelope` orders `blocked` ahead of `bad-signature` for
-       exactly this: verification is the expensive step, and a reader who has
-       stopped hearing somebody should not go on paying for their Ed25519. */
+    /* ⚠️ **A BLOCKED VOICE'S PUBLICATION IS REFUSED BEFORE ITS SIGNATURE IS
+       CHECKED.** `checkPublicEnvelope` orders `blocked` ahead of
+       `bad-signature` for exactly this: verification is the expensive step, and
+       a reader who has stopped hearing somebody should not go on paying for
+       their Ed25519. Their WITHDRAWALS are still read, and that door states
+       why — an `unnote` only ever takes back a publication of its own voice, so
+       refusing one on this ground makes the reader hear more of them. */
     const read = await readPublic(fs, request.bookId, book.contentHash, publicCrypto, Date.now(), (voice) =>
       standingOf(voice, decisions) === 'blocked',
     )
@@ -221,10 +224,15 @@ async function receiveNotes(held: Running, bookId: string, named: readonly strin
  * silence back needs the opposite: the envelope has to be readable for its
  * voice to be listed at all. This runs when the pane opens, not on a paint.
  *
- * ⚠️ **AND IT IS NOT THE WHOLE LIST.** Blocking is enforced before storage, so
- * a voice silenced long ago leaves nothing in the file to find. The surface
- * unions this with the device's own silenced set; neither half alone is
- * complete, and only this half is per book.
+ * ⚠️ **AND IT IS NOT THE WHOLE LIST.** A silenced voice's live publications are
+ * discarded at the next write, so a voice whose only note was live leaves
+ * nothing in this book's file to find. (What a write no longer discards is the
+ * EVIDENCE — their withdrawals and both sides of an equivocation — so a voice
+ * that took something back is still listed here. The claim used to be that
+ * blocking is enforced before storage and such a voice leaves nothing at all,
+ * which was true and was the defect: see `onlySaid`.) The surface unions this
+ * with the device's own silenced set; neither half alone is complete, and only
+ * this half is per book.
  */
 async function voicesHeardOn(held: Running, bookId: string): Promise<readonly string[]> {
   const { fs, voices } = held

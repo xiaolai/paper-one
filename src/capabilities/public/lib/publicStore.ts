@@ -11,7 +11,9 @@ import {
   hasRoom,
   keepWithin,
   publicPathIn,
+  publicationKey,
   readPublicEnvelope,
+  sequenceKey,
   sizeOf,
   sliceFor,
   type Delivered,
@@ -115,8 +117,19 @@ export const MAX_STORED_BYTES_PER_BOOK = 2 * MAX_HELD_BYTES_PER_BOOK
  */
 export const MAX_SUPPRESSIONS_PER_BOOK = 2 * MAX_HELD_PER_BOOK
 
+/* ⚠️ **ONE SPELLING OF EACH KEY, AND THERE WERE THREE.** This file wrote
+   `` `${one.voice}#${one.pub}` `` here and `` `${one.voice}#${one.seq}` ``
+   inline in `writePublic`, beside the kernel's own `publicationKey` and
+   `sequenceKey` — the exact shape of the `byteLength` duplication this file
+   carries the scars of at the bottom, and worse, because a key that disagrees
+   with the fold's does not fail loudly: it simply matches nothing, so a
+   suppression stops suppressing and looks like an absence. */
+
 /** `voice#pub` — the key a suppression and its note share. */
-const publicationKeyOf = (one: KeptEnvelope): string => `${one.voice}#${one.pub}`
+const publicationKeyOf = (one: KeptEnvelope): string => publicationKey(one.voice, one.pub)
+
+/** `voice#seq` — one point in one voice's own stream. */
+const sequenceKeyOf = (one: Pick<KeptEnvelope, 'voice' | 'seq'>): string => sequenceKey(one.voice, one.seq)
 
 /**
  * Read one book's public annotations, verifying every line.
@@ -269,6 +282,14 @@ const asWeighed = (one: Delivered) => ({ received: one.received, at: one.envelop
 const asWeighedKept = (one: KeptEnvelope) => ({ received: one.received, at: one.at })
 
 /**
+ * Nobody is silenced, for the one read that must not be filtered.
+ *
+ * Named rather than written inline, because `() => false` at a `blocked`
+ * parameter reads as an oversight and this one is the opposite.
+ */
+const NOBODY_SILENCED = (): boolean => false
+
+/**
  * Write a book's public annotations, on the book's own lane.
  *
  * ⚠️ **THE READ, THE FOLD AND THE WRITE ARE ONE QUEUED TRANSACTION.** Two
@@ -279,6 +300,10 @@ const asWeighedKept = (one: KeptEnvelope) => ({ received: one.received, at: one.
  * ⚠️ **AND WHAT IS WRITTEN IS `kept`, NOT `held`.** Writing only the live notes
  * threw away every withdrawal and every equivocation, so a reload forgot them
  * and a replayed note came back — measured by audit. See `PublicFile.kept`.
+ *
+ * ⚠️ **AND THE READER'S BLOCK REACHES A LIVE PUBLICATION AND NOTHING ELSE.**
+ * This read the stored file WITH the block, which is the same defect by another
+ * road: a read-modify-write that cannot see a line deletes it. See `onlySaid`.
  */
 export async function writePublic(
   fs: VaultFs & Pick<IndexFs, 'readFile'>,
@@ -296,12 +321,31 @@ export async function writePublic(
      rekeying and deletion — but the LINE is not: a flood of arrivals refuses
      at half the cap and leaves the rest for the reader's next note. */
   await queue.appendShared(lane(bookId), async () => {
-    const current = await readPublic(fs as IndexFs, bookId, expectedBook, crypto, now, blocked)
-    const taken = await takePublic(current.file, arriving, expectedBook, crypto, now, blocked, {
+    /* ⚠️ **THE STORED FILE IS READ WITHOUT THE BLOCK, AND IT USED TO BE READ
+       WITH IT.** This is a read-MODIFY-WRITE of the device's own record, so
+       every line the block hid from the read was a line this rewrite then
+       deleted from disk — silently, on the reader's next "Look for some". It
+       took the silenced voice's WITHDRAWALS with it, and both sides of any
+       equivocation, which are the two things `PublicFile.kept` exists to
+       persist. So "Hear this voice again" was not a reversal: a note the
+       author had taken back came straight back with them, and a voice this
+       device had caught equivocating came back looking honest. That is the
+       replay `order.ts` names in as many words — *"drop one side and the next
+       reload finds no conflict"* — reached through the reader's own control.
+       Found by audit. */
+    const current = await readPublic(fs as IndexFs, bookId, expectedBook, crypto, now, NOBODY_SILENCED)
+    /* The one thing the block DOES do to the stored file, and it is about room
+       rather than about evidence: a silenced voice's live publications stop
+       occupying the space an arriving note is weighed against. `held` is
+       exactly the live set — the fold puts neither a withdrawn note nor an
+       equivocating one there — so this frees what `hasRoom` counts and touches
+       nothing that is keeping a record. */
+    const standing: PublicFile = { ...current.file, held: current.file.held.filter((one) => !blocked(one.voice)) }
+    const taken = await takePublic(standing, arriving, expectedBook, crypto, now, blocked, {
       breathe: () => breathe(MAX_TASK_MS),
       live: () => true,
     })
-    const file = taken?.file ?? current.file
+    const file = taken?.file ?? standing
     let refusedHere: Partial<Record<PublicRefusal, number>> = {}
     /* Trimmed at the boundary as well as at the fold: `keepWithin` is the one
        rule for what a book retains, and a writer that skipped it would put a
@@ -310,8 +354,41 @@ export async function writePublic(
        ⚠️ **SUPPRESSION LINES ARE NOT TRIMMED.** They are the evidence, they are
        small, and evicting one is what lets a withdrawn note come back. */
     const equivocating = new Set(file.equivocated.map((one) => one.key))
-    const conflicts = file.kept.filter((one) => one.op === 'note' && equivocating.has(`${one.voice}#${one.seq}`))
-    const notes = file.kept.filter((one) => one.op === 'note' && !equivocating.has(`${one.voice}#${one.seq}`))
+    const withdrawn = new Set(file.withdrawn.map((one) => one.key))
+    /**
+     * ⚠️ **SILENCING DISCARDS WHAT A VOICE SAID AND NEVER WHAT THIS DEVICE
+     * KNOWS ABOUT THEM — AND IT USED TO TAKE BOTH.** The read above was made
+     * WITH the block, which hid a silenced voice's lines from a read-MODIFY-
+     * WRITE and so deleted them from disk on the reader's next "Look for some".
+     * Their withdrawals went with them, and both sides of any equivocation —
+     * the two things `PublicFile.kept` exists to persist. So "Hear this voice
+     * again" was not a reversal: a note its author had taken back came back
+     * with them, and a voice this device had caught equivocating came back
+     * looking honest, which is the revival `order.ts` names in as many words.
+     * Found by audit.
+     *
+     * A note an `unnote` has already taken back is kept for a reason that is
+     * easy to miss: `surviving` bounds a withdrawal's retention by the LATER of
+     * its own expiry and that of the note it suppresses, so dropping the note
+     * shortens the suppression to the `unnote`'s own lifetime — and a
+     * short-lived withdrawal of a long-lived note would then be forgotten while
+     * the note was still valid. That is the defect `surviving` already carries
+     * a paragraph about, re-entered by deleting the other half of the pair.
+     * Asked AFTER the fold, so a withdrawal arriving in THIS batch counts.
+     *
+     * ⚠️ **AND THE ROOM THIS RECLAIMS IS A COURTESY, NOT A DEFENCE.**
+     * `bounds.ts` states the adversary as one with unlimited keys and concedes
+     * the flood outright — *"a bulletin board anybody may write to is one
+     * anybody may fill"* — so no block holds a book's room against somebody who
+     * can mint another voice for nothing. Where the courtesy and the evidence
+     * disagreed, the courtesy used to win.
+     */
+    const onlySaid = (one: KeptEnvelope): boolean =>
+      blocked(one.voice) && !withdrawn.has(publicationKeyOf(one)) && !equivocating.has(sequenceKeyOf(one))
+    const conflicts = file.kept.filter((one) => one.op === 'note' && equivocating.has(sequenceKeyOf(one)))
+    const notes = file.kept.filter(
+      (one) => one.op === 'note' && !equivocating.has(sequenceKeyOf(one)) && !onlySaid(one),
+    )
     /* ⚠️ **SUPPRESSION LINES ARE BOUNDED, AND THEY USED TO BE UNBOUNDED.**
        Keeping every withdrawal was right about the DANGER — evicting one lets a
        withdrawn note come back — and wrong about the cost: nothing capped them,

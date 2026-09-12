@@ -452,6 +452,104 @@ describe('writePublic — one queued transaction', () => {
  }, FLOOD_TIMEOUT_MS)
 })
 
+/**
+ * ⚠️ **SILENCING A VOICE DELETED THIS DEVICE'S RECORD OF THEM.** `writePublic`
+ * is a read-MODIFY-WRITE and it made the read WITH the block, so every line the
+ * block hid was a line the rewrite then dropped from disk — on the reader's
+ * next "Look for some", silently. Their withdrawals went with their notes, and
+ * both sides of any equivocation, which are the two things `PublicFile.kept`
+ * exists to persist. `VoiceDecisions` offers "Hear this voice again" as a
+ * reversal; it restored a note the author had taken back, and a voice this
+ * device had caught equivocating came back looking honest. Found by audit.
+ */
+describe('silencing a voice', () => {
+  const write = (fs: ReturnType<typeof fakeFs>, lines: readonly string[]) =>
+    writePublic(fs, lanes, 'book:1', BOOK, lines, crypto(accepted), NOW, never)
+  const silenced = (fs: ReturnType<typeof fakeFs>, lines: readonly string[]) =>
+    writePublic(fs, lanes, 'book:1', BOOK, lines, crypto(accepted), NOW, (voice: string) => voice === VOICE)
+  const heardAgain = (fs: ReturnType<typeof fakeFs>) => readPublic2(fs, 'book:1', crypto(accepted), NOW, never)
+
+  it('keeps what they took back, so hearing them again does not revive it', async () => {
+    const files = new Map<string, string>()
+    const fs = fakeFs(files)
+    await write(fs, [note(), unnote()])
+    await lanes.queue.idle()
+    expect((await heardAgain(fs)).file.withdrawn).toHaveLength(1)
+
+    /* One ordinary write while they are silenced — which is every "Look for
+       some" the reader makes on this book. */
+    await silenced(fs, [])
+    await lanes.queue.idle()
+
+    const back = await heardAgain(fs)
+    expect(back.file.withdrawn.map((one) => one.key), 'silencing deleted the withdrawal').toEqual([`${VOICE}#p1`])
+    await write(fs, [note()])
+    await lanes.queue.idle()
+    const replayed = await heardAgain(fs)
+    expect(replayed.file.held, 'a note the voice had withdrawn came back when they were heard again').toEqual([])
+  })
+
+  it('keeps both sides of their equivocation, so hearing them again does not clear it', async () => {
+    /* ⚠️ **`order.ts` SAYS WHY IN AS MANY WORDS**: drop one side and the next
+       reload sees a single envelope at that sequence, finds no conflict, and
+       hands the reader something this device had already decided was
+       equivocation. */
+    const files = new Map<string, string>()
+    const fs = fakeFs(files)
+    const oneWay = note({ pub: 'p1' })
+    const theOther = note({ pub: 'p2' })
+    await write(fs, [oneWay, theOther])
+    await lanes.queue.idle()
+    const caught = await heardAgain(fs)
+    expect(caught.file.equivocated.map((one) => one.key)).toEqual([`${VOICE}#1`])
+    expect(caught.file.held).toEqual([])
+
+    await silenced(fs, [])
+    await lanes.queue.idle()
+
+    const back = await heardAgain(fs)
+    expect(back.file.equivocated.map((one) => one.key), 'silencing forgot the equivocation').toEqual([`${VOICE}#1`])
+    await write(fs, [oneWay])
+    await lanes.queue.idle()
+    expect((await heardAgain(fs)).file.held, 'one side of an equivocation revived').toEqual([])
+  })
+
+  it('hears them take something back while they are silenced', async () => {
+    /* The envelope door's half of the same rule: an `unnote` can only ever
+       remove a publication of its own voice, so refusing one because the reader
+       silenced its author makes the reader hear MORE of them. */
+    const files = new Map<string, string>()
+    const fs = fakeFs(files)
+    await write(fs, [note()])
+    await lanes.queue.idle()
+    await silenced(fs, [unnote()])
+    await lanes.queue.idle()
+
+    const back = await heardAgain(fs)
+    expect(back.file.withdrawn.map((one) => one.key), 'the withdrawal was refused for being theirs').toEqual([
+      `${VOICE}#p1`,
+    ])
+    expect(back.file.held).toEqual([])
+  })
+
+  it('does discard what they merely said, so the room comes back', async () => {
+    /* NON-VACUOUS IN THE OTHER DIRECTION: the three cases above would all pass
+       if the block had simply stopped applying to the stored file. It still
+       applies to a live publication — the thing the reader asked not to see,
+       and the thing that occupies the book's retained room. What it no longer
+       reaches is the evidence. */
+    const files = new Map<string, string>()
+    const fs = fakeFs(files)
+    await write(fs, [note()])
+    await lanes.queue.idle()
+    expect(files.get(publicPathIn('book:1'))).toBe(`${note()}\n`)
+
+    await silenced(fs, [])
+    await lanes.queue.idle()
+    expect(files.get(publicPathIn('book:1')), 'a silenced voice went on holding the book’s room').toBe('')
+  })
+})
+
 describe('the book an envelope names', () => {
   it('is refused when it is not the book whose file this is', async () => {
     /* ⚠️ **MEASURED BY AUDIT: VALID ENVELOPES FOR ANOTHER BOOK WERE ACCEPTED

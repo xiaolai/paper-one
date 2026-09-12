@@ -234,6 +234,26 @@ describe('the public envelope reader', () => {
     expect(asked.asked).toEqual([])
   })
 
+  it('hears a blocked voice take something back — silencing is a decision to hear LESS', () => {
+    /* ⚠️ **THIS REFUSED A WITHDRAWAL TOO, WHICH IS THE ONE DIRECTION THE RULE
+       MUST NEVER FAIL IN.** Suppression is keyed `<voice>#<pub>` and
+       equivocation `<voice>#<seq>`, so an `unnote` can only ever take back a
+       publication of its OWN voice and can never hide anybody else's. Refusing
+       one because the reader silenced its author therefore dropped that
+       author's "take it back" and left the note it took back standing — the
+       reader hearing MORE of a voice for having silenced them. */
+    const publication = note()
+    const { passage: _gone, ...rest } = publication as unknown as Record<string, unknown>
+    const withdrawal = { ...rest, op: 'unnote', seq: 2 } as PublicEnvelope
+    const asked = crypto([signed(withdrawal)])
+    expect(refusalFor(canonicalJson(withdrawal), asked, NOW, (v: string) => v === VOICE)).toBeNull()
+    /* NON-VACUOUS: the same voice, the same predicate, and a PUBLICATION from
+       it is still refused — so this is the op deciding, not a dead predicate. */
+    expect(
+      refusalFor(canonicalJson(publication), crypto([signed(publication)]), NOW, (v: string) => v === VOICE),
+    ).toBe('blocked')
+  })
+
   it('refuses a signature over different bytes', () => {
     const envelope = note()
     expect(refusalFor(canonicalJson(envelope), crypto(['something else']), NOW, never)).toBe('bad-signature')
