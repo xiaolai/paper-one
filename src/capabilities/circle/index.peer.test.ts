@@ -789,6 +789,73 @@ describe('re-admission is a pairing', () => {
     /* Disposed: the stream is let go. */
     expect(pairing.fire).toBeNull()
   })
+
+  it('re-admits nobody when the roster could not be read at start, and says why', async () => {
+    /* ⚠️ **A LOST BASELINE WAS AN AMNESTY.** `known ?? new Set()` made an
+       unreadable roster and an empty one the same answer, so with no baseline
+       every person on the roster looked newly met — and the first pairing to
+       complete after that read failed re-admitted everybody the reader had
+       blocked or exited, in a new epoch, with nothing said. The healthy path
+       never does that: a blocked person stays ON the roster, so they are in the
+       baseline and are skipped. Found by audit. */
+    const BOB = 'a2'.repeat(32)
+    const fs = fakeFs({
+      [relationshipPathIn(ALICE)]: relationship({ state: 'blocked', changedAt: hlcOf(3) }),
+      [relationshipPathIn(BOB)]: relationship({ person: BOB, state: 'exited', changedAt: hlcOf(3) }),
+    }) as unknown as IndexFs
+    const bob = { ...alice(), person: BOB, displayName: 'Bob' }
+    /* ⚠️ **ONE `people` FUNCTION FOR THE WHOLE CASE.** `readmitOnPairing` takes
+       `personPort()` ONCE, at start, so replacing `slots.person` afterwards
+       changes nothing it can see — a fixture that swapped the slot between
+       rounds was measuring the first one every time. */
+    let roster: readonly unknown[] | null = null
+    slots.publish = publishing()
+    slots.person = {
+      people: () =>
+        roster === null ? Promise.reject(new Error('the roster would not read')) : Promise.resolve(roster),
+    }
+    const run = started(fs)
+    try {
+      await settled()
+      /* The read at start failed; the roster reads from here on. */
+      roster = [alice(), bob]
+      pairing.fire!({ ok: true, kind: 'circle', id: ALICE_LAPTOP })
+      await settled()
+      await settled()
+      for (const [who, person] of [['Alice', ALICE], ['Bob', BOB]] as const) {
+        const held = JSON.parse(new TextDecoder().decode(await fs.readFile(relationshipPathIn(person)))) as {
+          state: string
+          epoch: number
+        }
+        expect(held.epoch, `${who} was re-admitted against a baseline nobody had`).toBe(1)
+      }
+      expect(run.warn).toHaveBeenCalledWith('circle.readmit-baseline-lost', { people: 2 })
+      /* ⚠️ **AND THE READ THAT FAILED IS REPORTED WHERE IT FAILED.** Its
+         rejection used to be held by nothing until a pairing completed — which
+         on most launches is never — so a roster that would not read was an
+         UNHANDLED REJECTION at every start. The suite's own unhandled-error
+         report is what caught it, over this very case. */
+      expect(run.warn).toHaveBeenCalledWith('circle.roster-read-failed', { message: 'the roster would not read' })
+
+      /* NON-VACUOUS: the baseline is taken now, so a person the reader forgets
+         and meets AGAIN is still re-admitted — the ceremony is delayed by one
+         round, not foreclosed. */
+      roster = [alice()]
+      pairing.fire!({ ok: true, kind: 'circle', id: ALICE_LAPTOP })
+      await settled()
+      await settled()
+      roster = [alice(), bob]
+      pairing.fire!({ ok: true, kind: 'circle', id: ALICE_LAPTOP })
+      await settled()
+      await settled()
+      const met = JSON.parse(new TextDecoder().decode(await fs.readFile(relationshipPathIn(BOB)))) as { epoch: number }
+      expect(met.epoch, 'a person met again after the lost baseline was never re-admitted').toBe(2)
+    } finally {
+      run.dispose()
+      slots.publish = null
+      slots.person = null
+    }
+  })
 })
 
 describe('an identity made after start', () => {

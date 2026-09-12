@@ -756,17 +756,57 @@ function readmitOnPairing(fs: VaultFs, writes: WriteQueue, clock: () => Hlc, dia
   const port = personPort()
   if (!port) return null
   const roster = async (): Promise<ReadonlySet<string>> => new Set((await port.people()).map((one) => one.person))
+  /**
+   * The roster as it was BEFORE this pairing, or `null` when it could not be
+   * read at all.
+   *
+   * ⚠️ **`null` AND EMPTY ARE OPPOSITE ANSWERS, AND `?? new Set()` MADE THEM
+   * THE SAME ONE.** An unreadable roster at start left this `null`, and a
+   * baseline of nothing makes EVERY person on the roster look newly met — so
+   * the first pairing to complete after that read failed re-admitted every
+   * person the reader had blocked or exited, in a new epoch, silently. The
+   * healthy path never does that: a blocked person stays on the roster, so
+   * they are in the baseline, so they are skipped. Only a lost baseline turns
+   * a ceremony for somebody just met into an amnesty for everybody. This is
+   * `readMarks`'s rule — absent is empty, unreadable is not — on a set rather
+   * than a file. Found by audit.
+   */
   let known: ReadonlySet<string> | null = null
-  const first = roster().then((now) => {
-    known = now
-  })
+  /* ⚠️ **THE REFUSAL IS TAKEN HERE, NOT AT THE `await` BELOW.** A roster that
+     would not read left this promise rejected with nobody holding it: the
+     `.catch` that handles it is inside the pairing handler, so until a pairing
+     completes — which on most launches is never — it is an UNHANDLED REJECTION
+     at every start. The failure is not news to this function, which is built to
+     carry on without a baseline; what it must not do is leave the rejection
+     lying where an unrelated `unhandledrejection` handler finds it. Found by
+     the suite's own unhandled-error report, which is why that report is read. */
+  const first = roster().then(
+    (now) => {
+      known = now
+    },
+    (cause: unknown) => {
+      diagnostics.warn('circle.roster-read-failed', { message: messageOf(cause) })
+    },
+  )
   return port.onResult((result) => {
     if (!result.ok) return
     void (async () => {
-      /* The roster as it was at start, before anything is diffed against it. */
-      await first.catch(() => {})
+      /* The roster as it was at start, before anything is diffed against it.
+         `first` never rejects — see where it is made. */
+      await first
       const now = await roster()
-      const before = known ?? new Set<string>()
+      if (known === null) {
+        /* Nothing can be called new against a baseline nobody has. Taking this
+           roster as the baseline costs one round of the ceremony and forecloses
+           nothing later: a forget REMOVES the person, so a re-pairing after
+           this puts them back and they are new again. Said out loud, because a
+           re-admission that silently did not happen is the shape this whole
+           function exists to prevent in the other direction. */
+        known = now
+        diagnostics.warn('circle.readmit-baseline-lost', { people: now.size })
+        return
+      }
+      const before = known
       known = now
       for (const person of now) {
         if (before.has(person)) continue

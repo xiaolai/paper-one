@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { messageOf } from '../kernel'
 import { MUTATION_KINDS, SERVICE_TABLE, readingGrant, type MutationKind, type MutationToken } from '../kernel'
 import { FIXTURE_FILES } from '../hosts/node/fixture.testkit'
 import { IDENTITY_TOLERANCE_MS, LOCK_FILE, LockHeld, acquireDataLock, hostBootedAt, ownStartedAt } from '../hosts/node/lock'
@@ -44,11 +45,35 @@ async function library(): Promise<string> {
   return root
 }
 
+/**
+ * ⚠️ **A RECURSIVE REMOVE THAT CANNOT RETRY TURNS A FILESYSTEM HICCUP INTO A
+ * RED SUITE, AND SAYS ONLY `ENOTEMPTY`.** Seen once here, on a machine at load
+ * 111 with three other agents running: `rmdir '<root>/books'` failed while
+ * every one of this file's 31 assertions had passed. Node's `fs.rm` documents
+ * `maxRetries` for exactly this errno and defaults it to zero.
+ *
+ * ⚠️ **THE CAUSE IS NOT ESTABLISHED, AND THAT IS SAID RATHER THAN IMPLIED BY A
+ * RETRY.** ENOTEMPTY at the `rmdir` means an entry appeared under `books/`
+ * between the walk and the removal, and nothing here should be writing by then
+ * — the hosts are closed first, a refused write never opens one, and a read
+ * opens with `persist: false`, which makes `loadShelf` write nothing. Three
+ * clean runs in a row afterwards; not reproduced. So the retry handles the
+ * transient case and the throw below handles the other one, by NAMING what was
+ * left instead of naming the syscall. A cleanup that fails informatively is
+ * worth more than one that fails mysteriously, and either is worth more than
+ * one that is quietly tolerated.
+ */
 afterEach(async () => {
   while (hosts.length > 0) await hosts.pop()?.close()
   while (roots.length > 0) {
     const root = roots.pop()
-    if (root) await rm(root, { recursive: true, force: true })
+    if (!root) continue
+    try {
+      await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 })
+    } catch (cause) {
+      const left = await readdir(root, { recursive: true }).catch(() => ['<unreadable>'])
+      throw new Error(`the scratch library would not go: ${messageOf(cause)} — left behind: ${left.join(', ')}`)
+    }
   }
 })
 

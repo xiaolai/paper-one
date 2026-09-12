@@ -1,6 +1,7 @@
 import type { ServiceContext } from '../capability'
 import type { DevicePort, DeviceRow, ServiceEnvironment } from './environment'
 import { descriptorOf, readInput, reqList, reqStr } from './input'
+import { GRANT_FAMILIES, SERVICE_GRANTS } from '../serviceTable'
 import { SERVICE_ERRORS, refuse } from './refusals'
 import type { RemovedRow } from './rows'
 
@@ -27,6 +28,37 @@ import type { RemovedRow } from './rows'
  *  the one `peers.rs` stores. Lower-case and hyphenated, like every grant the
  *  service table declares. */
 const GRANT = /^[a-z][a-z0-9-]*:([a-z][a-z0-9-]*|\*)$/
+
+/**
+ * Whether a grant means anything, as far as this shelf can know.
+ *
+ * ⚠️ **THE GRAMMAR WAS THE WHOLE CHECK, AND `book:reed` PASSED IT.** The
+ * comment beside the grammar names the cost exactly — *"a stored grant nothing
+ * ever matches is a permission the reader believes they granted and that
+ * silently does nothing"* — and then stopped one step short: a misspelling
+ * inside a family this kernel owns is that permission, spelled correctly.
+ * `SERVICE_GRANTS` has existed since the table did, describing itself as *"the
+ * API surface and the permission surface as ONE list"*, and nothing but its own
+ * test had ever read it. Found by audit.
+ *
+ * ⚠️ **AND THE CHECK IS SCOPED TO THE FAMILIES THIS TABLE OWNS, WHICH IS THE
+ * PART THAT MAKES IT SAFE.** A capability contributes services with grants of
+ * its own — `circle:read`, `sync:pull` — and the kernel's table does not list
+ * them and must not refuse them. So a grant whose family is not one of
+ * `GRANT_FAMILIES` is judged by its grammar alone, as before, and the omission
+ * is stated rather than left to look like an oversight. Inside a family the
+ * table owns, the list is complete by construction: `serviceTable.test.ts`
+ * asserts that every row's grant is in it AND that every entry in it is used by
+ * a row, both ways.
+ */
+function meansSomething(grant: string): boolean {
+  const family = grant.slice(0, grant.indexOf(':'))
+  if (!(GRANT_FAMILIES as readonly string[]).includes(family)) return true
+  /* The family wildcard is not a service's grant and is never in the list;
+     `grantCovers` is what understands it. */
+  if (grant === `${family}:*`) return true
+  return (SERVICE_GRANTS as readonly string[]).includes(grant)
+}
 
 function port(env: ServiceEnvironment, name: string): DevicePort {
   const bound = env.services.devices()
@@ -91,6 +123,13 @@ export function deviceGrant(env: ServiceEnvironment) {
         throw refuse(
           SERVICE_ERRORS.malformed,
           `${JSON.stringify(grant)} is not a grant — grants are <family>:<name>, or <family>:* for a whole family`,
+        )
+      }
+      /* AND THE NAME, not only the shape. See `meansSomething`. */
+      if (!meansSomething(grant)) {
+        throw refuse(
+          SERVICE_ERRORS.malformed,
+          `${JSON.stringify(grant)} is not a grant this shelf has — nothing would ever match it`,
         )
       }
     }

@@ -513,6 +513,37 @@ describe('what an audit of the published surface found', () => {
     }
     await expect(shelf.client.call('device.grant', { device: 'x', grants: ['book:read', 'mark:*'] })).resolves.toBeDefined()
   })
+
+  it('refuses a grant that is spelled correctly and names nothing', async () => {
+    /* ⚠️ **THE GRAMMAR WAS THE WHOLE CHECK.** The refusal above names the cost
+       in its own words — a stored grant nothing ever matches is a permission the
+       reader believes they granted and that silently does nothing — and then
+       stopped one step short: `book:reed` is that permission, spelled
+       correctly, and it was persisted. `SERVICE_GRANTS` has described itself as
+       *"the API surface and the permission surface as ONE list"* since the
+       table existed, and nothing but its own test had ever read it. */
+    const shelf = serveTable({
+      devices: {
+        list: async () => [],
+        grant: async (id, grants) => ({ id, name: '', platform: '', role: 'satchel', grants, pairedAt: 0, lastSeenAt: 0 }),
+        forget: async () => true,
+      },
+    })
+    for (const grant of ['book:reed', 'mark:writ', 'shelf:administer', 'card:red']) {
+      expect(
+        refusalCode(await shelf.client.call('device.grant', { device: 'x', grants: [grant] }).catch((e: unknown) => e)),
+        grant,
+      ).toBe('malformed')
+    }
+    /* ⚠️ **AND A CAPABILITY'S OWN FAMILY IS STILL ADMITTED, WHICH IS THE PART
+       THAT MAKES THE CHECK SAFE.** `circle:read` and `sync:pull` are contributed
+       services' grants; the kernel's table does not list them and must not
+       refuse them. A membership test over the whole vocabulary would have
+       locked every capability out of the one verb that grants anything. */
+    for (const grant of ['circle:read', 'sync:pull', 'book:read', 'book:*', 'position:write']) {
+      await expect(shelf.client.call('device.grant', { device: 'x', grants: [grant] }), grant).resolves.toBeDefined()
+    }
+  })
 })
 
 describe('what the audit’s verification pass then found', () => {
