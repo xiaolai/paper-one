@@ -116,12 +116,39 @@ export function recordStamp(record: BookRecord): Hlc {
   let latest: Hlc = hlcOf(record.addedAt)
   latest = laterHlc(latest, hlcOf(record.openedAt))!
   latest = laterHlc(latest, hlcOf(record.parsedAt))!
-  latest = laterHlc(latest, record.positionAt)!
-  latest = laterHlc(latest, record.finishedAt)!
-  for (const key of Object.keys(record.tagClock ?? {})) {
-    latest = laterHlc(latest, record.tagClock![key]!.at)!
-  }
+  /* ⚠️ **EVERY STAMP THE RECORD CARRIES, FOUND RATHER THAN LISTED — AND THE
+   * LIST WAS MISSING THREE.** `positionAt`, `finishedAt` and each tag's `at`
+   * were named here by hand, while `status.at`, `ratingAt` and `review.at` were
+   * not. This decides whether a live folder PREDATES the removal that names it,
+   * so a record touched after the removal was written — a rating arriving from
+   * a peer, a status set, a review typed — read as older than it was, and
+   * `finishPendingRemovals` trashed a book the reader had just touched, taking
+   * the newer value with it. Found by audit.
+   *
+   * A hand-written list is a list the next stamped field is left out of, and
+   * that has now happened three times in one function. Every `Hlc` in the
+   * record counts, wherever it sits, so the walk finds them: an HLC has a shape
+   * nothing else in a record matches — a title, a CFI, an extension and an
+   * origin are all refused by `isHlc` — and the record is JSON, so there is
+   * nothing to cycle through. */
+  for (const stamp of stampsIn(record, 0)) latest = laterHlc(latest, stamp)!
   return latest
+}
+
+/**
+ * Every `Hlc` inside a record, however deeply it sits.
+ *
+ * Four levels because the deepest one is real: `tagClock` → the tag's object →
+ * `at` is three from the record, and one more is the room for the next nested
+ * group rather than a number chosen to look generous.
+ */
+function* stampsIn(value: unknown, depth: number): Generator<Hlc> {
+  if (isHlc(value)) {
+    yield value
+    return
+  }
+  if (depth >= 4 || typeof value !== 'object' || value === null) return
+  for (const one of Object.values(value)) yield* stampsIn(one, depth + 1)
 }
 
 /**

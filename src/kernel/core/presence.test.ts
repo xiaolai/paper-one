@@ -87,6 +87,37 @@ describe('recordStamp', () => {
       }),
     ).toBe(t(95))
   })
+
+  /**
+   * ⚠️ **THREE STAMPS WERE MISSING FROM THE HAND-WRITTEN LIST.** `status.at`,
+   * `ratingAt` and `review.at` are all on a `BookRecord` and none of them was
+   * read. This decides whether a live folder PREDATES the removal that names
+   * it, so a record touched after the removal was written — a rating arriving
+   * from a peer, a status set, a review typed — read as older than it was, and
+   * `finishPendingRemovals` trashed a book the reader had just touched. Found
+   * by audit.
+   */
+  it.each([
+    ['a status', { status: { state: 'reading' as const, at: t(95) } }],
+    ['a rating', { rating: 4 as const, ratingAt: t(95) }],
+    ['a review', { review: { text: 'good', at: t(95) } }],
+  ])('counts %s, which the hand-written list left out', (_what, over) => {
+    /* Against an older stamp the list DID read, so what is measured is the new
+       field winning rather than the record being empty. */
+    expect(recordStamp({ title: '', author: '', positionAt: t(10), ...over })).toBe(t(95))
+  })
+
+  it('finds stamps by shape, and a record’s other strings do not have it', () => {
+    /* ⚠️ **THE COST OF FINDING RATHER THAN LISTING, STATED.** The walk reads
+       any value an `Hlc` shape matches, so a title that IS one would count —
+       asserted below rather than left to be discovered. The direction is the
+       safe one: a record that looks NEWER than it is leaves its folder
+       standing, where the defect this replaces trashed a book. And no ordinary
+       field has that shape: a title, an author, an origin path and an extension
+       are all refused, which is what makes the walk usable at all. */
+    expect(recordStamp({ title: 'Moby-Dick', author: 'Melville', origin: '/tmp/x.epub', ext: 'epub', positionAt: t(10) })).toBe(t(10))
+    expect(recordStamp({ title: t(99), author: '', positionAt: t(10) })).toBe(t(99))
+  })
 })
 
 describe('finishPendingRemovals — launch recovery', () => {

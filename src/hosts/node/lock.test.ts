@@ -33,7 +33,23 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   }
 })
 
-const { LOCK_FILE, LockHeld, acquireDataLock, livePid, zombiePid } = await import('./lock')
+/* Every `ps` this module runs, with the options it ran under — so a probe
+   written without a deadline is observed at the call rather than by reading the
+   source for one. Delegates to the real `execFileSync`, so every case below
+   keeps its real answer. */
+const ran: { readonly args: readonly string[]; readonly options: Record<string, unknown> }[] = []
+vi.mock('node:child_process', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:child_process')>()
+  return {
+    ...real,
+    execFileSync: (file: string, args: readonly string[], options: Record<string, unknown>) => {
+      ran.push({ args, options })
+      return real.execFileSync(file, args as string[], options as never)
+    },
+  }
+})
+
+const { LOCK_FILE, LockHeld, acquireDataLock, livePid, processStartedAt, zombiePid } = await import('./lock')
 
 afterEach(() => {
   hooks.rename = null
@@ -260,5 +276,22 @@ describe('a zombie holder', () => {
 
   it('keeps a live pid alive, so the exclusion has not swallowed the ordinary case', () => {
     expect(livePid(process.pid)).toBe(true)
+  })
+
+  it('gives every `ps` it runs a deadline, because both run inside the acquisition poll', () => {
+    /* ⚠️ **ONE OF THE TWO HAD NONE.** `processStartedAt` carried a timeout and
+       a paragraph saying why — a wedged process table has been seen, and a `ps`
+       that hangs stalls the whole wait. `zombiePid` is reached from `livePid`
+       on the same poll and had no deadline at all. A rule spelled at one call
+       site is a rule the other call site does not have. Found by audit. */
+    if (process.platform === 'win32') return
+    ran.length = 0
+    zombiePid(process.pid)
+    processStartedAt(process.pid)
+    /* NON-VACUOUS: both really shelled out, so an empty list cannot pass. */
+    expect(ran.map((one) => one.args[1])).toEqual(['stat=', 'etime='])
+    for (const one of ran) {
+      expect(one.options['timeout'], `ps ${one.args.join(' ')} has no deadline`).toBeGreaterThan(0)
+    }
   })
 })

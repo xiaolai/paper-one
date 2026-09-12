@@ -148,6 +148,19 @@ const DEFAULT_POLL_MS = 50
  * `ps -o stat=` prints `Z` for exactly this, on macOS and Linux alike, and
  * this file already shells out to `ps` for `etime`.
  */
+/**
+ * How long either `ps` probe may take before it answers "cannot say".
+ *
+ * ⚠️ **BOTH RUN INSIDE THE ACQUISITION POLL, AND ONLY ONE WAS BOUNDED.** A `ps`
+ * that hangs — a wedged process table has been seen — stalls the whole wait
+ * with no deadline of its own, and `zombiePid` is reached from `livePid` on
+ * every poll exactly as `processStartedAt` is. One constant, because two
+ * spellings of one deadline is the second chance for a probe to be written
+ * without one. A timeout answers `null`, and null refutes nothing — the safe
+ * direction. Found by audit.
+ */
+const PS_TIMEOUT_MS = 2_000
+
 export function zombiePid(pid: number): boolean | null {
   /* NOT A CONCEPT WINDOWS HAS, and no `ps` to ask. Answered without spawning
    * anything: a process that cannot exist is a failed spawn on every call, and
@@ -158,6 +171,9 @@ export function zombiePid(pid: number): boolean | null {
     const out = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      /* BOUNDED, for the reason at `PS_TIMEOUT_MS` — and this call had no
+         deadline while its sibling below carried one and said why. */
+      timeout: PS_TIMEOUT_MS,
     }).trim()
     if (out === '') return null
     /* The first letter is the state; the rest are flags (`Zs`, `Z+`). */
@@ -218,14 +234,11 @@ export function ownStartedAt(now: number = Date.now()): number {
 export function processStartedAt(pid: number, now: number = Date.now()): number | null {
   if (process.platform === 'win32') return null
   try {
-    /* BOUNDED, because this runs inside the acquisition poll: a `ps` that
-     * hangs (a wedged process table has been seen) would otherwise stall the
-     * whole wait with no deadline of its own. A timeout answers null, and
-     * null refutes nothing — the safe direction. */
+    /* BOUNDED, for the reason at `PS_TIMEOUT_MS`. */
     const out = execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2_000,
+      timeout: PS_TIMEOUT_MS,
     })
     const elapsed = parseElapsed(out.trim())
     return elapsed === null ? null : now - elapsed * 1000

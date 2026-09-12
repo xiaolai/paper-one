@@ -469,11 +469,26 @@ describe('the clock’s counter, exhausted', () => {
       vi.setSystemTime(1_700_000_000_000)
       const clock = monotonicClock()
       let last = clock()
+      /* ⚠️ **THE COMPARISON IS COLLECTED, NOT ASSERTED, INSIDE THE LOOP.** This
+         ran `expect` sixty-five thousand times — one matcher built and torn
+         down per tick — which made a test of a pure counter cost seconds, and
+         on a loaded machine cost more than the timeout: it failed once here in
+         a run where `src/kernel` and `src/hosts` went together, and passed
+         alone every time. A timeout is a liveness bound and not a performance
+         assertion, so the answer is the cost rather than the bound: measured
+         here, this file's tests went from 3.42 s to 193 ms, which moves the
+         case from within a factor of 1.5 of the five-second default to
+         twenty-six times under it. The
+         assertion is not weakened — the FIRST pair that fails to advance is
+         what is named, which is the one an `expect` in the loop would have
+         reported too. */
+      let stalled: { readonly at: number; readonly last: string; readonly next: string } | null = null
       for (let i = 0; i < 65_540; i++) {
         const next = clock()
-        expect(compareHlc(last, next)).toBeLessThan(0)
+        if (stalled === null && compareHlc(last, next) >= 0) stalled = { at: i, last, next }
         last = next
       }
+      expect(stalled, 'the clock handed out a stamp that did not advance').toBeNull()
       expect(parseHlc(last).ms).toBe(1_700_000_000_001)
     } finally {
       vi.useRealTimers()
