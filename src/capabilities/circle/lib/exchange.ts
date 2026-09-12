@@ -373,10 +373,30 @@ export async function answerLists(request: unknown, serving: Serving, discloses:
  * ⚠️ **AND SO IS A BOOK WITH NOTHING SHARED FROM IT.** The two are deliberately
  * indistinguishable from outside: telling a peer *"I have that book but have
  * shared nothing"* discloses the reader's library one request at a time.
+ *
+ * ⚠️ **AND SO IS A CALLER THIS READER NO LONGER ADMITS — WHICH THIS DID NOT
+ * ASK.** The shelf, the lists and the jackets each take the caller's standing
+ * and this one took nothing, so the only gate on the reader's shared passages
+ * was the `circle:read` grant itself. That grant lives in the peer store and
+ * OUTLIVES every control a reader has over somebody: `peer_circle_forget`
+ * removes them from `known_people` and leaves the peer record with its grants
+ * untouched, blocking and exiting write a relationship record the serving side
+ * never read, and revoking one device of theirs changes neither. So removing a
+ * person from the circle, blocking them, or revoking their laptop went on
+ * serving them every passage this reader had shared, from every book they
+ * could name. Found by audit.
+ *
+ * `admitted` is the same question `discloses` asks first and NOT the shelf
+ * switch it ends with: the switch is about showing a library, and sharing a
+ * passage is already a decision to show it. What ends is the relationship.
+ * The refusal is `NOTHING`, the same literal a shelf with nothing shared
+ * answers, because *"blocked" and "never paired" are the same answer* is this
+ * layer's rule and a distinguishable refusal is a way to ask which.
  */
-export async function answerPages(request: unknown, serving: Serving): Promise<PagesAnswer | null> {
+export async function answerPages(request: unknown, serving: Serving, admitted: boolean): Promise<PagesAnswer | null> {
   const asked = parsePagesRequest(request)
   if (!asked) return null
+  if (!admitted) return NOTHING
 
   const book = bookVia(indexOf(serving.books), asked.work)
   if (!book) return { pages: [], more: false }

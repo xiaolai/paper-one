@@ -116,7 +116,7 @@ function sessionTo(serving: Serving, answering = ALICE.id): Dialled & { readonly
     call: async (service: string, body: unknown) => {
       calls.push(service)
       if (service === CIRCLE_SERVICES.hello.name) return welcome(body, answering)
-      if (service === CIRCLE_SERVICES.pages.name) return answerPages(body, serving)
+      if (service === CIRCLE_SERVICES.pages.name) return answerPages(body, serving, true)
       /* The shelf, as a person the switch is on for is served it. */
       if (service === CIRCLE_SERVICES.shelf.name) return answerShelf(body, serving, true)
       if (service === CIRCLE_SERVICES.lists.name) return answerLists(body, serving, true)
@@ -342,7 +342,7 @@ describe('a passage shared on A appears in B', () => {
         if (service === CIRCLE_SERVICES.hello.name) return welcome(body, ALICE.id)
         if (service === CIRCLE_SERVICES.shelf.name || service === CIRCLE_SERVICES.lists.name) return { pages: [], more: false }
         pagesCalls += 1
-        const answer = await answerPages(body, forging)
+        const answer = await answerPages(body, forging, true)
         return { pages: answer!.pages, more: true }
       },
       close: () => Promise.resolve(),
@@ -470,7 +470,7 @@ describe('which chain is asked for — WI-23.B2', () => {
         [CIRCLE_SERVICES.hello.name]: () => ({ proto: 1, pages, person: ALICE.id, agreed: Math.min(pages.max, 2) }),
         [CIRCLE_SERVICES.pages.name]: (body) => {
           asked.push(body as Record<string, unknown>)
-          return answerPages(body, serving)
+          return answerPages(body, serving, true)
         },
         [CIRCLE_SERVICES.shelf.name]: nothing,
         [CIRCLE_SERVICES.lists.name]: nothing,
@@ -548,7 +548,7 @@ describe('the shelf, after the books — WI-23.C1/C3', () => {
         asked.push(service)
         return answering({
           [CIRCLE_SERVICES.hello.name]: (one) => welcome(one, ALICE.id),
-          [CIRCLE_SERVICES.pages.name]: (one) => answerPages(one, serving),
+          [CIRCLE_SERVICES.pages.name]: (one) => answerPages(one, serving, true),
           [CIRCLE_SERVICES.shelf.name]: (one) => answerShelf(one, serving, discloses),
           [CIRCLE_SERVICES.lists.name]: nothing,
         })(service, body)
@@ -617,7 +617,7 @@ describe('the shelf, after the books — WI-23.C1/C3', () => {
            the failure this test is about — it must not be answered quietly. */
         return answering({
           [CIRCLE_SERVICES.hello.name]: () => ({ proto: 1, pages: { min: 1, max: 1 }, person: ALICE.id, agreed: 1 }),
-          [CIRCLE_SERVICES.pages.name]: (one) => answerPages(one, a.serving),
+          [CIRCLE_SERVICES.pages.name]: (one) => answerPages(one, a.serving, true),
         })(service, body)
       },
       close: () => Promise.resolve(),
@@ -1021,7 +1021,7 @@ describe('the lists, after the shelf — WI-23.E1', () => {
           return { pages: [...shelfPage, 'not json'], more: true }
         }
         if (service === CIRCLE_SERVICES.shelf.name) return { pages: [], more: false }
-        return answerPages(body, a.serving)
+        return answerPages(body, a.serving, true)
       },
       close: () => Promise.resolve(),
     }
@@ -1049,7 +1049,7 @@ describe('the lists, after the shelf — WI-23.E1', () => {
         if (service === CIRCLE_SERVICES.hello.name) return { proto: 1, pages: { min: 1, max: 2 }, person: ALICE.id, agreed: 2 }
         if (service === CIRCLE_SERVICES.shelf.name) return answerShelf(body, a.serving, true)
         if (service === CIRCLE_SERVICES.lists.name) throw new Error('a v2 peer has no such service')
-        return answerPages(body, a.serving)
+        return answerPages(body, a.serving, true)
       },
       close: () => Promise.resolve(),
     }
@@ -1083,7 +1083,7 @@ describe('a shelf, or a list, disappears within one cadence of the switch going 
         if (service === CIRCLE_SERVICES.hello.name) return Promise.resolve(welcome(body, ALICE.id))
         if (service === CIRCLE_SERVICES.shelf.name) return answerShelf(body, serving, state.shown)
         if (service === CIRCLE_SERVICES.lists.name) return answerLists(body, serving, state.shown)
-        return answerPages(body, serving)
+        return answerPages(body, serving, true)
       },
       close: () => Promise.resolve(),
     }
@@ -1645,7 +1645,7 @@ describe('every clause of the shelf and the list fetches — one row each', () =
           return shelfMore && shelfAnswers++ === 0 ? { pages: answer!.pages, more: true } : answer
         }
         if (service === CIRCLE_SERVICES.lists.name) return bounds ? answerLists(body, serving, true, bounds) : answerLists(body, serving, true)
-        return answerPages(body, serving)
+        return answerPages(body, serving, true)
       },
       close: () => Promise.resolve(),
     }
@@ -1759,7 +1759,7 @@ describe('every clause of the shelf and the list fetches — one row each', () =
         if (service === CIRCLE_SERVICES.hello.name) return Promise.resolve(welcome(body, ALICE.id))
         if (service === CIRCLE_SERVICES.shelf.name) return Promise.resolve({ pages: [], more: false })
         if (service === CIRCLE_SERVICES.lists.name) return answerLists(body, a.serving, true, { maxPages: 1, budget: 1_200 })
-        return answerPages(body, a.serving)
+        return answerPages(body, a.serving, true)
       },
       close: () => Promise.resolve(),
     }
@@ -1791,7 +1791,7 @@ describe('every clause of the shelf and the list fetches — one row each', () =
           const answer = await answerShelf(body, forging, true)
           return { pages: answer!.pages, more: true }
         }
-        return answerPages(body, a.serving)
+        return answerPages(body, a.serving, true)
       },
       close: () => Promise.resolve(),
     }
@@ -1812,7 +1812,7 @@ describe('every clause of the shelf and the list fetches — one row each', () =
         if (service === CIRCLE_SERVICES.hello.name) return Promise.resolve({ proto: 1, pages: { min: 1, max: 2 }, person: ALICE.id, agreed: 2 })
         if (service === CIRCLE_SERVICES.shelf.name) return answerShelf(body, serving, true)
         if (service === CIRCLE_SERVICES.lists.name) throw new Error('a v2 peer has no such service')
-        return answerPages(body, serving)
+        return answerPages(body, serving, true)
       },
       close: () => Promise.resolve(),
     }
@@ -2031,7 +2031,7 @@ describe('the round, held to the letter — what a moved roster, a spent budget 
           if (name === CIRCLE_SERVICES.hello.name) return Promise.resolve(welcome(body, ALICE.id))
           if (name === CIRCLE_SERVICES.shelf.name) return answerShelf(body, serving, state.shown)
           if (name === CIRCLE_SERVICES.lists.name) return answerLists(body, serving, state.shown)
-          return answerPages(body, serving)
+          return answerPages(body, serving, true)
         },
         close: () => Promise.resolve(),
       }
@@ -2170,7 +2170,7 @@ describe('a lists request names at most what the peer’s parser reads', () => {
     const session = (): Dialled => ({
       call: answering({
         [CIRCLE_SERVICES.hello.name]: (body) => welcome(body, ALICE.id),
-        [CIRCLE_SERVICES.pages.name]: (body) => answerPages(body, a.serving),
+        [CIRCLE_SERVICES.pages.name]: (body) => answerPages(body, a.serving, true),
         [CIRCLE_SERVICES.shelf.name]: nothing,
         [CIRCLE_SERVICES.lists.name]: (body) => answerLists(body, a.serving, true),
       }),
@@ -2370,7 +2370,7 @@ describe('a lists request names at most what the peer’s parser reads', () => {
     const session: Dialled = {
       call: (service, body) => {
         if (service === CIRCLE_SERVICES.hello.name) return Promise.resolve(welcome(body, ALICE.id))
-        if (service === CIRCLE_SERVICES.pages.name) return answerPages(body, a.serving)
+        if (service === CIRCLE_SERVICES.pages.name) return answerPages(body, a.serving, true)
         if (service === CIRCLE_SERVICES.shelf.name) return answerShelf(body, a.serving, true)
         if (service === CIRCLE_SERVICES.lists.name) return answerLists(body, a.serving, true, { maxPages: 4, budget: 200 })
         return Promise.reject(new Error(`no such service ${service}`))

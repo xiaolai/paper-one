@@ -223,7 +223,7 @@ async function annotationsFor(
  */
 function served(): {
   hello: (r: unknown) => Promise<unknown>
-  pages: (r: unknown) => Promise<unknown>
+  pages: (r: unknown, peer: string) => Promise<unknown>
   shelf: (r: unknown, peer: string) => Promise<unknown>
   lists: (r: unknown, peer: string) => Promise<unknown>
   cover: (r: unknown, peer: string) => Promise<unknown>
@@ -244,9 +244,16 @@ function served(): {
       if (!answer) throw new Error('that hello is not one this build answers')
       return answer
     },
-    pages: async (request) => {
+    /* ⚠️ **THE CALLER'S STANDING, AND THIS TOOK NOTHING.** `circle:read` is
+     * granted once, by a circle pairing, into the peer store — and it outlives
+     * every control the reader has over a person: forgetting them removes them
+     * from `known_people` and leaves the grant, blocking and exiting write a
+     * relationship record nothing here read, and revoking one of their devices
+     * changes neither. So a person the reader had removed went on being served
+     * every passage they had shared. `answerPages` says the rest. */
+    pages: async (request, peer) => {
       if (!run) throw new Error('circle has not started')
-      const answer = await answerPages(request, run.serving())
+      const answer = await answerPages(request, run.serving(), await run.admitted(peer))
       if (!answer) throw new Error('that request is not one this build answers')
       return answer
     },
@@ -285,6 +292,14 @@ interface Running {
   readonly serving: () => Serving
   /** Whether the person the calling DEVICE speaks for is shown the shelf. */
   readonly discloses: (device: string) => Promise<boolean>
+  /**
+   * Whether the calling DEVICE still speaks for somebody this reader admits.
+   *
+   * `discloses` without its last clause. The shelf switch is about showing a
+   * library; this is about whether the relationship is still one at all, which
+   * is the question every service has to ask and only this one is named for.
+   */
+  readonly admitted: (device: string) => Promise<boolean>
   /**
    * The share control's port — WI-23.A1.
    *
@@ -392,7 +407,7 @@ export const circle: Capability = {
     {
       name: CIRCLE_SERVICES.pages.name,
       grant: CIRCLE_SERVICES.pages.grant,
-      handler: (request: unknown) => served().pages(request),
+      handler: (request: unknown, ctx) => served().pages(request, ctx.peer),
     },
     {
       name: CIRCLE_SERVICES.shelf.name,
@@ -957,7 +972,7 @@ function publicationOver({ fs, library, writes, clock, warn, onChanged }: Runnin
  * files, their jackets, the purge — and the disclosure rule the shelf
  * service asks. WI-23.C2–C5, over one run's stores.
  */
-function circleReadsOver({ fs, library, writes, clock, warn, ledger, settings, onChanged, changed }: RunningDeps): Pick<Running, 'circle' | 'discloses'> {
+function circleReadsOver({ fs, library, writes, clock, warn, ledger, settings, onChanged, changed }: RunningDeps): Pick<Running, 'circle' | 'discloses' | 'admitted'> {
   // Stryker disable next-line ArrowFunction: the lane, handed through.
   const lane = (id: string) => library.lane(id)
   /** The person a calling device speaks for, by the rosters this side holds. */
@@ -967,14 +982,30 @@ function circleReadsOver({ fs, library, writes, clock, warn, ledger, settings, o
        still listed speaks for nobody, least of all for the shelf. */
     return people.find((one) => one.devices.includes(device) && !one.revoked.includes(device))?.person ?? null
   }
-  const discloses = async (device: string): Promise<boolean> => {
+  /**
+   * What this device may be told, by the rosters and the record.
+   *
+   * ⚠️ **ONE READ ANSWERING BOTH QUESTIONS, BECAUSE THEY SHARE A PRECONDITION.**
+   * `discloses` was written as the whole of it and `pages` asked nothing at
+   * all, so the reader's shared passages were served on the `circle:read`
+   * grant alone — a grant that survives forgetting a person, blocking them,
+   * exiting, and revoking one of their devices. Splitting the two apart at the
+   * point they already differ is what lets the third service ask the half it
+   * needs instead of the half that happens to be exported.
+   */
+  const standingOf = async (device: string): Promise<{ admitted: boolean; shelf: boolean }> => {
     const person = await personOf(device)
-    if (person === null) return false
-    /* The switch, AND a relationship that still admits them: a record left
-       with the switch on after a block is a record, not a disclosure. */
+    if (person === null) return { admitted: false, shelf: false }
     const relationship = await readRelationship(fs as VaultFs, person)
-    return acceptsTransport(relationship.state) && relationship.shelf
+    /* A relationship that still admits them at all — the state, never the
+       switch: a record left with the switch on after a block is a record, not
+       a disclosure, and a record left ADMITTED after a forget is not a
+       relationship. */
+    const admitted = acceptsTransport(relationship.state)
+    return { admitted, shelf: admitted && relationship.shelf }
   }
+  const discloses = async (device: string): Promise<boolean> => (await standingOf(device)).shelf
+  const admitted = async (device: string): Promise<boolean> => (await standingOf(device)).admitted
   /* Stryker disable all: wiring — each line hands one store, port or prop through; the port's own tests hold the behaviour, and `index.peer.test.ts` holds that the seams reach the peer. */
   const covers = createCoverFetcher({
     fs: fs as VaultFs,
@@ -1019,7 +1050,7 @@ function circleReadsOver({ fs, library, writes, clock, warn, ledger, settings, o
     warn,
   })
   /* Stryker restore all */
-  return { circle, discloses }
+  return { circle, discloses, admitted }
 }
 
 /**
@@ -1069,7 +1100,7 @@ function runningOver(deps: RunningDeps): Running {
   const publisher = () => serving().publisher(EMPTY_WORK)
   const { sharing, opinion } = publicationOver(deps, publisher)
   const publishShelf = shelfPublisherOver(deps, publisher)
-  const { circle, discloses } = circleReadsOver(deps)
+  const { circle, discloses, admitted } = circleReadsOver(deps)
   const lists = listsOver(deps, publisher)
   /* What waited on an identity: the shelf, and the opinions whose switch is
      on — EACH ON ITS OWN, so a shelf that would not publish does not keep
@@ -1082,7 +1113,7 @@ function runningOver(deps: RunningDeps): Running {
     if (shelf.status === 'rejected') deps.warn('circle.shelf.publish-failed', { message: messageOf(shelf.reason) })
     if (opinions.status === 'rejected') deps.warn('circle.opinion.warm-failed', { message: messageOf(opinions.reason) })
   }
-  return { publisher, serving, sharing, opinion, discloses, circle, lists, publishShelf, identityChanged }
+  return { publisher, serving, sharing, opinion, discloses, admitted, circle, lists, publishShelf, identityChanged }
 }
 
 /** What a book says about the work it is — the claim's inputs, in clear, absent when the book says nothing. */

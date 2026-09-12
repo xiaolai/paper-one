@@ -183,6 +183,107 @@ describe('a service called when the capability is not running', () => {
   })
 })
 
+/**
+ * ⚠️ **THE SHARED PASSAGES WERE SERVED ON THE GRANT ALONE.** The shelf, the
+ * lists and the jackets each take the caller's standing; `circle.pages` took
+ * nothing, so the only gate on what the reader had shared was `circle:read` —
+ * and that grant lives in the peer store, where it outlives every control a
+ * reader has over a person. `peer_circle_forget` removes them from
+ * `known_people` and leaves the peer record with its grants; blocking and
+ * exiting write a relationship record the serving side never read; revoking one
+ * of their devices changes neither. So a person removed from the circle went on
+ * being served every passage this reader had shared, from every book they could
+ * name. Found by audit.
+ */
+describe('the passages, served to the caller’s device', () => {
+  const passage = { quote: 'Call me Ishmael', prefix: '', suffix: '', chapter: 'One' }
+  const asking = { work: claimOf({ id: 'book:moby', title: 'Moby-Dick', author: 'Herman Melville', identifier: 'isbn:9780142437247', languages: ['en'] }), since: {}, v: 3 }
+  const withShared = (fs: IndexFs) =>
+    updateShared(fs, writes, (id) => id, 'book:moby', (held) => share(held, { markId: 'm1', passage, device: MY_DEVICE }, 'pub1', hlcOf(5)).held)
+
+  const pagesFor = async (relationshipJson: string, people: readonly unknown[], peer: string) => {
+    const fs = fakeFs({ [relationshipPathIn(ALICE)]: relationshipJson }) as unknown as IndexFs
+    await withShared(fs)
+    slots.publish = publishing()
+    slots.person = { people: () => Promise.resolve(people) }
+    const run = started(fs)
+    try {
+      return (await call(CIRCLE_SERVICES.pages.name, asking, peer)) as { pages: unknown[] }
+    } finally {
+      run.dispose()
+      slots.publish = null
+      slots.person = null
+    }
+  }
+
+  it('serves a device the roster names', async () => {
+    /* NON-VACUOUS: the same book, the same shared passage and the same request
+       as every refusal below — so those are the caller's standing deciding,
+       not an empty log. */
+    const served = await pagesFor(relationship(), [alice()], ALICE_LAPTOP)
+    expect(served.pages.length).toBeGreaterThan(0)
+  })
+
+  it('serves nothing to a revoked device, an unknown one, a blocked person or one the reader has removed', async () => {
+    /* Each of these is a control the reader has, and each left the passages
+       being served. The revoked device is the sharpest: the person is still in
+       the circle, so nothing about the relationship changed — only which of
+       their machines may speak for them. */
+    const revoked = await pagesFor(relationship(), [alice({ revoked: [ALICE_PHONE] })], ALICE_PHONE)
+    expect(revoked.pages, 'a revoked device was served').toEqual([])
+    const unknown = await pagesFor(relationship(), [alice()], 'd9'.repeat(32))
+    expect(unknown.pages, 'a device on nobody’s roster was served').toEqual([])
+    const blocked = await pagesFor(relationship({ state: 'blocked' }), [alice()], ALICE_LAPTOP)
+    expect(blocked.pages, 'a blocked person was served').toEqual([])
+    const exited = await pagesFor(relationship({ state: 'exited' }), [alice()], ALICE_LAPTOP)
+    expect(exited.pages, 'an exited person was served').toEqual([])
+    /* Removed from the circle outright — `peer_circle_forget` empties the
+       roster and leaves the grant, which is the case with no relationship
+       record to read at all. */
+    const forgotten = await pagesFor(relationship(), [], ALICE_LAPTOP)
+    expect(forgotten.pages, 'a person removed from the circle was served').toEqual([])
+  })
+
+  it('answers a caller it refuses exactly as it answers one with nothing shared', async () => {
+    /* ⚠️ **"BLOCKED" AND "NEVER PAIRED" ARE THE SAME ANSWER** — this layer's
+       own rule, and a distinguishable refusal is a way to ask which. */
+    const refused = await pagesFor(relationship({ state: 'blocked' }), [alice()], ALICE_LAPTOP)
+    /* An admitted caller asking about a book this reader has shared nothing
+       from — no `withShared`, so the log is empty. */
+    const fs = fakeFs({ [relationshipPathIn(ALICE)]: relationship() }) as unknown as IndexFs
+    slots.publish = publishing()
+    slots.person = { people: () => Promise.resolve([alice()]) }
+    const run = started(fs)
+    try {
+      const nothingShared = (await call(CIRCLE_SERVICES.pages.name, asking, ALICE_LAPTOP)) as { pages: unknown[] }
+      expect(JSON.stringify(refused)).toBe(JSON.stringify(nothingShared))
+    } finally {
+      run.dispose()
+      slots.publish = null
+      slots.person = null
+    }
+  })
+
+  it('seals no boundary for a caller it refuses', async () => {
+    /* A refusal that still cut and recorded pages would move the shared log's
+       boundary for somebody who received nothing, and the next real caller
+       would be answered from past it. */
+    const fs = fakeFs({ [relationshipPathIn(ALICE)]: relationship({ state: 'blocked' }) }) as unknown as IndexFs
+    await withShared(fs)
+    slots.publish = publishing()
+    slots.person = { people: () => Promise.resolve([alice()]) }
+    const run = started(fs)
+    try {
+      await call(CIRCLE_SERVICES.pages.name, asking, ALICE_LAPTOP)
+      expect((await readShared(fs, 'book:moby')).sealed, 'a refused caller moved the boundary').toEqual([])
+    } finally {
+      run.dispose()
+      slots.publish = null
+      slots.person = null
+    }
+  })
+})
+
 describe('the shelf, disclosed by the caller’s device', () => {
   it('serves a device the roster names, and nothing to a revoked one, an unknown one, or under a block', async () => {
     const fs = fakeFs({ [relationshipPathIn(ALICE)]: relationship() }) as unknown as IndexFs

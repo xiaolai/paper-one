@@ -280,9 +280,38 @@ describe('the hello', () => {
 })
 
 describe('answering a request for pages', () => {
+  it('answers a caller this reader no longer admits with bytes identical to a book with nothing shared', async () => {
+    /* ⚠️ **THIS GATE DID NOT EXIST, AND `circle:read` WAS THE WHOLE OF IT.**
+       That grant lives in the peer store and outlives forgetting a person,
+       blocking them, exiting, and revoking one of their devices — so every
+       passage the reader had shared went on being served to all four. The
+       shelf, the lists and the jackets each take the caller's standing; this
+       took nothing. The refusal is the shelf's own literal, because *"blocked"
+       and "never paired" are the same answer* is this layer's rule and a
+       distinguishable refusal is a way to ask which. */
+    const refused = await answerPages(ask(), serving(), false)
+    const nothingShared = await answerPages(ask(), serving({ withShared: oneBook(() => NOTHING_PUBLISHED) }), true)
+    expect(JSON.stringify(refused)).toBe(JSON.stringify(nothingShared))
+    expect(refused).toEqual({ pages: [], more: false })
+  })
+
+  it('does not open or seal the shared log for a caller it refuses', async () => {
+    /* A refusal that still cut pages would move the boundary for somebody who
+       received nothing, and the next real caller would be answered from past
+       it — the same failure `withShared` exists to prevent, reached from the
+       other end. */
+    const opened: string[] = []
+    const withShared = ((bookId: string, step: never) => {
+      opened.push(bookId)
+      return oneBook(published)(bookId, step)
+    }) as unknown as Serving['withShared']
+    await answerPages(ask(), serving({ withShared }), false)
+    expect(opened).toEqual([])
+  })
+
   it('serves what was published, and the other side takes it', async () => {
     /* Both halves again, this time through the surface a peer actually calls. */
-    const answer = await answerPages(ask(), serving())
+    const answer = await answerPages(ask(), serving(), true)
     expect(answer?.pages.length).toBeGreaterThan(0)
 
     const ledger: Ledger = {
@@ -304,7 +333,7 @@ describe('answering a request for pages', () => {
        a failure in front of a reader for the fact that their friend owns a book
        they do not. */
     const other = claimOf({ id: 'y', title: 'Bleak House', author: 'Dickens', languages: ['en'] })
-    return expect(answerPages(ask({ work: other }), serving())).resolves.toEqual({
+    return expect(answerPages(ask({ work: other }), serving(), true)).resolves.toEqual({
       pages: [],
       more: false,
     })
@@ -314,21 +343,22 @@ describe('answering a request for pages', () => {
     /* ⚠️ **DELIBERATELY INDISTINGUISHABLE FROM THE CASE ABOVE.** Telling a peer
        "I have that book but have shared nothing" discloses the reader's library
        one request at a time. */
-    const empty = await answerPages(ask(), serving({ withShared: oneBook(() => NOTHING_PUBLISHED) }))
+    const empty = await answerPages(ask(), serving({ withShared: oneBook(() => NOTHING_PUBLISHED) }), true)
     const absent = await answerPages(
       ask({ work: claimOf({ id: 'y', title: 'Bleak House', author: 'Dickens', languages: ['en'] }) }),
       serving(),
+      true,
     )
     expect(empty).toEqual(absent)
   })
 
   it('refuses a request this build cannot parse', async () => {
-    expect(await answerPages({ work: 'moby', since: {} }, serving())).toBeNull()
-    expect(await answerPages(null, serving())).toBeNull()
+    expect(await answerPages({ work: 'moby', since: {} }, serving(), true)).toBeNull()
+    expect(await answerPages(null, serving(), true)).toBeNull()
   })
 
   it('says nothing when this device has no identity to publish with', async () => {
-    const answer = await answerPages(ask(), serving({ publisher: () => Promise.resolve(null) }))
+    const answer = await answerPages(ask(), serving({ publisher: () => Promise.resolve(null) }), true)
     expect(answer).toEqual({ pages: [], more: false })
   })
 
@@ -338,7 +368,7 @@ describe('answering a request for pages', () => {
        every recipient holding it then refuses the one after with `chain`. A
        boundary recorded and not served costs a round trip. */
     const wrote: SharedFile[] = []
-    const answer = await answerPages(ask(), serving({ withShared: oneBook(published, (next) => wrote.push(next)) }))
+    const answer = await answerPages(ask(), serving({ withShared: oneBook(published, (next) => wrote.push(next)) }), true)
 
     expect(wrote).toHaveLength(1)
     expect(wrote[0]!.sealed.length).toBeGreaterThan(0)
@@ -348,7 +378,7 @@ describe('answering a request for pages', () => {
   it('does not write when there was nothing new to seal', async () => {
     const sealed = { ...published(), sealed: [{ device: DEVICE.id, from: 1, to: 1, v: WIRE_VERSION }] }
     const wrote: SharedFile[] = []
-    await answerPages(ask(), serving({ withShared: oneBook(() => sealed, (next) => wrote.push(next)) }))
+    await answerPages(ask(), serving({ withShared: oneBook(() => sealed, (next) => wrote.push(next)) }), true)
     expect(wrote).toEqual([])
   })
 })
@@ -385,11 +415,11 @@ describe('two requests around one new share — the lost boundary', () => {
       },
     })
 
-    const first = answerPages(ask(), serve)
+    const first = answerPages(ask(), serve, true)
     /* A second share lands, and a second request with it, before the first has
        finished deciding its boundary. */
     files.set(MOBY.id, share(files.get(MOBY.id)!, { markId: 'm2', passage: { quote: 'two', prefix: '', suffix: '', chapter: 'One' }, device: DEVICE.id }, 'pub2', makeHlc(NOW + 1, 0, DEVICE.id.slice(0, 16))).held)
-    const second = answerPages(ask(), serve)
+    const second = answerPages(ask(), serve, true)
     const [a, b] = await Promise.all([first, second])
 
     /* The boundaries the store ended with cover every sequence exactly once
@@ -448,7 +478,7 @@ describe('two chains, sealed separately — WI-23.B2', () => {
     }
   }
   const pagesOf = async (serve: Serving, v: number) => {
-    const answer = await answerPages(v === 1 ? ask({ v: undefined }) : ask({ v }), serve)
+    const answer = await answerPages(v === 1 ? ask({ v: undefined }) : ask({ v }), serve, true)
     return answer!.pages
   }
   /* A v1 caller has no `v` member at all — `ask({ v: undefined })` still
@@ -463,14 +493,14 @@ describe('two chains, sealed separately — WI-23.B2', () => {
     const alice = shelf()
     alice.shareOne('first')
     alice.rateIt(4)
-    const v1First = (await answerPages(v1Ask(), alice.serve()))!.pages
+    const v1First = (await answerPages(v1Ask(), alice.serve(), true))!.pages
     const v2First = await pagesOf(alice.serve(), WIRE_VERSION)
     expect(v1First.length).toBeGreaterThan(0)
     expect(v2First.length).toBeGreaterThan(0)
 
     alice.shareOne('second')
     alice.rateIt(5)
-    const v1Again = (await answerPages(v1Ask(), alice.serve()))!.pages
+    const v1Again = (await answerPages(v1Ask(), alice.serve(), true))!.pages
     const v2Again = await pagesOf(alice.serve(), WIRE_VERSION)
 
     expect(v1Again.slice(0, v1First.length)).toEqual(v1First)
@@ -487,7 +517,7 @@ describe('two chains, sealed separately — WI-23.B2', () => {
     const alice = shelf()
     alice.shareOne('a passage')
     alice.rateIt(3)
-    const [v1] = (await answerPages(v1Ask(), alice.serve()))!.pages
+    const [v1] = (await answerPages(v1Ask(), alice.serve(), true))!.pages
     const [v2] = await pagesOf(alice.serve(), WIRE_VERSION)
     expect(v1).not.toBe(v2)
     const v1Page = JSON.parse(v1!) as { v: number; entries: { op: string }[] }
@@ -505,7 +535,7 @@ describe('two chains, sealed separately — WI-23.B2', () => {
   it('serves nothing to a caller naming a version this build does not publish', async () => {
     const alice = shelf()
     alice.shareOne('x')
-    expect(await answerPages(ask({ v: WIRE_VERSION + 1 }), alice.serve())).toBeNull()
+    expect(await answerPages(ask({ v: WIRE_VERSION + 1 }), alice.serve(), true)).toBeNull()
   })
 })
 
