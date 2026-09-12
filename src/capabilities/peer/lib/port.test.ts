@@ -4,6 +4,7 @@ import { ServiceCallError } from './envelope'
 import { fakeBlobHash, linkedWires } from './fakeWire.testkit'
 import { grantCovers } from './grants'
 import { createPeerPort } from './port'
+import { refusalOf } from '../../../kernel/testkit'
 
 /**
  * The port over the fake wire: the same envelope router/client the app runs,
@@ -162,7 +163,7 @@ describe('the port over two linked fake wires', () => {
     expect(attemptId).not.toBe('')
     // A confirmation bound to a DIFFERENT (e.g. pre-played) attempt is refused,
     // and must not consume the pending one.
-    await expect(shelf.pairConfirm(true, ['sync:*'], 'att-someone-else')).rejects.toThrow()
+    expect((await refusalOf(shelf.pairConfirm(true, ['sync:*'], 'att-someone-else'))).message, 'refused for the BINDING, not for some other reason').toBe('confirmation does not match the pending pairing attempt')
     // The attempt the human is actually looking at confirms.
     const peer = await shelf.pairConfirm(true, ['sync:*'], attemptId)
     expect(peer).not.toBeNull()

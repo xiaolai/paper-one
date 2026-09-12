@@ -19,6 +19,7 @@ import {
 } from './journal'
 import { crashableFs, fsOver, journalLines, memoryStorage, type CrashableFs } from './journalFs.testkit'
 import { marksDigest, recordDigest } from './merge'
+import { refusalOf } from '../../../kernel/testkit'
 
 const DEV = 'a1b2c3d4e5f60718'
 
@@ -1211,7 +1212,7 @@ describe('an append that fails ambiguously', () => {
      * COMMIT is what fails — `begin` appends too, and tripping it there would
      * exercise a different path. */
     barrierFails = true
-    await expect(journal.commit(doomed, 'two')).rejects.toThrow()
+    expect((await refusalOf(journal.commit(doomed, 'two'))).message, 'the barrier’s refusal, which is what makes the seq unsafe to reuse').toBe('EIO: the durability barrier refused')
 
     /* Every later use refuses, rather than allocating over the file. */
     await expect(journal.begin('c-book', 'record')).rejects.toThrow(/reopened/)

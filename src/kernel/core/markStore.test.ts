@@ -5,6 +5,7 @@ import { createMarkStore } from './markStore'
 import { bookmarkFrom, createMark, type Mark, type NewMark } from './marks'
 import { writeQueue } from './writeQueue'
 import { resolvedCfiForTesting } from './resolvedCfi.testkit'
+import { refusalOf } from '../../kernel/testkit'
 
 /**
  * The split at the store's door.
@@ -509,7 +510,7 @@ describe('a marks file that will not read', () => {
     expect(before.ready).toBe(false)
     expect(before.current).toEqual([])
 
-    await expect(s.add(highlight())).rejects.toThrow()
+    expect((await refusalOf(s.add(highlight()))).message).toBe('marks.json for book:abc is not a list')
     expect(new TextDecoder().decode(fs.store.get(marksPathIn(BOOK)))).toBe(damaged)
     expect(s.getSnapshot().persistent).toBe(false)
   })

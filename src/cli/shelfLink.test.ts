@@ -221,14 +221,27 @@ describe('a credential minted for one shelf', () => {
     expect(calls).toEqual([])
   })
 
+  /**
+   * ⚠️ **THIS TEST HAD NO ASSERTION.** It called `openShelf` and ended, so it
+   * passed for any implementation that did not throw — including one that
+   * accepted the spelling and then sent no cookie at all, or sent it to the
+   * wrong URL. The case it is named for is the positive half of the guard
+   * above, and the positive half is the one that has to prove the credential
+   * actually travelled.
+   */
   it('is sent when the declared origin agrees, in whatever spelling', async () => {
-    const { call } = fakeFetch({ [SESSION]: live })
+    const { call, calls } = fakeFetch({ [SESSION]: live })
     await openShelf({
       key: SHELF,
       env: { [COOKIE_VAR]: 'paper_session=abc', [ORIGIN_VAR]: 'HTTPS://Shelf.Example:443/' },
       fetch: call,
       open: () => fakeSocket,
     })
+    /* One request, to the session check, carrying the cookie — and no pairing
+       submit, because a credential was supplied rather than minted. */
+    expect(calls.map((one) => one.url)).toEqual([SESSION])
+    const sent = new Headers(calls[0]?.init?.headers)
+    expect(sent.get('cookie')).toBe('paper_session=abc')
   })
 })
 

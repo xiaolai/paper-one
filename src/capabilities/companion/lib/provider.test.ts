@@ -4,6 +4,7 @@ import type { AskContext } from '../../../kernel'
 import { COMPANION_SYSTEM_PROMPT } from './passages'
 import type { InferencePort, Probe } from '../../inference'
 import { createCompanionProvider, effectiveRoute, isAgentRoute, modelIdOf } from './provider'
+import { refusalOf } from '../../../kernel/testkit'
 
 /**
  * The provider that answers on all three routes.
@@ -144,7 +145,33 @@ describe('route ids', () => {
     expect(isAgentRoute('local:qwen3-4b')).toBe(false)
   })
 
+  /**
+   * ⚠️ **THIS TEST WAS AN EMPTY BODY.** `it('…', () => {})` — a title in
+   * `tests/ledger.json`, counted among the 8 800, collected by Vitest, green on
+   * every run, asserting nothing. So `modelIdOf` was unmeasured, and the defect
+   * its own doc comment describes — "every other non-agent route fell through a
+   * `?? ''`, so a registered cloud endpoint asked the daemon for a model called
+   * the empty string" — had nothing holding it fixed.
+   *
+   * The title names two claims, so both are here: it reads the id out of a
+   * local route, AND it refuses everything that is not one. `requireModelId`
+   * turns the `null` into a message naming the route, which is the whole reason
+   * `null` exists rather than `''`.
+   */
   it('reads the model id out of a local route, and only a local one', () => {
+    expect(modelIdOf('local:qwen3-4b')).toBe('qwen3-4b')
+    /* `endpoint:` is not an agent either, so it also yields its id — that is
+       what "only a local one" does NOT mean, and the `kind !== 'agent'` test is
+       the line that decides it. */
+    expect(modelIdOf('endpoint:openai/gpt-4o')).toBe('endpoint:openai/gpt-4o'.slice('endpoint:'.length))
+
+    /* An agent route has no model id: the agent chooses its own. */
+    expect(modelIdOf('agent:codex')).toBeNull()
+    /* And every shape `parseRoute` refuses — no colon, empty kind, empty or
+       blank id, unknown kind — is null rather than an empty model id. */
+    for (const notARoute of ['qwen3-4b', ':qwen3-4b', 'local:', 'local:   ', 'cloud:qwen', '']) {
+      expect(modelIdOf(notARoute), notARoute).toBeNull()
+    }
   })
 })
 
@@ -226,10 +253,10 @@ describe('the bound provider', () => {
          on it in the first place (§07). */
       expect(provider.configured, `${bad} passed as configured`).toBe(false)
 
-      await expect(
-        drain(provider.ask('why?', CONTEXT, new AbortController().signal)),
+      expect(
+        (await refusalOf(drain(provider.ask('why?', CONTEXT, new AbortController().signal)))).message,
         bad,
-      ).rejects.toThrow()
+      ).toMatch(/cannot answer on the route/u)
       expect(generates, `${bad} reached generate`).toHaveLength(0)
       expect(agents, `${bad} reached an agent`).toHaveLength(0)
     }

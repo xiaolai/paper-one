@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { acceptsTransport, drawsOverlays, hlcOf, newRelationship, type Hlc, type Relationship } from '../../../kernel'
 import { COVER_WIDTH, NOT_IN_CIRCLE, RECENT_LIMIT, circlePortOver, slotsOf, type CirclePortDeps, type FriendBook } from './circlePort'
 import { NOTHING_SHARED, type ForeignFile } from './store'
+import { refusalOf } from '../../../kernel/testkit'
 
 /**
  * WI-23.C2's switch and WI-23.C4's Friends view, from the screen's side.
@@ -168,7 +169,7 @@ describe('holding a person back — the mute that did not exist', () => {
     /* `setShowsShelf`'s reason: a record written for somebody already gone is
        a decision nobody can undo. */
     const { port } = world()
-    await expect(port.setMuted('someone-else', true)).rejects.toThrow()
+    expect((await refusalOf(port.setMuted('someone-else', true))).message).toBe('That person is not in your circle.')
   })
 
   it('refuses to un-hold somebody who LEFT, because that is a re-admission', async () => {

@@ -23,6 +23,7 @@ import { describeSession } from './status'
 import { SYNC_JOURNAL_FORMAT, SYNC_PROTO, SYNC_VERSION } from './protocol'
 import { canonicalJson, toWire } from './merge'
 import { PUSHABLE } from './protocol'
+import { refusalOf } from '../../../kernel/testkit'
 
 /**
  * WI-C.2 — the star protocol, end to end over the FAKE WIRE: a shelf stack
@@ -416,7 +417,7 @@ describe('the star protocol over two real stacks (WI-C.2)', () => {
     // a byte — the satchel revoked blob:read) — the push must FAIL and
     // nothing may be acked.
     await satchel.wire.setGrants(shelf.wire.id, ['sync:*'])
-    await expect(session()).rejects.toThrow()
+    expect((await refusalOf(session())).message, 'the push failed as a session-level error, so nothing was acked').toBe('sync.push: internal: the service failed')
     expect(pushableOutbox(satchel.journal).map((e) => e.what)).toContain('record')
     expect(shelf.fs.store.has('books/book_imp/content.epub')).toBe(false)
 

@@ -10,6 +10,7 @@ import { openNodeServices, type NodeHost } from '../hosts/node/services'
 import { localCaller } from './caller'
 import { paper } from './paper'
 import { EXIT, runCommand } from './run'
+import { refusalOf } from '../kernel/testkit'
 
 /**
  * THE WRITE SERVICES, AND THE WRITER QUESTION (WI-11.5).
@@ -248,7 +249,7 @@ describe('every write service, through the CLI', () => {
     expect(gone.here).toBe(false)
     /* The RECORD is untouched: eviction is about this device's copy. */
     expect(host.services.library.getSnapshot().some((one) => one.bookId === 'aaa')).toBe(true)
-    await expect(readFile(join(dataDir, 'books/aaa/content.epub'))).rejects.toThrow()
+    expect((await refusalOf(readFile(join(dataDir, 'books/aaa/content.epub')))).code, 'the bytes are gone, not unreadable').toBe('ENOENT')
   })
 
   it('empties the trash only for the count the caller expects', async () => {
@@ -367,7 +368,7 @@ describe('two writers cannot interleave', () => {
     const record = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { finished?: boolean }
     expect(record.finished).toBe(true)
     /* Released, so the next writer is not refused by a ghost. */
-    await expect(readFile(join(dataDir, LOCK_FILE))).rejects.toThrow()
+    expect((await refusalOf(readFile(join(dataDir, LOCK_FILE)))).code, 'the lock was given back, so the file is gone').toBe('ENOENT')
   })
 
   /* The lock is taken BEFORE the host is opened, so opening the host is the
@@ -397,7 +398,7 @@ describe('two writers cannot interleave', () => {
       }),
     ).resolves.toBe(EXIT.refused)
     expect(err.join('\n')).toContain('paper:')
-    await expect(readFile(join(root, LOCK_FILE))).rejects.toThrow()
+    expect((await refusalOf(readFile(join(root, LOCK_FILE)))).code, 'the lock was given back, so the file is gone').toBe('ENOENT')
   })
 
   it('gives the lock back even when the command failed', async () => {
@@ -409,7 +410,7 @@ describe('two writers cannot interleave', () => {
         sinks: { out: () => {}, err: () => {} },
       }),
     ).toBe(EXIT.refused)
-    await expect(readFile(join(dataDir, LOCK_FILE))).rejects.toThrow()
+    expect((await refusalOf(readFile(join(dataDir, LOCK_FILE)))).code, 'the lock was given back, so the file is gone').toBe('ENOENT')
   })
 
   it('waits, then refuses, when the holder does not let go', async () => {

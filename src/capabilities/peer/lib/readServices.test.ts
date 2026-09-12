@@ -17,6 +17,7 @@ import {
 } from '../../../kernel'
 import { ENVELOPE_ERRORS, ENVELOPE_VERSION, MAX_PAYLOAD_BYTES, ServiceCallError, encodeFrame } from './envelope'
 import { FORBIDDEN, markRow, refusalCode, seedBook, serveTable } from './serviceTable.testkit'
+import { refusalOf } from '../../../kernel/testkit'
 
 /**
  * THE READ SERVICES, over the envelope (phase 11, WI-11.3).
@@ -295,7 +296,7 @@ describe('what the read services actually answer', () => {
     const iterator = stream[Symbol.asyncIterator]()
     await iterator.next()
     shelf.setGrants([])
-    await expect(iterator.next()).rejects.toThrow()
+    expect((await refusalOf(iterator.next())).message, 'forbidden mid-stream — the grant was re-asked').toBe('book.list: forbidden: grant revoked')
   })
 })
 

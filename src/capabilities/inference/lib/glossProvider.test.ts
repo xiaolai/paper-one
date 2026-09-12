@@ -3,6 +3,7 @@ import type { GlossContext } from '../../../kernel'
 import type { Controller } from './controller'
 import { createGlossProvider, glossQuestion, GLOSS_SYSTEM_PROMPT } from './glossProvider'
 import type { InferencePlugin } from './plugin'
+import { refusalOf } from '../../../kernel/testkit'
 
 const context: GlossContext = {
   sentence: 'He kept his own counsel, and the crew grew close about him.',
@@ -360,7 +361,7 @@ describe('the gloss provider', () => {
        `useGloss` dropping it kept that invisible. The port's contract is that a
        cancelled lookup rejects; the check on the way IN already held it and the
        tail did not. */
-    await expect(provider.gloss('counsel', context, controllerAbort.signal)).rejects.toThrow()
+    expect((await refusalOf(provider.gloss('counsel', context, controllerAbort.signal))).message, 'the abort’s own words — a cancelled lookup rejects, it does not resolve').toBe('This operation was aborted')
     expect(cancel).toHaveBeenCalledTimes(1)
   })
 
@@ -375,7 +376,7 @@ describe('the gloss provider', () => {
         return 'Guarded.'
       }) as never,
     })
-    await expect(provider.gloss('counsel', context, controllerAbort.signal)).rejects.toThrow()
+    expect((await refusalOf(provider.gloss('counsel', context, controllerAbort.signal))).message, 'the abort’s own words — a cancelled lookup rejects, it does not resolve').toBe('This operation was aborted')
     expect(provider.cacheSize()).toBe(1)
   })
 
@@ -383,7 +384,7 @@ describe('the gloss provider', () => {
     const aborted = new AbortController()
     aborted.abort()
     const { provider, gloss } = harness()
-    await expect(provider.gloss('counsel', context, aborted.signal)).rejects.toThrow()
+    expect((await refusalOf(provider.gloss('counsel', context, aborted.signal))).message, 'the abort’s own words — a cancelled lookup rejects, it does not resolve').toBe('This operation was aborted')
     expect(gloss).not.toHaveBeenCalled()
   })
 

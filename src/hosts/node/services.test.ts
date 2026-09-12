@@ -7,8 +7,9 @@ import {
   loadShelf,
   type IndexedBook,
   type KernelServices,
+  type MutationRecorder,
 } from '../../kernel'
-import { fakeFs } from '../../kernel/testkit'
+import { fakeFs, refusalOf } from '../../kernel/testkit'
 import { FIXTURE, FIXTURE_FILES } from './fixture.testkit'
 import { APP_IDENTIFIER, DATA_DIR_ENV, defaultDataDir, openNodeServices } from './services'
 
@@ -201,17 +202,34 @@ describe('openNodeServices', () => {
     /* `books` as a FILE: the listing fails with ENOTDIR, which is the shape
      * of an unreadable library rather than an absent one. */
     await writeFile(join(root, 'books'), 'not a directory')
-    await expect(openNodeServices({ dataDir: root })).rejects.toThrow()
+    expect((await refusalOf(openNodeServices({ dataDir: root }))).code, 'an unreadable library is ENOTDIR — an EMPTY one would resolve').toBe('ENOTDIR')
   })
 
   it('leaves every kernel port on its default — nothing journals, nothing serves', async () => {
     const host = await openNodeServices({ dataDir: await fixtureOnDisk() })
     try {
-      /* Unbound, so binding succeeds — which is the observable form of "the
-       * slot is free". A composed capability would have taken it. */
-      const bound = host.services.bindRecorder({ begin: async (book, what) => ({ book, what }), commit: async () => {} })
+      /* ⚠️ **THIS TEST ASSERTED NOTHING.** The comment said binding succeeding
+       * "is the observable form of 'the slot is free'", and that is a claim
+       * about an absence with nothing observed: bind, dispose, serve, dispose,
+       * end. It passed for any host, including one that bound a recorder of its
+       * own at startup — the exact thing the title rules out.
+       *
+       * `exclusiveSlot` is what makes the emptiness observable: the recorder
+       * port refuses a SECOND bind by name, so a free slot and a taken one are
+       * told apart by whether the second throws, not the first. */
+      const recorder: MutationRecorder = { begin: async (book, what) => ({ book, what }), commit: async () => {} }
+      const bound = host.services.bindRecorder(recorder)
+      expect(() => host.services.bindRecorder(recorder)).toThrow(/recorder port is already bound/u)
+      /* And releasing gives the slot back, so the emptiness is the host's
+       * default rather than a one-shot. */
       bound.dispose()
+      host.services.bindRecorder(recorder).dispose()
+
+      /* The service host is a SET rather than a slot since phase 18, so the
+       * honest assertion there is that an empty contribution list serves
+       * nothing and still disposes. */
       const served = await host.services.serveServices([])
+      expect(typeof served.dispose).toBe('function')
       served.dispose()
     } finally {
       await host.close()

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { refusalOf } from '../../../kernel/testkit'
 
 /**
  * `makePdf` — the ranged-source dispatch, and what it releases when it fails.
@@ -173,7 +174,7 @@ describe('what it releases', () => {
 
   it('revokes what it minted when the document fails to open', async () => {
     pdfjs.outcome = 'reject'
-    await expect(makePdf(ranged() as never)).rejects.toThrow()
+    expect((await refusalOf(makePdf(ranged() as never))).message, 'the open’s own failure, not a revoke error masking it').toBe('this book is truncated')
     expect(minted.every((one) => one.revoked), 'an object URL outlived a failed open').toBe(true)
   })
 

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve, win32 } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { CONTENT_EXTENSIONS } from '../../kernel'
-import { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES } from '../../kernel/testkit'
+import { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES, refusalOf } from '../../kernel/testkit'
 import { makeDataDir, nodeIndexFs, nodeSizePort, nodeTextFs, under } from './fs'
 
 /**
@@ -122,7 +122,7 @@ describe('nodeIndexFs', () => {
    * for both is how a full library reports itself as empty. */
   it('throws on a directory that is not there', async () => {
     const root = await freshRoot()
-    await expect(nodeIndexFs(root).readDir('books')).rejects.toThrow()
+    expect((await refusalOf(nodeIndexFs(root).readDir('books'))).code, 'a missing directory is ENOENT, not merely "something threw"').toBe('ENOENT')
   })
 
   it('lists a directory, saying which entries are directories', async () => {
@@ -154,7 +154,7 @@ describe('nodeIndexFs', () => {
     await fs.writeFile('one.json', bytes('{}'))
     await fs.remove('one.json')
     expect(await fs.exists('one.json')).toBe(false)
-    await expect(fs.remove('one.json')).rejects.toThrow()
+    expect((await refusalOf(fs.remove('one.json'))).code).toBe('ENOENT')
   })
 
   it('removes a directory whole, and is content when it was already gone', async () => {
@@ -203,7 +203,7 @@ describe('nodeIndexFs', () => {
     await fs.writeAtomic!('sync/journal.jsonl', new TextEncoder().encode('{}\n'), 'full')
     await expect(fs.fsync!('sync/journal.jsonl', 'full')).resolves.toBeUndefined()
     await expect(fs.fsync!('sync', 'barrier')).resolves.toBeUndefined()
-    await expect(fs.fsync!('sync/nope.jsonl', 'full')).rejects.toThrow()
+    expect((await refusalOf(fs.fsync!('sync/nope.jsonl', 'full'))).code).toBe('ENOENT')
     await expect(fs.writeAtomic!('../outside.json', new Uint8Array(0), 'full')).rejects.toThrow(/leaves the data directory/)
   })
 
@@ -297,7 +297,7 @@ describe('nodeTextFs', () => {
 
     /* A DIRECTORY where the file belongs — EISDIR. */
     await nodeIndexFs(root).mkdir('paper.store.v1.json')
-    await expect(fs.read('paper.store.v1.json')).rejects.toThrow()
+    expect((await refusalOf(fs.read('paper.store.v1.json'))).code, 'a directory where the store belongs is EISDIR').toBe('EISDIR')
   })
 
   /* AND A FILE THAT WILL NOT OPEN — EACCES. Its own case, not the tail of
@@ -311,7 +311,7 @@ describe('nodeTextFs', () => {
     const undeniable = await denyAccess(at)
     if (undeniable !== null) skip(undeniable)
     try {
-      await expect(guarded.read('paper.store.v1.json')).rejects.toThrow()
+      expect((await refusalOf(guarded.read('paper.store.v1.json'))).code).toBe('EACCES')
     } finally {
       await chmod(at, 0o644)
     }
@@ -345,7 +345,7 @@ describe('nodeTextFs', () => {
      * name is private per write now, so the failure has to be induced
      * somewhere both writers would meet it. */
     await chmod(root, 0o555)
-    await expect(fs.write('paper.store.v1.json', '{"lost":true}')).rejects.toThrow()
+    expect((await refusalOf(fs.write('paper.store.v1.json', '{"lost":true}'))).code).toBe('EACCES')
     await chmod(root, 0o755)
     expect(await fs.read('paper.store.v1.json')).toBe('{"kept":true}')
     expect((await nodeIndexFs(root).readDir('')).map((one) => one.name)).toEqual(['paper.store.v1.json'])
@@ -366,7 +366,7 @@ describe('nodeTextFs', () => {
      * succeed, and the write has already reached disk by then. */
     await nodeIndexFs(root).mkdir('paper.store.v1.json')
     await nodeIndexFs(root).writeFile('paper.store.v1.json/occupied', bytes('x'))
-    await expect(fs.write('paper.store.v1.json', '{"doomed":true}')).rejects.toThrow()
+    expect((await refusalOf(fs.write('paper.store.v1.json', '{"doomed":true}'))).code, 'the publish failed, and on a directory that is EISDIR').toBe('EISDIR')
     const names = (await nodeIndexFs(root).readDir('')).map((one) => one.name)
     expect(names).toEqual(['paper.store.v1.json'])
   })

@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import { connectToShelf } from '../kernel'
 import { nodeSocketOpener } from './nodeSocket'
+import { refusalOf } from '../kernel/testkit'
 
 /**
  * THE CAST IN `nodeSocket.ts`, SETTLED BY THE RUNTIME (WI-11.7).
@@ -88,6 +89,6 @@ describe('the Node socket opener', () => {
      is never coming would look exactly like a slow shelf. */
   it('rejects when the shelf refuses the upgrade', async () => {
     const { url } = await recordingServer()
-    await expect(connectToShelf({ url, open: nodeSocketOpener('paper_session=wrong'), timeoutMs: 5_000 })).rejects.toThrow()
+    expect((await refusalOf(connectToShelf({ url, open: nodeSocketOpener('paper_session=wrong'), timeoutMs: 5_000 }))).message).toMatch(/could not open a channel/u)
   })
 })

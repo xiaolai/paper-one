@@ -12,6 +12,7 @@ import { createKernelServices, type KernelServices } from './services'
 import { createCoverFactsPass } from './coverFacts'
 import { BRIGHTNESS } from './metrics'
 import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, createSettingsStore } from './settings'
+import { refusalOf } from '../../kernel/testkit'
 
 /**
  * THE KERNEL-API RULE, as a test: the desktop UI and a remote service adapter
@@ -633,7 +634,7 @@ describe('every writer is bracketed by the recorder, begin before the write and 
     w.fs.writeFile = async () => {
       throw new Error('disk full')
     }
-    await expect(w.kernel.library.update('book:a', (record) => ({ ...record, finished: true }))).rejects.toThrow()
+    expect((await refusalOf(w.kernel.library.update('book:a', (record) => ({ ...record, finished: true })))).message, 'the disk’s refusal, not a wrapper that hides it').toBe('disk full')
     expect(log).toContain('begin record book:a #2')
     expect(log).not.toContain('commit record book:a #2')
   })

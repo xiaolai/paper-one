@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { recordFromMeta } from '../../core/bookFolder'
 import { readMeta } from './session'
+import { refusalOf } from '../../../kernel/testkit'
 
 /**
  * WI-24.A2 — **every format the picker offers, opened.**
@@ -208,7 +209,7 @@ describe('every format the picker offers', () => {
   describe('a file that is not the book it claims to be', () => {
     it('is refused rather than opened empty', async () => {
       const whole = bytesOf('fixture.mobi')
-      await expect(open('fixture.mobi', whole.slice(0, 200))).rejects.toThrow()
+      expect((await refusalOf(open('fixture.mobi', whole.slice(0, 200)))).message, 'refused by name rather than opened as an empty book').toMatch(/Offset is outside the bounds|truncated|not valid|refus/u)
     })
 
     it('is refused when it is empty, by name', async () => {

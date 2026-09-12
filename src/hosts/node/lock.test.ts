@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { refusalOf } from '../../kernel/testkit'
 
 /**
  * THE ADVISORY LOCK'S TWO FAILURE PATHS THAT NEED A FILESYSTEM TO MISBEHAVE.
@@ -173,7 +174,7 @@ describe('two releases in flight at once', () => {
 
     hooks.rm = null
     await mine.release()
-    await expect(readFile(path, 'utf8')).rejects.toThrow()
+    expect((await refusalOf(readFile(path, 'utf8'))).code, 'the lock file is gone').toBe('ENOENT')
 
     await rm(dataDir, { recursive: true, force: true })
   })

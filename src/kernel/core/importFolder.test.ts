@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { refusalOf } from '../../kernel/testkit'
 import { contentPathIn } from './bookFolder'
 import type { VaultFs } from './bookVault'
 import {
@@ -338,7 +339,7 @@ describe('keepOwnCopy', () => {
   it('leaves no temporary file behind when the write fails', async () => {
     const fs = fakeFs()
     fs.failWrite = 'books'
-    await expect(keepOwnCopy(fs, fileOf('moby.epub', 'W'), null)).rejects.toThrow()
+    expect((await refusalOf(keepOwnCopy(fs, fileOf('moby.epub', 'W'), null))).message, 'the write’s own failure reached the caller').toBe('disk full')
     expect([...fs.files.keys()].some((k) => k.endsWith('.writing'))).toBe(false)
   })
 

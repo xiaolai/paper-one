@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { refusalOf } from '../../kernel/testkit'
 import { asHlc, hlcOf } from './hlc'
 import { storedBookName, type VaultFs } from './bookVault'
 import { workKey } from './workKey'
@@ -679,7 +680,7 @@ describe('readMarks', () => {
 
   it('throws on a file that is not JSON at all', async () => {
     const fs = fakeFs({ [marksPathIn('book_a')]: 'half a write' })
-    await expect(readMarks(fs, 'book_a')).rejects.toThrow()
+    expect((await refusalOf(readMarks(fs, 'book_a'))).message).toMatch(/is not valid JSON/u)
   })
 })
 

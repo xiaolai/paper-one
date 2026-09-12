@@ -9,6 +9,7 @@ import {
 } from '../kernel'
 import { fakeFs } from '../kernel/testkit'
 import { localCaller } from './caller'
+import { refusalOf } from '../kernel/testkit'
 
 /**
  * THE IN-PROCESS CALLER, held to the contract the ROUTER keeps.
@@ -56,7 +57,7 @@ describe('the abort signal a handler is given', () => {
       seen = ctx.signal
       throw new Error('no')
     })
-    await expect(caller.call(REQ, bodyFor(REQ))).rejects.toThrow()
+    expect((await refusalOf(caller.call(REQ, bodyFor(REQ)))).message, 'the call’s own failure, carried through rather than replaced').toBe('no')
     expect((seen as unknown as AbortSignal).aborted).toBe(true)
   })
 

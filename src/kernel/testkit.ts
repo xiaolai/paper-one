@@ -32,3 +32,9 @@ export { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES } from './core
    says why this is not a second production minting site, and names the
    boundary rule that keeps it from becoming one. */
 export { resolvedCfiForTesting } from './core/resolvedCfi.testkit'
+
+/* The error a promise rejected with, for the assertion `rejects.toThrow()`
+   cannot make. That module's header carries the measurement: the pattern form
+   passes on a rejection of `undefined`, so neither form can tell a refusal from
+   a crash. */
+export { refusalOf } from './core/refusal.testkit'

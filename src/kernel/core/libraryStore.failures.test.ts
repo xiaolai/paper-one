@@ -6,6 +6,7 @@ import { WRITE_WIDTH, createLibrary } from './libraryStore'
 import { writeQueue } from './writeQueue'
 import { spyRecorder } from './servicesWorld.testkit'
 import type { MutationRecorder } from './ports'
+import { refusalOf } from '../../kernel/testkit'
 
 /**
  * A failed write is SAID, not logged (WI-20.36).
@@ -379,7 +380,7 @@ describe('the undo offer and a write that fails', () => {
     expect(library.lastRemoval()).toMatchObject({ tag: 'Sea', bookIds: ['book_a'] })
 
     refuse('book_a', true)
-    await expect(library.undoRemoveTag()).rejects.toThrow()
+    expect((await refusalOf(library.undoRemoveTag())).message, 'the write’s own failure, so the offer is kept for a real retry').toBe('disk full')
     expect(library.lastRemoval()).toMatchObject({ tag: 'Sea', bookIds: ['book_a'] })
 
     /* And with the disk back, the same offer goes through. */
