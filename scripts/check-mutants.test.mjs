@@ -26,6 +26,25 @@ describe('what the mutation gate chooses to mutate', () => {
     expect(changedFiles('main').every((f) => f.length > 0)).toBe(true)
   })
 
+  /**
+   * ⚠️ **THE VACUOUS-PASS THIS GATE WOULD HAVE HAD IN CI.** A CI checkout is
+   * shallow and has everything committed, so `merge-base` fails and the
+   * fallback leaves the WORKING TREE as the whole scope — which is clean there.
+   * Zero subjects, "nothing changed to mutate", exit 0: the gate scanning
+   * nothing and reporting success, on every pull request, which is exactly the
+   * failure shape the paragraph at the top of this file calls a poor joke to
+   * ship.
+   *
+   * So the caller that depends on a base says so, and an unresolvable one is a
+   * refusal rather than a narrowing. Locally, with no flag, the narrowing stays
+   * — there it is a smaller scope and never a wrong one.
+   */
+  it('refuses an unresolvable base when the caller depends on it, and narrows when it does not', () => {
+    expect(() => changedFiles('no-such-base-exists-here', true)).toThrow(/cannot resolve a merge base/u)
+    /* The same base, without the flag: an answer rather than a refusal. */
+    expect(Array.isArray(changedFiles('no-such-base-exists-here'))).toBe(true)
+  })
+
   it('follows imports rather than matching names', () => {
     /* ⚠️ **NAME MATCHING WOULD REPORT MOST OF THIS REPOSITORY AS UNTESTED.**
        `store.ts` is covered by `circle.test.ts`, `panes.ts` by

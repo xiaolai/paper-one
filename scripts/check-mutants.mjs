@@ -80,16 +80,39 @@ import { isProcessEntry } from './lib/entry.mjs'
 const SRC = /^(src|scripts)\/.+\.(ts|tsx|mjs)$/u
 const NOT_A_SUBJECT = /\.(test|testkit|contract\.test)\.(ts|tsx|mjs)$|\.d\.ts$/u
 
-/** The branch's own changes: committed since the base, plus what is uncommitted. */
-export function changedFiles(base = 'main') {
+/**
+ * The branch's own changes: committed since the base, plus what is uncommitted.
+ *
+ * `requireBase` turns an unresolvable base into a REFUSAL instead of a smaller
+ * scope — see the note at the fallback below.
+ */
+export function changedFiles(base = 'main', requireBase = false) {
   const git = (args) => execFileSync('git', args, { encoding: 'utf8' }).split('\n').filter(Boolean)
   let from = base
   try {
     from = execFileSync('git', ['merge-base', 'HEAD', base], { encoding: 'utf8' }).trim()
   } catch {
     /* No such base — a detached checkout, or a clone with one branch. Falling
-       back to the working tree alone is the honest answer: it is a smaller
-       scope, never a wrong one. */
+       back to the working tree alone is the honest answer LOCALLY: it is a
+       smaller scope, never a wrong one.
+     *
+     * ⚠️ **AND IT IS A VACUOUS PASS IN CI, WHICH IS WHY `requireBase` EXISTS.**
+     * A CI checkout is shallow and has everything committed, so a failed
+     * `merge-base` leaves the working tree as the whole scope — and the working
+     * tree is clean there. Zero subjects, "nothing changed to mutate", exit 0:
+     * a gate that scanned nothing, reporting success, on every pull request.
+     * That is the one failure shape this repository refuses everywhere else, so
+     * the caller that depends on the base says so and is refused rather than
+     * narrowed. */
+    if (requireBase) {
+      throw new Error(
+        `check-mutants: cannot resolve a merge base with ${JSON.stringify(base)}, so there is nothing to compare ` +
+          'against and a run here would mutate nothing while reporting success. Fetch the base branch ' +
+          '(`fetch-depth: 0`, or `git fetch origin ' +
+          base +
+          '`) and try again.',
+      )
+    }
     from = null
   }
   const names = new Set([
@@ -179,7 +202,16 @@ function run(argv) {
   /* `--only <substring>` narrows to one module while working on it. The whole
      value of this gate is being cheap enough to run mid-change. */
   const only = argv.includes('--only') ? argv[argv.indexOf('--only') + 1] : null
-  const subjects = changedFiles(base).filter((f) => only === null || f.includes(only))
+  /* `--require-base` is what CI passes: there, a base that cannot be resolved
+     means the run would mutate nothing and say it passed. See `changedFiles`. */
+  const requireBase = argv.includes('--require-base')
+  let subjects
+  try {
+    subjects = changedFiles(base, requireBase).filter((f) => only === null || f.includes(only))
+  } catch (cause) {
+    process.stderr.write(`${cause instanceof Error ? cause.message : String(cause)}\n`)
+    return 2
+  }
   if (subjects.length === 0) {
     process.stdout.write('check-mutants: nothing changed to mutate\n')
     return 0

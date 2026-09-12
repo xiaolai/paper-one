@@ -116,6 +116,50 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
 
+  # ⚠️ **THE MUTATION GATE, WHICH GATED NOTHING UNTIL NOW.**
+  #
+  # `scripts/check-mutants.mjs` says of itself that "a test that cannot fail is
+  # a red gate", that a survivor fails rather than a score, and that none may
+  # survive. It was in no `verify.mjs` step and in no workflow, so the only
+  # thing enforcing it was somebody remembering to type `pnpm mutants`. Six
+  # assertions that could not fail were found on one branch by planting the
+  # defect back by hand; that is what this exists to catch mechanically.
+  #
+  # PULL REQUESTS ONLY, and scoped to the diff. The script mutates one subject
+  # at a time against only its covering tests, so the cost is linear in the
+  # change rather than in the repository — its header measures the alternative
+  # at 8m26s without finishing. On a push to `main` the merge base is the tip,
+  # so there would be nothing to mutate and nothing to learn.
+  #
+  # ⚠️ **`fetch-depth: 0` AND `--require-base` ARE BOTH LOAD-BEARING.** A CI
+  # checkout is shallow and has everything committed, so a failed `merge-base`
+  # would leave the working tree as the whole scope — and it is clean here.
+  # Zero subjects, "nothing changed to mutate", exit 0: a gate that scanned
+  # nothing and reported success, on every pull request. The flag refuses that
+  # rather than narrowing to it.
+  #
+  # `continue-on-error` is deliberately NOT set. A gate that cannot fail is the
+  # thing this whole job is about.
+  mutants:
+    name: mutants (changed files only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base branch has to be here for `merge-base` to resolve; see above.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The base is the PR's target, not a hard-coded `main`: a stacked branch
+      # is measured against what it will actually merge into.
+      - run: node scripts/check-mutants.mjs --base "origin/${{ github.base_ref }}" --require-base
+
   windows:
     name: windows (check only)
     runs-on: windows-latest

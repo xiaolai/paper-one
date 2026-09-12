@@ -327,6 +327,7 @@
     "scripts/check-mutants.test.mjs > what the mutation gate chooses to mutate > follows imports rather than matching names",
     "scripts/check-mutants.test.mjs > what the mutation gate chooses to mutate > never offers a test file as a subject",
     "scripts/check-mutants.test.mjs > what the mutation gate chooses to mutate > offers only files that exist",
+    "scripts/check-mutants.test.mjs > what the mutation gate chooses to mutate > refuses an unresolvable base when the caller depends on it, and narrows when it does not",
     "scripts/check-mutants.test.mjs > what the mutation gate chooses to mutate > resolves a directory import to its index",
     "scripts/check-mutants.test.mjs > what the mutation gate chooses to mutate > sees UNTRACKED test files, which is where new work lives",
     "scripts/check-test-ledger.test.mjs > --root will not eat an option > refuses an option where a directory belongs",
