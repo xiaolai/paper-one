@@ -265,7 +265,14 @@ fn manifest_id_for(state: &InferenceState, loaded: &str) -> Option<String> {
         .map(|model| model.id.clone())
 }
 
-/// The models folder, for `[Reveal]`. Returns the path; the kernel opens it.
+/// The models folder. Returns the path; the caller decides what to do with it.
+///
+/// ⚠️ **THIS SAID "for `[Reveal]`", AND THERE IS NO SUCH CONTROL.** Its one
+/// caller is `modelsModel.ts`, whose value `ModelsPane.tsx` draws as static
+/// text beside "Memory" — nothing anywhere calls an opener, and the command's
+/// name promises an action it does not perform. Kept because the PATH is what
+/// the pane shows; renaming it is a wire change and would need the four command
+/// lists moved together.
 #[tauri::command]
 pub async fn inference_reveal_models_dir<R: Runtime>(
     app: AppHandle<R>,

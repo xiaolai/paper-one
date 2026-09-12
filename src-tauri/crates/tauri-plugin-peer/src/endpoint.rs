@@ -109,8 +109,14 @@ pub struct EndpointConfig {
 /// ⚠️ **A VALUE, NOT A LOG LINE, BECAUSE THE CLAIM HAD TO BE TESTABLE.** Phase
 /// 25's first draft claimed the circle was not discoverable while the circle
 /// endpoint was mDNS-advertised by default, and nothing in the tree could have
-/// contradicted it. `advertised()` is what a test reads to hold this file's
-/// prose to what the code does.
+/// contradicted it. This struct is what a test reads to hold the file's prose to
+/// what the code does.
+///
+/// ⚠️ **THROUGH `Bound.advertised`, NOT THROUGH AN `advertised()` METHOD.** The
+/// sentence here named the accessor; the tests below read the FIELD, and the
+/// accessors on `Node` and `ShareNode` have no caller at all — production or
+/// test. Named accurately so the next reader looking for the coverage finds it,
+/// and so the two unused methods are not mistaken for the thing under test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Advertised {
     /// The endpoint id published on the LAN, or `None` when mDNS is off.

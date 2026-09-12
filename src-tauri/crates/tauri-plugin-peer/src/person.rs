@@ -162,7 +162,26 @@ impl DeviceRole {
     /// ⚠️ **`home` REFUSES**, so *"revoke the device holding the root"* stops
     /// being a sentence any surface can write. Home is succeeded; revoking it
     /// would leave a person identity nothing can ever administer again.
-    #[allow(dead_code, reason = "the revocation half — consumed by WI-22.B2")]
+    /// ⚠️ **THE `allow` HERE SAID "consumed by WI-22.B2", AND WI-22.B2 SHIPPED
+    /// WITHOUT CONSUMING IT.** `circle::revoke_device` exists and calls nothing
+    /// of the sort, so the marker read as work in flight when it is not.
+    ///
+    /// It has no caller because it CANNOT have one where the revocation happens:
+    /// a `Roster` carries device ids and no roles (`circle::Roster::devices` is
+    /// `Vec<String>`), so `revoke_device` has no way to learn the role of the
+    /// device it is asked to withdraw. What actually stops the case is
+    /// structural and stronger — signing a roster needs the person root, which
+    /// only a home device holds, and `revoke_device` refuses to revoke the
+    /// device doing the revoking. So a home device can only be revoked by
+    /// itself, and that is already refused by name.
+    ///
+    /// Kept, with its test, because it is where the RULE is written down: a
+    /// surface that offers Revoke must not offer it for a home device, and the
+    /// sentence above is what it should ask.
+    #[allow(
+        dead_code,
+        reason = "states the rule; the case is refused structurally — see above"
+    )]
     pub const fn is_revocable(self) -> bool {
         matches!(self, Self::Leaf)
     }

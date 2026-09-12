@@ -601,7 +601,12 @@ export interface SessionCallbacks {
   onMarkDrawn: (cfi: string, range: Range) => void
   /** The selection in the book changed. Null when it collapsed. */
   onSelection: (selection: SelectionSnapshot | null) => void
-  /** A drawn mark was clicked, identified by its CFI. */
+  /* The line above this one documented an `onMarkActivated` callback — "A drawn
+     mark was clicked, identified by its CFI" — that was removed from
+     `SessionCallbacks` without its comment. Left stranded, it read as the
+     documentation for `onFileDropped` below, which is a different event
+     entirely. Deleted rather than restored: the reader reaches a mark through
+     the margin (`screens/Reader.tsx`), not by clicking the drawing. */
   /**
    * A book was dropped ON the book — see `#watchDrops`.
    *

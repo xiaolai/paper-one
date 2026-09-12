@@ -9,7 +9,7 @@ release.**
 
 It is written for one reader's own use. It is not a product, there is no
 release, no installer, no support, and no promise that any of it works on your
-machine. Version `0.1.1` is not modesty — the thing genuinely is that early.
+machine. The version number is not modesty — the thing genuinely is that early.
 
 Concretely, what that means for you:
 

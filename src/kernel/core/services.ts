@@ -280,9 +280,12 @@ export type ServiceHost = (services: readonly ServiceContribution[]) => Disposab
  * What a reader has already sent to a private audience — see
  * {@link KernelServices.bindPrivateAudience}.
  *
- * Synchronous, because it is asked while a disclosure is being drawn, and the
- * alternative is a control that renders before it knows what to warn about.
- * The circle keeps this in memory anyway.
+ * ⚠️ **ASYNC, AND THIS PARAGRAPH SAID "Synchronous".** The signature is
+ * `Promise<…>` and `bindPrivateAudience`'s own doc says why — the answer is on
+ * disk. The reasoning quoted here (a control that renders before it knows what
+ * to warn about) is the reason the CALLER must handle the pending state, not a
+ * description of the type, and reading it as the latter would have somebody
+ * write `audience(bookId).length`.
  */
 export type PrivateAudience = (bookId: string) => Promise<readonly PublicPassage[]>
 

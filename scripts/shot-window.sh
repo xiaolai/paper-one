@@ -30,8 +30,9 @@
 # Usage:
 #   scripts/shot-window.sh [output.png] [pid]
 #
-# With no pid it finds the dev build (`target/debug/app`), then a release
-# `Paper`. Pass one explicitly to capture something else.
+# With no pid it finds the dev build (`target/debug/app`) for THIS checkout,
+# then any installed bundle by process name. Pass one explicitly to capture
+# something else.
 
 set -euo pipefail
 
@@ -51,7 +52,20 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -z "$pid" ]]; then
   matches="$(pgrep -f "$repo/src-tauri/target/debug/app" || true)"
   if [[ -z "$matches" ]]; then
-    matches="$(pgrep -x 'Paper' || true)"
+    # ⚠️ **THIS FALLBACK WAS `pgrep -x 'Paper'`, WHICH CANNOT EVER MATCH.** A
+    # Tauri bundle names its executable after the Cargo target, so an installed
+    # `Paper.app` runs a process called `app` — the same mistake the two-machine
+    # harnesses each made once and wrote down, reproduced here in the one path
+    # that exists FOR the installed build. So capturing a release or deployed
+    # bundle always ended at "no running app found", and AGENTS.md recommends
+    # this script as capture fallback #3 for exactly that case.
+    #
+    # `-x app` matches the name. It cannot match a shell, which `-f` can; the
+    # dev-build line above is `-f` deliberately, because a repository PATH is
+    # the only way to tell two checkouts apart, and it is safe here for the
+    # reason `circle-scenario.sh` states — this is a simple command in a
+    # `$( )`, so no shell carrying the pattern survives to be matched.
+    matches="$(pgrep -x app || true)"
   fi
   count="$(printf '%s' "$matches" | grep -c . || true)"
   if [[ "$count" -gt 1 ]]; then

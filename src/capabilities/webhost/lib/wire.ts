@@ -125,7 +125,17 @@ export interface WebHostWire {
   status(): Promise<WebHostStatus>
   /** Tell the plugin the webview is serving the router, so frames may flow. */
   ready(): Promise<void>
-  /** Every frame waiting from one browser. Never waits; empty means nothing. */
+  /**
+   * Every frame waiting from one browser.
+   *
+   * ⚠️ **IT WAITS UP TO A SECOND, AND THIS SAID "Never waits".** The Rust side
+   * says so in capitals (`webhost/src/commands.rs`) and `pump.ts` agrees; the
+   * behaviour was changed precisely because returning immediately made the
+   * webview poll every 40 ms per session — 1 600 IPC round trips a second at the
+   * session cap, before any real traffic. An empty answer therefore means "a
+   * second passed with nothing", not "nothing right now", and sizing the pump's
+   * own interval from the old sentence would reintroduce the poll.
+   */
   sessionRecv(session: number): Promise<readonly Uint8Array[]>
   /**
    * One frame back to a browser. **Resolves when the frame is queued, which

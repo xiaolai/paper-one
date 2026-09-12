@@ -71,8 +71,14 @@ tauri-plugin-mcp-bridge = { version = "0.12", optional = true }
 # them (+44 on Linux, all zbus).
 tauri-plugin-single-instance = { version = "2.4.3", optional = true }
 # The window's size, position and maximised state across a relaunch. Stored
-# and restored as PHYSICAL pixels since 2.x (plugins-workspace #1743); the
-# Retina doubling filed as #3521 is what `window_state.rs`'s live check is for.
+# and restored as PHYSICAL pixels since 2.x (plugins-workspace #1743).
+#
+# ⚠️ **AND THERE IS NO LIVE CHECK FOR THE RETINA DOUBLING.** This line claimed
+# "#3521 is what `window_state.rs`'s live check is for"; that file has no scale
+# or monitor logic at all — `has_valid_geometry` strips the Windows minimised
+# sentinel and impossible sizes, and nothing else. The plugin's own
+# `available_monitors().intersects` is what keeps a restore on screen. Stated as
+# unguarded rather than left reading as guarded.
 tauri-plugin-window-state = { version = "2.4.1", optional = true }
 # The peer transport, on every platform (crates/tauri-plugin-peer).
 tauri-plugin-peer = { path = "crates/tauri-plugin-peer" }

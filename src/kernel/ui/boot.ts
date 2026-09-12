@@ -19,8 +19,9 @@
  * So the boot exports live HERE and `./index.ts` re-exports them, rather than
  * the reverse. One home, two doors: the desktop root keeps its single import
  * and sees no change, and `bootApp.ts` and the mobile root take this narrower
- * one. `.dependency-cruiser.cjs` (`mobile-root-not-desktop-ui-entry`) refuses
- * the shortcut back.
+ * one. `.dependency-cruiser.cjs` (`native-boot-not-desktop-ui-entry`) refuses
+ * the shortcut back — the rule was cited here as `mobile-root-…`, which no
+ * config has ever contained.
  *
  * EVERYTHING HERE IS TAURI-BOUND OR DEV-ONLY, and deliberately so — this is a
  * NATIVE boot. It is not browser-safe and must never become the browser

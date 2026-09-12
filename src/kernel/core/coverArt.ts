@@ -6,9 +6,15 @@
  *
  * THE BLOB IS NEVER STORED AS DATA, and that is the constraint everything here
  * is shaped by. A jacket is tens of kilobytes; base64'd into a book's record it
- * would be read and rewritten on every position save. So a cover is a FILE —
- * `cover.webp` inside the book's own folder — and because that path is derived
- * from the book's id, there is no field naming it and nothing to go stale.
+ * would be read and rewritten on every position save. So a cover is a FILE
+ * inside the book's own folder — and because that path is derived from the
+ * book's id, there is no field naming it and nothing to go stale.
+ *
+ * ⚠️ **THE NAME IS ONE OF `COVER_NAMES`, AND THIS SAID `cover.webp`.** There are
+ * two — `cover.jpg` and `cover.webp`, in that order — and `bookFolder.ts` owns
+ * the list. A reader who took this sentence literally would probe one name, miss
+ * the legacy one, and conclude a book has no jacket; `handleContent` and the
+ * sync push each had that bug once, for exactly this reason.
  *
  * They are downscaled once, on the way in, rather than on the way out. A
  * publisher's jacket is routinely 1600px wide and the shelf draws it at a

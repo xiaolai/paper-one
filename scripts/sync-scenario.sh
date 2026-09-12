@@ -354,14 +354,31 @@ skip() { step_no=$((step_no + 1)); skipped=$((skipped + 1)); log "  skip [$step_
 # Measured by hand on two Macs before it was written here: add → 2 journal
 # lines → both apps restarted → the book on the satchel in under 20 s, and
 # the same for the removal.
-# The running executable inside the bundle. `-f` and never `-x`: Tauri names
-# it `app`, so `pgrep -x Paper` can never match — that mistake once reported
-# the app closed on a machine where it was plainly running.
+# Whether the app is running, by process NAME — the same two helpers
+# `circle-scenario.sh` and `public-scenario.sh` use, and for the same reason.
 #
-# DECLARED HERE, beside its first user. It used to sit with the preflight
-# check that greps for it, several hundred lines below `app_quit` — and
-# `set -u` turned the first mutation into `APP_PROCESS: unbound variable`.
-readonly APP_PROCESS='Paper.app/Contents/MacOS/'
+# ⚠️ **`pgrep -x app`, AND NEITHER `-x Paper` NOR `-f <path>`.** The old
+# comment here said "`-f` and never `-x`", which was right about `-x Paper`
+# (Tauri names the executable after the Cargo target, so that matches nothing)
+# and wrong about the remedy. `-f` matches whole COMMAND LINES, so it also
+# matches any shell whose argv carries the pattern — and two of the uses below
+# were exactly that: a compound command sent to a remote shell, where
+# `sh -c "… pgrep -f 'Paper.app/Contents/MacOS/' …"` finds ITSELF. The satchel's
+# quit therefore reported "did not quit through its menu and was force-killed"
+# on every clean quit, and `pkill -f` on the next line aimed at the shell that
+# was asking. The window-raise had the same shape: the pid it found could be
+# the remote shell's, so `set frontmost` addressed a process with no window and
+# the app stayed occluded — with its timers suspended, which is the one thing
+# that function exists to prevent.
+#
+# `-x app` matches the executable NAME and cannot match a shell at all.
+# AGENTS.md vouched for this script using the safe form of `-f`; it did not, and
+# the fix is to stop depending on which form is safe where.
+#
+# DECLARED HERE, beside its first user, because `set -u` turned the first
+# mutation of the old variable into `APP_PROCESS: unbound variable`.
+app_pids_local() { pgrep -x app 2>/dev/null; }
+app_pids_remote() { remote_sh 'pgrep -x app' 2>/dev/null; }
 readonly APP_SETTLE_S="${PAPER_APP_SETTLE_S:-14}"
 
 # QUIT THROUGH THE APP'S OWN MENU ITEM, not `quit app "Paper"`.
@@ -395,13 +412,13 @@ app_quit() {
   local forced=no
   case "$1" in
     shelf) osascript -e "$QUIT_VIA_MENU" >/dev/null 2>&1 || true; sleep 8
-           if pgrep -f "$APP_PROCESS" >/dev/null 2>&1; then
+           if app_pids_local >/dev/null 2>&1; then
              forced=yes
-             pkill -f "$APP_PROCESS" || true
+             pkill -x app || true
              sleep 3
            fi ;;
     satchel) if remote_sh \
-               "osascript -e '$QUIT_VIA_MENU' >/dev/null 2>&1 || true; sleep 8; if pgrep -f '$APP_PROCESS' >/dev/null 2>&1; then pkill -f '$APP_PROCESS' || true; sleep 3; exit 9; fi; exit 0"; then
+               "osascript -e '$QUIT_VIA_MENU' >/dev/null 2>&1 || true; sleep 8; if pgrep -x app >/dev/null 2>&1; then pkill -x app || true; sleep 3; exit 9; fi; exit 0"; then
                forced=no
              else
                [ "$?" -eq 9 ] && forced=yes
@@ -482,12 +499,12 @@ app_raise() {
       # re-parsed for quotes, so the AppleScript's own quotes stay literal. It
       # is only the string handed to another shell that breaks.
       local script='tell application "System Events" to set frontmost of (first process whose unix id is PID) to true'
-      local pid; pid="$(pgrep -f "$APP_PROCESS" | head -1)"
+      local pid; pid="$(app_pids_local | head -1)"
       if [ -n "$pid" ]; then
         osascript -e "${script/PID/$pid}" >/dev/null 2>&1 || rc=$?
       fi ;;
     satchel)
-      remote_sh 'pid=$(pgrep -f "Paper.app/Contents/MacOS/" | head -1); [ -n "$pid" ] && osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true"' >/dev/null 2>&1 || rc=$?
+      remote_sh 'pid=$(pgrep -x app | head -1); [ -n "$pid" ] && osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true"' >/dev/null 2>&1 || rc=$?
       ;;
   esac
   # NAMED, NOT SWALLOWED. A raise that fails leaves an app whose timers may be
@@ -510,8 +527,8 @@ app_start() {
   app_raise "$1"
   local up=no
   case "$1" in
-    shelf) pgrep -f "$APP_PROCESS" >/dev/null 2>&1 && up=yes ;;
-    satchel) remote_sh "pgrep -f '$APP_PROCESS' >/dev/null 2>&1" && up=yes ;;
+    shelf) app_pids_local >/dev/null 2>&1 && up=yes ;;
+    satchel) app_pids_remote >/dev/null 2>&1 && up=yes ;;
   esac
   if [ "$up" != yes ]; then
     log "  note  the $1's app is NOT running after a launch attempt — every step below will time out against it"
@@ -881,7 +898,8 @@ fi
 # between a named failure in a second and a quarter of an hour of red that
 # says nothing about the software.
 #
-# BY BUNDLE PATH, not by process name.
+# BY PROCESS NAME — see `app_pids_local` / `app_pids_remote`, where the whole
+# argument lives.
 #
 # The first version asked `pgrep -x Paper`, and that can never match: a Tauri
 # bundle names its executable after the Cargo target, so the process is
@@ -892,8 +910,14 @@ fi
 # succeed is worse than no guard: it does not merely fail to catch things, it
 # manufactures failures and sends people after them.
 #
-# `-f` against the bundle path survives the executable being renamed, which is
-# the thing that varies. FRONTMOST it still cannot answer: `lsappinfo` needs a
+# ⚠️ **AND THIS PARAGRAPH THEN RECOMMENDED `-f` AGAINST THE BUNDLE PATH, WHICH
+# IS THE SECOND HALF OF THE SAME MISTAKE.** `-f` matches whole command lines, so
+# it matches the shell asking whenever the pattern is in that shell's argv — as
+# it was in both remote compound commands here. `-x app` is what the two later
+# harnesses use: it matches the executable name, cannot match a shell, and does
+# not depend on remembering which form is safe in which position.
+#
+# FRONTMOST it still cannot answer: `lsappinfo` needs a
 # session an ssh login does not have, and WI-8.6 measured that raising a
 # window over ssh does not work either. So the window stays an operator
 # precondition, stated loudly above and not pretended to be checked here.
@@ -1154,12 +1178,12 @@ PYEOF
 }
 probe_contact
 
-if pgrep -f "$APP_PROCESS" >/dev/null 2>&1; then
+if app_pids_local >/dev/null 2>&1; then
   pass 'Paper is running on the shelf'
 else
   fail 'Paper is NOT running on this machine — nothing will replicate, and every step below would time out'
 fi
-if remote_sh "pgrep -f '$APP_PROCESS' >/dev/null 2>&1"; then
+if app_pids_remote >/dev/null 2>&1; then
   pass 'Paper is running on the satchel'
 else
   fail "Paper is NOT running on $remote — nothing will replicate, and every step below would time out"

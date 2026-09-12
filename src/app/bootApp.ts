@@ -23,7 +23,9 @@
  * IMPORTS THE KERNEL THROUGH `ui/boot.ts`, NOT `ui/index.ts`: that barrel
  * names `App`, and a barrel retains everything it names, so taking the wide
  * door here would put the entire desktop pane tree into the mobile bundle.
- * `.dependency-cruiser.cjs` refuses the shortcut (`mobile-root-not-desktop-ui-entry`).
+ * `.dependency-cruiser.cjs` refuses the shortcut
+ * (`native-boot-not-desktop-ui-entry`; this said `mobile-root-…`, which is not a
+ * rule that exists — the guard holds, the pointer to it did not).
  */
 import {
   DIAGNOSTICS_FILE,
@@ -485,9 +487,19 @@ export async function bootApp(): Promise<BootedApp> {
    * — a file opened at launch is known to Rust before this module exists, and
    * an event emitted then is emitted into nothing. So READY is sent HERE,
    * after the listener is registered and never before, and the shell hands
-   * over what it held. StrictMode's mount/unmount/mount sends READY twice;
-   * the shell's queue answers the second with nothing, by design. Outside
-   * Tauri there is no shell and nothing to subscribe to. */
+   * over what it held.
+   *
+   * ⚠️ **AND STRICTMODE NO LONGER SENDS READY TWICE, THOUGH THIS SAID IT DID.**
+   * The claim described the Rust side answering a second READY with nothing "by
+   * design", which is true of the shell and no longer reached from here: the
+   * `stopped` guard below makes the first subscription's `listen` resolve after
+   * the synchronous unmount, call `off()` and return BEFORE it emits. So a
+   * mount/unmount/mount sends one. Left as a note rather than deleted because
+   * the shell's tolerance is still what makes the sequence safe — a future
+   * subscriber that emits before checking `stopped` would send two again, and
+   * nothing would break.
+   *
+   * Outside Tauri there is no shell and nothing to subscribe to. */
   const openRequests: OpenRequests = {
     subscribe: (handler) => {
       if (!inTauri()) return () => {}

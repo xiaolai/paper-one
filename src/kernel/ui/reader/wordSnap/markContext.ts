@@ -19,11 +19,17 @@ const TEXT_NODE = 3
  * Annotation model pairs an exact quote with a prefix and a suffix, and why
  * every re-anchoring reader stores all three.
  *
- * NOTHING READS THIS YET. It is captured now because it is the one part of a
- * mark that cannot be recovered later: a stored mark's context can only be
- * recomputed by re-opening the book it came from and resolving its CFI — which
- * is precisely the operation that has stopped working by the time anyone needs
- * the context.
+ * ⚠️ **THIS SAID "NOTHING READS THIS YET", AND TWO THINGS DO.** `reanchor.ts`
+ * scores a foreign passage's `prefix` and `suffix` when it re-anchors, and
+ * `sentenceAt.ts` names `useGloss`'s `sentenceAround` as the other reader. The
+ * window below is load-bearing, not speculative, so changing it changes what
+ * those two can resolve.
+ *
+ * It is still captured at MARK TIME for the original reason, which the readers
+ * do not change: it is the one part of a mark that cannot be recovered later. A
+ * stored mark's context can only be recomputed by re-opening the book it came
+ * from and resolving its CFI — precisely the operation that has stopped working
+ * by the time anyone needs the context.
  */
 
 /** Characters kept on each side. Enough to disambiguate, short enough to store. */

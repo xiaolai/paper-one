@@ -118,10 +118,12 @@ async function annotationsFor(held: Running, request: OverlayRequest): Promise<r
  * How many rounds of asking one call will do.
  *
  * ⚠️ **A PROVIDER'S ANSWER IS CAPPED, SO A FULL BOOK TAKES SEVERAL.** The cap
- * is 256 records and a book retains at most 512, so three rounds covers any
- * book this device would keep — and the bound is here rather than "until
- * `more` is false" because `more` is a stranger's claim and a hostile provider
- * would otherwise hold this loop for as long as it liked.
+ * is 256 records and a book retains at most 512, so TWO rounds cover any book
+ * this device would keep and the fourth is slack — the prose said "three
+ * rounds" beside a constant of four, which is the kind of disagreement that
+ * gets the constant changed to match the sentence. The bound is here rather
+ * than "until `more` is false" because `more` is a stranger's claim and a
+ * hostile provider would otherwise hold this loop for as long as it liked.
  */
 const NOTE_ROUNDS = 4
 

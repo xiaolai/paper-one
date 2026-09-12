@@ -16,10 +16,13 @@ import type { TagChange, TagCountRow } from './rows'
  * permits — there is no tag store, a tag IS a field of a record, and the
  * permission has to describe the file that changes.
  *
- * `tag.list` is `req` and not `stream`, and that is a measurement rather than
- * an oversight: a shelf has orders of magnitude fewer tags than books (the
- * 1 959-book library measured in WI-8.6 has a few hundred), so the whole
- * answer is kilobytes and paging it would be ceremony.
+ * ⚠️ **`tag.list` IS A `stream`, AND THIS SAID IT WAS A `req`.** The old
+ * sentence claimed the choice was "a measurement rather than an oversight",
+ * reasoning from a shelf having far fewer tags than books — and the table was
+ * changed for the bound that actually governs, which `serviceTable.ts` states
+ * beside the row: a RECORD permits 4 096 tags per book at `TAG_MAX` characters
+ * each, so a heavily tagged shelf can exceed one frame. The handler below is an
+ * async generator and pages. Both halves moved; only this comment stayed.
  */
 
 /** A spelling the store would actually write, or a refusal. `normalizeTag`

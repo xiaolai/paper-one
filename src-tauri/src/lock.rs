@@ -139,9 +139,13 @@ impl Liveness {
     /// (Linux). A pid reused on the same boot moves the start and not the
     /// boot, so it fails both and is still reclaimed.
     ///
-    /// ⚠️ THE CLI'S HALF OF THIS IS STILL THE OLD RULE. `lock.ts` refutes on
-    /// either stamp, so a `paper` beside a clock correction can still call a
-    /// running app stale; the rule belongs there too, in the same words.
+    /// ⚠️ **AND THE CLI'S HALF AGREES — THIS SAID IT DID NOT.** The note here
+    /// read "the CLI's half of this is still the old rule", which would send
+    /// somebody to fix a two-writer bug in `src/hosts/node/lock.ts` that is not
+    /// there: its `holds` implements this same rule, arm for arm — start-time
+    /// first, the shift-together fallback, then the boot-only one — and
+    /// `lock.test.ts` measures both shapes. Confirmed by comparing the two
+    /// decision tables case by case during the 2026-09-12 audit.
     fn holds(&self, held: &Owner) -> bool {
         if !(self.alive)(held.pid) {
             return false;

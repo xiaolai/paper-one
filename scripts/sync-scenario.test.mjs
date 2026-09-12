@@ -837,7 +837,14 @@ describe('the predicates it converges on', () => {
    * lines before the check that used to declare this. The first real run
    * after the restructure died with `APP_PROCESS: unbound variable`. */
   it('declares APP_PROCESS before the helpers that use it', () => {
-    const decl = text.indexOf("readonly APP_PROCESS=")
+    /* ⚠️ **`APP_PROCESS` IS GONE, AND THE ORDERING RULE IS NOT.** The variable
+       held a bundle PATH for `pgrep -f`, which matches whole command lines and
+       so matched the remote shell that was asking — see `app_pids_local`. The
+       liveness check is by process NAME now, as it already was in
+       `circle-scenario.sh` and `public-scenario.sh`. What this case was really
+       for survives: `set -u` turns a helper used above its definition into
+       `unbound variable` mid-run, so the definition must come first. */
+    const decl = text.indexOf('app_pids_local() {')
     const use = text.indexOf('app_quit() {')
     expect(decl).toBeGreaterThan(-1)
     expect(decl).toBeLessThan(use)
@@ -930,21 +937,27 @@ describe('the preflight', () => {
    * to. A named failure in a second is the whole difference. */
   it('checks that the app is running on both sides, and does not pretend to check frontmost', () => {
     const text = proseOf(readFileSync(SCRIPT, 'utf8'))
-    /* BY BUNDLE PATH. `pgrep -x Paper` can never match — a Tauri bundle names
-     * its executable after the Cargo target, so the process is
-     * `Paper.app/Contents/MacOS/app`. That check reported "not running" with
-     * the app on screen, and cost an hour of diagnosing a healthy install. */
-    expect(text).toContain("APP_PROCESS='Paper.app/Contents/MacOS/'")
-    /* Named in the comment that explains why it went, and RUN nowhere:
-     * comment lines are stripped before the assertion, so the guard is about
-     * the code rather than about the prose that documents it. */
+    /* BY PROCESS NAME, and neither of the two ways that cannot work.
+     *
+     * `pgrep -x Paper` can never match — a Tauri bundle names its executable
+     * after the Cargo target, so the process is `app`. That check reported "not
+     * running" with the app on screen and cost an hour of diagnosing a healthy
+     * install.
+     *
+     * ⚠️ **AND `-f` AGAINST THE BUNDLE PATH, WHICH THIS TEST USED TO REQUIRE,
+     * IS THE OTHER HALF OF THE SAME MISTAKE.** `-f` matches whole command
+     * lines, so it matches any shell whose argv carries the pattern — which is
+     * what both of this script's remote compound commands were. The satchel's
+     * quit reported a force-kill on every clean quit, and `pkill -f` aimed at
+     * the shell that asked. Refused by name here so it cannot come back. */
     const code = text
       .split('\n')
       .filter((line) => !line.trimStart().startsWith('#'))
       .join('\n')
     expect(code).not.toMatch(/pgrep -x Paper/)
-    expect(code).toMatch(/pgrep -f "\$APP_PROCESS"/)
-    expect(code).toMatch(/pgrep -f '\$APP_PROCESS'/)
+    expect(code, 'a command-line match can match the shell asking').not.toMatch(/pgrep -f/)
+    expect(code, 'and `pkill -f` would then aim at it').not.toMatch(/pkill -f/)
+    expect(code).toMatch(/pgrep -x app/)
     expect(text).toContain('Paper is NOT running on this machine')
     expect(text).toContain('Paper is NOT running on $remote')
     /* And it says WHY frontmost is a precondition rather than a check: a

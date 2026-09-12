@@ -8,12 +8,20 @@ export type { ResolvedCfi }
 /**
  * WI-21.S — the spike. **Route B: anchor a foreign passage in the RENDERED DOM.**
  *
- * ⚠️ **NOTHING IMPORTS THIS.** It is a spike, kept because the plan asks the
- * spike to deliver *"one passage from the corpus, anchored correctly in a
+ * ⚠️ **THIS SAID "NOTHING IMPORTS THIS. It is a spike", AND IT IS NOW ON THE
+ * PRODUCTION PATH.** `reanchorPass.ts` imports `cfiFor`, `distinguishable`,
+ * `indexText` and `reanchorIn`; `session.ts` imports the `ResolvedCfi`
+ * re-export; `useReanchor.ts` writes the results into the mark store. A reader
+ * who believed the old sentence would treat live code as deletable.
+ *
+ * What remains true is the PROVENANCE: it began as WI-21.S's spike, which the
+ * plan asked to deliver *"one passage from the corpus, anchored correctly in a
  * different build, in the rendered DOM, with a measured cost — or a written
  * statement of which route failed and why"*. The verdict and the measurement are
- * in `dev-docs/plans/phase-21-implementation.md`; what is here is the code that
- * produced them, so the next reader can re-run it rather than re-argue it.
+ * in `dev-docs/plans/phase-21-implementation.md`; the code that produced them is
+ * here, and is now also what ships. Two exports are still spike-only and say so
+ * at their own definitions: `reanchor` and `canonicalise` have no caller outside
+ * this module's tests.
  *
  * ## Why route B and not the other two
  *

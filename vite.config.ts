@@ -417,8 +417,14 @@ export default defineConfig({
      * `index.html` -> `src/main.tsx` mounts `App`, the DESKTOP shell: a
      * titlebar with traffic lights, a side pane, a command palette. Building
      * that for iOS and Android is what the mobile build did until this branch —
-     * the platform picked the right CAPABILITIES all along (`composition.ios.ts`
-     * is `[peer, sync]`) and then rendered the wrong shell over them.
+     * the platform picked the right CAPABILITIES all along and then rendered the
+     * wrong shell over them.
+     *
+     * ⚠️ **THIS NAMED `composition.ios.ts` AS `[peer, sync]`, AND HAS BEEN WRONG
+     * SINCE PHASE 25.** Both phone compositions are `[peer, sync, publicSharing]`
+     * — public sharing landed on every platform that has a peer, and
+     * `capabilities.manifest.json` agrees. Read the composition file rather than
+     * this comment: it is the only one of the two a build consults.
      *
      * `index.mobile.html` -> `src/main.mobile.tsx` mounts the mobile design's
      * shell instead, over the same launch sequence. Selected HERE rather than

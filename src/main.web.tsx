@@ -263,7 +263,7 @@ function ShelfList({
   const linkState = useSyncExternalStore(link.subscribe, link.getSnapshot)
   const [reading, setReading] = useState<{ bookId: string; name: string } | null>(null)
   /**
-   * THE FOUR TABS — Library · Reading · Cards · You. "The titlebar chip becomes
+   * THE TABS — Library · Reading · Settings. "The titlebar chip becomes
    * a tab": the open book is a peer of the shelf here, not a screen you leave
    * it for. Opening a book switches to Reading; the tab bar hides while a
    * book is open (the mockup's Reader has none) and Reading with no book open

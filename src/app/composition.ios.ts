@@ -12,8 +12,15 @@ import { sync } from '../capabilities/sync'
  * manifest `platforms` name `ios`, so nothing else can enter the iOS bundle
  * through it. `src/main.tsx` reaches whichever composition its build is for
  * through `virtual:paper-composition`, which `vite.config.ts` resolves from
- * `TAURI_ENV_PLATFORM` at build time; the other two compositions are never in
- * that build's module graph, and `assert-bundle` fails the build if one is.
+ * `TAURI_ENV_PLATFORM` at build time; the other compositions are never in that
+ * build's module graph, and `assert-bundle` fails the build if one is.
+ *
+ * ⚠️ **TWO CORRECTIONS IN ONE SENTENCE.** It said "the other two compositions",
+ * and there are four — `composition.web.ts` joined them, as
+ * `composition.android.ts` already records. And it named `src/main.tsx` as the
+ * entry that reaches this file: the phone's entry is `src/main.mobile.tsx`
+ * (`index.mobile.html`), which is the whole point of the mobile build having its
+ * own root. `main.tsx` mounts the DESKTOP shell.
  * `pnpm compositions:check` holds this list to the manifest;
  * `capability:remove <id>` edits it.
  */

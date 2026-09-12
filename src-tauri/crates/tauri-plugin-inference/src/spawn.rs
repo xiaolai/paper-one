@@ -68,9 +68,14 @@
 //! does NOT disable it — verified. What IS true, and is the reason this is
 //! recorded rather than escalated: it inherits `--host`, so with the host
 //! pinned to `127.0.0.1` it binds the loopback only, which `lsof` confirmed.
-//! The plan asked to "prove bind/auth or disable"; disable is not on offer,
-//! so this proves bind — see `daemon.rs`'s `websocket_is_loopback` check,
-//! which asserts it at runtime rather than trusting this note.
+//! The plan asked to "prove bind/auth or disable"; disable is not on offer, so
+//! this proves bind — by the `--host` pin above, and by nothing else.
+//!
+//! ⚠️ **THERE IS NO `websocket_is_loopback` CHECK, AND THIS SENTENCE CITED ONE.**
+//! `daemon.rs` says the opposite in capitals — "THERE IS NO RUNTIME CHECK HERE,
+//! AND TWO ATTEMPTS AT ONE WERE BOTH WRONG" — and `note_websocket_port` only
+//! logs the port it saw. So the loopback bind rests on the argument being
+//! pinned, which is a real guarantee and a different one from an assertion.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

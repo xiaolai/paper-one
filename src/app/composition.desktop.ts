@@ -18,8 +18,12 @@ import { webhost } from '../capabilities/webhost'
  * `src/main.tsx` reaches whichever composition its build is for through
  * `virtual:paper-composition`, which `vite.config.ts` resolves from
  * `TAURI_ENV_PLATFORM` at build time (unset, `darwin`, `windows`, `linux` →
- * this file); the other two compositions are never in that build's module
- * graph, and `assert-bundle` fails the build if one is.
+ * this file); the other compositions are never in that build's module graph, and
+ * `assert-bundle` fails the build if one is.
+ *
+ * ⚠️ **THERE ARE FOUR, AND THIS SAID "the other two".** `composition.web.ts`
+ * joined `.ios.ts` and `.android.ts` and `scripts/lib/compositions.mjs` handles
+ * all four; `composition.android.ts` already carries the same correction.
  * `pnpm compositions:check` holds this list to the manifest;
  * `capability:remove <id>` (WI-5.12) edits it.
  *
