@@ -38,7 +38,7 @@ use crate::role::Role;
 pub const PEER_ALPN: &[u8] = b"one.paper.reader/peer/1";
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 /* `DIAL_TIMEOUT` is `endpoint::DIAL_TIMEOUT` now — one answer to "how long do
-   we wait for a machine that may be asleep", read by everything that dials. */
+we wait for a machine that may be asleep", read by everything that dials. */
 /// Frames the inbox holds before the reader stops pulling from the wire — a
 /// secondary bound that keeps a flood of tiny (even empty) frames from growing
 /// the queue without bound. The byte budget below is the real memory ceiling.

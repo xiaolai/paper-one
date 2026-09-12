@@ -49,6 +49,45 @@ pub const NOTES_ALPN: &[u8] = b"paper/share-notes/1";
 /// How long a stranger has to open a stream.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The most exchanges one connection may serve before it is closed.
+///
+/// ⚠️ **A STRANGER HELD A CONNECTION SLOT FOR AS LONG AS THEY OPENED A STREAM
+/// EVERY TEN SECONDS, AND A REFUSED REQUEST COSTS NO ALLOWANCE.** The loop
+/// below ended only when `accept_bi` went idle, so a malformed request every
+/// nine seconds held the slot indefinitely at no cost — and the semaphore is
+/// the machine-wide one `iroh-blobs` takes, 64 slots shared with every book
+/// transfer. Sixty-four such connections take the share endpoint off the air
+/// for a reader's real callers, spending none of the byte allowance that is
+/// supposed to be what a stranger spends. Found by audit.
+///
+/// Eight because the asking side's own `NOTE_ROUNDS` is four, and it opens a
+/// fresh connection for each one: nothing legitimate reuses a connection at
+/// all today, and twice the rounds a client could ever want is the headroom
+/// for one that starts to. `circle::serve` answers the same class by having no
+/// loop — *"there is nothing to hold open"* — which is not available here,
+/// because this protocol is paginated by design.
+pub(crate) const MAX_REQUESTS_PER_CONNECTION: usize = 8;
+
+/// The longest one connection may hold that slot, whatever it is doing.
+///
+/// ⚠️ **THE REQUEST CAP ALONE BOUNDS A FAST CALLER AND NOT A SLOW ONE.** Eight
+/// exchanges that each stop just short of [`EXCHANGE_TIMEOUT`] is four minutes
+/// of a slot for eight frames; the two bounds answer two different behaviours
+/// and neither implies the other. Four exchanges at the full exchange deadline
+/// — a client using every second it is allowed for every round it could
+/// legitimately need — still fits inside this, and a real request is a disk
+/// read that takes milliseconds.
+///
+/// ⚠️ **UNMEASURED, AND SAID PLAINLY RATHER THAN LEFT TO BE ASSUMED.**
+/// `one_connection_may_not_hold_a_slot_for_ever` holds the request cap; a test
+/// for this one would have to wait two minutes of wall clock, and the only way
+/// to shorten it is to make the bound a parameter of `serve` — which is a seam
+/// that exists solely for the test, on the one function a stranger reaches.
+/// `MAX_CANCEL_MS` was deleted from `bounds.ts` for being a number nobody read;
+/// this one IS read — it wraps the loop — so what is missing is the
+/// measurement, not the enforcement.
+const CONNECTION_LIFETIME: Duration = Duration::from_secs(120);
+
 /// How long ONE exchange has, end to end — the request, the work and the reply.
 ///
 /// ⚠️ **THE TIMEOUT COVERED ONLY `accept_bi`, AND EVERYTHING AFTER IT HAD
@@ -425,42 +464,61 @@ pub async fn serve(
         conn.close(VarInt::from_u32(2), b"busy");
         return;
     };
-    loop {
-        let Ok(Ok((mut send, mut recv))) = timeout(REQUEST_TIMEOUT, conn.accept_bi()).await else {
-            break;
-        };
-        /* ⚠️ **THE WHOLE EXCHANGE IS UNDER A DEADLINE, INCLUDING THE FLUSH.**
-         * A client that never reads leaves the write blocked on flow control
-         * for as long as it likes, which holds this connection's slot and its
-         * transfer permit — the same denial as the partial frame, from the
-         * other end. */
-        let exchange = timeout(EXCHANGE_TIMEOUT, async {
-            /* ⚠️ **THE PERMIT OUTLIVES THE FLUSH, AND IT USED TO DIE WITH
-             * `answer`.** It was a local in `answer`, so it was released the
-             * moment the records were written to the stream — while `flush`
-             * below still waits for the client to take them. Unacknowledged
-             * responses could therefore pile up past
-             * `concurrent_transfers`, which is the bound that exists because
-             * each one holds buffers. Same defect as the blob path's permit,
-             * which was released on connection close rather than on request
-             * completion: both had the release point wrong, in opposite
-             * directions. `answer` fills the slot and this scope holds it. */
-            let mut permit = None;
-            let answered = answer(&root, &policy, &bounds, &mut recv, &mut send, &mut permit).await;
-            crate::pairing::flush(&mut send).await;
-            drop(permit);
-            answered
-        })
-        .await;
-        match exchange {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => log::debug!("peer: a public annotation request ended: {err}"),
-            Err(_) => {
-                log::debug!("peer: a public annotation exchange ran out of time");
+    /* ⚠️ **BOUNDED AS A WHOLE, AND EVERY BOUND USED TO BE INSIDE IT.** The
+     * accept had a deadline and each exchange had a deadline; the LOOP had
+     * none, so a stranger who kept starting new exchanges kept the connection
+     * slot for as long as they liked. See [`MAX_REQUESTS_PER_CONNECTION`] and
+     * [`CONNECTION_LIFETIME`] — a cap on how many, and a cap on how long,
+     * because a fast caller and a slow one exhaust it differently. */
+    let mut served = 0usize;
+    let _ = timeout(CONNECTION_LIFETIME, async {
+        loop {
+            if served >= MAX_REQUESTS_PER_CONNECTION {
                 break;
             }
+            let Ok(Ok((mut send, mut recv))) = timeout(REQUEST_TIMEOUT, conn.accept_bi()).await
+            else {
+                break;
+            };
+            /* COUNTED HERE, NOT AFTER THE ANSWER. A refused request is the cheap
+            one — it spends no byte allowance — so it is exactly the one that
+            must count against this cap. */
+            served += 1;
+            /* ⚠️ **THE WHOLE EXCHANGE IS UNDER A DEADLINE, INCLUDING THE FLUSH.**
+             * A client that never reads leaves the write blocked on flow control
+             * for as long as it likes, which holds this connection's slot and its
+             * transfer permit — the same denial as the partial frame, from the
+             * other end. */
+            let exchange = timeout(EXCHANGE_TIMEOUT, async {
+                /* ⚠️ **THE PERMIT OUTLIVES THE FLUSH, AND IT USED TO DIE WITH
+                 * `answer`.** It was a local in `answer`, so it was released the
+                 * moment the records were written to the stream — while `flush`
+                 * below still waits for the client to take them. Unacknowledged
+                 * responses could therefore pile up past
+                 * `concurrent_transfers`, which is the bound that exists because
+                 * each one holds buffers. Same defect as the blob path's permit,
+                 * which was released on connection close rather than on request
+                 * completion: both had the release point wrong, in opposite
+                 * directions. `answer` fills the slot and this scope holds it. */
+                let mut permit = None;
+                let answered =
+                    answer(&root, &policy, &bounds, &mut recv, &mut send, &mut permit).await;
+                crate::pairing::flush(&mut send).await;
+                drop(permit);
+                answered
+            })
+            .await;
+            match exchange {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => log::debug!("peer: a public annotation request ended: {err}"),
+                Err(_) => {
+                    log::debug!("peer: a public annotation exchange ran out of time");
+                    break;
+                }
+            }
         }
-    }
+    })
+    .await;
     conn.close(VarInt::from_u32(0), b"done");
 }
 
@@ -608,10 +666,15 @@ pub(crate) async fn ask_one(
      * site, arriving here through the half that was written later. A reader
      * pressing "Look for some" waited on it with nothing to stop it. Found by
      * audit. */
-    let conn = crate::endpoint::dial(endpoint, provider, NOTES_ALPN, crate::endpoint::DIAL_TIMEOUT)
-        .await
-        .ok_or_else(|| Error::ShareRefused("that provider did not answer a dial in time".into()))?
-        .map_err(|err| Error::ShareRefused(format!("that provider would not talk: {err}")))?;
+    let conn = crate::endpoint::dial(
+        endpoint,
+        provider,
+        NOTES_ALPN,
+        crate::endpoint::DIAL_TIMEOUT,
+    )
+    .await
+    .ok_or_else(|| Error::ShareRefused("that provider did not answer a dial in time".into()))?
+    .map_err(|err| Error::ShareRefused(format!("that provider would not talk: {err}")))?;
     let exchange = timeout(EXCHANGE_TIMEOUT, async {
         let (mut send, mut recv) = conn.open_bi().await.map_err(|err| {
             Error::ShareRefused(format!("that provider closed the stream: {err}"))

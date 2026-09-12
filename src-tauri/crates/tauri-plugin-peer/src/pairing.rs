@@ -47,9 +47,9 @@ pub const PAIR_TTL: Duration = Duration::from_secs(300);
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 /* `DIAL_TIMEOUT` was declared here too, at the same thirty seconds as
-   `session.rs`'s. It is `endpoint::DIAL_TIMEOUT` now — one answer to "how long
-   do we wait for a machine that may be asleep", read by everything that
-   dials. */
+`session.rs`'s. It is `endpoint::DIAL_TIMEOUT` now — one answer to "how long
+do we wait for a machine that may be asleep", read by everything that
+dials. */
 /// The satchel waits the shelf's confirm window plus this much for the ack.
 const ACK_GRACE: Duration = Duration::from_secs(30);
 
@@ -1278,7 +1278,7 @@ async fn dial(
     hello: &PairHello,
 ) -> Result<(Connection, SendStream, iroh::endpoint::RecvStream)> {
     /* `crate::endpoint::dial`, spelled in full because this function is called
-       `dial` too — the transport's one door, under the crate's one deadline. */
+    `dial` too — the transport's one door, under the crate's one deadline. */
     let conn = crate::endpoint::dial(
         node.endpoint(),
         uri.endpoint_addr(),

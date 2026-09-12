@@ -553,18 +553,18 @@ mod tests {
         let mut files = Vec::new();
         walk(&src, &mut files);
         /* NON-VACUOUS: a walk that found nothing would pass silently, which is
-           the failure this whole test exists to make loud. */
+        the failure this whole test exists to make loud. */
         assert!(
             files.len() > 10,
             "the source walk found {} files, so it scanned nothing",
             files.len()
         );
         /* ⚠️ **A WHOLE FILE CAN BE TEST CODE WITH NO `#[cfg(test)]` IN IT.**
-           `share/acceptance.rs` is a thousand lines of dialling and carries no
-           attribute of its own — the gate is `#[cfg(test)] mod acceptance;` in
-           `share/mod.rs`. Read the DECLARATIONS rather than assuming the file
-           says so about itself, or the first version of this test reports a
-           whole test suite as production code, which is what it did. */
+        `share/acceptance.rs` is a thousand lines of dialling and carries no
+        attribute of its own — the gate is `#[cfg(test)] mod acceptance;` in
+        `share/mod.rs`. Read the DECLARATIONS rather than assuming the file
+        says so about itself, or the first version of this test reports a
+        whole test suite as production code, which is what it did. */
         let mut test_only = Vec::new();
         for file in &files {
             let text = std::fs::read_to_string(file).expect("a source file reads");
@@ -584,14 +584,16 @@ mod tests {
         );
         let mut offenders = Vec::new();
         for file in &files {
-            let stem = file.file_stem().map(|one| one.to_string_lossy().into_owned());
+            let stem = file
+                .file_stem()
+                .map(|one| one.to_string_lossy().into_owned());
             if stem.is_some_and(|one| test_only.contains(&one)) {
                 continue;
             }
             let text = std::fs::read_to_string(file).expect("a source file reads");
             /* And within a production file, everything from its first
-               `#[cfg(test)]` on is test code — a test dialling however it likes
-               is fine. */
+            `#[cfg(test)]` on is test code — a test dialling however it likes
+            is fine. */
             let production = match text.find("#[cfg(test)]") {
                 Some(at) => &text[..at],
                 None => &text[..],
@@ -609,11 +611,15 @@ mod tests {
             "these dial without going through `endpoint::dial`, so their deadline is theirs to forget: {offenders:?}"
         );
         /* And the door itself is still ONE door. Counted over this file's own
-           production half, because the assertions above name `.connect(` in
-           their messages and would otherwise count themselves. */
+        production half, because the assertions above name `.connect(` in
+        their messages and would otherwise count themselves. */
         let here = include_str!("endpoint.rs");
         let door = &here[..here.find("#[cfg(test)]").expect("this file has tests")];
-        assert_eq!(door.matches(".connect(").count(), 1, "`dial` grew a second connect");
+        assert_eq!(
+            door.matches(".connect(").count(),
+            1,
+            "`dial` grew a second connect"
+        );
     }
 
     fn walk(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {

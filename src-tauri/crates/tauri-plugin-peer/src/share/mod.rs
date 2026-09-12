@@ -644,9 +644,9 @@ impl ShareNode {
             let attempt =
                 timeout(PROVIDER_TIMEOUT, async {
                     /* Through the one door, so the DIAL is bounded separately
-                       from the transfer. `PROVIDER_TIMEOUT` is ten minutes
-                       because a book is large; thirty seconds of it is all a
-                       machine gets to answer the phone. */
+                    from the transfer. `PROVIDER_TIMEOUT` is ten minutes
+                    because a book is large; thirty seconds of it is all a
+                    machine gets to answer the phone. */
                     let conn = crate::endpoint::dial(
                         &self.endpoint,
                         provider,
@@ -654,11 +654,13 @@ impl ShareNode {
                         crate::endpoint::DIAL_TIMEOUT,
                     )
                     .await
-                    .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
-                        Box::new(Error::ShareRefused(
-                            "that provider did not answer a dial in time".into(),
-                        ))
-                    })??;
+                    .ok_or_else(
+                        || -> Box<dyn std::error::Error + Send + Sync> {
+                            Box::new(Error::ShareRefused(
+                                "that provider did not answer a dial in time".into(),
+                            ))
+                        },
+                    )??;
                     self.store.remote().fetch(conn, blob).await.map_err(
                         |err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) },
                     )?;

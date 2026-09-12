@@ -15,7 +15,9 @@ use crate::endpoint::{Discovery, SHARE_BIND_PORT};
 use crate::node::testkit::TestNode;
 use crate::role::Role;
 use crate::share::bounds::ShareLimits;
-use crate::share::notes::{NotesAnswer, NotesRequest, NOTES_ALPN, NOTES_VERSION};
+use crate::share::notes::{
+    NotesAnswer, NotesRequest, MAX_REQUESTS_PER_CONNECTION, NOTES_ALPN, NOTES_VERSION,
+};
 use crate::share::policy::ShareService;
 use crate::share::testkit::TestShare;
 use crate::share::{ContentHash, ShareConfig, ShareNode};
@@ -1401,6 +1403,65 @@ struct NotesRequestOut {
     v: u32,
     hash: String,
     since: u64,
+}
+
+/// ⚠️ **A STRANGER HELD A CONNECTION SLOT FOR AS LONG AS THEY KEPT ASKING.**
+///
+/// `serve`'s loop ended only when `accept_bi` went idle, so a request every
+/// nine seconds held the slot indefinitely — and a REFUSED request spends no
+/// byte allowance, so it cost nothing to hold. The semaphore is the
+/// machine-wide one `iroh-blobs` takes: sixty-four such connections take the
+/// share endpoint off the air for a reader's real callers while the allowance
+/// that is supposed to bound a stranger sits untouched. Found by audit.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_connection_may_not_hold_a_slot_for_ever() {
+    let share = TestShare::start("share-notes-connection-cap").await;
+    let stranger = Stranger::new().await;
+    let hash = share.write_book("book", "content.epub", &a_book(11));
+    share.node.offer_notes(&hash).await.unwrap();
+    crate::share::notes::append(share.node.root(), &hash, br#"{"a":1}"#).unwrap();
+
+    let conn = stranger
+        .endpoint
+        .connect(share.node.endpoint().addr(), NOTES_ALPN)
+        .await
+        .unwrap();
+
+    /* The cheap request — a version this build does not speak — because that is
+    the one the defect made free: it is refused before any work and spends no
+    allowance, so it is exactly what an attacker would send. */
+    let ask = |conn: iroh::endpoint::Connection, hash: crate::share::ContentHash| async move {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|err| err.to_string())?;
+        crate::frame::write_json(
+            &mut send,
+            &NotesRequestOut {
+                v: NOTES_VERSION + 1,
+                hash: hash.as_str().to_owned(),
+                since: 0,
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        send.finish().map_err(|err| err.to_string())?;
+        read_answer(&mut recv).await.map(|answer| answer.ok)
+    };
+
+    for n in 0..MAX_REQUESTS_PER_CONNECTION {
+        /* NON-VACUOUS: every request the cap allows is really answered, so the
+        refusal below is the cap and not a server that stopped early. */
+        assert_eq!(
+            ask(conn.clone(), hash.clone()).await,
+            Ok(false),
+            "request {n} inside the cap went unanswered"
+        );
+    }
+    assert!(
+        ask(conn.clone(), hash.clone()).await.is_err(),
+        "the connection served past its cap, so a stranger can hold a slot for ever"
+    );
+
+    stranger.close().await;
+    share.close().await;
 }
 
 /// A request naming a version this build does not speak is refused, not read.
