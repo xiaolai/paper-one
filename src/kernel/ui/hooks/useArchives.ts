@@ -132,8 +132,13 @@ const importTagsNow = useCallback(() => {
  * The reader's marginalia, out to a file and back.
  *
  * THE EMPTY-FILE TRAP, and it is why this awaits rather than reads.
- * `MarksView.all` and `.allBookmarks` are empty until `loadAll()` has run,
- * and the only caller of `loadAll` is the Marginalia panel mounting. So an
+ * `MarksView.all` and `.allBookmarks` are empty until `loadAll()` has run, and
+ * the only caller of `loadAll` IN A RUNNING APP is the Marginalia panel
+ * mounting. (`app/mobile/localMarks.ts` calls it twice more, and `MobileApp`
+ * says in its own words that `localContent`/`localMarks`/`localPositions` are
+ * "written and mounted by nothing" — so a grep finds three call sites and two
+ * of them are unreachable. Said here because the bare claim reads as wrong to
+ * anyone who greps it.) So an
  * export from the palette, in a session where that panel was never opened,
  * would have walked an empty list, written `{"version":1,"books":[]}` and
  * reported success — a backup that exists, opens, and contains nothing.
