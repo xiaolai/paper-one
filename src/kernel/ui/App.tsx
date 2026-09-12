@@ -22,7 +22,7 @@ import { requestWindowClose, useWindowClose } from './hooks/useWindowClose'
 import { takeOpened, type OpenRequests } from './openedFiles'
 import { closePrepare } from './closeWindow'
 import { openExternal } from './openExternal'
-import { hasOpenLayer, paneAvailable, screenJump, useAppState } from './state'
+import { hasOpenLayer, paneAvailable, paneFits, screenJump, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
 import type { Composition } from '../core/registry'
@@ -1887,8 +1887,24 @@ export function App({
                 /* The companion has no model configured, so an unmatched query
                  * goes to the panel that says so rather than being answered.
                  * §13 forbids producing content about the book that is not
-                 * grounded in it. */
-                onAsk={() => dispatch({ type: 'openPane', pane: 'companion' })}
+                 * grounded in it.
+                 *
+                 * ⚠️ **AND ONLY WHERE THAT PANEL CAN BE REACHED.** Arriving at
+                 * the panel IS the action this offers — it explains itself, it
+                 * does not answer — so where `paneFits` refuses the companion
+                 * there is nothing to offer, and handing the palette a callback
+                 * anyway drew the promise over an `openPane` the reducer
+                 * redirected to Contents. Passed conditionally rather than
+                 * tested inside the palette, because the palette must not
+                 * acquire an opinion about which panels exist; it asks whether
+                 * it was given somewhere to send the query. */
+                {...(paneFits(state.screen, 'companion', {
+                  contributed: composition.panes,
+                  developer: state.developer,
+                  hiddenPanes: state.hiddenPanes,
+                })
+                  ? { onAsk: () => dispatch({ type: 'openPane', pane: 'companion' }) }
+                  : {})}
               />
             )}
             {state.switcherOpen && (

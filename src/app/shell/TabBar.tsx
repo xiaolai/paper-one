@@ -1,5 +1,6 @@
 import { BookOpen, Layers, LibraryBig, Settings as SettingsIcon } from 'lucide-react'
 import { ICON } from '../../kernel/core/metrics'
+import { isKernelPaneId, paneOffered } from '../../kernel/core/uiTypes'
 import styles from './TabBar.module.css'
 
 /**
@@ -48,10 +49,35 @@ const TABS: readonly { readonly id: Tab; readonly label: string; readonly Icon: 
   { id: 'settings', label: 'Settings', Icon: SettingsIcon },
 ]
 
+/**
+ * The tabs this build actually offers.
+ *
+ * ⚠️ **THIS LIST WAS A LITERAL FOUR, AND `cards` IS IN `UNFINISHED_PANE_IDS`.**
+ * The desktop hides that panel from the rail, the palette and the digit
+ * accelerators; this bar is mounted by BOTH other shells — `MobileApp` and
+ * `main.web.tsx` — and neither root names `paneOffered` anywhere, so the one
+ * deck the desktop refuses to show was a permanent top-level tab on every
+ * phone and in every browser, with no chord to hide it and nothing to find.
+ * The section above already states the rule this breaks: *"no tab is ever
+ * disabled — a tab that cannot be visited is not drawn."*
+ *
+ * ASKED, NOT RESTATED. Filtering on `UNFINISHED_PANE_IDS` here would be a
+ * second copy of the question; `paneOffered` is the answer the other four
+ * surfaces take. `reading` is this bar's own id and no panel, so it is passed
+ * through untouched — `isKernelPaneId` is what tells them apart.
+ *
+ * `developer` is `false` and not a parameter: the chord is a desktop surface
+ * and these shells have no way to reach it, so an unfinished panel is simply
+ * absent here rather than hidden behind something unreachable. Removing an id
+ * from `UNFINISHED_PANE_IDS` ships it on all three shells at once, which is
+ * what that list promises and did not deliver.
+ */
+const OFFERED_TABS = TABS.filter(({ id }) => !isKernelPaneId(id) || paneOffered(id, false))
+
 export function TabBar({ active, onSelect, hasBook }: TabBarProps) {
   return (
     <nav className={styles.bar} aria-label="Sections">
-      {TABS.map(({ id, label, Icon }) => (
+      {OFFERED_TABS.map(({ id, label, Icon }) => (
         <button
           key={id}
           type="button"

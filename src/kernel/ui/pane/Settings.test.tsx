@@ -434,6 +434,35 @@ describe('the two bands', () => {
     }
   })
 
+  /**
+   * ⚠️ **THE PANEL SHOWED SETTINGS FOR A PANEL THE READER COULD NOT OPEN.**
+   * `UNFINISHED_PANE_IDS` hid the Companion pane and never touched
+   * `Settings → Companion`, which sat in The app band from the day the
+   * capability contributed it. A section configuring a surface that is not
+   * offered is worse than either half alone: it is evidence the feature is
+   * there.
+   *
+   * `inference:models` is in the same assertion deliberately. It ships — the
+   * selection bar's Look up runs on it — so a rule that hid it because the
+   * companion shares its engine would take a working control away.
+   */
+  it('hides an unfinished capability’s settings, and only that capability’s', () => {
+    const both = [section('companion:provider', 'Companion'), section('inference:models', 'Local models')]
+    const { props } = full({ sections: both })
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    expect(bandOf('Local models', container)).toBe('The app')
+    expect(bandOf('Companion', container)).toBeNull()
+
+    /* One chord later it is there, which is what makes the line above about
+       the gate rather than about the section having been dropped. */
+    const { props: dev } = full({
+      sections: both,
+      developer: { hidden: [], onSetHidden: () => {}, recording: false },
+    })
+    const revealed = render(<Settings {...(dev as ComponentProps<typeof Settings>)} />)
+    expect(bandOf('Companion', revealed.container)).toBe('The app')
+  })
+
   it('captions each band with a real heading, so the split is structure and not a drawn line', () => {
     const { props } = full()
     const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)

@@ -42,6 +42,7 @@ import {
   SIDES,
   TABLE_FITS,
   UNFINISHED_PANE_IDS,
+  settingsSectionOffered,
 } from '../../core/uiTypes'
 import { PaneBand } from './PaneBand'
 import { PaneGroup } from './PaneGroup'
@@ -843,19 +844,27 @@ export function Settings({
           stops the Storage section reading the disk on every shelf write for
           a surface nobody has opened. */}
       <PaneBand title="The app">
-      {sections.map((section) => (
-        <PaneGroup
-          key={section.id}
-          title={section.title}
-          open={groupOpen(section.id)}
-          onToggle={() => toggleGroup(section.id)}
-        >
-          {/* The group mounts its body only while open — one gate, the group's — and a throw stops at the section. */}
-          <ContributionBoundary label={section.title} id={section.id} resetKey={section.id}>
-            <ContributionBody id={section.id} render={section.render} context={NO_BOOK} />
-          </ContributionBoundary>
-        </PaneGroup>
-      ))}
+      {/* ⚠️ **FILTERED, AND IT NEVER WAS.** `UNFINISHED_PANE_IDS` hid the
+          Companion PANEL and left `Settings → Companion` in front of every
+          reader — settings for a surface they cannot open. The rule is derived
+          from that one list rather than restated here; see
+          `settingsSectionOffered`, which also explains why `inference`'s two
+          sections stay (Look up ships on the same engine). */}
+      {sections
+        .filter((section) => settingsSectionOffered(section.id, developer !== undefined, developer?.hidden ?? []))
+        .map((section) => (
+          <PaneGroup
+            key={section.id}
+            title={section.title}
+            open={groupOpen(section.id)}
+            onToggle={() => toggleGroup(section.id)}
+          >
+            {/* The group mounts its body only while open — one gate, the group's — and a throw stops at the section. */}
+            <ContributionBoundary label={section.title} id={section.id} resetKey={section.id}>
+              <ContributionBody id={section.id} render={section.render} context={NO_BOOK} />
+            </ContributionBoundary>
+          </PaneGroup>
+        ))}
 
       {/* INSIDE THE BAND, not after it. These name a capability that failed to
           start, so they belong with the capabilities' own sections — floating

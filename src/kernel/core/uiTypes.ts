@@ -150,6 +150,41 @@ export function paneOffered(
 }
 
 /**
+ * Whether a capability's SETTINGS section is one the reader may see right now.
+ *
+ * ⚠️ **`UNFINISHED_PANE_IDS` HID A PANEL AND NEVER ITS SETTINGS**, and the
+ * paragraph above claiming that removing an id from it is "the only edit
+ * required" was written without noticing. `Settings → Companion` sat in the
+ * The app band for every reader from the day it was contributed, configuring a
+ * panel that same reader could not open — a section about a surface that is
+ * not there is worse than either half alone, because it is evidence the
+ * feature exists.
+ *
+ * DERIVED FROM THE ONE LIST, NOT A SECOND ONE. A section id is
+ * `${capabilityId}:${name}` by construction (`SettingsSection.id`), and the
+ * capability whose feature a panel promises carries the panel's id —
+ * `companion` the capability, `companion` the pane. So the question "is this
+ * feature unfinished" is still asked in exactly one place, which is the reason
+ * `UNFINISHED_PANE_IDS` is a list rather than a flag on each pane.
+ *
+ * ⚠️ **AND IT IS NOT A RULE ABOUT DEPENDENCIES.** `inference` contributes
+ * `Local models` and `Cloud endpoints`, and the companion is only one of the
+ * things it drives — the selection bar's **Look up** is the other, and that
+ * one ships. Hiding a shipped feature's settings because an unfinished feature
+ * shares its engine would take a working control away from the reader, so the
+ * match is on the section's OWN capability and nothing it depends on.
+ */
+export function settingsSectionOffered(
+  sectionId: string,
+  developer: boolean,
+  hidden: readonly string[] = [],
+): boolean {
+  const capability = sectionId.slice(0, sectionId.indexOf(':'))
+  if (!(UNFINISHED_PANE_IDS as readonly string[]).includes(capability)) return true
+  return paneOffered(capability as PaneId, developer, hidden)
+}
+
+/**
  * A pane a capability contributes: `<capability>:<name>`. The colon is what
  * tells the two apart at runtime — no kernel pane has one — and it is what
  * makes the id say who owns the pane.

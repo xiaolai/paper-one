@@ -403,6 +403,42 @@ describe('the pane follows the screen', () => {
       expect(off.lastPane).toBe('toc')
     })
 
+    /**
+     * ⚠️ **`openPane` WROTE STRAIGHT THROUGH THE INVARIANT THE TEST ABOVE
+     * MEASURES.** `afterVisibilityChange` repairs `lastPane` when developer
+     * options change, and it was the only thing enforcing "the remembered
+     * panel is one this reader may see". `openPane` recorded whatever it was
+     * asked for — so a request for an unfinished panel opened the screen's
+     * default and remembered the unopenable id, and nothing repaired it until
+     * the next visibility change, which for a reader who never touches the
+     * chord never comes.
+     *
+     * The cost is the panel the reader actually had: `togglePane` resolves the
+     * unopenable id to the screen default a second time, so Marginalia is gone
+     * after one press of a control that could not do anything in the first
+     * place.
+     */
+    it('an unofferable request leaves the remembered panel alone rather than overwriting it', () => {
+      const reading = at({ screen: 'reader', pane: 'marginalia', lastPane: 'marginalia' })
+      /* The click the titlebar used to offer every reader. */
+      const asked = reducer(reading, { type: 'openPane', pane: 'companion' })
+      expect(asked.pane).toBe('toc') // the request cannot be honoured...
+      expect(asked.lastPane).toBe('marginalia') // ...and must not cost the memory
+
+      const shut = reducer(asked, { type: 'closePane' })
+      expect(reducer(shut, { type: 'togglePane' }).pane).toBe('marginalia')
+    })
+
+    /* The same action with a panel the reader IS offered still records it —
+       the guard is about offered-ness, not about refusing to remember. */
+    it('an offerable request is remembered as before', () => {
+      const reading = at({ screen: 'reader', pane: 'toc', lastPane: 'toc' })
+      expect(reducer(reading, { type: 'openPane', pane: 'marginalia' }).lastPane).toBe('marginalia')
+      /* And under the chord, so is an unfinished one — it is offered then. */
+      const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
+      expect(reducer(on, { type: 'openPane', pane: 'companion' }).lastPane).toBe('companion')
+    })
+
     it('hide and show one panel at a time', () => {
       const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
       const hidden = reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: true })

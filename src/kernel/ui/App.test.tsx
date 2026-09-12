@@ -9,6 +9,8 @@ import { bookIdFor } from '../core/marks'
 import { fakeFs } from '../core/indexFsFake.testkit'
 import { composeCapabilities, kernelApi } from '../core/registry'
 import { createKernelServices } from '../core/services'
+import { UNFINISHED_PANE_IDS } from '../core/uiTypes'
+import { PANE_TITLES } from './panes'
 
 /**
  * `App`, mounted whole over the kernel's own services and a composition —
@@ -118,6 +120,26 @@ async function runCommand(query: string, label: string) {
   fireEvent.click(screen.getByText(label).closest('button')!)
   await settle()
 }
+
+/**
+ * Every button in the window drawn under `label`, chrome-faded ones included.
+ *
+ * ⚠️ **NOT `getByRole(..., { name })`, AND THE REASON IS LOAD-BEARING.** In the
+ * reader the titlebar's chrome is `visibility: hidden` until the pointer nears
+ * it. `{ hidden: true }` puts those elements back in the role query, but the
+ * accessible NAME of an element inside a hidden subtree computes to empty — so
+ * matching by name silently skips exactly the controls a test about the
+ * titlebar is about. Two earlier versions of the test below passed with the
+ * titlebar's filter deliberately removed because of this.
+ *
+ * The label each surface draws is the thing under test — they all take it from
+ * `PANE_TITLES` — so this reads that, and does not ask the accessibility tree
+ * to compute anything.
+ */
+const controlsLabelled = (label: string) =>
+  screen
+    .getAllByRole('button', { hidden: true })
+    .filter((one) => (one.getAttribute('aria-label') ?? one.getAttribute('title') ?? one.textContent ?? '').trim() === label)
 
 const row = (bookId: string, title: string): TrashedBook => ({ folder: bookId.replace(':', '_'), bookId, title, author: 'Someone', removedAt: 1_000, expiresAt: 2_000 })
 
@@ -264,6 +286,74 @@ describe('the palette’s own commands', () => {
     await settle()
     expect(screen.queryByRole('textbox', { name: 'Search or ask' })).toBeNull()
     expect(screen.getAllByRole('button', { name: 'Companion' }).some((one) => one.getAttribute('aria-pressed') === 'true')).toBe(true)
+  })
+
+  /**
+   * ⚠️ **THE RULE HAD FOUR READERS AND SIX SURFACES.**
+   *
+   * `UNFINISHED_PANE_IDS` says removing an id from it is "the only edit
+   * required" to ship a panel, and `paneFits` says it has five callers. Two
+   * surfaces in this window never asked either: the titlebar drew a Companion
+   * button for every reader (whose click `paneFor` sent to Contents, and whose
+   * `aria-pressed` could therefore never be true), and the palette promised
+   * "Press Enter to take it to the companion" over the same redirect.
+   *
+   * Written over the LIST rather than over those two controls, so it is a rule
+   * and not a pair of pins: a third unfinished panel, or a seventh surface that
+   * draws one, fails here. It asserts on the shared titles from `panes.ts`,
+   * which is where every surface takes its label from, so a surface drawing an
+   * unfinished panel under the right name cannot pass.
+   */
+  it('offers no unfinished panel anywhere in the window until the chord reveals them', async () => {
+    /* ⚠️ **A REAL BOOK, BECAUSE THE TITLEBAR'S BUTTONS ARE BEHIND `isReader`.**
+       Written first against `mount(null)` and the empty state, where this
+       passed with the titlebar's filter REMOVED — the block that draws the
+       Companion button never rendered, so the assertion was reading a window
+       that could not have failed it. The whole point is the titlebar, so the
+       test has to be in the reader. */
+    const { fs, moby } = await shelfWithMoby()
+    await mount(fs, { books: [moby] })
+    fireEvent.click(screen.getByTitle('Open Moby-Dick'))
+    await settle()
+    expect(await screen.findByText(WILL_NOT_PARSE)).toBeTruthy()
+
+    /* NON-VACUOUS: this proves nothing if the list is empty, and the list is
+       the whole subject. */
+    expect(UNFINISHED_PANE_IDS.length).toBeGreaterThan(0)
+    for (const id of UNFINISHED_PANE_IDS) {
+      expect(controlsLabelled(PANE_TITLES[id])).toEqual([])
+    }
+    /* The finished panel beside it IS drawn, in both the titlebar group and
+       the rail — the proof that this window renders the surfaces under test,
+       so the emptiness above is the filter's doing and not the harness's. */
+    expect(controlsLabelled(PANE_TITLES.toc).length).toBeGreaterThan(1)
+
+    accel('k')
+    await settle()
+    const input = screen.getByRole('textbox', { name: 'Search or ask' })
+    fireEvent.change(input, { target: { value: 'what is a whale' } })
+    await settle()
+    /* The palette still says it found nothing — it just does not offer a panel
+       the reader cannot open. */
+    expect(screen.getByText(/No command matches/u)).toBeTruthy()
+    expect(screen.queryByText(/take it to the companion/u)).toBeNull()
+
+    /* And Enter is inert rather than dismissing the palette for a pane change
+       that then lands somewhere else. */
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await settle()
+    expect(screen.getByRole('textbox', { name: 'Search or ask' })).toBeTruthy()
+
+    /* The same window, one chord later: every one of them is offered. That is
+       what makes the assertion above about the GATE and not about the panels
+       having been deleted. */
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await settle()
+    developerChord()
+    await settle()
+    for (const id of UNFINISHED_PANE_IDS) {
+      expect(controlsLabelled(PANE_TITLES[id]).length).toBeGreaterThan(0)
+    }
   })
 })
 

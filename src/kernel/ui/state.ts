@@ -394,7 +394,22 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       return {
         ...state,
         pane: paneFor(state.screen, action.pane, audienceOf(state, contributed)),
-        lastPane: action.pane,
+        /* ⚠️ **REMEMBERED ONLY IF IT IS A PANEL THIS READER MAY BE SHOWN.**
+         * `lastPane` has exactly one invariant — `afterVisibilityChange` states
+         * it and was the only thing enforcing it — and this wrote straight
+         * through it: a request for an UNFINISHED panel opened the screen's
+         * default and then recorded the unfinished id as "what the reader last
+         * opened". Nothing repairs that until the next visibility change, so
+         * the following ⌘\ resolved the unopenable id to the default a second
+         * time and the panel the reader actually had was gone.
+         *
+         * OFFERED-NESS, NOT FIT, for the reason given at `afterVisibilityChange`:
+         * this value is cross-screen, and a panel that does not fit the screen
+         * the reader is on is still the one to come back to on the screen where
+         * it does. An un-offered request leaves the memory untouched rather
+         * than overwriting it — the reader asked for something they cannot
+         * have, which is no reason to discard what they had. */
+        lastPane: paneOffered(action.pane, state.developer, state.hiddenPanes) ? action.pane : state.lastPane,
         paletteOpen: false,
       }
 

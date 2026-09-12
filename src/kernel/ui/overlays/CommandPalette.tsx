@@ -22,8 +22,20 @@ export interface CommandPaletteProps {
   /** Which accelerator glyph the combos are printed with. */
   platform: Platform
   onDismiss: () => void
-  /** Hand an unmatched query to the companion panel. */
-  onAsk: (question: string) => void
+  /**
+   * Hand an unmatched query to the companion panel — ABSENT when there is no
+   * companion to hand it to.
+   *
+   * ⚠️ **OPTIONAL SO THE OFFER AND THE ACTION CANNOT COME APART.** The sentence
+   * below ("Press Enter to take it to the companion") was rendered
+   * unconditionally while `companion` sat in `UNFINISHED_PANE_IDS`, so for
+   * every ordinary reader Enter dismissed the palette and `paneFor` redirected
+   * the open to Contents: a promise about a panel that cannot be reached,
+   * followed by an unrelated panel. Making this optional means the promise is
+   * drawn from the same value that performs it, so a caller cannot offer one
+   * without the other.
+   */
+  onAsk?: (question: string) => void
 }
 
 export function CommandPalette({ commands, platform, onDismiss, onAsk }: CommandPaletteProps) {
@@ -88,7 +100,7 @@ export function CommandPalette({ commands, platform, onDismiss, onAsk }: Command
     if (event.key === 'Enter') {
       event.preventDefault()
       if (matches.length > 0) run(matches[activeIdx])
-      else if (query.trim()) {
+      else if (query.trim() && onAsk) {
         onDismiss()
         onAsk(query.trim())
       }
@@ -122,8 +134,12 @@ export function CommandPalette({ commands, platform, onDismiss, onAsk }: Command
             {query.trim() ? (
               <>
                 No command matches “{query.trim()}”.
-                <br />
-                Press Enter to take it to the companion.
+                {onAsk ? (
+                  <>
+                    <br />
+                    Press Enter to take it to the companion.
+                  </>
+                ) : null}
               </>
             ) : (
               'Type to search commands.'
