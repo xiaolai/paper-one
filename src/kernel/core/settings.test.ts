@@ -321,6 +321,45 @@ describe('the reading size across a change to the ramp', () => {
     expect(readingBack(envelope({ 'kernel.stepIdx': 6 })).textSize).toBe(30)
   })
 
+  /**
+   * ⚠️ **THE ONE CHOICE NEITHER HALF COULD DETECT.** `readTextSize` read the
+   * legacy index whenever the stored size EQUALLED THE FALLBACK, and `set`
+   * skips a write whose value equals the current one — which, with nothing
+   * stored, IS the fallback. So a reader on a pre-ramp file who chose exactly
+   * the default size wrote nothing, the next read inferred "absent" again, and
+   * the legacy index won: their choice was undone on every launch, for ever.
+   *
+   * Both halves were reasonable alone. The fix is that absence is now ASKED
+   * (`store.has`) rather than inferred from the value.
+   *
+   * A migration hook could not have fixed it: `createSettingsStore` runs
+   * `migrate` only when the envelope's VERSION differs, and the ramp changed
+   * without a version bump — which is why this migration is read-time at all.
+   * Established by trying it.
+   */
+  it('keeps a chosen size that happens to equal the default, over a legacy index', () => {
+    const map = new Map<string, string>([
+      [SETTINGS_STORAGE_KEY, JSON.stringify(envelope({ 'kernel.stepIdx': 4 }))],
+    ])
+    const storage = {
+      getItem: (key: string) => map.get(key) ?? null,
+      setItem: (key: string, value: string) => void map.set(key, value),
+    }
+    const open = () => createSettingsStore({ storage, migrate: carryLegacySettings })
+
+    const first = open()
+    /* What the legacy index means on the ramp it was written for. */
+    expect(readKernelPreferences(first).textSize).toBe(LEGACY_READING_SIZES[4])
+    /* The reader picks exactly this build's default — a real choice, and the
+       only one whose value collides with the fallback. */
+    const chosen = KERNEL_SETTINGS.textSize.fallback
+    expect(chosen, 'the case only exists because these differ').not.toBe(LEGACY_READING_SIZES[4])
+    first.set(KERNEL_SETTINGS.textSize, chosen)
+
+    /* Next launch, from the same storage. */
+    expect(readKernelPreferences(open()).textSize).toBe(chosen)
+  })
+
   it('lets a stored size win outright, so the migration cannot fight it', () => {
     /* ONE DIRECTION AND ONE TIME. Once `kernel.textSize` exists the legacy key
        is never consulted again — otherwise a reader who changed their size

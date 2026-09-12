@@ -6534,6 +6534,7 @@
     "src/kernel/core/settings.test.ts > the mark appearance > refuses the companion’s wave, however it got into the file",
     "src/kernel/core/settings.test.ts > the mark appearance > restores a tint and a style the reader can choose",
     "src/kernel/core/settings.test.ts > the reading size across a change to the ramp > falls back to the default when there is nothing to migrate",
+    "src/kernel/core/settings.test.ts > the reading size across a change to the ramp > keeps a chosen size that happens to equal the default, over a legacy index",
     "src/kernel/core/settings.test.ts > the reading size across a change to the ramp > keeps a size this ramp does not offer, and lands it on the nearest step",
     "src/kernel/core/settings.test.ts > the reading size across a change to the ramp > lets a stored size win outright, so the migration cannot fight it",
     "src/kernel/core/settings.test.ts > the reading size across a change to the ramp > migrates the old index through the ramp it was written for",

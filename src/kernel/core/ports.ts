@@ -450,6 +450,25 @@ export interface SettingsStore {
    * the pane can draw rather than an exception nobody was catching.
    */
   set<T>(setting: Setting<T>, value: T): void
+  /**
+   * Whether this setting has a value STORED, as opposed to answering with its
+   * fallback.
+   *
+   * ⚠️ **`get` CANNOT EXPRESS THIS, AND A CALLER INFERRED IT FROM THE VALUE.**
+   * `get` never fails: absent, malformed and "stored as exactly the fallback"
+   * are one answer by design, which is what makes it safe to call anywhere. A
+   * setting whose fallback is not a legal value can use that — `kernel.stepIdx`
+   * uses `-1` and says so — but one whose fallback is legal cannot, and
+   * `readTextSize` tried: it read the legacy ramp whenever the stored size
+   * equalled the default. Combined with `set`, which skips a write whose value
+   * equals the current one (the fallback, when nothing is stored), a reader who
+   * chose exactly the default size stored nothing and had it overridden by the
+   * legacy value on every launch.
+   *
+   * So the question is asked rather than inferred. `set` already computes it
+   * internally; this is the same fact, exposed.
+   */
+  has<T>(setting: Setting<T>): boolean
   subscribe(listener: () => void): () => void
   /**
    * Whether what is set here will still be here next launch.

@@ -167,6 +167,12 @@ export function scopeSettings(store: SettingsStore, capId: string): SettingsStor
       guard(setting.key)
       return store.get(setting)
     },
+    /* Guarded like the other two: asking whether a setting is stored is asking
+       about it, and a capability may only ask about its own. */
+    has: (setting) => {
+      guard(setting.key)
+      return store.has(setting)
+    },
     set: (setting, value) => {
       guard(setting.key)
       store.set(setting, value)

@@ -99,6 +99,7 @@ export const carryLegacySettings: SettingsMigration = (found) => {
   for (const [key, value] of Object.entries(values)) {
     out[key.includes('.') ? key : `kernel.${key}`] = value
   }
+
   return out
 }
 
@@ -261,6 +262,8 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
   }
 
   return {
+    /* The same test `set` makes below — see the port. */
+    has: <T,>(setting: Setting<T>): boolean => setting.key in values,
     get: <T,>(setting: Setting<T>): T => {
       if (!(setting.key in values)) return setting.fallback
       /* `get` PROMISES NEVER TO FAIL, and `parse` is arbitrary code supplied
@@ -518,12 +521,42 @@ const LEGACY_STEP_IDX = defineSetting<number>('kernel.stepIdx', -1, index(LEGACY
  * reader sets afterwards. The old key is left on disk rather than deleted: it
  * costs one line of JSON, and a reader who moves a library back to an older
  * build gets their size there too.
+ *
+ * ⚠️ **"EXISTS" IS `has`, AND IT USED TO BE "DOES NOT EQUAL THE FALLBACK".**
+ * That is a sentinel the value can legitimately take, and it met `set`, which
+ * skips a write whose value equals the CURRENT one — with nothing stored, the
+ * fallback. So a reader on a legacy file who chose exactly the default size
+ * wrote nothing, this read inferred "absent" again, and the legacy index won:
+ * their choice was undone on every launch, for ever, and it is the one choice
+ * neither half could detect. Two reasonable halves, one unreachable state.
+ *
+ * A migration hook cannot fix it either — `createSettingsStore` runs `migrate`
+ * only when the envelope's VERSION differs, and the ramp changed without a
+ * version bump, which is why this read-time migration exists at all.
  */
 function readTextSize(store: SettingsStore): number {
-  const stored = store.get(KERNEL_SETTINGS.textSize)
-  if (stored !== KERNEL_SETTINGS.textSize.fallback) return stored
-  const legacy = store.get(LEGACY_STEP_IDX)
-  return LEGACY_READING_SIZES[legacy] ?? stored
+  if (store.has(KERNEL_SETTINGS.textSize)) return store.get(KERNEL_SETTINGS.textSize)
+  const carried = LEGACY_READING_SIZES[store.get(LEGACY_STEP_IDX)]
+  if (carried === undefined) return store.get(KERNEL_SETTINGS.textSize)
+  /* ⚠️ **RECORDED, SO "ABSENT" STOPS MEANING "THE LEGACY VALUE".** Reading it
+   * correctly is not enough on its own: `set` skips a write whose value equals
+   * the current one, and with nothing stored the current one is the FALLBACK —
+   * so a reader choosing exactly the default size stored nothing, and the next
+   * read came back here and answered with the legacy index instead. Writing it
+   * once makes every later read and write ordinary, and removes the ordering
+   * dependency altogether.
+   *
+   * Today the app happens not to lose the choice — `useAppState`'s effect
+   * writes every preference on mount, which materialises this before anything
+   * can be chosen — so this closes a latent hole rather than a reachable one.
+   * That is exactly the kind that returns: the effect's dependency list is
+   * hand-maintained, and two settings have already been forgotten from it.
+   *
+   * `set` never throws and reports a refused write through `persistent`, so a
+   * read-only store still answers correctly here; it simply carries the value
+   * again next launch. */
+  store.set(KERNEL_SETTINGS.textSize, carried)
+  return carried
 }
 
 export function readKernelPreferences(store: SettingsStore): KernelPreferences {
