@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.3.3"
+version = "0.3.4"
 description = "Paper — an ebook reader with a companion"
 authors = ["Paper"]
 license = "MIT"
