@@ -2,7 +2,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { KERNEL_SETTINGS, createSettingsStore } from '../core/settings'
 import { useAppState } from './state'
 
@@ -75,6 +75,27 @@ describe('developer options survive a relaunch', () => {
     act(() => result.current[1]({ type: 'toggleDeveloper' }))
 
     expect(settings.get(KERNEL_SETTINGS.developer)).toBe(false)
+  })
+})
+
+/**
+ * ⚠️ **THE STORE IS READ ONCE, AT MOUNT** (2026-09-13 audit). The initial
+ * state was an ordinary argument to `useReducer`, so `readKernelPreferences` —
+ * a read and a parse per preference — ran on every render and was thrown away
+ * on all but the first.
+ */
+describe('the settings store is read once', () => {
+  it('is not read again by a render that changes no preference', () => {
+    const settings = storeOverMap()
+    const get = vi.spyOn(settings, 'get')
+    const { result } = renderHook(() => useAppState(settings))
+    const atMount = get.mock.calls.length
+    expect(atMount, 'the mount read the preferences at all').toBeGreaterThan(0)
+
+    act(() => result.current[1]({ type: 'setLibraryQuery', query: 'whale' }))
+
+    expect(result.current[0].libraryQuery, 'the render happened').toBe('whale')
+    expect(get.mock.calls.length).toBe(atMount)
   })
 })
 

@@ -34,8 +34,9 @@
  * - **`truncatedStart`/`truncatedEnd` are word-safety flags, not
  *   block-completeness.** `flatten.test.ts` reports `truncatedEnd === false`
  *   while returning a budget-truncated window, because the cut happened to land
- *   on a space. Nothing here reads them; §C1's rule in `sentenceOf` depends on
- *   no `flatten` flag at all.
+ *   on a space. Nothing here reads them. What IS read is `reachedStart` /
+ *   `reachedEnd` — whether the walk ran out of tree rather than out of budget —
+ *   which is a different question, and the one the edges below need.
  * - **Out-of-flow content merges in reflowable books too**, not only in PDFs:
  *   `isBlockLevel` returns false for `position: absolute|fixed`
  *   unconditionally, so a positioned sidenote, running head or drop-folio joins
@@ -66,6 +67,27 @@
  * - **Out-of-flow content.** Kept only when its nearest positioned ancestor is
  *   the term's. Spliced *between* words, so a space, for the same reason.
  *
+ * ## What lies across the run's edges (phase 17, L8)
+ *
+ * The run's first and last sentences touch its edges, and `sentenceOf` vouches
+ * for one only when told what lies across the edge — see
+ * `SentenceOptions.before`. This reads it off the same window:
+ *
+ * - **The nearest readable run beyond the sentinel**, filtered exactly as the
+ *   term's own run is. A run with nothing readable in it is stepped over: the
+ *   source indentation between two `<p>`s is a text node of its own, and
+ *   stopping at it would make every pretty-printed paragraph look like the
+ *   start of a document.
+ * - **`null` where a heading lies between**, because `Loomings` neither ends in
+ *   a full stop nor runs into `Call me Ishmael.` — **and where the window
+ *   reached the tree's own edge**, since nothing precedes a section's first
+ *   paragraph. A heading by name (`h1`–`h6`) and by `role="heading"`, and
+ *   knowingly incomplete: `<p class="title">` is not recognised, and there the
+ *   seam decides, which is a fallback rather than a wrong sentence. Not for a
+ *   term that is itself in a heading, whose neighbours are that heading's own
+ *   lines.
+ * - **`undefined` where the budget ended the window**, which says nothing.
+ *
  * ## It never throws, and it declines rather than guesses
  *
  * `null` means "could not, or could not establish that it did", and every
@@ -77,18 +99,21 @@
  * text.
  */
 
-import { flatten, walkRoot, type DomPosition, type FlatNode } from './flatten'
+import { flatten, walkRoot, type DomPosition, type FlatNode, type Flattened } from './flatten'
 import { connectedRange } from './rangeText'
 import { resolveSegmenterLocale } from './classify'
 import { sentenceOf, type SentenceGap, type SentenceResult } from './sentenceOf'
 import { ariaRoles, declaredLang, epubTypes } from '../epubSemantics'
-import type { Diagnostics } from '../../../core/ports'
+import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../../core/ports'
 
-/* `Node.TEXT_NODE` / `Node.ELEMENT_NODE`, spelled as the numbers they are:
- * there is no `Node` global in the unit lane, and naming one would throw on
- * import — the same reason `flatten` spells them out. */
+/* `Node.TEXT_NODE`, spelled as the number it is: there is no `Node` global in
+ * the unit lane, and naming one would throw on import — the same reason
+ * `flatten` spells it out. (`ELEMENT_NODE` went with the climbs that tested it;
+ * see `ancestors`.) */
 const TEXT_NODE = 3
-const ELEMENT_NODE = 1
+
+/** The elements that are headings by name — see "What lies across the run's edges". */
+const HEADINGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6'])
 
 /**
  * How much text one sentence may be found in.
@@ -128,6 +153,8 @@ interface ElementFacts {
   readonly rubyAnnotation: boolean
   readonly noteref: boolean
   readonly outOfFlow: boolean
+  /** A heading, by name or by role. */
+  readonly heading: boolean
 }
 
 interface Context {
@@ -135,7 +162,75 @@ interface Context {
   readonly noteref: boolean
   /** The nearest `position: absolute|fixed` ancestor, or null for in-flow. */
   readonly positioned: Element | null
+  readonly heading: boolean
 }
+
+/** One entry as the term's sentence reads it — in the term's own run, or across
+ *  one of its edges. */
+interface Entry {
+  /** What it contributes: its own text, or what a filtered entry leaves behind. */
+  readonly text: string
+  /** It survived the filter. */
+  readonly kept: boolean
+  /** It sits in the term's positioned box. Asked apart from `kept`, because
+   *  ruby and noteref decide a drop before position is looked at. */
+  readonly inContext: boolean
+  /** A heading that is still IN the text. ⚠️ A filtered entry's heading used to
+   *  count although the entry was gone: a positioned `role="heading"` note
+   *  beside `He met Mr.` made that far side "a heading ends here", and
+   *  `Smith today.` was vouched for as a sentence's start. Found by audit. */
+  readonly heading: boolean
+}
+
+/**
+ * The names a thrown `Error` may be reported under: ECMAScript's own error
+ * types, and the `DOMException` names the platform defines (WebIDL's error
+ * names table, as MDN lists it). Anything else is reported as `Error`.
+ *
+ * `Error` itself is not listed, and it was: it is the answer every unlisted
+ * name already gets, so listing it changed no report. Found by mutation
+ * testing.
+ */
+const ERROR_NAMES: ReadonlySet<string> = new Set([
+  'AggregateError',
+  'EvalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+  'IndexSizeError',
+  'HierarchyRequestError',
+  'WrongDocumentError',
+  'InvalidCharacterError',
+  'NoModificationAllowedError',
+  'NotFoundError',
+  'NotSupportedError',
+  'InUseAttributeError',
+  'InvalidStateError',
+  'InvalidModificationError',
+  'NamespaceError',
+  'InvalidAccessError',
+  'TypeMismatchError',
+  'SecurityError',
+  'NetworkError',
+  'AbortError',
+  'URLMismatchError',
+  'QuotaExceededError',
+  'TimeoutError',
+  'InvalidNodeTypeError',
+  'DataCloneError',
+  'EncodingError',
+  'NotReadableError',
+  'UnknownError',
+  'ConstraintError',
+  'DataError',
+  'TransactionInactiveError',
+  'ReadOnlyError',
+  'VersionError',
+  'OperationError',
+  'NotAllowedError',
+])
 
 interface View {
   getComputedStyle(target: Element): CSSStyleDeclaration
@@ -165,7 +260,16 @@ export function sentenceAt(range: Range, options: SentenceAtOptions = {}): Sente
    * try above, so a throwing sink took the reader's lookup down with it. §E6
    * is about the selection path, and a counter is part of that path. */
   try {
-    record(options.diagnostics, result, cause)
+    /* ⚠️ **`record` TOOK THE OPTIONAL AND GUARDED IT, UNDER A Stryker `disable` DIRECTIVE
+     * THAT HID A MUTANT SIXTEEN TESTS KILL.** It named
+     * `ConditionalExpression`, so it covered the whole of `if (!diagnostics)
+     * return` — including `if (true) return`, which silences every count this
+     * module makes and was reported as ignored rather than as a survivor. Only
+     * the other half was equivalent, and the two cannot be told apart on one
+     * line. The kernel's own null sink takes the guard's place, so `record` is
+     * total and there is no branch left to hide anything. Found by mutation
+     * testing, 2026-09-14. */
+    record(options.diagnostics ?? NOOP_DIAGNOSTICS, result, cause)
   } catch {
     /* Nothing to report it to: the thing that would report it is what threw. */
   }
@@ -187,10 +291,27 @@ export function sentenceAt(range: Range, options: SentenceAtOptions = {}): Sente
  * language defines. Nothing a caller can influence rides out on it.
  */
 function causeOf(thrown: unknown): string {
-  if (!(thrown instanceof Error)) return typeof thrown
-  /* The same shape `redact` insists on: `name` is an ordinary mutable
-   * property, so a caller-set sentence could ride out on it otherwise. */
-  return /^[A-Za-z][A-Za-z0-9]{0,40}(Error|Exception)$/.test(thrown.name) ? thrown.name : 'Error'
+  try {
+    if (!(thrown instanceof Error)) return typeof thrown
+    /* ⚠️ **A CLOSED LIST, AND IT WAS A SHAPE.** `name` is an ordinary mutable
+     * property, and `/^[A-Za-z][A-Za-z0-9]{0,40}(Error|Exception)$/` — the shape
+     * `redact` insists on — let any identifier-shaped text through whole:
+     * `SecretBookTextError` rode out as it was written. The list fails closed
+     * where the shape failed open. Found by audit.
+     *
+     * READ ONCE, into a local: a `name` getter answered the list with a name it
+     * holds and the report with one it does not, while the check and the report
+     * read it separately (2026-09-13 verify). */
+    const name = thrown.name
+    return ERROR_NAMES.has(name) ? name : 'Error'
+  } catch {
+    /* ⚠️ **INSPECTING THE THROW CAN THROW TOO** — a `name` getter, or a proxy's
+     * `getPrototypeOf` trap under `instanceof` — and this runs inside
+     * `sentenceAt`'s `catch` with nothing around it, so the reader's lookup was
+     * lost to the thing classifying why it failed. `typeof` cannot throw, on
+     * anything. Found by audit. */
+    return typeof thrown
+  }
 }
 
 /**
@@ -201,12 +322,7 @@ function causeOf(thrown: unknown): string {
  * where the feature works are otherwise indistinguishable from the outside,
  * which is the failure §C exists to prevent, one level up.
  */
-function record(
-  diagnostics: Diagnostics | undefined,
-  result: SentenceResult,
-  cause: string | null,
-): void {
-  if (!diagnostics) return
+function record(diagnostics: Diagnostics, result: SentenceResult, cause: string | null): void {
   if (result.ok) {
     diagnostics.info('gloss.sentence', { outcome: 'used' })
     return
@@ -237,19 +353,17 @@ function extract(range: Range, options: SentenceAtOptions): SentenceResult {
   const startNode = range.startContainer
   const endNode = range.endContainer
   if (startNode.nodeType !== TEXT_NODE || endNode.nodeType !== TEXT_NODE) return gap('not-text')
+
+  /* A text node with no element above it is in no tree at all. Asked BEFORE
+   * connectivity, so the two reasons stay two — a node that was never placed,
+   * and one that has been taken away — rather than the second answering for
+   * both. */
+  const root = walkRoot(startNode)
+  if (!root) return gap('no-tree')
   /* §E5. A snapshot's range may have been re-rendered since the reader made
    * it — on a PDF that is what a zoom does — and walking detached nodes would
    * describe a page that no longer exists. */
   if (!connectedRange(range)) return gap('detached')
-
-  const root = walkRoot(startNode)
-  if (!root) return gap('no-tree')
-  const view = root.ownerDocument?.defaultView
-  /* No view means no computed styles, so out-of-flow content cannot be told
-   * from prose. `flatten` fails closed on the same condition; this does too
-   * rather than guessing from tag names. */
-  if (!view) return gap('no-window')
-
   const from: DomPosition = { node: startNode as Text, offset: range.startOffset }
   const to: DomPosition = { node: endNode as Text, offset: range.endOffset }
   const flat = flatten(root, {
@@ -278,50 +392,132 @@ function extract(range: Range, options: SentenceAtOptions): SentenceResult {
   let runEnd = first.index
   while (rows.has(runStart - 1)) runStart -= 1
   while (rows.has(runEnd + 1)) runEnd += 1
-  if (last.index < runStart || last.index > runEnd) return gap('span-blocks')
+  /* The run's own entries, in order. Every index between its edges is a node
+   * row — that is what makes it a run — so there is no gap to step over. */
+  const run = flat.nodes.filter((row) => row.index >= runStart && row.index <= runEnd)
 
+  /* THE COMPUTED STYLES, READ WHERE THEY ARE USED AND NOT GUARDED.
+   *
+   * No view means no computed styles, so out-of-flow content cannot be told
+   * from prose — and `flatten` fails closed on this very property of this very
+   * document, so a viewless one answers `toFlat` with `null` and the check
+   * above has already declined it as `no-window`. Measured: with the guard
+   * removed, both `no-window` tests still report `no-window`.
+   *
+   * THE ANSWER IS THE SAME AND THE WORK IS NOT, and that is the trade. The
+   * guard declined before `flatten` was called; now a viewless document costs
+   * one `flatten` call, which refuses on its first statement without walking
+   * anything, and one `toFlat` lookup on the empty window it returns — both
+   * done and dropped. Restoring the early return would restore the equivalent
+   * `if (false)` beside the killable `if (true)`, which is what hid the latter
+   * in the first place (review, 2026-09-14).
+   *
+   * ⚠️ **IT WAS AN `if (!view)` UNDER A Stryker `disable` DIRECTIVE THAT HID A MUTANT
+   * FIFTY-THREE TESTS KILL.** The directive named `ConditionalExpression`, so
+   * it covered `if (true)` — every lookup declining — as well as the equivalent
+   * `if (false)`, and the two cannot be told apart on one line. The guard stood
+   * for the TYPE of `view`, which a cast states directly. Found by mutation
+   * testing, 2026-09-14. */
+  const view = root.ownerDocument.defaultView as View
   const facts = new Map<Element, ElementFacts>()
-  const startRow = rows.get(first.index)
-  if (!startRow) return gap('no-window')
-  const term = contextOf(startRow.node, root, view, facts)
+  const term = contextOf(from.node, root, view, facts)
+  /* ONE FILTER, READ BY BOTH PASSES — the term's run below, and each far side in
+   * `across`. They were two copies of it and had already drifted apart: the far
+   * side's kept the heading of an entry it had just filtered out. */
+  const entryOf = (row: FlatNode): Entry => {
+    const context = contextOf(row.node, root, view, facts)
+    const drop = dropReason(context, term)
+    return {
+      text: drop ? separatorFor(drop) : row.node.data,
+      kept: drop === null,
+      inContext: context.positioned === term.positioned,
+      heading: drop === null && context.heading,
+    }
+  }
 
   let raw = ''
-  let termStart = -1
+  /* Always set: the start anchor's entry is in the run by construction. */
+  let termStart = 0
+  /* Set only when the loop meets the END anchor's entry. An end in another run
+   * is never met, and that is a selection spanning blocks (§A3) — which is the
+   * whole of that check, so it is not asked twice. */
   let termEnd = -1
-  /* The node the locale is read from. NOT `startRow.node` unconditionally: an
+  /* The node the locale is read from. NOT the start node unconditionally: an
    * entry this pass filters out is text the run no longer contains, and taking
    * a language from it would segment the sentence under metadata belonging to
    * something that is not in it. The first KEPT entry at or after the term's
    * start is the nearest node that survived. */
   let localeNode: Text | null = null
-  for (let index = runStart; index <= runEnd; index += 1) {
-    const row = rows.get(index)
-    if (!row) continue
-    const drop = dropReason(contextOf(row.node, root, view, facts), term)
+  for (const row of run) {
+    const entry = entryOf(row)
     /* §A3 AGAIN, in the shape §B3 makes possible. A term whose two ends sit in
      * different positioned boxes is a term spanning two visual contexts, and
-     * one of its ends is about to be filtered away — so what would come back
-     * is part of what the reader selected, silently. Ruby and noteref drops are
-     * NOT this: those are annotation spliced inside one context, and dropping
-     * them is the whole point of §B1. */
-    if ((index === first.index || index === last.index) && drop === 'out-of-flow') {
-      return gap('span-blocks')
-    }
+     * its far end is about to be filtered away — so what would come back is
+     * part of what the reader selected, silently. Only the END can leave: the
+     * term's context IS its first entry's. Ruby and noteref drops inside one
+     * context are NOT this: those are annotation spliced into the prose, and
+     * dropping them is the whole point of §B1.
+     *
+     * ⚠️ **ASKED OF THE CONTEXT, AND IT WAS ASKED OF THE DROP REASON.** Ruby and
+     * noteref win that contest, so a note reference that was ALSO positioned
+     * was filtered as a noteref, the guard never fired, and a selection ending
+     * inside it came back as its prose half alone. Found by audit. */
+    if (row.index === last.index && !entry.inContext) return gap('span-blocks')
     /* Recorded BEFORE the entry is appended, and against the separator's own
      * position when the entry is dropped — a term whose first character is a
      * ruby base sitting after a filtered reading starts where that reading
      * used to be, which is where the next kept character lands. */
-    if (index === first.index) termStart = raw.length + (drop ? 0 : first.offset)
-    if (index === last.index) termEnd = raw.length + (drop ? 0 : last.offset)
-    if (!drop && localeNode === null && index >= first.index) localeNode = row.node
-    raw += drop ? separatorFor(drop) : (flat.strs[index] ?? '')
+    if (row.index === first.index) termStart = raw.length + (entry.kept ? first.offset : 0)
+    if (row.index === last.index) termEnd = raw.length + (entry.kept ? last.offset : 0)
+    if (entry.kept && localeNode === null && row.index >= first.index) localeNode = row.node
+    raw += entry.text
   }
-  if (termStart < 0 || termEnd < 0) return gap('span-blocks')
+  if (termEnd < 0) return gap('span-blocks')
+
+  /* A heading ends what came before it — unless the term is in one, when the
+   * entries around it are that heading's own lines. */
+  const headingEnds = !term.heading
 
   return sentenceOf(raw, termStart, termEnd, {
-    locale: options.locale ?? localeFor(localeNode ?? startRow.node, root),
+    locale: options.locale ?? localeFor(localeNode ?? from.node, root),
     maxSentenceChars: options.maxSentenceChars,
+    before: across(flat, rows, runStart, true, entryOf, headingEnds),
+    after: across(flat, rows, runEnd, false, entryOf, headingEnds),
   })
+}
+
+/**
+ * What lies across one edge of the term's run: `SentenceOptions.before` walking
+ * back from `edge`, `.after` walking on. See "What lies across the run's edges".
+ */
+function across(
+  flat: Flattened,
+  rows: ReadonlyMap<number, FlatNode>,
+  edge: number,
+  backward: boolean,
+  entry: (row: FlatNode) => Entry,
+  headingEnds: boolean,
+): string | null | undefined {
+  const step = backward ? -1 : 1
+  let text = ''
+  let heading = false
+  /* `strs` holds a string at every index inside the window, sentinel or not,
+   * so the first index with none is the window's edge. */
+  for (let index = edge + step; flat.strs[index] !== undefined; index += step) {
+    const row = rows.get(index)
+    if (row === undefined) {
+      /* A sentinel. Past a run with something readable in it is past the far
+       * side; past one with nothing — source indentation — is still looking. */
+      if (text.trim() !== '') break
+      continue
+    }
+    const read = entry(row)
+    text = backward ? read.text + text : text + read.text
+    heading ||= read.heading
+  }
+  if (headingEnds && heading) return null
+  if (text.trim() === '') return (backward ? flat.reachedStart : flat.reachedEnd) ? null : undefined
+  return text
 }
 
 /**
@@ -344,6 +540,23 @@ function dropReason(entry: Context, term: Context): Drop | null {
   return null
 }
 
+/**
+ * `node`'s element ancestors, nearest first, up to and including `root`.
+ *
+ * `root` is `walkRoot`'s answer for this node — the topmost ELEMENT above it —
+ * so every step up to it is an element, and reaching it is the one stop the
+ * climb needs. Both climbs here used to carry two stops, a node-type test and
+ * the root test, and each made the other unobservable.
+ */
+function* ancestors(node: Text, root: Element): Generator<Element> {
+  let el = node.parentNode as Element
+  for (;;) {
+    yield el
+    if (el === root) return
+    el = el.parentNode as Element
+  }
+}
+
 /** The text context an entry sits in, read once per element on the way up. */
 function contextOf(
   node: Text,
@@ -354,17 +567,15 @@ function contextOf(
   let ruby = false
   let noteref = false
   let positioned: Element | null = null
-  let cur: Node | null = node.parentNode
-  while (cur && cur.nodeType === ELEMENT_NODE) {
-    const el = cur as Element
+  let heading = false
+  for (const el of ancestors(node, root)) {
     const known = factsOf(el, view, facts)
     if (known.rubyAnnotation) ruby = true
     if (known.noteref) noteref = true
     if (known.outOfFlow && positioned === null) positioned = el
-    if (el === root) break
-    cur = el.parentNode
+    if (known.heading) heading = true
   }
-  return { ruby, noteref, positioned }
+  return { ruby, noteref, positioned, heading }
 }
 
 function factsOf(el: Element, view: View, facts: Map<Element, ElementFacts>): ElementFacts {
@@ -383,9 +594,10 @@ function factsOf(el: Element, view: View, facts: Map<Element, ElementFacts>): El
      * alone here would be the near-miss this directory argues against
      * everywhere else, in the file that argues it. */
     rubyAnnotation:
-      tag === 'RT' || tag === 'RP' || (style.display ?? '').startsWith('ruby-text'),
+      tag === 'RT' || tag === 'RP' || style.display.startsWith('ruby-text'),
     noteref: epubTypes(el).has('noteref') || ariaRoles(el).has('doc-noteref'),
     outOfFlow: position === 'absolute' || position === 'fixed',
+    heading: HEADINGS.has(tag) || ariaRoles(el).has('heading'),
   }
   facts.set(el, known)
   return known
@@ -408,18 +620,19 @@ function factsOf(el: Element, view: View, facts: Map<Element, ElementFacts>): El
 export function localeAt(range: Range): string | undefined {
   try {
     const node = range.startContainer
-    if (node.nodeType !== TEXT_NODE) return undefined
     /* §E5, THE SAME GUARD `extract` APPLIES, and it was missing here. A
      * snapshot's range may have been re-rendered since the reader made it — on
      * a PDF that is what a zoom does — and reading `lang` off a detached tree
      * describes a page that no longer exists. The host's locale is the honest
      * answer for a range that is no longer in the document. Found by audit. */
-    if (!connectedRange(range)) return undefined
-    const root = walkRoot(node)
-    return root ? localeFor(node as Text, root) : undefined
+    if (node.nodeType !== TEXT_NODE || !connectedRange(range)) return undefined
+    /* A connected text node always has an element above it, so `walkRoot` has
+     * an answer; anything stranger throws, and is caught below. */
+    return localeFor(node as Text, walkRoot(node) as Element)
   } catch {
-    return undefined
+    /* Total — see above. */
   }
+  return undefined
 }
 
 /**
@@ -437,13 +650,9 @@ export function localeAt(range: Range): string | undefined {
  * typo — and a malformed tag on one span should not discard the book's own.
  */
 function localeFor(node: Text, root: Element): string | undefined {
-  let cur: Node | null = node.parentNode
-  while (cur && cur.nodeType === ELEMENT_NODE) {
-    const el = cur as Element
+  for (const el of ancestors(node, root)) {
     const resolved = resolveSegmenterLocale(declaredLang(el))
     if (resolved !== undefined) return resolved
-    if (el === root) break
-    cur = el.parentNode
   }
   return undefined
 }

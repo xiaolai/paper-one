@@ -68,6 +68,7 @@ export function localMarks({ marks, failed }: LocalMarksDeps): MarksStore {
      each render, defeating the memoisation on the other side of the seam. Same
      input array, same output array. */
   let placedFrom: readonly Annotation[] | null = null
+  // Stryker disable next-line ArrayDeclaration: `placedFrom` starts null and the store's `all` is always an array, so the first read replaces this before anything returns it.
   let placedTo: Placed<Annotation>[] = []
   /* ⚠️ THE RETURN TYPE IS `Placed<Annotation>[]`, NOT `Annotation[]`, and the
      comment above this function says why: the narrowing is the point, and it
@@ -100,8 +101,14 @@ export function localMarks({ marks, failed }: LocalMarksDeps): MarksStore {
       void marks.remove(mark.id, mark.bookId).catch(report('remove a mark'))
     },
 
-    setNote: (mark: MarkRef, note: string) => {
-      void marks.updateNote(mark.id, note, mark.bookId).catch(report('save a note'))
+    /* ⚠️ **HANDED BACK, NOT DROPPED** (2026-09-14 verify). The write was `void`,
+       so the note editor took every note for saved the moment it was handed over
+       and closed over a write that could still fail. Still reported here; the
+       promise is ALSO the caller's, so an editor can keep the draft. */
+    setNote: (mark: MarkRef, note: string): Promise<void> => {
+      const saving = marks.updateNote(mark.id, note, mark.bookId)
+      saving.catch(report('save a note'))
+      return saving
     },
 
     loadAll: () => {

@@ -700,6 +700,69 @@
   color: var(--ink-2);
 }
 
+/* --- lookups (phase 17, WI-17.3) ---------------------------------------- */
+
+/* A lookup row is the note row's shape, as a bookmark row is. Its bar is AMBER,
+ * because what the row mostly holds is definitions a model wrote — the same
+ * provenance `.note[data-kind='companion']` marks, said on the edge rather than
+ * across the background, since the row is the reader's history and not the
+ * companion's claim. */
+.note[data-kind='lookup']::before {
+  background: var(--amber);
+}
+
+.lookupHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+
+.lookupTerm {
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.lookupPlace {
+  padding-top: var(--space-8);
+}
+
+/* Two places of one word are two senses — a hairline says where one ends. */
+.lookupPlace + .lookupPlace {
+  margin-top: var(--space-8);
+  border-top: 1px solid var(--line);
+}
+
+/* `pre-line` for an answer in two languages, which is two lines. */
+.lookupSense {
+  font-size: var(--text-ui);
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+/* The sentence it was met in — clamped, because it is there to say WHERE, not to
+ * be read; the page is one click away. The prose face, like every passage in
+ * this pane. */
+.lookupSentence {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  padding-top: var(--space-4);
+  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-size: var(--text-body);
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.noteJump:disabled .lookupSentence {
+  color: var(--muted);
+}
+
 /* The remembered opening line, one line of it. It is there to confirm the
  * place, not to be read — the reader has the whole page one click away — so it
  * is clamped rather than allowed to set the height of every row. */
@@ -868,6 +931,16 @@
   flex: 1 1 auto;
 }
 
+/* The heading element around a group's toggle (#137). No look of its own — the
+   toggle inside is what is styled — and it takes the row's slack, as the toggle
+   did when it stood in the row alone. */
+.groupHeading {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font: inherit;
+}
+
 /* The sort toggle: the row menu's `⋯` shape, since it is the same kind of
    thing — a quiet mark until it is wanted. */
 .groupTool {
@@ -1003,6 +1076,27 @@
 .settingValue {
   font-size: var(--text-small);
   color: var(--muted);
+}
+
+/* A setting chosen from a LIST rather than cycled — WI-17.5's answer language,
+ * the first. The native `<select>`, dressed as `.settingValue`: a list of a
+ * dozen languages opened by the platform is keyboard-, screen-reader- and
+ * touch-correct for free, where a hand-built menu would have to earn each. */
+.settingSelect {
+  max-width: 60%;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-small);
+  text-align: end;
+  cursor: pointer;
+}
+
+.settingSelect:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--space-2);
+  border-radius: var(--radius-chip);
 }
 
 /* A row that holds its own controls rather than being one. `.settingRow` is a

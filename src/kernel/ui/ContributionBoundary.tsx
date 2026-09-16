@@ -1,4 +1,4 @@
-import { Component, type ReactNode } from 'react'
+import { Component, Suspense, type ReactNode } from 'react'
 import type { PaneContext, PaneRenderer } from '../core/capability'
 import { renderContribution } from './panes'
 import styles from './screens/ContributedScreen.module.css'
@@ -43,7 +43,14 @@ export class ContributionBoundary extends Component<
    * the second was never asked to draw. The key names what is being drawn.
    */
   override componentDidUpdate(previous: { readonly resetKey?: string }) {
-    // Stryker disable next-line LogicalOperator: clearing a failure that is not there changes nothing a reader can see.
+    /* ⚠️ **BOTH HALVES, AND THE SECOND ONE IS NOT BOOKKEEPING.** This line
+     * carried a directive calling `&&` interchangeable with `||`, on the
+     * reasoning that clearing a failure that is not there changes nothing a
+     * reader can see — true of the half it was thinking of, and silent about
+     * the other: `||` clears a failure that IS there whenever anything else
+     * re-renders, so a panel that threw would be asked to draw again with the
+     * same contribution in place. "keeps showing the failure until the
+     * contribution changes" measures it. */
     if (previous.resetKey !== this.props.resetKey && this.state.failed) this.setState({ failed: false })
   }
 
@@ -59,7 +66,21 @@ export class ContributionBoundary extends Component<
   }
 }
 
-/** The renderer, invoked as this element renders — inside the boundary above it. */
+/**
+ * The renderer, invoked as this element renders — inside the boundary above it.
+ *
+ * ⚠️ **AND INSIDE A SUSPENSE BOUNDARY, which the error boundary is not.** React
+ * 19 draws a promise (`use` unwraps it) and `renderContribution` lets one
+ * through deliberately — but a suspension is caught by the nearest SUSPENSE
+ * boundary, and there was none anywhere above a contribution. So one pane
+ * waiting on a promise took the root as its boundary and left the whole window
+ * blank until it settled (#150). No capability returns one today; this is the
+ * guard, and the outage it prevents costs the reader everything on screen.
+ *
+ * `null` for the fallback rather than a spinner: what suspends is a panel that
+ * has not said it is loading, and inventing a loading state on its behalf would
+ * be the kernel drawing a claim the capability never made.
+ */
 export function ContributionBody({ id, render, context }: { readonly id: string; readonly render: PaneRenderer; readonly context: PaneContext }) {
-  return <>{renderContribution(id, render, context)}</>
+  return <Suspense fallback={null}>{renderContribution(id, render, context)}</Suspense>
 }

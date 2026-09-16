@@ -78,6 +78,18 @@ export interface EndpointsSnapshot {
   readonly busy: boolean
   /** What went wrong, in the reader's words, or null. */
   readonly failure: string | null
+  /**
+   * What the reader has typed into the form and not yet saved.
+   *
+   * ⚠️ **THIS WAS `useState` IN THE PANE, AND THE PANE DOES NOT SURVIVE THE
+   * GROUP BEING CLOSED.** `PaneGroup` unmounts a closed group on purpose — a
+   * contributed section must not keep running behind one nobody is looking at
+   * — so a reader who pasted an address, opened another group to find their
+   * key and came back met three empty fields. The model is what outlives the
+   * mount, and every other thing the pane draws already lives here
+   * (2026-09-13 audit, round 2).
+   */
+  readonly draft: EndpointDraft
 }
 
 /* --------------------------- what a draft refuses ------------------------ */
@@ -99,7 +111,9 @@ const MAX_ID = 40
 const MAX_BASE_URL = 400
 
 export function validId(id: string): boolean {
-  return id.length > 0 && id.length <= MAX_ID && /^[a-z0-9-]+$/.test(id)
+  /* The pattern's `+` is the crate's `!id.is_empty()`: a separate length test
+     beside it could never be the one that refused. */
+  return id.length <= MAX_ID && /^[a-z0-9-]+$/.test(id)
 }
 
 export function validBaseUrl(url: string): boolean {
@@ -115,22 +129,28 @@ export function validBaseUrl(url: string): boolean {
   /* No credentials, and no fragment — a base URL is a prefix Paper appends a
      route to, and `#` would make everything after it part of the fragment. */
   if (rest.includes('@') || rest.includes('#')) return false
+  // Stryker disable next-line StringLiteral: `split` returns at least one part, so the fallback is never taken
   const authority = rest.split(/[/?]/)[0] ?? ''
   /* There has to BE a host: an empty authority is `https://` wearing a URL's
-     clothes, and it reaches the daemon as a registration that cannot resolve. */
-  if (!(authority.length > 0 && /^[A-Za-z0-9.:-]+$/.test(authority) && /[A-Za-z0-9]/.test(authority))) return false
+     clothes, and it reaches the daemon as a registration that cannot resolve.
+     The `+` refuses the empty one, as the crate's `!authority.is_empty()` does. */
+  if (!(/^[A-Za-z0-9.:-]+$/.test(authority) && /[A-Za-z0-9]/.test(authority))) return false
   /* AND IT HAS TO BE A HOST. The character class let `a:99999`, `a..b` and
      `-host` through with the message promising a valid address; the platform
-     parser knows what a host and a port are, and refuses those. */
+     parser knows what a host and a port are, and refuses those.
+
+     No credential or bracket test follows it, and two stood here: `@` is
+     refused above, so the parser never finds a user or a password, and `[` is
+     outside the character class, so no IPv6 literal reaches the parser. An
+     https URL that parses always has a host. */
   let parsed: URL
   try {
     parsed = new URL(url)
   } catch {
     return false
   }
-  if (parsed.hostname === '' || parsed.username !== '' || parsed.password !== '') return false
-  const labels = parsed.hostname.replace(/^\[|\]$/g, '').split('.')
-  if (!parsed.hostname.startsWith('[') && labels.some((label) => label === '' || label.startsWith('-') || label.endsWith('-'))) return false
+  const labels = parsed.hostname.split('.')
+  if (labels.some((label) => label === '' || label.startsWith('-') || label.endsWith('-'))) return false
   return true
 }
 
@@ -158,6 +178,7 @@ const KEY_STATE_WORDS: Readonly<Record<KeyState, string>> = {
 
 /** The host an address points at, for the row's value. */
 export function hostOf(baseUrl: string): string {
+  // Stryker disable next-line Regex: every stored address begins with `https://` (`valid_base_url`), and a replace with no `g` removes that first occurrence anchored or not
   const rest = baseUrl.replace(/^https:\/\//, '')
   return rest.split(/[/?]/)[0] ?? baseUrl
 }
@@ -184,13 +205,24 @@ export interface EndpointsModel {
   getSnapshot(): EndpointsSnapshot
   subscribe(listener: () => void): () => void
   refresh(): Promise<void>
+  /** Change one field of the unsaved draft — see `EndpointsSnapshot.draft`. */
+  edit(field: keyof EndpointDraft, value: string): void
   /**
-   * Add or replace an endpoint, and set its key when one was typed.
+   * Add or replace the endpoint in the draft, and set its key when one was
+   * typed.
    *
    * False when the draft was refused or a command failed; the reason is in
    * `snapshot.failure` either way.
+   *
+   * ⚠️ **IT TAKES NO DRAFT, AND THAT IS THE POINT.** The pane held the form in
+   * `useState` and handed it in, so the draft was lost whenever the group
+   * closed. Passing the model its own draft back would leave two copies of one
+   * thing, which is the arrangement that drifts. **Cleared only on success**:
+   * a refused draft stays in the fields so the reader corrects the one thing
+   * that was wrong, rather than retyping an address and a key they have
+   * already pasted once.
    */
-  save(draft: EndpointDraft): Promise<boolean>
+  save(): Promise<boolean>
   /**
    * Press Remove on a row: arms it, or removes it if it was already armed.
    *
@@ -208,7 +240,7 @@ export interface EndpointsModelOptions {
   readonly report?: ReportFailure
 }
 
-const EMPTY: EndpointsSnapshot = { rows: [], loading: true, busy: false, failure: null }
+const EMPTY: EndpointsSnapshot = { rows: [], loading: true, busy: false, failure: null, draft: EMPTY_DRAFT }
 
 
 export function createEndpointsModel({ plugin, report }: EndpointsModelOptions): EndpointsModel {
@@ -217,6 +249,7 @@ export function createEndpointsModel({ plugin, report }: EndpointsModelOptions):
   let arming: string | null = null
   let busy = false
   let failure: string | null = null
+  let draft: EndpointDraft = EMPTY_DRAFT
   let cached: EndpointsSnapshot | null = EMPTY
   let disposed = false
   /* LAST ISSUED WINS. Every mutation re-reads and the pane reads on mount, so
@@ -230,8 +263,8 @@ export function createEndpointsModel({ plugin, report }: EndpointsModelOptions):
 
   const build = (): EndpointsSnapshot =>
     stored === null
-      ? { ...EMPTY, busy, failure }
-      : { rows: stored.map((one) => rowFor(one, arming)), loading: false, busy, failure }
+      ? { ...EMPTY, busy, failure, draft }
+      : { rows: stored.map((one) => rowFor(one, arming)), loading: false, busy, failure, draft }
 
   const read = async (): Promise<void> => {
     const mine = generations.claim()
@@ -293,8 +326,16 @@ export function createEndpointsModel({ plugin, report }: EndpointsModelOptions):
     },
     refresh: read,
 
-    save: async (draft) => {
-      const refusal = refuseDraft(draft)
+    edit: (field, value) => {
+      draft = { ...draft, [field]: value }
+      invalidate()
+    },
+
+    save: async () => {
+      /* READ ONCE, so what is SENT cannot change under the await if the reader
+         goes on typing while the save is out. */
+      const sending = draft
+      const refusal = refuseDraft(sending)
       if (refusal !== null) {
         failure = refusal
         invalidate()
@@ -304,12 +345,25 @@ export function createEndpointsModel({ plugin, report }: EndpointsModelOptions):
          press left armed is one click away from deleting something they are no
          longer looking at. */
       arming = null
-      return mutate('inference.add-endpoint-failed', 'That endpoint could not be saved.', async () => {
-        await plugin.addEndpoint(draft.id, draft.label === '' ? draft.id : draft.label, draft.baseUrl)
+      const saved = await mutate('inference.add-endpoint-failed', 'That endpoint could not be saved.', async () => {
+        await plugin.addEndpoint(sending.id, sending.label === '' ? sending.id : sending.label, sending.baseUrl)
         /* BLANK MEANS LEAVE IT ALONE — `set_key("")` clears, which would take
            the key off an endpoint the reader was only relabelling. */
-        if (draft.key !== '') await plugin.setEndpointKey(draft.id, draft.key)
+        if (sending.key !== '') await plugin.setEndpointKey(sending.id, sending.key)
       })
+      /* CLEARED ONLY ON SUCCESS — a refused draft stays in the fields so the
+         reader corrects the one thing that was wrong.
+
+         ⚠️ **AND ONLY WHERE IT IS STILL THE DRAFT THAT WAS SENT.** A save is a
+         round trip to the runtime, and a reader goes on typing across it — so
+         clearing whatever was in the fields when it landed took away the NEXT
+         endpoint they had begun (2026-09-13 verify). `edit` builds a new draft,
+         so identity is the whole test. */
+      if (saved && !disposed && draft === sending) {
+        draft = EMPTY_DRAFT
+        invalidate()
+      }
+      return saved
     },
 
     pressRemove: async (id) => {
@@ -332,8 +386,9 @@ export function createEndpointsModel({ plugin, report }: EndpointsModelOptions):
     },
 
     dispose: () => {
+      /* No generation is claimed here: every read tests `disposed` beside its
+         generation, so a claim could only repeat what this flag already says. */
       disposed = true
-      generations.claim()
       listeners.clear()
     },
   }

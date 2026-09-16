@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os'
 import path, { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import {
   LEDGER,
   compare,
@@ -27,7 +27,13 @@ const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
  * round trip, and those are where a mistake would be silent.
  */
 
-const dir = () => mkdtempSync(path.join(tmpdir(), 'ledger-'))
+/** A directory of the case's own, removed when the case finishes — however it
+ *  finishes. Every call used to leave one behind in the system temp directory. */
+const dir = () => {
+  const made = mkdtempSync(path.join(tmpdir(), 'ledger-'))
+  onTestFinished(() => rmSync(made, { recursive: true, force: true }))
+  return made
+}
 
 /** A root that already holds a ledger with the given raw body. */
 const rootHolding = (body) => {
@@ -210,12 +216,11 @@ describe('a suite that declares itself conditional', () => {
   it('is dropped on the way into the ledger, not merely reported', () => {
     /* The half that stops the regression: a `--write` from a developer's
        machine has to produce the ledger a clean checkout would. */
-    const root = mkdtempSync(join(tmpdir(), 'paper-ledger-'))
+    const root = dir()
     const skipped = writeLedger(root, [NAME, 'a > b > c'])
     expect(skipped).toBe(1)
     const written = JSON.parse(readFileSync(join(root, LEDGER), 'utf8'))
     expect(written.tests).toEqual(['a > b > c'])
-    rmSync(root, { recursive: true, force: true })
   })
 
   it('is a finding wherever it is found, not only where it fails', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { VOICE_DECISIONS_PATH, writeQueue, type IndexFs, type VoiceBinding } from '../../../kernel'
-import { MAX_DECISIONS, voiceDecisionsPortOver } from './voicePort'
+import { MAX_DECISIONS, decisionsFrom, voiceDecisionsPortOver, type VoiceDecisionsPort } from './voicePort'
 
 const VOICE = 'ab'.repeat(32)
 const OTHER = 'cd'.repeat(32)
@@ -52,6 +52,66 @@ const portOn = (files = new Map<string, string>(), changed = () => {}) => {
   return { files, queue, port: voiceDecisionsPortOver(fakeFs(files), queue, changed) }
 }
 
+/** What `run` threw, or `null` — so a test can assert that it is an `Error` and what it says. */
+function thrown(run: () => unknown): unknown {
+  try {
+    run()
+  } catch (cause) {
+    return cause
+  }
+  return null
+}
+
+/** `count` distinct voices, well-formed. */
+const voices = (count: number): string[] => Array.from({ length: count }, (_, i) => i.toString(16).padStart(64, '0'))
+
+/** A stored decisions file, with every collection empty unless given. */
+const storedWith = (over: Record<string, unknown>): string =>
+  JSON.stringify({ v: 1, bindings: [], blockedVoices: [], blockedPeople: [], ...over })
+
+describe('decisionsFrom — the stored file, read back', () => {
+  it.each([
+    ['null', 'null'],
+    ['a number', '42'],
+    ['a string', '"decisions"'],
+  ])('refuses a file that is %s rather than a record', (_name, text) => {
+    const cause = thrown(() => decisionsFrom(text))
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe(`public: ${VOICE_DECISIONS_PATH} is not a record of decisions`)
+  })
+
+  it('reads a collection it does not find as empty, because absent is empty', () => {
+    expect(decisionsFrom('{"v":1}')).toEqual({ bindings: [], blockedVoices: [], blockedPeople: [] })
+  })
+
+  it.each([
+    ['bindings', 'bindings'],
+    ['blocked voices', 'blockedVoices'],
+    ['blocked people', 'blockedPeople'],
+  ])('names the %s list when it is there and will not read', (name, key) => {
+    const cause = thrown(() => decisionsFrom(storedWith({ [key]: 'not a list' })))
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe(`public: ${VOICE_DECISIONS_PATH} has a ${name} list that will not read`)
+  })
+
+  it('drops an entry of a blocked list that is not a string, and keeps the rest', () => {
+    const held = decisionsFrom(storedWith({ blockedVoices: [VOICE, 7, null], blockedPeople: [{}, PERSON] }))
+    expect(held.blockedVoices).toEqual([VOICE])
+    expect(held.blockedPeople).toEqual([PERSON])
+  })
+
+  it.each([
+    ['bindings', (count: number) => ({ bindings: voices(count).map((voice) => binding({ voice })) })],
+    ['blocked voices', (count: number) => ({ blockedVoices: voices(count) })],
+    ['blocked people', (count: number) => ({ blockedPeople: voices(count) })],
+  ])('reads %s at exactly the cap, and refuses a file one past it', (_name, holding) => {
+    expect(() => decisionsFrom(storedWith(holding(MAX_DECISIONS))), 'a file at the cap was refused').not.toThrow()
+    const cause = thrown(() => decisionsFrom(storedWith(holding(MAX_DECISIONS + 1))))
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe(`public: ${VOICE_DECISIONS_PATH} holds more decisions than this build will keep`)
+  })
+})
+
 describe('a reader who has decided nothing', () => {
   /* ⚠️ **A LOSSY READ FEEDING A WRITE MAKES THE LOSS PERMANENT.** Each of
      these read as "nothing decided", which silently stops every silence
@@ -63,6 +123,29 @@ describe('a reader who has decided nothing', () => {
     files.set(VOICE_DECISIONS_PATH, JSON.stringify({ v: 1, bindings: [], blockedVoices: 'a', blockedPeople: [] }))
     const { port } = portOn(files)
     await expect(port.decisions()).rejects.toThrow(/blocked voices list that will not read/u)
+  })
+
+  /* ⚠️ **AND `bindings` WAS THE COLLECTION LEFT OUT OF THAT RULE.** The two
+     blocked lists became fatal and this one kept reading a present-but-
+     mistyped value as no bindings — so the next decision wrote that emptiness
+     over every voice the reader had bound to a person, and the file is this
+     device's own. Found by the 2026-09-13 audit. */
+  it('refuses a decisions file whose bindings list is not a list, and writes nothing over it', async () => {
+    const files = new Map<string, string>()
+    const raw = JSON.stringify({ v: 1, bindings: 'x', blockedVoices: [], blockedPeople: [] })
+    files.set(VOICE_DECISIONS_PATH, raw)
+    const { port, queue } = portOn(files)
+
+    const cause = await port.decisions().then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/bindings list that will not read/u)
+
+    await port.blockVoice(VOICE).catch(() => {})
+    await queue.idle()
+    expect(files.get(VOICE_DECISIONS_PATH), 'the file it could not read must be intact').toBe(raw)
   })
 
   it('refuses a decisions file holding more than this build will keep', async () => {
@@ -231,6 +314,63 @@ describe('the write is one queued transaction', () => {
     await queue.idle()
     expect(listener, 'a refusal was announced as a change').toHaveBeenCalledTimes(1)
   })
+
+  it('stops telling a listener once it has unsubscribed', async () => {
+    const { port, queue } = portOn()
+    const listener = vi.fn()
+    const unsubscribe = port.subscribe(listener)
+    unsubscribe()
+    await port.blockVoice(VOICE)
+    await queue.idle()
+    expect(listener, 'an unsubscribed listener was told').not.toHaveBeenCalled()
+  })
+
+  it('names this store when a listener throws, and the decision still lands', async () => {
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { port, queue } = portOn()
+      port.subscribe(() => {
+        throw new Error('a pane that broke')
+      })
+      await port.blockVoice(VOICE)
+      await queue.idle()
+      expect(await port.standing(VOICE)).toBe('blocked')
+      expect(reported).toHaveBeenCalledWith(
+        'Paper: a voice decisions subscriber threw while being notified',
+        expect.any(Error),
+      )
+    } finally {
+      reported.mockRestore()
+    }
+  })
+
+  it('writes a binding said again with a newer time, and tells its listeners', async () => {
+    const { port, queue } = portOn()
+    await port.bind(binding({ at: 1 }))
+    await queue.idle()
+    const listener = vi.fn()
+    port.subscribe(listener)
+    expect(await port.bind(binding({ at: 2 }))).toBeNull()
+    await queue.idle()
+    expect((await port.decisions()).bindings.map((one) => one.at), 'the newer time was taken for no change').toEqual([2])
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+
+  it('writes a reordering, because the order is the reader’s own', async () => {
+    /* The same person and the same time for both, so only WHICH voice sits
+       where tells the two orders apart. */
+    const { port, queue } = portOn()
+    await port.bind(binding())
+    await port.bind(binding({ voice: OTHER }))
+    await queue.idle()
+    /* Said again, so it moves to the end. */
+    await port.bind(binding())
+    await queue.idle()
+    expect((await port.decisions()).bindings.map((one) => one.voice), 'a reordering was taken for no change').toEqual([
+      OTHER,
+      VOICE,
+    ])
+  })
 })
 
 describe('the store is bounded', () => {
@@ -252,6 +392,7 @@ describe('the store is bounded', () => {
        place. */
     const { files, port, queue } = portOn()
     await port.blockVoice(VOICE)
+    await port.bind(binding())
     await queue.idle()
     const before = files.get(VOICE_DECISIONS_PATH)
     let told = 0
@@ -260,9 +401,37 @@ describe('the store is bounded', () => {
     })
     /* The same block again, and a binding that is already held. */
     await port.blockVoice(VOICE)
+    await port.bind(binding())
     await queue.idle()
     expect(told, 'a change that changed nothing was announced').toBe(0)
     expect(files.get(VOICE_DECISIONS_PATH), 'the file was rewritten for nothing').toBe(before)
+  })
+
+  it.each<[string, (count: number) => Record<string, unknown>, (port: VoiceDecisionsPort) => Promise<unknown>]>([
+    [
+      'bindings',
+      (count) => ({ bindings: voices(count).map((voice) => binding({ voice })) }),
+      (port) => port.bind(binding({ voice: 'ff'.repeat(32) })),
+    ],
+    ['blocked voices', (count) => ({ blockedVoices: voices(count) }), (port) => port.blockVoice('ff'.repeat(32))],
+    ['blocked people', (count) => ({ blockedPeople: voices(count) }), (port) => port.blockPerson('ff'.repeat(32))],
+  ])('writes %s up to the cap, and refuses the decision past it', async (_name, holding, decide) => {
+    const under = portOn(new Map([[VOICE_DECISIONS_PATH, storedWith(holding(MAX_DECISIONS - 1))]]))
+    await decide(under.port)
+    await under.queue.idle()
+    expect(
+      JSON.stringify(await under.port.decisions()),
+      'the decision that reaches the cap was not written',
+    ).toContain('ff'.repeat(32))
+
+    const at = portOn(new Map([[VOICE_DECISIONS_PATH, storedWith(holding(MAX_DECISIONS))]]))
+    const cause = await decide(at.port).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    await at.queue.idle()
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe(`public: this device already holds the ${MAX_DECISIONS} decisions it will keep`)
   })
 
   it('copies the binding it is handed, so mutating it afterwards changes nothing', async () => {

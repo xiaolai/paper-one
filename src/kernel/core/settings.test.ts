@@ -1,7 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BRIGHTNESS, CONTRAST, LEGACY_READING_SIZES, READING_STEPS, SPACING, stepIndexForSize } from './metrics'
+import {
+  BRIGHTNESS,
+  CONTRAST,
+  DEFAULT_READING_STYLE,
+  LEGACY_READING_SIZES,
+  MINIMUM_SIZES,
+  READING_STEPS,
+  SPACING,
+  stepIndexForSize,
+} from './metrics'
 import { initialState, preferencesOf } from '../ui/state'
 import { defineSetting } from './ports'
+import type { ReadingStyle } from './uiTypes'
 import {
   KERNEL_SETTINGS,
   SETTINGS_STORAGE_KEY,
@@ -115,17 +125,142 @@ describe('what is persisted', () => {
 })
 
 describe('reading a file nobody can vouch for', () => {
-  it('returns the defaults for an absent, empty or unparseable file', () => {
-    for (const bad of ['', 'not json', '{oops']) {
-      expect(readingBack(bad)).toEqual(DEFAULTS)
+  it('returns the defaults when there is nothing stored', () => {
+    expect(readKernelPreferences(createSettingsStore({ storage: fakeStorage() }))).toEqual(DEFAULTS)
+  })
+
+  /* ⚠️ **UNREADABLE IS NOT ABSENT, AND THESE TWO USED TO BE ONE ANSWER.**
+     `parseEnvelope` answered `null` for bytes that are not JSON and for a shape
+     that is not an envelope, so the store came up carrying no values with
+     writes still ON — and the next preference the reader changed replaced the
+     file with an envelope holding that one alone. A storage that THREW on the
+     read was fixed by an earlier audit; a file that will not READ, which is the
+     commoner of the two, took the other path until the 2026-09-13 audit. The
+     reader still gets the defaults; what changes is that the file survives.
+     `null` is included deliberately — it is what an empty file parses to, and
+     `typeof null` is 'object'. */
+  it.each([
+    ['rubbish', 'not json', 'the stored settings are not JSON'],
+    ['truncated', '{oops', 'the stored settings are not JSON'],
+    ['an empty string', '', 'the stored settings are not JSON'],
+    ['JSON null', 'null', 'the stored settings are not an envelope'],
+    ['a list', '[]', 'the stored settings are not an envelope'],
+    ['a bare number', '42', 'the stored settings are not an envelope'],
+    ['a bare string', '"night"', 'the stored settings are not an envelope'],
+  ])('keeps the defaults for a file that is %s, and writes nothing over it', (_name, raw, clause) => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const map = new Map<string, string>([[SETTINGS_STORAGE_KEY, raw]])
+      const store = createSettingsStore({
+        storage: {
+          getItem: (key: string) => map.get(key) ?? null,
+          setItem: (key: string, value: string) => void map.set(key, value),
+        },
+      })
+
+      expect(readKernelPreferences(store)).toEqual(DEFAULTS)
+      expect(store.persistent, 'and is told nothing is being saved').toBe(false)
+      /* SAID, and for ITS reason: the two refusals share a prefix, so each is
+         held to its whole sentence rather than to the words they have in common. */
+      expect(error.mock.calls[0]?.[0]).toBe('Paper: settings could not be read, and will not be saved this session')
+      const cause: unknown = error.mock.calls[0]?.[1]
+      expect(cause).toBeInstanceOf(Error)
+      expect((cause as Error).message).toBe(clause)
+
+      store.set(KERNEL_SETTINGS.side, 'left')
+      expect(store.get(KERNEL_SETTINGS.side), 'the session still sees what it chose').toBe('left')
+      expect(map.get(SETTINGS_STORAGE_KEY), 'the file it could not read must be intact').toBe(raw)
+    } finally {
+      error.mockRestore()
     }
   })
 
-  it('returns the defaults for a shape that is not an object', () => {
-    // `null` is what an empty file parses to, and `typeof null` is 'object'.
-    for (const bad of ['null', '[]', '42', '"night"']) {
-      expect(readingBack(bad)).toEqual(DEFAULTS)
+  it('keeps what the JSON parser said, as the cause of refusing bytes that are not JSON', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      createSettingsStore({ storage: { getItem: () => '{oops', setItem: () => {} } })
+      const cause: unknown = error.mock.calls[0]?.[1]
+      expect(cause).toBeInstanceOf(Error)
+      expect((cause as Error).cause).toBeInstanceOf(SyntaxError)
+    } finally {
+      error.mockRestore()
     }
+  })
+
+  /* THE KEY IS THE STORED FORMAT'S NAME. Every other case here reads it through
+     the constant, so none of them could notice it change — and a changed key
+     is every reader's preferences orphaned, on the first launch of that build. */
+  it('reads the file earlier builds wrote, under the name they wrote it', () => {
+    const map = new Map<string, string>([['paper.settings.v1', JSON.stringify(envelope({ 'kernel.theme': 'night' }))]])
+    const store = createSettingsStore({
+      storage: {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => void map.set(key, value),
+      },
+    })
+    expect(store.get(KERNEL_SETTINGS.theme)).toBe('night')
+  })
+
+  /* ⚠️ **A COLLECTION THAT IS DAMAGED IS NOT A COLLECTION THAT IS EMPTY, AND
+     THE ENVELOPE'S `values` WAS THE ONE LEFT OUT OF THE RULE ABOVE.** Bytes
+     that are not an envelope at all were made to throw by the 2026-09-13
+     audit; a well-formed envelope whose `values` is a LIST, a string or a
+     number went on reading as `{}` with writes still ON — so the first
+     preference the reader changed replaced the whole file with an envelope
+     holding that one alone. That is the very loss the block above describes,
+     one field further in, and the two are spelled apart here because the
+     clauses share a prefix. Found by the 2026-09-13 verify.
+
+     A legacy FLAT file has no `values` key at all and is untouched by this —
+     see "carrying the pre-kernel settings file across" — and a versioned
+     envelope with no `values` really is carrying nothing. */
+  it.each([
+    ['a list', { version: SETTINGS_VERSION, values: [{ 'kernel.theme': 'night' }] }],
+    ['an empty list', { version: SETTINGS_VERSION, values: [] }],
+    ['a bare string', { version: SETTINGS_VERSION, values: 'night' }],
+    ['a bare number', { version: SETTINGS_VERSION, values: 42 }],
+    ['JSON null', { version: SETTINGS_VERSION, values: null }],
+    ['a list under no version at all', { values: ['kernel.theme'] }],
+  ])('keeps the defaults for an envelope whose values are %s, and writes nothing over it', (_name, doc) => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const raw = JSON.stringify(doc)
+      const map = new Map<string, string>([[SETTINGS_STORAGE_KEY, raw]])
+      const store = createSettingsStore({
+        storage: {
+          getItem: (key: string) => map.get(key) ?? null,
+          setItem: (key: string, value: string) => void map.set(key, value),
+        },
+      })
+
+      expect(readKernelPreferences(store)).toEqual(DEFAULTS)
+      expect(store.persistent, 'and is told nothing is being saved').toBe(false)
+      /* Refused for ITS reason, not for the envelope's: the words are this clause's own. */
+      const cause: unknown = error.mock.calls[0]?.[1]
+      expect(cause).toBeInstanceOf(Error)
+      expect((cause as Error).message).toMatch(/have values that are not a collection/u)
+
+      store.set(KERNEL_SETTINGS.side, 'left')
+      expect(store.get(KERNEL_SETTINGS.side), 'the session still sees what it chose').toBe('left')
+      expect(map.get(SETTINGS_STORAGE_KEY), 'the file it could not read must be intact').toBe(raw)
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  it('still reads a versioned envelope that is carrying no values at all', () => {
+    /* THE ONE SHAPE NEXT DOOR THAT IS NOT DAMAGE. `values` absent under a
+       version is an envelope this build wrote for a reader who has chosen
+       nothing, and refusing it would make a first launch unsaveable. */
+    const map = new Map<string, string>([[SETTINGS_STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION })]])
+    const store = createSettingsStore({
+      storage: {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => void map.set(key, value),
+      },
+    })
+    expect(readKernelPreferences(store)).toEqual(DEFAULTS)
+    expect(store.persistent).toBe(true)
   })
 
   it('keeps the one field it recognises out of a file of rubbish', () => {
@@ -161,6 +296,20 @@ describe('reading a file nobody can vouch for', () => {
     expect(got.side).toBe(DEFAULTS.side)
     expect(got.align).toBe(DEFAULTS.align)
     expect(got.pageLayout).toBe(DEFAULTS.pageLayout)
+  })
+
+  it('keeps the pane ids in a hidden list, dropping what is not one', () => {
+    /* One junk entry costs that entry, not the list — see `stringList`. */
+    expect(readingBack(envelope({ 'kernel.hiddenPanes': ['search', 42, null, 'library'] })).hiddenPanes).toEqual([
+      'search',
+      'library',
+    ])
+  })
+
+  it('refuses a switch that is not a boolean', () => {
+    const got = readingBack(envelope({ 'kernel.rulerOn': 'yes', 'kernel.themeFollowsOs': 0 }))
+    expect(got.rulerOn).toBe(DEFAULTS.rulerOn)
+    expect(got.themeFollowsOs).toBe(DEFAULTS.themeFollowsOs)
   })
 })
 
@@ -201,6 +350,23 @@ describe('indices into a scale', () => {
     const got = readingBack(envelope({ 'kernel.brightness': BRIGHTNESS.steps.length - 1 }))
     expect(got.brightness).toBe(BRIGHTNESS.steps.length - 1)
   })
+
+  it('rejects a fractional brightness or contrast rather than landing between two steps', () => {
+    const got = readingBack(envelope({ 'kernel.brightness': 1.5, 'kernel.contrast': 0.5 }))
+    expect(got.brightness).toBe(BRIGHTNESS.def)
+    expect(got.contrast).toBe(CONTRAST.def)
+  })
+
+  /* THE PARSER'S OWN ANSWER, not the store's. `get` forgives a parser that
+     throws and falls back on one that answers `undefined`, so through the store
+     "not a spacing", "a spacing of defaults" and "a throw" all read alike. The
+     port says `T | undefined`: a value of the wrong shape is `undefined`, and
+     only asking the parser can hold it to that. */
+  it('answers a spacing that is not an object as no spacing at all', () => {
+    for (const bad of ['no', 42, null, [], [1, 2, 3, 4]]) {
+      expect(KERNEL_SETTINGS.spacing.parse(bad), JSON.stringify(bad)).toBeUndefined()
+    }
+  })
 })
 
 describe('the typeface', () => {
@@ -234,6 +400,65 @@ describe('the mark appearance', () => {
        hand the reader a style they cannot choose and cannot see the
        provenance rule behind. */
     expect(readingBack(envelope({ 'kernel.markStyle': 'wave' })).markStyle).toBe(DEFAULTS.markStyle)
+  })
+})
+
+describe('the reading style', () => {
+  /* WI-14.4's fifteen, EVERY ONE MOVED OFF ITS DEFAULT — so a field read from
+     the wrong key, or not read at all, comes back as the default and shows. */
+  const CHOSEN: ReadingStyle = {
+    separation: 'indent',
+    flourish: 'drop-cap',
+    headingScale: 'paper',
+    blockquote: 'rule',
+    codeFace: 'paper',
+    codeWrap: 'wrap',
+    figureWidth: 1,
+    figureFrame: 'hairline',
+    figureScalesWithText: true,
+    figureHeight: 1,
+    wideTables: 'shrink',
+    noteSize: 'publisher',
+    cjkSpacing: true,
+    minimumSize: 2,
+    fidelity: 'publisher',
+  }
+
+  it('reads back every field a reader chose', () => {
+    for (const [key, value] of Object.entries(CHOSEN)) {
+      expect(value, `${key} must differ from its default, or the case proves nothing`).not.toEqual(
+        DEFAULT_READING_STYLE[key as keyof ReadingStyle],
+      )
+    }
+    expect(readingBack(envelope({ 'kernel.readingStyle': CHOSEN })).readingStyle).toEqual(CHOSEN)
+  })
+
+  it('keeps each field it recognises and gives each one it does not its own default', () => {
+    /* Field by field, never as a blob — and a step past the end of a scale
+       clamps, as every other index here does. */
+    const got = readingBack(
+      envelope({
+        'kernel.readingStyle': {
+          separation: 'indent',
+          flourish: 'sparkles',
+          figureWidth: 1.5,
+          cjkSpacing: 'yes',
+          minimumSize: 99,
+        },
+      }),
+    ).readingStyle
+    expect(got).toEqual({
+      ...DEFAULT_READING_STYLE,
+      separation: 'indent',
+      minimumSize: MINIMUM_SIZES.steps.length - 1,
+    })
+  })
+
+  /* The parser's own answer, for the reason given under "indices into a scale". */
+  it('answers a style that is not an object as no style at all', () => {
+    for (const bad of ['plain', 42, null, [], ['indent']]) {
+      expect(KERNEL_SETTINGS.readingStyle.parse(bad), JSON.stringify(bad)).toBeUndefined()
+    }
   })
 })
 
@@ -380,6 +605,15 @@ describe('the reading size across a change to the ramp', () => {
     expect(readingBack(envelope({})).textSize).toBe(DEFAULTS.textSize)
     expect(readingBack(envelope({ 'kernel.stepIdx': 'two' })).textSize).toBe(DEFAULTS.textSize)
   })
+
+  /* ⚠️ **A NEGATIVE INDEX NAMES NO STEP, AND IT MIGRATED TO THE SMALLEST.** The
+     sentinel's note said `index()` rejects `-1`; it clamps it to 0, so a stored
+     `-1` came back as 17px. No build ever wrote a negative index — a longer
+     ramp is the reason to clamp, and it only ever runs off the top. */
+  it('reads a negative legacy index as nothing to migrate, not as the smallest old size', () => {
+    expect(readingBack(envelope({ 'kernel.stepIdx': -1 })).textSize).toBe(DEFAULTS.textSize)
+    expect(readingBack(envelope({ 'kernel.stepIdx': -4 })).textSize).toBe(DEFAULTS.textSize)
+  })
 })
 
 describe('carrying the pre-kernel settings file across', () => {
@@ -409,8 +643,15 @@ describe('carrying the pre-kernel settings file across', () => {
   })
 
   it('leaves an already-namespaced key alone, so it is safe to run twice', () => {
+    /* ⚠️ **THIS EXPECTED `night` — THE LEGACY KEY OVERWRITING THE NAMESPACED
+       ONE — UNDER A NAME PROMISING THE OPPOSITE.** Which won was decided by
+       PROPERTY ORDER: the same two keys written the other way round gave
+       `sage`. Both orders are held now, and both keep the namespaced value. */
     expect(carryLegacySettings({ version: 0, values: { 'kernel.theme': 'sage', theme: 'night' } })).toEqual({
-      'kernel.theme': 'night',
+      'kernel.theme': 'sage',
+    })
+    expect(carryLegacySettings({ version: 0, values: { theme: 'night', 'kernel.theme': 'sage' } })).toEqual({
+      'kernel.theme': 'sage',
     })
     expect(carryLegacySettings({ version: 0, values: { 'sync.interval': 30 } })).toEqual({ 'sync.interval': 30 })
   })
@@ -486,6 +727,22 @@ describe('a storage that will not take a write', () => {
 
   it('is not persistent over no storage at all', () => {
     expect(createSettingsStore({ storage: null }).persistent).toBe(false)
+  })
+
+  it('opens over no storage at all without reporting a read that failed', () => {
+    /* No storage is the plain session store, not a damaged file: nothing was
+       read, so nothing failed, and a log line saying otherwise is a false alarm
+       on every launch of a build that has none. */
+    createSettingsStore({ storage: null })
+    expect(console.error).not.toHaveBeenCalled()
+  })
+
+  it('says to the log that nothing more will be saved, in its own words', () => {
+    createSettingsStore({ storage: refusing(0).storage }).set(KERNEL_SETTINGS.theme, 'night')
+    expect(console.error).toHaveBeenCalledWith(
+      'Paper: settings will not be saved on this device',
+      expect.any(DOMException),
+    )
   })
 
   /**
@@ -580,16 +837,175 @@ describe('what the store promises never to do', () => {
 
   /* ⚠️ **`JSON.stringify` IS NOT TOTAL.** The unchanged-check was an unguarded
      call inside the same never-throws method: a cyclic value throws, and so
-     does a `bigint`. A difference it cannot prove must read as a difference —
-     one redundant write is cheaper than a dropped preference. */
-  it('does not throw comparing a value JSON cannot serialise', () => {
-    const store = createSettingsStore({ storage: fakeStorage() })
-    const cyclic: Record<string, unknown> = {}
-    cyclic.self = cyclic
-    const setting = defineSetting<unknown>('test.cyclic', null, (raw: unknown) => raw)
+     does a `bigint`.
 
-    expect(() => store.set(setting, cyclic)).not.toThrow()
-    expect(store.get(setting)).toBe(cyclic)
+     ⚠️ **AND THIS CASE USED TO EXPECT THE VALUE HELD.** Held, it was in the
+     envelope, so every later write failed to serialise the whole of it — which
+     the write path read as a refused storage and answered with `persistent:
+     false` for the rest of the session. One capability's bad value stopped
+     every preference saving, and replacing it did not undo that. A value that
+     cannot be saved is refused at `set`, said to the log, and never held. */
+  it('does not throw comparing a value JSON cannot serialise', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const store = createSettingsStore({ storage: fakeStorage() })
+      const cyclic: Record<string, unknown> = {}
+      cyclic.self = cyclic
+      const setting = defineSetting<unknown>('test.cyclic', null, (raw: unknown) => raw)
+
+      expect(() => store.set(setting, cyclic)).not.toThrow()
+      expect(store.get(setting)).toBeNull()
+      expect(store.has(setting)).toBe(false)
+      expect(error, 'a refused value must be said').toHaveBeenCalled()
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  it('keeps saving everything else after refusing such a value, and saves its replacement', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const storage = fakeStorage()
+      const store = createSettingsStore({ storage })
+      const cyclic: Record<string, unknown> = {}
+      cyclic.self = cyclic
+      const setting = defineSetting<unknown>('test.cyclic', null, (raw: unknown) => raw)
+
+      store.set(setting, cyclic)
+      store.set(setting, { plain: true })
+      store.set(KERNEL_SETTINGS.theme, 'night')
+
+      expect(store.persistent).toBe(true)
+      const reopened = createSettingsStore({ storage })
+      expect(reopened.get(KERNEL_SETTINGS.theme)).toBe('night')
+      expect(reopened.get(setting)).toEqual({ plain: true })
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  /* ⚠️ **THE STORE HELD THE CALLER'S OWN OBJECT.** Mutated after `set`, the
+     value in memory changed with no notification and no write, and setting the
+     same object again compared equal to itself — so the disk kept the old
+     value while every reader saw the new one. What is held is a copy, taken at
+     the boundary, of exactly what would be written. */
+  it('holds its own copy, so a caller mutating what it set changes nothing held', () => {
+    const storage = fakeStorage()
+    const store = createSettingsStore({ storage })
+    const chosen = { letter: 0, word: 0, line: 1, paragraph: 0 }
+    store.set(KERNEL_SETTINGS.spacing, chosen)
+    const before = store.getSnapshot()
+
+    chosen.line = 2
+    expect(store.get(KERNEL_SETTINGS.spacing).line).toBe(1)
+    expect(store.getSnapshot()).toBe(before)
+
+    /* And the mutated object, set again, IS a change — written and published. */
+    store.set(KERNEL_SETTINGS.spacing, chosen)
+    expect(store.get(KERNEL_SETTINGS.spacing).line).toBe(2)
+    expect(store.getSnapshot()).not.toBe(before)
+    expect(createSettingsStore({ storage }).get(KERNEL_SETTINGS.spacing).line).toBe(2)
+  })
+
+  /* ⚠️ **AND WHAT `get` HANDS OUT WAS THE STORE'S OWN OBJECT** (2026-09-13
+     verify). A reader mutating a fallback — one object shared by every store and
+     every reader — or a stored value a parser passed straight through changed
+     what every other reader saw, with no notification, no write, and the
+     snapshot's identity unchanged. Frozen, the mutation fails at the line that
+     makes it. */
+  it('hands out values no reader can change under another', () => {
+    const store = createSettingsStore({ storage: fakeStorage() })
+    const fallback = store.get(KERNEL_SETTINGS.spacing)
+
+    expect(() => {
+      ;(fallback as { line: number }).line = 9
+    }).toThrow(TypeError)
+    expect(store.get(KERNEL_SETTINGS.spacing).line).toBe(SPACING.line.def)
+
+    const passedThrough = defineSetting<{ readonly tags: readonly string[] }>(
+      'test.passedThrough',
+      { tags: [] },
+      (raw) => raw as { tags: string[] },
+    )
+    store.set(passedThrough, { tags: ['kept'] })
+    const held = store.get(passedThrough)
+
+    expect(() => {
+      ;(held.tags as string[]).push('slipped in')
+    }).toThrow(TypeError)
+    expect(store.get(passedThrough).tags).toEqual(['kept'])
+  })
+
+  /* AND THROUGH THE SNAPSHOT (2026-09-13 verify, second round). `getSnapshot`
+     hands out the held record itself, so freezing only what `get` returns left
+     every stored value one cast away from changing in memory while the disk kept
+     the old one — a value loaded at launch and a value set since alike. */
+  it('hands out a snapshot no reader can change under the store', () => {
+    const storage = fakeStorage()
+    createSettingsStore({ storage }).set(KERNEL_SETTINGS.spacing, { letter: 0, word: 0, line: 1, paragraph: 0 })
+    const loaded = createSettingsStore({ storage })
+    const atLaunch = loaded.getSnapshot() as Record<string, { line: number }>
+
+    expect(() => {
+      atLaunch['kernel.spacing']!.line = 2
+    }).toThrow(TypeError)
+
+    loaded.set(KERNEL_SETTINGS.hiddenPanes, ['search'])
+    const sinceSet = loaded.getSnapshot() as Record<string, unknown>
+
+    expect(() => {
+      ;(sinceSet['kernel.hiddenPanes'] as string[]).push('library')
+    }).toThrow(TypeError)
+    expect(() => {
+      sinceSet['kernel.theme'] = 'night'
+    }).toThrow(TypeError)
+    expect(createSettingsStore({ storage }).get(KERNEL_SETTINGS.spacing).line).toBe(1)
+  })
+
+  /* The freeze reaches everything a fallback holds: under a parent somebody
+     already froze, past a null and a primitive, and round a cycle without
+     walking it for ever. */
+  it('freezes all of a fallback, whatever its shape', () => {
+    const inner = { deep: [1, null, 'x'] }
+    const cyclic: Record<string, unknown> = { frozenParent: Object.freeze({ child: inner }) }
+    cyclic['self'] = cyclic
+
+    const setting = defineSetting('test.cyclic', cyclic, () => undefined)
+
+    expect(Object.isFrozen(setting.fallback)).toBe(true)
+    expect(Object.isFrozen(inner)).toBe(true)
+    expect(Object.isFrozen(inner.deep)).toBe(true)
+  })
+
+  /* ⚠️ **A READ THAT FAILED WAS TREATED AS AN EMPTY FILE, AND THE NEXT WRITE
+     REPLACED THE FILE.** The store started from nothing with writes still on,
+     so one preference changed after a transient failure wrote an envelope
+     holding only that preference — every other setting, a capability's
+     included, gone from disk. Unreadable is not absent: the store keeps the
+     session's choices in memory and leaves the file alone. */
+  it('writes nothing over a file it could not read', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const written = JSON.stringify(envelope({ 'kernel.theme': 'night', 'sync.keepNotes': false }))
+      const map = new Map<string, string>([[SETTINGS_STORAGE_KEY, written]])
+      let readable = false
+      const storage = {
+        getItem: (key: string) => {
+          if (!readable) throw new Error('storage is busy')
+          return map.get(key) ?? null
+        },
+        setItem: (key: string, value: string) => void map.set(key, value),
+      }
+      const store = createSettingsStore({ storage })
+      readable = true
+
+      store.set(KERNEL_SETTINGS.side, 'left')
+      expect(store.get(KERNEL_SETTINGS.side), 'the session still sees what it chose').toBe('left')
+      expect(store.persistent, 'and is told nothing is being saved').toBe(false)
+      expect(map.get(SETTINGS_STORAGE_KEY), 'the file it could not read must be intact').toBe(written)
+    } finally {
+      error.mockRestore()
+    }
   })
 
   /* ⚠️ **AN ENVELOPE FROM THE FUTURE IS NOT THIS BUILD'S TO REWRITE.** Any
@@ -612,5 +1028,138 @@ describe('what the store promises never to do', () => {
 
     store.set(KERNEL_SETTINGS.theme, 'night')
     expect(storage.getItem(SETTINGS_STORAGE_KEY), 'the newer file must be intact').toBe(written)
+  })
+
+  /* AND A VERSION THAT IS NOT A FINITE NUMBER IS NOT A NEWER BUILD. `1e999` is
+     what `JSON.parse` makes Infinity of; counted as a version it outranks every
+     version there will ever be, and the file would never be written again. */
+  it('reads an envelope whose version is not a finite number as an older one, not a newer one', () => {
+    const storage = fakeStorage()
+    storage.setItem(SETTINGS_STORAGE_KEY, '{"version":1e999,"values":{"kernel.theme":"sage"}}')
+    const store = createSettingsStore({ storage })
+    expect(store.get(KERNEL_SETTINGS.theme)).toBe('sage')
+    expect(store.persistent).toBe(true)
+  })
+
+  it('does not run the migration over an envelope this build wrote', () => {
+    const migrate = vi.fn(() => ({}))
+    const storage = fakeStorage()
+    storage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(envelope({ 'kernel.theme': 'night' })))
+    const store = createSettingsStore({ storage, migrate })
+    expect(migrate).not.toHaveBeenCalled()
+    expect(store.get(KERNEL_SETTINGS.theme)).toBe('night')
+  })
+
+  /* ABSENT MEANS THE FALLBACK, WITHOUT ASKING. A parser is written for what is
+     STORED, and one that makes something of nothing — `raw === true` reads
+     absence as `false` — must not be given the chance. */
+  it('reads an absent value as the fallback without asking the parser', () => {
+    const onByDefault = defineSetting<boolean>('test.onByDefault', true, (raw: unknown) => raw === true)
+    expect(createSettingsStore({ storage: fakeStorage() }).get(onByDefault)).toBe(true)
+  })
+
+  /* `get` PROMISES NEVER TO FAIL, and `parse` is whoever defined the setting. */
+  it('reads a value its parser throws on as the fallback', () => {
+    const storage = fakeStorage()
+    storage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(envelope({ 'test.fragile': 'anything' })))
+    const fragile = defineSetting<string>('test.fragile', 'fallback', () => {
+      throw new Error('a parser that throws')
+    })
+    expect(createSettingsStore({ storage }).get(fragile)).toBe('fallback')
+  })
+
+  it('stops telling a subscriber once it has unsubscribed', () => {
+    const store = createSettingsStore({ storage: fakeStorage() })
+    let told = 0
+    const unsubscribe = store.subscribe(() => {
+      told += 1
+    })
+    store.set(KERNEL_SETTINGS.theme, 'night')
+    unsubscribe()
+    store.set(KERNEL_SETTINGS.theme, 'sepia')
+    expect(told).toBe(1)
+  })
+
+  it('names itself in the log when a subscriber throws, so the line is worth reading', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const store = createSettingsStore({ storage: fakeStorage() })
+      store.subscribe(() => {
+        throw new Error('a subscriber that throws')
+      })
+      store.set(KERNEL_SETTINGS.theme, 'night')
+      expect(error).toHaveBeenCalledWith('Paper: a settings subscriber threw while being notified', expect.any(Error))
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  /* `undefined` HAS NO JSON SPELLING, so it could never have reached the disk —
+     and it is refused for THAT reason, in those words, rather than for the parse
+     failure that would follow if it were let through. */
+  it('refuses undefined, and says which setting and why', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const store = createSettingsStore({ storage: fakeStorage() })
+      const setting = defineSetting<unknown>('test.nothing', 'fallback', (raw: unknown) => raw)
+
+      store.set(setting, undefined)
+
+      expect(store.has(setting)).toBe(false)
+      expect(error.mock.calls[0]?.[0]).toBe(
+        'Paper: the setting test.nothing was not changed, because its value cannot be saved',
+      )
+      const cause: unknown = error.mock.calls[0]?.[1]
+      expect(cause).toBeInstanceOf(TypeError)
+      expect((cause as Error).message).toBe('JSON has no spelling for this value')
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  /* A DIFFERENCE IT CANNOT PROVE IS A DIFFERENCE. With nothing stored a value
+     is compared against the fallback, and a fallback JSON cannot serialise can
+     be proved equal to nothing — so the value is written, not dropped. */
+  it('writes a value over a fallback it cannot compare, rather than calling the two the same', () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic['self'] = cyclic
+    const storage = fakeStorage()
+    const setting = defineSetting<unknown>('test.cyclicFallback', cyclic, (raw: unknown) => raw)
+
+    createSettingsStore({ storage }).set(setting, { plain: true })
+
+    expect(createSettingsStore({ storage }).get(setting)).toEqual({ plain: true })
+  })
+
+  /* ⚠️ SERIALISING IS NOT THE STORAGE. `set` refuses an unsaveable value at the
+     door, so the envelope can fail to serialise only through a migration hook's
+     output — and that skips the write, says so, and leaves a healthy storage
+     marked healthy rather than refused. */
+  it('skips a write it cannot serialise, and leaves a healthy storage marked healthy', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      let writes = 0
+      const map = new Map<string, string>()
+      const storage = {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          writes += 1
+          map.set(key, value)
+        },
+      }
+      const store = createSettingsStore({ storage, migrate: () => ({ 'test.count': BigInt(10) }) })
+
+      store.set(KERNEL_SETTINGS.theme, 'night')
+
+      expect(store.get(KERNEL_SETTINGS.theme), 'the session still sees what it chose').toBe('night')
+      expect(writes, 'nothing reached the storage').toBe(0)
+      expect(store.persistent).toBe(true)
+      expect(error).toHaveBeenCalledWith(
+        'Paper: settings could not be serialised, so this change was not saved',
+        expect.any(TypeError),
+      )
+    } finally {
+      error.mockRestore()
+    }
   })
 })

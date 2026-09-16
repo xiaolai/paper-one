@@ -85,10 +85,55 @@ export interface PeerPort {
   connect(peerId: string): Promise<Channel>
 
   /** A blob from a peer, resolved when the transfer is DONE — not merely
-   *  started. Rejects with the transfer's typed error string. */
+   *  started. Rejects with a `BlobFetchError` carrying the plugin's own kind,
+   *  which is what chooses the sentence the reader is shown. */
   fetchBlob(request: BlobRequest, onProgress?: (event: TransferProgress) => void): Promise<void>
   /** BLAKE3 + size of a blob in THIS device's data root. */
   hashFile(folder: string, name: string): Promise<HashResult>
+}
+
+/**
+ * A blob fetch that failed, in the shape the reader's sentence is chosen by.
+ *
+ * ⚠️ **THE KIND WAS KNOWN AT THE REJECTION AND SPENT ON THE MESSAGE.**
+ * `sync/lib/status.ts` classifies a thrown value by its `kind` FIELD —
+ * `blobRefused` → `revoked`, `blobHashMismatch` → `content`, which is
+ * *"“Title”’s file couldn’t be verified"* — and this rejected with a plain
+ * `Error` carrying that kind as PROSE. So `refusalKind` found no field,
+ * answered `unknown`, and every failed download reached the reader as "Sync
+ * failed" while the sentences written for these failures could not be reached
+ * from any device. An `Error` still, as `ServiceCallError` is, so a caller
+ * reading only the message loses nothing. Found by audit, 2026-09-14.
+ */
+export class BlobFetchError extends Error {
+  /** The plugin's own `Error::kind()`, as `sync` reads it. */
+  readonly kind: string
+  constructor(kind: string, message: string) {
+    super(message)
+    this.name = 'BlobFetchError'
+    this.kind = kind
+  }
+}
+
+/**
+ * The OTHER road out of `fetchBlob`, by the same rule: a fetch the plugin
+ * refuses before it starts — `noSession`, `transferBusy` — rejects the
+ * `blobFetch` call itself rather than reaching a terminal transfer event.
+ * Tauri's `invoke` rejects with the SERIALISED Rust error, a plain
+ * `{kind, message}` and never an `Error` instance, so that kind was dropped
+ * in the conversion to one exactly as a failed transfer's was. An `Error`
+ * is passed on whole, stack and all, because it has no kind to carry.
+ */
+function asRefusal(thrown: unknown): unknown {
+  if (thrown instanceof Error) return thrown
+  /* `Object` BOXES, so `null`, `undefined` and a bare string each answer the
+     two reads below without a guard of their own — and a guard that reaches
+     the same answer by another road is a branch no test can tell apart.
+     `String(thrown)` is still the value itself, which is what a refusal
+     carrying no message of its own has to say. */
+  const named = Object(thrown) as { kind?: unknown; message?: unknown }
+  const said = typeof named.message === 'string' ? named.message : String(thrown)
+  return typeof named.kind === 'string' ? new BlobFetchError(named.kind, said) : new Error(said)
 }
 
 export function createPeerPort(wire: PeerWire): PeerPort {
@@ -97,7 +142,16 @@ export function createPeerPort(wire: PeerWire): PeerPort {
    * order is the envelope's ground. Each drain is ABORTABLE (a session that
    * closes stops its loop at once) and reports a `sessionRecv` REJECTION to
    * `onError` instead of leaking an unhandled rejection; its state is deleted
-   * when the session closes, so the map does not grow without bound. */
+   * when the session closes, so the map does not grow without bound.
+   *
+   * ⚠️ **`aborted` IS SET IN ONE PLACE AND READ IN ONE PLACE**, and until
+   * 2026-09-16 it was set in two and read in three. A failed read set it
+   * before calling `onError`, and a fresh drain refused to start on a state
+   * carrying it — but every `onError` this port passes ends in `abortDrain`,
+   * which DELETES the state, so no later `drains.get` could return one with
+   * the flag set. Both halves stood as surviving mutants on 2026-09-15 and
+   * neither could be killed, because neither could happen. `abortDrain` sets
+   * it; the loop below reads it. */
   const drains = new Map<number, { running: boolean; again: boolean; aborted: boolean }>()
   const drainInto = async (
     sessionId: number,
@@ -106,10 +160,15 @@ export function createPeerPort(wire: PeerWire): PeerPort {
   ): Promise<void> => {
     let state = drains.get(sessionId)
     if (!state) {
-      state = { running: false, again: false, aborted: false }
+      // Stryker disable next-line ObjectLiteral: every field starts falsy and is assigned before anything reads it, so an empty object is this one.
+      state = {
+        running: false,
+        // Stryker disable next-line BooleanLiteral: the do-loop's first statement assigns `again`, and nothing can interleave before it.
+        again: false,
+        aborted: false,
+      }
       drains.set(sessionId, state)
     }
-    if (state.aborted) return
     if (state.running) {
       state.again = true
       return
@@ -124,15 +183,19 @@ export function createPeerPort(wire: PeerWire): PeerPort {
           try {
             frames = await wire.sessionRecv(sessionId)
           } catch (thrown) {
-            state.aborted = true
             onError(thrown)
             return
           }
           if (frames.length === 0) break
-          for (const frame of frames) {
-            if (state.aborted) return
-            deliver(frame)
-          }
+          /* ⚠️ **NO ABORT CHECK BETWEEN THE FRAMES OF ONE BATCH**, though there
+             was one until 2026-09-16. It could not be observed and could not be
+             wrong: whatever aborts a drain has already hung up on the consumer
+             this delivers to — `tearDown` disconnects the client,
+             `dropConnection` the router connection — and both answer `receive`
+             after that with an immediate return. The check that matters is the
+             one above, which stops the port READING a session it has lost, and
+             a test counts the reads. */
+          for (const frame of frames) deliver(frame)
         }
       } while (state.again)
     } finally {
@@ -142,12 +205,18 @@ export function createPeerPort(wire: PeerWire): PeerPort {
   const abortDrain = (sessionId: number): void => {
     const state = drains.get(sessionId)
     if (state) state.aborted = true
+    // Stryker disable next-line CallExpression: the entry's only reader is the live drain, which holds the state itself; dropping it keeps the map bounded and nothing can observe the difference.
     drains.delete(sessionId)
   }
 
   /* Callbacks a live `serve()` registers so a grant edit through this port can
-   * refresh its cache and have its router re-check open sessions. */
-  const grantWatchers = new Set<(peerId: string, grants?: readonly string[]) => Promise<void> | void>()
+   * refresh its cache and have its router re-check open sessions.
+   *
+   * ⚠️ **THE GRANTS ARE NOT OPTIONAL**, and this parameter was until
+   * 2026-09-16. `setGrants` is the only thing that ever calls a watcher and it
+   * always has them, so the `grants !== undefined` a watcher opened with was a
+   * branch nothing could enter — and therefore a mutant nothing could kill. */
+  const grantWatchers = new Set<(peerId: string, grants: readonly string[]) => Promise<void> | void>()
   /* One live server per port: two would install competing listeners and
    * race each other draining the same session inboxes. */
   let servingActive = false
@@ -189,6 +258,7 @@ export function createPeerPort(wire: PeerWire): PeerPort {
        * newer one had just narrowed — re-authorising revoked requests. */
       let peersGeneration = 0
       const refresh = async () => {
+        // Stryker disable next-line UpdateOperator: the guard below asks only whether the counter MOVED since this refresh took its mark, which any strictly monotone step answers alike.
         const mine = ++peersGeneration
         const listed = new Map((await wire.listPeers()).map((peer) => [peer.id, peer] as const))
         if (mine !== peersGeneration) return
@@ -224,17 +294,20 @@ export function createPeerPort(wire: PeerWire): PeerPort {
         if (closeNative) void wire.close(sessionId).catch(() => {})
       }
 
-      const onGrantsChanged = async (peerId: string, grants?: readonly string[]): Promise<void> => {
+      const onGrantsChanged = async (peerId: string, grants: readonly string[]): Promise<void> => {
         /* The COMMITTED grants land first, synchronously — the refresh that
          * follows can fail, and failing WIDE would keep an open session
          * authorized by grants the store no longer holds. The recheck for
          * everything else happens inside whichever refresh publishes. */
-        if (grants !== undefined) {
-          const held = peers.get(peerId)
-          if (held) {
-            peers.set(peerId, { ...held, grants: [...grants] })
-            for (const conn of connections.values()) if (conn.peer === peerId) conn.recheckGrants()
-          }
+        const held = peers.get(peerId)
+        if (held) {
+          peers.set(peerId, { ...held, grants: [...grants] })
+          /* EVERY open connection, not this peer's alone. A recheck asks the
+             live cache, so for a peer whose grants did not move it is a no-op
+             — which is what made the `conn.peer === peerId` filter a branch
+             whose two sides no test could tell apart. `refresh` below rechecks
+             the same way, and always did. */
+          for (const conn of connections.values()) conn.recheckGrants()
         }
         await refresh()
       }
@@ -357,15 +430,24 @@ export function createPeerPort(wire: PeerWire): PeerPort {
       let torn = false
       /* A close that lands during the dial window (before we know our session
        * id) is buffered and replayed once the id is known — see below. */
+      // Stryker disable next-line ArrayDeclaration: the replay below matches each buffered event's session id, so anything this started with is dropped there rather than acted on.
       const buffered: SessionClosed[] = []
 
       const tearDown = (reason: string): void => {
         if (torn) return
         torn = true
         closedReason = reason
-        if (sessionId !== null) abortDrain(sessionId)
+        /* `as number` for the reason `send` below gives, and it is the same
+           reason: every road into this one runs after the dial has answered —
+           the close listener checks the id, `lose` comes from a drain or a
+           write, and the replay below is after the assignment. The
+           `!== null` both this and `lose` carried until 2026-09-16 was a
+           branch with one live side, so a mutant taking the guard away could
+           not be told from the code it replaced. */
+        abortDrain(sessionId as number)
         offFrames()
         offClosed()
+        // Stryker disable next-line OptionalChaining: nothing can tear a channel down before the dial answers, and the client is created in the same synchronous step the id is — defence, not a branch.
         client?.disconnect()
         for (const fn of [...closedFns]) {
           /* Isolated: teardown often runs from a fire-and-forget drain, so a
@@ -379,15 +461,29 @@ export function createPeerPort(wire: PeerWire): PeerPort {
         }
       }
 
+      /* ONE ROAD OUT, for the transport breaking under us: close the native
+         session (best-effort) and tear the channel down as `lost`. Three
+         sites spelled this pair out and could drift apart.
+
+         ⚠️ **AND ONE OF THE THREE STILL DID** until 2026-09-15: `deliver`'s
+         catch carried its own copy of the pair, word for word, under a comment
+         claiming they had been collapsed into this. Nothing had drifted yet —
+         a mutation sweep is what found it, because the copy's `sessionId`
+         guard is a second branch no test can tell from this one. */
+      const lose = (): void => {
+        void wire.close(sessionId as number).catch(() => {})
+        tearDown('lost')
+      }
+
       const deliver = (bytes: Uint8Array) => {
         try {
+          // Stryker disable next-line OptionalChaining: a drain only ever starts once the id is known, and the client is created in the same synchronous step — see `tearDown`.
           client?.receive(bytes)
         } catch {
           /* Bytes that are not a frame mean the transport is broken under
            * us; every pending call rejects `disconnected` and the session
            * is closed rather than read further. */
-          if (sessionId !== null) void wire.close(sessionId).catch(() => {})
-          tearDown('lost')
+          lose()
         }
       }
 
@@ -396,13 +492,6 @@ export function createPeerPort(wire: PeerWire): PeerPort {
        * exists (which would leave later sends failing silently and callers
        * waiting out their 30 s timeout). Until the id is known, a close is
        * buffered; matched or discarded once it is. */
-      /* ONE ROAD OUT, for the transport breaking under us: close the native
-         session (best-effort) and tear the channel down as `lost`. Three
-         sites spelled this pair out and could drift apart. */
-      const lose = (): void => {
-        if (sessionId !== null) void wire.close(sessionId).catch(() => {})
-        tearDown('lost')
-      }
       let offClosed: Unsubscribe = () => {}
       let offFrames: Unsubscribe = () => {}
       try {
@@ -415,7 +504,15 @@ export function createPeerPort(wire: PeerWire): PeerPort {
           tearDown(event.reason)
         })
         offFrames = wire.onSessionFrames((event) => {
-          if (sessionId !== null && event.sessionId === sessionId) {
+          /* The id match is the whole guard. `SessionFrames.session_id` is a
+             `u64` in the plugin's own event struct — not an `Option`, unlike
+             the `attempt_id` and `error` declared beside it — so an event's id
+             is never null, and during the dial window this local is, which no
+             number equals. The `sessionId !== null &&` that stood here until
+             2026-09-16 was a conjunct the other operand had already decided,
+             so a mutant taking it away could not be told from the code it
+             replaced. */
+          if (event.sessionId === sessionId) {
             void drainInto(sessionId, deliver, lose)
           }
         })
@@ -466,11 +563,19 @@ export function createPeerPort(wire: PeerWire): PeerPort {
     fetchBlob(request, onProgress) {
       return new Promise<void>((resolve, reject) => {
         let transferId: number | null = null
+        // Stryker disable next-line ArrayDeclaration: `judge` matches each buffered event's transfer id, so anything this started with is dropped there rather than acted on.
         const early: TransferProgress[] = []
         let off: Unsubscribe = () => {}
         const judge = (event: TransferProgress) => {
-          if (transferId === null || event.transferId !== transferId) return
+          /* The id match alone, for the reason the frame listener above gives:
+             `TransferProgress.transfer_id` is a `u64` and never null, so while
+             this one is — before `blobFetch` has answered — no event's id can
+             equal it, and the comparison declines every event on its own. The
+             `transferId === null ||` that stood here until 2026-09-16 decided
+             nothing the second operand had not. */
+          if (event.transferId !== transferId) return
           try {
+            // Stryker disable next-line OptionalChaining: with no observer the call below throws into the catch that is already here for one that throws, and the terminal handling runs either way — measured.
             onProgress?.(event)
           } catch {
             /* Progress is advisory; a throwing observer must not skip the
@@ -482,7 +587,11 @@ export function createPeerPort(wire: PeerWire): PeerPort {
             resolve()
           } else if (event.state === 'failed') {
             off()
-            reject(new Error(`blob fetch failed: ${event.error ?? 'unknown'}`))
+            /* THE KIND RIDES THE REJECTION — see `BlobFetchError`. `event.error`
+             * is the plugin's own `Error::kind()`, and the sentence below is
+             * the diagnostic's, never the reader's. */
+            const kind = event.error ?? 'unknown'
+            reject(new BlobFetchError(kind, `blob fetch failed: ${kind}`))
           }
         }
         off = wire.onTransfer((event) => {
@@ -509,7 +618,7 @@ export function createPeerPort(wire: PeerWire): PeerPort {
           },
           (thrown) => {
             off()
-            reject(thrown instanceof Error ? thrown : new Error(String((thrown as { message?: string })?.message ?? thrown)))
+            reject(asRefusal(thrown))
           },
         )
       })

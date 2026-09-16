@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import { createPeerPort, linkedWires, type Channel, type FakeWire, type PeerPort } from '../capabilities/peer'
 import {
   PAGE_ROWS,
@@ -738,23 +738,20 @@ describe('paper --shelf', () => {
   it('takes no advisory lock — and touches nothing locally — for a remote write', async () => {
     const shelf = await serveOverTheWire()
     const dataDir = await mkdtemp(join(tmpdir(), 'paper-remote-'))
-    try {
-      const code = await paper({
-        argv: ['--shelf', 'the-shelf', 'book', 'set', 'b0004', '--finished'],
-        dataDir,
-        sinks: { out: () => {}, err: () => {} },
-        remote: async () => remoteCaller({ channel: shelf.channel, close: async () => {} }),
-      })
-      expect(code).toBe(EXIT.ok)
-      expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0004')?.finished).toBe(true)
+    onTestFinished(() => rm(dataDir, { recursive: true, force: true }))
+    const code = await paper({
+      argv: ['--shelf', 'the-shelf', 'book', 'set', 'b0004', '--finished'],
+      dataDir,
+      sinks: { out: () => {}, err: () => {} },
+      remote: async () => remoteCaller({ channel: shelf.channel, close: async () => {} }),
+    })
+    expect(code).toBe(EXIT.ok)
+    expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0004')?.finished).toBe(true)
 
-      /* NOTHING WAS CREATED. Not a lock, not an index, not a `books/` — the
-       * local host was never opened. An empty directory is the whole
-       * assertion, and it is one the old test could not make. */
-      expect(await readdir(dataDir)).toEqual([])
-    } finally {
-      await rm(dataDir, { recursive: true, force: true })
-    }
+    /* NOTHING WAS CREATED. Not a lock, not an index, not a `books/` — the
+     * local host was never opened. An empty directory is the whole
+     * assertion, and it is one the old test could not make. */
+    expect(await readdir(dataDir)).toEqual([])
   })
 
   /* AND THE SAME FOR A READ, which takes no lock either way — so this is
@@ -762,17 +759,14 @@ describe('paper --shelf', () => {
   it('opens no local host for a remote read', async () => {
     const shelf = await serveOverTheWire()
     const dataDir = await mkdtemp(join(tmpdir(), 'paper-remote-'))
-    try {
-      const code = await paper({
-        argv: ['--shelf', 'the-shelf', 'book', 'list'],
-        dataDir,
-        sinks: { out: () => {}, err: () => {} },
-        remote: async () => remoteCaller({ channel: shelf.channel, close: async () => {} }),
-      })
-      expect(code).toBe(EXIT.ok)
-      expect(await readdir(dataDir)).toEqual([])
-    } finally {
-      await rm(dataDir, { recursive: true, force: true })
-    }
+    onTestFinished(() => rm(dataDir, { recursive: true, force: true }))
+    const code = await paper({
+      argv: ['--shelf', 'the-shelf', 'book', 'list'],
+      dataDir,
+      sinks: { out: () => {}, err: () => {} },
+      remote: async () => remoteCaller({ channel: shelf.channel, close: async () => {} }),
+    })
+    expect(code).toBe(EXIT.ok)
+    expect(await readdir(dataDir)).toEqual([])
   })
 })

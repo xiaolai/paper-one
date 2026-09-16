@@ -1,17 +1,19 @@
-import { screenJump } from './state'
-import type { Command, CommandContext } from '../core/capability'
+import { paneAvailable, paneFits, screenJump } from './state'
+import type { Command, CommandContext, PaneContribution } from '../core/capability'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { panesFor, THEMES } from './panes'
 import { BUNDLED_FACES, GROUP_LABEL, type Face } from '../core/typefaces'
-import type { AppDispatch, AppState } from './state'
+import type { AppDispatch, AppState, PaneId } from './state'
 
 /**
  * Everything the command palette can do, as data.
  *
- * One registry rather than a list in the palette and a switch in the keyboard
- * handler. §11 publishes a keyboard map, and a command that has a shortcut
- * carries it here — so the palette shows the same combo the handler binds, and
- * neither can quietly stop matching the other.
+ * §11 publishes a keyboard map, and a command that has a shortcut carries its
+ * combo here, so the palette shows the reader the key. What the key DOES is
+ * `resolveAccel` in `accel.ts` — a second mapping, and this header called the
+ * pair "one registry" until the 2026-09-13 audit. What stops the two quietly
+ * disagreeing is not a shared table but `commands.test.ts`'s "binds every combo
+ * the palette prints", which puts each printed combo through the real map.
  *
  * Commands are built from the current state, so `on` reflects what is actually
  * true right now: the palette says "Close the side pane" when it is open rather
@@ -32,7 +34,7 @@ export type { Command } from '../core/capability'
 export interface KernelCommandContext {
   state: AppState
   dispatch: AppDispatch
-  /** Null when the reader has no book open — book commands are then omitted. */
+  /** False when the reader has no book open — book commands are then omitted. */
   hasBook: boolean
   /**
    * The faces to offer, which depends on what this machine has — see
@@ -42,6 +44,12 @@ export interface KernelCommandContext {
   faces?: readonly Face[]
   /** Marks the current selection, when there is one. */
   markSelection: (() => void) | null
+  /**
+   * Looks the selection up — `LookUp.press`, null where there is no selection
+   * or nothing to look it up with (phase 17, L4). The same handler the popup's
+   * button and ⌃⌘D run, so the three cannot disagree about whether it works.
+   */
+  lookUp: (() => void) | null
   /**
    * Keeps the place the reader is at, or gives it back. Null when no place can
    * be pinned down — see `Bookmarking.canBookmark`.
@@ -131,6 +139,19 @@ export interface KernelCommandContext {
    * Omitted, the kernel is alone.
    */
   contributed?: (ctx: CommandContext) => readonly Command[]
+  /**
+   * The panes the composition contributed — `Composition.panes` — so each gets
+   * the "Open …" row a kernel panel gets, on exactly the screens the rail
+   * draws it.
+   *
+   * ⚠️ **CIRCLE AND PUBLISH HAD NO ROW.** The panel rows came from `PANES`
+   * alone, so the two panels a desktop reader has beside every book could be
+   * reached from their rail button and from nowhere else — not by name.
+   * `contributed` above is a capability's own COMMANDS, which neither declares,
+   * and a pane is not a command (2026-09-13 audit). Omitted, the kernel's
+   * panels are alone, which is right for a host with no composition.
+   */
+  contributedPanes?: readonly Pick<PaneContribution, 'id' | 'label' | 'screens'>[]
 }
 
 export function buildCommands(ctx: KernelCommandContext): Command[] {
@@ -141,38 +162,61 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
    * three that cannot open there — and a palette entry that does something
    * other than what it says is worse than one that is missing, because the
    * reader has already decided before they press return. */
+  /* ONE ROW SHAPE FOR EVERY PANEL, the kernel's and a capability's alike. */
+  const paneRow = (id: PaneId, label: string, combo: string | undefined): Command => {
+    const open = state.pane === id
+    return {
+      id: `pane:${id}`,
+      label: open ? `Close ${label}` : `Open ${label}`,
+      group: 'Panels',
+      ...(combo ? { combo } : {}),
+      keywords: 'pane panel sidebar',
+      on: open,
+      run: () => (open ? dispatch({ type: 'closePane' }) : dispatch({ type: 'openPane', pane: id })),
+    }
+  }
+
   for (const pane of panesFor(state.screen, {
     developer: state.developer,
     hiddenPanes: state.hiddenPanes,
   })) {
-    const open = state.pane === pane.id
+    commands.push(paneRow(pane.id, pane.label, pane.combo))
+  }
+
+  /* THE CAPABILITIES' PANELS, after the kernel's and in the composition's
+     order — the rail's own order — where `paneFits` says the rail draws them,
+     so a row exists exactly where a button does. See `contributedPanes`. */
+  const contributedPanes = ctx.contributedPanes ?? []
+  for (const pane of contributedPanes) {
+    if (paneFits(state.screen, pane.id, { contributed: contributedPanes, developer: state.developer, hiddenPanes: state.hiddenPanes })) {
+      commands.push(paneRow(pane.id, pane.label, undefined))
+    }
+  }
+
+  /* ⚠️ **ONLY WHERE THERE IS A PANE — see `paneAvailable`.** Offered on a
+   * contributed screen, "Close the side pane" closed one nothing was drawing,
+   * and the panel the reader had open was gone when they went back. The
+   * reducer refuses it there now as well; this is what stops the row promising
+   * it (2026-09-13 audit). */
+  if (paneAvailable(state.screen)) {
     commands.push({
-      id: `pane:${pane.id}`,
-      label: open ? `Close ${pane.label}` : `Open ${pane.label}`,
+      id: 'pane:toggle',
+      label: state.pane ? 'Close the side pane' : 'Open the side pane',
       group: 'Panels',
-      ...(pane.combo ? { combo: pane.combo } : {}),
-      keywords: 'pane panel sidebar',
-      on: open,
-      run: () =>
-        open
-          ? dispatch({ type: 'closePane' })
-          : dispatch({ type: 'openPane', pane: pane.id }),
+      combo: '⌘\\',
+      on: state.pane !== null,
+      run: () => dispatch({ type: 'togglePane' }),
     })
   }
 
-  commands.push({
-    id: 'pane:toggle',
-    label: state.pane ? 'Close the side pane' : 'Open the side pane',
-    group: 'Panels',
-    combo: '⌘\\',
-    on: state.pane !== null,
-    run: () => dispatch({ type: 'togglePane' }),
-  })
-
   /* Only while a pane is showing. Closed, the command moved nothing anyone
    * could see — a label promising a visible result that did not come — and
-   * the preference is set again the moment a pane opens on the other side. */
-  if (state.pane !== null) {
+   * the preference is set again the moment a pane opens on the other side.
+   *
+   * SHOWING IS NOT `pane !== null`. A contributed screen keeps `pane` set for
+   * the trip back and draws none, so this offered to move a pane nobody could
+   * see (2026-09-13 audit, beside the toggle above). */
+  if (state.pane !== null && paneAvailable(state.screen)) {
     commands.push({
       id: 'pane:side',
       label: state.side === 'left' ? 'Move the pane to the right' : 'Move the pane to the left',
@@ -323,6 +367,20 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     })
   }
 
+  /* LOOK UP, beside Mark and for Mark's reason: omitted with nothing selected.
+     It was reachable ONLY from the popup's button, so a reader who had
+     dismissed the popup, or who reaches for the keyboard, had no way to it. */
+  if (ctx.lookUp) {
+    commands.push({
+      id: 'book:look-up',
+      label: 'Look up the selection',
+      group: 'Book',
+      combo: '⌃⌘D',
+      keywords: 'define definition dictionary meaning gloss word translate',
+      run: ctx.lookUp,
+    })
+  }
+
   /* Omitted where a place cannot be pinned down — before the renderer has
    * reported a position, and with no book open. The same rule ⌘D follows for
    * an absent selection, and for the same reason: a palette row that runs and
@@ -452,8 +510,14 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
       id: 'tags:import',
       /* "Merge" in the label, because that is what it does and the word is the
          reassurance: an import never removes a tag, so restoring an old file
-         cannot silently undo a month of filing. */
-      label: 'Import tags from a file…',
+         cannot silently undo a month of filing.
+
+         ⚠️ THE LABEL NEVER CARRIED IT. This comment, the marks import's
+         "exactly as the tag import says it" and a test titled "says merge in
+         the import label" all promised the word from the day this row was
+         written, and the test read the keywords. Added — and the test now reads
+         the label — by the 2026-09-13 audit. */
+      label: 'Import tags from a file… (merge)',
       group: 'Library',
       keywords: 'tag restore load import merge file json archive backup',
       run,
@@ -540,18 +604,39 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
  * Rank commands against a query.
  *
  * A prefix match on the label beats a match inside it, which beats a match on
- * the keywords — so typing "marg" puts "Open Marginalia" first rather than whichever
+ * the keywords, which beats every word of the query found somewhere across the
+ * two — so typing "marg" puts "Open Marginalia" first rather than whichever
  * command happens to contain those letters earliest. Returns null for a miss so
  * the caller can drop the row rather than showing every command at rank zero.
  */
 export function score(command: Command, query: string): number | null {
   const q = query.trim().toLowerCase()
-  if (!q) return 0
   const label = command.label.toLowerCase()
-  if (label.startsWith(q)) return 0
   const at = label.indexOf(q)
-  if (at >= 0) return 1 + at / 100
-  if (command.keywords?.toLowerCase().includes(q)) return 50
+  /* A PREFIX IS RANK 0 — and an empty query is a prefix of every label, which
+     is how the palette lists everything before a key is typed.
+
+     ⚠️ **ONE SEARCH, WHERE THERE WERE THREE** (2026-09-14). `if (!q)` and
+     `startsWith` each returned 0 ahead of this for a case `indexOf` already
+     puts at 0, so neither could change an answer and the mutation sweep said
+     so — and behind them `at > 0` read exactly as `at >= 0`, a boundary no
+     test could hold.
+
+     ⚠️ **BOUNDED, so a label match cannot rank behind a keyword match.** This
+     was `1 + at / 100` — 51 for a match five thousand characters in, behind the
+     keywords' 50 and against the order stated above, and a capability's label
+     has no length limit (2026-09-13 audit). Within a hundred characters,
+     nearer still ranks higher. */
+  if (at >= 0) return at === 0 ? 0 : 1 + Math.min(at, 99) / 100
+  const keywords = command.keywords?.toLowerCase() ?? ''
+  if (keywords.includes(q)) return 50
+  /* ⚠️ **EVERY WORD, IN EITHER FIELD, IN ANY ORDER — once the phrase has had its
+     chance.** Only a contiguous phrase inside one field matched, so "import
+     folder" found nothing — the label says "Import a folder…" and the keywords
+     say "add folder" — while "add folder" found the row (2026-09-13 audit). A
+     one-word query has already been asked of both fields above, so this only
+     ever answers for several. */
+  if (q.split(' ').every((word) => label.includes(word) || keywords.includes(word))) return 55
   if (command.group.toLowerCase().startsWith(q)) return 60
   return null
 }

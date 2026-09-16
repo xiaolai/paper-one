@@ -83,6 +83,347 @@ describe('open and close', () => {
     const journal = journalOver(crashableFs())
     await expect(journal.begin('book:a', 'record')).rejects.toThrow(/before open/)
   })
+
+  it('is building, with no epoch to publish, until it has been opened', () => {
+    const journal = journalOver(crashableFs())
+    expect(journal.state()).toBe('building')
+    expect(journal.epoch()).toBeNull()
+  })
+
+  it('closing a journal that was never opened touches nothing', async () => {
+    const fs = crashableFs()
+    await expect(journalOver(fs).close()).resolves.toBeUndefined()
+    expect(fs.ops).toEqual([])
+  })
+
+  it('refuses a commit, an ack and a compaction before open, each by name, and writes nothing', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    const token = { book: 'book:a', what: 'record' as const, seq: 1, origin: 'local' }
+    expect((await refusalOf(journal.commit(token))).message).toBe('journal: commit before open')
+    expect((await refusalOf(journal.ack('book:a', 'record', 1))).message).toBe('journal: ack before open')
+    expect((await refusalOf(journal.compact())).message).toBe('journal: compact before open')
+    expect(fs.ops).toEqual([])
+  })
+
+  it('refuses a begin, and the commit of a bracket opened earlier, once it is closed', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    const token = await journal.begin('book:a', 'record')
+    await journal.close()
+    expect((await refusalOf(journal.commit(token))).message).toBe('journal: commit before open')
+    expect((await refusalOf(journal.begin('book:b', 'record'))).message).toBe('journal: begin before open')
+    expect(journalLines(fs, JOURNAL_PATH)).toHaveLength(1)
+  })
+
+  it('opened again, re-reads the file rather than adding it to what memory already holds', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    await journal.commit(await journal.begin('book:a', 'record'), 'one')
+    await journal.close()
+    await journal.open()
+    expect(journal.entries()).toEqual(journalLines(fs, JOURNAL_PATH))
+    expect(journal.outbox()).toEqual([{ book: 'book:a', what: 'record', rev: 1, seq: 2 }])
+  })
+})
+
+/**
+ * THE FILE'S DIRECTORY ENTRY IS DURABLE ONCE, WHEN THE FILE IS CREATED (#8).
+ *
+ * Fsyncing a file makes its bytes durable, not the directory slot that names
+ * it — so the append that CREATES the journal owes the directory an fsync, and
+ * no append after it does. What "created" means is the journal's own belief
+ * about the file, which a fresh root, a file read at open and a quarantine that
+ * moved the file away each set differently.
+ */
+describe('the directory entry of the journal file', () => {
+  const at = makeHlc(1, 0, DEV)
+  /** What the disk was asked to do since op `from`, as `kind path`. */
+  const asked = (fs: CrashableFs, from: number): string[] => fs.ops.slice(from).map((op) => `${op.kind} ${op.path}`)
+
+  it('is fsynced after the append that creates the journal, and not after the next one', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    expect(fs.store.has(JOURNAL_PATH), 'an empty shelf writes no journal at open').toBe(false)
+
+    let from = fs.ops.length
+    const token = await journal.begin('book:a', 'record')
+    expect(asked(fs, from)).toEqual([`append ${JOURNAL_PATH}`, `fsync ${JOURNAL_PATH}`, `fsync ${SYNC_DIR}`])
+
+    from = fs.ops.length
+    await journal.commit(token, 'one')
+    expect(asked(fs, from)).toEqual([`append ${JOURNAL_PATH}`, `fsync ${JOURNAL_PATH}`])
+  })
+
+  it('is owed nothing by a journal that was already on disk at open', async () => {
+    const fs = crashableFs()
+    const first = journalOver(fs)
+    await first.open()
+    await first.commit(await first.begin('book:a', 'record'), 'one')
+    await first.close()
+
+    const reopened = journalOver(fs)
+    await reopened.open()
+    const from = fs.ops.length
+    await reopened.begin('book:b', 'record')
+    expect(asked(fs, from)).toEqual([`append ${JOURNAL_PATH}`, `fsync ${JOURNAL_PATH}`])
+  })
+
+  it('is fsynced again for the journal a quarantine rebuilds, because the old file was moved away', async () => {
+    const line = (seq: number): string =>
+      `${JSON.stringify({ seq, kind: 'begin', epoch: 'e1', book: 'book:a', what: 'record', at, origin: 'local' })}\n`
+    const fs = crashableFs({ [JOURNAL_PATH]: line(5) + line(3) })
+    const seen: string[] = []
+    const journal = journalOver(fs, { onQuarantine: (info) => seen.push(info.reason) })
+    await journal.open()
+    expect(seen, 'the journal was quarantined').toHaveLength(1)
+    expect(fs.store.has(JOURNAL_PATH), 'an empty shelf rebuilds no baseline').toBe(false)
+
+    const from = fs.ops.length
+    await journal.begin('book:a', 'record')
+    expect(asked(fs, from)).toEqual([`append ${JOURNAL_PATH}`, `fsync ${JOURNAL_PATH}`, `fsync ${SYNC_DIR}`])
+  })
+})
+
+/**
+ * `subscribe` IS THE SYNC SCHEDULER'S DEBOUNCE INPUT (WI-C.4).
+ *
+ * It must hear a RUNTIME LOCAL commit and nothing else: a remote apply is what
+ * the scheduler just did, and the bootstrap describes the past — a scheduler
+ * woken by either would sync in a loop, or a thousand times at open.
+ */
+describe('subscribe — what the sync scheduler hears', () => {
+  it('hears each runtime LOCAL commit once — not the bootstrap, a remote apply or an ack — and nothing once unsubscribed', async () => {
+    const fs = crashableFs({
+      'books/book_aaaa/book.json': JSON.stringify({ bookId: 'book:aaaa', title: 'Moby-Dick', author: 'M', addedAt: 100 }),
+    })
+    const journal = journalOver(fs)
+    let heard = 0
+    const unsubscribe = journal.subscribe(() => {
+      heard += 1
+    })
+    await journal.open()
+    expect(journal.entries().filter((e) => e.kind === 'commit'), 'the bootstrap emitted its baseline').toHaveLength(1)
+    expect(heard, 'the bootstrap describes the past').toBe(0)
+
+    await journal.commit(await journal.begin('book:aaaa', 'record'))
+    expect(heard).toBe(1)
+
+    await journal.markRemote([{ book: 'book:aaaa', what: 'record' }], async () => {
+      await journal.commit(await journal.begin('book:aaaa', 'record'))
+    })
+    expect(heard, 'a pulled row is not a local edit').toBe(1)
+    expect(await journal.ack('book:aaaa', 'record', 2)).toBe(true)
+    expect(heard).toBe(1)
+
+    unsubscribe()
+    await journal.commit(await journal.begin('book:aaaa', 'record'))
+    expect(heard).toBe(1)
+  })
+
+  it('a subscriber that throws neither fails the commit nor silences the one after it', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    let heard = 0
+    journal.subscribe(() => {
+      throw new Error('the scheduler broke')
+    })
+    journal.subscribe(() => {
+      heard += 1
+    })
+    const token = await journal.begin('book:a', 'record')
+    await expect(journal.commit(token, 'one')).resolves.toBeUndefined()
+    expect(heard).toBe(1)
+    expect(journalLines(fs, JOURNAL_PATH)).toHaveLength(2)
+  })
+})
+
+/**
+ * `journal.meta.json` IS READ, NOT TRUSTED.
+ *
+ * Its epoch is what a peer trusts and its state decides whether the shelf is
+ * baselined, so a meta that does not validate is read as NO meta: the shelf is
+ * baselined again, under the epoch its lines name or a fresh one. The journal
+ * is derived, so that costs a resync and loses nothing. A format this code does
+ * not know is different — it is a newer writer's file, and guessing at it is
+ * refused.
+ */
+describe('journal.meta.json — read, not trusted', () => {
+  const REC = JSON.stringify({ bookId: 'book:mmmm', title: 'Moby-Dick', author: 'M', addedAt: 100 })
+  const withMeta = (text: string): CrashableFs => crashableFs({ 'books/book_mmmm/book.json': REC, [JOURNAL_META_PATH]: text })
+  const meta = (fields: Record<string, unknown>): string =>
+    JSON.stringify({ epoch: 'e1', nextSeq: 7, journalFormat: 1, state: 'ready', ...fields })
+  const named = (journal: Journal): string[] => journal.entries().map((e) => `${e.kind} ${e.what} ${e.book}`)
+
+  it('believes a valid ready meta: its epoch stands, nothing is baselined again, and its nextSeq is the floor', async () => {
+    const journal = journalOver(withMeta(meta({})))
+    await journal.open()
+    expect(journal.epoch()).toBe('e1')
+    expect(journal.entries()).toEqual([])
+    await journal.begin('book:mmmm', 'record')
+    expect(journal.entries().map((e) => e.seq)).toEqual([7])
+  })
+
+  it('takes a nextSeq of 1 as the counter it is', async () => {
+    const journal = journalOver(withMeta(meta({ nextSeq: 1 })))
+    await journal.open()
+    expect(journal.epoch()).toBe('e1')
+    expect(journal.entries()).toEqual([])
+  })
+
+  it('keeps a building meta’s epoch for the resumed baseline, even when no line was written before the kill', async () => {
+    const journal = journalOver(withMeta(meta({ state: 'building' })))
+    await journal.open()
+    expect(journal.state()).toBe('ready')
+    expect(journal.epoch()).toBe('e1')
+    expect(named(journal)).toEqual(['commit record book:mmmm'])
+  })
+
+  it('reads a meta that does not validate as no meta: the shelf is baselined under a fresh epoch', async () => {
+    for (const [what, text, clause] of [
+      ['bytes that are not JSON', '{ not json', 'is not JSON'],
+      ['JSON null', 'null', 'holds no meta at all'],
+      ['an epoch that is not a string', meta({ epoch: 5 }), 'names no epoch'],
+      ['an empty epoch', meta({ epoch: '' }), 'names no epoch'],
+      ['a nextSeq below 1', meta({ nextSeq: 0 }), 'has no counter to go on from'],
+      ['a nextSeq that is not a number', meta({ nextSeq: '7' }), 'has no counter to go on from'],
+      ['a nextSeq that is not an integer', meta({ nextSeq: 1.5 }), 'has no counter to go on from'],
+      ['a nextSeq past the safe range', meta({ nextSeq: 2 ** 53 }), 'has no counter to go on from'],
+      ['a state it does not know', meta({ state: 'bogus' }), 'is in no state this journal knows'],
+    ] as const) {
+      const fs = withMeta(text)
+      const seen: { moved: string; reason: string }[] = []
+      const journal = journalOver(fs, { onQuarantine: (info) => seen.push(info) })
+      await journal.open()
+      expect(journal.state(), what).toBe('ready')
+      expect(journal.epoch(), what).not.toBe('e1')
+      expect(named(journal), what).toEqual(['commit record book:mmmm'])
+      /* AND THE DAMAGED BYTES ARE STILL THERE, under a new name, with the
+         clause that refused them reported. Absent is empty; present and
+         unreadable is refused — never quietly written over. */
+      expect(seen.map((info) => info.moved), what).toHaveLength(1)
+      expect(seen[0]!.reason, what).toContain(clause)
+      expect(new TextDecoder().decode(fs.store.get(seen[0]!.moved)!), what).toBe(text)
+    }
+  })
+
+  it('refuses to open under a journalFormat it does not know, rather than guessing at a newer file', async () => {
+    const fs = withMeta(meta({ journalFormat: 2 }))
+    const held = fs.store.get(JOURNAL_META_PATH)
+    const cause = await refusalOf(journalOver(fs).open())
+    expect(cause).toBeInstanceOf(Error)
+    expect(cause.message).toBe('journal: unknown journalFormat 2')
+    expect(fs.store.has(JOURNAL_PATH)).toBe(false)
+    /* NOT moved aside either: a newer writer's meta is a file this code does
+       not understand, which is not the same as a file that is damaged. */
+    expect(fs.store.get(JOURNAL_META_PATH)).toBe(held)
+  })
+})
+
+/**
+ * A META THAT WILL NOT READ IS NOT A META THAT IS NOT THERE.
+ *
+ * ⚠️ **THE BOOTSTRAP USED TO RUN STRAIGHT OVER THE DAMAGED BYTES.** A meta
+ * whose bytes would not read was taken for "no meta", so `open` bootstrapped —
+ * and its two `writeMeta` calls REPLACED the evidence, twice, while the open
+ * reported `ready` and nothing anywhere said a file had been damaged. Absent is
+ * empty; present and unreadable is refused (AGENTS.md).
+ *
+ * What is refused here is the FILE, not the open: the bytes are moved aside and
+ * the quarantine is reported, and the journal carries on under the epoch its
+ * LINES name — which is the same epoch, because the loader refuses lines that
+ * name another. Refusing the open outright would leave sync dead until somebody
+ * deleted a file by hand, which is the half of ADR 0001 Decision 9 this journal
+ * already learned about its own file.
+ */
+describe('a meta file that is there and will not read', () => {
+  const damaged = '{ not json at all'
+
+  /** A committed, cleanly closed journal, its meta then damaged, reopened. */
+  async function reopenedOverDamagedMeta(bytes: string): Promise<{
+    fs: CrashableFs
+    epoch: string | null
+    lines: unknown[]
+    seen: { moved: string; reason: string }[]
+    reopened: Journal
+  }> {
+    const fs = crashableFs()
+    const first = journalOver(fs)
+    await first.open()
+    await first.commit(await first.begin('book:a', 'record'), 'one')
+    await first.close()
+    const epoch = first.epoch()
+    const lines = journalLines(fs, JOURNAL_PATH)
+    fs.store.set(JOURNAL_META_PATH, new TextEncoder().encode(bytes))
+
+    const seen: { moved: string; reason: string }[] = []
+    const reopened = journalOver(fs, { onQuarantine: (info) => seen.push(info) })
+    await reopened.open()
+    return { fs, epoch, lines, seen, reopened }
+  }
+
+  it('moves the bytes aside and says so, rather than writing over them', async () => {
+    const { fs, seen } = await reopenedOverDamagedMeta(damaged)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.moved).toMatch(/^sync\/journal\.meta\.corrupt-/u)
+    expect(seen[0]!.reason).toContain(JOURNAL_META_PATH)
+    expect(new TextDecoder().decode(fs.store.get(seen[0]!.moved)!)).toBe(damaged)
+    /* And a fresh meta stands in its place, so the next open is ordinary. */
+    expect(JSON.parse(new TextDecoder().decode(fs.store.get(JOURNAL_META_PATH)!))).toMatchObject({ state: 'ready' })
+  })
+
+  it('keeps the epoch the lines name, and every line, so no peer is told to resync', async () => {
+    const { fs, epoch, lines, reopened } = await reopenedOverDamagedMeta(damaged)
+    expect(reopened.state()).toBe('ready')
+    expect(reopened.epoch()).toBe(epoch)
+    expect(journalLines(fs, JOURNAL_PATH)).toEqual(lines)
+    expect(reopened.outbox()).toEqual([expect.objectContaining({ book: 'book:a', what: 'record', rev: 1 })])
+  })
+
+  it('treats a read that fails over a file that is there the same way', async () => {
+    const fs = crashableFs()
+    const first = journalOver(fs)
+    await first.open()
+    await first.close()
+    const reading = fs.readFile
+    fs.readFile = async (path: string) => {
+      if (path === JOURNAL_META_PATH) throw new Error('EIO: simulated transient read failure')
+      return reading(path)
+    }
+    const seen: { moved: string; reason: string }[] = []
+    const journal = journalOver(fs, { onQuarantine: (info) => seen.push(info) })
+    await journal.open()
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.reason).toContain('will not read')
+    expect(seen[0]!.reason).toContain('EIO: simulated transient read failure')
+  })
+
+  it('opens the same way for a journal with no quarantine hook to tell', async () => {
+    const fs = crashableFs()
+    const first = journalOver(fs)
+    await first.open()
+    await first.commit(await first.begin('book:a', 'record'), 'one')
+    await first.close()
+    fs.store.set(JOURNAL_META_PATH, new TextEncoder().encode(damaged))
+
+    const reopened = journalOver(fs) // no `onQuarantine`
+    await expect(reopened.open()).resolves.toBeUndefined()
+    expect(reopened.epoch()).toBe(first.epoch())
+    expect(fs.store.has(JOURNAL_META_PATH)).toBe(true)
+  })
+
+  it('says nothing about a meta that is simply not there — that is a first run', async () => {
+    const fs = crashableFs()
+    const seen: { moved: string; reason: string }[] = []
+    const journal = journalOver(fs, { onQuarantine: (info) => seen.push(info) })
+    await journal.open()
+    expect(seen).toEqual([])
+    expect(journal.state()).toBe('ready')
+  })
 })
 
 describe('the bracket: begin, commit, seq and rev', () => {
@@ -127,6 +468,32 @@ describe('the bracket: begin, commit, seq and rev', () => {
     expect(commits).toHaveLength(2)
     expect(commits[0]).toMatchObject({ digest: 'v-a', rev: 1 })
     expect(commits[1]).toMatchObject({ book: 'book:a', what: 'record', rev: 2, origin: 'local' })
+  })
+
+  it('refuses a token it never issued, and writes nothing', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    await journal.begin('book:a', 'record')
+    const lines = journalLines(fs, JOURNAL_PATH)
+    const cause = await refusalOf(journal.commit({ book: 'book:a', what: 'record' }))
+    expect(cause).toBeInstanceOf(Error)
+    expect(cause.message).toBe('journal: commit for an unknown or already-settled begin (seq undefined)')
+    expect(journalLines(fs, JOURNAL_PATH)).toEqual(lines)
+  })
+
+  it('refuses a token it already settled, even while another begin on the key still dangles', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    const first = await journal.begin('book:a', 'record')
+    await journal.begin('book:a', 'record')
+    await journal.commit(first, 'one')
+    const lines = journalLines(fs, JOURNAL_PATH)
+    const cause = await refusalOf(journal.commit(first, 'again'))
+    expect(cause).toBeInstanceOf(Error)
+    expect(cause.message).toBe('journal: commit for an unknown or already-settled begin (seq 1)')
+    expect(journalLines(fs, JOURNAL_PATH)).toEqual(lines)
   })
 })
 
@@ -363,6 +730,95 @@ describe('the unclean-shutdown verify pass', () => {
     await clean.open()
     expect(clean.entries().filter((e) => e.kind === 'commit')).toHaveLength(1)
   })
+
+  it('keeps the flag when a recovered bracket’s folder will not read, so the next open measures it again', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode('{ not json at all'))
+    await journal.begin('book:a', 'record') // the crash-between-the-two shape
+    await journal.close()
+
+    const reopened = journalOver(fs)
+    await reopened.open()
+    const recovery = reopened.entries().filter((e) => e.kind === 'commit')
+    expect(recovery, 'the bracket was recovered, with nothing measured').toEqual([expect.objectContaining({ book: 'book:a' })])
+    expect(recovery[0]!.digest).toBeUndefined()
+    await reopened.close()
+    expect(await fs.exists(JOURNAL_DIRTY_PATH)).toBe(true)
+  })
+
+  /**
+   * A RECORD THE JOURNAL CERTIFIED, GONE FROM DISK.
+   *
+   * A lost `book.json` unless a REMOVAL explains it, and the arbiter is the
+   * presence register — a restore journals under the same `removed` kind, so a
+   * newer commit alone cannot say which way the book went. Unexplained, the
+   * verify pass stays incomplete and the flag survives `close`, rather than a
+   * clean close certifying a folder that lost its record.
+   */
+  describe('a certified record that is gone from disk', () => {
+    const REC_A = { bookId: 'book:a', title: 'Moby-Dick', author: 'Melville', addedAt: 50 }
+    const presence = (state: 'live' | 'removed'): Uint8Array =>
+      new TextEncoder().encode(JSON.stringify({ 'book:a': { state, at: hlcOf(5000) } }))
+    const bracket = async (journal: Journal, what: 'record' | 'removed', digest?: string): Promise<void> =>
+      journal.commit(await journal.begin('book:a', what), digest)
+
+    /** A shelf holding book:a, opened and never closed; `meanwhile` runs on
+     *  that journal, the record then vanishes, and the next open verifies.
+     *  Answers whether the dirty flag outlived that open's clean close. */
+    async function flagOutlivesVerify(meanwhile: (journal: Journal, fs: CrashableFs) => Promise<void>): Promise<boolean> {
+      const fs = crashableFs({ 'books/book_a/book.json': JSON.stringify(REC_A) })
+      const first = journalOver(fs)
+      await first.open()
+      await meanwhile(first, fs)
+      fs.store.delete('books/book_a/book.json')
+      const reopened = journalOver(fs)
+      await reopened.open()
+      await reopened.close()
+      return fs.exists(JOURNAL_DIRTY_PATH)
+    }
+
+    it('keeps the flag when nothing explains it', async () => {
+      expect(await flagOutlivesVerify(async () => {})).toBe(true)
+    })
+
+    it('clears it once a newer removal and the presence register both say the book was removed', async () => {
+      expect(
+        await flagOutlivesVerify(async (journal, fs) => {
+          fs.store.set('sync/removed.json', presence('removed'))
+          await bracket(journal, 'removed')
+        }),
+      ).toBe(false)
+    })
+
+    it('keeps it when the newer commit under the removed kind was a restore', async () => {
+      expect(
+        await flagOutlivesVerify(async (journal, fs) => {
+          fs.store.set('sync/removed.json', presence('live'))
+          await bracket(journal, 'removed')
+        }),
+      ).toBe(true)
+    })
+
+    it('keeps it when the removal is older than the record the journal last certified', async () => {
+      expect(
+        await flagOutlivesVerify(async (journal, fs) => {
+          fs.store.set('sync/removed.json', presence('removed'))
+          await bracket(journal, 'removed')
+          await bracket(journal, 'record', await recordDigest(REC_A))
+        }),
+      ).toBe(true)
+    })
+
+    it('keeps it when only the register says removed, and the journal holds no removal', async () => {
+      expect(
+        await flagOutlivesVerify(async (_journal, fs) => {
+          fs.store.set('sync/removed.json', presence('removed'))
+        }),
+      ).toBe(true)
+    })
+  })
 })
 
 describe('carried findings — crash durability and load hardening', () => {
@@ -473,6 +929,28 @@ describe('carried findings — crash durability and load hardening', () => {
     expect(fsynced).toContain('sync/removed.json')
     // #8: the sync DIRECTORY is fsynced too, so the entries it names survive.
     expect(fsynced).toContain(SYNC_DIR)
+  })
+
+  it('fsyncs every line appended after the bootstrap before the disk is asked for anything else', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(REC)))
+    await journal.commit(await journal.begin('book:a', 'record'), await recordDigest(REC))
+    expect(await journal.ack('book:a', 'record', 1)).toBe(true)
+    await journal.begin('book:b', 'record') // left open: recovered below
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify({ ...REC, finished: true })))
+
+    const reopened = journalOver(fs) // dirty: recovers book:b, re-commits book:a
+    await reopened.open()
+    expect(reopened.entries().slice(-2).map((e) => `${e.kind} ${e.book}`)).toEqual(['commit book:b', 'commit book:a'])
+
+    const appends = fs.ops.flatMap((op, index) => (op.kind === 'append' && op.path === JOURNAL_PATH ? [index] : []))
+    expect(appends, 'begin, commit, ack, begin, the recovery and the re-commit').toHaveLength(6)
+    for (const index of appends) {
+      const next = fs.ops[index + 1]
+      expect(`${next?.kind} ${next?.path}`, `after the append at op ${index}`).toBe(`fsync ${JOURNAL_PATH}`)
+    }
   })
 
   it('#31 migrates colliding legacy cards revs at load instead of refusing to open', async () => {
@@ -603,6 +1081,16 @@ describe('origin — the echo fix', () => {
     expect(journal.entries().filter((e) => e.kind === 'commit')[0]!.origin).toBe('local')
   })
 
+  it('hands back a fresh ticket for every arm, counting up from one', async () => {
+    /* The NUMBERS, not merely their distinctness: `clearRemote` finds an
+       expectation by the ticket its caller holds, and a counter running the
+       other way would hand out `0` — which reads as "no ticket" to anything
+       that tests a ticket rather than comparing it. */
+    const journal = journalOver(crashableFs())
+    await journal.open()
+    expect([journal.expectRemote('book:a', 'record'), journal.expectRemote('book:b', 'marks')]).toEqual([1, 2])
+  })
+
   it('a clear takes back only ITS OWN expectation — a concurrent operation keeps its arm', async () => {
     const journal = journalOver(crashableFs())
     await journal.open()
@@ -621,6 +1109,45 @@ describe('origin — the echo fix', () => {
     await journal.commit(after)
     const commits = journal.entries().filter((e) => e.kind === 'commit')
     expect(commits.map((e) => e.origin)).toEqual(['remote', 'remote', 'local'])
+  })
+
+  it('a clear of an expectation not yet consumed leaves another operation’s arm on the key in place', async () => {
+    const journal = journalOver(crashableFs())
+    await journal.open()
+    const first = journal.expectRemote('book:a', 'record')
+    journal.expectRemote('book:a', 'record')
+    journal.clearRemote('book:a', 'record', first)
+    await journal.commit(await journal.begin('book:a', 'record'))
+    await journal.commit(await journal.begin('book:a', 'record'))
+    expect(journal.entries().filter((e) => e.kind === 'commit').map((e) => e.origin)).toEqual(['remote', 'local'])
+  })
+
+  it('fences on the book id by default, so a local write already queued there keeps its local origin', async () => {
+    const fs = crashableFs()
+    const queue = writeQueue()
+    /* No `lane`: the default is what this measures. */
+    const journal = createJournal({ fs, queue, clock: testClock(), fsync: (path) => fs.fsync(path) })
+    await journal.open()
+    const bracket = async (): Promise<void> => {
+      await journal.commit(await journal.begin('book:a', 'record'))
+    }
+
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    /* A local edit already running on the book's lane, not yet begun. */
+    const local = queue.append('book:a', async () => {
+      await held
+      await bracket()
+    })
+    const remote = journal.markRemote([{ book: 'book:a', what: 'record' }], () => queue.append('book:a', bracket))
+    /* Everything that can run without the lane runs now: a fence on any other
+     * lane would arm here, and the local edit would consume it. */
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    release()
+    await Promise.all([local, remote])
+    expect(journal.entries().filter((e) => e.kind === 'commit').map((e) => e.origin)).toEqual(['local', 'remote'])
   })
 })
 
@@ -688,6 +1215,15 @@ describe('feed, outbox, ack', () => {
       await commitOn(journal, 'book:c', 'record')
     })
     expect(journal.outbox()).toEqual([])
+  })
+
+  it('outbox is in seq order — a key edited again goes behind a key edited since', async () => {
+    const journal = journalOver(crashableFs())
+    await journal.open()
+    await commitOn(journal, 'book:a', 'record')
+    await commitOn(journal, 'book:b', 'record')
+    await commitOn(journal, 'book:a', 'record')
+    expect(journal.outbox().map((e) => `${e.book} r${e.rev}`)).toEqual(['book:b r1', 'book:a r2'])
   })
 })
 
@@ -786,6 +1322,119 @@ describe('bootstrap — building to ready over an existing shelf', () => {
     { id: 'c1', bookId: 'book:aaaa', kind: 'Excerpt', body: 'x', answer: '', source: '', cfi: null, createdAt: 700 },
   ]
 
+  /* ⚠️ **A RECORD THAT WILL NOT READ WAS PUBLISHED AS A SHELF WITH ONE FEWER
+     BOOK.** The comment at the read says a `book.json` that is THERE and will
+     not read is a failure and is raised — and it was true of the read and false
+     of the parse, because `parseRecord` answers `null` for damaged bytes and
+     the loop skipped those. So the bootstrap ran to the end and wrote
+     `state: 'ready'`, claiming a complete baseline for a book it had never
+     read. `readMarks` refuses exactly this one surface over, and the meta is
+     `building` throughout precisely so a throw can be the recovery. Found by
+     the 2026-09-13 audit. */
+  it('refuses to finish a bootstrap over a book.json that is there and will not parse', async () => {
+    const fs = shelf()
+    fs.store.set('books/book_bbbb/book.json', new TextEncoder().encode('{ not json at all'))
+
+    const cause = await journalOver(fs)
+      .open()
+      .then(
+        () => null,
+        (error: unknown) => error,
+      )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/book_bbbb.*does not parse/u)
+
+    // Repaired, the next open finishes the baseline it refused to fake.
+    fs.store.set(
+      'books/book_bbbb/book.json',
+      new TextEncoder().encode(JSON.stringify({ bookId: 'book:bbbb', title: 'Walden', author: 'T', addedAt: 200 })),
+    )
+    const again = journalOver(fs)
+    await again.open()
+
+    expect(again.state()).toBe('ready')
+    expect(
+      again
+        .entries()
+        .filter((e) => e.kind === 'commit')
+        .map((e) => `${e.what} ${e.book}`),
+    ).toContain('record book:bbbb')
+  })
+
+  /* ⚠️ **THE TRASH HALF OF THE BOOTSTRAP STILL SAID "NOTHING THERE" FOR A
+     FAILURE, AND THE LIVE HALF BESIDE IT HAD STOPPED.** A trash listing that
+     threw was caught as `[]`, so the bootstrap reached `ready` and published a
+     baseline with NO removals — peers merge that, and a book removed here
+     comes back. And a trashed `book.json` that was there and would not parse
+     fell back to the FOLDER NAME: `book_cccc` is not `book:cccc`, and no
+     folder name can give an original id back, so the removal was published
+     for a book nobody has. The live path was fixed to throw by the 2026-09-13
+     audit; this is its twin (2026-09-13 verify). The meta is `building`
+     throughout, so the throw IS the recovery. */
+  it('refuses to finish a bootstrap whose trash will not list', async () => {
+    const fs = shelf()
+    const listing = fs.readDir.bind(fs)
+    fs.readDir = async (path: string) => {
+      if (path === 'trash') throw new Error('the trash would not list')
+      return listing(path)
+    }
+
+    const cause = await journalOver(fs)
+      .open()
+      .then(
+        () => null,
+        (error: unknown) => error,
+      )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/the trash would not list/u)
+    const meta = JSON.parse(new TextDecoder().decode(fs.store.get(JOURNAL_META_PATH)!)) as { state: string }
+    expect(meta.state, 'a baseline with no removals was published as complete').toBe('building')
+
+    fs.readDir = listing
+    const again = journalOver(fs)
+    await again.open()
+    expect(again.state()).toBe('ready')
+    expect(
+      again
+        .entries()
+        .filter((e) => e.kind === 'commit')
+        .map((e) => `${e.what} ${e.book}`),
+    ).toContain('removed book:cccc')
+  })
+
+  it('refuses to finish a bootstrap over a trashed book.json that is there and will not parse', async () => {
+    const fs = shelf()
+    fs.store.set('trash/book_cccc/book.json', new TextEncoder().encode('{ not json at all'))
+
+    const cause = await journalOver(fs)
+      .open()
+      .then(
+        () => null,
+        (error: unknown) => error,
+      )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/removed book_cccc.*does not parse/u)
+    /* Nothing was published under the folder name in the meantime. */
+    expect(fs.store.has('sync/removed.json') ? new TextDecoder().decode(fs.store.get('sync/removed.json')!) : '').not.toContain('book_cccc')
+  })
+
+  it('still takes the folder name for a trashed book with no record at all', async () => {
+    /* ABSENT IS NOT UNREADABLE. A trash entry holding only its `.removed`
+       stamp was never anything but a folder name, and refusing it would keep
+       the bootstrap from ever finishing. */
+    const fs = shelf()
+    fs.store.delete('trash/book_cccc/book.json')
+    const journal = journalOver(fs)
+    await journal.open()
+    expect(journal.state()).toBe('ready')
+    expect(
+      journal
+        .entries()
+        .filter((e) => e.kind === 'commit')
+        .map((e) => `${e.what} ${e.book}`),
+    ).toContain('removed book_cccc')
+  })
+
   it('emits one local baseline commit per surface, with legacy stamps and digests, then publishes the epoch', async () => {
     const fs = shelf()
     const journal = journalOver(fs, { cards: CARD })
@@ -866,6 +1515,150 @@ describe('bootstrap — building to ready over an existing shelf', () => {
     // the runtime rev on the canonical stream.
     expect(journal.feed(0, journal.head()).filter((e) => e.what === 'cards')).toHaveLength(1)
     expect(journal.outbox()).toContainEqual(expect.objectContaining({ book: '', what: 'cards', rev: 2 }))
+  })
+
+  const commitsNamed = (journal: Journal): string[] =>
+    journal
+      .entries()
+      .filter((e) => e.kind === 'commit')
+      .map((e) => `${e.what} ${e.book}`)
+      .sort()
+  /** What `shelf()` baselines with no cards store: its whole answer. */
+  const SHELF_BASELINE = ['marks book:aaaa', 'record book:aaaa', 'record book:bbbb', 'removed book:cccc']
+
+  it('fsyncs the baseline every fsyncEvery records, and once more before it says ready', async () => {
+    const fs = shelf()
+    await journalOver(fs, { cards: CARD, fsyncEvery: 2 }).open()
+    /* Five baselines — record, marks, record, cards, removed. */
+    expect(fs.ops.filter((op) => op.path === JOURNAL_PATH).map((op) => op.kind)).toEqual([
+      'append',
+      'append',
+      'fsync',
+      'append',
+      'append',
+      'fsync',
+      'append',
+      'fsync',
+    ])
+  })
+
+  it('a resumed build writes its meta once, when it is ready, rather than announcing building again', async () => {
+    const fs = shelf()
+    let appends = 0
+    const append = fs.appendFile.bind(fs)
+    fs.appendFile = async (path: string, bytes: Uint8Array) => {
+      appends += 1
+      if (appends > 2) throw new Error('killed')
+      return append(path, bytes)
+    }
+    expect((await refusalOf(journalOver(fs, { cards: CARD }).open())).message).toBe('killed')
+    fs.appendFile = append
+
+    const from = fs.ops.length
+    const resumed = journalOver(fs, { cards: CARD })
+    await resumed.open()
+    expect(resumed.state()).toBe('ready')
+    expect(fs.ops.slice(from).filter((op) => op.kind === 'rename' && op.to === JOURNAL_META_PATH)).toHaveLength(1)
+  })
+
+  it('reads a books or trash directory that is not there as empty, on a filesystem that will not list one', async () => {
+    const fs = crashableFs()
+    const listing = fs.readDir.bind(fs)
+    fs.readDir = async (path: string) => {
+      if (!(await fs.exists(path))) throw new Error(`no such directory: ${path}`)
+      return listing(path)
+    }
+    const journal = journalOver(fs)
+    await journal.open()
+    expect(journal.state()).toBe('ready')
+    expect(journal.entries()).toEqual([])
+  })
+
+  it('takes only directory entries as books and as removals', async () => {
+    const fs = shelf()
+    fs.store.set('books/book_dddd/book.json', new TextEncoder().encode(JSON.stringify({ bookId: 'book:dddd', title: 'D', author: '', addedAt: 1 })))
+    fs.store.set('trash/book_eeee/book.json', new TextEncoder().encode(JSON.stringify({ bookId: 'book:eeee', title: 'E', author: '' })))
+    fs.store.set('trash/book_eeee/.removed', new TextEncoder().encode('6000'))
+    /* A listing can name an entry that is not a directory while a path under
+     * it still resolves — a link, on a real filesystem. */
+    const listing = fs.readDir.bind(fs)
+    fs.readDir = async (path: string) =>
+      (await listing(path)).map((entry) => (entry.name === 'book_dddd' || entry.name === 'book_eeee' ? { ...entry, isDirectory: false } : entry))
+    const journal = journalOver(fs)
+    await journal.open()
+    expect(commitsNamed(journal)).toEqual(SHELF_BASELINE)
+    expect(new TextDecoder().decode(fs.store.get('sync/removed.json')!)).not.toContain('book:eeee')
+  })
+
+  it('passes over a folder with no book.json — it is not a book to the feed', async () => {
+    const fs = shelf()
+    fs.store.set('books/book_ffff/content.epub', new TextEncoder().encode('bytes'))
+    const journal = journalOver(fs)
+    await journal.open()
+    expect(commitsNamed(journal)).toEqual(SHELF_BASELINE)
+  })
+
+  it('stamps the cards baseline with the NEWEST card, whatever order the store holds them in', async () => {
+    const cards = [700, 900, 800].map((createdAt, index) => ({ ...CARD[0]!, id: `c${index}`, createdAt }))
+    const journal = journalOver(shelf(), { cards })
+    await journal.open()
+    expect(journal.entries().find((e) => e.what === 'cards')?.at).toBe(hlcOf(900))
+  })
+
+  it('removes a trashed book whose stamp will not read at the floor stamp, rather than not at all', async () => {
+    const fs = shelf()
+    fs.store.set('trash/book_cccc/.removed', new TextEncoder().encode('not a stamp'))
+    const journal = journalOver(fs)
+    await journal.open()
+    expect(journal.entries().find((e) => e.what === 'removed')).toMatchObject({ book: 'book:cccc', at: hlcOf(0) })
+    const presence = JSON.parse(new TextDecoder().decode(fs.store.get('sync/removed.json')!)) as Record<string, { at: Hlc }>
+    expect(presence['book:cccc']?.at).toBe(hlcOf(0))
+  })
+
+  it('removes a trashed record that carries no bookId under its folder name', async () => {
+    const fs = shelf()
+    fs.store.set('trash/book_cccc/book.json', new TextEncoder().encode(JSON.stringify({ title: 'Gone', author: '' })))
+    const journal = journalOver(fs)
+    await journal.open()
+    expect(commitsNamed(journal)).toEqual(['marks book:aaaa', 'record book:aaaa', 'record book:bbbb', 'removed book_cccc'])
+  })
+
+  it('neither rewrites nor fsyncs a removal the presence register already holds', async () => {
+    const fs = shelf()
+    fs.store.set('sync/removed.json', new TextEncoder().encode(JSON.stringify({ 'book:cccc': { state: 'removed', at: hlcOf(5000) } })))
+    const journal = journalOver(fs)
+    await journal.open()
+    expect(commitsNamed(journal), 'the removal is still baselined').toContain('removed book:cccc')
+    expect(fs.ops.filter((op) => op.path === 'sync/removed.json' || op.to === 'sync/removed.json')).toEqual([])
+  })
+
+  /* WHAT MEMORY HOLDS IS WHAT THE FILE SAYS. An entry built with a field set
+     to `undefined` serialises without it, so the line and the object agree on
+     every value and still disagree on shape — and every reader that asks
+     whether a digest is PRESENT gets two answers depending on whether the
+     entry was written this session or read back. */
+  it('holds in memory exactly what a reopen reads back, for the entries that measured no digest too', async () => {
+    const fs = shelf()
+    const journal = journalOver(fs)
+    await journal.open()
+    await journal.commit(await journal.begin('book:zzzz', 'record')) // no folder: nothing to measure
+    await journal.begin('book:yyyy', 'record') // left open, as a crash leaves it
+    const written = journal.entries()
+    expect(
+      written.filter((e) => e.kind === 'commit' && e.digest === undefined).map((e) => `${e.what} ${e.book}`),
+      'the baseline and the commit that carry no digest',
+    ).toEqual(['removed book:cccc', 'record book:zzzz'])
+    await journal.close()
+
+    const recovered = journalOver(fs)
+    await recovered.open()
+    expect(recovered.entries().slice(0, written.length)).toStrictEqual(written)
+    expect(recovered.entries().at(-1)).toMatchObject({ kind: 'commit', book: 'book:yyyy' })
+    expect(recovered.entries().at(-1)?.digest).toBeUndefined()
+
+    const reread = journalOver(fs)
+    await reread.open()
+    expect(reread.entries()).toStrictEqual(recovered.entries())
   })
 })
 
@@ -1100,6 +1893,53 @@ describe('recovering from a corrupt journal', () => {
     expect(seen).toEqual([])
     await journal.close()
   })
+
+  it('adopts nothing from a journal quarantined for disagreeing with its meta', async () => {
+    /* The lines themselves are sound, so they were read in before the meta
+     * contradicted them — and the rebuild must not inherit them, or it would
+     * resume under the very epoch it was quarantined for. */
+    const at = makeHlc(1, 0, DEV)
+    const fs = crashableFs({
+      [JOURNAL_PATH]: `${JSON.stringify({ seq: 1, kind: 'begin', epoch: 'e1', book: 'book:a', what: 'record', at, origin: 'local' })}\n`,
+      [JOURNAL_META_PATH]: JSON.stringify({ epoch: 'e2', nextSeq: 2, journalFormat: 1, state: 'ready' }),
+    })
+    const seen: string[] = []
+    const journal = journalOver(fs, { onQuarantine: (info) => seen.push(info.reason) })
+    await journal.open()
+    expect(seen).toHaveLength(1)
+    expect(journal.entries()).toEqual([])
+    expect(journal.epoch()).not.toBe('e1')
+  })
+})
+
+describe('what an open writes', () => {
+  it('does not rewrite a clean journal it has just read', async () => {
+    const fs = crashableFs()
+    const first = journalOver(fs)
+    await first.open()
+    await first.commit(await first.begin('book:a', 'record'), 'one')
+    await first.close()
+
+    const from = fs.ops.length
+    await journalOver(fs).open()
+    expect(fs.ops.slice(from).filter((op) => op.path === JOURNAL_PATH || op.to === JOURNAL_PATH)).toEqual([])
+  })
+
+  it('reopens a journal compacted down to nothing under the epoch it had', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    const epoch = journal.epoch()
+    await journal.compact()
+    expect(fs.store.get(JOURNAL_PATH), 'nothing to keep is an empty file').toEqual(new Uint8Array(0))
+    await journal.close()
+
+    const seen: string[] = []
+    const reopened = journalOver(fs, { onQuarantine: (info) => seen.push(info.reason) })
+    await reopened.open()
+    expect(seen, 'an empty file names no epoch to disagree with').toEqual([])
+    expect(reopened.epoch()).toBe(epoch)
+  })
 })
 
 /**
@@ -1160,6 +2000,27 @@ describe('a failing read is not an absent file', () => {
       return fs.readFile(path)
     }
     await expect(journalOver(broken).open()).rejects.toThrow(/EIO/)
+  })
+
+  it('raises the read’s own error and leaves the journal usable, because nothing was written', async () => {
+    const fs = crashableFs()
+    const noAppend = { ...fs, appendFile: undefined } as unknown as CrashableFs
+    const journal = journalOver(noAppend)
+    await journal.open()
+    await journal.commit(await journal.begin('a-book', 'record'), 'one')
+
+    const failure = new Error('EIO: simulated transient read failure')
+    const reading = noAppend.readFile
+    noAppend.readFile = async () => {
+      throw failure
+    }
+    expect(await refusalOf(journal.begin('b-book', 'record'))).toBe(failure)
+
+    /* NOT POISONED: a read that failed before any byte was written leaves no
+     * doubt about the file, so the next append simply works. */
+    noAppend.readFile = reading
+    await journal.commit(await journal.begin('b-book', 'record'), 'two')
+    expect(journal.outbox().map((e) => e.book)).toEqual(['a-book', 'b-book'])
   })
 })
 
@@ -1246,6 +2107,40 @@ describe('an append that fails ambiguously', () => {
     /* And the reopen did not quarantine — a duplicate rev would have. */
     expect(reopened.state()).toBe('ready')
   })
+
+  it('refuses markRemote, an ack and a compaction too — running nothing and rewriting nothing', async () => {
+    const fs = crashableFs()
+    let barrierFails = false
+    const journal = createJournal({
+      fs,
+      queue: writeQueue(),
+      clock: testClock(),
+      fsync: async (path: string) => {
+        if (barrierFails) throw new Error('EIO: the durability barrier refused')
+        await fs.fsync(path)
+      },
+    })
+    await journal.open()
+    await journal.commit(await journal.begin('a-book', 'record'), 'one')
+    const doomed = await journal.begin('b-book', 'record')
+    barrierFails = true
+    expect((await refusalOf(journal.commit(doomed, 'two'))).message).toBe('EIO: the durability barrier refused')
+    const held = fs.store.get(JOURNAL_PATH)
+    const closed =
+      'journal: an append failed and the file may disagree with memory, so this journal is closed until it is reopened (EIO: the durability barrier refused)'
+
+    let applied = false
+    const marking = journal.markRemote([{ book: 'a-book', what: 'record' }], async () => {
+      applied = true
+    })
+    expect((await refusalOf(marking)).message).toBe(closed)
+    expect(applied, 'the remote apply never ran').toBe(false)
+    /* A rev the CAS would turn away: refused for the journal's state, not
+     * answered `false` as though the journal were sound. */
+    expect((await refusalOf(journal.ack('a-book', 'record', 99))).message).toBe(closed)
+    expect((await refusalOf(journal.compact())).message).toBe(closed)
+    expect(fs.store.get(JOURNAL_PATH)).toBe(held)
+  })
 })
 
 /**
@@ -1299,6 +2194,21 @@ describe('opening a dirty journal without recovering', () => {
     await cli.commit(token, 'one')
     await cli.close()
     expect(await fs.exists(JOURNAL_DIRTY_PATH)).toBe(false)
+  })
+
+  it('re-commits nothing on the way past, even for a folder that moved under the dirty journal', async () => {
+    const REC = { bookId: 'book:a', title: 'Moby-Dick', author: 'Melville', addedAt: 50 }
+    const fs = crashableFs()
+    const first = journalOver(fs)
+    await first.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(REC)))
+    await first.commit(await first.begin('book:a', 'record'), await recordDigest(REC))
+    /* No close — and then the folder moves, which is what the owed pass is for. */
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify({ ...REC, finished: true })))
+
+    const cli = createJournal({ fs, queue: writeQueue(), clock: testClock(), fsync: (path) => fs.fsync(path), recover: false })
+    await cli.open()
+    expect(cli.entries().filter((e) => e.kind === 'commit')).toHaveLength(1)
   })
 })
 
@@ -1491,6 +2401,31 @@ describe('the journal compacts itself', () => {
      * dropped even though the floor was passed long ago. */
     expect(journal.entries().filter((e) => e.kind === 'commit')).toHaveLength(20)
     await journal.close()
+  })
+
+  it('does not rewrite a file of distinct surfaces at all, however far past the floor it grows', async () => {
+    /* The four-to-one rule measured on the FILE, not on the commits a rewrite
+     * would keep: dropping the settled begins is a rewrite too. */
+    const fs = crashableFs()
+    const journal = journalOver(fs, { compactEvery: 2 })
+    await journal.open()
+    for (let index = 0; index < 20; index += 1) {
+      await journal.commit(await journal.begin(`book:${index}`, 'record'), `d${index}`)
+    }
+    expect(journalLines(fs, JOURNAL_PATH)).toHaveLength(40)
+    expect(fs.ops.filter((op) => op.kind === 'rename' && op.to === JOURNAL_PATH)).toEqual([])
+  })
+
+  it('compacts on the append that reaches the threshold, not one after it', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs, { compactEvery: 4 })
+    await journal.open()
+    await churn(journal, 1)
+    expect(journal.entries(), 'two lines, under both halves of the rule').toHaveLength(2)
+    await churn(journal, 1)
+    /* Four lines against max(4, one key × 4): exactly at the threshold. */
+    expect(journal.entries().map((e) => `${e.kind} ${e.digest}`)).toEqual(['commit digest-0'])
+    expect(journalLines(fs, JOURNAL_PATH)).toHaveLength(1)
   })
 
   it('answers a peer identically before and after compacting', async () => {

@@ -1,6 +1,7 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { DELETED_ENV } from './verify-without.mjs'
 
 /**
  * NOTHING BUILT REACHES THE REPOSITORY.
@@ -90,6 +91,20 @@ function ignored(path) {
 }
 
 describe('build output never reaches the repository', () => {
+  /* ⚠️ **NOT INSIDE THE DELETION PROOF'S COPY, WHICH HAS NO `.git`.** `pnpm
+     verify:without <id>` copies the tree without it, so every probe below
+     answered "not ignored" there and all of them failed — on `main` too, found
+     2026-09-15. What git ignores is a property of the repository, which cutting
+     a capability does not change, and the real tree's `pnpm verify` runs this.
+     Only under the proof's own marker and only when git itself finds no work
+     tree, so a checkout git cannot read anywhere else still fails loudly. */
+  beforeEach((context) => {
+    const inside = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: REPO, encoding: 'utf8' }).stdout.trim()
+    if (process.env[DELETED_ENV] !== undefined && inside !== 'true') {
+      context.skip("the deletion proof's copy has no .git, so git cannot say what this repository ignores; the real tree's pnpm verify runs this")
+    }
+  })
+
   /* THE PROBE ITSELF FIRST. If `check-ignore` stopped working — a git that
      does not know `--no-index`, a wrong cwd — every case below would report
      "not ignored" and the suite would fail loudly rather than pass quietly.

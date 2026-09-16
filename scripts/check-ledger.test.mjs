@@ -139,6 +139,19 @@ describe('the coverage question', () => {
     expect(findings[0].where).toBe('paragraphRag')
   })
 
+  it('says why a name described nowhere is a finding', () => {
+    expect(checkCoverage(['paragraphRag'], text).findings.map((f) => f.message)).toEqual([
+      'the app declares this and no ledger mentions it — a surface with no row is the failure these documents exist to prevent',
+    ])
+  })
+
+  /* A name is matched as whole characters. Without the `u` flag the pattern
+     works in UTF-16 code units, and a lone surrogate matches half of a pair. */
+  it('reads a name as whole characters, never as half of one', () => {
+    const halfOfASmile = String.fromCharCode(0xde00)
+    expect(checkCoverage([halfOfASmile], `${String.fromCodePoint(0x1f600)} is a smile`).findings).toHaveLength(1)
+  })
+
   /* ⚠️ THE DEFECT A KNOWN POSITIVE FOUND, AND THE REASON THESE CASES EXIST.
    * The first `checkCoverage` asked whether the documents CONTAINED the name.
    * The test for it — rename `trash.empty` in `service-table.md`, watch the

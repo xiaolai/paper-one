@@ -12,56 +12,48 @@ import {
 } from 'lucide-react'
 import type { IndexedBook } from '../../core/bookIndex'
 import type { JumpTarget } from '../hooks/useJumps'
-import type { MarkControl, PaneContribution, SettingsSection } from '../../core/capability'
+import type { MarkControl, PaneContribution } from '../../core/capability'
 import type { AskPassage, CompanionProvider } from '../../core/companion'
 import { ICON, type Platform } from '../../core/metrics'
 import { PANE_TITLES, shownPane } from '../panes'
 import { isContributedScreenId } from '../../core/uiTypes'
-import { defaultPaneFor, paneFits, setReadingStyle, type AppDispatch, type AppState, type KernelPaneId, type PaneAudience } from '../state'
+import { contributionFits, defaultPaneFor, paneFits, setReadingStyle, type AppDispatch, type AppState, type KernelPaneId, type PaneAudience } from '../state'
 import type { Book } from '../hooks/useBook'
 import type { Annotation } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
 import type { CardsView } from '../hooks/useCards'
+import type { GlossState } from '../hooks/useGloss'
+import type { LookupsView } from '../hooks/useLookups'
 import type { MarksView } from '../hooks/useMarks'
 import type { Bookmarking } from '../hooks/useBookmarking'
 import { Companion } from './Companion'
 import { Contents } from './Contents'
-import type { Face } from '../../core/typefaces'
-import { LibraryPanel } from './LibraryPanel'
-import type { TagPrefsStore } from '../hooks/useTagPrefs'
+import { LibraryPanel, type LibraryPanelProps } from './LibraryPanel'
 import { Cards } from './Cards'
 import { Marginalia } from './Marginalia'
 import { SearchPanel } from './SearchPanel'
 import { DevPane } from './DevPane'
 import type { DiagnosticLog } from '../../core/diagnosticsLog'
 import type { CopyOutcome } from '../clipboard'
-import { Settings } from './Settings'
+import { Settings, type SettingsProps } from './Settings'
 import styles from './SidePane.module.css'
 import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
 
 /**
  * The pane's tools, in rail order.
  *
- * Counted from `PANES` rather than written out, because the number in the prose
- * was wrong: three separate comments said "seven" over a rail of eight, and a
- * count in a sentence has no way to notice a panel being added.
+ * NO COUNT IN THE PROSE, because the number was wrong: three separate comments
+ * said "seven" over a rail of eight, and a count in a sentence has no way to
+ * notice a panel being added. The check below the list is what notices.
  *
  * Contents and Companion used to live in a separate 340px card beside the
  * reader. One pane holds them all, so there is a single place to look for a
  * tool and a single surface competing with the text.
  *
- * This component now only selects a panel. Each panel owns its own state and
- * markup — previously every one of them was inline here, coupling navigation,
- * filtering, settings and content rendering in one 300-line file.
- */
-/**
- * The rail's icons, by panel.
- *
- * Only the icons. Ids and labels come from `ui/panes`, which the palette and
- * the titlebar read too — this file used to carry its own copy of all three,
- * under a comment about registries that drift. Typed as a total Record, so
- * adding a panel without an icon fails to compile rather than rendering a rail
- * button with nothing in it.
+ * This component selects a panel and builds the rail beside it. Each panel owns
+ * its own state and markup — previously every one of them was inline here,
+ * coupling navigation, filtering, settings and content rendering in one
+ * 300-line file.
  */
 /* ONE LIST: the rail's order and each panel's icon, together. They were two —
  * a total Record for the icons and an ordered array of ids — which meant two
@@ -69,7 +61,14 @@ import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
  * below covers the merged list exactly as it covered the array. The ORDER is
  * this file's; the membership is not: Companion sits second here, beside
  * Contents, because §03 groups the two surfaces that read the book. Labels
- * still come from `ui/panes`, which the palette and the titlebar read too. */
+ * still come from `ui/panes`, which the palette and the titlebar read too —
+ * this file once carried its own copy of the ids, the labels and the
+ * accelerators, under a comment about registries that drift.
+ *
+ * ⚠️ A SECOND DOC BLOCK STOOD HERE describing that Record — "only the icons",
+ * "typed as a total Record" — after the Record was gone, directly above the
+ * list that replaced it (#149). What was still true of it is folded into the
+ * paragraph above. */
 const RAIL_ENTRIES = [
   { id: 'toc', Icon: List },
   { id: 'companion', Icon: Sparkles },
@@ -88,6 +87,7 @@ const RAIL_ENTRIES = [
 type RailCoversEveryPane = Exclude<KernelPaneId, (typeof RAIL_ENTRIES)[number]['id']> extends never
   ? true
   : ['a panel is missing from RAIL_ENTRIES', Exclude<KernelPaneId, (typeof RAIL_ENTRIES)[number]['id']>]
+// Stryker disable next-line BooleanLiteral: a compile-time witness whose only reader is `void` — `false` here fails tsc and changes nothing at runtime, so no test can observe it
 const _railIsExhaustive: RailCoversEveryPane = true
 void _railIsExhaustive
 
@@ -111,6 +111,7 @@ const railFor = (screen: AppState['screen'], audience: PaneAudience) =>
 
 /** The companion's passages when the host supplies none — one function, not a
  *  fresh `() => []` per render that re-rendered the pane for nothing. */
+// Stryker disable next-line ArrowFunction: `Companion` reads its passages as `passages?.() ?? []`, so a function answering undefined reaches the provider as this same empty list and no test can tell the two apart
 const NO_PASSAGES = (): AskPassage[] => []
 
 export interface SidePaneProps {
@@ -200,32 +201,30 @@ export interface SidePaneProps {
    *
    * `books` is the exception that stays outside: Marginalia reads it too, to
    * name the book a cross-book row came from.
+   *
+   * THE PANEL'S OWN PROPS, LESS THE THREE THIS PANE SUPPLIES. It was the other
+   * seven restated field by field, so a type could drift from the panel's and a
+   * prop the panel gained reached it only if somebody copied it here too (#146).
+   * Each field's meaning is documented where it is used — `LibraryPanelProps`.
    */
-  library: {
-    /** Collection-wide tag edits — see `LibraryPanel`. */
-    readonly onRenameTag: (from: string, to: string) => void
-    readonly onRemoveTag: (tag: string) => void
-    /** The reader's decisions about their tags — see `tagPrefs`. */
-    readonly tagPrefs: TagPrefsStore
-    /** The last shelf-wide tag removal and its undo. */
-    readonly lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
-    readonly onUndoRemoveTag: () => void
-    readonly onAdoptTag: (tag: string) => void
-    readonly onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
-  }
+  library: Omit<LibraryPanelProps, 'books' | 'query' | 'dispatch'>
   /** The shelf: the Library panel's counts and scopes, and Marginalia's titles. */
   books: readonly IndexedBook[]
-  /** Everything the Settings panel needs, as one prop — same reason as `library`. */
-  settings: {
-    /** The faces this machine can offer. */
-    readonly offered: readonly Face[]
-    /** The contributed settings sections (WI-C.5). */
-    readonly sections: readonly SettingsSection[]
-    /** Capabilities that did not compose — see `Settings.missing`. */
-    readonly missing?: readonly { readonly id: string }[] | undefined
-    /** Whether a choice made in the panel survives a launch — see `Settings.persistent`. */
-    readonly persistent?: boolean | undefined
-  }
+  /**
+   * Everything the Settings panel needs from its host rather than from the app
+   * state, as one prop — same reason as `library`, and picked from
+   * `SettingsProps` for the same reason: `offered`, the contributed `sections`
+   * (WI-C.5), the capabilities that are `missing`, whether a choice is
+   * `persistent`, and Look up's answer language.
+   */
+  settings: Readonly<Pick<SettingsProps, 'offered' | 'sections' | 'missing' | 'persistent' | 'lookUp'>>
+  /**
+   * The lookup history, for Marginalia's Dictionary chip (WI-17.3). Absent: no
+   * chip — see `MarginaliaProps.lookups`.
+   */
+  lookups?: LookupsView | undefined
+  /** The lookup happening now — `useLookUp`'s state, lifted for exactly this. */
+  liveLookUp?: GlossState | undefined
   /**
    * The panes the composed capabilities contributed. They take the rail
    * AFTER the kernel's, in the composition's order, on the screens each one
@@ -263,6 +262,8 @@ export function SidePane({
   contributed,
   markControls,
   developer,
+  lookups,
+  liveLookUp,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -278,7 +279,13 @@ export function SidePane({
    *
    * RESOLVED against the composition after that, not trusted: a remembered
    * pane id that belongs to no composed capability shows the screen's default
-   * rather than a title over nothing — see `shownPane`. */
+   * rather than a title over nothing — see `shownPane`.
+   *
+   * ⚠️ **AND THE PANE ASKED FOR BY NAME IS FITTED TOO.** Only `lastPane` was:
+   * `state.pane` went straight to the switch below, so a state naming Companion
+   * with developer options off drew the Companion beside a rail that has no
+   * button for it (#145). The reducer never builds that state; the rail and the
+   * panel asking one question is what stops this pane depending on it. */
   /* WHO IS LOOKING, as one value — the screen fit and the developer's own
      answer travel together through `paneFits`, and building it once here is
      what stops the rail, the fallback and the contributed list asking three
@@ -290,8 +297,8 @@ export function SidePane({
   }
 
   const fallback = defaultPaneFor(state.screen)
-  const wanted =
-    state.pane ?? (paneFits(state.screen, state.lastPane, audience) ? state.lastPane : fallback)
+  const asked = state.pane ?? state.lastPane
+  const wanted = paneFits(state.screen, asked, audience) ? asked : fallback
   const shown = shownPane(wanted, contributed, fallback)
   const pane = shown.id
 
@@ -309,14 +316,17 @@ export function SidePane({
   const goToProps = onGoTo ? { onGoTo } : {}
   /* THE RAIL, BUILT WHEN ITS INPUTS CHANGE and not per render — the
    * contributed half asked `paneFits` per entry, which rescans `contributed`,
-   * so a rail of n contributed panes cost n² on every keystroke anywhere. */
+   * so a rail of n contributed panes cost n² on every keystroke anywhere.
+   * ⚠️ AND THE RESCAN WAS THE OTHER HALF OF IT: `paneFits` takes an id and
+   * looks it up in the very list being filtered. `contributionFits` is the same
+   * rule asked of the contribution in hand (#148) — one pass, one rule. */
   const rail = useMemo(
     () => [
       /* SPREAD, not mapped through an identity: `railFor` already returns
          `{ id, label, Icon }`, so the map only rebuilt equal objects. */
       ...railFor(state.screen, audience),
       ...contributed
-        .filter((entry) => paneFits(state.screen, entry.id, audience))
+        .filter((entry) => contributionFits(state.screen, entry))
         .map(({ id, label }) => ({ id, label, Icon: Puzzle })),
     ],
     [state.screen, contributed, state.developer, state.hiddenPanes],
@@ -349,8 +359,14 @@ export function SidePane({
                amber marks provenance, and provenance carried over is worse than
                none. Keyed, so the session is rebuilt rather than reset by hand
                — and the unmount aborts a generation still streaming, which is a
-               subscription turn spent on an answer nobody will read. */
-            key={book.bookId ?? 'no-book'}
+               subscription turn spent on an answer nobody will read.
+
+               NO KEY FOR NO BOOK, rather than a sentinel. `'no-book'` was a
+               string in the same namespace as book ids — a book carrying it
+               would have shared a thread with no book, and which string it was
+               could not be told from any other. `undefined` is not a key at
+               all; `null` would not do, because React makes it `"null"`. */
+            key={book.bookId ?? undefined}
             currentChapter={book.position.chapterLabel}
             /* A book that is OPEN and READ, not merely chosen: `source` is set
                the instant a file is handed over, while it is still parsing and
@@ -392,6 +408,8 @@ export function SidePane({
             focus={markFocus}
             onFocusDone={onMarkFocusDone}
             markControls={markControls}
+            lookups={lookups}
+            liveLookUp={liveLookUp}
             {...goToProps}
           />
         )}
@@ -445,6 +463,10 @@ export function SidePane({
             sections={settings.sections}
             missing={settings.missing}
             persistent={settings.persistent}
+            lookUp={settings.lookUp}
+            /* "Install one" lands on its section (phase 17, L3). */
+            reveal={state.settingsReveal}
+            onRevealed={(nonce) => dispatch({ type: 'settingsRevealed', nonce })}
             theme={state.theme}
             themeFollowsOs={state.themeFollowsOs}
             pageLayout={state.pageLayout}
@@ -467,7 +489,10 @@ export function SidePane({
             align={state.align}
             onAlign={(align) => dispatch({ type: 'setAlign', align })}
             style={state.readingStyle}
-            onStyle={(key, value) => dispatch(setReadingStyle(key, value))}
+            /* FORWARDED AS THE PAIR IT ARRIVED AS. Taking `(key, value)` and
+               handing them on separately is what splits the correlation apart
+               again — see `ReadingStyleArgs`. */
+            onStyle={(...args) => dispatch(setReadingStyle(...args))}
             brightness={state.brightness}
             onBrightness={(idx) => dispatch({ type: 'setBrightness', idx })}
             contrast={state.contrast}

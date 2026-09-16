@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from 'react'
+import { useEffect, useId, useSyncExternalStore } from 'react'
 import { CAPABILITY_UI as ui } from '../../../kernel'
 import type { RouteRow, RoutesModel } from './routesModel'
 
@@ -29,7 +29,7 @@ export interface CompanionPaneProps {
    * prop is how a caller forgets to answer.
    *
    * It was made required, and now it is deleted with the row it fed. The fact
-   * it replaced lives on `GlossProvider.installable`, stated by the object
+   * it replaced lives on `GlossProvider.installAt`, stated by the object
    * that knows it rather than passed down from a root that has to remember. */
 }
 
@@ -95,10 +95,24 @@ function RouteAction({ row, model }: { readonly row: RouteRow; readonly model: R
     case 'none':
       return null
   }
+  /* ⚠️ **"HERE IT IS A TYPE ERROR" WAS NOT TRUE UNTIL THIS LINE.** A `switch`
+     with no declared return type that falls off its end returns `undefined`,
+     which React draws as nothing and `tsc` accepts — this repository does not
+     set `noImplicitReturns` — so a seventh `RowAction` compiled clean and hid
+     its row's control, the silence the switch was written to end. Measured by
+     widening the union in memory: no error without this, one with it
+     (2026-09-13 audit). `BrowsersPane` spells the same guard. */
+  const unreached: never = row.action
+  return unreached
 }
 
 export function CompanionPane({ model }: CompanionPaneProps) {
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot)
+  /* A local, so the check below narrows it inside the row lookup's callback
+     too: read off `snapshot` there it needed a `?.` for a null the branch had
+     already ruled out — an optional chain nothing could reach. */
+  const { signInFailure } = snapshot
+  const effortHint = useId()
   useEffect(() => {
     /* ⚠️ NOT FIRE-AND-FORGET. `refresh` never rejects — it absorbs a failed
      * probe into an empty route list — but `void` on a promise that later
@@ -124,11 +138,62 @@ export function CompanionPane({ model }: CompanionPaneProps) {
         </div>
       ))}
 
+      {/* NOTHING TO LIST IS STILL AN ANSWER, and it drew as a bare heading. A
+          probe that failed is absorbed into an empty list (`routesModel`'s
+          `refresh`), so this is also what a dead plugin looks like, and asking
+          again is the one thing a reader can do about either. Not while the
+          first check is out: "nothing found" before anything was looked for is
+          a claim nobody checked (2026-09-13 audit). */}
+      {!snapshot.loading && snapshot.rows.length === 0 ? (
+        <>
+          <div className={ui.row}>
+            <span className={ui.grow}>Nothing found to answer with</span>
+            <button
+              type="button"
+              className={ui.button}
+              aria-label="Check again for something to answer with"
+              onClick={() => void model.refresh().catch(() => {})}
+            >
+              Check again
+            </button>
+          </div>
+          <div className={ui.hint}>
+            A model installed in Local models, an endpoint added in Cloud endpoints, or Codex or Claude once
+            installed and signed in can answer here.
+          </div>
+        </>
+      ) : null}
+
       {snapshot.fellBack && snapshot.inUse !== null ? (
         <div className={ui.hint}>
           The route you chose is not available, so the companion is answering with{' '}
           {snapshot.rows.find((row) => row.id === snapshot.inUse)?.label ?? snapshot.inUse}. Your
           choice is remembered and will come back when it does.
+        </div>
+      ) : null}
+
+      {/* ⚠️ A LOGIN THAT WOULD NOT LAUNCH TOLD THE READER NOTHING. `signIn`
+          catches, reports to the log, and puts the row back to `Sign in…` —
+          which is right, and is also exactly what an ignored press looks like,
+          so the reader's next move was to press it again. NAMED, because a
+          list of several routes has no other way to say which one refused
+          (2026-09-13 audit, round 2). */}
+      {signInFailure !== null ? (
+        <div className={ui.hint}>
+          Signing in to{' '}
+          {snapshot.rows.find((row) => row.id === signInFailure.route)?.label ?? signInFailure.route}{' '}
+          did not start. {signInFailure.reason}.
+        </div>
+      ) : null}
+
+      {/* ⚠️ AND WHEN THERE IS NOTHING TO FALL BACK TO. The notice above was the
+          only one, gated on a route to name, so the worse case — the chosen
+          route gone and nothing else usable — said nothing about the choice at
+          all (2026-09-13 audit). */}
+      {snapshot.fellBack && snapshot.inUse === null ? (
+        <div className={ui.hint}>
+          The route you chose is not available, and nothing else can answer. Your choice is remembered and
+          will come back when it does.
         </div>
       ) : null}
 
@@ -153,19 +218,33 @@ export function CompanionPane({ model }: CompanionPaneProps) {
        * own stylesheet was cleaned of once already. It comes back with the
        * feature that needs it, and with selection state of its own. */}
 
-      {/* THE EFFORT, and it is absent rather than disabled when a local model
-          is answering — the two flags it maps to exist on the agent CLIs and
-          nowhere else. Same shape as Look up above: a cycle, because there
-          are three states and there cannot be a fourth. */}
+      {/* THE EFFORT, and it is absent rather than disabled unless an agent is
+          answering — the two flags it maps to exist on the agent CLIs and
+          nowhere else. A cycle, because there are three states and there
+          cannot be a fourth.
+
+          (This said "Same shape as Look up above", pointing at a cycle row
+          deleted from above it; corrected 2026-09-13, by audit.)
+
+          ⚠️ NAMED BY THE SETTING AS WELL AS THE VALUE. `Effort` is a sibling
+          span, so the button's accessible name was its value alone — "Account
+          default" — the defect `RouteAction`'s header records for the route
+          buttons. The hint is attached for the same reason. */}
       {snapshot.depth !== null ? (
         <>
           <div className={ui.row}>
             <span className={ui.grow}>Effort</span>
-            <button type="button" className={ui.button} onClick={() => model.cycleDepth()}>
+            <button
+              type="button"
+              className={ui.button}
+              aria-label={`Effort: ${snapshot.depth}`}
+              aria-describedby={effortHint}
+              onClick={() => model.cycleDepth()}
+            >
               {snapshot.depth}
             </button>
           </div>
-          <div className={ui.hint}>
+          <div id={effortHint} className={ui.hint}>
             How much of your subscription one answer may spend. Faster answers sooner
             and costs less; more thorough thinks for longer.
           </div>

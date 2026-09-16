@@ -139,6 +139,20 @@ export interface Flattened {
    *  so a snap that reaches it would be a guess. */
   readonly truncatedStart: boolean
   readonly truncatedEnd: boolean
+  /**
+   * The window starts where the root's rendered text starts: the walk behind
+   * the anchor ran out of TREE rather than out of budget, so nothing readable
+   * lies before it.
+   *
+   * NOT `!truncatedStart`. That flag is word-safety — a budget cut that lands on
+   * a space reports it `false` — and this is the one question it cannot answer:
+   * whether anything lies past the window's edge at all. `sentenceAt` needs
+   * exactly that to tell the first sentence of a document from the first
+   * sentence of a window (phase 17, L8).
+   */
+  readonly reachedStart: boolean
+  /** `reachedStart`, at the other end. */
+  readonly reachedEnd: boolean
   /** A live position as an `Edge` into `strs`, or `null` if this walk never
    *  reached that node. */
   toFlat(node: Text, offset: number): Edge | null
@@ -157,22 +171,41 @@ interface Direction {
   readonly next: 'nextSibling' | 'previousSibling'
   /** Whitespace at the edge the walk arrives at, and the edge it leaves
    *  behind. A cut beside either one is a cut no word spans. */
-  readonly leading: RegExp
-  readonly trailing: RegExp
+  readonly leading: (text: string) => boolean
+  readonly trailing: (text: string) => boolean
 }
+
+/**
+ * Whitespace no word spans: JavaScript's `\s`, less the two members UAX #29
+ * JOINS INTO a word.
+ *
+ * ⚠️ **IT WAS `\s`, AND TWO OF ITS TWENTY-FIVE ARE NOT BOUNDARIES AT ALL.**
+ * U+FEFF is General_Category `Cf`, which WB4 folds into the letter before it —
+ * the sentinel's trap above, met from the other side — and U+202F NARROW
+ * NO-BREAK SPACE is `ExtendNumLet`, which WB13a/b glue letters across. Measured
+ * with `Intl.Segmenter` over every `\s` code point: `abc<U+FEFF>defgh` and
+ * `abc<U+202F>defgh` are one word each, and the other twenty-three break on both
+ * sides. So a window cut beside either one was called safe, and snapped `abc`
+ * where the whole walk selects the word. `flatten.test.ts` asks the segmenter
+ * about every member rather than trusting this list. Found by audit.
+ */
+const BREAKING_SPACE = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u205f\u3000]/
+
+const startsWithBreakingSpace = (text: string): boolean => BREAKING_SPACE.test(text.slice(0, 1))
+const endsWithBreakingSpace = (text: string): boolean => BREAKING_SPACE.test(text.slice(-1))
 
 const FORWARD: Direction = {
   first: 'firstChild',
   next: 'nextSibling',
-  leading: /^\s/,
-  trailing: /\s$/,
+  leading: startsWithBreakingSpace,
+  trailing: endsWithBreakingSpace,
 }
 
 const BACKWARD: Direction = {
   first: 'lastChild',
   next: 'previousSibling',
-  leading: /\s$/,
-  trailing: /^\s/,
+  leading: endsWithBreakingSpace,
+  trailing: startsWithBreakingSpace,
 }
 
 /** What the walk needs to know about an element, computed once. */
@@ -211,9 +244,16 @@ interface Gathered {
   readonly pieces: Piece[]
   /** Ran out of tree rather than out of budget. */
   readonly complete: boolean
-  /** A block boundary lies in the gap where the walk stopped. */
-  readonly stoppedAtBreak: boolean
-  readonly used: number
+  /** The cut where the walk stopped is safe from its far side: a block
+   *  boundary lies in the gap, or the node the budget refused begins with
+   *  whitespace. */
+  readonly stoppedSafe: boolean
+}
+
+/** One side of the window, once `trim` has retreated it to a safe cut. */
+interface HalfWindow {
+  readonly pieces: Piece[]
+  readonly truncated: boolean
 }
 
 function tagOf(el: Element): string {
@@ -231,7 +271,10 @@ function tagOf(el: Element): string {
  */
 function isBlockLevel(style: CSSStyleDeclaration): boolean {
   const display = style.display
-  if (!display || display === 'none' || display === 'contents') return false
+  /* `none` is not asked: a `display: none` element is SKIPPED before its
+   * block-ness can matter — never entered, and never the parent of an entry the
+   * walk climbs out of. */
+  if (!display || display === 'contents') return false
   if (display.startsWith('inline') || display.startsWith('ruby')) return false
   const position = style.position
   if (position === 'absolute' || position === 'fixed') return false
@@ -243,14 +286,15 @@ function factsOf(el: Element, walk: Walk): ElementFacts {
   if (cached) return cached
   const tag = tagOf(el)
   const style = walk.view.getComputedStyle(el)
-  const skipped = SKIPPED_TAGS.has(tag) || style.display === 'none'
   const visibility = style.visibility
   const facts: ElementFacts = {
-    skipped,
+    skipped: SKIPPED_TAGS.has(tag) || style.display === 'none',
     visible: visibility !== 'hidden' && visibility !== 'collapse',
-    /* `<br>` is handled by name where it is met, not here: it is a break
-     * BETWEEN its siblings rather than a box with edges to cross. */
-    block: !skipped && tag !== 'BR' && isBlockLevel(style),
+    /* Asked of every element and read only where it can matter: a skipped
+     * element is never entered nor climbed out of, and `<br>` is handled by
+     * name where it is met — a break BETWEEN its siblings rather than a box
+     * with edges to cross. */
+    block: isBlockLevel(style),
   }
   walk.facts.set(el, facts)
   return facts
@@ -265,38 +309,63 @@ function budgetLeft(walk: Walk): boolean {
 }
 
 /**
- * The first text node of `node`'s subtree, in `dir`'s order.
+ * The first text node of `from`'s subtree, in `dir`'s order.
  *
  * Returns `null` when the subtree holds none — the caller then continues from
- * `node` as if its subtree were finished. Block edges met on the way in set
+ * `from` as if its subtree were finished. Block edges met on the way in set
  * `pendingBreak`; the matching edges on the way out are set by `advance` as it
  * climbs.
+ *
+ * ⚠️ **A LOOP, AND IT WAS RECURSION — ONE FRAME PER LEVEL OF NESTING.** A tree
+ * ten thousand elements deep threw `RangeError: Maximum call stack size
+ * exceeded` long before the node budget could refuse it: a throw, where every
+ * other pathological tree gets a decline. And the loop over a node's children
+ * went on stepping through siblings once the budget was spent — its comment
+ * said each call past the budget refused at its first line, "touching nothing",
+ * and ten thousand empty siblings were still ten thousand reads. It climbs back
+ * by `parentNode` now, as `advance` does, and stops the moment the budget runs
+ * out. Both found by audit.
  */
-function descend(node: Node, dir: Direction, walk: Walk): Text | null {
-  if (walk.overflowed || !budgetLeft(walk)) return null
-  const type = node.nodeType
-  if (type === TEXT_NODE) {
-    const text = node as Text
-    const parent = text.parentNode
-    const parentFacts = parent ? walk.facts.get(parent) : undefined
-    if (parentFacts && !parentFacts.visible) return null
-    return text
+function descend(from: Node, dir: Direction, walk: Walk): Text | null {
+  let node: Node = from
+  for (;;) {
+    if (walk.overflowed || !budgetLeft(walk)) return null
+    const type = node.nodeType
+    if (type === TEXT_NODE) {
+      const parent = node.parentNode
+      const parentFacts = parent ? walk.facts.get(parent) : undefined
+      if (!parentFacts || parentFacts.visible) return node as Text
+    } else if (type === ELEMENT_NODE) {
+      const el = node as Element
+      const facts = factsOf(el, walk)
+      if (!facts.skipped) {
+        if (tagOf(el) === 'BR') {
+          walk.pendingBreak = true
+        } else {
+          if (facts.block) walk.pendingBreak = true
+          const child = el[dir.first]
+          if (child) {
+            node = child
+            continue
+          }
+        }
+      }
+    }
+    /* This node's subtree is finished: on to the next sibling, climbing out of
+     * every subtree that has none — but never past `from`, whose own siblings
+     * are its caller's to walk. Everything stepped through lies strictly inside
+     * `from`, so every climb has a parent and meets `from` before it could meet
+     * null. */
+    for (;;) {
+      if (node === from) return null
+      const sibling = node[dir.next]
+      if (sibling) {
+        node = sibling
+        break
+      }
+      node = node.parentNode as Node
+    }
   }
-  if (type !== ELEMENT_NODE) return null
-  const el = node as Element
-  const facts = factsOf(el, walk)
-  if (facts.skipped) return null
-  if (tagOf(el) === 'BR') {
-    walk.pendingBreak = true
-    return null
-  }
-  if (facts.block) walk.pendingBreak = true
-  for (let child = el[dir.first]; child; child = child[dir.next]) {
-    const leaf = descend(child, dir, walk)
-    if (leaf) return leaf
-    if (walk.overflowed) return null
-  }
-  return null
 }
 
 /** The next text node after `from` in `dir`'s order, within the walk's root. */
@@ -308,11 +377,13 @@ function advance(from: Node, dir: Direction, walk: Walk): Text | null {
       if (leaf) return leaf
       if (walk.overflowed) return null
     }
-    const parent: Node | null = cur.parentNode
-    if (!parent) return null
+    /* Every step up from a walked node is an element under the root, whose facts
+     * the way down already read — `reachable` refused anything else before the
+     * walk began — so the climb meets the root before it could meet null. */
+    const parent = cur.parentNode as Element
     /* Leaving a block is a boundary just as entering one is; the flag is a
      * boolean, so a nest of them still yields exactly one sentinel. */
-    if (walk.facts.get(parent)?.block) walk.pendingBreak = true
+    if (factsOf(parent, walk).block) walk.pendingBreak = true
     cur = parent
   }
   return null
@@ -327,11 +398,15 @@ function gather(seed: Text, dir: Direction, walk: Walk, budget: number): Gathere
     walk.pendingBreak = false
     const next = advance(cur, dir, walk)
     if (!next) {
-      return { pieces, complete: !walk.overflowed, stoppedAtBreak: walk.pendingBreak, used }
+      return { pieces, complete: !walk.overflowed, stoppedSafe: walk.pendingBreak }
     }
     const text = next.data
     if (used + text.length > budget) {
-      return { pieces, complete: false, stoppedAtBreak: walk.pendingBreak, used }
+      /* THE NODE REFUSED IS STILL EVIDENCE. It was read, and whitespace at the
+       * edge the walk arrived at makes the cut in front of it safe — discarding
+       * that declined `['word', ' next sentence']` under a four-character
+       * budget, against a cut beside a space. Found by audit. */
+      return { pieces, complete: false, stoppedSafe: walk.pendingBreak || dir.leading(text) }
     }
     pieces.push({ node: next, text, gapBreak: walk.pendingBreak })
     used += text.length
@@ -359,21 +434,22 @@ function gather(seed: Text, dir: Direction, walk: Walk, budget: number): Gathere
  * inline shape in an EPUB, so that give-up was not exotic.
  *
  * `text` reads in WALK order, not document order, which is why the same two
- * regexes serve both directions: `dir.trailing` is whitespace at the edge the
- * cut is made on, `dir.leading` whitespace at the edge left behind.
+ * predicates serve both directions: `dir.trailing` is whitespace at the edge
+ * the cut is made on, `dir.leading` whitespace at the edge left behind.
  */
-function trim(gathered: Gathered, seedText: string, dir: Direction): { pieces: Piece[]; truncated: boolean } {
+function trim(gathered: Gathered, seedText: string, dir: Direction): HalfWindow {
   if (gathered.complete) return { pieces: gathered.pieces, truncated: false }
   const pieces = [...gathered.pieces]
   /* Dropping every piece leaves the cut at the far edge of the seed, which is
    * always in the window — so the seed's own text is what the last question is
    * asked about. */
   const endsWith = (): string => pieces[pieces.length - 1]?.text ?? seedText
-  let safe = gathered.stoppedAtBreak || dir.trailing.test(endsWith())
-  while (!safe && pieces.length > 0) {
+  let safe = gathered.stoppedSafe || dir.trailing(endsWith())
+  while (!safe) {
     const dropped = pieces.pop()
-    if (!dropped) break
-    safe = dropped.gapBreak || dir.leading.test(dropped.text) || dir.trailing.test(endsWith())
+    /* Nothing left to drop: the seed's own far edge was the last cut to ask about. */
+    if (dropped === undefined) break
+    safe = dropped.gapBreak || dir.leading(dropped.text) || dir.trailing(endsWith())
   }
   return { pieces, truncated: !safe }
 }
@@ -386,6 +462,11 @@ function trim(gathered: Gathered, seedText: string, dir: Direction): { pieces: P
  * that nothing on the way is skipped, and that its own text is rendered. An
  * anchor inside `display: none` or a `<script>` has no flat position, and
  * inventing one would flatten text the reader cannot see.
+ *
+ * ⚠️ **AND THE CLIMB IS CHARGED TO THE NODE BUDGET, WHICH IT WAS NOT.** It
+ * reads a computed style at every level, and reading those free let a one-node
+ * budget read a hundred and one. A climb the budget cannot pay for is a block
+ * that could not be read, so it refuses like one. Found by audit.
  */
 function reachable(node: Text, walk: Walk): boolean {
   if (node.nodeType !== TEXT_NODE) return false
@@ -393,6 +474,7 @@ function reachable(node: Text, walk: Walk): boolean {
   while (cur !== walk.root) {
     const parent: Node | null = cur.parentNode
     if (!parent || parent.nodeType !== ELEMENT_NODE) return false
+    if (!budgetLeft(walk)) return false
     const facts = factsOf(parent as Element, walk)
     if (facts.skipped) return false
     if (cur === node && !facts.visible) return false
@@ -410,6 +492,9 @@ function nothing(truncated: boolean): Flattened {
     nodes: [],
     truncatedStart: truncated,
     truncatedEnd: truncated,
+    /* A walk that read nothing vouches for no edge, whatever the reason. */
+    reachedStart: false,
+    reachedEnd: false,
     toFlat: () => null,
     fromFlat: () => null,
   }
@@ -443,7 +528,7 @@ export function flatten(root: Element, options: FlattenOptions = {}): Flattened 
    * document `makePdf` builds for search. Guessing at block-ness without them
    * would be a fabrication, so this fails closed rather than falling back to a
    * tag list. */
-  const view = root.ownerDocument?.defaultView
+  const view = root.ownerDocument.defaultView
   if (!view) return nothing(true)
 
   const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS
@@ -453,12 +538,16 @@ export function flatten(root: Element, options: FlattenOptions = {}): Flattened 
     maxNodes: options.maxNodes ?? DEFAULT_MAX_NODES,
     facts: new Map(),
     visits: 0,
+    // Stryker disable next-line BooleanLiteral: every gather resets it before its first read.
     pendingBreak: false,
     overflowed: false,
   }
 
   const anchor = options.anchors?.[0]
-  let backward: { pieces: Piece[]; truncated: boolean } = { pieces: [], truncated: false }
+  let backward: HalfWindow = { pieces: [], truncated: false }
+  /* With no anchor the seed IS the first text in the tree, so nothing lies
+   * before it by construction. */
+  let reachedStart = true
   let seed: Text | null
   if (anchor) {
     if (!reachable(anchor.node, walk)) return nothing(true)
@@ -466,7 +555,9 @@ export function flatten(root: Element, options: FlattenOptions = {}): Flattened 
     /* A quarter of the budget behind the anchor: a word extends backward from
      * an edge by a few characters, not by a paragraph, and the remainder is
      * more useful ahead of it where the second edge of a selection lives. */
-    backward = trim(gather(seed, BACKWARD, walk, Math.floor(maxChars / 4)), seed.data, BACKWARD)
+    const gatheredBehind = gather(seed, BACKWARD, walk, Math.floor(maxChars / 4))
+    reachedStart = gatheredBehind.complete
+    backward = trim(gatheredBehind, seed.data, BACKWARD)
   } else {
     seed = descend(root, FORWARD, walk)
   }
@@ -474,35 +565,31 @@ export function flatten(root: Element, options: FlattenOptions = {}): Flattened 
 
   const behind = backward.pieces.reduce((total, piece) => total + piece.text.length, 0)
   const ahead = Math.max(0, maxChars - seed.data.length - behind)
-  const forward = trim(gather(seed, FORWARD, walk, ahead), seed.data, FORWARD)
+  const gatheredAhead = gather(seed, FORWARD, walk, ahead)
+  const forward = trim(gatheredAhead, seed.data, FORWARD)
 
-  return assemble(seed, backward, forward)
+  return assemble(seed, backward, forward, { reachedStart, reachedEnd: gatheredAhead.complete })
 }
 
 /** The two half-windows and the seed, in document order, with the sentinels
  *  written in and the lookups built. */
 function assemble(
   seed: Text,
-  backward: { pieces: Piece[]; truncated: boolean },
-  forward: { pieces: Piece[]; truncated: boolean },
+  backward: HalfWindow,
+  forward: HalfWindow,
+  edges: { readonly reachedStart: boolean; readonly reachedEnd: boolean },
 ): Flattened {
-  const ordered: { node: Text; text: string; breakBefore: boolean }[] = []
   const behind = backward.pieces
   /* A backward piece's own `gapBreak` describes the gap on its LATER side, so
-   * in document order it belongs to the piece in front of it. */
-  for (let i = behind.length - 1; i >= 0; i -= 1) {
-    const piece = behind[i]
-    if (!piece) continue
-    ordered.push({
-      node: piece.node,
-      text: piece.text,
-      breakBefore: behind[i + 1]?.gapBreak ?? false,
-    })
-  }
-  ordered.push({ node: seed, text: seed.data, breakBefore: behind[0]?.gapBreak ?? false })
-  for (const piece of forward.pieces) {
-    ordered.push({ node: piece.node, text: piece.text, breakBefore: piece.gapBreak })
-  }
+   * in document order it belongs to the piece in front of it — and the piece
+   * farthest back has nothing in front of it at all. */
+  const ordered: { node: Text; text: string; breakBefore: boolean }[] = [
+    ...behind
+      .map((piece, i) => ({ node: piece.node, text: piece.text, breakBefore: behind[i + 1]?.gapBreak ?? false }))
+      .reverse(),
+    { node: seed, text: seed.data, breakBefore: behind[0]?.gapBreak ?? false },
+    ...forward.pieces.map((piece) => ({ node: piece.node, text: piece.text, breakBefore: piece.gapBreak })),
+  ]
 
   const strs: string[] = []
   const nodes: FlatNode[] = []
@@ -512,8 +599,10 @@ function assemble(
   for (const piece of ordered) {
     /* No leading sentinel: the window's own edge is not a block boundary
      * anyone can act on, and a leading one would shift every offset in the
-     * table by one for no gain. */
-    if (piece.breakBefore && strs.length > 0) {
+     * table by one for no gain. Nothing here needs to refuse one — the first
+     * entry in document order is given `breakBefore: false` by both `?? false`
+     * above. */
+    if (piece.breakBefore) {
       strs.push(SENTINEL)
       flat += SENTINEL.length
     }
@@ -530,19 +619,13 @@ function assemble(
     flat += piece.text.length
   }
 
-  const neighbour = (index: number, step: number): FlatNode | null => {
-    for (let i = index + step; i >= 0 && i < strs.length; i += step) {
-      const row = byIndex.get(i)
-      if (row) return row
-    }
-    return null
-  }
-
   return {
     strs,
     nodes,
     truncatedStart: backward.truncated,
     truncatedEnd: forward.truncated,
+    reachedStart: edges.reachedStart,
+    reachedEnd: edges.reachedEnd,
 
     toFlat(node: Text, offset: number): Edge | null {
       const row = byNode.get(node)
@@ -554,23 +637,24 @@ function assemble(
     fromFlat(index: number, offset: number): DomPosition | null {
       if (!Number.isInteger(index) || index < 0 || index >= strs.length) return null
       const row = byIndex.get(index)
-      if (row) {
-        const length = row.flatEnd - row.flatStart
-        if (!Number.isInteger(offset) || offset < 0 || offset > length) return null
-        return { node: row.node, offset }
-      }
+      /* A sentinel's entry is as long as the sentinel, and an offset into it is
+       * held to that exactly as one into a node is held to the node. ⚠️ It was
+       * CLAMPED instead, so `-1`, `0.5`, `NaN` and `99` all came back as live
+       * positions. Found by audit. */
+      const length = row ? row.flatEnd - row.flatStart : SENTINEL.length
+      if (!Number.isInteger(offset) || offset < 0 || offset > length) return null
+      if (row) return { node: row.node, offset }
       /* A sentinel occupies no DOM at all, so a position inside one is really
        * the seam beside it: its start is the end of the node before, its end
        * the start of the node after. Both are live positions; neither invents
-       * one. */
-      const before = neighbour(index, -1)
-      const after = neighbour(index, 1)
-      if (offset <= 0) {
-        if (before) return { node: before.node, offset: before.flatEnd - before.flatStart }
-        return after ? { node: after.node, offset: 0 } : null
-      }
-      if (after) return { node: after.node, offset: 0 }
-      return before ? { node: before.node, offset: before.flatEnd - before.flatStart } : null
+       * one. And both EXIST: no sentinel is written first or last, and a nest
+       * of breaks writes one — so an entry of text stands on either side of
+       * every sentinel. */
+      const before = byIndex.get(index - 1) as FlatNode
+      const after = byIndex.get(index + 1) as FlatNode
+      return offset === 0
+        ? { node: before.node, offset: before.flatEnd - before.flatStart }
+        : { node: after.node, offset: 0 }
     },
   }
 }
@@ -604,8 +688,22 @@ export function snapInDom(
   const snapped = snapWordRange(flat.strs, startEdge, endEdge, options)
   if (!snapped) return null
 
-  const snappedStart = flat.fromFlat(snapped.start.index, snapped.start.offset)
-  const snappedEnd = flat.fromFlat(snapped.end.index, snapped.end.offset)
-  if (!snappedStart || !snappedEnd) return null
+  /* BOTH MAP, so there is nothing to decline here. `snapWordRange` answers
+   * edges inside `strs` — `startEdge` takes the last entry that begins at or
+   * before the position and `endEdge` the first that ends at or after it, so
+   * each offset lies inside its own entry — and `fromFlat` maps every one of
+   * those, a sentinel's index included, which resolves to the seam beside it.
+   * The cast is `fromFlat`'s own idiom for a null it has just proved cannot
+   * happen.
+   *
+   * ⚠️ **AND IT WAS A GUARD UNDER A Stryker `disable` DIRECTIVE, WHICH HID A MUTANT EIGHT
+   * TESTS KILL.** The directive named `ConditionalExpression`, so it covered the
+   * whole condition — including `if (true) return null`, which turns every snap
+   * in the app into "leave the selection alone" and was reported as ignored
+   * rather than as a survivor. The equivalent half (`false`, and the `&&`) is
+   * gone with the branch rather than hidden beside it. Found by mutation
+   * testing, 2026-09-14. */
+  const snappedStart = flat.fromFlat(snapped.start.index, snapped.start.offset) as DomPosition
+  const snappedEnd = flat.fromFlat(snapped.end.index, snapped.end.offset) as DomPosition
   return { start: snappedStart, end: snappedEnd }
 }

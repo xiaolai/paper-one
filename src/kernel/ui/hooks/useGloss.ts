@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GlossProvider } from '../../core/gloss'
+import type { AnswerLanguages } from '../../core/glossLanguage'
 import type { Diagnostics } from '../../core/ports'
 import { termVerdict } from '../lookUp'
 import { localeAt, sentenceAt } from '../reader/wordSnap/sentenceAt'
@@ -54,11 +55,11 @@ export type GlossState =
    *
    * A STATE RATHER THAN A REDIRECT. `useGloss` is the kernel's, and it has no
    * business knowing that a models pane exists or how to open one — see
-   * `GlossStrip`, which takes the action as a prop and draws nothing when
+   * `LookUpFace`, which takes the action as a prop and draws nothing when
    * there is none.
    */
   /**
-   * ⚠️ **`installable` IS READ AT THE PRESS AND CARRIED**, because the two
+   * ⚠️ **`installAt` IS READ AT THE PRESS AND CARRIED**, because the two
    * facts are answered a render apart. `decideLookUp` reads the provider when
    * the button is DRAWN; this state is reached when it is PRESSED, and
    * availability can drop in between — uninstalling the only text model is the
@@ -66,11 +67,11 @@ export type GlossState =
    * the argument that `unavailable` "can only be reached when `decideLookUp`
    * answered `install`", which is false for exactly that window: the strip
    * then offered **Install one** with no runtime to install into, which is the
-   * WI-20.21 failure `GlossProvider.installable` exists to prevent. Answered
+   * WI-20.21 failure `GlossProvider.installAt` exists to prevent. Answered
    * at the moment of use, like `available` beside it, so there is no snapshot
    * left for anything to go stale against.
    */
-  | { readonly kind: 'unavailable'; readonly term: string; readonly installable: boolean }
+  | { readonly kind: 'unavailable'; readonly term: string; readonly installAt: string | null }
   /**
    * Asked with a passage rather than a term.
    *
@@ -81,13 +82,52 @@ export type GlossState =
    * indistinguishable from a broken feature.
    *
    * IT CARRIES NO TERM, and that is deliberate rather than an omission. The
-   * term here is a paragraph: naming it back is what `.glossFailedSaid` and
-   * `.glossAbsentSaid` had to be made shrinkable for, and neither of them
-   * ellipsizes. The sentence needs no name — the reader is looking at what
-   * they selected — and quoting a chapter into a one-line strip says nothing
-   * the reader does not already know.
+   * term here is a paragraph, and quoting a chapter back into a popover says
+   * nothing the reader does not already know — they are looking at what they
+   * selected.
    */
   | { readonly kind: 'tooLong' }
+
+/**
+ * What the reader asked, and what came back — handed to `AskGlossContext.onAnswer`
+ * once, when a definition arrives for the ask it was passed to.
+ */
+export interface GlossAnswer {
+  /** The term as the sentence spells it — see `GlossRequest`. */
+  readonly term: string
+  readonly sentence: string
+  readonly text: string
+  /** What it was asked in, so a recorded lookup can say. */
+  readonly answerIn: AnswerLanguages
+}
+
+/**
+ * Everything about an ask that is not the passage.
+ *
+ * `answerIn` IS A FUNCTION OF THE PASSAGE'S LOCALE, and is resolved only once
+ * the request is built — for the reason `request` is a thunk: the locale comes
+ * from the same range the walk reads, and nothing about a press that never
+ * reaches a model is worth computing.
+ */
+export interface AskGlossContext {
+  readonly bookTitle: string
+  readonly answerIn: (locale: string | undefined) => AnswerLanguages
+  /**
+   * Told when THIS ask's definition arrives — WI-17.2's recording.
+   *
+   * PER ASK, NOT PER HOOK, because what a recording needs besides the answer —
+   * which book, which anchor, which chapter — is a fact about the moment of the
+   * press, and the reader may have selected somewhere else by the time the
+   * model answers. Closed over at the press, it cannot file the answer under a
+   * later selection.
+   *
+   * `void | Promise<void>` IN SO MANY WORDS: a recorder may be `async`, and
+   * `recordAnswer` catches its rejection as well as its throw. This said `void`,
+   * which an `async` function satisfies too, so the rejection one could return
+   * was a case nothing had to think about (2026-09-13 audit).
+   */
+  readonly onAnswer?: ((answer: GlossAnswer) => void | Promise<void>) | undefined
+}
 
 export interface Gloss {
   readonly state: GlossState
@@ -115,7 +155,7 @@ export interface Gloss {
    * walk that trimmed ruby out of a paragraph would not make that paragraph a
    * term.
    */
-  ask(request: () => GlossRequest, fallbackTerm: string, bookTitle: string): void
+  ask(request: () => GlossRequest, fallbackTerm: string, context: AskGlossContext): void
   /** Put it away — the reader moved on. */
   dismiss(): void
 }
@@ -125,23 +165,21 @@ export interface Gloss {
  *
  * An OPAQUE KEY, and the hook never reads inside it: a change means "the
  * passage this gloss describes has stopped being shown", and `null` means the
- * reader is not looking at a book at all. Both take the gloss down.
+ * reader is not looking at a passage at all. Both take the gloss down.
  *
- * ⚠️ **IT IS DELIBERATELY NOT THE READING POSITION**, and that is measured
- * rather than assumed. The strip is a flex child of the reader's column beside
- * `.stage`, which is `flex: 1` — so the strip APPEARING shrinks the stage,
- * foliate re-paginates, and a relocate lands with a new fraction and possibly a
- * new CFI. An anchor keyed on either would then dismiss the gloss that had just
- * caused the reflow, grow the stage back, and relocate again: a flicker loop,
- * driven by the fix. The spine item and the chapter cannot be moved by a
- * reflow, so they are what `Reader` builds the key from.
+ * ⚠️ **THE SELECTION IS PART OF IT NOW, AND IT COULD NOT BE BEFORE.** The answer
+ * used to be a strip under the page, a flex row beside `.stage` — so its own
+ * appearance shrank the stage, re-paginated the book, and moved the reading
+ * position; an anchor on the position would have dismissed the gloss that had
+ * just caused the move, and looped. That reflow was measured in the running app
+ * (phase 17's L1) moving the defined word onto the next page, which is why the
+ * answer moved into the selection popup, which floats and moves nothing. With
+ * nothing left to reflow, the anchor can name the selection — and has to: the
+ * popup is where the answer is drawn, so a gloss that outlived its selection
+ * would reappear, stale, over the next passage the reader selected.
  *
- * That leaves ONE case uncovered and it is stated rather than glossed over: a
- * jump to a different place in the SAME chapter (a mark in this chapter, a
- * backlink within it) does not change the key, so the strip survives it. The
- * page turn — every route of it — is covered by `Reader` calling `dismiss()` at
- * `onPageIntent`, on the line `clearSelection()` is already on and for the
- * identical reason.
+ * `useLookUp` builds the key. The page turn is in it too, through the reader's
+ * navigation count, for the keyboard route that never clears a selection.
  */
 export type GlossAnchor = string | null
 
@@ -149,21 +187,30 @@ export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): G
   const [state, setState] = useState<GlossState>({ kind: 'idle' })
   const abort = useRef<AbortController | null>(null)
 
-  /* A gloss outliving the reader that asked for it is a request nobody will
-   * read, and on a loaded machine that is a model still generating. */
-  useEffect(
-    () => () => {
-      abort.current?.abort()
-      abort.current = null
-    },
-    [],
-  )
-
-  const dismiss = useCallback(() => {
+  /* ONE WAY TO LET GO OF THE REQUEST IN FLIGHT, for every route that does —
+     unmounting, dismissing, a new ask, and the two presses that never reach a
+     model. The abort-and-clear pair used to be written out at each of them
+     (2026-09-13 audit). It reads only the ref, so it never changes, and the
+     hooks below that call it list nothing for it. */
+  /* Stryker disable ArrayDeclaration: the three empty lists down to `dismiss`
+     are the only arrays here, and each hook closes over nothing that changes —
+     the ref, the state setter, `cancel`. A list holding one constant re-creates
+     a callback, or re-runs an effect, no more often than an empty one does, so
+     no test can tell the two apart. */
+  const cancel = useCallback(() => {
     abort.current?.abort()
     abort.current = null
+  }, [])
+
+  /* A gloss outliving the reader that asked for it is a request nobody will
+   * read, and on a loaded machine that is a model still generating. */
+  useEffect(() => cancel, [])
+
+  const dismiss = useCallback(() => {
+    cancel()
     setState({ kind: 'idle' })
   }, [])
+  // Stryker restore ArrayDeclaration
 
   /*
    * ⚠️ **THE PROMPT HAS TO GO AWAY WHEN ITS REASON DOES.**
@@ -208,7 +255,7 @@ export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): G
   }, [anchor, dismiss])
 
   const ask = useCallback(
-    (request: () => GlossRequest, fallbackTerm: string, bookTitle: string) => {
+    (request: () => GlossRequest, fallbackTerm: string, context: AskGlossContext) => {
       /* NOT A TERM, AND SAID SO. `lookUpPress` used to hold this bound and
        * `return` on it: a live button, an accepted press, and nothing at all.
        * It is decided HERE because the answer to it is a state, and states are
@@ -224,8 +271,7 @@ export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): G
       const verdict = termVerdict(fallbackTerm)
       if (verdict === 'empty') return
       if (verdict === 'too-long') {
-        abort.current?.abort()
-        abort.current = null
+        cancel()
         setState({ kind: 'tooLong' })
         return
       }
@@ -234,31 +280,51 @@ export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): G
        * reader who asked a second question has stopped caring about the first
        * either way. */
       if (!provider.available) {
-        abort.current?.abort()
-        abort.current = null
+        cancel()
         /* READ HERE, not at the draw — see `unavailable`. */
-        setState({ kind: 'unavailable', term: fallbackTerm, installable: provider.installable })
+        setState({ kind: 'unavailable', term: fallbackTerm, installAt: provider.installAt })
         return
       }
-      /* BUILT ONLY NOW, past the one check that decides. */
-      const { term, sentence } = request()
-      /* The previous one is abandoned, not queued — see the header. */
-      abort.current?.abort()
+      /* The previous one is abandoned, not queued — see the header. BEFORE the
+         request is built, so a press whose request cannot be built still takes
+         the lookup before it down: the reader asked a second question either
+         way. */
+      cancel()
       const controller = new AbortController()
       abort.current = controller
-      setState({ kind: 'asking', term })
+      /* What a failure is filed under: the selection, until the request has
+         spelled the term. */
+      let term = fallbackTerm
 
-      void provider
-        .gloss(term, { sentence, bookTitle }, controller.signal)
-        .then((text) => {
-          if (controller.signal.aborted) return
-          setState({ kind: 'ready', term, text })
-        })
+      /* ⚠️ **ONE GUARDED OPERATION, FROM BUILDING THE REQUEST TO FILING THE
+       * ANSWER.** The build, the language and the provider's own call all ran
+       * outside the promise chain, so a throw from any of them escaped its
+       * `catch`: a request that could not be built threw out of `ask` with the
+       * previous lookup still running, and a provider that threw where it
+       * should have rejected left the state at `asking` for good (2026-09-13
+       * audit). Inside an `async` function a throw IS a rejection — and the
+       * body runs synchronously up to its first `await`, so `asking` is still
+       * set by the press that asked. */
+      const define = async (): Promise<void> => {
+        /* BUILT ONLY NOW, past the one check that decides. */
+        const { term: spelled, sentence, locale } = request()
+        term = spelled
+        const answerIn = context.answerIn(locale)
+        setState({ kind: 'asking', term })
+        const text = await provider.gloss(term, { sentence, bookTitle: context.bookTitle, answerIn }, controller.signal)
+        if (controller.signal.aborted) return
+        setState({ kind: 'ready', term, text })
+        recordAnswer(context.onAnswer, { term, sentence, text, answerIn })
+      }
+
+      void define()
         .catch((error: unknown) => {
           if (controller.signal.aborted) return
           /* SAID, not swallowed. A lookup that silently did nothing is the
-           * failure this whole path is easiest to get wrong in — the same
-           * rule `lookUp` states for the system dictionary. */
+           * failure this whole path is easiest to get wrong in — the rule the
+           * deleted system-dictionary route wrote down first, and the one
+           * `unavailable` and `tooLong` above keep for the presses that never
+           * reach a model. */
           setState({
             kind: 'failed',
             term,
@@ -284,6 +350,12 @@ export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): G
 export interface GlossRequest {
   readonly term: string
   readonly sentence: string
+  /**
+   * The passage's own language — `localeAt`, the nearest `lang` above the
+   * range — for WI-17.5's `book` and `both`. Absent is "the document did not
+   * say", which those choices read as the book's declared language.
+   */
+  readonly locale?: string | undefined
 }
 
 /** The fields of a `SelectionSnapshot` a lookup reads. Named separately so this
@@ -313,26 +385,6 @@ export interface GlossRequestOptions {
 }
 
 /**
- * What to send for a lookup: the real sentence, or today's answer.
- *
- * **THE REUSE SITE, and the defect this phase exists to fix.** The fallback
- * below reads `prefix`/`suffix`, which are `markContext`'s 32 characters a
- * side — a budget sized for STORAGE, spent as a budget for MEANING. On one
- * ordinary sentence it handed the model 70 characters out of 183, beginning
- * `"en the bait"`, cut out of the middle of `taken`.
- *
- * `sentenceAt` walks the document instead and returns `null` rather than
- * anything it cannot vouch for, which makes this a strict improvement by
- * construction: **the worst outcome here is exactly what shipped before.** It
- * is called ONLY from the Look up gesture and never from `publish()` — a
- * second walk per `selectionchange` would be a walk per pointer move.
- *
- * The TERM comes back too, because a sentence with ruby readings filtered out
- * of it no longer contains the term the reader selected: `漢かん字` is what
- * `flatten` produces and `漢字` is what the sentence holds. Sending the raw
- * selection would ask the model to define a word that is not there.
- */
-/**
  * What the Look up handler needs, with the one field that must not be forgotten
  * spelled REQUIRED.
  *
@@ -343,9 +395,32 @@ export interface GlossRequestOptions {
  * Required, that mutation is a compile error rather than a case somebody has to
  * have thought to write.
  */
-export interface AskGlossOptions extends GlossRequestOptions {
+export interface AskGlossOptions extends GlossRequestOptions, AskGlossContext {
   readonly fixedLayout: boolean
-  readonly bookTitle: string
+}
+
+/**
+ * Hand an answer to the ask's recorder — AFTER the state, and GUARDED both ways.
+ *
+ * The definition is on screen whatever the recording does: a history write that
+ * fails must not turn an answer the reader is reading into "Paper couldn't
+ * define", which is what reaching `ask`'s `catch` would do. A refused write is
+ * the store's to report, through its `persistent` flag.
+ *
+ * ⚠️ **A REJECTION TOO, NOT ONLY A THROW.** The guard was a `try` around the
+ * call, which catches a recorder that throws and not one written `async` that
+ * rejects — and the type allowed the second, which then escaped as an unhandled
+ * rejection (2026-09-13 audit). `Promise.resolve` adopts whichever comes back.
+ */
+function recordAnswer(onAnswer: AskGlossContext['onAnswer'], answer: GlossAnswer): void {
+  const unrecorded = (cause: unknown): void => {
+    console.error('Paper: a lookup was answered and could not be recorded', cause)
+  }
+  try {
+    void Promise.resolve(onAnswer?.(answer)).catch(unrecorded)
+  } catch (cause) {
+    unrecorded(cause)
+  }
 }
 
 /**
@@ -356,19 +431,20 @@ export interface AskGlossOptions extends GlossRequestOptions {
  * and a source scan cannot tell a working wiring from a plausible-looking one.
  * Everything that turns a SELECTION INTO A REQUEST is here.
  *
- * ⚠️ **What is still not pinned by a test, precisely.** Deleting the CALL to
- * this from `Reader` survives every case in `useGloss.test.ts`, and closing
- * that means mounting `Reader` — sixteen props and foliate — or a
- * dependency-cruiser `reachable` rule over the call graph. Said here rather
- * than left for someone to assume otherwise.
+ * ⚠️ **THE CALL TO THIS IS PINNED BY A TEST NOW, AND THIS PARAGRAPH SAID IT
+ * COULD NOT BE.** It read: deleting the call from `Reader` survives every case
+ * in `useGloss.test.ts`, and closing that means mounting `Reader` or a
+ * dependency-cruiser `reachable` rule. WI-17.2 moved the call out of `Reader`
+ * into `useLookUp`, which mounts with `renderHook`, and `useLookUp.test.ts`
+ * drives a press through it to the provider — so deleting the call fails there
+ * (corrected 2026-09-13, by audit).
  *
- * It is narrower than it was, twice over. The gap used to include
+ * The gap had already narrowed twice before that. It used to include
  * `gloss || both`, a branch deciding whether the gloss fired alongside
  * Dictionary.app; there is one behaviour now, so that mutation no longer
  * exists. And it used to include the whole lookup decision — draw a control or
  * not, guard the term or not — which now lives in `lookUpPress` and is RUN by
  * `lookUp.test.ts` rather than scanned for.
- *
  */
 export function askGloss(
   gloss: Pick<Gloss, 'ask'>,
@@ -393,40 +469,73 @@ export function askGloss(
    * The raw selection text is what the `unavailable` message names — the
    * sentence-spelled term is a thing only the walk could have produced.
    */
-  gloss.ask(() => glossRequest(selection, options), selection.text, options.bookTitle)
+  gloss.ask(() => glossRequest(selection, options), selection.text, {
+    bookTitle: options.bookTitle,
+    answerIn: options.answerIn,
+    onAnswer: options.onAnswer,
+  })
 }
 
+/**
+ * What to send for a lookup: the real sentence, or today's answer.
+ *
+ * **THE REUSE SITE, and the defect this phase exists to fix.** The fallback
+ * below reads `prefix`/`suffix`, which are `markContext`'s 32 characters a
+ * side — a budget sized for STORAGE, spent as a budget for MEANING. On one
+ * ordinary sentence it handed the model 70 characters out of 183, beginning
+ * `"en the bait"`, cut out of the middle of `taken`.
+ *
+ * `sentenceAt` walks the document instead and returns `null` rather than
+ * anything it cannot vouch for, which makes this a strict improvement by
+ * construction: **the worst outcome here is exactly what shipped before.** It
+ * is called ONLY from the Look up gesture and never from `publish()` — a
+ * second walk per `selectionchange` would be a walk per pointer move.
+ *
+ * The TERM comes back too, because a sentence with ruby readings filtered out
+ * of it no longer contains the term the reader selected: `漢かん字` is what
+ * `flatten` produces and `漢字` is what the sentence holds. Sending the raw
+ * selection would ask the model to define a word that is not there.
+ *
+ * (This comment sat above `AskGlossOptions`, a declaration it does not
+ * describe, until the 2026-09-13 audit pass moved it to the function it does.)
+ */
 export function glossRequest(
   selection: GlossSelection,
   options: GlossRequestOptions = {},
 ): GlossRequest {
+  /* ONE CLIMB, on the gesture, for both branches — the language of the passage
+     is the same fact whether or not the walk can vouch for its sentence. */
+  const locale = localeAt(selection.range)
   if (options.fixedLayout) {
     /* Guarded for the reason `sentenceAt` guards its own: `Diagnostics` has no
      * no-throw contract, and a counter that can abort the lookup it counts is
      * worse than no counter. */
     try {
+      // Stryker disable next-line OptionalChaining: with no sink the unguarded call throws a TypeError, and this `try` exists to swallow a throwing sink — the lookup goes on identically either way.
       options.diagnostics?.info('gloss.sentence', { outcome: 'fallback', gap: 'fixed-layout' })
     } catch {
       /* Nothing to report it to — see above. */
     }
   } else {
     const found = sentenceAt(selection.range, { diagnostics: options.diagnostics })
-    if (found) return found
+    if (found) return { ...found, locale }
   }
   return {
     term: selection.text,
     /* THE LOCALE COMES FROM THE RANGE, not from the walk that did not happen.
      * It is one climb of the ancestor chain, and `localeAt` is total — a
      * document torn down between the selection and the press answers
-     * `undefined`, which means the host's, rather than losing the lookup. */
-    sentence: sentenceAround(selection.prefix, selection.text, selection.suffix, {
-      locale: localeAt(selection.range),
-    }),
+     * `undefined` — no declared language, read as `sentenceOf` reads one —
+     * rather than losing the lookup. */
+    sentence: sentenceAround(selection.prefix, selection.text, selection.suffix, { locale }),
+    locale,
   }
 }
 
 export interface SentenceAroundOptions {
-  /** The document's own, from `localeAt`. `undefined` means the host's. */
+  /** The document's own, from `localeAt`. `undefined` means the book declares
+   *  none: ICU segments in the host's locale, and the text's own script decides
+   *  the merge (`SentenceOptions.locale`). */
   readonly locale?: string | undefined
 }
 

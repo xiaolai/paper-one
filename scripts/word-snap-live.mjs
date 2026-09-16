@@ -69,11 +69,6 @@ import {
   loadCorpus,
 } from './word-snap-parity.mjs'
 
-/** Pinned in `src-tauri/src/lib.rs` and in `AGENTS.md`. The plugin's own
- *  default is 9223 and it scans the next 100 ports, so two Tauri projects on
- *  the default collide; 31415 clears that window and vmark's 9323 by far. */
-
-
 /** The selection adapter, in dependency order: a module may only use names the
  *  modules before it export. Read from disk on every run — see
  *  `lib/inline-ts.mjs` for why a transcription would be worse than nothing. */
@@ -305,9 +300,17 @@ try {
 
       var result = applySnap(sel);
 
+      /* ⚠️ **THIS EXPECTED NINE CHARACTERS OF AN EIGHT-CHARACTER SELECTION**
+       * until 2026-09-14, so the check could not pass on any engine — and being
+       * manual-gated, nobody had run it to find out. In "the quick brown fox"
+       * offsets 5 to 13 are "uick bro"; "uick brow" is 5 to 14. Everything else
+       * here answered exactly as written, the backward anchor and focus
+       * included, the first time it ran in WebKit.
+       * (No backticks in this comment: it is inside the injected snippet's own
+       * template literal, and one closes it.) */
       return {
         pass:
-          before === 'uick brow' &&
+          before === 'uick bro' &&
           result.snapped === true &&
           sel.toString() === 'quick brown' &&
           sel.anchorNode === fox &&
@@ -371,22 +374,19 @@ return report;
 /** The DOM checks as a self-contained snippet: the app's own adapter, read
  *  from disk, plus the driver above. */
 export function buildDomSnippet() {
+  /* The `;` travels inside the statement it ends, as it does in
+   * `word-snap-parity.mjs`. As a literal of its own, deleting it changed
+   * nothing any run could see: the inlined source opens on a comment line, so
+   * automatic semicolon insertion put it back. */
   return assertTransportable(
     '(function () {\n' +
       "'use strict';\n" +
-      'var CHECK_IDS = ' +
-      JSON.stringify(CHECKS.map((check) => check.id)) +
-      ';\n' +
+      `var CHECK_IDS = ${JSON.stringify(CHECKS.map((check) => check.id))};\n` +
       inlineModules(WORD_SNAP, MODULES) +
       DOM_DRIVER +
       '})()\n',
   )
 }
-
-/* ------------------------------------------------------------------------ */
-/* The bridge                                                                */
-/* ------------------------------------------------------------------------ */
-
 
 /* ------------------------------------------------------------------------ */
 /* The run                                                                   */
@@ -399,9 +399,10 @@ export function buildDomSnippet() {
  * A run that connects, evaluates nothing and answers `{}` satisfies every
  * "no problems found" test there is. These are the assertions that do not.
  *
- * Exported because it is the one part of the bridge path the unit lane can
- * reach: the round trip needs a running app, but what the runner CONCLUDES from
- * a report is pure, and a bug here would turn a hollow run green.
+ * Exported because what the runner CONCLUDES from a report is pure, and a bug
+ * here would turn a hollow run green — so the unit lane holds it to every
+ * shape a page could answer, one call per shape. `main` reaches it too, over a
+ * fake socket, but a whole run per shape is the slow way to ask.
  */
 export function assertRan(parity, dom, expectedRows) {
   const problems = []
@@ -453,8 +454,14 @@ export function assertRan(parity, dom, expectedRows) {
     problems.push('the DOM report claims ' + dom.ran + ' checks ran and carries ' + dom.checks.length)
   }
   /* An explicit failure status is believed even when every entry passed: the
-     page knows something the entries do not carry. */
-  if (dom.ok === false || (typeof dom.failures === 'number' && dom.failures > 0)) {
+     page knows something the entries do not carry.
+
+     ⚠️ **A FAILURE COUNT THAT WAS NOT A NUMBER WAS NOT READ AT ALL** until
+     2026-09-15. A `typeof … === 'number'` guard stood in front of the
+     comparison, and the only values it ever turned away were ones that compare
+     as a positive count — so `failures: "2"` over entries that all passed was
+     a clean report. Absent and `null` compare as no failures without it. */
+  if (dom.ok === false || dom.failures > 0) {
     problems.push('the DOM report declares itself failed (ok: ' + String(dom.ok) + ', failures: ' + String(dom.failures) + ')')
   }
   if (typeof dom.engine !== 'string' || dom.engine === '' || /no navigator/.test(dom.engine)) {
@@ -465,6 +472,7 @@ export function assertRan(parity, dom, expectedRows) {
 }
 
 function readCorpusFile(path) {
+  // Stryker disable next-line StringLiteral: a read with no encoding answers a Buffer, and `JSON.parse` stringifies one as UTF-8 anyway — so both parse the same rows and no test can tell them apart
   const rows = JSON.parse(readFileSync(path, 'utf8'))
   if (!Array.isArray(rows)) {
     throw new Error('the corpus file must hold an array of rows, not ' + typeof rows)
@@ -486,47 +494,97 @@ const USAGE = [
   'which is kept outside this repository.',
 ].join('\n')
 
+/** Every option this runner reads: the ones that stand alone, and the ones that take a value. */
+const SWITCHES = ['--help', '-h', '--list', '--emit-dom', '--json']
+const VALUED = ['--corpus', '--port']
+
 /**
+ * The whole command line, read before anything runs, so a mistyped invocation
+ * cannot quietly produce a report about something nobody asked for. Answers
+ * each option given, with its value; a standalone option's is `undefined`.
+ *
  * ⚠️ **A TRAILING FLAG IS A MISTAKE, NOT A DEFAULT.** `--port` with nothing
  * after it returned `null`, which every caller read as "not given" — so a
  * mistyped invocation connected to the default port and ran, reporting on
  * something the operator did not ask for. An option named without a value is
  * refused by name.
- */
-function option(argv, name) {
-  const at = argv.indexOf(name)
-  if (at === -1) return null
-  const value = argv[at + 1]
-  if (value === undefined || value.startsWith('--')) throw new Error(name + ' needs a value')
-  return value
-}
-
-/**
+ *
  * ⚠️ **AND AN UNKNOWN FLAG WAS IGNORED ENTIRELY**, so `--prot 9223` ran the
  * whole suite against the default port and said nothing. A runner that
  * silently does something other than what it was asked is worse than one that
  * refuses.
+ *
+ * ⚠️ **AND THE REFUSAL THAT FIXED IT HAD HOLES OF ITS OWN** until 2026-09-15. Its
+ * list of known flags never named `--json`, so every run the usage offers JSON
+ * for was refused as a typo. It looked only at `--` flags, so a bare `9223`
+ * was ignored exactly as `--prot 9223` had been. And it ran after `--help`,
+ * `--list` and `--emit-dom` had already returned, and read only the first of a
+ * repeated option. Every argument is accounted for here, once.
  */
-function refuseUnknown(argv, known) {
-  for (const [i, arg] of argv.entries()) {
-    if (!arg.startsWith('--')) continue
-    if (known.includes(arg)) continue
-    throw new Error('unknown option: ' + arg + ' (known: ' + known.join(', ') + ')')
+function argumentsOf(argv) {
+  const given = new Map()
+  for (let at = 0; at < argv.length; at += 1) {
+    const arg = argv[at]
+    if (given.has(arg)) throw new Error(arg + ' was given more than once')
+    if (SWITCHES.includes(arg)) {
+      given.set(arg, undefined)
+    } else if (VALUED.includes(arg)) {
+      const value = argv[at + 1]
+      if (value === undefined || value.startsWith('--')) throw new Error(arg + ' needs a value')
+      given.set(arg, value)
+      at += 1
+    } else {
+      throw new Error('unknown option: ' + arg + ' (known: ' + [...SWITCHES, ...VALUED].join(', ') + ')')
+    }
   }
-  return argv.length
+  return given
 }
 
-async function main(argv) {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    process.stderr.write(USAGE + '\n')
+/**
+ * The script, with everything it reaches handed in — the same seam as
+ * `word-snap-parity.mjs`'s `main`.
+ *
+ * The defaults are the process: its two streams, the corpus on disk and the
+ * bridge's own `connect`. A test hands in writers that capture, rows of its
+ * own and a `dial` that answers with a fake socket, so nothing is dialled.
+ * ⚠️ **THIS SCRIPT WAS TESTED ONLY BY SPAWNING IT**, which exercises a CLI
+ * faithfully and measures none of it: 169 of its mutants had no test reach
+ * them — every option, every exit and the whole bridge path.
+ *
+ * Nothing leaves as a rejection. A crash is a run that did not happen, so it
+ * exits non-zero with its stack like every other failure here.
+ */
+export async function main(
+  argv,
+  { stdout = process.stdout, stderr = process.stderr, corpus = loadCorpus, dial = connect } = {},
+) {
+  try {
+    return await run(argv, { stdout, stderr, corpus, dial })
+  } catch (cause) {
+    stderr.write('word-snap-live: ' + (cause?.stack ?? String(cause)) + '\n')
+    return 1
+  }
+}
+
+async function run(argv, io) {
+  let args
+  try {
+    args = argumentsOf(argv)
+  } catch (cause) {
+    io.stderr.write(String(cause.message) + '\n' + USAGE + '\n')
+    return 2
+  }
+
+  if (args.has('--help') || args.has('-h')) {
+    io.stderr.write(USAGE + '\n')
     return 0
   }
 
-  if (argv.includes('--list')) {
+  if (args.has('--list')) {
     for (const check of CHECKS) {
-      process.stdout.write(check.id + '  —  ' + check.title + '\n    ' + check.why + '\n\n')
+      io.stdout.write(check.id + '  —  ' + check.title + '\n    ' + check.why + '\n\n')
     }
-    process.stdout.write(
+    io.stdout.write(
       CHECKS.length + ' programmatic checks, plus the ' +
         'WI-4 corpus, run against the live WKWebView.\n' +
         'No gesture is among them, and none can be: see the manual selection\n' +
@@ -535,54 +593,33 @@ async function main(argv) {
     return 0
   }
 
-  if (argv.includes('--emit-dom')) {
-    process.stdout.write(buildDomSnippet())
+  if (args.has('--emit-dom')) {
+    io.stdout.write(buildDomSnippet())
     return 0
   }
 
-  /* Refused BEFORE anything runs, so a mistyped flag cannot quietly produce a
-     report about something nobody asked for. */
-  try {
-    refuseUnknown(argv, ['--help', '--emit-dom', '--corpus', '--port'])
-  } catch (cause) {
-    process.stderr.write(String(cause.message) + '\n' + USAGE + '\n')
-    return 2
-  }
-
-  let corpusPath
-  try {
-    corpusPath = option(argv, '--corpus')
-  } catch (cause) {
-    process.stderr.write(String(cause.message) + '\n' + USAGE + '\n')
-    return 2
-  }
+  const corpusPath = args.get('--corpus')
   let rows
   try {
-    rows = corpusPath === null ? await loadCorpus() : readCorpusFile(corpusPath)
+    rows = corpusPath === undefined ? await io.corpus() : readCorpusFile(corpusPath)
   } catch (cause) {
-    process.stderr.write('word-snap-live: the corpus could not be read: ' + cause.message + '\n')
+    io.stderr.write('word-snap-live: the corpus could not be read: ' + cause.message + '\n')
     return 1
   }
   /* Before the bridge is dialled, so the reason names the corpus rather than
    * the connection. Zero rows is a failure: under `ok = failures === 0` an
    * empty corpus scores a perfect pass. */
   if (rows.length === 0) {
-    process.stderr.write(
+    io.stderr.write(
       'word-snap-live: the corpus is empty — zero rows to check is a failure, not a clean sweep\n',
     )
     return 1
   }
 
-  let portRaw
-  try {
-    portRaw = option(argv, '--port')
-  } catch (cause) {
-    process.stderr.write(String(cause.message) + '\n' + USAGE + '\n')
-    return 2
-  }
-  const port = portRaw === null ? DEFAULT_PORT : Number(portRaw)
+  const portRaw = args.get('--port')
+  const port = portRaw === undefined ? DEFAULT_PORT : Number(portRaw)
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    process.stderr.write('word-snap-live: --port needs a port number, got ' + String(portRaw) + '\n')
+    io.stderr.write('word-snap-live: --port needs a port number, got ' + String(portRaw) + '\n')
     return 1
   }
 
@@ -591,12 +628,12 @@ async function main(argv) {
 
   let socket
   try {
-    socket = await connect(port)
+    socket = await io.dial(port)
   } catch (cause) {
     /* The bridge-unreachable case, and the reason this runner has an exit code
      * at all. No report is not a pass: it is a run that did not happen, and in
      * a summary the two look identical. */
-    process.stderr.write(
+    io.stderr.write(
       'word-snap-live: the MCP bridge at 127.0.0.1:' + port + ' is unreachable — ' +
         cause.message + '\n' +
         '  nothing was checked. Start the app with `pnpm tauri dev` (a debug build; the\n' +
@@ -611,7 +648,7 @@ async function main(argv) {
     parityLive = await execute(socket, paritySnippet, 'the corpus run')
     domLive = await execute(socket, domSnippet, 'the DOM checks')
   } catch (cause) {
-    process.stderr.write('word-snap-live: ' + cause.message + '\n  nothing can be concluded from this run.\n')
+    io.stderr.write('word-snap-live: ' + cause.message + '\n  nothing can be concluded from this run.\n')
     socket.close()
     return 1
   }
@@ -621,18 +658,18 @@ async function main(argv) {
   const { problems, notes } = compareReports(parityLocal, parityLive)
   const ranProblems = assertRan(parityLive, domLive, rows.length)
 
-  if (argv.includes('--json')) {
-    process.stdout.write(JSON.stringify({ corpus: parityLive, dom: domLive }, null, 2) + '\n')
+  if (args.has('--json')) {
+    io.stdout.write(JSON.stringify({ corpus: parityLive, dom: domLive }, null, 2) + '\n')
   }
 
-  for (const note of notes) process.stderr.write('  note: ' + note + '\n')
+  for (const note of notes) io.stderr.write('  note: ' + note + '\n')
   for (const check of domLive?.checks ?? []) {
-    process.stderr.write('  ' + (check.pass ? 'ok  ' : 'FAIL') + '  ' + check.id + ': ' + check.detail + '\n')
+    io.stderr.write('  ' + (check.pass ? 'ok  ' : 'FAIL') + '  ' + check.id + ': ' + check.detail + '\n')
   }
 
   const all = [...problems, ...ranProblems]
   if (all.length === 0) {
-    process.stderr.write(
+    io.stderr.write(
       'word-snap-live: ' + parityLive.rows.length + ' corpus rows agree with this engine and ' +
         domLive.ran + ' checks pass in ' + domLive.engine + '\n' +
         '  NOT covered, by anything, at any level: every gesture. See the\n' +
@@ -641,19 +678,10 @@ async function main(argv) {
     return 0
   }
 
-  process.stderr.write('word-snap-live: ' + all.length + (all.length === 1 ? ' problem\n' : ' problems\n'))
-  for (const problem of all) process.stderr.write('  ' + problem + '\n')
+  io.stderr.write('word-snap-live: ' + all.length + (all.length === 1 ? ' problem\n' : ' problems\n'))
+  for (const problem of all) io.stderr.write('  ' + problem + '\n')
   return 1
 }
 
-if (isProcessEntry(import.meta)) {
-  main(process.argv.slice(2)).then(
-    (code) => {
-      process.exitCode = code
-    },
-    (cause) => {
-      process.stderr.write('word-snap-live: ' + (cause?.stack ?? String(cause)) + '\n')
-      process.exitCode = 1
-    },
-  )
-}
+// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — every decision is in `main`, which is measured in-process
+if (isProcessEntry(import.meta)) process.exitCode = await main(process.argv.slice(2))

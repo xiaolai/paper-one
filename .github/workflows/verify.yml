@@ -139,12 +139,56 @@ jobs:
   # rather than narrowing to it.
   #
   # `continue-on-error` is deliberately NOT set. A gate that cannot fail is the
-  # thing this whole job is about.
-  mutants:
-    name: mutants (changed files only)
+  # thing these three jobs are about.
+  #
+  # ⚠️ **ONE RUNNER COULD NOT HOLD THE SWEEP, AND THE ONE JOB THAT TRIED HAD
+  # NEVER RUN** (measured 2026-09-14). `feat/looking-up` changes 79 files
+  # carrying 15 898 whole-file mutants. With nine Stryker runners on a 10-core
+  # Mac, `scripts/check-mutants.mjs` alone took 18 min 5 s and most other files
+  # 15-70 s; this was one 4-vCPU job with 45 minutes. So the sweep is planned
+  # ONCE, swept by isolated shards, and reconciled by an aggregate that is the
+  # only job able to pass it:
+  #
+  #   mutants-plan    freezes the subjects, their content hashes, covering tests,
+  #                   classes, mutant counts and shards into one manifest.
+  #   mutants-shard   one matrix job per shard, each its own checkout. Each
+  #                   re-derives the plan and REFUSES a checkout that differs,
+  #                   sweeps only its own files, and uploads one result per file
+  #                   and a receipt whether or not its sweep passed.
+  #   mutants         the aggregate, and the check that matters. It runs whatever
+  #                   the shards did, and fails unless every planned file has
+  #                   exactly one passing result and every shard left a receipt.
+  #
+  # SIZING. Sharding splits the files, never the slowest file, so no number of
+  # shards shortens the shard that holds `check-mutants.mjs`. It was measured at
+  # 18.08 min when Stryker counted 1 174 mutants in it; the change that sharded
+  # the sweep grew it to 2 941, and scaling by that count is an ESTIMATE, not a
+  # measurement: 18.08 x 2941/1174 x 9 local runners / 4 vCPUs = 102 min, doubled
+  # for a slower core and a runner count Stryker may set one lower = 204. The
+  # sweep STEP is bounded at 210 and the job at 225, so a step that times out
+  # still leaves the upload room to run. Replace the estimate with the first
+  # shard's own `durationMs` for that file once one exists. The two
+  # heaviest files by mutant count get shards of their own and the rest are
+  # balanced by mutant count over the other four — an ESTIMATE, since one mutant
+  # cost about fifteen times as much in `check-mutants.mjs` as in
+  # `check-browser-safe.mjs`. Every result records its measured duration, which
+  # is what a better balance would be built from.
+  #
+  # ⚠️ 4 vCPUs is what an `ubuntu-24.04` runner gives a PUBLIC repository; a
+  # private one's standard runner has 2, which doubles the arithmetic. Stryker
+  # prints "Creating N test runner process(es)" in every shard's log: read it on
+  # the first run before trusting the bound.
+  mutants-plan:
+    name: mutants (plan)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 15
+    env:
+      SHARDS: 6
+      ISOLATE: 2
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+      shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -157,8 +201,96 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # The base is the PR's target, not a hard-coded `main`: a stacked branch
-      # is measured against what it will actually merge into.
-      - run: node scripts/check-mutants.mjs --base "origin/${{ github.base_ref }}" --require-base
+      # is measured against what it will actually merge into. It reaches the
+      # shell through `env`, never spliced into the script's text.
+      #
+      # The matrix below is built from SHARDS here and the manifest records the
+      # same number, so the two cannot be edited apart: a shard refuses a count
+      # that is not its plan's, and the aggregate requires a receipt from every
+      # shard the plan has.
+      - id: plan
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          node scripts/check-mutants.mjs --plan mutants-plan/plan.json --shards "$SHARDS" --isolate "$ISOLATE" --base "origin/$BASE_REF" --require-base
+          echo "count=$SHARDS" >> "$GITHUB_OUTPUT"
+          echo "shards=[$(seq -s, 1 "$SHARDS")]" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutants-plan
+          path: mutants-plan/plan.json
+          if-no-files-found: error
+
+  mutants-shard:
+    name: mutants (shard ${{ matrix.shard }})
+    needs: mutants-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 225
+    strategy:
+      # A survivor in one shard must not cancel the others: the aggregate names
+      # every failure at once only if every shard ran to its end.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.mutants-plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A shard re-derives the plan, merge base included; see above.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: mutants-plan
+          path: mutants-plan
+      # Bounded as a STEP, below the job: a step that times out fails, and the
+      # upload after it still runs inside a job that has not.
+      - name: Sweep this shard
+        timeout-minutes: 210
+        env:
+          SHARD: ${{ matrix.shard }}/${{ needs.mutants-plan.outputs.count }}
+        run: node scripts/check-mutants.mjs --shard "$SHARD" --manifest mutants-plan/plan.json --results mutants-results
+      # Whatever the sweep did. A shard that stopped part-way still has a result
+      # for every file it finished, and no receipt — which is how the aggregate
+      # knows. `error`, because an upload of nothing is a shard that wrote
+      # nothing, and even an empty shard writes its receipt.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants-results/
+          if-no-files-found: error
+
+  mutants:
+    name: mutants (changed files only)
+    needs: [mutants-plan, mutants-shard]
+    # `always()`: a shard that failed, or never ran, is exactly what this job
+    # exists to name, so it must not be skipped with it. The event test keeps it
+    # off pushes, where the plan never ran.
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: mutants-plan
+          path: mutants-plan
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-shard-*
+          path: mutants-results
+      - run: node scripts/check-mutants.mjs --aggregate --manifest mutants-plan/plan.json --results mutants-results
 
   windows:
     name: windows (check only)

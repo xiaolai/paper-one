@@ -1,19 +1,41 @@
 import { describe, expect, it } from 'vitest'
 import {
+  BRIGHTNESS,
   CARD_W,
   CELL_FURNITURE,
+  CONCENTRIC_INSET,
+  CONTRAST,
+  CONTROL_TITLEBAR,
   COVER_ASPECT,
+  DEFAULT_READING_STYLE,
   DEFAULT_STEP_IDX,
+  FIGURE_HEIGHTS,
+  FIGURE_WIDTHS,
   GUTTER,
+  LEADING_CARD_RADIUS,
   LINE,
+  MINIMUM_SIZES,
+  PANE_W,
+  SPACING,
+  TAG_LINE,
   cellHeightFor,
+  stepAt,
   GUTTER_MIN,
   MARGIN_COL,
   MEASURE,
+  MOTION,
   PANE_TRACK,
   PROSE_GAP,
+  RADIUS,
   READING_STEPS,
   STAGE_PADDING_X,
+  SYS_ZONE_W,
+  TITLEBAR_H,
+  TRAFFIC_LIGHT,
+  WINDOW_RADIUS,
+  Z,
+  applyMetrics,
+  type Platform,
   measureForStep,
   paneTakesTrack,
   proseBleed,
@@ -34,6 +56,220 @@ function containerCentre(grid: ReturnType<typeof proseGrid>): number {
   const bleed = proseBleed(grid)
   return bleed.start + (total - bleed.start - bleed.end) / 2
 }
+
+/**
+ * THE SCALES A READER STEPS THROUGH, and the two numbers each one publishes
+ * that nothing else derives: the value at its default step — what a reader who
+ * never opens the pane gets — and the UNIT its readout is written in, which
+ * `StepRow` puts straight in front of them (`1.15×`, `80%`, `12px`).
+ */
+describe('the stepped scales', () => {
+  it.each([
+    ['letter spacing', SPACING.letter, 'em', 0],
+    ['word spacing', SPACING.word, 'em', 0],
+    ['line spacing', SPACING.line, 'x', 1],
+    ['paragraph spacing', SPACING.paragraph, 'x', 1],
+    ['brightness', BRIGHTNESS, 'x', 1],
+    ['contrast', CONTRAST, 'x', 0],
+    ['figure width', FIGURE_WIDTHS, '%', 95],
+    ['figure height', FIGURE_HEIGHTS, 'vh', 95],
+    ['minimum size', MINIMUM_SIZES, 'px', 0],
+  ])('%s runs in order, in its own unit, and starts where the app has always been', (_name, scale, unit, standing) => {
+    expect(scale.unit).toBe(unit)
+    expect(scale.steps.length).toBeGreaterThan(1)
+    expect(scale.steps[scale.def]).toBe(standing)
+    expect(stepAt(scale, scale.def)).toBe(standing)
+    // Ordered, low to high: a step is a direction, and the pane draws them in this order.
+    expect([...scale.steps].sort((a, b) => a - b)).toEqual([...scale.steps])
+  })
+})
+
+/* WHAT A READER WHO NEVER OPENS THE PANE READS. Every field here is the book as
+   it has always been drawn, so a changed default is a changed page for every
+   reader at once — and none of these is derived from anything else. */
+describe('the shipped reading style', () => {
+  it('is the one the app has always drawn', () => {
+    expect(DEFAULT_READING_STYLE).toEqual({
+      separation: 'space',
+      flourish: 'none',
+      headingScale: 'publisher',
+      blockquote: 'indent',
+      codeFace: 'publisher',
+      codeWrap: 'scroll',
+      figureWidth: 3,
+      figureFrame: 'none',
+      figureScalesWithText: false,
+      figureHeight: 3,
+      wideTables: 'scroll',
+      noteSize: 'prose',
+      cjkSpacing: false,
+      minimumSize: 0,
+      fidelity: 'paper',
+    })
+  })
+})
+
+/* Three derived lengths whose derivation IS the design rule: the pane's track
+   is the pane with a concentric margin on each side, a leading card's corner is
+   the window's own corner drawn in by one inset, and a shelf cell's furniture
+   is the text block, the tag line and the gap above it. */
+describe('the derived lengths', () => {
+  it('gives the pane a concentric margin on each side of its track', () => {
+    expect((PANE_TRACK - PANE_W) / 2).toBe(CONCENTRIC_INSET)
+  })
+
+  it('draws a leading card inside the window by exactly the concentric inset', () => {
+    /* PARENT MINUS INSET — §05's rule against the real frame, which is the
+       relation rather than the 13 it comes to. The DIRECTION is the whole of
+       it: Finder's sidebar is tighter than the window holding it (28 inside
+       36), and a card whose corners bulge past its container cannot read as
+       native whatever value it borrowed — which is what the earlier 26 inside
+       our 21 did. */
+    expect(WINDOW_RADIUS - LEADING_CARD_RADIUS).toBe(CONCENTRIC_INSET)
+    expect(LEADING_CARD_RADIUS).toBeLessThan(WINDOW_RADIUS)
+  })
+
+  it('leaves a shelf cell room for its text, its tag line and the gap above it', () => {
+    expect(CELL_FURNITURE - TAG_LINE).toBe(40)
+    expect(CELL_FURNITURE).toBe(56)
+  })
+})
+
+/* WHAT A STYLESHEET CAN READ. `tokens.test.ts` holds that every `var()` names a
+   published token; this holds that publishing puts a value there — the one
+   the constant says, in the unit CSS needs — on the root it was handed. A
+   plain recorder stands in for the root: the only thing asked of it is
+   `style.setProperty`. */
+describe('applyMetrics', () => {
+  const published = (platform: Platform): Map<string, string> => {
+    const set = new Map<string, string>()
+    const root = { style: { setProperty: (name: string, value: string) => void set.set(name, value) } }
+    applyMetrics(root as unknown as HTMLElement, platform)
+    return set
+  }
+
+  it('publishes every token as a custom property with a value', () => {
+    const set = published('macos')
+    expect(set.size).toBeGreaterThan(0)
+    for (const [name, value] of set) {
+      expect(name, name).toMatch(/^--[a-z]/u)
+      expect(typeof value === 'string' && value.length > 0, `${name} was published empty`).toBe(true)
+    }
+  })
+
+  it('publishes lengths in px, from their constants, for the platform it was given', () => {
+    const mac = published('macos')
+    expect(mac.get('--pane-track')).toBe(`${PANE_TRACK}px`)
+    expect(mac.get('--titlebar-h')).toBe(`${TITLEBAR_H.macos}px`)
+    expect(published('web').get('--titlebar-h')).toBe(`${TITLEBAR_H.web}px`)
+    expect(published('windows').get('--sys-zone-w')).toBe(`${SYS_ZONE_W.windows}px`)
+    for (const [name, key] of [
+      ['--radius-pill', 'pill'],
+      ['--radius-card', 'card'],
+      ['--radius-control', 'control'],
+      ['--radius-chip', 'chip'],
+      ['--radius-mark', 'mark'],
+      ['--radius-sheet', 'sheet'],
+    ] as const) {
+      expect(mac.get(name), name).toBe(`${RADIUS[key]}px`)
+    }
+    expect(mac.get('--card-w')).toBe(`${CARD_W}px`)
+    expect(mac.get('--cell-height')).toBe(`${cellHeightFor(CARD_W)}px`)
+  })
+
+  /**
+   * EVERY PLATFORM THE TYPE DECLARES, written out rather than read off the
+   * tables' own keys. A table asked for its keys agrees with itself even when
+   * it is empty, and an empty one publishes `undefinedpx` — which CSS drops as
+   * an invalid declaration, leaving the bar with no height and the system zone
+   * with no width while every test that compares a token against its own
+   * constant still passes.
+   */
+  const PLATFORMS: readonly Platform[] = ['macos', 'windows', 'linux', 'web', 'ios', 'android']
+
+  /** The number a stylesheet is handed, refused unless it is a real px length. */
+  const lengthOf = (set: Map<string, string>, name: string): number => {
+    const value = set.get(name)
+    expect(value, name).toMatch(/^\d+(?:\.\d+)?px$/u)
+    return Number.parseFloat(String(value))
+  }
+
+  it('gives every platform it draws for a real band and a real system zone', () => {
+    for (const platform of PLATFORMS) {
+      const set = published(platform)
+      expect(set.get('--titlebar-h'), platform).toMatch(/^\d+px$/u)
+      expect(set.get('--sys-zone-w'), platform).toMatch(/^\d+px$/u)
+    }
+  })
+
+  it('reserves neither where there is no window of its own — a browser tab, a phone', () => {
+    /* A phone's chrome is an INSET, reached through `env(safe-area-inset-top)`,
+       and a browser tab has no titlebar to overlay: a band reserved here holds
+       nothing and pushes the reading surface down the screen for a decoration
+       that does not exist. Both phones were reported as `macos` until the
+       platform type learned about them, and the mobile build drew a 52px
+       overlay titlebar with three traffic lights on an iPhone. */
+    const mac = published('macos')
+    for (const platform of ['web', 'ios', 'android'] as const) {
+      const set = published(platform)
+      expect(lengthOf(set, '--titlebar-h'), platform).toBe(0)
+      expect(lengthOf(set, '--sys-zone-w'), platform).toBe(0)
+      expect(set.get('--titlebar-h'), platform).not.toBe(mac.get('--titlebar-h'))
+      expect(set.get('--sys-zone-w'), platform).not.toBe(mac.get('--sys-zone-w'))
+    }
+  })
+
+  it('gives a windowed platform a band its own controls fit in, and a zone that covers the window controls', () => {
+    for (const platform of ['macos', 'windows', 'linux'] as const) {
+      const set = published(platform)
+      /* `CONTROL_TITLEBAR` is what a control in this bar is drawn at, and a bar
+         no taller than the control it holds has nothing left to hold it in. */
+      expect(lengthOf(set, '--titlebar-h'), platform).toBeGreaterThan(CONTROL_TITLEBAR)
+      expect(lengthOf(set, '--sys-zone-w'), platform).toBeGreaterThan(0)
+    }
+    const mac = published('macos')
+    /* macOS OVERLAYS its bar over the leading cards, which pad themselves down
+       by the band less the concentric inset — a band no deeper than that inset
+       pads by nothing at all and leaves the card's first row under the traffic
+       lights. */
+    expect(lengthOf(mac, '--titlebar-h')).toBeGreaterThan(lengthOf(mac, '--concentric-inset'))
+    /* And the zone has to cover the three lights AND the inset they sit at,
+       which is the whole of what it is for: short of them, the centred book
+       chip meets a traffic light as soon as the window is narrow. */
+    expect(lengthOf(mac, '--sys-zone-w')).toBeGreaterThan(3 * TRAFFIC_LIGHT)
+  })
+
+  it('never publishes a token reading `undefined`, whichever table went missing', () => {
+    /* THE WHOLE CLASS, not the two tables that were caught. A table emptied —
+       by an edit, or by a mutant — still publishes: `${undefined}px` is a
+       string, so a token check that asks only for a non-empty value passes,
+       and a token compared against its own constant passes twice over. CSS
+       drops `undefinedpx` as invalid and the reader gets a bar with no height,
+       a column with no width or a handle with no size, with nothing said
+       anywhere.
+
+       ⚠️ AND THE MUTATION GATE CANNOT FIND THIS ONE FOR ITSELF. Stryker makes
+       no `ObjectLiteral` mutant for a table written `{ … } as const`, which is
+       most of the tables here — `PROSE_MAX`, `LIST_COL`, `SHEET_HANDLE`, `Z`,
+       `RADIUS`, `MOTION`, `ICON` among them — so 100 % of this file's mutants
+       says nothing whatever about them. Emptied by hand, all three of the
+       first were invisible to every covering test until this ran (measured
+       2026-09-16). */
+    for (const platform of PLATFORMS) {
+      for (const [name, value] of published(platform)) {
+        expect(value, `${name} on ${platform}`).not.toMatch(/undefined|NaN/u)
+      }
+    }
+  })
+
+  /* A proportion, a layer and a duration are not lengths, and carry no unit. */
+  it('publishes a proportion, a layer and a motion as they are', () => {
+    const mac = published('macos')
+    expect(mac.get('--cover-aspect')).toBe(String(COVER_ASPECT))
+    expect(mac.get('--z-figure')).toBe(String(Z.figure))
+    expect(mac.get('--motion-sheet')).toBe(MOTION.sheet)
+  })
+})
 
 describe('proseGrid', () => {
   it('holds the full measure when there is room', () => {
@@ -107,6 +343,21 @@ describe('proseGrid', () => {
       expect(grid.marginCol).toBeGreaterThanOrEqual(0)
     }
   })
+
+  /* TO THE PIXEL, stage by stage. The cases above hold the ORDER and the
+     floors; these hold the amounts, which is what a take counted twice — or
+     not subtracted from what was still over — gets wrong while every floor
+     and every ordering still holds. Without marks the full grid is
+     56 + 660 + 56 + 2 × 32 = 836. */
+  it('spends exactly what is over: the mirror to its floor, then the gutter, then the measure', () => {
+    // 36 over: the mirror gives its 32, the gutter the last 4.
+    expect(proseGrid(800, false)).toEqual({ gutter: GUTTER - 4, measure: MEASURE, marginCol: GUTTER_MIN, gap: PROSE_GAP })
+    // 136 over: the mirror 32, the gutter 32, the measure the remaining 72.
+    expect(proseGrid(700, false)).toEqual({ gutter: GUTTER_MIN, measure: MEASURE - 72, marginCol: GUTTER_MIN, gap: PROSE_GAP })
+    // Exactly full, and one pixel under: nothing moves, then the mirror gives one.
+    expect(proseGrid(836, false)).toEqual({ gutter: GUTTER, measure: MEASURE, marginCol: GUTTER, gap: PROSE_GAP })
+    expect(proseGrid(835, false)).toEqual({ gutter: GUTTER, measure: MEASURE, marginCol: GUTTER - 1, gap: PROSE_GAP })
+  })
 })
 
 /* A shelf cell is a FIXED height because virtualisation derives one row height
@@ -153,6 +404,18 @@ describe('paneTakesTrack', () => {
   const stageInner = (windowWidth: number) =>
     windowWidth - PANE_TRACK - STAGE_PADDING_X * 2
 
+  /* BOUNDED, and it says so when it finds nothing. Two cases below walk the
+     width up to the first that takes the track, and a `while` loop over a
+     predicate that never answers true does not fail — it hangs, and a hang
+     reads as a slow test rather than as the answer it is. No window is
+     4000px past the widest measure this ramp offers. */
+  const firstWidthTaking = (stepIdx: number): number => {
+    for (let width = 0; width <= 4000; width += 1) {
+      if (paneTakesTrack(width, stepIdx)) return width
+    }
+    throw new Error(`paneTakesTrack never grants a track at step ${stepIdx}, up to 4000px`)
+  }
+
   it('lets the pane take a track only when the full gutter survives it', () => {
     for (let stepIdx = 0; stepIdx < READING_STEPS.length; stepIdx++) {
       const measure = measureForStep(stepIdx)
@@ -168,11 +431,7 @@ describe('paneTakesTrack', () => {
   })
 
   it('moves with the reading step rather than sitting at one number', () => {
-    const widths = READING_STEPS.map((_, stepIdx) => {
-      let width = 0
-      while (!paneTakesTrack(width, stepIdx)) width += 1
-      return width
-    })
+    const widths = READING_STEPS.map((_, stepIdx) => firstWidthTaking(stepIdx))
     // Strictly increasing: a larger measure needs a wider window.
     for (let i = 1; i < widths.length; i++) {
       expect(widths[i]!).toBeGreaterThan(widths[i - 1]!)
@@ -180,6 +439,19 @@ describe('paneTakesTrack', () => {
     // And every one of them is above the flat 1024 this replaced, which is
     // exactly why the old constant was wrong rather than merely imprecise.
     for (const width of widths) expect(width).toBeGreaterThan(1024)
+  })
+
+  /* NOT A PIXEL LATE EITHER. The case above holds that a granted track keeps
+     the gutter; this holds the other half — the first width it grants is the
+     first at which the gutter survives, so a pane is not kept a sheet over a
+     window that had room for it. */
+  it('grants the track at the very first width the full gutter survives', () => {
+    for (let stepIdx = 0; stepIdx < READING_STEPS.length; stepIdx++) {
+      const measure = measureForStep(stepIdx)
+      const width = firstWidthTaking(stepIdx)
+      expect(proseGrid(stageInner(width), false, measure).gutter).toBe(GUTTER)
+      expect(proseGrid(stageInner(width - 1), false, measure).gutter, `step ${stepIdx}`).toBeLessThan(GUTTER)
+    }
   })
 })
 
@@ -275,6 +547,14 @@ describe('stepIndexForSize', () => {
       expect(stepIndexForSize(bad)).toBe(DEFAULT_STEP_IDX)
     }
   })
+
+  /* HALFWAY LANDS ON THE SMALLER. A size exactly between two steps is as near
+     one as the other, and the answer must not depend on which the loop met
+     last: the first found — the smaller — is kept. */
+  it('lands a size exactly between two steps on the smaller', () => {
+    expect(stepIndexForSize(19.5)).toBe(stepIndexForSize(19))
+    expect(stepIndexForSize(27.5)).toBe(stepIndexForSize(27))
+  })
 })
 
 describe('measureForStep', () => {
@@ -350,13 +630,16 @@ describe('proseColumn', () => {
     expect(left + width / 2).toBeLessThan(961 / 2 + 24)
   })
 
-  it('gives no negative offset when the tracks cannot fit', () => {
-    /* `proseGrid` sizes the tracks to the stage, so this is a defensive case
-       rather than a reachable one — but a negative offset would put the bar
-       off the reading area entirely, which is worse than a bar pressed against
-       its leading edge. Grid itself does the same: it stops centring and
-       overflows the end. */
-    const { left } = proseColumn(200, GRID)
-    expect(left).toBe(24 + 56 + 32)
+  it('keeps centring past the width where the tracks fit, overflowing both sides as the stage does', () => {
+    /* ⚠️ **THIS CASE ASSERTED A CLAMP, ON THE CLAIM THAT GRID "STOPS CENTRING
+       AND OVERFLOWS THE END".** That is `justify-content: safe center`; the
+       stage says plain `center`, which overflows both sides equally — so the
+       clamp put the column right of where CSS draws it. It also used a grid
+       `proseGrid` never hands out. This is the smallest one it does: both
+       gutters floored at 24, the measure spent, 112px of tracks in a 100px
+       stage — 12 over, six each side. */
+    const grid = proseGrid(100, false)
+    expect(grid.gutter + grid.measure + grid.marginCol + 2 * grid.gap).toBe(112)
+    expect(proseColumn(100, grid).left).toBe(24 - 6 + 24 + 32)
   })
 })

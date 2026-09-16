@@ -3,6 +3,7 @@ import {
   createController,
   detailFor,
   glossModel,
+  readerFailure,
   type ControllerPlugin,
   type InferenceSnapshot,
 } from './controller'
@@ -85,6 +86,74 @@ describe('detailFor', () => {
   it('has a sentence for an answer the model was cut off in', () => {
     expect(detailFor({ kind: 'answerTruncated' })).toBe('The answer was cut off before it finished')
   })
+
+  /* EVERY OTHER KIND, BY ITS OWN SENTENCE. A `case` that goes missing falls
+     through to the sentence beneath it — `runtimeUnreachable` would read "not
+     running", `runtimeMalformed` "cut off" — and a test that names only some of
+     the kinds cannot see which one moved. */
+  it('has its own sentence for every other kind the plugin raises', () => {
+    const sentences = {
+      runtimeExited: 'The runtime stopped',
+      digestMismatch: 'The download did not verify — nothing was changed',
+      sizeMismatch: 'The download did not verify — nothing was changed',
+      runtimeUnreachable: 'The runtime is not answering',
+      notRunning: 'The runtime is not running',
+      modelUnknown: 'That model is not available',
+      requestBusy: 'That request is already running',
+      fieldTooLarge: 'That request was too large',
+      runtimeHttp: 'The runtime refused the request',
+      runtimeMalformed: 'The runtime’s answer could not be read',
+      cancelled: 'The runtime stopped before it answered',
+    }
+    expect(Object.fromEntries(Object.keys(sentences).map((kind) => [kind, detailFor({ kind })]))).toEqual(sentences)
+    /* And a kind no `case` names is still the default, an empty one included. */
+    expect(detailFor({ kind: '' })).toBe('Something went wrong')
+  })
+})
+
+/**
+ * THE FOUR BRANCHES BOTH READERS' FAILURES GO THROUGH — the gloss and the
+ * companion — so each is held here by what it hands back, not only through the
+ * callers that happen to reach it.
+ */
+describe('readerFailure', () => {
+  const live = new AbortController().signal
+  const aborted = AbortSignal.abort()
+
+  it('passes the reader’s own abort through as itself', () => {
+    const cause = { kind: 'cancelled', message: 'cancelled' }
+    expect(readerFailure(cause, aborted)).toBe(cause)
+  })
+
+  /* `signal` DECIDES ONE BRANCH AND ONLY ONE. A daemon that cancelled on stop is
+     not the reader's abort, and neither is any other kind that happens to land
+     after the reader moved on. */
+  it('translates every other plugin failure into the reader’s sentence, keeping the cause', () => {
+    const daemonCancelled = { kind: 'cancelled', message: 'the daemon stopped' }
+    const notReady = { kind: 'notReady', message: 'port 13399 refused' }
+    for (const [cause, signal, sentence] of [
+      [daemonCancelled, live, 'The runtime stopped before it answered'],
+      [notReady, aborted, 'The runtime did not start'],
+    ] as const) {
+      const raised = readerFailure(cause, signal)
+      expect(raised).toBeInstanceOf(Error)
+      expect((raised as Error).message).toBe(sentence)
+      expect((raised as Error).cause, 'the plugin’s own failure was dropped from the chain').toBe(cause)
+    }
+  })
+
+  it('passes an Error that is not the plugin’s through untouched', () => {
+    const cause = new Error('Command inference_gloss not found')
+    expect(readerFailure(cause, live)).toBe(cause)
+  })
+
+  it('makes a bare rejection readable, keeping it as the cause', () => {
+    const cause = 'Command inference_gloss not found'
+    const raised = readerFailure(cause, live)
+    expect(raised).toBeInstanceOf(Error)
+    expect((raised as Error).message).toBe('Command inference_gloss not found')
+    expect((raised as Error).cause).toBe(cause)
+  })
 })
 
 /**
@@ -129,15 +198,24 @@ describe('what a badly-behaved subscriber cannot do', () => {
      either all or none, because it is invisible. */
   it('does not stop the subscribers after it from being told', async () => {
     const controller = createController(plugin())
+    const thrown = new Error('a subscriber that throws')
     let told = 0
     controller.subscribe(() => {
-      throw new Error('a subscriber that throws')
+      throw thrown
     })
     controller.subscribe(() => {
       told += 1
     })
 
-    await controller.refresh()
+    /* AND THE THROW IS WRITTEN DOWN, NOT SWALLOWED WHOLE. An empty catch passes
+       the count below and leaves a broken pane with no trace anywhere. */
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await controller.refresh()
+      expect(logged.mock.calls).toEqual([['inference controller: a subscriber threw while being notified', thrown]])
+    } finally {
+      logged.mockRestore()
+    }
 
     expect(told).toBeGreaterThan(0)
   })
@@ -185,6 +263,23 @@ describe('glossModel', () => {
     expect(glossModel([a, b])).toBe('aaa')
   })
 
+  /* SIZE DECIDES BEFORE THE ID DOES, and the tie is only among the smallest: the
+     lowest id of all belongs to the largest model here, and the one listed first
+     is neither. Every order answers the same. */
+  it('breaks a tie by id only among the smallest, in any order', () => {
+    const large = row({ id: 'aaa', bytes: 9_000 })
+    const small = row({ id: 'zzz', bytes: 1_000 })
+    const alsoSmall = row({ id: 'mmm', bytes: 1_000 })
+    for (const order of [
+      [large, small, alsoSmall],
+      [alsoSmall, small, large],
+      [small, large, alsoSmall],
+      [small, alsoSmall, large],
+    ]) {
+      expect(glossModel(order), order.map((one) => one.id).join(',')).toBe('mmm')
+    }
+  })
+
   /* An uninstalled row is not a candidate however small — the gloss cannot run
      artifacts that are not on disk, and `resolve_model` refuses it anyway. */
   it('ignores a smaller model that is not installed', () => {
@@ -216,6 +311,14 @@ describe('the controller', () => {
     const controller = createController(plugin({ start }))
     expect(controller.getSnapshot().runtime.kind).toBe('absent')
     expect(start).not.toHaveBeenCalled()
+    /* The whole of it: nothing listed, nothing moving, nothing failed. */
+    expect(controller.getSnapshot()).toEqual({
+      runtime: { kind: 'absent', reason: 'Not installed' },
+      models: [],
+      installing: null,
+      removing: null,
+      failure: null,
+    })
   })
 
   it('reports a failed refresh as degraded rather than throwing', async () => {
@@ -340,6 +443,60 @@ describe('the controller', () => {
     controller.dispose()
   })
 
+  /* ONLY THE TWO KINDS THAT DESCRIBE WORK IN PROGRESS MOVE THE ROW. The third,
+     `installed`, says nothing the command's own settle does not, and the settle
+     is what decides the runtime — it must not be drawn as a verification. */
+  it('draws nothing new for the progress event that says the bytes are in', async () => {
+    const seen: InferenceSnapshot['runtime'][] = []
+    const controller = createController(
+      plugin({
+        installModel: async (_id, _model, onProgress: (p: InstallProgress) => void) => {
+          onProgress({ kind: 'downloading', received: 1, total: 2 })
+          onProgress({ kind: 'installed' })
+          seen.push(controller.getSnapshot().runtime)
+        },
+      }),
+    )
+    await controller.install('qwen')
+    expect(seen).toEqual([{ kind: 'installing', model: 'qwen', received: 1, total: 2 }])
+    controller.dispose()
+  })
+
+  /* OWNERSHIP ON THE PROGRESS PATH TOO. A progress callback can outlive the
+     download that registered it, and by then the slot may belong to the one
+     that replaced it — whose row must keep its own model and counts. */
+  it('ignores progress from a download that no longer owns the slot', async () => {
+    const told: ((progress: InstallProgress) => void)[] = []
+    const gates = [deferred(), deferred()]
+    const controller = createController(
+      plugin({
+        installModel: async (_id, _model, onProgress: (p: InstallProgress) => void) => {
+          const mine = told.push(onProgress) - 1
+          await gates[mine]!.promise
+          if (mine === 0) throw cancelled()
+        },
+      }),
+    )
+    const first = controller.install('qwen')
+    controller.cancelInstall()
+    gates[0]!.open()
+    await expect(first).resolves.toBe(false)
+    const second = controller.install('kokoro')
+
+    told[0]!({ kind: 'downloading', received: 7, total: 9 })
+    told[0]!({ kind: 'verifying' })
+    expect(controller.getSnapshot().runtime, 'a replaced download wrote over the one that replaced it').toEqual({
+      kind: 'installing',
+      model: 'kokoro',
+      received: 0,
+      total: 0,
+    })
+
+    gates[1]!.open()
+    await second
+    controller.dispose()
+  })
+
   /**
    * THE ROW IS CORRECTED FROM THE COMMAND, NOT ONLY FROM THE REFRESH.
    *
@@ -368,6 +525,39 @@ describe('the controller', () => {
       'a swallowed refresh failure left a downloaded model reading Install',
     ).toBe(true)
     controller.dispose()
+  })
+
+  /* ONE ROW, NOT THE CATALOGUE. The correction is keyed on the model the
+     command named; every other row keeps what the last read said. */
+  it('corrects only the row it installed or removed when the confirming refresh fails', async () => {
+    const OTHER: ModelRow = { ...MODEL, id: 'kokoro', modality: 'speech' }
+    const rows = (controller: ReturnType<typeof createController>) =>
+      controller.getSnapshot().models.map((row) => [row.id, row.installed])
+    const withCatalogue = (listed: readonly ModelRow[]) => {
+      let changed = false
+      return createController(
+        plugin({
+          installModel: async () => void (changed = true),
+          removeModel: async () => void (changed = true),
+          models: async () => {
+            if (changed) throw { kind: 'runtimeUnreachable' }
+            return listed
+          },
+        }),
+      )
+    }
+
+    const installing = withCatalogue([MODEL, OTHER])
+    await installing.refresh()
+    await expect(installing.install('qwen')).resolves.toBe(true)
+    expect(rows(installing), 'the install marked a model it never touched').toEqual([['qwen', true], ['kokoro', false]])
+    installing.dispose()
+
+    const removing = withCatalogue([{ ...MODEL, installed: true }, { ...OTHER, installed: true }])
+    await removing.refresh()
+    await expect(removing.uninstall('qwen')).resolves.toBe(true)
+    expect(rows(removing), 'the removal unmarked a model it never touched').toEqual([['qwen', false], ['kokoro', true]])
+    removing.dispose()
   })
 
   /* A cancellation is the reader's own doing. Reporting it as `degraded`
@@ -503,6 +693,26 @@ describe('the controller', () => {
     controller.dispose()
   })
 
+  /* THE RUNTIME IS WITHHELD, NOT THE CATALOGUE. Only the runtime field belongs
+     to the download; the model list a mid-download refresh read is still the
+     current one. */
+  it('still brings the catalogue up to date when a refresh lands mid-download', async () => {
+    const gate = deferred()
+    let listed: readonly ModelRow[] = [MODEL]
+    const controller = createController(plugin({ models: async () => listed, installModel: async () => gate.promise }))
+    const install = controller.install('qwen')
+    listed = [MODEL, { ...MODEL, id: 'kokoro', modality: 'speech' }]
+    await controller.refresh()
+    expect(controller.getSnapshot().models.map((row) => row.id), 'a download froze the catalogue').toEqual([
+      'qwen',
+      'kokoro',
+    ])
+    expect(controller.getSnapshot().runtime.kind).toBe('installing')
+    gate.open()
+    await install
+    controller.dispose()
+  })
+
   /**
    * A DOWNLOAD OWNS THE RUNTIME SLOT, AND `ensureReady` RESPECTS IT.
    *
@@ -594,6 +804,7 @@ describe('the controller', () => {
        other request would satisfy a call count and leave the download running,
        which is exactly what the reader pressed the button to stop. */
     expect(issued).toHaveLength(1)
+    expect(issued[0], 'the id does not say what kind of request it is').toMatch(/^install-/)
     expect(cancel).toHaveBeenCalledTimes(1)
     expect(cancel.mock.calls[0]?.[0]).toBe(issued[0])
 
@@ -668,6 +879,39 @@ describe('the controller', () => {
     await expect(controller.ensureReady()).resolves.toBe(true)
     expect(start, 'a cached `ready` skipped the restart').toHaveBeenCalledTimes(2)
     expect(controller.getSnapshot().runtime).toEqual({ kind: 'ready', version: '11.7.0' })
+    controller.dispose()
+  })
+
+  /* `starting` IS SHOWN FOR A LAUNCH, NOT FOR A HEALTH CHECK. `start` runs before
+     every question, so a daemon already up must not flash "starting" on the
+     row each time one is asked. */
+  it('shows starting while a launch is out, and never over a runtime that is already ready', async () => {
+    const gates = [deferred(), deferred()]
+    let launches = 0
+    const controller = createController(
+      plugin({
+        start: async () => {
+          await gates[launches++]!.promise
+          return 13399
+        },
+        status: async () => ({ state: 'ready', version: '11.7.0', port: 13399 }),
+      }),
+    )
+    const first = controller.start()
+    expect(controller.getSnapshot().runtime, 'a launch from nothing did not say it was starting').toEqual({
+      kind: 'starting',
+    })
+    gates[0]!.open()
+    await first
+    expect(controller.getSnapshot().runtime).toEqual({ kind: 'ready', version: '11.7.0' })
+
+    const second = controller.start()
+    expect(controller.getSnapshot().runtime, 'a ready runtime was shown starting again').toEqual({
+      kind: 'ready',
+      version: '11.7.0',
+    })
+    gates[1]!.open()
+    await second
     controller.dispose()
   })
 
@@ -762,9 +1006,48 @@ describe('the controller', () => {
     const controller = createController(plugin())
     const listener = vi.fn()
     controller.subscribe(listener)
+    const before = controller.getSnapshot()
     controller.dispose()
     await controller.refresh()
     expect(listener).not.toHaveBeenCalled()
+    /* NOR WRITING. Silence alone would pass a controller that went on changing
+       state nobody is told about, for whoever reads it next. */
+    expect(controller.getSnapshot(), 'a disposed controller kept what a late refresh read').toBe(before)
+  })
+
+  it('stops telling a subscriber that unsubscribed, and only that one', async () => {
+    const controller = createController(plugin())
+    const gone = vi.fn()
+    const kept = vi.fn()
+    const unsubscribe = controller.subscribe(gone)
+    controller.subscribe(kept)
+    unsubscribe()
+    await controller.refresh()
+    expect(gone).not.toHaveBeenCalled()
+    expect(kept, 'nobody was told at all, so this measures nothing').toHaveBeenCalled()
+    controller.dispose()
+  })
+
+  /* A DOWNLOAD THAT FAILS AFTER ITS CONTROLLER IS GONE BELONGS TO NOBODY. It
+     did not end up installed for anyone, so it resolves false, and `dispose`
+     had already abandoned it, so no `install-failed` line is written for it. */
+  it('resolves false and reports nothing for a download that fails after dispose', async () => {
+    const gate = deferred()
+    const events: string[] = []
+    const controller = createController(
+      plugin({
+        installModel: async () => {
+          await gate.promise
+          throw Object.assign(new Error('digest 9f3a… did not match'), { kind: 'digestMismatch' })
+        },
+      }),
+      (event) => void events.push(event),
+    )
+    const installing = controller.install('qwen')
+    controller.dispose()
+    gate.open()
+    await expect(installing).resolves.toBe(false)
+    expect(events, 'an abandoned download reported a failure').toEqual([])
   })
 })
 
@@ -809,19 +1092,25 @@ describe('uninstall', () => {
    */
   it('resolves false and explains itself when the removal fails', async () => {
     const events: string[] = []
+    const fields: Record<string, unknown>[] = []
     const controller = createController(
       plugin({
         removeModel: async () => {
           throw Object.assign(new Error('EBUSY'), { kind: 'notRunning' })
         },
       }),
-      (event) => void events.push(event),
+      (event, said) => {
+        events.push(event)
+        fields.push(said)
+      },
     )
     await controller.refresh()
 
     await expect(controller.uninstall(MODEL.id)).resolves.toBe(false)
     expect(controller.getSnapshot().failure).toBe('The runtime is not running')
     expect(events).toEqual(['inference.remove-failed'])
+    /* Which model, and both halves: the reader's sentence alone finds nothing. */
+    expect(fields).toEqual([{ model: MODEL.id, detail: 'The runtime is not running', message: 'EBUSY' }])
     controller.dispose()
   })
 
@@ -941,7 +1230,16 @@ describe('reporting a failed refresh', () => {
         },
       }),
     )
-    await expect(controller.refresh()).resolves.toBeUndefined()
+    /* AND ITS ABSENCE IS NOT A FAULT. Calling a reporter that was never given
+       would throw into the guard, which would then log "the failure reporter
+       itself threw" for every failure of a controller that simply has none. */
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(controller.refresh()).resolves.toBeUndefined()
+      expect(logged).not.toHaveBeenCalled()
+    } finally {
+      logged.mockRestore()
+    }
     controller.dispose()
   })
 })
@@ -1012,6 +1310,7 @@ describe('audit-fix round 1 — the controller', () => {
   })
 
   it('a reporter that throws does not turn an absorbed failure into a rejection', async () => {
+    const broken = new Error('the reporter is broken')
     const controller = createController(
       plugin({
         status: async () => {
@@ -1019,9 +1318,162 @@ describe('audit-fix round 1 — the controller', () => {
         },
       }),
       () => {
-        throw new Error('the reporter is broken')
+        throw broken
       },
     )
-    await expect(controller.refresh()).resolves.toBeUndefined()
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(controller.refresh()).resolves.toBeUndefined()
+      /* ABSORBED, NOT LOST: the reporter's own failure is written where it can
+         still be read, with the event it was carrying when it threw. */
+      expect(logged.mock.calls).toEqual([
+        ['inference controller: the failure reporter itself threw', broken, 'while reporting', 'inference.refresh-failed'],
+      ])
+    } finally {
+      logged.mockRestore()
+    }
+  })
+})
+
+/**
+ * ⚠️ **A START THAT FAILED KNEW WHY AND TOLD NOBODY.**
+ *
+ * `ensureReady` turned every failure into `false` and reported nothing, so the
+ * one place holding the cause threw it away: the reader was told "The runtime
+ * is not running" by `glossProvider`'s fallback while this controller had just
+ * computed "The runtime is not installed", and no diagnostic recorded either.
+ * `start` is the same launch with the cause kept; `ensureReady` is `start`
+ * collapsed, for the callers whose contract is a boolean (2026-09-13 audit,
+ * round 2).
+ */
+describe('audit-fix round 2 — a start that failed says why', () => {
+  const refusal = { kind: 'runtimeMissing', message: 'the inference runtime is not installed at /x' }
+
+  it('rejects with the plugin’s own failure, so a caller can translate it', async () => {
+    const controller = createController(
+      plugin({
+        start: async () => {
+          throw refusal
+        },
+      }),
+    )
+    const cause = await controller.start().then(() => null, (thrown: unknown) => thrown)
+    expect(cause, 'the cause was replaced, so nothing downstream can name it').toBe(refusal)
+    expect(detailFor(cause)).toBe('The runtime is not installed')
+    controller.dispose()
+  })
+
+  /* BOTH HALVES, as `refresh` already reported them: `detail` is the reader's
+     sentence and `message` is the crate's, and they are deliberately different
+     — reporting only the first would have said "Something went wrong" to the
+     log as well. */
+  it('writes one diagnostic carrying the reader’s sentence and the crate’s', async () => {
+    const events: { event: string; fields: Record<string, unknown> }[] = []
+    const controller = createController(
+      plugin({
+        start: async () => {
+          throw refusal
+        },
+      }),
+      (event, fields) => void events.push({ event, fields }),
+    )
+    await controller.start().catch(() => {})
+    expect(events).toEqual([
+      {
+        event: 'inference.start-failed',
+        fields: { detail: 'The runtime is not installed', message: refusal.message },
+      },
+    ])
+    expect(controller.getSnapshot().runtime).toEqual({
+      kind: 'degraded',
+      detail: 'The runtime is not installed',
+    })
+    controller.dispose()
+  })
+
+  /* AND `ensureReady` KEEPS ITS OWN CONTRACT. It answers false rather than
+     rejecting, because its callers are `const ready = await …` with no catch
+     — the port's `ensureReady` promises "false when it could not". */
+  it('leaves ensureReady answering false rather than rejecting', async () => {
+    const controller = createController(
+      plugin({
+        start: async () => {
+          throw refusal
+        },
+      }),
+    )
+    await expect(controller.ensureReady()).resolves.toBe(false)
+    controller.dispose()
+  })
+
+  /**
+   * A DAEMON THAT CAME UP AND IS STILL NOT READY IS NOT AN EXCEPTION, and the
+   * state must stay the status's own rather than becoming `degraded`: what the
+   * reader can do about an absent runtime is install one, and `degraded` tells
+   * them to restart something they do not have.
+   */
+  it('refuses by the status when the launch itself did not fail, and keeps the status’s state', async () => {
+    const events: { event: string; fields: Record<string, unknown> }[] = []
+    const controller = createController(
+      plugin({ start: async () => 13399, status: async () => ({ state: 'absent', reason: 'not staged' }) }),
+      (event, fields) => void events.push({ event, fields }),
+    )
+    const cause = await controller.start().then(() => null, (thrown: unknown) => thrown)
+    expect(detailFor(cause), 'an absent runtime was reported as one that did not start').toBe(
+      'The runtime is not installed',
+    )
+    expect(controller.getSnapshot().runtime).toEqual({ kind: 'absent', reason: 'not staged' })
+    /* Reported as a launch that threw is: both halves, the status's reason as the maintainer's. */
+    expect(events).toEqual([
+      { event: 'inference.start-failed', fields: { detail: 'The runtime is not installed', message: 'not staged' } },
+    ])
+    controller.dispose()
+  })
+
+  /**
+   * ⚠️ **AND THE SAME SHAPE ONE FIELD ALONG: A DISPOSED CONTROLLER LEFT ITS
+   * DOWNLOAD RUNNING.**
+   *
+   * `dispose` cleared the install slot and told nobody, so the request it had
+   * minted went on downloading in Rust for a controller that no longer exists —
+   * no pane counting the bytes, no Cancel to press, and a staging path a
+   * re-composed capability could start writing to as well. `voiceTest.dispose`
+   * already aborts its own request and `inferencePort`'s teardown now cancels
+   * every request it has out; this was the third minting site of the four and
+   * the only one left (2026-09-13 audit, round 2).
+   */
+  it('cancels a download it still had out when it is disposed', async () => {
+    const gate = deferred()
+    const cancel = vi.fn(async (_requestId: string) => {})
+    const issued: string[] = []
+    const controller = createController(
+      plugin({
+        cancel,
+        installModel: async (requestId) => {
+          issued.push(requestId)
+          await gate.promise
+        },
+      }),
+    )
+    const installing = controller.install('qwen')
+    expect(issued, 'no download went out, so this measures nothing').toHaveLength(1)
+
+    controller.dispose()
+    expect(cancel.mock.calls, 'a download outlived the controller that started it').toEqual([[issued[0]]])
+
+    gate.open()
+    await expect(installing).resolves.toBe(false)
+  })
+
+  it('says the runtime is not running when it is installed and stopped', async () => {
+    const controller = createController(plugin({ start: async () => 13399, status: async () => ({ state: 'stopped' }) }))
+    const cause = await controller.start().then(() => null, (thrown: unknown) => thrown)
+    expect(detailFor(cause)).toBe('The runtime is not running')
+    expect(cause, 'the maintainer’s half does not say what the status was').toEqual({
+      kind: 'notRunning',
+      message: 'the runtime is stopped after a start that did not fail',
+    })
+    expect(controller.getSnapshot().runtime).toEqual({ kind: 'installed' })
+    controller.dispose()
   })
 })

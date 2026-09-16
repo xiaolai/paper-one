@@ -21,7 +21,7 @@ import { scan } from './sourceScan.testkit'
  * invisible. This number is the only thing that can tell "every row passed"
  * from "there were no rows".
  */
-const PINNED_ROWS = 26
+const PINNED_ROWS = 37
 
 /**
  * How many rows the implementation does NOT get right, pinned the same way.
@@ -33,7 +33,7 @@ const PINNED_ROWS = 26
  * be improved on purpose and cannot quietly fall: a new uncovered row fails
  * here until someone writes the number down and says why.
  */
-const PINNED_UNCOVERED = 10
+const PINNED_UNCOVERED = 12
 
 /**
  * The categories the corpus must cover, stated HERE rather than in
@@ -76,6 +76,14 @@ function faults(value: unknown): readonly string[] {
   if (!Number.isInteger(row['termEnd'])) out.push('termEnd')
   if (typeof row['locale'] !== 'string' || row['locale'] === '') out.push('locale')
   if (!Number.isInteger(row['maxSentenceChars'])) out.push('maxSentenceChars')
+  /* Absent is a value — see `SentenceCorpusRow.before` — so only a PRESENT side
+     that is neither text nor null is a fault. */
+  for (const side of ['before', 'after'] as const) {
+    if (side in row && row[side] !== null && typeof row[side] !== 'string') out.push(side)
+  }
+  /* And so is an absent gate — `SentenceCorpusRow.requireComplete` — which
+     leaves `false` as the only thing a present one may say. */
+  if ('requireComplete' in row && row['requireComplete'] !== false) out.push('requireComplete')
   if (typeof row['sentence'] !== 'string' || row['sentence'] === '') out.push('sentence')
   if (!('actual' in row) || row['actual'] === undefined) out.push('actual is missing')
   else if (row['actual'] !== 'none' && !isAnswer(row['actual'])) out.push('actual is malformed')
@@ -94,6 +102,9 @@ function answerFor(row: (typeof SENTENCE_CORPUS)[number]): unknown {
   const result = sentenceOf(row.raw, row.termStart, row.termEnd, {
     locale: row.locale,
     maxSentenceChars: row.maxSentenceChars,
+    before: row.before,
+    after: row.after,
+    requireComplete: row.requireComplete,
   })
   return result.ok ? { sentence: result.sentence, term: result.term } : 'none'
 }
@@ -122,13 +133,15 @@ describe('the sentence corpus — what it says about coverage', () => {
    */
   it('names exactly the rows the implementation does not get right', () => {
     expect(uncovered.map((row) => row.id)).toEqual([
-      'abbreviation-closing-quote',
       'abbreviation-street-overshoot',
       'japanese-closing-quote',
       'lowercase-sentence-start',
       'sentence-final-initial',
       'run-start-edge',
       'run-end-edge',
+      'block-edge-weld',
+      'block-edge-abbreviation',
+      'block-edge-continues',
       'longer-than-a-sentence',
       'latin-abbreviation-in-han-under-zh',
       'unknown-language',
@@ -201,6 +214,11 @@ describe('the sentence corpus — the guards that make a green run mean somethin
     )
     expect(faults({ ...unfinished, actual: 'none', locale: '' })).toContain('locale')
     expect(faults({ ...unfinished, actual: 'none', why: '  ' })).toContain('why')
+    expect(faults({ ...unfinished, actual: 'none', before: 3 })).toContain('before')
+    expect(faults({ ...unfinished, actual: 'none', after: false })).toContain('after')
+    expect(faults({ ...unfinished, actual: 'none', before: null, after: 'Gamma three.' })).toEqual([])
+    expect(faults({ ...unfinished, actual: 'none', requireComplete: true })).toContain('requireComplete')
+    expect(faults({ ...unfinished, actual: 'none', requireComplete: false })).toEqual([])
     expect(faults({ ...unfinished, actual: 'none' })).toEqual([])
   })
 

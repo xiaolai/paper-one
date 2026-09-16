@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { globSync } from 'node:fs'
 import { notifyAll } from './notify'
 
@@ -81,9 +81,13 @@ describe('no store announces without it', () => {
     const root = join(here, '..', '..')
     /* Production modules only. A test file may build a fake store with a bare
        loop, and holding those to the rule would be holding the fixture to the
-       fixture's own subject. `notify.ts` is the loop. */
+       fixture's own subject. `notify.ts` is the loop.
+
+       ⚠️ `globSync` answers in the PLATFORM's separator, so on Windows the
+       loop itself came back as `kernel\core\notify.ts`, missed this `/`
+       comparison, and was reported as its own offender (2026-09-14). */
     const files = globSync('**/*.{ts,tsx}', { cwd: root }).filter(
-      (one) => !/\.test\.tsx?$/u.test(one) && !one.endsWith('core/notify.ts'),
+      (one) => !/\.test\.tsx?$/u.test(one) && !one.split(sep).join('/').endsWith('core/notify.ts'),
     )
     const offenders: string[] = []
     for (const file of files) {

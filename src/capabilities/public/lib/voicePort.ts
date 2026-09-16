@@ -80,6 +80,7 @@ export interface VoiceDecisionsPort {
 }
 
 /** The lane every decision write queues on. One file, one key. */
+// Stryker disable next-line StringLiteral: nothing else queues on this key and `writeQueue` treats every key alike, so which string it is cannot be observed.
 const LANE = 'public:voices'
 
 /** What the file holds. `v` first, so a future shape can be told from this one. */
@@ -116,7 +117,16 @@ export function decisionsFrom(text: string): VoiceDecisions {
   if (held.v !== VERSION) {
     throw new Error(`public: ${VOICE_DECISIONS_PATH} is version ${String(held.v)}, not ${VERSION}`)
   }
-  const bindings = (Array.isArray(held.bindings) ? held.bindings : []).filter(isWellFormed)
+  /* ⚠️ **AND `bindings` IS A COLLECTION TOO — IT WAS THE ONE LEFT OUT OF THE
+     RULE BELOW.** This line read a present-but-mistyped `bindings` as no
+     bindings while the two lists under it were made fatal, so every voice the
+     reader had bound to a person was written away by the next decision they
+     made. Found by the 2026-09-13 audit. Absent is still empty, as it is
+     there, and a malformed ROW is still dropped alone. */
+  if (held.bindings !== undefined && !Array.isArray(held.bindings)) {
+    throw new Error(`public: ${VOICE_DECISIONS_PATH} has a bindings list that will not read`)
+  }
+  const bindings = held.bindings === undefined ? [] : held.bindings.filter(isWellFormed)
   /* ⚠️ **A COLLECTION THAT IS NOT A LIST IS DAMAGE, NOT AN EMPTY LIST.** A
      missing or mistyped `blockedVoices` read as `[]`, which silently stops
      every silence applying — and the next change writes that emptiness over
@@ -155,25 +165,22 @@ export function decisionsFrom(text: string): VoiceDecisions {
  *
  * Order-sensitive on purpose: these lists are the reader's own and the fold
  * keeps their order, so a reordering IS a change worth persisting.
+ *
+ * One spelling of everything a decision says, compared whole. It was a
+ * field-by-field walk, and three of its comparisons could not be seen by any
+ * test: a blocked list never changes without changing its length, and one
+ * voice has one person, who is also its asserter — so the walk's parts
+ * vouched for each other, and a guard for a missing twin sat behind a length
+ * check that had already ruled one out (2026-09-14 mutation sweep).
  */
 function sameDecisions(a: VoiceDecisions, b: VoiceDecisions): boolean {
-  const sameList = (one: readonly string[], other: readonly string[]) =>
-    one.length === other.length && one.every((each, at) => each === other[at])
-  return (
-    sameList(a.blockedVoices, b.blockedVoices) &&
-    sameList(a.blockedPeople, b.blockedPeople) &&
-    a.bindings.length === b.bindings.length &&
-    a.bindings.every((each, at) => {
-      const twin = b.bindings[at]
-      return (
-        twin !== undefined &&
-        each.voice === twin.voice &&
-        each.person === twin.person &&
-        each.assertedBy === twin.assertedBy &&
-        each.at === twin.at
-      )
-    })
-  )
+  const said = (one: VoiceDecisions): string =>
+    JSON.stringify([
+      one.bindings.map(({ voice, person, assertedBy, at }) => [voice, person, assertedBy, at]),
+      one.blockedVoices,
+      one.blockedPeople,
+    ])
+  return said(a) === said(b)
 }
 
 export function voiceDecisionsPortOver(

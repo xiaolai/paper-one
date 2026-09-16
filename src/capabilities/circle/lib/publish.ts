@@ -1051,7 +1051,6 @@ function sealFresh(mine: readonly Entry[], boundaries: readonly SealedPage[], pu
     if (run.length > 0) out.push(run)
     return out
   }
-  // Stryker disable OptionalChaining
   return paginate(fresh, budget).flatMap(withinSpan).map((group) => {
     /* ⚠️ **AN ENTRY TOO BIG FOR A PAGE WAS SEALED INTO ONE ANYWAY.**
        `paginate` emits an oversized entry alone rather than dropping it —

@@ -234,8 +234,11 @@ describe('the directory the bundle declares', () => {
     }
   })
 
+  /* The ROOT is removed, not `current`: removing only the directory under test
+     left the temporary directory holding it behind on every run. */
   it('is created, with a reason, when there is nothing to stage', () => {
-    const dir = join(mkdtempSync(join(tmpdir(), 'paper-vendor-')), 'current')
+    const root = mkdtempSync(join(tmpdir(), 'paper-vendor-'))
+    const dir = join(root, 'current')
     try {
       leaveEmpty(dir, 'A reason a reader can act on.')
 
@@ -244,7 +247,7 @@ describe('the directory the bundle declares', () => {
       expect(marker).toContain('A reason a reader can act on.')
       expect(marker, 'it must say the app still runs').toMatch(/runs normally/i)
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
     }
   })
 
@@ -252,12 +255,13 @@ describe('the directory the bundle declares', () => {
      marker mistaken for one would claim a runtime that is not there, which is
      the failure this whole path exists to avoid, inverted. */
   it('does not make an empty tree look like a staged one', () => {
-    const dir = join(mkdtempSync(join(tmpdir(), 'paper-vendor-')), 'current')
+    const root = mkdtempSync(join(tmpdir(), 'paper-vendor-'))
+    const dir = join(root, 'current')
     try {
       leaveEmpty(dir, 'nothing staged')
       expect(isStaged(dir, 'darwin-arm64')).toBe(false)
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })

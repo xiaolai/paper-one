@@ -102,6 +102,21 @@ export function cardStamp(card: Card): Hlc {
 }
 
 /**
+ * Which of two rows carrying ONE id stands — newest stamp, ties to the
+ * serialised row. `laterMark`'s rule, in one function because two callers
+ * apply it: `mergeCards`, and `parseCards` deciding between duplicates. They
+ * were two copies of one expression, and a merge rule stated twice is two
+ * merge rules the day one of them is edited.
+ */
+function laterCard(held: Card, incoming: Card): Card {
+  const mine = cardStamp(held)
+  const theirs = cardStamp(incoming)
+  if (mine < theirs) return incoming
+  if (mine > theirs) return held
+  return JSON.stringify(held) < JSON.stringify(incoming) ? incoming : held
+}
+
+/**
  * Fold two card lists — LATEST ACTION WINS, per id; the same semilattice as
  * `mergeMarks`, including the tie rule and the identity convention. Deletes
  * are included: the newest row wins whole, tombstone or not.
@@ -116,17 +131,11 @@ export function mergeCards(a: readonly Card[], b: readonly Card[]): readonly Car
       changed = true
       continue
     }
-    const mine = cardStamp(held)
-    const theirs = cardStamp(incoming)
-    const winner =
-      mine < theirs
-        ? incoming
-        : mine > theirs
-          ? held
-          : JSON.stringify(held) < JSON.stringify(incoming)
-            ? incoming
-            : held
-    if (winner !== held && JSON.stringify(winner) !== JSON.stringify(held)) {
+    const winner = laterCard(held, incoming)
+    /* A winner that is not `held` differs from it: `laterCard` keeps `held`
+       at a tie of stamp and serialization. This also compared the two
+       serializations, which could never disagree with the identity test. */
+    if (winner !== held) {
       byId.set(incoming.id, winner)
       changed = true
     }
@@ -161,7 +170,13 @@ export function cardFromMark(mark: {
 }
 
 function isCard(value: unknown): value is Card {
-  if (typeof value !== 'object' || value === null) return false
+  if (
+    value === null ||
+    // Stryker disable next-line ConditionalExpression: `JSON.parse` makes no primitive with an `id`, so the first test below refuses one anyway.
+    typeof value !== 'object'
+  ) {
+    return false
+  }
   const c = value as Record<string, unknown>
   /* Same rule as `isMark`, and for the same reasons: an empty id collides as a
    * React key and makes `discard(id)` remove two cards, an empty body is a
@@ -173,29 +188,42 @@ function isCard(value: unknown): value is Card {
     typeof c['bookId'] === 'string' &&
     typeof c['body'] === 'string' &&
     c['body'] !== '' &&
+    // Stryker disable next-line ConditionalExpression: `includes` on the next line refuses every non-string, without coercing.
     typeof c['kind'] === 'string' &&
     (CARD_KINDS as readonly string[]).includes(c['kind'] as string) &&
     typeof c['answer'] === 'string' &&
     typeof c['source'] === 'string' &&
     (typeof c['cfi'] === 'string' || c['cfi'] === null) &&
+    // Stryker disable next-line ConditionalExpression: `Number.isFinite` refuses every non-number, without coercing; this narrows the type for `>= 0`.
     typeof c['createdAt'] === 'number' &&
     Number.isFinite(c['createdAt']) &&
     c['createdAt'] >= 0
   )
 }
 
-/** Same trust-boundary rule as marks: drop a bad row, keep the rest — and a
- *  malformed STAMP is dropped alone, leaving a legacy row, rather than
- *  costing the card. */
+/**
+ * Same trust-boundary rule as marks: drop a bad row, keep the rest — and a
+ * malformed STAMP is dropped alone, leaving a legacy row, rather than costing
+ * the card.
+ *
+ * ⚠️ **UNREADABLE THROWS, AND IT USED TO READ AS EMPTY** — `parseLookups`' rule,
+ * found by the 2026-09-13 audit. Bytes that were not JSON, or JSON that was not
+ * a list, answered `[]`: `createCards` came up healthy with no cards, and the
+ * next card made wrote "no cards plus this one" over every card the reader had
+ * — the one thing that store's own comment says a failed load must never do.
+ * Thrown, it takes the load-failure path already there for a storage that
+ * throws on READ: session-only, `persistent` false, and the bytes left where
+ * they are. ONLY `null` — nothing stored — is an empty collection.
+ */
 export function parseCards(raw: string | null): Card[] {
-  if (!raw) return []
+  if (raw === null) return []
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
-  } catch {
-    return []
+  } catch (cause) {
+    throw new Error('the stored cards are not JSON', { cause })
   }
-  if (!Array.isArray(parsed)) return []
+  if (!Array.isArray(parsed)) throw new Error('the stored cards are not a list')
   const rows = parsed.filter(isCard).map((card) => {
     const { updatedAt, deletedAt, ...rest } = card as Card & { updatedAt?: unknown; deletedAt?: unknown }
     const updated = isHlc(updatedAt) ? updatedAt : undefined
@@ -203,9 +231,12 @@ export function parseCards(raw: string | null): Card[] {
     /* LATEST ACTION WINS ON THE ROW ITSELF — `validMarks`' rule, for the
      * same reason: an edit newer than the tombstone means the card is
      * alive, and the read models decide by the tombstone's presence, so
-     * the older action is cleared at the door. */
-    const tombstone =
-      deleted !== undefined && !(updated !== undefined && updated > deleted) ? deleted : undefined
+     * the older action is cleared at the door. A tie keeps the tombstone:
+     * `laterHlc` answers either of two equal stamps, and both are this one.
+     * (Spelled `deleted !== undefined && !(updated !== undefined && updated
+     * > deleted)`, both `undefined` tests only narrowed a type: a comparison
+     * with `undefined` is false, so neither changed the answer.) */
+    const tombstone = laterHlc(updated, deleted) === deleted ? deleted : undefined
     return {
       ...rest,
       ...(updated !== undefined ? { updatedAt: updated } : {}),
@@ -224,11 +255,7 @@ export function parseCards(raw: string | null): Card[] {
       byId.set(card.id, card)
       continue
     }
-    const mine = cardStamp(held)
-    const theirs = cardStamp(card)
-    const winner =
-      mine < theirs ? card : mine > theirs ? held : JSON.stringify(held) < JSON.stringify(card) ? card : held
-    byId.set(card.id, winner)
+    byId.set(card.id, laterCard(held, card))
   }
   return [...byId.values()]
 }

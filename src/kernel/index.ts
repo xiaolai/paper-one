@@ -1,21 +1,31 @@
 /**
- * The kernel's public entry — the ONLY kernel module anything outside
- * `src/kernel/` may import (`.dependency-cruiser.cjs`, rule
- * `kernel-public-entry-only`), with the exemptions that rule names: the
- * browser client under `src/app/web/` reaches `ui/browser` and `core/metrics`
- * directly. Those exemptions are written beside the rule, with the reason;
- * they are not a licence for anyone else.
+ * The kernel's public entry — the only kernel module a capability, or anything
+ * else under `src/` outside the kernel, may import (`.dependency-cruiser.cjs`,
+ * rule `kernel-public-entry-only`).
  *
- * ⚠️ **THE REASON GIVEN FOR THEM WAS THAT THIS BARREL PULLS IN `@tauri-apps`,
- * AND IT DOES NOT.** `pnpm browser:check` holds this exact module and passes:
- * every platform binding was split out of the kernel (`vaultFsTauri.ts` from
- * `bookVault.ts` is the pattern), which is what made the kernel reachable from
- * a browser at all. What the exemptions are really for is WEIGHT and REACT: a
- * barrel's re-exports evaluate with the barrel, so a web bundle that wanted
- * two surfaces would load every one of them, and `ui/browser` is the entry
- * that grows one export at a time for that reason. A rationale that names a
- * blocker which no longer exists is one somebody will remove the exemption
- * over. Found by audit.
+ * The shells and the composition roots are not exemptions from that rule. It
+ * leaves them out of its `from` entirely, and each is judged by a rule of its
+ * own that names its kernel doors exactly: `composition-root-kernel-entries`,
+ * `web-client-kernel-entries`, `mobile-client-kernel-entries` and
+ * `shared-shell-kernel-entries`. The browser client's, for one, admits this
+ * entry, `ui/browser`, and five browser-safe leaves. Read the lists in the
+ * rules — they are what a build enforces, and a copy of one here is how this
+ * header came to be wrong.
+ *
+ * ⚠️ **THIS HEADER CALLED THEM "THE EXEMPTIONS THAT RULE NAMES", AND GAVE THE
+ * BROWSER TWO MODULES.** Both were stale: the exemption was replaced by the
+ * separate rules, and the browser's door lists seven. Found by audit.
+ *
+ * ⚠️ **THE REASON ONCE GIVEN FOR THE SEPARATE DOORS WAS THAT THIS BARREL PULLS
+ * IN `@tauri-apps`, AND IT DOES NOT.** `pnpm browser:check` holds this exact
+ * module and passes: every platform binding was split out of the kernel
+ * (`vaultFsTauri.ts` from `bookVault.ts` is the pattern), which is what made
+ * the kernel reachable from a browser at all. What the doors are really for is
+ * WEIGHT and REACT: a barrel's re-exports evaluate with the barrel, so a web
+ * bundle that wanted two surfaces would load every one of them, and
+ * `ui/browser` is the entry that grows one export at a time for that reason. A
+ * rationale that names a blocker which no longer exists is one somebody will
+ * remove the door over. Found by audit.
  *
  * NOTHING REACT. What is here is the non-React kernel: the services a
  * composition root builds and a capability's `start` receives, the ports a
@@ -34,19 +44,25 @@
  *
  * ⚠️ **AN EXPORT NOBODY IMPORTS COSTS A MODULE LOAD ONLY WHEN NOTHING ELSE
  * HERE ALREADY LOADS THAT MODULE — AND MOST DO.** An audit counted two hundred
- * names in this file with no importer and read them as weight; measured, the
- * weight was two modules. `core/cardStore` and `core/formats` were each here
- * for names nothing outside the kernel ever asked for, while every other
- * unimported name sits beside one that is imported, in a module the barrel
- * loads anyway. Both are gone; the rest stay, because they are a declared
- * contract rather than a cost, and shrinking a contract on the grounds that
- * today's capabilities happen not to use it is a different decision from
- * removing dead weight.
+ * names in this file with no importer and read them as weight. They are not:
+ * almost every one sits beside a name that IS imported, in a module the barrel
+ * loads anyway. They stay, because they are a declared contract rather than a
+ * cost, and shrinking a contract on the grounds that today's capabilities
+ * happen not to use it is a different decision from removing dead weight.
  *
- * `kernel-entry.test.mjs` is what keeps the distinction: it re-derives the
- * measurement rather than trusting the sentence above, so a clause added for a
- * module nothing else loads is a finding on the day it lands. A number written
- * here would have a half-life; the test does not.
+ * ⚠️ **`core/cardStore` AND `core/formats` WERE DROPPED AS "THE TWO MODULES
+ * THAT COST", AND NEITHER COST ANYTHING.** Both still load with this entry:
+ * `core/services.ts` imports `createCards` from the one and `core/bookFolder.ts`
+ * imports `isFormat` from the other, and this file re-exports both of those.
+ * What dropping the clauses bought is a smaller API — names nothing outside the
+ * kernel asked for — which is reason enough; the loading saving was a second
+ * reason that was not true, the same mistake the `NO_GLOSS` note below records.
+ * Found by audit.
+ *
+ * `kernel-entry.test.mjs` holds the NAMES, not the loading: it refuses a value
+ * clause none of whose names anything outside the entry imports, whether or not
+ * something else here loads the module behind it. It does not walk the module
+ * graph, so it can neither confirm nor refute a claim about what loads.
  */
 
 /* The services, and the factory a composition root calls once. */
@@ -199,8 +215,15 @@ export { createRenderSlot } from './core/renderSlot'
 export type { RenderSlot } from './core/renderSlot'
 /* The first half of a shutdown: hand over what memory holds, so the queue has
  * something to drain. The composition root needs it for the QUIT path, which
- * is not the window-close path `App` already covers — see `beforeClose.ts`. */
-export { flushBeforeClose, onBeforeClose } from './core/beforeClose'
+ * is not the window-close path `App` already covers — see `beforeClose.ts`.
+ *
+ * AND `onBeforeDrain`, the list of work already RUNNING that the drain waits
+ * for (2026-09-14). Registering is how anything outside the kernel puts a wait
+ * on both shutdown paths — and how `app/bootApp.test.ts` proves the quit's
+ * teardown is handed `settleBeforeDrain` at all, since a test under `src/app/`
+ * reaches the kernel through this entry and no other. The waiting half stays on
+ * `ui/boot.ts`, beside the bound it runs under. */
+export { flushBeforeClose, onBeforeClose, onBeforeDrain } from './core/beforeClose'
 /* The companion and the gloss (phase 15). The types a capability implements
  * to bind `KernelServices.bindCompanion` / `bindGloss`.
  *
@@ -226,6 +249,10 @@ export type { AnswerEnd, AskContext, AskPassage, Citation, CompanionProvider } f
  * true, and a false reason attached to a correct decision is how the decision
  * gets reversed when somebody checks it. Found by audit. */
 export type { GlossContext, GlossProvider } from './core/gloss'
+/* The shape `GlossContext.answerIn` carries (WI-17.5) — named so a provider can
+ * type what it reads without reaching into the kernel's core. The resolution
+ * itself stays the kernel's: a provider is TOLD what to answer in. */
+export type { AnswerLanguage, AnswerLanguages } from './core/glossLanguage'
 /* WHAT A BOOK'S LINK MAY DO TO THE HOST, decided once and in one place.
  *
  * foliate hands any link whose scheme leaves the package to `globalThis.open`

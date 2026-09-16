@@ -25,13 +25,14 @@
 
 import { folderOf, readBook, type BookRecord, atomicWrite } from './bookFolder'
 import { trashBook, type TrashFs } from './bookTrash'
-import type { VaultFs } from './bookVault'
+import { isMissingFile, type VaultFs } from './bookVault'
 import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
 
 /** Where the register lives: beside the journal, under the sync directory. */
 export const PRESENCE_PATH = 'sync/removed.json'
 
 /** The one write-queue key every `notePresence` call must be serialised on. */
+// Stryker disable next-line StringLiteral: a queue key is shared by reference — every caller imports this constant, nothing stores it, and a spelling that collided with another lane could only serialise more, never less.
 export const PRESENCE_KEY = 'sync:presence'
 
 export type PresenceState = 'live' | 'removed'
@@ -46,29 +47,54 @@ export type Presence = Readonly<Record<string, PresenceEntry>>
 /**
  * Read the register, dropping malformed ENTRIES individually — one hand-edited
  * row must not cost the register beside it, which for this file would mean a
- * removal forgotten. Absent, unreadable and not-an-object are all the empty
- * register: this file is derived state plus history, and an unreadable history
- * refuses nothing — the journal's verify pass is what audits it.
+ * removal forgotten. ABSENT is the empty register, and nothing else is.
+ *
+ * ⚠️ **UNREADABLE AND NOT-AN-OBJECT USED TO BE THE EMPTY REGISTER TOO, AND
+ * THAT ERASED EVERY REMOVAL THIS DEVICE HAD EVER RECORDED.** The paragraph
+ * here argued that this file is derived state and an unreadable history
+ * refuses nothing. It is not derived: nothing else on disk remembers that a
+ * book was removed once the fortnight of trash is up. And `notePresence` is a
+ * read-modify-write of the WHOLE file, so a momentary read failure or a
+ * truncated file read as no removals and the next removal wrote `{ that one
+ * book }` over all the rest. A satchel that was in a drawer then re-uploads
+ * the books the reader deleted — the deletion that resurrects, which the
+ * header above names as the thing this file exists to prevent. Found by the
+ * 2026-09-13 audit.
+ *
+ * `isMissingFile` is the distinction, as it is in `readBook`: a book that is
+ * not there, told apart from a read that FAILED, on the message alone —
+ * Tauri's fs errors carry no code. `journalDigests` already said in a comment
+ * that this throws; it does now.
  */
 export async function readPresence(fs: VaultFs): Promise<Presence> {
   let raw: string
   try {
     raw = new TextDecoder().decode(await fs.readFile(PRESENCE_PATH))
-  } catch {
-    return {}
+  } catch (cause) {
+    if (isMissingFile(cause)) return {}
+    throw cause
   }
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
-  } catch {
-    return {}
+  } catch (cause) {
+    throw new Error('the presence register is not JSON', { cause })
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('the presence register is not a record of books')
+  }
   const presence: Record<string, PresenceEntry> = Object.create(null) as Record<string, PresenceEntry>
   for (const key of Object.keys(parsed)) {
     if (key === '') continue
     const value = (parsed as Record<string, unknown>)[key]
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+    if (
+      value === null ||
+      Array.isArray(value) ||
+      // Stryker disable next-line ConditionalExpression: a string, number or boolean has no `state`, so the test below drops it either way; `value === null` is the clause that decides, and it is a line of its own.
+      typeof value !== 'object'
+    ) {
+      continue
+    }
     const entry = value as Record<string, unknown>
     if (entry['state'] !== 'live' && entry['state'] !== 'removed') continue
     if (!isHlc(entry['at'])) continue
@@ -95,12 +121,17 @@ export async function notePresence(
 ): Promise<boolean> {
   const presence = await readPresence(fs)
   const held = presence[bookId]
-  /* `<=` ON A REPEAT of the same state, `<` never: an equal stamp with a
-   * DIFFERENT state is a tie the register cannot order, and the held value
-   * wins because rewriting on a tie would let two replicas flap. An equal
-   * stamp with the SAME state is a no-op either way. */
-  if (held && (held.at > at || (held.at === at && held.state !== state))) return false
-  if (held && held.at === at && held.state === state) return false
+  /* ONLY A STRICTLY NEWER STAMP WRITES. An equal stamp with a DIFFERENT state
+   * is a tie the register cannot order, and the held value wins because
+   * rewriting on a tie would let two replicas flap; an equal stamp with the
+   * SAME state is a repeat, and a no-op.
+   *
+   * ⚠️ **THIS WAS TWO TESTS, AND THE STATES IN THEM DECIDED NOTHING.** The first
+   * refused a tie whose state differed, the second a tie whose state matched —
+   * which is every tie, whatever the states. Mutation testing found that either
+   * state comparison could be deleted and no test could tell, because nothing
+   * could: one condition says what the two did. */
+  if (held && held.at >= at) return false
   await writePresence(fs, { ...presence, [bookId]: { state, at } })
   return true
 }
@@ -147,7 +178,14 @@ function* stampsIn(value: unknown, depth: number): Generator<Hlc> {
     yield value
     return
   }
-  if (depth >= 4 || typeof value !== 'object' || value === null) return
+  if (
+    depth >= 4 ||
+    value === null ||
+    // Stryker disable next-line ConditionalExpression: a string, number or boolean holds no stamp at any depth, so this saves the walk and changes nothing it finds; the depth and `null` clauses are lines of their own.
+    typeof value !== 'object'
+  ) {
+    return
+  }
   for (const one of Object.values(value)) yield* stampsIn(one, depth + 1)
 }
 
@@ -180,11 +218,14 @@ export async function finishPendingRemovals(fs: TrashFs): Promise<string[]> {
        * the opposite of what the line above promises. The weaker question is
        * asked explicitly: what matters here is whether anything says the book
        * is NEWER than the removal, and an unreadable record says nothing. */
+      // Stryker disable next-line ArrowFunction: `undefined` and `null` are equally false to the one check that reads `record`.
       const record = await readBook(fs, bookId).catch(() => null)
       if (record && recordStamp(record) > entry.at) continue
       if (await trashBook(fs, bookId)) finished.push(bookId)
     } catch {
-      continue
+      /* ONE FOLDER THAT WILL NOT MOVE DOES NOT STOP THE OTHERS, and there is
+         nothing else to do here: the catch ends the loop body, so the `continue`
+         that used to stand in it was a step the loop took anyway. */
     }
   }
   return finished

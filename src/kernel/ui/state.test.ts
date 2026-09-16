@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { BUNDLED_FACES, faceById } from '../core/typefaces'
-import { createSettingsStore, readKernelPreferences } from '../core/settings'
-import { bootState, defaultPaneFor, initialState, paneFits, preferencesOf, reducer, screenFor, type AppState } from './state'
+import { KERNEL_SETTINGS, createSettingsStore, readKernelPreferences } from '../core/settings'
+import { bootState, contributionFits, defaultPaneFor, initialState, paneFits, preferencesOf, readerTakesInput, reducer, screenFor, type AppState } from './state'
 import { paneOffered } from '../core/uiTypes'
 
 /**
@@ -20,6 +20,75 @@ import { paneOffered } from '../core/uiTypes'
 
 const step = (state: AppState, idx: number): AppState =>
   reducer(state, { type: 'setStepIdx', idx })
+
+/** WI-17.5 — what Look up writes its definitions in, as a durable preference. */
+describe('the answer language', () => {
+  it('starts as the reader’s own language', () => {
+    expect(initialState.lookUpLanguage).toBe('reader')
+  })
+
+  it('stores a choice, and is the same state when nothing changed', () => {
+    const chinese = reducer(initialState, { type: 'setLookUpLanguage', choice: 'zh-Hans' })
+
+    expect(chinese.lookUpLanguage).toBe('zh-Hans')
+    expect(reducer(chinese, { type: 'setLookUpLanguage', choice: 'zh-Hans' })).toBe(chinese)
+  })
+
+  it('survives a launch through the settings store', () => {
+    const map = new Map<string, string>()
+    const storage = { getItem: (key: string) => map.get(key) ?? null, setItem: (key: string, value: string) => void map.set(key, value) }
+    createSettingsStore({ storage }).set(KERNEL_SETTINGS.lookUpLanguage, 'both')
+
+    const relaunched = bootState('', readKernelPreferences(createSettingsStore({ storage })))
+
+    expect(relaunched.lookUpLanguage).toBe('both')
+    expect(preferencesOf(relaunched).lookUpLanguage).toBe('both')
+  })
+})
+
+/**
+ * "Install one" LANDS ON ITS SECTION (phase 17, L3). A request, with a nonce so
+ * asking twice is two requests, and a pending flag so a remount of the panel
+ * does not answer it again.
+ */
+describe('revealing a settings section', () => {
+  it('opens Settings and files a pending request for the section', () => {
+    const next = reducer({ ...initialState, screen: 'reader', pane: null }, { type: 'revealSettings', section: 'inference:models' })
+
+    expect(next.pane).toBe('settings')
+    expect(next.settingsReveal).toEqual({ section: 'inference:models', nonce: 1, pending: true })
+  })
+
+  it('numbers each request after the last, whether or not that one was answered', () => {
+    const first = reducer(initialState, { type: 'revealSettings', section: 'inference:models' })
+    const answered = reducer(first, { type: 'settingsRevealed', nonce: 1 })
+    const second = reducer(answered, { type: 'revealSettings', section: 'inference:models' })
+
+    expect(second.settingsReveal).toEqual({ section: 'inference:models', nonce: 2, pending: true })
+  })
+
+  it('marks the request answered — only the one the report names', () => {
+    const first = reducer(initialState, { type: 'revealSettings', section: 'a:one' })
+    const second = reducer(first, { type: 'revealSettings', section: 'a:two' })
+
+    /* A late report about the first must not answer the second. */
+    expect(reducer(second, { type: 'settingsRevealed', nonce: 1 })).toBe(second)
+    expect(reducer(second, { type: 'settingsRevealed', nonce: 2 }).settingsReveal).toEqual({
+      section: 'a:two',
+      nonce: 2,
+      pending: false,
+    })
+  })
+
+  it('is the same state for a report with nothing pending', () => {
+    expect(reducer(initialState, { type: 'settingsRevealed', nonce: 1 })).toBe(initialState)
+    const answered = reducer(reducer(initialState, { type: 'revealSettings', section: 'a:one' }), {
+      type: 'settingsRevealed',
+      nonce: 1,
+    })
+    expect(reducer(answered, { type: 'settingsRevealed', nonce: 1 })).toBe(answered)
+  })
+})
 
 describe('setStepIdx', () => {
   it('stores a step in range', () => {
@@ -310,6 +379,32 @@ describe('the pane follows the screen', () => {
     }
   })
 
+  /* ONE ANSWER TO "DOES THE BOOK HAVE THE READER'S INPUT", for the wheel and
+     the keyboard alike — they were assembled separately and the keyboard's
+     copy forgot the sheet (#207). Each clause is asked on its own. */
+  it('gives the book the reader’s input only on the reader, under no layer, with no sheet over it', () => {
+    const reading: AppState = { ...initialState, screen: 'reader', pane: null }
+    expect(readerTakesInput(reading, false)).toBe(true)
+    expect(readerTakesInput({ ...reading, screen: 'library' }, true)).toBe(false)
+    expect(readerTakesInput({ ...reading, paletteOpen: true }, true)).toBe(false)
+    /* The pane counts only while it is open, and only as a sheet. */
+    expect(readerTakesInput({ ...reading, pane: 'toc' }, false)).toBe(false)
+    expect(readerTakesInput({ ...reading, pane: 'toc' }, true)).toBe(true)
+  })
+
+  /* ONE RULE FOR A CONTRIBUTED PANEL, asked two ways: by id, which looks the
+     contribution up, and of the contribution itself, which is what the rail
+     already holds (#148). They must not be able to disagree. */
+  it('answers the same for a contribution held as for its id', () => {
+    const circle = { id: 'circle:book', screens: ['reader'] } as const
+    const audience = { contributed: [circle] }
+    for (const screen of ['reader', 'library'] as const) {
+      expect(contributionFits(screen, circle)).toBe(paneFits(screen, circle.id, audience))
+    }
+    expect(contributionFits('reader', circle)).toBe(true)
+    expect(contributionFits('library', circle)).toBe(false)
+  })
+
   /* The mirror: the collection view is about the SHELF, and in the reader the
    * shelf is hidden. Permitted everywhere it leaked onto the reader's rail and,
    * worse, followed the reader into their first book as `lastPane`. */
@@ -487,6 +582,16 @@ describe('the pane follows the screen', () => {
       const once = reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: true })
       const twice = reducer(once, { type: 'setPaneHidden', pane: 'cards', hidden: true })
       expect(twice.hiddenPanes).toEqual(['cards'])
+    })
+
+    /* THE SAME STATE, not an equal one. The write effect depends on
+       `hiddenPanes` by identity, so a repeat that rebuilt the array re-ran the
+       whole preference write (2026-09-13 audit). */
+    it('return the same state when the list already says so', () => {
+      const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
+      const once = reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: true })
+      expect(reducer(once, { type: 'setPaneHidden', pane: 'cards', hidden: true })).toBe(once)
+      expect(reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: false })).toBe(on)
     })
   })
 
@@ -670,7 +775,9 @@ describe('the hook starts from bootState', () => {
      * so the pin is two facts rather than one spelling: the wrapper delegates
      * to `reducer`, and the initial state is `bootState(`. */
     expect(hook).toMatch(/const reduce = useCallback\(\(state: AppState, action: Action\) => reducer\(state, action, contributed\)/)
-    expect(hook).toMatch(/useReducer\(\s*reduce,\s*bootState\(/)
+    /* LAZILY: the store is the initializer's argument, so the preferences are
+       read once and not on every render (2026-09-13 audit). */
+    expect(hook).toMatch(/useReducer\(\s*reduce,\s*settings,\s*\(store\) =>\s*bootState\(/)
   })
 
   /* And it reads the settings store into that call — the whole point of the
@@ -678,7 +785,7 @@ describe('the hook starts from bootState', () => {
   it('hands the remembered preferences to bootState', () => {
     const source = readFileSync(fileURLToPath(new URL('./state.ts', import.meta.url)), 'utf8')
     const hook = source.slice(source.indexOf('export function useAppState'))
-    expect(hook).toMatch(/bootState\([^)]*readKernelPreferences\(settings\)/)
+    expect(hook).toMatch(/bootState\([^)]*readKernelPreferences\(store\)/)
     expect(hook).toMatch(/writeKernelPreferences\(settings, prefs\)/)
   })
 })
@@ -757,6 +864,9 @@ describe('bootState with remembered preferences', () => {
         minimumSize: 2,
         fidelity: 'publisher' as const,
       },
+      /* WI-17.5, and NOT the default `reader`, for the reason the fifteen above
+         give. */
+      lookUpLanguage: 'both' as const,
     }
     expect(preferencesOf(bootState('', remembered))).toEqual(remembered)
   })
@@ -942,6 +1052,18 @@ describe('a contributed screen owns the whole window (WI-22.D3)', () => {
     expect(isContributedScreenId('circle:circle')).toBe(true)
     expect(isContributedScreenId('library')).toBe(false)
     expect(isContributedScreenId('reader')).toBe(false)
+  })
+
+  /* ⚠️ **AND THE PANE TOGGLE IS REFUSED ON ONE**, not merely undrawn. The
+     palette's "Close the side pane" reached the reducer there and closed a pane
+     nothing was drawing, so the panel left open on the shelf was gone on the way
+     back (2026-09-13 audit). */
+  it('refuses the pane toggle on one, and gives the shelf its open panel back', () => {
+    const shelf: AppState = { ...initialState, screen: 'library', pane: 'marginalia', lastPane: 'marginalia' }
+    const away = reducer(shelf, { type: 'goScreen', screen: 'circle:circle' })
+    const toggled = reducer(away, { type: 'togglePane' })
+    expect(toggled).toBe(away)
+    expect(reducer(toggled, { type: 'goScreen', screen: 'library' }).pane).toBe('marginalia')
   })
 
   it('offers a contributed pane only on a screen it named', () => {

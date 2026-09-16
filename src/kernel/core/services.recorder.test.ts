@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { ZERO_DEVICE, hlcOf } from './hlc'
+import { HLC_MAX_COUNTER, ZERO_DEVICE, compareHlc, deviceOf, hlcOf, makeHlc, type Hlc } from './hlc'
 import type { MutationKind, MutationRecorder, MutationToken } from './ports'
+import { createKernelServices } from './services'
 import { gatedRecorder, servicesWith, spyRecorder } from './servicesWorld.testkit'
+
+/** Two device ids, so a stamp's issuer can be read back off it. */
+const DEVICE = '1d8865efc2eaef44'
+const OTHER_DEVICE = '2e9976f0d3fbf055'
 
 /**
  * The bind/unbind contract of the recorder and clock ports (C2).
@@ -87,24 +92,227 @@ describe('bindRecorder / bindClock disposers', () => {
        through the SLOT, so a bind and an unbind both reach it. */
     const services = servicesWith(spyRecorder().recorder)
     expect(services.clock().endsWith(`-${ZERO_DEVICE}`)).toBe(true)
-    const unbind = services.bindClock(stamp)
-    expect(services.clock()).toBe(stamp())
+    /* AHEAD of the stamp just taken, which is what a live sync clock is. A
+       clock bound BEHIND it is held above it — see the suite below — and this
+       used `hlcOf(0)`, which would now read as that case instead of this one. */
+    const ahead = hlcOf(Date.now() + 60_000, DEVICE)
+    const unbind = services.bindClock(() => ahead)
+    expect(services.clock()).toBe(ahead)
     unbind.dispose()
-    expect(services.clock()).not.toBe(stamp())
+    expect(services.clock()).not.toBe(ahead)
     expect(services.clock().endsWith(`-${ZERO_DEVICE}`)).toBe(true)
   })
 })
 
 /**
- * A COMMIT MUST NEVER REACH A JOURNAL THAT DID NOT ISSUE ITS BEGIN.
+ * THE CLOCK ACROSS A CHANGE OF BINDING.
  *
- * An unbind between begin and commit was already handled: the commit falls to
- * the default, the old journal keeps a dangling begin, and launch recovery
- * settles it because it cannot tell that from a crash. A REBIND was not.
- * Every capability reload unbinds and binds again, so "resolve the current
+ * ⚠️ The port read the slot and nothing else, so unbinding a clock that was
+ * AHEAD of wall time — which the sync HLC is, once it has met a peer whose
+ * clock is — handed the next edit a stamp EARLIER than the one before it, and a
+ * last-writer-wins merge then preferred the older edit.
+ */
+describe('the clock across a change of binding', () => {
+  it('never stamps an edit before the last one when a clock ahead of wall time is unbound', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const ahead = hlcOf(Date.now() + 60_000, DEVICE)
+    const unbind = services.bindClock(() => ahead)
+    const last = services.clock()
+    unbind.dispose()
+
+    const next = services.clock()
+    expect(compareHlc(next, last), 'the stamp after the unbind went backwards').toBeGreaterThan(0)
+    expect(compareHlc(services.clock(), next)).toBeGreaterThan(0)
+    /* Held above by counter, but still the restored clock's own device. */
+    expect(deviceOf(next)).toBe(ZERO_DEVICE)
+  })
+
+  it('holds a clock bound behind the last stamp above it, and trusts it again once it overtakes', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const early = services.bindClock(() => makeHlc(5_000_000_000_000, 0, DEVICE))
+    const last = services.clock()
+    early.dispose()
+
+    let wall = 1_000
+    services.bindClock(() => makeHlc(wall, 0, OTHER_DEVICE))
+    const held = services.clock()
+    expect(compareHlc(held, last)).toBeGreaterThan(0)
+    expect(deviceOf(held)).toBe(OTHER_DEVICE)
+
+    wall = 6_000_000_000_000
+    expect(services.clock(), 'a clock that has overtaken is passed through untouched').toBe(makeHlc(wall, 0, OTHER_DEVICE))
+  })
+
+  it('passes one binding’s stamps through exactly as its clock gives them', () => {
+    /* NOT A SECOND CLOCK. Within a binding the clock is trusted — a port that
+       re-ordered its stamps would be the second clock `clock()` exists to
+       prevent — so even a clock that repeats itself is answered verbatim. */
+    const fixed = makeHlc(1_700_000_000_000, 0, DEVICE)
+    const services = createKernelServices({ fs: null, storage: null, clock: () => fixed })
+    expect([services.clock(), services.clock()]).toEqual([fixed, fixed])
+  })
+
+  /* ⚠️ **AND THE CLOCK WAS NEVER TOLD** (2026-09-13 verify). A clock bound behind
+     the last stamp was held above it by a counter the PORT made up, which the
+     clock's own persisted floor never learned — so a relaunch inside that window
+     could issue the same stamp again. A clock that can be told is told, and asked
+     again: the stamp handed out is the clock's own. */
+  it('tells a clock bound behind the last stamp where to start, and hands out its own stamp', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const early = services.bindClock(() => makeHlc(5_000_000_000_000, 0, DEVICE))
+    const last = services.clock()
+    early.dispose()
+
+    let raised = false
+    let issued = 0
+    const told: string[] = []
+    services.bindClock(
+      () => makeHlc(raised ? 5_000_000_000_000 : 1_000, (issued += 1), OTHER_DEVICE),
+      (stamp) => {
+        told.push(stamp)
+        raised = true
+        issued = 0
+      },
+    )
+
+    expect(services.clock()).toBe(makeHlc(5_000_000_000_000, 1, OTHER_DEVICE))
+    expect(told).toEqual([last])
+    expect(services.clock(), 'a clock that was told is trusted again').toBe(makeHlc(5_000_000_000_000, 2, OTHER_DEVICE))
+  })
+
+  /* A CLOCK THAT WILL NOT MOVE IS STILL HELD ABOVE: a witness that changes
+     nothing leaves the port where it stood before it could tell a clock anything
+     — by counter, under the clock's own device. */
+  it('holds a clock above by counter when telling it changes nothing', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const early = services.bindClock(() => makeHlc(5_000_000_000_000, 0, DEVICE))
+    services.clock()
+    early.dispose()
+
+    services.bindClock(
+      () => makeHlc(1_000, 0, OTHER_DEVICE),
+      () => {},
+    )
+
+    expect(services.clock()).toBe(makeHlc(5_000_000_000_000, 1, OTHER_DEVICE))
+  })
+
+  /* AND A CLOCK THAT REFUSES ITS FLOOR SAYS SO. The sync HLC refuses only a
+     stamp implausibly far ahead, which no clock bound here hands out; a refusal is
+     a fault to surface at the write, not one to paper over with a stamp the clock
+     never agreed to. */
+  it('lets a clock that refuses its floor refuse the stamp', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const early = services.bindClock(() => makeHlc(5_000_000_000_000, 0, DEVICE))
+    services.clock()
+    early.dispose()
+
+    services.bindClock(
+      () => makeHlc(1_000, 0, OTHER_DEVICE),
+      () => {
+        throw new Error('witness: stamp implausibly far in the future')
+      },
+    )
+
+    expect(() => services.clock()).toThrow(/implausibly far in the future/u)
+  })
+
+  /* NOT EVEN ONCE MORE. A clock bound after the unbind that answers exactly the
+     last stamp handed out is a clock at the floor, not past it — and a stamp
+     handed out twice is two edits a merge cannot order. */
+  it('holds a clock that answers exactly the last stamp above it', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const last = makeHlc(5_000_000_000_000, 3, DEVICE)
+    const early = services.bindClock(() => last)
+    expect(services.clock()).toBe(last)
+    early.dispose()
+
+    services.bindClock(() => last)
+    expect(services.clock()).toBe(makeHlc(5_000_000_000_000, 4, DEVICE))
+  })
+
+  /* THE NEWEST, NOT THE LATEST. Within a binding a clock is trusted as it is,
+     even one that steps back — so the floor a later binding is held above is the
+     highest stamp handed out, whichever order they came in. */
+  it('holds a later clock above the newest stamp handed out, not the last one', () => {
+    for (const order of [
+      [5_000_000_000_000, 4_000_000_000_000],
+      [4_000_000_000_000, 5_000_000_000_000],
+    ]) {
+      const services = servicesWith(spyRecorder().recorder)
+      const stamps = order.map((ms) => makeHlc(ms, 0, DEVICE))
+      let at = 0
+      const first = services.bindClock(() => stamps[at++]!)
+      expect([services.clock(), services.clock()], 'a binding’s own stamps are passed through as given').toEqual(stamps)
+      first.dispose()
+
+      services.bindClock(() => makeHlc(4_500_000_000_000, 0, OTHER_DEVICE))
+      expect(services.clock(), `after ${order.join(', ')}`).toBe(makeHlc(5_000_000_000_000, 1, OTHER_DEVICE))
+    }
+  })
+
+  /* A CLOCK THAT WAS TOLD IS BELIEVED ONLY PAST THE FLOOR. Moved beyond it, its
+     own stamp is handed out — not the port's counter above the floor; moved only
+     TO it, it is still held above, since the floor was already handed out. */
+  it('hands out a told clock’s own stamp once it is past the floor, and holds one that only reached it', () => {
+    const floor = makeHlc(5_000_000_000_000, 0, DEVICE)
+
+    const past = servicesWith(spyRecorder().recorder)
+    const before = past.bindClock(() => floor)
+    past.clock()
+    before.dispose()
+    let raisedTo: Hlc | null = null
+    past.bindClock(
+      () => raisedTo ?? makeHlc(1_000, 0, OTHER_DEVICE),
+      () => {
+        raisedTo = makeHlc(6_000_000_000_000, 0, OTHER_DEVICE)
+      },
+    )
+    expect(past.clock()).toBe(makeHlc(6_000_000_000_000, 0, OTHER_DEVICE))
+
+    const reached = servicesWith(spyRecorder().recorder)
+    const early = reached.bindClock(() => floor)
+    reached.clock()
+    early.dispose()
+    let told = false
+    reached.bindClock(
+      () => (told ? floor : makeHlc(1_000, 0, OTHER_DEVICE)),
+      () => {
+        told = true
+      },
+    )
+    expect(reached.clock()).toBe(makeHlc(5_000_000_000_000, 1, OTHER_DEVICE))
+  })
+
+  /* AND A FULL COUNTER MOVES THE HELD STAMP INTO THE NEXT MILLISECOND, as the
+     fallback clock does, rather than asking `makeHlc` for a counter it refuses. */
+  it('holds a clock above a stamp whose counter is full by moving to the next millisecond', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const full = makeHlc(5_000_000_000_000, HLC_MAX_COUNTER, DEVICE)
+    const early = services.bindClock(() => full)
+    services.clock()
+    early.dispose()
+
+    services.bindClock(() => makeHlc(1_000, 0, OTHER_DEVICE))
+    expect(services.clock()).toBe(makeHlc(5_000_000_000_001, 0, OTHER_DEVICE))
+  })
+})
+
+/**
+ * A COMMIT MUST NEVER REACH A RECORDER THAT DID NOT ISSUE ITS BEGIN.
+ *
+ * An unbind between begin and commit must not reach the retired journal, and
+ * the old journal keeps a dangling begin that launch recovery settles because
+ * it cannot tell that from a crash. A REBIND was the case that first broke:
+ * every capability reload unbinds and binds again, so "resolve the current
  * slot" handed the NEW journal a token it never issued — rejected, after the
  * file write had already happened, leaving a durable unjournalled mutation
  * and a write failure for something that did not fail.
+ *
+ * ⚠️ **AND THE DEFAULT DID NOT ISSUE IT EITHER.** The fix for the rebind sent
+ * the commit to the default instead, and these cases asserted that it arrived
+ * there — which a spy happily accepts and a default that checks its own tokens
+ * refuses, after the write. A retired bracket's commit now goes to nobody.
  */
 /**
  * THE TOKEN THAT REACHES `commit` IS THE ONE `begin` RETURNED.
@@ -173,8 +381,12 @@ describe('the token crossing the recorder port', () => {
   })
 })
 
+/** The title the shelf holds for the one book, which is how a landed write is told from a lost one. */
+const titleOf = (services: ReturnType<typeof servicesWith>) =>
+  services.library.getSnapshot().find((one) => one.bookId === 'book_x')?.title
+
 describe('a bracket that spans a rebind', () => {
-  it('sends the commit to the default, not to the journal bound since', async () => {
+  it('commits to nobody: not the journal bound since, and not the default that never issued it', async () => {
     const base = spyRecorder()
     const second = spyRecorder()
     const services = servicesWith(base.recorder)
@@ -199,10 +411,69 @@ describe('a bracket that spans a rebind', () => {
     await services.drain()
 
     /* The journal bound during the bracket must not have seen a token it
-     * never issued. */
+     * never issued — and nor may the default, which did not issue it either. */
     expect(second.commits).toEqual([])
-    /* It went to the default — where an unbind already sent it. */
+    expect(base.commits).toEqual([])
+    /* And the write itself landed: an abandoned commit is not a lost write. */
+    expect(titleOf(services)).toBe('A')
+  })
+
+  /* THE REFUSAL THE SPY COULD NOT SEE. A default that holds its own open
+     brackets refuses a token it never issued, and it refused it after the
+     record was on disk — so the update rejected for a write that had landed. */
+  it('does not hand a default that checks its tokens one it never issued', async () => {
+    const issuedByDefault = new Set<MutationToken>()
+    let refused = 0
+    const checking: MutationRecorder = {
+      begin: async (book, what) => {
+        const token = { book, what }
+        issuedByDefault.add(token)
+        return token
+      },
+      commit: async (token) => {
+        if (issuedByDefault.delete(token)) return
+        refused += 1
+        throw new Error('the default was handed a token it never issued')
+      },
+    }
+    const services = servicesWith(checking)
+    let unbind: { dispose(): void } | null = null
+    const retiring: MutationRecorder = {
+      begin: async (book: string, what: MutationKind): Promise<MutationToken> => {
+        unbind?.dispose()
+        services.bindRecorder(spyRecorder().recorder)
+        return { book, what }
+      },
+      commit: async () => {
+        throw new Error('the issuing journal has closed and must not be committed to')
+      },
+    }
+    unbind = services.bindRecorder(retiring)
+
+    await expect(services.library.update('book_x', (record) => ({ ...record, title: 'A' }))).resolves.toBeUndefined()
+    await services.drain()
+    expect(refused).toBe(0)
+    expect(titleOf(services)).toBe('A')
+  })
+
+  /* AND THE DEFAULT'S OWN BRACKETS STILL CLOSE. It is never unbound, so a
+     bracket it opened is committed to it however the slot has moved since —
+     which is the one fall-through that was always right. */
+  it('still commits a bracket the default opened, after a journal was bound over it', async () => {
+    const base = gatedRecorder()
+    const journal = spyRecorder()
+    const services = servicesWith(base.recorder)
+
+    const writing = services.library.update('book_x', (record) => ({ ...record, title: 'A' }))
+    await base.began
+    services.bindRecorder(journal.recorder)
+    base.release()
+    await writing
+    await services.drain()
+
     expect(base.commits).toHaveLength(1)
+    expect(base.commits[0]?.book).toBe('book_x')
+    expect(journal.commits).toEqual([])
   })
 
   it('still commits to the same journal when nothing rebound', async () => {
@@ -233,13 +504,14 @@ describe('a bracket that spans a rebind', () => {
  * on every open, which is what drives recovery and the verify pass.
  */
 describe('a recorder rebound while a write is in flight', () => {
-  it('leaves the issuing bracket dangling and sends the commit to the default', async () => {
+  it('leaves the issuing bracket dangling and commits to nobody', async () => {
     const first = gatedRecorder()
     const second = spyRecorder()
-    /* THE DEFAULT IS KEPT, NOT DISCARDED. Asserting only that neither `first`
-       nor `second` was committed to cannot tell "routed to the default" from
-       "dropped on the floor" — and those are opposite outcomes: one is the
-       documented fall-through, the other loses a journal entry. */
+    /* THE DEFAULT IS WATCHED, AND THE WRITE WITH IT. This said the default had
+       to RECEIVE the commit, because otherwise "routed to the default" could not
+       be told from "dropped on the floor". But the default never issued the
+       token, so no entry could land there that was not bogus — the outcome that
+       matters is the WRITE, which landing proves was not lost. */
     const base = spyRecorder()
     const services = servicesWith(base.recorder)
     const unbind = services.bindRecorder(first.recorder)
@@ -260,7 +532,7 @@ describe('a recorder rebound while a write is in flight', () => {
     /* THE BEGIN WENT TO THE RECORDER THAT WAS BOUND. */
     expect(first.kinds).toEqual(['record'])
 
-    /* AND THE COMMIT REACHES NEITHER — it falls through to the default.
+    /* AND THE COMMIT REACHES NOBODY — not either journal, and not the default.
      *
      * This is `services.ts`'s documented choice, and it is written down here
      * because the cost was not: the old journal keeps a DANGLING BEGIN, and a
@@ -273,21 +545,21 @@ describe('a recorder rebound while a write is in flight', () => {
      * before the first paint, and it is paid on an ORDINARY restart rather
      * than on a crash.
      *
-     * The alternative it rejects is worse in a different way: committing to
-     * whatever is bound NOW hands a newly bound journal a token it never
-     * issued, which it refuses — and the data write has already landed, so the
-     * refusal reports a failure for something that did not fail.
+     * The alternatives it rejects are worse in a different way: committing to
+     * whatever is bound NOW, or to the default, hands a recorder a token it
+     * never issued, which it may refuse — and the data write has already
+     * landed, so the refusal reports a failure for something that did not fail.
      *
      * Pinned rather than argued about. If the routing changes, this is the
-     * assertion that says which of the three outcomes was chosen. */
+     * assertion that says which of the outcomes was chosen. */
     expect(first.commits).toEqual([])
     expect(second.kinds).toEqual([])
     expect(second.commits).toEqual([])
-    /* And it landed — exactly once, on the book that was written. Without
-       this the previous three assertions are satisfied by a lost commit. */
-    expect(base.commits).toHaveLength(1)
-    expect(base.commits[0]?.book).toBe('book_x')
+    expect(base.commits).toEqual([])
     expect(base.kinds).toEqual([])
+    /* And the write landed. Without this the assertions above are satisfied
+       by a write that was lost along with its commit. */
+    expect(titleOf(services)).toBe('A')
   })
 
   it('sends the NEXT write to the recorder bound now', async () => {

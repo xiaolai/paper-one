@@ -35,10 +35,15 @@
  * unless the exit code says otherwise.
  */
 
-import { readFileSync } from 'node:fs'
-import { runInNewContext } from 'node:vm'
+import { createHash } from 'node:crypto'
 import { isProcessEntry } from './lib/entry.mjs'
 import { inlineModules } from './lib/inline-ts.mjs'
+import { asAsciiJson, evaluateSnippet, readReport } from './lib/parity.mjs'
+
+/* `word-snap-live.mjs` drives this harness's snippet over the bridge and takes
+   the evaluator from here, where it used to live. Re-exported rather than moved
+   out from under it: one evaluator, named where its callers already look. */
+export { evaluateSnippet }
 
 /** The snapping implementation, in dependency order: a module may only use
  *  names the modules before it export. */
@@ -54,41 +59,21 @@ function snapperSource() {
   return inlineModules(WORD_SNAP, MODULES)
 }
 
-/**
- * JSON, escaped down to printable ASCII.
- *
- * The corpus carries a soft hyphen, a word joiner, a zero-width joiner, lone
- * astral characters and a line feed. Emitting those raw into a JS string
- * literal is asking for one of them to be eaten by a transport, a terminal or a
- * copy-paste, and the failure would look like a segmentation divergence rather
- * than like the mangling it is. Escaped, the snippet is pure ASCII and says the
- * same thing everywhere.
- *
- * Applied to each row's COMPACT JSON, never to a pretty-printed document. In
- * pretty-printed output the newlines between fields are structure, not data,
- * and escaping those emits a U+000A escape where the parser needs an actual
- * line break — a snippet that fails at parse. Measured, not hypothetical: it is
- * exactly what the first draft of this function did.
- */
-function asAsciiJson(rows) {
-  const escape = (text) =>
-    text.replace(/[^\x20-\x7E]/g, (character) => {
-      return '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0')
-    })
-  if (rows.length === 0) return '[]'
-  return '[\n  ' + rows.map((row) => escape(JSON.stringify(row))).join(',\n  ') + ',\n]'
-}
+/** What a report calls its engine when the snippet found no `navigator` — which
+ *  is to say when it ran in Node's vm, and not in a browser at all. */
+const NO_BROWSER = 'no navigator — not a browser engine'
 
-/** The report builder, as source. Runs with `ROWS` and `snapWordRange` already
- *  in scope. Written without template literals so it survives being embedded in
- *  one. */
+/** The report builder, as source. Runs with `ROWS`, `IMPLEMENTATION` and
+ *  `snapWordRange` already in scope. Written without template literals so it
+ *  survives being embedded in one. */
 const DRIVER = `
 const report = {
   ok: false,
+  implementation: IMPLEMENTATION,
   engine:
     typeof navigator === 'object' && navigator !== null && typeof navigator.userAgent === 'string'
       ? navigator.userAgent
-      : 'no navigator — not a browser engine',
+      : ${JSON.stringify(NO_BROWSER)},
   total: ROWS.length,
   failures: 0,
   errors: 0,
@@ -205,9 +190,9 @@ export function assertTransportable(snippet) {
     if (character.length === 1 && code >= 0xd800 && code <= 0xdfff) offenders.add(code)
   }
   if (offenders.size === 0) return snippet
-  const named = [...offenders]
-    .map((code) => 'U+' + code.toString(16).toUpperCase().padStart(4, '0'))
-    .join(', ')
+  /* No padding: every character refused above is at U+2028 or higher, so its
+     hex is four digits already. It was padded to four, which no run could see. */
+  const named = [...offenders].map((code) => 'U+' + code.toString(16).toUpperCase()).join(', ')
   throw new Error(
     `word-snap-parity: the snippet carries ${named} — a JS line terminator or an unpaired ` +
       'surrogate. It would fail at parse inside the webview, or arrive mangled. Escape it, or ' +
@@ -228,45 +213,70 @@ export function buildSnippet(rows) {
   if (!Array.isArray(rows)) {
     throw new TypeError('word-snap-parity: buildSnippet needs an array of corpus rows')
   }
+  const implementation = snapperSource() + DRIVER
+  /* The `;` travels inside the statement it ends. As a literal of its own,
+   * deleting it changed nothing any run could see: the inlined source opens on
+   * a comment line, so automatic semicolon insertion put it back. */
   return assertTransportable(
     '(function () {\n' +
       "'use strict';\n" +
-      'const ROWS = ' +
-      asAsciiJson(rows) +
-      ';\n' +
-      snapperSource() +
-      DRIVER +
+      `const ROWS = ${asAsciiJson(rows)};\n` +
+      `const IMPLEMENTATION = '${digestOf(implementation)}';\n` +
+      implementation +
       '})()\n',
   )
 }
 
 /**
- * Evaluate a snippet here, in a context with no module resolver.
+ * The identity of the code a report came from: everything the snippet runs
+ * except its rows, which `inputsOf` already holds.
  *
- * The JSON round-trip is not cosmetic: it brings the report out of the vm's
- * realm and, more usefully, proves the report is something the MCP bridge can
- * actually serialise. A report the bridge mangles is a report that arrives
- * looking like a divergence.
+ * ⚠️ **A REPORT FROM OLDER CODE PASSED AGAINST NEWER CODE**, here after
+ * `sentence-parity.mjs` had been fixed for it. Every row was pinned to the
+ * corpus and nothing pinned the report to the implementation, so a webview run
+ * from before a change to `snapWordRange.ts` — or to this driver — compared
+ * after it agreed wherever the change happened not to move Node's answers.
  */
-export function evaluateSnippet(snippet) {
-  return JSON.parse(JSON.stringify(runInNewContext(snippet, undefined, { timeout: 30000 })))
+function digestOf(implementation) {
+  return createHash('sha256').update(implementation).digest('hex')
 }
 
 /**
  * The corpus, imported from `corpus.ts` with nothing but Node's own type
  * stripping — no vite, no bundler, no build step. `corpus.ts` has no value
  * imports, which is what makes that possible, and `corpus.test.ts` enforces it.
+ *
+ * `from` is there for the refusal: the real module always exports the array,
+ * so only a module that does not can show the refusal fires.
  */
-export async function loadCorpus() {
-  const module = await import(new URL('corpus.ts', WORD_SNAP).href)
+export async function loadCorpus(from = new URL('corpus.ts', WORD_SNAP)) {
+  const module = await import(from.href)
   const rows = module.CORPUS
   if (!Array.isArray(rows)) {
-    throw new Error('word-snap-parity: corpus.ts did not export a CORPUS array')
+    throw new Error(`word-snap-parity: ${from.href} did not export a CORPUS array`)
   }
   return rows
 }
 
-const compact = (value) => JSON.stringify(value)
+/**
+ * JSON with every object's keys in one order.
+ *
+ * ⚠️ **THE ORDER OF AN OBJECT'S FIELDS WAS COMPARED AS THOUGH IT WERE
+ * BEHAVIOUR.** A snap written `{ end, start }` diverged from the same snap
+ * written `{ start, end }` — 41 divergences from one real report, measured
+ * 2026-09-14 — an order a transport rebuilding the object decides, and neither
+ * engine. `sentence-parity.mjs` had already been fixed for it.
+ */
+const compact = (value) =>
+  JSON.stringify(value, (_key, inner) =>
+    inner !== null && typeof inner === 'object' && !Array.isArray(inner)
+      ? Object.fromEntries(
+          Object.keys(inner)
+            .sort()
+            .map((key) => [key, inner[key]]),
+        )
+      : inner,
+  )
 const boundaries = (segments) => compact(segments.map((s) => [s.text, s.index]))
 const flags = (segments) => compact(segments.map((s) => s.wordLike))
 
@@ -288,6 +298,134 @@ const flags = (segments) => compact(segments.map((s) => s.wordLike))
 const inputsOf = (row) => compact([row.id, row.strs, row.start, row.end, row.expected])
 
 /**
+ * Whether a report's engine is a browser.
+ *
+ * ⚠️ **NODE'S OWN REPORT, FED BACK, PASSED FOR WEBKIT'S** — reproduced here on
+ * 2026-09-14, after the same fix had landed in `sentence-parity.mjs`. `--check`
+ * prints a report and `--compare` accepted it: one engine agreeing with itself,
+ * printed as "rows agree between this engine and no navigator — not a browser
+ * engine", exit 0. Node outside a vm has a `navigator` of its own, and its user
+ * agent says `Node.js/`.
+ */
+const fromABrowser = (engine) =>
+  typeof engine === 'string' && engine !== NO_BROWSER && !/^Node\.js\//u.test(engine)
+
+/**
+ * What the driver writes in every row, as a test of each field's value. Every
+ * field is written for every row; `actual`, `text` and `error` are `null` when
+ * there is nothing to say.
+ *
+ * ⚠️ **A ROW MISSING A FIELD THE DRIVER ALWAYS WRITES COMPARED SUCCESSFULLY.**
+ * Reproduced 2026-09-14: with `error` taken out of every row a real report
+ * still agreed, and a row without `segments` was read as `[]` — which two real
+ * rows genuinely are. The shape is held first, so nothing past it can mistake
+ * an absent field for a value.
+ */
+const TEXT = (value) => typeof value === 'string'
+const NUMBER = (value) => typeof value === 'number'
+const FLAG = (value) => typeof value === 'boolean'
+const TEXTS = (value) => Array.isArray(value) && value.every(TEXT)
+const EDGE = (value) => NUMBER(value?.index) && NUMBER(value.offset)
+const SNAP = (value) => EDGE(value?.start) && EDGE(value.end)
+const SEGMENT = (value) => TEXT(value?.text) && NUMBER(value.index) && FLAG(value.wordLike)
+const ROW_SHAPE = {
+  id: TEXT,
+  tags: TEXTS,
+  strs: TEXTS,
+  start: EDGE,
+  end: EDGE,
+  expected: (value) => value === 'none' || SNAP(value),
+  actual: (value) => value === null || SNAP(value),
+  text: (value) => value === null || TEXT(value),
+  pass: FLAG,
+  error: (value) => value === null || TEXT(value),
+  segments: (value) => Array.isArray(value) && value.every(SEGMENT),
+}
+
+/** Each field some row lacks or mistypes, with those rows — by id, or by where
+ *  a row stands when it has no id to be named by. */
+function misshapen(rows) {
+  const found = []
+  for (const [field, valid] of Object.entries(ROW_SHAPE)) {
+    const wrong = rows.flatMap((row, at) => (valid(row?.[field]) ? [] : [TEXT(row?.id) ? row.id : at]))
+    if (wrong.length > 0) found.push(`${field} in ${compact(wrong)}`)
+  }
+  return found
+}
+
+/**
+ * Where a report's own claims disagree with its rows — its totals, and the
+ * flag each row carries about itself.
+ *
+ * ⚠️ **THE TOTALS WERE BELIEVED OVER THE ROWS**, in this harness after the
+ * sentence harness had been fixed for it. `total: 999` beside 51 rows, and a row
+ * that threw and did not pass under `failures: 0, errors: 0`, compared
+ * successfully and exited 0 — reproduced 2026-09-14. The driver writes every
+ * count from its rows, and each row's `pass` as `error === null` and the snap
+ * being the expected one, so a report in which they disagree was not written
+ * by it — or did not arrive intact.
+ */
+function contradictions(live) {
+  const count = (holds) => live.rows.filter(holds).length
+  const notPassing = count((row) => !row.pass)
+  const erring = count((row) => row.error !== null)
+  const passWrong = live.rows
+    .filter((row) => row.pass !== (row.error === null && compact(row.actual) === compact(row.expected === 'none' ? null : row.expected)))
+    .map((row) => row.id)
+  const found = []
+  if (live.total !== live.rows.length) found.push(`total ${String(live.total)} for ${live.rows.length} rows`)
+  if (live.failures !== notPassing) found.push(`failures ${String(live.failures)} but ${notPassing} not passing`)
+  if (live.errors !== erring) found.push(`errors ${String(live.errors)} but ${erring} carrying an error`)
+  if (passWrong.length > 0) found.push(`rows whose pass contradicts their error or their answer: ${compact(passWrong)}`)
+  return found
+}
+
+/**
+ * Why a report cannot be compared row for row at all, or `null` when it can.
+ * Each reason makes a row-by-row reading meaningless rather than merely
+ * different, so each is the ONLY thing said about the report.
+ */
+function refusalOf(local, live) {
+  if (live === null || typeof live !== 'object' || !Array.isArray(live.rows)) {
+    return 'the report has no rows array — it is not a report this harness produced'
+  }
+  if (live.rows.length === 0) {
+    return 'the report holds zero rows — an empty run is a failure, not a clean sweep'
+  }
+  if (!fromABrowser(live.engine)) {
+    return `the report came from ${String(live.engine)}, not a browser — an engine compared with itself says nothing about WebKit`
+  }
+  if (live.implementation !== local.implementation) {
+    return (
+      `the report was produced by different code: ${String(live.implementation)} against ` +
+      `${String(local.implementation)} here — emit the snippet again and rerun it in the webview`
+    )
+  }
+  const shape = misshapen(live.rows)
+  if (shape.length > 0) {
+    return `the report's rows are missing fields this harness writes, or carry them as the wrong type: ${shape.join(', ')}`
+  }
+  const wrong = contradictions(live)
+  if (wrong.length > 0) {
+    return `the report's own claims contradict its rows: ${wrong.join(', ')}`
+  }
+
+  const localIds = local.rows.map((row) => row.id)
+  const liveIds = live.rows.map((row) => row.id)
+  if (compact(localIds) !== compact(liveIds)) {
+    const missing = localIds.filter((id) => !liveIds.includes(id))
+    const extra = liveIds.filter((id) => !localIds.includes(id))
+    return (
+      'the report was produced from a different corpus: ' +
+      `${liveIds.length} rows against ${localIds.length} here` +
+      (missing.length > 0 ? `, missing ${compact(missing)}` : '') +
+      (extra.length > 0 ? `, unexpected ${compact(extra)}` : '')
+    )
+  }
+  return null
+}
+
+/**
  * A webview report against this engine's, row for row.
  *
  * Three outcomes, and the difference between them is the whole calibration of
@@ -302,38 +440,20 @@ const inputsOf = (row) => compact([row.id, row.strs, row.start, row.end, row.exp
  *   on it would make this harness red on a healthy app, which is how a check
  *   gets switched off.
  *
+ * Before any of them, a report that cannot be read row for row is refused as a
+ * whole — see `refusalOf` — and past that point every field is taken as written.
+ *
  * Exported because `word-snap-live.mjs` drives the same comparison over the
  * bridge. A second implementation there would be a second calibration of these
  * three outcomes, and the two would diverge the first time one was tuned.
  */
 export function compareReports(local, live) {
+  const refusal = refusalOf(local, live)
+  if (refusal !== null) return { problems: [refusal], notes: [] }
+
   const problems = []
   const notes = []
-
-  if (live === null || typeof live !== 'object' || !Array.isArray(live.rows)) {
-    problems.push('the report has no rows array — it is not a report this harness produced')
-    return { problems, notes }
-  }
-  if (live.rows.length === 0) {
-    problems.push('the report holds zero rows — an empty run is a failure, not a clean sweep')
-    return { problems, notes }
-  }
-
-  const localIds = local.rows.map((row) => row.id)
-  const liveIds = live.rows.map((row) => row.id)
-  if (compact(localIds) !== compact(liveIds)) {
-    const missing = localIds.filter((id) => !liveIds.includes(id))
-    const extra = liveIds.filter((id) => !localIds.includes(id))
-    problems.push(
-      'the report was produced from a different corpus: ' +
-        `${liveIds.length} rows against ${localIds.length} here` +
-        (missing.length > 0 ? `, missing ${compact(missing)}` : '') +
-        (extra.length > 0 ? `, unexpected ${compact(extra)}` : ''),
-    )
-    return { problems, notes }
-  }
-
-  for (let i = 0; i < localIds.length; i += 1) {
+  for (let i = 0; i < local.rows.length; i += 1) {
     const here = local.rows[i]
     const there = live.rows[i]
     if (inputsOf(here) !== inputsOf(there)) {
@@ -350,22 +470,22 @@ export function compareReports(local, live) {
           `    node    ${compact(here.actual)}\n` +
           `    webview ${compact(there.actual)}\n` +
           `    node    segments ${boundaries(here.segments)}\n` +
-          `    webview segments ${boundaries(there.segments ?? [])}`,
+          `    webview segments ${boundaries(there.segments)}`,
       )
       continue
     }
-    if (boundaries(here.segments) !== boundaries(there.segments ?? [])) {
+    if (boundaries(here.segments) !== boundaries(there.segments)) {
       problems.push(
         `${here.id}: segmented differently while snapping the same\n` +
           `    node    ${boundaries(here.segments)}\n` +
-          `    webview ${boundaries(there.segments ?? [])}`,
+          `    webview ${boundaries(there.segments)}`,
       )
       continue
     }
-    if (flags(here.segments) !== flags(there.segments ?? [])) {
+    if (flags(here.segments) !== flags(there.segments)) {
       notes.push(
         `${here.id}: isWordLike differs — node ${flags(here.segments)}, ` +
-          `webview ${flags(there.segments ?? [])}`,
+          `webview ${flags(there.segments)}`,
       )
     }
   }
@@ -379,12 +499,6 @@ export function compareReports(local, live) {
   return { problems, notes }
 }
 
-function readReport(path) {
-  const raw = path === '-' ? readFileSync(0, 'utf8') : readFileSync(path, 'utf8')
-  if (raw.trim() === '') throw new Error('the report is empty')
-  return JSON.parse(raw)
-}
-
 const USAGE = [
   'usage:',
   '  node scripts/word-snap-parity.mjs                 emit the snippet for webview_execute_js',
@@ -393,22 +507,76 @@ const USAGE = [
   '  node scripts/word-snap-parity.mjs --compare -     … reading the report from stdin',
 ].join('\n')
 
-async function main(argv) {
+/**
+ * The script, with everything it reads and writes handed in — the same seam
+ * as `sentence-parity.mjs`'s `main`.
+ *
+ * The defaults are the process: its two streams, file descriptor 0 and the
+ * corpus on disk. A test hands in writers that capture, an open file as
+ * `stdin` and, for the branches the real corpus cannot reach, rows of its own.
+ * ⚠️ **THIS SCRIPT WAS TESTED ONLY BY SPAWNING IT**, which exercises a CLI
+ * faithfully and measures none of it: 201 of its 266 mutants were uncovered
+ * behind a green test file, `compareReports` among them.
+ *
+ * Nothing leaves as a rejection. A crash is a run that did not happen, so it
+ * exits non-zero with its stack like every other failure here.
+ */
+export async function main(
+  argv,
+  { stdout = process.stdout, stderr = process.stderr, stdin = 0, corpus = loadCorpus } = {},
+) {
+  try {
+    return await run(argv, { stdout, stderr, stdin, corpus })
+  } catch (cause) {
+    stderr.write(`word-snap-parity: ${cause?.stack ?? String(cause)}\n`)
+    return 1
+  }
+}
+
+/**
+ * How many arguments each mode takes, counting its own name.
+ *
+ * ⚠️ **AN ARGUMENT AFTER THE MODE WAS IGNORED**, `--help`'s included — the fix
+ * `sentence-parity.mjs` already carried, reproduced here 2026-09-14.
+ * `--check --compare missing.json` ran the check, never looked for the report,
+ * and exited 0; `--help --compare report.json` printed the usage and exited 0.
+ * Each a comparison that did not happen, reading exactly like one that passed.
+ */
+const ARITY = { '--emit': 1, '--check': 1, '--compare': 2, '--help': 1, '-h': 1 }
+
+async function run(argv, io) {
   const mode = argv[0] ?? '--emit'
+  if (!Object.hasOwn(ARITY, mode)) {
+    io.stderr.write(`word-snap-parity: unknown option ${mode}\n${USAGE}\n`)
+    return 1
+  }
+  if (argv.length > ARITY[mode]) {
+    io.stderr.write(
+      `word-snap-parity: ${mode} takes ${ARITY[mode] === 2 ? 'one argument' : 'no arguments'}, ` +
+        `and was also given ${compact(argv.slice(ARITY[mode]))}\n${USAGE}\n`,
+    )
+    return 1
+  }
   if (mode === '--help' || mode === '-h') {
-    process.stderr.write(USAGE + '\n')
+    io.stderr.write(USAGE + '\n')
     return 0
   }
+  /* Before the corpus, like every other refusal here: a command line that is
+     already wrong should not depend on the corpus being readable. */
+  if (mode === '--compare' && argv[1] === undefined) {
+    io.stderr.write('word-snap-parity: --compare needs a report file, or - for stdin\n')
+    return 1
+  }
 
-  const rows = await loadCorpus()
+  const rows = await io.corpus()
   if (rows.length === 0) {
-    process.stderr.write('word-snap-parity: the corpus is empty — nothing to check\n')
+    io.stderr.write('word-snap-parity: the corpus is empty — nothing to check\n')
     return 1
   }
 
   if (mode === '--emit') {
-    process.stdout.write(buildSnippet(rows))
-    process.stderr.write(
+    io.stdout.write(buildSnippet(rows))
+    io.stderr.write(
       `word-snap-parity: ${rows.length} rows. Paste stdout into webview_execute_js, then feed ` +
         'the report back with --compare -\n',
     )
@@ -417,8 +585,8 @@ async function main(argv) {
 
   if (mode === '--check') {
     const report = evaluateSnippet(buildSnippet(rows))
-    process.stdout.write(JSON.stringify(report, null, 2) + '\n')
-    process.stderr.write(
+    io.stdout.write(JSON.stringify(report, null, 2) + '\n')
+    io.stderr.write(
       report.ok
         ? `word-snap-parity: ${report.total} rows pass in this engine\n`
         : `word-snap-parity: ${String(report.reason)}\n`,
@@ -426,54 +594,38 @@ async function main(argv) {
     return report.ok ? 0 : 1
   }
 
-  if (mode === '--compare') {
-    const path = argv[1]
-    if (path === undefined) {
-      process.stderr.write('word-snap-parity: --compare needs a report file, or - for stdin\n')
-      return 1
-    }
-    let live
-    try {
-      live = readReport(path)
-    } catch (cause) {
-      /* The bridge-unreachable case. No report is not a pass: it is a run that
-       * did not happen, and only the exit code can tell the two apart. */
-      process.stderr.write(
-        `word-snap-parity: no report to compare (${path}): ${cause.message}\n` +
-          '  the webview run produced nothing — the bridge was unreachable, or the snippet threw\n',
-      )
-      return 1
-    }
-
-    const local = evaluateSnippet(buildSnippet(rows))
-    const { problems, notes } = compareReports(local, live)
-
-    for (const note of notes) process.stderr.write(`  note: ${note}\n`)
-    if (problems.length === 0) {
-      process.stderr.write(
-        `word-snap-parity: ${local.total} rows agree between this engine and ${String(live.engine)}` +
-          (notes.length > 0 ? ` (${notes.length} isWordLike flag differences, not read by us)\n` : '\n'),
-      )
-      return 0
-    }
-    const plural = problems.length === 1 ? 'divergence' : 'divergences'
-    process.stderr.write(`word-snap-parity: ${problems.length} ${plural}\n`)
-    for (const problem of problems) process.stderr.write(`  ${problem}\n`)
+  /* `--compare`, the only mode left, and it has a value: both were settled
+     above, before the corpus was read. */
+  const path = argv[1]
+  let live
+  try {
+    live = readReport(path, io.stdin)
+  } catch (cause) {
+    /* The bridge-unreachable case. No report is not a pass: it is a run that
+     * did not happen, and only the exit code can tell the two apart. */
+    io.stderr.write(
+      `word-snap-parity: no report to compare (${path}): ${cause.message}\n` +
+        '  the webview run produced nothing — the bridge was unreachable, or the snippet threw\n',
+    )
     return 1
   }
 
-  process.stderr.write(`word-snap-parity: unknown option ${mode}\n${USAGE}\n`)
+  const local = evaluateSnippet(buildSnippet(rows))
+  const { problems, notes } = compareReports(local, live)
+
+  for (const note of notes) io.stderr.write(`  note: ${note}\n`)
+  if (problems.length === 0) {
+    io.stderr.write(
+      `word-snap-parity: ${local.total} rows agree between this engine and ${String(live.engine)}` +
+        (notes.length > 0 ? ` (${notes.length} isWordLike flag differences, not read by us)\n` : '\n'),
+    )
+    return 0
+  }
+  const plural = problems.length === 1 ? 'divergence' : 'divergences'
+  io.stderr.write(`word-snap-parity: ${problems.length} ${plural}\n`)
+  for (const problem of problems) io.stderr.write(`  ${problem}\n`)
   return 1
 }
 
-if (isProcessEntry(import.meta)) {
-  main(process.argv.slice(2)).then(
-    (code) => {
-      process.exitCode = code
-    },
-    (cause) => {
-      process.stderr.write(`word-snap-parity: ${cause?.stack ?? String(cause)}\n`)
-      process.exitCode = 1
-    },
-  )
-}
+// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — every decision is in `main`, which is measured in-process
+if (isProcessEntry(import.meta)) process.exitCode = await main(process.argv.slice(2))

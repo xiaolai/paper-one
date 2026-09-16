@@ -121,7 +121,10 @@ export function reasonOf(route: Route): UnusableReason | null {
    * one of ours and could pick the wrong action. Unknown reads as "unusable,
    * reason unknown", which is what `unusable`'s sentence still says. */
   const key = typeof reason === 'string' ? reason : Object.keys(reason)[0]
-  return key !== undefined && (UNUSABLE_REASONS as readonly string[]).includes(key) ? (key as UnusableReason) : null
+  /* ONE TEST, NOT TWO. An object naming no code gives `undefined`, which the
+   * set does not hold either — a separate `key !== undefined &&` in front of
+   * this could never change the answer, and was a mutant nothing could kill. */
+  return (UNUSABLE_REASONS as readonly (string | undefined)[]).includes(key) ? (key as UnusableReason) : null
 }
 
 export interface Probe {
@@ -325,6 +328,14 @@ export function isCancelled(error: unknown): boolean {
  *
  * Never rethrows: it runs from an `abort` listener, where there is nobody to
  * catch and the reader has already moved on.
+ *
+ * ⚠️ **AND THE REPORTER IS PART OF THAT PROMISE, WHICH IT WAS NOT.** The sink
+ * ran unguarded inside the handler of a promise nothing awaits, so one that
+ * threw left as an unhandled rejection. `controller.ts` and `glossProvider.ts`
+ * wrap their own reporter before handing it here, so neither could meet it;
+ * `index.ts` hands `api.diagnostics.warn` in raw, and could. Guarded HERE
+ * rather than at a third call site, for the reason this function exists
+ * (2026-09-13 audit, round 2).
  */
 export function cancelRequest(
   plugin: Pick<InferencePlugin, 'cancel'>,
@@ -333,11 +344,15 @@ export function cancelRequest(
 ): void {
   void plugin.cancel(requestId).catch((cause: unknown) => {
     if (errorKind(cause) === 'requestUnknown') return
-    report?.('inference.cancel-failed', {
-      requestId,
-      kind: errorKind(cause),
-      message: messageOf(cause),
-    })
+    try {
+      report?.('inference.cancel-failed', {
+        requestId,
+        kind: errorKind(cause),
+        message: messageOf(cause),
+      })
+    } catch (thrown) {
+      console.error('inference: the failure reporter itself threw', thrown, 'while reporting a failed cancel')
+    }
   })
 }
 

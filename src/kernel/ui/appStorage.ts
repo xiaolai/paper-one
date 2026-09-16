@@ -80,11 +80,16 @@ export async function freeQuarantinePath(
 ): Promise<string> {
   for (let n = 0; n <= 100; n += 1) {
     const candidate = n === 0 ? to : `${to}.${n}`
+    /* The question in the try and the answer outside it, so the skip is what
+     * keeps an unreadable candidate from being used — as the loop's last
+     * statement, a `continue` did nothing a missing one would not. */
+    let there: boolean
     try {
-      if (!(await taken(candidate))) return candidate
+      there = await taken(candidate)
     } catch {
       continue
     }
+    if (!there) return candidate
   }
   throw new Error(
     `cannot quarantine the store: ${to} and .1 through .100 all exist. ` +
@@ -173,6 +178,11 @@ export async function openAppStorage(): Promise<AppStorage> {
 export function damageNotice(damaged: FileStore['damaged']): string | null {
   if (damaged === null) return null
   return damaged.aside === null
-    ? `The file holding ${KEPT_THERE} could not be read, and could not be moved aside — the next change will replace it.`
+    ? /* ⚠️ **THIS SAID "the next change will replace it", AND IT DID.** The
+         store refuses every write in that state now rather than destroying the
+         only copy — see `fileStore`'s `unmovable` — so the sentence names what
+         the reader can actually expect: nothing saved, and nothing lost.
+         Changed with the behaviour, by the 2026-09-13 audit. */
+      `The file holding ${KEPT_THERE} could not be read, and could not be moved aside — so nothing is being saved this session, and the file is left exactly as it was.`
     : `The file holding ${KEPT_THERE} could not be read; it was moved to ${damaged.aside}, and Paper started with an empty one.`
 }

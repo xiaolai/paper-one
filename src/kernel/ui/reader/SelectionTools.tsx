@@ -2,13 +2,13 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useReducer,
   useRef,
   useState,
   type CSSProperties,
 } from 'react'
 import {
   BookA,
-  ChevronLeft,
   ChevronRight,
   Copy,
   Highlighter,
@@ -26,6 +26,8 @@ import {
   type MarkStyle,
   type MarkTint,
 } from '../../core/marks'
+import type { GlossState } from '../hooks/useGloss'
+import { BackToBar, LookUpFace } from './LookUpFace'
 import { MarkSpecimen } from './MarkSpecimen'
 import {
   frameBoxInHost,
@@ -73,8 +75,82 @@ import styles from './SelectionTools.module.css'
  * unlabelled glyphs is unusable without one for anybody not using a pointer.
  */
 
-/** Which face of the popup is showing. */
+/** Which face of the popup the READER turned to. */
 type Face = 'bar' | 'marks' | 'copy'
+
+/**
+ * Which face is drawn: the lookup whenever one is on, else the reader's own.
+ *
+ * DERIVED, NOT A FOURTH `Face`. The lookup is not a place the reader turned the
+ * popup to — it is App's state (`useLookUp`), started by the button, the
+ * palette or a key — so storing it here would be a second copy of a fact that
+ * already has an owner, and the two would disagree the first time a lookup was
+ * started from somewhere other than this popup. Back puts the lookup away, and
+ * the face the reader had is still underneath.
+ */
+export function shownFace(face: Face, lookUp: GlossState): Face | 'lookup' {
+  return lookUp.kind === 'idle' ? face : 'lookup'
+}
+
+/**
+ * The height the popup is PLACED as.
+ *
+ * The bar and its two sibling faces are one row, exactly `POPUP_H` tall — see
+ * the constant. The lookup is not: it is as tall as its answer, and `place`
+ * hangs the popup above the selection by subtracting this number, so a lookup
+ * placed as a row would hang down over the words it defines. Until it has been
+ * measured once it is placed as a row, which is what it is while it mounts.
+ */
+export function surfaceHeight(face: Face | 'lookup', measured: number): number {
+  return face === 'lookup' && measured > 0 ? measured : POPUP_H
+}
+
+/**
+ * Whether two snapshots are the same passage — what the face reset asks, see
+ * `SelectionTools`.
+ *
+ * The document, the section, the CFI and the text. A keyup republishes all four
+ * unchanged; a shift+arrow that extends the selection changes the CFI and the
+ * text; a new section or a new book changes the document. The text is compared
+ * as well as the CFI because `view.getCFI` answers `''` for a range it cannot
+ * address, and two such passages would otherwise be one.
+ *
+ * TWO PASSAGES, NEVER AN ABSENT ONE (2026-09-14). It took nulls and answered
+ * `a === b` for them, and the one call that could compare two — the mount, with
+ * no selection — resets a popup that has nothing to reset, so the answer could
+ * not matter. The reset asks about absence itself, where it can be seen.
+ */
+function samePassage(a: SelectionSnapshot, b: SelectionSnapshot): boolean {
+  return (
+    a.range.startContainer.ownerDocument === b.range.startContainer.ownerDocument &&
+    a.sectionIndex === b.sectionIndex &&
+    a.cfi === b.cfi &&
+    a.text === b.text
+  )
+}
+
+/** No visible line — the popup has nothing to hang from. One value, so a
+ *  measurement that finds nothing again is not a change. */
+const NO_LINES: readonly HostRect[] = []
+
+/**
+ * The union of the visible lines — what the popup stays clear of, see `lines`.
+ *
+ * One pass, no spread. `Math.min(...rects)` puts every rect on the call stack
+ * as an argument, and a selection dragged across a whole chapter has enough line
+ * rects to throw `RangeError: Maximum call stack size` — on the one gesture that
+ * produces the most of them.
+ */
+function extentOf(lines: readonly HostRect[]): HostRect {
+  let top = Infinity, left = Infinity, bottom = -Infinity, right = -Infinity
+  for (const r of lines) {
+    top = Math.min(top, r.top)
+    left = Math.min(left, r.left)
+    bottom = Math.max(bottom, r.top + r.height)
+    right = Math.max(right, r.left + r.width)
+  }
+  return { top, left, width: right - left, height: bottom - top, bottom, right }
+}
 
 export interface SelectionToolsProps {
   selection: SelectionSnapshot | null
@@ -132,6 +208,15 @@ export interface SelectionToolsProps {
    * where a press is a decision rather than a trial.
    */
   onApply: (appearance: MarkAppearance, keep: boolean) => void
+  /**
+   * Whether this passage can be marked — `Marking.canMark`, handed down.
+   *
+   * False hides Mark, its chevron and Note, exactly as a null `onLookUp` hides
+   * Look up: a passage with no anchor cannot hold a mark, and both buttons did
+   * nothing when pressed (#202). ASKED, NOT WORKED OUT HERE: `cfi === ''` in
+   * this file would be a second copy of the rule `useMarking` owns.
+   */
+  canMark: boolean
   onNote: () => void
   onCopy: () => void
   /** Copy the passage with its source — see `citation`. */
@@ -144,6 +229,18 @@ export interface SelectionToolsProps {
    * cannot tell a permanently dead button from a broken one.
    */
   onLookUp: (() => void) | null
+  /**
+   * The lookup — anything but idle turns the popup to its lookup face.
+   *
+   * ⚠️ **THE ANSWER IS DRAWN HERE, AND IT USED TO BE A STRIP UNDER THE PAGE**
+   * whose appearance re-paginated the book and pushed the defined word off it —
+   * see `LookUpFace` for the measurement. The popup floats and moves nothing.
+   */
+  lookUp: GlossState
+  /** Back from the lookup face — puts the lookup away. */
+  onLookUpBack: () => void
+  /** Where "Install one" goes, or absent where this screen has nowhere. */
+  onInstall?: ((section: string) => void) | undefined
   onRemove: () => void
 }
 
@@ -158,8 +255,11 @@ export interface SelectionToolsProps {
  *  40 is `--control-sm` plus 6px of padding on each side — derived from the
  *  controls in the bar rather than chosen and then divided up. Change the
  *  control size and this must change with it, which is why the arithmetic is
- *  written down here next to the number. */
-const POPUP_H = 40
+ *  written down here next to the number.
+ *
+ *  THE ROW'S HEIGHT, NOT THE POPUP'S. The lookup face is as tall as its
+ *  answer — see `surfaceHeight`. */
+export const POPUP_H = 40
 const GAP = 8
 /** How close the popup may come to the edge of the stage before it is pushed
  *  back in. Enough that it reads as inset rather than as clipped. */
@@ -187,23 +287,62 @@ export function SelectionTools({
   position,
   appearance,
   onApply,
+  canMark,
   onNote,
   onCopy,
   onCite,
   onLookUp,
+  lookUp,
+  onLookUpBack,
+  onInstall,
   onRemove,
 }: SelectionToolsProps) {
-  const [box, setBox] = useState<HostRect | null>(null)
-  /* The visible EXTENT of the selection — every on-page line, unioned — so
-   * the popup can be told to stay clear of all of it, not just the line it
-   * hangs from. Anchored to the first line alone, a toolbar over a three-line
+  /* EVERY VISIBLE LINE of the selection, in the range's own order: the first is
+   * the line the popup hangs from, and all of them, unioned, are what it stays
+   * clear of. Anchored to the first line alone, a toolbar over a three-line
    * selection sat on top of lines two and three: the very words the reader
-   * had just chosen. */
-  const [extent, setExtent] = useState<HostRect | null>(null)
+   * had just chosen.
+   *
+   * ONE STATE, AND THE ANCHOR AND THE EXTENT ARE BOTH READ OFF IT (2026-09-14).
+   * They were two states set side by side, so either could be written without
+   * the other — and an extent with no anchor beside it, which nothing can read
+   * because without an anchor nothing is drawn, was a value the code took care
+   * to clear. */
+  const [lines, setLines] = useState<readonly HostRect[]>(NO_LINES)
   /** The popup's own width, for the edge clamp below. */
   const popupRef = useRef<HTMLDivElement | null>(null)
+  /* RE-MEASURED WHEN IT RESIZES ON ITS OWN, not only when React renders it
+     (2026-09-13). The layout effect below measures after every render, and a
+     popup can change size with no render at all — a face whose font arrives
+     late re-wraps the answer — which left it placed at its old size until
+     something unrelated re-rendered it: an answer grown by a line hung down over
+     the word it defines. A callback ref, because the node comes and goes with
+     the selection and the observer has to go with it.
+     ⚠️ NEVER HANDED NULL, so the node is typed without it (2026-09-14). A ref
+     callback that returns its cleanup is given the cleanup on detach and not a
+     null — React 19's contract — and the `if (node === null) return` that stood
+     here was a branch no render could take. */
+  // Stryker disable next-line ArithmeticOperator: the count is never read — any new state re-renders, and n - 1 is as new as n + 1
+  const [, remeasure] = useReducer((n: number) => n + 1, 0)
+  const popupNode = useCallback(
+    (node: HTMLDivElement) => {
+      popupRef.current = node
+      const observer = new ResizeObserver(() => remeasure())
+      observer.observe(node)
+      return () => {
+        observer.disconnect()
+        popupRef.current = null
+      }
+    },
+    // Stryker disable next-line ArrayDeclaration: a constant dependency never changes, so the callback is exactly as stable as with none
+    [],
+  )
   const [width, setWidth] = useState(0)
+  /** And its height — which only the lookup face varies. See `surfaceHeight`. */
+  const [height, setHeight] = useState(0)
+  // Stryker disable next-line StringLiteral: the passage reset below sets the bar in the commit a selection first arrives in, and no face is drawn before one has
   const [face, setFace] = useState<Face>('bar')
+  const current = shownFace(face, lookUp)
 
   /**
    * The left edge the bar was placed at, held while another face is showing.
@@ -215,57 +354,120 @@ export function SelectionTools({
    * took its place. Holding the edge makes the popup grow and shrink from one
    * side, which is what "slides open" ought to mean.
    *
-   * Written during render, deliberately: it is derived from the same inputs as
-   * the placement itself, so re-rendering the same state writes the same
-   * number. It is a cache of the last placement, not state — nothing reads it
-   * to decide whether to render.
+   * ⚠️ WRITTEN ONLY FOR A RENDER THAT COMMITTED — and until 2026-09-13 it was
+   * written during render, "deliberately: … re-rendering the same state writes
+   * the same number". True, and beside the point: a render React throws away —
+   * a transition that suspends, one that is interrupted — renders DIFFERENT
+   * state, and its write stayed behind. The next face then hung from the edge
+   * of a bar the reader never saw. `barPlacedAt` carries this render's edge to a
+   * layout effect, and a layout effect runs only for a render that is on screen.
    */
   const barLeft = useRef<number | null>(null)
+
+  /**
+   * The face the reader turned the popup away from with focus INSIDE it, or
+   * null — so the layout effect below can put focus in the face that arrived.
+   *
+   * ⚠️ TURNING A FACE DROPPED KEYBOARD FOCUS until 2026-09-13. Each face is its
+   * own keyed element, so the control that was pressed is unmounted by its own
+   * press and focus falls to `<body>`: a keyboard reader who opened the marks
+   * face from its chevron was sent back to the top of the window, and coming
+   * back lost the chevron too. Focus now goes to the new face's first control —
+   * its Back — and, returning to the bar, to the control that opened the face
+   * being left (`data-opens`).
+   *
+   * Only when focus WAS inside. A pointer never puts it there — the popup
+   * cancels pointerdown to keep the book's selection alive — so a pointer
+   * reader's focus is left exactly where it was.
+   */
+  const turning = useRef<Face | 'lookup' | null>(null)
+
+  /* A NEW PASSAGE GETS THE BAR. A face is about the passage in hand, so
+   * carrying one across would open the popup mid-task on a passage the reader
+   * has not chosen anything for yet — with the marks face lighting up the
+   * PREVIOUS passage's tint.
+   *
+   * ⚠️ A PASSAGE, NOT A SNAPSHOT — and until 2026-09-13 it was the snapshot.
+   * The session publishes a fresh one for the SAME passage on every keyup in
+   * the book (`#watchSelection`'s `publishLive`), so a reader in the marks face
+   * who pressed any key was put back on the bar. `useLookUp` met the same
+   * republishing and keys its anchor on the CFI for the same reason; see
+   * `samePassage`.
+   *
+   * A LAYOUT effect, so the old face is never painted over a new passage, and
+   * declared before the one that keeps the bar's edge, so a new passage's first
+   * bar is the edge that stays. */
+  const passage = useRef<SelectionSnapshot | null>(null)
+  useLayoutEffect(() => {
+    const was = passage.current
+    passage.current = selection
+    /* A selection that went away and came back is a new passage, even the same
+       one: the popup was gone, and what it had turned to went with it. */
+    if (was !== null && selection !== null && samePassage(was, selection)) return
+    setFace('bar')
+    barLeft.current = null
+    turning.current = null
+  }, [selection])
+
+  /* THIS RENDER'S BAR EDGE, or null for a render that draws another face or
+     nothing. Assigned below, once `place` has run; the effect closes over the
+     binding and runs after the render has finished assigning it — and only if
+     the render committed, which is the point. See `barLeft`. */
+  let barPlacedAt: number | null = null
+  useLayoutEffect(() => {
+    if (barPlacedAt !== null) barLeft.current = barPlacedAt
+  })
+
+  /* Focus into the face that arrived — see `turning`. */
+  useLayoutEffect(() => {
+    const from = turning.current
+    if (from === null || from === current) return
+    turning.current = null
+    const popup = popupRef.current
+    if (popup === null) return
+    /* NOT OVER A READER WHO HAS MOVED ON. Focus somewhere real outside the
+       popup went there on purpose. Unmounted with the face it was on, it is
+       nowhere — which is the case this exists for. */
+    const active = document.activeElement
+    if (active !== null && active !== document.body && active.isConnected && !popup.contains(active)) return
+    /* ONLY THE BAR CARRIES `data-opens`, so in any other face the first query
+       finds nothing and focus goes to the face's first control, its Back. */
+    const into =
+      popup.querySelector<HTMLElement>(`[data-opens="${from}"]`) ??
+      popup.querySelector<HTMLElement>('button')
+    // Stryker disable next-line OptionalChaining: every face draws a button — its Back, or on the bar Copy — so there is always one to find
+    into?.focus({ preventScroll: true })
+  })
 
   /* Measured in an effect rather than during render: the rect depends on laid
    * out DOM in another document, and reading it while rendering would both tear
    * and force a synchronous layout on every keystroke elsewhere in the app. */
   const measure = useCallback(() => {
     if (!selection || !stage) {
-      setBox(null)
-      setExtent(null)
+      setLines(NO_LINES)
       return
     }
     const doc = selection.range.startContainer.ownerDocument
     const page = doc ? frameBoxInHost(doc, stage) : null
-    /* The first VISIBLE line rect, not the range's bounding box.
+    /* The VISIBLE line rects, and the popup hangs from the first of them — not
+     * from the range's bounding box.
      *
      * A bounding box over a selection that crosses a column break spans both
      * columns, and its centre — which is what the popup is placed on — lands in
      * the gutter between them, or on a page that is not being shown. One line's
      * rect is always somewhere real. The same clip keeps a selection that has
      * scrolled off the page from putting the popup over whatever text now
-     * occupies that spot, offering to mark a passage nowhere on screen. */
-    const visible = rangeRectsInHost(selection.range, stage).filter(
-      (candidate) =>
-        (candidate.width > 0 || candidate.height > 0) &&
-        (!page || overlaps(candidate, page)),
+     * occupies that spot, offering to mark a passage nowhere on screen.
+     *
+     * EVERY LINE IS CLIPPED THE SAME WAY, not only the anchor: a line on a page
+     * that is not being shown must not push the popup around either. */
+    setLines(
+      rangeRectsInHost(selection.range, stage).filter(
+        (candidate) =>
+          (candidate.width > 0 || candidate.height > 0) &&
+          (!page || overlaps(candidate, page)),
+      ),
     )
-    setBox(visible[0] ?? null)
-    /* Union of the visible lines. Still clipped to the page, for the same
-     * reason as the anchor: a line on a page that is not being shown must not
-     * push the popup around. */
-    if (visible.length === 0) {
-      setExtent(null)
-    } else {
-      /* One pass, no spread. `Math.min(...rects)` puts every rect on the call
-       * stack as an argument, and a selection dragged across a whole chapter
-       * has enough line rects to throw `RangeError: Maximum call stack size`
-       * — on the one gesture that produces the most of them. */
-      let top = Infinity, left = Infinity, bottom = -Infinity, right = -Infinity
-      for (const r of visible) {
-        if (r.top < top) top = r.top
-        if (r.left < left) left = r.left
-        if (r.top + r.height > bottom) bottom = r.top + r.height
-        if (r.left + r.width > right) right = r.left + r.width
-      }
-      setExtent({ top, left, width: right - left, height: bottom - top, bottom, right })
-    }
   }, [selection, stage])
 
   useEffect(() => {
@@ -287,19 +489,17 @@ export function SelectionTools({
    * then jump. Its width does not depend on where it is put, so this settles in
    * one pass. */
   useLayoutEffect(() => {
-    const measured = popupRef.current?.getBoundingClientRect().width ?? 0
+    const rect = popupRef.current?.getBoundingClientRect()
+    const measured = rect?.width ?? 0
     if (Math.abs(measured - width) > 0.5) setWidth(measured)
+    /* THE HEIGHT FEEDS THE SAME PLACEMENT, and settles the same way: the answer
+       arriving grows the face, this re-measures before paint, and the popup is
+       placed against what it now is rather than what it was while looking. */
+    const tall = rect?.height ?? 0
+    if (Math.abs(tall - height) > 0.5) setHeight(tall)
   })
 
-  /* A NEW SELECTION GETS THE BAR. A face is about the passage in hand, so
-   * carrying one across would open the popup mid-task on a passage the reader
-   * has not chosen anything for yet — with the marks face lighting up the
-   * PREVIOUS passage's tint. */
-  useEffect(() => {
-    setFace('bar')
-    barLeft.current = null
-  }, [selection])
-
+  const box = lines[0]
   if (!selection || !box) return null
 
   /* WHERE IT GOES IS `place`'S DECISION, and the reasoning that used to live
@@ -326,7 +526,7 @@ export function SelectionTools({
        numerically valid and wrong by the stage's offset, and nothing else
        could tell. */
     anchor: { top: box.top, left: box.left, width: box.width, height: box.height, space: 'container' },
-    surface: { width, height: POPUP_H },
+    surface: { width, height: surfaceHeight(current, height) },
     bounds: {
       top: 0,
       left: within.left,
@@ -335,7 +535,7 @@ export function SelectionTools({
       space: 'container',
     },
     // Clear of EVERY selected line, not just the one it hangs from.
-    ...(extent ? { avoid: { ...extent, space: 'container' as const } } : {}),
+    avoid: { ...extentOf(lines), space: 'container' },
     side: 'top',
     align: 'center',
     gap: GAP,
@@ -353,20 +553,40 @@ export function SelectionTools({
    * knows. */
   if (placed.fit === 'detached') return null
 
-  if (face === 'bar') barLeft.current = placed.left
-  /* The held edge, still CLAMPED: a face wider than the bar must not run off
-     the stage merely because it inherited a position that suited a narrow one. */
-  const held = barLeft.current
-  const leftEdge =
-    face === 'bar' || held === null
-      ? placed.left
-      : Math.max(
-          within.left + EDGE,
-          Math.min(held, within.left + within.width - EDGE - width),
-        )
+  /* The bar is placed afresh and its edge kept; any other face takes the kept
+     edge, still CLAMPED: a face wider than the bar must not run off the stage
+     merely because it inherited a position that suited a narrow one. One
+     branch or the other, never both — the bar's own edge is already inside
+     that clamp, so clamping it too could not change the answer. */
+  let leftEdge = placed.left
+  if (current === 'bar') barPlacedAt = placed.left
+  else if (barLeft.current !== null) {
+    leftEdge = Math.max(
+      within.left + EDGE,
+      Math.min(barLeft.current, within.left + within.width - EDGE - width),
+    )
+  }
 
   const top = placed.top
   const left = width > 0 ? leftEdge + width / 2 : box.left + box.width / 2
+
+  /* EVERY FACE IS BOUNDED BY THE ROOM IT IS PLACED IN. `place` keeps a surface
+     inside the stage by moving it, and moving is all it can do: an answer taller
+     than the stage was pinned 8px from the top and ran on past the bottom, and a
+     face wider than the column hung off its far side. So the popup is told the
+     stage's height and the column's width, less the inset at each edge, scrolls
+     inside that (see the stylesheet), and is measured — and so placed — at the
+     size it is allowed to be.
+     ⚠️ ONE RULE FOR ALL FOUR, AND IT WAS THE LOOKUP'S ALONE until 2026-09-14
+     (2026-09-13 audit, #159). The rows were left out because "a bound could only
+     clip a control" — true of a bound with nothing to scroll, and the popup
+     scrolls now whichever face it shows. Unbounded, a bar or a palette in a
+     column narrower than itself kept its leading edge in and ran the rest out
+     over the margin notes the column exists to keep it off. */
+  const bound: CSSProperties = {
+    maxWidth: within.width - 2 * EDGE,
+    maxHeight: (stageBox?.height ?? 1e6) - 2 * EDGE,
+  }
 
   /**
    * WHAT THE POPUP IS ACTING ON.
@@ -387,23 +607,52 @@ export function SelectionTools({
       ? { tint: marked.tint, style: marked.style }
       : appearance
 
+  /* Where focus was as a face is turned — see `turning`. Every control that
+     turns the popup calls this first. */
+  const turnFrom = () => {
+    turning.current =
+      // Stryker disable next-line OptionalChaining: only a control inside the mounted popup calls this, so the ref always holds the popup here
+      popupRef.current?.contains(document.activeElement) ? current : null
+  }
+
   const back = (
+    <BackToBar
+      className={styles.tool}
+      onBack={() => {
+        turnFrom()
+        setFace('bar')
+      }}
+    />
+  )
+
+  /* A chevron that turns the popup to one of its faces.
+     ONE SPELLING FOR BOTH (2026-09-13), because each now carries a second fact
+     beside its label: `data-opens`, which is where focus returns when the face
+     it opened is left (see `turning`). Written out twice, the attribute and the
+     face the click opens were two values that had to agree, on two buttons. The
+     labels stay distinct — they are what the two chevrons are for. */
+  const opener = (to: 'marks' | 'copy', title: string, label: string) => (
     <button
       type="button"
-      className={styles.tool}
-      onClick={() => setFace('bar')}
-      title="Back"
-      aria-label="Back to the selection tools"
+      className={styles.chevron}
+      data-opens={to}
+      onClick={() => {
+        turnFrom()
+        setFace(to)
+      }}
+      title={title}
+      aria-label={label}
     >
-      <ChevronLeft size={ICON.control} strokeWidth={ICON.stroke} />
+      <ChevronRight size={ICON.inline} strokeWidth={ICON.stroke} />
     </button>
   )
 
   return (
     <div
-      ref={popupRef}
+      ref={popupNode}
       className={styles.popup}
-      style={{ top, left, '--popup-h': `${POPUP_H}px` } as CSSProperties}
+      data-face={current}
+      style={{ top, left, '--popup-h': `${POPUP_H}px`, ...bound } as CSSProperties}
       /* The selection lives in the book document, and clicking the host clears
        * it in some engines before the click handler runs. Suppressing the
        * default on pointerdown is what keeps the range alive long enough to
@@ -416,8 +665,22 @@ export function SelectionTools({
           per face rather than one that mutates: a shared node would animate
           from its own previous contents, which reads as a cross-fade of two
           states rather than as one arriving. */}
-      <div key={face} className={styles.face}>
-        {face === 'bar' && (
+      <div key={current} className={styles.face}>
+        {/* THE LOOKUP, over whichever face the reader had — see `shownFace`,
+            which makes `current` 'lookup' exactly when this holds. Tested on
+            the lookup itself because that is the half that narrows it. */}
+        {lookUp.kind !== 'idle' && (
+          <LookUpFace
+            state={lookUp}
+            onBack={() => {
+              turnFrom()
+              onLookUpBack()
+            }}
+            onInstall={onInstall}
+          />
+        )}
+
+        {current === 'bar' && (
           <>
             {/* ONE CONTROL RATHER THAN A PALETTE: a reader picks a scheme and
                 stays in it, so the bar shows the answer and keeps the question
@@ -427,38 +690,38 @@ export function SelectionTools({
                 read as one row of tools. It carries the tint it will lay down
                 as its colour, so the bar still says what pressing it does.
                 Inline, because the value is one of three custom properties
-                chosen at runtime; the hover fill behind it still changes. */}
-            <button
-              type="button"
-              className={styles.tool}
-              onClick={() => onApply(shown, false)}
-              style={{ color: `var(--mark-${shown.tint}-rule)` }}
-              title={`${STYLE_NAMES[shown.style]} · ${TINT_NAMES[shown.tint]}`}
-              aria-label={`Mark this passage — ${STYLE_NAMES[shown.style].toLowerCase()}, ${TINT_NAMES[shown.tint].toLowerCase()}`}
-            >
-              <Highlighter size={ICON.control} strokeWidth={ICON.stroke} />
-            </button>
-            <button
-              type="button"
-              className={styles.chevron}
-              onClick={() => setFace('marks')}
-              title="Mark styles"
-              aria-label="Choose a colour and a style"
-            >
-              <ChevronRight size={ICON.inline} strokeWidth={ICON.stroke} />
-            </button>
+                chosen at runtime; the hover fill behind it still changes.
+                ONLY WHERE A MARK CAN BE MADE — see `canMark`. The divider goes
+                with the pair, or the row would open on a rule. */}
+            {canMark && (
+              <>
+                <button
+                  type="button"
+                  className={styles.tool}
+                  onClick={() => onApply(shown, false)}
+                  style={{ color: `var(--mark-${shown.tint}-rule)` }}
+                  title={`${STYLE_NAMES[shown.style]} · ${TINT_NAMES[shown.tint]}`}
+                  aria-label={`Mark this passage — ${STYLE_NAMES[shown.style].toLowerCase()}, ${TINT_NAMES[shown.tint].toLowerCase()}`}
+                >
+                  <Highlighter size={ICON.control} strokeWidth={ICON.stroke} />
+                </button>
+                {opener('marks', 'Mark styles', 'Choose a colour and a style')}
 
-            <span className={styles.divider} aria-hidden="true" />
+                <span className={styles.divider} aria-hidden="true" />
 
-            <button
-              type="button"
-              className={styles.tool}
-              onClick={onNote}
-              title="Note"
-              aria-label="Write a note on this passage"
-            >
-              <MessageSquareQuote size={ICON.control} strokeWidth={ICON.stroke} />
-            </button>
+                {/* NOTE IS A MARK TOO: it marks the passage first, to give the
+                    note its anchor, so it cannot be offered where Mark is not. */}
+                <button
+                  type="button"
+                  className={styles.tool}
+                  onClick={onNote}
+                  title="Note"
+                  aria-label="Write a note on this passage"
+                >
+                  <MessageSquareQuote size={ICON.control} strokeWidth={ICON.stroke} />
+                </button>
+              </>
+            )}
 
             {/* Copy stays one click; the other way to copy is one chevron
                 away, exactly as another mark style is. */}
@@ -471,21 +734,17 @@ export function SelectionTools({
             >
               <Copy size={ICON.control} strokeWidth={ICON.stroke} />
             </button>
-            <button
-              type="button"
-              className={styles.chevron}
-              onClick={() => setFace('copy')}
-              title="Copy options"
-              aria-label="More ways to copy this passage"
-            >
-              <ChevronRight size={ICON.inline} strokeWidth={ICON.stroke} />
-            </button>
+            {opener('copy', 'Copy options', 'More ways to copy this passage')}
 
             {onLookUp && (
               <button
                 type="button"
                 className={styles.tool}
-                onClick={onLookUp}
+                data-opens="lookup"
+                onClick={() => {
+                  turnFrom()
+                  onLookUp()
+                }}
                 title="Look up"
                 /* ⚠️ IT SAID "Look this up in the dictionary", and there is no
                    dictionary: the Dictionary.app hand-off, the mode cycle, the
@@ -514,7 +773,7 @@ export function SelectionTools({
           </>
         )}
 
-        {face === 'marks' && (
+        {current === 'marks' && (
           <>
             {back}
             <span className={styles.divider} aria-hidden="true" />
@@ -574,7 +833,7 @@ export function SelectionTools({
           </>
         )}
 
-        {face === 'copy' && (
+        {current === 'copy' && (
           <>
             {back}
             <span className={styles.divider} aria-hidden="true" />

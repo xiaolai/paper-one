@@ -44,54 +44,82 @@ export interface PaneGroupProps {
    * list's sort toggle is the only one so far.
    *
    * BESIDE THE HEADING, NOT INSIDE IT, and that is a fact about HTML rather
-   * than a layout preference: the heading is a `<button>`, and a button may
+   * than a layout preference: the heading holds a `<button>`, and a button may
    * not contain a button. Passed as a node so the caller keeps its own
    * labelling and state.
    */
   readonly tool?: ReactNode
   /** What the group is, when the title alone does not say — a `title` tooltip. */
   readonly hint?: string
+  /**
+   * The group's id in its panel, drawn as `data-group` so the panel can scroll
+   * a requested group into view — Settings does, for "Install one" (phase 17,
+   * L3). Absent draws nothing.
+   */
+  readonly group?: string
   readonly children: ReactNode
 }
 
-export function PaneGroup({ title, open, onToggle, count, tool, hint, children }: PaneGroupProps) {
+export function PaneGroup({ title, open, onToggle, count, tool, hint, group, children }: PaneGroupProps) {
   const id = useId()
   return (
     <>
-      <div className={styles.groupTitleRow}>
-        <button
-          type="button"
-          className={styles.groupToggle}
-          aria-expanded={open}
-          aria-controls={id}
-          onClick={onToggle}
-          {...(hint === undefined ? {} : { title: hint })}
-        >
-          {/* Rotates rather than swapping glyph: one mark that turns is read as
-              the same thing in two states, where two marks are read as two
-              things. */}
-          <ChevronRight
-            className={styles.groupChevron}
-            size={ICON.control}
-            strokeWidth={ICON.stroke}
-            data-open={open}
-            aria-hidden="true"
-          />
-          {title}
-          {count === undefined ? null : <span className={styles.groupCount}>{count}</span>}
-        </button>
+      <div className={styles.groupTitleRow} data-group={group}>
+        {/* A HEADING, WITH THE TOGGLE INSIDE IT — the W3C accordion pattern. A
+            button in a `div` is a control a screen reader can press and cannot
+            find: heading navigation, which is how a long panel is walked, went
+            straight past every group (#137). `tool` stays outside, so the
+            heading is named for the group and not for its sort control too.
+
+            LEVEL 4, because in Settings a group sits under its band's `h3`
+            (`PaneBand`). The Library panel has no bands, so its groups skip a
+            level — which costs a screen reader far less than a heading it
+            cannot reach at all. */}
+        <h4 className={styles.groupHeading}>
+          <button
+            type="button"
+            className={styles.groupToggle}
+            aria-expanded={open}
+            aria-controls={id}
+            onClick={onToggle}
+            /* Bare, not spread in on a condition: React draws no attribute for
+               `undefined`, so the condition decided nothing — half of it was a
+               branch no reader could ever tell from the other. */
+            title={hint}
+          >
+            {/* Rotates rather than swapping glyph: one mark that turns is read as
+                the same thing in two states, where two marks are read as two
+                things. */}
+            <ChevronRight
+              className={styles.groupChevron}
+              size={ICON.control}
+              strokeWidth={ICON.stroke}
+              data-open={open}
+              aria-hidden="true"
+            />
+            {title}
+            {count === undefined ? null : <span className={styles.groupCount}>{count}</span>}
+          </button>
+        </h4>
         {tool}
       </div>
-      {/* Unmounted rather than hidden. There is nothing in these rows that has
-          to keep running while they are away — every value lives in app state,
-          so a closed group costs nothing and reopens exactly as it was. It is
-          also what keeps a contributed settings section from doing its work
-          while nobody is looking at it. */}
-      {open && (
-        <div id={id} className={styles.groupBody}>
-          {children}
-        </div>
-      )}
+      {/* THE BODY IS ALWAYS THERE; ITS ROWS ARE NOT. `aria-controls` names this
+          element, and a closed group that rendered nothing left that
+          relationship pointing at nothing (#136) — so the container stays,
+          hidden, and only what is in it goes.
+
+          The rows are unmounted rather than hidden, which is what keeps a
+          contributed settings section from doing its work while nobody is
+          looking at it. ⚠️ **A ROW'S OWN STATE GOES WITH THEM.** This said
+          "every value lives in app state, so a closed group reopens exactly as
+          it was", and a contributed section is bound by no such rule:
+          `EndpointsPane` holds its half-typed endpoint in local state, and
+          closing Local models over it empties the form (2026-09-13 audit,
+          #135). A row whose draft has to survive a close keeps it somewhere
+          that outlives the group. */}
+      <div id={id} className={styles.groupBody} hidden={!open}>
+        {open ? children : null}
+      </div>
     </>
   )
 }

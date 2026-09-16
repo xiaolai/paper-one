@@ -40,6 +40,13 @@ export interface Arrival {
  * failure would persist an empty object over every arrival this device had
  * recorded. A row that is not a usable pair is dropped INDIVIDUALLY so a
  * hand-edited entry cannot cost the ones beside it.
+ *
+ * ⚠️ **AND THAT WAS TRUE OF THE READ ALONE — CORRUPT BYTES ANSWERED `{}`.**
+ * The read-modify-write then made the loss permanent by the other door, which
+ * is exactly what the paragraph above says must not happen. The one caller at
+ * the node start already warns `sync.arrivals-read-failed` and carries on, so
+ * a throw costs this run's notices and nothing else. Found by the 2026-09-13
+ * audit.
  */
 export async function readArrivals(fs: IndexFs): Promise<Readonly<Record<string, Arrival>>> {
   let raw: Uint8Array
@@ -52,16 +59,27 @@ export async function readArrivals(fs: IndexFs): Promise<Readonly<Record<string,
   let parsed: unknown
   try {
     parsed = JSON.parse(new TextDecoder().decode(raw))
-  } catch {
-    return {}
+  } catch (cause) {
+    throw new Error('the arrivals index is not JSON', { cause })
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('the arrivals index is not an object')
+  }
   const out: Record<string, Arrival> = {}
   for (const [book, value] of Object.entries(parsed as Record<string, unknown>)) {
-    if (typeof value !== 'object' || value === null) continue
+    if (
+      value === null ||
+      // Stryker disable next-line ConditionalExpression: a non-object has no `from` member, so the check below refuses it anyway.
+      typeof value !== 'object'
+    ) continue
     const { from, at } = value as { from?: unknown; at?: unknown }
     if (typeof from !== 'string' || from === '') continue
-    if (typeof at !== 'number' || !Number.isFinite(at) || at < 0) continue
+    if (
+      !Number.isFinite(at) ||
+      // Stryker disable next-line ConditionalExpression: `isFinite` above already refused a non-number; this narrows the type.
+      typeof at !== 'number' ||
+      at < 0
+    ) continue
     out[book] = { from, at }
   }
   return out
@@ -109,7 +127,13 @@ export function describeArrival(
   /* AT OR AFTER, not strictly after. Both stamps are milliseconds and a book
      opened in the same millisecond it landed is a book the reader has seen —
      a collision is rare but the strict comparison made it a notice that
-     survived being read. */
-  if (typeof opened === 'number' && opened >= arrival.at) return null
-  return { label: `Added from ${arrival.from}` }
+     survived being read.
+
+     Asked as "never opened, or opened BEFORE it landed" rather than as its
+     negation, because only this way round does the type check decide
+     anything: `undefined >= at` is already false, so in the negated form the
+     check changed no answer, while here it is what keeps a never-opened
+     book's notice. */
+  if (typeof opened !== 'number' || opened < arrival.at) return { label: `Added from ${arrival.from}` }
+  return null
 }

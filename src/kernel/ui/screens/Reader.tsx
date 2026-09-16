@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Bookmark, ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
 import type { ExternalLinkDetail, LinkDetail } from 'foliate-js/view.js'
 import { comboFor } from '../panes'
@@ -21,18 +21,15 @@ import {
 } from '../../core/metrics'
 import { bookAccent } from '../../core/bookAccent'
 import { citation, type Source } from '../../core/citation'
-import { decideLookUp, lookUpPress } from '../lookUp'
 import { writeClipboard } from '../clipboard'
-import { NO_GLOSS, type GlossProvider } from '../../core/gloss'
-import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../core/ports'
-import { askGloss, useGloss } from '../hooks/useGloss'
+import type { LookUp } from '../hooks/useLookUp'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
 import type { ForeignAnchor } from '../reader/session'
 import type { SaveFailureView } from '../hooks/useLibrary'
 import type { Marking } from '../hooks/useMarking'
 import type { Bookmarking } from '../hooks/useBookmarking'
-import { hasOpenLayer } from '../state'
+import { readerTakesInput } from '../state'
 import type { AppDispatch, AppState } from '../state'
 import type { Book } from '../hooks/useBook'
 import { useAvailableWidth, useElementWidth } from '../hooks/useAvailableWidth'
@@ -42,7 +39,6 @@ import type { PageIntent } from '../reader/wheelPaging'
 import { MarginMarks } from '../reader/MarginMarks'
 import { ReadingRuler } from '../reader/ReadingRuler'
 import { SelectionTools } from '../reader/SelectionTools'
-import { GlossStrip } from '../reader/GlossStrip'
 import styles from './Reader.module.css'
 import { pageFilter } from '../reader/fixedLayout'
 
@@ -77,41 +73,84 @@ export interface ReturnHint {
   readonly nonce: number
 }
 
+/**
+ * What the notice slot says about an action that did not work, and which kind
+ * of action it was — see `notice` in the component.
+ */
+interface ActionFailure {
+  readonly text: string
+  readonly about: 'copy' | 'mark'
+}
+
+/** An update that takes down a failure of one kind and leaves any other standing. */
+const clearedOf =
+  (about: ActionFailure['about']) =>
+  (was: ActionFailure | null): ActionFailure | null =>
+    was?.about === about ? null : was
+
+/**
+ * One notice at the foot of the column — what happened, and what can be done.
+ *
+ * EXTRACTED AT THE THIRD COPY (2026-09-13). The failed save, the failed copy
+ * and the import each wrote out the same wrapper, sentence and text buttons —
+ * and the copies had already come apart in the one way that mattered, WHERE
+ * they were drawn: two sat inside the open-book branch and one outside it, so
+ * closing a book hid a save the disk had refused, and its Retry with it.
+ *
+ * A control is drawn only for a callback that exists: a Dismiss that tells
+ * nobody is worse than none, and a Retry with no verb behind it is a promise.
+ */
+function FootNotice({
+  message,
+  onRetry = null,
+  onDismiss,
+}: {
+  readonly message: string
+  readonly onRetry?: (() => void) | null | undefined
+  readonly onDismiss?: (() => void) | undefined
+}) {
+  return (
+    <div className={styles.notice} role="status">
+      <span>{message}</span>
+      {onRetry !== null && (
+        <button type="button" className={styles.noticeDismiss} onClick={onRetry}>
+          Retry
+        </button>
+      )}
+      {onDismiss && (
+        <button type="button" className={styles.noticeDismiss} onClick={onDismiss}>
+          Dismiss
+        </button>
+      )}
+    </div>
+  )
+}
+
 export interface ReaderProps {
   state: AppState
   dispatch: AppDispatch
   platform: Platform
   book: Book
   /**
-   * The gloss provider — `NO_GLOSS` until `inference` binds one (WI-15.13).
+   * Look up — what the selection popup's dictionary control does, and the
+   * answer it draws (phase 17).
    *
-   * A prop rather than a constant reached for inside this file, for the same
-   * reason `SidePane` takes the companion as one: a seam that exists in the
-   * types and nowhere in the wiring cannot be substituted for, including in a
-   * test.
+   * ⚠️ **APP'S STATE, NOT THIS SCREEN'S, AND IT USED TO BE THIS SCREEN'S.**
+   * `useGloss` was called here, below the side pane, so the Dictionary view in
+   * Marginalia could not see a live lookup and the palette and the keyboard
+   * could not start one. `useLookUp` holds it above both (WI-17.2); this
+   * screen draws it and presses it, and decides nothing about it.
    */
-  gloss?: GlossProvider
-  /**
-   * Take the reader to where a model is installed.
-   *
-   * Called only when the gloss is `installable` and not `available` — a
-   * desktop with `inference` composed and nothing downloaded yet. A host with
-   * nowhere to send them passes nothing, and `decideLookUp` answers `none` so
-   * the control is never drawn in the first place.
-   *
-   * ⚠️ IT REPLACES `onSystemLookUp`, which handed a term to Dictionary.app,
-   * and the two are opposites worth noting: that prop existed so this screen
-   * could stay bundlable for a browser while reaching a native command, and
-   * this one exists so the screen can reach a PANE it must not know the owner
-   * of. The models pane is `inference`'s, and the kernel imports nothing from
-   * a capability — so what crosses is a callback, not an id.
-   */
-  onInstallGloss?: (() => void) | undefined
+  lookUp: LookUp
   /**
    * A save that did not land — a position, a tag, a mark's record — with
-   * the way to try it again. Drawn in the notice slot over the footer, where
-   * the clipboard's failures already are: the reader is here, not on the
-   * shelf, when a page turn's write is refused. See `LibraryView.saveFailure`.
+   * the way to try it again. Drawn at the foot of the column with the other
+   * notices: the reader is here, not on the shelf, when a page turn's write is
+   * refused. See `LibraryView.saveFailure`.
+   *
+   * ⚠️ OUTSIDE THE BOOK'S BRANCHES, like `importNotice` — and until 2026-09-13
+   * it was inside the open-book one, so closing the book, or a book that would
+   * not open, hid a write the disk had refused together with its Retry.
    */
   saveFailure?: SaveFailureView | null
   onDismissSaveFailure?: () => void
@@ -134,21 +173,6 @@ export interface ReaderProps {
    */
   importNotice?: string | null
   onDismissImportNotice?: () => void
-  /**
-   * Where a lookup says whether it found a real sentence (WI-16.4, §F4).
-   *
-   * OBSERVABILITY, NOT UI. After §16 some lookups use the sentence the term
-   * sits in and some fall back to the 32-character window, and the reader
-   * cannot act on the difference — showing it would be noise, and this app does
-   * not narrate its internals to readers. But a build where some common markup
-   * sends EVERY lookup down the fallback is indistinguishable from a working
-   * one without a count, which is the failure the whole phase is arranged to
-   * prevent, one level up.
-   *
-   * The default writes nothing, so nothing here depends on the composition
-   * root having bound one.
-   */
-  diagnostics?: Diagnostics
   marks: MarksView
   /** Passages other readers shared, anchored here — see `useOverlays`. */
   overlays?: readonly ForeignAnchor[]
@@ -247,13 +271,11 @@ export function Reader({
   dispatch,
   platform,
   book,
-  gloss: glossProvider = NO_GLOSS,
-  onInstallGloss,
+  lookUp,
   saveFailure = null,
   onDismissSaveFailure,
   importNotice = null,
   onDismissImportNotice,
-  diagnostics = NOOP_DIAGNOSTICS,
   marks,
   overlays,
   marking,
@@ -290,8 +312,13 @@ export function Reader({
    * channel therefore threw the reader off the screen — book intact, nothing
    * wrong with it — over a copy that did not land. A failed action says so and
    * gets out of the way.
+   *
+   * TAGGED WITH WHAT IT IS ABOUT (2026-09-13), because two kinds of action
+   * report here now — a copy and a mark — and a later success clears its own
+   * kind's failure and nobody else's: a copy that worked says nothing about a
+   * mark that did not.
    */
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<ActionFailure | null>(null)
 
   /**
    * The return line fades on its own after a few seconds.
@@ -312,68 +339,13 @@ export function Reader({
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
 
-  /* WHAT `Look up` DOES, decided once per render. There used to be three
-     inputs — the platform's dictionary, the gloss, and a stored preference
-     between them — and there are now two, because there is one behaviour and
-     nothing to choose between. `decideLookUp` is the rule; this is the wiring.
-
-     `onInstallGloss !== undefined` IS PART OF THE QUESTION, not a guard bolted
-     on. `installable` asks whether this BUILD has somewhere to install a model;
-     whether this screen was handed the means to go there is a different fact,
-     and the two can differ — the same distinction `onSystemLookUp` used to
-     carry against `hasDictionary`. Drawing a control that cannot act is what
-     both halves exist to prevent, so they are answered together. */
-  /* WHERE THE GLOSS IS ANCHORED — see `GlossAnchor`, which owns the rule and
-     the measurement behind the two fields it is built from. `null` while the
-     reader is not looking at this book, which is what takes the strip down on
-     the way to the library: `inert` already clears the selection for the
-     identical reason, and the gloss was the one surface it did not reach.
-
-     THE SPINE ITEM, THE CHAPTER AND THE TURN COUNT — and deliberately not the
-     fraction or the CFI: the strip is a flex child above `.stage` (`flex: 1`),
-     so its own appearance shrinks the stage and makes foliate relocate. An
-     anchor either of those could move would dismiss the gloss that caused the
-     reflow and loop. None of these three can be moved by a re-pagination.
-
-     ⚠️ `book.navigation` IS THE ONE THAT COVERS THE KEYBOARD, and it is here
-     because the first version of this claimed `onPageIntent` covered "every
-     route" of a page turn. It does not: `App`'s key handler calls
-     `book[verb]()` directly for the arrows, the paging keys and Space, and
-     never reaches this screen's intent handler at all. So a keyboard turn left
-     an amber definition on the new page — the exact defect the anchor was added
-     to fix, surviving through the one route nobody checked. Found by audit.
-     `useBook` counts the turns instead, which is the only place BOTH routes
-     pass through. */
-  const gloss = useGloss(
-    glossProvider,
-    inert
-      ? null
-      : `${book.generation}|${book.position.sectionIndex ?? ''}|${book.position.chapterHref}|${book.navigation}`,
-  )
-  const lookUpAction = decideLookUp(
-    glossProvider.available,
-    glossProvider.installable && onInstallGloss !== undefined,
-  )
-  /* THE SENTENCE, or today's answer (WI-16.4). `askGloss` walks the document
-     for the sentence the term really sits in and falls back to the
-     32-character window when it cannot vouch for one — so the worst outcome is
-     exactly what shipped before it existed. The handler lives THERE rather
-     than here so it can be driven by a test; this is the wiring and nothing
-     else.
-
-     ONLY FROM THE LOOK UP GESTURE. `publish()` never reaches here: a walk per
-     `selectionchange` would be a walk per pointer move.
-
-     The term comes back from the request rather than being passed through,
-     because the sentence may not spell it the way the selection did — ruby
-     readings are filtered out of both, and `漢かん字` is what `flatten` gives
-     for what the book prints as `漢字`. */
-  const lookUpGloss = (): void =>
-    askGloss(gloss, selection, {
-      fixedLayout: book.fixedLayout,
-      diagnostics,
-      bookTitle: book.meta?.title ?? '',
-    })
+  /* ⚠️ **LOOK UP IS NOT DECIDED HERE ANY MORE.** The gloss hook, its anchor,
+     the install decision and the sentence walk lived in this body; they moved
+     to `useLookUp` (WI-17.2), in `App`, so the Dictionary view, the palette and
+     the keyboard can reach the same lookup this popup draws. The anchor's
+     reasoning — the keyboard page turn that never reaches `onPageIntent`, and
+     why the selection is part of it now that nothing reflows — moved with it,
+     to `GlossAnchor`. */
 
   /** What the next mark takes, as one value, so nothing has to pair them up. */
   const appearance = useMemo<MarkAppearance>(
@@ -511,11 +483,18 @@ export function Reader({
    * One callback because there were three spellings of this pair across the
    * file, and the drift between them is what let the page-turn path guard the
    * teardown on a value that is not always populated yet.
+   *
+   * ON `deselect` AND `setSelection`, not on `book` (2026-09-13). `useBook`
+   * rebuilds the book object whenever its position moves, so this callback was
+   * rebuilt — and the layout effect below that lists it re-ran — on every
+   * relocation, for the sake of one function that never changes; while
+   * `setSelection`, which it also calls, was not listed at all.
    */
+  const { deselect } = book
   const clearSelection = useCallback(() => {
-    book.deselect()
+    deselect()
     setSelection(null)
-  }, [book])
+  }, [deselect, setSelection])
 
   /**
    * Put something on the clipboard.
@@ -527,17 +506,67 @@ export function Reader({
    * did, until the reader pastes nothing. Three callers now — the selection
    * popup's two, and the note popover's copy.
    */
+  const copies = useRef(0)
+  /* Stryker disable ArrayDeclaration: a dependency list of constants never
+     changes between renders, so a literal added to this one memoises exactly
+     what the empty one does — there is no render either could tell apart. A
+     BLOCK rather than `next-line`, because the list is on the callback's
+     closing line and a comment there is nobody's leading comment. */
   const copyText = useCallback((text: string) => {
     /* THE THREE OUTCOMES COME FROM `writeClipboard` NOW, and the sentences stay
        here — see that module for why the split falls where it does. This body
        WAS the careful version; the Developer panel's later copy had lost every
        lesson in it, which is what made one path worth having. */
     if (!text) return
+    /* ONLY THE LATEST COPY SPEAKS, AND A COPY THAT WORKED SAYS SO BY CLEARING
+       (2026-09-13). The outcome arrives later, so two copies close together
+       could answer out of order — an older refusal landing after a newer copy
+       had worked — and a copy that worked left the previous one's failure
+       standing over it, telling the reader the clipboard was still refusing. */
+    const attempt = ++copies.current
     void writeClipboard(text).then((outcome) => {
-      if (outcome === 'refused') setNotice('That could not be copied to the clipboard.')
-      else if (outcome === 'absent') setNotice('This device has no clipboard available.')
+      if (attempt !== copies.current) return
+      if (outcome === 'refused') setNotice({ text: 'That could not be copied to the clipboard.', about: 'copy' })
+      else if (outcome === 'absent') setNotice({ text: 'This device has no clipboard available.', about: 'copy' })
+      else setNotice(clearedOf('copy'))
     })
   }, [])
+  /* Stryker restore ArrayDeclaration */
+
+  /* A FAILURE BELONGS TO THE BOOK IT HAPPENED IN. This screen stays mounted from
+     one book to the next, so the last book's "could not be copied" stood over the
+     next one, and a copy still in flight when the book changed reported into
+     it. A LAYOUT effect, so the next book never paints under the last one's
+     notice.
+     ⚠️ ON THE GENERATION, NOT THE ID — and until 2026-09-14 it was the id
+     (2026-09-13 audit, #204). The id is not what changes when the book does:
+     it is null until `bookIdFor` answers and stays null for a book that could
+     not be identified, so one unidentified book replacing another left it
+     unchanged and kept the last book's refusal and its copy in flight. And it
+     changes when nothing else has — null to an id, a moment into the SAME open
+     — which silenced a refusal from a copy made in that moment. `useBook`
+     advances the generation on every open and close, and only then. */
+  useLayoutEffect(() => {
+    copies.current += 1
+    setNotice(null)
+  }, [book.generation])
+
+  /**
+   * Say whether a mark was made — for every control in the popup that makes one.
+   *
+   * ⚠️ A MARK THAT WAS NOT MADE WAS SILENT HERE until 2026-09-13. `mark` answers
+   * null for a selection it cannot anchor — `view.getCFI` gives `''` for a range
+   * it cannot address, and `useMarking` refuses to write that — and the popup's
+   * Mark button ignored the answer, so the press did nothing a reader could see.
+   * `useMarking` leaves a console line and says the surface must say the rest;
+   * this is the surface.
+   */
+  /* Stryker disable ArrayDeclaration: as above — a constant dependency memoises
+     what none does, and the list is on the closing line. */
+  const reportMark = useCallback((made: boolean) => {
+    setNotice(made ? clearedOf('mark') : { text: 'That passage could not be marked.', about: 'mark' })
+  }, [])
+  /* Stryker restore ArrayDeclaration */
 
   /** Copy a passage, and take the selection down with it — the popup's way. */
   const copyToClipboard = useCallback(
@@ -618,16 +647,15 @@ export function Reader({
        * scrolled is the default and it describes a PDF's renderer under a name
        * that renderer does not answer to. */
       if (state.pageLayout !== 'paginated' && !book.fixedLayout) return
-      /* ⚠️ **THE SECOND INSTANCE OF THE SAME MECHANISM as `reading` in
-         `App.tsx`.** `=== 'library'` meant "not reading" only while there were
+      /* ⚠️ **THE SAME MECHANISM as `reading` in `App.tsx`, AND NOW THE SAME
+         FUNCTION.** `=== 'library'` meant "not reading" only while there were
          two screens; on a capability's screen this did not return, so a wheel
-         or a swipe paged the book nobody could see. */
-      if (state.screen !== 'reader' || hasOpenLayer(state)) return
-      /* The side pane counts too, below §06's threshold, where it stops being a
-       * track beside the reader and becomes a SHEET over it. `hasOpenLayer`
-       * knows only about the palette and the switcher, so without this a
-       * gesture over the sheet paged the book behind it. */
-      if (state.pane !== null && !paneVisible) return
+         or a swipe paged the book nobody could see. The three facts — the
+         screen, the layers, and the side pane being a track rather than a SHEET
+         over the book — were then assembled here and, differently, in App: the
+         keyboard knew nothing about the sheet and paged the book underneath it
+         (#207). `readerTakesInput` is the one question both ask. */
+      if (!readerTakesInput(state, paneVisible)) return
 
       /* Unconditionally, and NOT gated on `selection` being set.
        *
@@ -672,21 +700,27 @@ export function Reader({
   /**
    * Show a mark in Notes — focus it, then open the pane.
    *
-   * Three routes reach this: clicking a drawn highlight, clicking one in the
-   * margin, and making a note from the selection. Opening the panel is NOT
-   * showing the mark, which is why both halves are always needed: the list holds
-   * every mark in every book, so landing at the top of it leaves the reader to
-   * find the one they just clicked. Written out three times, one of them was
-   * always going to drift.
+   * Two routes reach this: clicking a mark in the margin, and making a note from
+   * the selection. Opening the panel is NOT showing the mark, which is why both
+   * halves are always needed: the list holds every mark in every book, so
+   * landing at the top of it leaves the reader to find the one they just
+   * clicked. Written out at each route, one of them was always going to drift.
    *
-   * `null` OPENS THE PANE WITHOUT FOCUSING ANYTHING, which is what the note
-   * route did when a mark could not be made — kept deliberately, because a
-   * refactor that quietly stops opening a panel is a refactor that changed
-   * behaviour while claiming to move code.
+   * ⚠️ IT SAID "Three routes", the first being a click on a drawn highlight —
+   * which has not come here since `onMarkActivated` was removed: that click
+   * SELECTS the passage now (see the note at `FoliateView` below).
+   *
+   * ⚠️ AND IT TOOK `null`, which opened the pane with nothing focused — "what
+   * the note route did when a mark could not be made — kept deliberately,
+   * because a refactor that quietly stops opening a panel is a refactor that
+   * changed behaviour". Right about the refactor, and the behaviour it kept was
+   * a defect: Notes opened on no mark, with no editor and no word about why.
+   * Since 2026-09-13 the note route opens Notes only once it has a mark, and
+   * says so when it has none — see `reportMark`.
    */
   const showInNotes = useCallback(
-    (id: string | null, editing = false) => {
-      if (id) marking.focusMark(id, editing)
+    (id: string, editing = false) => {
+      marking.focusMark(id, editing)
       dispatch({ type: 'openPane', pane: 'marginalia' })
     },
     [marking, dispatch],
@@ -867,7 +901,16 @@ export function Reader({
                         button here would swallow them: `App`'s key handler
                         stands down when focus is on a control, so clicking a
                         chevron would stop ← and → working until the reader
-                        clicked somewhere else. */}
+                        clicked somewhere else.
+
+                        ⚠️ AND `tabIndex={-1}` IS ONLY HALF OF THAT. It takes a
+                        control out of Tab; it does not stop a CLICK focusing
+                        it, which Chromium-based webviews — WebView2, Tauri's on
+                        Windows — do for any button. WebKit on macOS happens not
+                        to, which is why this read as settled. Focus moves as the
+                        pointerdown's default action, so that default is
+                        cancelled and focus stays in the book, where the keys
+                        still turn the page (2026-09-13). */}
                     {/* REFLOWABLE ONLY, and not merely paged. `--page-margin`
                         comes off the prose grid, and `foliate-fxl` reads none
                         of it — not `max-inline-size`, not `gap` — it scales and
@@ -887,6 +930,7 @@ export function Reader({
                           aria-label="Page to the left"
                           className={styles.turn}
                           data-side="left"
+                          onPointerDown={(event) => event.preventDefault()}
                           onClick={() => onPageIntent('left')}
                         >
                           <span className={styles.turnGlyph}>
@@ -899,6 +943,7 @@ export function Reader({
                           aria-label="Page to the right"
                           className={styles.turn}
                           data-side="right"
+                          onPointerDown={(event) => event.preventDefault()}
                           onClick={() => onPageIntent('right')}
                         >
                           <span className={styles.turnGlyph}>
@@ -974,8 +1019,11 @@ export function Reader({
                     onApply={(next, keep) => {
                       dispatch({ type: 'setMarkTint', tint: next.tint })
                       dispatch({ type: 'setMarkStyle', style: next.style })
-                      mark(selected?.note ?? '', next, keep)
+                      reportMark(mark(selected?.note ?? '', next, keep) !== null)
                     }}
+                    /* WHETHER MARK AND NOTE ARE OFFERED AT ALL — `useMarking`'s
+                       rule, asked rather than restated (#202). */
+                    canMark={marking.canMark}
                     onNote={() => {
                       /* The note itself is written in the Marginalia panel, where
                          there is room for it. Marking first is what gives it an
@@ -986,71 +1034,53 @@ export function Reader({
                          that is already marked has its anchor, and re-marking it
                          here would lay the LAST-USED appearance over the one it
                          is already wearing — recolouring a mark on the way to
-                         writing a note about it. */
+                         writing a note about it.
+                         And Notes opens only ONCE THERE IS A MARK to write on
+                         — see `showInNotes` for what it did without one. */
                       if (selected) {
                         showInNotes(selected.id, true)
                         clearSelection()
                         return
                       }
                       const created = mark('', appearance)
-                      showInNotes(created?.id ?? null, true)
+                      reportMark(created !== null)
+                      if (created) showInNotes(created.id, true)
                     }}
-                    onCopy={() => copyToClipboard(selection?.text ?? '')}
-                    onCite={() => {
-                      if (!selection) return
-                      copyToClipboard(citation(selection.text, sourceFor(selection.sectionIndex)))
-                    }}
-                    onLookUp={
-                      /* ONE GESTURE, ONE THING, and the whole decision lives in
-                         `lookUp.ts` where it can be RUN by a test — `Reader`
-                         cannot be mounted cheaply, so anything left here could
-                         only ever be checked by reading this file back.
-
-                         ⚠️ `install` CALLS THE SAME FUNCTION AS `gloss`, and
-                         that is deliberate. `useGloss.ask` already decides what
-                         an unavailable provider does — it sets `unavailable`
-                         rather than returning silently — so branching here
-                         would be a second copy of a decision the hook has to
-                         make anyway, and the two would eventually disagree
-                         about which states are reachable.
-
-                         ⚠️ THE TERM THUNK IS GONE for that same rule, one case
-                         later: `lookUpPress` used to take the selection's text
-                         and drop the press when it was too long, silently. The
-                         bound is `useGloss.ask`'s now, where a refusal can be
-                         a state the reader reads rather than nothing at all. */
-                      lookUpPress(lookUpAction, lookUpGloss)
+                    /* ⚠️ **ASSERTED, NOT GUARDED, AND ALL THREE WERE GUARDED**
+                       (2026-09-14). `SelectionTools` draws nothing at all
+                       without a selection, and draws Remove only over `marked`
+                       — which is `selected` itself — so each of these handlers
+                       is made in a render where its own value is set and can
+                       only be pressed from that render. The checks could
+                       therefore never be false: a branch no press can reach,
+                       which is a branch no test can pin, and all three stood as
+                       surviving mutants for exactly that reason. Saying it with
+                       `!` states the invariant where it is relied on, and fails
+                       loudly at the press if the popup ever draws a control it
+                       has nothing to act on — where a guard would quietly do
+                       nothing and look like a clipboard that had refused. */
+                    onCopy={() => copyToClipboard(selection!.text)}
+                    onCite={() =>
+                      copyToClipboard(citation(selection!.text, sourceFor(selection!.sectionIndex)))
                     }
+                    /* ONE PRESS FOR THE BUTTON, THE PALETTE AND THE KEY — see
+                       `LookUp.press`, which is null exactly where no control
+                       should be drawn. */
+                    onLookUp={lookUp.press}
+                    /* AND THE ANSWER IS DRAWN HERE, in the popup beside the
+                       word — not in a strip under the page, whose appearance
+                       re-paginated the book and pushed the word off it
+                       (phase 17, L1; see `LookUpFace`). */
+                    lookUp={lookUp.state}
+                    onLookUpBack={lookUp.dismiss}
+                    onInstall={lookUp.onInstall}
+                    /* `selected!` for the reason the copy controls above give. */
                     onRemove={() => {
-                      if (selected) unmark(selected)
+                      unmark(selected!)
                       clearSelection()
                     }}
                   />
                 </div>
-
-                {/* THE GLOSS, the lookup that did not arrive, and the lookup
-                    that had nothing to answer it. Its own component (WI-16.3)
-                    so the three can be RENDERED in a test rather than read back
-                    out of this file's source — see `GlossStrip`, where the
-                    whole argument lives.
-
-                    `onInstall` is passed unconditionally, and it is no longer
-                    the only thing gating the offer. This used to argue that the
-                    strip "reads it only in the `unavailable` state, which
-                    `useGloss` can only reach when the provider is unavailable,
-                    which is the same condition that made `decideLookUp` answer
-                    `install`" — untrue in the window between the draw and the
-                    press, where a model uninstalled in between reaches
-                    `unavailable` from a button drawn as `gloss`, with nothing
-                    to install into. `GlossState.unavailable` now carries
-                    `installable` read at the press, and the strip needs both.
-                    What this prop still answers is the other half: whether this
-                    SCREEN was given anywhere to send the reader. */}
-                <GlossStrip
-                  state={gloss.state}
-                  onDismiss={() => gloss.dismiss()}
-                  onInstall={onInstallGloss}
-                />
 
                 {/* The way back from a jump. Above the failure notice and
                     styled apart from it: one is an offer and the other is an
@@ -1062,42 +1092,6 @@ export function Reader({
                       ← Back to {returnTo.label}
                     </button>
                     <span className={styles.returnHintKey}>{comboFor('⌘[', platform)}</span>
-                  </div>
-                )}
-
-                {/* A save that did not land (WI-20.36): the position this page
-                    turn wrote, or the mark's record. Amber, like the clipboard's
-                    failure below, and beside its retry — the reader is here
-                    when the disk refuses a write, not on the shelf. */}
-                {saveFailure && (
-                  <div className={styles.notice} role="status">
-                    <span>{saveFailure.message}</span>
-                    {saveFailure.retry !== null && (
-                      <button type="button" className={styles.noticeDismiss} onClick={saveFailure.retry}>
-                        Retry
-                      </button>
-                    )}
-                    {onDismissSaveFailure && (
-                      <button type="button" className={styles.noticeDismiss} onClick={onDismissSaveFailure}>
-                        Dismiss
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* §11: say what happened. It sits over the footer rather than
-                    displacing the text, and it dismisses itself — the reader
-                    has already moved on to whatever they meant to paste. */}
-                {notice && (
-                  <div className={styles.notice} role="status">
-                    <span>{notice}</span>
-                    <button
-                      type="button"
-                      className={styles.noticeDismiss}
-                      onClick={() => setNotice(null)}
-                    >
-                      Dismiss
-                    </button>
                   </div>
                 )}
 
@@ -1226,17 +1220,33 @@ export function Reader({
             AT THE FOOT OF THE COLUMN, which is also where `Library` puts this
             same sentence — its own note says "THE IMPORT LINE IS IN THE STATUS
             BAR, at the foot" — so the two screens now report one event in one
-            place rather than in two. */}
-        {importNotice && (
-          <div className={styles.notice} role="status">
-            <span>{importNotice}</span>
-            {onDismissImportNotice && (
-              <button type="button" className={styles.noticeDismiss} onClick={onDismissImportNotice}>
-                Dismiss
-              </button>
-            )}
-          </div>
+            place rather than in two.
+
+            ⚠️ **AND THE OTHER TWO NOTICES WERE STILL INSIDE IT** until
+            2026-09-13 — the failed save (WI-20.36) and the failed copy — which
+            is the same defect again: close the book, or open one that fails,
+            and a write the disk had refused vanished with its Retry. All three
+            are here now, in one order: the reader's action that did not happen
+            above the one that did, as on the shelf's foot.
+
+            ⚠️ **IN THE COLUMN'S FLOW, WHICH IS NOT "OVER THE FOOTER".** The
+            copy notice's own comment said it "sits over the footer rather than
+            displacing the text, and it dismisses itself" — neither was true.
+            Each of these is a flex row beside `.stage`, so one appearing takes
+            its height from the stage and the book re-paginates around it —
+            what phase 17 measured and removed for the lookup (`LookUpFace`).
+            It stands here, and moving the notices out of flow is a layout
+            change to measure in the running app. Nor does any of them go on its
+            own: each waits for Dismiss, or for its own success to clear it. */}
+        {saveFailure && (
+          <FootNotice
+            message={saveFailure.message}
+            onRetry={saveFailure.retry}
+            onDismiss={onDismissSaveFailure}
+          />
         )}
+        {notice && <FootNotice message={notice.text} onDismiss={() => setNotice(null)} />}
+        {importNotice && <FootNotice message={importNotice} onDismiss={onDismissImportNotice} />}
       </div>
     </div>
   )

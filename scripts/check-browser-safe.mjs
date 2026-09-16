@@ -39,28 +39,37 @@
  *
  * 1. **A match anywhere in the file counts doc comments.** `bookVault.ts` names
  *    `@tauri-apps` three times to explain that it does NOT import it, and was
- *    reported as Tauri-bound. Comments are stripped first.
+ *    reported as Tauri-bound.
  * 2. **A regex that forbids newlines misses every multi-line import.** A
  *    six-symbol `import { … } from '@tauri-apps/plugin-fs'` spread over eight
- *    lines matched nothing, and the Tauri binding itself came back clean. The
- *    scan now keys on `from '…'` alone, which needs no preceding clause and so
- *    cannot be defeated by how the import is wrapped.
+ *    lines matched nothing, and the Tauri binding itself came back clean.
+ *
+ * ⚠️ **THIS SAID BOTH WERE FIXED BY STRIPPING COMMENTS AND KEYING ON
+ * `from '…'` ALONE**, and those fixes were the third and fourth wrong answers —
+ * a stripper that took a regex literal for a comment, a matcher that took a
+ * string for an import. The module is PARSED now, by `runtimeSpecifiers` in
+ * `scripts/lib/specifiers.mjs`, which `check-mutants` reads imports through as
+ * well; that file carries the rest of the history, including the two clauses
+ * this gate's own parse still misread until 2026-09-14.
  *
  * `check-browser-safe.test.mjs` asserts a KNOWN POSITIVE for exactly this
  * reason: a detector that finds nothing looks identical to a clean result.
  *
  * Exit 0 when everything checked is browser-safe, 1 on a blocker, 2 on a usage
- * error.
+ * error or on a path it could not read — a directory named as a module, a file
+ * or directory it may not open, a `tsconfig.base.json` that does not parse or
+ * that maps an alias in a shape this gate cannot follow. Until 2026-09-14 every
+ * one of those was swallowed and read as clean; see `unchecked`.
  */
 
-import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import ts from 'typescript'
 import { isProcessEntry } from './lib/entry.mjs'
+import { runtimeSpecifiers } from './lib/specifiers.mjs'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
-const USAGE = 'usage: node scripts/check-browser-safe.mjs [--root <dir>] [module...]'
+const USAGE = 'usage: node scripts/check-browser-safe.mjs [--root <dir>] [--survey [<dir>] | <module>...]'
 
 /** The package prefix that cannot exist in a browser. */
 export const PLATFORM_PREFIX = '@tauri-apps'
@@ -126,59 +135,6 @@ export const PINNED = Object.freeze([
 ])
 
 /**
- * Every module specifier a file imports, **parsed rather than matched**.
- *
- * ⚠️ **THIS WAS TWO REGEXES OVER A COMMENT-STRIPPED STRING, AND BOTH HALVES
- * WERE WRONG IN OPPOSITE DIRECTIONS.**
- *
- *   - The stripper was not JavaScript-aware. A regex literal containing `//`
- *     — `/https?:\/\//` — opened a line comment as far as it was concerned,
- *     and everything after it on that line disappeared, including a real
- *     import. A blocked module read as clean.
- *   - The matcher had no idea what a string was. An ordinary literal
- *     containing `from '@tauri-apps/api/core'` — this file's own header holds
- *     several, and `bookVault.ts` names the package three times to say it does
- *     NOT import it — counted as an import. A clean module read as blocked.
- *
- * The file's own header records that this detector "shipped two confident
- * wrong answers before it worked". These are the third and fourth, and they
- * share one cause: reading a language with a pattern instead of a parser.
- *
- * TYPE-ONLY IMPORTS ARE NOT IMPORTS. `import type { X } from '@tauri-apps/…'`
- * is erased before anything runs, so a type-only edge cannot put a platform
- * binding in a bundle. Counting it blocked a module that ships nothing.
- * Only `import type`/`export type` — the whole-clause form TypeScript always
- * erases — is skipped; a mixed `import { type A, B }` still needs the module
- * at runtime for `B`.
- */
-export function specifiersIn(source, fileName = 'module.tsx') {
-  const tree = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
-  const found = new Set()
-  const add = (node) => {
-    if (node && ts.isStringLiteral(node)) found.add(node.text)
-  }
-  const visit = (node) => {
-    if (ts.isImportDeclaration(node)) {
-      /* `import type …` is erased entirely; a bare `import '…'` (no clause) is
-       * a side effect and very much runs. */
-      if (!node.importClause?.isTypeOnly) add(node.moduleSpecifier)
-    } else if (ts.isExportDeclaration(node)) {
-      if (!node.isTypeOnly) add(node.moduleSpecifier)
-    } else if (ts.isImportEqualsDeclaration(node)) {
-      if (ts.isExternalModuleReference(node.moduleReference)) add(node.moduleReference.expression)
-    } else if (
-      ts.isCallExpression(node) &&
-      node.expression.kind === ts.SyntaxKind.ImportKeyword
-    ) {
-      add(node.arguments[0])
-    }
-    ts.forEachChild(node, visit)
-  }
-  ts.forEachChild(tree, visit)
-  return found
-}
-
-/**
  * The repository's own `paths` aliases, read from `tsconfig.base.json`.
  *
  * ⚠️ `resolveModule` DISCARDED EVERY NON-RELATIVE SPECIFIER, which silently
@@ -186,48 +142,134 @@ export function specifiersIn(source, fileName = 'module.tsx') {
  * to `src/*`, so an aliased path to a Tauri-bound module was a real edge this
  * walk could not see — and a pinned module reached one through it would have
  * passed. The aliases are read rather than restated so the two cannot drift.
+ *
+ * ⚠️ **AND A FILE IT COULD NOT READ OR PARSE WAS A TREE WITH NO ALIASES.** The
+ * whole body sat in a `catch` answering `[]`, so a block comment or a trailing
+ * comma added to `tsconfig.base.json` would have made every `@/…` edge
+ * invisible without a word. Only ABSENCE means no aliases now — a fixture tree
+ * has no such file — and anything else is refused. 2026-09-14.
  */
 function aliases(root) {
+  const file = path.join(root, 'tsconfig.base.json')
+  let raw
   try {
-    const raw = readFileSync(path.join(root, 'tsconfig.base.json'), 'utf8')
+    raw = readFileSync(file, 'utf8')
+  } catch (cause) {
+    // Stryker disable next-line ArrayDeclaration: an entry that is not an alias has no `wildcard` and no `prefix`, so `resolveModule` compares each specifier with `undefined` and follows none — no answer can differ
+    if (cause.code === 'ENOENT') return []
+    throw unchecked(root, file, cause)
+  }
+  let json
+  try {
     /* JSON with comments: strip them the safe way round — line comments only
      * at the start of a trimmed line, which is how this file writes them. */
-    const json = JSON.parse(
+    json = JSON.parse(
       raw
         .split('\n')
         .filter((line) => !line.trim().startsWith('//'))
         .join('\n'),
     )
-    const options = json.compilerOptions ?? {}
-    const base = path.resolve(root, options.baseUrl ?? '.')
-    return Object.entries(options.paths ?? {}).map(([pattern, targets]) => ({
-      prefix: pattern.replace(/\*$/u, ''),
-      wildcard: pattern.endsWith('*'),
-      targets: targets.map((t) => path.resolve(base, t.replace(/\*$/u, ''))),
-    }))
   } catch {
-    return []
+    throw new Error(
+      'tsconfig.base.json does not parse as JSON with line comments, so every import through one of its `paths` would go unseen',
+    )
   }
+  const options = json.compilerOptions ?? {}
+  // Stryker disable next-line StringLiteral: `path.resolve` reads an empty segment as `.`, so either spelling is the root itself
+  const base = path.resolve(root, options.baseUrl ?? '.')
+  return Object.entries(options.paths ?? {}).map(([pattern, targets]) => {
+    /* ⚠️ **ONLY A TRAILING STAR WAS EVER READ, AND EVERY OTHER SHAPE WAS
+     * MISREAD WITHOUT A WORD.** An exact alias was matched as a PREFIX, so
+     * `virtual:paper-compositionX` would have been followed to the desktop
+     * composition; a star anywhere but last stayed a literal `*` that matched
+     * nothing; and a `prefix*` mapped onto a file had the rest of the specifier
+     * appended to that file. TypeScript reads none of those that way, and two of
+     * the three hide an edge. An exact alias names one specifier now, `prefix*`
+     * → `dir*` names a family, and any other shape is refused by name rather
+     * than read wrong. 2026-09-14. */
+    const wildcard = pattern.endsWith('*')
+    const followed = (spelling) => spelling.indexOf('*') === (wildcard ? spelling.length - 1 : -1)
+    if (![pattern, ...targets].every(followed)) {
+      throw new Error(
+        `tsconfig.base.json maps ${JSON.stringify(pattern)} to ${JSON.stringify(targets)}, which this gate cannot follow — ` +
+          'it reads an exact name and `prefix*` → `dir*`, and an alias it misread would be an edge it could not see',
+      )
+    }
+    return {
+      prefix: wildcard ? pattern.slice(0, -1) : pattern,
+      wildcard,
+      targets: targets.map((target) => path.resolve(base, wildcard ? target.slice(0, -1) : target)),
+    }
+  })
 }
 
-/** Resolve a specifier — relative or aliased — to a file on disk, or null. */
-function resolveModule(fromFile, spec, aliasList = []) {
+/**
+ * Resolve a specifier — relative or aliased — to a file on disk, or null.
+ *
+ * ⚠️ **THE ALIASES IT WAS HANDED RESOLVED TO NOTHING.** `path.resolve` drops a
+ * trailing separator, so the target of `@/*` → `src/*` is `…/src`, and the
+ * rest of the specifier was APPENDED to it: `@/leaf` was looked for at
+ * `…/srcleaf`. Every aliased edge went unseen from the day the note on
+ * `aliases` said they were followed. It is resolved against the target now.
+ * Measured 2026-09-14 by the first test to import through one; nothing under
+ * `src/` imports through `@/` yet, which is how it survived.
+ */
+function resolveModule(root, fromFile, spec, aliasList) {
+  // Stryker disable next-line ArrayDeclaration: the one base that is not a path is a name no module has, looked for against the working directory — tried first, found absent, and every real base is tried after it
   const bases = []
   if (spec.startsWith('.')) {
     bases.push(path.resolve(path.dirname(fromFile), spec))
   } else {
     for (const alias of aliasList) {
-      if (!spec.startsWith(alias.prefix)) continue
-      const rest = alias.wildcard ? spec.slice(alias.prefix.length) : ''
-      for (const target of alias.targets) bases.push(path.resolve(target + rest))
+      /* An exact alias names one specifier and only `prefix*` a family of them —
+       * see `aliases` — so what an exact match leaves over is nothing. */
+      if (alias.wildcard ? !spec.startsWith(alias.prefix) : spec !== alias.prefix) continue
+      for (const target of alias.targets) bases.push(path.resolve(target, spec.slice(alias.prefix.length)))
     }
   }
   for (const base of bases) {
-    for (const candidate of [base + '.ts', base + '.tsx', base + '/index.ts', base + '/index.tsx', base]) {
-      if (/\.(ts|tsx)$/.test(candidate) && existsSync(candidate)) return candidate
+    /* ⚠️ **A DIRECTORY'S INDEX IS JOINED, NOT APPENDED WITH `/`.** `base` is
+       `path.resolve`'s, in the host's separator, so on Windows `./pkg` found
+       `…\pkg/index.ts` while `./pkg/index` found `…\pkg\index.ts` — one module
+       under two names, walked and counted twice (2026-09-15). */
+    for (const candidate of [base + '.ts', base + '.tsx', path.join(base, 'index.ts'), path.join(base, 'index.tsx'), base]) {
+      if (/\.(ts|tsx)$/.test(candidate) && existsAt(root, candidate)) return candidate
     }
   }
   return null
+}
+
+/**
+ * Whether anything is at `candidate`.
+ *
+ * ⚠️ **`existsSync` ANSWERS `false` FOR A PATH IT CANNOT STAT**, so a module
+ * behind a directory this user may not search was a module that did not exist
+ * — its edge dropped, and every blocker past it with it. Only absence is
+ * `false` here; any other failure is refused, naming the path.
+ */
+function existsAt(root, candidate) {
+  try {
+    statSync(candidate)
+    return true
+  } catch (cause) {
+    if (isAbsence(cause)) return false
+    throw unchecked(root, candidate, cause, 'look for')
+  }
+}
+
+/** A stat that failed because nothing is there — the one failure that is an answer. */
+const isAbsence = (cause) => cause.code === 'ENOENT' || cause.code === 'ENOTDIR'
+
+/**
+ * A path the walk could not check. Thrown, never answered as "nothing here":
+ * a detector that could not look has to be distinguishable from one that found
+ * nothing, and `main` turns this into exit 2 with these words.
+ */
+function unchecked(root, file, cause, doing = 'read') {
+  return new Error(
+    `cannot ${doing} ${toPosix(path.relative(root, file))} (${cause.code ?? String(cause)}) — ` +
+      'nothing past it was checked, and a path this gate could not check is not a clean one',
+  )
 }
 
 /**
@@ -248,7 +290,6 @@ export function blockersOf(root, entry, shared = null) {
      * see `newWalkCache`. `seen` and `blockers` stay per-entry, because each
      * entry reports its OWN module count and its own blocking files. */
     const edges = cache.edgesOf(file)
-    if (edges === null) return // a specifier that resolves to nothing blocks nothing
     for (const { spec, next } of edges) {
       if (spec.startsWith(PLATFORM_PREFIX)) {
         const rel = toPosix(path.relative(root, file))
@@ -258,7 +299,10 @@ export function blockersOf(root, entry, shared = null) {
       if (next !== null) walk(next)
     }
   }
-  if (!existsSync(start)) return { modules: 0, blockers, missing: true }
+  /* ⚠️ `existsSync` HERE TOO, after `existsAt` was written to replace it: an
+     entry behind a directory this user may not search came back MISSING,
+     "renamed or deleted?", when it was neither. 2026-09-14. */
+  if (!existsAt(root, start)) return { modules: 0, blockers, missing: true }
   walk(start)
   return { modules: seen.size, blockers, missing: false }
 }
@@ -291,36 +335,57 @@ export function blockersOf(root, entry, shared = null) {
 function newWalkCache(root) {
   const aliasList = aliases(root)
   const edges = new Map()
+  /** `file`'s edges, read off disk and parsed, and remembered for the next asker. */
+  function readEdges(file) {
+    let source
+    try {
+      source = readFileSync(file, 'utf8')
+    } catch (cause) {
+      /* ⚠️ THIS ANSWERED `null`, WHICH THE WALK READ AS "NO EDGES": a module
+         it could not read — a directory named as one, a file it may not
+         open — ended its branch clean. See `unchecked`. 2026-09-14. */
+      throw unchecked(root, file, cause)
+    }
+    /* Read as the language reads it — see `runtimeSpecifiers`, which this
+     * gate shares with `check-mutants` so the two cannot read one clause two
+     * ways again. A Set, so spread before mapping. */
+    const out = [...runtimeSpecifiers(source, file)].map((spec) => ({
+      spec,
+      next: resolveModule(root, file, spec, aliasList),
+    }))
+    // Stryker disable next-line CallExpression: with nothing remembered the next asker reads and parses the file again and is given the same list — the cache decides the cost, never the answer
+    edges.set(file, out)
+    return out
+  }
   return {
+    /* ⚠️ **NOT `if (edges.has(file)) return edges.get(file)`**, which needed a
+     * directive over its whole line to hide the one mutant that cannot be seen
+     * — the cache never consulted — and so hid `if (true)` with it, which hands
+     * the walk `undefined` for a file nobody has read and is anything but
+     * invisible. An edge list is an array and never `undefined`, so `??` falls
+     * through on a miss and on nothing else, and no line here needs a directive
+     * but the one that remembers. 2026-09-14. */
     edgesOf(file) {
-      if (edges.has(file)) return edges.get(file)
-      let source
-      try {
-        source = readFileSync(file, 'utf8')
-      } catch {
-        edges.set(file, null)
-        return null
-      }
-      /* `specifiersIn` returns a Set — spread it before mapping. */
-      const out = [...specifiersIn(source, file)].map((spec) => ({
-        spec,
-        next: resolveModule(file, spec, aliasList),
-      }))
-      edges.set(file, out)
-      return out
+      return edges.get(file) ?? readEdges(file)
     },
   }
 }
 
-/** Every `.ts`/`.tsx` under `dir` that is not a test. */
+/**
+ * Every `.ts`/`.tsx` under `dir` that is not a test.
+ *
+ * ⚠️ **A DIRECTORY IT COULD NOT LIST WAS A DIRECTORY WITH NOTHING IN IT**, so a
+ * survey counted every module it could reach and said nothing of the ones it
+ * could not. Refused now, naming the directory — see `unchecked`. 2026-09-14.
+ */
 export function sourcesUnder(root, dir) {
   const out = []
   const walk = (rel) => {
     let entries
     try {
       entries = readdirSync(path.join(root, rel), { withFileTypes: true })
-    } catch {
-      return
+    } catch (cause) {
+      throw unchecked(root, path.join(root, rel), cause)
     }
     for (const entry of entries) {
       const child = toPosix(path.join(rel, entry.name))
@@ -347,23 +412,61 @@ export function checkBrowserSafe(root, modules) {
   })
 }
 
-/** Is `dir` a directory that exists? */
+/**
+ * Is `dir` a directory that exists?
+ *
+ * ⚠️ **A PATH IT COULD NOT STAT WAS "NOT A DIRECTORY"**, the diagnosis
+ * `existsAt` had already stopped giving: a `--root` behind a directory this
+ * user may not search was refused for being absent, which sends the reader
+ * looking for a tree that is there. Only absence is `false`; any other failure
+ * is thrown in node's own words, which name the path. 2026-09-14.
+ */
 function isDirectory(dir) {
   try {
     return statSync(dir).isDirectory()
-  } catch {
-    return false
+  } catch (cause) {
+    if (isAbsence(cause)) return false
+    throw cause
   }
 }
 
-function main(argv) {
+/**
+ * The command, as its exit code.
+ *
+ * A path the walk could not check is THROWN — see `unchecked` — and reported
+ * here as exit 2 in its own words, never as a count. A count printed over a
+ * walk that stopped short is the confident all-clear this file's header
+ * records, and 1 is taken: it means a module IS blocked, which nobody knows.
+ *
+ * What it prints goes to the two streams it is handed — the process's own
+ * unless a caller says otherwise, which is the seam `run` has in
+ * `check-mutants.mjs`. ⚠️ **EVERY TEST OF THIS COMMAND SPAWNED IT**, and a
+ * spawned child never runs the mutant under test, so the whole command —
+ * `--survey`, the walk of a directory, every line it prints — was 139 of this
+ * file's 290 mutants with no coverage while each of those tests passed.
+ * 2026-09-14.
+ */
+export function main(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
+  const out = (line) => void stdout.write(`${line}\n`)
+  const err = (line) => void stderr.write(`${line}\n`)
+  try {
+    return command(argv, { out, err })
+  } catch (cause) {
+    err(`check-browser-safe: ${cause instanceof Error ? cause.message : String(cause)}`)
+    return 2
+  }
+}
+
+function command(argv, { out, err }) {
   let root = REPO_ROOT
+  /* The directory `--survey` names, or null when the question is about modules. */
+  let survey = null
   const rest = []
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--root') {
       const value = argv[++i]
       if (value === undefined) {
-        console.error(USAGE)
+        err(USAGE)
         return 2
       }
       root = path.resolve(value)
@@ -371,53 +474,69 @@ function main(argv) {
       /* Every module under a directory, grouped by cause. How the nine leaves
        * were found in the first place; kept so the next survey is one command
        * rather than a throwaway script written under time pressure. */
-      const dir = argv[++i] ?? 'src/kernel'
-      /* ⚠️ **A SURVEY THAT SCANNED NOTHING USED TO EXIT 0**, and printed
-       * "0 browser-safe, 0 blocked" while doing it. The root validation below
-       * runs after this branch returns, so `--root /nowhere --survey src/kernel`
-       * was an authoritative-looking all-clear about a tree that does not
-       * exist — the precise failure this file's header records twice. A
-       * detector that finds nothing has to be distinguishable from one that
-       * looked nowhere. */
-      if (!isDirectory(root)) {
-        console.error(`check-browser-safe: ${root} is not a directory`)
-        return 2
-      }
-      if (!isDirectory(path.resolve(root, dir))) {
-        console.error(`check-browser-safe: ${dir} is not a directory under ${root}`)
-        return 2
-      }
-      const sources = sourcesUnder(root, dir)
-      if (sources.length === 0) {
-        console.error(
-          `check-browser-safe: ${dir} holds no .ts/.tsx sources — a survey of nothing is not a clean survey`,
-        )
-        return 2
-      }
-      const causes = new Map()
-      let clean = 0
-      for (const file of sources) {
-        const { blockers } = blockersOf(root, file)
-        if (blockers.size === 0) {
-          clean += 1
-          continue
-        }
-        const key = [...blockers.keys()].sort().join(' + ')
-        if (!causes.has(key)) causes.set(key, [])
-        causes.get(key).push(file)
-      }
-      console.log(`${dir}: ${clean} browser-safe, ${[...causes.values()].flat().length} blocked`)
-      for (const [cause, list] of [...causes].sort((a, b) => b[1].length - a[1].length)) {
-        console.log(`\n  ${cause}`)
-        for (const f of list) console.log(`    ${f}`)
-      }
-      return 0
+      survey = argv[++i] ?? 'src/kernel'
     } else rest.push(argv[i])
   }
 
+  /* ⚠️ **A SURVEY THAT SCANNED NOTHING USED TO EXIT 0**, and printed
+   * "0 browser-safe, 0 blocked" while doing it. The root was validated only
+   * after the survey had returned, so `--root /nowhere --survey src/kernel` was
+   * an authoritative-looking all-clear about a tree that does not exist — the
+   * precise failure this file's header records twice. A detector that finds
+   * nothing has to be distinguishable from one that looked nowhere.
+   *
+   * ⚠️ **AND IT ANSWERED BEFORE IT HAD READ THE REST OF ITS ARGUMENTS.** The
+   * survey ran inside the loop above, so `--survey src/kernel --root <other>`
+   * surveyed THIS checkout and exited 0, and a module named beside it was never
+   * checked or mentioned. Every argument is read first now. 2026-09-14. */
   if (!isDirectory(root)) {
-    console.error(`check-browser-safe: ${root} is not a directory`)
+    err(`check-browser-safe: ${root} is not a directory`)
     return 2
+  }
+
+  if (survey !== null) {
+    if (rest.length > 0) {
+      err(`check-browser-safe: --survey checks a directory, not modules — ${rest.join(', ')} would go unchecked`)
+      return 2
+    }
+    if (!isDirectory(path.resolve(root, survey))) {
+      err(`check-browser-safe: ${survey} is not a directory under ${root}`)
+      return 2
+    }
+    const sources = sourcesUnder(root, survey)
+    if (sources.length === 0) {
+      err(`check-browser-safe: ${survey} holds no .ts/.tsx sources — a survey of nothing is not a clean survey`)
+      return 2
+    }
+    const causes = new Map()
+    let clean = 0
+    for (const file of sources) {
+      const { blockers } = blockersOf(root, file)
+      if (blockers.size === 0) {
+        clean += 1
+        continue
+      }
+      const key = [...blockers.keys()].sort().join(' + ')
+      if (!causes.has(key)) causes.set(key, [])
+      causes.get(key).push(file)
+    }
+    out(`${survey}: ${clean} browser-safe, ${[...causes.values()].flat().length} blocked`)
+    for (const [cause, list] of [...causes].sort((a, b) => b[1].length - a[1].length)) {
+      out(`\n  ${cause}`)
+      for (const f of list) out(`    ${f}`)
+    }
+    return 0
+  }
+
+  /* ⚠️ A DIRECTORY NAMED AS A MODULE WAS ONE MODULE, CHECKED CLEAN: `src`
+     printed "1 module(s) checked, 0 blocked" and exited 0 on 2026-09-14. The
+     walk refuses what it cannot read now; this answers first, and says which
+     command reads a directory. */
+  for (const module of rest) {
+    if (isDirectory(path.resolve(root, module))) {
+      err(`check-browser-safe: ${module} is a directory, not a module — \`--survey ${module}\` checks every module under it`)
+      return 2
+    }
   }
 
   const modules = rest.length > 0 ? rest : PINNED
@@ -430,20 +549,20 @@ function main(argv) {
       /* A PINNED MODULE THAT MOVED IS A FINDING, not a pass. Skipping it
        * silently is how a pin stops guarding anything while still looking
        * green — the same shape as a scan that found no files. */
-      console.log(`${report.module}  — MISSING (renamed or deleted?)`)
+      out(`${report.module}  — MISSING (renamed or deleted?)`)
       failed += 1
       continue
     }
     if (report.blockers.length === 0) continue
     failed += 1
-    console.log(`${report.module}  (${report.modules} modules)`)
-    for (const b of report.blockers) console.log(`    ${b.file}  →  ${b.packages.join(', ')}`)
+    out(`${report.module}  (${report.modules} modules)`)
+    for (const b of report.blockers) out(`    ${b.file}  →  ${b.packages.join(', ')}`)
   }
 
   const scope = pinned ? `${modules.length} pinned` : `${modules.length}`
-  console.log(`check-browser-safe: ${scope} module(s) checked, ${failed} blocked`)
+  out(`check-browser-safe: ${scope} module(s) checked, ${failed} blocked`)
   if (failed > 0) {
-    console.log(
+    out(
       `\nA module reaches ${PLATFORM_PREFIX} through the closure above, so it cannot be\n` +
         'bundled for a browser. Usually the cause is a pure value sharing a module\n' +
         'with a platform binding — split the binding into its own file, the way\n' +
@@ -454,4 +573,5 @@ function main(argv) {
   return 0
 }
 
+// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — every decision is in `main`, which is measured in-process
 if (isProcessEntry(import.meta)) process.exit(main(process.argv.slice(2)))

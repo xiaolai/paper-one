@@ -82,6 +82,52 @@ describe('the storage model', () => {
     ])
   })
 
+  /* BEFORE ANY READ, NOTHING — not a row, not a byte, not a failure. The pane
+   * draws this snapshot on its first frame, before its mount refresh lands. */
+  it('starts with an empty snapshot and the cap the settings hold', () => {
+    const w = world()
+    expect(w.model.getSnapshot()).toEqual({
+      downloads: [],
+      downloadCount: 0,
+      coverBytes: 0,
+      coverCapMB: 200,
+      status: w.status.getSnapshot(),
+      busy: null,
+      failure: null,
+    })
+  })
+
+  /* THE TITLE THE SHELF HOLDS, and the id only when there is none — a row
+   * called by its id is a row nobody recognises. */
+  it('names each row by its title, and by its id when the title is empty', async () => {
+    const w = world()
+    for (const [book, title] of [['book:a', 'Moby-Dick'], ['book:b', '']] as const) {
+      await w.services.library.add(book, rec(title))
+      await w.fs.writeFile(`books/book_${book.slice('book:'.length)}/content.epub`, new TextEncoder().encode(book))
+      await w.services.library.refreshContent(book)
+      await recordDownloadSize(w.fs, book, 10)
+    }
+    await w.model.refresh()
+    expect(w.model.getSnapshot().downloads.map((one) => one.title)).toEqual(['Moby-Dick', 'book:b'])
+  })
+
+  /* A SUBSCRIBER THAT THROWS IS REPORTED UNDER THIS STORE'S NAME, so the
+   * console line says which pane's listener broke. */
+  it('names the storage store when a subscriber throws', () => {
+    const w = world()
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const broken = new Error('a listener that broke')
+      w.model.subscribe(() => {
+        throw broken
+      })
+      w.status.set({ state: 'syncing', detail: null })
+      expect(said).toHaveBeenCalledWith('Paper: a storage subscriber threw while being notified', broken)
+    } finally {
+      said.mockRestore()
+    }
+  })
+
   it('does not offer to remove a book that was never downloaded', async () => {
     const w = await world()
     // Bytes on this machine, no ledger row: an imported book.
@@ -211,14 +257,75 @@ describe('the storage model', () => {
     expect(model.getSnapshot().failure).toBeNull()
   })
 
-  it('the download ledger round-trips and tolerates junk', async () => {
+  it('the download ledger round-trips', async () => {
     const w = world()
     await recordDownloadSize(w.fs, 'book:a', 10)
     await recordDownloadSize(w.fs, 'book:b', 20)
     await dropDownloadSize(w.fs, 'book:a')
     expect(await readDownloadSizes(w.fs)).toEqual({ 'book:b': 20 })
-    await w.fs.writeFile('sync/downloads.json', new TextEncoder().encode('not json'))
-    expect(await readDownloadSizes(w.fs)).toEqual({})
+  })
+
+  /* DROPPING A ROW THAT IS NOT THERE WRITES NOTHING — no ledger conjured from
+   * an absent one, and a held one left byte for byte as it was. */
+  it('writes nothing to drop a download it never recorded', async () => {
+    const w = world()
+    await dropDownloadSize(w.fs, 'book:a')
+    expect(await w.fs.exists('sync/downloads.json')).toBe(false)
+
+    const raw = '{ "book:b": 20 }'
+    await w.fs.writeFile('sync/downloads.json', new TextEncoder().encode(raw))
+    await dropDownloadSize(w.fs, 'book:a')
+    expect(new TextDecoder().decode(await w.fs.readFile('sync/downloads.json'))).toBe(raw)
+  })
+
+  /* THE PARSER'S OWN WORDS TRAVEL WITH THE REFUSAL. */
+  it('carries the parse error as the cause of a refusal', async () => {
+    const w = world()
+    await w.fs.writeFile('sync/downloads.json', new TextEncoder().encode('{"book:a":'))
+    const cause = await readDownloadSizes(w.fs).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe('the downloads ledger is not JSON')
+    expect((cause as Error).cause).toBeInstanceOf(SyntaxError)
+  })
+
+  /**
+   * ⚠️ **BYTES THAT WILL NOT READ ARE NOT AN EMPTY LEDGER, AND THEY USED TO BE
+   * ONE.** The read distinguished ABSENT from a failed READ and then answered
+   * `{}` for bytes that were merely unreadable — so `recordDownloadSize`, which
+   * is a read-modify-write, persisted that emptiness over the whole ledger. The
+   * Storage pane then stopped offering to reclaim any download this device had,
+   * permanently, and there is no second record of those sizes. Found by the
+   * 2026-09-13 audit. Each clause is asserted in its own words, because the two
+   * share a prefix.
+   */
+  it.each([
+    ['not JSON', 'not json', /the downloads ledger is not JSON/u],
+    ['a list', '[1,2,3]', /the downloads ledger is not an object/u],
+    ['JSON null', 'null', /the downloads ledger is not an object/u],
+    ['a bare number', '42', /the downloads ledger is not an object/u],
+    ['a bare string', '"downloads"', /the downloads ledger is not an object/u],
+    ['a bare boolean', 'true', /the downloads ledger is not an object/u],
+  ])('refuses a ledger that is %s, and leaves its bytes where they are', async (_name, raw, clause) => {
+    const w = world()
+    await w.fs.writeFile('sync/downloads.json', new TextEncoder().encode(raw))
+
+    const cause = await readDownloadSizes(w.fs).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(clause)
+
+    /* AND THE WRITER DOES NOT CLOBBER IT — the whole point of the distinction. */
+    const wrote = await recordDownloadSize(w.fs, 'book:b', 20).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    )
+    expect(wrote).toBeInstanceOf(Error)
+    expect(new TextDecoder().decode(await w.fs.readFile('sync/downloads.json'))).toBe(raw)
   })
 
   /**
@@ -226,15 +333,9 @@ describe('the storage model', () => {
    * half-migrated ledger actually looks like — the syntax check above never
    * sees any of these.
    */
-  it('drops corrupt entries individually and refuses a document that is not a ledger', async () => {
+  it('drops corrupt entries individually and keeps the good ones', async () => {
     const w = world()
     const write = (value: unknown) => w.fs.writeFile('sync/downloads.json', new TextEncoder().encode(JSON.stringify(value)))
-
-    /* Not an object at all: there is nothing here to preserve. */
-    for (const whole of [[1, 2, 3], null, 42, 'downloads', true]) {
-      await write(whole)
-      expect(await readDownloadSizes(w.fs), JSON.stringify(whole)).toEqual({})
-    }
 
     /* An object WITH good rows in it: the bad ones go, the good ones stay. A
      * whole-document refusal here would throw away the reader's real
@@ -376,6 +477,24 @@ describe('the storage model', () => {
       await w.seed('book:b', true)
       await settle()
       expect(w.reads() - before).toBe(0)
+    })
+
+    /* NOTHING MISSED, NOTHING READ. A subscriber arriving at a model nothing
+     * has changed under — a new one, or one read since the last change — costs
+     * no read; the pane's own mount refresh is the one that reads. */
+    it('reads nothing on subscribe when nothing changed since the last read', async () => {
+      const fresh = await watched()
+      fresh.model.subscribe(() => {})
+      await settle()
+      expect(fresh.reads()).toBe(0)
+
+      const read = await watched()
+      await read.seed('book:a', true)
+      await read.model.refresh()
+      const before = read.reads()
+      read.model.subscribe(() => {})
+      await settle()
+      expect(read.reads() - before).toBe(0)
     })
 
     /* Deferred, not dropped: the pane opening must show what happened while
@@ -540,6 +659,20 @@ describe('the storage model', () => {
     /* UNSUBSCRIBING IS ENOUGH ON ITS OWN. The last listener leaving puts the
      * model back to reading nothing, which is what makes closing the Settings
      * pane stop the cost rather than merely hide it. */
+    /* `dispose` LETS GO OF BOTH ENDS: the stores it listened to, and the
+     * listeners it told. A status change after it reaches no snapshot, and a
+     * read after it tells nobody. */
+    it('hears no store and tells no listener once disposed', async () => {
+      const w = await watched()
+      let told = 0
+      w.model.subscribe(() => void (told += 1))
+      w.model.dispose()
+      w.status.set({ state: 'syncing', detail: null })
+      expect(w.model.getSnapshot().status.state).toBe('idle')
+      await w.model.refresh()
+      expect(told).toBe(0)
+    })
+
     it('stops reading when the last listener unsubscribes', async () => {
       const w = await watched()
       const off = w.model.subscribe(() => {})
@@ -576,6 +709,30 @@ describe('the storage model', () => {
     expect(snap.downloads).toHaveLength(MAX_SHOWN)
     expect(snap.downloads[0]?.size).toBe(many)
     expect(snap.downloads.at(-1)?.size).toBe(many - MAX_SHOWN + 1)
+  })
+
+  /**
+   * THE TIE-BREAK DECIDES WHICH ROW A READER SEES, at the fiftieth.
+   *
+   * Fifty-one downloads of one size: the order among them is entirely the id
+   * comparison, and the one it puts last is the one nobody sees. `book:aa`
+   * before `book:Bb` is the kernel's comparison (`byRecency`'s
+   * `localeCompare`); a code-point comparison puts every capital first and
+   * would cut the other one.
+   */
+  it('cuts equal-size downloads at the fiftieth by the kernel’s id order', async () => {
+    const w = world()
+    const ids = [...Array.from({ length: MAX_SHOWN - 1 }, (_one, at) => `book:${String(at).padStart(3, '0')}`), 'book:Bb', 'book:aa']
+    for (const id of ids) {
+      await w.seed(id, true)
+      await recordDownloadSize(w.fs, id, 100)
+    }
+    await w.model.refresh()
+    const shown = w.model.getSnapshot().downloads.map((one) => one.book)
+    expect(w.model.getSnapshot().downloadCount).toBe(MAX_SHOWN + 1)
+    expect(shown).toHaveLength(MAX_SHOWN)
+    expect(shown.at(-1)).toBe('book:aa')
+    expect(shown).not.toContain('book:Bb')
   })
 
   it('shows everything when there is little, and says the count once', async () => {
@@ -676,12 +833,62 @@ describe('the cover cache cap', () => {
     expect(evictions).toEqual([])
   })
 
+  /* NOT A NUMBER IS REFUSED BEFORE THE RANGE IS ASKED. `NaN` fails every
+   * comparison, so a range check alone waves it through — to a setting that
+   * refuses it and an eviction that runs anyway. */
+  it('does not evict for a value that is not a number', async () => {
+    const { model, evictions } = await capModel()
+    await model.setCoverCapMB(Number.NaN)
+    expect(evictions).toEqual([])
+  })
+
   it('accepts a value in range, rounded to whole megabytes', async () => {
     const { model, settings } = await capModel()
     await model.setCoverCapMB(250.4)
     expect(settings.get(COVER_CAP_SETTING)).toBe(250)
     await model.setCoverCapMB(COVER_CAP_MIN_MB)
     expect(settings.get(COVER_CAP_SETTING)).toBe(COVER_CAP_MIN_MB)
+  })
+
+  it('accepts the largest cap in range', async () => {
+    const { model, settings } = await capModel()
+    await model.setCoverCapMB(COVER_CAP_MAX_MB)
+    expect(settings.get(COVER_CAP_SETTING)).toBe(COVER_CAP_MAX_MB)
+  })
+
+  /* A CAP CHANGE STARTING CLEARS THE LAST FAILURE, as a removal starting does:
+   * the eviction it runs is a new attempt, and a reason left on screen during
+   * it belongs to something else. */
+  it('clears a previous failure when a cap change starts', async () => {
+    const services = createKernelServices({ fs: crashableFs(), storage: memoryStorage() })
+    const during: (string | null)[] = []
+    const model = createStorageModel({
+      services,
+      coverCache: {
+        ensure: async () => true,
+        index: async () => ({}),
+        totalBytes: async () => 0,
+        evict: async () => void during.push(model.getSnapshot().failure),
+      },
+      status: createSyncStatus(),
+      removeDownload: async () => {
+        throw new Error('the file is locked')
+      },
+    })
+    await model.removeDownload('book:a')
+    expect(model.getSnapshot().failure).toMatch(/the file is locked/u)
+    await model.setCoverCapMB(42)
+    expect(during).toEqual([null])
+    expect(model.getSnapshot().failure).toBeNull()
+  })
+
+  /* WITH NO COVER CACHE — before sync has started — a cap change stores the
+   * number and has nothing to evict, which is not a failure. */
+  it('stores a cap with no cover cache, and reports nothing', async () => {
+    const w = world()
+    await w.model.setCoverCapMB(42)
+    expect(w.services.settings.get(COVER_CAP_SETTING)).toBe(42)
+    expect(w.model.getSnapshot().failure).toBeNull()
   })
 })
 
@@ -725,5 +932,188 @@ describe('failures reach the snapshot', () => {
     })
     await model.removeDownload('book:x')
     expect(model.getSnapshot().busy).toBeNull()
+  })
+})
+
+/**
+ * ⚠️ **A READ THAT FAILED WAS A REJECTION NOBODY HELD, AND THE PANE SAID
+ * NOTHING.** The 2026-09-13 audit made an unreadable ledger — and an unreadable
+ * cover index — THROW rather than read as empty, which is right; but `refresh`
+ * let that throw out, and every caller of it dropped the promise: the pane's
+ * mount effect, its cap field and its Evict button with `void`, this model's
+ * own debounce timer and subscribe with `void`, and both actions from a line
+ * outside their `try`. So `refresh`, `setCoverCapMB` and `removeDownload` all
+ * rejected while `failure` stayed `null` — the reader saw an empty section and
+ * no reason, and the runtime saw an unhandled rejection. Found by the
+ * 2026-09-13 verify. The read's failure is the model's failure now, published
+ * like an action's.
+ */
+describe('a read that fails reaches the snapshot, not an unhandled rejection', () => {
+  const LEDGER_CLAUSE = /the downloads ledger is not an object/u
+  const damage = (w: ReturnType<typeof world>) =>
+    w.fs.writeFile('sync/downloads.json', new TextEncoder().encode('[1,2,3]'))
+
+  /** Every rejection nobody handled while `run` was going, collected rather than thrown at the runner. */
+  async function unhandledDuring(run: () => Promise<void>): Promise<readonly unknown[]> {
+    const seen: unknown[] = []
+    const note = (reason: unknown) => void seen.push(reason)
+    process.on('unhandledRejection', note)
+    try {
+      await run()
+      /* A dropped rejection is reported after the microtask queue drains — on
+         the fake clock when one is installed, where a real `setTimeout` would
+         never fire. */
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0)
+      else await new Promise((done) => setTimeout(done, 0))
+    } finally {
+      process.off('unhandledRejection', note)
+    }
+    return seen
+  }
+
+  it('resolves a refresh over an unreadable ledger, and names the ledger', async () => {
+    const w = world()
+    await damage(w)
+    const unhandled = await unhandledDuring(() => w.model.refresh())
+    expect(unhandled).toEqual([])
+    expect(w.model.getSnapshot().failure).toMatch(LEDGER_CLAUSE)
+  })
+
+  it('resolves a cap change over an unreadable ledger, keeps the cap, and names the ledger', async () => {
+    const w = world()
+    await damage(w)
+    const unhandled = await unhandledDuring(() => w.model.setCoverCapMB(42))
+    expect(unhandled).toEqual([])
+    expect(w.services.settings.get(COVER_CAP_SETTING)).toBe(42)
+    expect(w.model.getSnapshot().failure).toMatch(LEDGER_CLAUSE)
+  })
+
+  it('resolves an eviction whose refresh cannot read the ledger, and names the ledger', async () => {
+    const w = world({ removeDownload: async () => {} })
+    await damage(w)
+    const unhandled = await unhandledDuring(() => w.model.removeDownload('book:a'))
+    expect(unhandled).toEqual([])
+    expect(w.model.getSnapshot().busy).toBeNull()
+    expect(w.model.getSnapshot().failure).toMatch(LEDGER_CLAUSE)
+  })
+
+  it('names the ledger from the refresh a subscriber triggers, and from the one a shelf change schedules', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = world()
+      await damage(w)
+      /* Missed while nobody watched, read back on subscribe. */
+      await w.seed('book:a', true)
+      const unhandled = await unhandledDuring(async () => {
+        w.model.subscribe(() => {})
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(unhandled).toEqual([])
+      expect(w.model.getSnapshot().failure).toMatch(LEDGER_CLAUSE)
+
+      /* Repaired, read clean, then damaged again — and only the debounce reads it. */
+      await w.fs.writeFile('sync/downloads.json', new TextEncoder().encode('{}'))
+      await w.model.refresh()
+      expect(w.model.getSnapshot().failure).toBeNull()
+      await damage(w)
+      const later = await unhandledDuring(async () => {
+        await w.seed('book:b', true)
+        await vi.advanceTimersByTimeAsync(60_000)
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(later).toEqual([])
+      expect(w.model.getSnapshot().failure).toMatch(LEDGER_CLAUSE)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('names a cover total that will not read', async () => {
+    const services = createKernelServices({ fs: crashableFs(), storage: memoryStorage() })
+    const model = createStorageModel({
+      services,
+      coverCache: {
+        ensure: async () => true,
+        index: async () => ({}),
+        totalBytes: async () => {
+          throw new Error('the covers index is not an object')
+        },
+        evict: async () => {},
+      },
+      status: createSyncStatus(),
+      removeDownload: null,
+    })
+    await model.refresh()
+    expect(model.getSnapshot().failure).toMatch(/the covers index is not an object/u)
+  })
+
+  /* ONLY ITS OWN. An eviction's failure is published before the refresh in its
+     `finally` runs, and that refresh succeeding must not erase the reason the
+     row is still there — `publishes a failed eviction…` above holds that. What
+     a successful read may clear is a failure a READ published. */
+  it('clears a read failure once a read succeeds, and not before', async () => {
+    const w = world()
+    await damage(w)
+    await w.model.refresh()
+    expect(w.model.getSnapshot().failure).toMatch(LEDGER_CLAUSE)
+    await w.fs.writeFile('sync/downloads.json', new TextEncoder().encode('{}'))
+    await w.model.refresh()
+    expect(w.model.getSnapshot().failure).toBeNull()
+  })
+
+  /* ⚠️ **AND "ONLY ITS OWN" WAS A FLAG NOBODY RESET WHEN AN ACTION FAILED.** A
+     read that failed WHILE an action ran set it; the action's failure replaced
+     the read's on screen and left the flag standing; and the clean read in the
+     action's `finally` took the flag at its word and cleared the ACTION's
+     failure. Reproduced by the 2026-09-14 verify, in exactly this order. */
+  it('keeps an eviction’s failure on show when a read failed while it ran and the read after it is clean', async () => {
+    let refuse: (cause: Error) => void = () => {}
+    const w = world({
+      removeDownload: () =>
+        new Promise<void>((_done, fail) => {
+          refuse = fail
+        }),
+    })
+    const evicting = w.model.removeDownload('book:a')
+    await damage(w)
+    await w.model.refresh()
+    expect(w.model.getSnapshot().failure).toMatch(LEDGER_CLAUSE)
+    await w.fs.writeFile('sync/downloads.json', new TextEncoder().encode('{}'))
+
+    refuse(new Error('the file is locked'))
+    await evicting
+
+    expect(w.model.getSnapshot().failure, 'the clean read erased why the row is still there').toMatch(/the file is locked/u)
+    expect(w.model.getSnapshot().busy).toBeNull()
+  })
+
+  it('keeps a cap change’s failure on show when a read failed while it ran and the read after it is clean', async () => {
+    const fs = crashableFs()
+    const services = createKernelServices({ fs, storage: memoryStorage() })
+    let refuse: (cause: Error) => void = () => {}
+    const model = createStorageModel({
+      services,
+      coverCache: {
+        ensure: async () => true,
+        index: async () => ({}),
+        totalBytes: async () => 0,
+        evict: () =>
+          new Promise<void>((_done, fail) => {
+            refuse = fail
+          }),
+      },
+      status: createSyncStatus(),
+      removeDownload: null,
+    })
+    const capping = model.setCoverCapMB(42)
+    await fs.writeFile('sync/downloads.json', new TextEncoder().encode('[1,2,3]'))
+    await model.refresh()
+    expect(model.getSnapshot().failure).toMatch(LEDGER_CLAUSE)
+    await fs.writeFile('sync/downloads.json', new TextEncoder().encode('{}'))
+
+    refuse(new Error('the covers would not go'))
+    await capping
+
+    expect(model.getSnapshot().failure, 'the clean read erased why the cap did not take').toMatch(/the covers would not go/u)
   })
 })

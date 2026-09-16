@@ -285,8 +285,15 @@ describe('readRole', () => {
    */
   it('is the only way any capability reads the role — nothing calls localRole() directly', async () => {
     const { readFileSync, readdirSync } = await import('node:fs')
-    const { join } = await import('node:path')
-    const root = new URL('../../../src/capabilities/', import.meta.url).pathname
+    const { join, sep } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    /* ⚠️ **A FILE URL'S `pathname` IS NOT A PATH ON WINDOWS** (2026-09-14). It
+       is `/C:/Users/…`, which `join` turned into `C:\C:\Users\…`, and the walk
+       died on ENOENT the first time the Windows leg reached it. The filters
+       below spell paths with `/`, and Windows separates with `\`, so every
+       path is compared in forward slashes. */
+    const root = fileURLToPath(new URL('../../../src/capabilities/', import.meta.url))
+    const posix = (file: string): string => file.split(sep).join('/')
     const walk = (dir: string): string[] =>
       readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
         const at = join(dir, entry.name)
@@ -298,15 +305,15 @@ describe('readRole', () => {
     expect(files.length).toBeGreaterThan(30)
 
     const offenders = files
-      .filter((file) => !file.endsWith('/peer/index.ts'))
-      .filter((file) => !file.includes('/peer/lib/'))
+      .filter((file) => !posix(file).endsWith('/peer/index.ts'))
+      .filter((file) => !posix(file).includes('/peer/lib/'))
       .filter((file) => {
         /* Comments stripped, or this test's own explanation of the defect —
            and the one in `sync/index.ts` — would count as a call. */
         const text = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
         return /\blocalRole\s*\(\s*\)/.test(text)
       })
-      .map((file) => file.slice(root.length))
+      .map((file) => posix(file.slice(root.length)))
     expect(offenders).toEqual([])
   })
 

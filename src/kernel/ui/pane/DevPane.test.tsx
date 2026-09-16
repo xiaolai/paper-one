@@ -6,7 +6,7 @@ import type { CopyOutcome } from '../clipboard'
 import { DevPane } from './DevPane'
 
 /**
- * ⚠️ **RENDERED, NOT READ BACK.** `GlossStrip` carries the argument for this
+ * ⚠️ **RENDERED, NOT READ BACK.** `LookUpFace` carries the argument for this
  * file's existence: a panel whose states are asserted by scanning its source
  * survives `display: none` on the rule that draws them. The Developer panel has
  * four states a reader can land in — not recording, recording with nothing,

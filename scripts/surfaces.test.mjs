@@ -76,7 +76,10 @@ describe('the registries it evaluates', () => {
   })
 
   it('reads the counts this phase measured', () => {
-    expect(surfaces.kernelSettings).toHaveLength(18)
+    /* 19 since phase 17 added `kernel.lookUpLanguage` — Look up's answer
+       language (WI-17.5), a durable preference like the rest. */
+    expect(surfaces.kernelSettings).toHaveLength(19)
+    expect(surfaces.kernelSettings).toContain('lookUpLanguage')
     expect(surfaces.services).toHaveLength(31)
     expect(surfaces.readingSteps).toHaveLength(14)
     expect(surfaces.spacingAxes).toEqual(['letter', 'word', 'line', 'paragraph'])

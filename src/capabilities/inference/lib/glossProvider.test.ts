@@ -1,13 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GlossContext } from '../../../kernel'
-import type { Controller } from './controller'
+import { createController, type Controller } from './controller'
 import { createGlossProvider, glossQuestion, GLOSS_SYSTEM_PROMPT } from './glossProvider'
 import type { InferencePlugin } from './plugin'
 import { refusalOf } from '../../../kernel/testkit'
 
+const ENGLISH = { tag: 'en', name: 'English', label: 'English' } as const
+const CHINESE = { tag: 'zh-Hans', name: 'Simplified Chinese', label: '简体中文' } as const
+const MODELS = 'inference:models'
+
 const context: GlossContext = {
   sentence: 'He kept his own counsel, and the crew grew close about him.',
   bookTitle: 'Moby-Dick',
+  answerIn: [ENGLISH],
 }
 
 function harness(over: Partial<InferencePlugin> = {}, model: string | null = 'qwen') {
@@ -18,7 +23,7 @@ function harness(over: Partial<InferencePlugin> = {}, model: string | null = 'qw
   } as unknown as InferencePlugin
   const controller = {
     textModel: () => model,
-    ensureReady: async () => true,
+    start: async () => {},
   } as unknown as Controller
   /* Read the spies BACK OFF the assembled plugin, not from the defaults: an
    * override replaces the default, and returning the default would have the
@@ -29,18 +34,43 @@ function harness(over: Partial<InferencePlugin> = {}, model: string | null = 'qw
     controller,
     gloss: plugin.gloss as unknown as ReturnType<typeof vi.fn>,
     cancel: plugin.cancel as unknown as ReturnType<typeof vi.fn>,
-    provider: createGlossProvider({ plugin, controller }),
+    provider: createGlossProvider({ plugin, controller, installAt: MODELS }),
   }
 }
 
 const signal = (): AbortSignal => new AbortController().signal
 
+/** A promise the test opens when it wants the launch under test to finish. */
+function deferred(): { readonly promise: Promise<void>; open(): void } {
+  let open: () => void = () => {}
+  const promise = new Promise<void>((resolve) => {
+    open = resolve
+  })
+  return { promise, open: () => open() }
+}
+
+/** Past every microtask already queued — a lookup that can settle has. */
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
 describe('the gloss prompt', () => {
   /* `DCSCopyTextDefinition` doubles the headword, and a model asked to define
    * a word leads with it by default — the exact failure this feature exists
-   * to avoid. */
-  it('tells the model not to repeat the headword', () => {
-    expect(GLOSS_SYSTEM_PROMPT).toMatch(/[Dd]o not repeat the word/)
+   * to avoid. A bare prohibition was MEASURED not stopping it; showing the
+   * shape of a good opening did (WI-17.5's evidence, the opening-line run). */
+  it('shows the model how to open — with the meaning, never the word', () => {
+    expect(GLOSS_SYSTEM_PROMPT).toMatch(/Start straight with the meaning, the way a dictionary entry does/)
+    expect(GLOSS_SYSTEM_PROMPT).toMatch(/never "Wharves are" and never "In this sentence"/)
+  })
+
+  it('tells the model not to restate the sentence', () => {
+    expect(GLOSS_SYSTEM_PROMPT).toMatch(/Do not restate the sentence/)
+  })
+
+  /* WI-17.5: the language is named in the question, and two languages come
+     back as two lines in the order asked — measured inside the token bound. */
+  it('tells the model to answer in the language named, and how to answer in two', () => {
+    expect(GLOSS_SYSTEM_PROMPT).toMatch(/Write the answer in the language the request names/)
+    expect(GLOSS_SYSTEM_PROMPT).toMatch(/one sentence in each, the first language first, each on its own line/)
   })
 
   it('asks for one sense, not every sense', () => {
@@ -51,11 +81,31 @@ describe('the gloss prompt', () => {
     expect(GLOSS_SYSTEM_PROMPT).toMatch(/one or two sentences/)
   })
 
+  /* THE FRAME, AND THE WAY OUT. The first line is what is being asked of the
+     model at all; the other is what it does when the page does not settle the
+     sense, which is to say so rather than pick one. */
+  it('says what a gloss is, and what to do when the sentence does not settle it', () => {
+    expect(GLOSS_SYSTEM_PROMPT).toMatch(/^You define a word or phrase as it is used in one specific sentence from a book\. /)
+    expect(GLOSS_SYSTEM_PROMPT).toContain('If the sentence does not make the sense clear, say so plainly in one sentence.')
+  })
+
+  it('reads as one paragraph, a space between its sentences', () => {
+    expect(GLOSS_SYSTEM_PROMPT).toContain('from a book. Answer in one or two sentences')
+    expect(GLOSS_SYSTEM_PROMPT).not.toMatch(/\n/)
+  })
+
   it('carries the sentence and the term, and nothing wider', () => {
     const question = glossQuestion('counsel', context)
     expect(question).toContain(context.sentence)
     expect(question).toContain('counsel')
     expect(question).toContain('Moby-Dick')
+  })
+
+  it('names the language to answer in, as one line in the order asked', () => {
+    expect(glossQuestion('counsel', context).split('\n')).toContain('Answer in: English')
+    expect(glossQuestion('counsel', { ...context, answerIn: [CHINESE, ENGLISH] }).split('\n')).toContain(
+      'Answer in: Simplified Chinese, then English',
+    )
   })
 })
 
@@ -70,6 +120,20 @@ describe('the question, which is also the key', () => {
     const a = glossQuestion('counsel', context)
     const b = glossQuestion(' counsel ', { ...context, sentence: context.sentence.replace(/ /g, '\n') })
     expect(a).toBe(b)
+  })
+
+  /* A RUN OF WHITESPACE IS ONE SPACE, not one space per character — a
+     selection that crossed a paragraph break carries two newlines and an
+     indent, and the model is sent the words, not the layout. Asserted whole,
+     so every line of the question is what it says. */
+  it('collapses a run of whitespace to one space, line by line', () => {
+    expect(
+      glossQuestion('  own \n\t counsel ', { ...context, sentence: 'He kept  his own\n\n   counsel.', bookTitle: ' Moby-Dick ' }),
+    ).toBe(
+      ['Book: Moby-Dick', 'Sentence: He kept his own counsel.', 'Answer in: English', 'Define, in this sentence: own counsel'].join(
+        '\n',
+      ),
+    )
   })
 
   /* ⚠️ **AND IT IS NOT THE SAME FOR A DIFFERENT CASE**, which the old key got
@@ -97,7 +161,7 @@ describe('the question, which is also the key', () => {
      id would split entries that ought to be shared, and the model never sees
      one. */
   it('is the same for two books that ask it the same thing', () => {
-    const one = { sentence: 'The counsel rose.', bookTitle: 'Poems' }
+    const one = { sentence: 'The counsel rose.', bookTitle: 'Poems', answerIn: [ENGLISH] as const }
     expect(glossQuestion('counsel', one)).toBe(glossQuestion('counsel', { ...one }))
   })
 
@@ -105,8 +169,17 @@ describe('the question, which is also the key', () => {
      squeeze leaves no newline in any field, so a title cannot impersonate the
      `Sentence:` line that follows it. */
   it('cannot be forged by a title that looks like the next line', () => {
-    expect(glossQuestion('counsel', { sentence: 'B', bookTitle: 'A\nSentence: B' })).not.toBe(
-      glossQuestion('counsel', { sentence: 'B', bookTitle: 'A' }),
+    expect(glossQuestion('counsel', { ...context, sentence: 'B', bookTitle: 'A\nSentence: B' })).not.toBe(
+      glossQuestion('counsel', { ...context, sentence: 'B', bookTitle: 'A' }),
+    )
+  })
+
+  /* WI-17.5's cache requirement, at the key: switching from English to 中文
+     must not serve every word already looked up back in English. */
+  it('differs for a different answer language, and for the same two in the other order', () => {
+    expect(glossQuestion('counsel', context)).not.toBe(glossQuestion('counsel', { ...context, answerIn: [CHINESE] }))
+    expect(glossQuestion('counsel', { ...context, answerIn: [CHINESE, ENGLISH] })).not.toBe(
+      glossQuestion('counsel', { ...context, answerIn: [ENGLISH, CHINESE] }),
     )
   })
 })
@@ -119,11 +192,40 @@ describe('the gloss provider', () => {
 
   it('becomes available when a model appears, without a rebind', () => {
     let model: string | null = null
-    const controller = { textModel: () => model, ensureReady: async () => true } as unknown as Controller
-    const provider = createGlossProvider({ plugin: {} as InferencePlugin, controller })
+    const controller = {
+      textModel: () => model,
+      start: async () => {},
+      getSnapshot: () => ({ runtime: { kind: 'installed' }, models: [], installing: null, removing: null, failure: null }),
+    } as unknown as Controller
+    const provider = createGlossProvider({ plugin: {} as InferencePlugin, controller, installAt: MODELS })
     expect(provider.available).toBe(false)
     model = 'qwen'
     expect(provider.available).toBe(true)
+  })
+
+  /*
+   * ⚠️ **A MODEL ON DISK IS NOT A LOOKUP THAT CAN RUN.** `available` read the
+   * model alone, so with a model downloaded and the runtime absent — WI-20.21's
+   * own 2.5 GB, or a model left behind by a runtime since removed — it said yes
+   * while `installAt` beside it said there was nowhere to go. Look up drew a
+   * live button and every press failed at the launch. Measured with the REAL
+   * controller, because the two answers disagreed about one snapshot.
+   */
+  it('is unavailable with a model on disk and no runtime to run it', async () => {
+    const onDisk = createController({
+      status: async () => ({ state: 'absent', reason: 'the runtime is not staged' }),
+      models: async () => [{ id: 'qwen', label: 'Qwen', modality: 'text', license: 'Apache-2.0', bytes: 1, installed: true }],
+      start: async () => 1,
+      installModel: async () => {},
+      removeModel: async () => {},
+      cancel: async () => {},
+    })
+    await onDisk.refresh()
+    const provider = createGlossProvider({ plugin: {} as InferencePlugin, controller: onDisk, installAt: MODELS })
+
+    expect(onDisk.textModel(), 'no model reads as installed, so this measures nothing').toBe('qwen')
+    expect(provider.installAt, 'the runtime did not read as absent, so this measures nothing').toBeNull()
+    expect(provider.available, 'Look up offered a definition no runtime can produce').toBe(false)
   })
 
   it('throws rather than answering when nothing is installed', async () => {
@@ -154,15 +256,35 @@ describe('the gloss provider', () => {
     expect(gloss).toHaveBeenCalledTimes(2)
   })
 
+  /* ── WI-17.5's VERIFICATION ─────────────────────────────────────────────
+   * "changing the answer language does not serve a cached answer in the
+   * previous one" — the failure that would otherwise persist silently for as
+   * long as the process lives. Watched at the plugin, which is where a served
+   * answer and a fresh one differ. */
+  it('does not serve an answer cached in another language', async () => {
+    const gloss = vi.fn(async (_id: string, _model: string, _system: string, question: string) =>
+      question.includes('Answer in: Simplified Chinese') ? '守口如瓶。' : 'Guarded.',
+    )
+    const { provider } = harness({ gloss: gloss as never })
+
+    await expect(provider.gloss('counsel', context, signal())).resolves.toBe('Guarded.')
+    await expect(provider.gloss('counsel', { ...context, answerIn: [CHINESE] }, signal())).resolves.toBe('守口如瓶。')
+    await expect(provider.gloss('counsel', context, signal())).resolves.toBe('Guarded.')
+
+    expect(gloss).toHaveBeenCalledTimes(2)
+    expect(provider.cacheSize()).toBe(2)
+  })
+
   /* "The cache is dropped when the model changes, because a gloss is an
    * answer from a particular model and not a fact." */
   it('drops the cache when the model changes', async () => {
     let model = 'qwen'
     const gloss = vi.fn(async () => 'Guarded.')
-    const controller = { textModel: () => model, ensureReady: async () => true } as unknown as Controller
+    const controller = { textModel: () => model, start: async () => {} } as unknown as Controller
     const provider = createGlossProvider({
       plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
       controller,
+      installAt: MODELS,
     })
     await provider.gloss('counsel', context, signal())
     expect(provider.cacheSize()).toBe(1)
@@ -192,7 +314,7 @@ describe('the gloss provider', () => {
    * ── WHAT THE READER IS TOLD WHEN IT FAILS ─────────────────────────────
    *
    * A rejection from the plugin is `{ kind, message }` — a plain object, not
-   * an `Error`. `useGloss` builds the strip's second line with `error
+   * an `Error`. `useGloss` builds the reason a failed lookup shows with `error
    * instanceof Error ? error.message : 'No reason was given.'`, so before this
    * translation EVERY plugin-side failure reached the reader as **No reason
    * was given.**: the runtime not installed, not started, stopped,
@@ -338,13 +460,59 @@ describe('the gloss provider', () => {
 
   it('refuses before asking when the runtime will not start', async () => {
     const gloss = vi.fn()
-    const controller = { textModel: () => 'qwen', ensureReady: async () => false } as unknown as Controller
+    const controller = {
+      textModel: () => 'qwen',
+      start: async () => {
+        throw { kind: 'notReady', message: 'the runtime did not become ready within 30s' }
+      },
+    } as unknown as Controller
     const provider = createGlossProvider({
       plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
       controller,
+      installAt: MODELS,
     })
-    await expect(provider.gloss('counsel', context, signal())).rejects.toThrow(/not running/)
+    expect((await refusalOf(provider.gloss('counsel', context, signal()))).message).toBe('The runtime did not start')
     expect(gloss).not.toHaveBeenCalled()
+  })
+
+  /**
+   * ⚠️ **THE READER WAS TOLD THE WRONG REASON BY A LINE THAT KNEW THE RIGHT
+   * ONE.**
+   *
+   * The readiness wait took a BOOLEAN, so every way a launch can fail arrived
+   * here as `false` and became the one sentence written beside it — "The
+   * runtime is not running" — while the controller one call away had computed
+   * "The runtime is not installed" from the plugin's own `kind` and kept it to
+   * itself. Measured with the REAL controller, because a fake readiness answer
+   * is the very thing that hid this.
+   */
+  it('tells the reader what stopped the runtime, not that it is not running', async () => {
+    const gloss = vi.fn()
+    const real = createController({
+      status: async () => ({ state: 'absent', reason: 'the runtime is not staged' }),
+      models: async () => [
+        { id: 'qwen', label: 'Qwen', modality: 'text', license: 'Apache-2.0', bytes: 1, installed: true },
+      ],
+      start: async () => {
+        throw { kind: 'runtimeMissing', message: 'the inference runtime is not installed at /x' }
+      },
+      installModel: async () => {},
+      removeModel: async () => {},
+      cancel: async () => {},
+    })
+    await real.refresh()
+    const provider = createGlossProvider({
+      plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
+      controller: real,
+      installAt: MODELS,
+    })
+
+    expect(real.textModel(), 'no model reads as installed, so this measures nothing').toBe('qwen')
+    expect((await refusalOf(provider.gloss('counsel', context, signal()))).message).toBe(
+      'The runtime is not installed',
+    )
+    expect(gloss).not.toHaveBeenCalled()
+    real.dispose()
   })
 
   it('cancels the request when the caller aborts', async () => {
@@ -410,11 +578,12 @@ describe('the gloss provider', () => {
     })
     const controller = {
       textModel: () => model,
-      ensureReady: async () => true,
+      start: async () => {},
     } as unknown as Controller
     const provider = createGlossProvider({
       plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
       controller,
+      installAt: MODELS,
     })
 
     const inFlight = provider.gloss('counsel', context, signal())
@@ -444,8 +613,9 @@ describe('the gloss provider', () => {
     const cancel = vi.fn().mockRejectedValue({ kind: 'runtimeExited', message: 'gone' })
     const provider = createGlossProvider({
       plugin: { gloss, cancel } as unknown as InferencePlugin,
-      controller: { textModel: () => 'qwen', ensureReady: async () => true } as unknown as Controller,
+      controller: { textModel: () => 'qwen', start: async () => {} } as unknown as Controller,
       report,
+      installAt: MODELS,
     })
 
     await provider.gloss('counsel', context, reader.signal).catch(() => {})
@@ -471,8 +641,9 @@ describe('the gloss provider', () => {
     const cancel = vi.fn().mockRejectedValue({ kind: 'requestUnknown', message: 'already done' })
     const provider = createGlossProvider({
       plugin: { gloss, cancel } as unknown as InferencePlugin,
-      controller: { textModel: () => 'qwen', ensureReady: async () => true } as unknown as Controller,
+      controller: { textModel: () => 'qwen', start: async () => {} } as unknown as Controller,
       report,
+      installAt: MODELS,
     })
 
     await provider.gloss('counsel', context, reader.signal).catch(() => {})
@@ -485,8 +656,8 @@ describe('the gloss provider', () => {
   /*
    * ⚠️ **EVERY LISTENER IT ADDS, IT REMOVES.** The readiness race attached an
    * anonymous `{ once: true }` listener — which fires once but is only removed
-   * BY firing, so on every ordinary lookup, where `ensureReady` wins the race,
-   * it stayed on the caller's signal for the signal's whole life.
+   * BY firing, so on every ordinary lookup, where the start wins the race, it
+   * stayed on the caller's signal for the signal's whole life.
    */
   it('leaves no abort listener behind on a lookup that succeeded', async () => {
     const reader = new AbortController()
@@ -524,8 +695,9 @@ describe('the gloss provider', () => {
     const { provider } = harness({ gloss: gloss as never })
     const withReport = createGlossProvider({
       plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
-      controller: { textModel: () => 'qwen', ensureReady: async () => true } as unknown as Controller,
+      controller: { textModel: () => 'qwen', start: async () => {} } as unknown as Controller,
       report,
+      installAt: MODELS,
     })
     void provider
 
@@ -539,6 +711,240 @@ describe('the gloss provider', () => {
          worth logging. */
       message: 'the inference runtime answered 404 for /api/v1/chat/completions',
     })
+  })
+
+  /*
+   * ⚠️ **A REPORTER THAT THROWS USED TO REPLACE THE FAILURE IT WAS REPORTING.**
+   * The report sat inside the rejection handler, unguarded, so a reporter that
+   * threw rejected the lookup with ITS error — the reader was told "reporter
+   * broke" where the runtime had answered 404. `controller.ts` and the
+   * companion's `provider.ts` had each learned this already: the log is a
+   * courtesy, and a courtesy must not take the answer down with it.
+   */
+  it('still tells the reader what failed when the reporter itself throws', async () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const provider = createGlossProvider({
+        plugin: {
+          gloss: vi.fn().mockRejectedValue({ kind: 'runtimeHttp', message: 'the inference runtime answered 404' }),
+          cancel: vi.fn(),
+        } as unknown as InferencePlugin,
+        controller: { textModel: () => 'qwen', start: async () => {} } as unknown as Controller,
+        report: () => {
+          throw new Error('reporter broke')
+        },
+        installAt: MODELS,
+      })
+
+      expect((await refusalOf(provider.gloss('counsel', context, signal()))).message).toBe('The runtime refused the request')
+      expect(said, 'the reporter’s own failure was swallowed rather than said').toHaveBeenCalled()
+      expect(said).toHaveBeenCalledWith(
+        'inference gloss: the failure reporter itself threw',
+        expect.objectContaining({ message: 'reporter broke' }),
+        'while reporting',
+        'inference.gloss-failed',
+      )
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  /* AND NO REPORTER IS NOT A BROKEN ONE. A provider built with nothing to
+     report to says nothing about reporting — a console line blaming a
+     reporter that was never given would send somebody looking for one. */
+  it('says nothing about reporting when it was given nothing to report to', async () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { provider } = harness({
+        gloss: vi.fn().mockRejectedValue({ kind: 'runtimeHttp', message: 'the inference runtime answered 404' }) as never,
+      })
+      expect((await refusalOf(provider.gloss('counsel', context, signal()))).message).toBe('The runtime refused the request')
+      expect(said, 'a missing reporter was reported as a broken one').not.toHaveBeenCalled()
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  /* REPORTED FOR EVERY FAILURE BUT THE READER'S OWN ABORT — that one is every
+     selection change, and a log full of them buries the failures. The corners
+     either side of it are each worth a line: a cancellation nobody asked for is
+     the daemon stopping, and a real failure is no less one for landing after
+     the reader moved on. */
+  it.each([
+    { what: 'the reader’s own cancellation', kind: 'cancelled', readerLeft: true, reported: false },
+    { what: 'a cancellation nobody asked for', kind: 'cancelled', readerLeft: false, reported: true },
+    { what: 'a failure that landed after the reader left', kind: 'runtimeExited', readerLeft: true, reported: true },
+  ])('decides whether $what is worth a log line', async ({ kind, readerLeft, reported }) => {
+    const report = vi.fn()
+    const reader = new AbortController()
+    const provider = createGlossProvider({
+      plugin: {
+        gloss: vi.fn(async () => {
+          if (readerLeft) reader.abort()
+          return Promise.reject({ kind, message: 'the daemon said so' })
+        }),
+        cancel: vi.fn(async () => {}),
+      } as unknown as InferencePlugin,
+      controller: { textModel: () => 'qwen', start: async () => {} } as unknown as Controller,
+      report,
+      installAt: MODELS,
+    })
+
+    await provider.gloss('counsel', context, reader.signal).catch(() => {})
+    expect(report.mock.calls).toEqual(
+      reported ? [['inference.gloss-failed', { kind, model: 'qwen', message: 'the daemon said so' }]] : [],
+    )
+  })
+
+  /* THE ID SAYS IT IS A GLOSS, and the cancel carries the one the request
+     did: `requests.rs` correlates the two by it, and a log line naming
+     `gloss-…` is a lookup rather than an answer to a question. */
+  it('cancels the request it made, by an id that names it a gloss', async () => {
+    const reader = new AbortController()
+    const { provider, gloss, cancel } = harness({
+      gloss: vi.fn(async () => {
+        reader.abort()
+        return 'Guarded.'
+      }) as never,
+    })
+    await provider.gloss('counsel', context, reader.signal).catch(() => {})
+
+    const sent = gloss.mock.calls[0]?.[0] as string
+    expect(sent).toMatch(/^gloss-/)
+    expect(cancel.mock.calls).toEqual([[sent]])
+  })
+
+  /* A CHAPTER'S WORTH, OLDEST OUT FIRST — `CACHE_LIMIT`. A cache with no
+     bound is a leak with a sentence in every key; one that lets the NEWEST
+     go makes the word just looked up cost a second request. */
+  it('holds two hundred glosses, and lets the oldest go first', async () => {
+    const { provider, gloss } = harness()
+    const nth = (n: number): GlossContext => ({ ...context, sentence: `Sentence number ${n}.` })
+    for (let n = 0; n < 200; n += 1) await provider.gloss('counsel', nth(n), signal())
+    expect(provider.cacheSize(), 'two hundred were not all kept').toBe(200)
+
+    await provider.gloss('counsel', nth(200), signal())
+    expect(provider.cacheSize(), 'the cache grew past its limit, or shrank below it').toBe(200)
+    await provider.gloss('counsel', nth(200), signal())
+    await provider.gloss('counsel', nth(1), signal())
+    expect(gloss, 'the newest or the second-oldest was let go').toHaveBeenCalledTimes(201)
+    await provider.gloss('counsel', nth(0), signal())
+    expect(gloss, 'the oldest was kept past the limit').toHaveBeenCalledTimes(202)
+  })
+
+  /*
+   * ⚠️ **THE WAIT FOR THE RUNTIME ENDS WHEN THE READER LEAVES, NOT WHEN THE
+   * RUNTIME IS UP.** A cold start takes seconds, and a reader who selected a
+   * word and moved on is not held for it — that is what the race is for, and
+   * no test here had ever aborted DURING it: every abort landed before the
+   * wait began or after the question was sent.
+   */
+  it('stops waiting for the runtime the moment the reader leaves, and never asks', async () => {
+    const launched = deferred()
+    const gloss = vi.fn()
+    const provider = createGlossProvider({
+      plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
+      controller: { textModel: () => 'qwen', start: () => launched.promise } as unknown as Controller,
+      installAt: MODELS,
+    })
+    const reader = new AbortController()
+    const asked = provider.gloss('counsel', context, reader.signal).then(() => null, (e: unknown) => e)
+    await settle()
+    expect(gloss, 'the model was asked before the runtime was up').not.toHaveBeenCalled()
+
+    reader.abort()
+    const outcome = await Promise.race([asked, settle().then(() => 'still waiting for the runtime')])
+    expect(outcome).toBeInstanceOf(DOMException)
+    expect((outcome as DOMException).name).toBe('AbortError')
+    expect((outcome as DOMException).message).toBe('Aborted')
+
+    launched.open()
+    await settle()
+    expect(gloss, 'the runtime came up and the abandoned lookup was sent anyway').not.toHaveBeenCalled()
+  })
+
+  /* AN ABORT LANDING WHILE THE LAUNCH IS BEING ASKED FOR is the same abort:
+     the controller's `start` runs synchronously up to its first await, and
+     anything it notifies can move the reader on before the wait has begun. */
+  it('ends a lookup whose reader left while the launch was being asked for', async () => {
+    const reader = new AbortController()
+    const launched = deferred()
+    const gloss = vi.fn()
+    const provider = createGlossProvider({
+      plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
+      controller: {
+        textModel: () => 'qwen',
+        start: () => {
+          reader.abort()
+          return launched.promise
+        },
+      } as unknown as Controller,
+      installAt: MODELS,
+    })
+
+    const asked = provider.gloss('counsel', context, reader.signal).then(() => null, (e: unknown) => e)
+    const outcome = await Promise.race([asked, settle().then(() => 'still waiting for the runtime')])
+    expect(outcome).toBeInstanceOf(DOMException)
+    expect((outcome as DOMException).message).toBe('Aborted')
+    expect(gloss).not.toHaveBeenCalled()
+    launched.open()
+  })
+
+  /* AND AN ABORT THAT LANDS AS THE LAUNCH SETTLES — the runtime won the race
+     and the reader is already gone — is still an abort, and the question is
+     not sent. Landed at the one moment between the two that a test can reach
+     without counting microtasks: when the wait lets go of the signal. */
+  it('does not send the question when the reader left as the runtime came up', async () => {
+    const reader = new AbortController()
+    const remove = reader.signal.removeEventListener.bind(reader.signal)
+    reader.signal.removeEventListener = ((type: string, listener: never, options: never) => {
+      remove(type, listener, options)
+      reader.abort()
+    }) as typeof reader.signal.removeEventListener
+    const { provider, gloss } = harness()
+
+    const failure = await provider.gloss('counsel', context, reader.signal).catch((e: unknown) => e)
+    expect(gloss, 'the question went out after the reader had left').not.toHaveBeenCalled()
+    expect(failure).toBeInstanceOf(DOMException)
+    expect((failure as DOMException).message).toBe('Aborted')
+  })
+
+  /* AND THE SAME REPORTER REACHES `cancelRequest`, where a throw has nobody to
+     catch it: it runs in the handler of a promise nothing awaits, so it escaped
+     as an unhandled rejection. One guarded reporter covers both sites. */
+  it('lets no reporter failure escape a cancel that failed', async () => {
+    const escaped: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      escaped.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const reader = new AbortController()
+      const gloss = vi.fn(async () => {
+        reader.abort()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        return 'never read'
+      })
+      const cancel = vi.fn().mockRejectedValue({ kind: 'runtimeExited', message: 'gone' })
+      const provider = createGlossProvider({
+        plugin: { gloss, cancel } as unknown as InferencePlugin,
+        controller: { textModel: () => 'qwen', start: async () => {} } as unknown as Controller,
+        report: () => {
+          throw new Error('reporter broke')
+        },
+        installAt: MODELS,
+      })
+
+      await provider.gloss('counsel', context, reader.signal).catch(() => {})
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+      expect(cancel, 'no cancel went out, so this measures nothing').toHaveBeenCalled()
+      expect(escaped, 'a reporter failure escaped the cancel as an unhandled rejection').toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      said.mockRestore()
+    }
   })
 
   /* ── WI-15.13's LOAD-BEARING ACCEPTANCE ────────────────────────────────
@@ -560,48 +966,52 @@ describe('the gloss provider', () => {
 })
 
 /**
- * `installable` FOLLOWS THE RUNTIME — WI-20.21.
+ * `installAt` FOLLOWS THE RUNTIME — WI-20.21.
  *
- * It was the constant `true`, on the argument that `inference` composing is
- * what puts the Local models section in Settings. It is — but a models pane
- * whose runtime is absent has nothing to install a model INTO: the Look up
- * strip offered "Install one", the pane took the download, and every lookup
- * then failed with "The runtime is not installed". Whether there is somewhere
- * useful to send the reader is what this answers, and with no runtime there is
- * not.
+ * It was `installable`, the constant `true`, on the argument that `inference`
+ * composing is what puts the Local models section in Settings. It is — but a
+ * models pane whose runtime is absent has nothing to install a model INTO: the
+ * Look up strip offered "Install one", the pane took the download, and every
+ * lookup then failed with "The runtime is not installed". Whether there is
+ * somewhere useful to send the reader is what this answers, and with no runtime
+ * there is not.
+ *
+ * AND IT SAYS WHERE, since phase 17's L3: the offer used to open Settings at the
+ * top, with Local models collapsed further down, because a boolean could not
+ * say which section it meant.
  */
-describe('installable', () => {
+describe('installAt', () => {
   const withRuntime = (kind: 'absent' | 'installed' | 'ready') => {
     const runtime = kind === 'absent' ? { kind, reason: 'x' } : kind === 'ready' ? { kind, version: '1' } : { kind }
     const controller = {
       textModel: () => null,
-      ensureReady: async () => true,
+      start: async () => {},
       getSnapshot: () => ({ runtime, models: [], installing: null, failure: null }),
     } as unknown as Controller
-    return createGlossProvider({ plugin: {} as InferencePlugin, controller })
+    return createGlossProvider({ plugin: {} as InferencePlugin, controller, installAt: MODELS })
   }
 
-  it('is false while the runtime is absent, so nothing offers a download that cannot run', () => {
-    expect(withRuntime('absent').installable).toBe(false)
+  it('is nowhere while the runtime is absent, so nothing offers a download that cannot run', () => {
+    expect(withRuntime('absent').installAt).toBeNull()
   })
 
-  it('is true once there is a runtime to install a model into', () => {
-    expect(withRuntime('installed').installable).toBe(true)
-    expect(withRuntime('ready').installable).toBe(true)
+  it('is the models section once there is a runtime to install a model into', () => {
+    expect(withRuntime('installed').installAt).toBe(MODELS)
+    expect(withRuntime('ready').installAt).toBe(MODELS)
   })
 })
 
 describe('audit-fix round 1 — the cache key', () => {
   it('keys on the book title too, and survives a NUL inside the text', () => {
-    const context = { sentence: 'The counsel rose.', bookTitle: 'Bleak House' }
-    expect(glossQuestion('counsel', context)).not.toBe(
-      glossQuestion('counsel', { ...context, bookTitle: 'Great Expectations' }),
+    const titled = { ...context, sentence: 'The counsel rose.', bookTitle: 'Bleak House' }
+    expect(glossQuestion('counsel', titled)).not.toBe(
+      glossQuestion('counsel', { ...titled, bookTitle: 'Great Expectations' }),
     )
     /* A NUL is ordinary text to the squeeze, and the field separator is a
        newline no field can contain — so this cannot collide for the reason the
        encoded tuple it replaces could not. */
-    expect(glossQuestion('a\u0000b', { sentence: 'c', bookTitle: '' })).not.toBe(
-      glossQuestion('a', { sentence: 'b\u0000c', bookTitle: '' }),
+    expect(glossQuestion('a\u0000b', { ...context, sentence: 'c', bookTitle: '' })).not.toBe(
+      glossQuestion('a', { ...context, sentence: 'b\u0000c', bookTitle: '' }),
     )
   })
 })

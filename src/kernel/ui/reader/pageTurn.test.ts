@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { Renderer } from 'foliate-js/view.js'
-import { READING_STEPS, pageMargins, proseBleed, proseGrid } from '../../core/metrics'
+import { MOTION, READING_STEPS, pageMargins, proseBleed, proseGrid } from '../../core/metrics'
 import { applyLayout } from './FoliateView'
 import { DEFAULT_READING_STYLE } from '../../core/metrics'
 
@@ -295,9 +295,16 @@ describe('the renderer Paper actually ships', () => {
 
   /* The duration is a literal in the fork, not an attribute — `MOTION.pageTurn`
    * records it rather than setting it, and this is what keeps that record
-   * honest. */
+   * honest.
+   *
+   * ⚠️ **READ FROM THE TABLE, NOT WRITTEN A SECOND TIME.** This spelled `300`
+   * here as well, so changing the token left the case green against a fork
+   * still easing over the old duration — the one drift it exists to catch.
+   * Found by audit. */
   it('still eases the turn over the 300ms the motion table reports', () => {
-    expect(paginator).toContain('300, easeOutQuad')
+    const ms = /^(\d+)ms$/u.exec(MOTION.pageTurn)?.[1]
+    expect(ms, 'MOTION.pageTurn is no longer a whole number of milliseconds').toBeDefined()
+    expect(paginator).toContain(`${ms}, easeOutQuad`)
   })
 
   /**

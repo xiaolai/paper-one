@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TrashSheet } from './TrashSheet'
 import { TRASH_KEPT_FOR, type TrashedBook } from '../../core/bookTrash'
+import { coverTintFor } from '../../core/bookAccent'
 
 /**
  * THE SURFACE THAT KEEPS A PROMISE THE APP WAS ALREADY MAKING.
@@ -120,6 +121,27 @@ describe('the removed-books sheet', () => {
     expect(screen.queryByText(/Nothing removed/)).toBeNull()
   })
 
+  /* ⚠️ **A FAILED RESTORE IS NOT AN UNREADABLE TRASH**, and `App` was passing
+     one as the other (#97): a single restore that came back `partial` replaced
+     every row with "The trash could not be read", so the reader lost the list,
+     every other Restore button, and any true account of what happened — on the
+     surface that exists to undo a deletion. The list was read perfectly well. */
+  it('says a failed restore ABOVE the rows, keeping every restore offered', () => {
+    render(<TrashSheet {...shared} rows={[row(), row({ bookId: 'bk2', title: 'Ada' })]} actionError="EIO: two files were left behind" />)
+
+    expect(screen.getByText(/two files were left behind/)).toBeTruthy()
+    expect(screen.queryByText(/could not be read/), 'a failed restore was reported as a failed read').toBeNull()
+    expect(screen.getByRole('button', { name: 'Restore Bad Blood' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Restore Ada' })).toBeTruthy()
+  })
+
+  /* And an unreadable trash still replaces the list, because then there is no
+     list — the two slots are not interchangeable in either direction. */
+  it('still replaces the list when the trash itself would not read', () => {
+    render(<TrashSheet {...shared} rows={[]} error="EACCES" actionError="EIO" />)
+    expect(screen.getByText(/could not be read/)).toBeTruthy()
+  })
+
   it('names a book whose record could not be read', () => {
     /* `listTrash` returns an empty title for an unreadable `book.json`, which
        is one of the reasons a book needs rescuing in the first place. The old
@@ -187,5 +209,55 @@ describe('the removed-books sheet', () => {
     /* A reader on a screen reader is told what took the window. */
     render(<TrashSheet {...shared} rows={[row()]} />)
     expect(screen.getByRole('dialog', { name: 'Removed books' })).toBeTruthy()
+  })
+
+  /* A TITLE OF SPACES IS NO TITLE. It rendered a row that looked blank above a
+     button whose name was "Restore" and some spaces — the same defect the
+     empty title had, one keystroke over. */
+  it('names a book by its folder when its title is only spaces', () => {
+    render(<TrashSheet {...shared} rows={[row({ title: '   ', folder: 'bad-blood' })]} />)
+    expect(screen.getByRole('button', { name: 'Restore bad-blood' })).toBeTruthy()
+    expect(screen.getByTitle('Put bad-blood back in the library')).toBeTruthy()
+  })
+
+  /* The line under the title, whole: who wrote it, when it went, how long is
+     left — three clauses a reader tells apart only by the rule between them. */
+  it('says who, when and how long on one line, each clause set apart', () => {
+    render(<TrashSheet {...shared} rows={[row()]} />)
+    expect(screen.getByText('Carreyrou, John', { exact: false }).textContent).toBe(
+      'Carreyrou, John · Yesterday · 13 days left',
+    )
+  })
+
+  it('says a removal whose time could not be read as removed, not as an age', () => {
+    render(<TrashSheet {...shared} rows={[row({ removedAt: null, expiresAt: null })]} />)
+    expect(screen.getByText('Carreyrou, John', { exact: false }).textContent).toBe(
+      'Carreyrou, John · Removed · Kept',
+    )
+  })
+
+  /* Each row carries its book's own tint, the one the library's cover wears,
+     so the book is recognisable before its title is read. */
+  it('tints each row with its own book’s cover colour', () => {
+    const { container } = render(
+      <TrashSheet {...shared} rows={[row(), row({ bookId: 'bk2', title: 'Ada', folder: 'ada' })]} />,
+    )
+    const covers = [...container.querySelectorAll<HTMLElement>('[data-static] > [aria-hidden]')]
+    expect(covers.map((cover) => cover.style.background)).toEqual([coverTintFor('bk1'), coverTintFor('bk2')])
+  })
+
+  /* NO FAILED RESTORE, NO ALERT — and an empty reason is no reason. An alert
+     that fires with nothing to say is read aloud over the list anyway. */
+  it('raises no alert without a failed restore to report', () => {
+    for (const actionError of [undefined, null, '']) {
+      render(<TrashSheet {...shared} rows={[row()]} actionError={actionError} />)
+      expect(screen.queryByRole('alert'), `an alert for ${String(JSON.stringify(actionError))}`).toBeNull()
+      cleanup()
+    }
+  })
+
+  it('says a failed restore in its own words, as an alert', () => {
+    render(<TrashSheet {...shared} rows={[row()]} actionError="EIO: two files were left behind" />)
+    expect(screen.getByRole('alert').textContent).toBe('That book could not be put back.EIO: two files were left behind')
   })
 })

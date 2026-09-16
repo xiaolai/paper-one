@@ -282,6 +282,7 @@ export interface SpacingScale {
   readonly unit: 'em' | 'x' | '%' | 'vh' | 'px'
 }
 
+// Stryker disable next-line ObjectLiteral: emptying this table leaves `DEFAULT_SPACING` below reading `.def` off four missing scales, at module scope — so the mutant throws while this module is being imported, every covering suite fails to LOAD, no test fails, and Stryker's vitest runner reports it Survived with nothing able to kill it (measured 2026-09-14)
 export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SpacingScale> = {
   /* Tracking, in em so it follows the size. Negative is offered because a face
    * set loose by its designer can be tightened, but only one step of it: past
@@ -368,6 +369,8 @@ export const DEFAULT_STEP_IDX = 6
  * the number means whatever the current ramp happens to have at that position.
  * Nothing else may read it; it is a fact about a file format, not about type.
  */
+export const LEGACY_READING_SIZES: readonly number[] = [17, 19, 21, 23, 26, 28, 30]
+
 /**
  * The step nearest a size in px, clamped to the ramp.
  *
@@ -383,8 +386,6 @@ export const DEFAULT_STEP_IDX = 6
  * by the closest thing this build can show than by dropping them to the default.
  * That is the argument the `index` validator already makes for clamping.
  */
-export const LEGACY_READING_SIZES: readonly number[] = [17, 19, 21, 23, 26, 28, 30]
-
 export function stepIndexForSize(px: number): number {
   if (!Number.isFinite(px)) return DEFAULT_STEP_IDX
   let best = 0
@@ -433,16 +434,21 @@ export const GUTTER_MIN = 24
  * rather than to `undefined` several frames later.
  */
 export function readingStep(stepIdx: number): ReadingStep {
-  const step = READING_STEPS[stepIdx] ?? READING_STEPS[DEFAULT_STEP_IDX]
-  if (!step) throw new Error('READING_STEPS is empty')
-  return step
+  /* NO GUARD FOR AN EMPTY RAMP. This threw 'READING_STEPS is empty' when the
+     default step was missing too — which no call could ever reach, because
+     `MEASURE` reads the same step while this module loads, so an empty ramp
+     fails the import before any caller exists. */
+  return READING_STEPS[stepIdx] ?? READING_STEPS[DEFAULT_STEP_IDX]!
 }
 
 /**
  * The measure for a reading step.
  *
- * §09 gives each of the seven sizes its own line width, from 540 at 17px to
- * 820 at 30px, so that the line stays near 68 characters as the type grows.
+ * §09 gives each of the fourteen sizes its own line width, from 480 at 15px to
+ * 780 at 28px — about 69 characters at the smallest, falling to about 60 at the
+ * largest, for the reason `READING_STEPS` gives. (This said seven sizes, 540 at
+ * 17px to 820 at 30px, and "near 68 characters" throughout, for a ramp that has
+ * since been replaced.)
  * Both the host grid and foliate's renderer must read the SAME value or the
  * book is laid out to one width inside a column sized to another.
  */
@@ -499,36 +505,70 @@ export function proseGrid(
 
   // Two gaps are always in play: gutter|measure and measure|margin.
   let over = gutter + measure + marginCol + gap * 2 - stageInner
+  /* NOTHING IS SPENT WHEN NOTHING IS OVER. Each stage below takes at most what
+   * is still over, and never less than nothing — `Math.max(0, over)` — so a
+   * stage with room to spare leaves every track where it was. Each was an
+   * `if (over > 0)` around the same take, and at exactly zero the take was
+   * zero either way: a guard no width could tell apart from its absence. */
 
-  if (over > 0) {
-    /* The mark lane may be spent WHOLE — `paneTakesTrack` counts one gutter
-     * and declares the margin spendable, and the pane threshold is built on
-     * that. But the MIRROR is not a mark lane: it floors at `GUTTER_MIN`,
-     * exactly as the gutter it mirrors does, because it drained to zero here
-     * and the text sat flush against the stage's right edge — the same broken
-     * window `GUTTER_MIN` was introduced to prevent on the left. The measure
-     * still sits a little off centre while the two sides walk down to their
-     * shared floor; what it can no longer do is lose its right margin
-     * entirely. */
-    const floor = showMargin ? 0 : GUTTER_MIN
-    const take = Math.min(over, Math.max(0, marginCol - floor))
-    marginCol -= take
-    over -= take
-  }
+  /* The mark lane may be spent WHOLE — `paneTakesTrack` counts one gutter
+   * and declares the margin spendable, and the pane threshold is built on
+   * that. But the MIRROR is not a mark lane: it floors at `GUTTER_MIN`,
+   * exactly as the gutter it mirrors does, because it drained to zero here
+   * and the text sat flush against the stage's right edge — the same broken
+   * window `GUTTER_MIN` was introduced to prevent on the left. The measure
+   * still sits a little off centre while the two sides walk down to their
+   * shared floor; what it can no longer do is lose its right margin
+   * entirely. */
+  const floor = showMargin ? 0 : GUTTER_MIN
+  const fromMargin = Math.min(Math.max(0, over), Math.max(0, marginCol - floor))
+  marginCol -= fromMargin
+  over -= fromMargin
   /* DOWN TO THE FLOOR, and no further — see `GUTTER_MIN`. This took the gutter
    * to zero, which is what let an open pane leave the text flush against the
    * edge of the stage. The measure yields after this instead: narrower text is
    * still a page, whereas text with no margin reads as a broken window. */
-  if (over > 0) {
-    const take = Math.min(over, Math.max(0, gutter - GUTTER_MIN))
-    gutter -= take
-    over -= take
-  }
-  if (over > 0) {
-    measure = Math.max(0, measure - over)
-  }
+  const fromGutter = Math.min(Math.max(0, over), Math.max(0, gutter - GUTTER_MIN))
+  gutter -= fromGutter
+  over -= fromGutter
+  measure = Math.max(0, measure - Math.max(0, over))
 
   return { gutter, measure, marginCol, gap }
+}
+
+/**
+ * Where the MEASURE track sits, relative to the stage's own box.
+ *
+ * For anything that has to stay over the words rather than merely inside the
+ * reading area — the selection tools, which were bounded by the stage and so
+ * were free to hang across the whole margin column, over the very notes that
+ * live there.
+ *
+ * The stage centres the grid (`justify-content: center`), so the measure's
+ * offset is the stage's padding, plus half the slack, plus the tracks before
+ * it. `stageInner` is the CONTENT width — what `useElementWidth` reports and
+ * what `proseGrid` is given — while the offset is returned against the stage's
+ * BORDER box, because that is the origin `rangeRectsInHost` translates into and
+ * the origin an absolutely positioned child resolves against. The stage has no
+ * border, so the two coincide; the padding is what has to be added back.
+ *
+ * Pure, and checked against the running app: at a 1009px stage with tracks
+ * 56/660/56 and a 32px gap it returns 174.5, and the measure was measured in
+ * the window at 175.
+ */
+export function proseColumn(stageInner: number, grid: ProseGrid): { left: number; width: number } {
+  const tracks = grid.gutter + grid.measure + grid.marginCol + 2 * grid.gap
+  /* SIGNED, AS THE GRID CENTRES. The stage says `justify-content: center` with
+     no `safe`, so tracks wider than the stage overflow BOTH sides by half the
+     overflow each, and the column starts that much left of the centred place.
+     This clamped the slack at zero, on the belief that grid stops centring and
+     overflows the end — which is `safe center`, not what the stage asks for —
+     and so reported the column right of where CSS puts it: 80 against 74 for
+     `proseGrid(100, false)`. Found by audit. Reachable only once `proseGrid`
+     has floored both gutters and spent the measure (a stage under 112px with no
+     notes), which no supported window produces. */
+  const slack = (stageInner - tracks) / 2
+  return { left: STAGE_PADDING_X + slack + grid.gutter + grid.gap, width: grid.measure }
 }
 
 /**
@@ -552,34 +592,6 @@ export function proseGrid(
  * constant this replaces was 1024 for every reading step, which is below every
  * width this returns.
  */
-/**
- * Where the MEASURE track sits, relative to the stage's own box.
- *
- * For anything that has to stay over the words rather than merely inside the
- * reading area — the selection tools, which were bounded by the stage and so
- * were free to hang across the whole margin column, over the very notes that
- * live there.
- *
- * The stage centres the grid (`justify-content: center`), so the measure's
- * offset is the stage's padding, plus half the slack, plus the tracks before
- * it. `stageInner` is the CONTENT width — what `useElementWidth` reports and
- * what `proseGrid` is given — while the offset is returned against the stage's
- * BORDER box, because that is the origin `rangeRectsInHost` translates into and
- * the origin an absolutely positioned child resolves against. The stage has no
- * border, so the two coincide; the padding is what has to be added back.
- *
- * Pure, and checked against the running app: at a 1009px stage with tracks
- * 56/660/56 and a 32px gap it returns 174.5, and the measure was measured in
- * the window at 175.
- */
-export function proseColumn(stageInner: number, grid: ProseGrid): { left: number; width: number } {
-  const tracks = grid.gutter + grid.measure + grid.marginCol + 2 * grid.gap
-  /* Never negative: below the width where the tracks fit, grid stops centring
-     and overflows the end, so the column starts at the padding. */
-  const slack = Math.max(0, stageInner - tracks) / 2
-  return { left: STAGE_PADDING_X + slack + grid.gutter + grid.gap, width: grid.measure }
-}
-
 export function paneTakesTrack(windowWidth: number, stepIdx: number): boolean {
   /* `+ GUTTER_MIN`: the mirror's floor. The margin column is spendable down
    * to that floor and no further — drained whole, the text sat flush against
@@ -778,6 +790,18 @@ export const SHEET = { max: 640, inset: 48, top: 96, maxHeight: 560 } as const
 export const FOOTNOTE = { maxWidth: 420, maxHeight: 320 } as const
 
 /**
+ * How wide the selection popup's lookup face may grow (phase 17, L1).
+ *
+ * NARROWER THAN A FOOTNOTE, for the footnote's own reason taken one step
+ * further: a note is read and dismissed over the text it came from, and a
+ * definition hangs directly over the LINE it defines, one gap away. At the
+ * interface's 13px a line of this measure holds roughly fifty-five characters —
+ * a definition's two sentences read in two or three short lines rather than one
+ * that runs across the page it is covering.
+ */
+export const LOOKUP_MEASURE = 360
+
+/**
  * A menu's narrowest. Wide enough that "Remove from library" — the longest
  * thing any menu in the app says — does not wrap, which is what actually
  * decides it.
@@ -823,15 +847,6 @@ export const TAG_EDITOR_W = 300
 export const TOC_INDENT = 16
 
 /**
- * An Appearance swatch: a tile that previews a theme by being drawn in it.
- *
- * Not on the control ramp, for the same reason a book's cover is not: it is a
- * picture of something, sized to what it has to show. What it has to show is a
- * 15px specimen, 6px of air and a 10px name — 31px — so this leaves about 10
- * either side. Enough that the two lines sit IN the tile rather than fill it,
- * and no more: five of these are a row of choices, not five panels.
- */
-/**
  * The colour disc inside a tint button in §10's selection bar.
  *
  * ITS BUTTON IS `CONTROL.sm`, off the ordinary scale — the bar is a row of
@@ -849,6 +864,15 @@ export const TOC_INDENT = 16
  */
 export const MARK_SWATCH = 14
 
+/**
+ * An Appearance swatch: a tile that previews a theme by being drawn in it.
+ *
+ * Not on the control ramp, for the same reason a book's cover is not: it is a
+ * picture of something, sized to what it has to show. What it has to show is a
+ * 15px specimen, 6px of air and a 10px name — 31px — so this leaves about 10
+ * either side. Enough that the two lines sit IN the tile rather than fill it,
+ * and no more: five of these are a row of choices, not five panels.
+ */
 export const THEME_SWATCH_H = 52
 
 /**
@@ -904,9 +928,15 @@ export const BREAKPOINT = { compact: 860, min: 720, phone: 600 } as const
 /**
  * The narrowest viewport this app is drawn in at all.
  *
- * An iPhone SE is 375 CSS pixels and nothing Paper is served to is narrower.
- * It is the floor a breakpoint must sit above to mean anything — the role 720
- * played while every host was a window.
+ * 320 CSS pixels — the first iPhone SE's viewport, and the narrowest a phone
+ * browser still presents; every SE since is 375. It is the floor a breakpoint
+ * must sit above to mean anything — the role 720 played while every host was a
+ * window.
+ *
+ * ⚠️ **THIS SAID "AN iPHONE SE IS 375 … AND NOTHING PAPER IS SERVED TO IS
+ * NARROWER" ABOVE THE 320 IT DESCRIBES**, from the commit that wrote both. The
+ * number is the one `tokens.test.ts` holds breakpoints to, so it is the number
+ * that is right; the sentence was corrected to it. Found by audit.
  */
 export const VIEWPORT_MIN = 320
 
@@ -1022,12 +1052,20 @@ export const RADIUS = {
  */
 export const SHEET_HANDLE = { w: 36, h: 4 } as const
 
-/** §12 layer order. Anything not on this list does not get a z-index. */
+/**
+ * §12 layer order. Anything that crosses components and is not on this list
+ * does not get a z-index; stacking inside one component's own context is the
+ * `1..3` residue `tokens.test.ts` lists.
+ *
+ * ⚠️ **THREE MEMBERS HERE HAD NO READER, AND ARE GONE.** `rulerBand: 0` and
+ * `prose: 1` were never read: the band is `z-index: -1` INSIDE the book
+ * (`bookCss.ts`), where no host layer can reach, and the prose needs none.
+ * `stickyBar: 7` was published as `--z-sticky`, which no stylesheet reads. A
+ * layer nobody stacks against is a number that looks like a decision and
+ * decides nothing. Found by audit.
+ */
 export const Z = {
-  rulerBand: 0,
-  prose: 1,
   chrome: 4,
-  stickyBar: 7,
   rulerHint: 8,
   popover: 20,
   /* The pane when it is a sheet, and the scrim under it. Below `scrim`, which
@@ -1059,9 +1097,11 @@ export const MOTION = {
    * THE MOBILE SHEET — companion and tools, §08: "280ms spring. Interruptible,
    * follows the finger." A spring rather than an ease because the sheet is
    * DRAGGED: it has to feel attached to the thumb, and an ease-out lands like
-   * something arriving on its own schedule. Expressed as a cubic-bezier that
-   * overshoots slightly, which is the closest CSS gets to a spring without
-   * JavaScript driving every frame.
+   * something arriving on its own schedule. Expressed as a steep ease-out that
+   * SETTLES rather than overshoots — both control points' `y` (0.72 and 1) sit
+   * inside [0, 1], so the curve never passes its end — which is a critically
+   * damped spring's shape, without JavaScript driving every frame. (This said
+   * the curve overshoots slightly. It cannot, with those points.)
    */
   sheet: '280ms cubic-bezier(0.32, 0.72, 0, 1)',
   /**
@@ -1122,7 +1162,8 @@ export const ICON = {
    * in the stylesheet for two reasons: `tokens.test.ts` refuses a raw value
    * where a token belongs, and a `<button>` does not inherit font-size, so an
    * `em` there would have resolved against the UA's own 11px and come out at 22
-   * — SMALLER than the 19 it was meant to enlarge.
+   * — barely larger than the 19 it was meant to enlarge, and ten short of the
+   * 32 specified. (This said 22 was SMALLER than 19.)
    */
   standalone: 32,
   stroke: 1.75,
@@ -1178,6 +1219,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--sheet-max-h': px(SHEET.maxHeight),
     '--footnote-max-w': px(FOOTNOTE.maxWidth),
     '--footnote-max-h': px(FOOTNOTE.maxHeight),
+    '--lookup-measure': px(LOOKUP_MEASURE),
     '--menu-min-w': px(MENU_MIN_W),
     '--menu-scroll-h': px(MENU_SCROLL_H),
     '--tag-editor-w': px(TAG_EDITOR_W),
@@ -1221,7 +1263,6 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--cell-height': px(cellHeightFor(CARD_W)),
     // §12 layer order, published so stylesheets stop restating the numbers.
     '--z-chrome': String(Z.chrome),
-    '--z-sticky': String(Z.stickyBar),
     '--z-ruler-hint': String(Z.rulerHint),
     '--z-popover': String(Z.popover),
     '--z-pane-sheet-scrim': String(Z.paneSheetScrim),

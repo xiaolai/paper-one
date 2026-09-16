@@ -40,7 +40,9 @@
  * Storage throws on a full quota, in private browsing on some engines, and
  * whenever a reader has disabled it. **A lost position must never be a lost
  * book**, so every path here answers "no position" rather than raising. That is
- * why `get` returns `null` for a malformed store instead of repairing it.
+ * why `get` returns `null` for a malformed store instead of repairing it — and
+ * why `set`, `touch` and `forget` stand down over one rather than replacing it
+ * with what this session happens to know.
  */
 
 /** The one key. Namespaced, because the origin is shared with nothing else. */
@@ -107,19 +109,34 @@ export interface PositionStore {
 /** A map with no prototype — see the note in `read`. */
 const empty = (): Record<string, Stored> => Object.create(null) as Record<string, Stored>
 
-/** The stored map, or an empty one for anything unreadable. */
-function read(store: PositionStore): Record<string, Stored> {
-  let raw: string | null
+/**
+ * The stored map — an empty one where nothing is stored, `null` where
+ * something is and this could not read it.
+ *
+ * ⚠️ **THE TWO USED TO BE ONE ANSWER, AND EVERY WRITE HERE IS A
+ * READ-MODIFY-WRITE.** An unreadable store read as no positions, so the next
+ * page turn wrote one position over the whole of it — the repair the paragraph
+ * below refuses, performed one line later by `set`. `null` is what tells the
+ * writers to stand down (2026-09-13 audit).
+ */
+function read(store: PositionStore): Record<string, Stored> | null {
+  /* ONE CATCH FOR A STORE THAT WILL NOT READ AND ONE THAT WILL NOT PARSE,
+     because they are one answer. Reading can throw too — Safari's private mode
+     has done exactly this. There were two catches returning the same `null`,
+     and emptying the first changed nothing a test could see: `raw` stayed
+     unset and `JSON.parse` threw into the second. */
   try {
-    raw = store.getItem(KEY)
-  } catch {
-    /* Reading can throw too — Safari's private mode has done exactly this. */
-    return empty()
-  }
-  if (raw === null) return empty()
-  try {
+    const raw = store.getItem(KEY)
+    if (raw === null) return empty()
     const parsed: unknown = JSON.parse(raw)
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return empty()
+    if (
+      typeof parsed !== 'object' ||
+      // Stryker disable next-line ConditionalExpression: `Object.entries(null)` throws inside this same `try`, and its catch answers the same null.
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return null
+    }
     /* NO PROTOTYPE, because a book id is a KEY FROM STORAGE and storage is not
      * trusted input. `__proto__` is a perfectly valid string and assigning to
      * it on an object literal does not create an entry — it REPLACES the
@@ -135,7 +152,13 @@ function read(store: PositionStore): Record<string, Stored> {
      * path needs nothing further. */
     const out: Record<string, Stored> = Object.create(null) as Record<string, Stored>
     for (const [bookId, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof value !== 'object' || value === null) continue
+      if (
+        value === null ||
+        // Stryker disable next-line ConditionalExpression: `JSON.parse` makes no primitive with a `cfi`, so the cfi check below skips one anyway.
+        typeof value !== 'object'
+      ) {
+        continue
+      }
       const row = value as Record<string, unknown>
       /* A ROW WITHOUT A CFI IS NOT A POSITION. `at` is allowed to be missing —
        * it only orders eviction — but a missing or empty cfi would send a
@@ -145,16 +168,22 @@ function read(store: PositionStore): Record<string, Stored> {
        * `Infinity`, which beats every real stamp forever — in the eviction
        * order AND in the shelf comparison. A timestamp that is not a real
        * moment is treated like one that was never recorded. */
-      const stamp = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
+      const stamp = (value: unknown): number =>
+        Number.isFinite(value) &&
+        // Stryker disable next-line ConditionalExpression: `Number.isFinite` never coerces, so it is already false for every non-number; this half narrows the type.
+        typeof value === 'number'
+          ? value
+          : 0
       const readAt = stamp(row['readAt'])
       out[bookId] = { cfi: row['cfi'], at: stamp(row['at']), ...(readAt !== 0 ? { readAt } : {}) }
     }
     return out
   } catch {
     /* NOT REPAIRED, NOT CLEARED. A store this cannot parse is one something
-     * else may own; overwriting it would be this module deciding that. Reading
-     * as empty loses positions and nothing else. */
-    return empty()
+     * else may own; overwriting it would be this module deciding that. Losing
+     * this session's positions is the whole cost, and only while the bytes are
+     * unreadable. */
+    return null
   }
 }
 
@@ -190,11 +219,16 @@ export function readingPositions(
     }
   }
 
+  /* ONE ANSWER FOR BOTH QUESTIONS: a store that would not read has no row for
+     a reader and nothing for a writer to modify, so the two can no longer
+     disagree about it the way they did. */
+  const rowFor = (bookId: string): Stored | undefined => read(store)?.[bookId]
+
   return {
-    get: (bookId) => read(store)[bookId]?.cfi ?? null,
+    get: (bookId) => rowFor(bookId)?.cfi ?? null,
 
     held: (bookId) => {
-      const row = read(store)[bookId]
+      const row = rowFor(bookId)
       return row === undefined ? null : { cfi: row.cfi, at: row.at }
     },
 
@@ -204,6 +238,8 @@ export function readingPositions(
        * nothing — so the previous one stands, which is the better answer. */
       if (cfi === null || cfi === '') return
       const all = read(store)
+      /* NOTHING IS WRITTEN OVER A STORE THAT WOULD NOT READ — see `read`. */
+      if (all === null) return
       /* AN UNCHANGED CFI IS SKIPPED — recency is `touch`'s job now, in its
        * own field. This comment used to claim the opposite ("still refreshes
        * `at`") over a line that returned early: the refresh moved to `touch`
@@ -233,6 +269,7 @@ export function readingPositions(
        * serialisation of up to 500 entries in the page-turn path for no new
        * information. This runs once, when a book is opened. */
       const all = read(store)
+      if (all === null) return
       const held = all[bookId]
       if (held === undefined) return
       write({ ...all, [bookId]: { ...held, readAt: now() } })
@@ -240,6 +277,7 @@ export function readingPositions(
 
     forget: (bookId) => {
       const all = read(store)
+      if (all === null) return
       if (!(bookId in all)) return
       const { [bookId]: _gone, ...rest } = all
       write(rest)
@@ -258,6 +296,7 @@ export function browserPositions(): ReadingPositions {
   try {
     return readingPositions(window.localStorage)
   } catch {
+    // Stryker disable next-line ObjectLiteral,ArrowFunction: a store that reads as nothing or will not read at all answers every call the same — no position, no write.
     const nothing: PositionStore = { getItem: () => null, setItem: () => {} }
     return readingPositions(nothing)
   }

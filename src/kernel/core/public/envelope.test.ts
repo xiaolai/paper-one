@@ -2,14 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { canonicalJson } from '../canonicalJson'
 import {
   DEFAULT_LIFETIME_MS,
+  MAX_CHAPTER,
   MAX_CLOCK_SKEW_MS,
   MAX_ENVELOPE_BYTES,
   MAX_LIFETIME_MS,
   MAX_NOTE,
+  MAX_PUB,
   MAX_QUOTE,
   PUBLIC_OPS,
   PUBLIC_VERSION,
   byteLengthOf,
+  integersOnlyEnvelope,
   isPublicEnvelopeShape,
   mintNote,
   mintPublicationId,
@@ -57,6 +60,12 @@ function note(over: Partial<PublicEnvelope> = {}): PublicEnvelope {
 
 const signed = (envelope: PublicEnvelope): string => publicSignedBytes(envelope.v, envelope)
 const never = () => false
+
+/** A withdrawal of `note()`'s publication. */
+function withdrawal(over: Partial<PublicEnvelope> = {}): PublicEnvelope {
+  const { passage: _gone, ...rest } = note() as unknown as Record<string, unknown>
+  return { ...rest, op: 'unnote', seq: 2, ...over } as PublicEnvelope
+}
 
 describe('publicSignedBytes', () => {
   it('uses the public domain and never the circle’s', () => {
@@ -206,6 +215,35 @@ describe('the public envelope reader', () => {
     const asked = crypto([signed(envelope)])
     expect(refusalFor(canonicalJson(envelope), asked, NOW, never)).toBe('expired')
     expect(asked.asked).toEqual([])
+  })
+
+  it('refuses a note whose expiry is this very moment', () => {
+    const envelope = note({ expires: NOW })
+    expect(refusalFor(canonicalJson(envelope), crypto([signed(envelope)]), NOW, never)).toBe('expired')
+  })
+
+  /* ⚠️ **A WITHDRAWAL PAST ITS OWN EXPIRY WAS REFUSED HERE, AND THE NOTE IT TOOK
+     BACK CAME BACK.** `order.ts` keeps a withdrawal for as long as the note it
+     suppresses could still be drawn, and this door refused the withdrawal first
+     — so a 180-day note taken back by a two-hour withdrawal was drawn again on
+     the first reload three hours later (2026-09-14). Its own expiry is the
+     fold's to judge; this door still verifies it, and a note is refused here as
+     it always was. */
+  it('leaves a withdrawal past its own expiry to the fold, and still verifies it', () => {
+    const late = withdrawal({ at: NOW - 1000, expires: NOW - 1 })
+    const asked = crypto([signed(late)])
+    expect(refusalFor(canonicalJson(late), asked, NOW, never), 'a withdrawal was refused for its own expiry').toBeNull()
+    expect(asked.asked, 'a withdrawal the fold may keep was not verified').toEqual([signed(late)])
+    expect(refusalFor(canonicalJson(late), crypto(['something else']), NOW, never)).toBe('bad-signature')
+  })
+
+  it('still refuses a withdrawal dated ahead of this clock, or claiming a lifetime this build will not keep', () => {
+    const ahead = withdrawal({ at: NOW + MAX_CLOCK_SKEW_MS + 1, expires: NOW + MAX_CLOCK_SKEW_MS + 1000 })
+    expect(refusalFor(canonicalJson(ahead), crypto([signed(ahead)]), NOW, never)).toBe('expired')
+    const long = withdrawal({ at: NOW, expires: NOW + MAX_LIFETIME_MS + 1 })
+    expect(refusalFor(canonicalJson(long), crypto([signed(long)]), NOW, never)).toBe('expired')
+    const far = withdrawal({ at: NOW + MAX_CLOCK_SKEW_MS, expires: NOW + MAX_CLOCK_SKEW_MS + MAX_LIFETIME_MS + 10_000 })
+    expect(refusalFor(canonicalJson(far), crypto([signed(far)]), NOW, never)).toBe('expired')
   })
 
   it('refuses a lifetime longer than this build accepts', () => {
@@ -499,7 +537,152 @@ describe('minting — the writing side of the same module', () => {
   })
 })
 
+/** A note whose canonical line is exactly `bytes` long — control characters JSON spells in six bytes each fill it past the field bounds' reach. */
+function noteOfBytes(bytes: number, over: Partial<PublicEnvelope> = {}): PublicEnvelope {
+  const wide = { quote: 'q'.repeat(MAX_QUOTE), prefix: 'p'.repeat(MAX_QUOTE), suffix: 's'.repeat(MAX_QUOTE), chapter: 'c'.repeat(MAX_CHAPTER) }
+  const rest = bytes - byteLengthOf(canonicalJson(note({ ...over, passage: { ...wide, note: '' } })))
+  const sixes = Math.floor(rest / 6)
+  const text = String.fromCharCode(1).repeat(sixes) + 'n'.repeat(rest - 6 * sixes)
+  const made = note({ ...over, passage: { ...wide, note: text } })
+  if (byteLengthOf(canonicalJson(made)) !== bytes || byteLengthOf(text) > MAX_NOTE) {
+    throw new Error(`the fixture cannot make an envelope of ${bytes} bytes`)
+  }
+  return made
+}
+
+/**
+ * What the 2026-09-15 sweep found the shape and the reader did not hold: each
+ * guard asked of a test that no test put to it.
+ */
+describe('every field the shape names, held to its own type and bound', () => {
+  /* ⚠️ **A ONE-ELEMENT ARRAY SPELLS THE STRING INSIDE IT.** A regex test, a byte
+     count and a `Set` of names each turn `['aaa…']` into `'aaa…'` or refuse it
+     for a different reason, so every `typeof` guard in front of them looked
+     redundant — and without it an array stood where the signed field was. */
+  it.each([
+    ['voice', { voice: [VOICE] }],
+    ['book', { book: [BOOK] }],
+    ['signature', { sig: [SIG] }],
+    ['publication id', { pub: ['p1'] }],
+  ])('refuses a %s that is an array holding a valid one', (_name, over) => {
+    expect(isPublicEnvelopeShape(note(over as never))).toBe(false)
+  })
+
+  it.each(['quote', 'prefix', 'suffix', 'chapter', 'note'])('refuses a passage %s that is an array holding a valid one', (field) => {
+    const passage = { quote: 'q', prefix: '', suffix: '', chapter: '', [field]: ['x'] }
+    expect(isPublicEnvelopeShape(note({ passage } as never))).toBe(false)
+  })
+
+  it.each(['v', 'seq', 'at', 'expires'])('refuses a %s that is not a number', (field) => {
+    expect(isPublicEnvelopeShape(note({ [field]: '1' } as never))).toBe(false)
+    expect(readPublicEnvelope(canonicalJson(note({ [field]: '1' } as never)), crypto(), NOW, never)).toBe('malformed')
+  })
+
+  it('refuses an operation that is not one of its own names, however it is spelled', () => {
+    for (const op of [['note'], 'toString', 'constructor', 'rate', 42]) {
+      expect(isPublicEnvelopeShape({ ...note(), op }), String(op)).toBe(false)
+      const { passage: _gone, ...bare } = note() as unknown as Record<string, unknown>
+      expect(isPublicEnvelopeShape({ ...bare, op }), `${String(op)} without a passage`).toBe(false)
+    }
+  })
+
+  it('refuses a signature with anything before or after its 128 hex characters', () => {
+    expect(isPublicEnvelopeShape(note({ sig: `${SIG}0` }))).toBe(false)
+    expect(isPublicEnvelopeShape(note({ sig: `0${SIG}` }))).toBe(false)
+  })
+
+  it('takes every text field at exactly its bound, and refuses one byte past it', () => {
+    const at = (field: string, bytes: number) => {
+      const passage = { quote: 'q', prefix: '', suffix: '', chapter: '', [field]: 'x'.repeat(bytes) }
+      return isPublicEnvelopeShape(note({ passage } as never))
+    }
+    for (const [field, bound] of [['prefix', MAX_QUOTE], ['suffix', MAX_QUOTE], ['chapter', MAX_CHAPTER]] as const) {
+      expect(at(field, bound), `${field} at its bound`).toBe(true)
+      expect(at(field, bound + 1), `${field} past its bound`).toBe(false)
+    }
+    expect(isPublicEnvelopeShape(note({ pub: 'p'.repeat(MAX_PUB) })), 'a publication id at its bound').toBe(true)
+  })
+
+  it('reads an envelope of exactly the size a reader accepts, and refuses one byte more', () => {
+    const exact = noteOfBytes(MAX_ENVELOPE_BYTES)
+    expect(refusalFor(canonicalJson(exact), crypto([signed(exact)]), NOW, never)).toBeNull()
+    const over = noteOfBytes(MAX_ENVELOPE_BYTES + 1)
+    expect(refusalFor(canonicalJson(over), crypto([signed(over)]), NOW, never)).toBe('too-large')
+  })
+
+  it('refuses a publication dated before the epoch, and takes one dated at it', () => {
+    const before = withdrawal({ at: -1, expires: 1000 })
+    expect(refusalFor(canonicalJson(before), crypto([signed(before)]), NOW, never)).toBe('malformed')
+    const atZero = withdrawal({ at: 0, expires: 1000 })
+    expect(refusalFor(canonicalJson(atZero), crypto([signed(atZero)]), NOW, never)).toBeNull()
+  })
+
+  it('takes the latest publication this clock allows, with the longest lifetime it allows', () => {
+    /* Both bounds at once, to the millisecond: dated a whole skew ahead, and
+       living the whole lifetime from there. */
+    const latest = note({ at: NOW + MAX_CLOCK_SKEW_MS, expires: NOW + MAX_CLOCK_SKEW_MS + MAX_LIFETIME_MS })
+    expect(refusalFor(canonicalJson(latest), crypto([signed(latest)]), NOW, never)).toBeNull()
+  })
+
+  it('allows a clock a day ahead of this one, and not more', () => {
+    /* In hours rather than through the constant, so the constant is held to
+       what its comment says it is. */
+    const HOUR = 60 * 60 * 1000
+    const ahead = note({ at: NOW + 23 * HOUR })
+    expect(refusalFor(canonicalJson(ahead), crypto([signed(ahead)]), NOW, never)).toBeNull()
+    const beyond = note({ at: NOW + 25 * HOUR })
+    expect(refusalFor(canonicalJson(beyond), crypto([signed(beyond)]), NOW, never)).toBe('expired')
+  })
+
+  it('counts every number, and nothing that is not one, including nulls', () => {
+    expect(integersOnlyEnvelope({ a: null, b: [1, 2], c: { d: 'three' } })).toBe(true)
+    expect(integersOnlyEnvelope({ a: null, b: [1, 2.5] })).toBe(false)
+  })
+})
+
+describe('minting at the edges of what a reader takes', () => {
+  const minting = { voice: VOICE, book: BOOK, seq: 1, at: NOW, pub: 'p1' }
+
+  it('mints the longest lifetime a reader accepts, and at the epoch', () => {
+    expect(mintNote({ ...minting, lifetimeMs: MAX_LIFETIME_MS }, { quote: 'q', prefix: '', suffix: '', chapter: '' }).envelope.expires).toBe(
+      NOW + MAX_LIFETIME_MS,
+    )
+    expect(mintUnnote({ ...minting, at: 0 }).envelope.at).toBe(0)
+  })
+
+  it('mints an envelope of exactly the size a reader accepts, and refuses one byte more', () => {
+    const passageOf = (bytes: number) => {
+      const made = noteOfBytes(bytes, { at: NOW, expires: NOW + DEFAULT_LIFETIME_MS })
+      if (made.op !== 'note') throw new Error('the fixture must be a note')
+      return made.passage
+    }
+    expect(() => mintNote(minting, passageOf(MAX_ENVELOPE_BYTES))).not.toThrow()
+    const cause = (() => {
+      try {
+        mintNote(minting, passageOf(MAX_ENVELOPE_BYTES + 1))
+      } catch (error) {
+        return error
+      }
+      return null
+    })()
+    expect(cause).toBeInstanceOf(RangeError)
+    expect((cause as Error).message).toBe(
+      `public: that envelope is ${MAX_ENVELOPE_BYTES + 1} bytes, past the ${MAX_ENVELOPE_BYTES} a reader accepts`,
+    )
+  })
+})
+
 describe('mintPublicationId', () => {
+  it('writes a byte below sixteen as two hex digits, not one', () => {
+    expect(mintPublicationId((bytes) => bytes.fill(0x01))).toBe('01'.repeat(16))
+  })
+
+  it('draws from the platform’s random source when it is given none', () => {
+    const one = mintPublicationId()
+    expect(one).toMatch(/^[0-9a-f]{32}$/u)
+    expect(mintPublicationId(), 'two ids drawn at random were the same').not.toBe(one)
+  })
+
   it('is sixteen random bytes as lower-case hex', () => {
     const id = mintPublicationId((bytes) => bytes.fill(0xab))
     expect(id).toBe('ab'.repeat(16))

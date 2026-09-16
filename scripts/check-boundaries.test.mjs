@@ -247,6 +247,10 @@ describe('the cruiser is spawned in a way all three platforms can', () => {
        (exit null)` — a parse failure, naming the wrong cause, for a run that
        simply ran long. A timeout says it timed out. */
     const dir = mkdtempSync(path.join(tmpdir(), 'paper-cruise-'))
+    /* AND THE REMOVAL IS DEFERRED AND FORGIVING — see `scratch` above. Recorded
+       the moment it exists: pushed after the assertions below, it was left
+       behind by exactly the run in which one of them failed. */
+    scratch.push(dir)
     const never = path.join(dir, 'never-answers.mjs')
     writeFileSync(never, 'setTimeout(() => {}, 60_000)\n')
     const started = Date.now()
@@ -262,9 +266,6 @@ describe('the cruiser is spawned in a way all three platforms can', () => {
        `dir` holds the fake binary and nothing holds `dir`. */
     await expect(cruise(REPO_ROOT, { bin: never, timeoutMs: 200 })).rejects.toThrow(/did not answer within 200 ms/)
     expect(Date.now() - started).toBeLessThan(10_000)
-    /* AND THE REMOVAL IS DEFERRED AND FORGIVING. A temporary directory left
-       behind costs nothing; a red gate over one costs a run. */
-    scratch.push(dir)
   })
 
   it('keeps a real timeout far above what one cruise costs', () => {

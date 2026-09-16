@@ -102,7 +102,7 @@ export interface LibraryProps {
    * Take books off this machine, or nothing when the host has none to take.
    *
    * OPTIONAL, AND ABSENT MEANS THE CONTROL IS NOT DRAWN — the same convention
-   * as `bookActions` for a row and `onInstallGloss` for the reader. A browser
+   * as `bookActions` for a row and `LookUp.onInstall` for the reader. A browser
    * has no local filesystem, so a `+` wired to a no-op would be the shelf
    * offering something it cannot do; a DISABLED `+` would be little better,
    * because it names a feature this host will never have.
@@ -217,7 +217,14 @@ export interface LibraryProps {
 const ORDERS: readonly ToolbarOption<LibraryOrder>[] = [
   { id: 'recent', label: 'Recently opened', Icon: Clock },
   { id: 'title', label: 'Title', Icon: CaseSensitive },
-  { id: 'author', label: 'Author', Icon: User },
+  {
+    /* Stryker disable next-line StringLiteral: `inOrder` sorts by author for
+       every id that is not one of the other three, so a different id here is
+       the same shelf in the same order, ticked in the same row. */
+    id: 'author',
+    label: 'Author',
+    Icon: User,
+  },
   { id: 'progress', label: 'Progress', Icon: Gauge },
 ]
 
@@ -319,12 +326,20 @@ export function Library({
   const [, setStatusTick] = useState(0)
   useEffect(() => {
     if (bookStatuses.length === 0) return
-    /* COALESCED, because a transfer publishes per FRAME. Every notification
-       re-renders the shelf and re-asks `of` for every visible row, and a
-       download emits many frames a second — so a single book coming down
-       drove thousands of shelf-wide renders, each of them to move one
-       percentage. A burst inside one tick is one render; nothing is dropped,
-       because the store is pulled and the last read wins either way. */
+    /* DEFERRED TO A MICROTASK, AND THAT IS ALL IT DOES. Until 2026-09-13 this
+       said "COALESCED, because a transfer publishes per FRAME … A burst inside
+       one tick is one render", as though it bounded how often a download
+       re-renders the shelf. It does not. `runDownload`'s progress callback
+       fires once per transfer frame, each frame its own task, and a microtask
+       cannot merge work across tasks — while ticks set within ONE task React
+       batches into one render with no help from here. So every frame still
+       renders the shelf and re-asks `of` for every visible row.
+       What the deferral does buy is that the tick never runs on a notifier's
+       own stack: a store that published while something was rendering would
+       otherwise set this screen's state inside another component's render.
+       Nothing is dropped either way, because the store is pulled and the last
+       read wins. A real bound needs an interval chosen against a measured
+       frame rate and a measured shelf render, and neither has been measured. */
     let queued = false
     /* A microtask already queued when the effect is torn down would still
        fire — into a component that has unsubscribed, or whose providers have
@@ -335,10 +350,20 @@ export function Library({
       queued = true
       queueMicrotask(() => {
         queued = false
+        /* Stryker disable next-line ArithmeticOperator: the tick is never read
+           — any step that changes it is one render of the shelf. */
         if (active) setStatusTick((n) => n + 1)
       })
     }
     const offs = bookStatuses.map((one) => one.subscribe(bump))
+    /* ⚠️ AND ONCE STRAIGHT AFTER SUBSCRIBING, because the render asked before
+       this listened (2026-09-13). `of` is read while the shelf renders and this
+       subscription is a passive effect, so whatever a store published in
+       between — from a layout effect anywhere in the tree, or a transfer frame
+       that landed first — reached no listener and was lost until something
+       unrelated re-rendered the shelf: a finished download could stay drawn at
+       its last percentage. One tick re-reads what the render may have missed. */
+    bump()
     return () => {
       active = false
       for (const off of offs) off()
@@ -381,6 +406,8 @@ export function Library({
   const [, setNowTick] = useState(0)
   useEffect(() => {
     if (layout !== 'list') return
+    /* Stryker disable next-line ArithmeticOperator: the tick is never read —
+       any step that changes it is one repaint of the list's timestamps. */
     const timer = window.setInterval(() => setNowTick((t) => t + 1), 60_000)
     return () => window.clearInterval(timer)
   }, [layout])
@@ -454,24 +481,6 @@ export function Library({
   )
   const selecting = selectedBooks.length > 0
 
-  /* Pruned to the shelf as shown. Ids are compared, so a shelf that re-sorts
-   * changes nothing here. When the pruning empties the selection, everything
-   * hanging off it goes too — the bulk editor cannot stay open over zero
-   * books, and a ⇧-run from an anchor nothing shows would select a run the
-   * reader cannot see the start of. */
-  useEffect(() => {
-    if (selected.size === 0) return
-    const shown = new Set(shelf.map((book) => book.bookId))
-    const kept = new Set([...selected].filter((id) => shown.has(id)))
-    if (kept.size === selected.size) return
-    setSelected(kept)
-    if (kept.size === 0) {
-      setAnchorId(null)
-      setTaggingSelection(false)
-      setRemovingSelection(false)
-    }
-  }, [shelf, selected])
-
   /* One click on a card, read three ways — see `BookCell.onJacketClick`. A
    * range runs between the anchor and this book in SHELF ORDER, which is the
    * order the reader can see, whatever the sort. With no anchor a ⇧-click is
@@ -483,7 +492,13 @@ export function Library({
         if (mode === 'range' && anchorId) {
           const from = shelf.findIndex((one) => one.bookId === anchorId)
           const to = shelf.findIndex((one) => one.bookId === book.bookId)
-          if (from >= 0 && to >= 0) {
+          if (
+            from >= 0 &&
+            /* Stryker disable next-line ConditionalExpression: the book clicked
+               came off the shelf this callback closed over, so `to` is never
+               -1; the anchor is the index that can have gone. */
+            to >= 0
+          ) {
             for (const one of shelf.slice(Math.min(from, to), Math.max(from, to) + 1)) {
               next.add(one.bookId)
             }
@@ -506,29 +521,89 @@ export function Library({
    * lives here; a confirmation ABOUT that selection cannot outlive it, and a
    * boolean in the reducer would have to be swept whenever the selection was
    * pruned — a second place to forget. It is closed by `clearSelection` for
-   * exactly that reason, and by the effect that prunes to what is shown.
+   * exactly that reason, which the effect that prunes to what is shown calls
+   * rather than repeating.
    */
   const [removingSelection, setRemovingSelection] = useState(false)
 
+  /* Stryker disable ArrayDeclaration: a dependency list of constants never
+     changes, so the callback keeps one identity whatever is written here. */
   const clearSelection = useCallback(() => {
     setSelected(new Set())
     setAnchorId(null)
     setTaggingSelection(false)
     setRemovingSelection(false)
   }, [])
+  /* Stryker restore ArrayDeclaration */
+
+  /* Pruned to the shelf as shown. Ids are compared, so a shelf that re-sorts
+   * changes nothing here. When the pruning empties the selection, everything
+   * hanging off it goes too — the bulk editor cannot stay open over zero
+   * books, and a ⇧-run from an anchor nothing shows would select a run the
+   * reader cannot see the start of.
+   *
+   * THROUGH `clearSelection`, which it did not use until 2026-09-13: this
+   * effect wrote the anchor, editor and removal resets out a second time — the
+   * second place to forget that `removingSelection`'s own comment warns about. */
+  useEffect(() => {
+    /* ⚠️ **NOTHING SELECTED, NOTHING TO PRUNE — AND THIS WAS DELETED AS AN
+       EQUIVALENT MUTANT, WHICH IT IS NOT.** The size comparison below answers
+       the same question for an empty selection (it keeps nothing, so the sizes
+       agree), and that is a claim about the ANSWER: it reaches it only after
+       building a set of every id on the shelf. At about two thousand books
+       that is a second pass over the whole library on every keystroke that
+       changes the query, for a selection nobody made. A review counted it.
+       So the branch is observable and the gate can hold it: `if (true)` never
+       prunes, `if (false)` walks a shelf with nothing selected, and
+       `LibraryBulk`'s read-counting test kills each — the same shape
+       `pinnedFirst` uses in `tagPrefs.ts`. */
+    if (selected.size === 0) return
+    const shown = new Set(shelf.map((book) => book.bookId))
+    const kept = new Set([...selected].filter((id) => shown.has(id)))
+    if (kept.size === selected.size) return
+    if (kept.size === 0) clearSelection()
+    else setSelected(kept)
+  }, [shelf, selected, clearSelection])
 
   /* ⌘A takes the shelf as shown; Escape lets it go. Both only on this screen
    * and only when the reader is not typing — the search field's own ⌘A is
    * select-all-text, and must stay so. Escape is left to the menus and the
    * editor while one of them is open, since those close on it first; the
    * selection goes on the NEXT Escape, which is the order a reader expects
-   * things to peel back in. */
+   * things to peel back in.
+   *
+   * ⚠️ THE TOOLBAR'S SORT AND NARROW MENUS WERE NOT IN THAT LIST until
+   * 2026-09-13, and `useRowMenu`'s `stopPropagation` could not make up for it:
+   * that listener and this one are both on `document`, and stopping
+   * propagation does not stop another listener on the same node. One Escape
+   * closed Sort AND dropped the selection. */
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null
       const typing =
+        /* Stryker disable next-line OptionalChaining: a keydown this listener
+           is handed was dispatched at something — the document itself at
+           worst — so the chains only satisfy the type `event.target` carries. */
         target?.isContentEditable || target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA'
       if (typing) return
+      /* ONE LAYER PER PRESS, topmost first — the same rule §11 states for the
+       * reader's own overlays. The removal sheet is modal and is on top, so it
+       * goes first and the selection it was asking about survives; a single
+       * Escape that dismissed the question AND the selection would make
+       * backing out of the ceremony cost the reader the gathering.
+       *
+       * ⚠️ AND WHILE IT IS UP IT OWNS EVERY OTHER KEY TOO, which it did not
+       * until 2026-09-13: ⌘A was answered before this was asked. The sheet
+       * names what it removes from the SELECTION, so ⌘A with focus on its
+       * Cancel button turned "Remove 1 book" into "Remove 3 books" under the
+       * reader's hand. A modal is not somewhere the shelf's shortcuts reach. */
+      if (removingSelection) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          setRemovingSelection(false)
+        }
+        return
+      }
       const accel = platform === 'macos' ? event.metaKey : event.ctrlKey
       if (accel && event.key === 'a' && shelf.length > 0) {
         event.preventDefault()
@@ -536,23 +611,13 @@ export function Library({
         return
       }
       if (event.key !== 'Escape') return
-      /* ONE LAYER PER PRESS, topmost first — the same rule §11 states for the
-       * reader's own overlays. The removal sheet is modal and is on top, so it
-       * goes first and the selection it was asking about survives; a single
-       * Escape that dismissed the question AND the selection would make
-       * backing out of the ceremony cost the reader the gathering. */
-      if (removingSelection) {
-        event.preventDefault()
-        setRemovingSelection(false)
-        return
-      }
-      if (selecting && !menuFor && !tagging && !taggingSelection) {
+      if (selecting && openMenu === null && !menuFor && !tagging && !taggingSelection) {
         clearSelection()
       }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [platform, shelf, selecting, menuFor, tagging, taggingSelection, removingSelection, clearSelection])
+  }, [platform, shelf, selecting, openMenu, menuFor, tagging, taggingSelection, removingSelection, clearSelection])
 
   /* What leaves the shelf when a card is dragged: the selection if the card is
    * in it, the card alone if not — Finder's rule. See `bookDrag`. */
@@ -570,13 +635,39 @@ export function Library({
 
   /* The bulk editor hangs off the bar's own Tag… button. */
   const bulkAnchor = useRef<HTMLButtonElement | null>(null)
-  const { menuRef: bulkRef, menuStyle: bulkStyle } = useRowMenu(
+  const {
+    moreRef: bulkTrigger,
+    menuRef: bulkRef,
+    menuStyle: bulkStyle,
+  } = useRowMenu(
     taggingSelection,
     bulkAnchor,
     () => setTaggingSelection(false),
+    /* Stryker disable next-line ObjectLiteral: `nextPlacement`'s own defaults
+       are this side and this alignment, so an empty options object hangs the
+       editor in the same place — the pair is here to be read, not to differ. */
     { side: 'bottom', align: 'start' },
   )
-  const finishedAll = selectedBooks.length > 0 && selectedBooks.every((book) => book.finished)
+  /* ⚠️ THE BUTTON IS THE HOOK'S TRIGGER AS WELL AS ITS ANCHOR, and until
+     2026-09-13 it was only the anchor. `useRowMenu` closes on a pointerdown
+     outside the editor and outside its trigger, and it knows the trigger only
+     as `moreRef` — which nothing here was given. So pressing Tags… to put the
+     editor away closed it on pointerdown, and the click that followed toggled
+     it straight back open: the control that opened it could not close it. */
+  const bulkButton = useCallback(
+    (node: HTMLButtonElement | null) => {
+      bulkAnchor.current = node
+      bulkTrigger.current = node
+    },
+    /* Stryker disable next-line ArrayDeclaration: `bulkTrigger` is the hook's
+       own ref object, which it keeps for the life of the component. */
+    [bulkTrigger],
+  )
+  /* NO `length > 0` GUARD. It read as one — `every` answers true for an empty
+     selection — and the only thing that reads this is the selection bar, which
+     is drawn while `selecting`. A guard against a state its reader cannot be in
+     is a claim nothing can check. */
+  const finishedAll = selectedBooks.every((book) => book.finished)
   /* Virtualisation, but only past the point where it pays.
    *
    * Below `VIRTUALISE_ABOVE` the window arithmetic, the spacers and the scroll
@@ -596,8 +687,27 @@ export function Library({
    * height is a constant and `applyMetrics` publishes it beside `--card-w`. */
 
   useEffect(() => {
-    const node = shelfRef.current
-    if (!node || !virtualising) return
+    /* ⚠️ **THE THRESHOLD IS READ FIRST, AND IT IS READ HERE RATHER THAN IN THE
+       GUARD BELOW.** A shelf with no window to place asks the DOM nothing at
+       all: `closest` walks the ancestors, and doing that before deciding the
+       shelf does not need a scroller was work for an answer already known.
+       (It briefly did, on the grounds that the guard returned either way —
+       true of the answer, not of the work, which is the same mistake the
+       prune's shortcut above was deleted for.) */
+    const node = virtualising ? shelfRef.current : null
+    /* THE BOX THAT ACTUALLY MOVES, found once and narrowed once — see
+     * `.body[data-scroll]` in the stylesheet. It was looked up inside `measure`
+     * AND again beside it, and every reader of it re-asked `instanceof` on the
+     * same answer; one lookup means the arithmetic below and the listeners can
+     * never end up reading two different boxes. */
+    /* Stryker disable next-line LogicalOperator: the shelf is rendered as the
+       `[data-scroll]` body's own child, so `closest` finds that parent and the
+       fallback is the very same node. */
+    const scroller = node?.closest('[data-scroll]') ?? node?.parentElement
+    /* Stryker disable next-line LogicalOperator: the scroller is DERIVED from
+       the node, so the two stand or fall together — no state reaches this line
+       holding one of them and not the other. */
+    if (!node || !(scroller instanceof HTMLElement)) return
     /* Measured from the FIRST CELL rather than assumed from the CSS. The grid is
      * responsive, so the column count and the row height are both facts about
      * the rendered layout — reading them from a constant would put the window a
@@ -624,23 +734,24 @@ export function Library({
       const columns = cell && cell.offsetWidth > 0
         ? Math.max(1, style.gridTemplateColumns.split(' ').filter(Boolean).length)
         : 0
-      const scroller = node.closest('[data-scroll]') ?? node.parentElement
       /* SHELF-RELATIVE. The scroller's `scrollTop` counts from its own top,
        * which is above the heading, the sort controls and the filter row — so
        * feeding it straight to the grid told the arithmetic the reader was
        * further down the shelf than they were, by the height of everything
        * above it. `offsetTop` is that distance. */
-      const above = node.offsetTop - (scroller instanceof HTMLElement ? scroller.offsetTop : 0)
+      const above = node.offsetTop - scroller.offsetTop
       setViewport({
-        scrollTop: scroller instanceof HTMLElement ? Math.max(0, scroller.scrollTop - above) : 0,
-        height: scroller instanceof HTMLElement ? scroller.clientHeight : 0,
+        scrollTop: Math.max(0, scroller.scrollTop - above),
+        height: scroller.clientHeight,
         columns,
         rowHeight,
       })
     }
     measure()
-    const scroller = node.closest('[data-scroll]') ?? node.parentElement
-    scroller?.addEventListener('scroll', measure, { passive: true })
+    /* Stryker disable next-line ObjectLiteral,BooleanLiteral: a `scroll` event
+       is not cancelable, so `passive` tells the browser something it already
+       knows about this listener and changes nothing it can do. */
+    scroller.addEventListener('scroll', measure, { passive: true })
     const observer = new ResizeObserver(measure)
     observer.observe(node)
     /* THE SCROLLER TOO. The viewport height in the window arithmetic is the
@@ -648,9 +759,9 @@ export function Library({
      * selection bar appears, the chips wrap onto a second line, the window
      * itself grows. Observed only through the shelf, those left `height`
      * stale and the bottom rows of the newly exposed viewport unrendered. */
-    if (scroller instanceof HTMLElement) observer.observe(scroller)
+    observer.observe(scroller)
     return () => {
-      scroller?.removeEventListener('scroll', measure)
+      scroller.removeEventListener('scroll', measure)
       observer.disconnect()
     }
   }, [virtualising, shelf.length])
@@ -675,6 +786,8 @@ export function Library({
    * large library means the virtualiser did not engage, which is a different
    * problem from a scan that took too long. Dev only, and gone from a build. */
   const measured = useRef(false)
+  /* Stryker disable ArrayDeclaration: the ref latches on the first run, so
+     every later one returns on its first line whatever wakes it. */
   useEffect(() => {
     if (measured.current) return
     measured.current = true
@@ -686,6 +799,7 @@ export function Library({
     })
     onFirstPaint('the shelf drew its first frame')
   }, [books.length, shelf.length, visible.length, virtualising])
+  /* Stryker restore ArrayDeclaration */
 
   /**
    * What the reader asked for, and what came of it — the status bar's work
@@ -892,7 +1006,7 @@ export function Library({
           </span>
           {canTag && (
           <button
-            ref={bulkAnchor}
+            ref={bulkButton}
             type="button"
             className={styles.selectionAction}
             data-open={taggingSelection}
@@ -944,7 +1058,11 @@ export function Library({
           >
             <X size={ICON.control} strokeWidth={ICON.stroke} />
           </button>
-          {taggingSelection && selectedBooks.length > 0 && (
+          {/* NO `selectedBooks.length > 0` HERE. The whole bar above is drawn
+              only while something is selected, so the editor's own copy of that
+              test could not fail — and a guard that cannot fail reads as one
+              that is doing something. */}
+          {taggingSelection && (
             <div
               ref={bulkRef}
               className={editorStyles.popover}
@@ -1023,7 +1141,6 @@ export function Library({
                      which is how the claim was disproved — and a construct
                      that reads as protection while protecting nothing is
                      worse than none. */
-                  setRemovingSelection(false)
                   clearSelection()
                   /* Not optional here: the sheet renders only with `onRemove`
                      present, so a confirm that cleared the selection and
@@ -1083,10 +1200,19 @@ export function Library({
                        shelf. It still read "Add a book, or a folder of them" over
                        an empty space — an instruction with no control anywhere on
                        screen to follow it with, which is the same defect the note
-                       below this one was written about, in the other direction. */
-                    onAddBooks !== undefined || onAddFolder !== undefined
+                       below this one was written about, in the other direction.
+
+                       ⚠️ AND ONLY FOR THE BUTTONS THAT ARE THERE — until
+                       2026-09-13 either route alone still read "Add a book, or a
+                       folder of them". The two are optional independently, so
+                       that offered a route the host had not given. */
+                    onAddBooks !== undefined && onAddFolder !== undefined
                     ? 'Add a book, or a folder of them — everything you highlight and tag stays with it.'
-                    : 'Nothing on the shelf yet. Books added on the shelf itself appear here.'
+                    : onAddBooks !== undefined
+                      ? 'Add a book — everything you highlight and tag stays with it.'
+                      : onAddFolder !== undefined
+                        ? 'Add a folder of books — everything you highlight and tag stays with it.'
+                        : 'Nothing on the shelf yet. Books added on the shelf itself appear here.'
               : 'Try a different search, or clear the filter.'}
           </div>
           {/* THE FOLDER ROUTE, at the moment it is actually wanted — and only
@@ -1110,14 +1236,19 @@ export function Library({
                   instruction with no control anywhere on screen to follow it
                   with. The empty state is the one moment both belong at equal
                   weight: a first-time reader has not chosen files-or-folder
-                  yet, and this is where they choose. */}
+                  yet, and this is where they choose.
+
+                  NEITHER CAN BE DISABLED, so neither says it is. Both carried
+                  `disabled={importing !== null}` and `data-disabled` beside it,
+                  with a note on why a control needs the pair — inside a row
+                  that renders only while `importing === null`, where both were
+                  always false. Removed 2026-09-13; if these are ever drawn
+                  during an import, the pair is what they need back. */}
               {onAddBooks !== undefined && (
                 <button
                   type="button"
                   className={styles.emptyImport}
                   onClick={onAddBooks}
-                  disabled={importing !== null}
-                  data-disabled={importing !== null}
                 >
                   <Plus size={ICON.control} strokeWidth={ICON.stroke} />
                   Add books…
@@ -1128,14 +1259,6 @@ export function Library({
                   type="button"
                   className={styles.emptyImport}
                   onClick={onAddFolder}
-                  disabled={importing !== null}
-                /* BOTH, because they do different jobs and the app's convention
-                   is the attribute. `disabled` stops the click; `data-disabled`
-                   is what `global.css` styles on — so with only the first, the
-                   button refused at full opacity with a pointer cursor, looking
-                   exactly as available as it does when it works. `TitleBar`
-                   sets both on its own controls; this set one. */
-                  data-disabled={importing !== null}
                 >
                   <FolderPlus size={ICON.control} strokeWidth={ICON.stroke} />
                   Import a folder…
