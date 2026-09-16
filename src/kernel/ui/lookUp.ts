@@ -48,9 +48,9 @@ export type LookUpAction = 'gloss' | 'install' | 'none'
  * What to do when the reader asks to look something up.
  *
  * Two inputs, and they are not the same question. `gloss` is whether a
- * definition can be produced right now; `installable` is whether a build that
+ * definition can be produced right now; `canInstall` is whether a build that
  * cannot produce one has somewhere to send the reader to fix that. See
- * `GlossProvider.installable` for why the second exists at all — collapsing
+ * `GlossProvider.installAt` for why the second exists at all — collapsing
  * them would either draw a dead button in a browser or silently remove the
  * feature from a desktop that has simply not downloaded a model yet.
  *
@@ -59,9 +59,9 @@ export type LookUpAction = 'gloss' | 'install' | 'none'
  * foliate — so a rule left inside it can only be checked by reading its source
  * back, and a source scan cannot tell a working wiring from a plausible one.
  */
-export function decideLookUp(gloss: boolean, installable: boolean): LookUpAction {
+export function decideLookUp(gloss: boolean, canInstall: boolean): LookUpAction {
   if (gloss) return 'gloss'
-  return installable ? 'install' : 'none'
+  return canInstall ? 'install' : 'none'
 }
 
 /**
@@ -92,16 +92,27 @@ export function decideLookUp(gloss: boolean, installable: boolean): LookUpAction
  * ordinary-looking characters.
  *
  * The Rust half is gone, so there is no second check to disagree with any
- * more. The counting stays as it is regardless: `Array.from` iterates by code
+ * more. The counting stays as it is regardless: a string iterates by code
  * point, and a bound on a *term* that miscounts CJK is wrong on its own terms
  * in a codebase whose model was chosen for Chinese.
+ *
+ * ⚠️ **COUNTED ONLY AS FAR AS THE BOUND.** This was `Array.from(trimmed).length`,
+ * which built an array of the whole selection to learn whether it passed 120 —
+ * and a reader can select a chapter. A million code points took about 13 ms to
+ * refuse that way and 0.15 ms stopping at the 121st, measured 2026-09-13; the
+ * squeeze on the line before is not the cost, at 0.13 ms on the same input.
  */
 export type TermVerdict = 'ok' | 'empty' | 'too-long'
 
 export function termVerdict(term: string): TermVerdict {
   const trimmed = term.trim().replace(/\s+/g, ' ')
   if (trimmed === '') return 'empty'
-  return Array.from(trimmed).length <= MAX_TERM ? 'ok' : 'too-long'
+  let count = 0
+  for (const _codePoint of trimmed) {
+    count += 1
+    if (count > MAX_TERM) return 'too-long'
+  }
+  return 'ok'
 }
 
 /**

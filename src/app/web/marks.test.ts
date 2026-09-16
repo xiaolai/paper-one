@@ -44,7 +44,35 @@ function shelfOf(rows: readonly Record<string, unknown>[], onCall?: (s: string, 
   } as unknown as ShelfChannel
 }
 
+/** A shelf whose every read waits for the test to hand it the rows it answers with. */
+function gatedShelf() {
+  const reads: ((rows: readonly Record<string, unknown>[]) => void)[] = []
+  const channel = {
+    call: async () => null,
+    stream: () => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield await new Promise<readonly Record<string, unknown>[]>((land) => reads.push(land))
+      },
+    }),
+    close: () => {},
+  } as unknown as ShelfChannel
+  return { channel, reads }
+}
+
 const settled = () => new Promise((r) => setTimeout(r, 0))
+
+/** What a reader supplies to make a highlight — every field distinct, so a body that swaps two is seen. */
+const DRAFT = {
+  bookId: 'b1',
+  cfi: 'epubcfi(/6/4)',
+  sectionIndex: 2,
+  text: 'a new passage',
+  prefix: 'is ',
+  suffix: ' here',
+  note: 'mine',
+  tint: 'green',
+  chapter: 'Two',
+} as const
 
 describe('asMark', () => {
   it('carries every field the wire sends', () => {
@@ -82,13 +110,31 @@ describe('parseMarks', () => {
   })
 
   /* AN ID AND A BOOK OR IT IS NOT A MARK: React keys on the first and every
-     view groups by the second. */
+     view groups by the second.
+     ⚠️ THE BOOKLESS ROW USED TO SHARE `m1` WITH THE GOOD ONE, so a parser that
+     let it through still answered `['m1']` — the duplicate rule dropped the
+     good row instead. Its own id is what makes a missed drop visible. */
   it('drops a row with no id or no book', () => {
-    expect(parseMarks([row({ id: '' }), row({ bookId: undefined }), row()]).map((m) => m.id)).toEqual(['m1'])
+    expect(parseMarks([row({ id: '' }), row({ id: 'm2', bookId: undefined }), row()]).map((m) => m.id)).toEqual(['m1'])
   })
 
   it('survives an answer that is not a list', () => {
     for (const junk of [null, undefined, 7, 'rows', { rows: [] }]) expect(parseMarks(junk)).toEqual([])
+  })
+
+  /* NOT AN OBJECT IS NOT A ROW, `null` and `undefined` included — and a call
+     that resolves nothing hands `add` exactly `[undefined]`. Reading a field off
+     either throws, which would lose every good row beside it. */
+  it('skips an item that is not an object and reads the rows beside it', () => {
+    expect(parseMarks([null, undefined, 7, 'm1', row()]).map((m) => m.id)).toEqual(['m1'])
+  })
+
+  /* `null` IS HOW JSON SPELLS AN ABSENT VALUE. A row carrying `unplaced: null`
+     is a placed mark with no record of being unplaced, not a row to throw on. */
+  it('reads a row whose unplaced is null as a placed mark', () => {
+    const [mark] = parseMarks([row({ unplaced: null })])
+    expect(mark?.cfi).toBe('epubcfi(/6/2)')
+    expect(mark).not.toHaveProperty('unplaced')
   })
 
   /**
@@ -199,11 +245,46 @@ describe('createRemoteMarks', () => {
 
   it('writes a note optimistically and tells the shelf', async () => {
     const asked: { service: string; body: unknown }[] = []
-    const store = createRemoteMarks(shelfOf([row()], (s, b) => asked.push({ service: s, body: b })))
+    const store = createRemoteMarks(
+      shelfOf([row(), row({ id: 'm2', note: 'theirs' })], (s, b) => asked.push({ service: s, body: b })),
+    )
     await settled()
     store.setNote({ id: 'm1', bookId: 'b1' }, 'mine')
     expect(store.all[0]?.note).toBe('mine')
+    /* THAT MARK'S NOTE, and no other's. */
+    expect(store.all[1]?.note).toBe('theirs')
     expect(asked.at(-1)).toEqual({ service: 'mark.set', body: { mark: 'm1', book: 'b1', note: 'mine' } })
+  })
+
+  /* ⚠️ **A NOTE WRITE HANDED BACK** (2026-09-14 verify). `setNote` returned
+     nothing while its write went to the shelf asynchronously, so the note editor
+     took the note for saved the moment it was handed over, and closed over a
+     write the shelf could still refuse — the draft went with it. */
+  it('hands a note write back, so an editor can tell a saved note from a refused one', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const refusing = {
+      ...shelfOf([row()]),
+      call: async () => {
+        throw new Error('forbidden')
+      },
+    } as unknown as ShelfChannel
+    const store = createRemoteMarks(refusing)
+    await settled()
+
+    const cause = await Promise.resolve(store.setNote({ id: 'm1', bookId: 'b1' }, 'mine')).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    )
+
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/forbidden/u)
+    expect(store.persistent, 'and the store still says it stopped saving').toBe(false)
+    expect(errors).toHaveBeenCalledWith('Paper: mark.set was refused', cause)
+    /* AND THE OPTIMISTIC NOTE IS UNDONE by the re-read the refusal starts: the
+       shelf still holds the note it had, and that is what the reader is shown. */
+    await settled()
+    expect(store.all[0]?.note).toBe('')
+    vi.restoreAllMocks()
   })
 
   /**
@@ -244,7 +325,7 @@ describe('createRemoteMarks', () => {
       }),
       close: () => {},
     } as unknown as ShelfChannel
-    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     const store = createRemoteMarks(flaky)
     await settled()
     expect(store.all).toHaveLength(1)
@@ -252,6 +333,9 @@ describe('createRemoteMarks', () => {
     store.refresh()
     await settled()
     expect(store.all).toHaveLength(1)
+    /* SAID, not swallowed: a list that quietly stopped updating looks exactly
+       like a list with nothing new in it. */
+    expect(errors).toHaveBeenCalledWith('Paper: could not read your marks', expect.objectContaining({ message: 'gone' }))
     vi.restoreAllMocks()
   })
 
@@ -262,6 +346,144 @@ describe('createRemoteMarks', () => {
     store.dispose()
     await settled()
     expect(woke).not.toHaveBeenCalled()
+    /* AND KEEPS NOTHING THAT LANDS AFTER IT. The read above answered after
+       dispose; a store that took it would hold a list nobody reads. */
+    expect(store.all).toEqual([])
+    /* NOR IS A LISTENER TOLD about a change made after it. */
+    store.remove({ id: 'm1', bookId: 'b1' })
+    expect(woke).not.toHaveBeenCalled()
+  })
+
+  /* NOTHING UNTIL THE SHELF ANSWERS — no placeholder rows — and a store that
+     has been refused nothing is one that saves. */
+  it('holds no marks before the first read lands, and starts out saving', () => {
+    const store = createRemoteMarks(shelfOf([row()]))
+    expect(store.all).toEqual([])
+    expect(store.allBookmarks).toEqual([])
+    expect(store.allUnplaced).toEqual([])
+    expect(store.persistent).toBe(true)
+  })
+
+  /* ONE SHARED EMPTY LIST while nothing is unplaced, so a change elsewhere does
+     not hand the panel a new empty array to re-render on. */
+  it('keeps the same empty unplaced list across a change', async () => {
+    const store = createRemoteMarks(shelfOf([row(), row({ id: 'm2' })]))
+    await settled()
+    const none = store.allUnplaced
+    expect(none).toEqual([])
+    store.remove({ id: 'm1', bookId: 'b1' })
+    expect(store.allUnplaced, 'a new empty list is a re-render for nothing').toBe(none)
+  })
+
+  it('names itself when a subscriber throws', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const store = createRemoteMarks(shelfOf([row()]))
+    await settled()
+    store.subscribe(() => {
+      throw new Error('boom')
+    })
+    store.remove({ id: 'm1', bookId: 'b1' })
+    expect(errors).toHaveBeenCalledWith(
+      'Paper: a web marks subscriber threw while being notified',
+      expect.objectContaining({ message: 'boom' }),
+    )
+    vi.restoreAllMocks()
+  })
+
+  it('stops waking a listener once it unsubscribes', async () => {
+    const store = createRemoteMarks(shelfOf([row(), row({ id: 'm2' })]))
+    await settled()
+    const woke = vi.fn()
+    const unsubscribe = store.subscribe(woke)
+    unsubscribe()
+    store.remove({ id: 'm1', bookId: 'b1' })
+    expect(woke, 'a panel that unmounted is still being told').not.toHaveBeenCalled()
+  })
+
+  /* THE READ THAT STARTED LAST STANDS, whichever lands last — see
+     `generation`. An older answer landing on a newer one takes away a mark the
+     reader has just made, until the next refresh brings it back. */
+  it('does not let an older read that lands late overwrite a newer one', async () => {
+    const { channel, reads } = gatedShelf()
+    const store = createRemoteMarks(channel)
+    store.refresh()
+    await settled()
+    expect(reads).toHaveLength(2)
+    reads[1]?.([row({ id: 'newer' })])
+    await settled()
+    reads[0]?.([row({ id: 'older' })])
+    await settled()
+    expect(store.all.map((m) => m.id)).toEqual(['newer'])
+  })
+
+  describe('add', () => {
+    /* NOT OPTIMISTIC: what is drawn is what the shelf made, under the id the
+       shelf issued — and it joins the marks already there. */
+    it('asks mark.add for a highlight and adds what the shelf made beside the marks already there', async () => {
+      const asked: { service: string; body: unknown }[] = []
+      const channel = {
+        ...shelfOf([row()]),
+        call: async (service: string, body: unknown) => {
+          asked.push({ service, body })
+          return row({ id: 'm9', text: DRAFT.text })
+        },
+      } as unknown as ShelfChannel
+      const store = createRemoteMarks(channel)
+      await settled()
+      const woke = vi.fn()
+      store.subscribe(woke)
+
+      const made = await store.add(DRAFT)
+
+      expect(asked).toEqual([
+        {
+          service: 'mark.add',
+          body: {
+            book: 'b1',
+            cfi: 'epubcfi(/6/4)',
+            section: 2,
+            text: 'a new passage',
+            prefix: 'is ',
+            suffix: ' here',
+            note: 'mine',
+            colour: 'green',
+            chapter: 'Two',
+            kind: 'highlight',
+          },
+        },
+      ])
+      expect(made?.id).toBe('m9')
+      expect(store.all.map((m) => m.id)).toEqual(['m1', 'm9'])
+      expect(woke, 'a highlight nobody is told about is one the page never draws').toHaveBeenCalledOnce()
+    })
+
+    it('adds nothing, and still saves, when the shelf answers with something that is not a mark', async () => {
+      const channel = { ...shelfOf([row()]), call: async () => ({ nope: true }) } as unknown as ShelfChannel
+      const store = createRemoteMarks(channel)
+      await settled()
+      expect(await store.add(DRAFT)).toBeNull()
+      expect(store.all.map((m) => m.id)).toEqual(['m1'])
+      expect(store.persistent, 'an answer this build cannot read is not a refusal').toBe(true)
+    })
+
+    it('hands back null, says so and stops saving when the shelf refuses', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const refusal = new Error('forbidden')
+      const channel = {
+        ...shelfOf([row()]),
+        call: async () => {
+          throw refusal
+        },
+      } as unknown as ShelfChannel
+      const store = createRemoteMarks(channel)
+      await settled()
+
+      expect(await store.add(DRAFT)).toBeNull()
+      expect(store.persistent).toBe(false)
+      expect(store.all.map((m) => m.id)).toEqual(['m1'])
+      expect(errors).toHaveBeenCalledWith('Paper: mark.add was refused', refusal)
+      vi.restoreAllMocks()
+    })
   })
 })
 
@@ -299,6 +521,41 @@ describe('a mark the shelf says has no place', () => {
     ['true', true],
   ])('is refused when the reason is unreadable — %s', (_why, bad) => {
     expect(parseMarks([row({ cfi: '', sectionIndex: 0, unplaced: bad })])).toEqual([])
+  })
+
+  /* A GOOD REASON DOES NOT EXCUSE A BAD FIELD. Only the anchor may be missing;
+     everything else is read exactly as a placed mark's is. One field at a time,
+     so each check is the only thing between the row and the list. */
+  it.each([
+    ['text', { text: 7 }],
+    ['note', { note: 42 }],
+    ['chapter', { chapter: null }],
+    ['createdAt', { createdAt: '10' }],
+    ['kind', { kind: 'scribble' }],
+    ['tint', { tint: 'chartreuse' }],
+    ['style', { style: 'sparkle' }],
+  ])('is refused for a %s that will not read, whatever reason it gives', (_field, bad) => {
+    expect(parseMarks([row({ cfi: '', sectionIndex: 0, unplaced: STRANDED, ...bad })])).toEqual([])
+  })
+
+  it('keeps the recovery context it carries, and defaults what an older mark lacks', () => {
+    const [carried] = parseMarks([row({ cfi: '', sectionIndex: 0, unplaced: STRANDED, prefix: 'the ', suffix: ' calls' })])
+    expect(carried?.prefix).toBe('the ')
+    expect(carried?.suffix).toBe(' calls')
+    const [older] = parseMarks([
+      row({ cfi: '', sectionIndex: 0, unplaced: STRANDED, prefix: undefined, suffix: undefined }),
+    ])
+    expect(older?.prefix).toBe('')
+    expect(older?.suffix).toBe('')
+  })
+
+  it('is the only mark in allUnplaced when placed marks arrive beside it', async () => {
+    const view = createRemoteMarks(
+      shelfOf([row({ id: 'placed' }), row({ id: 'stranded', cfi: '', sectionIndex: 0, unplaced: STRANDED })]),
+    )
+    await settled()
+    expect(view.allUnplaced.map((m) => m.id)).toEqual(['stranded'])
+    expect(view.all.map((m) => m.id)).toEqual(['placed'])
   })
 
   it('reaches the pane through allUnplaced, not through all', async () => {

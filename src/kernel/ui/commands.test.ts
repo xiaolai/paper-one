@@ -14,6 +14,7 @@ function context(over: Partial<AppState> = {}) {
     dispatch: (action: unknown) => dispatched.push(action),
     hasBook: true,
     markSelection: null,
+    lookUp: null,
     toggleBookmark: null,
     bookmarked: false,
     openBookPicker: () => {},
@@ -35,6 +36,21 @@ function context(over: Partial<AppState> = {}) {
 const find = (commands: Command[], id: string) => commands.find((c) => c.id === id)
 
 describe('buildCommands', () => {
+  /* LOOK UP, beside Mark (phase 17, L4): it was reachable only from the popup's
+     button. Offered exactly when there is something to look up, and running the
+     very handler the button and the key run. */
+  it('offers Look up only with something to look up, and runs the one handler', () => {
+    expect(find(buildCommands(context().ctx), 'book:look-up')).toBeUndefined()
+
+    let pressed = 0
+    const row = find(buildCommands({ ...context().ctx, lookUp: () => (pressed += 1) }), 'book:look-up')
+
+    expect(row?.label).toBe('Look up the selection')
+    expect(row?.combo).toBe('⌃⌘D')
+    row?.run()
+    expect(pressed).toBe(1)
+  })
+
   it('names the action, not the thing — a pane that is open offers to close', () => {
     const open = buildCommands(context({ pane: 'marginalia' }).ctx)
     expect(find(open, 'pane:marginalia')?.label).toBe('Close Marginalia')
@@ -227,6 +243,174 @@ describe('buildCommands', () => {
 })
 
 /**
+ * THE WHOLE MAP, ROW BY ROW (2026-09-14, mutation sweep).
+ *
+ * Every case above asks one row one question, and between them they never
+ * read most of what the palette prints: the group a row is filed under, the
+ * words it is found by, the label on the far side of a toggle, or what running
+ * the row does. A row filed under no group, found by no word or running nothing
+ * passed all of them — 146 such mutants did.
+ */
+describe('every row the palette prints', () => {
+  /** A context offering every conditional row, each handler recording its own name. */
+  const offering = (over: Partial<AppState>) => {
+    const { ctx, dispatched } = context(over)
+    const handler = (name: string) => () => {
+      dispatched.push(name)
+    }
+    return {
+      dispatched,
+      ctx: {
+        ...ctx,
+        markSelection: handler('markSelection'),
+        lookUp: handler('lookUp'),
+        toggleBookmark: handler('toggleBookmark'),
+        editTags: handler('editTags'),
+        jumpBack: handler('jumpBack'),
+        jumpForward: handler('jumpForward'),
+        exportMarks: handler('exportMarks'),
+        importMarks: handler('importMarks'),
+        exportTags: handler('exportTags'),
+        importTags: handler('importTags'),
+        openBookPicker: handler('openBookPicker'),
+        importFolder: handler('importFolder'),
+        openSwitcher: handler('openSwitcher'),
+        closeBook: handler('closeBook'),
+      },
+    }
+  }
+
+  /** Each row as the palette prints it, with what running it did in place of `run`. */
+  const rowsOf = ({ ctx, dispatched }: ReturnType<typeof offering>) =>
+    buildCommands(ctx).map(({ run, ...row }) => {
+      const from = dispatched.length
+      run()
+      return { ...row, ran: dispatched.slice(from) }
+    })
+
+  it('names, files and finds each row exactly, in order, and runs what it names', () => {
+    const PANE = 'pane panel sidebar'
+    const THEME = 'colour color appearance'
+    const reading = offering({
+      screen: 'reader',
+      pane: 'toc',
+      side: 'left',
+      rulerOn: true,
+      scrollbarOn: false,
+      progressLineOn: true,
+      pageLayout: 'scrolled',
+      stepIdx: 3,
+      theme: 'sepia',
+      typeface: 'instrument',
+      themeFollowsOs: false,
+    })
+    expect(rowsOf(reading)).toEqual([
+      { id: 'pane:toc', label: 'Close Contents', group: 'Panels', combo: '⌘1', keywords: PANE, on: true, ran: [{ type: 'closePane' }] },
+      { id: 'pane:marginalia', label: 'Open Marginalia', group: 'Panels', combo: '⌘2', keywords: PANE, on: false, ran: [{ type: 'openPane', pane: 'marginalia' }] },
+      { id: 'pane:search', label: 'Open Search', group: 'Panels', combo: '⌘3', keywords: PANE, on: false, ran: [{ type: 'openPane', pane: 'search' }] },
+      { id: 'pane:settings', label: 'Open Settings', group: 'Panels', keywords: PANE, on: false, ran: [{ type: 'openPane', pane: 'settings' }] },
+      { id: 'pane:toggle', label: 'Close the side pane', group: 'Panels', combo: '⌘\\', on: true, ran: [{ type: 'togglePane' }] },
+      { id: 'pane:side', label: 'Move the pane to the right', group: 'Panels', keywords: 'position side', ran: [{ type: 'setSide', side: 'right' }] },
+      { id: 'reading:ruler', label: 'Turn the reading ruler off', group: 'Reading', keywords: 'line guide focus', on: true, ran: [{ type: 'toggleRuler' }] },
+      { id: 'reading:scrollbar', label: 'Show the scrollbar', group: 'Reading', keywords: 'scroll bar gutter position', on: false, ran: [{ type: 'toggleScrollbar' }] },
+      { id: 'reading:progress', label: 'Hide the progress rule', group: 'Reading', keywords: 'progress bar edge colour color how far', on: true, ran: [{ type: 'toggleProgressLine' }] },
+      { id: 'reading:flow', label: 'Switch to pages', group: 'Reading', keywords: 'flow paginated scrolled layout', ran: [{ type: 'setPageLayout', layout: 'paginated' }] },
+      { id: 'reading:bigger', label: `Larger type — ${READING_STEPS[4]!.size}px`, group: 'Reading', combo: '⌘+', keywords: 'size text bigger increase zoom', ran: [{ type: 'setStepIdx', idx: 4 }] },
+      { id: 'reading:smaller', label: `Smaller type — ${READING_STEPS[2]!.size}px`, group: 'Reading', combo: '⌘−', keywords: 'size text smaller decrease zoom', ran: [{ type: 'setStepIdx', idx: 2 }] },
+      { id: 'reading:size-default', label: `Default type size — ${READING_STEPS[DEFAULT_STEP_IDX]!.size}px`, group: 'Reading', combo: '⌘0', keywords: 'size text reset', ran: [{ type: 'setStepIdx', idx: DEFAULT_STEP_IDX }] },
+      { id: 'theme:paper', label: 'Theme — Paper', group: 'Appearance', keywords: THEME, on: false, ran: [{ type: 'setTheme', theme: 'paper' }] },
+      { id: 'theme:slate', label: 'Theme — Slate', group: 'Appearance', keywords: THEME, on: false, ran: [{ type: 'setTheme', theme: 'slate' }] },
+      { id: 'theme:sepia', label: 'Theme — Sepia', group: 'Appearance', keywords: THEME, on: true, ran: [{ type: 'setTheme', theme: 'sepia' }] },
+      { id: 'theme:sage', label: 'Theme — Sage', group: 'Appearance', keywords: THEME, on: false, ran: [{ type: 'setTheme', theme: 'sage' }] },
+      { id: 'theme:night', label: 'Theme — Night', group: 'Appearance', keywords: THEME, on: false, ran: [{ type: 'setTheme', theme: 'night' }] },
+      /* The face's GROUP is in its keywords, in the lower case every other row's are. */
+      { id: 'typeface:literata', label: 'Typeface — Literata', group: 'Appearance', keywords: 'font family type serif, for reading', on: false, ran: [{ type: 'setTypeface', typeface: 'literata' }] },
+      { id: 'typeface:instrument', label: 'Typeface — Instrument Sans', group: 'Appearance', keywords: 'font family type sans', on: true, ran: [{ type: 'setTypeface', typeface: 'instrument' }] },
+      { id: 'typeface:plex', label: 'Typeface — IBM Plex Mono', group: 'Appearance', keywords: 'font family type monospaced', on: false, ran: [{ type: 'setTypeface', typeface: 'plex' }] },
+      { id: 'theme:follow', label: 'Follow the system appearance', group: 'Appearance', on: false, ran: [{ type: 'setThemeFollowsOs', follows: true }] },
+      { id: 'book:mark', label: 'Mark the selection', group: 'Book', combo: '⌘D', keywords: 'highlight annotate', ran: ['markSelection'] },
+      { id: 'book:look-up', label: 'Look up the selection', group: 'Book', combo: '⌃⌘D', keywords: 'define definition dictionary meaning gloss word translate', ran: ['lookUp'] },
+      { id: 'book:bookmark', label: 'Bookmark this place', group: 'Book', combo: '⌘B', keywords: 'bookmark place keep return ribbon', on: false, ran: ['toggleBookmark'] },
+      { id: 'book:tags', label: 'Tags for this book…', group: 'Book', combo: '⌘T', keywords: 'tag label subject shelve', ran: ['editTags'] },
+      { id: 'jump:back', label: 'Back to where you were', group: 'Book', combo: '⌘[', keywords: 'back return jump history previous where was undo navigate', ran: ['jumpBack'] },
+      { id: 'jump:forward', label: 'Forward again', group: 'Book', combo: '⌘]', keywords: 'forward jump history next redo navigate', ran: ['jumpForward'] },
+      { id: 'marks:export', label: 'Export your marks and cards…', group: 'Library', keywords: 'mark note card highlight annotation backup save export file json markdown archive', ran: ['exportMarks'] },
+      { id: 'marks:import', label: 'Import marks from a file… (merge)', group: 'Library', keywords: 'mark note card highlight annotation restore load import merge file json archive backup', ran: ['importMarks'] },
+      { id: 'tags:export', label: 'Export your tags…', group: 'Library', keywords: 'tag backup save export file json archive', ran: ['exportTags'] },
+      { id: 'tags:import', label: 'Import tags from a file… (merge)', group: 'Library', keywords: 'tag restore load import merge file json archive backup', ran: ['importTags'] },
+      { id: 'screen:library', label: 'Library', group: 'Book', combo: '⌘L', keywords: 'shelf books home library', on: false, ran: [{ type: 'goScreen', screen: 'library' }] },
+      { id: 'book:open', label: 'Add books…', group: 'Book', keywords: 'import file epub open', ran: ['openBookPicker'] },
+      { id: 'book:import-folder', label: 'Import a folder…', group: 'Book', keywords: 'add folder bulk collection recursive many', ran: ['importFolder'] },
+      { id: 'book:switch', label: 'Switch book…', group: 'Book', keywords: 'library recent', ran: ['openSwitcher'] },
+      { id: 'book:close', label: 'Close the book', group: 'Book', ran: ['closeBook'] },
+    ])
+  })
+
+  /* THE FAR SIDE OF EVERY ROW THAT HAS ONE. The table above sees each toggle
+     one way round, so a row that said, lit or did the same thing both ways
+     would pass it. */
+  it('says, lights and does the other thing from the other side of each toggle', () => {
+    const FLIPPED = [
+      { over: { screen: 'reader', pane: null }, id: 'pane:toggle', label: 'Open the side pane', on: false, ran: [{ type: 'togglePane' }] },
+      { over: { screen: 'reader', pane: 'toc', side: 'right' }, id: 'pane:side', label: 'Move the pane to the left', ran: [{ type: 'setSide', side: 'left' }] },
+      { over: { rulerOn: false }, id: 'reading:ruler', label: 'Turn the reading ruler on', on: false, ran: [{ type: 'toggleRuler' }] },
+      { over: { scrollbarOn: true }, id: 'reading:scrollbar', label: 'Hide the scrollbar', on: true, ran: [{ type: 'toggleScrollbar' }] },
+      { over: { progressLineOn: false }, id: 'reading:progress', label: 'Show the progress rule', on: false, ran: [{ type: 'toggleProgressLine' }] },
+      { over: { pageLayout: 'paginated' }, id: 'reading:flow', label: 'Switch to scrolling', ran: [{ type: 'setPageLayout', layout: 'scrolled' }] },
+      { over: { themeFollowsOs: true }, id: 'theme:follow', label: 'Stop following the system appearance', on: true, ran: [{ type: 'setThemeFollowsOs', follows: false }] },
+      { over: { screen: 'library' }, id: 'screen:library', label: 'Back to the book', on: true, ran: [{ type: 'goScreen', screen: 'reader' }] },
+    ] as const
+    for (const { over, id, ...expected } of FLIPPED) {
+      expect(rowsOf(offering(over)).find((row) => row.id === id), id).toMatchObject(expected)
+    }
+  })
+
+  /* THE SHELF'S OWN ROW, which a table read from the reader cannot see. */
+  it('files the removed books under Library, on the shelf', () => {
+    expect(rowsOf(offering({ screen: 'library' })).find((row) => row.id === 'library:trash')).toEqual({
+      id: 'library:trash',
+      label: 'Removed books…',
+      group: 'Library',
+      keywords: 'trash deleted removed restore undo recover bin',
+      ran: [{ type: 'toggleLayer', layer: 'trashOpen' }],
+    })
+  })
+
+  /* AND NOTHING THE CONTEXT CANNOT DO. A handed-in action is a row exactly when
+     its handler is there — a row built without one would run nothing. */
+  it('offers each handed-in action only with its handler', () => {
+    const bare = context({ screen: 'reader' }).ctx
+    const without = buildCommands(bare).map((command) => command.id)
+    const GATED = [
+      ['book:mark', { markSelection: () => {} }],
+      ['book:look-up', { lookUp: () => {} }],
+      ['book:bookmark', { toggleBookmark: () => {} }],
+      ['book:tags', { editTags: () => {} }],
+      ['jump:back', { jumpBack: () => {} }],
+      ['jump:forward', { jumpForward: () => {} }],
+      ['marks:export', { exportMarks: () => {} }],
+      ['marks:import', { importMarks: () => {} }],
+      ['tags:export', { exportTags: () => {} }],
+      ['tags:import', { importTags: () => {} }],
+    ] as const
+    for (const [id, handler] of GATED) {
+      const added = buildCommands({ ...bare, ...handler })
+        .map((command) => command.id)
+        .filter((one) => !without.includes(one))
+      expect(added, id).toEqual([id])
+    }
+  })
+
+  /* SHOWING, WHICH NEEDS A PANEL AS WELL AS A SCREEN THAT DRAWS ONE: with none
+     open there is nothing to move. The contributed screen is the case below. */
+  it('offers to move the pane only while one is open', () => {
+    const shut = buildCommands(context({ screen: 'reader', pane: null }).ctx)
+    expect(find(shut, 'pane:toggle')).toBeDefined()
+    expect(find(shut, 'pane:side')).toBeUndefined()
+  })
+})
+
+/**
  * The invariant `commands.ts` claims in its own header — "the palette shows the
  * same combo the handler binds, and neither can quietly stop matching the
  * other" — and which nothing enforced until the size shortcuts were added.
@@ -255,6 +439,7 @@ describe('advertised combos are bound', () => {
     hasBook: true,
     canJumpBack: true,
     canJumpForward: true,
+    canLookUp: true,
   } as const
 
   /**
@@ -268,7 +453,7 @@ describe('advertised combos are bound', () => {
     expect(resolveAccel({ key: 'q', repeat: false }, { ...anything, platform: 'windows' })).toEqual({ kind: 'quit' })
     expect(resolveAccel({ key: 'q', repeat: false }, { ...anything, platform: 'linux' })).toEqual({ kind: 'quit' })
     expect(resolveAccel({ key: 'q', repeat: false }, anything)).toBeNull()
-    expect(resolveAccel({ key: 'q', repeat: true }, { ...anything, platform: 'windows' })).toBeNull()
+    expect(resolveAccel({ key: 'q', repeat: true }, { ...anything, platform: 'windows', pressTaken: true })).toEqual({ kind: 'held' })
   })
 
   /**
@@ -278,16 +463,21 @@ describe('advertised combos are bound', () => {
    * mark and a tombstone per repeat — ⌘B's defect on another key. The walks
    * (⌘+, ⌘[) stay repeatable on purpose; everything else is one press.
    */
+  /* AND A SUPPRESSED REPEAT IS TAKEN — `held` — never `null`, which hands the
+     key to the platform: the first press was Paper's and every repeat after it
+     went to whatever the webview does with the combo (2026-09-13 audit). */
   it('suppresses a repeat for every binding that is not a walk — including the two the old list missed', () => {
     expect(resolveAccel({ key: 'l', repeat: false }, anything)).toEqual({ kind: 'toggleScreen' })
-    expect(resolveAccel({ key: 'l', repeat: true }, anything)).toBeNull()
+    expect(resolveAccel({ key: 'l', repeat: true }, { ...anything, pressTaken: true })).toEqual({ kind: 'held' })
     const selecting = { ...anything, hasSelection: true }
     expect(resolveAccel({ key: 'd', repeat: false }, selecting)).toEqual({ kind: 'markSelection' })
-    expect(resolveAccel({ key: 'd', repeat: true }, selecting)).toBeNull()
+    expect(resolveAccel({ key: 'd', repeat: true }, { ...selecting, pressTaken: true })).toEqual({ kind: 'held' })
+    /* A repeat of a press that was not bound here stays the platform's. */
+    expect(resolveAccel({ key: 'd', repeat: true }, { ...selecting, hasSelection: false, pressTaken: false })).toBeNull()
     /* The walks still repeat. */
-    expect(resolveAccel({ key: '=', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
+    expect(resolveAccel({ key: '=', repeat: true }, { ...anything, pressTaken: true })).toEqual({ kind: 'stepBy', delta: 1 })
     expect(
-      resolveAccel({ key: '[', repeat: true }, { ...anything, canJumpBack: true }),
+      resolveAccel({ key: '[', repeat: true }, { ...anything, canJumpBack: true, pressTaken: true }),
     ).toEqual({ kind: 'jumpBack' })
   })
 
@@ -300,6 +490,12 @@ describe('advertised combos are bound', () => {
     const bookmarkable = { ...anything, onReader: true, canBookmark: true }
     expect(resolveAccel({ key: 'B', repeat: false }, bookmarkable)).toEqual({ kind: 'toggleBookmark' })
     expect(resolveAccel({ key: 'B', repeat: false, shiftKey: true }, bookmarkable)).toBeNull()
+    /* ⚠️ AND NOT ONLY BECAUSE THE ENGINE UPPERCASED IT. The case was the only
+       thing standing for Shift, so an engine reporting the unshifted letter
+       under ⌘ — `b`, with Shift down — bookmarked (2026-09-13 audit). */
+    expect(resolveAccel({ key: 'b', repeat: false, shiftKey: true }, bookmarkable)).toBeNull()
+    /* As a real event reports it: `shiftKey` is false, not absent. */
+    expect(resolveAccel({ key: 'B', repeat: false, shiftKey: false }, bookmarkable)).toEqual({ kind: 'toggleBookmark' })
   })
 
   /**
@@ -316,7 +512,13 @@ describe('advertised combos are bound', () => {
    * Panel digits are absent on purpose: ⌘1…5 is bound from PANE_SHORTCUTS, and
    * the test above already checks that table against the renderer.
    */
-  const KEYS_FOR_COMBO: Record<string, readonly string[]> = {
+  /* A key, or — for a chord that stacks Control on the accelerator — the whole
+     event a real press produces, because `key` alone cannot say Control was
+     down and `accel.ts` binds such a chord on the physical key. */
+  type Press = string | { readonly key: string; readonly code: string; readonly ctrlKey: boolean }
+  const KEYS_FOR_COMBO: Record<string, readonly Press[]> = {
+    /* ⌃⌘D — Look up (phase 17, L4) — as the running app reports it. */
+    '⌃⌘D': [{ key: 'd', code: 'KeyD', ctrlKey: true }],
     '⌘K': ['k'],
     /* ONE BACKSLASH, which it could not be while this searched App's source:
        the source spells that key as an escaped pair, so the table had to
@@ -358,6 +560,7 @@ describe('advertised combos are bound', () => {
     const everything = {
       ...context({ screen: 'reader' }).ctx,
       markSelection: () => {},
+      lookUp: () => {},
       toggleBookmark: () => {},
       editTags: () => {},
       exportTags: () => {},
@@ -378,21 +581,23 @@ describe('advertised combos are bound', () => {
     // The commands this test exists for must actually be in the set it checks.
     expect(advertised.has('⌘B')).toBe(true)
     expect(advertised.has('⌘D')).toBe(true)
+    expect(advertised.has('⌃⌘D')).toBe(true)
 
     for (const combo of advertised) {
       const keys = KEYS_FOR_COMBO[combo]
       // A new combo with no entry here is the failure, not an exemption: it
       // means the palette prints a keystroke this test cannot confirm exists.
       expect(keys, `no expected key for ${combo}`).toBeDefined()
-      for (const key of keys ?? []) {
+      for (const press of keys ?? []) {
         /* THE KEY IS PUT THROUGH THE MAP, not looked for in App's source. The
            search was the whole weakness: a literal in a comment satisfied it,
            and so did one in an unreachable branch or behind the wrong
            modifier. Now the combo the palette prints has to actually produce
            an action from the key a keyboard reports. */
+        const event = typeof press === 'string' ? { key: press } : press
         expect(
-          resolveAccel({ key, repeat: false }, anything),
-          `${combo} prints, but '${key}' resolves to nothing`,
+          resolveAccel({ ...event, repeat: false }, anything),
+          `${combo} prints, but '${event.key}' resolves to nothing`,
         ).not.toBeNull()
       }
     }
@@ -487,24 +692,227 @@ describe('advertised combos are bound', () => {
       expect(resolveAccel({ key: 'd', repeat: false }, anything)).toEqual({ kind: 'markSelection' })
     })
 
-    /* Two of the three modifiers is not the chord. */
+    /* Two of the three modifiers is not the chord.
+       ⌃⌘D ALONE WAS "markSelection" HERE UNTIL PHASE 17 bound it to Look up —
+       macOS's own Look Up chord (L4). What this case exists to hold is that it
+       is NOT the developer chord, which is still true.
+       ⌥⌘D WAS "markSelection" TOO, until the 2026-09-13 audit: a letter is
+       bound under the accelerator alone, so with Option it is no binding. */
     it('needs both Control and Option', () => {
       expect(
         resolveAccel({ key: 'd', code: 'KeyD', repeat: false, ctrlKey: true }, anything),
-      ).toEqual({ kind: 'markSelection' })
+      ).toEqual({ kind: 'lookUp' })
       expect(
         resolveAccel({ key: 'd', code: 'KeyD', repeat: false, altKey: true }, anything),
-      ).toEqual({ kind: 'markSelection' })
+      ).toBeNull()
+    })
+
+    /* EXACTLY THOSE THREE. Shift was never read, so ⇧ on top of the chord was
+       still the chord; now it is no binding at all, whichever case the engine
+       reports the letter in (2026-09-13 audit). */
+    it('is not bound with Shift added', () => {
+      const shifted = { code: 'KeyD', repeat: false, ctrlKey: true, altKey: true, shiftKey: true }
+      for (const key of ['d', 'D']) {
+        expect(resolveAccel({ ...shifted, key }, anything), key).toBeNull()
+        expect(resolveAccel({ ...shifted, key }, { ...anything, platform: 'windows' }), `${key} off a Mac`).toBeNull()
+      }
     })
 
     /* A REPEAT IS THE SAME PRESS. Holding it would flicker developer options
        on and off for as long as the key is down — the rule `REPEATABLE` states,
-       arriving on a new binding. */
+       arriving on a new binding. Taken, not handed to the platform. */
     it('does not fire again while the key is held', () => {
       expect(
-        resolveAccel({ key: 'd', code: 'KeyD', repeat: true, ctrlKey: true, altKey: true }, anything),
-      ).toBeNull()
+        resolveAccel({ key: 'd', code: 'KeyD', repeat: true, ctrlKey: true, altKey: true }, { ...anything, pressTaken: true }),
+      ).toEqual({ kind: 'held' })
     })
+  })
+
+  /**
+   * ⌃⌘D — Look up (phase 17, L4). macOS's own Look Up chord on a Mac; off a Mac
+   * the accelerator IS Control, so the chord is Shift there — see `bind`.
+   */
+  describe('the look up chord', () => {
+    const press = (over: Record<string, unknown>) => ({ key: 'd', code: 'KeyD', repeat: false, ...over })
+
+    it('looks up on ⌃⌘D on a Mac', () => {
+      expect(resolveAccel(press({ ctrlKey: true }), anything)).toEqual({ kind: 'lookUp' })
+    })
+
+    it('looks up on Ctrl+Shift+D off a Mac', () => {
+      for (const platform of ['windows', 'linux'] as const) {
+        expect(resolveAccel(press({ key: 'D', ctrlKey: true, shiftKey: true }), { ...anything, platform }), platform).toEqual({
+          kind: 'lookUp',
+        })
+      }
+    })
+
+    /* Off a Mac, Control is the accelerator on EVERY combo, so Control alone
+       cannot mean Look up there — it would take ⌘D from marking. */
+    it('does not take Ctrl+D from marking off a Mac', () => {
+      expect(resolveAccel(press({ ctrlKey: true }), { ...anything, platform: 'windows' })).toEqual({ kind: 'markSelection' })
+    })
+
+    /* And on a Mac, Shift is not the chord. */
+    it('does not look up on ⇧⌘D on a Mac', () => {
+      expect(resolveAccel(press({ key: 'D', shiftKey: true }), anything)).toBeNull()
+    })
+
+    it('leaves ⌘D marking and ⌘⌃⌥D toggling developer options', () => {
+      expect(resolveAccel(press({}), anything)).toEqual({ kind: 'markSelection' })
+      expect(resolveAccel(press({ ctrlKey: true, altKey: true }), anything)).toEqual({ kind: 'toggleDeveloper' })
+      expect(
+        resolveAccel(press({ ctrlKey: true, altKey: true }), { ...anything, platform: 'windows' }),
+      ).toEqual({ kind: 'toggleDeveloper' })
+    })
+
+    /* WITH NOTHING TO LOOK UP, THE KEY IS THE PLATFORM'S — which on a Mac is
+       the system's Look Up. Swallowing it to do nothing would take that away. */
+    it('leaves the key to the platform when there is nothing to look up', () => {
+      expect(resolveAccel(press({ ctrlKey: true }), { ...anything, canLookUp: false })).toBeNull()
+      const { canLookUp: _unused, ...absent } = anything
+      expect(resolveAccel(press({ ctrlKey: true }), absent)).toBeNull()
+    })
+
+    it('does not fire again while the key is held', () => {
+      expect(resolveAccel(press({ ctrlKey: true, repeat: true }), { ...anything, pressTaken: true })).toEqual({ kind: 'held' })
+    })
+
+    /* NO THIRD MODIFIER: ⇧⌃⌘D on a Mac looked up too (2026-09-13 audit). */
+    it('does not look up on ⇧⌃⌘D on a Mac', () => {
+      expect(resolveAccel(press({ key: 'D', ctrlKey: true, shiftKey: true }), anything)).toBeNull()
+      expect(resolveAccel(press({ ctrlKey: true, shiftKey: true }), anything)).toBeNull()
+    })
+  })
+
+  /**
+   * ⚠️ **A LETTER IS BOUND UNDER THE ACCELERATOR ALONE** (2026-09-13 audit).
+   * Nothing in the map read a modifier for the letters, so ⌥⌘B bookmarked, ⌃⌘L
+   * left the book and Ctrl+Alt+Q closed the window. Every letter, each extra
+   * modifier on its own: one binding that forgot the rule is the defect.
+   */
+  describe('the letters and their modifiers', () => {
+    const LETTERS = [
+      { key: 'k', kind: 'togglePalette' },
+      { key: 'l', kind: 'toggleScreen' },
+      { key: 'd', kind: 'markSelection' },
+      { key: 'b', kind: 'toggleBookmark' },
+      { key: 't', kind: 'editTags' },
+    ] as const
+    const windows = { ...anything, platform: 'windows' } as const
+
+    it('binds each letter with nothing but the accelerator, on either platform', () => {
+      for (const { key, kind } of LETTERS) {
+        expect(resolveAccel({ key, repeat: false }, anything), `⌘${key}`).toEqual({ kind })
+        /* Off a Mac Control IS the accelerator, so it is no extra modifier. */
+        expect(resolveAccel({ key, repeat: false, ctrlKey: true }, windows), `Ctrl+${key}`).toEqual({ kind })
+      }
+      expect(resolveAccel({ key: 'q', repeat: false, ctrlKey: true }, windows)).toEqual({ kind: 'quit' })
+    })
+
+    it('binds no letter with Shift, Option or — on a Mac — Control added', () => {
+      for (const { key } of LETTERS) {
+        expect(resolveAccel({ key, repeat: false, shiftKey: true }, anything), `⇧⌘${key}`).toBeNull()
+        expect(resolveAccel({ key, repeat: false, altKey: true }, anything), `⌥⌘${key}`).toBeNull()
+        expect(resolveAccel({ key, repeat: false, ctrlKey: true }, anything), `⌃⌘${key}`).toBeNull()
+      }
+      /* The quit, which closes the window. */
+      expect(resolveAccel({ key: 'q', repeat: false, ctrlKey: true, altKey: true }, windows)).toBeNull()
+      expect(resolveAccel({ key: 'q', repeat: false, ctrlKey: true, shiftKey: true }, windows)).toBeNull()
+    })
+
+    /* THE CHARACTERS ARE NOT LETTERS, and their modifiers are the layout's:
+       ⌘+ arrives as ⇧= on a US board, reporting '+' with Shift down. */
+    it('still binds a character that took Shift to type', () => {
+      expect(resolveAccel({ key: '+', repeat: false, shiftKey: true }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
+      expect(resolveAccel({ key: '_', repeat: false, shiftKey: true }, anything)).toEqual({ kind: 'stepBy', delta: -1 })
+      /* And Option: `[` is ⌥5 on a German Mac. */
+      expect(resolveAccel({ key: '[', repeat: false, altKey: true }, anything)).toEqual({ kind: 'jumpBack' })
+    })
+  })
+
+  /**
+   * ⚠️ **META WAS NEVER READ** (2026-09-13 audit, #85, round 3). Round 1 closed
+   * Shift, Option and — on a Mac — Control, and stopped there: off a Mac the
+   * fourth modifier is Meta (⊞, Super), and nothing in the map looked at it, so
+   * Ctrl+Meta+Q closed the window on Windows and Ctrl+Alt+Meta+D toggled
+   * developer options. The modifier that is neither the accelerator nor any
+   * layout's is Control on a Mac and Meta everywhere else, and no binding takes
+   * it — letter, character, digit or chord.
+   */
+  describe('the modifier that is neither the accelerator nor a layout’s', () => {
+    const windows = { ...anything, platform: 'windows', developer: true } as const
+    const mac = { ...anything, developer: true } as const
+    const KEYS = ['k', 'l', 'd', 'b', 't', '\\', '[', ']', '=', '+', '-', '_', '0', ...PANE_SHORTCUTS.map((entry) => entry.digit)]
+
+    it('binds nothing with Meta added off a Mac', () => {
+      for (const key of [...KEYS, 'q']) {
+        /* THE PREMISE: every one of these is bound under Control alone, so a
+           `null` below is the modifier's doing and not a missing binding. */
+        expect(resolveAccel({ key, repeat: false, ctrlKey: true }, windows), `Ctrl+${key}`).not.toBeNull()
+        expect(resolveAccel({ key, repeat: false, ctrlKey: true, metaKey: true }, windows), `Ctrl+Meta+${key}`).toBeNull()
+      }
+      const chord = { key: 'd', code: 'KeyD', repeat: false, ctrlKey: true } as const
+      expect(resolveAccel({ ...chord, altKey: true, metaKey: true }, windows), 'Ctrl+Alt+Meta+D').toBeNull()
+      expect(resolveAccel({ ...chord, key: 'D', shiftKey: true, metaKey: true }, windows), 'Ctrl+Shift+Meta+D').toBeNull()
+    })
+
+    /* Round 1 refused Control for the LETTERS on a Mac and nowhere else, on the
+       reasoning that a character's modifiers are the layout's. Shift and Option
+       are; Control is not, on any Mac layout. */
+    it('binds no character or digit with Control added on a Mac', () => {
+      for (const key of KEYS) {
+        expect(resolveAccel({ key, repeat: false, metaKey: true }, mac), `⌘${key}`).not.toBeNull()
+        expect(resolveAccel({ key, repeat: false, metaKey: true, ctrlKey: true }, mac), `⌃⌘${key}`).toBeNull()
+      }
+    })
+
+    /* ⚠️ **THE ACCELERATOR IS A MODIFIER TOO, AND A REAL EVENT CARRIES IT.** Every
+       case above this block leaves ⌘ off a Mac event, because `App` checks it
+       before asking. A map that counted Meta as extra on a Mac would pass all of
+       them and bind nothing in the running app. */
+    it('still binds every key and both chords with the accelerator itself down', () => {
+      for (const key of KEYS) {
+        expect(resolveAccel({ key, repeat: false, metaKey: true }, mac), `⌘${key}`).not.toBeNull()
+      }
+      const d = { key: 'd', code: 'KeyD', repeat: false } as const
+      expect(resolveAccel({ ...d, metaKey: true, ctrlKey: true, altKey: true }, mac)).toEqual({ kind: 'toggleDeveloper' })
+      expect(resolveAccel({ ...d, metaKey: true, ctrlKey: true }, mac)).toEqual({ kind: 'lookUp' })
+      expect(resolveAccel({ ...d, ctrlKey: true, altKey: true }, windows)).toEqual({ kind: 'toggleDeveloper' })
+      expect(resolveAccel({ ...d, key: 'D', ctrlKey: true, shiftKey: true }, windows)).toEqual({ kind: 'lookUp' })
+    })
+
+    /* ⚠️ **ALTGR ARRIVES AS CONTROL AND ALT OFF A MAC** (2026-09-14). Chromium on
+       Windows — and so WebView2 — reports AltGr as `ctrlKey` and `altKey`
+       together, with `key` the character it types. Alt was left free for a
+       layout, and Control is the accelerator there, so on a German layout
+       AltGr+8, which types `[`, arrived as Ctrl+Alt+[ and jumped back instead of
+       typing the bracket. Off a Mac, Control with Alt is a character being typed. */
+    it('binds nothing off a Mac under Control and Alt together, which is AltGr typing', () => {
+      for (const key of [...KEYS, 'q', '@', '{', '}', '~', '€', '|']) {
+        expect(resolveAccel({ key, repeat: false, ctrlKey: true, altKey: true }, windows), `Ctrl+Alt+${key}`).toBeNull()
+      }
+    })
+
+    /* The developer chord is the one binding that names Alt off a Mac, and it
+       keeps it — only where the key reports the plain letter. On a layout where
+       AltGr+D types a character (Hungarian: đ), `key` is that character, and the
+       chord must not swallow it. */
+    it('keeps the developer chord off a Mac only where the key is the plain letter', () => {
+      const chord = { code: 'KeyD', repeat: false, ctrlKey: true, altKey: true } as const
+      expect(resolveAccel({ ...chord, key: 'd' }, windows)).toEqual({ kind: 'toggleDeveloper' })
+      expect(resolveAccel({ ...chord, key: 'đ' }, windows), 'AltGr+D typing đ took the developer chord').toBeNull()
+      expect(resolveAccel({ ...chord, key: 'đ', metaKey: true }, mac), '⌘⌃⌥D on a Mac is matched on the key it is').toEqual({
+        kind: 'toggleDeveloper',
+      })
+    })
+  })
+
+  /* ⌘\ WHERE THERE IS NO PANE is left to the platform rather than taken to do
+     nothing — which is the whole of what `null` promises (2026-09-13 audit). */
+  it('leaves ⌘\\ unbound on a contributed screen, which has no pane', () => {
+    expect(resolveAccel({ key: '\\', repeat: false }, anything)).toEqual({ kind: 'togglePane' })
+    expect(resolveAccel({ key: '\\', repeat: false }, { ...anything, screen: 'circle:circle' })).toBeNull()
   })
 
   /* A DIGIT FOR A PANEL THIS SCREEN DOES NOT HAVE does nothing, rather than
@@ -538,11 +946,44 @@ describe('advertised combos are bound', () => {
      the reader let go. The size steps are deliberately exempt — holding ⌘+ to
      walk up the ramp is a real gesture with a real result at each repeat. */
   it('ignores an auto-repeat on the toggles and honours it on the size steps', () => {
+    /* TAKEN AND NOT ACTED ON — `held`, not `null`, which would hand every
+       repeat after the first press to the platform (2026-09-13 audit). A digit
+       for a panel this reader is not offered is unbound whether it repeats or
+       not, and stays the platform's. */
     for (const key of ['k', '\\', 't', 'b', ...PANE_SHORTCUTS.map((e) => e.digit)]) {
-      expect(resolveAccel({ key, repeat: true }, anything), `held ⌘${key}`).toBeNull()
+      const once = resolveAccel({ key, repeat: false }, anything)
+      expect(resolveAccel({ key, repeat: true }, { ...anything, pressTaken: once !== null }), `held ⌘${key}`).toEqual(once === null ? null : { kind: 'held' })
     }
-    expect(resolveAccel({ key: '=', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
-    expect(resolveAccel({ key: '-', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: -1 })
+    for (const key of ['k', '\\', 't', 'b']) {
+      expect(resolveAccel({ key, repeat: true }, { ...anything, pressTaken: true }), `held ⌘${key}`).toEqual({ kind: 'held' })
+    }
+    expect(resolveAccel({ key: '=', repeat: true }, { ...anything, pressTaken: true })).toEqual({ kind: 'stepBy', delta: 1 })
+    expect(resolveAccel({ key: '-', repeat: true }, { ...anything, pressTaken: true })).toEqual({ kind: 'stepBy', delta: -1 })
+  })
+
+  /* ⚠️ **WHETHER A REPEAT IS TAKEN IS THE PRESS'S ANSWER, NOT THE MOMENT'S**
+     (2026-09-13 audit, #86, round 3). `held` fixed the first repeat and nothing
+     after it: ⌘D marks the selection and marking CLEARS it, so from the next
+     repeat on the binding resolved to `null` and the rest of the hold went to
+     the platform. ⌘[ on the press that empties the stack is the same defect on
+     a walk. A key belongs to whoever took its first press until it comes up. */
+  it('keeps taking a held press’s repeats after its own action removed what it was bound under', () => {
+    expect(resolveAccel({ key: 'd', repeat: true }, { ...anything, hasSelection: false, pressTaken: true })).toEqual({ kind: 'held' })
+    expect(resolveAccel({ key: '[', repeat: true }, { ...anything, canJumpBack: false, pressTaken: true })).toEqual({ kind: 'held' })
+    expect(resolveAccel({ key: ']', repeat: true }, { ...anything, canJumpForward: false, pressTaken: true })).toEqual({ kind: 'held' })
+    expect(
+      resolveAccel({ key: 'd', code: 'KeyD', repeat: true, ctrlKey: true }, { ...anything, canLookUp: false, pressTaken: true }),
+    ).toEqual({ kind: 'held' })
+  })
+
+  /* And the other owner keeps it too: a press the platform had is the
+     platform's for as long as it is held, whatever became bindable meanwhile. */
+  it('leaves a repeat to the platform when the platform had the press', () => {
+    expect(resolveAccel({ key: 'd', repeat: true }, { ...anything, pressTaken: false })).toBeNull()
+    expect(resolveAccel({ key: '=', repeat: true }, { ...anything, pressTaken: false })).toBeNull()
+    expect(resolveAccel({ key: '[', repeat: true }, { ...anything, pressTaken: false })).toBeNull()
+    /* Absent is false, as every optional field in the context reads. */
+    expect(resolveAccel({ key: 'k', repeat: true }, anything)).toBeNull()
   })
 
   it('resolves ⌘[ and ⌘] when the stack has somewhere to go, and repeats them', () => {
@@ -552,8 +993,8 @@ describe('advertised combos are bound', () => {
        several jumps is a real gesture with a real result at each press, and
        the stack bottoms out on its own — `goBack` returns null on an empty
        one. Refusing the repeat would make the reader press it n times. */
-    expect(resolveAccel({ key: '[', repeat: true }, anything)).toEqual({ kind: 'jumpBack' })
-    expect(resolveAccel({ key: ']', repeat: true }, anything)).toEqual({ kind: 'jumpForward' })
+    expect(resolveAccel({ key: '[', repeat: true }, { ...anything, pressTaken: true })).toEqual({ kind: 'jumpBack' })
+    expect(resolveAccel({ key: ']', repeat: true }, { ...anything, pressTaken: true })).toEqual({ kind: 'jumpForward' })
   })
 
   it('advertises every reading-size key it binds, so none is a secret', () => {
@@ -563,6 +1004,16 @@ describe('advertised combos are bound', () => {
     expect(sized).toContain('⌘+')
     expect(sized).toContain('⌘−')
     expect(sized).toContain('⌘0')
+  })
+
+  /* WHAT EACH SIZE KEY DOES, not only that it does something: the check above
+     asks for an answer that is not null, and ⌘0 answering `{}` passed it. */
+  it('resolves each reading-size key to the step it names', () => {
+    expect(resolveAccel({ key: '=', repeat: false }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
+    expect(resolveAccel({ key: '+', repeat: false, shiftKey: true }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
+    expect(resolveAccel({ key: '-', repeat: false }, anything)).toEqual({ kind: 'stepBy', delta: -1 })
+    expect(resolveAccel({ key: '_', repeat: false, shiftKey: true }, anything)).toEqual({ kind: 'stepBy', delta: -1 })
+    expect(resolveAccel({ key: '0', repeat: false }, anything)).toEqual({ kind: 'resetStep' })
   })
 })
 
@@ -667,6 +1118,67 @@ describe('score', () => {
   it('matches everything on an empty query', () => {
     expect(score(command, '   ')).toBe(0)
   })
+
+  /* ⚠️ **A LABEL MATCH STAYS AHEAD OF A KEYWORD MATCH, however far in**
+     (2026-09-13 audit). `1 + at / 100` put a match five thousand characters
+     into a capability's label at 51, behind the keywords' 50. */
+  it('ranks a label match above a keyword match however far into the label it is', () => {
+    const long = { ...command, label: `${'x'.repeat(5000)} whale` }
+    expect(score(long, 'whale')!).toBeLessThan(score(command, 'sidebar')!)
+  })
+
+  /* ⚠️ **EVERY WORD, IN EITHER FIELD, ONCE THE PHRASE HAS HAD ITS CHANCE**
+     (2026-09-13 audit). "import folder" found nothing while "add folder" found
+     the row, because only a contiguous phrase inside one field matched. */
+  it('matches every word of a query across the label and the keywords, below a phrase', () => {
+    const folder: Command = { id: 'f', label: 'Import a folder…', group: 'Book', keywords: 'add folder bulk', run: () => {} }
+    const words = score(folder, 'import folder')
+    expect(words).not.toBeNull()
+    expect(words!).toBeGreaterThan(score(folder, 'add folder')!)
+    expect(words!).toBeLessThan(score(folder, 'book')!)
+    /* In any order — and a word in neither field is still a miss. */
+    expect(score(folder, 'bulk import')).toBe(words)
+    expect(score(folder, 'import whale')).toBeNull()
+  })
+
+  /* WORDS, NOT LETTERS: a query whose letters are all somewhere is a miss. */
+  it('does not match a word by its letters', () => {
+    expect(score(command, 'ream')).toBeNull()
+  })
+
+  it('reads a command that has no keywords', () => {
+    const bare: Command = { id: 'b', label: 'Open Marginalia', group: 'Panels', run: () => {} }
+    expect(score(bare, 'sidebar')).toBeNull()
+    expect(score(bare, 'open marginalia')).toBe(0)
+  })
+
+  /* THE RANKS THEMSELVES, not only their order against one other row: every
+     case above compared two scores, so a prefix scored as a match inside the
+     label, or a nearer match inside it ranking BEHIND a farther one, passed. */
+  it('gives each kind of match its own rank, nearer ranking higher inside the label', () => {
+    const bare: Command = { id: 'b', label: 'Open Marginalia', group: 'Panels', run: () => {} }
+    expect(score(command, 'open')).toBe(0)
+    /* A label that ENDS with the query is not a prefix. */
+    expect(score(command, 'marginalia')).toBeCloseTo(1.05, 9)
+    expect(score({ ...command, label: 'Reopen Marginalia' }, 'open')).toBeCloseTo(1.02, 9)
+    expect(score(command, 'sidebar')).toBe(50)
+    expect(score(command, 'open sidebar')).toBe(55)
+    /* The group answers only to its own beginning. */
+    expect(score(bare, 'pan')).toBe(60)
+    expect(score(bare, 'els')).toBeNull()
+  })
+
+  /* NO KEYWORDS IS NO WORDS: a missing field must add nothing to what finds
+     the row. Asked letter by letter, so no stand-in string can hide. */
+  it('finds a command with no keywords by nothing but its label and group', () => {
+    const bare: Command = { id: 'b', label: 'Open Marginalia', group: 'Panels', run: () => {} }
+    const shown = `${bare.label} ${bare.group}`.toLowerCase()
+    const absent = [...'abcdefghijklmnopqrstuvwxyz!'].filter((letter) => !shown.includes(letter))
+    expect(absent.length).toBeGreaterThan(0)
+    for (const letter of absent) {
+      expect(score(bare, letter), letter).toBeNull()
+    }
+  })
 })
 
 /* The folder import is no longer in the library's toolbar — it is offered in
@@ -731,6 +1243,26 @@ describe('filterCommands', () => {
     const commands = buildCommands(context().ctx)
     expect(filterCommands(commands, 'qqqq')).toEqual([])
   })
+
+  /* BY RANK, NOT BY WHERE A ROW SAT. The case above finds its best match first
+     in a list that already had it first, so a filter that never sorted passed. */
+  it('orders every match by its rank, whatever order the rows came in', () => {
+    const row = (id: string, label: string, group: string, keywords?: string): Command => ({
+      id,
+      label,
+      group,
+      ...(keywords === undefined ? {} : { keywords }),
+      run: () => {},
+    })
+    const commands = [
+      row('group', 'Songs', 'Whales'),
+      row('keyword', 'Sea life', 'Book', 'whale dolphin'),
+      row('inside', 'A whale of a time', 'Book'),
+      row('miss', 'Ships', 'Book'),
+      row('prefix', 'Whale song', 'Book'),
+    ]
+    expect(filterCommands(commands, 'whale').map((command) => command.id)).toEqual(['prefix', 'inside', 'keyword', 'group'])
+  })
 })
 
 describe('the tag archive commands', () => {
@@ -759,6 +1291,10 @@ describe('the tag archive commands', () => {
     /* The word is the reassurance: an import never removes a tag, so restoring
        an old file cannot silently undo a month of filing. */
     const row = buildCommands(withArchive({ importTags: () => {} })).find((c) => c.id === 'tags:import')
+    /* THE LABEL, which this title always named and which this case never read:
+       it asserted the keywords, and the label had no "merge" in it from the
+       day the row was written (2026-09-13 audit). */
+    expect(row?.label).toBe('Import tags from a file… (merge)')
     expect(row?.keywords).toContain('merge')
   })
 })
@@ -789,6 +1325,52 @@ describe('contributed commands', () => {
   it('are absent when nothing is contributed', () => {
     const { ctx } = context()
     expect(buildCommands(ctx).some((c) => c.id.startsWith('example:'))).toBe(false)
+  })
+})
+
+/**
+ * A capability's PANELS, as rows (2026-09-13 audit). Circle and Publish
+ * contribute panes and no commands, and the panel rows came from `PANES`
+ * alone, so neither could be opened by name.
+ */
+describe('contributed panels', () => {
+  const circle = { id: 'circle:book', label: 'Circle', screens: ['reader'] } as const
+
+  it('get an “Open …” row where the rail draws them, which opens them', () => {
+    const { ctx, dispatched } = context({ screen: 'reader', pane: null })
+    const row = find(buildCommands({ ...ctx, contributedPanes: [circle] }), 'pane:circle:book')
+    expect(row?.label).toBe('Open Circle')
+    expect(row?.group).toBe('Panels')
+    row?.run()
+    expect(dispatched).toEqual([{ type: 'openPane', pane: 'circle:book' }])
+  })
+
+  it('offer to close the one that is open', () => {
+    const { ctx, dispatched } = context({ screen: 'reader', pane: 'circle:book' })
+    const row = find(buildCommands({ ...ctx, contributedPanes: [circle] }), 'pane:circle:book')
+    expect(row?.label).toBe('Close Circle')
+    expect(row?.on).toBe(true)
+    row?.run()
+    expect(dispatched).toEqual([{ type: 'closePane' }])
+  })
+
+  it('get no row on a screen the contribution did not name', () => {
+    const { ctx } = context({ screen: 'library' })
+    expect(find(buildCommands({ ...ctx, contributedPanes: [circle] }), 'pane:circle:book')).toBeUndefined()
+  })
+})
+
+/* ⚠️ **NO PANE ROWS WHERE THERE IS NO PANE** (2026-09-13 audit). A contributed
+   screen keeps `pane` set for the trip back and draws none, and the palette
+   offered to close it and to move it to the other side. */
+describe('the pane rows on a contributed screen', () => {
+  it('offer neither the toggle nor the side there, and both on the shelf', () => {
+    const away = buildCommands(context({ screen: 'circle:circle', pane: 'library' }).ctx)
+    expect(find(away, 'pane:toggle')).toBeUndefined()
+    expect(find(away, 'pane:side')).toBeUndefined()
+    const shelf = buildCommands(context({ screen: 'library', pane: 'library' }).ctx)
+    expect(find(shelf, 'pane:toggle')).toBeDefined()
+    expect(find(shelf, 'pane:side')).toBeDefined()
   })
 })
 

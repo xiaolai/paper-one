@@ -1,0 +1,148 @@
+/* The lookup face of the selection popup — the definition that arrived, and the
+ * lookups that did not. See `LookUpFace.tsx` for why this is a face rather than
+ * the strip it replaced.
+ *
+ * A back control on the leading edge, the same size as every tool in the bar
+ * it replaces, and the words beside it. The face is content-sized up to a
+ * measure a definition can be read at in one glance; `SelectionTools` measures
+ * the height it comes to and places the popup against it. */
+
+.lookUp {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  width: max-content;
+  max-width: var(--lookup-measure);
+}
+
+/* The bar's own tool, repeated rather than imported: this face is its own
+   module, and `SelectionTools.module.css` is a screen's neighbour, not a
+   library. The size is the same token, which is what has to agree. */
+.back {
+  flex: 0 0 auto;
+  /* STICKY, because the popup scrolls a lookup taller than the stage (see the
+     bound in `SelectionTools`), and the way out must not scroll away with the
+     answer the reader is trying to leave. */
+  position: sticky;
+  top: 0;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.back:hover,
+.back:focus-visible {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+.back:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--space-2));
+}
+
+.content {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--space-4) var(--space-4) var(--space-4) 0;
+  /* EVERY WORD IN THE FACE WRAPS, the term included — by inheritance, from the
+     one box every state is drawn in. A term is whatever the reader selected, up
+     to 120 code points, and a URL or a long compound has no break in it; the
+     face is capped at `--lookup-measure`. Until 2026-09-13 only `.body` and
+     `.failedReason` wrapped, so the term in the definition, in "couldn't
+     define" and in "needs a language model" ran straight out of the popup. */
+  overflow-wrap: anywhere;
+}
+
+/* THE DEFINITION — AMBER, and that is the point rather than decoration: a
+ * definition from a dictionary is authoritative and a gloss from a 4B model is
+ * not, and the reader must be able to tell without being told. */
+.definition {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--amber-line);
+  border-radius: var(--radius-chip);
+  background: var(--amber-bg);
+  font-size: var(--text-ui);
+}
+
+.term {
+  color: var(--amber);
+  font-weight: var(--weight-semibold);
+}
+
+/* `pre-line`, because an answer in two languages is two lines (WI-17.5) and the
+   line break is the model's own separator between them. */
+.body {
+  color: var(--ink);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+/* THE LOOKUP THAT DID NOT ARRIVE — and the whole point is that it does not look
+ * like the rule above. No amber, no box, small and grey. It shares nothing with
+ * `.definition`: sharing so much as the border would be the same mistake in a
+ * lighter shade. */
+.failed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* What went wrong, said rather than swallowed — second and quieter, and
+ * WRAPPED. The strip ellipsised it onto one line, and it is the only account the
+ * reader gets of why there is no definition. */
+.failedReason {
+  color: var(--ink-2);
+  opacity: var(--opacity-quiet);
+  overflow-wrap: anywhere;
+}
+
+/* NOTHING INSTALLED TO ANSWER WITH — not a failure, so it does not wear the
+ * failure's words; and not amber, because this is Paper speaking about itself. */
+.absent {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* A PASSAGE RATHER THAN A TERM — Paper declining to send, not a model failing to
+   answer. The failure's grey, for the failure's reason. */
+.refused {
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* The way out, and the only reason `.absent` is allowed to exist at all — §07
+ * forbids a control that cannot act, and a control that starts an install acts.
+ * A text button, because a filled one in a passing notice reads as a modal's
+ * confirm. */
+.install {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+
+.install:hover {
+  text-decoration: underline;
+}

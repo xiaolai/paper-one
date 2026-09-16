@@ -38,6 +38,9 @@ function shell(over: Partial<ShutdownDeps> = {}) {
       answered?.()
     },
     flush: () => void order.push('flush'),
+    /* Nothing running by default, so the order the cases below assert is the
+       one a quit with no import in flight produces. */
+    settle: async () => {},
     drain: async () => void order.push('drain'),
     abort: () => {
       order.push('abort')
@@ -88,6 +91,75 @@ describe('the teardown order', () => {
     await armShutdown(world.deps)
     await world.quit()
     expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+  })
+
+  /**
+   * ⚠️ **THE DRAIN WAITS FOR AN IMPORT STILL COPYING** (2026-09-13 audit, #96).
+   *
+   * ⌘Q on a Mac reaches THIS teardown and never the window close, and it
+   * drained the queue with an import mid-copy. The import's shelf writes are
+   * chained a batch behind its copying, so they reach the queue only once the
+   * copy has let go — after a drain that did not wait had declared it empty.
+   * `App` registers its import's stop with `onBeforeDrain`, and `bootApp.ts`
+   * hands this teardown `settleBeforeDrain` as `settle` — the registry itself is
+   * `beforeClose.test.ts`'s, and that handing is `bootApp.test.ts`'s, so the
+   * stop is injected here as the one the registry would run.
+   */
+  it('stops an import still copying, and does not drain until it has let go', async () => {
+    let letGo: () => void = () => {}
+    const copying = new Promise<void>((resolve) => {
+      letGo = resolve
+    })
+    const order: string[] = []
+    const world = shell({
+      settle: async () => {
+        order.push('stop')
+        await copying
+        order.push('let go')
+      },
+    })
+    const seen = () => [...world.order, ...order].sort((a, b) => sequence.indexOf(a) - sequence.indexOf(b))
+    const sequence = ['flush', 'stop', 'let go', 'drain', 'abort', 'quiesce']
+    await armShutdown(world.deps)
+    const answered = world.quit()
+    await vi.waitFor(() => expect(order).toContain('stop'))
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve()
+    expect(world.order, 'the queue was drained under an import still copying').toEqual(['flush'])
+    letGo()
+    await answered
+    expect(order).toEqual(['stop', 'let go'])
+    expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+    expect(seen()).toEqual(sequence)
+  })
+
+  /* ONE BUDGET OVER BOTH. A stop that never lets go is the wedged queue again,
+     one step earlier: it may delay the quit by the grace period and no more,
+     and the line that says so names the step that did not finish. */
+  it('gives up on a stop that never lets go, within the same grace, and says so', async () => {
+    vi.useFakeTimers()
+    try {
+      const warned: string[] = []
+      const world = shell({
+        settle: () => new Promise<void>(() => {}),
+        diagnostics: {
+          warn: (_event: string, fields: { message?: string }) => void warned.push(fields.message ?? ''),
+          info: () => {},
+          error: () => {},
+        } as unknown as ShutdownDeps['diagnostics'],
+      })
+      await armShutdown(world.deps)
+      const answered = world.quit()
+      await vi.advanceTimersByTimeAsync(world.deps.graceMs - 1)
+      expect(world.order).toEqual(['flush'])
+      await vi.advanceTimersByTimeAsync(2)
+      await answered
+      expect(world.order).toEqual(['flush', 'abort', 'quiesce'])
+      expect(warned).toEqual([
+        `settle: what the write queue waits for did not finish within ${world.deps.graceMs}ms — writes may have been lost`,
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('answers the shell exactly once, and only when it is done', async () => {
@@ -147,6 +219,7 @@ describe('the teardown order', () => {
   it('answers the shell even when the teardown throws, and reports why', async () => {
     for (const broken of [
       { flush: () => { throw new Error('flush failed') } },
+      { settle: async () => { throw new Error('the import would not stop') } },
       { drain: async () => { throw new Error('drain failed') } },
       { abort: () => { throw new Error('abort failed') } },
       { quiesce: async () => { throw new Error('journal failed') } },
@@ -185,6 +258,65 @@ describe('the teardown order', () => {
     world.quit()
     await vi.waitFor(() => expect(attempted).toBe(1))
     expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+  })
+
+  /* AND IT IS SAID. The shell finds out through its own timeout either way;
+     without this line nothing afterwards says which side failed. */
+  it('says so when the answer cannot be sent', async () => {
+    const said: { event: string; fields: Record<string, unknown> }[] = []
+    const world = shell({
+      emit: async () => {
+        throw new Error('the shell has gone')
+      },
+      diagnostics: { warn: (event: string, fields: Record<string, unknown>) => said.push({ event, fields }) } as unknown as ShutdownDeps['diagnostics'],
+    })
+    await armShutdown(world.deps)
+    void world.quit()
+    await vi.waitFor(() => expect(said).toHaveLength(1))
+    expect(said).toEqual([{ event: 'shutdown.ack-failed', fields: { message: 'the shell has gone' } }])
+  })
+
+  /* A DRAIN THAT FAILS AFTER THE BOUND RAN OUT is a rejection nobody is still
+     waiting for — and it must not surface as an unhandled one on the way out
+     of the app, where it would read as a crash. */
+  it('lets a drain that fails after the bound ran out go without an unhandled rejection', async () => {
+    const unhandled: unknown[] = []
+    const hear = (reason: unknown) => void unhandled.push(reason)
+    process.on('unhandledRejection', hear)
+    vi.useFakeTimers()
+    try {
+      const world = shell({
+        drain: () =>
+          new Promise<void>((_resolve, reject) => {
+            setTimeout(() => reject(new Error('the queue failed after the quit')), 3_000)
+          }),
+        diagnostics: { warn: () => {} } as unknown as ShutdownDeps['diagnostics'],
+      })
+      await armShutdown(world.deps)
+      const answered = world.quit()
+      await vi.advanceTimersByTimeAsync(world.deps.graceMs + 1)
+      await answered
+      await vi.advanceTimersByTimeAsync(1_000)
+      vi.useRealTimers()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(unhandled).toEqual([])
+    } finally {
+      vi.useRealTimers()
+      process.off('unhandledRejection', hear)
+    }
+  })
+})
+
+/**
+ * THE EVENTS ARE A CONTRACT WITH `src-tauri/src/lib.rs`, which spells them
+ * `ASK` and `DONE` in its own `shutdown` module. Every other test here uses the
+ * constants on both sides, so they pass whatever the constants say — and a
+ * misspelt one is a quit that waits out the shell's whole grace, every time.
+ */
+describe('the shell’s event names', () => {
+  it('asks and answers on the names the shell listens for', () => {
+    expect(SHUTDOWN_EVENT).toBe('paper://shutdown')
+    expect(SHUTDOWN_DONE_EVENT).toBe('paper://shutdown-done')
   })
 })
 
@@ -253,6 +385,10 @@ describe('the listener’s lifetime', () => {
     await armShutdown(world.deps)
     world.lifetime.abort()
     world.lifetime.abort()
+    /* A second `abort()` fires no event — the platform sends `abort` once — so
+       on its own it cannot tell a one-shot listener from a standing one. The
+       event heard again is what can. */
+    world.lifetime.signal.dispatchEvent(new Event('abort'))
     expect(world.unlistened()).toBe(1)
   })
 
@@ -295,6 +431,23 @@ describe('arming in the background', () => {
     expect(said[0]?.event).toBe('shutdown.handshake-unavailable')
     expect(said[0]?.fields.message).toMatch(/no event module/)
   })
+
+  /* A TEARDOWN HANDED IN IS NOT BOUND BY THE DEFAULT'S PROMISE TO SETTLE ITS
+     OWN FAILURES. The listener cannot await it, so a rejection is caught and
+     said there — not left as an unhandled rejection on the way out. */
+  it('reports a teardown handed in that rejects, rather than leaving it unhandled', async () => {
+    const said: { event: string; fields: Record<string, unknown> }[] = []
+    const world = shell({
+      diagnostics: { warn: (event: string, fields: Record<string, unknown>) => said.push({ event, fields }) } as unknown as ShutdownDeps['diagnostics'],
+    })
+    await armShutdown(world.deps, async () => {
+      throw new Error('a teardown of its own failed')
+    })
+    /* Never answered: the teardown handed in is the one that would have. */
+    void world.quit()
+    await vi.waitFor(() => expect(said).toHaveLength(1))
+    expect(said).toEqual([{ event: 'shutdown.teardown-failed', fields: { message: 'a teardown of its own failed' } }])
+  })
 })
 
 
@@ -323,5 +476,33 @@ describe('a failing step does not take the rest with it', () => {
     expect(world.order).toEqual(['drain', 'abort', 'quiesce'])
     expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
     expect(warned).toEqual(['flush: a note refused to leave its editor'])
+  })
+
+  /* EACH FAILURE IS NAMED FOR ITS OWN STEP, and two failures are two clauses of
+     one line — that line is all anybody has afterwards to learn which part of
+     a quit went wrong. */
+  it('names every step that failed, in one line', async () => {
+    for (const [broken, said] of [
+      [{ settle: async () => { throw new Error('the import would not stop') } }, 'settle: the import would not stop'],
+      [{ drain: async () => { throw new Error('the queue refused') } }, 'drain: the queue refused'],
+      [{ abort: () => { throw new Error('a capability would not stop') } }, 'abort: a capability would not stop'],
+      [{ quiesce: async () => { throw new Error('the journal would not close') } }, 'quiesce: the journal would not close'],
+      [
+        { flush: () => { throw new Error('a note') }, quiesce: async () => { throw new Error('the journal') } },
+        'flush: a note; quiesce: the journal',
+      ],
+    ] as [Partial<ShutdownDeps>, string][]) {
+      const warned: string[] = []
+      const world = shell({
+        ...broken,
+        diagnostics: {
+          warn: (_event: string, fields: { message?: string }) => void warned.push(fields.message ?? ''),
+        } as unknown as ShutdownDeps['diagnostics'],
+      })
+      await armShutdown(world.deps)
+      await world.quit()
+      expect(warned).toEqual([said])
+      expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
+    }
   })
 })

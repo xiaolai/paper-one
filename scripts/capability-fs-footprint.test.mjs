@@ -418,6 +418,11 @@ const REVIEWED_FOOTPRINT = [
    * from `SYNC_DIR`, and the meta file goes so `bootstrap` mints a fresh
    * epoch. Nothing is deleted; the evidence keeps its bytes under a new name. */
   'sync/lib/journal.ts fs.remove(JOURNAL_META_PATH)',
+  /* And the META file gets the same treatment when IT is the one that will not
+   * read: moved aside under a stamped name in `sync/`, reported through
+   * `onQuarantine`, never written over. Taking damaged meta bytes for "no
+   * meta" ran the bootstrap across them and replaced them twice, silently. */
+  'sync/lib/journal.ts fs.rename(JOURNAL_META_PATH)',
   'sync/lib/journal.ts fs.rename(JOURNAL_PATH)',
   'sync/lib/journal.ts fs.writeFile(JOURNAL_DIRTY_PATH)',
   'sync/lib/journal.ts fs.writeFile(JOURNAL_PATH)',

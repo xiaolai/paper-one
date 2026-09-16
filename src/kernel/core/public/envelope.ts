@@ -61,15 +61,6 @@ export type PublicOp =
 
 export const PUBLIC_OPS: readonly PublicOp[] = ['note', 'unnote']
 
-/**
- * The same two names as a set, for the shape check.
- *
- * ⚠️ **`PUBLIC_OPS` WAS DECLARED, RE-EXPORTED AND READ BY NOTHING**, while
- * `isPublicEnvelopeShape` spelled the two operation names out again — so the
- * list that says what a public operation IS could have gained a third entry
- * without the validator ever hearing about it. Found by audit.
- */
-const IS_PUBLIC_OP = new Set<string>(PUBLIC_OPS)
 
 /** What travels: the quote and its neighbours. Never an anchor. */
 export interface PublicPassage {
@@ -233,7 +224,13 @@ export type PublicRefusal =
   | 'too-large'
   | 'malformed'
   | 'bad-signature'
-  /** `expires` has passed, or is further out than this build will accept. */
+  /**
+   * `expires` has passed, or is further out than this build will accept.
+   *
+   * For a withdrawal only the second half is refused at the door: its own
+   * expiry passing is the fold's to judge — see `checkPublicEnvelope` — and the
+   * store reports one the fold forgot under this name.
+   */
   | 'expired'
   /** The reader has blocked this voice. */
   | 'blocked'
@@ -261,9 +258,30 @@ const hasOnly = (value: Record<string, unknown>, allowed: ReadonlySet<string>): 
   Object.keys(value).every((key) => allowed.has(key))
 
 const COMMON_FIELDS = ['v', 'voice', 'book', 'seq', 'at', 'expires', 'pub', 'op', 'sig'] as const
-const NOTE_FIELDS = new Set<string>([...COMMON_FIELDS, 'passage'])
-const UNNOTE_FIELDS = new Set<string>(COMMON_FIELDS)
 const PASSAGE_FIELDS = new Set(['quote', 'prefix', 'suffix', 'chapter', 'note'])
+
+/**
+ * The fields each operation's envelope may carry, keyed by the operation.
+ *
+ * ⚠️ **KEYED BY `PublicOp`, SO A THIRD OPERATION DOES NOT COMPILE UNTIL ITS FIELDS
+ * ARE WRITTEN HERE.** `PUBLIC_OPS` was once declared and read by nothing while
+ * the shape spelled the two names out again, so the list could have gained an
+ * entry the validator never heard about. The fix read the names into a `Set`
+ * and asked it first — and every name that `Set` refused was refused again by
+ * the field check below it, so the question it asked was one no test could hear
+ * (2026-09-15 sweep). The table is the one question now: an operation that is
+ * not one of its keys has no fields, and is refused for it.
+ */
+const FIELDS_OF: Readonly<Record<PublicOp, ReadonlySet<string>>> = {
+  note: new Set<string>([...COMMON_FIELDS, 'passage']),
+  unnote: new Set<string>(COMMON_FIELDS),
+}
+
+/**
+ * The same table as a `Map`, which answers only for its own keys and never
+ * coerces one: `toString` is on every object, and `['note']` spells `note`.
+ */
+const FIELDS_BY_OP: ReadonlyMap<unknown, ReadonlySet<string>> = new Map(Object.entries(FIELDS_OF))
 
 /**
  * Whether a parsed value has the shape of a public envelope.
@@ -276,8 +294,8 @@ const PASSAGE_FIELDS = new Set(['quote', 'prefix', 'suffix', 'chapter', 'note'])
 export function isPublicEnvelopeShape(value: unknown): value is PublicEnvelope {
   if (!isObject(value)) return false
   const e = value
-  if (typeof e['op'] !== 'string' || !IS_PUBLIC_OP.has(e['op'])) return false
-  if (!hasOnly(e, e['op'] === 'note' ? NOTE_FIELDS : UNNOTE_FIELDS)) return false
+  const fields = FIELDS_BY_OP.get(e['op'])
+  if (fields === undefined || !hasOnly(e, fields)) return false
   if (typeof e['v'] !== 'number') return false
   if (typeof e['voice'] !== 'string' || !HEX64.test(e['voice'])) return false
   if (typeof e['book'] !== 'string' || !HEX64.test(e['book'])) return false
@@ -347,11 +365,32 @@ function checkPublicEnvelope(
      check written the other way, and would go on passing it for a thousand
      years. Both halves are needed — a publication dated absurdly far ahead is
      refused, and so is one whose expiry is further out than this build accepts
-     from now. */
+     from now.
+
+     ⚠️ **THE SECOND HALF IS THE TWO LINES TOGETHER, AND A THIRD LINE SAID IT
+     AGAIN.** A date no later than `now + MAX_CLOCK_SKEW_MS` and a lifetime no
+     longer than `MAX_LIFETIME_MS` from that date put every expiry this door
+     takes at or before `now + MAX_LIFETIME_MS + MAX_CLOCK_SKEW_MS`, so a check
+     for exactly that between them refused nothing either of them let through
+     (2026-09-15 sweep). The bound it stated is held by a test at the
+     millisecond instead: "takes the latest publication this clock allows". */
   if (envelope.at > now + MAX_CLOCK_SKEW_MS) return 'expired'
-  if (envelope.expires > now + MAX_LIFETIME_MS + MAX_CLOCK_SKEW_MS) return 'expired'
   if (envelope.expires - envelope.at > MAX_LIFETIME_MS) return 'expired'
-  if (envelope.expires <= now) return 'expired'
+  /* ⚠️ **A NOTE PAST ITS OWN EXPIRY IS REFUSED HERE, AND A WITHDRAWAL NO LONGER
+     IS — THIS REFUSED BOTH, AND A WITHDRAWN NOTE CAME BACK.** `order.ts` keeps a
+     withdrawal for as long as the note it takes back could still be drawn, so
+     its own expiry is not when it stops mattering, and only the fold knows the
+     note. Refused here, a 180-day note taken back by a two-hour withdrawal was
+     drawn again on the first reload three hours later, and the store's next
+     write deleted the withdrawal for good (2026-09-14).
+
+     So a late withdrawal is VERIFIED rather than refused unread, and the fold
+     forgets it at once when it takes back nothing held — the store counts that
+     as `expired`, as this line used to. What it costs is a signature check per
+     replayed withdrawal, which a stranger could already buy with a valid one;
+     the bound on what is REMEMBERED is untouched, because the fold's horizon is
+     the later of two signed expiries, each capped above. */
+  if (envelope.op === 'note' && envelope.expires <= now) return 'expired'
   /* Before the signature, because it is cheaper and a blocked voice's
      PUBLICATION is refused whatever it signed.
 
@@ -565,7 +604,9 @@ export function readPublicEnvelope(
   try {
     parsed = JSON.parse(line)
   } catch {
-    return 'malformed'
+    /* Not JSON: `parsed` stays `undefined`, which is no shape, so the line is
+       refused as `malformed` below — once, by the same question as any other
+       line that is not an envelope. A `return` here said it twice. */
   }
   if (!isPublicEnvelopeShape(parsed)) return 'malformed'
   const refusal = checkPublicEnvelope(parsed, line, crypto, now, blocked)

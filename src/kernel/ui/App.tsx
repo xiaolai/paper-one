@@ -8,7 +8,7 @@ import { tauriVaultFs } from '../core/vaultFsTauri'
 import { offeredFaces } from '../core/typefaces'
 import { presentFaces } from './fontProbe'
 import { canKeepPlace, resolveAccel, resolvePageKey } from './accel'
-import { DEFAULT_STEP_IDX, applyMetrics } from '../core/metrics'
+import { DEFAULT_STEP_IDX, applyMetrics, paneTakesTrack } from '../core/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
 import { createGenerations } from '../core/generations'
@@ -22,17 +22,20 @@ import { requestWindowClose, useWindowClose } from './hooks/useWindowClose'
 import { takeOpened, type OpenRequests } from './openedFiles'
 import { closePrepare } from './closeWindow'
 import { openExternal } from './openExternal'
-import { hasOpenLayer, paneAvailable, paneFits, screenJump, useAppState } from './state'
+import { hasOpenLayer, paneFits, readerTakesInput, screenJump, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
 import type { Composition } from '../core/registry'
 import { useBook } from './hooks/useBook'
 import { useBookIntake } from './hooks/useBookIntake'
 import { useEnrichment } from './hooks/useEnrichment'
-import { flushBeforeClose, onBeforeClose } from '../core/beforeClose'
+import { flushBeforeClose, onBeforeClose, onBeforeDrain, settleBeforeDrain } from '../core/beforeClose'
 import { useFileDrop, type DropHaul } from './hooks/useFileDrop'
 import { useLibrary } from './hooks/useLibrary'
 import { useCards } from './hooks/useCards'
+import { useLookUp } from './hooks/useLookUp'
+import { useLookups } from './hooks/useLookups'
+import { readerLanguage } from '../core/glossLanguage'
 import { useMarks } from './hooks/useMarks'
 import { useMarking } from './hooks/useMarking'
 import { useBookmarking } from './hooks/useBookmarking'
@@ -43,7 +46,7 @@ import { useResumeAt } from './hooks/useResumeAt'
 import { locationToOpen, overrideSpent, type Place } from '../core/jumpStack'
 import type { ExternalLinkDetail } from 'foliate-js/view.js'
 import type { FootnoteRender } from './reader/session'
-import { extensionFor, readOwnedBook, storedBookName } from '../core/bookVault'
+import { extensionFor, isMissingFile, readOwnedBook, storedBookName } from '../core/bookVault'
 import type { IndexedBook } from '../core/bookIndex'
 import type { IndexFs } from '../core/bookIndex'
 import { contentPathIn } from '../core/bookFolder'
@@ -79,6 +82,14 @@ import { useSpeech } from './reader/useSpeech'
  * every one of 1 961 rows, every render.
  */
 const desktopCovers = (bookId: string) => coverIn(tauriVaultFs, bookId)
+
+/**
+ * The tag sheet's books when no book is being read — which is never drawn: the
+ * sheet renders only over a book the shelf holds. A constant rather than an
+ * inline `[]` so that fact sits on a line of its own.
+ */
+// Stryker disable next-line ArrayDeclaration: read only while no book is being read, when the sheet it would fill is not rendered.
+const NO_BOOKS: readonly IndexedBook[] = Object.freeze([])
 
 export interface AppProps {
   /**
@@ -182,6 +193,7 @@ export function App({
   /* Probed once for the app's lifetime: which fonts this machine has cannot
      change while it is running. Shared by the settings panel and the palette so
      the two cannot come to offer different lists. */
+  // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it — the probe runs once, at mount, either way.
   const offeredHere = useMemo(() => offeredFaces(presentFaces()), [])
   const prefersDark = usePrefersDark()
   /* The one thing that can stop a page turn sliding. Not a setting — see the
@@ -206,11 +218,12 @@ export function App({
      directly above it. That snapshot existed to resolve the `Look up` mode and
      went with it; the sentence outlived it by one commit and was caught by
      audit. */
-  const settingsPersistent = useSyncExternalStore(
-    services.settings.subscribe,
-    () => services.settings.persistent,
-    () => services.settings.persistent,
-  )
+  /* ONE READER FOR BOTH SNAPSHOTS, as `workLine.line` is below. The second is
+     read only when a server render is hydrated, which this window never is, so
+     as an arrow of its own it was a function nothing could call — a mutation
+     sweep said so (2026-09-15). */
+  const readPersistent = () => services.settings.persistent
+  const settingsPersistent = useSyncExternalStore(services.settings.subscribe, readPersistent, readPersistent)
   /* The status bar's third rung, through the kernel's own port — the kernel
      imports nothing from a capability, so `inference` binds this and App reads
      it here. Null at rest, which is what keeps the bar byte-for-byte what it
@@ -230,6 +243,64 @@ export function App({
   /* Beside marking, not inside it. Marking acts on a selection and
    * bookmarking acts on a place — see `useBookmarking`. */
   const bookmarking = useBookmarking(book, marks)
+  /* ── LOOK UP (phase 17) ───────────────────────────────────────────────────
+   *
+   * HERE, ABOVE THE READER AND THE PANE, because both draw it: the selection
+   * popup's lookup face and Marginalia's Dictionary view read one state, and the
+   * palette, ⌃⌘D and Escape act on it (WI-17.2).
+   *
+   * The gloss port is read per render rather than captured: `inference` binds
+   * it after composition, and a reader who installs a model must not have to
+   * restart to get Look up back. */
+  const lookups = useLookups(services.lookups)
+  const glossProvider = services.gloss()
+  const readerLocale = typeof navigator === 'undefined' ? undefined : navigator.language
+  /* Whether the reader is actually LOOKING at the book. The reader screen stays
+   * mounted under the library — see `Reader.inert` — so nothing downstream of
+   * it can be trusted to say which screen is on top.
+   *
+   * DECLARED HERE, above Look up, because Look up asks it too — and asking it
+   * as a second `state.screen === 'reader'` is the defect the keyboard map's
+   * note records about its own copy. */
+  const onReader = state.screen === 'reader'
+  /* TO THE SECTION, not to the top of Settings (phase 17, L3). The id is the
+     provider's — the kernel names no capability's section.
+
+     ⚠️ **A STABLE CALLBACK, AND IT WAS AN INLINE ARROW.** `useLookUp` returns
+     its object through a memo that lists this, so a new arrow per render made
+     `lookUp` a new object on every render — and the palette's memo and the
+     keyboard map's effect both list `lookUp`, so both were rebuilt on every
+     render whatever the reader did (2026-09-13 audit). */
+  // Stryker disable next-line ArrayDeclaration: `dispatch` is `useReducer`'s, the same function for the component's whole life — an empty list holds the same callback.
+  const onInstall = useCallback((section: string) => dispatch({ type: 'revealSettings', section }), [dispatch])
+  const lookUp = useLookUp({
+    provider: glossProvider,
+    selection: marking.selection,
+    /* ONLY WHILE THE READER IS THE SCREEN — the reader stays mounted under the
+       library, and a lookup must not outlive the trip there. */
+    reading:
+      onReader && book.bookId !== null
+        ? {
+            bookId: book.bookId,
+            title: book.meta?.title ?? '',
+            // Stryker disable next-line ArrayDeclaration: the only reader is `languages[0]`, taken as a locale, and Stryker's filler is not one — `supportedLanguage` answers null for it exactly as for no first element.
+            languages: book.meta?.languages ?? [],
+            fixedLayout: book.fixedLayout,
+            chapterLabel: book.position.chapterLabel,
+            generation: book.generation,
+            sectionIndex: book.position.sectionIndex,
+            chapterHref: book.position.chapterHref,
+            navigation: book.navigation,
+          }
+        : null,
+    choice: state.lookUpLanguage,
+    readerLocale,
+    lookups: services.lookups,
+    /* Whether a lookup found a real sentence or fell back — counted, never
+       shown (WI-16.4, §F4). */
+    diagnostics: services.diagnostics,
+    onInstall,
+  })
   /* Pins, colours, hidden subjects and saved views — the reader's decisions
      ABOUT their tags, as opposed to which books carry them. See `tagPrefs`. */
   const tagPrefs = useTagPrefs(services.storage)
@@ -245,6 +316,7 @@ export function App({
    * stated once. */
   const importFs = useMemo(
     () => (fs ? tauriImportFs : null),
+    // Stryker disable next-line ArrayDeclaration: `fs` is a prop fixed by the composition root for the window's life, so the first answer is the only one.
     [fs],
   )
   const library = useLibrary(services.library)
@@ -285,12 +357,22 @@ export function App({
 
   const openBook = useCallback(
     (source: File | string, path: string | null = null, undo: (() => void) | null = null) => {
+      /* ⚠️ **BOTH OF THESE ARE BELT AND BRACES, and a mutation sweep is what
+         says so.** Every route here claims the generation and arms the same
+         rollback one line earlier, in the same turn — `openStored` at its
+         `fresh`, `addAndOpen` before it opens what it added — and each checks
+         that claim before reaching this function. So the claim below is of a
+         generation nothing else can have taken, and the arm is of the rollback
+         already held. They stay, because the next caller will not necessarily
+         do either (2026-09-14). */
+      // Stryker disable next-line CallExpression: see above — every caller claims first, and this claim supersedes nothing its own `fresh()` has not already refused.
       openGenerations.current.claim()
       /* A direct open RETIRES the rollback a pending open armed — runs it,
        * rather than dropping it: the state a superseded jump committed is
        * still committed. `undo` is how `openStored` carries its own rollback
        * through the origin fallback, which is the one re-entry that is the
        * same open continuing. See `openRollback.ts`. */
+      // Stryker disable next-line CallExpression: arming the rollback the caller armed one line earlier is `arm`'s no-op case — it fires a stale one only where the two differ, and here they never do.
       undoOpen.current.arm(undo)
       dispatch({ type: 'goScreen', screen: 'reader' })
       /* Handed over WITH its source rather than set directly, so the effect that
@@ -310,6 +392,7 @@ export function App({
       intake.noteOpen(source, path)
       book.open(source)
     },
+    // Stryker disable next-line ArrayDeclaration: everything this reads is stable for the window's life — `book.open` and `dispatch` are, and so is `intake.noteOpen` (asserted in `useBookIntake.stability.test.tsx`) — so the first closure and the latest are the same function.
     [book, dispatch],
   )
 
@@ -363,17 +446,29 @@ export function App({
         }))
       return addMany(entries)
     },
+    // Stryker disable next-line ArrayDeclaration: `addMany` is the library service's own verb, memoized over the store for the window's life — a constant dependency list holds the same function.
     [addMany],
   )
 
   /**
    * Open a book the library holds.
    *
-   * THREE BRANCHES BECAME ONE. Phase 3 tried the vault, then the reader's
+   * THE VAULT FIRST, THEN THE ORIGIN. Phase 3 tried the vault, then the reader's
    * original path, then a URL, each with its own failure handling — because a
    * row could name any combination of the three and might be right about none of
-   * them. A book is a folder now, so there is exactly one place to look and its
-   * name is the book's id.
+   * them. A book is a folder now, so the vault is where to look first and its
+   * name is the book's id; the `catch` below falls back to the book's `origin` —
+   * as a file, then as an address — only when the stored copy is MISSING, and
+   * its notes say why phase 4 deleted that too eagerly and why a copy that is
+   * there and will not read is another case. (This said "a record with no
+   * stored content" while the code fell back after any failure, and it was the
+   * code that moved — 2026-09-14, #103, round 4.)
+   *
+   * ⚠️ **THIS OPENED "THREE BRANCHES BECAME ONE" AND "EXACTLY ONE PLACE TO
+   * LOOK" UNTIL THE 2026-09-13 AUDIT**, and its first correction was appended
+   * beneath both claims and left them standing. The three places are still
+   * three; what changed is that they are tried in one order, from one failure
+   * path.
    *
    * The filename carries the EXTENSION, not the title. `isPdf` routes on it, so
    * handing foliate `Moby-Dick` with no suffix sent every PDF to the wrong
@@ -402,6 +497,7 @@ export function App({
    * that starts (`openStored`'s `undo` argument) and consumed by whichever
    * settles first; the slot itself is declared above `openBook`, which see.
    */
+  // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it, and the only thing this reads is a ref.
   const openFailed = useCallback(() => undoOpen.current.fire(), [])
 
   const openStored = useCallback(
@@ -422,13 +518,20 @@ export function App({
            * Back to …" line. The rollback travels with the open — see the
            * `book.error` effect, which fires it, and the override's own
            * spending effect, which releases it once a section has rendered. */
-          openBook(file, entry.origin ?? null, undo ?? null)
+          /* WHERE THIS COPY CAME FROM, handed to the intake with the bytes.
+             ⚠️ **AND IT CANNOT BE READ BACK OUT OF THE RECORD**, which is why
+             the directive below is honest: the row already carries this origin,
+             and `mergeParsed` keeps what the previous record held wherever a
+             parse supplies none. */
+          // Stryker disable next-line LogicalOperator: see above — the origin reaches the record through the library's own merge whether or not the open repeats it.
+          const origin = entry.origin ?? null
+          openBook(file, origin, undo ?? null)
         })
         .catch((cause: unknown) => {
           if (!fresh()) return
           /* FALL BACK TO THE READER'S OWN FILE, which phase 4 deleted too
-           * eagerly. "Three branches became one" was true for a book Paper
-           * holds — and six of the ten books in a real phase-3 library never
+           * eagerly. One place to look was enough for a book Paper holds —
+           * and six of the ten books in a real phase-3 library never
            * had a stored copy, because phase 3 only started keeping them near
            * the end. Migrating those produced a record with no content, and
            * with the path fallback gone they became unopenable.
@@ -437,8 +540,17 @@ export function App({
            * needed here. It is still a fallback rather than a first choice: it
            * depends on the reader's file being where it was, which is the whole
            * reason Paper keeps its own copy. */
+          /* ⚠️ **MISSING, AND ONLY MISSING** (2026-09-14, #103, round 4). This
+           * fell back after ANY failure. A copy that is THERE and will not read
+           * — a permission, an I/O error — is not a book Paper never kept, and
+           * opening the origin in its place logged nothing and healed nothing:
+           * the intake's `keepContent` declines when the content file exists, so
+           * every later open went to the origin again, silently, until the
+           * origin moved and the book would not open with nothing on record to
+           * say why. Absent and unreadable are different answers — see
+           * `isMissingFile`, whose miss errs towards the loud one. */
           const original = entry.origin
-          if (original) {
+          if (original && isMissingFile(cause)) {
             /* AN ORIGIN IS A PATH OR AN ADDRESS, and which one is not always
              * decidable by looking. `https://…` is obvious; `/sample.epub` is
              * not — it is a relative URL served by the app itself, and it is
@@ -469,17 +581,27 @@ export function App({
               })
             return
           }
-          /* The folder is there and its content is not, which means an import
-           * that did not finish. The record stays — its tags and position are
-           * still the reader's — and they are told rather than left clicking
-           * something that does nothing. */
+          /* MISSING, WITH NOWHERE ELSE TO LOOK: the folder is there and its
+           * content is not, which means an import that did not finish. The
+           * record stays — its tags and position are still the reader's — and
+           * they are told rather than left clicking something that does nothing.
+           *
+           * ⚠️ **A COPY THAT IS THERE AND WILL NOT READ IS NOT TOLD TO ADD IT
+           * AGAIN** (round 4), which it was: adding a book whose content file
+           * exists writes nothing — `keepOwnCopy` calls it a duplicate — so the
+           * advice sent the reader round a loop that changes nothing. */
           console.error('Paper: could not read the stored book', entry.bookId, cause)
           /* Nothing opened, so anything that committed on the assumption it
              would has to come back off — see `undoOpen`. */
           openFailed()
-          setImportNotice('That book could not be opened. Try adding it again.')
+          setImportNotice(
+            isMissingFile(cause)
+              ? 'That book could not be opened. Try adding it again.'
+              : 'That book could not be read from your library.',
+          )
         })
     },
+    // Stryker disable next-line ArrayDeclaration: all three are stable for the window's life — `fs` is a prop fixed at composition and the other two are callbacks over refs — so the first closure and the latest are the same function.
     [openBook, fs, openFailed],
   )
 
@@ -512,8 +634,31 @@ export function App({
    * library was empty.
    *
    * DECLARED ABOVE THE IMPORT COORDINATOR, which writes every import's notice
-   * through it. */
-  const [importNotice, setImportNotice] = useState<string | null>(null)
+   * through it.
+   *
+   * ⚠️ **A NOTICE AND A NONCE, NOT A STRING.** React bails out of a `setState`
+   * to an identical value and the expiry below is keyed on what is held, so
+   * the same failure reported twice — the second time shortly before the
+   * first one's timer ran out — did not restart the timer, and the repeat
+   * vanished almost as it appeared (2026-09-13 audit). `ReturnHint` learned
+   * this for the same reason. Every call is a new notice. */
+  const [notice, setNotice] = useState<{ readonly text: string; readonly nonce: number } | null>(null)
+  const notices = useRef(0)
+  const importNotice = notice?.text ?? null
+  /* ⚠️ **IT SAYS SOMETHING, and it used to take `null` for "say nothing".** The
+     two are not one operation: nothing reads a notice but its text, so clearing
+     through here was a call no reader could tell from the one that did not
+     clear — and the only caller that meant it is the Dismiss button, which has
+     `setNotice` itself. */
+  const setImportNotice = useCallback(
+    (text: string) => {
+      // Stryker disable next-line AssignmentOperator: the nonce is read for INEQUALITY and nothing else, so counting down is the same sequence backwards — every notice still differs from the one before it.
+      notices.current += 1
+      setNotice({ text, nonce: notices.current })
+    },
+    // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it — React compares the elements, and Stryker's filler is equal to itself on every render.
+    [],
+  )
   /* Standing, not transient: a quarantined store is not something the app
      did, it is something the reader has lost, and it stays until they say
      they have read it. */
@@ -550,9 +695,13 @@ export function App({
     parse: (file) => parseBook(file),
   })
 
-  useEffect(() => {
-    applyMetrics(document.documentElement, platform)
-  }, [platform])
+  useEffect(
+    () => {
+      applyMetrics(document.documentElement, platform)
+    },
+    // Stryker disable next-line ArrayDeclaration: the platform cannot change under a running window — `usePlatform` resolves it once, at mount — so an empty list runs this exactly as often.
+    [platform],
+  )
 
   /* §05: the system follows the OS by default, with an explicit override in
    * Settings. Night is the dark surface; Paper is the light default. */
@@ -706,8 +855,21 @@ export function App({
        * a generation token this line has just advanced — so it returned
        * without a word and the reader lost an import in progress with nothing
        * on screen to say it had happened. */
-      if (imports.busy) setImportNotice('That replaced the import already running.')
-      imports.supersede()
+      /* ASKED OF `supersede` ITSELF, which answers as of now. This read
+         `imports.busy` — the last render's — so a run started in the same turn
+         was replaced in silence (2026-09-13 audit, #98, round 3). */
+      if (imports.supersede()) setImportNotice('That replaced the import already running.')
+      /* ⚠️ **AND IT SUPERSEDES A PENDING OPEN, BECAUSE IT IS ONE.** Every intake
+       * ends in `openBook`, so from here on it is an open the reader is waiting
+       * for — and the import's token is not the open's. They were two counters,
+       * so: start a multi-book import, open another book off the shelf, and the
+       * import finishing landed its `openBook` on top of the book chosen since
+       * (2026-09-13 audit). Claimed here — with whatever rollback a superseded
+       * open armed RETIRED, not left loaded; see `openRollback.ts` — and asked
+       * again below, before the book is opened. The shelving is not asked: it
+       * finishes whatever happens, as it always did. */
+      const fresh = openGenerations.current.claim()
+      undoOpen.current.arm(null)
 
       /* Whether this intake was still the current one when it finished — a
          superseded one must not open its book over the one asked for since.
@@ -726,6 +888,7 @@ export function App({
            writes supersedes this run after the work last looked. */
         return imports.run(
           async (run) => {
+            // Stryker disable next-line ArrayDeclaration: the only reader is `summarise`, which counts by `status`; Stryker's filler has none, so it changes no count — and the one branch that reads the LENGTH ("no books found") belongs to a run that has been superseded and says nothing.
             const outcomes: ImportOutcome[] = []
             for (const [index, { file, path }] of picked.entries()) {
               /* `break`, NOT `return`: the settle is unconditional, and
@@ -733,15 +896,20 @@ export function App({
               if (!run.current()) break
               run.report({ done: index, total: picked.length })
               try {
-                /* Never null without a signal — the only `null` is a stop, and
-                 * neither the picker nor a drop has anything to stop. */
-                const kept = await keepOwnCopy(bytes, file, path)
+                /* WITH THE RUN'S SIGNAL, so a superseded run stops between the
+                 * hash and the write instead of finishing a copy nobody wants.
+                 * This said "neither the picker nor a drop has anything to stop"
+                 * and passed none — but either can be superseded, and
+                 * `keepOwnCopy` checks the signal at exactly that point
+                 * (2026-09-13 audit). `null` is that stop, not an outcome. */
+                const kept = await keepOwnCopy(bytes, file, path, run.signal)
                 if (kept) {
                   outcomes.push(kept)
                   run.shelve(kept)
                 }
               } catch (cause) {
                 console.error('Paper: could not add', path ?? file.name, cause)
+                // Stryker disable next-line LogicalOperator: nothing reads a FAILED outcome's path — `summarise` counts by status and `shelveImported` filters failures out — so which of the two names it carries cannot be seen.
                 outcomes.push({ path: path ?? file.name, status: 'failed', name: file.name })
               }
             }
@@ -759,33 +927,40 @@ export function App({
           },
         )
       })()
-      if (!current) return
+      /* Both tokens: the import's says whether this intake was superseded by
+         another, the open's whether any open has been asked for since. */
+      if (!current || !fresh()) return
       openBook(opening.file, opening.path)
     },
+    // Stryker disable next-line ArrayDeclaration: `openBook` and `fs` are stable, and the only members of `imports` this reads — `supersede` and `run` — are stable callbacks over refs, however often the object around them is rebuilt.
     [openBook, fs, imports],
   )
 
-  const addBooks = useCallback(() => {
-    void pickBooks()
-      .then((picked) =>
-        /* ITS OWN CATCH, so the sentence matches the stage. One catch over
-         * both used to answer a rejected ADD with "The file picker failed" —
-         * files had been selected and partly copied, and the reader was sent
-         * to re-pick them. */
-        addAndOpen(picked).catch((cause: unknown) => {
-          console.error('Paper: could not add the picked books', cause)
-          setImportNotice('Those books could not be added.')
-        }),
-      )
-      .catch((cause: unknown) => {
-        /* SAID, not only logged. A cancelled picker resolves empty, so
-         * reaching here is a real failure — and a reader whose "Add books"
-         * produced nothing at all cannot tell a broken picker from a click
-         * that did not land. */
-        console.error('Paper: the book picker failed', cause)
-        setImportNotice('The file picker failed — nothing was added.')
-      })
-  }, [addAndOpen])
+  const addBooks = useCallback(
+    () => {
+      void pickBooks()
+        .then((picked) =>
+          /* ITS OWN CATCH, so the sentence matches the stage. One catch over
+           * both used to answer a rejected ADD with "The file picker failed" —
+           * files had been selected and partly copied, and the reader was sent
+           * to re-pick them. */
+          addAndOpen(picked).catch((cause: unknown) => {
+            console.error('Paper: could not add the picked books', cause)
+            setImportNotice('Those books could not be added.')
+          }),
+        )
+        .catch((cause: unknown) => {
+          /* SAID, not only logged. A cancelled picker resolves empty, so
+           * reaching here is a real failure — and a reader whose "Add books"
+           * produced nothing at all cannot tell a broken picker from a click
+           * that did not land. */
+          console.error('Paper: the book picker failed', cause)
+          setImportNotice('The file picker failed — nothing was added.')
+        })
+    },
+    // Stryker disable next-line ArrayDeclaration: `addAndOpen`'s own dependencies are stable for the window's life, so an empty list holds the same function this one does.
+    [addAndOpen],
+  )
 
   /**
    * Books dropped on the window, treated exactly as picked ones.
@@ -825,6 +1000,13 @@ export function App({
           ? `${unreadable} ${unreadable === 1 ? 'item' : 'items'} could not be read.`
           : null,
       ].filter((one): one is string => one !== null)
+      /* ⚠️ **A BACKSTOP THAT CANNOT BE REACHED FROM HERE, AND IT STAYS.**
+         `addAndOpen` is handed files this drop produced, and every await inside
+         it is caught where it happens: the import's own `run` never rejects and
+         `openBook` cannot throw on a `File`. So a sweep would be measuring a
+         rejection nobody can make — while the lines themselves are for the one
+         a later change could (2026-09-14). */
+      // Stryker disable BlockStatement: unreachable — see the note above.
       void addAndOpen(
         books.map((file) => ({ file, path: null })),
         notes.length ? notes.join(' ') : undefined,
@@ -832,10 +1014,13 @@ export function App({
         /* SAID, like every other route in. The drop was the one intake whose
          * failure went to the console alone — the silent-failure shape this
          * callback's own header says it exists to remove. */
+        // Stryker disable StringLiteral,CallExpression: unreachable with the block above — neither call can be observed, nor either sentence read back.
         console.error('Paper: could not add what was dropped', cause)
         setImportNotice('Those books could not be added.')
       })
     },
+    // Stryker restore BlockStatement,StringLiteral,CallExpression
+    // Stryker disable next-line ArrayDeclaration: what `addAndOpen` calls is stable for the window's life — `openBook`, `fs`, and `imports.supersede` and `imports.run` — so a first `addAndOpen` does what every later one does.
     [addAndOpen],
   )
 
@@ -867,31 +1052,40 @@ export function App({
    * Subscribing once per `openRequests` — that is, once for the window's
    * lifetime — is what the comment above already describes as the intent. */
   const openLaunched = useRef(addAndOpen)
-  useEffect(() => {
-    openLaunched.current = addAndOpen
-  }, [addAndOpen])
+  /* FILLED DURING RENDER, as `rememberRef` is below — NOT BY AN EFFECT, which
+     this was. Every value `addAndOpen` reads is stable for the window's life
+     (see the directive on `dropBooks`' dependencies), so a ref never refreshed
+     cannot be told from one that is, and the effect doing the refreshing was a
+     call no test could see removed — two directives and a surviving mutant
+     said so (2026-09-15). The refresh stays: that stability is a property of
+     `useImportRun` and `useBook` this file must not depend on silently. */
+  openLaunched.current = addAndOpen
 
-  useEffect(() => {
-    if (!openRequests) return
-    /* IN ORDER, one launch at a time. Two deliveries close together — the
-     * reader double-clicks A, then B — used to run concurrently, and a slow
-     * A (a big PDF off a network volume) could finish its `addAndOpen` AFTER
-     * B's, leaving A open when B was the later ask. The chain survives a
-     * failure: one launch that cannot be read must not dam the next. */
-    let chain: Promise<void> = Promise.resolve()
-    return openRequests.subscribe((paths) => {
-      chain = chain
-        .then(() =>
-          takeOpened(paths, {
-            addAndOpen: (books, note) => openLaunched.current(books, note),
-            notice: setImportNotice,
-          }),
-        )
-        .catch((cause: unknown) => {
-          console.error('Paper: could not open what the launch carried', cause)
-        })
-    })
-  }, [openRequests])
+  useEffect(
+    () => {
+      if (!openRequests) return
+      /* IN ORDER, one launch at a time. Two deliveries close together — the
+       * reader double-clicks A, then B — used to run concurrently, and a slow
+       * A (a big PDF off a network volume) could finish its `addAndOpen` AFTER
+       * B's, leaving A open when B was the later ask. The chain survives a
+       * failure: one launch that cannot be read must not dam the next. */
+      let chain: Promise<void> = Promise.resolve()
+      return openRequests.subscribe((paths) => {
+        chain = chain
+          .then(() =>
+            takeOpened(paths, {
+              addAndOpen: (books, note) => openLaunched.current(books, note),
+              notice: setImportNotice,
+            }),
+          )
+          .catch((cause: unknown) => {
+            console.error('Paper: could not open what the launch carried', cause)
+          })
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: `openRequests` is a prop the composition root hands over once, for the window's life — see the note above — so subscribing on mount and subscribing on its change are the same subscription.
+    [openRequests],
+  )
 
   /**
    * Add a whole folder.
@@ -922,11 +1116,17 @@ export function App({
    * every failure it reports is also on the console, and every count it
    * reports is visible in the shelf itself.
    */
+  /* KEYED ON THE NOTICE, NOT ITS TEXT — see `notice`: a repeat is a new one
+     and gets the whole of its time. */
+  /* ⚠️ **NO `notice === null` GUARD, AND THERE WAS ONE** (2026-09-15). With no
+     notice up the timer sets null over null, which React discards without
+     rendering, and the next notice's run clears it first — so the guard saved
+     one idle timer and changed nothing anybody could see, which a mutation
+     sweep said. */
   useEffect(() => {
-    if (importNotice === null) return
-    const timer = setTimeout(() => setImportNotice(null), NOTICE_MS)
+    const timer = setTimeout(() => setNotice(null), NOTICE_MS)
     return () => clearTimeout(timer)
-  }, [importNotice])
+  }, [notice])
 
   /* THE READER'S FILING AND THEIR MARGINALIA, out to a file and back — see
    * `useArchives`. Four handlers and a hundred and seventy lines of the same
@@ -934,8 +1134,8 @@ export function App({
    * position, the screen or the keyboard map this component coordinates. */
   const archives = useArchives({ library, marks, cards, notice: setImportNotice })
 
-  const addFolder = useCallback(() => {
-    void (async () => {
+  const addFolder = useCallback(
+    () => {
       /* REFUSES TO RE-ENTER. The toolbar button carried `disabled={importing
        * !== null}` and that was the whole guard — so when the control moved to
        * the empty state and the ⌘K palette, the palette had none and ⌘K during
@@ -945,59 +1145,98 @@ export function App({
        * Guarded HERE rather than only in the palette, because a guard that
        * lives in one caller is a guard the next caller has to remember. The
        * palette also omits the command while importing, so the reader is not
-       * offered something that would refuse — but this is what makes it true. */
-      if (imports.busy) return
-      /* A rejected picker is a FAILURE, not a cancellation — cancelling
-       * resolves null — and swallowing it into the same null made a broken
-       * dialog look like a change of mind: the reader clicked Import, nothing
-       * happened, nothing was said anywhere. */
-      const folder = await pickFolder().catch((cause: unknown) => {
-        console.error('Paper: the folder picker failed', cause)
-        setImportNotice('The folder picker failed — nothing was imported.')
-        return null
-      })
-      if (!folder || !importFs) return
-      const bytes = importFs
-      /* THE LIFECYCLE IS `useImportRun`'s, THE SAME ONE THE DROP ROUTE USES —
-       * so the two supersede each other rather than only themselves, and the
-       * progress bar, the token, the signal and the settle cannot disagree
-       * between them. They already did, in three separate ways. */
-      await imports.run(
-        (run) =>
-          importFolder(bytes, folder, {
-            onProgress: run.report,
-            /* UNCONDITIONAL: a walk that has been superseded still copied
-             * these bytes, and a copy with no record is invisible to the shelf
-             * and to removal alike. The token governs the notice, never the
-             * bookkeeping. */
-            onCopied: (copied) => {
-              for (const one of copied) run.shelve(one)
-            },
-            signal: run.signal,
-          }),
-        {
-          summarise,
-          onFailure: (cause) => {
-            console.error('Paper: the folder import failed', cause)
-            setImportNotice('That folder could not be imported.')
-          },
-        },
-      )
-    })().catch((cause: unknown) => {
-      /* THE TERMINAL CATCH. `run` reports its own failures through
-       * `onFailure`, but its settle — the shelving handover — used to reject
-       * past that, and a detached IIFE turned it into an unhandled rejection
-       * with no notice anywhere.
+       * offered something that would refuse — but this is what makes it true.
+       *
+       * ⚠️ **A RESERVATION, TAKEN BEFORE THE PICKER AND SPENT WITH THE WALK**
+       * (2026-09-13 audit, #98). This read `imports.busy` here and again after
+       * the picker — first as the callback captured it, then through a ref
+       * refreshed each render — and both were the LAST RENDER's answer. Two
+       * choices landing in one turn both read the render from before either had
+       * started, and the second superseded the walk the first had been admitted
+       * to. While a reservation is held no second folder route gets a picker, and
+       * its own `run` checks again in the same turn as the walk it starts. */
+      const reservation = imports.reserve()
+      if (reservation === null) return
+      /* THE TERMINAL CATCH. `run` reports its own failures through `onFailure`,
+       * but its settle — the shelving handover — used to reject past that, and a
+       * detached IIFE turned it into an unhandled rejection with no notice
+       * anywhere.
        *
        * THE SETTLE IS HANDLED INSIDE `run` NOW, which is where it belonged:
-       * catching it here said the right sentence but left the progress bar up
-       * and `imports.busy` true forever, so this route refused every later
-       * import. This stays as the backstop it should always have been — a
-       * detached IIFE with no catch is a rejection nobody hears. */
-      console.error('Paper: the folder import failed to settle', cause)
-      setImportNotice('That folder could not be imported.')
-    })
-  }, [importFs, imports])
+       * catching it here said the right sentence but left the progress bar up and
+       * `imports.busy` true forever, so this route refused every later import.
+       * This stays as the backstop it should always have been — a detached IIFE
+       * with no catch is a rejection nobody hears.
+       *
+       * ⚠️ **AND IT CANNOT BE REACHED FROM HERE, WHICH IS WHY IT HAS A NAME.**
+       * Everything the run below awaits is caught where it happens — the picker
+       * has its own `catch`, `run` promises never to reject, and nothing between
+       * them throws — so no test can put a rejection into it and a sweep would be
+       * measuring a failure nobody can make. Named so the directive has something
+       * to sit on; kept because the next await added here will not necessarily be
+       * caught (2026-09-14). */
+      // Stryker disable BlockStatement,CallExpression,StringLiteral: unreachable — see the note above.
+      const settleFailed = (cause: unknown) => {
+        /* And the reservation, if the throw came before it was spent. */
+        reservation.release()
+        console.error('Paper: the folder import failed to settle', cause)
+        setImportNotice('That folder could not be imported.')
+      }
+      // Stryker restore BlockStatement,CallExpression,StringLiteral
+      void (async () => {
+        /* A rejected picker is a FAILURE, not a cancellation — cancelling
+         * resolves null — and swallowing it into the same null made a broken
+         * dialog look like a change of mind: the reader clicked Import, nothing
+         * happened, nothing was said anywhere. */
+        const folder = await pickFolder().catch((cause: unknown) => {
+          console.error('Paper: the folder picker failed', cause)
+          setImportNotice('The folder picker failed — nothing was imported.')
+          return null
+        })
+        if (!folder || !importFs) {
+          reservation.release()
+          return
+        }
+        const bytes = importFs
+        /* THE LIFECYCLE IS `useImportRun`'s, THE SAME ONE THE DROP ROUTE USES —
+         * so the two supersede each other rather than only themselves, and the
+         * progress bar, the token, the signal and the settle cannot disagree
+         * between them. They already did, in three separate ways. */
+        const walking = reservation.run(
+          (run) =>
+            importFolder(bytes, folder, {
+              onProgress: run.report,
+              /* UNCONDITIONAL: a walk that has been superseded still copied
+               * these bytes, and a copy with no record is invisible to the shelf
+               * and to removal alike. The token governs the notice, never the
+               * bookkeeping. */
+              onCopied: (copied) => {
+                for (const one of copied) run.shelve(one)
+              },
+              signal: run.signal,
+            }),
+          {
+            summarise,
+            onFailure: (cause) => {
+              console.error('Paper: the folder import failed', cause)
+              setImportNotice('That folder could not be imported.')
+            },
+          },
+        )
+        /* REFUSED WHEN ANOTHER IMPORT STARTED WHILE THE READER CHOSE — the drop
+         * route supersedes rather than reserving, so one can — and SAID: the
+         * reader chose a folder, and a choice that silently does nothing is what
+         * every notice on this route exists to prevent (2026-09-13 audit). */
+        if (walking === null) {
+          setImportNotice('Another import started while you were choosing — that folder was not imported.')
+          return
+        }
+        await walking
+      })().catch(settleFailed)
+    },
+    // Stryker disable next-line ArrayDeclaration: `importFs` follows a prop fixed for the window's life, and the one member of `imports` this reads, `reserve`, is a stable callback over refs.
+    [importFs, imports],
+  )
 
 
   /**
@@ -1019,6 +1258,7 @@ export function App({
       intake.noteRemoval(entry.bookId)
       remove(entry.bookId)
     },
+    // Stryker disable next-line ArrayDeclaration: `remove` is the library service's own memoized verb and `intake.noteRemoval` is stable (see `openBook`), so the first closure is the latest.
     [remove],
   )
 
@@ -1053,7 +1293,7 @@ export function App({
      because the shelf recomputes on a minute tick and a fortnight does not
      need one. */
   const [trashNow, setTrashNow] = useState(0)
-  /* WHICH SCAN IS ALLOWED TO ANSWER. `readTrash` returns a cleanup that the
+  /* WHICH SCAN IS ALLOWED TO ANSWER. A scan returns a cleanup that the
      effect uses, and the post-restore call discarded it — so an older scan
      could still be in flight across a close-and-reopen and overwrite the
      newer one's rows. A counter settles it without the caller having to
@@ -1068,56 +1308,75 @@ export function App({
    * is the effect's cleanup; `trashScan` is what stops a superseded read from
    * answering either way.
    */
-  const scanTrash = useCallback((): { readonly done: Promise<void>; readonly cancel: () => void } => {
-    if (!fs) {
-      setTrashRows([])
-      setTrashError(null)
-      return { done: Promise.resolve(), cancel: () => {} }
-    }
-    const scan = ++trashScan.current
-    let live = true
-    setTrashError(null)
-    const applied = listTrash(fs)
-      .then((rows) => {
-        if (!live || scan !== trashScan.current) return
-        /* Newest first — the book a reader came here for is the one they just
-           lost, and it is almost never at the bottom of a fortnight's list.
-           An entry with no readable stamp sorts last rather than as 1970: it
-           is not old, it is unknown. */
-        setTrashRows(
-          [...rows].sort((a, b) => (b.removedAt ?? -Infinity) - (a.removedAt ?? -Infinity)),
-        )
-      })
-      .catch((thrown: unknown) => {
-        if (!live || scan !== trashScan.current) return
+  const scanTrash = useCallback(
+    (): { readonly done: Promise<void>; readonly cancel: () => void } => {
+      if (!fs) {
         setTrashRows([])
-        setTrashError(messageOf(thrown))
-      })
-    /* SUPERSEDED IS NOT DONE. A scan a newer one overtook resolved `done`
-       having set nothing, so a restore awaiting it re-enabled its row over a
-       list that had not caught up — and while the newer scan was still
-       pending, the same book could be restored a second time. A superseded
-       scan is done when the scan that superseded it is: what its awaiter
-       wanted was the list as it is now, and only the newest scan can say. */
-    const done: Promise<void> = applied.then(() => (scan === trashScan.current ? undefined : latestScan.current))
-    latestScan.current = done
-    return {
-      done,
-      cancel: () => {
-        live = false
-      },
-    }
-  }, [fs])
-  const readTrash = useCallback(() => scanTrash().cancel, [scanTrash])
+        // Stryker disable next-line CallExpression: only a scan can set this, and a scan needs a filesystem — with none there has never been a failure to clear.
+        setTrashError(null)
+        // Stryker disable next-line ObjectLiteral: both members are the empty answer already — `done` is awaited by a restore with nothing to wait for, and `cancel` is an effect cleanup with no scan to stop.
+        return { done: Promise.resolve(), cancel: () => {} }
+      }
+      // Stryker disable next-line UpdateOperator: the scan's number is only ever compared with the counter it was taken from, so counting down names every scan as uniquely as counting up.
+      const scan = ++trashScan.current
+      let live = true
+      setTrashError(null)
+      const applied = listTrash(fs)
+        .then((rows) => {
+          if (!live || scan !== trashScan.current) return
+          /* Newest first — the book a reader came here for is the one they just
+             lost, and it is almost never at the bottom of a fortnight's list.
+             An entry with no readable stamp sorts last rather than as 1970: it
+             is not old, it is unknown. */
+          setTrashRows(
+            [...rows].sort((a, b) => (b.removedAt ?? -Infinity) - (a.removedAt ?? -Infinity)),
+          )
+        })
+        .catch((thrown: unknown) => {
+          if (!live || scan !== trashScan.current) return
+          setTrashRows([])
+          setTrashError(messageOf(thrown))
+        })
+      /* SUPERSEDED IS NOT DONE. A scan a newer one overtook resolved `done`
+         having set nothing, so a restore awaiting it re-enabled its row over a
+         list that had not caught up — and while the newer scan was still
+         pending, the same book could be restored a second time. A superseded
+         scan is done when the scan that superseded it is: what its awaiter
+         wanted was the list as it is now, and only the newest scan can say. */
+      const done: Promise<void> = applied.then(() => (scan === trashScan.current ? undefined : latestScan.current))
+      latestScan.current = done
+      return {
+        done,
+        /* EVERY LATE ANSWER THIS STOPS IS STOPPED BY SOMETHING ELSE TOO. A scan
+           cancelled by the sheet closing answers into a sheet that is not drawn,
+           and reopening resets rows and failure before the next scan starts, in
+           the same commit; a scan overtaken by a newer one is refused by
+           `scan !== trashScan.current` first. What is left is the unmount, where
+           there is nothing to see. */
+        // Stryker disable next-line BlockStatement: see above.
+        cancel: () => {
+          // Stryker disable next-line BooleanLiteral: see above.
+          live = false
+        },
+      }
+    },
+    // Stryker disable next-line ArrayDeclaration: `fs` is a prop fixed by the composition root for the window's life, and every mount the tests make hands it over once — so the first scan's filesystem is every scan's.
+    [fs],
+  )
 
   useEffect(() => {
     if (!state.trashOpen) return
     setTrashRows(null)
+    // Stryker disable next-line CallExpression: the scan below clears it in the same effect — `scanTrash` resets the failure before it reads, and with no filesystem there has never been one.
     setTrashError(null)
     setRestoreError(null)
     setTrashNow(Date.now())
-    return readTrash()
-  }, [state.trashOpen, readTrash])
+    /* THE SCAN'S OWN CLEANUP, returned. A `readTrash` stood between the two,
+       a callback over `scanTrash` whose one reader was this effect — so its
+       dependency list could only ever be as stable as `scanTrash` itself, and
+       a mutation sweep said so (2026-09-15). */
+    return scanTrash().cancel
+  }, [state.trashOpen, scanTrash])
 
   const restoreBook = useCallback(
     (bookId: string) => {
@@ -1152,6 +1411,7 @@ export function App({
           scanTrash().done,
         )
     },
+    // Stryker disable next-line ArrayDeclaration: both are fixed for the window's life — `services` is built once by the composition root, and `scanTrash` follows only `fs`, which the root resolves before the first render — and every mount the tests make hands over each once.
     [services.library, scanTrash],
   )
 
@@ -1225,10 +1485,34 @@ export function App({
    * A whole errand with its own lifetime failure modes, and both defects it
    * has had were lifetime defects. The composition's teardown when there is
    * one; the kernel's own flush-and-drain when there is not. */
+  // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it.
   const reportClose = useCallback((message: string, cause: unknown) => console.error(message, cause), [])
+  /* ⚠️ **THE IMPORT IS STOPPED BEFORE THE DRAIN, AND IT USED TO BE IGNORED
+   * ALTOGETHER** (2026-09-13 audit, #96). Both preparations end in a DRAIN of
+   * the write queue, and a queue can only drain what it has been given: an
+   * import still copying goes on copying while the window closes, and its
+   * handover runs one batch BEHIND the copying, so a book already on disk could
+   * have its shelf write queued after the drain had finished — or never. Bytes
+   * with no record are a book the library cannot see and `paper book remove`
+   * cannot reach.
+   *
+   * `imports.stop()` aborts the copying and resolves once every run's handover
+   * has settled, which is the point at which there is something for the drain
+   * to find.
+   *
+   * ⚠️ **REGISTERED, NOT AWAITED HERE — AWAITED HERE IT COVERED THE WINDOW'S
+   * CLOSE AND NOT EVERY QUIT.** ⌘Q on macOS reaches `app/shutdown.ts`'s teardown
+   * directly and never passes through this handler, so that path drained under
+   * a live copy; this note said so and pointed at `bootApp.ts`. Both teardowns
+   * now wait on `settleBeforeDrain` between their flush and their drain — the
+   * composed one in `shutdown.ts`, the kernel's own in `closePrepare` — and
+   * this registration is what they find there. */
+  // Stryker disable next-line ArrayDeclaration: `imports.stop` is a stable callback over refs, so registering it once is registering it for good.
+  useEffect(() => onBeforeDrain(imports.stop), [imports.stop])
   useWindowClose(
     useMemo(
-      () => beforeWindowClose ?? closePrepare(flushBeforeClose, () => services.drain(), reportClose),
+      () => beforeWindowClose ?? closePrepare(flushBeforeClose, settleBeforeDrain, () => services.drain(), reportClose),
+      // Stryker disable next-line ArrayDeclaration: all three are fixed for the window's life — the composition root hands `services` and `beforeWindowClose` over once, and `reportClose` is memoised over nothing — and every mount the tests make hands each over once.
       [beforeWindowClose, services, reportClose],
     ),
   )
@@ -1291,33 +1575,42 @@ export function App({
     })
   }
 
-  useEffect(() => {
-    const recorder = saver.current
-    if (!recorder) return
-    const flush = () => recorder.flush()
-    const onHidden = () => {
-      if (document.visibilityState === 'hidden') flush()
-    }
-    /* AND THE CLOSE PATH. The close handler runs `flushBeforeClose()` before
-     * draining the queue — that is the whole design: hand over what memory
-     * holds, then drain — but the throttled position was never REGISTERED
-     * with it. So the last two seconds of reading rode on `pagehide`, which
-     * Tauri fires after the close request has already drained the queue: the
-     * flush wrote into a queue nothing would run, and quitting mid-page lost
-     * the place the reader quit at. */
-    const offBeforeClose = onBeforeClose(flush)
-    window.addEventListener('pagehide', flush)
-    document.addEventListener('visibilitychange', onHidden)
-    return () => {
-      offBeforeClose()
-      window.removeEventListener('pagehide', flush)
-      document.removeEventListener('visibilitychange', onHidden)
-      // In that order: whatever is outstanding is written, and only then is the
-      // timer that would have written it dropped.
-      recorder.flush()
-      recorder.stop()
-    }
-  }, [])
+  useEffect(
+    () => {
+      /* NEVER NULL HERE, and it was guarded as though it could be: the ref is
+         filled during render, above, before any effect of this component runs.
+         The guard was the only branch of this effect nothing could take, and a
+         mutation sweep is what said so (2026-09-15). */
+      const recorder = saver.current!
+      const flush = () => recorder.flush()
+      const onHidden = () => {
+        if (document.visibilityState === 'hidden') flush()
+      }
+      /* AND THE CLOSE PATH. The close handler runs `flushBeforeClose()` before
+       * draining the queue — that is the whole design: hand over what memory
+       * holds, then drain — but the throttled position was never REGISTERED
+       * with it. So the last two seconds of reading rode on `pagehide`, which
+       * Tauri fires after the close request has already drained the queue: the
+       * flush wrote into a queue nothing would run, and quitting mid-page lost
+       * the place the reader quit at. */
+      const offBeforeClose = onBeforeClose(flush)
+      window.addEventListener('pagehide', flush)
+      document.addEventListener('visibilitychange', onHidden)
+      return () => {
+        // Stryker disable next-line CallExpression: a registration left behind calls a recorder that has just been flushed — nothing is pending, so nothing is written, and the registry is not something the window can be asked about.
+        offBeforeClose()
+        window.removeEventListener('pagehide', flush)
+        document.removeEventListener('visibilitychange', onHidden)
+        // In that order: whatever is outstanding is written, and only then is the
+        // timer that would have written it dropped.
+        recorder.flush()
+        // Stryker disable next-line CallExpression: `stop` only clears the timer, and the `flush` above has already cleared it.
+        recorder.stop()
+      }
+    },
+    // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it.
+    [],
+  )
 
   const { cfi, fraction } = book.position
   useEffect(() => {
@@ -1325,7 +1618,8 @@ export function App({
      * separately would put a progress bar and the position it describes on two
      * different cadences, and they would disagree for as long as the reader kept
      * reading. */
-    saver.current?.record(bookId, cfi, fraction)
+    /* Filled during render — see the effect above. */
+    saver.current!.record(bookId, cfi, fraction)
   }, [bookId, cfi, fraction])
 
   /* The book being read, AS THE SHELF KNOWS IT — the row the tag editor edits.
@@ -1333,16 +1627,13 @@ export function App({
    * neither ⌘T nor the palette offers to tag a book that has no record to
    * write the tag into. FROM `openRow`, which is the same lookup made once
    * above — this ran its own scan of the shelf beside it. */
-  /* Whether the reader is actually LOOKING at the book. The reader screen stays
-   * mounted under the library — see `Reader.inert` — so nothing downstream of
-   * it can be trusted to say which screen is on top. */
-  const onReader = state.screen === 'reader'
   const readingBook = onReader ? (openRow ?? null) : null
   /* Memoized as the one-element list `TagEditor` takes, or a fresh `[book]`
    * inline at the render defeated every books-keyed memo inside it. */
-  const readingBooks = useMemo(() => (readingBook ? [readingBook] : []), [readingBook])
+  const readingBooks = useMemo(() => (readingBook ? [readingBook] : NO_BOOKS), [readingBook])
   const openTags = useCallback(
     () => dispatch({ type: 'toggleLayer', layer: 'tagsOpen' }),
+    // Stryker disable next-line ArrayDeclaration: `dispatch` is `useReducer`'s, the same function for the component's whole life.
     [dispatch],
   )
 
@@ -1392,22 +1683,36 @@ export function App({
      site. A ref rather than `n + 1` off the current hint: the hint is cleared
      to null between jumps, so its own count is not there to read. */
   const returnHints = useRef(0)
-  const raiseReturnHint = useCallback((label: string) => {
-    returnHints.current += 1
-    setReturnTo({ label, nonce: returnHints.current })
-  }, [])
+  const raiseReturnHint = useCallback(
+    (label: string) => {
+      // Stryker disable next-line AssignmentOperator: the nonce is the OCCASION, compared only for inequality — see `useFadingHint` — so counting down restarts the fade exactly as counting up does.
+      returnHints.current += 1
+      setReturnTo({ label, nonce: returnHints.current })
+    },
+    // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it, and this reads only a ref and `useState`'s setter.
+    [],
+  )
   /* DECLARED ABOVE `goToJump`, which clears it when a cross-book open fails.
      A refused jump and a jump whose book would not open are the same lie to
      the reader, and only the first was being caught. */
 
   /** Go where a jump asks, and say whether it was accepted — see `JumpsDeps`. */
   const goToJump = useCallback(
-    (target: JumpTarget): boolean => {
+    (target: JumpTarget, revert: () => void): boolean => {
       if (typeof target === 'string') {
         book.goTo(target)
         return true
       }
       if (target.bookId === book.bookId) {
+        /* ⚠️ **A JUMP IS A REQUEST TO BE THERE, SO IT SHOWS THE READER.** A
+           jump into another book reaches `openBook`, which switches screens;
+           one within the open book called `goTo` and nothing else. History and
+           Marginalia are both reachable off the reader, so ⌘[ on the shelf, or
+           a mark of the open book clicked in the shelf's Marginalia, moved a
+           book nobody could see and left the reader where they were
+           (2026-09-13 audit). Only when the reader is not already the screen:
+           `goScreen` also shuts every layer and re-fits the pane. */
+        if (state.screen !== 'reader') dispatch({ type: 'goScreen', screen: 'reader' })
         book.goTo(target.cfi)
         return true
       }
@@ -1441,11 +1746,20 @@ export function App({
       openStored(row, () => {
         setOpenAt(null)
         setReturnTo(null)
+        /* ⚠️ **AND THE STACK, which was committed on the same assumption and
+           was not taken back with the rest of it** (#94). Returning `true`
+           lets `useJumps` record the departure at once; when the open then
+           fails, everything else this rollback undoes was a lie and the stack
+           entry was too — ⌘[ offered a way back from a jump that never
+           happened, and a failed Back consumed its destination without moving.
+           Safe to call whatever has happened since: the hook reverts only the
+           stack THIS navigation left. */
+        revert()
       })
       setOpenAt(target)
       return true
     },
-    [book, library.books, openStored, setReturnTo],
+    [book, library.books, openStored, setReturnTo, state.screen, dispatch],
   )
 
   const jumps = useJumps({ placeHere, navigate: goToJump })
@@ -1464,9 +1778,16 @@ export function App({
     (target: JumpTarget) => {
       /* Read BEFORE the jump — this is where the reader is leaving from. */
       const leaving = book.position.chapterLabel
-      if (jumps.jumpTo(target) && leaving) raiseReturnHint(leaving)
+      /* ⚠️ **AND ONLY FROM A PLACE THE STACK COULD RECORD** (2026-09-15). The
+         stack keeps no origin where `placeHere` answers null — a section still
+         rendering, a spread whose page is a guess — and the line was raised
+         anyway: a button naming the chapter left that went nowhere, over a ⌘[
+         that was not bound. The same question the stack asks, and before the
+         jump, where it is still the place being left. */
+      const recorded = placeHere() !== null
+      if (jumps.jumpTo(target) && leaving && recorded) raiseReturnHint(leaving)
     },
-    [jumps, book.position.chapterLabel, raiseReturnHint],
+    [jumps, book.position.chapterLabel, placeHere, raiseReturnHint],
   )
 
   /* Spent by using it, so the line does not linger over a place the reader has
@@ -1503,9 +1824,11 @@ export function App({
    */
   const onBookLink = useCallback(() => {
     const leaving = book.position.chapterLabel
+    /* Only where the push records an origin — see `jumpTo`. */
+    const recorded = placeHere() !== null
     jumps.record()
-    if (leaving) raiseReturnHint(leaving)
-  }, [jumps, book.position.chapterLabel, raiseReturnHint])
+    if (leaving && recorded) raiseReturnHint(leaving)
+  }, [jumps, book.position.chapterLabel, placeHere, raiseReturnHint])
 
   /**
    * A link whose scheme leaves the book.
@@ -1526,13 +1849,56 @@ export function App({
         if (refusal) setImportNotice(refusal)
       })
     },
+    // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it.
     [],
   )
   /* Every tag on the shelf, for the sheet's suggestions. Only walked while the
    * sheet is up: the shelf computes its own for its own editors. */
+  /* ⚠️ **NULL WHILE THE SHEET IS CLOSED, AND THE SHEET IS DRAWN FROM IT.** The
+     closed branch answered `[]` — a shelf with no tags — for an editor that is
+     not rendered then, so nothing could read the claim, and a surviving mutant
+     said so (2026-09-15). Null says what it is: not walked. */
   const shelfTags = useMemo(
-    () => (state.tagsOpen ? tagCounts(library.books) : []),
+    () => (state.tagsOpen ? tagCounts(library.books) : null),
     [state.tagsOpen, library.books],
+  )
+
+  /**
+   * Mark the selection, in the tint and style the selection bar is showing.
+   *
+   * The same two settings the selection bar writes, so a mark made by ⌘D and a
+   * mark made by clicking a swatch cannot come out looking different — which
+   * is what a second default would guarantee.
+   *
+   * ONE CALLBACK FOR BOTH ROUTES. The palette row and ⌘D each built this call
+   * for themselves, and the keyboard's copy has already gone stale once — the
+   * note in its effect's dependency list records a ⌘D that marked in the
+   * PREVIOUS colour (2026-09-13 audit).
+   */
+  const markSelection = useCallback(
+    () => marking.mark('', { tint: state.markTint, style: state.markStyle }),
+    [marking, state.markTint, state.markStyle],
+  )
+
+  /**
+   * "Close the book" — and every open still on its way, with it.
+   *
+   * ⚠️ **IT WAS `book.close()` AND NOTHING ELSE.** A stored book's read takes
+   * real time, and closing did not advance the open generation, so a read
+   * started before the close landed after it and put a book back on screen:
+   * "Close the book", and then a book opening. The rollback a pending jump
+   * armed stayed loaded too. Closing is the newest thing the reader asked for,
+   * so it supersedes a pending open exactly as an open does, and retires what
+   * that open armed (2026-09-13 audit).
+   */
+  const closeBook = useCallback(
+    () => {
+      openGenerations.current.claim()
+      undoOpen.current.arm(null)
+      book.close()
+    },
+    // Stryker disable next-line ArrayDeclaration: `book.close` is a stable callback of `useBook`'s, so the first closure closes the book every later one would.
+    [book],
   )
 
   const commands = useMemo(
@@ -1555,12 +1921,13 @@ export function App({
         hasBook: book.source !== null,
         // Null when nothing is selected, so the palette simply does not offer
         // a command that could not do anything.
-        /* The same two settings the selection bar writes, so a mark made by
-           ⌘D and a mark made by clicking a swatch cannot come out looking
-           different — which is what a second default here would guarantee. */
-        markSelection: marking.selection
-          ? () => marking.mark('', { tint: state.markTint, style: state.markStyle })
-          : null,
+        /* ⚠️ `canMark`, NOT `selection !== null` — a selection with no anchor
+           is a selection `mark` refuses, and the row ran and did nothing
+           (#202). The rule is `useMarking`'s; this asks it. */
+        markSelection: marking.canMark ? markSelection : null,
+        /* THE SAME PRESS the popup's button and ⌃⌘D run (phase 17, L4) — null
+           with nothing to look up, so the row is simply not offered. */
+        lookUp: onReader ? lookUp.press : null,
         /* Null where there is no place to keep — the palette then does not
            offer the row at all, rather than offering one that does nothing.
            AND ONLY ON THE READER, which is not the same condition. The reader
@@ -1582,9 +1949,12 @@ export function App({
          * carries one action — see `KernelCommandContext`. */
         importFolder: addFolder,
         importing: importing !== null,
-        closeBook: () => book.close(),
+        closeBook,
         openSwitcher: () => dispatch({ type: 'toggleLayer', layer: 'switcherOpen' }),
         contributed: composition.commands,
+        /* The panels a capability contributed, so each can be opened by name —
+           see `KernelCommandContext.contributedPanes`. */
+        contributedPanes: composition.panes,
       }),
     /* `bookmarking` is READ inside this builder, so it belongs here. It was
        missing, and the memo only stayed fresh because `book` happens to change
@@ -1611,8 +1981,25 @@ export function App({
       composition,
       jumps,
       archives,
+      /* The palette row reads `lookUp.press`, which changes with the selection
+         and the provider — the `bookmarking` lesson above, not repeated. */
+      lookUp,
+      markSelection,
+      closeBook,
     ],
   )
+
+  /**
+   * The physical key whose first press the map took, until it comes up.
+   *
+   * ⚠️ **A REF, BECAUSE THE PRESS OUTLIVES THE HANDLER THAT TOOK IT** (2026-09-13
+   * audit, #86, round 3). ⌘D marks and clears the selection, the effect below
+   * re-runs with `marking` changed, and the repeats arrive at a NEW handler —
+   * one that had asked the map again and been told the key was unbound, so the
+   * rest of the hold went to the platform. What the first press decided is kept
+   * here, where a re-subscribed handler can still read it.
+   */
+  const taken = useRef<string | null>(null)
 
   /* §11's keyboard map. Every combo the design publishes is bound here, and
    * nothing is bound to a layer that does not exist — ⌘K used to be left
@@ -1620,19 +2007,35 @@ export function App({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        dispatch({ type: 'dismissTop' })
+        /* THE TOPMOST THING FIRST. A layer is above everything; the lookup is
+           a face of the selection popup under it. Escape used to reach only the
+           layers, so a definition on screen could be put away by its own
+           control and nothing else (phase 17, L2). */
+        if (hasOpenLayer(state)) {
+          dispatch({ type: 'dismissTop' })
+        } else {
+          /* ⚠️ **AND ONLY A LOOKUP THAT IS UP, WHICH A DIRECTIVE HERE USED TO
+             CALL UNOBSERVABLE.** `dismiss` publishes a NEW idle state, so
+             dismissing an idle one hands back a new `LookUp` object — and this
+             effect lists `lookUp`, so it would take the window's keyboard
+             listener down and put it back on every Escape pressed with nothing
+             on screen. Measured by the 2026-09-14 audit; the guard is what
+             keeps the key free. */
+          if (lookUp.state.kind !== 'idle') lookUp.dismiss()
+        }
         return
       }
-
-      const overlayOpen = hasOpenLayer(state)
 
       /* Typing comes first. The search field, a note, and the palette all take
        * arrow keys and a space bar, and turning the page underneath someone
        * mid-word is worse than not binding the key at all. */
       const target = event.target as HTMLElement | null
       const typing =
+        // Stryker disable next-line OptionalChaining: a dispatched event always has a target — the window, when nothing nearer — so `?.` never short-circuits here.
         target?.isContentEditable ||
+        // Stryker disable next-line OptionalChaining: see above.
         target?.tagName === 'INPUT' ||
+        // Stryker disable next-line OptionalChaining: see above.
         target?.tagName === 'TEXTAREA'
 
       /* The accelerator is ⌘ on macOS and Ctrl elsewhere — not either, anywhere.
@@ -1664,7 +2067,19 @@ export function App({
        * impossible — with a third screen, "not the shelf" stopped meaning
        * "reading", and every paging key drove the book mounted invisibly
        * underneath a capability's page, persisting a position nobody saw. */
-      const reading = onReader && !overlayOpen
+      /* ⚠️ **AND THE SIDE PANE COUNTS, WHICH THIS DID NOT KNOW** (2026-09-13
+       * audit, #207). `Reader.onPageIntent` refuses a wheel or a swipe when the
+       * pane is a SHEET over the book rather than a track beside it; this asked
+       * the screen and the layers and stopped there, so below §06's threshold
+       * an arrow key turned the page underneath the sheet while the wheel over
+       * the same sheet was refused. `readerTakesInput` is the one question, and
+       * `onReader` is now folded into it.
+       *
+       * THE LIVE WINDOW, not a tracked width: this runs at the keystroke, where
+       * `window.innerWidth` is exact and costs nothing. `useAvailableWidth`
+       * would re-render the whole App on every resize frame for a value only
+       * this line reads. */
+      const reading = readerTakesInput(state, paneTakesTrack(window.innerWidth, state.stepIdx))
 
       /* §11: ← → turn the page. Unbound until now, which went unnoticed
        * because a scrolled EPUB scrolls — but a fixed-layout book, which is
@@ -1731,11 +2146,16 @@ export function App({
          the dispatching, which is the part that needs an effect. Every guard,
          every repeat rule and every toggle lives there, where a test can put
          real keys through it instead of searching this file for a literal. */
+      /* The physical key, so a Shift pressed mid-hold — which changes `key` —
+         does not change whose key it is. `key` where an engine gives no code. */
+      const pressed = event.code || event.key
       const action = resolveAccel(event, {
         platform,
         screen: state.screen,
         pane: state.pane,
-        hasSelection: marking.selection !== null,
+        /* "Whether ⌘D has something to mark" — which a selection with no
+           anchor is not. `canMark`, for the palette row's reason above (#202). */
+        hasSelection: marking.canMark,
         canBookmark: bookmarking.canBookmark,
         onReader,
         hasBook: readingBook !== null,
@@ -1745,7 +2165,19 @@ export function App({
            as a digit for a panel this screen has not got — see `AccelContext`. */
         developer: state.developer,
         hiddenPanes: state.hiddenPanes,
+        /* ⌃⌘D's condition is the palette row's — see `canLookUp`. */
+        canLookUp: onReader && lookUp.press !== null,
+        /* Who took this key's first press — see `pressTaken`, and `taken`. */
+        pressTaken: event.repeat && taken.current === pressed,
       })
+      /* ⚠️ **FOR A REPEAT TOO, AND THIS WAS FENCED OFF FROM ONE.** A repeat
+         the window took resolves to an action — its own or `held` — so it
+         writes back the key it already holds; a repeat it did not take resolves
+         to nothing and does not hold this key, so it clears nothing. The
+         exception changed no outcome, and a mutation sweep is what said so
+         (2026-09-15). */
+      if (action) taken.current = pressed
+      else if (taken.current === pressed) taken.current = null
       if (!action) return
       event.preventDefault()
 
@@ -1759,20 +2191,27 @@ export function App({
           dispatch({ type: 'toggleLayer', layer: 'paletteOpen' })
           return
         case 'togglePane':
-          /* ⚠️ A no-op where there is no pane — see `paneAvailable`. `lastPane`
-             is left alone deliberately, so leaving a contributed screen
-             restores whatever the reader had open before they arrived. */
-          if (paneAvailable(state.screen)) dispatch({ type: 'togglePane' })
+          /* No `paneAvailable` test here any more: `resolveAccel` leaves ⌘\ to
+             the platform where there is no pane, and the reducer refuses the
+             toggle there for every dispatcher, keeping `lastPane` — see both
+             notes (2026-09-13 audit). */
+          dispatch({ type: 'togglePane' })
           return
         case 'toggleScreen':
           /* `screenJump`, not a comparison of its own — see `state.ts`. The
              titlebar advertises this shortcut in its own tooltip, and the two
              disagreed on every screen that is neither of the kernel's. */
+          // Stryker disable next-line ConditionalExpression,EqualityOperator: `screenJump` decides its LABEL from whether a book is open and its destination from the screen alone, and this reads only the destination.
           dispatch({ type: 'goScreen', screen: screenJump(state.screen, book.source !== null).to })
           return
         case 'markSelection':
           // The tint and style the selection bar is showing — see `markSelection`.
-          marking.mark('', { tint: state.markTint, style: state.markStyle })
+          markSelection()
+          return
+        /* A held key's repeat: taken — `preventDefault` above — and nothing
+           done. `null` would have handed it to the platform; see `held`. */
+        // Stryker disable next-line StringLiteral: this case does nothing, and a case that matches nothing does the same — the switch ends and the handler returns, the key already taken above.
+        case 'held':
           return
         case 'toggleBookmark':
           bookmarking.toggle()
@@ -1798,6 +2237,10 @@ export function App({
         case 'jumpForward':
           jumps.forward()
           return
+        case 'lookUp':
+          // Stryker disable next-line OptionalChaining: `resolveAccel` returns this action only when `canLookUp` is true, which is this same `press` being non-null in this same closure.
+          lookUp.press?.()
+          return
         /* THE WINDOW'S CLOSE, not an exit: `useWindowClose` intercepts it and
            runs the teardown the quit handshake runs, so Ctrl+Q closes the
            journal as ⌘Q and the red button do. */
@@ -1806,8 +2249,16 @@ export function App({
           return
       }
     }
+    /* THE KEY COMES UP, and whoever took it gives it back. */
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (taken.current === (event.code || event.key)) taken.current = null
+    }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keyup', onKeyUp)
+    }
   }, [
     dispatch,
     marking,
@@ -1826,14 +2277,15 @@ export function App({
        and stayed live after it was hidden. */
     state.developer,
     state.hiddenPanes,
-    /* ⌘D MARKS IN THE COLOUR THE BAR IS SHOWING, and these were missing — so
-       the handler went on closing over whichever tint was current when the
-       effect last ran. Change the colour in the mark palette, select a new
-       passage, press ⌘D: it was marked in the PREVIOUS colour, and the button
-       beside it in the new one. Nothing else in this list changes when a tint
-       does, so nothing else was rebuilding the handler. */
-    state.markTint,
-    state.markStyle,
+    /* ⌘D MARKS IN THE COLOUR THE BAR IS SHOWING, and `state.markTint` and
+       `state.markStyle` were missing here — so the handler went on closing over
+       whichever tint was current when the effect last ran. Change the colour in
+       the mark palette, select a new passage, press ⌘D: it was marked in the
+       PREVIOUS colour, and the button beside it in the new one. Nothing else in
+       this list changes when a tint does, so nothing else was rebuilding the
+       handler. The two are `markSelection`'s dependencies now, and this lists
+       the callback (2026-09-13 audit). */
+    markSelection,
     readingBook,
     openTags,
     /* The whole object, because ⌘B reads two things off it — whether a place
@@ -1848,6 +2300,9 @@ export function App({
        jump behind. Exactly the `state.markTint` defect above, on a different
        object. */
     jumps,
+    /* ⌃⌘D and Escape both read it — the same stale-closure defect as every
+       note in this list, on the newest object. */
+    lookUp,
   ])
 
   /* Titlebar metadata comes from the OPEN book, and from nothing else.
@@ -1858,7 +2313,11 @@ export function App({
    * named a book with a chapter position while the window behind it said the
    * library was empty. With nothing open the chip says so. */
   const title = book.meta?.title || (book.source ? 'Untitled' : 'Paper')
-  const subtitle = book.source ? book.position.chapterLabel || book.meta?.author || '' : ''
+  /* NO BOOK, NOTHING UNDER THE TITLE — and that needs no test of its own:
+     `useBook` clears the position and the metadata in the same commit as the
+     source, on a close and on every open, so with no source there is no chapter
+     and no author to name. The test it had was a second copy of that rule. */
+  const subtitle = book.position.chapterLabel || book.meta?.author || ''
 
   return (
     <>
@@ -1932,13 +2391,23 @@ export function App({
                 on the one surface whose entire purpose is a button that undoes
                 a deletion. The jsdom tests could not see it: they mount the
                 sheet directly and never build the shell around it. */}
-            {state.screen === 'library' && state.trashOpen && (
+            {/* THE LAYER IS THE SHELF'S ALREADY: the palette offers it on the
+                library alone, and every screen change shuts every layer — so a
+                second test of the screen here was a second copy of that rule. */}
+            {state.trashOpen && (
               <TrashSheet
+                /* Stryker disable next-line ArrayDeclaration: the fallback is reached only while `trashRows` is null, which is exactly when `loading` is true — and the sheet draws its own line then, never these rows. */
                 rows={trashRows ?? []}
                 loading={trashRows === null}
-                /* The action's word wins: it is the newer answer, and it is
-                   the one the reader just asked for. */
-                error={restoreError ?? trashError}
+                /* ⚠️ **TWO SLOTS, BECAUSE THEY ARE TWO FAILURES.** These were
+                   passed as one — `restoreError ?? trashError` — on the
+                   reasoning that the newer answer wins. The sheet draws `error`
+                   INSTEAD of the list, so one book that would not come back
+                   replaced every row with "The trash could not be read", a
+                   sentence about a read that had just succeeded, and took every
+                   other Restore button with it (#97). */
+                error={trashError}
+                actionError={restoreError}
                 now={trashNow}
                 onRestore={restoreBook}
                 onDismiss={() => dispatch({ type: 'closeLayer', layer: 'trashOpen' })}
@@ -1946,8 +2415,9 @@ export function App({
             )}
             {/* The tag editor over the book being read — ⌘T. The same box the
                 shelf opens over a card, in a sheet, because in the reader
-                there is no card to hang it from. */}
-            {state.tagsOpen && readingBook && (
+                there is no card to hang it from. Drawn from `shelfTags`,
+                which is non-null exactly while `state.tagsOpen` is. */}
+            {shelfTags && readingBook && (
               <OverlaySheet
                 label="Tags for this book"
                 onDismiss={() => dispatch({ type: 'closeLayer', layer: 'tagsOpen' })}
@@ -2006,11 +2476,24 @@ export function App({
               sections: composition.settings,
               missing: composition.failures,
               persistent: settingsPersistent,
+              /* THE LANGUAGE ROW ONLY WHERE THERE IS A LOOK UP — a model, or
+                 somewhere to get one. `decideLookUp`'s own two facts. */
+              lookUp:
+                glossProvider.available || glossProvider.installAt !== null
+                  ? {
+                      choice: state.lookUpLanguage,
+                      readerLanguage: readerLanguage(readerLocale),
+                      onChoice: (choice) => dispatch({ type: 'setLookUpLanguage', choice }),
+                    }
+                  : undefined,
             }}
-            /* ⚠️ **SUPPLIED ONLY WHILE DEVELOPER OPTIONS ARE ON**, so the band
-               and the panel cannot come to disagree about whether they are
-               showing: absence is the off state, in one place, rather than a
-               boolean each surface reads for itself.
+            lookups={lookups}
+            liveLookUp={lookUp.state}
+            /* ⚠️ **SUPPLIED UNCONDITIONALLY — AND THIS SAID "ONLY WHILE
+               DEVELOPER OPTIONS ARE ON"**, the contract `SidePaneProps.developer`
+               has since reversed: whether the band and the panel are DRAWN is
+               `state.developer`, the one answer both read, and this is only the
+               data they draw with (corrected by the 2026-09-13 audit).
 
                `recording` is not the same question as `developer`. Recording is
                decided at boot by a FILE — see `diagnosticsLog.ts` — so a reader
@@ -2037,19 +2520,12 @@ export function App({
             foliate down mid-flight and loses the reading position — see the
             note on Library's own stacking. */}
         <Reader
-          /* NOWHERE TO SEND A READER WITH NO MODEL BUT THE SETTINGS PANE, and
-             that is the honest action rather than a placeholder: `inference`
-             contributes its Local models section there, and a pane is the
-             finest target the app has — there is no mechanism for opening a
-             pane scrolled to one capability's section, and inventing one for a
-             single caller would put a section id in the kernel, which is the
-             thing `onInstallGloss` exists to avoid naming.
-
-             PASSED UNCONDITIONALLY. `decideLookUp` needs `installable` as well
-             as this, and only a build that composes `inference` has that — so
-             on iOS and Android, where the composition is `[peer, sync]` and the
-             port keeps its `NO_GLOSS` default, the button is still absent. */
-          onInstallGloss={() => dispatch({ type: 'openPane', pane: 'settings' })}
+          /* LOOK UP, lifted — see `useLookUp` above. The install offer goes to
+             the provider's own section through `revealSettings`; on a build with
+             no `inference` — the phones compose `[peer, sync, publicSharing]` —
+             the port keeps `NO_GLOSS`, `installAt` is null, and no control is
+             drawn at all. */
+          lookUp={lookUp}
           libraryCount={library.books.length}
           saveFailure={library.saveFailure}
           onDismissSaveFailure={library.dismissSaveFailure}
@@ -2066,20 +2542,13 @@ export function App({
              invisible behind the shelf, and read out loud by a screen reader.
              `Library` renders it for its own screen. */
           importNotice={state.screen === 'reader' ? importNotice : null}
-          onDismissImportNotice={() => setImportNotice(null)}
+          onDismissImportNotice={() => setNotice(null)}
           shelfUnread={shelfUnread}
           onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
           state={state}
           dispatch={dispatch}
           platform={platform}
           book={book}
-          /* The gloss port, read per render rather than captured: `inference`
-             binds it after composition, and a reader who installs a model
-             must not have to restart to get Look up back. */
-          gloss={services.gloss()}
-          /* Whether a lookup found a real sentence or fell back — counted,
-             never shown. See `ReaderProps.diagnostics`. */
-          diagnostics={services.diagnostics}
           marks={marks}
           overlays={overlays}
           marking={marking}

@@ -1,4 +1,4 @@
-import { TAG_MAX, normalizeTag, tagKey } from './library'
+import { normalizeTag, tagKey } from './library'
 
 /**
  * What the reader has decided ABOUT their tags, as opposed to which books carry
@@ -75,8 +75,18 @@ const MAX_ROWS = 2_000
 const MAX_VIEWS = 200
 const MAX_QUERY = 500
 
-const keyList = (value: unknown, limit = MAX_ROWS): readonly string[] => {
-  if (!Array.isArray(value)) return []
+/**
+ * ⚠️ **A COLLECTION THAT IS THERE AND IS NOT A COLLECTION THROWS — ALL THREE
+ * READERS BELOW USED TO ANSWER IT EMPTY.** The record around them was made to
+ * throw by the 2026-09-13 audit; these went on turning an object-valued
+ * `pinned` or a list-valued `colours` into "none", with `useTagPrefs` still
+ * persistent — so the reader's next pin wrote that pin and an empty collection
+ * over the file. `voicePort.ts`'s bindings had the same line and the same fix
+ * (2026-09-13 verify). ABSENT is empty; one bad ROW is still dropped alone.
+ */
+const keyList = (value: unknown, name: string, limit = MAX_ROWS): readonly string[] => {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error(`the stored tag preferences have a ${name} list that will not read`)
   const seen = new Set<string>()
   const out: string[] = []
   for (const one of value) {
@@ -91,7 +101,10 @@ const keyList = (value: unknown, limit = MAX_ROWS): readonly string[] => {
 }
 
 function colourMap(value: unknown): Readonly<Record<string, TagColour>> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  if (value === undefined) return {}
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('the stored tag preferences have a colours map that will not read')
+  }
   const out: Record<string, TagColour> = {}
   let n = 0
   for (const [raw, colour] of Object.entries(value as Record<string, unknown>)) {
@@ -104,11 +117,18 @@ function colourMap(value: unknown): Readonly<Record<string, TagColour>> {
 }
 
 function viewList(value: unknown): readonly SavedView[] {
-  if (!Array.isArray(value)) return []
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error('the stored tag preferences have a views list that will not read')
   const seen = new Set<string>()
   const out: SavedView[] = []
   for (const one of value) {
-    if (typeof one !== 'object' || one === null) continue
+    if (
+      one === null ||
+      // Stryker disable next-line ConditionalExpression: a string, number or boolean row has no `id`, so the test below drops it either way; `one === null` is the clause that decides, and it is a line of its own.
+      typeof one !== 'object'
+    ) {
+      continue
+    }
     const row = one as Record<string, unknown>
     const id = typeof row['id'] === 'string' ? row['id'].slice(0, 64) : ''
     const name = typeof row['name'] === 'string' ? normalizeTag(row['name']) : ''
@@ -126,24 +146,37 @@ function viewList(value: unknown): readonly SavedView[] {
 /**
  * Read the file, keeping what survives.
  *
- * The same rule as every other store here: one bad field costs that field. A
- * library preference file that threw would take the shelf down with it, and
- * these are conveniences — the tags themselves are on the books.
+ * The same rule as every other store here: one bad ROW costs that row — a pin
+ * that is not a string, a view with no query. Refusing the file over one would
+ * cost every decision beside it, and these are conveniences — the tags
+ * themselves are on the books. (This said one bad FIELD costs that field, and a
+ * field here is a whole collection: see `keyList` for what that cost.)
+ *
+ * ⚠️ **A FILE NOTHING CAN READ IS NOT ONE BAD FIELD, AND IT ANSWERED
+ * `NO_TAG_PREFS` — WHICH IS WHAT A READER WHO HAS DECIDED NOTHING GETS.** So
+ * `useTagPrefs` came up healthy over damaged bytes and the first pin wrote
+ * "nothing plus this pin" over every colour, hidden subject and saved view in
+ * the file (2026-09-13 audit). It throws for those bytes now, the hook holds
+ * the session's decisions in memory and says they are not being saved, and the
+ * file is left for whatever can recover it. ONLY `null` — no file — is nothing
+ * set. `parseLookups`' rule, and `parseCards`' after it.
  */
 export function parseTagPrefs(raw: string | null): TagPrefs {
-  if (!raw) return NO_TAG_PREFS
+  if (raw === null) return NO_TAG_PREFS
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
-  } catch {
-    return NO_TAG_PREFS
+  } catch (cause) {
+    throw new Error('the stored tag preferences are not JSON', { cause })
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return NO_TAG_PREFS
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('the stored tag preferences are not a record')
+  }
   const doc = parsed as Record<string, unknown>
   return {
-    pinned: keyList(doc['pinned']),
+    pinned: keyList(doc['pinned'], 'pinned'),
     colours: colourMap(doc['colours']),
-    hiddenSubjects: keyList(doc['hiddenSubjects']),
+    hiddenSubjects: keyList(doc['hiddenSubjects'], 'hidden subjects'),
     views: viewList(doc['views']),
   }
 }
@@ -213,7 +246,14 @@ export function removeView(prefs: TagPrefs, id: string): TagPrefs {
 }
 
 export function renameView(prefs: TagPrefs, id: string, name: string): TagPrefs {
-  const label = normalizeTag(name).slice(0, TAG_MAX)
+  /* ⚠️ **`normalizeTag` IS THE CUT, AND THIS CUT A SECOND TIME.** It read
+   * `normalizeTag(name).slice(0, TAG_MAX)` — but `normalizeTag` already cuts at
+   * `TAG_MAX` BY CODE POINT, and `slice` counts UTF-16 units. So a name whose
+   * sixtieth character was astral kept half a surrogate pair, a name of astral
+   * characters lost half its length, and renaming a view stored something
+   * different from saving it under the same name, which `saveView` never cut
+   * twice. `tags.ts` records the same defect. Found by mutation testing. */
+  const label = normalizeTag(name)
   if (!label) return prefs
   return {
     ...prefs,
@@ -242,6 +282,14 @@ export function pinnedFirst<T extends { tag: string }>(
   rows: readonly T[],
   prefs: TagPrefs,
 ): T[] {
+  /* ⚠️ **THE SHORTCUT WAS DELETED AS UNOBSERVABLE AND IT IS NOT** (2026-09-14).
+     It was taken out because the walk below answers the same list with an empty
+     `rank`, so removing the branch looked like a mutant no test could catch.
+     A review then COUNTED the work: without it every row's `tag` is read and
+     folded, on a shelf of about two thousand books, on every prune — and a
+     `tag` getter that throws escapes from a call that used to be skipped. The
+     branch is observable, so the gate can hold it: `if (true)` loses the
+     reader's pins, `if (false)` reads every tag, and a test kills each. */
   if (prefs.pinned.length === 0) return [...rows]
   const rank = new Map(prefs.pinned.map((key, at) => [key, at]))
   const pinned: T[] = []
@@ -259,6 +307,8 @@ export function shownSubjects<T extends { tag: string }>(
   rows: readonly T[],
   prefs: TagPrefs,
 ): T[] {
+  /* The shortcut is observable for `pinnedFirst`'s reason: with nothing hidden
+     it reads no row's tag. */
   if (prefs.hiddenSubjects.length === 0) return [...rows]
   return rows.filter((row) => !prefs.hiddenSubjects.includes(tagKey(row.tag)))
 }

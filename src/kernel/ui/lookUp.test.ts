@@ -104,6 +104,14 @@ describe('termVerdict', () => {
     expect(termVerdict(`kept his\n\n   own counsel`)).toBe('ok')
   })
 
+  /* COLLAPSED, NOT STRIPPED: a run of whitespace counts as ONE space at the
+     bound. Counting every character of it would refuse a phrase broken across
+     lines; counting none would admit a passage one character too long. */
+  it('counts a run of whitespace as one space at the bound', () => {
+    expect(termVerdict(`${'a'.repeat(60)} \n\n ${'b'.repeat(59)}`)).toBe('ok')
+    expect(termVerdict(`${'a'.repeat(60)} ${'b'.repeat(60)}`)).toBe('too-long')
+  })
+
   /* COUNTED IN CODE POINTS. `String.length` is UTF-16 units, so an astral
    * character counts twice and a selection of 120 of them would be refused as
    * 240. There is no longer a Rust half to disagree with, but the bound is on a

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ContributionBoundary, ContributionBody } from './ContributionBoundary'
 
@@ -34,6 +34,36 @@ describe('a contributed renderer inside its boundary', () => {
     expect(screen.getByText('beside it')).toBeTruthy()
     expect(spy.mock.calls.some((call) => String(call[0]).includes('A pane failed to draw'))).toBe(true)
     spy.mockRestore()
+  })
+
+  /* A PENDING PROMISE IS A NODE REACT DRAWS, and drawing one SUSPENDS. Without
+     a boundary of its own the nearest one is the root, so a single contribution
+     waiting on a promise took the whole window blank until it settled — the
+     error boundary does not contain a suspension (#150). No capability returns
+     one today; this is the guard, and it is cheaper than the outage. */
+  it('holds the window while a contribution suspends, and draws it when it settles', async () => {
+    let settle: (node: string) => void = () => {}
+    const later = new Promise<string>((resolve) => {
+      settle = resolve
+    })
+    /* AWAITED, because a tree that suspends inside a synchronous `act` is left
+       mid-commit and React says so. */
+    await act(async () => {
+      render(
+        <>
+          <p>beside it</p>
+          <ContributionBoundary label="A pane">
+            <ContributionBody id="cap:one" render={() => later} context={{ bookId: null }} />
+          </ContributionBoundary>
+        </>,
+      )
+    })
+    expect(screen.getByText('beside it'), 'the root went blank while one pane waited').toBeTruthy()
+
+    await act(async () => {
+      settle('arrived late')
+    })
+    expect(screen.getByText('arrived late')).toBeTruthy()
   })
 
   it('hands the renderer the context it was given', () => {

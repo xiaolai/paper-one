@@ -17,8 +17,15 @@
  * sequence backwards. A mobile entry with its own copy of this would have
  * started out correct and drifted, one incident at a time, out of sight of the
  * tests that hold the order — which live in `app/boot.ts` and
- * `app/shutdown.ts` precisely because they cannot run against a file like
- * this one.
+ * `app/shutdown.ts`, over fakes. What this file HANDS those two is exported
+ * beside it — `shelfAtLaunch` and `shutdownDepsOf` — because that wiring is the
+ * one part only this file holds, and `bootApp.test.ts` runs both (2026-09-14).
+ *
+ * ⚠️ **THIS SAID THOSE TESTS LIVE ELSEWHERE "PRECISELY BECAUSE THEY CANNOT RUN
+ * AGAINST A FILE LIKE THIS ONE", WHICH STOPPED BEING TRUE THE SAME DAY.**
+ * `bootApp.test.ts` runs `bootApp()` whole, with only the native side stood in
+ * for — the fs plugin, `invoke`, the shell's events and the composition list —
+ * and holds both incidents above as cases of their own.
  *
  * IMPORTS THE KERNEL THROUGH `ui/boot.ts`, NOT `ui/index.ts`: that barrel
  * names `App`, and a barrel retains everything it names, so taking the wide
@@ -42,7 +49,16 @@ import {
   messageOf,
   serviceClients,
 } from '../kernel'
-import type { Composition, DiagnosticLog, IndexFs, KernelServices } from '../kernel'
+import type {
+  Capability,
+  Composition,
+  DiagnosticLog,
+  DiagnosticSpool,
+  IndexFs,
+  IndexedBook,
+  KernelServices,
+  TrashFs,
+} from '../kernel'
 import {
   CLOSE_DRAIN_MS,
   OPEN_FILES_EVENT,
@@ -57,14 +73,15 @@ import {
   openAppStorage,
   reportFs,
   reportStartup,
+  settleBeforeDrain,
   summariseMigration,
   timed,
   watchFs,
   tauriSizePort,
 } from '../kernel/ui/boot'
 import type { OpenRequests } from '../kernel/ui/boot'
-import { armShutdownInBackground } from './shutdown'
-import { bootShelf } from './boot'
+import { armShutdownInBackground, type ShutdownDeps } from './shutdown'
+import { bootNoticeOf, bootShelf, legacySources } from './boot'
 import { capabilities } from 'virtual:paper-composition'
 
 /**
@@ -189,66 +206,9 @@ export async function bootApp(): Promise<BootedApp> {
           },
         })
 
-  /* THE SHELF'S BOOT ORDER — carry a phase-3 library across, finish the
-   * removals a crash left half done, then read the shelf — lives in
-   * `app/boot.ts`, where its order is tested. Timing wraps each step here,
-   * because the timing is this file's concern and the order is not.
-   *
-   * THE ANSWER TO "why is launch slow" IS USUALLY `rescanned`. A trusted
-   * cache is one file read and one listing; a rescan is two round-trips per
-   * book, and a library of a few thousand feels every one of them. If this
-   * says `rescanned=true` on every launch, the cache is being distrusted
-   * rather than the scan being slow, and that is a different bug. */
-  const { initialBooks, shelfUnread } = await bootShelf({
-    fs,
-    legacy:
-      storage === null
-        ? null
-        : () => {
-            /* CHECKED, not asserted. `as []` told the compiler this was a list and
-             * told the runtime nothing — so a store holding a valid JSON OBJECT
-             * threw inside the migration and skipped every legacy book. Parsed
-             * separately, so a malformed marks value does not stop the rows.
-             *
-             * AND A VALUE THAT WOULD NOT PARSE IS SAID, not silently emptied:
-             * a corrupt legacy blob used to make the library simply appear
-             * empty, with nothing anywhere explaining where the books went. */
-            const rawRows = storage.getItem('paper.library.v1')
-            const parsedRows = readJson(rawRows, null)
-            if (rawRows !== null && parsedRows === null) {
-              console.error('paper: the legacy library value exists but would not parse; migration sees no rows')
-            }
-            /* THE SAME SENTENCE FOR THE MARKS, which had none. The paragraph
-               above says a value that would not parse is SAID rather than
-               silently emptied, and then the very next line emptied one
-               silently: a corrupt marks blob migrated the books and dropped
-               every highlight and note on them, and the migration STAMPS, so
-               the next launch treated those books as already carried across.
-               Nothing anywhere said where the annotations went. */
-            const rawMarks = storage.getItem('paper.marks.v1')
-            const parsedMarks = readJson(rawMarks, null)
-            if (rawMarks !== null && parsedMarks === null) {
-              console.error('paper: the legacy marks value exists but would not parse; migration carries no marks')
-            }
-            return {
-              rows: asRows(parsedRows ?? []),
-              marks: parsedMarks ?? [],
-            }
-          },
-    migrate: (target, legacy) => timed('carry a legacy library across', () => migrateToFolders(target, legacy)),
-    summarise: summariseMigration,
-    finishPendingRemovals: (target) => timed('finish pending removals', () => finishPendingRemovals(target), (ids) => ({ finished: ids.length })),
-    loadShelf: (target) =>
-      timed('load the shelf', () => loadShelf(target), (one) => ({
-        books: one.books.length,
-        rescanned: one.rescanned,
-        why: one.why,
-      })),
-    report: {
-      info: (message) => console.info(message),
-      error: (message, cause) => console.error(message, cause),
-    },
-  })
+  /* THE SHELF, and what the launch tells the reader about it — see
+     `shelfAtLaunch`, which hands the shelf's boot order its steps. */
+  const { initialBooks, shelfUnread, bootNotice } = await shelfAtLaunch({ fs, storage, storeNotice })
 
   /* NAMED FOR WHAT IT ACTUALLY COVERS. This said "everything before the first
      render" and was taken here — before the services are built, before the
@@ -296,6 +256,7 @@ export async function bootApp(): Promise<BootedApp> {
         ? {
             record: (entry) => {
               diagnosticLog.record(entry)
+              // Stryker disable next-line OptionalChaining: the spool is null only with no filesystem, where the throw would land after the entry is recorded and inside `createDiagnostics`' guard, which drops a failing recorder — the window reads the same.
               diagnosticSpool?.touch()
             },
           }
@@ -366,7 +327,7 @@ export async function bootApp(): Promise<BootedApp> {
    * does not exist yet there, so a quit in that window costs the shell's
    * grace period and nothing else — a slow quit, never a dirty flag — and
    * arming earlier would mean late-binding `services` through a mutable
-   * reference in the one file no test can mount.
+   * reference. (This ended "in the one file no test can mount"; see the header.)
    *
    * Everything it needs already exists here: `lifetime` and `services` are
    * built above, and `quiesce()` resolves at once when no capability has
@@ -376,7 +337,8 @@ export async function bootApp(): Promise<BootedApp> {
    * its ordering, its bounding and its failure paths are the parts that go
    * wrong, and inline in this function nothing could reach them. What is left
    * here is the one thing that genuinely belongs to a composition root —
-   * naming the real Tauri event module.
+   * naming the real Tauri event module, and the rest of what the handshake is
+   * handed — and that is `shutdownDepsOf`, below, where a test can reach it.
    *
    * THE REAL MODULE, not `window.__TAURI__`. The first version read the
    * global, which a RELEASE build does not expose — `tauri.conf.json` sets
@@ -391,52 +353,9 @@ export async function bootApp(): Promise<BootedApp> {
   /* THE TEARDOWN IS HANDED TO THE WINDOW AS WELL. Arming answers the shell's
      ask; the same function goes to `App` as `beforeWindowClose`, so the red
      button — the only quit on Windows and Linux — closes the journal too. */
-  const teardown = armShutdownInBackground({
-    listen: async (event, handler) => {
-      const { listen } = await shellEvents()
-      return listen(event, () => handler())
-    },
-    emit: async (event) => {
-      const { emit } = await shellEvents()
-      await emit(event)
-    },
-    /* THE SPOOL'S TAIL GOES WITH THE FLUSH, because the diagnostics worth
-       having are the ones written just before the app stopped — and the spool
-       is debounced, so without this the last two seconds are exactly what a
-       crash-adjacent shutdown would drop. */
-    flush: async () => {
-      await flushBeforeClose()
-      await diagnosticSpool?.flush()
-    },
-    drain: () => services.drain(),
-    abort: () => lifetime.abort(),
-    /* EVERY CAPABILITY'S ASYNC TAIL, read from the STATIC composition list
-       rather than from the composed object.
-
-       The note this replaces said that the day a second capability owed a
-       tail, it should become a property of `Composition` — and it cannot be.
-       This handshake is armed BEFORE `composeCapabilities` is awaited, on
-       purpose, because a quit during startup is the window most likely to be
-       slow. A tail read off the composition would therefore be a no-op for
-       exactly as long as composition takes, which is the same window in which
-       sync's `start` opens the journal: quit there and the flag stays up,
-       which is the failure the handshake exists to prevent.
-
-       `capabilities` is imported at module load, so this thunk sees every
-       capability's `quiesce` from the first tick, and each one answers about
-       live module state at the moment it is called. `Promise.all` rather than
-       `allSettled`: one tail rejecting must reach `shutdown.ts`'s failure
-       path exactly as a single rejecting tail used to. */
-    quiesce: async () => {
-      await Promise.all(capabilities.map((cap) => cap.quiesce?.()))
-    },
-    signal: lifetime.signal,
-    /* THE SAME BOUND THE WINDOW CLOSE USES, imported rather than restated:
-       both drain the same queue under the same rule, and two spellings of one
-       policy is how they come to disagree. */
-    graceMs: CLOSE_DRAIN_MS,
-    diagnostics: services.diagnostics,
-  })
+  /* `capabilities` IS THE STATIC LIST imported at module load, not the
+     composition awaited below — see `quiesce` in `shutdownDepsOf`. */
+  const teardown = armShutdownInBackground(shutdownDepsOf({ services, lifetime, diagnosticSpool, capabilities }))
 
   /* THE LIFETIME ENDS WITH THE PAGE, which nothing used to do.
    *
@@ -459,6 +378,7 @@ export async function bootApp(): Promise<BootedApp> {
    * it does not ask to block the unload, and it is the event the platform
    * actually guarantees here. Idempotent — `dispose()` and the abort listener
    * both no-op after the first. */
+  // Stryker disable next-line ObjectLiteral,BooleanLiteral: a second `pagehide` would abort an aborted controller, which does nothing — a listener left registered changes nothing anybody can observe.
   window.addEventListener('pagehide', () => lifetime.abort(), { once: true })
 
   const composition = await composeCapabilities(capabilities, kernelApi(services), lifetime.signal, {
@@ -530,7 +450,7 @@ export async function bootApp(): Promise<BootedApp> {
     services,
     fs,
     shelfUnread,
-    bootNotice: storeNotice,
+    bootNotice,
     composition,
     beforeWindowClose: teardown,
     openRequests,
@@ -543,6 +463,142 @@ export async function bootApp(): Promise<BootedApp> {
     onDiagnosticsCleared: diagnosticSpool ? () => diagnosticSpool.touch() : null,
     bookCount: initialBooks.length,
     startedAt: bootFrom,
+  }
+}
+
+/**
+ * THE SHELF A LAUNCH READS, AND THE NOTICE IT LEAVES THE READER.
+ *
+ * ⚠️ **EXPORTED BECAUSE NOTHING BUT THE TYPE CHECK HELD ITS WIRING** (2026-09-14).
+ * The order is `app/boot.ts`'s and is tested there, over whatever a test hands
+ * it; what no test reached was what THIS file hands it — the real legacy read,
+ * and the shelf's `carryRefused` passed on to the notice. `bootNotice:
+ * storeNotice` compiled here, passed every suite, and would have dropped a
+ * refused carry from the one place a reader sees it. `bootApp.test.ts` runs
+ * this over a real in-memory library.
+ */
+export async function shelfAtLaunch({
+  fs,
+  storage,
+  storeNotice,
+}: {
+  /** The library's filesystem, or null outside Tauri — where the shelf starts empty. */
+  readonly fs: (TrashFs & IndexFs) | null
+  /** The store the phase-3 library is read from, or null when there is none to read. */
+  readonly storage: { getItem(key: string): string | null } | null
+  /** What opening the store had to say, or null. */
+  readonly storeNotice: string | null
+}): Promise<{ readonly initialBooks: readonly IndexedBook[]; readonly shelfUnread: boolean; readonly bootNotice: string | null }> {
+  /* THE SHELF'S BOOT ORDER — carry a phase-3 library across, finish the
+   * removals a crash left half done, then read the shelf — lives in
+   * `app/boot.ts`, where its order is tested. Timing wraps each step here,
+   * because the timing is this file's concern and the order is not.
+   *
+   * THE ANSWER TO "why is launch slow" IS USUALLY `rescanned`. A trusted
+   * cache is one file read and one listing; a rescan is two round-trips per
+   * book, and a library of a few thousand feels every one of them. If this
+   * says `rescanned=true` on every launch, the cache is being distrusted
+   * rather than the scan being slow, and that is a different bug. */
+  const { initialBooks, shelfUnread, carryRefused } = await bootShelf({
+    fs,
+    /* READ BY `legacySources`, which REFUSES a value that is there and will not
+     * read — the migration then does not run, nothing is stamped, and
+     * `bootShelf` says so. This was inline here, logging and carrying a corrupt
+     * marks value across as no marks; see `legacySources` for what that cost. */
+    legacy: storage === null ? null : () => legacySources(storage),
+    migrate: (target, legacy) => timed('carry a legacy library across', () => migrateToFolders(target, legacy)),
+    summarise: summariseMigration,
+    finishPendingRemovals: (target) => timed('finish pending removals', () => finishPendingRemovals(target), (ids) => ({ finished: ids.length })),
+    loadShelf: (target) =>
+      timed('load the shelf', () => loadShelf(target), (one) => ({
+        books: one.books.length,
+        rescanned: one.rescanned,
+        why: one.why,
+      })),
+    report: {
+      info: (message) => console.info(message),
+      error: (message, cause) => console.error(message, cause),
+    },
+  })
+  return { initialBooks, shelfUnread, bootNotice: bootNoticeOf(storeNotice, { carryRefused }) }
+}
+
+/**
+ * THE QUIT HANDSHAKE'S OPTIONS, composed from what the launch has built.
+ *
+ * ⚠️ **EXPORTED BECAUSE NOTHING BUT THE TYPE CHECK HELD `settle`** (2026-09-14).
+ * `app/shutdown.ts` holds the teardown's order over whatever it is handed; what
+ * this file hands it was held by nothing. `settle: settleBeforeDrain` is what
+ * makes ⌘Q wait for an import still copying, and `settle: async () => {}`
+ * compiles, passes every other suite, and is not even a mutant — Stryker does
+ * not change a name. `bootApp.test.ts` runs the real teardown over this, with
+ * the kernel's real registries.
+ *
+ * `capabilities` is the STATIC composition list — see `quiesce` — and is an
+ * argument only so a test can hand in capabilities of its own.
+ */
+export function shutdownDepsOf({
+  services,
+  lifetime,
+  diagnosticSpool,
+  capabilities: listed,
+}: {
+  readonly services: Pick<KernelServices, 'drain' | 'diagnostics'>
+  readonly lifetime: AbortController
+  /** The diagnostics file's spool, or null when this run writes no file. */
+  readonly diagnosticSpool: Pick<DiagnosticSpool, 'flush'> | null
+  readonly capabilities: readonly Pick<Capability, 'quiesce'>[]
+}): ShutdownDeps {
+  return {
+    listen: async (event, handler) => {
+      const { listen } = await shellEvents()
+      return listen(event, () => handler())
+    },
+    emit: async (event) => {
+      const { emit } = await shellEvents()
+      await emit(event)
+    },
+    /* THE SPOOL'S TAIL GOES WITH THE FLUSH, because the diagnostics worth
+       having are the ones written just before the app stopped — and the spool
+       is debounced, so without this the last two seconds are exactly what a
+       crash-adjacent shutdown would drop. */
+    flush: async () => {
+      await flushBeforeClose()
+      await diagnosticSpool?.flush()
+    },
+    /* WHAT IS STILL RUNNING, before the queue it will hand writes to is
+       drained — an import mid-copy, which `App` registers its stop for. ⌘Q
+       reaches only this teardown, so without it the quit drained under a live
+       copy (2026-09-13 audit, #96). */
+    settle: settleBeforeDrain,
+    drain: () => services.drain(),
+    abort: () => lifetime.abort(),
+    /* EVERY CAPABILITY'S ASYNC TAIL, read from the STATIC composition list
+       rather than from the composed object.
+
+       The note this replaces said that the day a second capability owed a
+       tail, it should become a property of `Composition` — and it cannot be.
+       This handshake is armed BEFORE `composeCapabilities` is awaited, on
+       purpose, because a quit during startup is the window most likely to be
+       slow. A tail read off the composition would therefore be a no-op for
+       exactly as long as composition takes, which is the same window in which
+       sync's `start` opens the journal: quit there and the flag stays up,
+       which is the failure the handshake exists to prevent.
+
+       `capabilities` is imported at module load, so this thunk sees every
+       capability's `quiesce` from the first tick, and each one answers about
+       live module state at the moment it is called. `Promise.all` rather than
+       `allSettled`: one tail rejecting must reach `shutdown.ts`'s failure
+       path exactly as a single rejecting tail used to. */
+    quiesce: async () => {
+      await Promise.all(listed.map((cap) => cap.quiesce?.()))
+    },
+    signal: lifetime.signal,
+    /* THE SAME BOUND THE WINDOW CLOSE USES, imported rather than restated:
+       both drain the same queue under the same rule, and two spellings of one
+       policy is how they come to disagree. */
+    graceMs: CLOSE_DRAIN_MS,
+    diagnostics: services.diagnostics,
   }
 }
 
@@ -563,27 +619,4 @@ export function reportFirstFrame(booted: BootedApp): void {
     books: booted.bookCount,
   })
   watchFs()
-}
-
-/**
- * A legacy library value that is not a list is not a library.
- *
- * The cast used to be `as []` over an unchecked array, which claims the
- * EMPTY-tuple type — so `[null, validRow]` satisfied the outer check and every
- * element was then treated as a row it might not be. Each entry is checked to
- * be a non-null object, and anything else is dropped: a legacy file is one a
- * reader may have hand-edited, so a single bad row must not cost the rest.
- */
-function asRows(value: unknown): readonly Record<string, unknown>[] {
-  if (!Array.isArray(value)) return []
-  return value.filter((one): one is Record<string, unknown> => typeof one === 'object' && one !== null)
-}
-
-function readJson(raw: string | null, fallback: unknown): unknown {
-  if (!raw) return fallback
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return fallback
-  }
 }

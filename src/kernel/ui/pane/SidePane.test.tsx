@@ -71,11 +71,19 @@ const book = () =>
 const marksView = () =>
   ({ all: [], current: [], bookmarks: [], allBookmarks: [], allUnplaced: [], persistent: true, ready: true, loadAll: vi.fn() }) as unknown as MarksView
 
-/** The pane in the reader, on one panel, with only what that panel reads varied. */
-function draw(over: Partial<SidePaneProps> & { pane: 'search' | 'companion' | 'library' }) {
+/**
+ * The pane in the reader, on one panel, with only what that panel reads varied.
+ *
+ * `developerOptions` because Companion is an UNFINISHED panel: it is offered —
+ * and so drawn — only with developer options on (`UNFINISHED_PANE_IDS`).
+ */
+function draw({
+  developerOptions = false,
+  ...over
+}: Partial<SidePaneProps> & { pane: 'search' | 'companion' | 'library'; developerOptions?: boolean }) {
   const onGoTo = vi.fn()
   const props: SidePaneProps = {
-    state: { ...initialState, screen: 'reader', pane: over.pane, lastPane: over.pane },
+    state: { ...initialState, screen: 'reader', pane: over.pane, lastPane: over.pane, developer: developerOptions },
     dispatch: vi.fn(),
     book: book(),
     marks: marksView(),
@@ -130,7 +138,7 @@ describe('the search panel', () => {
 
 describe('the companion panel', () => {
   it('is handed the reader\'s selection, so a question carries it', () => {
-    const { companion } = draw({ pane: 'companion', selection: 'Call me Ishmael.' })
+    const { companion } = draw({ pane: 'companion', selection: 'Call me Ishmael.', developerOptions: true })
     const input = screen.getByLabelText('Ask the companion about this chapter')
     fireEvent.change(input, { target: { value: 'who is speaking?' } })
     fireEvent.keyDown(input, { key: 'Enter' })
@@ -147,7 +155,7 @@ describe('the companion panel', () => {
    * asked about. "grounded in this book only" is the panel's own line.
    */
   it('starts a new thread when the reader opens another book', async () => {
-    const { openAnother } = draw({ pane: 'companion' })
+    const { openAnother } = draw({ pane: 'companion', developerOptions: true })
     const input = screen.getByLabelText('Ask the companion about this chapter')
     fireEvent.change(input, { target: { value: 'who is speaking?' } })
     fireEvent.keyDown(input, { key: 'Enter' })
@@ -167,7 +175,7 @@ describe('the companion panel', () => {
   /* The draft too: a question typed and not sent is about the book it was
      typed in. */
   it('clears a half-typed question when the book changes', () => {
-    const { openAnother } = draw({ pane: 'companion' })
+    const { openAnother } = draw({ pane: 'companion', developerOptions: true })
     fireEvent.change(screen.getByLabelText('Ask the companion about this chapter'), {
       target: { value: 'what is a gam?' },
     })
@@ -175,6 +183,21 @@ describe('the companion panel', () => {
     expect(
       (screen.getByLabelText('Ask the companion about this chapter') as HTMLInputElement).value,
     ).toBe('')
+  })
+})
+
+/**
+ * ⚠️ **A PANE THE READER IS NOT OFFERED WAS DRAWN IF IT WAS ASKED FOR BY NAME.**
+ * Only the remembered `lastPane` was fitted; `state.pane` went straight to the
+ * panel switch, so a state naming Companion with developer options off drew the
+ * Companion beside a rail with no button for it (#145). The reducer does not
+ * produce that state — this is the pane not depending on it.
+ */
+describe('a pane asked for that this reader is not offered', () => {
+  it('shows the screen’s own default, as the rail does', () => {
+    draw({ pane: 'companion' })
+    expect(screen.queryByLabelText('Ask the companion about this chapter')).toBeNull()
+    expect(screen.getByText('Contents')).not.toBeNull()
   })
 })
 
@@ -204,13 +227,18 @@ describe('the library panel', () => {
     onTagBooks: vi.fn(),
   })
 
+  /* ON THE LIBRARY SCREEN, the one whose rail offers this panel. These drew it
+     in the reader, which only worked because a pane asked for by name was not
+     fitted to its screen (#145). */
+  const shelf = { ...initialState, screen: 'library' as const, pane: 'library' as const, lastPane: 'library' as const }
+
   it('says when the tag preferences are not being kept', () => {
-    draw({ pane: 'library', library: library(false) })
+    draw({ pane: 'library', state: shelf, library: library(false) })
     expect(screen.getByText(/not being saved/).textContent).toContain('pins')
   })
 
   it('says nothing when they are', () => {
-    draw({ pane: 'library', library: library(true) })
+    draw({ pane: 'library', state: shelf, library: library(true) })
     expect(screen.queryByText(/not being saved/)).toBeNull()
   })
 })

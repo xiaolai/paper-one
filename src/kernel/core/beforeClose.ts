@@ -54,3 +54,57 @@ export function flushBeforeClose(): void {
     }
   }
 }
+
+/**
+ * Work the drain has to WAIT FOR — registered here, awaited between the
+ * handover above and the drain.
+ *
+ * ⚠️ **A SECOND LIST, BECAUSE THE FIRST ONE'S CONTRACT IS RIGHT** (2026-09-13
+ * audit, #96). Some state is not held in memory waiting to be handed over; it
+ * is work already RUNNING, and it hands itself over later. An import still
+ * copying chains its shelf writes one batch behind the copying, so a book
+ * already on disk reaches the queue only once the copy has let go — after a
+ * drain that did not wait for it had already declared the queue empty. Bytes
+ * with no record: a book the library cannot see and removal cannot reach.
+ *
+ * The window close had been taught to stop the import first, inside `App`; ⌘Q
+ * on a Mac never passes through there (`app/shutdown.ts` runs its teardown
+ * directly), so that path drained under a live copy. Registering here is what
+ * puts the wait on BOTH paths. `onBeforeClose` stays synchronous — its
+ * callbacks are handovers, and "exactly one thing to wait for" is still true
+ * of them; this list is the one thing, and it is awaited once.
+ *
+ * NOT BOUNDED HERE: each shutdown path bounds its own wait, and one budget
+ * over the settle and the drain together is what keeps a stuck stop from
+ * holding the window or the quit open.
+ */
+type Settle = () => Promise<unknown>
+
+const settling = new Set<Settle>()
+
+/** Register work the drain must wait for. Returns its own removal. */
+export function onBeforeDrain(settle: Settle): () => void {
+  settling.add(settle)
+  return () => {
+    settling.delete(settle)
+  }
+}
+
+/**
+ * Run every registered settle and wait for ALL of them.
+ *
+ * Never rejects, and one failing does not stop the others being waited for —
+ * the drain goes ahead either way, and a stop that threw must not cost the
+ * queue its drain. A settle that throws synchronously is caught the same way.
+ */
+export async function settleBeforeDrain(): Promise<void> {
+  await Promise.all(
+    [...settling].map(async (settle) => {
+      try {
+        await settle()
+      } catch (cause) {
+        console.error('Paper: something the write queue waits for did not finish before closing', cause)
+      }
+    }),
+  )
+}

@@ -97,12 +97,14 @@ function quiet(report: CloseSteps['report']): CloseSteps['report'] {
 
 /**
  * The kernel's own preparation, for a host with no composition to tear down:
- * hand what memory holds to the queue, then let the queue drain. Each half
- * reports its own failure and the other still runs — a note that will not
- * serialise must not stop the position being written.
+ * hand what memory holds to the queue, wait for what is still running to hand
+ * itself over, then let the queue drain. Each step reports its own failure and
+ * the next still runs — a note that will not serialise must not stop the
+ * position being written.
  */
 export function closePrepare(
   flush: () => void,
+  settle: () => Promise<unknown>,
   drain: () => Promise<unknown>,
   report: CloseSteps['report'],
 ): () => Promise<void> {
@@ -115,6 +117,17 @@ export function closePrepare(
       flush()
     } catch (cause) {
       say('Paper: could not hand over unsaved work before closing', cause)
+    }
+    /* ⚠️ **THEN WHAT IS STILL RUNNING, WHICH HANDS ITSELF OVER LATER**
+     * (2026-09-13 audit, #96) — an import mid-copy, whose shelf writes follow
+     * the copying a batch behind. `App` awaited its own stop ahead of this,
+     * which covered the window close and never ⌘Q; `settle` is now the one
+     * list both paths wait on (`settleBeforeDrain`). Bounded with everything
+     * else here by the close sequence's hold. */
+    try {
+      await settle()
+    } catch (cause) {
+      say('Paper: what the write queue waits for did not finish before the drain', cause)
     }
     try {
       await drain()

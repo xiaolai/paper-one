@@ -71,7 +71,16 @@ export function useTagPrefs(storage: MarkStorage | null): TagPrefsStore {
    * when storage is disabled — and `persistent` seeded from `storage !== null`
    * alone claimed durability for exactly that store, until the first change
    * tried to write and flipped it. The claim is honest from the start now:
-   * a store whose read threw will not take a write either. */
+   * a store whose read threw will not take a write either.
+   *
+   * ⚠️ **AND A FILE THAT WILL NOT PARSE IS UNREADABLE TOO — IT USED TO READ AS
+   * "nothing decided".** `parseTagPrefs` answered `NO_TAG_PREFS` for damaged
+   * bytes, so `readable` stayed true, and unlike the throwing storage that
+   * write LANDS: the first pin replaced every colour, hidden subject and saved
+   * view the reader had. The parse throws for those bytes now and they arrive
+   * here, where the session keeps its decisions and the file is left alone
+   * (2026-09-13 audit). Said to the log, because nothing else can say it: this
+   * hook's panel draws `persistent`, not a reason. */
   const first = useRef<{ prefs: TagPrefs; readable: boolean } | null>(null)
   if (first.current === null) {
     if (!storage) {
@@ -79,8 +88,9 @@ export function useTagPrefs(storage: MarkStorage | null): TagPrefsStore {
     } else {
       try {
         first.current = { prefs: parseTagPrefs(storage.getItem(TAG_PREFS_STORAGE_KEY)), readable: true }
-      } catch {
+      } catch (cause) {
         first.current = { prefs: NO_TAG_PREFS, readable: false }
+        console.error('Paper: your tag preferences could not be read, and will not be saved this session', cause)
       }
     }
   }
@@ -90,10 +100,19 @@ export function useTagPrefs(storage: MarkStorage | null): TagPrefsStore {
    * what was READ: a launch that changes nothing must not rewrite the file. */
   const written = useRef<TagPrefs | null>(null)
   if (written.current === null) written.current = prefs
-  const [persistent, setPersistent] = useState(storage !== null && first.current.readable)
+  /* `readable` is already false with no storage, so it is the whole answer — a
+     `storage !== null` beside it decided nothing, and hid whether it did. */
+  const [persistent, setPersistent] = useState(first.current.readable)
 
   useEffect(() => {
-    if (!storage || written.current === prefs) return
+    /* ⚠️ **AND NEVER OVER A FILE THIS COULD NOT READ.** `readable` decided the
+       first snapshot's honesty and nothing else, so the effect wrote anyway —
+       which costs nothing against a storage that refuses every write, and is
+       the whole loss against a file that merely would not parse, because THAT
+       write lands. Session-only means no write at all: the rule `createLookups`
+       and `createCards` keep (2026-09-13 audit). */
+    // Stryker disable next-line OptionalChaining: `first.current` is assigned during the first render, before any effect can run, so it is never null here — the chain is for the ref's type.
+    if (!storage || first.current?.readable !== true || written.current === prefs) return
     try {
       storage.setItem(TAG_PREFS_STORAGE_KEY, JSON.stringify(prefs))
       /* ADVANCED AFTER THE WRITE, not before it. Advanced first, a refused
@@ -114,6 +133,11 @@ export function useTagPrefs(storage: MarkStorage | null): TagPrefsStore {
     }
   }, [storage, prefs])
 
+  /* Stryker disable ArrayDeclaration: every operation below closes over nothing
+     that changes — the state setter and module functions — so each is memoised
+     over nothing, and a dependency list holding one constant re-creates nothing
+     either; no test can tell the two apart. The six empty lists are the only
+     arrays in the block. */
   const togglePinned = useCallback((tag: string) => {
     setPrefs((current) => togglePinnedIn(current, tag))
   }, [])
@@ -137,6 +161,7 @@ export function useTagPrefs(storage: MarkStorage | null): TagPrefsStore {
   const removeView = useCallback((id: string) => {
     setPrefs((current) => removeViewIn(current, id))
   }, [])
+  // Stryker restore ArrayDeclaration
 
   return { prefs, persistent, togglePinned, setColour, toggleHidden, saveView, renameView, removeView }
 }

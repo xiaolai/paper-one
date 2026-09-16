@@ -1,16 +1,22 @@
 import { messageOf } from '../../../kernel'
 import type { GlossContext, GlossProvider } from '../../../kernel'
-import { detailFor, type Controller, type ReportFailure } from './controller'
+import { readerFailure, type Controller, type ReportFailure } from './controller'
 import { cancelRequest, errorKind, mintRequestId, type InferencePlugin } from './plugin'
 
 /**
  * The gloss provider — bound by `inference`, and by nothing else.
  *
- * ⚠️ **NO CODE PATH FROM HERE REACHES AN AGENT.** This file imports the
- * plugin's `gloss` command and the controller, and neither can reach
- * `agentAsk`. That is the enforcement F8 asks for: an agent would open a
- * session and start a turn to define one word — seconds, and a subscription
- * turn spent, for a gesture a reader makes dozens of times a chapter.
+ * ⚠️ **NO CODE PATH FROM HERE REACHES AN AGENT.** It is handed two of the
+ * plugin's commands — `gloss`, and `cancel` to abandon one — and the
+ * controller, and none of the three can reach `agentAsk`. That is the
+ * enforcement F8 asks for: an agent would open a session and start a turn to
+ * define one word — seconds, and a subscription turn spent, for a gesture a
+ * reader makes dozens of times a chapter.
+ *
+ * (This said the file imported the `gloss` command while the option it read
+ * was the WHOLE plugin, `agentAsk` included — an enforcement held by habit and
+ * not by the type. `GlossProviderOptions.plugin` names the two now; corrected
+ * 2026-09-13, by audit.)
  *
  * # The cache, and why it is keyed the way it is
  *
@@ -39,19 +45,32 @@ const CACHE_LIMIT = 200
 /**
  * What the model is told. Short, and every line of it is load-bearing.
  *
- * `Do not repeat the word` is there because `DCSCopyTextDefinition`'s doubled
- * headword is the exact failure this feature was written to avoid, and a
- * model asked to define a word will lead with it by default. `one or two
- * sentences` bounds it to what a popover can hold. `the sense used here` is
- * the feature: a dictionary gives every sense of *close*, and this gives the
- * one on the page.
+ * `one or two sentences` bounds it to what a popover can hold. `the sense used
+ * here` is the feature: a dictionary gives every sense of *close*, and this
+ * gives the one on the page.
+ *
+ * ⚠️ **"DO NOT REPEAT THE WORD" DID NOT WORK, AND IT WAS MEASURED NOT WORKING.**
+ * `DCSCopyTextDefinition`'s doubled headword is the failure this feature was
+ * written to avoid, and a model asked to define a word leads with it by
+ * default. The prohibition was here from the start and the answers still opened
+ * `wharves are the docks…` and `in this context, los wharves son…`; a stronger
+ * prohibition fared no better. What worked — seven of seven, on 2026-09-13 — is
+ * showing the SHAPE of a good opening instead of naming the bad one
+ * (`dev-docs/plans/evidence/wi-17-5-answer-languages.md`). The example uses
+ * `wharves`, and answers about other words did not echo it.
+ *
+ * The language line is WI-17.5's, and it is the SYSTEM prompt's rather than
+ * the question's only in its wording: which language to use is a line in the
+ * question, where the cache key sees it — see `glossQuestion`.
  */
 export const GLOSS_SYSTEM_PROMPT = [
   'You define a word or phrase as it is used in one specific sentence from a book.',
   'Answer in one or two sentences, plain prose, no formatting and no quotation marks.',
   'Give only the sense used here, not every sense the word has.',
-  'Do not repeat the word as a headword and do not restate the sentence.',
+  'Start straight with the meaning, the way a dictionary entry does: for wharves, begin with something like "Structures along a shore where ships dock", never "Wharves are" and never "In this sentence".',
+  'Do not restate the sentence.',
   'If the sentence does not make the sense clear, say so plainly in one sentence.',
+  'Write the answer in the language the request names. When it names two languages, write one sentence in each, the first language first, each on its own line.',
 ].join(' ')
 
 /**
@@ -94,20 +113,35 @@ function squeezed(text: string): string {
  * answer for it is the cache working rather than a collision. The book's
  * identity is deliberately not in it: the model never sees an id, so an id
  * could only ever split entries that ought to be shared.
+ *
+ * ⚠️ **THE ANSWER LANGUAGE IS A LINE OF IT, AND THAT IS THE WHOLE OF WI-17.5's
+ * CACHE REQUIREMENT.** A key without it would serve every word already looked
+ * up back in the old language after the reader switched, silently, for as long
+ * as the process lived — the same class of error as serving another model's
+ * answer, which the cache already refuses. In the question, the key has it by
+ * construction and there is nothing separate to remember. The names are
+ * English because the model is told in English; the order is the order asked.
  */
 export function glossQuestion(term: string, context: GlossContext): string {
   return [
     `Book: ${squeezed(context.bookTitle)}`,
     `Sentence: ${squeezed(context.sentence)}`,
+    `Answer in: ${context.answerIn.map((one) => squeezed(one.name)).join(', then ')}`,
     `Define, in this sentence: ${squeezed(term)}`,
   ].join('\n')
 }
 
 export interface GlossProviderOptions {
-  readonly plugin: InferencePlugin
+  /** The two commands a gloss uses, and no others — see the header on `agentAsk`. */
+  readonly plugin: Pick<InferencePlugin, 'gloss' | 'cancel'>
   readonly controller: Controller
   /** Told when a cancel fails for a reason that is not the expected race. */
   readonly report?: ReportFailure | undefined
+  /**
+   * The settings section a model is installed from — `inference:models`,
+   * handed in by the capability that declares it, so the id is written once.
+   */
+  readonly installAt: string
 }
 
 export interface BoundGlossProvider extends GlossProvider {
@@ -125,21 +159,47 @@ export interface BoundGlossProvider extends GlossProvider {
   cacheSize(): number
 }
 
-export function createGlossProvider({ plugin, controller, report }: GlossProviderOptions): BoundGlossProvider {
+export function createGlossProvider({ plugin, controller, report: reportTo, installAt }: GlossProviderOptions): BoundGlossProvider {
   /* A Map, for insertion order: JavaScript's Map iterates oldest-first, which
    * is the eviction order this wants and costs no bookkeeping. */
   const cache = new Map<string, string>()
   let cachedFor: string | null = null
 
+  /* ⚠️ **A REPORTER THAT CANNOT REPLACE WHAT IT REPORTS.** It is called from two
+   * places that cannot survive it throwing: the lookup's rejection handler,
+   * where the throw BECAME the rejection — the reader was told the reporter's
+   * error instead of the runtime's — and `cancelRequest`'s, which nothing
+   * awaits, where it escaped as an unhandled rejection. `controller.ts` and the
+   * companion's `provider.ts` each guard theirs for the same reason (2026-09-13
+   * audit). */
+  const report: ReportFailure = (event, fields) => {
+    try {
+      reportTo?.(event, fields)
+    } catch (thrown) {
+      console.error('inference gloss: the failure reporter itself threw', thrown, 'while reporting', event)
+    }
+  }
+
+  /* ONE READING OF "IS THERE A RUNTIME", for both getters below — they are the
+     two halves of one decision (`decideLookUp`), and two spellings of it are
+     how they came to disagree. */
+  const hasRuntime = (): boolean => controller.getSnapshot().runtime.kind !== 'absent'
+
   return {
     /* Resolved per call rather than captured: a reader who installs a model
-     * while the pane is open must get a working Look up without a restart. */
+     * while the pane is open must get a working Look up without a restart.
+     *
+     * ⚠️ **AND A MODEL IS NOT ENOUGH.** This read the model alone, so with one
+     * on disk and the runtime absent it answered yes while `installAt` answered
+     * "nowhere" — one snapshot, two readings — and Look up drew a live control
+     * whose every press failed at the launch (2026-09-13 audit). */
     get available(): boolean {
-      return controller.textModel() !== null
+      return controller.textModel() !== null && hasRuntime()
     },
 
     /**
-     * TRUE WHILE THERE IS A RUNTIME TO INSTALL A MODEL INTO.
+     * THE MODELS SECTION WHILE THERE IS A RUNTIME TO INSTALL A MODEL INTO,
+     * and `null` while there is not.
      *
      * ⚠️ **THIS WAS THE CONSTANT `true`**, on the argument that `inference`
      * composing is exactly what puts the Local models section in Settings —
@@ -152,14 +212,15 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
      * something can be done there.
      *
      * So this follows the runtime, read per call like `available` — and with
-     * it false the reader UI draws no Look up control at all, which is the
+     * it null the reader UI draws no Look up control at all, because
+     * `available` reads the same runtime and is false with it. That is the
      * same answer a browser or a phone gets (`decideLookUp` → `none`), and the
      * honest one: nothing the reader can do from here changes it. A build that
      * did not compose `inference` keeps the port's `NO_GLOSS` default, where
-     * the field is `false` for the other reason. See `GlossProvider.installable`.
+     * the field is `null` for the other reason. See `GlossProvider.installAt`.
      */
-    get installable(): boolean {
-      return controller.getSnapshot().runtime.kind !== 'absent'
+    get installAt(): string | null {
+      return hasRuntime() ? installAt : null
     },
 
     async gloss(term: string, context: GlossContext, signal: AbortSignal): Promise<string> {
@@ -197,31 +258,58 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
        * `useGloss` mints a fresh `AbortController` per ask so the signal dies
        * quickly and the leak is bounded there; a caller that reuses one
        * accumulates a listener per lookup. Found by audit. */
-      let onAbort: (() => void) | null = null
-      const ready = await Promise.race([
-        controller.ensureReady(),
-        new Promise<'aborted'>((resolve) => {
-          if (signal.aborted) {
-            resolve('aborted')
-            return
-          }
-          onAbort = () => resolve('aborted')
-          signal.addEventListener('abort', onAbort, { once: true })
-        }),
-      ]).finally(() => {
-        if (onAbort !== null) signal.removeEventListener('abort', onAbort)
+      /* ⚠️ **`start()`, NOT `ensureReady()` — AND THE DIFFERENCE IS WHAT THE
+       * READER IS TOLD.** The boolean collapsed every way a launch can fail
+       * into one, so the line below said "The runtime is not running" about a
+       * runtime that was never INSTALLED, while the controller one call away
+       * had already computed that exact sentence from the plugin's `kind` and
+       * had nowhere to put it. The cause now arrives here and goes through the
+       * same `readerFailure` the plugin's own rejections do (2026-09-13 audit,
+       * round 2). The controller reports it; this only speaks. */
+      let wake!: (launch: null) => void
+      const woken = new Promise<null>((resolve) => {
+        wake = resolve
       })
-      if (ready === 'aborted' || signal.aborted) {
+      const onAbort = (): void => wake(null)
+      /* ATTACHED BEFORE THE LAUNCH IS ASKED FOR, so an abort that `start()`
+         itself sets off — it runs synchronously up to its first await — is
+         heard like any other, with no second test for a signal that was
+         already aborted when the wait began. */
+      signal.addEventListener('abort', onAbort)
+      let launch: { readonly cause: unknown } | null
+      try {
+        launch = await Promise.race([
+          /* CARRIED, NOT THROWN. A rejection would win the race outright and
+             talk about a runtime the reader no longer needs — the abort below
+             has to be able to win a tie. */
+          controller.start().then(
+            () => null,
+            (cause: unknown) => ({ cause }),
+          ),
+          woken,
+        ])
+      } finally {
+        signal.removeEventListener('abort', onAbort)
+      }
+      /* ⚠️ **THE SIGNAL SAYS WHETHER THE READER LEFT, NOT WHICH SIDE WON.** An
+         abort landing as the launch settled leaves the launch's answer in hand
+         and the reader gone. This read `ready === 'aborted' || signal.aborted`:
+         two readings of one fact, the first never true without the second, so
+         the label decided nothing the signal did not (2026-09-14, mutation
+         sweep). The race now only WAKES the wait. */
+      if (signal.aborted) {
         throw new DOMException('Aborted', 'AbortError')
       }
-      if (!ready) throw new Error('The runtime is not running')
+      if (launch !== null) throw readerFailure(launch.cause, signal)
 
       const requestId = mintRequestId('gloss')
       /* One cancel, one place — see `cancelRequest`. This and
        * `inferencePort`'s `withCancel` both swallowed every failure, and
        * fixing one copy is how the other stayed broken. */
       const abort = (): void => cancelRequest(plugin, requestId, report)
-      signal.addEventListener('abort', abort, { once: true })
+      /* No `{ once: true }`: the `finally` below removes it however the call
+         ends, and a signal aborts once, so the option could change nothing. */
+      signal.addEventListener('abort', abort)
       try {
         const answer = (
           await plugin
@@ -231,7 +319,7 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
                *
                * A rejection from the plugin is `{ kind, message }` — a plain
                * object, serialised by the crate's `error.rs`, NOT an `Error`.
-               * `useGloss` turns a rejection into the strip's second line with
+               * `useGloss` turns a rejection into the reason `LookUpFace` draws with
                * `error instanceof Error ? error.message : 'No reason was
                * given.'`, so every plugin-side failure took the second branch:
                * the runtime not installed, not started, stopped, unreachable,
@@ -266,6 +354,15 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
                * the real boundary never produces. A non-`Error` cause is
                * wrapped, preserving its text; a real `Error` is passed through
                * with its own message intact.
+               *
+               * ⚠️ **THE BRANCHES THEMSELVES ARE `readerFailure` NOW**, beside
+               * `detailFor` where the sentences are. The companion's `failure`
+               * was written as this catch "branch for branch" and nothing held
+               * it to that: its last branch was `String(cause)`, so the same
+               * rejection object told a reader looking up a word what happened
+               * and a reader asking a question `[object Object]` (2026-09-13
+               * audit, round 2). What stays here is the REPORT, because the two
+               * disagree about it on purpose — see `readerFailure`.
                */
               const kind = errorKind(cause)
 
@@ -292,27 +389,14 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
                * reader made by moving on is every selection change, and a
                * log full of those buries the failures. */
               if (!(kind === 'cancelled' && signal.aborted)) {
-                report?.('inference.gloss-failed', { kind, model, message: messageOf(cause) })
+                report('inference.gloss-failed', { kind, model, message: messageOf(cause) })
               }
 
-              /* THE READER'S OWN ABORT, and only when it really was one.
-               * `cancelled` also arrives when the DAEMON cancels — it does so
-               * on stop — and that lands with a signal nobody aborted. Passing
-               * it through there shows the reader nothing while the lookup
-               * silently ends. Only a genuinely aborted signal is dropped;
-               * `useGloss` ignores it and the reader has already moved on. */
-              if (kind === 'cancelled' && signal.aborted) throw cause
-
-              if (kind !== null) throw new Error(detailFor(cause), { cause })
-
-              /* NOT THE PLUGIN'S. `errorKind` states the rule and the reason:
-               * a rejection with no `kind` is a Tauri or webview failure, and
-               * `detailFor` would map it to its default, destroying whatever
-               * the real failure said. So it is not translated — but it is
-               * made READABLE, which is a different thing and the half that
-               * was missing. */
-              if (cause instanceof Error) throw cause
-              throw new Error(messageOf(cause), { cause })
+              /* THE READER'S OWN ABORT is passed through as itself, and only
+               * when it really was one; everything else becomes the sentence
+               * for its `kind`, or a readable `Error` when it has none. All
+               * four branches are `readerFailure`. */
+              throw readerFailure(cause, signal)
             })
         ).trim()
         /* An empty answer is NOT cached and NOT returned as a definition: an
@@ -329,9 +413,12 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
         if (cachedFor === model) {
           cache.set(question, answer)
         }
-        while (cache.size > CACHE_LIMIT) {
-          const oldest = cache.keys().next().value
-          if (oldest === undefined) break
+        /* OLDEST OUT FIRST, until the cache is back at its limit: a Map visits
+           keys in insertion order, and deleting the key being visited is safe.
+           A `while` stood here with an `undefined` guard that could never fire —
+           the loop only ran while the map held more than the limit. */
+        for (const oldest of cache.keys()) {
+          if (cache.size <= CACHE_LIMIT) break
           cache.delete(oldest)
         }
         /* ⚠️ **CANCELLED IS CANCELLED AT THE END TOO, AND IT ONLY WAS AT THE

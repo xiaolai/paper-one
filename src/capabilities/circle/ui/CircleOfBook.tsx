@@ -78,7 +78,6 @@ export function CircleOfBook({ circle, bookId, openBook }: { readonly circle: Ci
         <>
           <p className={CAPABILITY_UI.hint}>Friends who have this also have</p>
           {view.alsoRead.map((one) => (
-            // Stryker disable next-line StringLiteral: a key is for React's reconciler, not the reader.
             <div className={CAPABILITY_UI.row} key={one.key}>
               <span className={CAPABILITY_UI.grow}>
                 {namesOf(one.names)} also {one.names.length === 1 ? 'has' : 'have'} {one.title}

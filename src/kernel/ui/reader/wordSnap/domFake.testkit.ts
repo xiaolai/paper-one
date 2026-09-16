@@ -40,8 +40,12 @@
  *    foliate parsed as XHTML and one it had to reparse as `text/html`, and an
  *    implementation reading one spelling is a live defect — see
  *    `ElementOptions.namespaced`.
+ * 7. **Carries comments, and will not style one.** A comment is neither text
+ *    nor an element, and WebKit's `getComputedStyle` throws on it — so a walk
+ *    that asked a comment for its display fails here as it would in a book,
+ *    where XHTML is full of them.
  *
- * `domFake.test.ts` asserts all six, because a fake that quietly stopped
+ * `domFake.test.ts` asserts all seven, because a fake that quietly stopped
  * doing any of them would leave every case that depends on it green and
  * vacuous, and nothing else in the suite would notice.
  *
@@ -70,10 +74,15 @@ const TEXT_NODE = 3
 const ELEMENT_NODE = 1
 
 /** A tree, before it is built. Plain data, so a fixture reads as markup. */
-export type Spec = TextSpec | ElementSpec
+export type Spec = TextSpec | ElementSpec | CommentSpec
 
 interface TextSpec {
   readonly kind: 'text'
+  readonly data: string
+}
+
+interface CommentSpec {
+  readonly kind: 'comment'
   readonly data: string
 }
 
@@ -121,6 +130,11 @@ export function txt(data: string): Spec {
 
 export function elem(tag: string, options: ElementOptions = {}, children: readonly Spec[] = []): Spec {
   return { kind: 'element', tag, options, children }
+}
+
+/** A comment. Not held to `buildFixture`'s uniqueness rule: no walk reads its text. */
+export function comment(data: string): Spec {
+  return { kind: 'comment', data }
 }
 
 /**
@@ -208,6 +222,17 @@ class FakeText extends FakeNode {
   }
 }
 
+/** `Node.COMMENT_NODE`. */
+class FakeComment extends FakeNode {
+  constructor(counters: Counters, ownerDocument: unknown, public data: string) {
+    super(counters, ownerDocument)
+  }
+
+  protected override get rawNodeType(): number {
+    return 8
+  }
+}
+
 class FakeElement extends FakeNode {
   readonly tagName: string
   firstChild: FakeNode | null = null
@@ -292,8 +317,12 @@ export class Fixture {
         ? null
         : {
             getComputedStyle: (target: unknown) => {
+              /* WebKit's own refusal, and the reason it is modelled: see point 7. */
+              if (!(target instanceof FakeElement)) {
+                throw new TypeError("getComputedStyle: parameter 1 is not of type 'Element'.")
+              }
               this.counters.styleReads += 1
-              const el = target as FakeElement
+              const el = target
               return {
                 display: computedDisplay(el),
                 visibility: computedVisibility(el),
@@ -308,6 +337,7 @@ export class Fixture {
 
   private build(spec: Spec): FakeNode {
     this.nodes += 1
+    if (spec.kind === 'comment') return new FakeComment(this.counters, this.doc, spec.data)
     if (spec.kind === 'text') {
       if (this.texts.has(spec.data)) {
         throw new Error(

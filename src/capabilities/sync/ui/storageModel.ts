@@ -62,6 +62,12 @@ export interface StorageSnapshot {
   readonly failure: string | null
 }
 
+/**
+ * ⚠️ **THE THREE PROMISES RESOLVE WHATEVER HAPPENS; A FAILURE IS `failure`.**
+ * That is the contract `StoragePane` leans on when it `void`s each one, and it
+ * was not kept: `refresh` rejected over a ledger that would not read, and both
+ * actions with it (2026-09-13 verify). See `refresh` in `createStorageModel`.
+ */
 export interface StorageModel {
   getSnapshot(): StorageSnapshot
   subscribe(listener: () => void): () => void
@@ -105,8 +111,15 @@ export const COVER_CAP_MAX_MB = 100_000
  *
  * A row that is not a non-negative finite number is dropped INDIVIDUALLY: a
  * hand-edited or half-written entry must not cost the entries beside it, and
- * a NaN or negative size poisons the total the pane reports. A document that
- * is not an object at all is not a ledger and reads as empty.
+ * a NaN or negative size poisons the total the pane reports.
+ *
+ * ⚠️ **AND BYTES THAT WILL NOT READ ARE UNREADABLE TOO — THEY USED TO BE AN
+ * EMPTY LEDGER.** Only a failed READ took the path this comment describes;
+ * bytes that were not JSON, and JSON that was not a ledger, answered `{}` — so
+ * the very next `recordDownloadSize` wrote that emptiness over the whole file,
+ * which is the loss above by another route and just as permanent. Thrown, the
+ * bytes are left where they are for whatever can recover them. Found by the
+ * 2026-09-13 audit.
  */
 export async function readDownloadSizes(fs: IndexFs): Promise<Readonly<Record<string, number>>> {
   let raw: Uint8Array
@@ -119,17 +132,23 @@ export async function readDownloadSizes(fs: IndexFs): Promise<Readonly<Record<st
   let parsed: unknown
   try {
     parsed = JSON.parse(new TextDecoder().decode(raw))
-  } catch {
-    /* Bytes that are not JSON at all are not a ledger to preserve. */
-    return {}
+  } catch (cause) {
+    throw new Error('the downloads ledger is not JSON', { cause })
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('the downloads ledger is not an object')
+  }
   /* NULL-PROTOTYPE: the keys are book ids, and a book id can come off the
    * wire. `{}` inherits `Object.prototype`, so a book named `__proto__`
    * would run the legacy setter rather than becoming an entry. */
   const out: Record<string, number> = Object.create(null) as Record<string, number>
   for (const [book, size] of Object.entries(parsed as Record<string, unknown>)) {
-    if (typeof size === 'number' && Number.isSafeInteger(size) && size >= 0) out[book] = size
+    if (
+      Number.isSafeInteger(size) &&
+      // Stryker disable next-line ConditionalExpression: `isSafeInteger` above already refused a non-number; this narrows the type.
+      typeof size === 'number' &&
+      size >= 0
+    ) out[book] = size
   }
   return out
 }
@@ -221,10 +240,20 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
     const coverBytes = coverCache ? await coverCache.totalBytes() : 0
     /* BIGGEST FIRST, then bounded. Sorting before the cut is what makes the
      * cut answer the pane's question — "what is taking the space" — rather
-     * than showing whichever fifty the shelf happened to list first. Ties are
-     * broken by book id so two reads of an unchanged library agree. */
+     * than showing whichever fifty the shelf happened to list first.
+     *
+     * TIES ARE BROKEN BY BOOK ID, so two reads of an unchanged library agree —
+     * and by `localeCompare`, which is the kernel's own id tie-break
+     * (`byRecency`), so the shelf and this pane cannot disagree about which of
+     * two ids comes first. ⚠️ **THAT IS A CHOICE, NOT A SPELLING.** The `<`
+     * ladder it replaces compared code points, which puts every capital ahead
+     * of every lower-case letter — so `book:Bb` came before `book:aa` and the
+     * other one was the row cut at the fiftieth. An id is never shown (the row
+     * carries the title), so the tie-break owes the reader nothing but a total
+     * order that does not move between reads; what it costs is that two
+     * devices under different collations can cut a different row. */
     const shown = [...downloads]
-      .sort((a, b) => b.size - a.size || (a.book < b.book ? -1 : a.book > b.book ? 1 : 0))
+      .sort((a, b) => b.size - a.size || a.book.localeCompare(b.book))
       .slice(0, MAX_SHOWN)
     return {
       downloads: shown,
@@ -251,7 +280,48 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
    * and only while somebody is looking". */
   let stale = false
   let reading: Promise<void> | null = null
+  // Stryker disable next-line BooleanLiteral: the loop in `refresh` writes it before it is read.
   let again = false
+  /* Whether the `failure` on show is a READ's — the one kind a later read may
+     clear. Written with every failure shown, by `fail`; see `refresh`.
+
+     ONLY `fail` WRITES IT, and that is the whole rule. It means nothing while
+     no failure is on show — a clean read with it set publishes the `null`
+     that is already there — so the resets that stood beside each clearing of
+     `failure` changed no answer, and are gone rather than kept as a second
+     place to get it wrong. */
+  // Stryker disable next-line BooleanLiteral: no failure is on show until `fail` writes this, and with none on show its value changes no answer.
+  let readFailed = false
+  /**
+   * Show a failure, and say WHOSE it is in the same step.
+   *
+   * ⚠️ **THE FLAG WAS SET BESIDE ONE PUBLISH AND NOT THE OTHER TWO.** Both
+   * actions showed their failure and left `readFailed` as they found it — and a
+   * read that failed WHILE the action ran had set it. So the clean read in the
+   * action's `finally` took the flag at its word and cleared the ACTION's
+   * failure: the row still on screen, and no reason (2026-09-14 verify). One
+   * call does both now, so no failure is shown without its owner.
+   */
+  const fail = (by: 'read' | 'action', cause: unknown): void => {
+    readFailed = by === 'read'
+    publish({ failure: messageOf(cause) })
+  }
+  /**
+   * Read again, and NEVER REJECT — a read that fails is published as `failure`.
+   *
+   * ⚠️ **IT REJECTED, AND EVERY CALLER DROPPED THE PROMISE.** `collect` throws
+   * for a ledger or cover index that is there and will not read, since the
+   * 2026-09-13 audit stopped those reading as empty — and the timer below and
+   * `subscribe` discarded this with `void`, the pane did the same on mount, on
+   * a cap change and on Evict, and both actions awaited it outside their `try`.
+   * So all three public methods rejected while `failure` stayed `null`: an
+   * empty section, no reason, and an unhandled rejection (2026-09-13 verify).
+   *
+   * A read's failure is CLEARED BY A READ THAT SUCCEEDS, and only a read's: an
+   * action publishes its own failure before the refresh in its `finally`, and a
+   * clean read there must not erase why the row is still on screen. An action
+   * starting clears either kind, as it always did.
+   */
   const refresh = (): Promise<void> => {
     if (reading) {
       again = true
@@ -262,8 +332,12 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
         do {
           again = false
           stale = false
-          publish(await collect())
+          const next = await collect()
+          if (readFailed) publish({ ...next, failure: null })
+          else publish(next)
         } while (again)
+      } catch (cause) {
+        fail('read', cause)
       } finally {
         reading = null
       }
@@ -322,7 +396,8 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
         /* SAID, not swallowed. The row stays where it is either way; the
          * difference is whether the reader knows the eviction did not
          * happen. */
-        publish({ failure: messageOf(cause) })
+        // Stryker disable next-line StringLiteral: `fail` asks only whether a failure is a read's, so any word but 'read' is an action's.
+        fail('action', cause)
       } finally {
         publish({ busy: null })
         await refresh()
@@ -348,13 +423,14 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
         settings.set(COVER_CAP_SETTING, wanted)
         if (coverCache) await coverCache.evict()
       } catch (cause) {
-        publish({ failure: messageOf(cause) })
+        // Stryker disable next-line StringLiteral: as above — any word but 'read' is an action's.
+        fail('action', cause)
       }
       await refresh()
     },
     dispose: () => {
       for (const off of offs.splice(0)) off()
-      if (timer !== null) clearTimeout(timer)
+      clearTimeout(timer ?? undefined)
       timer = null
       listeners.clear()
     },

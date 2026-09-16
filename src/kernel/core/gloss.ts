@@ -20,14 +20,20 @@
  * lifetime independent of the conversation: with `companion` absent, failed,
  * or set to an agent, the gloss still works.
  *
- * ⚠️ **THE GLOSS MUST NOT REACH AN AGENT**, and it is enforced by
- * construction rather than by a rule someone has to remember. Codex or Claude
- * would open a session and start a turn to define one word — seconds, and a
- * subscription turn spent, for a gesture a reader makes dozens of times a
- * chapter. So `gloss` is bound only by `inference`, the agent adapters
- * implement `ask` and nothing else, and there is no code path from a
- * selection to a session. `companion` cannot bind this port; the registry
- * would throw if it tried.
+ * ⚠️ **THE GLOSS MUST NOT REACH AN AGENT**, and most of that is enforced by
+ * construction. Codex or Claude would open a session and start a turn to
+ * define one word — seconds, and a subscription turn spent, for a gesture a
+ * reader makes dozens of times a chapter. The agent adapters implement `ask`
+ * and nothing else, and there is no code path from a selection to a session.
+ *
+ * ⚠️ **WHO BINDS THIS PORT IS A CONVENTION, NOT A CHECK — THIS PARAGRAPH SAID
+ * THE REGISTRY WOULD THROW IF `companion` TRIED, AND IT WOULD NOT.** The
+ * registry hands every capability the same `services`, `bindGloss` included,
+ * and the slot behind it (`exclusiveSlot` in `services.ts`) refuses only a
+ * SECOND binding. A capability that bound it before `inference` did, or in a
+ * composition without `inference`, would own the port without complaint — and
+ * it is `inference` that would then throw. What holds today is that `inference`
+ * is the only caller of `bindGloss` under `src/` (2026-09-13 audit).
  *
  * ## The system dictionary is gone, and this is now the whole feature
  *
@@ -57,6 +63,8 @@
  * being told, which is what the mark is for.
  */
 
+import type { AnswerLanguages } from './glossLanguage'
+
 /**
  * What the model is allowed to see when it defines a term.
  *
@@ -70,13 +78,36 @@ export interface GlossContext {
   readonly sentence: string
   /** The book's title, for a term whose sense is set by the subject. */
   readonly bookTitle: string
+  /**
+   * What to write the definition in — one language, or two in order (WI-17.5).
+   *
+   * AN INSTRUCTION, NOT CONTEXT: it widens nothing the model reads about the
+   * book, which is the rule above. It is here because it changes the answer,
+   * and a provider that caches has to key on everything that does — a lookup
+   * made in English must not be served back after the reader chose 中文.
+   *
+   * ONE OR TWO BY TYPE. A request with no language is a request the kernel
+   * failed to resolve, and `answerLanguages` always resolves one — so the
+   * empty case is not a state a provider should have to decide about, and
+   * neither is a third language nothing asks for. This said NON-EMPTY, and the
+   * type allowed any number (2026-09-13 audit); see `AnswerLanguages`.
+   */
+  readonly answerIn: AnswerLanguages
 }
 
 export interface GlossProvider {
-  /** False when nothing can define anything — see `installable` for why not. */
+  /** False when nothing can define anything — see `installAt` for why not. */
   readonly available: boolean
   /**
-   * Whether an unavailable gloss is one the reader could go and install.
+   * WHERE the reader goes to install something that can define — the id of a
+   * settings section — or `null` when there is nowhere.
+   *
+   * ⚠️ **IT WAS A BOOLEAN, `installable`, AND "WHETHER" WAS NOT ENOUGH.** The
+   * install offer opened Settings at its top, with the section that installs a
+   * model collapsed further down under another band, because a yes/no could
+   * not say which section it meant and the kernel may not name a capability's.
+   * The provider is the one object that knows both whether and where, so it
+   * answers both, as one field — two fields could disagree.
    *
    * ⚠️ **THIS IS THE DIFFERENCE BETWEEN A DEAD BUTTON AND A LIVE ONE**, and
    * it is why `available: false` is not enough on its own. Two situations look
@@ -100,7 +131,7 @@ export interface GlossProvider {
    * cycle for as long as the production caller forgot to pass it. A field on
    * the object that knows cannot be defaulted wrong by a caller that does not.
    */
-  readonly installable: boolean
+  readonly installAt: string | null
   /**
    * Define `term` as it is used in `context`.
    *
@@ -124,7 +155,7 @@ export interface GlossProvider {
 /**
  * The default: there is nothing to define with, and nowhere to get one.
  *
- * `installable` is FALSE, which is what stops a host with no `inference` from
+ * `installAt` is NULL, which is what stops a host with no `inference` from
  * drawing a Look up button that offers a download it cannot perform. A build
  * that composes `inference` replaces this whole object at `bindGloss`.
  *
@@ -136,7 +167,7 @@ export interface GlossProvider {
  */
 export const NO_GLOSS: GlossProvider = {
   available: false,
-  installable: false,
+  installAt: null,
   async gloss() {
     throw new Error('No gloss provider is bound. Check `available` before calling gloss().')
   },

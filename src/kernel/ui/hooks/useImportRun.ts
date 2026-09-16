@@ -64,7 +64,16 @@ export interface ImportRun {
 export interface Imports {
   /** The running import's progress, or null. */
   readonly progress: ImportProgress | null
-  /** True while an import is running — what a route reads to decide policy. */
+  /**
+   * True while the bar is up, AS OF THE LAST RENDER — for drawing.
+   *
+   * ⚠️ **NOT FOR ADMISSION, AND IT WAS** (2026-09-13 audit, #98, round 3). This
+   * said "what a route reads to decide policy", and the folder route read it
+   * before its picker and again after it. State lags: two choices landing in
+   * one turn both read the render from before either had raised the bar. A
+   * route deciding policy asks `reserve` or `supersede`, which answer as of
+   * the moment they are called.
+   */
   readonly busy: boolean
   /**
    * Retire whatever is running, without starting anything.
@@ -76,8 +85,38 @@ export interface Imports {
    * reader had just asked for, leaving them in the older one. One book is as
    * much an intake as a thousand; what is being superseded is "which book
    * opens last", which every intake decides.
+   *
+   * ANSWERS WHETHER IT RETIRED AN IMPORT WHOSE BAR WAS UP, as of now, so a
+   * route can say what it replaced. The drop route read `busy` for that, and a
+   * run started in the same turn was replaced in silence (round 3, #98).
    */
-  supersede(): void
+  supersede(): boolean
+  /**
+   * Retire whatever is running AND WAIT FOR IT TO LET GO — what a teardown
+   * needs, where `supersede` is what a newer intake needs.
+   *
+   * ⚠️ **THE SHUTDOWN DRAINED THE WRITE QUEUE AND NEVER ASKED THE IMPORT**
+   * (2026-09-13 audit, #96). A copy in flight goes on copying while the window
+   * closes, and the handover is chained one batch BEHIND the copying — so the
+   * books already copied had their shelf writes queued after the drain had
+   * finished, or not queued at all. The bytes land on disk with no record: a
+   * book the library cannot see and removal cannot reach.
+   *
+   * The abort is immediate; the promise resolves once the run has flushed its
+   * handover and settled it, which is the point at which there is nothing left
+   * for a drain to miss. It resolves rather than rejects — `run` never rejects
+   * — and resolves at once when nothing is running.
+   *
+   * ⚠️ **EVERY RUN, AND NOTHING AFTER** (round 3, #96). It waited on the newest
+   * run's promise only, so a run a later one had superseded — still flushing
+   * what it copied — was abandoned to the drain; and it left the coordinator
+   * taking work, so a drop landing while the window closed started a copy
+   * after the teardown had been told the import was stopped. It waits for
+   * every run still settling now, and from its first call `run` and `reserve`
+   * refuse for the rest of this coordinator's life: the teardown it serves
+   * ends the window.
+   */
+  stop(): Promise<void>
   /**
    * Run one import, superseding whatever was running.
    *
@@ -105,6 +144,34 @@ export interface Imports {
       onFailure: (cause: unknown) => void
     },
   ): Promise<boolean>
+  /**
+   * Hold the next run across an await — for a route that REFUSES a second
+   * import rather than superseding one. `null` while a run's bar is up, while
+   * another reservation is held, or once stopped.
+   *
+   * ⚠️ **A RESERVATION, BECAUSE A READ IS NOT ONE** (2026-09-13 audit, #98,
+   * round 3). The folder route read `busy` before its picker and again after
+   * it; `busy` is state, and two choices landing in one turn both read the
+   * render from before either had started — so the second superseded the run
+   * the first had been admitted to. Taken before the await and spent by its
+   * own `run`, in the same synchronous turn as the check, nothing between the
+   * two can read a stale answer.
+   */
+  reserve(): ImportReservation | null
+}
+
+/** The next run, held for one route — see `Imports.reserve`. */
+export interface ImportReservation {
+  /**
+   * Spend it on a run. `null`, running nothing, when any intake has come since
+   * it was taken — the drop route supersedes rather than reserving, so one can
+   * start while the reader is choosing, and FINISH, which is still an import
+   * the choice was made before — when it was released, or once stopped. Spent
+   * either way.
+   */
+  run(work: Parameters<Imports['run']>[0], say: Parameters<Imports['run']>[1]): Promise<boolean> | null
+  /** Give it back unspent — a cancelled picker. Idempotent. */
+  release(): void
 }
 
 export interface ImportRunOptions {
@@ -140,15 +207,43 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
    */
   const bar = useRef(0)
 
+  /* THE BAR, AS OF NOW — `progress !== null` without waiting for the render
+     that draws it. What `reserve` and `supersede` answer from; see `busy`. */
+  const raised = useRef(false)
+  /* The one route holding the next run — see `reserve`. */
+  const reserved = useRef<object | null>(null)
+  /* Set by `stop`, for the rest of this coordinator's life — see `stop`. */
+  const stopped = useRef(false)
+
   /* A NEW INTAKE RETIRES THE OLD ONE'S WORK, not just its reporting: the
      token stops it REPORTING and the signal stops it COPYING. */
-  const supersede = useCallback((): void => {
+  /* Stryker disable ArrayDeclaration: its empty dependency list is the only
+     array in it, and it reads only refs, which never change — a list holding one
+     constant re-creates it no more often, so no test can tell the two apart. */
+  const supersede = useCallback((): boolean => {
+    const replaced = raised.current
     abort.current?.abort()
     abort.current = null
+    // Stryker disable next-line AssignmentOperator: the generation is only ever compared for equality, with a value it held after an intake, and a count stepping down never repeats any more than one stepping up does.
     generation.current += 1
+    return replaced
   }, [])
+  // Stryker restore ArrayDeclaration
 
-  const run = useCallback<Imports['run']>(
+  /**
+   * EVERY run still settling, as something to WAIT for — see `stop`.
+   *
+   * The lifecycle's own promises rather than a second flag: each settles
+   * exactly when its handover has been flushed and settled, which is what a
+   * teardown has to outlast. Never rejects, because `run` does not.
+   *
+   * ⚠️ **A SET, AND IT WAS ONE PROMISE** — the newest run's (round 3, #96). A
+   * run superseded by a later one is still shelving what it copied, and a
+   * teardown that waited for the newest let the drain go under it.
+   */
+  const running = useRef(new Set<Promise<boolean>>())
+
+  const perform = useCallback<Imports['run']>(
     async (work, say) => {
       supersede()
       const controller = new AbortController()
@@ -157,8 +252,10 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
       const current = (): boolean => generation.current === mine
 
       bar.current = mine
+      raised.current = true
       setProgress({ done: 0, total: 0 })
       const handed = createHandover<ImportOutcome>(batch, shelve)
+      // Stryker disable next-line ArrayDeclaration: only the summary reads this, and it runs only when nothing failed — so the work returned, and its outcomes replaced this seed before anything could read it.
       let outcomes: readonly ImportOutcome[] = []
       let failed: { cause: unknown } | null = null
       try {
@@ -176,8 +273,9 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
 
       /* FLUSHED AND SETTLED ON EVERY PATH, superseded or failed included: the
          bytes are on disk either way, and leaving them recordless is the
-         orphan this pipeline exists to avoid. */
-      handed.flush()
+         orphan this pipeline exists to avoid. `settled()` hands over what is
+         pending before it waits — `importHandover.test.ts` pins that — so the
+         `handed.flush()` that stood here handed over nothing, and went. */
       /* ⚠️ AND THE SETTLE ITSELF CAN REJECT, WHICH IS STILL THIS LIFECYCLE'S
          TO CLOSE. `settled()` is a chain of `shelve` calls, so one rejected
          shelf write threw straight out of `run` — past `setProgress(null)`,
@@ -213,9 +311,13 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
            this run's: a replacement `run` has already raised its own, and
            pulling that one down is what the bare return was protecting. See
            `bar`. */
-        if (bar.current === mine) setProgress(null)
+        if (bar.current === mine) {
+          raised.current = false
+          setProgress(null)
+        }
         return false
       }
+      raised.current = false
       setProgress(null)
       /* The caller's own callbacks, guarded: `run` promises never to reject,
          and a `summarise` that throws is a caller's bug, not a reason to
@@ -231,5 +333,60 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
     [shelve, batch, notice, supersede],
   )
 
-  return { progress, busy: progress !== null, supersede, run }
+  /* THE ONE PLACE THE RUN'S OWN PROMISE IS HELD. An async function cannot
+     record the promise it is itself producing, so the lifecycle stays whole in
+     `perform` and this thin wrapper is what `stop` has something to wait on. */
+  const run = useCallback<Imports['run']>(
+    (work, say) => {
+      /* NOTHING NEW ONCE STOPPED — see `stop`. False, as a run that was
+         superseded before it could say anything answers. */
+      if (stopped.current) return Promise.resolve(false)
+      const started = perform(work, say)
+      running.current.add(started)
+      // Stryker disable next-line ArrowFunction: only a promise that has settled is deleted, and one left behind is found already settled by `stop`'s `Promise.all` — which resolves as it would without it, a microtask later; nothing else reads the set.
+      void started.then(() => running.current.delete(started))
+      return started
+    },
+    [perform],
+  )
+
+  const stop = useCallback(
+    async (): Promise<void> => {
+      stopped.current = true
+      supersede()
+      await Promise.all([...running.current])
+    },
+    // Stryker disable next-line ArrayDeclaration: `supersede` is memoised over nothing and never changes, so listing it re-creates nothing and leaving it out keeps the same one.
+    [supersede],
+  )
+
+  const reserve = useCallback((): ImportReservation | null => {
+    if (stopped.current || raised.current || reserved.current !== null) return null
+    const mine = {}
+    reserved.current = mine
+    /* ⚠️ **THE GENERATION IT WAS TAKEN AT, NOT WHETHER A BAR IS UP WHEN IT IS
+       SPENT** (2026-09-14, #98, round 4). It refused on `raised`, which answers
+       for the import running NOW — so a drop that started and finished while
+       the reader was choosing left the bar down, and the stale choice started a
+       walk behind it. Every intake advances the generation, a run and a bare
+       `supersede` alike, and so does `stop`: one comparison answers for all of
+       them, the run still up included, since a reservation is never granted
+       while one is. */
+    const taken = generation.current
+    const release = (): void => {
+      if (reserved.current === mine) reserved.current = null
+    }
+    return {
+      release,
+      run: (work, say) => {
+        const held = reserved.current === mine
+        release()
+        /* THE CHECK AND THE RUN IN ONE TURN: `run` raises the bar before it
+           returns, so nothing can be admitted between the two. */
+        return held && generation.current === taken ? run(work, say) : null
+      },
+    }
+  }, [run])
+
+  return { progress, busy: progress !== null, supersede, stop, run, reserve }
 }

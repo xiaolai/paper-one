@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
-import { useState } from 'react'
+import { useLayoutEffect, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { KnownPerson, PersonPort, PersonStatus } from '../../peer'
 import { CAPABILITY_UI } from '../../../kernel'
 import { CirclePane } from './CirclePane'
-import type { CirclePort, FriendView } from '../lib/circlePort'
+import type { CirclePort, FriendBook, FriendView } from '../lib/circlePort'
 import type { ListsPort, OwnListView } from '../lib/listsPort'
 
 /**
@@ -1712,5 +1712,264 @@ describe('Start a circle begun through a port the screen no longer holds', () =>
       expect(screen.queryByText(word)).toBeNull()
     }
     expect(second.phrase).not.toHaveBeenCalled()
+  })
+})
+
+describe('a person row, held to its source — every clause mutation testing found unasked', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const withMo = () => portWith({ people: () => Promise.resolve([mo]) })
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void
+    let reject!: (cause: unknown) => void
+    const promise = new Promise<T>((yes, no) => {
+      resolve = yes
+      reject = no
+    })
+    return { promise, resolve, reject }
+  }
+  const shelfSwitch = () => screen.getByRole('checkbox', { name: 'Show my shelf to Mo' }) as HTMLInputElement
+
+  it('reads a switch back through the circle it holds NOW, not the one the write began on', async () => {
+    /* ⚠️ **THE CHECK THAT SAID IT BOUND A READ TO ITS SOURCE COMPARED A NAME
+       WITH ITSELF.** `circle === held`, where `held` had just been assigned
+       from `circle` in the same closure, so it could not fail — found
+       2026-09-15 as a surviving mutant. A write holds the read-back it was
+       begun with; when the circle was replaced while the write was out, that
+       read-back asked the OLD circle and drew its answer under the new one. */
+    let finish: (() => void) | null = null
+    const port = withMo()
+    const first: CirclePort = {
+      ...minimalCircleFor(),
+      showsShelf: () => Promise.resolve(true),
+      setShowsShelf: () =>
+        new Promise<void>((done) => {
+          finish = done
+        }),
+    }
+    const second: CirclePort = { ...minimalCircleFor(), showsShelf: vi.fn(() => Promise.resolve(false)) }
+    const view = render(<CirclePane port={port} circle={first} />)
+    const box = (await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })) as HTMLInputElement
+    expect(box.checked).toBe(true)
+    fireEvent.click(box)
+    await waitFor(() => expect(finish).not.toBeNull())
+
+    view.rerender(<CirclePane port={port} circle={second} />)
+    await waitFor(() => expect(second.showsShelf).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(shelfSwitch().checked).toBe(false))
+
+    await fire(() => finish)
+    await flush()
+    /* The circle on screen's answer stands, because the read-back asked IT — a second time. */
+    expect(shelfSwitch().checked).toBe(false)
+    expect(second.showsShelf).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads the hold-back switch back once its write has landed, as it does the shelf switch', async () => {
+    const stored = { shows: false, muted: false }
+    const circle: CirclePort = {
+      ...minimalCircleFor(),
+      showsShelf: () => Promise.resolve(stored.shows),
+      muted: () => Promise.resolve(stored.muted),
+      /* A port that does not tell its subscribers, so only the read-back can move the switch. */
+      setShowsShelf: (_person, on) => {
+        stored.shows = on
+        return Promise.resolve()
+      },
+      setMuted: (_person, on) => {
+        stored.muted = on
+        return Promise.resolve()
+      },
+    }
+    render(<CirclePane port={withMo()} circle={circle} />)
+    const held = (await screen.findByRole('checkbox', { name: "Hold back Mo's passages" })) as HTMLInputElement
+    expect(held.checked).toBe(false)
+    fireEvent.click(held)
+    await screen.findByText(/Mo's passages are not drawn in your books/u)
+    expect((screen.getByRole('checkbox', { name: "Hold back Mo's passages" }) as HTMLInputElement).checked).toBe(true)
+    fireEvent.click(shelfSwitch())
+    await screen.findByText(/Mo can see every book in your library/u)
+    expect(shelfSwitch().checked).toBe(true)
+  })
+
+  it('lets a switch read begun on a replaced circle land without drawing it', async () => {
+    const slow = deferred<boolean>()
+    const port = withMo()
+    const first: CirclePort = { ...minimalCircleFor(), showsShelf: () => slow.promise }
+    const second: CirclePort = { ...minimalCircleFor(), showsShelf: () => Promise.resolve(false) }
+    const view = render(<CirclePane port={port} circle={first} />)
+    await screen.findByRole('button', { name: 'Their shelf' })
+    view.rerender(<CirclePane port={port} circle={second} />)
+    await waitFor(() => expect(shelfSwitch().checked).toBe(false))
+    slow.resolve(true)
+    await flush()
+    expect(shelfSwitch().checked).toBe(false)
+  })
+
+  it('lets a switch read begun on a circle that has gone fail without saying so', async () => {
+    const slow = deferred<boolean>()
+    const port = withMo()
+    const view = render(<CirclePane port={port} circle={{ ...minimalCircleFor(), showsShelf: () => slow.promise }} />)
+    await screen.findByRole('button', { name: 'Their shelf' })
+    view.rerender(<CirclePane port={port} circle={null} />)
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Their shelf' })).toBeNull())
+    slow.reject(new Error('the old circle will not read'))
+    await flush()
+    expect(screen.queryByText(/could not read what Mo shared/u)).toBeNull()
+    expect(screen.getByText('Mo')).toBeTruthy()
+  })
+
+  it('says a switch that cannot be read, rather than drawing it in a position nobody read', async () => {
+    const circle: CirclePort = { ...minimalCircleFor(), showsShelf: () => Promise.reject(new Error('the relationship will not read')) }
+    render(<CirclePane port={withMo()} circle={circle} />)
+    const said = await screen.findByText(/^Paper could not read what Mo shared\./u)
+    expect(said.textContent).toBe('Paper could not read what Mo shared. the relationship will not read')
+    expect(screen.queryByRole('checkbox')).toBeNull()
+  })
+
+  it('reads a friend’s shelf only once it is asked for, and draws none of the last one while the next is read', async () => {
+    const answers: Promise<FriendView>[] = [
+      Promise.resolve({ shelf: [{ pub: 's1', title: 'Dune', author: '', language: 'en', own: null, device: null, cover: null }], recent: [], lists: [] }),
+      new Promise<FriendView>(() => {}),
+    ]
+    const friend = vi.fn(() => answers.shift()!)
+    render(<CirclePane port={withMo()} circle={{ ...minimalCircleFor(), friend }} />)
+    await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })
+    await flush()
+    expect(friend).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Dune')
+    fireEvent.click(screen.getByRole('button', { name: 'Hide their shelf' }))
+    await flush()
+    expect(friend).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Their shelf' }))
+    await waitFor(() => expect(friend).toHaveBeenCalledTimes(2))
+    await flush()
+    expect(screen.queryByText('Dune')).toBeNull()
+  })
+
+  it('clears the shelf and the trouble it read from a circle it no longer holds', async () => {
+    const port = withMo()
+    const silent = (): CirclePort => ({ ...minimalCircleFor(), showsShelf: () => new Promise<boolean>(() => {}), muted: () => new Promise<boolean>(() => {}) })
+    const shown = render(
+      <CirclePane
+        port={port}
+        circle={{ ...minimalCircleFor(), friend: () => Promise.resolve({ shelf: [{ pub: 's1', title: 'Dune', author: '', language: 'en', own: null, device: null, cover: null }], recent: [], lists: [] }) }}
+      />,
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Dune')
+    shown.rerender(<CirclePane port={port} circle={silent()} />)
+    await flush()
+    expect(screen.queryByText('Dune')).toBeNull()
+    cleanup()
+
+    const failed = render(<CirclePane port={port} circle={{ ...minimalCircleFor(), friend: () => Promise.reject(new Error('their shelf will not read')) }} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText(/could not read what Mo shared/u)
+    failed.rerender(<CirclePane port={port} circle={silent()} />)
+    await flush()
+    expect(screen.queryByText(/could not read what Mo shared/u)).toBeNull()
+  })
+
+  it('draws no switch and no friend’s shelf without a circle, not even in the commit before its reset runs', async () => {
+    /* ⚠️ **THE RESET IS AN EFFECT, SO THE COMMIT THAT TAKES THE CIRCLE AWAY STILL
+       HOLDS WHAT IT READ.** Only `circle !== null`, beside each drawing, keeps
+       that commit empty — which is a frame the webview can paint. A layout
+       effect in the parent runs after that commit and before the reset, so it
+       sees exactly what the frame would show. */
+    const commits: { readonly switches: number; readonly shelves: number }[] = []
+    const port = withMo()
+    const Probe = ({ circle }: { readonly circle: CirclePort | null }) => {
+      useLayoutEffect(() => {
+        commits.push({
+          switches: document.querySelectorAll('input[aria-label="Show my shelf to Mo"], input[aria-label="Hold back Mo\'s passages"]').length,
+          shelves: document.querySelectorAll('[data-friend-view]').length,
+        })
+      })
+      return <CirclePane port={port} circle={circle} />
+    }
+    const view = render(<Probe circle={minimalCircleFor()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Mo has shown you no books.')
+    await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })
+    const before = commits.length
+
+    view.rerender(<Probe circle={null} />)
+    const after = commits.slice(before)
+    expect(after.length).toBeGreaterThan(0)
+    expect(after).toEqual(after.map(() => ({ switches: 0, shelves: 0 })))
+  })
+
+  it('reads the roster again once somebody is removed', async () => {
+    let people: readonly KnownPerson[] = [mo]
+    const forgetPerson = vi.fn(() => {
+      people = []
+      return Promise.resolve()
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve(people), forgetPerson })} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }))
+    await screen.findByText('Nobody yet.')
+    expect(forgetPerson).toHaveBeenCalledWith(mo.person)
+    expect(screen.queryByText('Mo')).toBeNull()
+  })
+
+  it('draws no trouble line in a row where nothing has failed', async () => {
+    render(<CirclePane port={withMo()} />)
+    const row = (await screen.findByText('Mo')).closest(`.${CAPABILITY_UI.row}`)!.parentElement!
+    expect(row.querySelectorAll('p')).toHaveLength(0)
+  })
+
+  it('lets a jacket go when its row changes, draws nothing a let-go request brings back, and asks nothing of a row with no device', async () => {
+    const asked: { readonly book: FriendBook; readonly signal: AbortSignal | undefined; readonly answer: ReturnType<typeof deferred<string | null>> }[] = []
+    const cover = vi.fn((_person: string, book: FriendBook, signal?: AbortSignal) => {
+      const answer = deferred<string | null>()
+      asked.push({ book, signal, answer })
+      return answer.promise
+    })
+    const dune: FriendBook = { pub: 's1', title: 'Dune', author: '', language: 'en', own: null, device: 'd1', cover: 'ab'.repeat(32) }
+    let shelf: readonly FriendBook[] = [dune]
+    let tell: (() => void) | null = null
+    const circle: CirclePort = {
+      ...minimalCircleFor(),
+      friend: () => Promise.resolve({ shelf, recent: [], lists: [] }),
+      cover,
+      subscribe: (listener) => {
+        tell = listener
+        return () => {}
+      },
+    }
+    const { container } = render(<CirclePane port={withMo()} circle={circle} />)
+    const jacket = () => container.querySelector('img[data-jacket="s1"]')
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await waitFor(() => expect(asked).toHaveLength(1))
+    expect(asked[0]!.signal?.aborted).toBe(false)
+
+    /* A new digest for the same book: the request out is let go, and what it brings back is not drawn. */
+    shelf = [{ ...dune, cover: 'cd'.repeat(32) }]
+    await fire(() => tell)
+    await waitFor(() => expect(asked).toHaveLength(2))
+    expect(asked[0]!.signal?.aborted).toBe(true)
+    asked[0]!.answer.resolve('data:image/png;base64,OLD')
+    await flush()
+    expect(jacket()).toBeNull()
+    asked[1]!.answer.resolve('data:image/png;base64,NEW')
+    await waitFor(() => expect(jacket()?.getAttribute('src')).toBe('data:image/png;base64,NEW'))
+
+    /* Another: the picture already drawn goes while the next one is out. */
+    shelf = [{ ...dune, cover: 'ef'.repeat(32) }]
+    await fire(() => tell)
+    await waitFor(() => expect(asked).toHaveLength(3))
+    await flush()
+    expect(jacket()).toBeNull()
+
+    /* A digest with no device to ask for it: nothing is asked. */
+    shelf = [{ ...dune, cover: '12'.repeat(32), device: null }]
+    await fire(() => tell)
+    await flush()
+    await flush()
+    expect(asked).toHaveLength(3)
+    expect(asked[2]!.signal?.aborted).toBe(true)
   })
 })

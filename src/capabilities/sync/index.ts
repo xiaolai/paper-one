@@ -9,6 +9,7 @@ import {
   type Capability,
   type CapabilityContext,
   type Disposable,
+  type IndexFs,
   type IndexedBook,
   type KernelApi,
   type KernelServices,
@@ -18,7 +19,7 @@ import {
   type Setting,
 } from '../../kernel'
 import { peerPort, readRole, registerSyncNow, type PeerPort } from '../peer'
-import { createClock, ensureDeviceId, isHlc, type Hlc } from './lib/clock'
+import { createClock, ensureDeviceId, isHlc } from './lib/clock'
 import { createBackfill } from './lib/backfill'
 import { stampMeasured, unstampUnlessVerified } from './lib/coverStamps'
 import { createCoverCache, type CoverCache } from './lib/coverCache'
@@ -29,7 +30,7 @@ import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, 
 import { createDownloads, describeDownload } from './lib/downloads'
 import { describeArrival, dropArrival, readArrivals, recordArrival, type Arrival } from './lib/arrivals'
 import { createSyncScheduler, type SyncOutcome, type SyncScheduler } from './lib/scheduler'
-import { describeRefusal, describeSession, refusalKind, type RefusalNames } from './lib/status'
+import { describeRefusal, describeSession, refusalKind, type RefusalNames, type SessionRefusal } from './lib/status'
 import { createStorageModel, dropDownloadSize, recordDownloadSize, type StorageModel } from './ui/storageModel'
 import { StoragePane } from './ui/StoragePane'
 
@@ -66,8 +67,15 @@ import { StoragePane } from './ui/StoragePane'
  * `journalFsync.test.ts` pins the wiring that replaced it. */
 
 /** The clock floor, persisted before any stamp escapes (`clock.ts`). */
-export const CLOCK_FLOOR_SETTING: Setting<string> = defineSetting('sync.clockFloor', '', (raw) =>
-  typeof raw === 'string' ? raw : undefined,
+export const CLOCK_FLOOR_SETTING: Setting<string> = defineSetting(
+  /* THE KEY IS ON A LINE OF ITS OWN because a `next-line` directive covers
+     every mutant of its mutator on the line it names, and the fallback below is
+     a second string whose mutant `index.test.ts` kills. Written on one line,
+     the directive would have hidden that one too. */
+  // Stryker disable next-line StringLiteral: `defineSetting` refuses an unnamespaced key, and it is called HERE, at module scope — so the empty-string mutant throws while this module is being imported, every covering suite fails to LOAD, no test fails, and Stryker's vitest runner reports it Survived with nothing able to kill it (measured 2026-09-14)
+  'sync.clockFloor',
+  '',
+  (raw) => (typeof raw === 'string' ? raw : undefined),
 )
 
 /* ---------------------------------------------------------- runtime state */
@@ -81,10 +89,11 @@ let running: {
   readonly shelfName: () => Promise<string | null>
   /** A book's title, for a refusal that is about one book. */
   readonly titleOf: (book: string) => string | null
-  readonly coverCache: CoverCache | null
+  readonly coverCache: CoverCache
   /** The composition's (scoped) filesystem — carried here so an action that
-   *  outlives a teardown cannot write through a NEWER runtime's handle. */
-  readonly fs: KernelApi['services']['fs']
+   *  outlives a teardown cannot write through a NEWER runtime's handle. Never
+   *  null: a runtime is only built over a filesystem. */
+  readonly fs: IndexFs
   /** The kernel's queue and the book's lane on it — download-size bookkeeping
    *  is ordered against eviction there (audit-fix #319). */
   readonly writes: KernelApi['services']['writes']
@@ -148,7 +157,7 @@ const arrivalsChanged = () => {
  * costs a notice that returns once, on the next launch, which is a great deal
  * better than a render that cannot be repeated safely.
  */
-function pruneArrivals(books: readonly { bookId: string; openedAt?: number }[]): void {
+function pruneArrivals(books: readonly { bookId: string; openedAt?: number }[], fs: IndexFs): void {
   if (arrivals.size === 0) return
   let dropped = false
   for (const book of books) {
@@ -157,15 +166,12 @@ function pruneArrivals(books: readonly { bookId: string; openedAt?: number }[]):
     if (describeArrival(arrival, book) !== null) continue
     arrivals.delete(book.bookId)
     dropped = true
-    const fs = running?.fs
-    if (fs) {
-      void dropArrival(fs, book.bookId).catch((thrown: unknown) => {
-        warn?.('sync.arrival-drop-failed', {
-          book: book.bookId,
-          message: messageOf(thrown),
-        })
+    void dropArrival(fs, book.bookId).catch((thrown: unknown) => {
+      warn?.('sync.arrival-drop-failed', {
+        book: book.bookId,
+        message: messageOf(thrown),
       })
-    }
+    })
   }
   if (dropped) arrivalsChanged()
 }
@@ -205,6 +211,7 @@ async function refusalNames(): Promise<RefusalNames> {
   const held = running
   return {
     shelf: held ? await held.shelfName().catch(() => null) : null,
+    // Stryker disable next-line OptionalChaining: a title is asked for only where the runtime that asked is still the one running.
     title: (book) => held?.titleOf(book) ?? null,
   }
 }
@@ -217,21 +224,26 @@ async function refusalNames(): Promise<RefusalNames> {
  * hardware the reader may not own. The kind decides the sentence; the
  * shelf's own name and the book's title go where they belong.
  */
-async function degrade(thrown: unknown, book?: string): Promise<void> {
-  /* OWNED BY THE RUNTIME THAT WAS UP WHEN THIS FAILED. `refusalNames` asks
-   * the plugin for the shelf's name, which is IPC — and a teardown or a
-   * restart lands inside that await freely. The status is a module slot, so
-   * an old download's refusal used to arrive after the runtime it belonged
-   * to was gone and paint "your shelf isn't reachable" over a session that
-   * had just started successfully. The callers that capture their own owner
-   * check it before calling this; this is the check for the await INSIDE. */
-  const owner = running
-  const message = messageOf(thrown)
-  const refusal = { kind: refusalKind(thrown), message, ...(book === undefined ? {} : { book }) }
+async function degrade(refusal: SessionRefusal, owner: typeof running): Promise<void> {
+  /* OWNED BY THE RUNTIME THAT WAS UP WHEN THE WORK BEGAN — the caller's own,
+   * not whichever runtime holds the slot now. `refusalNames` asks the plugin
+   * for the shelf's name, which is IPC, and a teardown or a restart lands
+   * inside that await freely. The status is a module slot, so an old
+   * download's refusal used to arrive after the runtime it belonged to was
+   * gone and paint "your shelf isn't reachable" over a session that had just
+   * started successfully.
+   *
+   * ⚠️ **AND IT STILL DID FOR A DOWNLOAD**, which is where that defect was
+   * first seen: the owner was read HERE, at the failure, so a download that
+   * failed after its own runtime had been replaced captured the REPLACEMENT
+   * and painted over it. The press is what owns the sentence. */
   const names = await refusalNames()
   if (running !== owner) return
   syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, names) })
 }
+
+/** A thrown value as the refusal it is — the book added by a caller that has one. */
+const refusalOf = (thrown: unknown): SessionRefusal => ({ kind: refusalKind(thrown), message: messageOf(thrown) })
 
 /* IN FLIGHT, BY BOOK. The corner mark on the card and the Download item in
    the menu both run this, and neither disables itself while it works — so a
@@ -274,15 +286,13 @@ async function runDownload(bookId: string): Promise<void> {
        * why. The download itself still counts as done — the bytes are on disk,
        * which is what the reader asked for — so this reports rather than
        * throws. */
-      if (fs) {
-        await held.writes
-          .append(held.lane(bookId), () => recordDownloadSize(fs, bookId, size))
-          .catch((thrown: unknown) => {
-            warn?.('sync.download-size-unrecorded', { book: bookId, message: messageOf(thrown) })
-          })
-      }
+      await held.writes
+        .append(held.lane(bookId), () => recordDownloadSize(fs, bookId, size))
+        .catch((thrown: unknown) => {
+          warn?.('sync.download-size-unrecorded', { book: bookId, message: messageOf(thrown) })
+        })
       /* The jacket, best-effort — a cover that will not come costs nothing. */
-      await held.coverCache?.ensure(bookId).catch(() => {})
+      await held.coverCache.ensure(bookId).catch(() => {})
     })
   } finally {
     /* WHATEVER HAPPENED. A terminal transfer event clears this already, but a
@@ -298,7 +308,7 @@ async function removeDownloadAction(bookId: string): Promise<void> {
   if (!held) return
   await held.ledger.removeDownload(bookId)
   const fs = held.fs
-  if (fs) await held.writes.append(held.lane(bookId), () => dropDownloadSize(fs, bookId)).catch(() => {})
+  await held.writes.append(held.lane(bookId), () => dropDownloadSize(fs, bookId)).catch(() => {})
 }
 
 /* The journal HANDOFF: one journal's close must settle before the next
@@ -359,20 +369,26 @@ const BACKFILL_IDLE_CEILING_MS = 3_000
  * comparing everything would report differences that mean nothing and teach a
  * reader to ignore the answer.
  */
+/* An absent tag list, spread as nothing. */
+// Stryker disable next-line ArrayDeclaration: `parseRecord` keeps no empty tag list, so both rows it compares spread this for exactly the same absent list.
+const NO_TAGS: readonly string[] = []
+
 function summarise(row: IndexedBook): string {
   return JSON.stringify([
     row.title,
     row.author,
-    [...(row.tags ?? [])].sort(),
+    [...(row.tags ?? NO_TAGS)].sort(),
+    // Stryker disable next-line EqualityOperator: negated for both rows alike, and only whether the two agree is read.
     row.finished === true,
     row.progress ?? 0,
+    // Stryker disable next-line EqualityOperator: as above.
     row.hasContent === true,
   ])
 }
 
 async function integrityPass(
   journal: Journal,
-  fs: ReturnType<() => KernelApi['services']['fs']>,
+  fs: IndexFs,
   /* The caller's cancellation, honoured at the two points where this pass
    * becomes expensive: the journal walk and the shelf scan. A verify runs over
    * the whole library, so a caller that timed out, cancelled, disconnected or
@@ -396,6 +412,11 @@ async function integrityPass(
   for (const entry of journal.entries()) {
     /* Cheap per entry, and a journal can hold tens of thousands. */
     if (stop()) return { ok: false, findings: ['cancelled'], notes }
+    /* One key for every surface would count the same brackets: a commit that
+     * names its begin removes a seq no other key holds, and a begin that one
+     * naming none clears early is one a later commit names anyway — `open()`
+     * commits every dangling begin before this can walk the file. */
+    // Stryker disable next-line StringLiteral: see above — one shared key counts the same brackets.
     const key = `${entry.what}\u0000${entry.book}`
     if (entry.kind === 'begin') {
       const held = open.get(key) ?? new Set<number>()
@@ -419,44 +440,44 @@ async function integrityPass(
   const owed = journal.outbox().length
   if (owed > 0) notes.push(`${owed} ${owed === 1 ? 'row is' : 'rows are'} still waiting to push`)
 
-  if (fs) {
-    try {
-      /* BY CONTENT, not by count and not by id alone.
-       *
-       * `book.json` is explicitly allowed to be NEWER than `index.json` — the
-       * index is a cache — so a write that failed between the two leaves a
-       * cache with the right ids and stale fields, and nothing later notices:
-       * `loadShelf` trusts a cache whose folder listing still agrees. That is
-       * the failure this pass exists for, and a count or an id set cannot see
-       * it. Comparing the fields the shelf actually reads can. */
-      if (stop()) return { ok: false, findings: ['cancelled'], notes }
-      const scanned = await scanBooks(fs)
-      const onDisk = new Map(scanned.map((one) => [one.bookId, one] as const))
-      const cached = parseIndex(new TextDecoder().decode(await fs.readFile(INDEX_FILE)))
-      if (cached === null) findings.push('index.json is missing or will not parse')
-      else {
-        const indexed = new Map(cached.map((one) => [one.bookId, one] as const))
-        /* A DUPLICATE ROW IS A FAULT, and a map alone would hide it: an
-         * `index.json` holding one book twice has the right ids and the wrong
-         * contents. */
-        if (indexed.size !== cached.length) {
-          findings.push(`index.json holds ${cached.length - indexed.size} duplicate row(s)`)
-        }
-        const missing = [...onDisk.keys()].filter((id) => !indexed.has(id))
-        const extra = [...indexed.keys()].filter((id) => !onDisk.has(id))
-        if (missing.length > 0) findings.push(`index.json is missing ${missing.length} book(s) the folders hold, e.g. ${missing[0]}`)
-        if (extra.length > 0) findings.push(`index.json holds ${extra.length} book(s) with no folder, e.g. ${extra[0]}`)
-        const stale = [...onDisk.entries()].filter(([id, row]) => {
+  /* BY CONTENT, not by count and not by id alone.
+   *
+   * `book.json` is explicitly allowed to be NEWER than `index.json` — the
+   * index is a cache — so a write that failed between the two leaves a
+   * cache with the right ids and stale fields, and nothing later notices:
+   * `loadShelf` trusts a cache whose folder listing still agrees. That is
+   * the failure this pass exists for, and a count or an id set cannot see
+   * it. Comparing the fields the shelf actually reads can. */
+  try {
+    if (stop()) return { ok: false, findings: ['cancelled'], notes }
+    const scanned = await scanBooks(fs)
+    const onDisk = new Map(scanned.map((one) => [one.bookId, one] as const))
+    const cached = parseIndex(new TextDecoder().decode(await fs.readFile(INDEX_FILE)))
+    if (cached === null) findings.push('index.json is missing or will not parse')
+    else {
+      const indexed = new Map(cached.map((one) => [one.bookId, one] as const))
+      /* A DUPLICATE ROW IS A FAULT, and a map alone would hide it: an
+       * `index.json` holding one book twice has the right ids and the wrong
+       * contents. */
+      if (indexed.size !== cached.length) {
+        findings.push(`index.json holds ${cached.length - indexed.size} duplicate row(s)`)
+      }
+      const missing = [...onDisk.keys()].filter((id) => !indexed.has(id))
+      const extra = [...indexed.keys()].filter((id) => !onDisk.has(id))
+      if (missing.length > 0) findings.push(`index.json is missing ${missing.length} book(s) the folders hold, e.g. ${missing[0]}`)
+      if (extra.length > 0) findings.push(`index.json holds ${extra.length} book(s) with no folder, e.g. ${extra[0]}`)
+      const stale = [...onDisk.entries()]
+        .filter(([id, row]) => {
           const held = indexed.get(id)
           return held !== undefined && summarise(held) !== summarise(row)
         })
-        if (stale.length > 0) {
-          findings.push(`index.json is behind the record for ${stale.length} book(s), e.g. ${stale[0]?.[0] ?? ''}`)
-        }
+        .map(([id]) => id)
+      if (stale.length > 0) {
+        findings.push(`index.json is behind the record for ${stale.length} book(s), e.g. ${stale[0]}`)
       }
-    } catch (error) {
-      findings.push(`the library could not be scanned: ${messageOf(error)}`)
     }
+  } catch (error) {
+    findings.push(`the library could not be scanned: ${messageOf(error)}`)
   }
 
   return { ok: findings.length === 0, findings, notes }
@@ -548,8 +569,11 @@ export const sync: Capability = {
       /* A satchel's metadata-only row. The kernel's open path still refuses
        * a book with no bytes (`canOpen`); tap-to-open-fetches is C.6 polish
        * — this action is the honest seam today. */
-      when: (book) => runningRole() === 'satchel' && book.hasContent !== true,
-      run: (bookId) => downloadAction(bookId).catch((thrown: unknown) => degrade(thrown, bookId)),
+      when: (book) => currentRole() === 'satchel' && book.hasContent !== true,
+      run: (bookId) => {
+        const owner = running
+        return downloadAction(bookId).catch((thrown: unknown) => degrade({ ...refusalOf(thrown), book: bookId }, owner))
+      },
     },
     {
       /* EVICT, not "Remove download" (phase 11).
@@ -571,13 +595,15 @@ export const sync: Capability = {
        * device's bytes and the book stays put. Giving them one icon would
        * undo in artwork exactly what the label was renamed to prevent. */
       icon: 'circle-minus',
-      when: (book) => runningRole() === 'satchel' && book.hasContent === true,
-      run: (bookId) =>
-        removeDownloadAction(bookId).catch((thrown: unknown) =>
+      when: (book) => currentRole() === 'satchel' && book.hasContent === true,
+      run: (bookId) => {
+        const owner = running
+        return removeDownloadAction(bookId).catch((thrown: unknown) =>
           /* Content that stayed put must not look removed — same signal as a
            * failed download. */
-          degrade(thrown, bookId),
-        ),
+          degrade({ ...refusalOf(thrown), book: bookId }, owner),
+        )
+      },
     },
   ],
 
@@ -611,8 +637,10 @@ export const sync: Capability = {
     /* The epoch this runtime claimed, so its teardown can tell whether the
        map is still its own — see the `arrival-prune` step. */
     let myArrivalsEpoch: number | null = null
-    let backfillTimer: ReturnType<typeof setTimeout> | null = null
-    let boundRole: object | null = null
+    let backfillTimer: ReturnType<typeof setTimeout> | undefined
+    /* A token that owns nothing until `bindRole` answers with the real one, so
+       the teardown hands one back without asking whether a role was bound. */
+    let boundRole: object = {}
     let stopped = false
 
     const step = (label: string, fn: () => void): void => {
@@ -628,36 +656,51 @@ export const sync: Capability = {
     const stop = (): void => {
       if (stopped) return
       stopped = true
+      // Stryker disable next-line StringLiteral,CallExpression: a listener left on the signal can only call this again, and it returns above.
       signal.removeEventListener('abort', stop)
       step('scheduler', () => scheduler?.stop())
+      /* A stopped scheduler ignores `syncNow`, so the slot still holding one
+       * changes nothing a caller can see — this lets it go. */
+      // Stryker disable next-line StringLiteral,BlockStatement,CallExpression: see above; and `unbindScheduler` does not throw.
       step('bindScheduler', () => {
+        // Stryker disable next-line ConditionalExpression,EqualityOperator,CallExpression: see above.
         if (scheduler !== null) unbindScheduler(scheduler)
       })
       step('syncNow', () => unregisterSyncNow?.())
       step('arrival-prune', () => {
-        offLibrary?.()
-        /* ONLY IF THE MAP IS STILL OURS. A stop that ran unconditionally
-           cleared it and bumped the epoch even when a NEWER runtime had
-           already claimed both — so a restart wiped the arrivals the new run
-           had just loaded, and invalidated its in-flight read as well. A
-           late-stopping old runtime now leaves the new one alone. */
-        if (myArrivalsEpoch !== null && myArrivalsEpoch === arrivalsEpoch) {
-          arrivalsEpoch++
-          arrivals.clear()
-          arrivalsChanged()
-          warn = null
+        /* THE MAP IS GIVEN UP WHATEVER THE UNSUBSCRIBE DOES. One that threw
+           used to skip everything below it, so the notices and the epoch
+           outlived the runtime that had claimed them. */
+        try {
+          offLibrary?.()
+        } finally {
+          /* ONLY IF THE MAP IS STILL OURS. A stop that ran unconditionally
+             cleared it and bumped the epoch even when a NEWER runtime had
+             already claimed both — so a restart wiped the arrivals the new run
+             had just loaded, and invalidated its in-flight read as well. A
+             late-stopping old runtime now leaves the new one alone. */
+          if (myArrivalsEpoch === arrivalsEpoch) {
+            arrivalsEpoch++
+            arrivals.clear()
+            arrivalsChanged()
+            warn = null
+          }
+          myArrivalsEpoch = null
         }
-        myArrivalsEpoch = null
       })
       step('shelf-port', () => unbindShelfPort?.dispose())
       step('serve', () => unserve?.())
-      step('backfill', () => {
-        if (backfillTimer !== null) clearTimeout(backfillTimer)
-      })
+      step('backfill', () => clearTimeout(backfillTimer))
       step('storageModel', () => {
         if (storageModel === myStorageModel) {
-          storageModel?.dispose()
-          storageModel = null
+          /* EMPTIED WHATEVER THE DISPOSE DOES. A dispose that threw left the
+           * slot holding the model it had half taken down, and the Storage
+           * section went on drawing it after the runtime was gone. */
+          try {
+            storageModel?.dispose()
+          } finally {
+            storageModel = null
+          }
         } else {
           myStorageModel?.dispose()
         }
@@ -671,15 +714,15 @@ export const sync: Capability = {
        * — the whole point of an unbind-able bind. */
       step('unbindRecorder', () => unbindRecorder?.dispose())
       step('unbindClock', () => unbindClock?.dispose())
-      step('role', () => {
-        if (boundRole !== null) unbindRole(boundRole)
-      })
+      // Stryker disable next-line StringLiteral: `unbindRole` does not throw, so the label is never reported.
+      step('role', () => unbindRole(boundRole))
       /* Best-effort: the dirty flag stays if this write loses the race with
        * the window, and the next open's verify pass squares it — that is
        * what the flag is FOR. */
       step('journal', () => closeJournal?.())
     }
     api.onCleanup(stop)
+    // Stryker disable next-line ObjectLiteral,BooleanLiteral: a signal aborts once, and `stop` takes the listener off itself.
     signal.addEventListener('abort', stop, { once: true })
 
     const device = ensureDeviceId(settings)
@@ -687,11 +730,11 @@ export const sync: Capability = {
       deviceId: device,
       load: () => {
         const raw = settings.get(CLOCK_FLOOR_SETTING)
-        return raw !== '' && isHlc(raw) ? (raw as Hlc) : null
+        return isHlc(raw) ? raw : null
       },
       save: (last) => settings.set(CLOCK_FLOOR_SETTING, last),
     })
-    unbindClock = services.bindClock(() => clock.now())
+    unbindClock = services.bindClock(() => clock.now(), (stamp) => clock.witness(stamp))
 
     const port = peerPort()
     const fs = services.fs
@@ -764,8 +807,11 @@ export const sync: Capability = {
     }
     if (abortedDuringStart()) throw new Error('sync: start aborted while the journal was opening')
 
-    if (fs && journal && port) {
-      const openJournal = journal
+    /* THE FILESYSTEM ANSWERS FOR THE JOURNAL: one is opened above whenever
+     * there is a filesystem, and a start that could not open it has already
+     * thrown. Asking for both here was a check that could never decide. */
+    if (fs && port) {
+      const openJournal = journal!
       /* ⚠️ **THROUGH `readRole`, WHICH RETRIES — THIS ASKED ONCE.** `peer`'s
        * own reader exists because the plugin can answer late: `devicePort.test`
        * has a case named "retries a plugin that is not ready yet, rather than
@@ -794,6 +840,13 @@ export const sync: Capability = {
          check inside it. Hydration from disk is still the shelf's alone. */
       myArrivalsEpoch = ++arrivalsEpoch
       arrivals.clear()
+      /* ⚠️ **AND THE REPORTER IS CLAIMED WITH IT, FOR EITHER ROLE.** It was set
+         in the shelf's branch alone, beside the prune it was written for, and
+         then read by `withShelf` and `runDownload` — which run on a SATCHEL,
+         where it was always null. So a channel that would not close and a
+         download size that would not save were both reported to nobody, on the
+         one role that has them. Cleared under the same ownership as the map. */
+      warn = (code, detail) => api.diagnostics.warn(code, detail)
       const fetchVerifiedBlob = (
         peerId: string,
         folder: string,
@@ -802,7 +855,8 @@ export const sync: Capability = {
       ) =>
         port.fetchBlob(
           { peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash },
-          onProgress === undefined ? undefined : (event) => onProgress(event.received, event.total),
+          // Stryker disable next-line OptionalChaining: a caller that asked for no progress makes this throw into the port's own catch, which is where doing nothing already goes.
+        (event) => onProgress?.(event.received, event.total),
         )
       const ledger = createLedger({
         services,
@@ -823,24 +877,22 @@ export const sync: Capability = {
              provenance is still unwritten. */
           (async () => {
             const from =
+              // Stryker disable next-line ArrayDeclaration: any list without the sender answers the same fallback.
               (await port.listPeers().catch(() => [])).find((one) => one.id === peerId)?.name ??
               'another device'
             /* EPOCH-CHECKED ACROSS THE AWAIT. `listPeers` is IPC, so a
                session that was still acking when the runtime stopped could
                land its arrival in a map the next run owns. */
-            if (myArrivalsEpoch === null || myArrivalsEpoch !== arrivalsEpoch) return
+            if (myArrivalsEpoch !== arrivalsEpoch) return
             const arrival: Arrival = { from, at: Date.now() }
             arrivals.set(bookId, arrival)
             arrivalsChanged()
-            const fs = services.fs
-            if (fs) {
-              await recordArrival(fs, bookId, arrival).catch((thrown: unknown) => {
-                api.diagnostics.warn('sync.arrival-record-failed', {
-                  book: bookId,
-                  message: messageOf(thrown),
-                })
+            await recordArrival(fs, bookId, arrival).catch((thrown: unknown) => {
+              api.diagnostics.warn('sync.arrival-record-failed', {
+                book: bookId,
+                message: messageOf(thrown),
               })
-            }
+            })
           })(),
         /* THE SHELF'S "last synced", and the only honest moment it has. It
            does not initiate, so there is no session of its own to finish; a
@@ -854,6 +906,7 @@ export const sync: Capability = {
       const shelfPeer = async (): Promise<string | null> =>
         (await port.listPeers()).find((peer) => peer.role === 'shelf')?.id ?? null
       const shelfName = async (): Promise<string | null> =>
+        // Stryker disable next-line OptionalChaining: with no shelf paired the throw lands in `refusalNames`' own catch, exactly where `null` goes.
         (await port.listPeers()).find((peer) => peer.role === 'shelf')?.name ?? null
       const titleOf = (book: string): string | null =>
         services.library.getSnapshot().find((one) => one.bookId === book)?.title ?? null
@@ -864,37 +917,44 @@ export const sync: Capability = {
         /* The host's size port where the host has one — `paper` does, the
          * webview does not. Read at CALL time like the other outward ports,
          * because it is bound after the services are built. */
+        // Stryker disable next-line OptionalChaining: with no size port the throw lands in the cache's own catch, exactly where `null` goes.
         bytesAt: async (path) => (await services.sizes()?.bytesAt(path)) ?? null,
         /* The host's hasher, for a stamp still owed: paid from a fresh
            measurement of the file that is there. Read at call time, as `bytesAt` is. */
-        // Stryker disable next-line all: wiring — the hash port handed through; `coverCache.test.ts` holds what a stamp owed does with one.
         hashes: () => services.hashes(),
         lookup: async (book) => {
+          /* ONLY THE ASKING IS "NOTHING FOUND" — no shelf, no session, a
+             refusal. The catch used to wrap the reading of the answer too, so
+             a defect there came back as a book with no jacket, exactly as a
+             shelf that had none did. */
+          let reached: { readonly peerId: string; readonly raw: unknown }
           try {
-            return await withShelf(async (channel) => {
-              /* The one canonical parser — an ad-hoc cast here once accepted
-               * shapes the protocol module would refuse. */
-              const answer = parseContentAnswer(await channel.call(SYNC_SERVICES.content.name, { book }))
-              if (answer === null) return null
-              const cover =
-                answer.coverName !== null && answer.coverSize !== undefined && answer.coverHash !== undefined
-                  ? { name: answer.coverName, size: answer.coverSize, hash: answer.coverHash }
-                  : null
-              return { peerId: channel.peerId, folder: answer.folder, cover }
-            })
+            reached = await withShelf(async (channel) => ({
+              peerId: channel.peerId,
+              raw: await channel.call(SYNC_SERVICES.content.name, { book }),
+            }))
           } catch {
             return null
           }
+          /* The one canonical parser — an ad-hoc cast here once accepted
+           * shapes the protocol module would refuse. */
+          const answer = parseContentAnswer(reached.raw)
+          if (answer === null) return null
+          /* THE JACKET'S THREE FIELDS ARE ONE TUPLE, and `parseContentAnswer`
+             refuses every other combination — a size with no name, a name
+             with no digest — so the digest answers for all three. Asking
+             each of them separately here meant two of the three checks
+             could never decide anything, and the cache checks all three
+             again before a byte moves. */
+          const cover =
+            answer.coverHash === undefined ? null : { name: answer.coverName!, size: answer.coverSize!, hash: answer.coverHash }
+          return { peerId: reached.peerId, folder: answer.folder, cover }
         },
         fetchBlob: fetchVerifiedBlob,
-        /* A jacket that landed carries its facts onto the record (WI-23.C5). */
-        // Stryker disable next-line all: wiring — the cache's stamp handed to the library; `coverCache.test.ts` holds the call and `bookFolder.test.ts` the field.
         /* A jacket that landed carries its facts onto the record, and a jacket
            gone takes them back — both decided INSIDE the book's lane against
            the file that is there (WI-23.C5): `coverStamps.ts`. */
-        // Stryker disable next-line all: wiring — `coverStamps.test.ts` holds what each does at the record.
         stamp: (book, facts) => stampMeasured({ library: services.library, hashes: () => services.hashes() }, book, facts),
-        // Stryker disable next-line all: wiring — as above.
         unstamp: (book, name) => unstampUnlessVerified({ library: services.library, hashes: () => services.hashes() }, book, name),
         /* Eviction's only delete — the kernel's closed-name primitive
          * (WI-10.2/10.5); the scoped fs cannot reach a book's folder. */
@@ -936,7 +996,7 @@ export const sync: Capability = {
           syncNow()
           return { started: true, detail: null }
         },
-        verify: async (signal) => integrityPass(openJournal, services.fs, signal),
+        verify: async (signal) => integrityPass(openJournal, fs, signal),
       })
 
       if (role === 'shelf') {
@@ -950,32 +1010,33 @@ export const sync: Capability = {
         syncStatus.set({ state: 'idle', detail: null })
         /* WHAT ARRIVED WHILE NOBODY WAS LOOKING. The shelf is the unattended
            device, so the notice has to survive a relaunch or it would only
-           ever be seen by a reader who happened to be watching. */
-        if (services.fs) {
-          /* THE SEAM THAT REPLACED A SIDE EFFECT IN RENDER. `openedAt` moving
-             IS a library change, so this fires the moment the reader opens an
-             arrived book — the same instant the old code cleared it from
-             inside `BookStatus.of`, but off the path React may re-run. */
-          warn = (code, detail) => api.diagnostics.warn(code, detail)
-          offLibrary = services.library.subscribe(() => {
-            pruneArrivals(services.library.getSnapshot())
+           ever be seen by a reader who happened to be watching. (No filesystem
+           guard: this branch is only reached with one.) */
+        /* THE SEAM THAT REPLACED A SIDE EFFECT IN RENDER. `openedAt` moving
+           IS a library change, so this fires the moment the reader opens an
+           arrived book — the same instant the old code cleared it from
+           inside `BookStatus.of`, but off the path React may re-run. */
+        /* THROUGH THIS RUNTIME'S OWN FILESYSTEM, the one it subscribed with
+           — never whichever runtime happens to hold `running` when the
+           library changes. */
+        offLibrary = services.library.subscribe(() => {
+          pruneArrivals(services.library.getSnapshot(), fs)
+        })
+        const epoch = myArrivalsEpoch
+        void readArrivals(fs)
+          .then((held) => {
+            if (epoch !== arrivalsEpoch || stopped) return
+            for (const [book, arrival] of Object.entries(held)) arrivals.set(book, arrival)
+            arrivalsChanged()
           })
-          const epoch = myArrivalsEpoch
-          void readArrivals(services.fs)
-            .then((held) => {
-              if (epoch !== arrivalsEpoch || stopped) return
-              for (const [book, arrival] of Object.entries(held)) arrivals.set(book, arrival)
-              arrivalsChanged()
+          .catch((thrown: unknown) => {
+            /* An unreadable index is not an empty one. The notices are lost
+               for this run either way, but a silent loss is how a feature
+               comes to look as though it was never wired. */
+            api.diagnostics.warn('sync.arrivals-read-failed', {
+              message: messageOf(thrown),
             })
-            .catch((thrown: unknown) => {
-              /* An unreadable index is not an empty one. The notices are lost
-                 for this run either way, but a silent loss is how a feature
-                 comes to look as though it was never wired. */
-              api.diagnostics.warn('sync.arrivals-read-failed', {
-                message: messageOf(thrown),
-              })
-            })
-        }
+          })
         /* `detail: null` with the state: a degraded sentence left from before
          * would otherwise stand under a green `ok`.
          *
@@ -1025,7 +1086,12 @@ export const sync: Capability = {
                over a book that never arrives (WI-20.25). Each refusal is a
                diagnostic too, with the raw message the sentence leaves out. */
             for (const refusal of summary.refused) {
-              api.diagnostics.warn('sync.push-refused', { book: refusal.book ?? '', kind: refusal.kind, message: refusal.message })
+              api.diagnostics.warn('sync.push-refused', {
+                // Stryker disable next-line StringLiteral: the ledger names the book on every refusal it records, so the fallback is never the value written.
+                book: refusal.book ?? '',
+                kind: refusal.kind,
+                message: refusal.message,
+              })
             }
             if (summary.quarantine.held > 0 || summary.quarantine.repaired > 0) {
               api.diagnostics.warn('sync.marks-quarantined', { ...summary.quarantine })
@@ -1050,8 +1116,9 @@ export const sync: Capability = {
               kind: refusalKind(thrown),
               message: messageOf(thrown),
             })
+            // Stryker disable next-line StringLiteral: the scheduler reads every outcome but `ok` as a failure.
             if (running !== owner) return 'failed'
-            await degrade(thrown)
+            await degrade(refusalOf(thrown), owner)
             /* THE OUTCOME IS WHAT ARMS THE NEXT TICK, and it is the half that
                made `retryable: true` a promise nothing kept: `groupRefusal`
                ends the session on a retryable refusal by design, and until the
@@ -1060,6 +1127,7 @@ export const sync: Capability = {
                minutes — which is the difference between a satchel that lost a
                startup race by 1.2 s recovering by itself and one that waits
                for a human. */
+            // Stryker disable next-line StringLiteral: as above.
             return 'failed'
           }
         }
@@ -1148,10 +1216,6 @@ export const sync: Capability = {
   },
 }
 
-function runningRole(): SyncRole | null {
-  return running === null ? null : currentRole()
-}
-
 export { useSync } from './ui/useSync'
 export { syncStatus } from './lib/runtime'
 export type { SyncStatus } from './lib/status'
@@ -1231,18 +1295,21 @@ export async function openLocalJournal({ services }: LocalJournalOptions): Promi
     deviceId: ensureDeviceId(services.settings),
     load: () => {
       const raw = services.settings.get(CLOCK_FLOOR_SETTING)
-      return raw !== '' && isHlc(raw) ? (raw as Hlc) : null
+      return isHlc(raw) ? raw : null
     },
     save: (last) => services.settings.set(CLOCK_FLOOR_SETTING, last),
   })
-  const unbindClock = services.bindClock(() => clock.now())
+  const unbindClock = services.bindClock(() => clock.now(), (stamp) => clock.witness(stamp))
   const journal = createJournal({
     fs,
     /* The shelf's queue, for `JournalOptions.queue`'s stated reason: the same
      * one the stores write on, so a drain covers a journal append in flight. */
     queue: services.writes,
     /* Same resolver as the app's composition: the fence has to land on the
-     * lane the kernel's writers use, and `paper` shares that queue too. */
+     * lane the kernel's writers use, and `paper` shares that queue too. Read
+     * only by `markRemote`, which only a ledger calls — and there is none
+     * here, so it is the composition's rule kept, not one this path runs. */
+    // Stryker disable next-line ArrowFunction,ConditionalExpression,EqualityOperator,StringLiteral: see above — nothing in this composition asks for a lane.
     lane: (book, what) => (what === 'cards' ? '' : services.library.lane(book)),
     clock: () => clock.now(),
     /* The kernel's own barrier, as the app's composition wires it (above):

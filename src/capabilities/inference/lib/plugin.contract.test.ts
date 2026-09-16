@@ -232,6 +232,37 @@ describe('cancelRequest', () => {
     expect(() => cancelRequest({ cancel } as never, 'x-1')).not.toThrow()
     await new Promise((resolve) => setTimeout(resolve, 0))
   })
+
+  /**
+   * ⚠️ **AND THE REPORTER IS PART OF "NEVER RETHROWS", WHICH IT WAS NOT.**
+   *
+   * The guard above covers the cancel; the reporter ran unguarded inside the
+   * same handler, on a promise nothing awaits, so a sink that threw left as an
+   * unhandled rejection. `controller.ts` and `glossProvider.ts` each wrap their
+   * own reporter before handing it here and so could not see it — `index.ts`
+   * hands `api.diagnostics.warn` in raw, which is the caller that could. One
+   * guard here covers all three, which is the argument for this function
+   * existing at all (2026-09-13 audit, round 2).
+   */
+  it('lets no reporter failure escape as an unhandled rejection', async () => {
+    const escaped: unknown[] = []
+    const onUnhandled = (reason: unknown): void => void escaped.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const cancel = vi.fn().mockRejectedValue({ kind: 'runtimeExited', message: 'gone' })
+      cancelRequest({ cancel } as never, 'ask-9', () => {
+        throw new Error('the reporter is broken')
+      })
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(cancel, 'no cancel went out, so this measures nothing').toHaveBeenCalled()
+      expect(escaped, 'a reporter failure escaped the cancel as an unhandled rejection').toEqual([])
+      expect(said, 'the reporter’s own failure was swallowed rather than said').toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      said.mockRestore()
+    }
+  })
 })
 
 describe('audit-fix round 1 — reasons and request ids', () => {

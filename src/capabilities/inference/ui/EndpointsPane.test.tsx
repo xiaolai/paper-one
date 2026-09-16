@@ -1,8 +1,19 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
+import { CAPABILITY_UI } from '../../../kernel'
 import { EndpointsPane } from './EndpointsPane'
-import type { EndpointDraft, EndpointsModel, EndpointsSnapshot } from './endpointsModel'
+import { EMPTY_DRAFT, createEndpointsModel, type EndpointDraft, type EndpointsModel, type EndpointsSnapshot } from './endpointsModel'
+
+/** The four commands the section uses, answering an empty list. */
+const fakePlugin = () => ({
+  plugin: {
+    endpoints: async () => [],
+    addEndpoint: async () => {},
+    removeEndpoint: async () => {},
+    setEndpointKey: async () => {},
+  },
+})
 
 /**
  * The Cloud endpoints section, mounted.
@@ -16,7 +27,7 @@ import type { EndpointDraft, EndpointsModel, EndpointsSnapshot } from './endpoin
  * refusal, and typing taking back an armed removal.
  */
 
-const EMPTY: EndpointsSnapshot = { rows: [], loading: false, busy: false, failure: null }
+const EMPTY: EndpointsSnapshot = { rows: [], loading: false, busy: false, failure: null, draft: EMPTY_DRAFT }
 
 const row = (over: Partial<EndpointsSnapshot['rows'][number]> & { id: string }) => ({
   label: over.id,
@@ -35,6 +46,13 @@ function fakeModel(over: Partial<EndpointsSnapshot> = {}) {
   let disarms = 0
   let refreshes = 0
   let accept = true
+  const tell = (): void => {
+    for (const listener of [...listeners]) listener()
+  }
+  /* THE DRAFT IS THE MODEL'S NOW, so the fake keeps one — including the rule
+     that a refused draft stays put. The rule itself is asserted against the
+     REAL model in `endpointsModel.test.ts`; what these cases measure is that
+     the pane draws the model's draft and reports every keystroke back to it. */
   const model: EndpointsModel = {
     getSnapshot: () => snapshot,
     subscribe: (listener) => {
@@ -42,8 +60,16 @@ function fakeModel(over: Partial<EndpointsSnapshot> = {}) {
       return () => void listeners.delete(listener)
     },
     refresh: async () => void (refreshes += 1),
-    save: async (draft) => {
-      saved.push(draft)
+    edit: (field, value) => {
+      snapshot = { ...snapshot, draft: { ...snapshot.draft, [field]: value } }
+      tell()
+    },
+    save: async () => {
+      saved.push(snapshot.draft)
+      if (accept) {
+        snapshot = { ...snapshot, draft: EMPTY_DRAFT }
+        tell()
+      }
       return accept
     },
     pressRemove: async (id) => void pressed.push(id),
@@ -59,7 +85,7 @@ function fakeModel(over: Partial<EndpointsSnapshot> = {}) {
     refuse: () => void (accept = false),
     set: (next: Partial<EndpointsSnapshot>) => {
       snapshot = { ...snapshot, ...next }
-      for (const listener of [...listeners]) listener()
+      tell()
     },
   }
 }
@@ -179,6 +205,40 @@ describe('the Cloud endpoints pane', () => {
     await waitFor(() => expect(address.value).toBe(''))
   })
 
+  /**
+   * ⚠️ **CLOSING THE GROUP THREW AWAY A HALF-TYPED ENDPOINT.**
+   *
+   * The kernel's `PaneGroup` UNMOUNTS a closed group, deliberately — a
+   * contributed section must not keep running behind a group nobody is looking
+   * at — and the draft lived in `useState`, which goes with the component. So a
+   * reader who pasted an address, went to another group to find their key, and
+   * came back found three empty fields and nothing saying why. The model
+   * outlives the mount and every other thing this pane draws already lives
+   * there (2026-09-13 audit, round 2).
+   *
+   * THE REAL MODEL, because a fake that happened to remember would prove
+   * nothing about where the draft is kept.
+   */
+  it('keeps a half-typed endpoint across a close and re-open', async () => {
+    const world = fakePlugin()
+    const model = createEndpointsModel({ plugin: world.plugin })
+    const opened = render(<EndpointsPane model={model} />)
+    fireEvent.change(screen.getByLabelText('Endpoint address'), { target: { value: 'https://api.example.com' } })
+    expect(
+      (screen.getByLabelText('Endpoint address') as HTMLInputElement).value,
+      'nothing was typed, so this measures nothing',
+    ).toBe('https://api.example.com')
+
+    opened.unmount()
+    render(<EndpointsPane model={model} />)
+
+    expect(
+      (screen.getByLabelText('Endpoint address') as HTMLInputElement).value,
+      'the reader’s half-typed endpoint went with the closed group',
+    ).toBe('https://api.example.com')
+    model.dispose()
+  })
+
   /* TYPING TAKES BACK AN ARMED REMOVAL: the reader is plainly doing something
      else, and a press left armed is one click from deleting a row they are no
      longer looking at. */
@@ -222,5 +282,71 @@ describe('the Cloud endpoints pane', () => {
         `a row holds ${row.querySelectorAll('input').length} fields: ${row.textContent ?? ''}`,
       ).toBeLessThanOrEqual(1)
     }
+  })
+
+  /* "Checking…" is the whole of what the title row says beside the title, and
+     only while the list is out: once it is read, the title stands alone. */
+  it('says nothing beside the title once the list has been read', () => {
+    const { container } = render(<EndpointsPane model={fakeModel().model} />)
+    expect(container.querySelector(`.${CAPABILITY_UI.row}`)!.textContent).toBe('Cloud endpoints')
+  })
+
+  /* A NEW STORE IS A NEW LIST. The capability builds its store per session, so
+     a pane handed a different one has read nothing from it yet. */
+  it('reads the list again when it is handed a different store', () => {
+    const first = fakeModel()
+    const second = fakeModel()
+    const { rerender } = render(<EndpointsPane model={first.model} />)
+    rerender(<EndpointsPane model={second.model} />)
+    expect(second.refreshes(), 'the pane drew a store it had never read').toBe(1)
+    expect(first.refreshes()).toBe(1)
+  })
+
+  /* DRAWN IN THE KERNEL'S VOCABULARY, AND THE VOCABULARY CARRIES MEANING.
+     Remove is the danger button because it is the one press here that cannot
+     be undone (`EndpointRow.action`); Save is the primary button because it is
+     what this surface is for (`CAPABILITY_UI.button`); the row's value is
+     `code`, a string to be selected rather than read; the name field is drawn
+     narrow. */
+  it('marks the destructive press, the primary one, the value and the name field', () => {
+    const world = fakeModel({ rows: [row({ id: 'a', label: 'My proxy' })] })
+    render(<EndpointsPane model={world.model} />)
+    expect(screen.getByText('api.example.com · key set').className).toBe(`${CAPABILITY_UI.value} ${CAPABILITY_UI.code}`)
+    expect(screen.getByLabelText('Remove My proxy').className).toBe(`${CAPABILITY_UI.button} ${CAPABILITY_UI.buttonDanger}`)
+    expect(screen.getByText('Save').className).toBe(`${CAPABILITY_UI.button} ${CAPABILITY_UI.buttonPrimary}`)
+    expect(screen.getByLabelText('Endpoint name').className).toBe(`${CAPABILITY_UI.field} ${CAPABILITY_UI.fieldNarrow}`)
+  })
+
+  /* THE UNARMED BUTTON SAYS REMOVE, and only the armed one asks — a row that
+     asked "Really remove?" before anything was pressed would be a question
+     nobody put. */
+  it('says Remove on a row nobody has pressed', () => {
+    const world = fakeModel({ rows: [row({ id: 'a', label: 'My proxy' })] })
+    render(<EndpointsPane model={world.model} />)
+    expect(screen.getByLabelText('Remove My proxy').textContent).toBe('Remove')
+  })
+
+  it('does not say there are none over a list that has rows', () => {
+    render(<EndpointsPane model={fakeModel({ rows: [row({ id: 'a' })] }).model} />)
+    expect(screen.queryByText(/none yet/i)).toBeNull()
+  })
+
+  /* THE FORM IS NEVER SUBMITTED FOR REAL. A native submission navigates the
+     webview — which is the whole app — away from itself; the save is the
+     model's, and the event stops here. */
+  it('keeps a save in the page rather than submitting the form', () => {
+    const world = fakeModel()
+    const { container } = render(<EndpointsPane model={world.model} />)
+    expect(fireEvent.submit(container.querySelector('form')!), 'the submission went on to the browser').toBe(false)
+    expect(world.saved).toHaveLength(1)
+  })
+
+  /* NO FAILURE, NO LINE FOR ONE: the section ends on the hint about re-using a
+     name, not on an empty line waiting for a failure. */
+  it('adds no line for a failure when there is none', () => {
+    const { container } = render(<EndpointsPane model={fakeModel({ rows: [row({ id: 'a' })] }).model} />)
+    expect(container.querySelector(`.${CAPABILITY_UI.section}`)!.lastElementChild!.textContent).toMatch(
+      /^Re-using a name replaces that endpoint/,
+    )
   })
 })

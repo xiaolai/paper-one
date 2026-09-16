@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { createKernelServices, scopeSettings } from '../../../kernel'
+import { describe, expect, it, vi } from 'vitest'
+import { createKernelServices, scopeSettings, type SettingsStore } from '../../../kernel'
 import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
 import type { InferencePort, Probe, Route, UnusableReason } from '../../inference'
 import { DEPTH_LABELS, DEPTH_ORDER, createRoutesModel, resolveRoute, rowFor } from './routesModel'
@@ -166,6 +166,21 @@ describe('resolveRoute', () => {
     expect(resolveRoute('', [endpointReady, codexReady]).inUse).toBe('agent:codex')
     expect(resolveRoute('', [endpointReady]).inUse).toBe('endpoint:p')
   })
+
+  /* THE ORDER IS THE RANK, NOT THE LIST. The case above lists the endpoint
+     first; a comparator that ranked only one side honestly still passes it,
+     and answers with the endpoint when the probe lists the agent first. */
+  it('prefers an agent to an endpoint whichever order the probe lists them in', () => {
+    const endpointReady = endpointRoute({ id: 'endpoint:p', label: 'P', detail: 'endpoint' })
+    expect(resolveRoute('', [codexReady, endpointReady]).inUse).toBe('agent:codex')
+    expect(resolveRoute('', [endpointReady, codexReady]).inUse).toBe('agent:codex')
+  })
+
+  /* Nothing was chosen, so nothing was lost: no route answering is not a
+     fall-back from anything. */
+  it('reports no fall-back when nothing can answer and nothing was chosen', () => {
+    expect(resolveRoute('', [claudeOut, endpointKeyless])).toEqual({ inUse: null, fellBack: false })
+  })
 })
 
 describe('rowFor', () => {
@@ -231,6 +246,11 @@ describe('rowFor', () => {
     const row = rowFor(codexReady, null)
     expect(row.value).toBe('ChatGPT · 0.149.0')
     expect(row.value).not.toMatch(/gpt-|o[0-9]|sonnet|opus/i)
+  })
+
+  /* Nothing to say is said as nothing: the value slot is drawn as text. */
+  it('shows nothing beside a usable route that carries no detail', () => {
+    expect(rowFor(agentRoute({ id: 'agent:codex', label: 'Codex' }), null).value).toBe('')
   })
 })
 
@@ -536,6 +556,109 @@ describe('the routes store', () => {
       expect(events[0]?.fields.message).toBe('Codex is not installed')
       model.dispose()
     })
+
+    /**
+     * ⚠️ **AND IT SAID SO IN THE LOG AND NOWHERE ELSE.**
+     *
+     * The row goes back to `Sign in…` and the pane drew nothing, so a login
+     * that could not be launched — no CLI installed, a spawn refused — looked
+     * exactly like a press that was ignored, which is the one reading that
+     * makes a reader press it again. The snapshot names the route and the
+     * reason now, and the pane draws them (2026-09-13 audit, round 2).
+     */
+    const refusing = (cause: unknown) => {
+      const port = {
+        generate: async () => '',
+        agentAsk: async () => '',
+        probe: async () => probeOf(signedOut),
+        ensureReady: async () => true,
+        signIn: async () => {
+          throw cause
+        },
+      } satisfies InferencePort
+      return createRoutesModel({ port, ...wiring() })
+    }
+
+    it('names the route and the reason the reader can act on', async () => {
+      const model = refusing({ kind: 'agentMissing', message: 'codex is not on PATH' })
+      await model.refresh()
+      await model.signIn('agent:codex')
+
+      expect(model.getSnapshot().signInFailure, 'the reader was told nothing about a login that never opened').toEqual({
+        route: 'agent:codex',
+        reason: 'That agent is not installed',
+      })
+      model.dispose()
+    })
+
+    /* IT DESCRIBES THE LAST PRESS, not everything that has ever failed: the
+       next attempt clears it before it can add a second, and the next probe
+       clears it because whatever it reports is newer. */
+    it('clears the reason when the reader tries again, and at the next probe', async () => {
+      let refuse = true
+      const port = {
+        generate: async () => '',
+        agentAsk: async () => '',
+        probe: async () => probeOf(signedOut),
+        ensureReady: async () => true,
+        signIn: async () => {
+          if (refuse) throw { kind: 'agentMissing', message: 'codex is not on PATH' }
+        },
+      } satisfies InferencePort
+      const model = createRoutesModel({ port, ...wiring() })
+      await model.refresh()
+      await model.signIn('agent:codex')
+      expect(model.getSnapshot().signInFailure, 'nothing failed, so this measures nothing').not.toBeNull()
+
+      refuse = false
+      await model.signIn('agent:codex')
+      expect(model.getSnapshot().signInFailure, 'a press that worked still showed the last one’s reason').toBeNull()
+
+      refuse = true
+      await model.signIn('agent:codex')
+      expect(model.getSnapshot().signInFailure).not.toBeNull()
+      await model.refresh()
+      expect(model.getSnapshot().signInFailure, 'a fresh probe still showed a reason it had just superseded').toBeNull()
+      model.dispose()
+    })
+
+    /* A failure before the first probe has no row to sit beside, and the
+       snapshot must still not contradict the model that holds it. */
+    it('carries the reason even with no routes to draw it against', async () => {
+      const model = refusing(new Error('the flow could not be launched'))
+      await model.signIn('agent:codex')
+      expect(model.getSnapshot().signInFailure).toEqual({ route: 'agent:codex', reason: 'Something went wrong' })
+      model.dispose()
+    })
+
+    /* THE PANE IS ALREADY DRAWING THE WAIT when a launch fails — it read the
+       snapshot the press produced — so the failure must be a change it is told
+       about, not one it would only see on a read it has no reason to make. */
+    it('tells the pane when a launch it is already showing fails', async () => {
+      let refuse: (cause: unknown) => void = () => {}
+      const port = {
+        generate: async () => '',
+        agentAsk: async () => '',
+        probe: async () => probeOf(signedOut),
+        ensureReady: async () => true,
+        signIn: () => new Promise<void>((_done, fail) => void (refuse = fail)),
+      } satisfies InferencePort
+      const model = createRoutesModel({ port, ...wiring() })
+      await model.refresh()
+      let told = 0
+      model.subscribe(() => void (told += 1))
+
+      const pressed = model.signIn('agent:codex')
+      expect(model.getSnapshot().rows[0]?.action).toBe('check-again')
+      expect(told).toBe(1)
+      refuse({ kind: 'agentMissing', message: 'codex is not on PATH' })
+      await pressed
+
+      expect(told, 'the failure changed the snapshot and nobody was told').toBe(2)
+      expect(model.getSnapshot().rows[0]?.action).toBe('sign-in')
+      expect(model.getSnapshot().signInFailure).toEqual({ route: 'agent:codex', reason: 'That agent is not installed' })
+      model.dispose()
+    })
   })
 
   it('writes the chosen route, and signs in through the port', async () => {
@@ -592,6 +715,124 @@ describe('the routes store', () => {
        setting: `TOOLS_SETTING` no longer exists to be read. */
     expect(Object.keys(model.getSnapshot())).not.toContain('tools')
     model.dispose()
+  })
+
+  /* A failed probe is drawn as no routes, so the log is the only place a dead
+     plugin and an empty machine differ. */
+  it('reports a probe that fails, with what it said', async () => {
+    const events: { event: string; fields: Record<string, unknown> }[] = []
+    const { port } = portWith(async () => {
+      throw new Error('the daemon is not there')
+    })
+    const model = createRoutesModel({ port, ...wiring(), report: (event, fields) => void events.push({ event, fields }) })
+    await model.refresh()
+    expect(events).toEqual([{ event: 'companion.probe-failed', fields: { message: 'the daemon is not there' } }])
+    model.dispose()
+  })
+
+  /* A subscriber that throws is said, BY NAME, and does not stop the others. */
+  it('names itself when a subscriber throws, and still tells the rest', async () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { port } = portWith(probeOf(codexReady))
+      const model = createRoutesModel({ port, ...wiring() })
+      const broke = new Error('the panel is gone')
+      let told = 0
+      model.subscribe(() => {
+        throw broke
+      })
+      model.subscribe(() => void (told += 1))
+      await model.refresh()
+      expect(told).toBe(1)
+      expect(said.mock.calls).toEqual([['Paper: a routes subscriber threw while being notified', broke]])
+      model.dispose()
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  /* STILL THE SAME OBJECT while there is nothing to draw. A settings write
+     before the first probe changes nothing the pane shows, so the snapshot it
+     reads must not become a new object that asks React to draw it again. */
+  it('keeps the empty snapshot as one object while there is still no probe', () => {
+    const { port } = portWith(probeOf(codexReady))
+    const model = createRoutesModel({ port, ...wiring() })
+    const first = model.getSnapshot()
+    model.cycleDepth()
+    expect(model.getSnapshot()).toBe(first)
+    model.dispose()
+  })
+
+  /* THE ROUTE IN USE, not the first one listed: a signed-out agent listed ahead
+     of the local model answering is not what the effort applies to. */
+  it('offers the effort for the route in use, not for the first route listed', async () => {
+    const { port } = portWith(probeOf(claudeOut, localReady))
+    const model = createRoutesModel({ port, ...wiring() })
+    await model.refresh()
+    expect(model.getSnapshot().inUse).toBe('local:qwen')
+    expect(model.getSnapshot().depth).toBeNull()
+    model.dispose()
+  })
+
+  /* THE WORDS ON THE BUTTON, held to the letter: the cycle's order is asserted
+     elsewhere through `DEPTH_LABELS` itself, which would pass over empty ones. */
+  it('names each effort in the words the reader reads', async () => {
+    const { port } = portWith(probeOf(codexReady))
+    const model = createRoutesModel({ port, ...wiring() })
+    await model.refresh()
+    const seen = [model.getSnapshot().depth]
+    model.cycleDepth()
+    seen.push(model.getSnapshot().depth)
+    model.cycleDepth()
+    seen.push(model.getSnapshot().depth)
+    expect(seen).toEqual(['Account default', 'Faster', 'More thorough'])
+    model.dispose()
+  })
+
+  describe('once disposed', () => {
+    /* A refresh begun AFTER dispose claims a generation of its own, so the
+       generation guard cannot be what stops it. */
+    it('changes nothing for a refresh begun after dispose', async () => {
+      const { port } = portWith(probeOf(codexReady))
+      const model = createRoutesModel({ port, ...wiring() })
+      model.dispose()
+      await model.refresh()
+      expect(model.getSnapshot().loading).toBe(true)
+      expect(model.getSnapshot().rows).toEqual([])
+    })
+
+    /* The settings store outlives the pane; a subscription left on it keeps a
+       closed pane's model alive for as long as the app runs. */
+    it('lets go of the settings store', () => {
+      const { settings } = wiring()
+      const live = new Set<() => void>()
+      const counted: SettingsStore = {
+        ...settings,
+        subscribe: (listener) => {
+          live.add(listener)
+          const off = settings.subscribe(listener)
+          return () => {
+            live.delete(listener)
+            off()
+          }
+        },
+      }
+      const { port } = portWith(probeOf())
+      const model = createRoutesModel({ port, settings: counted })
+      expect(live.size).toBe(1)
+      model.dispose()
+      expect(live.size, 'a disposed model is still subscribed to settings').toBe(0)
+    })
+
+    it('tells a subscriber nothing, a sign-in included', async () => {
+      const { port } = portWith(probeOf(claudeOut))
+      const model = createRoutesModel({ port, ...wiring() })
+      let seen = 0
+      model.subscribe(() => void (seen += 1))
+      model.dispose()
+      await model.signIn('agent:claude')
+      expect(seen, 'a listener was told about a change after dispose').toBe(0)
+    })
   })
 
   /* ⚠️ `cycles Look up only when there is more than one mode` WAS HERE. It

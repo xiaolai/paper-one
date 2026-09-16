@@ -89,7 +89,29 @@ export interface Controller extends InferenceStore {
    * false positive to its allowlist.
    */
   uninstall(model: string): Promise<boolean>
-  /** Start the daemon if it is not up. Answers false when it could not. */
+  /**
+   * Start the daemon if it is not up. **Rejects with what stopped it.**
+   *
+   * ⚠️ **`ensureReady` WAS THE ONLY WAY IN AND IT DESTROYED THE CAUSE.** Every
+   * failure became `false`, so the caller had a boolean and no sentence: the
+   * gloss said "The runtime is not running" from its own fallback while this
+   * controller had just computed "The runtime is not installed" from the
+   * plugin's `kind`, and nothing recorded either (2026-09-13 audit, round 2).
+   *
+   * The rejection is THE PLUGIN'S OWN, untranslated, because the reader's
+   * sentence belongs to whoever is speaking to the reader — `readerFailure` on
+   * the gloss path, `companion`'s `failure` on the other. A launch that
+   * resolved and left the runtime not ready rejects with a `kind` of the same
+   * shape, so a caller has one thing to translate rather than two.
+   */
+  start(): Promise<void>
+  /**
+   * Start the daemon if it is not up. Answers false when it could not.
+   *
+   * `start` collapsed, and kept for the callers whose contract is a boolean:
+   * `InferencePort.ensureReady` promises "false when it could not", and its
+   * callers are `const ready = await …` with no catch anywhere.
+   */
   ensureReady(): Promise<boolean>
   /**
    * The id of the installed text model that answers a gloss, or null.
@@ -204,6 +226,44 @@ export function detailFor(error: unknown): string {
 }
 
 /**
+ * What a failed request raises: `detailFor`'s sentence when the plugin named a
+ * `kind`, the cause itself when the reader aborted, and a readable `Error`
+ * otherwise.
+ *
+ * ⚠️ **THIS WAS WRITTEN TWICE AND THE TWO COPIES HAD ALREADY DIVERGED.**
+ * `glossProvider`'s catch and `companion/lib/provider.ts`'s `failure` are the
+ * same four branches in the same order — the second's own header calls itself
+ * "the mirror of `glossProvider`'s catch, branch for branch" — and the last
+ * branch was `messageOf(cause)` in one and `String(cause)` in the other. So a
+ * rejection object carrying a message and no `kind` reached a reader looking up
+ * a word with its own text, and a reader asking the companion as
+ * `[object Object]` (2026-09-13 audit, round 2).
+ *
+ * **CONVERSION ONLY — THE REPORTING STAYS AT THE CALL SITES**, and deliberately:
+ * the two disagree about it for reasons each states. The gloss stays silent
+ * about the reader's own abort because that is every selection change and a log
+ * full of them buries the failures; the companion records even that, because
+ * one answer abandoned is worth a line. Folding the report in here would have
+ * to pick one of those and silently change the other.
+ *
+ * `signal` decides one branch and only one: `cancelled` arrives both when the
+ * reader aborted and when the DAEMON cancelled — it does so on stop — and the
+ * second must not be passed through as the reader's own, which shows them
+ * nothing while the request silently ends.
+ */
+export function readerFailure(cause: unknown, signal: AbortSignal): unknown {
+  const kind = errorKind(cause)
+  if (kind === 'cancelled' && signal.aborted) return cause
+  if (kind !== null) return new Error(detailFor(cause), { cause })
+  /* NOT THE PLUGIN'S. A rejection with no `kind` is a Tauri or webview failure
+     — `Command inference_gloss not found` is a bare STRING — and `detailFor`
+     would map it to its default, destroying the one sentence that ends the
+     search. Not translated, but made readable. */
+  if (cause instanceof Error) return cause
+  return new Error(messageOf(cause), { cause })
+}
+
+/**
  * Which installed model answers a gloss.
  *
  * ⚠️ **THIS USED TO BE `.find()`, AND ARRAY ORDER IS NOT A RULE ANYBODY CHOSE.**
@@ -244,14 +304,21 @@ export function detailFor(error: unknown): string {
  */
 export function glossModel(models: readonly ModelRow[]): string | null {
   const usable = models.filter((model) => model.modality === 'text' && model.installed)
-  /* `reduce`, not `sort`: this must not reorder the caller's array, and the
-   * snapshot's `models` is handed to the pane by reference. */
-  const best = usable.reduce<ModelRow | null>((chosen, model) => {
-    if (chosen === null) return model
-    if (model.bytes !== chosen.bytes) return model.bytes < chosen.bytes ? model : chosen
-    return model.id < chosen.id ? model : chosen
-  }, null)
-  return best?.id ?? null
+  /* THE SMALLEST SIZE, THEN THE LOWEST ID AMONG THE ROWS OF THAT SIZE — with no
+   * comparison between two rows. Picking a row pairwise had a boundary at which
+   * both answers were the same id (`<` against `<=`), which no test can tell
+   * apart and which no directive can hide without hiding `>=` beside it.
+   *
+   * `sort` runs on the ids `map` copied out, never on the caller's array: the
+   * snapshot's `models` is handed to the pane by reference. Its default order is
+   * by UTF-16 code unit, which is the order `<` gave. */
+  const smallest = Math.min(...usable.map((model) => model.bytes))
+  return (
+    usable
+      .filter((model) => model.bytes === smallest)
+      .map((model) => model.id)
+      .sort()[0] ?? null
+  )
 }
 
 /**
@@ -512,6 +579,66 @@ export function createController(plugin: ControllerPlugin, reportTo?: ReportFail
     cancelRequest(plugin, requestId, report)
   }
 
+  /**
+   * A launch that came back with the daemon still not up, as the plugin would
+   * have spelled it.
+   *
+   * ⚠️ **THE STATE IS THE STATUS'S OWN, AND ONLY THE REFUSAL IS SYNTHESISED.**
+   * `absent` and `stopped` are two different things to a reader — one is a
+   * download and the other is a restart, which is the distinction this file's
+   * header opens with — so one sentence for both would tell somebody with no
+   * runtime at all to restart it. The shape is the plugin's `{ kind, message }`
+   * because a caller must not have to tell a rejection raised here from one
+   * raised across the IPC boundary.
+   */
+  const refusalFor = (status: RuntimeStatus): { readonly kind: string; readonly message: string } =>
+    status.state === 'absent'
+      ? { kind: 'runtimeMissing', message: status.reason }
+      : { kind: 'notRunning', message: `the runtime is ${status.state} after a start that did not fail` }
+
+  const start = async (): Promise<void> => {
+    /* ⚠️ NO CACHED `ready`. Trusting the last known state meant a daemon
+     * that had since crashed was never restarted: every later question saw
+     * `ready`, skipped the start, and failed at the request instead. The
+     * plugin's own `start` is idempotent and cheap when the daemon is up —
+     * it health-checks and returns the same port — so asking every time
+     * costs one loopback round trip and buys a runtime that recovers.
+     * Found by audit. */
+    /* THE SAME GENERATION `refresh` CLAIMS. Two starts, or one and a refresh,
+       used to settle in either order with the older one writing last;
+       whichever asked LAST now owns the next state write, as every refresh
+       already did among refreshes. The answer is still raised either way — a
+       caller waiting to generate needs it. */
+    const mine = generations.claim()
+    if (!owned() && snapshot.runtime.kind !== 'ready') set({ runtime: { kind: 'starting' } })
+    let status: RuntimeStatus
+    try {
+      await plugin.start()
+      status = await plugin.status()
+    } catch (error) {
+      /* BOTH HALVES, as `refresh` reports them and for the same reason: the
+         reader's sentence and the crate's are deliberately different, and the
+         maintainer's is the one that ends the search. This was the half that
+         did not exist — the launch absorbed its failure into `false` and said
+         nothing anywhere. */
+      const detail = detailFor(error)
+      report('inference.start-failed', { detail, message: messageOf(error) })
+      if (mine() && !owned()) set({ runtime: { kind: 'degraded', detail } })
+      throw error
+    }
+    /* Asked and answered either way; only the STATE write waits for the
+       download to finish owning the slot. */
+    if (mine() && !owned()) set({ runtime: runtimeFrom(status) })
+    /* ⚠️ NOT `degraded`. The launch itself did not fail, so the status is the
+       better answer — `degraded` means something that was working has stopped,
+       and an `absent` runtime was never working. */
+    if (status.state !== 'ready') {
+      const refusal = refusalFor(status)
+      report('inference.start-failed', { detail: detailFor(refusal), message: refusal.message })
+      throw refusal
+    }
+  }
+
   return {
     getSnapshot: () => snapshot,
     subscribe: (listener) => {
@@ -545,40 +672,30 @@ export function createController(plugin: ControllerPlugin, reportTo?: ReportFail
       await refresh()
       return true
     },
-    ensureReady: async () => {
-      /* ⚠️ NO CACHED `ready`. Trusting the last known state meant a daemon
-       * that had since crashed was never restarted: every later question saw
-       * `ready`, skipped the start, and failed at the request instead. The
-       * plugin's own `start` is idempotent and cheap when the daemon is up —
-       * it health-checks and returns the same port — so asking every time
-       * costs one loopback round trip and buys a runtime that recovers.
-       * Found by audit. */
-      /* THE SAME GENERATION `refresh` CLAIMS. Two `ensureReady`s, or one and
-         a refresh, used to settle in either order with the older one writing
-         last; whichever asked LAST now owns the next state write, as every
-         refresh already did among refreshes. The answer is still returned
-         either way — a caller waiting to generate needs it. */
-      const mine = generations.claim()
-      if (!owned() && snapshot.runtime.kind !== 'ready') set({ runtime: { kind: 'starting' } })
-      try {
-        await plugin.start()
-        const status = await plugin.status()
-        /* Asked and answered either way; only the STATE write waits for the
-           download to finish owning the slot. */
-        if (mine() && !owned()) set({ runtime: runtimeFrom(status) })
-        return status.state === 'ready'
-      } catch (error) {
-        if (mine() && !owned()) set({ runtime: { kind: 'degraded', detail: detailFor(error) } })
-        return false
-      }
-    },
+    start,
+    /* ⚠️ **THE COLLAPSE IS ONE LINE AND IT IS THE ONLY ONE.** This used to be
+       a second copy of the launch, which is how it came to report nothing
+       while `refresh` beside it reported both halves of every failure. */
+    ensureReady: () => start().then(() => true, () => false),
     textModel: () => glossModel(snapshot.models),
     dispose: () => {
+      /* ⚠️ **THE DOWNLOAD IS ABANDONED, NOT MERELY FORGOTTEN.** Clearing the
+         slot stopped this controller writing state for it and left the request
+         downloading in Rust — for a pane that no longer counts the bytes, with
+         no Cancel to press, against a staging path a re-composed capability
+         could start writing to as well. `voiceTest.dispose` aborts its own
+         request for the same reason. BEFORE `disposed`, so the cancel reads the
+         slot it is about to clear; the settle that follows writes nothing,
+         because `set` is a no-op by then and `mine()` is already false
+         (2026-09-13 audit, round 2). */
+      cancelInstall()
       disposed = true
       /* Release the slot and retire every refresh in flight, so a late settle
          cannot write through a torn-down controller. */
       install_ = null
+      // Stryker disable next-line CallExpression: a second guard — a retired refresh or start only ever writes through `set`, which `disposed` has already made a no-op.
       generations.claim()
+      // Stryker disable next-line CallExpression: frees the listeners for collection; `set` is the only thing that calls them and it stops at `disposed`.
       listeners.clear()
     },
   }

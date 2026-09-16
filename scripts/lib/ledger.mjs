@@ -87,6 +87,7 @@ export const COVERAGE_DOCUMENTS = Object.freeze([
  * of turning the check off — so the entries were spent rather than accepted,
  * and this stays empty until something genuinely cannot be described.
  */
+// Stryker disable next-line ArrayDeclaration: a non-empty list hands `new Map` an entry that is not a pair, so it throws while this module is imported, every covering suite fails to LOAD, and Stryker's vitest runner reports it Survived (verified by hand 2026-09-15) — the list's emptiness is asserted by `check-ledger.test.mjs`.
 export const COVERAGE_EXCEPTIONS = readOnlyMap([])
 
 /**
@@ -195,11 +196,12 @@ function readOnlyMap(entries) {
      `scripts/lib/**` function-coverage gate is at 100% precisely so that a
      surface nobody reaches cannot be added quietly. Iteration stays, because
      `ledger.test.mjs` walks `EXTERNAL` with `for…of` to hold every excused
-     path to a reason. */
+     path to a reason. `keys()` went the same way on 2026-09-15: its one caller
+     was a test in the suite a clone skips, so every CI leg measured it
+     unreached — which the ENOENT that suite used to throw had hidden. */
   return Object.freeze({
     get: (key) => held.get(key),
     has: (key) => held.has(key),
-    keys: () => held.keys(),
     [Symbol.iterator]: () => held.entries(),
     get size() {
       return held.size
@@ -277,12 +279,17 @@ export function parseRows(markdown) {
      ledger has one today, so this is a trap rather than a live defect — but the
      documents explain their own format, and the first time somebody shows the
      row shape in a fence it would be parsed, checked and reported against. */
+  /* Only the lines BETWEEN fences are recorded, and only a header is looked up
+     in them. A fence line starts with neither a header nor a pipe, so it is
+     never read as either, and a table's rows stop at it before reaching
+     anything fenced. Recording the fence lines too, and testing every row as
+     well as the header, changed nothing any input could show — mutation
+     testing found both on 2026-09-15. */
   const fenced = new Set()
   let inFence = false
-  for (let i = 0; i < lines.length; i++) {
-    if (/^\s*(```|~~~)/.test(lines[i])) {
+  for (const [i, line] of lines.entries()) {
+    if (/^\s*(```|~~~)/.test(line)) {
       inFence = !inFence
-      fenced.add(i)
       continue
     }
     if (inFence) fenced.add(i)
@@ -291,7 +298,6 @@ export function parseRows(markdown) {
     if (fenced.has(i)) continue
     if (!TABLE_HEADERS.includes(lines[i].trim())) continue
     for (let j = i + 1; j < lines.length; j++) {
-      if (fenced.has(j)) break
       const line = lines[j]
       if (!line.trim().startsWith('|')) break
       if (isSeparator(line)) continue
@@ -299,7 +305,8 @@ export function parseRows(markdown) {
       const at = `${j + 1}`
       if (cells.length !== 4) {
         findings.push(
-          finding('LEDGER_ROW_SHAPE', `line ${at}`, `${cells.length} cells, expected 4 — ${cells[0] ?? ''}`),
+          /* `split` always yields at least one cell, so there is a first. */
+          finding('LEDGER_ROW_SHAPE', `line ${at}`, `${cells.length} cells, expected 4 — ${cells[0]}`),
         )
         continue
       }
@@ -346,7 +353,8 @@ const codeSpans = (cell) => [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1])
 export function isPathClaim(token) {
   if (/[$<>{}*\s]/.test(token)) return false
   const bare = token.replace(/:\d+$/, '')
-  if (bare === '') return false
+  /* A token that is nothing but a line suffix strips to '', which has neither
+     a separator nor an extension, so the two tests below refuse it already. */
   if (bare.includes('/')) return true
   return SOURCE_EXTENSIONS.some((ext) => bare.endsWith(ext))
 }
@@ -368,7 +376,8 @@ export function isPathClaim(token) {
  */
 export function vagueClaims(where) {
   return codeSpans(where).filter((token) => {
-    if (isPathClaim(token)) return false
+    /* A path claim carries none of these characters, so this is also what
+       keeps a claim from being counted twice. */
     if (!/[$<>{}*]/.test(token)) return false
     const bare = token.replace(/[$<>{}*]/g, '')
     return bare.includes('/') || SOURCE_EXTENSIONS.some((ext) => bare.endsWith(ext))
@@ -420,7 +429,12 @@ export function resolveClaim(claim) {
  */
 export function checkLedger({ markdown, exists, removed }) {
   const { rows, findings } = parseRows(markdown)
-  const removedDir = typeof removed === 'string' && removed !== '' ? `src/capabilities/${removed}` : null
+  const removedDir =
+    typeof removed === 'string' &&
+    // Stryker disable next-line ConditionalExpression,StringLiteral: an empty id would make `src/capabilities/`, which no normalised claim equals or begins with plus `/`, so dropping this test excuses nothing
+    removed !== ''
+      ? `src/capabilities/${removed}`
+      : null
   const notes = []
   const seenExternal = new Set()
   let claimCount = 0
@@ -433,7 +447,7 @@ export function checkLedger({ markdown, exists, removed }) {
         /* The CALLER knows which document this is; hardcoding one name meant a
            library-ledger legend error pointed at the feature ledger. */
         'the State legend',
-        `the State legend lists ${legend.join(', ')}; this check knows ${STATES.join(', ')}`,
+        `the State legend lists ${legend.join(', ') || 'no state this check can read'}; this check knows ${STATES.join(', ')}`,
       ),
     )
   }
@@ -493,7 +507,15 @@ export function checkLedger({ markdown, exists, removed }) {
 }
 
 /**
- * The states the ledger's own legend table defines, or null if it has none.
+ * The states the ledger's own legend table defines, or null if it has no
+ * legend table.
+ *
+ * ⚠️ **A LEGEND WITH NO ROW THIS CAN READ IS STILL A LEGEND** (2026-09-15).
+ * It returned null for one, the answer for "no legend", so a legend whose every
+ * state was written in a shape the row pattern does not read — `` `Shipped` ``,
+ * `*Shipped*` — switched the legend check off without a word, while the same
+ * shape in ONE row was reported. A surviving mutant showed that nothing could
+ * tell the two apart. It answers the empty list now, which is refused.
  *
  * ⚠️ **ANCHORED TO THE `State | Meaning` HEADER RATHER THAN SCANNED FOR SHAPE.**
  * The first version matched any bold single-word first cell in a two-column
@@ -510,11 +532,12 @@ function legendStates(markdown) {
   for (let i = at + 1; i < lines.length; i++) {
     const line = lines[i].trim()
     if (!line.startsWith('|')) break
-    if (/^\|[\s:|-]+\|$/.test(line)) continue
+    /* The separator needs no test of its own: its first cell holds no word
+       character, so this pattern finds no state in it. */
     const m = /^\|\s*(?:\*\*)?(\w+)(?:\*\*)?\s*\|/u.exec(line)
     if (m !== null) found.push(m[1])
   }
-  return found.length > 0 ? found : null
+  return found
 }
 
 /* MEMBERSHIP, NOT ORDER. Reordering the same five states changes no definition,

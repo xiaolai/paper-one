@@ -419,7 +419,28 @@ export function defineSetting<T>(
   if (dot < 1 || dot === key.length - 1) {
     throw new Error(`defineSetting: ${JSON.stringify(key)} must be "<namespace>.<name>", both non-empty`)
   }
-  return { key, fallback, parse }
+  return { key, fallback: frozen(fallback), parse: (raw) => frozen(parse(raw)) }
+}
+
+/**
+ * A value and everything reachable through its own properties, frozen in place.
+ *
+ * ⚠️ **A SETTING'S VALUE WAS SHARED, AND MUTABLE.** A fallback is one object every
+ * store and every reader is handed, and a parser may pass a stored value straight
+ * through — so a reader who changed what `get` returned changed it for every
+ * other reader, with no notification, no write, and the snapshot's identity
+ * unchanged (2026-09-13 verify). Frozen where every setting is minted, the
+ * mutation fails at the line that makes it, whichever store reads the setting.
+ *
+ * The walk carries what it has seen, so a cycle ends it, and a parent somebody
+ * already froze does not hide a child that was not.
+ */
+export function frozen<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
+  if (typeof value !== 'object' || value === null || seen.has(value)) return value
+  seen.add(value)
+  Object.freeze(value)
+  for (const child of Object.values(value)) frozen(child, seen)
+  return value
 }
 
 /**

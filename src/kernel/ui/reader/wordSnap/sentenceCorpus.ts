@@ -77,9 +77,27 @@ export interface SentenceCorpusRow {
   /** Always explicit. See the header. */
   readonly locale: string
   readonly maxSentenceChars: number
-  /** The full linguistic sentence, written by hand — or `'none'` when the row
-   *  genuinely has no sentence to name, which an empty term does. */
-  readonly sentence: string | 'none'
+  /**
+   * What lies across the run's start and end edges — `SentenceOptions.before`
+   * and `.after` (phase 17, L8). ABSENT is a value here, not an omission: it is
+   * "nothing is known across this edge", the budget-cut edge, and the two
+   * `run-*-edge` rows are that case. `null` is "nothing lies across it".
+   */
+  readonly before?: string | null
+  readonly after?: string | null
+  /**
+   * The completeness gate — `SentenceOptions.requireComplete`. ABSENT is the gate
+   * ON, which is `sentenceOf`'s default and the walk's, and `false` is the
+   * fallback walk, which answers where the gate declines. A row can therefore
+   * change its answer with every other input standing still, which is why the
+   * parity report carries it (2026-09-13 audit).
+   */
+  readonly requireComplete?: false
+  /** The full linguistic sentence, written by hand — or the literal `'none'`
+   *  when the row genuinely has no sentence to name, which an empty term does.
+   *  Typed `string` because `string | 'none'` IS `string`: TypeScript absorbs
+   *  the literal, so spelling it out read as a distinction nothing checked. */
+  readonly sentence: string
   /** What the implementation returns today. Where this differs from
    *  `sentence`, the row is uncovered and says so. */
   readonly actual: SentenceAnswer
@@ -122,8 +140,8 @@ export const SENTENCE_CORPUS: readonly SentenceCorpusRow[] = [
     locale: 'en',
     maxSentenceChars: 1000,
     sentence: 'He said, "Stop!" he said.',
-    actual: { sentence: 'he said.', term: 'said' },
-    why: 'UNCOVERED. ICU ends a sentence at the closing quote, and the reported speech is cut off the front of it. A general fix is an abbreviation-and-quotation model, which is a second feature — recorded rather than implied away',
+    actual: { sentence: 'He said, "Stop!" he said.', term: 'said' },
+    why: 'ICU ends a sentence at the closing quote after "!" — UAX #29 keeps a lowercase continuation with the sentence before it only after a full stop (SB8) — so the attribution came back alone as "he said." The merge pass puts a quotation ending in "!" or "?" back with the lowercase words straight after it. Recorded as a shortfall until an audit showed that much is a bounded rule rather than a quotation model; the Japanese row is what that model would still be for',
   },
   {
     id: 'abbreviation-street-overshoot',
@@ -173,7 +191,7 @@ export const SENTENCE_CORPUS: readonly SentenceCorpusRow[] = [
     maxSentenceChars: 1000,
     sentence: '然后走了。',
     actual: { sentence: '然后走了。', term: '然后' },
-    why: 'the regex this replaces does not split Chinese AT ALL — its lookbehind lists the CJK terminators but the pattern still requires \\s+ after them, and Chinese puts no space after 。 The segmenter splits it even under an en locale, which is what a book with no lang attribute gets',
+    why: 'the regex this replaces does not split Chinese AT ALL — its lookbehind lists the CJK terminators but the pattern still requires \\s+ after them, and Chinese puts no space after 。 The segmenter splits it even under an en locale, where the Latin merge pass is on',
   },
   {
     id: 'japanese-closing-quote',
@@ -185,7 +203,7 @@ export const SENTENCE_CORPUS: readonly SentenceCorpusRow[] = [
     maxSentenceChars: 1000,
     sentence: '彼は「止まれ！」と言った。',
     actual: { sentence: 'と言った。', term: 'と言った' },
-    why: 'UNCOVERED, and the same shape as the English closing-quote row in a script where the merge pass deliberately does not run. Quoted speech loses its attribution',
+    why: 'UNCOVERED, and the same shape as the English closing-quote row in a script where the merge pass deliberately does not run: there is no letter case to tell the attribution "と言った" from a new sentence, so the rule that answers the English row has nothing to read here. Quoted speech loses its attribution',
   },
 
   /* ── Normalise before segment ─────────────────────────────────────────── */
@@ -248,7 +266,7 @@ export const SENTENCE_CORPUS: readonly SentenceCorpusRow[] = [
     maxSentenceChars: 1000,
     sentence: 'iPhone users noticed.',
     actual: 'none',
-    why: 'UNCOVERED, and it is ICU\u2019s rule rather than ours: UAX #29 SB11 does not end a sentence before a LOWERCASE word, so a sentence beginning "iPhone" is swallowed by the one before it. Measured — the whole run comes back as one segment. It matters here because the swallowed span then reaches the run\u2019s edge and the lookup falls back',
+    why: 'UNCOVERED, and it is ICU\u2019s rule rather than ours: UAX #29 SB8 does not end a sentence after a full stop when the next word is LOWERCASE, so a sentence beginning "iPhone" is swallowed by the one before it. Measured — ICU returns TWO segments, "Alpha one. iPhone users noticed. " and "Beta two.": the first two sentences merged, not the whole run. It matters here because the merged segment then begins at the run\u2019s start, nothing is known across that edge, and the answer is the run-start refusal',
   },
 
   {
@@ -302,7 +320,20 @@ export const SENTENCE_CORPUS: readonly SentenceCorpusRow[] = [
     maxSentenceChars: 1000,
     sentence: 'Alpha one.',
     actual: 'none',
-    why: 'UNCOVERED BY DESIGN. The sentence begins at the run’s edge, and nothing in the run can tell </p> from <br> from a budget cut. The caller falls back to what shipped before this existed, so declining is never a regression — but the cost is real and this row is where it is stated',
+    why: 'UNCOVERED BY DESIGN. The sentence begins at the run’s edge and NOTHING IS KNOWN across it — the budget ended the window there — so the edge is no evidence of a sentence starting. `block-edge-start` is the same shape with the paragraph before it known, and answers',
+  },
+  {
+    id: 'run-start-edge-ungated',
+    tags: ['latin', 'edge'],
+    raw: 'Alpha one. Beta two.',
+    termStart: 0,
+    termEnd: 5,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    requireComplete: false,
+    sentence: 'Alpha one.',
+    actual: { sentence: 'Alpha one.', term: 'Alpha' },
+    why: '`run-start-edge` with the completeness gate off: the fallback walk, which answers where the gated walk declines. Every other input is the same, so this pair is what makes the gate an input the parity report must record; without the field the two rows would be one run with two answers',
   },
   {
     id: 'run-end-edge',
@@ -314,7 +345,139 @@ export const SENTENCE_CORPUS: readonly SentenceCorpusRow[] = [
     maxSentenceChars: 1000,
     sentence: 'Beta two.',
     actual: 'none',
-    why: 'UNCOVERED BY DESIGN, the other side of the same rule. A two-sentence paragraph therefore yields nothing at all: it takes three for the middle one to be vouched for',
+    why: 'UNCOVERED BY DESIGN, the other side of the same rule: nothing is known across the end edge. Until phase 17 this was EVERY paragraph’s last sentence, whatever followed it — see `block-edge-end`',
+  },
+
+  /* ── What lies across the edge (phase 17, L8) ─────────────────────────── */
+  {
+    id: 'block-edge-start',
+    tags: ['latin', 'edge'],
+    raw: 'Beta two. Gamma three.',
+    termStart: 0,
+    termEnd: 4,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    before: 'Alpha one.',
+    sentence: 'Beta two.',
+    actual: { sentence: 'Beta two.', term: 'Beta' },
+    why: 'a paragraph’s first sentence. The run cannot vouch for its own start, but the paragraph before it is known, and read with it as flowing text the segmenter breaks exactly at the seam. Only the edge is confirmed from across it — nothing of `Alpha one.` is sent',
+  },
+  {
+    id: 'block-edge-end',
+    tags: ['latin', 'edge'],
+    raw: 'Alpha one. Beta two.',
+    termStart: 16,
+    termEnd: 19,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    after: 'Gamma three.',
+    sentence: 'Beta two.',
+    actual: { sentence: 'Beta two.', term: 'two' },
+    why: 'a paragraph’s last sentence, confirmed by the paragraph after it — the same run as `run-end-edge`, which knows nothing across the edge and declines',
+  },
+  {
+    id: 'document-start',
+    tags: ['latin', 'edge'],
+    raw: 'Alpha one. Beta two.',
+    termStart: 0,
+    termEnd: 5,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    before: null,
+    sentence: 'Alpha one.',
+    actual: { sentence: 'Alpha one.', term: 'Alpha' },
+    why: 'nothing lies across the edge — a section’s first paragraph, or the first under a heading. The segmenter is still asked, with a sentence that has ended standing in for the far side; `document-start-lowercase` is why it is asked rather than assumed',
+  },
+  {
+    id: 'document-end',
+    tags: ['latin', 'edge'],
+    raw: 'Alpha one. Beta two.',
+    termStart: 16,
+    termEnd: 19,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    after: null,
+    sentence: 'Beta two.',
+    actual: { sentence: 'Beta two.', term: 'two' },
+    why: 'a section’s last sentence: nothing follows it, and it ends in a full stop the segmenter would break after',
+  },
+  {
+    id: 'block-edge-cjk',
+    tags: ['cjk', 'edge'],
+    raw: '然后走了。最后一句。',
+    termStart: 0,
+    termEnd: 2,
+    locale: 'zh',
+    maxSentenceChars: 1000,
+    before: '他说。',
+    sentence: '然后走了。',
+    actual: { sentence: '然后走了。', term: '然后' },
+    why: 'the seam rule in the script where the two engines are likeliest to disagree. The join puts a space after 。 that Chinese never writes, and the break must still fall at the seam rather than after the space',
+  },
+  {
+    id: 'document-start-lowercase',
+    tags: ['latin', 'edge'],
+    raw: 'and so it ended. Beta two.',
+    termStart: 7,
+    termEnd: 9,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    before: null,
+    sentence: 'none',
+    actual: 'none',
+    why: 'a section that opens in the middle of a sentence begun in the one before it — which a producer’s split can do. Nothing lies across the edge here either, and the sentence does not start at it: the probe asks, the segmenter does not break before a lowercase word, and there is no sentence in this run to name',
+  },
+  {
+    id: 'document-end-unterminated',
+    tags: ['latin', 'edge'],
+    raw: 'Alpha one. Apples and pears',
+    termStart: 22,
+    termEnd: 27,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    after: null,
+    sentence: 'none',
+    actual: 'none',
+    why: 'a list item or a caption at the end of a section: nothing follows, and nothing ends it either. It is a phrase, not a sentence, and the answer is the fallback rather than a fragment presented as whole',
+  },
+  {
+    id: 'block-edge-weld',
+    tags: ['latin', 'edge'],
+    raw: 'Call me Ishmael. Some years ago.',
+    termStart: 8,
+    termEnd: 15,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    before: 'Chapter 1. Loomings',
+    sentence: 'Call me Ishmael.',
+    actual: 'none',
+    why: 'UNCOVERED BY DESIGN. A heading with no full stop, spelled as a paragraph, runs into the sentence after it as flowing text: the segmenter finds no break at the seam, and a boundary it did not find is not one to vouch for. `sentenceAt` passes `null` for an h1–h6 or role="heading", which is what answers this in a book; `<p class="title">` is this row',
+  },
+  {
+    id: 'block-edge-abbreviation',
+    tags: ['latin', 'edge', 'abbreviation'],
+    raw: 'Smith today. Beta two.',
+    termStart: 0,
+    termEnd: 5,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    before: 'He met Mr.',
+    sentence: 'He met Mr. Smith today.',
+    actual: 'none',
+    why: 'UNCOVERED BY DESIGN. ICU alone breaks after "Mr." at the seam; the merge pass does not, and the seam is asked through the merge pass like every other boundary. So a title at the end of one block is not taken for the end of a sentence — and nothing from across an edge is ever sent, so the sentence cannot be had either',
+  },
+  {
+    id: 'block-edge-continues',
+    tags: ['latin', 'edge'],
+    raw: 'store and bought milk. Beta two.',
+    termStart: 0,
+    termEnd: 5,
+    locale: 'en',
+    maxSentenceChars: 1000,
+    before: 'He went to the',
+    sentence: 'He went to the store and bought milk.',
+    actual: 'none',
+    why: 'UNCOVERED BY DESIGN. A sentence running ACROSS a block edge — a verse line, a paragraph a producer split at a page break. The kind of edge was never the question; the text on both sides is, and it does not break at the seam',
   },
   {
     id: 'spans-two-sentences',

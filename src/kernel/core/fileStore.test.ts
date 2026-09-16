@@ -71,6 +71,37 @@ describe('openFileStore', () => {
     expect(writes).toHaveLength(1)
     expect(writes[0]).toContain('[19]')
   })
+
+  it('keeps the file name every earlier version wrote', async () => {
+    const { fs } = fakeFs({ 'paper.store.v1.json': JSON.stringify({ 'paper.marks.v1': MARKS }) })
+    expect((await openFileStore({ fs })).getItem('paper.marks.v1')).toBe(MARKS)
+  })
+
+  it('lands a write on its own, with no flush asked for', async () => {
+    const { fs, writes } = fakeFs()
+    const store = await openFileStore({ fs })
+    store.setItem('paper.marks.v1', MARKS)
+    expect(writes).toEqual([])
+    await settled()
+    expect(writes).toEqual([JSON.stringify({ 'paper.marks.v1': MARKS })])
+  })
+
+  it('queues one write for a burst, lands it without a flush, and queues again for the next', async () => {
+    const { fs, writes } = fakeFs()
+    const queued: (() => void)[] = []
+    const store = await openFileStore({ fs, schedule: (fn) => void queued.push(fn) })
+    for (let i = 0; i < 3; i++) store.setItem('paper.library.v1', `[${i}]`)
+    expect(queued).toHaveLength(1)
+    queued[0]!()
+    await settled()
+    expect(writes).toEqual([JSON.stringify({ 'paper.library.v1': '[2]' })])
+
+    store.setItem('paper.library.v1', '[3]')
+    expect(queued).toHaveLength(2)
+    queued[1]!()
+    await settled()
+    expect(writes).toHaveLength(2)
+  })
 })
 
 describe('the migration from localStorage', () => {
@@ -111,6 +142,15 @@ describe('the migration from localStorage', () => {
     expect(store.migrated).toBe(false)
     expect(writes).toHaveLength(0)
   })
+
+  it('opens a first run with nothing to inherit from without a word', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs } = fakeFs()
+    const store = await openFileStore({ fs })
+    expect(store.migrated).toBe(false)
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
 })
 
 describe('when the disk refuses', () => {
@@ -127,6 +167,7 @@ describe('when the disk refuses', () => {
     await expect(store.flush()).rejects.toThrow('disk full')
     expect(store.healthy).toBe(false)
     expect(() => store.setItem('paper.marks.v1', CARDS)).toThrow('previous save')
+    expect(warn).toHaveBeenCalledWith('Paper: could not save to disk', expect.objectContaining({ message: 'disk full' }))
 
     fail(false)
     await store.flush()
@@ -219,10 +260,30 @@ describe('a store that will not parse', () => {
     expect(store.damaged).toEqual({ aside: `${STORE_FILE}.corrupt` })
     warn.mockRestore()
   })
+
+  /* Valid JSON is not a store: only an object of strings is. Each of these
+     parses, and each read as an empty, healthy store would be written over. */
+  it.each([
+    ['a list', '["paper.marks.v1"]'],
+    ['a number', '42'],
+    ['JSON null', 'null'],
+  ])('treats a file holding %s as damaged, not as an empty store', async (_name, text) => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs, files } = fakeFs({ [STORE_FILE]: text })
+    const store = await openFileStore({ fs })
+    expect(store.damaged).toEqual({ aside: `${STORE_FILE}.corrupt` })
+    expect(files.get(`${STORE_FILE}.corrupt`)).toBe(text)
+    warn.mockRestore()
+  })
 })
 
 async function readBack(fs: FileSystem): Promise<string> {
   return (await fs.read(STORE_FILE)) ?? ''
+}
+
+/** Past every microtask the store queued — a zero-delay timer runs after them all. */
+function settled(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
 /**
@@ -238,6 +299,7 @@ describe('what the store has to say about its own file', () => {
     const { fs } = fakeFs({ [STORE_FILE]: '{"paper.marks.v1": [trunca' })
     const store = await openFileStore({ fs })
     expect(store.damaged).toEqual({ aside: `${STORE_FILE}.corrupt` })
+    expect(warn).toHaveBeenCalledWith(`Paper: the store could not be read; moved it to ${STORE_FILE}.corrupt`)
     warn.mockRestore()
   })
 
@@ -266,24 +328,66 @@ describe('what the store has to say about its own file', () => {
     warn.mockRestore()
   })
 
-  it('reports a damaged file it could not move, which the next write will replace', async () => {
+  it('reports the name it asked for when the filesystem answers with an empty one', async () => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { fs } = fakeFs({ [STORE_FILE]: 'not json' })
-    const store = await openFileStore({ fs: { ...fs, quarantine: () => Promise.reject(new Error('EROFS')) } })
-    expect(store.damaged).toEqual({ aside: null })
+    const store = await openFileStore({
+      fs: {
+        ...fs,
+        quarantine: async (from, to) => {
+          await fs.quarantine!(from, to)
+          return ''
+        },
+      },
+    })
+    expect(store.damaged).toEqual({ aside: `${STORE_FILE}.corrupt` })
     warn.mockRestore()
   })
 
-  it('reports a damaged file when this filesystem has no way to move it aside', async () => {
-    /* `fs.quarantine?.()` resolved undefined, and the report claimed the
-       bytes were moved to a path nothing wrote — the next write then
-       overwrote the reader's only copy under a notice saying it was safe. */
+  /* ⚠️ **AND IT USED TO REPLACE THOSE BYTES ON THE NEXT CHANGE — WHICH IS THE
+     ONLY COPY OF THE READER'S CARDS, SETTINGS AND TAG PREFERENCES.** Moving the
+     file aside is what makes starting empty safe; where the move did not
+     happen, starting empty and writing is the destruction the quarantine
+     exists to prevent, announced instead of silent. So the store refuses to
+     write at all: the session keeps what it is given, every store above reads
+     the refusal as `persistent: false`, and the bytes stay for whatever can
+     recover them. Found by the 2026-09-13 audit. */
+  const unmovable = [
+    [
+      'the filesystem refused the move',
+      (fs: FileSystem) => ({ ...fs, quarantine: () => Promise.reject(new Error('EROFS')) }),
+      'Paper: the store could not be read, and could not be moved aside',
+    ],
+    /* `fs.quarantine?.()` resolved undefined, and the report claimed the bytes
+       were moved to a path nothing wrote. An absent seam is the could-not-move
+       case, and it answers the same way — and the log says which it was. */
+    [
+      'this filesystem has no way to move it',
+      ({ quarantine: _seam, ...bare }: FileSystem) => bare,
+      'Paper: the store could not be read, and this filesystem cannot move it aside',
+    ],
+  ] as const
+
+  it.each(unmovable)('reports a damaged file when %s, and writes nothing over it', async (_name, breaks, said) => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { fs } = fakeFs({ [STORE_FILE]: 'not json' })
-    const { quarantine, ...bare } = fs
-    void quarantine
-    const store = await openFileStore({ fs: bare })
+    const damaged = 'not json'
+    const { fs, files } = fakeFs({ [STORE_FILE]: damaged })
+    const store = await openFileStore({ fs: breaks(fs) })
+
     expect(store.damaged).toEqual({ aside: null })
+    expect(store.healthy, 'said before a single write is attempted').toBe(false)
+    expect(() => store.setItem('paper.marks.v1', MARKS)).toThrow(/could not be moved aside/u)
+    // Held for the session, as every other session-only store holds it.
+    expect(store.getItem('paper.marks.v1')).toBe(MARKS)
+
+    const cause = await store.flush().then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/could not be moved aside/u)
+    expect(files.get(STORE_FILE), 'the only copy of the reader’s work must be intact').toBe(damaged)
+    expect(warn.mock.calls.map((call) => call[0])).toEqual([said])
     warn.mockRestore()
   })
 
@@ -310,6 +414,7 @@ describe('what the store has to say about its own file', () => {
     }
     const store = await openFileStore({ fs, legacy })
     expect(store.getItem('paper.cards.v1')).toBe('kept')
+    expect(warn).toHaveBeenCalledWith('Paper: could not migrate paper.marks.v1 from the old storage', expect.any(Error))
     warn.mockRestore()
   })
 

@@ -1,14 +1,14 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Script } from 'node:vm'
-import { describe, expect, it } from 'vitest'
+import { Script, createContext, runInContext } from 'node:vm'
+import { describe, expect, it, onTestFinished } from 'vitest'
 import { CORPUS } from '../src/kernel/ui/reader/wordSnap/corpus.ts'
-import { evaluateSnippet } from './word-snap-parity.mjs'
-import { CHECKS, assertRan, buildDomSnippet } from './word-snap-live.mjs'
+import { buildSnippet, compareReports, evaluateSnippet } from './word-snap-parity.mjs'
+import { CHECKS, assertRan, buildDomSnippet, main } from './word-snap-live.mjs'
 
 /**
  * The guards on WI-12's live lane — and they live HERE, in the lane that
@@ -47,6 +47,15 @@ import { CHECKS, assertRan, buildDomSnippet } from './word-snap-live.mjs'
  *    both exit non-zero, and the snippet reports failure rather than success in
  *    an engine with no DOM.
  *
+ * ⚠️ **THE SCRIPT IS CALLED, NOT SPAWNED — EXCEPT TO PROVE THE ENTRY POINT.**
+ * Every case about the command line used to run it as a child process, which
+ * measured none of it: 169 of the script's mutants had no test reach them —
+ * every option, every exit, the whole bridge path — and the `--json` its usage
+ * offers had been refused as an unknown option all along. `main` takes its
+ * streams, its corpus and the bridge's `connect` as arguments now, the way
+ * `word-snap-parity.mjs`'s does, and a fake socket answers in place of the
+ * bridge. Nothing here dials one.
+ *
  * **Nothing here verifies a gesture, and nothing here claims a live run
  * happened.** The Tauri MCP bridge dispatches `isTrusted: false` events, which
  * produce no native selection and no `selectionchange`; no harness at any level
@@ -73,9 +82,17 @@ function run(args) {
   return { code: result.status, out: result.stdout ?? '', err: result.stderr ?? '' }
 }
 
-function tempFile(name, contents) {
+/** A directory of the case's own, removed when the case finishes — however it
+ *  finishes, a failed assertion or a skip included. Every call used to leave
+ *  one behind in the system temp directory, on every run. */
+function tempDir() {
   const dir = mkdtempSync(join(tmpdir(), 'word-snap-live-'))
-  const path = join(dir, name)
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }))
+  return dir
+}
+
+function tempFile(name, contents) {
+  const path = join(tempDir(), name)
   writeFileSync(path, contents, 'utf8')
   return path
 }
@@ -94,6 +111,140 @@ function closedPort() {
   })
 }
 
+/** Spelled out, not imported: the words are the behaviour under test. */
+const USAGE = [
+  'usage:',
+  '  node scripts/word-snap-live.mjs                 run every check against the bridge',
+  '  node scripts/word-snap-live.mjs --list          list the checks; needs no bridge',
+  '  node scripts/word-snap-live.mjs --emit-dom      print the DOM-check snippet',
+  '  node scripts/word-snap-live.mjs --port N        bridge port (default 31415)',
+  '  node scripts/word-snap-live.mjs --corpus FILE   corpus rows from a JSON file',
+  '  node scripts/word-snap-live.mjs --json          print both reports as JSON',
+  '',
+  'The app must be running (pnpm tauri dev, a DEBUG build — the bridge is not in release).',
+  'No gesture is reachable from here: see the manual selection checklist,',
+  'which is kept outside this repository.',
+].join('\n')
+
+/** What `--list` prints — the lane's probe, and the only place a check says what it is FOR. */
+const LISTING =
+  'range-detach  —  setBaseAndExtent detaches a captured Range\n' +
+  '    The single WebKit behaviour every WI-6 assertion rests on. If this ever disagrees with ' +
+  'selectionFake.testkit.ts, every Level 4 assertion in applySnap.test.ts becomes suspect at once — ' +
+  'which makes this the highest-value check in the lane.\n\n' +
+  'backward-direction  —  a backward selection keeps its direction through a snap\n' +
+  '    Verifies the ADAPTER against a real backward Selection. It does NOT cover a backward DRAG, ' +
+  'which needs trusted pointer input and stays on the manual checklist.\n\n' +
+  'block-merge  —  toString() welds two blocks together, and rangeText does not\n' +
+  '    The defect and the fix asserted in one run, so a green result cannot mean the defect was ' +
+  'simply never there in this engine.\n\n' +
+  'br-merge  —  toString() welds across a <br>, and rangeText does not\n' +
+  '    The same defect through the other sentinel source. Both must reproduce, and both must be fixed.\n\n' +
+  'soft-hyphen  —  a soft hyphen does not break a word\n' +
+  '    UAX #29 WB4 ignores U+00AD, and WebKit double-click agrees. This is where that decision gets ' +
+  're-checked on evidence rather than on memory when ICU moves with the OS.\n\n' +
+  'word-joiner  —  a word joiner does not break a word\n' +
+  '    Why U+2060 is not a usable sentinel: it does not split a word, so it cannot mark a boundary.\n\n' +
+  '6 programmatic checks, plus the WI-4 corpus, run against the live WKWebView.\n' +
+  'No gesture is among them, and none can be: see the manual selection\n' +
+  'checklist, kept outside this repository.\n'
+
+const UNREACHABLE_ADVICE =
+  '  nothing was checked. Start the app with `pnpm tauri dev` (a debug build; the\n' +
+  '  bridge is compiled out of release) and run this again.\n'
+
+const GESTURES_NOT_COVERED =
+  '  NOT covered, by anything, at any level: every gesture. See the\n' +
+  '  manual selection checklist, kept outside this repository.\n'
+
+/** What a webview report calls its engine. Anything naming a browser will do;
+ *  Node's own name is refused by both comparisons. */
+const WEBKIT = 'WebKit under test'
+
+/** Two corpus rows: enough to be a corpus, few enough to evaluate quickly. */
+const ROWS = CORPUS.slice(0, 2)
+
+/** A DOM report as a page that ran every check and passed them all writes it. */
+const PASSING_DOM = {
+  ok: true,
+  engine: WEBKIT,
+  expected: CHECKS.length,
+  ran: CHECKS.length,
+  failures: 0,
+  reason: null,
+  checks: CHECKS.map((check) => ({ id: check.id, pass: true, detail: 'as expected' })),
+}
+
+/** The bridge's reply to one `execute_js`, as `lib/bridge.mjs` reads it. */
+const answering = (data) => () => ({ success: true, data })
+
+/** The corpus snippet, run in this engine and relabelled as a webview's. */
+const corpusInWebview = (script) => ({ success: true, data: { ...evaluateSnippet(script), engine: WEBKIT } })
+
+/** A jsdom window running `snippet`, answering what it returns. jsdom is not
+ *  WebKit: a pass here says nothing about WebKit, only about the assembly. */
+async function inJsdom(snippet) {
+  const { JSDOM } = await import('jsdom')
+  return new JSDOM('<!doctype html><body></body>', { runScripts: 'outside-only' }).window.eval(snippet)
+}
+
+/**
+ * A stand-in for the bridge's WebSocket, with nothing behind it.
+ *
+ * Each `execute_js` it is sent is answered by the next of `replies`, given the
+ * script, and the answer travels as JSON text the way the plugin's does — so
+ * the real `execute` in `lib/bridge.mjs` runs against it unchanged, id
+ * matching included. It records what it was sent and how often it was closed.
+ */
+function fakeBridge(...replies) {
+  const socket = new EventTarget()
+  socket.readyState = 1
+  socket.scripts = []
+  socket.closes = 0
+  socket.close = () => {
+    socket.closes += 1
+  }
+  socket.send = (text) => {
+    const { id, args } = JSON.parse(text)
+    socket.scripts.push(args.script)
+    const reply = replies[socket.scripts.length - 1](args.script)
+    setImmediate(async () => {
+      const settled = { id, ...reply, data: await reply.data }
+      socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(settled) }))
+    })
+  }
+  return socket
+}
+
+/**
+ * The script, called the way its entry point calls it, with everything it says
+ * captured. `dial` answers with `socket`, or rejects with `refuse` — and records
+ * every port it was asked for, so a case that must not reach the bridge can
+ * say it did not. `corpusReads` counts calls to the default corpus.
+ */
+async function cli(args, { rows = ROWS, corpus, socket, refuse, stdout } = {}) {
+  const out = []
+  const err = []
+  const dialled = []
+  let corpusReads = 0
+  const code = await main(args, {
+    stdout: stdout ?? { write: (text) => out.push(text) },
+    stderr: { write: (text) => err.push(text) },
+    corpus:
+      corpus ??
+      (async () => {
+        corpusReads += 1
+        return rows
+      }),
+    dial: async (port) => {
+      dialled.push(port)
+      if (refuse !== undefined) throw refuse
+      return socket
+    },
+  })
+  return { code, out: out.join(''), err: err.join(''), dialled, corpusReads }
+}
+
 /**
  * The workspace's tdd-guardian config, when this checkout has one.
  *
@@ -102,7 +253,7 @@ function closedPort() {
  * config to assert against, and a test that read it unconditionally would be
  * red for everyone but the machine that ran `/tdd-guardian:init`.
  *
- * Absent, the four lane cases below are **skipped and say so in their names**,
+ * Absent, the three lane cases below are **skipped and say so in their names**,
  * never quietly passed.
  */
 const config = existsSync(CONFIG) ? JSON.parse(readFileSync(CONFIG, 'utf8')) : null
@@ -319,6 +470,86 @@ describe('word-snap-live — what it concludes from a report', () => {
 
     expect(assertRan(goodParity, noEngine, 2).join(' ')).toMatch(/engine/i)
     expect(assertRan(goodParity, { ...goodDom, engine: '' }, 2).join(' ')).toMatch(/engine/i)
+    expect(assertRan(goodParity, { ...goodDom, engine: undefined }, 2)).toEqual([
+      'the DOM report carries no engine string — it did not run in a browser engine',
+    ])
+  })
+
+  /* Every case below asserts the WHOLE list. A matcher on one clause passes a
+   * function that adds a second, wrong complaint beside the right one, and a
+   * complaint missing its numbers is a complaint nobody can act on. */
+  const n = CHECKS.length
+
+  it('says only that a corpus answer is not a report, whatever shape it is not one in', () => {
+    for (const parity of [null, undefined, 'rows', { rows: 'many' }]) {
+      expect(assertRan(parity, goodDom, 2)).toEqual(['the corpus report is not a report this harness produced'])
+    }
+  })
+
+  it('names both row counts when the corpus report holds a different number', () => {
+    expect(assertRan(goodParity, goodDom, 3)).toEqual(['the corpus report holds 2 rows against 3 sent'])
+  })
+
+  it('refuses a DOM report whose declared count alone is wrong, naming all three numbers and its reason', () => {
+    expect(assertRan(goodParity, { ...goodDom, expected: n - 1 }, 2)).toEqual([
+      `the DOM report ran ${n} of a declared ${n - 1} checks, against ${n} defined here`,
+    ])
+    expect(assertRan(goodParity, { ...goodDom, expected: n - 1, reason: 'the frame went away' }, 2)).toEqual([
+      `the DOM report ran ${n} of a declared ${n - 1} checks, against ${n} defined here — the frame went away`,
+    ])
+  })
+
+  it('refuses an entry that is not a check, whichever way it fails to be one', () => {
+    const rest = goodDom.checks.slice(1)
+    for (const entry of [undefined, CHECKS[0].id, { pass: true, detail: 'ok' }]) {
+      expect(assertRan(goodParity, { ...goodDom, checks: [entry, ...rest] }, 2)).toEqual([
+        'the DOM report holds an entry that is not a check',
+        `${CHECKS[0].id}: declared here and absent from the report`,
+      ])
+    }
+  })
+
+  it('reports a failed check as its id and its own detail, and nothing else', () => {
+    const failed = {
+      ...goodDom,
+      checks: goodDom.checks.map((check, i) => (i === 0 ? { ...check, pass: false, detail: 'identical after=true' } : check)),
+    }
+
+    expect(assertRan(goodParity, failed, 2)).toEqual([`${CHECKS[0].id}: identical after=true`])
+  })
+
+  /* The counts all agree here, so the declared check that is missing is the
+   * only thing that can say so. */
+  it('refuses a report carrying a check nobody declared in place of one that was', () => {
+    const stray = { id: 'stray', pass: true, detail: 'ok' }
+    const swapped = { ...goodDom, checks: [...goodDom.checks.slice(0, -1), stray] }
+
+    expect(assertRan(goodParity, swapped, 2)).toEqual([`${CHECKS.at(-1).id}: declared here and absent from the report`])
+  })
+
+  it('refuses a report whose entries outnumber the checks it says ran', () => {
+    const padded = { ...goodDom, checks: [...goodDom.checks, { id: 'stray', pass: true, detail: 'ok' }] }
+
+    expect(assertRan(goodParity, padded, 2)).toEqual([`the DOM report claims ${n} checks ran and carries ${n + 1}`])
+  })
+
+  it('believes a failure status on either field alone', () => {
+    expect(assertRan(goodParity, { ...goodDom, ok: false }, 2)).toEqual([
+      'the DOM report declares itself failed (ok: false, failures: 0)',
+    ])
+    expect(assertRan(goodParity, { ...goodDom, ok: true, failures: 2 }, 2)).toEqual([
+      'the DOM report declares itself failed (ok: true, failures: 2)',
+    ])
+  })
+
+  /* ⚠️ **A FAILURE COUNT THAT WAS NOT A NUMBER WAS NOT READ AT ALL** until
+     2026-09-15: a type guard stood in front of the comparison, and the only
+     values it ever turned away were ones that compare as a positive count — so
+     a report saying `failures: "2"` over entries that all passed was clean. */
+  it('believes a failure count that arrives as text', () => {
+    expect(assertRan(goodParity, { ...goodDom, ok: true, failures: '2' }, 2)).toEqual([
+      'the DOM report declares itself failed (ok: true, failures: 2)',
+    ])
   })
 })
 
@@ -361,12 +592,53 @@ describe('word-snap-live — the DOM-check snippet', () => {
   })
 
   /*
-   * The snippet crosses a process boundary as JSON and is then parsed by
-   * WebKit. A JS line terminator inside a comment ends that comment early and
-   * turns the rest of the line into code; an unpaired surrogate does not
-   * survive UTF-8 at all. Both arrive from the inlined source, where escaping
-   * is not an option because a comment is not a string.
+   * ⚠️ **A CHECK THAT NO ENGINE COULD PASS STOOD IN THIS FILE UNNOTICED.** The
+   * backward-direction check expected nine characters of an eight-character
+   * selection until 2026-09-14, and being manual-gated, nothing ran it. jsdom
+   * is not WebKit, so a pass here says nothing about WebKit — but a check that
+   * fails in EVERY DOM, and an adapter that did not arrive in the snippet, or
+   * an id the snippet has no check for, all fail here, in the lane that always
+   * runs. Every one of the six passes in jsdom.
    */
+  it('passes every check it declares when a DOM runs it', async () => {
+    const report = await inJsdom(buildDomSnippet())
+
+    expect(report).toMatchObject({ ok: true, expected: CHECKS.length, ran: CHECKS.length, failures: 0, reason: null })
+    /* Compared whole, so a failure prints each check's own detail beside it. */
+    expect(report.checks).toEqual(CHECKS.map(({ id }) => expect.objectContaining({ id, pass: true })))
+  })
+
+  /*
+   * The adapter was written as modules, which are strict, and the snippet
+   * keeps it that way. Strictness is only visible from inside — a sloppy
+   * function's `caller` never reveals a strict one — so the probe is a sloppy
+   * getter on `navigator`, which the driver reads before anything else. The
+   * same probe `word-snap-parity.test.mjs` holds its snippet to.
+   */
+  it('runs the inlined adapter in strict mode, as the modules it was written as', () => {
+    const callersSeenBy = (snippet) => {
+      const context = createContext({})
+      runInContext(
+        'var callers = [];\n' +
+          "Object.defineProperty(globalThis, 'navigator', { get: function probe() { callers.push(probe.caller); return undefined; } });\n",
+        context,
+      )
+      runInContext(snippet, context)
+      return [...context.callers]
+    }
+
+    const snippet = buildDomSnippet()
+    const strict = callersSeenBy(snippet)
+    expect(strict.length).toBeGreaterThan(0)
+    expect(strict.filter((caller) => caller !== null)).toEqual([])
+
+    /* The known positive: the same snippet without its directive, and the same
+     * probe sees exactly who called it. */
+    const sloppy = callersSeenBy(snippet.replace("'use strict';\n", ''))
+    expect(sloppy.length).toBeGreaterThan(0)
+    expect(sloppy.every((caller) => typeof caller === 'function')).toBe(true)
+  })
+
   it('removes its fixture frame, however the run ends', async () => {
     /* ⚠️ **EVERY OTHER TEST OF THE SNIPPET RUNS WITHOUT A DOM**, where it stops
        at the first guard — which is the point of those, and leaves everything
@@ -377,8 +649,8 @@ describe('word-snap-live — the DOM-check snippet', () => {
        A jsdom window rather than the `jsdom` test environment: this file is
        assembled from the app's source through `import.meta.url`, which under
        that environment is not a file URL and cannot be read from. jsdom is not
-       WebKit and several checks will not pass in it — that is not what this
-       measures. What it measures is what the snippet LEAVES. */
+       WebKit, so whether the checks pass in it is not what this measures — the
+       case above does that. What this measures is what the snippet LEAVES. */
     const { JSDOM } = await import('jsdom')
     const snippet = buildDomSnippet()
 
@@ -413,6 +685,13 @@ describe('word-snap-live — the DOM-check snippet', () => {
     expect(broken.window.document.querySelectorAll('iframe')).toHaveLength(0)
   })
 
+  /*
+   * The snippet crosses a process boundary as JSON and is then parsed by
+   * WebKit. A JS line terminator inside a comment ends that comment early and
+   * turns the rest of the line into code; an unpaired surrogate does not
+   * survive UTF-8 at all. Both arrive from the inlined source, where escaping
+   * is not an option because a comment is not a string.
+   */
   it('carries nothing that would break at parse in transit', () => {
     const snippet = buildDomSnippet()
     const lineSeparator = String.fromCharCode(0x2028)
@@ -453,5 +732,296 @@ describe('word-snap-live — the DOM-check snippet', () => {
   it('is a different snippet from the corpus parity one, and both are non-empty', () => {
     expect(buildDomSnippet().length).toBeGreaterThan(0)
     expect(CORPUS.length).toBeGreaterThan(0)
+  })
+})
+
+describe('word-snap-live — the command line', () => {
+  it('prints its usage for --help and -h, reading no corpus and dialling nothing', async () => {
+    for (const flag of ['--help', '-h']) {
+      expect(await cli([flag])).toEqual({ code: 0, out: '', err: `${USAGE}\n`, dialled: [], corpusReads: 0 })
+    }
+  })
+
+  it('lists every check with what it is for, reading no corpus and dialling nothing', async () => {
+    expect(await cli(['--list'])).toEqual({ code: 0, out: LISTING, err: '', dialled: [], corpusReads: 0 })
+  })
+
+  it('prints the DOM-check snippet for --emit-dom, and nothing else', async () => {
+    expect(await cli(['--emit-dom'])).toEqual({ code: 0, out: buildDomSnippet(), err: '', dialled: [], corpusReads: 0 })
+  })
+
+  /* ⚠️ **ONLY `--` FLAGS WERE CHECKED, AND ONLY AFTER THREE MODES HAD RUN.** A
+     bare `9223` was ignored exactly as `--prot 9223` once was, and so was
+     anything after `--list`. The whole command line is read first now. */
+  it('refuses an argument it does not know, with its usage, before anything runs', async () => {
+    const known = '(known: --help, -h, --list, --emit-dom, --json, --corpus, --port)'
+    for (const [args, unknown] of [
+      [['--prot', '9223'], '--prot'],
+      [['9223'], '9223'],
+      [['--list', '--bogus'], '--bogus'],
+    ]) {
+      expect(await cli(args)).toEqual({
+        code: 2,
+        out: '',
+        err: `unknown option: ${unknown} ${known}\n${USAGE}\n`,
+        dialled: [],
+        corpusReads: 0,
+      })
+    }
+  })
+
+  /* ⚠️ **`--json` WAS NEVER ON THE LIST OF KNOWN OPTIONS**, though the usage
+     offers it: every run asked for JSON was refused as a typo. */
+  it('knows every option its usage offers', async () => {
+    const socket = fakeBridge(corpusInWebview, answering(PASSING_DOM))
+    const { code, err } = await cli(['--json', '--port', '31415'], { socket })
+
+    expect(err).not.toContain('unknown option')
+    expect(code).toBe(0)
+  })
+
+  it('refuses an option named without its value', async () => {
+    for (const [args, flag] of [
+      [['--port'], '--port'],
+      [['--corpus', '--json'], '--corpus'],
+    ]) {
+      expect(await cli(args)).toEqual({ code: 2, out: '', err: `${flag} needs a value\n${USAGE}\n`, dialled: [], corpusReads: 0 })
+    }
+  })
+
+  it('refuses an option given twice rather than reading one of them', async () => {
+    expect(await cli(['--port', '4242', '--port', '31415'])).toEqual({
+      code: 2,
+      out: '',
+      err: `--port was given more than once\n${USAGE}\n`,
+      dialled: [],
+      corpusReads: 0,
+    })
+  })
+})
+
+describe('word-snap-live — the corpus it sends', () => {
+  it('exits non-zero on an empty corpus, before it dials the bridge', async () => {
+    expect(await cli([], { rows: [] })).toEqual({
+      code: 1,
+      out: '',
+      err: 'word-snap-live: the corpus is empty — zero rows to check is a failure, not a clean sweep\n',
+      dialled: [],
+      corpusReads: 1,
+    })
+  })
+
+  it('exits non-zero when the corpus cannot be read, saying why, before it dials', async () => {
+    const refused = await cli([], { corpus: () => Promise.reject(new Error('corpus.ts did not export a CORPUS array')) })
+    expect(refused).toMatchObject({ code: 1, out: '', dialled: [] })
+    expect(refused.err).toBe('word-snap-live: the corpus could not be read: corpus.ts did not export a CORPUS array\n')
+
+    const notRows = await cli(['--corpus', tempFile('not-rows.json', '{"rows": []}')])
+    expect(notRows).toEqual({
+      code: 1,
+      out: '',
+      err: 'word-snap-live: the corpus could not be read: the corpus file must hold an array of rows, not object\n',
+      dialled: [],
+      corpusReads: 0,
+    })
+
+    const missing = join(tempDir(), 'absent.json')
+    const absent = await cli(['--corpus', missing])
+    expect(absent).toMatchObject({ code: 1, out: '', dialled: [], corpusReads: 0 })
+    expect(absent.err).toMatch(/^word-snap-live: the corpus could not be read: ENOENT: .*absent\.json'\n$/u)
+  })
+
+  it('sends the rows from --corpus FILE rather than the corpus module', async () => {
+    const rows = [CORPUS[2]]
+    const socket = fakeBridge(corpusInWebview, answering(PASSING_DOM))
+
+    const result = await cli(['--corpus', tempFile('one-row.json', JSON.stringify(rows))], { socket })
+
+    expect(result).toMatchObject({ code: 0, corpusReads: 0 })
+    expect(result.err).toContain('word-snap-live: 1 corpus rows agree with this engine')
+    expect(socket.scripts[0]).toBe(buildSnippet(rows))
+  })
+})
+
+describe('word-snap-live — the bridge', () => {
+  it('dials the pinned port unless --port names another, and says so when nothing answers', async () => {
+    const refuse = new Error('the bridge refused or dropped the connection')
+
+    expect(await cli([], { refuse })).toEqual({
+      code: 1,
+      out: '',
+      err:
+        'word-snap-live: the MCP bridge at 127.0.0.1:31415 is unreachable — the bridge refused or dropped the connection\n' +
+        UNREACHABLE_ADVICE,
+      dialled: [31415],
+      corpusReads: 1,
+    })
+    for (const port of ['1', '4242', '65535']) {
+      const result = await cli(['--port', port], { refuse })
+      expect(result.dialled).toEqual([Number(port)])
+      expect(result.err).toBe(
+        `word-snap-live: the MCP bridge at 127.0.0.1:${port} is unreachable — the bridge refused or dropped the connection\n` +
+          UNREACHABLE_ADVICE,
+      )
+    }
+  })
+
+  it('refuses a --port that is not a port number, before it dials', async () => {
+    for (const port of ['abc', '0', '-1', '1.5', '65536', '']) {
+      expect(await cli(['--port', port])).toEqual({
+        code: 1,
+        out: '',
+        err: `word-snap-live: --port needs a port number, got ${port}\n`,
+        dialled: [],
+        corpusReads: 1,
+      })
+    }
+  })
+
+  it('runs the corpus and then the DOM checks, closes the connection, and exits zero when both agree', async () => {
+    const socket = fakeBridge(corpusInWebview, answering(PASSING_DOM))
+
+    expect(await cli([], { socket })).toEqual({
+      code: 0,
+      out: '',
+      err:
+        CHECKS.map(({ id }) => `  ok    ${id}: as expected\n`).join('') +
+        `word-snap-live: 2 corpus rows agree with this engine and ${CHECKS.length} checks pass in ${WEBKIT}\n` +
+        GESTURES_NOT_COVERED,
+      dialled: [31415],
+      corpusReads: 1,
+    })
+    expect(socket.scripts).toEqual([buildSnippet(ROWS), buildDomSnippet()])
+    expect(socket.closes).toBe(1)
+  })
+
+  it('passes end to end when a DOM answers the checks the snippet carries', async () => {
+    const socket = fakeBridge(corpusInWebview, (script) => ({ success: true, data: inJsdom(script) }))
+
+    const { code, err } = await cli([], { socket })
+
+    for (const { id } of CHECKS) expect(err).toContain(`  ok    ${id}: `)
+    expect(err).toContain(`word-snap-live: 2 corpus rows agree with this engine and ${CHECKS.length} checks pass in `)
+    expect(code).toBe(0)
+  })
+
+  it('prints both reports as JSON for --json', async () => {
+    const socket = fakeBridge(corpusInWebview, answering(PASSING_DOM))
+    const corpus = JSON.parse(JSON.stringify(corpusInWebview(buildSnippet(ROWS)).data))
+
+    const result = await cli(['--json'], { socket })
+
+    expect(result.out).toBe(JSON.stringify({ corpus, dom: PASSING_DOM }, null, 2) + '\n')
+    expect(result.code).toBe(0)
+  })
+
+  it('prints each note the comparison makes, and still exits zero', async () => {
+    const flipped = (script) => {
+      const report = evaluateSnippet(script)
+      const [first, ...rest] = report.rows
+      const segments = first.segments.map((segment, i) => (i === 0 ? { ...segment, wordLike: !segment.wordLike } : segment))
+      return { success: true, data: { ...report, engine: WEBKIT, rows: [{ ...first, segments }, ...rest] } }
+    }
+    const { notes } = compareReports(evaluateSnippet(buildSnippet(ROWS)), flipped(buildSnippet(ROWS)).data)
+    expect(notes).toHaveLength(1)
+
+    const result = await cli([], { socket: fakeBridge(flipped, answering(PASSING_DOM)) })
+
+    expect(result.err).toBe(
+      `  note: ${notes[0]}\n` +
+        CHECKS.map(({ id }) => `  ok    ${id}: as expected\n`).join('') +
+        `word-snap-live: 2 corpus rows agree with this engine and ${CHECKS.length} checks pass in ${WEBKIT}\n` +
+        GESTURES_NOT_COVERED,
+    )
+    expect(result.code).toBe(0)
+  })
+
+  it('exits non-zero on one failed check, printing it and counting one problem', async () => {
+    const failing = {
+      ...PASSING_DOM,
+      checks: PASSING_DOM.checks.map((check, i) => (i === 0 ? { ...check, pass: false, detail: 'identical after=true' } : check)),
+    }
+
+    const result = await cli([], { socket: fakeBridge(corpusInWebview, answering(failing)) })
+
+    expect(result.err).toBe(
+      `  FAIL  ${CHECKS[0].id}: identical after=true\n` +
+        CHECKS.slice(1).map(({ id }) => `  ok    ${id}: as expected\n`).join('') +
+        'word-snap-live: 1 problem\n' +
+        `  ${CHECKS[0].id}: identical after=true\n`,
+    )
+    expect(result.code).toBe(1)
+  })
+
+  it('counts and prints every problem, the comparison’s before the report’s', async () => {
+    const short = () => ({ success: true, data: { ...evaluateSnippet(buildSnippet(ROWS.slice(0, 1))), engine: WEBKIT } })
+    const { problems } = compareReports(evaluateSnippet(buildSnippet(ROWS)), short().data)
+    expect(problems).toHaveLength(1)
+
+    const result = await cli([], { socket: fakeBridge(short, answering({ ...PASSING_DOM, ok: false })) })
+
+    expect(result.err).toBe(
+      CHECKS.map(({ id }) => `  ok    ${id}: as expected\n`).join('') +
+        'word-snap-live: 3 problems\n' +
+        `  ${problems[0]}\n` +
+        '  the corpus report holds 1 rows against 2 sent\n' +
+        '  the DOM report declares itself failed (ok: false, failures: 0)\n',
+    )
+    expect(result.code).toBe(1)
+  })
+
+  it('refuses an answer that is not a DOM report, and prints no check for it', async () => {
+    const result = await cli([], { socket: fakeBridge(corpusInWebview, answering(null)) })
+
+    expect(result.err).toBe('word-snap-live: 1 problem\n  the DOM report is not a report this harness produced\n')
+    expect(result.code).toBe(1)
+  })
+
+  it('exits non-zero when the webview refuses either script, closing the connection', async () => {
+    const refusing = () => ({ success: false, error: 'the page went away' })
+
+    const first = fakeBridge(refusing)
+    expect(await cli([], { socket: first })).toMatchObject({
+      code: 1,
+      out: '',
+      err: 'word-snap-live: the corpus run: the page went away\n  nothing can be concluded from this run.\n',
+    })
+    expect(first.scripts).toHaveLength(1)
+    expect(first.closes).toBe(1)
+
+    const second = fakeBridge(corpusInWebview, refusing)
+    expect(await cli([], { socket: second })).toMatchObject({
+      code: 1,
+      out: '',
+      err: 'word-snap-live: the DOM checks: the page went away\n  nothing can be concluded from this run.\n',
+    })
+    expect(second.closes).toBe(1)
+  })
+
+  /*
+   * A crash is a run that did not happen, and it must not escape as a
+   * rejection that a caller could mistake for anything else: non-zero, with
+   * the stack — or, for a throw that has none, whatever was thrown.
+   */
+  it('exits non-zero on a crash, printing its stack', async () => {
+    const failure = new Error('stdout is gone')
+    const throwing = (value) => ({
+      write: () => {
+        throw value
+      },
+    })
+
+    expect(await cli(['--list'], { stdout: throwing(failure) })).toMatchObject({
+      code: 1,
+      err: `word-snap-live: ${failure.stack}\n`,
+    })
+    expect(await cli(['--list'], { stdout: throwing(undefined) })).toMatchObject({
+      code: 1,
+      err: 'word-snap-live: undefined\n',
+    })
+
+    const notRows = await cli([], { corpus: async () => ({ length: 1 }) })
+    expect(notRows).toMatchObject({ code: 1, dialled: [] })
+    expect(notRows.err).toMatch(/^word-snap-live: TypeError: word-snap-parity: buildSnippet needs an array of corpus rows\n {4}at /u)
   })
 })

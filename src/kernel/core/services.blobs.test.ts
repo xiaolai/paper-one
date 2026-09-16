@@ -276,6 +276,143 @@ describe('removeBlob', () => {
     expect(spy.commits).toHaveLength(spy.kinds.length)
   })
 
+  /* NO FILESYSTEM, NOTHING TO REMOVE — and still no name outside the set. The
+     refusal is the operation's own, filesystem or none. */
+  it('is a no-op without a filesystem, and still refuses a name outside the set', async () => {
+    const spy = spyRecorder()
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [BOOK], recorder: spy.recorder })
+    await expect(services.removeBlob('book_x', 'content.epub')).resolves.toBeUndefined()
+    const cause = await services.removeBlob('book_x', 'book.json' as 'cover.jpg').then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe('removeBlob: "book.json" is not a blob the kernel removes')
+    expect(spy.kinds).toEqual([])
+  })
+
+  /* ANOTHER BOOK ON THE SHELF IS NOT A CLAIM ON THIS FOLDER. Only a row whose
+     own folder is this one refuses the removal; a shelf with other books in it
+     goes through exactly as a shelf with none. */
+  it('removes a blob while another book sits on the shelf', async () => {
+    const spy = spyRecorder()
+    const fs = fakeFs({
+      'books/book_x/book.json': JSON.stringify({ bookId: 'book_x', title: 'X' }),
+      [CONTENT]: 'bytes',
+      'books/book_y/book.json': JSON.stringify({ bookId: 'book_y', title: 'Y' }),
+    })
+    const services = createKernelServices({
+      fs,
+      storage: null,
+      initialBooks: [BOOK, { bookId: 'book_y', title: 'Y', author: '', openedAt: 1 }],
+      recorder: spy.recorder,
+    })
+    await expect(services.removeBlob('book_x', 'content.epub')).resolves.toBeUndefined()
+    await services.drain()
+    expect(fs.store.has(CONTENT)).toBe(false)
+    expect(spy.kinds).toEqual(['content'])
+  })
+
+  /* AN ORPHANED FOLDER — no record at all — still has its blob cleared, a cover
+     included: there are no facts to take off a record that is not there. */
+  it('clears a jacket from a folder that holds no record', async () => {
+    const spy = spyRecorder()
+    const fs = fakeFs({ 'books/book_gone/cover.jpg': 'jacket' })
+    const services = createKernelServices({ fs, storage: null, initialBooks: [], recorder: spy.recorder })
+    await expect(services.removeBlob('book_gone', 'cover.jpg')).resolves.toBeUndefined()
+    await services.drain()
+    expect(fs.store.has('books/book_gone/cover.jpg')).toBe(false)
+    expect(spy.kinds).toEqual(['cover'])
+  })
+
+  /* PRESENT BUT UNREADABLE IS NOT AN ORPHAN — and nor is a record the read
+     calls missing while the folder says it is there. Tauri's fs errors carry no
+     code, so "missing" is read off a message; a read that failed in the wrong
+     words must not clear a jacket whose facts it could not take off. */
+  it('refuses when the read calls the record missing and the folder says it is there', async () => {
+    const w = blobWorld()
+    const read = w.fs.readFile
+    w.fs.readFile = async (path) => {
+      if (path === 'books/book_x/book.json') throw new Error(`no such file: ${path}`)
+      return read(path)
+    }
+    const cause = await w.services.removeBlob('book_x', 'cover.jpg').then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe('removeBlob: book.json for book_x is there but could not be read')
+    await w.services.drain()
+    expect(w.fs.store.has('books/book_x/cover.jpg')).toBe(true)
+    expect(w.spy.kinds).toEqual([])
+  })
+
+  /* A DELETE ANOTHER PROCESS WON IS DONE; one that failed with the file still
+     there is not. The exists/remove pair is atomic only against this queue, so
+     a remove that finds the file already gone is the ordinary absence — and a
+     remove that could not take a file that is still there is the caller's to
+     hear, in the disk's own words. */
+  it('treats a delete another process already made as done, and raises one that left the file', async () => {
+    const won = blobWorld()
+    won.fs.remove = async (path) => {
+      won.fs.store.delete(path)
+      throw new Error(`no such file: ${path}`)
+    }
+    await expect(won.services.removeBlob('book_x', 'content.epub')).resolves.toBeUndefined()
+    await won.services.drain()
+    expect(won.spy.kinds).toEqual(['content'])
+    expect(won.spy.commits).toHaveLength(1)
+
+    const refused = blobWorld()
+    const denied = new Error('permission denied')
+    refused.fs.remove = async () => {
+      throw denied
+    }
+    const cause = await refused.services.removeBlob('book_x', 'content.epub').then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBe(denied)
+    expect(refused.fs.store.has(CONTENT)).toBe(true)
+  })
+
+  /* THE FACTS THE WRITE FINDS, NOT THE FACTS THE CHECK SAW. The record is read
+     again where it is written, and something outside this queue can change it
+     in between — here, the journal's own `begin`. Facts that no longer name the
+     removed jacket are not this removal's to take. */
+  it('takes off only facts that still name the jacket when the record is written', async () => {
+    const hash = 'ab'.repeat(32)
+    const recordAt = 'books/book_x/book.json'
+    const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value))
+    for (const [what, replacement, expected] of [
+      ['facts that still name it', { name: 'cover.jpg', size: 6, hash }, undefined],
+      ['facts for the other name', { name: 'cover.webp', size: 9, hash }, { name: 'cover.webp', size: 9, hash }],
+      ['no facts at all', undefined, undefined],
+    ] as const) {
+      const fs = fakeFs({ 'books/book_x/cover.jpg': 'jacket' })
+      fs.store.set(recordAt, encode({ bookId: 'book_x', title: 'X', coverFacts: { name: 'cover.jpg', size: 6, hash } }))
+      const services = createKernelServices({
+        fs,
+        storage: null,
+        initialBooks: [BOOK],
+        recorder: {
+          begin: async (book, kind) => {
+            if (kind === 'record') {
+              fs.store.set(recordAt, encode({ bookId: 'book_x', title: 'X', ...(replacement ? { coverFacts: replacement } : {}) }))
+            }
+            return { book, what: kind }
+          },
+          commit: async () => {},
+        },
+      })
+      await expect(services.removeBlob('book_x', 'cover.jpg'), what).resolves.toBeUndefined()
+      await services.drain()
+      const written = JSON.parse(new TextDecoder().decode(fs.store.get(recordAt))) as { coverFacts?: unknown }
+      expect(written.coverFacts, what).toEqual(expected)
+      expect(fs.store.has('books/book_x/cover.jpg'), what).toBe(false)
+    }
+  })
+
   /* A NAME OUTSIDE THE CLOSED SET IS REFUSED, and the record is not a blob:
    * `book.json` is the book as far as the shelf is concerned. */
   it('refuses anything outside the closed set, including the record', async () => {
@@ -290,5 +427,108 @@ describe('removeBlob', () => {
       expect([...w.fs.store.keys()].sort(), `${bad} changed the tree`).toEqual(before)
     }
     expect(w.spy.kinds).toEqual([])
+  })
+})
+
+/**
+ * `drain`, STAGE BY STAGE — what the window closing waits for.
+ *
+ * The contract suite holds the two losses it was written for: a tick that
+ * landed after its flush, and a failed flush abandoning the stages after it.
+ * These hold what it raises and when it lets go: one failure as itself, several
+ * as one error naming each — both index flushes among them — and not before a
+ * write that arrived during its last flush has landed.
+ */
+describe('drain, stage by stage', () => {
+  /* A FLAT STORE WITH NOTHING TO FLUSH IS NOT A FAILED STAGE. `flush` is
+     optional on the storage the composition hands in — a browser's
+     `localStorage` has none — and asking for one that is not there must not
+     turn the last stage of a shutdown into an error. */
+  it('lets go of a flat store that has no flush', async () => {
+    const services = createKernelServices({ fs: null, storage: { getItem: () => null, setItem: () => {} }, initialBooks: [] })
+    await expect(services.drain()).resolves.toBeUndefined()
+  })
+
+  it('raises a single stage that failed as that failure itself', async () => {
+    const refused = new Error('the flat store would not flush')
+    const storage = {
+      getItem: () => null,
+      setItem: () => {},
+      flush: async () => {
+        throw refused
+      },
+    }
+    const services = createKernelServices({ fs: null, storage, initialBooks: [] })
+    const cause = await services.drain().then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBe(refused)
+  })
+
+  /* BOTH FLUSHES ARE TRIED, AND BOTH ARE COUNTED. The index is flushed before
+     the idle and again after it; an index that will not write fails each, and
+     the flat store's refusal is a third. */
+  it('raises several failed stages as one error that names each, in order', async () => {
+    const fs = fakeFs({ 'books/book_x/book.json': JSON.stringify({ bookId: 'book_x', title: 'X' }) })
+    const write = fs.writeFile
+    fs.writeFile = async (path, bytes) => {
+      if (path.startsWith('index.json')) throw new Error('the index would not write')
+      return write(path, bytes)
+    }
+    const refused = new Error('the flat store would not flush')
+    const services = createKernelServices({
+      fs,
+      storage: {
+        getItem: () => null,
+        setItem: () => {},
+        flush: async () => {
+          throw refused
+        },
+      },
+      initialBooks: [BOOK],
+    })
+    await services.library.rememberPosition('book_x', 'epubcfi(/6/4!/4/2/1:0)', 0.6)
+    const cause = await services.drain().then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(AggregateError)
+    expect((cause as AggregateError).errors.at(-1)).toBe(refused)
+    expect((cause as AggregateError).message).toBe(
+      'drain: 3 stages failed — the index would not write; the index would not write; the flat store would not flush',
+    )
+  })
+
+  /* NOT BEFORE THE QUEUE IS IDLE AGAIN. A write that arrives while the last
+     flush is writing the index — the reader's final handover, say — is on the
+     queue when that flush returns, and a drain that let go then would close
+     the window over it. */
+  it('lets go only once a write that arrived during its last flush has landed', async () => {
+    const w = blobWorld()
+    const write = w.fs.writeFile
+    /* The late write takes a turn of the event loop to land, so a drain that
+       did not wait for the queue again would already have let go. */
+    const slow = deferred()
+    let arrived: Promise<void> | null = null
+    w.fs.writeFile = async (path, bytes) => {
+      if (arrived === null && path.startsWith('index.json')) {
+        arrived = w.services.library.update('book_x', (record) => ({ ...record, title: 'Handed over' }))
+        setTimeout(() => slow.open(), 0)
+      } else if (arrived !== null && path.startsWith('books/book_x/book.json')) {
+        await slow.promise
+      }
+      return write(path, bytes)
+    }
+    /* A tick on the queue, not awaited: it lands during the drain's first idle,
+       so the index is dirty only for the SECOND flush — the one whose write
+       lets the late arrival in. */
+    const tick = w.services.library.rememberPosition('book_x', 'epubcfi(/6/4!/4/2/1:0)', 0.5)
+    await w.services.drain()
+    const title = (JSON.parse(new TextDecoder().decode(w.fs.store.get('books/book_x/book.json'))) as { title?: string }).title
+    expect(arrived, 'nothing arrived during the flush, so this proves nothing').not.toBeNull()
+    expect(title, 'the drain let go with a write still on the queue').toBe('Handed over')
+    await tick
+    await arrived
   })
 })

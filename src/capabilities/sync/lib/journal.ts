@@ -167,7 +167,8 @@ export interface JournalOptions {
    */
   readonly cards?: () => readonly Card[]
   /**
-   * Told when a corrupt journal was quarantined and rebuilt — see `open`.
+   * Told when a corrupt journal, or a meta file that will not read, was
+   * quarantined — see `open`.
    *
    * A hook rather than a `console.error`: the capability holds a scoped
    * `Diagnostics` and this is its news to report. Silence here would make a
@@ -281,6 +282,16 @@ interface JournalToken extends MutationToken {
   readonly origin: JournalOrigin
 }
 
+/**
+ * A counter the journal can go on incrementing: a safe integer from 1.
+ *
+ * Safe, for the same reason `seq` is: a `nextSeq` at 2^53 stops advancing when
+ * incremented and every append repeats it. A guard rather than a `typeof` test
+ * beside `Number.isSafeInteger`, which already refuses everything that is not a
+ * number — the guard is what tells the compiler so.
+ */
+const isCounter = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 1
+
 export function createJournal({
   fs,
   queue,
@@ -309,6 +320,8 @@ export function createJournal({
   /** True when an unclean-shutdown verify pass could not complete — a folder
    *  it had to read errored rather than answered. The dirty flag then STAYS
    *  through `close`, so the next open retries instead of passing by omission. */
+  /* Stryker disable next-line BooleanLiteral: `open` sets this before anything
+     reads it, and `close` reads it only once opened. */
   let verifyIncomplete = false
   /** Runtime local-commit listeners — see `subscribe`. */
   const listeners = new Set<() => void>()
@@ -387,6 +400,8 @@ export function createJournal({
   class AppendNotAttempted extends Error {
     constructor(readonly cause: unknown) {
       super(messageOf(cause))
+      /* Stryker disable next-line StringLiteral: the class never leaves
+         `appendOrPoison`, which throws its cause instead, so no reader sees it. */
       this.name = 'AppendNotAttempted'
     }
   }
@@ -468,30 +483,59 @@ export function createJournal({
     await fsyncDir()
   }
 
+  /**
+   * The meta file, or `null` when there is NONE.
+   *
+   * ⚠️ **ABSENT AND UNREADABLE WERE ONE ANSWER HERE, AND IT COST THE
+   * EVIDENCE.** Every failure — bytes that would not read, bytes that were not
+   * JSON, a shape that was not a meta — answered `null`, which `open` reads as
+   * "no meta" and answers with a BOOTSTRAP: two `writeMeta` calls that replaced
+   * the damaged file before anyone could look at it, while the open reported
+   * `ready` and nothing said a thing. Absent is empty; present and unreadable
+   * is refused (AGENTS.md). It is refused by THROWING, and `open` quarantines
+   * the bytes rather than passing them over.
+   *
+   * A format this code does not know is NOT damage — it is a newer writer's
+   * file — so that stays an ordinary error and the file is left alone.
+   */
   const readMeta = async (): Promise<JournalMeta | null> => {
-    let raw: string
+    let raw: Uint8Array
     try {
-      raw = new TextDecoder().decode(await fs.readFile(JOURNAL_META_PATH))
-    } catch {
+      raw = await fs.readFile(JOURNAL_META_PATH)
+    } catch (cause) {
+      /* `exists()` rather than an errno, for the reason `loadLines` gives: the
+       * error SHAPE differs between the Node host and the webview's fs plugin,
+       * so matching a code would be right on one and silent on the other. */
+      if (await fs.exists(JOURNAL_META_PATH)) {
+        throw new JournalCorruption(`journal: ${JOURNAL_META_PATH} is there and will not read (${messageOf(cause)})`)
+      }
       return null
     }
     let parsed: unknown
     try {
-      parsed = JSON.parse(raw)
-    } catch {
-      return null
+      parsed = JSON.parse(new TextDecoder().decode(raw))
+    } catch (cause) {
+      throw new JournalCorruption(`journal: ${JOURNAL_META_PATH} is there and is not JSON (${messageOf(cause)})`)
     }
-    if (typeof parsed !== 'object' || parsed === null) return null
+    /* `null` is the one JSON value a property read throws on. Every other
+     * shape that is not a meta object has no string `epoch`, and the next line
+     * refuses it — which is why no `typeof` test stands here. */
+    if (parsed === null) throw new JournalCorruption(`journal: ${JOURNAL_META_PATH} holds no meta at all`)
     const m = parsed as Record<string, unknown>
-    if (typeof m['epoch'] !== 'string' || m['epoch'] === '') return null
-    /* Safe, for the same reason `seq` is: a `nextSeq` at 2^53 stops
-     * advancing when incremented and every append repeats it. */
-    if (typeof m['nextSeq'] !== 'number' || !Number.isSafeInteger(m['nextSeq']) || m['nextSeq'] < 1) return null
+    if (typeof m['epoch'] !== 'string' || m['epoch'] === '') {
+      throw new JournalCorruption(`journal: ${JOURNAL_META_PATH} names no epoch`)
+    }
+    const nextSeq = m['nextSeq']
+    if (!isCounter(nextSeq)) {
+      throw new JournalCorruption(`journal: ${JOURNAL_META_PATH} has no counter to go on from`)
+    }
     if (m['journalFormat'] !== JOURNAL_FORMAT) {
       throw new Error(`journal: unknown journalFormat ${String(m['journalFormat'])}`)
     }
-    if (m['state'] !== 'building' && m['state'] !== 'ready') return null
-    return { epoch: m['epoch'], nextSeq: m['nextSeq'], journalFormat: JOURNAL_FORMAT, state: m['state'] }
+    if (m['state'] !== 'building' && m['state'] !== 'ready') {
+      throw new JournalCorruption(`journal: ${JOURNAL_META_PATH} is in no state this journal knows`)
+    }
+    return { epoch: m['epoch'], nextSeq, journalFormat: JOURNAL_FORMAT, state: m['state'] }
   }
 
   /* ------------------------------------------------------------- load */
@@ -613,8 +657,10 @@ export function createJournal({
        * invisible here. The digest below is still the newest STATEMENT about
        * this surface, so comparing the folder against it is the same check,
        * one entry further back. */
+      /* No digest test: `lastDigested` only ever holds a commit that carries one
+       * (`journalIndex.ts`). */
       const last = state.lastDigested
-      if (!last || last.digest === undefined) continue
+      if (!last) continue
       let current: string | null
       try {
         current = await digestOf(last.book, last.what)
@@ -627,25 +673,40 @@ export function createJournal({
         continue
       }
       if (current === null) {
-        if (last.what === 'record') {
-          /* A record the journal certifies at a digest, GONE from disk: a
-           * lost `book.json` unless a REMOVAL explains it — and the arbiter
-           * is the presence register, because a RESTORE journals under the
-           * same 'removed' kind, so a newer commit alone cannot say which
-           * way the book went. Inventing a removal here would REPLICATE the
-           * loss, so verification stays incomplete instead — the dirty flag
-           * survives `close` and every later open keeps retrying until the
-           * folder is resolved. */
-          const removed = keyState(last.book, 'removed').lastCommit
-          let explained = false
-          if (removed && removed.seq > last.seq) {
-            try {
-              explained = (await readPresence(fs))[last.book]?.state === 'removed'
-            } catch {
-              explained = false
-            }
+        /* A record the journal certifies at a digest, GONE from disk: a
+         * lost `book.json` unless a REMOVAL explains it — and the arbiter
+         * is the presence register, because a RESTORE journals under the
+         * same 'removed' kind, so a newer commit alone cannot say which
+         * way the book went. Inventing a removal here would REPLICATE the
+         * loss, so verification stays incomplete instead — the dirty flag
+         * survives `close` and every later open keeps retrying until the
+         * folder is resolved. */
+        const removed = keyState(last.book, 'removed').lastCommit
+        let explained = false
+        /* THE LATER OF THE TWO, asked as which seq is the larger rather than
+         * with `>`: seq is one strictly increasing sequence over every line, so
+         * a removal and a record commit never share one, and the boundary an
+         * inequality draws could never decide anything here. */
+        if (removed && Math.max(removed.seq, last.seq) === removed.seq) {
+          try {
+            /* Stryker disable next-line OptionalChaining: a book the register
+               does not name throws inside this try, and the catch leaves
+               `explained` false — the answer `undefined` gives. */
+            explained = (await readPresence(fs))[last.book]?.state === 'removed'
+          } catch {
+            /* An unreadable register explains nothing: `explained` stays false. */
           }
-          if (!explained) verifyIncomplete = true
+        }
+        if (
+          !explained &&
+          /* Stryker disable next-line ConditionalExpression: only a record
+             digests to null — every other kind answers an existence or content
+             digest (`journalDigests.ts`) — so no journal reaches here with
+             another kind; the check keeps a future null-digest kind out of the
+             removal rule. */
+          last.what === 'record'
+        ) {
+          verifyIncomplete = true
         }
         continue
       }
@@ -689,6 +750,8 @@ export function createJournal({
       origin: 'local',
       ...(digest === undefined ? {} : { digest }),
     }
+    /* Stryker disable next-line AssignmentOperator: counting down reaches a
+       multiple of `fsyncEvery` on exactly the same records, since -0 === 0. */
     pending.count += 1
     const sync = pending.count % fsyncEvery === 0
     await appendOrPoison(entry, sync)
@@ -720,6 +783,8 @@ export function createJournal({
      * end, so THROWING is the whole recovery: the next open sees `building`
      * and bootstraps again. A library that genuinely has no books directory is
      * still empty, which is the truth rather than a guess. */
+    /* Stryker disable next-line ArrayDeclaration: an entry that is not a
+       directory is passed over below, so a placeholder is passed over too. */
     let folders: { name: string; isDirectory: boolean }[] = []
     if (await fs.exists(BOOKS_DIR)) {
       folders = await fs.readDir(BOOKS_DIR)
@@ -731,7 +796,15 @@ export function createJournal({
        * THERE and will not read is a failure, and is raised. */
       if (!(await fs.exists(recordPath))) continue
       const record = parseRecord(new TextDecoder().decode(await fs.readFile(recordPath)))
-      if (!record) continue
+      /* ⚠️ **AND THIS SKIPPED THE COMMONEST SHAPE OF THE FAILURE IT NAMES.**
+       * `parseRecord` answers `null` for bytes that are THERE and will not
+       * parse, so the sentence above was true of the read and false of the
+       * parse: a damaged `book.json` was passed over, the bootstrap ran to the
+       * end, and the meta went `ready` — publishing a complete baseline for a
+       * shelf with one fewer book in it. `readMarks` refuses exactly this one
+       * surface down, and the meta is `building` throughout so that throwing
+       * IS the recovery (see above). Found by the 2026-09-13 audit. */
+      if (!record) throw new Error(`journal: book.json for ${folder.name} is there but does not parse`)
       const book = record.bookId ?? folder.name
       const at = hlcOf(record.addedAt)
       await emitBaseline(epoch, book, 'record', at, await recordDigest(record), pending)
@@ -761,28 +834,44 @@ export function createJournal({
 
     /* Trash markers become presence entries — the register outlives the
      * fortnight, the marker does not — and a removal baseline commit. */
+    /* ⚠️ **THE LIVE HALF'S RULE, AND THIS HALF DID NOT FOLLOW IT.** A listing
+     * that threw was caught as `[]` here, so the pass reached `ready` with a
+     * baseline carrying NO removals — and a peer that merges it puts back every
+     * book removed on this device. A library with no trash directory is still
+     * empty of removals, which is the truth; one whose trash will not list is a
+     * bootstrap that has not finished, and the next open tries again
+     * (2026-09-13 verify). */
+    /* Stryker disable next-line ArrayDeclaration: an entry that is not a
+       directory is passed over below, so a placeholder is passed over too. */
     let trashed: { name: string; isDirectory: boolean }[] = []
-    try {
+    if (await fs.exists(TRASH_DIR)) {
       trashed = await fs.readDir(TRASH_DIR)
-    } catch {
-      trashed = []
     }
     for (const entry of trashed) {
       if (!entry.isDirectory) continue
       let at = hlcOf(0)
       try {
-        const stamp = Number(new TextDecoder().decode(await fs.readFile(`${TRASH_DIR}/${entry.name}/.removed`)))
-        if (Number.isFinite(stamp)) at = hlcOf(stamp)
+        /* No finiteness test: `hlcOf` floors a stamp that is not a finite
+         * number to the same epoch stamp this starts from. */
+        at = hlcOf(Number(new TextDecoder().decode(await fs.readFile(`${TRASH_DIR}/${entry.name}/.removed`))))
       } catch {
         /* An unstamped trash entry is still a removal; the epoch stamp is
          * the honest floor. */
       }
+      /* ⚠️ **THE FOLDER NAME STOOD IN FOR A RECORD THAT WAS THERE AND WOULD NOT
+       * READ, AND A FOLDER NAME CANNOT GIVE AN ID BACK.** `book_a` is what
+       * `book:a` became on disk, and nothing turns it back — so a damaged
+       * trashed `book.json` published a removal for a book nobody has, and the
+       * book it WAS stayed un-removed in every peer's feed. The live path above
+       * throws for exactly this; so does this now (2026-09-13 verify). A trash
+       * entry with NO record is still its folder name: that is all it ever
+       * had. */
       let bookId = entry.name
-      try {
-        const record = parseRecord(new TextDecoder().decode(await fs.readFile(`${TRASH_DIR}/${entry.name}/book.json`)))
-        if (record?.bookId) bookId = record.bookId
-      } catch {
-        /* the folder name stands in */
+      const trashedRecord = `${TRASH_DIR}/${entry.name}/book.json`
+      if (await fs.exists(trashedRecord)) {
+        const record = parseRecord(new TextDecoder().decode(await fs.readFile(trashedRecord)))
+        if (!record) throw new Error(`journal: book.json for the removed ${entry.name} is there but does not parse`)
+        if (record.bookId) bookId = record.bookId
       }
       await queue.append(PRESENCE_KEY, async () => {
         const wrote = await notePresence(fs, bookId, 'removed', at)
@@ -814,7 +903,27 @@ export function createJournal({
   const open = (): Promise<void> =>
     queue.append(JOURNAL_KEY, async () => {
       verifyIncomplete = false
-      meta = await readMeta()
+      try {
+        meta = await readMeta()
+      } catch (cause) {
+        /* A META THAT WILL NOT READ IS MOVED ASIDE AND REPORTED, not written
+         * over — the same answer this function gives the journal file below,
+         * and for the same two reasons. Refusing the open would leave sync
+         * dead until somebody deleted a file by hand; overwriting it destroys
+         * the evidence of a bug that has now happened at least once.
+         *
+         * It does NOT mint a new epoch, and that is the difference from the
+         * journal file. The epoch is the only thing here a peer trusts, and
+         * the LINES carry it too — `loadLines` refuses any that name a
+         * different one — so the journal goes on under the epoch it had, and
+         * no peer is told to resync for a damaged cache file. With no lines to
+         * name it, `bootstrap` mints one, and this report is what says so. */
+        if (!(cause instanceof JournalCorruption)) throw cause
+        const moved = `${SYNC_DIR}/journal.meta.corrupt-${clock()}.json`
+        await fs.rename(JOURNAL_META_PATH, moved)
+        meta = null
+        onQuarantine?.({ moved, reason: cause.message })
+      }
       try {
         await loadLines()
       } catch (cause) {
@@ -910,7 +1019,10 @@ export function createJournal({
         if (!opened) throw new Error('journal: begin before open')
         const key = keyOf(book, what)
         const armed = expectedRemote.get(key)
-        const origin: JournalOrigin = armed !== undefined && armed.length > 0 ? 'remote' : 'local'
+        /* A key stays in the map only while it holds a ticket — the delete
+         * below and the one in `clearRemote` see to that — so being there IS
+         * the answer, and a length test beside it could never decide anything. */
+        const origin: JournalOrigin = armed === undefined ? 'local' : 'remote'
         if (origin === 'remote') {
           armed!.shift()
           if (armed!.length === 0) expectedRemote.delete(key)
@@ -937,8 +1049,10 @@ export function createJournal({
       const mine = token as JournalToken
       /* The token must be one THIS journal issued and has not yet settled:
        * a foreign or malformed one (no seq), or one already committed,
-       * would append a commit line clearing a bracket it does not own. */
-      if (typeof mine.seq !== 'number' || !keyState(canonicalBook(mine.book, mine.what), mine.what).dangling.some((begin) => begin.seq === mine.seq)) {
+       * would append a commit line clearing a bracket it does not own. A
+       * token with no numeric seq needs no test of its own — every begin's
+       * seq is a number, so it matches none. */
+      if (!keyState(canonicalBook(mine.book, mine.what), mine.what).dangling.some((begin) => begin.seq === mine.seq)) {
         throw new Error(`journal: commit for an unknown or already-settled begin (seq ${String(mine.seq)})`)
       }
       /* THE COMMIT CARRIES A DIGEST EVEN WHEN THE CALLER GAVE NONE (#6). The
@@ -973,6 +1087,9 @@ export function createJournal({
 
   const expectRemote = (rawBook: string, what: MutationKind): number => {
     const key = keyOf(canonicalBook(rawBook, what), what)
+    /* COUNTING UP, and a caller can see which way: the ticket is returned, and
+     * a counter running the other way hands out `0` — a number anything that
+     * tests a ticket rather than comparing it reads as "no ticket". */
     const ticket = nextTicket++
     const armed = expectedRemote.get(key) ?? []
     armed.push(ticket)
@@ -980,15 +1097,18 @@ export function createJournal({
     return ticket
   }
 
-  const clearRemote = (rawBook: string, what: MutationKind, ticket: number): void => {
+  const clearRemote = (rawBook: string, what: MutationKind, ticket: number | null): void => {
     /* An expectation the apply did not consume — a row that changed
      * nothing writes nothing — must not lie in wait for the NEXT local
      * edit on that key. Removed BY TICKET: taking back "one" from a shared
-     * count could take back a concurrent operation's still-armed one. */
+     * count could take back a concurrent operation's still-armed one. A NULL
+     * ticket is a `markRemote` fence that never ran: nothing was armed for
+     * it, so it is found nowhere below and takes nothing back. */
     const key = keyOf(canonicalBook(rawBook, what), what)
     const armed = expectedRemote.get(key)
     if (!armed) return
-    const at = armed.indexOf(ticket)
+    const held: readonly (number | null)[] = armed
+    const at = held.indexOf(ticket)
     if (at < 0) return
     armed.splice(at, 1)
     if (armed.length === 0) expectedRemote.delete(key)
@@ -1017,9 +1137,7 @@ export function createJournal({
       return await fn()
     } finally {
       await Promise.allSettled(fences)
-      for (const { book, what, ticket } of armed) {
-        if (ticket !== null) clearRemote(book, what, ticket)
-      }
+      for (const { book, what, ticket } of armed) clearRemote(book, what, ticket)
     }
   }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { buildFixture, elem, txt, type Fixture } from './domFake.testkit'
-import { sentenceAt } from './sentenceAt'
+import { localeAt, sentenceAt } from './sentenceAt'
 
 /**
  * The sentence a selection sits in, over the hand-built DOM.
@@ -139,9 +139,10 @@ describe('sentenceAt — the run', () => {
 
   /*
    * §A5. A list item, a heading, a verse line: the run IS the sentence, and
-   * nothing in it says so. Both of its boundaries coincide with the run's
-   * edges, so under §C1 there is no sentence to vouch for and the caller falls
-   * back to what shipped before this existed.
+   * nothing in it says so. Nothing lies across either edge of this document
+   * either, and that is not enough (phase 17, L8): `Apples` is not a sentence
+   * the segmenter would end, so there is still nothing to vouch for and the
+   * caller falls back to what shipped before this existed.
    */
   it('declines a run with no sentence boundary inside it', () => {
     const fixture = buildFixture(elem('li', {}, [txt('Apples')]))
@@ -476,6 +477,201 @@ describe('sentenceAt — what an audit found', () => {
       watched.mockRestore()
     }
   })
+
+  /*
+   * A DROPPED ENTRY IS NOT IN THE SENTENCE, AND NEITHER IS ITS HEADING. A
+   * positioned note carrying `role="heading"` beside `He met Mr.` is filtered
+   * out of the far side's text — and still made that side "a heading ends
+   * here", so `Smith today.` was vouched for as the start of a sentence. The
+   * same markup with no role declines; a role on text that is not there must
+   * not change the answer.
+   */
+  it('reads no heading off an entry it filtered out of the far side', () => {
+    const next = 'Smith today. Beta two.'
+    const withNote = (attributes: Readonly<Record<string, string>>) =>
+      buildFixture(
+        elem('div', {}, [
+          elem('p', {}, [txt('He met Mr.'), elem('span', { position: 'absolute', attributes }, [txt('Margin note')])]),
+          elem('p', {}, [txt(next)]),
+        ]),
+      )
+    const notes: readonly Readonly<Record<string, string>>[] = [{ role: 'heading' }, {}]
+
+    for (const attributes of notes) {
+      expect(sentenceAt(rangeOf(withNote(attributes), [next, 0], [next, 5]))).toBeNull()
+    }
+    /* Non-vacuity: a heading that IS in the far side still ends it. */
+    const kept = buildFixture(
+      elem('div', {}, [elem('p', { attributes: { role: 'heading' } }, [txt('He met Mr.')]), elem('p', {}, [txt(next)])]),
+    )
+    expect(sentenceAt(rangeOf(kept, [next, 0], [next, 5]))).toEqual({ sentence: 'Smith today.', term: 'Smith' })
+  })
+
+  /*
+   * §A3 BY CONTEXT, NOT BY WHICHEVER DROP REASON WON. A note reference that is
+   * also positioned was filtered AS A NOTEREF, and a noteref drop skipped the
+   * guard — so a selection ending inside it came back as its prose half alone.
+   */
+  it('declines a term ending in another positioned box, whatever else that box is', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [
+        txt('One first. The whale '),
+        elem('a', { position: 'absolute', attributes: { 'epub:type': 'noteref' } }, [txt('swam')]),
+        txt(' here. Last one.'),
+      ]),
+    )
+    const diagnostics = { info: vi.fn(), error: vi.fn() }
+
+    expect(
+      sentenceAt(rangeOf(fixture, ['One first. The whale ', 15], ['swam', 4]), { diagnostics: diagnostics as never }),
+    ).toBeNull()
+    expect(diagnostics.info.mock.calls).toEqual([['gloss.sentence', { outcome: 'fallback', gap: 'span-blocks' }]])
+  })
+})
+
+describe('sentenceAt — what an audit found about a throw', () => {
+  const throwingRange = (thrown: unknown): Range =>
+    ({
+      get startContainer(): never {
+        throw thrown
+      },
+      startOffset: 0,
+      endContainer: null,
+      endOffset: 0,
+    }) as unknown as Range
+
+  /*
+   * CLASSIFYING THE THROW MUST NOT THROW. It ran inside the `catch`, with no
+   * guard of its own — so an Error whose `name` getter throws, or a proxy that
+   * refuses `instanceof`, took the reader's lookup down with it.
+   */
+  it('declines a throw it cannot even inspect, and still says that it threw', () => {
+    const unnamed = new Error('boom')
+    Object.defineProperty(unnamed, 'name', {
+      get: () => {
+        throw new Error('the name is not readable')
+      },
+    })
+    const refusing = new Proxy(
+      {},
+      {
+        getPrototypeOf: () => {
+          throw new Error('nor is the prototype')
+        },
+      },
+    )
+    const diagnostics = { info: vi.fn(), error: vi.fn() }
+
+    for (const thrown of [unnamed, refusing]) {
+      expect(() => sentenceAt(throwingRange(thrown), { diagnostics: diagnostics as never })).not.toThrow()
+    }
+    expect(diagnostics.error.mock.calls).toEqual([
+      ['gloss.sentence', { outcome: 'fallback', gap: 'threw', cause: 'object' }],
+      ['gloss.sentence', { outcome: 'fallback', gap: 'threw', cause: 'object' }],
+    ])
+  })
+
+  /*
+   * A NAME SHAPED LIKE A TYPE IS NOT THEREFORE ONE. `SecretBookTextError` fits
+   * `/…(Error|Exception)$/`, and `name` is an ordinary mutable property, so the
+   * shape let any identifier-shaped text out. A closed list does not.
+   */
+  it('reports only the error names the language and the DOM define', () => {
+    const diagnostics = { info: vi.fn(), error: vi.fn() }
+
+    for (const name of ['SecretBookTextError', 'CallMeIshmaelException', 'RangeError', 'InvalidStateError']) {
+      const named = new Error('boom')
+      named.name = name
+      sentenceAt(throwingRange(named), { diagnostics: diagnostics as never })
+    }
+
+    expect(diagnostics.error.mock.calls.map((call) => (call[1] as { cause: unknown }).cause)).toEqual([
+      'Error',
+      'Error',
+      'RangeError',
+      'InvalidStateError',
+    ])
+  })
+
+  /*
+   * EVERY NAME ON THE LIST IS ONE THE PLATFORM THROWS, AND EACH IS REPORTED AS
+   * ITSELF. The test above takes two of them, so a name dropped from the list
+   * reported its real errors as a bare `Error` and nothing said so. Thrown here
+   * as the platform throws them: the language's own constructors, and a
+   * `DOMException` under each name WebIDL's error names table gives it.
+   */
+  it('reports each error the language and the DOM throw under its own name', () => {
+    const diagnostics = { info: vi.fn(), error: vi.fn() }
+    const thrown: readonly Error[] = [
+      new Error('boom'),
+      new AggregateError([], 'boom'),
+      new EvalError('boom'),
+      new RangeError('boom'),
+      new ReferenceError('boom'),
+      new SyntaxError('boom'),
+      new TypeError('boom'),
+      new URIError('boom'),
+      ...[
+        'IndexSizeError',
+        'HierarchyRequestError',
+        'WrongDocumentError',
+        'InvalidCharacterError',
+        'NoModificationAllowedError',
+        'NotFoundError',
+        'NotSupportedError',
+        'InUseAttributeError',
+        'InvalidStateError',
+        'InvalidModificationError',
+        'NamespaceError',
+        'InvalidAccessError',
+        'TypeMismatchError',
+        'SecurityError',
+        'NetworkError',
+        'AbortError',
+        'URLMismatchError',
+        'QuotaExceededError',
+        'TimeoutError',
+        'InvalidNodeTypeError',
+        'DataCloneError',
+        'EncodingError',
+        'NotReadableError',
+        'UnknownError',
+        'ConstraintError',
+        'DataError',
+        'TransactionInactiveError',
+        'ReadOnlyError',
+        'VersionError',
+        'OperationError',
+        'NotAllowedError',
+      ].map((name) => new DOMException('boom', name)),
+    ]
+
+    for (const error of thrown) sentenceAt(throwingRange(error), { diagnostics: diagnostics as never })
+
+    const causes = diagnostics.error.mock.calls.map((call) => (call[1] as { cause: unknown }).cause)
+    /* Non-vacuity: every one was a real `Error`, thrown and counted. */
+    expect(thrown.every((error) => error instanceof Error)).toBe(true)
+    expect(causes).toHaveLength(39)
+    expect(causes).toEqual(thrown.map((error) => error.name))
+  })
+
+  /*
+   * READ ONCE. `name` can be a getter, and one that answers the list with a
+   * name it holds and the report with a name it does not got past the closed
+   * list the moment the check and the report read it separately.
+   */
+  it('reports the name it checked, not a second reading of it', () => {
+    const diagnostics = { info: vi.fn(), error: vi.fn() }
+    const shifting = new Error('boom')
+    let readings = 0
+    Object.defineProperty(shifting, 'name', {
+      get: () => (readings++ === 0 ? 'TypeError' : 'SecretBookTextError'),
+    })
+
+    sentenceAt(throwingRange(shifting), { diagnostics: diagnostics as never })
+
+    expect(diagnostics.error.mock.calls.map((call) => (call[1] as { cause: unknown }).cause)).toEqual(['TypeError'])
+  })
 })
 
 describe('sentenceAt — completeness is the gate', () => {
@@ -522,21 +718,190 @@ describe('sentenceAt — completeness is the gate', () => {
   })
 
   /*
-   * A first sentence and a last sentence both touch their block's edge, and
-   * `</p>` is indistinguishable from `<br>` and from a budget cut. This is the
-   * price of the rule, stated as a case rather than left to be discovered: the
-   * phase covers the interior of a paragraph and declines its two ends.
+   * PHASE 17, L8 — AND THIS CASE USED TO ASSERT THE OPPOSITE. It was "declines
+   * the first and last sentence of a block", stated as the price of §C1:
+   * `</p>` cannot be told from `<br>` or from a budget cut. True, and the kind
+   * of edge was never the question — what lies across it is. This paragraph is
+   * the whole document, so nothing does, and its first and last sentences both
+   * end the way the segmenter ends a sentence.
    */
-  it('declines the first and last sentence of a block', () => {
+  it('answers the first and last sentence of a paragraph that is the whole document', () => {
     const fixture = buildFixture(elem('p', {}, [txt('Alpha one. Beta two. Gamma three.')]))
     const whole = 'Alpha one. Beta two. Gamma three.'
 
-    expect(sentenceAt(rangeOf(fixture, [whole, 6], [whole, 9]))).toBeNull()
+    expect(sentenceAt(rangeOf(fixture, [whole, 6], [whole, 9]))).toEqual({ sentence: 'Alpha one.', term: 'one' })
     expect(sentenceAt(rangeOf(fixture, [whole, 11], [whole, 15]))).toEqual({
       sentence: 'Beta two.',
       term: 'Beta',
     })
-    expect(sentenceAt(rangeOf(fixture, [whole, 27], [whole, 32]))).toBeNull()
+    expect(sentenceAt(rangeOf(fixture, [whole, 27], [whole, 32]))).toEqual({
+      sentence: 'Gamma three.',
+      term: 'three',
+    })
+  })
+})
+
+/**
+ * What lies across the run's edges (phase 17, L8) — see the section of that name
+ * in `sentenceAt.ts`. Every case that answers has a twin that declines on the
+ * same markup with one thing changed, so the rule cannot be passed by answering
+ * everything.
+ */
+describe('sentenceAt — what lies across the run’s edges', () => {
+  /*
+   * Both far sides are split by inline markup, so reading one in the wrong
+   * order makes `door.He shut the` and ` four.Delta` — neither of which a
+   * sentence breaks against.
+   */
+  it('answers a paragraph’s first and last sentence from the paragraphs around it', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('p', {}, [txt('He shut the '), elem('em', {}, [txt('door.')])]),
+        elem('p', {}, [txt('Beta two. Gamma three.')]),
+        elem('p', {}, [elem('em', {}, [txt('Delta')]), txt(' four.')]),
+      ]),
+    )
+    const middle = 'Beta two. Gamma three.'
+
+    expect(sentenceAt(rangeOf(fixture, [middle, 0], [middle, 4]))).toEqual({ sentence: 'Beta two.', term: 'Beta' })
+    expect(sentenceAt(rangeOf(fixture, [middle, 10], [middle, 15]))).toEqual({
+      sentence: 'Gamma three.',
+      term: 'Gamma',
+    })
+  })
+
+  /*
+   * A heading spelled as a paragraph runs into the sentence after it as flowing
+   * text, and the segmenter finds no break at the seam. Pretty-printed XHTML
+   * puts a text node of indentation between the two, which is a run of its own —
+   * stopping at it would find nothing across the edge and answer.
+   */
+  it('reads past source indentation to the paragraph beyond, and declines what runs into it', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        txt('\n  '),
+        elem('p', {}, [txt('Chapter 1. Loomings')]),
+        txt('\n    '),
+        elem('p', {}, [txt('Call me Ishmael. Some years ago.')]),
+        txt('\n'),
+      ]),
+    )
+    const first = 'Call me Ishmael. Some years ago.'
+
+    expect(sentenceAt(rangeOf(fixture, [first, 8], [first, 15]))).toBeNull()
+  })
+
+  it('takes indentation before a section’s first paragraph for nothing at all', () => {
+    const fixture = buildFixture(elem('div', {}, [txt('\n  '), elem('p', {}, [txt('Alpha one. Beta two.')]), txt('\n')]))
+    const only = 'Alpha one. Beta two.'
+
+    expect(sentenceAt(rangeOf(fixture, [only, 0], [only, 5]))).toEqual({ sentence: 'Alpha one.', term: 'Alpha' })
+    expect(sentenceAt(rangeOf(fixture, [only, 16], [only, 19]))).toEqual({ sentence: 'Beta two.', term: 'two' })
+  })
+
+  /* The same two texts as the indentation case, the first one now a heading. */
+  it.each(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])('answers the first sentence under an <%s>', (tag) => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem(tag, {}, [txt('Chapter 1. Loomings')]),
+        elem('p', {}, [txt('Call me Ishmael. Some years ago.')]),
+      ]),
+    )
+    const first = 'Call me Ishmael. Some years ago.'
+
+    expect(sentenceAt(rangeOf(fixture, [first, 8], [first, 15]))).toEqual({
+      sentence: 'Call me Ishmael.',
+      term: 'Ishmael',
+    })
+  })
+
+  it('answers the first sentence under anything whose role is heading', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('div', { attributes: { role: 'heading' } }, [txt('Chapter 1. Loomings')]),
+        elem('p', {}, [txt('Call me Ishmael. Some years ago.')]),
+      ]),
+    )
+    const first = 'Call me Ishmael. Some years ago.'
+
+    expect(sentenceAt(rangeOf(fixture, [first, 8], [first, 15]))?.sentence).toBe('Call me Ishmael.')
+  })
+
+  /* Not when the term is IN the heading: its neighbours are that heading's own lines. */
+  it('does not end a heading’s lines at one another', () => {
+    const fixture = buildFixture(
+      elem('h1', {}, [
+        elem('span', { display: 'block' }, [txt('Part one')]),
+        elem('span', { display: 'block' }, [txt('The whale arrives. Later on.')]),
+      ]),
+    )
+    const line = 'The whale arrives. Later on.'
+
+    expect(sentenceAt(rangeOf(fixture, [line, 4], [line, 9]))).toBeNull()
+  })
+
+  it('declines a last sentence the next paragraph carries on', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('p', {}, [txt('Alpha one. He went to the')]),
+        elem('p', {}, [txt('store and bought milk.')]),
+      ]),
+    )
+    const last = 'Alpha one. He went to the'
+
+    expect(sentenceAt(rangeOf(fixture, [last, 14], [last, 18]))).toBeNull()
+  })
+
+  /* §C2's `<br>` from the other side: a line break after a FINISHED sentence is
+     a boundary the seam confirms, whatever element made the edge. */
+  it('answers a sentence after a <br> that follows a finished one', () => {
+    const fixture = buildFixture(elem('p', {}, [txt('Alpha one.'), elem('br', {}), txt('Beta two. Gamma three.')]))
+    const line = 'Beta two. Gamma three.'
+
+    expect(sentenceAt(rangeOf(fixture, [line, 0], [line, 4]))).toEqual({ sentence: 'Beta two.', term: 'Beta' })
+  })
+
+  /* A far side is filtered as the term's own run is. Unfiltered, the marker
+     after `door.` makes `door.3`, which the segmenter reads as a number. */
+  it('filters the paragraph across the edge as it filters the term’s own', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('p', {}, [txt('He shut the door.'), elem('a', { attributes: { 'epub:type': 'noteref' } }, [txt('3')])]),
+        elem('p', {}, [txt('Beta two. Gamma three.')]),
+      ]),
+    )
+    const middle = 'Beta two. Gamma three.'
+
+    expect(sentenceAt(rangeOf(fixture, [middle, 0], [middle, 4]))).toEqual({ sentence: 'Beta two.', term: 'Beta' })
+  })
+
+  /*
+   * THE BUDGET'S EDGE SAYS NOTHING, and each end is asked about separately.
+   * Each window below reaches the document's edge at one end and the budget at
+   * the other.
+   */
+  it('does not vouch for a sentence at an edge the budget made, at either end', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [
+        elem('span', {}, [txt('Alpha one. ')]),
+        elem('span', {}, [txt('Beta two. ')]),
+        elem('span', {}, [txt('Gamma three.')]),
+      ]),
+    )
+
+    /* Nothing behind `Alpha one. `, and `Beta two. ` does not fit ahead of it. */
+    expect(sentenceAt(rangeOf(fixture, ['Alpha one. ', 0], ['Alpha one. ', 5]), { maxChars: 20 })).toBeNull()
+    /* Nothing ahead of `Gamma three.`, and a quarter of 20 is too little for `Beta two. `. */
+    expect(sentenceAt(rangeOf(fixture, ['Gamma three.', 0], ['Gamma three.', 5]), { maxChars: 20 })).toBeNull()
+    /* With room for the whole paragraph, both are answered. */
+    expect(sentenceAt(rangeOf(fixture, ['Alpha one. ', 0], ['Alpha one. ', 5]))).toEqual({
+      sentence: 'Alpha one.',
+      term: 'Alpha',
+    })
+    expect(sentenceAt(rangeOf(fixture, ['Gamma three.', 0], ['Gamma three.', 5]))).toEqual({
+      sentence: 'Gamma three.',
+      term: 'Gamma',
+    })
   })
 })
 
@@ -706,29 +1071,31 @@ describe('sentenceAt — it declines rather than throwing', () => {
   })
 
   /* An `Error` whose `name` was set to a sentence is the same leak wearing a
-   * different hat — `name` is an ordinary mutable property. */
-  it('refuses an Error name that is not shaped like a type', () => {
-    const named = new Error('boom')
-    named.name = 'Call me Ishmael'
+   * different hat — `name` is an ordinary mutable property. And a type's shape
+   * at ONE end is not enough: a sentence ending in `TypeError`, or starting
+   * with it, is still a sentence. */
+  it('refuses an Error name that is not shaped like a type, end to end', () => {
     const diagnostics = { info: vi.fn(), error: vi.fn() }
 
-    sentenceAt(
-      {
-        get startContainer(): never {
-          throw named
-        },
-        startOffset: 0,
-        endContainer: null,
-        endOffset: 0,
-      } as unknown as Range,
-      { diagnostics: diagnostics as never },
-    )
+    for (const name of ['Call me Ishmael', 'Call me TypeError', 'TypeError in Call me Ishmael']) {
+      const named = new Error('boom')
+      named.name = name
+      sentenceAt(
+        {
+          get startContainer(): never {
+            throw named
+          },
+          startOffset: 0,
+          endContainer: null,
+          endOffset: 0,
+        } as unknown as Range,
+        { diagnostics: diagnostics as never },
+      )
+    }
 
-    expect(diagnostics.error).toHaveBeenCalledWith('gloss.sentence', {
-      outcome: 'fallback',
-      gap: 'threw',
-      cause: 'Error',
-    })
+    expect(diagnostics.error.mock.calls).toEqual(
+      Array.from({ length: 3 }, () => ['gloss.sentence', { outcome: 'fallback', gap: 'threw', cause: 'Error' }]),
+    )
   })
 })
 
@@ -751,10 +1118,15 @@ describe('sentenceAt — whether the path fires at all', () => {
     const whole = 'Alpha one. Beta two. Gamma three.'
     const diagnostics = spy()
 
+    /* A section that opens mid-sentence: nothing lies before it, and the
+       sentence does not start at its edge either. */
+    const opening = 'and so it ended. Delta four.'
+    const midSentence = buildFixture(elem('p', {}, [txt(opening)]))
+
     sentenceAt(rangeOf(fixture, [whole, 11], [whole, 15]), {
       diagnostics: diagnostics as never,
     })
-    sentenceAt(rangeOf(fixture, [whole, 0], [whole, 5]), { diagnostics: diagnostics as never })
+    sentenceAt(rangeOf(midSentence, [opening, 4], [opening, 6]), { diagnostics: diagnostics as never })
 
     expect(diagnostics.info.mock.calls).toEqual([
       ['gloss.sentence', { outcome: 'used' }],
@@ -780,5 +1152,332 @@ describe('sentenceAt — whether the path fires at all', () => {
       outcome: 'fallback',
       gap: 'span-blocks',
     })
+  })
+})
+
+/**
+ * THE REASON, not only the answer. Every decline is `null` to the caller, so a
+ * guard that stopped firing — leaving a LATER guard, or a throw, to produce the
+ * same `null` — looks identical from there. `Diagnostics` is where the reason
+ * is kept, and it is asserted here for every guard in the walk.
+ */
+describe('sentenceAt — the reason it gives for each decline', () => {
+  const whole = 'Alpha one. Beta two. Gamma three.'
+
+  function reasonFor(range: Range): unknown {
+    const diagnostics = { info: vi.fn(), error: vi.fn() }
+    expect(sentenceAt(range, { diagnostics: diagnostics as never })).toBeNull()
+    expect(diagnostics.error).not.toHaveBeenCalled()
+    expect(diagnostics.info).toHaveBeenCalledTimes(1)
+    return (diagnostics.info.mock.calls[0]?.[1] as { gap?: unknown } | undefined)?.gap
+  }
+
+  it('says a boundary is not text, at either end', () => {
+    const fixture = buildFixture(elem('p', {}, [txt(whole)]))
+    const text = fixture.text(whole)
+    const range = (startContainer: unknown, endContainer: unknown) =>
+      ({ startContainer, startOffset: 0, endContainer, endOffset: 1 }) as unknown as Range
+
+    expect(reasonFor(range(fixture.root, text))).toBe('not-text')
+    expect(reasonFor(range(text, fixture.root))).toBe('not-text')
+  })
+
+  it('tells a text node that was never placed from one taken out of the document', () => {
+    const orphan = { nodeType: 3, parentNode: null, isConnected: false, data: 'nowhere' }
+    expect(
+      reasonFor({ startContainer: orphan, startOffset: 0, endContainer: orphan, endOffset: 3 } as unknown as Range),
+    ).toBe('no-tree')
+
+    const fixture = buildFixture(elem('div', { id: 'layer' }, [elem('p', {}, [txt(whole)])]))
+    const range = rangeOf(fixture, [whole, 11], [whole, 15])
+    fixture.replaceChildren('layer', [elem('p', {}, [txt('Repainted at a new scale.')])])
+    expect(reasonFor(range)).toBe('detached')
+  })
+
+  it('says there is no window where there are no styles, or where the start is hidden', () => {
+    const unstyled = buildFixture(elem('p', {}, [txt(whole)]), { detachedView: true })
+    expect(reasonFor(rangeOf(unstyled, [whole, 11], [whole, 15]))).toBe('no-window')
+
+    const hidden = buildFixture(
+      elem('p', {}, [txt('Alpha one. '), elem('span', { display: 'none' }, [txt('hidden words')])]),
+    )
+    expect(reasonFor(rangeOf(hidden, ['hidden words', 0], ['hidden words', 6]))).toBe('no-window')
+  })
+
+  it('says a selection whose end is hidden spans blocks', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [txt('Alpha one. Beta two. '), elem('span', { display: 'none' }, [txt('hidden words')])]),
+    )
+    expect(reasonFor(rangeOf(fixture, ['Alpha one. Beta two. ', 11], ['hidden words', 6]))).toBe('span-blocks')
+  })
+
+  it('says a selection ending in another positioned box spans blocks', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [
+        txt('One first. The whale '),
+        elem('span', { position: 'absolute' }, [txt('swam')]),
+        txt(' here. Last one.'),
+      ]),
+    )
+    expect(reasonFor(rangeOf(fixture, ['One first. The whale ', 15], ['swam', 4]))).toBe('span-blocks')
+  })
+
+  /* Empty is no term — even at the very start of a run, where the end offset is zero. */
+  it('says an empty selection at the start of a paragraph has no term', () => {
+    const fixture = buildFixture(elem('p', {}, [txt(whole)]))
+    expect(reasonFor(rangeOf(fixture, [whole, 0], [whole, 0]))).toBe('no-term')
+  })
+})
+
+/**
+ * What mutation testing found the cases above could not tell apart. Each case
+ * is one shape of book, and each names the rule it holds.
+ */
+describe('sentenceAt — what its mutants found', () => {
+  /* The window is CENTRED on the selection. Walked from the top instead, a
+     5 000-character paragraph before the term fills the budget and the term is
+     never reached. */
+  it('finds a sentence deep in a long chapter', () => {
+    const text = 'Alpha one. Beta two. Gamma three.'
+    const fixture = buildFixture(
+      elem('div', {}, [elem('p', {}, [txt('Long ago. '.repeat(500))]), elem('p', {}, [txt(text)])]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, [text, 11], [text, 15]))?.sentence).toBe('Beta two.')
+  })
+
+  /* Where the language is read from when the run holds two: the first KEPT
+     entry at or after the term's start — not the last, and not an earlier one.
+     The observable is the Latin abbreviation merge. */
+  it('reads the language from the term’s own entry, not from one after it', () => {
+    const text = 'Alpha one. He met Mr. Smith today. '
+    const fixture = buildFixture(
+      elem('p', {}, [
+        elem('span', { attributes: { lang: 'en' } }, [txt(text)]),
+        elem('span', { attributes: { lang: 'zh' } }, [txt('Beta two.')]),
+      ]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, [text, 22], [text, 27]))?.sentence).toBe('He met Mr. Smith today.')
+  })
+
+  it('reads the language from the term’s own entry, not from one before it', () => {
+    const text = 'He met Mr. Smith today. Beta two.'
+    const fixture = buildFixture(
+      elem('p', {}, [
+        elem('span', { attributes: { lang: 'zh' } }, [txt('第一句。')]),
+        elem('span', { attributes: { lang: 'en' } }, [txt(text)]),
+      ]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, [text, 11], [text, 16]))?.sentence).toBe('He met Mr. Smith today.')
+  })
+
+  /* A footnote marker's number usually sits in a <sup> INSIDE the marker, so
+     the semantic is on the grandparent — the climb has to reach it. */
+  it('drops a footnote marker whose number sits in a <sup> inside it', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [
+        txt('One first. He left.'),
+        elem('a', { attributes: { 'epub:type': 'noteref' } }, [elem('sup', {}, [txt(' 1 ')])]),
+        txt('Then she stayed. Last one.'),
+      ]),
+    )
+    const tail = 'Then she stayed. Last one.'
+
+    expect(sentenceAt(rangeOf(fixture, [tail, 9], [tail, 15]))?.sentence).toBe('Then she stayed.')
+  })
+
+  /* The END of a selection may sit inside annotation that is filtered away.
+     That is not the term leaving its context — only a positioned box does that. */
+  it('keeps a term whose end falls inside a footnote marker', () => {
+    const said = 'Alpha one. He said so'
+    const fixture = buildFixture(
+      elem('p', {}, [
+        txt(said),
+        elem('a', { attributes: { 'epub:type': 'noteref' } }, [txt(' 4 ')]),
+        txt(' and left. Beta two.'),
+      ]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, [said, 19], [' 4 ', 2]))).toEqual({
+      sentence: 'He said so and left.',
+      term: 'so',
+    })
+  })
+
+  /* The NEAREST positioned box is the term's context, not the outermost one. */
+  it('takes the nearest positioned box as the term’s context', () => {
+    const inner = 'The term here. Inner last.'
+    const fixture = buildFixture(
+      elem('div', { position: 'absolute' }, [
+        txt('Outer words '),
+        elem('span', { position: 'absolute' }, [txt(inner)]),
+      ]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, [inner, 4], [inner, 8]))?.sentence).toBe('The term here.')
+  })
+
+  it('drops a fixed box out of the prose as it drops an absolute one', () => {
+    const head = 'One first. The whale '
+    const fixture = buildFixture(
+      elem('p', {}, [
+        txt(head),
+        elem('span', { position: 'fixed' }, [txt('Running head. ')]),
+        txt('swam here. Last one.'),
+      ]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, [head, 15], [head, 20]))?.sentence).toBe('The whale swam here.')
+  })
+
+  /* BY NAME: an <rt> and an <rp> are the annotation whatever their style says. */
+  it('drops a ruby reading and its brackets by name, with no ruby display on them', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [
+        txt('最初の文。'),
+        elem('ruby', {}, [
+          txt('東京'),
+          elem('rp', {}, [txt('（')]),
+          elem('rt', {}, [txt('とうきょう')]),
+          elem('rp', {}, [txt('）')]),
+        ]),
+        txt('は大きい。最後の文。'),
+      ]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, ['東京', 0], ['東京', 2]))).toEqual({ sentence: '東京は大きい。', term: '東京' })
+  })
+
+  /* BY SHAPE: a container of annotations is annotation, and its display begins
+     with `ruby-text` without ending with it. */
+  it('drops a ruby text container by its display', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [
+        txt('前の文です。'),
+        elem('span', { display: 'ruby' }, [
+          txt('漢字'),
+          elem('span', { display: 'ruby-text-container' }, [txt('かんじ')]),
+        ]),
+        txt('は難しい。次の文です。'),
+      ]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, ['漢字', 0], ['漢字', 2]))?.sentence).toBe('漢字は難しい。')
+  })
+
+  /* ONCE PER ELEMENT PER WALK, however many entries sit under it: once for
+     `flatten`'s walk, once for this module's. Per entry it would be twenty-odd
+     reads of each of these five. */
+  it('reads each element’s style once, however many entries sit under it', () => {
+    const tail = 'Beta two. Gamma three.'
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('section', {}, [
+          elem('p', {}, [
+            elem('span', {}, [
+              elem('em', {}, [
+                txt('Alpha one. '),
+                ...Array.from({ length: 20 }, (_, i) => txt(`word${i} `)),
+                txt(tail),
+              ]),
+            ]),
+          ]),
+        ]),
+      ]),
+    )
+    fixture.resetCounters()
+
+    sentenceAt(rangeOf(fixture, [tail, 0], [tail, 4]))
+
+    expect(fixture.styleReads).toBeGreaterThan(0)
+    expect(fixture.styleReads).toBeLessThanOrEqual(10)
+  })
+
+  /* The far side is the NEAREST paragraph with words in it. A heading further
+     back does not end a sentence that paragraph runs into. */
+  it('stops at the nearest paragraph with words in it, not at a heading beyond it', () => {
+    const first = 'Call me Ishmael. Some years ago.'
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('h2', {}, [txt('Loomings')]),
+        elem('p', {}, [txt('Chapter one')]),
+        elem('p', {}, [txt(first)]),
+      ]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, [first, 8], [first, 15]))).toBeNull()
+  })
+
+  it('keeps the run to its own paragraph when that paragraph is several entries', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('p', {}, [txt('Alpha one. Beta two.')]),
+        elem('p', {}, [txt('Gamma '), elem('em', {}, [txt('three')]), txt(' here. Delta four.')]),
+      ]),
+    )
+
+    expect(sentenceAt(rangeOf(fixture, ['Gamma ', 0], ['Gamma ', 5]))).toEqual({
+      sentence: 'Gamma three here.',
+      term: 'Gamma',
+    })
+  })
+})
+
+/** The ancestor climb alone, for `sentenceAround` — see `localeAt`. */
+describe('localeAt', () => {
+  it('reads the nearest declared language above the range', () => {
+    const fixture = buildFixture(
+      elem('div', { attributes: { lang: 'fr' } }, [
+        elem('p', {}, [txt('Bonjour. ')]),
+        elem('p', {}, [elem('span', { attributes: { lang: 'de' } }, [txt('Hallo. ')])]),
+      ]),
+    )
+
+    expect(localeAt(rangeOf(fixture, ['Bonjour. ', 0], ['Bonjour. ', 3]))).toBe('fr')
+    expect(localeAt(rangeOf(fixture, ['Hallo. ', 0], ['Hallo. ', 3]))).toBe('de')
+  })
+
+  it('answers undefined — the host’s — where nothing is declared', () => {
+    const fixture = buildFixture(elem('p', {}, [txt('Nothing declared.')]))
+
+    expect(localeAt(rangeOf(fixture, ['Nothing declared.', 0], ['Nothing declared.', 7]))).toBeUndefined()
+  })
+
+  it('answers undefined for a boundary that is not text, whatever is declared above it', () => {
+    const fixture = buildFixture(
+      elem('div', { attributes: { lang: 'fr' } }, [elem('p', { id: 'para' }, [txt('Bonjour encore.')])]),
+    )
+    const para = fixture.element('para')
+
+    expect(
+      localeAt({ startContainer: para, startOffset: 0, endContainer: para, endOffset: 1 } as unknown as Range),
+    ).toBeUndefined()
+  })
+
+  it('answers undefined for a range that has left the document, whatever it declared', () => {
+    const fixture = buildFixture(
+      elem('div', { id: 'layer' }, [elem('p', { attributes: { lang: 'fr' } }, [txt('Ancienne page.')])]),
+    )
+    const range = rangeOf(fixture, ['Ancienne page.', 0], ['Ancienne page.', 8])
+    expect(localeAt(range)).toBe('fr')
+
+    fixture.replaceChildren('layer', [elem('p', {}, [txt('Nouvelle page.')])])
+
+    expect(localeAt(range)).toBeUndefined()
+  })
+
+  it('answers undefined rather than throwing', () => {
+    const exploding = {
+      get startContainer(): never {
+        throw new Error('the document was torn down mid-walk')
+      },
+      startOffset: 0,
+      endContainer: null,
+      endOffset: 0,
+    } as unknown as Range
+
+    expect(localeAt(exploding)).toBeUndefined()
   })
 })

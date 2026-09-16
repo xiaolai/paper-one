@@ -1,8 +1,17 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
+import { CAPABILITY_UI, createKernelServices } from '../../../kernel'
+import { crashableFs, memoryStorage } from '../lib/journalFs.testkit'
+import { createSyncStatus } from '../lib/status'
 import { StoragePane, formatBytes } from './StoragePane'
-import { COVER_CAP_MAX_MB, COVER_CAP_MIN_MB, type StorageModel, type StorageSnapshot } from './storageModel'
+import {
+  COVER_CAP_MAX_MB,
+  COVER_CAP_MIN_MB,
+  createStorageModel,
+  type StorageModel,
+  type StorageSnapshot,
+} from './storageModel'
 
 /**
  * The Storage section, mounted.
@@ -199,6 +208,26 @@ describe('the downloads list', () => {
     render(<StoragePane model={model} />)
     expect(model.refreshes()).toBe(1)
   })
+
+  /* A PANE HANDED ANOTHER MODEL READS THAT ONE. The capability builds a new
+   * model on each start, and a pane that refreshed only the first would draw
+   * the second's snapshot from before anything was read into it. */
+  it('refreshes a model it is handed in place of the first', () => {
+    const first = fakeModel()
+    const second = fakeModel()
+    const { rerender } = render(<StoragePane model={first} />)
+    rerender(<StoragePane model={second} />)
+    expect(first.refreshes()).toBe(1)
+    expect(second.refreshes()).toBe(1)
+  })
+
+  /* DRAWN AS DESTRUCTIVE, in the kernel's own vocabulary — the look is what
+   * tells a sighted reader this button deletes bytes. */
+  it('draws each Evict button as a destructive one', () => {
+    render(<StoragePane model={fakeModel({ downloads })} />)
+    const classes = screen.getByLabelText('Evict Walden').className.split(' ')
+    expect(classes).toEqual(expect.arrayContaining([CAPABILITY_UI.button, CAPABILITY_UI.buttonDanger]))
+  })
 })
 
 describe('the cover cap field', () => {
@@ -299,5 +328,82 @@ describe('the cover cap field', () => {
     render(<StoragePane model={model} />)
     expect((screen.getByLabelText('Cover cache cap, megabytes') as HTMLInputElement).value).toBe('500')
     expect(screen.getByText('3.0 MB of')).toBeTruthy()
+  })
+
+  /* A COMMITTED EDIT HANDS THE FIELD BACK TO THE MODEL. What it shows next is
+   * the value the model holds — here the one it kept after refusing `0` — and
+   * a second blur has nothing left to commit. */
+  it('shows the model’s value again once an edit is committed, and commits it once', () => {
+    const model = fakeModel()
+    render(<StoragePane model={model} />)
+    const field = screen.getByLabelText('Cover cache cap, megabytes') as HTMLInputElement
+    fireEvent.change(field, { target: { value: '0' } })
+    fireEvent.blur(field)
+    expect(field.value).toBe('200')
+    fireEvent.blur(field)
+    expect(model.caps).toEqual([0])
+  })
+
+  /* LEAVING THE FIELD WITHOUT AN EDIT IS NOT AN EDIT. Nothing is committed and
+   * nothing throws — a throw here is an error from a blur the reader never
+   * meant as anything. */
+  it('commits nothing, and throws nothing, when the field is left untouched', () => {
+    const model = fakeModel()
+    const thrown: unknown[] = []
+    const note = (event: ErrorEvent) => void thrown.push(event.error)
+    window.addEventListener('error', note)
+    try {
+      render(<StoragePane model={model} />)
+      const field = screen.getByLabelText('Cover cache cap, megabytes')
+      fireEvent.blur(field)
+      fireEvent.keyDown(field, { key: 'Enter' })
+    } finally {
+      window.removeEventListener('error', note)
+    }
+    expect(thrown).toEqual([])
+    expect(model.caps).toEqual([])
+  })
+
+  /* ONLY ESCAPE ABANDONS. Any other key — an arrow nudging the number, a digit
+   * the browser handles itself — leaves the edit standing for the blur. */
+  it('keeps the edit through a key that is neither Enter nor Escape', () => {
+    const model = fakeModel()
+    render(<StoragePane model={model} />)
+    const field = screen.getByLabelText('Cover cache cap, megabytes') as HTMLInputElement
+    fireEvent.change(field, { target: { value: '250' } })
+    fireEvent.keyDown(field, { key: 'ArrowUp' })
+    expect(field.value).toBe('250')
+    fireEvent.blur(field)
+    expect(model.caps).toEqual([250])
+  })
+
+  it('draws the field in the kernel’s narrow field style', () => {
+    render(<StoragePane model={fakeModel()} />)
+    const classes = screen.getByLabelText('Cover cache cap, megabytes').className.split(' ')
+    expect(classes).toEqual(expect.arrayContaining([CAPABILITY_UI.field, CAPABILITY_UI.fieldNarrow]))
+  })
+})
+
+/**
+ * ⚠️ **OVER A LEDGER THAT WILL NOT READ, THE PANE DREW AN EMPTY SECTION AND NO
+ * REASON.** Every call it makes into the model is `void`ed, which is right only
+ * while the model never rejects — and its refresh did, from the mount effect,
+ * once an unreadable ledger stopped reading as empty (2026-09-13 verify). The
+ * fake model above cannot show this: the rejection was the real model's. So
+ * this one mounts the real model, over a damaged ledger, and asks what a reader
+ * would see.
+ */
+describe('over the real model, a ledger that will not read', () => {
+  it('is announced as an alert from the refresh the pane makes on mount', async () => {
+    const fs = crashableFs()
+    await fs.writeFile('sync/downloads.json', new TextEncoder().encode('[1,2,3]'))
+    const model = createStorageModel({
+      services: createKernelServices({ fs, storage: memoryStorage() }),
+      coverCache: null,
+      status: createSyncStatus(),
+      removeDownload: null,
+    })
+    render(<StoragePane model={model} />)
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'the downloads ledger is not an object')
   })
 })

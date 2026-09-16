@@ -1,4 +1,4 @@
-import { BOOKS_DIR, COVER_NAMES, atomicWrite, defineSetting, isContentHash, isRefusal, type CoverName, type HashPort, type IndexFs, type RemovableBlobName, type Setting, type SettingsStore } from '../../../kernel'
+import { BOOKS_DIR, COVER_NAMES, atomicWrite, defineSetting, isContentHash, type CoverName, type HashPort, type IndexFs, type RemovableBlobName, type Setting, type SettingsStore } from '../../../kernel'
 import { blobFolderOf, type BlobFacts } from './ledger'
 
 /**
@@ -31,8 +31,15 @@ import { blobFolderOf, type BlobFacts } from './ledger'
  */
 export const COVER_CAP_MAX_MB = 1024 * 1024
 
+// Stryker disable next-line StringLiteral: `defineSetting` refuses an unnamespaced key, and it is called HERE, at module scope — so the empty-string mutant throws while this module is being imported, every covering suite fails to LOAD, no test fails, and Stryker's vitest runner reports it Survived with nothing able to kill it (measured 2026-09-14)
 export const COVER_CAP_SETTING: Setting<number> = defineSetting('sync.coverCapMB', 200, (raw) =>
-  typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 && raw <= COVER_CAP_MAX_MB ? raw : undefined,
+  Number.isSafeInteger(raw) &&
+  // Stryker disable next-line ConditionalExpression: `isSafeInteger` above already refused a non-number; this narrows the type.
+  typeof raw === 'number' &&
+  raw > 0 &&
+  raw <= COVER_CAP_MAX_MB
+    ? raw
+    : undefined,
 )
 
 export const COVER_INDEX_PATH = 'sync/covers.json'
@@ -153,7 +160,16 @@ export function createCoverCache({
   const readIndex = async (): Promise<CoverIndex> => {
     try {
       const parsed: unknown = JSON.parse(new TextDecoder().decode(await fs.readFile(COVER_INDEX_PATH)))
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+      /* ⚠️ **AND A DOCUMENT THAT IS NOT AN INDEX IS UNREADABLE, NOT EMPTY.**
+       * Bytes that are not JSON have always thrown from here and been re-raised
+       * below; JSON of the wrong shape answered `{}` instead, and `writeIndex`
+       * then persisted it — the same permanent forgetting the catch below
+       * exists to prevent, one door along. Thrown, it lands in that catch,
+       * where the file is there and the error is raised. Found by the
+       * 2026-09-13 audit. */
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('the covers index is not an object')
+      }
       /* NULL-PROTOTYPE, because the keys are BOOK IDS and a book id comes off
        * the wire from a peer. `{}` inherits `Object.prototype`, so a book
        * named `__proto__` did not become an entry — it ran the legacy
@@ -163,24 +179,41 @@ export function createCoverCache({
        * keys to collide with. */
       const out: Record<string, CoverEntry> = Object.create(null) as Record<string, CoverEntry>
       for (const [book, raw] of Object.entries(parsed as Record<string, unknown>)) {
-        if (typeof raw !== 'object' || raw === null) continue
+        if (
+          raw === null ||
+          // Stryker disable next-line ConditionalExpression: a non-object has no `name` member, so the name check below refuses it anyway.
+          typeof raw !== 'object'
+        ) continue
         const entry = raw as Record<string, unknown>
-        if (typeof entry['name'] !== 'string' || typeof entry['size'] !== 'number' || typeof entry['usedAt'] !== 'number') continue
+        /* ⚠️ **A JACKET'S NAME, OR THE ROW IS NOT THIS CACHE'S — AND ITS
+         * EVICTION DELETED WHATEVER IT NAMED.** Any string was accepted here,
+         * and eviction hands the name to the kernel's remove primitive, whose
+         * closed set holds the book's own `content.*` as well as its jackets.
+         * So a row naming `content.epub` — a hand edit, a damaged file — made
+         * this jackets-only cache delete the book; and a row naming nothing
+         * removable was refused with a plain `Error`, kept, and counted toward
+         * the cap for good, so every pass deleted real jackets to get under
+         * it. Nothing this cache writes carries another name: only `ensure`
+         * writes a row, and only under one of these (2026-09-14, found by the
+         * mutation sweep's survivor in the refusal branch it could not reach). */
+        if (!(COVER_NAMES as readonly unknown[]).includes(entry['name'])) continue
         /* Finite, non-negative, or the row is corrupt: a NaN or negative
          * size poisons the byte total and a NaN stamp scrambles the LRU. */
         /* SAFE integers: a size at 2^53 or beyond stops adding exactly, so a
          * handful of them make the running total in `evictLocked` disagree
          * with itself and eviction either never starts or never stops. */
-        if (!Number.isSafeInteger(entry['size']) || entry['size'] < 0) continue
+        if (!Number.isSafeInteger(entry['size']) || (entry['size'] as number) < 0) continue
         if (!Number.isFinite(entry['usedAt'])) continue
         /* A stamp owed is a flag — or, from an index the previous build
          * wrote, the digest it kept: either reads as owed, and the debt is
          * paid from a fresh measurement, never from that digest. */
         const owed = entry['owed'] === true || isContentHash(entry['pendingHash'])
+        /* The casts are the checks above, as `parseCoverFacts` spells them —
+         * a `typeof` beside each would refuse nothing they have not. */
         out[book] = {
-          name: entry['name'],
-          size: entry['size'],
-          usedAt: entry['usedAt'],
+          name: entry['name'] as CoverName,
+          size: entry['size'] as number,
+          usedAt: entry['usedAt'] as number,
           ...(owed ? { owed: true } : {}),
         }
       }
@@ -215,17 +248,16 @@ export function createCoverCache({
      * from eviction for as long as it stayed current: the cache sat
      * permanently over its limit, and every other cover was deleted trying to
      * get under it. A cover this device cannot afford to keep is not made
-     * affordable by being the newest one. */
-    const exempt = keep !== undefined && (index[keep]?.size ?? 0) <= cap ? keep : undefined
+     * affordable by being the newest one.
+     *
+     * `keep` is always a book whose entry the caller has just written, so its
+     * entry is there to read. */
+    const exempt = keep !== undefined && index[keep]!.size <= cap ? keep : undefined
     const oldestFirst = Object.entries(index)
       .filter(([book]) => book !== exempt)
       .sort((a, b) => a[1].usedAt - b[1].usedAt)
     for (const [book, entry] of oldestFirst) {
       if (total <= cap) break
-      /* An index entry naming something outside the closed set (a hand-edited
-       * covers.json) is REFUSED by the primitive; the entry still leaves the
-       * index, so a poisoned row cannot delete anything and stops being
-       * tracked. */
       /* THE ENTRY LEAVES ONLY IF THE FILE DID.
        *
        * A swallowed delete used to untrack the row anyway and subtract its
@@ -235,15 +267,18 @@ export function createCoverCache({
        * the cache grows without bound while its own arithmetic says it is
        * under the limit.
        *
-       * A refusal from the primitive is different and is still dropped — an
-       * index row naming something outside the closed set (a hand-edited
-       * `covers.json`) can delete nothing, and keeping it would stall
-       * eviction on a row that will never succeed. */
-      const removed = await removeBlob(book, entry.name as RemovableBlobName).then(
-        () => true,
-        (cause: unknown) => isRefusal(cause),
-      )
-      if (!removed) continue
+       * ⚠️ **A "REFUSAL" WAS DROPPED HERE INSTEAD, AND NONE EVER ARRIVED.** The
+       * branch was for a row naming something outside the closed set, but the
+       * kernel's primitive refuses that with a plain `Error`, which is not a
+       * `Refusal` — so the row was kept, and one naming a book's `content.*`
+       * was not refused at all. Such a row no longer survives `readIndex`, so
+       * every name that reaches this line is a jacket's the primitive
+       * accepts, and a failure is the file's. */
+      try {
+        await removeBlob(book, entry.name as RemovableBlobName)
+      } catch {
+        continue
+      }
       delete index[book]
       total -= entry.size
       /* THE FACTS GO WITH THE FILE, here too. The primitive clears them when
@@ -271,8 +306,18 @@ export function createCoverCache({
   const measured = async (folder: string, name: string): Promise<{ readonly size: number; readonly hash: string } | null> => {
     const port = hashes?.() ?? null
     if (port === null) return null
+    /* ⚠️ **TAKEN OFF THE PORT HERE, AND CALLED BELOW — AND THE TWO LINES ARE
+       NOT INTERCHANGEABLE.** A hasher that THROWS rather than rejecting is the
+       same "would not answer" and must leave the caller doing the same thing,
+       so the CALL belongs inside the `catch`; delivery is not a decision about
+       what the record keeps (2026-09-14 review). But a port that is not there
+       is a defect rather than a busy hasher, and a `try` around the whole
+       expression swallows that TypeError too — which is how the guard above
+       came to decide nothing at all. Reading the method out is what separates
+       them. */
+    const { hashFile } = port
     try {
-      const facts = await port.hashFile(folder, name)
+      const facts = await hashFile.call(port, folder, name)
       return { size: facts.size, hash: facts.blake3 }
     } catch {
       return null
@@ -295,7 +340,12 @@ export function createCoverCache({
     ensure: (book) =>
       serial(async () => {
         const folder = blobFolderOf(book)
-        const index = { ...(await readIndex()) } as Record<string, CoverEntry>
+        /* NULL-PROTOTYPE HERE TOO. This was `{ ...index }`, which hands the
+           copy `Object.prototype` straight back — so `toString` was "in" the
+           index before anything tracked it, and a `__proto__` jacket that
+           landed ran the prototype setter rather than becoming an entry. The
+           read's own note on this was true of the read and undone here. */
+        const index = Object.assign(Object.create(null) as Record<string, CoverEntry>, await readIndex())
         const present = await coverHere(folder)
         if (present !== null) {
           const held = index[book]
@@ -304,7 +354,11 @@ export function createCoverCache({
            * bytes and is never worth evicting. A held size is kept — the
            * touch path must stay one read cheap. */
           let size = held?.size
-          if (size === undefined || held?.name !== present) {
+          if (
+            held?.name !== present ||
+            // Stryker disable next-line ConditionalExpression: every held entry has a size, so a missing one is a missing entry, which the name check above already caught; this narrows the type.
+            size === undefined
+          ) {
             try {
               /* MEASURED, not read. This pulled the whole file into the
                * webview to take `.length` — for a jacket that is ordinarily a
@@ -312,6 +366,7 @@ export function createCoverCache({
                * is not this device's decision. `bytesAt` asks the filesystem
                * for the length. */
               const measured = await measure(`${BOOKS_DIR}/${folder}/${present}`)
+              // Stryker disable next-line StringLiteral: the catch below binds nothing, so no reader ever sees this message.
               if (measured === null) throw new Error('the cover could not be measured')
               size = measured
             } catch {
@@ -326,10 +381,15 @@ export function createCoverCache({
               /* The entry is left exactly as it was — including absent, so a
                * cover that has never been measured is not entered at a made-up
                * size. `true`, because the cover IS here; what failed is
-               * measuring it, and the next `ensure` will try again. */
-              if (held !== undefined) index[book] = held
-              else delete index[book]
-              await writeIndex(index)
+               * measuring it, and the next `ensure` will try again.
+               *
+               * NOTHING IS WRITTEN FOR IT, AND THAT IS A CHANGE RATHER THAN A
+               * TIDY-UP. Restoring `index[book]` to `held` decided nothing —
+               * it was the value the copy had never stopped holding — but the
+               * `writeIndex` beside it did: a write that failed turned a
+               * jacket this device could not MEASURE into an `ensure` that
+               * rejected, over an index with nothing new to save. There is
+               * nothing to save, so nothing is saved (2026-09-14 review). */
               return true
             }
           }

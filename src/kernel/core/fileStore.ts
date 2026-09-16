@@ -39,7 +39,9 @@ type Contents = Record<string, string>
 export interface FileStore extends MarkStorage {
   /** Write anything outstanding now. For teardown, and for tests. */
   flush: () => Promise<void>
-  /** False once a write has failed — see the note on reporting, below. */
+  /** False once a write has failed — and from the start for a damaged file
+   *  that could not be moved aside, which is a store that will never write.
+   *  See the note on reporting, below. */
   readonly healthy: boolean
   /** True when the contents were seeded from localStorage on this run. */
   readonly migrated: boolean
@@ -47,7 +49,8 @@ export interface FileStore extends MarkStorage {
    * What this run found on disk that it could not read — or null.
    *
    * `aside` is where the damaged file went, or null when it could not be
-   * moved and the next write will replace it. Reported rather than only
+   * moved — in which case this store REFUSES EVERY WRITE rather than replacing
+   * it, and holds the session in memory. Reported rather than only
    * logged: a reader who lost their cards and settings to a truncated file
    * learned it from an empty pane with nothing to say why, and a console
    * line is not where a reader looks. Boot says it where they do.
@@ -164,7 +167,30 @@ export async function openFileStore({
     migrated = Object.keys(contents).length > 0
   }
 
-  let healthy = true
+  /**
+   * The damaged bytes are still where they were, and nothing may write over
+   * them.
+   *
+   * ⚠️ **THE NEXT CHANGE USED TO REPLACE THEM, UNDER A NOTICE SAYING SO.**
+   * Moving the file aside is the whole of what makes starting empty safe; where
+   * the move did NOT happen — a refused rename, a filesystem with no seam — the
+   * store started empty with writes on, so the first card, preference or pin
+   * wrote a file holding that one thing over the only copy of the reader's
+   * cards, settings and tag preferences. Announcing it is not the same as not
+   * doing it (2026-09-13 audit).
+   *
+   * Refusing is the same answer every store above this one already understands:
+   * `setItem` throws, which each of them reads as `persistent: false` and
+   * reports, and this session's values stay in memory where the reader can
+   * still see them. `flush` raises it too, so the shutdown step and the CLI's
+   * close report a session that saved nothing rather than printing success.
+   */
+  const unmovable =
+    damaged !== null && damaged.aside === null
+      ? new Error('the store on disk could not be read and could not be moved aside, so nothing is written over it')
+      : null
+
+  let healthy = unmovable === null
   /** Something has changed since the last write was chained. */
   let dirty = false
   /** A coalescing callback is queued and has not yet run. */
@@ -175,7 +201,7 @@ export async function openFileStore({
    * Why the last write did not land, or null when it did — `healthy`'s cause,
    * kept so `flush` can raise the real failure rather than a summary of it.
    */
-  let lastFailure: unknown = null
+  let lastFailure: unknown = unmovable
 
   const writeNow = async () => {
     const snapshot = JSON.stringify(contents)
@@ -214,6 +240,10 @@ export async function openFileStore({
 
     setItem: (key, value) => {
       contents[key] = value
+      /* HELD, THEN REFUSED — and nothing is queued, because there is nothing
+       * this store may write until somebody moves the damaged file. See
+       * `unmovable`. */
+      if (unmovable !== null) throw unmovable
       /* Scheduled BEFORE the throw below, so an unhealthy store can recover.
        * Throwing first meant a single failed write was permanent: nothing was
        * ever queued again, so nothing ever succeeded again, and the reader was
@@ -282,25 +312,33 @@ export async function openFileStore({
 
 /** The contents, or null when the payload is not a store at all. */
 function parse(text: string): Contents | null {
+  let value: unknown
   try {
-    const value: unknown = JSON.parse(text)
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
-    /* ONE invalid entry damns the file, deliberately. Every store above this
-     * writes a JSON string, so a non-string entry means the file was not
-     * written by this code — and FILTERING it meant the remainder was
-     * accepted as healthy and the next write erased the dropped keys with no
-     * quarantine and no notice. Damage is damage: `null` sends the whole
-     * file down the move-aside path, where every byte survives and the boot
-     * notice says so. */
-    const entries = Object.entries(value as Record<string, unknown>)
-    if (!entries.every(([, v]) => typeof v === 'string')) return null
-    return Object.assign(Object.create(null), Object.fromEntries(entries)) as Contents
+    value = JSON.parse(text)
   } catch {
     /* Reported to the caller rather than thrown. Throwing here would happen
      * before React mounts and take the whole application down — a reader whose
      * marks file was truncated would get no application at all, rather than one
      * that has lost some marks. The caller moves the file aside so it survives
-     * the next write. */
-    return null
+     * the next write.
+     *
+     * NOTHING IS RETURNED HERE: `value` stays `undefined`, and the shape test
+     * below answers `null` for it. A `return null` in this block gave that
+     * answer twice, and emptying it changed nothing a test could see. */
   }
+  /* The shape is tested OUTSIDE the `try`, which holds only what can throw.
+   * Inside it, `Object.entries(null)` threw into the catch and answered `null`
+   * for a file holding JSON null whether or not `value === null` was tested —
+   * a guard nothing could tell was there. */
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  /* ONE invalid entry damns the file, deliberately. Every store above this
+   * writes a JSON string, so a non-string entry means the file was not
+   * written by this code — and FILTERING it meant the remainder was
+   * accepted as healthy and the next write erased the dropped keys with no
+   * quarantine and no notice. Damage is damage: `null` sends the whole
+   * file down the move-aside path, where every byte survives and the boot
+   * notice says so. */
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (!entries.every(([, v]) => typeof v === 'string')) return null
+  return Object.assign(Object.create(null), Object.fromEntries(entries)) as Contents
 }

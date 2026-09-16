@@ -45,6 +45,19 @@ export interface Marking {
    *  the placed list in its type as well as at runtime. */
   readonly selected: Placed<Annotation> | null
   /**
+   * Whether `mark` would lay one down for the selection in hand — a selection,
+   * WITH AN ANCHOR, in a book.
+   *
+   * ⚠️ **THE RULE `mark` REFUSES BY, SAID WHERE A SURFACE CAN READ IT**
+   * (2026-09-13 audit, #202). `view.getCFI` answers `''` for a range it cannot
+   * address and `mark` refuses that, so the selection popup's Mark and Note,
+   * ⌘D and the palette's "Mark the selection" were all offered for a passage
+   * they could do nothing with: the reader pressed, and nothing happened. Each
+   * of those asks here. A surface spelling `cfi === ''` for itself would be a
+   * second copy of this rule, and the copy is where it drifts.
+   */
+  readonly canMark: boolean
+  /**
    * Mark the selection in the given tint and style. Returns the mark, or null
    * if nothing was selected.
    *
@@ -117,12 +130,16 @@ export function useMarking(book: Book, marks: MarksView): Marking {
     setSelection(null)
   }
 
-  const onMarkDrawn = useCallback((cfi: string, range: Range) => {
-    setRanges((prev) => {
-      if (prev.get(cfi) === range) return prev
-      return new Map(prev).set(cfi, range)
-    })
-  }, [])
+  const onMarkDrawn = useCallback(
+    (cfi: string, range: Range) => {
+      setRanges((prev) => {
+        if (prev.get(cfi) === range) return prev
+        return new Map(prev).set(cfi, range)
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: a dependency list holding one constant never changes, so it memoises exactly as an empty one does and the callback keeps one identity either way.
+    [],
+  )
 
   /**
    * Drop one anchor's cached range.
@@ -133,14 +150,18 @@ export function useMarking(book: Book, marks: MarksView): Marking {
    * overlapping mark in `mark` did not — leaving a Range pointing at DOM that
    * had just been erased, which the margin then measured.
    */
-  const forgetRange = useCallback((cfi: string) => {
-    setRanges((prev) => {
-      if (!prev.has(cfi)) return prev
-      const next = new Map(prev)
-      next.delete(cfi)
-      return next
-    })
-  }, [])
+  const forgetRange = useCallback(
+    (cfi: string) => {
+      setRanges((prev) => {
+        if (!prev.has(cfi)) return prev
+        const next = new Map(prev)
+        next.delete(cfi)
+        return next
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: as `onMarkDrawn`'s — one constant dependency memoises as none does.
+    [],
+  )
 
   /**
    * The mark under the selection — by OVERLAP, not by a byte-identical CFI.
@@ -163,6 +184,13 @@ export function useMarking(book: Book, marks: MarksView): Marking {
         : null,
     [marks.current, selection, bookId],
   )
+
+  /* THE SAME THREE FACTS `mark` GUARDS ON BELOW, in the same order — see
+     `Marking.canMark`. `mark` keeps its own guards because they are what
+     narrow `selection` and `bookId` for the compiler, and because ⌘D can land
+     between a render and the next; this is what a surface reads to decide
+     whether to offer the control at all. */
+  const canMark = selection !== null && selection.cfi !== '' && bookId !== null
 
   /**
    * Drawn immediately rather than waiting for the section to re-render:
@@ -189,8 +217,9 @@ export function useMarking(book: Book, marks: MarksView): Marking {
          * names as worse than no control at all: the reader presses Mark and
          * nothing happens, with no way to tell it from a broken app. The
          * surface-level fix — never offering the control for a selection that
-         * cannot be anchored — belongs to whoever owns the selection bar and is
-         * recorded as outstanding; this at least leaves a trace. */
+         * cannot be anchored — was recorded here as outstanding and is now
+         * `canMark`, which every surface that offers Mark reads (#202). This
+         * stays as the trace for a route that reaches `mark` anyway. */
         console.warn('Paper: this selection has no anchor, so it cannot be marked')
         return null
       }
@@ -257,13 +286,22 @@ export function useMarking(book: Book, marks: MarksView): Marking {
 
   const [focus, setFocus] = useState<MarkFocus | null>(null)
   const nonce = useRef(0)
-  const focusMark = useCallback((id: string, edit = false) => {
-    nonce.current += 1
-    setFocus({ id, edit, nonce: nonce.current })
-  }, [])
-  const clearFocus = useCallback((done: number) => {
-    setFocus((current) => (current?.nonce === done ? null : current))
-  }, [])
+  const focusMark = useCallback(
+    (id: string, edit = false) => {
+      // Stryker disable next-line AssignmentOperator: counting down mints nonces as distinct, and as far from the panel's unanswered 0, as counting up — and a nonce is only ever compared for equality.
+      nonce.current += 1
+      setFocus({ id, edit, nonce: nonce.current })
+    },
+    // Stryker disable next-line ArrayDeclaration: as `onMarkDrawn`'s — one constant dependency memoises as none does.
+    [],
+  )
+  const clearFocus = useCallback(
+    (done: number) => {
+      setFocus((current) => (current?.nonce === done ? null : current))
+    },
+    // Stryker disable next-line ArrayDeclaration: as `onMarkDrawn`'s — one constant dependency memoises as none does.
+    [],
+  )
 
   const unmark = useCallback(
     (target: Annotation) => {
@@ -299,12 +337,13 @@ export function useMarking(book: Book, marks: MarksView): Marking {
       ranges,
       onMarkDrawn,
       selected,
+      canMark,
       mark,
       unmark,
       focus,
       focusMark,
       clearFocus,
     }),
-    [selection, ranges, onMarkDrawn, selected, mark, unmark, focus, focusMark, clearFocus],
+    [selection, ranges, onMarkDrawn, selected, canMark, mark, unmark, focus, focusMark, clearFocus],
   )
 }

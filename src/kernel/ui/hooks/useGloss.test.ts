@@ -5,7 +5,7 @@ import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GlossContext, GlossProvider } from '../../core/gloss'
 import { buildFixture, elem, txt, type Fixture } from '../reader/wordSnap/domFake.testkit'
-import { askGloss, glossRequest, sentenceAround, useGloss, type GlossSelection } from './useGloss'
+import { askGloss, glossRequest, sentenceAround, useGloss, type GlossSelection, type GlossState } from './useGloss'
 
 /**
  * WHAT THE MODEL IS ACTUALLY SENT — asserted at the provider, which is the only
@@ -27,6 +27,11 @@ import { askGloss, glossRequest, sentenceAround, useGloss, type GlossSelection }
  */
 
 afterEach(cleanup)
+
+const ENGLISH = { tag: 'en', name: 'English', label: 'English' } as const
+const MODELS = 'inference:models'
+/** What every ask carries besides the passage — see `AskGlossContext`. */
+const CONTEXT = { bookTitle: 'Moby-Dick', answerIn: () => [ENGLISH] as const }
 
 /** A `Range` as `sentenceAt` reads one: four fields and nothing else. */
 function rangeOf(
@@ -62,7 +67,7 @@ function spyProvider(): {
     seen,
     provider: {
       available: true,
-      installable: true,
+      installAt: MODELS,
       async gloss(term, context) {
         seen.push({ term, context })
         return 'a definition'
@@ -79,14 +84,14 @@ async function askThrough(
 ) {
   const { provider, seen } = spyProvider()
   const { result } = renderHook(() => useGloss(provider))
-  /* Through `askGloss`, the whole handler `Reader` calls — not through
+  /* Through `askGloss`, the whole handler `useLookUp` calls — not through
    * `glossRequest` on its own. Driving the decision function directly left the
    * step that turns a request into a provider call untested, which an audit
    * pointed out is most of what the wiring IS. */
   await act(async () => {
     askGloss(result.current, selection, {
       fixedLayout: false,
-      bookTitle: 'Moby-Dick',
+      ...CONTEXT,
       ...options,
     })
   })
@@ -259,10 +264,15 @@ describe('whether the sentence path fires', () => {
     const info = vi.fn()
     const diagnostics = { info } as never
 
+    /* A section that opens mid-sentence: nothing lies before the run, and the
+       sentence does not start at its edge either. */
+    const opening = 'and so it ended. Delta four.'
+    const midSentence = buildFixture(elem('p', {}, [txt(opening)]))
+
     glossRequest(selection, { diagnostics })
     glossRequest(selection, { diagnostics, fixedLayout: true })
     glossRequest(
-      selectionOf(fixture, 'Alpha', [whole, 0], [whole, 5], { prefix: '', suffix: ' one.' }),
+      selectionOf(midSentence, 'so', [opening, 4], [opening, 6], { prefix: 'and ', suffix: ' it ended.' }),
       { diagnostics },
     )
 
@@ -273,7 +283,7 @@ describe('whether the sentence path fires', () => {
     ])
     const written = JSON.stringify(info.mock.calls)
     expect(written).not.toContain('Beta')
-    expect(written).not.toContain('Alpha')
+    expect(written).not.toContain('ended')
   })
 })
 
@@ -285,7 +295,7 @@ describe('the handler itself', () => {
     const { result } = renderHook(() => useGloss(provider))
 
     await act(async () => {
-      askGloss(result.current, null, { fixedLayout: false, bookTitle: 'Moby-Dick' })
+      askGloss(result.current, null, { fixedLayout: false, ...CONTEXT })
     })
 
     expect(seen).toEqual([])
@@ -300,11 +310,11 @@ describe('the handler itself', () => {
    * trace for a reader of this file to find.
    */
   it('requires the caller to say whether the book is fixed-layout', () => {
-    const options: Parameters<typeof askGloss>[2] = { fixedLayout: false, bookTitle: '' }
+    const options: Parameters<typeof askGloss>[2] = { fixedLayout: false, ...CONTEXT, bookTitle: '' }
 
     expect(Object.keys(options)).toContain('fixedLayout')
     // @ts-expect-error — omitting it is the mutation this refuses.
-    const dropped: Parameters<typeof askGloss>[2] = { bookTitle: '' }
+    const dropped: Parameters<typeof askGloss>[2] = { ...CONTEXT, bookTitle: '' }
     expect(dropped).toBeDefined()
   })
 
@@ -318,7 +328,7 @@ describe('the handler itself', () => {
       askGloss(
         result.current,
         selectionOf(fixture, 'two', [whole, 16], [whole, 19], { prefix: '', suffix: '' }),
-        { fixedLayout: false, bookTitle: 'Moby-Dick' },
+        { fixedLayout: false, ...CONTEXT },
       )
     })
 
@@ -390,7 +400,7 @@ describe('with no model installed', () => {
        BUTTON IS DRAWN and this state is reached when it is PRESSED, so a model
        uninstalled in between offered a download into a runtime that was not
        there. See the `installable` case below. */
-    installable: true,
+    installAt: MODELS,
     async gloss() {
       throw new Error('the hook must not call a provider that says it cannot answer')
     },
@@ -400,10 +410,10 @@ describe('with no model installed', () => {
     const { result } = renderHook(() => useGloss(nothing))
 
     act(() => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', CONTEXT)
     })
 
-    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installable: true })
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installAt: MODELS })
   })
 
   /* NOT `failed`, and the distinction is the reader's not the maintainer's:
@@ -414,7 +424,7 @@ describe('with no model installed', () => {
     const { result } = renderHook(() => useGloss(nothing))
 
     act(() => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', CONTEXT)
     })
 
     expect(result.current.state.kind).not.toBe('failed')
@@ -428,7 +438,7 @@ describe('with no model installed', () => {
     const { result } = renderHook(() => useGloss(nothing))
 
     act(() => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', CONTEXT)
     })
 
     expect(result.current.state.kind).toBe('unavailable')
@@ -459,7 +469,7 @@ describe('with no model installed', () => {
           prefix: 'Alpha one. Beta ',
           suffix: '. Gamma three.',
         }),
-        { fixedLayout: false, bookTitle: 'Moby-Dick', diagnostics: { info } as never },
+        { fixedLayout: false, ...CONTEXT, diagnostics: { info } as never },
       )
     })
 
@@ -468,7 +478,45 @@ describe('with no model installed', () => {
        is "did not walk" rather than "did nothing at all" — which is the
        failure this whole state exists to end. It names the RAW selection,
        because the sentence-spelled term is what the skipped walk produces. */
-    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'two', installable: true })
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'two', installAt: MODELS })
+  })
+
+  /* THE MODEL WENT BETWEEN TWO PRESSES. The first lookup is still generating
+     when the reader, who has since uninstalled the model, asks about another
+     word: the prompt to install one replaces it, and the first answer — landing
+     afterwards from a runtime that is going — must not replace the prompt. */
+  it('takes the lookup in flight down with it, so its answer never replaces the prompt', async () => {
+    const live = { available: true }
+    let signalled: AbortSignal | null = null
+    let answer = (_text: string): void => {}
+    const provider: GlossProvider = {
+      get available() {
+        return live.available
+      },
+      installAt: MODELS,
+      gloss: (_term, _context, signal) => {
+        signalled = signal
+        return new Promise<string>((resolve) => {
+          answer = resolve
+        })
+      },
+    }
+    const { result } = renderHook(() => useGloss(provider))
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+    expect(result.current.state).toEqual({ kind: 'asking', term: 'gam' })
+
+    live.available = false
+    act(() => {
+      result.current.ask(() => ({ term: 'wharves', sentence: 'The wharves.' }), 'wharves', CONTEXT)
+    })
+    expect((signalled as unknown as AbortSignal).aborted, 'the first lookup was left generating').toBe(true)
+
+    await act(async () => {
+      answer('A meeting between whaling ships.')
+    })
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'wharves', installAt: MODELS })
   })
 
   /* And it is dismissable, like every other thing the strip shows. A state the
@@ -477,7 +525,7 @@ describe('with no model installed', () => {
     const { result } = renderHook(() => useGloss(nothing))
 
     act(() => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', CONTEXT)
     })
     act(() => {
       result.current.dismiss()
@@ -500,7 +548,7 @@ describe('with no model installed', () => {
 describe('with a passage rather than a term', () => {
   const model: GlossProvider = {
     available: true,
-    installable: true,
+    installAt: MODELS,
     async gloss() {
       throw new Error('a passage must not reach the provider')
     },
@@ -513,7 +561,7 @@ describe('with a passage rather than a term', () => {
       result.current.ask(
         () => ({ term: 'x', sentence: 'x' }),
         'a'.repeat(121),
-        'Moby-Dick',
+        CONTEXT,
       )
     })
 
@@ -529,7 +577,7 @@ describe('with a passage rather than a term', () => {
     const request = vi.fn(() => ({ term: 'x', sentence: 'x' }))
 
     act(() => {
-      result.current.ask(request, 'a'.repeat(121), 'Moby-Dick')
+      result.current.ask(request, 'a'.repeat(121), CONTEXT)
     })
 
     expect(request).not.toHaveBeenCalled()
@@ -541,7 +589,7 @@ describe('with a passage rather than a term', () => {
   it('is decided before the model is, so the message is about the gesture', () => {
     const nothingInstalled: GlossProvider = {
       available: false,
-      installable: true,
+      installAt: MODELS,
       async gloss() {
         throw new Error('unreachable')
       },
@@ -549,7 +597,7 @@ describe('with a passage rather than a term', () => {
     const { result } = renderHook(() => useGloss(nothingInstalled))
 
     act(() => {
-      result.current.ask(() => ({ term: 'x', sentence: 'x' }), 'a'.repeat(121), 'Moby-Dick')
+      result.current.ask(() => ({ term: 'x', sentence: 'x' }), 'a'.repeat(121), CONTEXT)
     })
 
     expect(result.current.state.kind).toBe('tooLong')
@@ -563,7 +611,7 @@ describe('with a passage rather than a term', () => {
     const { result } = renderHook(() => useGloss(model))
 
     act(() => {
-      result.current.ask(() => ({ term: 'x', sentence: 'x' }), '   \n ', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'x', sentence: 'x' }), '   \n ', CONTEXT)
     })
 
     expect(result.current.state).toEqual({ kind: 'idle' })
@@ -576,12 +624,45 @@ describe('with a passage rather than a term', () => {
     const { result } = renderHook(() => useGloss(model))
 
     await act(async () => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', CONTEXT)
     })
     act(() => {
-      result.current.ask(() => ({ term: 'x', sentence: 'x' }), 'a'.repeat(121), 'Moby')
+      result.current.ask(() => ({ term: 'x', sentence: 'x' }), 'a'.repeat(121), CONTEXT)
     })
 
+    expect(result.current.state).toEqual({ kind: 'tooLong' })
+  })
+
+  /* AND A DEFINITION STILL ON ITS WAY. The reader has asked a second question,
+     so the first is abandoned — told to stop, and its answer, when it lands,
+     is about a word they have moved on from and must not replace the refusal
+     of what they asked since. */
+  it('takes the lookup in flight down, so its answer never replaces the refusal', async () => {
+    let signalled: AbortSignal | null = null
+    let answer = (_text: string): void => {}
+    const slow: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      gloss: (_term, _context, signal) => {
+        signalled = signal
+        return new Promise<string>((resolve) => {
+          answer = resolve
+        })
+      },
+    }
+    const { result } = renderHook(() => useGloss(slow))
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+
+    act(() => {
+      result.current.ask(() => ({ term: 'x', sentence: 'x' }), 'a'.repeat(121), CONTEXT)
+    })
+    expect((signalled as unknown as AbortSignal).aborted, 'the first lookup was left generating').toBe(true)
+
+    await act(async () => {
+      answer('A meeting between whaling ships.')
+    })
     expect(result.current.state).toEqual({ kind: 'tooLong' })
   })
 })
@@ -598,37 +679,37 @@ describe('with a passage rather than a term', () => {
  * WI-20.21 failure `GlossProvider.installable` exists to prevent.
  */
 describe('what an unavailable press records about installing', () => {
-  function providerWith(installable: boolean): GlossProvider {
+  function providerWith(installAt: string | null): GlossProvider {
     return {
       available: false,
-      installable,
+      installAt,
       async gloss() {
         throw new Error('unreachable')
       },
     }
   }
 
-  it.each([true, false])('carries the provider’s answer of %s', (installable) => {
-    const { result } = renderHook(() => useGloss(providerWith(installable)))
+  it.each([MODELS, null])('carries the provider’s answer of %s', (installAt) => {
+    const { result } = renderHook(() => useGloss(providerWith(installAt)))
 
     act(() => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
     })
 
-    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installable })
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installAt })
   })
 
   /* THE WINDOW ITSELF: the button was drawn while a model was installed, and
      the press lands after it is gone and the runtime with it. Read at the draw,
      this would have said `true`. */
   it('reads it at the press, not at the render that drew the button', () => {
-    const live = { available: true, installable: true }
+    const live: { available: boolean; installAt: string | null } = { available: true, installAt: MODELS }
     const provider: GlossProvider = {
       get available() {
         return live.available
       },
-      get installable() {
-        return live.installable
+      get installAt() {
+        return live.installAt
       },
       async gloss() {
         throw new Error('unreachable')
@@ -637,12 +718,83 @@ describe('what an unavailable press records about installing', () => {
     const { result } = renderHook(() => useGloss(provider))
 
     live.available = false
-    live.installable = false
+    live.installAt = null
     act(() => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
     })
 
-    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installable: false })
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installAt: null })
+  })
+})
+
+/**
+ * ⚠️ **THE PROMPT GOES AWAY WHEN ITS REASON DOES — AND NOTHING ELSE DOES.**
+ *
+ * `unavailable` offers the download. A reader who took the offer came back to a
+ * prompt still telling them to take it, so the arrival of a model clears that
+ * one state. Only that one: a `ready` gloss is still the answer to the word they
+ * asked about, and a `failed` one is not un-failed by a model appearing.
+ */
+describe('when a model arrives', () => {
+  function liveProvider(gloss: GlossProvider['gloss']): { provider: GlossProvider; live: { available: boolean } } {
+    const live = { available: false }
+    return {
+      live,
+      provider: {
+        get available() {
+          return live.available
+        },
+        installAt: MODELS,
+        gloss,
+      },
+    }
+  }
+
+  it('takes down the prompt to install one', () => {
+    const { provider, live } = liveProvider(async () => 'unreachable')
+    const { result, rerender } = renderHook(() => useGloss(provider))
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam', installAt: MODELS })
+
+    live.available = true
+    rerender()
+
+    expect(result.current.state, 'the prompt outlived the install it asked for').toEqual({ kind: 'idle' })
+  })
+
+  const settled: readonly (readonly [string, GlossProvider['gloss'], GlossState])[] = [
+    [
+      'a definition on screen',
+      async () => 'A meeting between whaling ships.',
+      { kind: 'ready', term: 'gam', text: 'A meeting between whaling ships.' },
+    ],
+    [
+      'a failure on screen',
+      async () => {
+        throw new Error('The runtime stopped')
+      },
+      { kind: 'failed', term: 'gam', reason: 'The runtime stopped' },
+    ],
+  ]
+
+  it.each(settled)('leaves %s alone', async (_case, gloss, shown) => {
+    const { provider, live } = liveProvider(gloss)
+    live.available = true
+    const { result, rerender } = renderHook(() => useGloss(provider))
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+    expect(result.current.state).toEqual(shown)
+
+    /* The model goes, and comes back: the arrival the prompt waits for. */
+    live.available = false
+    rerender()
+    live.available = true
+    rerender()
+
+    expect(result.current.state).toEqual(shown)
   })
 })
 
@@ -662,7 +814,7 @@ describe('what an unavailable press records about installing', () => {
 describe('when the passage stops being shown', () => {
   const model: GlossProvider = {
     available: true,
-    installable: true,
+    installAt: MODELS,
     async gloss() {
       return 'a meeting between whaling ships'
     },
@@ -673,7 +825,7 @@ describe('when the passage stops being shown', () => {
       initialProps: { at: 'book-1|3|ch3.xhtml' },
     })
     await act(async () => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
     })
     expect(result.current.state.kind).toBe('ready')
 
@@ -691,7 +843,7 @@ describe('when the passage stops being shown', () => {
       initialProps: { at: 'book-1|3|ch3.xhtml' as string | null },
     })
     await act(async () => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
     })
 
     rerender({ at: null })
@@ -707,7 +859,7 @@ describe('when the passage stops being shown', () => {
     let signalled: AbortSignal | null = null
     const slow: GlossProvider = {
       available: true,
-      installable: true,
+      installAt: MODELS,
       gloss(_term, _context, signal) {
         signalled = signal
         return new Promise<string>(() => {})
@@ -717,7 +869,7 @@ describe('when the passage stops being shown', () => {
       initialProps: { at: 'book-1|3|ch3.xhtml' },
     })
     act(() => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
     })
     expect(result.current.state.kind).toBe('asking')
 
@@ -735,12 +887,195 @@ describe('when the passage stops being shown', () => {
       initialProps: { at: 'book-1|3|ch3.xhtml' },
     })
     await act(async () => {
-      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
     })
 
     rerender({ at: 'book-1|3|ch3.xhtml' })
 
     expect(result.current.state).toMatchObject({ kind: 'ready', term: 'gam' })
+  })
+
+  /* AND WHEN THE READER THAT ASKED IS GONE ALTOGETHER. A gloss outliving its
+     hook is a request nobody will read — on a loaded machine, a model still
+     generating for a surface that no longer exists. */
+  it('aborts a lookup still in flight when the hook unmounts', () => {
+    let signalled: AbortSignal | null = null
+    const slow: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      gloss(_term, _context, signal) {
+        signalled = signal
+        return new Promise<string>(() => {})
+      },
+    }
+    const { result, unmount } = renderHook(() => useGloss(slow))
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+    expect((signalled as unknown as AbortSignal).aborted).toBe(false)
+
+    unmount()
+
+    expect((signalled as unknown as AbortSignal).aborted, 'the model was left generating for nobody').toBe(true)
+  })
+})
+
+/**
+ * ONE LOOKUP AT A TIME, AND THE ONE ON SCREEN IS THE NEWEST — whatever the ones
+ * before it do when they finally settle. A definition, a failure or a refusal
+ * for a word the reader has moved on from is worse than nothing, because it
+ * reads as the answer to what they asked since.
+ */
+describe('a lookup the reader has moved on from', () => {
+  /** A provider whose every call waits for the test, holding the signal it was given. */
+  function heldProvider(): {
+    provider: GlossProvider
+    calls: { signal: AbortSignal; answer: (text: string) => void }[]
+  } {
+    const calls: { signal: AbortSignal; answer: (text: string) => void }[] = []
+    return {
+      calls,
+      provider: {
+        available: true,
+        installAt: MODELS,
+        gloss: (_term, _context, signal) =>
+          new Promise<string>((resolve) => {
+            calls.push({ signal, answer: resolve })
+          }),
+      },
+    }
+  }
+
+  it('is idle from the first render, before any effect has run', () => {
+    const { provider } = heldProvider()
+    const drawn: GlossState[] = []
+    renderHook(() => {
+      const gloss = useGloss(provider)
+      drawn.push(gloss.state)
+      return gloss
+    })
+
+    expect(drawn[0], 'the first frame drew a state that is none of the five').toEqual({ kind: 'idle' })
+  })
+
+  /* A PROVIDER REJECTS WHEN IT IS ABORTED — `glossProvider` throws an
+     `AbortError` for exactly this — so the refusal of an abandoned lookup
+     arrives as a failure, after the reader has already put it away. */
+  it('says nothing when a dismissed lookup rejects for being aborted', async () => {
+    const aborting: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      gloss: (_term, _context, signal) =>
+        new Promise<string>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+        }),
+    }
+    const { result } = renderHook(() => useGloss(aborting))
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+
+    await act(async () => {
+      result.current.dismiss()
+    })
+
+    expect(result.current.state, 'the abort the reader caused was reported as a failed lookup').toEqual({
+      kind: 'idle',
+    })
+  })
+
+  /* THE OLDER LOOKUP SETTLING LATE MUST NOT LET GO OF THE NEWER ONE. Had it
+     cleared the hook's hold on "the request in flight" as it went, dismissing
+     would abort nothing — and the newer answer would land on a strip the reader
+     had closed. */
+  it('keeps hold of the newer lookup when the one it replaced settles late', async () => {
+    const { provider, calls } = heldProvider()
+    const { result } = renderHook(() => useGloss(provider))
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+    act(() => {
+      result.current.ask(() => ({ term: 'wharves', sentence: 'The wharves.' }), 'wharves', CONTEXT)
+    })
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.signal.aborted).toBe(true)
+
+    await act(async () => {
+      calls[0]?.answer('A meeting between whaling ships.')
+    })
+    expect(result.current.state).toEqual({ kind: 'asking', term: 'wharves' })
+
+    act(() => {
+      result.current.dismiss()
+    })
+    expect(calls[1]?.signal.aborted, 'dismissing no longer reached the lookup still generating').toBe(true)
+
+    await act(async () => {
+      calls[1]?.answer('Where ships tie up.')
+    })
+    expect(result.current.state, 'an answer landed on a strip the reader had closed').toEqual({ kind: 'idle' })
+  })
+
+  /* AN ABORT IS "THE READER WALKED AWAY FROM THIS REQUEST", which is not true of
+     one that has already answered — `glossProvider` turns an abort into a cancel
+     sent to the runtime. Put away, or replaced by the next question, a finished
+     lookup is left alone. */
+  it('does not abort a lookup that has already answered', async () => {
+    const signals: AbortSignal[] = []
+    const answering: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      async gloss(_term, _context, signal) {
+        signals.push(signal)
+        return 'A meeting between whaling ships.'
+      },
+    }
+    const { result } = renderHook(() => useGloss(answering))
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+    expect(result.current.state).toEqual({ kind: 'ready', term: 'gam', text: 'A meeting between whaling ships.' })
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'wharves', sentence: 'The wharves.' }), 'wharves', CONTEXT)
+    })
+    act(() => {
+      result.current.dismiss()
+    })
+
+    expect(signals.map((signal) => signal.aborted), 'an answered lookup was cancelled after the fact').toEqual([
+      false,
+      false,
+    ])
+  })
+
+  /* THE PROVIDER IS THE ONE OF THE LAST RENDER. A press asks whatever the host
+     composes now, not what it composed when the reader first opened the book. */
+  it('asks the provider it was last rendered with', async () => {
+    const first: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      async gloss() {
+        return 'from the first render'
+      },
+    }
+    const latest: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      async gloss() {
+        return 'from the latest render'
+      },
+    }
+    const { result, rerender } = renderHook(({ provider }: { provider: GlossProvider }) => useGloss(provider), {
+      initialProps: { provider: first },
+    })
+    rerender({ provider: latest })
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+
+    expect(result.current.state).toEqual({ kind: 'ready', term: 'gam', text: 'from the latest render' })
   })
 })
 
@@ -806,6 +1141,14 @@ describe('the fallback sentence', () => {
     expect(sentenceAround('  ', '  ', '  ')).toBe('  ')
   })
 
+  /* WHAT `sentenceOf` REFUSES, WITH A WINDOW AROUND IT, IS THAT WINDOW —
+     squeezed as the regex left it: trimmed, every run of whitespace one space.
+     A term that squeezes to nothing is one such refusal; handing back the bare
+     term there would send the model a line break to define. */
+  it('is the squeezed window when the term squeezes to nothing', () => {
+    expect(sentenceAround('He said  ', ' \n ', '  and left. ')).toBe('He said and left.')
+  })
+
   /* §C1 IS OFF HERE AND ONLY HERE. The window is cut mid-sentence by
      construction, so `sentenceAt`'s rule — a boundary at the run's edge is not
      evidence of a sentence ending — would decline every single call and leave
@@ -827,6 +1170,318 @@ describe('the fallback sentence', () => {
   })
 })
 
+/**
+ * WHAT ARRIVES IS HANDED ON, ONCE, TO THE ASK THAT ASKED FOR IT (WI-17.2), and
+ * in the language that ask resolved (WI-17.5).
+ */
+describe('an answered lookup', () => {
+  const answering = (text = 'A meeting between whaling ships.'): GlossProvider => ({
+    available: true,
+    installAt: MODELS,
+    async gloss() {
+      return text
+    },
+  })
+
+  it('is handed to the ask’s own recorder with what was asked', async () => {
+    const onAnswer = vi.fn()
+    const { result } = renderHook(() => useGloss(answering()))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam at sea.' }), 'gam', { ...CONTEXT, onAnswer })
+    })
+
+    expect(onAnswer).toHaveBeenCalledTimes(1)
+    expect(onAnswer).toHaveBeenCalledWith({
+      term: 'gam',
+      sentence: 'A gam at sea.',
+      text: 'A meeting between whaling ships.',
+      answerIn: [ENGLISH],
+    })
+  })
+
+  it('is not handed on when it failed', async () => {
+    const onAnswer = vi.fn()
+    const failing: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      async gloss() {
+        throw new Error('The runtime stopped')
+      },
+    }
+    const { result } = renderHook(() => useGloss(failing))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', { ...CONTEXT, onAnswer })
+    })
+
+    expect(result.current.state.kind).toBe('failed')
+    expect(onAnswer).not.toHaveBeenCalled()
+  })
+
+  /* A REJECTION THAT IS NOT AN `Error` CARRIES NO MESSAGE, and the view's own
+     first line already says Paper could not define the word — so the reason
+     says only that there is nothing more to say, never an empty line. */
+  it('fails with no reason given when the rejection carries no message', async () => {
+    const bare: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      gloss: () => Promise.reject({ kind: 'stopped' }),
+    }
+    const { result } = renderHook(() => useGloss(bare))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+
+    expect(result.current.state).toEqual({ kind: 'failed', term: 'gam', reason: 'No reason was given.' })
+  })
+
+  /* A lookup the reader walked away from is not a lookup they made — the
+     answer that lands afterwards must not be filed. */
+  it('is not handed on when the reader dismissed it before it arrived', async () => {
+    const onAnswer = vi.fn()
+    let answer = (_text: string): void => {}
+    const slow: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      gloss: () =>
+        new Promise<string>((resolve) => {
+          answer = resolve
+        }),
+    }
+    const { result } = renderHook(() => useGloss(slow))
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', { ...CONTEXT, onAnswer })
+    })
+    act(() => {
+      result.current.dismiss()
+    })
+
+    await act(async () => {
+      answer('late')
+    })
+
+    expect(onAnswer).not.toHaveBeenCalled()
+    expect(result.current.state).toEqual({ kind: 'idle' })
+  })
+
+  /* THE DEFINITION IS ON SCREEN WHATEVER THE HISTORY DOES. A recorder that
+     throws must not turn an answer into "Paper couldn't define". */
+  it('stays on screen when recording it throws, and says the recording failed', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const full = new Error('the history is full')
+    const { result } = renderHook(() => useGloss(answering('Guarded.')))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', {
+        ...CONTEXT,
+        onAnswer: () => {
+          throw full
+        },
+      })
+    })
+
+    expect(result.current.state).toEqual({ kind: 'ready', term: 'gam', text: 'Guarded.' })
+    expect(error).toHaveBeenCalledWith('Paper: a lookup was answered and could not be recorded', full)
+    error.mockRestore()
+  })
+
+  /* NO RECORDER IS NOT A FAILED RECORDING: an ask that files nothing — a host
+     with no history — says nothing about filing. */
+  it('reports nothing about recording for an ask with no recorder', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { result } = renderHook(() => useGloss(answering('Unfiled.')))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+
+    expect(result.current.state).toEqual({ kind: 'ready', term: 'gam', text: 'Unfiled.' })
+    expect(error).not.toHaveBeenCalled()
+    error.mockRestore()
+  })
+
+  /* WI-17.5: the language is resolved from the PASSAGE's locale, at the press,
+     and what the provider is told is what was resolved. */
+  it('asks in the language resolved from the passage’s own locale', async () => {
+    const seen: GlossContext[] = []
+    const provider: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      async gloss(_term, context) {
+        seen.push(context)
+        return 'x'
+      },
+    }
+    const chinese = { tag: 'zh-Hans', name: 'Simplified Chinese', label: '简体中文' } as const
+    const answerIn = vi.fn((locale: string | undefined) => (locale === 'zh-CN' ? ([chinese] as const) : ([ENGLISH] as const)))
+    const { result } = renderHook(() => useGloss(provider))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: '守口如瓶', sentence: '他守口如瓶。', locale: 'zh-CN' }), '守口如瓶', {
+        ...CONTEXT,
+        answerIn,
+      })
+    })
+
+    expect(answerIn).toHaveBeenCalledWith('zh-CN')
+    expect(seen[0]?.answerIn).toEqual([chinese])
+  })
+
+  /* And NOT resolved for a press that never reaches a model, for the reason the
+     request is a thunk. */
+  it('resolves no language for a press with nothing installed', () => {
+    const answerIn = vi.fn(() => [ENGLISH] as const)
+    const nothing: GlossProvider = {
+      available: false,
+      installAt: MODELS,
+      async gloss() {
+        throw new Error('unreachable')
+      },
+    }
+    const { result } = renderHook(() => useGloss(nothing))
+
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', { ...CONTEXT, answerIn })
+    })
+
+    expect(answerIn).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * ⚠️ **A THROW BEFORE THERE IS A PROMISE IS A FAILED LOOKUP TOO**, and it was
+ * not — found by the 2026-09-13 audit. Building the request, resolving its
+ * language and calling the provider all ran outside the promise's `catch`: a
+ * request that could not be built threw out of `ask` with the previous lookup
+ * still running, and a provider that threw where it should have rejected left
+ * the reader looking at `asking` for good. A recorder written `async` — which
+ * its type allowed — rejected past a guard that caught only a throw.
+ */
+describe('a lookup that throws instead of rejecting', () => {
+  const answering: GlossProvider = {
+    available: true,
+    installAt: MODELS,
+    async gloss() {
+      return 'Guarded.'
+    },
+  }
+
+  it('fails, and takes the lookup before it down, when its request cannot be built', async () => {
+    let signalled: AbortSignal | null = null
+    const slow: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      gloss(_term, _context, signal) {
+        signalled = signal
+        return new Promise<string>(() => {})
+      },
+    }
+    const { result } = renderHook(() => useGloss(slow))
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
+    })
+
+    await act(async () => {
+      result.current.ask(
+        () => {
+          throw new Error('the page was torn down')
+        },
+        'wharves',
+        CONTEXT,
+      )
+    })
+
+    expect((signalled as unknown as AbortSignal).aborted).toBe(true)
+    expect(result.current.state).toEqual({ kind: 'failed', term: 'wharves', reason: 'the page was torn down' })
+  })
+
+  /* UNDER THE TERM THE REQUEST SPELLED, once there is one — the selection
+     spells it `Gam` here, and the sentence `gam`. */
+  it('fails under the term it was asking about when its language cannot be resolved', async () => {
+    const { result } = renderHook(() => useGloss(answering))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'Gam', {
+        ...CONTEXT,
+        answerIn: () => {
+          throw new Error('no language')
+        },
+      })
+    })
+
+    expect(result.current.state).toEqual({ kind: 'failed', term: 'gam', reason: 'no language' })
+  })
+
+  it('fails rather than asking for good when the provider throws where it should reject', async () => {
+    const throwing: GlossProvider = {
+      available: true,
+      installAt: MODELS,
+      gloss() {
+        throw new Error('the runtime is gone')
+      },
+    }
+    const { result } = renderHook(() => useGloss(throwing))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'Gam', CONTEXT)
+    })
+
+    expect(result.current.state).toEqual({ kind: 'failed', term: 'gam', reason: 'the runtime is gone' })
+  })
+
+  it('stays on screen, and says the recording failed, when an async recorder rejects', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const full = new Error('the history is full')
+    const { result } = renderHook(() => useGloss(answering))
+
+    await act(async () => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', {
+        ...CONTEXT,
+        onAnswer: async () => {
+          throw full
+        },
+      })
+    })
+
+    await vi.waitFor(() => expect(error).toHaveBeenCalledWith('Paper: a lookup was answered and could not be recorded', full))
+    expect(result.current.state).toEqual({ kind: 'ready', term: 'gam', text: 'Guarded.' })
+    error.mockRestore()
+  })
+})
+
+describe('the request’s locale', () => {
+  it('is carried on both routes — the walk and the fixed-layout fallback', () => {
+    const whole = 'Alpha one. Beta two. Gamma three.'
+    const fixture = buildFixture(elem('p', {}, [txt(whole)]))
+    const selection = selectionOf(fixture, 'two', [whole, 16], [whole, 19], {
+      prefix: 'Alpha one. Beta ',
+      suffix: '. Gamma three.',
+    })
+
+    expect(Object.keys(glossRequest(selection))).toContain('locale')
+    expect(Object.keys(glossRequest(selection, { fixedLayout: true }))).toContain('locale')
+  })
+
+  /* AND THE FALLBACK SEGMENTS IN IT. A passage declared Chinese does not get the
+     Latin abbreviation merge, so its sentence breaks after "Mr." — where the
+     host's own locale would have merged it back into one. */
+  it('segments the fixed-layout fallback in the passage’s own language', () => {
+    const whole = 'Alpha one. He met Mr. Smith today. Beta two.'
+    const fixture = buildFixture(elem('p', { attributes: { lang: 'zh' } }, [txt(whole)]))
+    const selection = selectionOf(fixture, 'Smith', [whole, 22], [whole, 27], {
+      prefix: 'Alpha one. He met Mr. ',
+      suffix: ' today. Beta two.',
+    })
+
+    const request = glossRequest(selection, { fixedLayout: true })
+
+    expect(request.locale).toBe('zh')
+    expect(request.sentence).toBe('Smith today.')
+  })
+})
+
 describe('what the lookup path costs', () => {
   /*
    * §E3. The walk is on the GESTURE and nowhere else. `publish()` runs on every
@@ -840,23 +1495,21 @@ describe('what the lookup path costs', () => {
   it('never reaches the selection publish path', () => {
     /* Resolved from the repository root rather than from `import.meta.url`:
      * this file opts into jsdom for the hook, and there `import.meta.url` is an
-     * http URL that `fileURLToPath` refuses. `readFileSync` throws if either
-     * path is wrong, so a moved file fails loudly instead of scanning nothing. */
+     * http URL that `fileURLToPath` refuses. `readFileSync` throws if the path
+     * is wrong, so a moved file fails loudly instead of scanning nothing. */
     const session = readFileSync(resolve('src/kernel/ui/reader/session.ts'), 'utf8')
-    const reader = readFileSync(resolve('src/kernel/ui/screens/Reader.tsx'), 'utf8')
 
     expect(session).not.toMatch(/sentenceAt|glossRequest|askGloss/)
     /* Non-vacuity: the session really is the module that publishes selections,
      * so its silence above means the walk is absent rather than that the file
      * moved. */
     expect(session).toContain('onSelection')
-    /* And the gesture really does reach it. A source assertion, and a weak one
-     * — an audit pointed out that a differently named helper called from
-     * `publish()` would survive the scan above. The honest instrument is a
-     * dependency-cruiser `reachable` rule over the whole call graph, which is a
-     * change to the boundary system rather than to this phase. Recorded under
-     * "What the audit rounds found" in `dev-docs/plans/phase-16-the-sentence.md`
-     * rather than implied away.
+    /* A source assertion, and a weak one — an audit pointed out that a
+     * differently named helper called from `publish()` would survive the scan
+     * above. The honest instrument is a dependency-cruiser `reachable` rule
+     * over the whole call graph, which is a change to the boundary system rather
+     * than to this phase. Recorded under "What the audit rounds found" in
+     * `dev-docs/plans/phase-16-the-sentence.md` rather than implied away.
      *
      * ⚠️ IT USED TO CARRY MORE WEIGHT THAN THIS. The scan was also the only
      * thing standing behind `Reader`'s lookup DECISION — whether a control is
@@ -866,8 +1519,15 @@ describe('what the lookup path costs', () => {
      * against a value it cannot hold. Whether the term is worth sending moved
      * HERE, to `ask` — see "with a passage rather than a term" — because the
      * answer to a refusal is a state, and a guard that only `return`ed was the
-     * silence this whole file exists to keep out. What is left in this case is
-     * the narrow claim that the reader still calls the handler. */
-    expect(reader).toContain('askGloss(gloss, selection')
+     * silence this whole file exists to keep out.
+     *
+     * ⚠️ AND THE LAST OF IT — THAT THE GESTURE STILL CALLS THE HANDLER — IS RUN
+     * NOW TOO, SO ITS SCAN IS GONE. It searched the Look up hook's source for
+     * `askGloss(gloss, selection`, and failed on 2026-09-13 when the hook began
+     * passing `{ ask }` so that its press stops changing on every render: a
+     * rename no reader can see, reported as a broken wiring. `useLookUp.test.ts`
+     * presses and watches the provider receive the walk's sentence, which a
+     * deleted call fails and a renamed argument does not. What this case pins
+     * is the publish path's half alone. */
   })
 })

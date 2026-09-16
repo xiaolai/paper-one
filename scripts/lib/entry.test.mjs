@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileS
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { isProcessEntry } from './entry.mjs'
 
 /**
@@ -17,8 +17,17 @@ import { isProcessEntry } from './entry.mjs'
  */
 
 const HELPER = fileURLToPath(new URL('./entry.mjs', import.meta.url))
-const tmp = mkdtempSync(join(tmpdir(), 'entry-guard-'))
-afterAll(() => rmSync(tmp, { recursive: true, force: true }))
+/* Made before the first case, not at module scope: collecting a file runs its
+   body and no hook — `vitest list` does exactly that, and `pnpm test:ledger`
+   runs it, and so does a run whose name filter leaves no case here — so a
+   directory made there was left behind. */
+let tmp
+beforeAll(() => {
+  tmp = mkdtempSync(join(tmpdir(), 'entry-guard-'))
+})
+afterAll(() => {
+  if (tmp !== undefined) rmSync(tmp, { recursive: true, force: true })
+})
 
 /** A script that prints the guard's verdict for itself. */
 function fixture(name) {

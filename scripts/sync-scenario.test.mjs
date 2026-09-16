@@ -3,7 +3,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, onTestFinished } from 'vitest'
 
 /**
  * `scripts/sync-scenario.sh` — what can be checked without two Macs
@@ -109,8 +109,14 @@ function validateOnly(args) {
    * finish — so every accepted-argument case left a file in the repository.
    * A hundred and twenty-nine of them accumulated before anyone looked at
    * `git status`. A test that litters the tree it is testing is a test nobody
-   * will keep running. */
-  const out = path.join(mkdtempSync(path.join(tmpdir(), 'paper-scenario-')), 'transcript.md')
+   * will keep running.
+   *
+   * And the temporary directory is removed when the case finishes: moving
+   * the litter out of the tree had left one behind in the system temp
+   * directory for every accepted-argument case, on every run. */
+  const dir = mkdtempSync(path.join(tmpdir(), 'paper-scenario-'))
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }))
+  const out = path.join(dir, 'transcript.md')
   const result = spawnSync('bash', [SCRIPT, ...args, '--out', out], {
     cwd: REPO_ROOT,
     encoding: 'utf8',

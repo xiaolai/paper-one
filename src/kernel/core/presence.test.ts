@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { folderOf, recordPath, trashOf } from './bookFolder'
+import { folderOf, recordPath, trashOf, type BookRecord } from './bookFolder'
 import { fakeFs, jsonAt, textAt } from './fakeFs.testkit'
 import { hlcOf, makeHlc } from './hlc'
 import {
@@ -15,13 +15,89 @@ const DEV = 'a1b2c3d4e5f60718'
 const t = (ms: number) => makeHlc(ms, 0, DEV)
 
 describe('the register on disk', () => {
-  it('round-trips, and an absent or unreadable file is the empty register', async () => {
+  it('round-trips, and an absent file is the empty register', async () => {
     const fs = fakeFs()
     expect(await readPresence(fs)).toEqual({})
     await writePresence(fs, { 'book:a': { state: 'removed', at: t(5) } })
     expect(await readPresence(fs)).toEqual({ 'book:a': { state: 'removed', at: t(5) } })
-    fs.store.set(PRESENCE_PATH, new TextEncoder().encode('not json'))
-    expect(await readPresence(fs)).toEqual({})
+  })
+
+  /* ⚠️ **UNREADABLE IS NOT THE EMPTY REGISTER, AND THIS FILE USED TO SAY IT
+     WAS** — found by the 2026-09-13 audit, the same class as `readMarks` and
+     `parseCards`. `notePresence` is a read-modify-write of the WHOLE file, so
+     bytes that would not parse read as no removals and the next removal wrote
+     `{ this one book }` over every other book's entry. That register is what
+     outlives the trash: with it gone, a satchel that was in a drawer re-uploads
+     the books the reader deleted — the deletion that resurrects this module's
+     own header warns about. Each clause in its own words, because the two share
+     a prefix. */
+  it.each([
+    ['not JSON', 'not json', /is not JSON/u],
+    ['a list', '[1,2]', /is not a record of books/u],
+    ['JSON null', 'null', /is not a record of books/u],
+    ['a bare value', '42', /is not a record of books/u],
+  ])('refuses a register that is %s, and leaves its bytes where they are', async (_what, raw, clause) => {
+    const fs = fakeFs({ [PRESENCE_PATH]: raw })
+
+    const cause = await readPresence(fs).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(clause)
+
+    const wrote = await notePresence(fs, 'book:a', 'removed', t(9)).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(wrote).toBeInstanceOf(Error)
+    expect(textAt(fs, PRESENCE_PATH), 'the file it could not read must be intact').toBe(raw)
+  })
+
+  /* A READ THAT FAILED OVER A FILE THAT IS THERE is the same answer: this
+     device's own register, momentarily unreadable, is not a register with
+     nothing in it. Absence is the only empty one — `isMissingFile` is the
+     distinction, as it is in `readBook`. */
+  it('refuses a register it could not read at all, rather than starting again', async () => {
+    const fs = fakeFs({ [PRESENCE_PATH]: JSON.stringify({ 'book:a': { state: 'removed', at: t(5) } }) })
+    const held = textAt(fs, PRESENCE_PATH)
+    fs.readFile = () => Promise.reject(new Error('EIO: the disk is busy'))
+
+    const cause = await readPresence(fs).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/EIO: the disk is busy/u)
+    expect(textAt(fs, PRESENCE_PATH)).toBe(held)
+  })
+
+  it('keeps what the JSON parser said, as the cause of refusing a register that is not JSON', async () => {
+    const cause = await readPresence(fakeFs({ [PRESENCE_PATH]: '{oops' })).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).cause).toBeInstanceOf(SyntaxError)
+  })
+
+  /* THE PATH IS THE STORED FORMAT'S NAME. Every other case here reaches it
+     through the constant, so none could notice it move — and a moved register
+     is every removal this device ever recorded, forgotten on the first launch. */
+  it('reads the register earlier builds wrote, at the path they wrote it', async () => {
+    const fs = fakeFs({ 'sync/removed.json': JSON.stringify({ 'book:a': { state: 'removed', at: t(5) } }) })
+    expect(await readPresence(fs)).toEqual({ 'book:a': { state: 'removed', at: t(5) } })
+  })
+
+  /* NULL IS THE ONE MALFORMED ENTRY THAT CAN THROW. Every other shape that is
+     not an entry reads as having no `state` and is dropped by the check below
+     it; reading a property of `null` is a TypeError, which would refuse the
+     whole register over one row. */
+  it('drops an entry that is null alone, rather than refusing the register over it', async () => {
+    const fs = fakeFs({
+      [PRESENCE_PATH]: JSON.stringify({ 'book:null': null, 'book:good': { state: 'removed', at: t(5) } }),
+    })
+    expect(await readPresence(fs)).toEqual({ 'book:good': { state: 'removed', at: t(5) } })
   })
 
   it('drops a malformed entry alone and keeps the register beside it', async () => {
@@ -68,6 +144,16 @@ describe('notePresence — last writer wins', () => {
     expect(await notePresence(fs, 'book:a', 'live', t(5))).toBe(false)
     expect(await notePresence(fs, 'book:a', 'removed', t(5))).toBe(false)
     expect(await readPresence(fs)).toEqual({ 'book:a': { state: 'removed', at: t(5) } })
+  })
+
+  it('writes a newer stamp for the state it already holds', async () => {
+    /* A later word is the last word even when it says the same thing — a
+       removal re-recorded after a re-add that lost its race must carry the
+       later stamp, or the older one decides against whatever comes between. */
+    const fs = fakeFs()
+    await notePresence(fs, 'book:a', 'removed', t(5))
+    expect(await notePresence(fs, 'book:a', 'removed', t(6))).toBe(true)
+    expect(await readPresence(fs)).toEqual({ 'book:a': { state: 'removed', at: t(6) } })
   })
 })
 
@@ -117,6 +203,27 @@ describe('recordStamp', () => {
        are all refused, which is what makes the walk usable at all. */
     expect(recordStamp({ title: 'Moby-Dick', author: 'Melville', origin: '/tmp/x.epub', ext: 'epub', positionAt: t(10) })).toBe(t(10))
     expect(recordStamp({ title: t(99), author: '', positionAt: t(10) })).toBe(t(99))
+  })
+
+  /* FOUR LEVELS AND NO FURTHER, as the walk's own note says: the deepest real
+     stamp is three from the record, and one more is the room. Past that the
+     walk stops, so a stamp nested deeper is not counted. */
+  it('counts a stamp four levels down and none deeper', () => {
+    const nested = {
+      title: '',
+      author: '',
+      positionAt: t(10),
+      four: { levels: { down: { at: t(40) } } },
+      five: { levels: { further: { down: { at: t(50) } } } },
+    } as BookRecord
+    expect(recordStamp(nested)).toBe(t(40))
+  })
+
+  it('walks past a field a record holds as null', () => {
+    /* `position` and `seriesIndex` may be null in a record. A walk that asked
+       for the values of one would throw — and launch recovery's catch would
+       then leave a removed book's folder standing. */
+    expect(recordStamp({ title: '', author: '', position: null, seriesIndex: null, positionAt: t(10) })).toBe(t(10))
   })
 })
 
@@ -169,6 +276,31 @@ describe('finishPendingRemovals — launch recovery', () => {
       return exists(path)
     }
     expect(await finishPendingRemovals(fs)).toEqual(['book:b'])
+  })
+
+  it('moves a folder whose record is exactly as old as the removal — only NEWER stands', async () => {
+    /* The removal was written knowing a record at least this old, so a tie is
+       not a re-add racing a crash; it is the removal the crash interrupted. */
+    const fs = fakeFs({ [recordPath('book:a')]: record(100) })
+    await writePresence(fs, { 'book:a': { state: 'removed', at: hlcOf(100) } })
+    expect(await finishPendingRemovals(fs)).toEqual(['book:a'])
+    expect(await fs.exists(folderOf('book:a'))).toBe(false)
+  })
+
+  /* THE REGISTER IS KEPT FOR EVER, and this runs on every launch — so a book
+     whose folder is long gone costs one question about the folder, not a read of
+     a record that is not there, for every book the reader has ever removed. */
+  it('reads no record for a book whose folder is already gone', async () => {
+    const fs = fakeFs()
+    await writePresence(fs, { 'book:a': { state: 'removed', at: t(100) } })
+    const read: string[] = []
+    const readFile = fs.readFile
+    fs.readFile = async (path) => {
+      read.push(path)
+      return readFile(path)
+    }
+    expect(await finishPendingRemovals(fs)).toEqual([])
+    expect(read).toEqual([PRESENCE_PATH])
   })
 
   it('presence entries survive the finish — the register outlives the trash', async () => {

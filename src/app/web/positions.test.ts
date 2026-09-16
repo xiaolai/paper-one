@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-import { readingPositions, type PositionStore } from './positions'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { browserPositions, readingPositions, type PositionStore } from './positions'
 
 /**
  * Where a reader stopped.
@@ -66,6 +66,27 @@ describe('readingPositions', () => {
     expect(() => positions.forget('never-there')).not.toThrow()
   })
 
+  it('forgetting a book it does not have writes nothing', () => {
+    const { store, held } = fakeStore()
+    readingPositions(store).forget('never-there')
+    expect(held(), 'nothing to forget is nothing to write').toBeNull()
+  })
+
+  /* THE KEY IS STORED STATE, not a name. Positions an earlier build wrote sit
+     under it, and a build that looked anywhere else would open every book at
+     page one. */
+  it('reads and writes under the key earlier builds wrote to', () => {
+    const keys: string[] = []
+    const store: PositionStore = {
+      getItem: (key) => (key === 'paper.reading-positions' ? JSON.stringify({ one: { cfi: 'cfi-one', at: 1 } }) : null),
+      setItem: (key) => void keys.push(key),
+    }
+    const positions = readingPositions(store, () => 2)
+    expect(positions.get('one')).toBe('cfi-one')
+    positions.set('two', 'cfi-two')
+    expect(keys).toEqual(['paper.reading-positions'])
+  })
+
   /* NOT A WRITE PER PAGE TURN of the same page. `onRelocate` fires on every
      turn and on resize; rewriting the same value still costs a JSON round trip
      and a synchronous storage write, on the frame a reader is turning a page. */
@@ -89,11 +110,15 @@ describe('readingPositions', () => {
   describe('failing soft', () => {
     /* A LOST POSITION IS NOT A LOST BOOK. Storage throws on a full quota, in
        private browsing, and whenever a reader has blocked site data. */
-    it('answers nothing when the store cannot be read', () => {
-      const { store } = fakeStore('{}', 'read')
+    it('answers nothing when the store cannot be read, and writes nothing over it', () => {
+      const { store, held } = fakeStore('{}', 'read')
       const positions = readingPositions(store)
       expect(positions.get('one')).toBeNull()
       expect(() => positions.set('one', 'cfi')).not.toThrow()
+      /* A READ THAT FAILED IS NOT AN EMPTY STORE. `set` is a read-modify-write,
+         so writing here would put one position over every position this module
+         could not read a moment ago. */
+      expect(held()).toBe('{}')
     })
 
     it('does not throw when the store is full', () => {
@@ -103,14 +128,29 @@ describe('readingPositions', () => {
       expect(positions.get('one')).toBeNull()
     })
 
-    it('reads a corrupt store as empty rather than repairing it', () => {
-      /* NOT CLEARED. A store this cannot parse may belong to something else;
-         overwriting it would be this module deciding that. */
-      const { store, held } = fakeStore('not json at all')
-      const positions = readingPositions(store)
-      expect(positions.get('one')).toBeNull()
-      expect(held()).toBe('not json at all')
-    })
+    /* NOT CLEARED. A store this cannot parse may belong to something else;
+       overwriting it would be this module deciding that.
+
+       ⚠️ **AND EVERY WRITE USED TO DECIDE IT ANYWAY.** The read answered an
+       empty map, and `set`, `touch` and `forget` are each a read-modify-write
+       — so the next page turn put one position over a store this module had
+       just refused to touch, and the comment above it described the opposite.
+       Found by the 2026-09-13 audit. */
+    it.each(['not json at all', '[]', '42', '"a string"', 'null'])(
+      'reads a store holding %s as no positions, and never writes over it',
+      (raw) => {
+        const { store, held } = fakeStore(raw)
+        const positions = readingPositions(store)
+        expect(positions.get('one')).toBeNull()
+        expect(positions.held('one')).toBeNull()
+
+        positions.set('one', 'a-real-cfi')
+        positions.touch('one')
+        positions.forget('one')
+
+        expect(held()).toBe(raw)
+      },
+    )
 
     it('ignores rows that are not positions', () => {
       const { store } = fakeStore(
@@ -130,12 +170,21 @@ describe('readingPositions', () => {
       expect(positions.get('notAnObject')).toBeNull()
     })
 
-    it('survives a store holding an array or a bare value', () => {
-      for (const raw of ['[]', '42', '"a string"', 'null']) {
-        const { store } = fakeStore(raw)
-        expect(readingPositions(store).get('one')).toBeNull()
-      }
+    /* ONE BAD ROW LOSES ONE ROW. A `null` row read as an object throws, and a
+       throw is the whole store's refusal — so it would take every good position
+       with it. A cfi that is not a string is no position either, and `held`
+       must say so as plainly as `get`, which turns `undefined` into null. */
+    it('refuses a null row, or a cfi that is not a string, and keeps the rows beside them', () => {
+      const { store } = fakeStore(
+        JSON.stringify({ good: { cfi: 'a-cfi', at: 1 }, nothing: null, noCfi: { at: 2 }, numberCfi: { cfi: 7, at: 3 } }),
+      )
+      const positions = readingPositions(store)
+      expect(positions.get('good')).toBe('a-cfi')
+      expect(positions.held('nothing')).toBeNull()
+      expect(positions.held('noCfi')).toBeNull()
+      expect(positions.held('numberCfi')).toBeNull()
     })
+
   })
 
   /**
@@ -158,6 +207,36 @@ describe('readingPositions', () => {
     expect(positions.get('book-19')).toBeNull()
     expect(positions.get('book-519')).toBe('cfi-519')
     expect(positions.get('book-20')).toBe('cfi-20')
+  })
+
+  /* AT THE CAP IS NOT OVER IT. Nothing is dropped and nothing is sorted:
+     sorting is the eviction path's cost, not every page turn's, so the store
+     is written in the order its books were first remembered. */
+  it('fills to exactly the cap without dropping or reordering anything', () => {
+    /* 499 seeded oldest-first, so the 500th — the newest — is the one a sort
+       would move to the front. Seeded rather than written one at a time: 500
+       writes of a growing store cost seconds and test nothing more. */
+    const seed: Record<string, { cfi: string; at: number }> = {}
+    for (let i = 0; i < 499; i += 1) seed[`book-${i}`] = { cfi: `cfi-${i}`, at: i + 1 }
+    const { store, held } = fakeStore(JSON.stringify(seed))
+    readingPositions(store, () => 10_000).set('book-499', 'cfi-499')
+    const kept = Object.keys(JSON.parse(held() ?? '{}') as Record<string, unknown>)
+    expect(kept).toHaveLength(500)
+    expect(kept[0]).toBe('book-0')
+    expect(kept.at(-1)).toBe('book-499')
+  })
+
+  /* A ROW WRITTEN BEFORE `readAt` EXISTED is ordered by its write stamp — `at`
+     stands in. Read as recency 0 instead, every old row ties, and the tie
+     evicts by place in the store rather than by age. */
+  it('evicts a row that predates readAt by when it was written', () => {
+    const seed: Record<string, { cfi: string; at: number }> = {}
+    for (let i = 0; i < 500; i += 1) seed[`book-${i}`] = { cfi: `cfi-${i}`, at: i + 1 }
+    const positions = readingPositions(fakeStore(JSON.stringify(seed)).store, () => 10_000)
+    positions.set('new', 'cfi-new')
+    expect(positions.get('book-0'), 'the oldest write is the one to go').toBeNull()
+    expect(positions.get('book-499')).toBe('cfi-499')
+    expect(positions.get('new')).toBe('cfi-new')
   })
 
   /* RE-READING A BOOK MOVES IT BACK TO THE FRONT of the eviction order, or the
@@ -271,6 +350,14 @@ describe('held', () => {
     const { store } = fakeStore(JSON.stringify({ one: { cfi: 'epubcfi(/6/4)' } }))
     expect(readingPositions(store).held('one')).toEqual({ cfi: 'epubcfi(/6/4)', at: 0 })
   })
+
+  it('stamps with the wall clock when no clock is handed in', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000)
+    const positions = readingPositions(fakeStore().store)
+    positions.set('one', 'epubcfi(/6/4)')
+    expect(positions.held('one')).toEqual({ cfi: 'epubcfi(/6/4)', at: 1_700_000_000_000 })
+    vi.restoreAllMocks()
+  })
 })
 
 describe('recency and the position stamp are two different questions', () => {
@@ -289,9 +376,41 @@ describe('recency and the position stamp are two different questions', () => {
 
   it('a stored timestamp that is not a real moment is read as never recorded', () => {
     /* `1e400` parses as `Infinity`, which would beat every genuine stamp
-     * forever — in eviction and against the shelf alike. */
-    const seed = JSON.stringify({ 'book:a': { cfi: 'epubcfi(/6/2!/4/2)', at: 1e400 } })
+     * forever — in eviction and against the shelf alike.
+     *
+     * ⚠️ WRITTEN AS TEXT, because `JSON.stringify` writes `Infinity` as `null`.
+     * This seed was built with it, so the store held `"at":null` and the test
+     * never met the value its title names; a stamp that let `Infinity` through
+     * passed it. */
+    const seed = '{"book:a":{"cfi":"epubcfi(/6/2!/4/2)","at":1e400}}'
     const positions = readingPositions(fakeStore(seed).store)
     expect(positions.held('book:a')).toEqual({ cfi: 'epubcfi(/6/2!/4/2)', at: 0 })
+  })
+})
+
+describe('browserPositions', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('keeps positions in the browser’s own storage', () => {
+    const { store, held } = fakeStore()
+    vi.stubGlobal('window', { localStorage: store })
+    browserPositions().set('one', 'cfi-one')
+    expect(held()).toContain('"cfi-one"')
+  })
+
+  /* `localStorage` IS A GETTER THAT THROWS when a reader blocks site data, so
+     reaching for it is as risky as using it. A lost position, never a lost book. */
+  it('remembers nothing, and throws nothing, when reaching storage throws', () => {
+    vi.stubGlobal('window', {
+      get localStorage(): PositionStore {
+        throw new Error('site data is blocked')
+      },
+    })
+    const positions = browserPositions()
+    expect(() => positions.set('one', 'cfi-one')).not.toThrow()
+    expect(positions.get('one')).toBeNull()
+    expect(positions.held('one')).toBeNull()
   })
 })

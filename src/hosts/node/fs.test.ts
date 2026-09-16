@@ -345,8 +345,14 @@ describe('nodeTextFs', () => {
      * name is private per write now, so the failure has to be induced
      * somewhere both writers would meet it. */
     await chmod(root, 0o555)
-    expect((await refusalOf(fs.write('paper.store.v1.json', '{"lost":true}'))).code).toBe('EACCES')
-    await chmod(root, 0o755)
+    /* REOPENED WHATEVER THE ASSERTION SAYS, like its neighbours: a directory
+     * left unwritable cannot be emptied, so a failure here also failed
+     * `afterEach` and left the whole root behind. */
+    try {
+      expect((await refusalOf(fs.write('paper.store.v1.json', '{"lost":true}'))).code).toBe('EACCES')
+    } finally {
+      await chmod(root, 0o755)
+    }
     expect(await fs.read('paper.store.v1.json')).toBe('{"kept":true}')
     expect((await nodeIndexFs(root).readDir('')).map((one) => one.name)).toEqual(['paper.store.v1.json'])
   })
@@ -366,7 +372,12 @@ describe('nodeTextFs', () => {
      * succeed, and the write has already reached disk by then. */
     await nodeIndexFs(root).mkdir('paper.store.v1.json')
     await nodeIndexFs(root).writeFile('paper.store.v1.json/occupied', bytes('x'))
-    expect((await refusalOf(fs.write('paper.store.v1.json', '{"doomed":true}'))).code, 'the publish failed, and on a directory that is EISDIR').toBe('EISDIR')
+    /* ⚠️ **WINDOWS REPORTS THIS RENAME AS `EPERM`, NOT `EISDIR`** — measured
+     * 2026-09-14 on Windows 11 with Node 24.19. It is the same failure through
+     * another errno, and `write` does not branch on the code, so what this
+     * pins — the cleanup — is the same on both. */
+    const refused = process.platform === 'win32' ? 'EPERM' : 'EISDIR'
+    expect((await refusalOf(fs.write('paper.store.v1.json', '{"doomed":true}'))).code, `the publish failed, and on a directory that is ${refused}`).toBe(refused)
     const names = (await nodeIndexFs(root).readDir('')).map((one) => one.name)
     expect(names).toEqual(['paper.store.v1.json'])
   })

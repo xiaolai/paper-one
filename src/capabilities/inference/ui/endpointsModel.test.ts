@@ -11,7 +11,9 @@ import {
   validBaseUrl,
   validId,
   type EndpointDraft,
+  type EndpointsModel,
   type EndpointsPlugin,
+  type EndpointsSnapshot,
 } from './endpointsModel'
 
 /** A promise the test opens when it wants the read under test to finish. */
@@ -36,6 +38,19 @@ const draft = (over: Partial<EndpointDraft> = {}): EndpointDraft => ({
   baseUrl: 'https://api.example.com/v1',
   ...over,
 })
+
+/**
+ * Type a whole draft into a model, field by field, as the pane's inputs do.
+ *
+ * ⚠️ **THE DRAFT IS THE MODEL'S, AND IT USED TO BE `useState` IN THE PANE** —
+ * which `PaneGroup` unmounts whenever the reader closes the group, taking a
+ * half-typed endpoint with it. `save` therefore takes no argument: handing the
+ * model its own draft back would be two copies of one thing.
+ */
+const type = (model: EndpointsModel, over: Partial<EndpointDraft> = {}): void => {
+  const whole = draft(over)
+  for (const field of ['id', 'label', 'baseUrl', 'key'] as const) model.edit(field, whole[field])
+}
 
 /**
  * ⚠️ ONE CORPUS, TWO VALIDATORS.
@@ -155,6 +170,32 @@ describe('what the crate will accept', () => {
       expect(validBaseUrl(bad), JSON.stringify(bad)).toBe(false)
     }
   })
+
+  /* THE BOUND IS INCLUSIVE, as the crate's `url.len() > MAX_ENDPOINT_URL` is:
+     an address of exactly 400 bytes is one `endpoints.rs` stores, and refusing
+     it here would be a pre-check stricter than the authority by one byte. */
+  it('takes an address of exactly the crate’s 400 bytes, and refuses one byte more', () => {
+    const atBound = `https://${'a'.repeat(392)}`
+    expect(new TextEncoder().encode(atBound).length, 'the case is not 400 bytes, so this measures nothing').toBe(400)
+    expect(validBaseUrl(atBound)).toBe(true)
+    expect(validBaseUrl(`${atBound}a`)).toBe(false)
+  })
+
+  /* EVERY CHARACTER OF THE HOST, as `endpoints.rs` checks every one: letters,
+     digits, dots, hyphens and a port's colon. An underscore is a hostname the
+     platform parser accepts and the crate refuses, so only the character check
+     stands between it and a round trip — at the start, in the middle or at the
+     end. A bracketed IPv6 literal is refused by the same check. */
+  it('refuses a host character the crate refuses, wherever it sits', () => {
+    for (const bad of [
+      'https://my_host.example.com',
+      'https://_host.example.com',
+      'https://host.example.com_',
+      'https://[::1]:8443/v1',
+    ]) {
+      expect(validBaseUrl(bad), bad).toBe(false)
+    }
+  })
 })
 
 describe('refuseDraft', () => {
@@ -170,6 +211,21 @@ describe('refuseDraft', () => {
     expect(refuseDraft(draft({ id: 'My Proxy' }))).toMatch(/lower-case/i)
     expect(refuseDraft(draft({ baseUrl: '' }))).toMatch(/address/i)
     expect(refuseDraft(draft({ baseUrl: 'http://x' }))).toMatch(/https/i)
+  })
+
+  /* THE WORDS THEMSELVES. A blank name and a malformed one both mention a
+     name, and a blank address and a malformed one both mention an address, so
+     a pattern cannot tell "you left it empty" from "you typed it wrong" — and
+     those are two different things for the reader to do. */
+  it('tells a field left empty from one typed wrong', () => {
+    expect(refuseDraft(draft({ id: '' }))).toBe('Give the endpoint a name to refer to it by.')
+    expect(refuseDraft(draft({ id: 'My Proxy' }))).toBe(
+      'A name is lower-case letters, digits and hyphens, up to 40 characters.',
+    )
+    expect(refuseDraft(draft({ baseUrl: '' }))).toBe('Give the endpoint its address.')
+    expect(refuseDraft(draft({ baseUrl: 'http://x' }))).toBe(
+      'An address is an https:// URL with a host, and no credentials in it.',
+    )
   })
 })
 
@@ -237,6 +293,23 @@ function fakePlugin(over: Partial<EndpointsPlugin> = {}) {
   }
 }
 
+/**
+ * Every snapshot a subscriber was told about, read AT THE NOTIFICATION, the
+ * way `useSyncExternalStore` reads it.
+ *
+ * ⚠️ **A TEST THAT READS ONLY AT THE END CANNOT SEE A MISSING NOTIFICATION.**
+ * The snapshot cache is empty after any change, so a late `getSnapshot` builds
+ * a fresh, correct one whether or not anybody was told — while the pane, which
+ * reads only when told, is still drawing the state before it.
+ */
+const watch = (model: EndpointsModel): EndpointsSnapshot[] => {
+  const seen: EndpointsSnapshot[] = []
+  model.subscribe(() => void seen.push(model.getSnapshot()))
+  return seen
+}
+
+const BLANK = { id: '', label: '', baseUrl: '', key: '' } as const
+
 describe('the endpoints store', () => {
   it('is empty and loading until the first read', async () => {
     const world = fakePlugin()
@@ -273,10 +346,66 @@ describe('the endpoints store', () => {
     const model = createEndpointsModel({ plugin: world.plugin })
     await model.refresh()
 
-    await expect(model.save(draft({ label: 'My proxy', key: 'sk-secret' }))).resolves.toBe(true)
+    type(model, { label: 'My proxy', key: 'sk-secret' })
+    await expect(model.save()).resolves.toBe(true)
     expect(world.addEndpoint.mock.calls).toEqual([['my-proxy', 'My proxy', 'https://api.example.com/v1']])
     expect(world.setEndpointKey.mock.calls).toEqual([['my-proxy', 'sk-secret']])
     expect(model.getSnapshot().rows[0]?.keyState).toBe('set')
+    model.dispose()
+  })
+
+  /**
+   * ⚠️ **THE DRAFT OUTLIVES THE PANE, AND IT USED NOT TO.**
+   *
+   * It was `useState` in `EndpointsPane`, and `PaneGroup` unmounts a closed
+   * group deliberately — so a reader who pasted an address, opened another
+   * group to find their key and came back met three empty fields. It is the
+   * model's now, which is the thing the close does not touch (2026-09-13 audit,
+   * round 2).
+   */
+  it('holds what the reader typed, and clears it only when a save succeeds', async () => {
+    const world = fakePlugin()
+    const model = createEndpointsModel({ plugin: world.plugin })
+    await model.refresh()
+
+    type(model, { baseUrl: 'http://insecure' })
+    expect(model.getSnapshot().draft.baseUrl).toBe('http://insecure')
+
+    await expect(model.save(), 'the draft was accepted, so this measures nothing').resolves.toBe(false)
+    expect(model.getSnapshot().draft, 'a refused draft was thrown away').toEqual(draft({ baseUrl: 'http://insecure' }))
+
+    model.edit('baseUrl', 'https://api.example.com/v1')
+    await expect(model.save()).resolves.toBe(true)
+    expect(model.getSnapshot().draft, 'the fields kept an endpoint that had been saved').toEqual(EMPTY_DRAFT)
+    model.dispose()
+  })
+
+  /* ⚠️ **AND ONLY THE DRAFT THAT WAS SENT.** A save is a round trip to the
+     runtime, and a reader goes on typing across it — so clearing whatever is in
+     the fields when it lands took away the NEXT endpoint they had begun
+     (2026-09-13 verify, round 2). `edit` builds a new draft, so identity is the
+     whole test. */
+  it('keeps what the reader typed while a save was still in flight', async () => {
+    let land = (): void => {}
+    const world = fakePlugin({
+      addEndpoint: vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          land = resolve
+        })
+      }),
+    })
+    const model = createEndpointsModel({ plugin: world.plugin })
+    await model.refresh()
+
+    type(model, { id: 'first', baseUrl: 'https://one.example.com' })
+    const saving = model.save()
+    type(model, { id: 'second', baseUrl: 'https://two.example.com' })
+    land()
+
+    await expect(saving).resolves.toBe(true)
+    expect(model.getSnapshot().draft, 'the endpoint begun while the first was saving').toEqual(
+      draft({ id: 'second', baseUrl: 'https://two.example.com' }),
+    )
     model.dispose()
   })
 
@@ -292,7 +421,8 @@ describe('the endpoints store', () => {
     const model = createEndpointsModel({ plugin: world.plugin })
     await model.refresh()
 
-    await model.save(draft({ label: 'Renamed', key: '' }))
+    type(model, { label: 'Renamed', key: '' })
+    await model.save()
     expect(world.setEndpointKey, 'a blank field cleared the stored key').not.toHaveBeenCalled()
     model.dispose()
   })
@@ -300,7 +430,8 @@ describe('the endpoints store', () => {
   it('falls back to the name when no label was typed', async () => {
     const world = fakePlugin()
     const model = createEndpointsModel({ plugin: world.plugin })
-    await model.save(draft({ label: '' }))
+    type(model, { label: '' })
+    await model.save()
     expect(world.addEndpoint.mock.calls[0]?.[1]).toBe('my-proxy')
     model.dispose()
   })
@@ -310,7 +441,8 @@ describe('the endpoints store', () => {
   it('refuses a bad draft without calling the plugin', async () => {
     const world = fakePlugin()
     const model = createEndpointsModel({ plugin: world.plugin })
-    await expect(model.save(draft({ baseUrl: 'http://insecure' }))).resolves.toBe(false)
+    type(model, { baseUrl: 'http://insecure' })
+    await expect(model.save()).resolves.toBe(false)
     expect(world.addEndpoint).not.toHaveBeenCalled()
     expect(model.getSnapshot().failure).toMatch(/https/i)
     model.dispose()
@@ -349,7 +481,8 @@ describe('the endpoints store', () => {
     expect(model.getSnapshot().rows[0]?.action).toBe('remove')
 
     await model.pressRemove('a')
-    await model.save(draft())
+    type(model)
+    await model.save()
     expect(
       model.getSnapshot().rows.find((r) => r.id === 'a')?.action,
       'a removal stayed armed while the reader did something else',
@@ -393,7 +526,8 @@ describe('the endpoints store', () => {
       plugin: world.plugin,
       report: (event, fields) => void events.push({ event, fields }),
     })
-    await expect(model.save(draft())).resolves.toBe(false)
+    type(model)
+    await expect(model.save()).resolves.toBe(false)
     expect(model.getSnapshot().failure).toMatch(/could not be saved/i)
     expect(model.getSnapshot().busy, 'the pane was left disabled by the failure').toBe(false)
     expect(events[0]?.event).toBe('inference.add-endpoint-failed')
@@ -467,6 +601,224 @@ describe('the endpoints store', () => {
     model.dispose()
     await model.refresh()
     expect(after, 'a read landing after dispose notified a torn-down pane').toBe(0)
+  })
+
+  /* NOTHING TYPED, NOTHING WRONG, NOTHING IN FLIGHT — before the first read
+     and after it. Save and Remove are disabled on `busy`, so a store that
+     opened busy would draw a pane nobody can press. */
+  it('opens with nothing typed, nothing wrong and nothing in flight', async () => {
+    const model = createEndpointsModel({ plugin: fakePlugin().plugin })
+    expect(model.getSnapshot()).toEqual({ rows: [], loading: true, busy: false, failure: null, draft: BLANK })
+
+    await model.refresh()
+    expect(model.getSnapshot()).toEqual({ rows: [], loading: false, busy: false, failure: null, draft: BLANK })
+    model.dispose()
+  })
+
+  /* A SUBSCRIBER THAT THROWS IS NAMED BY THE STORE IT BELONGS TO, so the line
+     in the console says which pane broke rather than that one did. */
+  it('names the endpoints store when one of its subscribers throws', async () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const model = createEndpointsModel({ plugin: fakePlugin().plugin })
+      model.subscribe(() => {
+        throw new Error('a pane broke')
+      })
+      await model.refresh()
+      expect(said).toHaveBeenCalledWith('Paper: a endpoints subscriber threw while being notified', expect.any(Error))
+      model.dispose()
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  /* THE REPORTER IS OPTIONAL, and the reader's half is not: a store built with
+     nothing to report to still says the list could not be read. */
+  it('explains an unreadable list with no reporter to tell', async () => {
+    const world = fakePlugin({
+      endpoints: async () => {
+        throw new Error('endpoints.json is malformed')
+      },
+    })
+    const model = createEndpointsModel({ plugin: world.plugin })
+    await expect(model.refresh()).resolves.toBeUndefined()
+    expect(model.getSnapshot().failure).toBe('The endpoint list could not be read.')
+    model.dispose()
+  })
+
+  /* THE MAINTAINER'S HALF: what the failed read actually said. */
+  it('hands the reporter what the failed read said', async () => {
+    const report = vi.fn()
+    const world = fakePlugin({
+      endpoints: async () => {
+        throw new Error('endpoints.json is malformed')
+      },
+    })
+    const model = createEndpointsModel({ plugin: world.plugin, report })
+    await model.refresh()
+    expect(report.mock.calls).toEqual([['inference.endpoints-failed', { message: 'endpoints.json is malformed' }]])
+    model.dispose()
+  })
+
+  /* AN OLDER READ THAT FAILS IS SUPERSEDED TOO. The newer one has already
+     answered, and "could not be read" over a list on screen is a false alarm. */
+  it('says nothing about a superseded read that fails after the newest answered', async () => {
+    const gates = [deferred(), deferred()]
+    let asked = 0
+    const world = fakePlugin({
+      endpoints: async () => {
+        const mine = asked++
+        await gates[mine]!.promise
+        if (mine === 0) throw new Error('the older read failed')
+        return [endpoint({ id: 'fresh' })]
+      },
+    })
+    const model = createEndpointsModel({ plugin: world.plugin })
+    const older = model.refresh()
+    const newer = model.refresh()
+
+    gates[1]!.open()
+    await newer
+    gates[0]!.open()
+    await older
+    expect(model.getSnapshot().failure, 'a superseded failure was drawn over the current list').toBeNull()
+    expect(model.getSnapshot().rows.map((r) => r.id)).toEqual(['fresh'])
+    model.dispose()
+  })
+
+  /* BUSY FOR EXACTLY AS LONG AS THE SAVE IS OUT, AND THE PANE IS TOLD AT BOTH
+     ENDS. A start it was not told about lets a second save race the first; an
+     end it was not told about leaves Save and Remove disabled for good. */
+  it('tells the pane a save is out, and tells it again when the save lands', async () => {
+    const landing = deferred()
+    const world = fakePlugin({
+      addEndpoint: vi.fn(async () => {
+        await landing.promise
+      }),
+    })
+    const model = createEndpointsModel({ plugin: world.plugin })
+    await model.refresh()
+    type(model)
+    const seen = watch(model)
+
+    const saving = model.save()
+    expect(seen.at(-1)?.busy, 'the pane was not told a save had begun').toBe(true)
+
+    landing.open()
+    await expect(saving).resolves.toBe(true)
+    expect(seen.at(-1)?.busy, 'the pane was left disabled after the save landed').toBe(false)
+    expect(seen.at(-1)?.draft, 'the pane still drew the endpoint it had just saved').toEqual(BLANK)
+    model.dispose()
+  })
+
+  /* A REMOVAL CLEARS NO DRAFT, so nothing after it would tell the pane by
+     accident: the end of `busy` has to be said for itself. */
+  it('tells the pane a removal is over once it lands', async () => {
+    const world = fakePlugin()
+    world.seed([endpoint({ id: 'a' })])
+    const model = createEndpointsModel({ plugin: world.plugin })
+    await model.refresh()
+    await model.pressRemove('a')
+    const seen = watch(model)
+
+    await model.pressRemove('a')
+    expect(seen[0]?.busy, 'the pane was not told a removal had begun').toBe(true)
+    expect(seen.at(-1)?.busy, 'the pane was left disabled after the removal landed').toBe(false)
+    model.dispose()
+  })
+
+  /* A SAVE THAT FAILED IS TOLD AS ONE — the reason, and the buttons back —
+     and what the reader typed stays: they correct the address rather than
+     paste a key a second time. */
+  it('tells the pane a save failed, and keeps what the reader typed', async () => {
+    const world = fakePlugin({
+      addEndpoint: async () => {
+        throw new Error('the keychain refused')
+      },
+    })
+    const model = createEndpointsModel({ plugin: world.plugin })
+    type(model, { key: 'sk-secret' })
+    const seen = watch(model)
+
+    await expect(model.save(), 'a failed save with no reporter rejected').resolves.toBe(false)
+    expect(seen.at(-1)?.failure).toBe('That endpoint could not be saved.')
+    expect(seen.at(-1)?.busy).toBe(false)
+    expect(model.getSnapshot().draft, 'a failed save threw away what the reader typed').toEqual(draft({ key: 'sk-secret' }))
+    model.dispose()
+  })
+
+  it('tells the pane why a draft was refused', async () => {
+    const model = createEndpointsModel({ plugin: fakePlugin().plugin })
+    type(model, { baseUrl: 'http://insecure' })
+    const seen = watch(model)
+
+    await model.save()
+    expect(seen.at(-1)?.failure).toBe('An address is an https:// URL with a host, and no credentials in it.')
+    model.dispose()
+  })
+
+  /* A STORE DISPOSED WITH A SAVE OUT DOES NOT MOVE WHEN IT LANDS, whichever
+     way it lands. The capability is being torn down; a snapshot that changes
+     afterwards is state written for nobody — the rule a read landing after
+     dispose already keeps. */
+  it.each(['lands', 'fails'] as const)('changes nothing when a save %s after dispose', async (outcome) => {
+    const landing = deferred()
+    const world = fakePlugin({
+      addEndpoint: vi.fn(async () => {
+        await landing.promise
+        if (outcome === 'fails') throw new Error('the keychain refused')
+      }),
+    })
+    const model = createEndpointsModel({ plugin: world.plugin })
+    type(model)
+    const saving = model.save()
+    model.dispose()
+    const atDispose = model.getSnapshot()
+
+    landing.open()
+    await saving
+    expect(model.getSnapshot(), 'a save landing after dispose moved the store').toBe(atDispose)
+  })
+
+  /* DISPOSED MEANS DEAF AND STILL: a torn-down pane is told nothing, whatever
+     is typed or pressed, and a read after dispose replaces nothing. */
+  it('tells nobody anything after dispose, and reads nothing into itself', async () => {
+    const world = fakePlugin()
+    world.seed([endpoint({ id: 'a' })])
+    const model = createEndpointsModel({ plugin: world.plugin })
+    await model.refresh()
+    let told = 0
+    model.subscribe(() => void (told += 1))
+    model.dispose()
+
+    model.edit('id', 'typed-after')
+    await model.pressRemove('a')
+    world.seed([endpoint({ id: 'b' })])
+    await model.refresh()
+    expect(told, 'a torn-down pane was told').toBe(0)
+    expect(model.getSnapshot().rows.map((r) => r.id), 'a read after dispose replaced the list').toEqual(['a'])
+  })
+
+  /* THE PANE DISARMS ON EVERY KEYSTROKE, before every `edit` — so a disarm with
+     nothing armed has to be nothing: no new snapshot, no notification. One
+     with something armed has to be said, or the button keeps offering it. */
+  it('takes nothing back when nothing is armed, and tells the pane when something was', async () => {
+    const world = fakePlugin()
+    world.seed([endpoint({ id: 'a' })])
+    const model = createEndpointsModel({ plugin: world.plugin })
+    await model.refresh()
+    const seen = watch(model)
+    const before = model.getSnapshot()
+
+    model.disarm()
+    expect(seen, 'a disarm with nothing armed told the pane').toEqual([])
+    expect(model.getSnapshot()).toBe(before)
+
+    await model.pressRemove('a')
+    expect(seen.at(-1)?.rows[0]?.action).toBe('confirm')
+    model.disarm()
+    expect(seen.at(-1)?.rows[0]?.action, 'the pane still offered the removal it took back').toBe('remove')
+    model.dispose()
   })
 })
 

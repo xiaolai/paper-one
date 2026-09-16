@@ -241,6 +241,7 @@ describe('the models store', () => {
       install: vi.fn(async (_model: string) => true),
       cancelInstall: vi.fn(() => {}),
       uninstall: vi.fn(async (_model: string) => true),
+      start: vi.fn(async () => {}),
       ensureReady: vi.fn(async () => true),
       dispose: vi.fn(() => {}),
     }

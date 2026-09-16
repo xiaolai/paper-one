@@ -21,20 +21,21 @@ describe('NO_GLOSS', () => {
    * browser client, iOS and Android from drawing a Look up button that would
    * send the reader to a models pane those builds do not have.
    *
-   * It is the whole reason `installable` is a field rather than something the
+   * It is the whole reason `installAt` is a field rather than something the
    * reader UI infers from `available`. Inferring it would make the two states
    * — "no model yet" and "no such feature here" — indistinguishable, and the
    * app would name a feature it does not have on the platforms that have least.
    */
   it('offers no install either, because there is nowhere to install to', () => {
-    expect(NO_GLOSS.installable).toBe(false)
+    expect(NO_GLOSS.installAt).toBeNull()
   })
 
   /* Loud, not apologetic. A provider that resolved with a sentence would put
    * that sentence in front of the reader under an amber mark, which is the
    * one thing the mark must never be used for. */
   it('throws rather than resolving with an apology', async () => {
-    await expect(NO_GLOSS.gloss('close', { sentence: 'x', bookTitle: 'y' }, new AbortController().signal))
+    const answerIn = [{ tag: 'en', name: 'English', label: 'English' }] as const
+    await expect(NO_GLOSS.gloss('close', { sentence: 'x', bookTitle: 'y', answerIn }, new AbortController().signal))
       .rejects.toThrow(/Check `available`/)
   })
 })

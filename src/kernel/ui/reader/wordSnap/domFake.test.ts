@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildFixture, elem, txt } from './domFake.testkit'
+import { buildFixture, comment, elem, txt } from './domFake.testkit'
 
 /**
  * The fake's own contract.
@@ -35,6 +35,18 @@ function styleOf(root: Element, target: Element): { display: string; visibility:
 }
 
 describe('the WI-5 fixture fake', () => {
+  /* Point 7. XHTML books are full of comments and WebKit will not compute a
+     style for one — so neither does the fake, or a walk that asked would pass
+     here and throw in a book. */
+  it('carries a comment as a node that is neither text nor an element, and will not style it', () => {
+    const fixture = buildFixture(elem('p', { id: 'para' }, [txt('before'), comment('typesetter note'), txt('after')]))
+    const note = fixture.text('before').nextSibling as Node
+
+    expect(note.nodeType).toBe(8)
+    expect(() => fixture.root.ownerDocument.defaultView?.getComputedStyle(note as Element)).toThrow(TypeError)
+    expect(styleOf(fixture.root, fixture.element('para')).display).toBe('block')
+  })
+
   it('answers getComputedStyle per element, so two same-tag elements can differ', () => {
     const fixture = buildFixture(
       elem('div', {}, [

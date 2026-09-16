@@ -1,7 +1,7 @@
 import type { SettingsStore } from '../../../kernel'
 import { createGenerations, messageOf, notifyAll } from '../../../kernel'
 import type { Depth } from '../../inference'
-import { reasonOf, type InferencePort, type Probe, type Route } from '../../inference'
+import { detailFor, reasonOf, type InferencePort, type Probe, type Route } from '../../inference'
 import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
 
 /**
@@ -90,6 +90,23 @@ export interface RoutesSnapshot {
    * spent logging in, and pressing it again launched a second flow. So the
    * press is a state: the row says it is waiting and offers `Check again`,
    * which re-probes. One flow at a time, and a way out of it. */
+  /**
+   * The last login flow that would not launch, or null.
+   *
+   * ⚠️ **THIS WENT TO THE LOG AND NOWHERE ELSE.** `signIn` catches, reports,
+   * and puts the row back to `Sign in…` — which is right, and is also exactly
+   * what an ignored press looks like. A reader whose Codex is not installed
+   * pressed the button, watched nothing happen, and pressed it again; the only
+   * account of why was a diagnostic they cannot open (2026-09-13 audit,
+   * round 2).
+   *
+   * `reason` is `detailFor`'s sentence, so it is the reader's half rather than
+   * the crate's — the diagnostic keeps the other. It describes the LAST press
+   * and not every failure since: the next `signIn` and the next `refresh` both
+   * clear it, the same rule `InferenceSnapshot.failure` follows and for the
+   * same reason.
+   */
+  readonly signInFailure: { readonly route: string; readonly reason: string } | null
   /** The route in use, or null when nothing can answer. */
   readonly inUse: string | null
   /** True when the reader's stored choice is no longer usable. */
@@ -217,6 +234,7 @@ export interface RoutesModelOptions {
 
 const EMPTY: RoutesSnapshot = {
   rows: [],
+  signInFailure: null,
   inUse: null,
   fellBack: false,
   depth: null,
@@ -235,6 +253,7 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
      already superseded, and nothing refreshes again until the group reopens. */
   const generations = createGenerations()
   let signingIn: string | null = null
+  let signInFailure: RoutesSnapshot['signInFailure'] = null
 
   const invalidate = (): void => {
     cached = null
@@ -243,13 +262,17 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
   const unsubscribeSettings = settings.subscribe(invalidate)
 
   const build = (): RoutesSnapshot => {
-    if (probe === null) return EMPTY
+    /* The failure travels even here, where there is no row to draw it beside:
+       a snapshot that contradicted the model holding it would be the harder
+       defect to find of the two. */
+    if (probe === null) return signInFailure === null ? EMPTY : { ...EMPTY, signInFailure }
     const chosen = settings.get(ROUTE_SETTING)
     const { inUse, fellBack } = resolveRoute(chosen, probe.routes)
     return {
       rows: probe.routes
         .filter((route) => route.modality === 'text')
         .map((route) => rowFor(route, inUse, signingIn)),
+      signInFailure,
       inUse,
       fellBack,
       /* Offered only while an AGENT answers — the two flags this maps to
@@ -289,6 +312,7 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
            `signIn` below uses it. The ANSWER is unchanged: a probe that failed
            offers nothing, which is the safe reading. */
         report?.('companion.probe-failed', { message: messageOf(thrown) })
+        // Stryker disable next-line ArrayDeclaration: the element put here is a string, with no `modality`, `unusable` or `id`, so every reader of `probe.routes` passes over it and the snapshot is the one an empty list gives.
         found = { routes: [], runtimeVersion: null }
       }
       /* Superseded, or the pane closed while the children ran. Either way this
@@ -301,6 +325,9 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
          than waiting on a flow that has already failed. Either way this
          terminates — a pending state with no exit is worse than none. */
       signingIn = null
+      /* AND THE REASON GOES WITH IT: whatever this probe found is newer than
+         the last launch that would not start. */
+      signInFailure = null
       invalidate()
     },
     use: (id) => settings.set(ROUTE_SETTING, id),
@@ -308,11 +335,19 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
       /* Claimed BEFORE the await, so a second press cannot open a second
          flow while the first is being launched. */
       signingIn = id
+      /* THE LAST PRESS'S REASON, NOT EVERY PRESS'S — cleared as this one
+         starts, so what is on screen always describes the attempt the reader
+         just made. */
+      signInFailure = null
       invalidate()
       try {
         await port.signIn(id)
       } catch (error) {
         signingIn = null
+        /* BOTH HALVES, the way `controller.ts` reports a failed launch:
+           `detailFor`'s sentence is the reader's and goes on the snapshot;
+           the crate's own message is the maintainer's and goes to the log. */
+        signInFailure = { route: id, reason: detailFor(error) }
         invalidate()
         report?.('companion.sign-in-failed', {
           route: id,
@@ -328,6 +363,7 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
       disposed = true
       /* Retire every in-flight probe too, so a late arrival cannot write
          `probe` on a torn-down model even if `disposed` were ever relaxed. */
+      // Stryker disable next-line CallExpression: its only reader is `refresh`'s `!mine() || disposed`, and `disposed` is already true above — the defence this comment describes is invisible while that flag stands.
       generations.claim()
       unsubscribeSettings()
       listeners.clear()

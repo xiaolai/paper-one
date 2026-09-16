@@ -77,22 +77,35 @@ function PersonRow({
   readonly refresh: () => Promise<void>
   readonly openBook?: (bookId: string) => void
 }) {
-  const [shows, setShows] = useState<boolean | null>(null)
+  /* Both switches, `null` until a read has landed. ⚠️ **THEY WERE TWO STATES,
+     AND THE SECOND HAD A DEFAULT NOTHING COULD SEE** (2026-09-15, two surviving
+     mutants): `muted` began `false` and was reset to `false`, but it was drawn
+     only beside `shows` and set in the same batch as it, so neither default
+     ever reached the screen and flipping either default changed nothing. One
+     read sets both, so they are one value. */
+  const [switches, setSwitches] = useState<{ readonly shows: boolean; readonly muted: boolean } | null>(null)
   /* ⚠️ **NARROWED FROM `disable all`, WHICH COVERED MORE THAN ITS REASON.** The
-     comment explains the `circle !== null` half — a switch read through the
-     port is unknowable without one — and said nothing about `shows !== null`,
-     which is the LOADING guard and is very much observable: without it the row
-     draws a switch in the wrong position while the first read is still in
-     flight. Suppressing every mutant of the line suppressed that one too.
-     Stryker disable next-line ConditionalExpression: the `circle !== null` half
-     — with no circle there is no port to read a switch through, so a row that
-     drew one would have nothing to put in it. The `shows !== null` half is
-     covered by "clears what the old port loaded when the circle is replaced". */
-  const switchReady = circle !== null && shows !== null
+     comment explained the `circle !== null` half and said nothing about the
+     second, which is the LOADING guard and is very much observable: without it
+     the row draws a switch in the wrong position while the first read is still
+     in flight — "clears what the old port loaded when the circle is replaced"
+     covers it. ⚠️ **AND WHAT REPLACED IT DISABLED NOTHING AT ALL** (found
+     2026-09-14 by `pnpm directives:check`): the narrowed directive was written
+     INSIDE this prose, and Stryker reads one only where the comment begins
+     with it.
+     ⚠️ **AND `circle !== null` IS NOT EQUIVALENT, WHICH THIS TREATED IT AS** —
+     it said to disable it one day, on the reasoning that with no circle there
+     is nothing to read, so the guard beside it is null anyway. Not in the
+     commit that TAKES the circle away: the reset below is an effect, so that
+     commit still holds the old circle's switches, and only this operand keeps
+     them off a frame the webview can paint (2026-09-15, when this file became
+     a changed subject). Nothing is disabled here; "draws no switch and no
+     friend’s shelf without a circle, not even in the commit before its reset
+     runs" holds it. */
+  const switchReady = circle !== null && switches !== null
   const [friend, setFriend] = useState<FriendView | null>(null)
   const [open, setOpen] = useState(false)
   const [unread, setUnread] = useState<string | null>(null)
-  const [muted, setMuted] = useState(false)
   const read = useRef(0)
   /* The row's own act — the switch and Remove — busy and reported here. */
   const { busy, trouble, run } = useAction('That did not go through.')
@@ -106,25 +119,29 @@ function PersonRow({
     if (circle === null) return
     /* Stryker disable next-line UpdateOperator: counting down tells reads apart as well as counting up. */
     const mine = ++read.current
-    /* ⚠️ **BOUND TO ITS SOURCE, NOT ONLY TO ITS ORDER.** The counter alone told
-       reads apart within one port; it could not tell a read of the OLD circle
-       from a read of the new one. A switch write holds the `look` it was made
-       with, so a write still in flight when the port is replaced completes,
-       calls that old `look`, and commits the old circle's answers over the new
-       one's. `port` is checked for the same reason a removal already checks
-       it. */
-    const held = circle
-    const stillMine = (): boolean => read.current === mine && circle === held && current.current === port
+    /* ⚠️ **BOUND TO ITS SOURCE — AND THE CHECK THAT SAID SO COULD NOT FAIL.**
+       A switch write held the `look` it was made with, so a write still in
+       flight when the circle was replaced completed, called that old `look`,
+       and committed the old circle's answers over the new one's. The guard
+       against it was `circle === held` beside the counter, with `held` assigned
+       from `circle` one line earlier in the same closure: a name compared with
+       itself, true every time, and the defect it named was live (2026-09-15, a
+       surviving mutant; "reads a switch back through the circle it holds NOW"
+       measures it). It is closed where it began — a write reads back through
+       `readBack`, the look the row holds when the write lands — so the counter
+       is the whole check: the effect below retires every read in flight when
+       the circle changes, and each later look supersedes an earlier one. The
+       `port` half went too; nothing here reads through the person port. */
+    const stillMine = (): boolean => read.current === mine
 
     /* ⚠️ **THE SWITCHES COMMIT ON THEIR OWN.** All three answers were awaited
        and then set together, so one unreadable shelf file threw before any of
        them landed — and a switch the reader had just moved went on showing its
        old position, because the failure was in something else entirely. */
     try {
-      const [on, quiet] = await Promise.all([held.showsShelf(person.person), held.muted(person.person)])
+      const [on, quiet] = await Promise.all([circle.showsShelf(person.person), circle.muted(person.person)])
       if (!stillMine()) return
-      setShows(on)
-      setMuted(quiet)
+      setSwitches({ shows: on, muted: quiet })
       setUnread(null)
     } catch (cause) {
       if (!stillMine()) return
@@ -132,30 +149,40 @@ function PersonRow({
       return
     }
 
+    /* No `stillMine()` here: nothing is awaited since the one above, so it
+       could only answer as that one did. */
     if (!open) {
-      if (stillMine()) setFriend(null)
+      setFriend(null)
       return
     }
     try {
-      const view = await held.friend(person.person)
+      const view = await circle.friend(person.person)
       if (!stillMine()) return
       setFriend(view)
     } catch (cause) {
       if (!stillMine()) return
       setUnread(messageOf(cause))
     }
-  }, [circle, person.person, open, port])
+  }, [circle, person.person, open])
+  /* What a write reads back through once it lands: the look the row holds
+     THEN, so a circle replaced meanwhile is the one asked. */
+  const lookNow = useRef(look)
+  lookNow.current = look
+  const readBack = (): Promise<void> => lookNow.current()
 
   /* ⚠️ **A NEW SOURCE INVALIDATES WHAT THE OLD ONE LOADED.** Cleanup only
      unsubscribed: anything in flight stayed eligible to commit, and the values
      already on screen — a switch position, a friend's shelf — kept being drawn
      as though they belonged to the new port. Bumping the counter retires every
      read in flight, and clearing the state means the row shows nothing rather
-     than something from a port it no longer holds. */
+     than something from a port it no longer holds.
+     ⚠️ **THE COUNTER WAS BUMPED TWICE, IN THE BODY AND IN THE CLEANUP**, so
+     the cleanup could be emptied and nothing noticed (2026-09-15, a surviving
+     mutant). The cleanup runs just before the body on every change, and at
+     mount nothing is in flight: one bump is the whole retirement, kept in the
+     cleanup, where it also runs when the row goes. */
   useEffect(() => {
-    read.current += 1
-    setShows(null)
-    setMuted(false)
+    setSwitches(null)
     setFriend(null)
     setUnread(null)
     return () => {
@@ -201,7 +228,7 @@ function PersonRow({
             <input
               type="checkbox"
               className={CAPABILITY_UI.toggle}
-              checked={shows}
+              checked={switches.shows}
               disabled={busy}
               aria-label={`Show my shelf to ${person.displayName}`}
               onChange={(e) => {
@@ -209,13 +236,13 @@ function PersonRow({
                    lands and two quick flips cannot resolve out of order — and
                    the switch is read back once it has. */
                 const on = e.target.checked
-                void run(() => circle.setShowsShelf(person.person, on), look)
+                void run(() => circle.setShowsShelf(person.person, on), readBack)
               }}
             />
             <span className={CAPABILITY_UI.grow}>Show my shelf</span>
           </label>
           <p className={CAPABILITY_UI.hint}>
-            {shows
+            {switches.shows
               ? `${person.displayName} can see every book in your library, including ones you have shared nothing from.`
               : `${person.displayName} will be able to see every book in your library, including ones you have shared nothing from.`}
           </p>
@@ -231,7 +258,7 @@ function PersonRow({
             <input
               type="checkbox"
               className={CAPABILITY_UI.toggle}
-              checked={muted}
+              checked={switches.muted}
               disabled={busy}
               aria-label={`Hold back ${person.displayName}'s passages`}
               onChange={(e) => {
@@ -239,13 +266,13 @@ function PersonRow({
                    quick flips cannot resolve out of order and the state is
                    read back once the write has landed. */
                 const on = e.target.checked
-                void run(() => circle.setMuted(person.person, on), look)
+                void run(() => circle.setMuted(person.person, on), readBack)
               }}
             />
             <span className={CAPABILITY_UI.grow}>Hold back their passages</span>
           </label>
           <p className={CAPABILITY_UI.hint}>
-            {muted
+            {switches.muted
               ? `${person.displayName}'s passages are not drawn in your books. Nothing has been deleted — what they have shared is still here, and turning this off brings it back.`
               : `${person.displayName}'s passages appear in your books, where the sentence is.`}
           </p>

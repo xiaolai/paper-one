@@ -64,7 +64,11 @@ export interface RemoteMarks {
   /* `MarkRef`, not `Mark` — a write needs only which mark and which book, which
    * is also all this client can be sure it has. */
   remove: (mark: MarkRef) => void
-  setNote: (mark: MarkRef, note: string) => void
+  /** Settles when the note is saved, and REJECTS when it is not — so a note
+   *  editor can keep the draft rather than take it for saved when it was only
+   *  handed over. The store still reports a refusal itself; the promise is the
+   *  caller's as well. */
+  setNote: (mark: MarkRef, note: string) => Promise<void>
   /** Re-read every book's marks. One call here; one read per book on the desktop. */
   loadAll: () => void
   /**
@@ -265,6 +269,7 @@ export interface MarksStore extends RemoteMarks {
 }
 
 export function createRemoteMarks(channel: ShelfChannel): MarksStore {
+  // Stryker disable next-line ArrayDeclaration: every reader of `marks` goes through `resplit`'s `isAnnotation`/`isBookmark`, which drop anything that is not a mark.
   let marks: readonly Mark[] = []
   let persistent = true
   let live = true
@@ -305,9 +310,11 @@ export function createRemoteMarks(channel: ShelfChannel): MarksStore {
   let generation = 0
 
   const refresh = (): void => {
+    // Stryker disable next-line UpdateOperator: counting down tells reads apart as well as counting up.
     const mine = ++generation
     void (async () => {
       try {
+        // Stryker disable next-line ArrayDeclaration: `seen` becomes `marks`, and every reader of `marks` drops anything that is not a mark.
         const seen: Mark[] = []
         /* NO `book`, which the service reads as every book — see the header. */
         for await (const page of channel.stream('mark.list', {})) {
@@ -325,14 +332,24 @@ export function createRemoteMarks(channel: ShelfChannel): MarksStore {
     })()
   }
 
-  const write = (service: string, body: Record<string, unknown>): void => {
-    void channel.call(service, body).catch((cause: unknown) => {
+  /* ⚠️ **HANDED BACK, NOT DROPPED** (2026-09-14 verify). This was `void`, so no
+   * caller could tell a write the shelf took from one it refused — and the note
+   * editor, handed nothing, took every note for saved the moment it was handed
+   * over and closed over a write that could still fail. The refusal is still
+   * said here, the store marked as not saving and the optimistic change undone
+   * by the re-read; the promise is ALSO the caller's, so an editor can keep the
+   * draft. A caller that ignores it leaves nothing unhandled: this handler is
+   * attached either way. */
+  const write = (service: string, body: Record<string, unknown>): Promise<void> => {
+    const sent = channel.call(service, body).then(() => undefined)
+    sent.catch((cause: unknown) => {
       console.error(`Paper: ${service} was refused`, cause)
       /* THE SHELF STOPPED ACCEPTING WRITES, and the pane says so. The optimistic
        * change is then undone by the re-read, which is the truth. */
       persistent = false
       refresh()
     })
+    return sent
   }
 
   refresh()
@@ -353,12 +370,12 @@ export function createRemoteMarks(channel: ShelfChannel): MarksStore {
     remove: (mark) => {
       marks = marks.filter((one) => one.id !== mark.id)
       resplit()
-      write('mark.remove', { mark: mark.id, book: mark.bookId })
+      void write('mark.remove', { mark: mark.id, book: mark.bookId })
     },
     setNote: (mark, note) => {
       marks = marks.map((one) => (one.id === mark.id ? { ...one, note } : one))
       resplit()
-      write('mark.set', { mark: mark.id, book: mark.bookId, note })
+      return write('mark.set', { mark: mark.id, book: mark.bookId, note })
     },
     subscribe: (listener) => {
       listeners.add(listener)

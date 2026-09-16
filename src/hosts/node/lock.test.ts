@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { refusalOf } from '../../kernel/testkit'
 
 /**
@@ -56,7 +56,15 @@ afterEach(() => {
   hooks.rm = null
 })
 
-const library = () => mkdtemp(join(tmpdir(), 'paper-lock-'))
+/** A library directory of the case's own, removed when the case finishes —
+ *  however it finishes, and after `afterEach` has put the real `rm` back. Two
+ *  cases never removed theirs, and the rest only on the line after their last
+ *  assertion, so a failing one left its directory behind. */
+const library = async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'paper-lock-'))
+  onTestFinished(() => rm(dir, { recursive: true, force: true }))
+  return dir
+}
 
 /** A record for a holder that is gone: reclamation's own precondition. */
 const staleRecord = () =>
@@ -113,8 +121,6 @@ describe('a reclamation the filesystem will not allow', () => {
     expect((refused as InstanceType<typeof LockHeld>).cause).toMatchObject({ code: 'EPERM' })
     expect(slept.reduce((total, one) => total + one, 0)).toBe(200)
     expect(attempts, 'the reclamation span rather than waiting out its poll').toBeLessThanOrEqual(10)
-
-    await rm(dataDir, { recursive: true, force: true })
   })
 })
 
@@ -166,7 +172,6 @@ describe('two releases in flight at once', () => {
 
     hooks.rm = null
     await other!.release()
-    await rm(dataDir, { recursive: true, force: true })
   })
 
   /* AND A FAILED RELEASE IS STILL RETRYABLE. Latching on the attempt rather
@@ -191,8 +196,6 @@ describe('two releases in flight at once', () => {
     hooks.rm = null
     await mine.release()
     expect((await refusalOf(readFile(path, 'utf8'))).code, 'the lock file is gone').toBe('ENOENT')
-
-    await rm(dataDir, { recursive: true, force: true })
   })
 })
 

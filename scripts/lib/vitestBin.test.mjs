@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { binEntryOf, vitestBin } from './vitestBin.mjs'
 
@@ -47,7 +48,10 @@ describe('vitestBin', () => {
 
   it('goes through the package manifest, which every package must export', () => {
     /* `./package.json` is exported by every package — Node requires it — which
-       is why this survives an `exports` map that drops the bin's own subpath. */
-    expect(vitestBin()).toContain('/vitest/')
+       is why this survives an `exports` map that drops the bin's own subpath.
+       In the host's separator: `path.join` answers in it, and on Windows this
+       read `…\node_modules\vitest\vitest.mjs` and failed against `/vitest/`
+       (2026-09-15) — the same file, spelt the way that platform spells it. */
+    expect(vitestBin()).toContain(`${path.sep}vitest${path.sep}`)
   })
 })

@@ -42,27 +42,42 @@
  * regex it replaces splits `Mr. Smith` too, **and** `'He met Mr. '.split(…).pop()`
  * is `''` — the whole prefix lost — **and** it does not split Chinese at all,
  * because its `\s+` never matches after `。`. So: the segmenter, plus one
- * bounded merge pass for titles and single capital initials, gated to
- * Latin-script locales. No general abbreviation dictionary — that is unbounded,
+ * bounded merge pass — for titles, for single capital initials, and for a
+ * quotation ending in `!` or `?` that runs straight on in lower case — gated to
+ * Latin script: the declared language's, or with none declared the text's own,
+ * and never the machine's. No general abbreviation dictionary — that is unbounded,
  * locale-specific, and a second feature. `sentenceCorpus.ts` records which
  * cases stay uncovered rather than implying none do.
  *
  * ## Completeness is the gate, not a diagnostic
  *
  * > A side of the sentence is complete **iff the segmenter found that boundary
- * > strictly inside the run**. A boundary that coincides with the run's edge —
- * > whatever that edge is — is not evidence of a sentence ending.
+ * > strictly inside the run** — or, where the boundary IS the run's edge, iff
+ * > the caller knows what lies across that edge and the segmenter, reading the
+ * > two as flowing text, breaks exactly at the seam.
  *
- * Uniform and fail-closed, and it subsumes three cases at once: a
- * budget-truncated window, a selection spanning blocks, and `<br>` mid-sentence
- * (`He said,<br>and left.` yields a sentinel `Flattened` cannot tell from
- * `</p>`, so the run ends at `He said,` and the caller must fall back).
+ * Uniform and fail-closed. A budget-truncated window has nothing known across
+ * its edge, so that edge is still no evidence of anything; `He said,<br>and
+ * left.` meets `and left.` across its seam and the segmenter does not break
+ * there, so the run's `He said,` is still declined and the caller falls back.
  *
- * It costs the first and last sentence of every block, which is deliberate:
- * nothing in the run can distinguish `</p>` from `<br>` from a budget cut, and
- * a wrong sentence handed to a model reads exactly like a right one. The
- * caller's fallback is what shipped before this existed, so declining is never
- * a regression — see `SentenceGap`, which is counted rather than shown.
+ * ⚠️ **THIS RULE USED TO COST THE FIRST AND LAST SENTENCE OF EVERY BLOCK**, and
+ * a dialogue paragraph is one sentence long, so in fiction that was most
+ * lookups (phase 17, L8). The argument was that nothing in the run can tell
+ * `</p>` from `<br>` from a budget cut. True, and beside the point: the kind of
+ * edge was never the question. A verse line ending in a comma is a sentence
+ * running ACROSS an edge whichever element made it, and `reefs.` before `</p>`
+ * is one ending AT an edge — and what tells them apart is the text on both
+ * sides, which is this module's question and not the DOM's. Measured: a
+ * paragraph after a paragraph, a closing quote before new dialogue, CJK —
+ * break; a verse comma, a lowercase continuation, `Mr.` at the edge, and
+ * `Chapter 1. Loomings` run into `Call me Ishmael.` — no break, so no answer.
+ *
+ * Only the EDGE is confirmed from across it. The sentence returned is still
+ * inside the run: nothing from the far side of an edge is ever sent.
+ *
+ * The caller's fallback is what shipped before this existed, so declining is
+ * never a regression — see `SentenceGap`, which is counted rather than shown.
  *
  * ⚠️ **AND THE FALLBACK NOW COMES THROUGH HERE TOO**, with the gate off. It has
  * nowhere to decline TO, so the rule above is not available to it; what it
@@ -160,18 +175,37 @@ export type SentenceResult =
 
 export interface SentenceOptions {
   /** A tag already proven to construct a `Segmenter` — see
-   *  `resolveSegmenterLocale`. `undefined` means the host's own locale, and it
-   *  is spelled out because that is a value a caller passes rather than a key
-   *  it omits — `exactOptionalPropertyTypes` tells the two apart. */
+   *  `resolveSegmenterLocale`. `undefined` means the book declares none: ICU
+   *  segments in the host's own locale, and the merge pass reads the text's
+   *  script rather than the host's (`isLatinLocale`). It is spelled out because
+   *  that is a value a caller passes rather than a key it omits —
+   *  `exactOptionalPropertyTypes` tells the two apart. */
   readonly locale?: string | undefined
   readonly maxSentenceChars?: number | undefined
   /**
-   * Whether a boundary at the run's edge disqualifies the sentence (§C1).
+   * What lies across the run's START edge, where the caller knows (phase 17,
+   * L8) — see "Completeness is the gate" above.
+   *
+   * - `undefined` — nothing is known: the window's own budget ended there. A
+   *   sentence starting at the edge is declined, as it always was.
+   * - a string — the readable text before the edge: the previous paragraph, or
+   *   the line before a `<br>`. The sentence may start at the edge iff the
+   *   segmenter breaks exactly where the two meet.
+   * - `null` — nothing that could belong to the sentence lies across it: the
+   *   document starts there, or a heading ends there. Asked the same question,
+   *   with `PROBE` standing in for a sentence that has ended — so a document
+   *   opening mid-sentence in lower case is still not taken at its word.
+   */
+  readonly before?: string | null | undefined
+  /** What lies across the run's END edge — `before`, mirrored. */
+  readonly after?: string | null | undefined
+  /**
+   * Whether a boundary at the run's edge disqualifies the sentence (§C1) unless
+   * the text across it says otherwise — `before` and `after`.
    *
    * TRUE by default, which is the walk's rule and the one this module was
-   * written around: nothing in a run can tell `</p>` from `<br>` from a budget
-   * cut, a wrong sentence handed to a model reads exactly like a right one, and
-   * `sentenceAt` has somewhere to fall back to.
+   * written around: a wrong sentence handed to a model reads exactly like a
+   * right one, and `sentenceAt` has somewhere to fall back to.
    *
    * ⚠️ **FALSE IS FOR THE CALLER THAT HAS NOWHERE TO FALL BACK TO**, and there
    * is exactly one: `sentenceAround`, the fallback itself. Its run is
@@ -219,12 +253,15 @@ export function sentenceOf(
   termEnd: number,
   options: SentenceOptions = {},
 ): SentenceResult {
-  /* Before any work, not after it — see `MAX_RUN_CHARS`. */
-  if (raw.length > MAX_RUN_CHARS) return { ok: false, gap: 'too-long' }
+  /* Before any work, not after it — see `MAX_RUN_CHARS`. What lies across the
+   * edges counts: it is squeezed and segmented too. */
+  if (raw.length + (options.before?.length ?? 0) + (options.after?.length ?? 0) > MAX_RUN_CHARS) {
+    return { ok: false, gap: 'too-long' }
+  }
 
   /* ⚠️ **THE OFFSETS ARE CHECKED, AND THEY USED TO BE TRUSTED.** `squeeze`
-   * clamps whatever it is given — a `termEnd` past the end of `raw` resolves to
-   * `text.length` — so an out-of-range pair did not fail, it silently described
+   * clamped whatever it was given — a `termEnd` past the end of `raw` resolved
+   * to `text.length` — so an out-of-range pair did not fail, it silently described
    * a DIFFERENT term. Under §C1 that mostly ended as a `run-end` gap and was
    * invisible; with `requireComplete: false` the gate is gone, so the same
    * mistake now returns a confident sentence spanning every segment from the
@@ -240,6 +277,15 @@ export function sentenceOf(
     return { ok: false, gap: 'no-term' }
   }
 
+  /* ⚠️ **A CAP THAT IS NOT A WHOLE NUMBER CAPS NOTHING.** `length > NaN` is
+   * false for every length, so `maxSentenceChars: NaN` switched the guard at the
+   * end of this function off and a 1 101-character "sentence" went out. The
+   * offsets' rule: a caller that computed it wrongly is told, not answered — and
+   * told before the work. A negative whole number needs no test of its own:
+   * every sentence is longer than it. Found by audit. */
+  const cap = options.maxSentenceChars ?? MAX_SENTENCE_CHARS
+  if (!Number.isInteger(cap)) return { ok: false, gap: 'too-long' }
+
   const squeezed = squeeze(raw, termStart, termEnd)
   const { text } = squeezed
   if (text === '') return { ok: false, gap: 'empty' }
@@ -253,25 +299,37 @@ export function sentenceOf(
    * and taking only the first would send half of what the reader chose. */
   const first = spanAt(spans, squeezed.termStart)
   const last = spanAt(spans, Math.max(squeezed.termStart, squeezed.termEnd - 1))
-  if (!first || !last) return { ok: false, gap: 'empty' }
-
   const span: Span = { start: first.start, end: last.end }
 
-  /* §C1, and it depends on no `flatten` flag at all. A boundary at the run's
-   * edge is the run ending, which is not the same fact as a sentence ending.
-   * Skipped only for the caller with nothing behind it — see
-   * `requireComplete`, which is the whole argument. */
+  /* §C1. A boundary at the run's edge is the run ending, which is not the same
+   * fact as a sentence ending — unless what lies across the edge is known and
+   * the segmenter breaks at the seam (`before`, `after`). Skipped only for the
+   * caller with nothing behind it — see `requireComplete`, which is the whole
+   * argument. */
   if (options.requireComplete ?? true) {
-    if (span.start <= 0) return { ok: false, gap: 'run-start' }
-    if (span.end >= text.length) return { ok: false, gap: 'run-end' }
+    if (
+      span.start <= 0 &&
+      (options.before === undefined || !breaksBetween(farSide(options.before), text, options.locale))
+    ) {
+      return { ok: false, gap: 'run-start' }
+    }
+    if (
+      span.end >= text.length &&
+      (options.after === undefined || !breaksBetween(text, farSide(options.after), options.locale))
+    ) {
+      return { ok: false, gap: 'run-end' }
+    }
   }
 
+  /* Never empty, so not asked: the span holds the term, and a term is never
+   * empty and never starts or ends on the one thing `trim` removes that the
+   * squeeze kept — a separator (see `squeeze`). It carried a `sentence === ''`
+   * refusal nothing could reach. Found by mutation testing. */
   const sentence = text.slice(span.start, span.end).trim()
-  if (sentence === '') return { ok: false, gap: 'empty' }
   /* Measured on what would actually be SENT, after the trim. A segment carries
    * the whitespace that separates it from the next one, so capping the raw span
    * refused a sentence for characters the model never sees. */
-  if (sentence.length > (options.maxSentenceChars ?? MAX_SENTENCE_CHARS)) {
+  if (sentence.length > cap) {
     return { ok: false, gap: 'too-long' }
   }
   return { ok: true, sentence, term }
@@ -291,20 +349,35 @@ export function sentenceOf(
  * space starts at the word, not at the space. An end lands on the output as it
  * stands the moment the offset is reached, BEFORE any owed space is flushed —
  * so a term followed by a space does not swallow it.
+ *
+ * ⚠️ **AND NEITHER LANDS ON A MANDATORY SEPARATOR AT THE TERM'S EDGE.** U+2028
+ * and U+2029 are EMITTED, unlike a space, so they could be the term: selecting
+ * the separator alone was answered with the sentence before it, and a term
+ * ending on one was sent carrying a character its trimmed sentence does not
+ * contain. A start steps over them as it steps over collapsed space, and an end
+ * stops before any it has just passed. One INSIDE the term is the reader's, and
+ * stays. Found by audit.
  */
 function squeeze(raw: string, termStart: number, termEnd: number): Squeezed {
   let text = ''
   let owedSpace = false
   let pendingStart = false
   let start: number | null = null
-  let end: number | null = null
+  let end = 0
+  /* `text.length`, less any separators `text` currently ends with. */
+  let contentEnd = 0
 
   for (let at = 0; at <= raw.length; at += 1) {
     if (at === termStart) pendingStart = true
-    if (at === termEnd && end === null) end = text.length
+    /* Written exactly once, so there is nothing to fall back to: every `termEnd`
+     * lies in `[0, raw.length]` — `sentenceOf` refuses any other and `farSide`
+     * passes zero — and this loop stops at every offset in that range,
+     * `raw.length` included. It carried `end === null` and `end ?? text.length`,
+     * neither of which anything could reach. Found by audit. */
+    if (at === termEnd) end = contentEnd
     if (at === raw.length) break
 
-    const character = raw[at] ?? ''
+    const character = raw.charAt(at)
     if (character === SOFT_HYPHEN) continue
     if (COLLAPSIBLE.test(character)) {
       /* Owed, not written: a run of whitespace with nothing after it must
@@ -316,41 +389,124 @@ function squeeze(raw: string, termStart: number, termEnd: number): Squeezed {
      * than following one: `line one\u2028line two` must not become
      * `line one \u2028line two`, whose extra space would survive into the
      * sentence either side of it. */
-    if (SEPARATOR.test(character)) owedSpace = false
+    const separator = SEPARATOR.test(character)
+    if (separator) owedSpace = false
     if (owedSpace) {
       text += ' '
       owedSpace = false
     }
-    if (pendingStart) {
+    if (pendingStart && !separator) {
       start = text.length
       pendingStart = false
     }
     text += character
+    if (!separator) contentEnd = text.length
   }
 
   return {
     text,
-    /* Still pending means the term began in whitespace that never emitted, so
-     * it starts where the text ran out — which makes it empty, which is the
-     * `no-term` answer rather than a silently relocated term. */
+    /* Still pending means the term began in whitespace or separators with
+     * nothing kept after them, so it starts where the text ran out — which
+     * makes it empty, which is the `no-term` answer rather than a silently
+     * relocated term. */
     termStart: start ?? text.length,
-    termEnd: end ?? text.length,
+    termEnd: end,
   }
 }
 
-/** The segments, with abbreviation runs merged. */
+/**
+ * A sentence that has ended: the far side of an edge nothing lies across (see
+ * `SentenceOptions.before`). A whole word and a full stop, and NOT an initial —
+ * `INITIAL` would merge `A.` into whatever follows it, and a probe the merge
+ * pass swallows confirms nothing, ever.
+ */
+const PROBE = 'Then.'
+
+/** What lies across an edge, normalised as the run is — `null`, nothing, as `PROBE`. */
+function farSide(side: string | null): string {
+  return side === null ? PROBE : squeeze(side, 0, 0).text
+}
+
+/** A run of them at the start of a string — see `breaksBetween`. */
+const LEADING_SEPARATORS = /^[\u2028\u2029]+/
+
+/**
+ * Whether a sentence boundary falls exactly where `head` meets `tail`, read as
+ * flowing text.
+ *
+ * Through `merged`, not the raw segments: ICU alone breaks after `Mr.` at the
+ * end of one block, and a boundary the merge pass would take back inside a run
+ * is not one to vouch for at a run's edge either. One policy, asked in one
+ * place. An empty side has no seam inside the joined text, so it answers false
+ * without being special-cased.
+ *
+ * Both sides arrive NORMALISED — the run by `sentenceOf`'s own squeeze, a far
+ * side by `farSide`. This used to squeeze both itself, so a run already
+ * squeezed once was squeezed again for every edge it asked about. Found by
+ * audit.
+ */
+function breaksBetween(head: string, tail: string, locale: string | undefined): boolean {
+  /* ⚠️ **NO SPACE BESIDE A MANDATORY SEPARATOR, AND THERE ALWAYS WAS ONE.** ICU
+   * ends a sentence straight AFTER U+2028 or U+2029, so `one.<U+2028>` joined
+   * to `Beta` by a space broke one character before the seam, and an edge the
+   * reader sees as a line break was declined. The separator takes the space's
+   * place — the rule `squeeze` applies inside a run — and a break after the
+   * tail's own leading separators is still the seam's, since nothing else lies
+   * between. Found by audit.
+   *
+   * ⚠️ PAST ALL OF THEM, NOT THE FIRST. Node's ICU breaks after every separator
+   * (UAX #29 SB4), so there counting one and counting all look the same, and
+   * cutting this to the first was proposed on that evidence (2026-09-14). WebKit
+   * on macOS runs the system ICU; an engine that keeps a run of separators
+   * together breaks only after the last, and `sentenceOf.guards.test.ts` stands
+   * one in. */
+  const joint = SEPARATOR.test(head.slice(-1)) || SEPARATOR.test(tail.slice(0, 1)) ? '' : ' '
+  const seam = head.length + joint.length + (tail.length - tail.replace(LEADING_SEPARATORS, '').length)
+  return merged(`${head}${joint}${tail}`, locale).some((span) => span.start === seam)
+}
+
+/** The segments, with abbreviation runs — and a quotation's lowercase
+ *  attribution — merged. */
 function merged(text: string, locale: string | undefined): readonly Span[] {
   const spans = segmentsOf(text, locale)
-  if (!isLatinLocale(locale)) return spans
+  /* A declared language answers for every segment alike, so it is asked once.
+   * With none declared it is `undefined`, and each segment answers for itself —
+   * see `isLatinLocale` for why the machine is never asked instead. */
+  const declared = locale === undefined ? undefined : isLatinLocale(locale)
 
+  // Stryker disable next-line ArrayDeclaration: a first entry that is not a span is never merged into (nothing is owed a merge before the first segment), and both readers — `spanAt` and `breaksBetween` — test a field it does not have, so it is skipped.
   const out: Span[] = []
+  /* What the span last written ends in, asked of the SEGMENT that ended it.
+   *
+   * ⚠️ **IT WAS ASKED OF THE WHOLE MERGED SPAN**, which re-read every character
+   * merged so far at every step: `J. ` twenty-one thousand times is under
+   * `MAX_RUN_CHARS` and took seconds to decline, synchronously, on the selection
+   * path. The segment gives the same answer. The patterns read only a span's
+   * TAIL, and that tail lies inside its last segment — the character before a
+   * title included, because ICU never breaks between `Mr.` or `J.` and a capital
+   * straight after it (UAX #29 SB7), so a segment continuing a merge always
+   * follows a space. Found by audit. */
+  let abbreviated = false
+  let quoted = false
   for (const span of spans) {
-    const previous = out[out.length - 1]
-    if (previous && endsInAbbreviation(text.slice(previous.start, previous.end))) {
-      out[out.length - 1] = { start: previous.start, end: span.end }
-      continue
+    const segment = text.slice(span.start, span.end)
+    if (abbreviated || (quoted && STARTS_LOWER.test(segment))) {
+      out[out.length - 1] = { start: (out[out.length - 1] as Span).start, end: span.end }
+    } else {
+      out.push(span)
     }
-    out.push(span)
+    /* Asked of the segment's TAIL, which is the only part the patterns read.
+     *
+     * ⚠️ **IT WAS THE WHOLE SEGMENT, AND THAT CUT ORDINARY ENGLISH** (found by
+     * review, 2026-09-14): one letter of another script anywhere in the
+     * sentence answered "not Latin", so selecting a word in `He discussed α
+     * with Dr. Smith at noon.` returned `Smith at noon.` — the very failure the
+     * locale fix removed, arriving through a different door. A Greek variable,
+     * a Han name or a quoted foreign word is ordinary text in an English
+     * sentence; what decides is whether THIS abbreviation is a Latin one. */
+    const latin = declared ?? isLatinTail(segment)
+    abbreviated = latin && endsInAbbreviation(segment)
+    quoted = latin && QUOTATION.test(segment)
   }
   return out
 }
@@ -393,18 +549,46 @@ function endsInAbbreviation(segment: string): boolean {
 }
 
 /**
- * Whether the merge pass applies at all.
+ * A quotation or aside ending in `!` or `?` — `"Stop!"`, `(fast!)` — that the
+ * next segment carries on in lower case: `He said, "Stop!" he said.`
+ *
+ * ICU breaks after `!"` whatever follows: UAX #29 keeps a lowercase continuation
+ * with the sentence before it only after a FULL STOP (SB8), so the attribution
+ * came back as a sentence of its own — `he said.`, which is half of one. Bounded
+ * on purpose: a closing mark is required, so `Stop! he said.` with no quotation
+ * stays as ICU split it, and a capital after the quotation is a new sentence as
+ * it always was. The cost of a wrong merge is the one `St.` already buys: one
+ * sentence too long, never one cut in half. Trailing spaces only, not `\s`, for
+ * `TITLE`'s reason. Found by audit.
+ */
+const QUOTATION = /[!?]["'’”»)\]]+ *$/
+const STARTS_LOWER = /^\p{Ll}/u
+
+/**
+ * Whether the merge pass applies to a book that DECLARES `locale`.
  *
  * Gated by SCRIPT rather than by language, because the list above is Latin
  * orthography and nothing else: `。` needs no merge and `Dr.` does not occur.
  * Unknown resolves to false — not merging is exactly what the regex this
  * replaces did, so failing closed here cannot regress anything.
+ *
+ * ⚠️ **IT TOOK `undefined` AND ASKED THE MACHINE.** A book that declares no
+ * language got `new Intl.Segmenter(undefined, …).resolvedOptions().locale` —
+ * the SYSTEM's locale — so whether `Mr.` ended a sentence depended on the
+ * computer the book was read on, not on the book. Measured 2026-09-14 on Windows
+ * 11 set to zh-CN, ICU 78.3: `He met Mr. Smith at noon.` came back as
+ * `Smith at noon.`, and an edge after `He met Mr.` was vouched for as a sentence
+ * boundary; both held on an en-US Mac, and both failed there too under
+ * `LC_ALL=zh_CN.UTF-8`. ICU was not the dependence — it splits after `Mr.` the
+ * same under `undefined`, `en` and `zh-CN`. The lookup was.
+ *
+ * So it takes a declared tag only, and the text answers the rest: with no
+ * language, `merged` asks the tail each segment ends in (`isLatinTail`). The book's
+ * text decides, never the machine.
  */
-function isLatinLocale(locale: string | undefined): boolean {
+function isLatinLocale(locale: string): boolean {
   try {
-    const tag =
-      locale ?? new Intl.Segmenter(undefined, { granularity: 'sentence' }).resolvedOptions().locale
-    const parsed = new Intl.Locale(tag)
+    const parsed = new Intl.Locale(locale)
     /* ⚠️ `und` MAXIMIZES TO `en-Latn-US`. Measured: `new Intl.Locale('und')
      * .maximize().script` is `Latn`, so a book that says "I do not know what
      * language this is" would have had the Latin merge applied to it — the
@@ -419,14 +603,67 @@ function isLatinLocale(locale: string | undefined): boolean {
     if (language === undefined || ['und', 'mul', 'zxx'].includes(language)) return false
     return parsed.maximize().script === 'Latn'
   } catch {
+    /* ⚠️ **UNREACHABLE IN V8, AND THAT IS ONE ENGINE.** `merged` segments under
+     * this tag before asking, and V8 refuses exactly the same tags in
+     * `Intl.Segmenter` and `Intl.Locale` — measured 2026-09-14 over thirty-eight.
+     * WebKit on the system ICU and WebView2 are what run this, and a tag their
+     * segmenter took and their `Intl.Locale` refused would otherwise throw
+     * inside the reader's lookup. It looks dead under Node, and removing it was
+     * proposed on that evidence alone (2026-09-14); `sentenceOf.guards.test.ts`
+     * reaches it through a stand-in engine instead. */
     return false
   }
 }
 
-/** The span holding `offset`, or the last one when the offset is the end. */
-function spanAt(spans: readonly Span[], offset: number): Span | null {
-  for (const span of spans) {
-    if (offset >= span.start && offset < span.end) return span
-  }
-  return spans[spans.length - 1] ?? null
+/** A character of the Latin script: a letter, or one of the Roman numeral
+ *  signs, which are Latin too and are the only non-letters in it. */
+const LATIN = /\p{Script=Latin}/u
+/** A letter of some script other than Latin. `Common` is nobody's script —
+ *  `µ` in `5 µm`, `ʼ`, `ℕ` — so it counts against no text. */
+const OTHER_SCRIPT_LETTER = /(?![\p{Script=Latin}\p{Script=Common}])\p{L}/u
+
+/** The last run of non-space characters, with any spaces after it: `Mr.` of
+ *  `He met Mr.`, `"Stop!"` of `He said, "Stop!"`. `TITLE`, `INITIAL` and
+ *  `QUOTATION` all anchor at the end, so this is everything they can match. */
+const TAIL = /\S+ *$/u
+
+/**
+ * Whether the abbreviation a segment ENDS in is a Latin one — the merge pass's
+ * question when the book declares no language to ask it of.
+ *
+ * Fails closed on both sides, as `isLatinLocale` does: a tail with nothing
+ * Latin in it — digits and punctuation, `"42!"` — is unknown and gets no merge,
+ * and so does one carrying a letter of another script, which keeps a Cyrillic
+ * `А.` or a Greek `Γ.` from being read as a Latin initial even at the end of an
+ * English sentence.
+ *
+ * Asked of the TAIL, never the segment and never the run. Of the segment, one
+ * Greek variable or Han name anywhere in a sentence took the merge away from a
+ * Latin title at its end; of the run, a paragraph holding one foreign word
+ * would lose the merge in every sentence in it.
+ */
+function isLatinTail(segment: string): boolean {
+  /* NO TAIL IS `false`, SAID AS `false`. `TAIL` finds none only when the
+   * segment ends in a line separator, which `\S` does not match — and then no
+   * pattern can match either, since each needs a non-space character before
+   * its trailing spaces. So what this answers there never reaches a merge; it
+   * answered through `?? ''`, whose operand no test could tell from any other
+   * string (found by the final mutation sweep, 2026-09-15). Refused outright,
+   * there is nothing to stand in for. */
+  const tail = TAIL.exec(segment)
+  return tail !== null && LATIN.test(tail[0]) && !OTHER_SCRIPT_LETTER.test(tail[0])
+}
+
+/**
+ * The span holding `offset`.
+ *
+ * Always one: `sentenceOf` asks only about offsets inside a term, a term lies
+ * inside the text, and the spans cover the text end to end from zero — so the
+ * first span ending after `offset` holds it. This returned the last span for an
+ * offset past the end and `null` for no spans, and tested each span's start as
+ * well; `sentenceOf` refused a `null` as `empty`. None of the three could
+ * happen. Found by mutation testing.
+ */
+function spanAt(spans: readonly Span[], offset: number): Span {
+  return spans.find((span) => offset < span.end) as Span
 }

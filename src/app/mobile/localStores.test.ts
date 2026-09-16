@@ -273,6 +273,25 @@ const annotation = (placed: boolean): Annotation =>
     chapter: 'Loomings',
   }) as Annotation
 
+/** A highlight as `Reader` drafts one. */
+const draft = {
+  bookId: 'bk1',
+  cfi: 'epubcfi(/6/4!/2)',
+  sectionIndex: 0,
+  text: 'call me Ishmael',
+  prefix: '',
+  suffix: '',
+  note: '',
+  tint: 'yellow',
+  chapter: 'Loomings',
+} as const
+
+const settled = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+/** Each report as `[what, the error's message]`, so a report with no Error in it shows as itself. */
+const reportsOf = (failed: ReturnType<typeof vi.fn>) =>
+  failed.mock.calls.map(([what, cause]: unknown[]) => [what, cause instanceof Error ? cause.message : cause])
+
 describe('localMarks', () => {
   it('narrows the cross-book list to PLACED annotations before the painter sees it', () => {
     const { store } = markStoreWith({ all: [annotation(true), annotation(false)] })
@@ -300,12 +319,133 @@ describe('localMarks', () => {
     })
     expect(made?.tint).toBe('green')
     expect(made?.style).toBe('fill')
+    expect(made?.kind).toBe('highlight')
     expect(calls).toEqual(['add bk1'])
+  })
+
+  it('hands the painter the same list until the store’s own list changes', () => {
+    /* CACHED BY SOURCE IDENTITY. A new array on every read hands `Marginalia`
+       a new list each render and defeats the memoisation across the seam. */
+    const held: { all: Annotation[] } = { all: [annotation(true), annotation(false)] }
+    const marks = localMarks({ marks: markStoreWith(held).store })
+    const first = marks.all
+    expect(marks.all, 'a fresh array on every look').toBe(first)
+    held.all = [annotation(true)]
+    expect(marks.all, 'the store’s list changed and the painter’s did not').not.toBe(first)
+    expect(marks.all).toHaveLength(1)
+  })
+
+  it('passes the store’s bookmarks, unplaced marks and saving flag straight through', () => {
+    const allBookmarks: MarkSnapshot['allBookmarks'] = []
+    const allUnplaced = [annotation(false)]
+    const marks = localMarks({ marks: markStoreWith({ allBookmarks, allUnplaced, persistent: false }).store })
+    expect(marks.allBookmarks).toBe(allBookmarks)
+    expect(marks.allUnplaced).toBe(allUnplaced)
+    expect(marks.persistent, 'a store that stopped saving must say so').toBe(false)
+  })
+
+  it('subscribes through the store, so a change there wakes the reader', () => {
+    const listeners = new Set<() => void>()
+    const { store } = markStoreWith({})
+    ;(store as unknown as { subscribe: (listener: () => void) => () => void }).subscribe = (listener) => {
+      listeners.add(listener)
+      return () => void listeners.delete(listener)
+    }
+    const woke = vi.fn()
+    const unsubscribe = localMarks({ marks: store }).subscribe(woke)
+    for (const listener of listeners) listener()
+    expect(woke).toHaveBeenCalledOnce()
+    unsubscribe()
+    expect(listeners.size, 'unsubscribing reaches the store').toBe(0)
+  })
+
+  it('reports a removal the store refused, by what it was', async () => {
+    const { store } = markStoreWith({})
+    const refusal = new Error('read-only')
+    ;(store as unknown as { remove: () => Promise<void> }).remove = async () => {
+      throw refusal
+    }
+    const failed = vi.fn()
+    localMarks({ marks: store, failed }).remove({ id: 'm1', bookId: 'bk1' })
+    await settled()
+    expect(failed).toHaveBeenCalledWith('remove a mark', refusal)
+  })
+
+  /* `failed` IS OPTIONAL. Called unguarded it throws inside the refusal, and
+     `add` then rejects where its contract says null. */
+  it('hands back null for a refused highlight even with nobody to tell', async () => {
+    const { store, refuse } = markStoreWith({})
+    refuse(new Error('read-only'))
+    expect(await localMarks({ marks: store }).add(draft)).toBeNull()
+  })
+
+  /* `loadAll` NEVER REJECTS, so `scanFailed` is the only sign a library would
+     not read — reported when it is set, and only then. */
+  it('loadAll reads every book’s marks, and reports a scan that did not finish', async () => {
+    const broken = markStoreWith({ scanFailed: true })
+    const failed = vi.fn()
+    localMarks({ marks: broken.store, failed }).loadAll()
+    await settled()
+    expect(broken.calls).toEqual(['loadAll'])
+    expect(reportsOf(failed)).toEqual([['read every book’s marks', 'the scan did not finish']])
+
+    const fine = markStoreWith({ scanFailed: false })
+    const quiet = vi.fn()
+    localMarks({ marks: fine.store, failed: quiet }).loadAll()
+    await settled()
+    expect(fine.calls).toEqual(['loadAll'])
+    expect(quiet, 'a scan that finished is not a failure').not.toHaveBeenCalled()
+  })
+
+  /* `open` DOES NOT REJECT EITHER: `unreadable` is its only signal, as
+     `scanFailed` is `loadAll`'s. Both read, each reported by what it was. */
+  it('refresh reports a marks file that would not read and a scan that did not finish, and nothing when both did', async () => {
+    const broken = markStoreWith({ bookId: 'bk1', unreadable: true, scanFailed: true })
+    const failed = vi.fn()
+    localMarks({ marks: broken.store, failed }).refresh()
+    await settled()
+    expect(reportsOf(failed)).toEqual([
+      ['re-read this book’s marks', 'this book’s marks file would not read'],
+      ['read every book’s marks', 'the scan did not finish'],
+    ])
+
+    const fine = markStoreWith({ bookId: 'bk1', unreadable: false, scanFailed: false })
+    const quiet = vi.fn()
+    localMarks({ marks: fine.store, failed: quiet }).refresh()
+    await settled()
+    expect(fine.calls).toEqual(['open bk1', 'loadAll'])
+    expect(quiet, 'a book and a library that both read are not failures').not.toHaveBeenCalled()
+  })
+
+  /* ⚠️ **A NOTE WRITE HANDED BACK** (2026-09-14 verify). `setNote` returned
+     nothing while the phone's store saved asynchronously, so the note editor
+     took the note for saved the moment it was handed over, and closed over a
+     write that could still fail — the draft went with it. */
+  it('hands a note write back, so an editor can tell a saved note from a refused one', async () => {
+    const { store } = markStoreWith({})
+    ;(store as unknown as { updateNote: () => Promise<void> }).updateNote = async () => {
+      throw new Error('the disk is full')
+    }
+    const reported: unknown[] = []
+
+    const saving = localMarks({ marks: store, failed: (what, cause) => void reported.push([what, cause]) }).setNote(
+      { id: 'm1', bookId: 'bk1' },
+      'mine',
+    )
+    const cause = await Promise.resolve(saving).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    )
+
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/the disk is full/u)
+    expect(reported, 'and it is still reported').toEqual([['save a note', cause]])
   })
 
   it('returns null when the store refuses, so nothing is painted that is not in the file', async () => {
     const { store, refuse } = markStoreWith({})
-    refuse(new Error('read-only'))
+    const refusal = new Error('read-only')
+    refuse(refusal)
     const failed = vi.fn()
     const made = await localMarks({ marks: store, failed }).add({
       bookId: 'bk1',
@@ -320,6 +460,7 @@ describe('localMarks', () => {
     })
     expect(made).toBeNull()
     expect(failed).toHaveBeenCalledOnce()
+    expect(failed).toHaveBeenCalledWith('make a highlight', refusal)
   })
 
   it('routes remove and setNote by id AND book', () => {

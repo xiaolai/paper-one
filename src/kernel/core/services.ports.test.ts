@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
-import { compareHlc, parseHlc } from './hlc'
-import { monotonicClock } from './services'
+import { ZERO_DEVICE, compareHlc, makeHlc, parseHlc, type Hlc } from './hlc'
+import { createKernelServices, monotonicClock } from './services'
 import { NO_GLOSS, type GlossProvider } from './gloss'
-import { NO_WORK_LINE, type WorkLine } from './ports'
+import { NO_WORK_LINE, type Diagnostics, type WorkLine } from './ports'
+import type { PublicPassage } from './public/envelope'
+import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY } from './settings'
 import { servicesWith, spyRecorder } from './servicesWorld.testkit'
 
 /**
@@ -61,15 +63,15 @@ describe('the companion, gloss and work-line ports', () => {
     const services = servicesWith(spyRecorder().recorder)
     expect(services.gloss()).toBe(NO_GLOSS)
     expect(services.gloss().available).toBe(false)
-    await expect(services.gloss().gloss('word', { sentence: 'a word here', bookTitle: 'X' }, new AbortController().signal)).rejects.toThrow(/no gloss provider/i)
+    await expect(services.gloss().gloss('word', { sentence: 'a word here', bookTitle: 'X', answerIn: [{ tag: 'en', name: 'English', label: 'English' }] }, new AbortController().signal)).rejects.toThrow(/no gloss provider/i)
   })
 
   it('binds a gloss and restores it on dispose', async () => {
     const services = servicesWith(spyRecorder().recorder)
-    const provider: GlossProvider = { available: true, installable: true, gloss: async () => 'a meaning' }
+    const provider: GlossProvider = { available: true, installAt: 'inference:models', gloss: async () => 'a meaning' }
     const unbind = services.bindGloss(provider)
     expect(services.gloss().available).toBe(true)
-    await expect(services.gloss().gloss('w', { sentence: 's', bookTitle: 'X' }, new AbortController().signal)).resolves.toBe('a meaning')
+    await expect(services.gloss().gloss('w', { sentence: 's', bookTitle: 'X', answerIn: [{ tag: 'en', name: 'English', label: 'English' }] }, new AbortController().signal)).resolves.toBe('a meaning')
     unbind.dispose()
     expect(services.gloss()).toBe(NO_GLOSS)
   })
@@ -118,23 +120,13 @@ describe('the companion, gloss and work-line ports', () => {
     const services = servicesWith(spyRecorder().recorder)
     services.bindCompanion(fake('one'))
     expect(() => services.bindCompanion(fake('two'))).toThrow(/already bound/)
-    services.bindGloss({ available: true, installable: true, gloss: async () => 'x' })
-    expect(() => services.bindGloss({ available: true, installable: true, gloss: async () => 'y' })).toThrow(/already bound/)
+    services.bindGloss({ available: true, installAt: 'inference:models', gloss: async () => 'x' })
+    expect(() => services.bindGloss({ available: true, installAt: 'inference:models', gloss: async () => 'y' })).toThrow(/already bound/)
     services.bindWorkLine({ line: () => null, subscribe: () => () => {} })
     expect(() => services.bindWorkLine({ line: () => null, subscribe: () => () => {} })).toThrow(/already bound/)
   })
 })
 
-/**
- * `Look up`, WHICH THE KERNEL OWNS AND TWO CAPABILITIES DRAW.
- *
- * The setting is `kernel.lookUp` on purpose — `ui/lookUp.ts` acts on it — but
- * `scopeSettings` confines a capability to its own namespace at every door,
- * `services.settings` included. So the two panes that draw the control cannot
- * reach the value through a store at all, and reading it through one threw
- * `namespace` on their first render. This accessor is the seam; these cases
- * are what say it behaves.
- */
 /**
  * THE SERVICE HOST'S DISPOSER IS ITS CONTRACT.
  *
@@ -379,6 +371,213 @@ describe('serving a composed set of services', () => {
     services.bindServiceHost((() => ({ dispose: 'soon' })) as never)
     await expect(services.serveServices([])).rejects.toThrow(/no disposer/)
   })
+
+  /* A STALE DISPOSER CANNOT REACH A LATER BINDING of the same function: each
+     bind is its own binding, so the old one's second call finds nothing. */
+  it('lets a disposer that runs again leave a later binding of the same host serving', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    let served = 0
+    const shared: Parameters<typeof services.bindServiceHost>[0] = () => {
+      served += 1
+      return { dispose: () => {} }
+    }
+    const first = services.bindServiceHost(shared)
+    first.dispose()
+    services.bindServiceHost(shared)
+    first.dispose()
+    await services.serveServices([])
+    expect(served, 'a stale disposer unbound the host bound after it').toBe(1)
+  })
+})
+
+/**
+ * WHAT THE UNWINDS SAY, AND TO WHOM.
+ *
+ * The cases above hold that every host is taken down whatever one of them
+ * does. A disposer that fails is not thrown — the original failure outranks it
+ * — so the diagnostics port is the only place it is heard, under the unwind it
+ * happened in. A host that never served, or answered nothing to dispose, has
+ * not failed to dispose anything and is not reported.
+ */
+describe('the dispose failures a serve reports', () => {
+  const recording = () => {
+    const warned: [string, Record<string, unknown> | undefined][] = []
+    const diagnostics: Diagnostics = {
+      child: () => diagnostics,
+      info: () => {},
+      warn: (event, fields) => void warned.push([event, fields]),
+      error: () => {},
+    }
+    return { warned, services: createKernelServices({ fs: null, storage: null, diagnostics }) }
+  }
+  const broken = () => ({
+    dispose: () => {
+      throw new Error('this disposer is broken')
+    },
+  })
+
+  it('reports a disposer that throws while unserving, and nothing for the hosts that disposed', async () => {
+    const { warned, services } = recording()
+    services.bindServiceHost(() => ({ dispose: () => {} }))
+    services.bindServiceHost(broken)
+    const served = await services.serveServices([])
+    served.dispose()
+    expect(warned).toEqual([['services.host-dispose-failed', { where: 'unserve', message: 'this disposer is broken' }]])
+  })
+
+  it('reports it under the rejection it is unwinding, and not the host that rejected', async () => {
+    const { warned, services } = recording()
+    let disposed = 0
+    services.bindServiceHost(() => ({ dispose: () => void (disposed += 1) }))
+    services.bindServiceHost(broken)
+    const refusal = new Error('the socket refused')
+    services.bindServiceHost(async () => {
+      throw refusal
+    })
+    const cause = await services.serveServices([]).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBe(refusal)
+    expect(disposed).toBe(1)
+    expect(warned).toEqual([['services.host-dispose-failed', { where: 'serve-rejected', message: 'this disposer is broken' }]])
+  })
+
+  it('reports it under the refusal of a host with no disposer, which names that host by its place', async () => {
+    const { warned, services } = recording()
+    services.bindServiceHost(broken)
+    services.bindServiceHost((() => ({ dispose: 'soon' })) as never)
+    const cause = await services.serveServices([]).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe('serveServices: a bound service host returned no disposer (host 2 of 2)')
+    expect(warned).toEqual([['services.host-dispose-failed', { where: 'serve-no-disposer', message: 'this disposer is broken' }]])
+  })
+
+  /* A PORT THAT THROWS WHILE REPORTING loses that report to the console and
+     nothing else: every other report is still made, and unserving still does
+     not throw into a teardown that has nothing to do with it. */
+  it('carries on past a diagnostics port that throws, and says so on the console', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const full = new Error('the log is full')
+      const diagnostics: Diagnostics = {
+        child: () => diagnostics,
+        info: () => {},
+        warn: () => {
+          throw full
+        },
+        error: () => {},
+      }
+      const services = createKernelServices({ fs: null, storage: null, diagnostics })
+      const first = new Error('the first disposer is broken')
+      const second = new Error('the second disposer is broken')
+      services.bindServiceHost(() => ({
+        dispose: () => {
+          throw first
+        },
+      }))
+      services.bindServiceHost(() => ({
+        dispose: () => {
+          throw second
+        },
+      }))
+      const served = await services.serveServices([])
+      expect(() => served.dispose()).not.toThrow()
+      const said = 'Paper: the diagnostics port threw while reporting a dispose failure'
+      expect(errors.mock.calls).toEqual([
+        [said, full, first],
+        [said, full, second],
+      ])
+    } finally {
+      errors.mockRestore()
+    }
+  })
+})
+
+/* EMPTY IS THE HONEST DEFAULT: a build with no circle composed has no private
+   audience, and a reader who has shared nothing has shared nothing. */
+describe('the private audience', () => {
+  it('shares nothing with anybody until one is bound, and nothing again once it is gone', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    expect(await services.sharedPrivately('book_x')).toEqual([])
+    const sent = [{ id: 'p1' }] as unknown as PublicPassage[]
+    const unbind = services.bindPrivateAudience(async (bookId) => (bookId === 'book_x' ? sent : []))
+    expect(await services.sharedPrivately('book_x')).toBe(sent)
+    expect(await services.sharedPrivately('book_y')).toEqual([])
+    unbind.dispose()
+    expect(await services.sharedPrivately('book_x')).toEqual([])
+  })
+})
+
+/**
+ * THE NULL-DEFAULT PORTS — device, shelf, sizes.
+ *
+ * Null rather than a stub, because there is no answer an unbound device or
+ * shelf port could give: an empty peer list would be a lie a caller could not
+ * detect. Each is read through the slot per call, restores null on dispose, and
+ * refuses a second binder by the name of the port so the message says which
+ * one.
+ */
+describe('the device, shelf and size ports', () => {
+  it('answer null until bound, the port while bound, and null again once released', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const device = { deviceId: 'this' } as never
+    const shelf = { facts: () => null } as never
+    const sizes = { size: () => null } as never
+    expect([services.devices(), services.shelf(), services.sizes()]).toEqual([null, null, null])
+
+    const bound = [services.bindDevicePort(device), services.bindShelfPort(shelf), services.bindSizePort(sizes)]
+    expect([services.devices(), services.shelf(), services.sizes()]).toEqual([device, shelf, sizes])
+    for (const off of bound) off.dispose()
+    expect([services.devices(), services.shelf(), services.sizes()]).toEqual([null, null, null])
+  })
+
+  /* ONE BINDER AT A TIME, and the refusal names the port — the same message a
+     re-composition that forgot to dispose would read. */
+  it.each([
+    ['bindDevicePort', 'bindDevicePort: the device port is already bound'],
+    ['bindShelfPort', 'bindShelfPort: the shelf port is already bound'],
+    ['bindSizePort', 'bindSizePort: the size port is already bound'],
+    ['bindPrivateAudience', 'bindPrivateAudience: the private-audience port is already bound'],
+  ])('refuses a second %s by name', (bind, message) => {
+    const services = servicesWith(spyRecorder().recorder)
+    const port = (async () => []) as never
+    ;(services[bind as 'bindDevicePort'] as (next: never) => unknown)(port)
+    const cause = (() => {
+      try {
+        ;(services[bind as 'bindDevicePort'] as (next: never) => unknown)(port)
+        return null
+      } catch (error: unknown) {
+        return error
+      }
+    })()
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe(message)
+  })
+})
+
+/**
+ * WHAT A COMPOSITION LEAVES OUT.
+ *
+ * `initialBooks` and `shelfRead` are the composition root's knowledge, and both
+ * have a default that most compositions take: no books, and a shelf that WAS
+ * read. The second matters because "0 books" and "the shelf could not be read"
+ * are one snapshot otherwise — and `shelf.status` is what a peer asks to decide
+ * whether this device is healthy.
+ */
+describe('the services a composition asks for nothing of', () => {
+  it('start on an empty shelf that was read', () => {
+    const services = createKernelServices({ fs: null, storage: null })
+    expect(services.library.getSnapshot()).toEqual([])
+    expect(services.shelfRead()).toBe(true)
+  })
+
+  it('say the shelf was not read when the root says so', () => {
+    expect(createKernelServices({ fs: null, storage: null, shelfRead: false }).shelfRead()).toBe(false)
+  })
 })
 
 /*
@@ -398,7 +597,7 @@ describe('serving a composed set of services', () => {
  * had a system dictionary, it was silently excluded from the cycle and the
  * reader could not select `System dictionary` or `Both` at all.
  *
- * The replacement fact is `GlossProvider.installable`, and it is deliberately
+ * The replacement fact is `GlossProvider.installAt`, and it is deliberately
  * shaped so the same defect cannot recur: it is a REQUIRED field on the object
  * that knows the answer, not an optional argument threaded through a root that
  * has to remember to pass it. `gloss.test.ts` pins the `NO_GLOSS` end and
@@ -507,5 +706,97 @@ describe('the hash port — BLAKE3 by the peer plugin, bound late (WI-23.C5)', (
     expect(() => services.bindHashPort(port)).toThrow(/already bound/u)
     bound.dispose()
     expect(services.hashes()).toBeNull()
+  })
+})
+
+/**
+ * THE SETTINGS STORE IS COMPOSED OVER THE FLAT STORE — AND OVER A MIGRATION.
+ *
+ * `carryLegacySettings` by default, not `keepValues`: the app has a settings
+ * file older than the namespaced keys, and the kernel is where that history is
+ * known. A composition may still supply its own, which is how a host with a
+ * different history reads its own file.
+ */
+describe('the settings store, as composed', () => {
+  /* NO VERSION, which is what the pre-kernel file has — the state a migration
+     is for. An envelope already at `SETTINGS_VERSION` is this build's own and
+     is read as it stands. */
+  const held = (values: Record<string, unknown>) => {
+    const store = new Map<string, string>([[SETTINGS_STORAGE_KEY, JSON.stringify({ values })]])
+    return {
+      store,
+      storage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+      },
+    }
+  }
+
+  it('carries a settings file older than the namespaced keys onto them', () => {
+    const { storage } = held({ theme: 'sage' })
+    const services = createKernelServices({ fs: null, storage })
+    expect(services.settings.get(KERNEL_SETTINGS.theme)).toBe('sage')
+    expect(services.settings.has(KERNEL_SETTINGS.theme)).toBe(true)
+  })
+
+  it('takes the migration the composition hands it instead', () => {
+    const { storage } = held({ theme: 'sage' })
+    const services = createKernelServices({
+      fs: null,
+      storage,
+      settingsMigration: (found) => ({ 'kernel.theme': (found?.values['theme'] === 'sage' ? 'night' : 'paper') as string }),
+    })
+    expect(services.settings.get(KERNEL_SETTINGS.theme)).toBe('night')
+  })
+})
+
+/**
+ * THE LOOKUP HISTORY IS COMPOSED OVER THE STORAGE AND THE CLOCK THE ROOT HANDS IN.
+ *
+ * `createLookups` has a fallback for both — no storage, and stamps from
+ * `Date.now()` — and both fallbacks WORK: a history that lives for the session,
+ * stamped from outside the shared clock. So a composition that forgot either
+ * looks fine until the next launch finds nothing, or a merge reads stamps the
+ * clock never issued. What is asserted is where the record lands and what
+ * stamps it.
+ */
+describe('the lookup history, as composed', () => {
+  const WHARVES = {
+    bookId: 'book_x',
+    cfi: 'epubcfi(/6/4!/4/2/1:0)',
+    chapter: 'One',
+    spelled: 'wharves',
+    sentence: 'The ships lay at the wharves.',
+    gloss: 'Structures along a shore where ships dock.',
+    language: 'en',
+    at: 1,
+  }
+
+  it('keeps it in the storage it was handed, and stamps it with the clock it was handed', async () => {
+    const held = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => held.get(key) ?? null,
+      setItem: (key: string, value: string) => void held.set(key, value),
+    }
+    /* A millisecond no wall clock reads, so a stamp from `Date.now()` cannot pass for one of these. */
+    const handed: Hlc[] = []
+    const clock = (): Hlc => {
+      const stamp = makeHlc(42_000, handed.length, ZERO_DEVICE)
+      handed.push(stamp)
+      return stamp
+    }
+
+    const first = createKernelServices({ fs: null, storage, clock })
+    await first.lookups.record(WHARVES)
+    const written = JSON.parse(held.get('paper.lookups.v1') ?? '[]') as readonly { readonly term: string; readonly updatedAt?: string }[]
+    expect(written.map((row) => row.term)).toEqual(['wharves'])
+    expect(written[0]?.updatedAt).toBe(handed.at(-1))
+
+    /* A SECOND COMPOSITION over the same storage is the next launch. */
+    const second = createKernelServices({ fs: null, storage, clock })
+    expect(second.lookups.getSnapshot().all.map((row) => row.term)).toEqual(['wharves'])
+
+    await second.lookups.remove('wharves')
+    expect(second.lookups.stored().map((row) => row.deletedAt)).toEqual([handed.at(-1)])
   })
 })

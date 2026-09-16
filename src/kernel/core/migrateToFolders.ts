@@ -80,7 +80,11 @@ export interface MigrationOutcome {
 const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v ? v.slice(0, 4000) : undefined
 const num = (v: unknown): number | undefined =>
-  typeof v === 'number' && Number.isFinite(v) ? v : undefined
+  Number.isFinite(v) &&
+  // Stryker disable next-line ConditionalExpression: `Number.isFinite` never coerces, so it is already false for every non-number; this half narrows the type.
+  typeof v === 'number'
+    ? v
+    : undefined
 /* Whole or nothing, never sliced: `str` cuts at 4000, and a shortened path or
  * URL is not a rougher way back to the book — it is one that opens nothing. */
 const origin = (v: unknown): string | undefined =>
@@ -222,7 +226,6 @@ async function migrateOne(
        * through to retry must not undo a rename, a tag or a position the reader
        * has applied since the incomplete record was written. */
       const record = existing ? { ...recordFromRow(row), ...existing } : recordFromRow(row)
-      const name = `book.${record.ext ?? 'epub'}`
 
       // The bytes first, then the cover, then the marks, and the RECORD LAST.
       // A record is what puts a book on the shelf, so writing it last means a
@@ -230,7 +233,7 @@ async function migrateOne(
       // a book missing its content.
       const legacyContent = typeof row.vault === 'string' ? row.vault : null
       const copied = legacyContent
-        ? await copy(fs, legacyContent, contentPathIn(bookId, name))
+        ? await copy(fs, legacyContent, contentPathOf(bookId, record))
         : false
       /* A ROW WITH NO BYTES AND NO WAY BACK TO THEM IS NOT MIGRATED.
        *
@@ -309,18 +312,35 @@ export const DONE_FILE = 'migrated.json'
  * A list of ids, written where the migration can find it and the phase-3 store
  * stays untouched. Being told a book is done outranks looking for its folder.
  */
+/**
+ * ⚠️ **UNREADABLE WAS THE SAME AS ABSENT HERE, AND THE REASON GIVEN WAS FALSE.**
+ * It said the cost of being wrong is re-migrating a book that is already
+ * migrated, which is idempotent because the folder check below catches it. The
+ * folder check cannot catch the one case this function was written for: a book
+ * migrated, then REMOVED, has no folder, and once the fortnight of trash is up
+ * it has no trash entry either — so this list is the only thing that remembers
+ * it. Bytes that would not parse read as "nothing carried across", the book was
+ * copied back out of the phase-3 store and put on the shelf, and then the run
+ * wrote its own set over the bytes it could not read, taking the record of
+ * every earlier migration with it. The explanation sat directly above the
+ * paragraph that refutes it. Found by the 2026-09-13 audit.
+ *
+ * ABSENT IS STILL THE EMPTY LIST — the `exists` probe is what tells the two
+ * apart, and a first run has nothing here. Everything else raises, which
+ * `bootShelf` already reports as "could not carry the previous library across"
+ * and boots past, leaving the phase-3 files untouched for the next attempt.
+ */
 async function readDone(fs: VaultFs): Promise<Set<string>> {
+  if (!(await fs.exists(DONE_FILE))) return new Set()
+  const raw = new TextDecoder().decode(await fs.readFile(DONE_FILE))
+  let parsed: unknown
   try {
-    if (!(await fs.exists(DONE_FILE))) return new Set()
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(await fs.readFile(DONE_FILE)))
-    if (!Array.isArray(parsed)) return new Set()
-    return new Set(parsed.filter((one): one is string => typeof one === 'string'))
-  } catch {
-    /* Unreadable is the same as absent HERE, and only here: the cost of being
-     * wrong is re-migrating a book that is already migrated, which is idempotent
-     * — the folder check below still catches it. */
-    return new Set()
+    parsed = JSON.parse(raw)
+  } catch (cause) {
+    throw new Error(`${DONE_FILE} is not JSON`, { cause })
   }
+  if (!Array.isArray(parsed)) throw new Error(`${DONE_FILE} is not a list`)
+  return new Set(parsed.filter((one): one is string => typeof one === 'string'))
 }
 
 export async function migrateToFolders(
@@ -346,6 +366,7 @@ export async function migrateToFolders(
      * and `url_x_a` are two strings and one directory. Comparing them verbatim
      * distinguished names the filesystem does not, which let exactly the
      * collision this check exists for through. */
+    // Stryker disable next-line MethodExpression: `folderOf` answers ASCII letters, digits, `_` and `/` alone, so folding either way groups exactly the same names.
     const folder = folderOf(bookId).toLowerCase()
     const owner = claimed.get(folder)
     if (owner !== undefined && owner !== bookId) {
@@ -383,9 +404,21 @@ export async function migrateToFolders(
   return outcomes
 }
 
+/**
+ * Where a record's content is kept in its own folder.
+ *
+ * ONE RULE for the copy and for the check that the copy arrived. It was spelled
+ * twice, once for each, and a fallback that changed in one of them would have
+ * copied bytes to a name `hasBytes` never looks at — a finished book retried on
+ * every launch.
+ */
+function contentPathOf(bookId: string, record: BookRecord): string {
+  return contentPathIn(bookId, `book.${record.ext ?? 'epub'}`)
+}
+
 /** Whether a record's own folder actually holds the book it describes. */
 async function hasBytes(fs: VaultFs, bookId: string, record: BookRecord): Promise<boolean> {
-  return fs.exists(contentPathIn(bookId, `book.${record.ext ?? 'epub'}`))
+  return fs.exists(contentPathOf(bookId, record))
 }
 
 /**

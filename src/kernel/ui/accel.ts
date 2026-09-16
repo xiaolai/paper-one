@@ -1,6 +1,6 @@
 import type { Platform } from '../core/metrics'
 import { PANE_SHORTCUTS } from './panes'
-import { paneFits, type KernelPaneId, type PaneId, type Screen } from './state'
+import { paneAvailable, paneFits, type KernelPaneId, type PaneId, type Screen } from './state'
 
 /**
  * What ⌘-and-a-key means, as a value.
@@ -45,14 +45,37 @@ export type AccelAction =
   | { readonly kind: 'closePane' }
   | { readonly kind: 'jumpBack' }
   | { readonly kind: 'jumpForward' }
+  /**
+   * Look up the selection — ⌃⌘D on macOS, Ctrl+Shift+D elsewhere (phase 17,
+   * L4). See `bind` for why the two platforms need two chords.
+   */
+  | { readonly kind: 'lookUp' }
   /** Ctrl+Q, where there is no application menu to own it — see the map. */
   | { readonly kind: 'quit' }
+  /**
+   * A HELD KEY'S REPEAT: TAKEN, AND NOTHING DONE — see `REPEATABLE`.
+   *
+   * ⚠️ **NOT `null`, AND IT WAS.** `null` hands the key to the platform, so a
+   * suppressed repeat came back indistinguishable from an unbound key: the
+   * first press was Paper's and was consumed, and every repeat after it went
+   * to whatever the webview does with that combo. A key belongs to one owner
+   * for as long as it is held. Found by the 2026-09-13 audit.
+   *
+   * ⚠️ **AND THAT FIX STOPPED AT THE FIRST REPEAT** (round 3, #86): whether a
+   * repeat was taken was still asked of the binding as it stood at the repeat,
+   * and a press can change that answer itself — see `pressTaken`.
+   */
+  | { readonly kind: 'held' }
 
 /** What the accelerator map needs to know about the moment the key arrived. */
 export interface AccelContext {
   /**
-   * Which chrome the window has. Only Ctrl+Q reads it: macOS has a menu whose
-   * Quit item owns ⌘Q, and the other two have nothing.
+   * Which chrome the window has — and so what Control is. Three things read
+   * it: Ctrl+Q (macOS has a menu whose Quit item owns ⌘Q, and the other two
+   * have nothing), Look up (⌃⌘D on a Mac, Ctrl+Shift+D elsewhere), and the
+   * letters' modifier guard (Control is an extra modifier on a Mac and the
+   * accelerator everywhere else). This said "only Ctrl+Q reads it" until the
+   * 2026-09-13 audit — true until Look up arrived.
    */
   readonly platform: Platform
   readonly screen: Screen
@@ -91,6 +114,27 @@ export interface AccelContext {
    */
   readonly developer?: boolean
   readonly hiddenPanes?: readonly string[]
+  /**
+   * Whether Look up has a selection and something to act with — `LookUp.press`
+   * being non-null, which is also what decides whether the palette offers the
+   * row. Absent is false: the key is left to the platform, which on macOS is
+   * the system's own Look Up.
+   */
+  readonly canLookUp?: boolean
+  /**
+   * Whether the press a REPEAT belongs to was taken — resolved to an action
+   * rather than left to the platform. Read only on a repeat; absent is false.
+   * `App` remembers it per physical key, from the first keydown to its keyup.
+   *
+   * ⚠️ **ASKED OF THE PRESS, BECAUSE THE PRESS CHANGES THE ANSWER** (2026-09-13
+   * audit, #86, round 3). A repeat used to be resolved like a first press and
+   * then suppressed, so its owner was whatever the binding said at THAT moment
+   * — and ⌘D marks the selection, marking clears it, and from the next repeat
+   * on `hasSelection` was false: `null`, and the rest of the hold went to the
+   * platform. ⌘[ on the press that empties the stack did the same. The first
+   * press decides who owns the key; nothing it does can hand the key on.
+   */
+  readonly pressTaken?: boolean
 }
 
 /**
@@ -126,6 +170,10 @@ export function canKeepPlace(context: Pick<AccelContext, 'onReader' | 'canBookma
  * back through the jump stack are real gestures with a real result at each
  * repeat; the reducer clamps and the stack bottoms out, so neither needs a
  * guard here.
+ *
+ * A SUPPRESSED REPEAT IS STILL TAKEN — it resolves to `held`, never to `null`.
+ * See `held`. And a walk that has run out mid-hold — the stack bottomed out
+ * under ⌘[ — is `held` too, rather than handed on: see `pressTaken`.
  */
 const REPEATABLE: ReadonlySet<AccelAction['kind']> = new Set(['stepBy', 'jumpBack', 'jumpForward'])
 
@@ -133,43 +181,73 @@ const REPEATABLE: ReadonlySet<AccelAction['kind']> = new Set(['stepBy', 'jumpBac
  *  `code` and not a `key`. */
 const DEVELOPER_CODE = 'KeyD'
 
-export function resolveAccel(
-  event: {
-    readonly key: string
-    readonly repeat: boolean
-    readonly shiftKey?: boolean
-    readonly ctrlKey?: boolean
-    readonly altKey?: boolean
-    readonly code?: string
-  },
-  context: AccelContext,
-): AccelAction | null {
-  const action = bind(event, context)
-  if (action === null) return null
-  return event.repeat && !REPEATABLE.has(action.kind) ? null : action
+/**
+ * One keydown, as much of it as the map reads.
+ *
+ * ONE SHAPE FOR BOTH FUNCTIONS. `bind` spelled it out a second time, without
+ * `repeat`, so a modifier the map started reading had two places to be added.
+ */
+interface AccelEvent {
+  readonly key: string
+  readonly repeat: boolean
+  readonly shiftKey?: boolean
+  readonly ctrlKey?: boolean
+  readonly altKey?: boolean
+  readonly metaKey?: boolean
+  readonly code?: string
 }
 
-function bind(
-  event: {
-    readonly key: string
-    readonly shiftKey?: boolean
-    readonly ctrlKey?: boolean
-    readonly altKey?: boolean
-    readonly code?: string
-  },
-  context: AccelContext,
-): AccelAction | null {
+export function resolveAccel(event: AccelEvent, context: AccelContext): AccelAction | null {
+  const action = bind(event, context)
+  if (!event.repeat) return action
+  /* A REPEAT BELONGS TO WHOEVER TOOK THE PRESS — see `pressTaken`. Paper's:
+     a walk walks on, and everything else, including a binding the press itself
+     has since switched off, is `held`. The platform's: it stays the
+     platform's, whatever became bindable while the key was down. */
+  if (context.pressTaken !== true) return null
+  return action !== null && REPEATABLE.has(action.kind) ? action : { kind: 'held' }
+}
+
+/* Without `repeat`: whether a press repeated is `resolveAccel`'s question,
+   asked of the binding this returns. */
+function bind(event: Omit<AccelEvent, 'repeat'>, context: AccelContext): AccelAction | null {
   /* CAPS LOCK IS NOT SHIFT. With it latched, `key` for ⌘B is 'B', and every
-   * letter shortcut here went dead — while ⇧⌘B stays a different (unbound)
-   * combo, which is why the lowercase applies only when shift is UP. The
-   * shifted spellings the size steps bind ('+', '_') are unaffected: they
-   * arrive with shift down and pass through as themselves. */
-  const key = event.key.length === 1 && event.shiftKey !== true ? event.key.toLowerCase() : event.key
+   * letter shortcut here went dead. So a key is read in lower case, whatever
+   * case it arrived in; the shifted spellings the size steps bind ('+', '_')
+   * have no case to lose.
+   *
+   * ⚠️ **WHATEVER CASE, AND IT WAS ONLY A SINGLE CHARACTER WITH SHIFT UP**
+   * (2026-09-14). Neither condition could change an answer, and the mutation
+   * sweep said so. ⇧⌘B stays a different combo because `plain` below refuses
+   * Shift for every letter — the case never stood for Shift, since an engine
+   * may report `b` with Shift down — and no case below names a key longer than
+   * one character. One that does (`Escape`) must spell it in lower case, which
+   * its own test says the first time it runs. */
+  const key = event.key.toLowerCase()
+
+  /* ⚠️ **FOUR MODIFIERS, AND EVERY ONE IS READ — META WAS NOT** (2026-09-13
+   * audit, #85, round 3). The accelerator is `App`'s to check before asking: ⌘
+   * on a Mac, Control elsewhere. Shift and Option are what a layout types a
+   * character with. The fourth is neither — Control on a Mac, Meta (⊞, Super)
+   * everywhere else — and no layout on any platform types with it, so a combo
+   * carrying it is somebody else's: ⌃⌘Q locks a Mac, ⊞ belongs to the Windows
+   * shell. Round 1 closed Control on a Mac for the letters and left Meta off a
+   * Mac unread, so Ctrl+⊞+Q closed the window on Windows and Ctrl+Alt+⊞+D
+   * toggled developer options. The two chords below are the only bindings that
+   * mention it, and each names it exactly; nothing after them takes it. */
+  const mac = context.platform === 'macos'
+  const shift = event.shiftKey === true
+  const alt = event.altKey === true
+  const control = event.ctrlKey === true
+  const stray = mac ? control : event.metaKey === true
 
   /* ⚠️ **BEFORE THE SWITCH, AND IT HAS TO BE.** `d` is already bound — ⌘D marks
-   * the selection — and nothing below reads `ctrlKey` or `altKey`, so ⌘⌃⌥D
-   * would fall through and mark instead. Matched here, exclusively, so the
+   * the selection — and nothing below read `ctrlKey` or `altKey`, so ⌘⌃⌥D
+   * fell through and marked instead. Matched here, exclusively, so the
    * four-key chord means one thing and the two-key one still means what it did.
+   * Since the 2026-09-13 audit what follows does read them, and a ⌘⌃⌥D that
+   * reached it would be refused rather than marked — so the order is now what
+   * lets the chord bind at all, rather than what stops it marking.
    *
    * ⚠️ **`code`, NOT `key`, AND THE FIRST VERSION GUESSED AT `key`.** It
    * compared against a set spelling the character three ways — `d`, `D`, and
@@ -187,39 +265,105 @@ function bind(
    * compares `key` everywhere else, and that is the trade: the rest of the map
    * binds single keys under one modifier, where `key` is exactly right, and
    * this is the only chord that stacks three. */
-  if (event.ctrlKey === true && event.altKey === true && event.code === DEVELOPER_CODE) {
+  /* EXACTLY THESE MODIFIERS. Shift was never read, so ⇧ added to the chord
+     was still the chord (2026-09-13 audit). Control and Option beside the
+     accelerator — which off a Mac IS Control — so on a Mac the stray modifier
+     is part of the chord, and off one it is refused (round 3, #85). */
+  /* AND OFF A MAC THE KEY MUST BE THE PLAIN LETTER: AltGr types with Control and
+     Alt there, and on a layout where AltGr+D types a character (Hungarian: đ),
+     `key` is that character — which is typing, not this chord (2026-09-14). */
+  if (event.code === DEVELOPER_CODE && control && alt && !shift && (mac || (!stray && key === 'd'))) {
     return { kind: 'toggleDeveloper' }
   }
 
+  /* ⌃⌘D — LOOK UP — AND THE SAME TRAP AS THE CHORD ABOVE: `d` is ⌘D below, so
+   * this is matched first and exclusively, on the physical key.
+   *
+   * TWO SPELLINGS, BECAUSE THE PLATFORMS DISAGREE ABOUT WHAT CONTROL IS. On
+   * macOS ⌃⌘D is the system's own Look Up chord, which a Mac reader already
+   * knows — binding the same meaning to it is the point. Elsewhere the
+   * accelerator IS Control, so "Control and the accelerator" is one key and the
+   * chord would collapse into ⌘D; Ctrl+Alt+D is already the developer chord
+   * there. Shift is the free modifier, and `comboFor` prints it as such.
+   *
+   * WITH NOTHING TO LOOK UP THE KEY IS LEFT ALONE, which on macOS hands it back
+   * to the platform's Look Up rather than swallowing it to do nothing.
+   *
+   * AND NO THIRD MODIFIER: ⇧⌃⌘D on a Mac looked up too, until the 2026-09-13
+   * audit. Off a Mac Control is the accelerator, which `App` has checked — and
+   * Meta is the stray, which Ctrl+Shift+⊞+D carried unread until round 3. */
+  if (event.code === DEVELOPER_CODE && !alt && (mac ? control && !shift : shift && !stray)) {
+    return context.canLookUp === true ? { kind: 'lookUp' } : null
+  }
+
+  /* ⚠️ **ALTGR IS CONTROL AND ALT OFF A MAC** (2026-09-14). Chromium on Windows —
+   * and so WebView2 — reports AltGr as `ctrlKey` and `altKey` together, with
+   * `key` the character it types. Control is the accelerator there and Alt was
+   * left free for a layout, so on a German layout AltGr+8, which types `[`,
+   * arrived as Ctrl+Alt+[ and jumped back instead of typing the bracket. Off a
+   * Mac, Control with Alt is a character being typed, and binds nothing: the
+   * developer chord above is the one binding that names Alt there, and it takes
+   * only the plain letter.
+   *
+   * GROUPED AS THE ONE KEY THEY ARE. Ungrouped, the platform test paired with
+   * Control, and `(!mac || control) && alt` — the halves regrouped — differed
+   * only for an event with no accelerator, which `App` never asks about. */
+  if (!mac && (control && alt)) return null
+
+  /* NOTHING BELOW TAKES THE STRAY MODIFIER — letter, character or digit. The
+     characters are free of Shift and Option on purpose (see `plain`), and that
+     reason does not reach this one: it types nothing on any layout. */
+  if (stray) return null
+
   const digit = PANE_SHORTCUTS.find((entry) => entry.digit === key)
+
+  /* ⚠️ **A LETTER IS BOUND UNDER THE ACCELERATOR ALONE**, and nothing in the
+   * switch below read a modifier — so ⌥⌘B, ⌃⌘L and Ctrl+Alt+Q, which closes the
+   * window, all took a letter's binding. Shift had only the case-keeping that
+   * sat above standing for it, which holds only on an engine that reports a shifted
+   * letter in upper case; one reporting `b` for ⇧⌘B bookmarked. Found by the
+   * 2026-09-13 audit.
+   *
+   * THE LETTERS ONLY, and that is the rule rather than a first step. Every
+   * other key here is a CHARACTER, and which modifiers produce one is the
+   * layout's business: ⌘+ is ⇧= on a US board, a digit is shifted on AZERTY,
+   * `[` is ⌥5 on a German Mac. `key` already names the character, so refusing
+   * a modifier there would unbind the combo on exactly the layouts that need
+   * one. A Latin letter needs none on any of them. The fourth modifier was
+   * refused above for every key, which is why it is not named here. */
+  const plain = !shift && !alt
 
   switch (key) {
     case 'k':
-      return { kind: 'togglePalette' }
+      return plain ? { kind: 'togglePalette' } : null
+    /* NOT WHERE THERE IS NO PANE — see `paneAvailable`. Resolved on a
+       contributed screen, the key was taken in order to do nothing, which is
+       what `null` exists to prevent (2026-09-13 audit). */
     case '\\':
-      return { kind: 'togglePane' }
+      return paneAvailable(context.screen) ? { kind: 'togglePane' } : null
     /* UP ONE LEVEL, the same toggle the titlebar button and the palette entry
        do. Bound because the button's tooltip names it, and a tooltip naming a
        key nothing binds is the app describing a feature it does not have. */
     case 'l':
-      return { kind: 'toggleScreen' }
+      return plain ? { kind: 'toggleScreen' } : null
     case 'd':
-      return context.hasSelection ? { kind: 'markSelection' } : null
+      return plain && context.hasSelection ? { kind: 'markSelection' } : null
     /* ⌘B: keep this place, or give it back. Only where a place can be pinned
        down, on exactly the reasoning ⌘D and ⌘T are guarded by. */
     case 'b':
-      return canKeepPlace(context) ? { kind: 'toggleBookmark' } : null
+      return plain && canKeepPlace(context) ? { kind: 'toggleBookmark' } : null
     /* ⌘T: the tags of the book being read — the palette's "Tags for this
        book…". Only when there is such a book. */
     case 't':
-      return context.hasBook ? { kind: 'editTags' } : null
+      return plain && context.hasBook ? { kind: 'editTags' } : null
     /*
      * ⌘[ and ⌘] — back to where you were, and forward again.
      *
-     * NOT IN `TOGGLES`, deliberately. Holding ⌘[ to walk back several jumps is
-     * a real gesture with a real result at each repeat, exactly as the size
-     * steps below are, and the stack bottoms out on its own — `goBack` returns
-     * null on an empty one rather than throwing or wrapping.
+     * IN `REPEATABLE`, deliberately — this said "not in `TOGGLES`", naming the
+     * list `REPEATABLE` replaced, until the 2026-09-13 audit. Holding ⌘[ to walk
+     * back several jumps is a real gesture with a real result at each repeat,
+     * exactly as the size steps below are, and the stack bottoms out on its own
+     * — `goBack` returns null on an empty one rather than throwing or wrapping.
      *
      * Guarded, so an empty stack leaves the combo to the platform rather than
      * swallowing it to do nothing.
@@ -239,7 +383,7 @@ function bind(
      * did. On macOS the key is left to the platform, which already has it.
      */
     case 'q':
-      return context.platform === 'macos' ? null : { kind: 'quit' }
+      return context.platform === 'macos' || !plain ? null : { kind: 'quit' }
     /*
      * §09's reading sizes, on the combo every reader already knows.
      *
@@ -259,8 +403,6 @@ function bind(
       return { kind: 'stepBy', delta: -1 }
     case '0':
       return { kind: 'resetStep' }
-    default:
-      break
   }
 
   /* NOT ON A SCREEN THAT HAS NO SUCH PANEL. `openPane` falls back rather than
@@ -271,6 +413,7 @@ function bind(
     !digit ||
     !paneFits(context.screen, digit.pane, {
       developer: context.developer ?? false,
+      // Stryker disable next-line ArrayDeclaration: a default naming no panel hides nothing, exactly as the empty one does.
       hiddenPanes: context.hiddenPanes ?? [],
     })
   ) {

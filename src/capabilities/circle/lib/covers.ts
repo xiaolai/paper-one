@@ -23,12 +23,27 @@ import { CIRCLE_SERVICES, parseCoverAnswer } from './protocol'
 
 export const COVER_CAP_MAX_MB = 1024
 
-/** How much of the disk the circle's jackets may take, in MiB — the same shape as the satchel's cover cap. */
-/* Stryker disable StringLiteral,ConditionalExpression: the key is refused at load by `defineSetting`, so the module cannot be imported with another; a non-number never passes `isSafeInteger`. */
+/**
+ * How much of the disk the circle's jackets may take, in MiB — the same shape
+ * as the satchel's cover cap.
+ *
+ * ⚠️ **THE WHOLE PARSE WAS DISABLED, AND ONE CLAUSE OF IT NEEDED TO BE.** The
+ * key and every bound are asserted by `names its index, its setting and the
+ * setting's bounds`, so seven of the eight mutants the directive covered were
+ * already dying (2026-09-14 mutation debt). `isSafeInteger` runs FIRST so the
+ * one clause that decides nothing stands alone, under a directive that reaches
+ * only it.
+ */
+// Stryker disable next-line StringLiteral: an empty key makes `defineSetting` throw while this module is imported, so every covering suite fails to load and Stryker's vitest runner reports it Survived (verified by hand 2026-09-14) — the key itself is asserted by the test named above.
 export const COVER_CAP_SETTING: Setting<number> = defineSetting('circle.coverCapMB', 64, (raw) =>
-  typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 && raw <= COVER_CAP_MAX_MB ? raw : undefined,
+  Number.isSafeInteger(raw) &&
+  // Stryker disable next-line ConditionalExpression: `isSafeInteger` is true only for a number, so this clause narrows the type for the two below and refuses nothing that reached it.
+  typeof raw === 'number' &&
+  raw > 0 &&
+  raw <= COVER_CAP_MAX_MB
+    ? raw
+    : undefined,
 )
-/* Stryker restore StringLiteral,ConditionalExpression */
 
 export const COVER_INDEX_PATH = 'circle/covers.json'
 
@@ -129,7 +144,7 @@ interface CoverCache {
   purge(person: string): Promise<void>
 }
 
-function createCoverCache({ fs, now, capBytes }: Pick<CoverFetchDeps, 'fs' | 'now' | 'capBytes'>): CoverCache {
+function createCoverCache({ fs, now, capBytes, warn }: Pick<CoverFetchDeps, 'fs' | 'now' | 'capBytes' | 'warn'>): CoverCache {
   /* How many times each person has been purged — the fence a fetch that was
      on its way when the purge ran is measured against before it keeps. */
   const purges = new Map<string, number>()
@@ -143,15 +158,41 @@ function createCoverCache({ fs, now, capBytes }: Pick<CoverFetchDeps, 'fs' | 'no
     return next
   }
 
+  /**
+   * The index, or a THROW for one that is there and will not read.
+   *
+   * ⚠️ **ABSENT IS EMPTY; DAMAGED IS NOT, AND THIS ANSWERED BOTH THE SAME.** A
+   * stored `[]` — or `null`, or a number — read as no entries, and every caller
+   * here is a read-modify-write, so the next jacket touched wrote an index
+   * holding that one alone: every tracked cover and the cap's accounting gone,
+   * and their files left on disk where the cap could no longer see them. Found
+   * by the 2026-09-13 verify. Bytes that were not JSON threw already, but
+   * unnamed. A malformed ENTRY is still dropped alone, below.
+   */
   const readIndex = async (): Promise<CoverIndex> => {
     const out: CoverIndex = Object.create(null) as CoverIndex
     if (!(await fs.exists(COVER_INDEX_PATH))) return out
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(await fs.readFile(COVER_INDEX_PATH)))
-    // Stryker disable next-line ConditionalExpression: a number or a word has no entries to walk; the type check spells out what the walk finds.
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return out
+    const bytes = await fs.readFile(COVER_INDEX_PATH)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(bytes))
+    } catch (cause) {
+      throw new Error(`${COVER_INDEX_PATH} is not JSON`, { cause })
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error(`${COVER_INDEX_PATH} is not an index of jackets`)
+    }
     for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
-      // Stryker disable next-line ConditionalExpression: a word has no `size`, so the check below drops it anyway.
-      if (typeof raw !== 'object' || raw === null) continue
+      /* `null` FIRST, because it is the half that has to be caught here:
+         `typeof null` is `'object'`, so a null read past this line is a
+         property read on null, which throws where a damaged entry should
+         simply be dropped. */
+      if (
+        raw === null ||
+        // Stryker disable next-line ConditionalExpression: a value that is not an object has no numeric `size` either, so the check below drops it anyway.
+        typeof raw !== 'object'
+      )
+        continue
       const entry = raw as Record<string, unknown>
       /* A FINITE use: `1e400` is valid JSON and parses to infinity, and a
          difference of two infinities is `NaN`, which sorts nowhere. */
@@ -186,9 +227,8 @@ function createCoverCache({ fs, now, capBytes }: Pick<CoverFetchDeps, 'fs' | 'no
       total -= entry.size
     }
   }
-  /** Index a verified jacket and make room — inside the serialisation. */
-  const keepIndexed = async (key: string, size: number): Promise<void> => {
-    const index = await readIndex()
+  /** Index a verified jacket in an index already read, and make room — inside the serialisation. */
+  const keepIndexed = async (index: CoverIndex, key: string, size: number): Promise<void> => {
     index[key] = { size, usedAt: now() }
     /* Room made on EVERY touch, not only after a download: an index rebuilt
        from what was on disk, or a cap lowered in Settings, was otherwise over
@@ -211,7 +251,15 @@ function createCoverCache({ fs, now, capBytes }: Pick<CoverFetchDeps, 'fs' | 'no
            jacket in a folder that is gone. */
         if (purgesOf(person) !== fence) return null
         const path = coverPathOf(person, digest)
-        if (!(await fs.exists(path))) return null
+        if (!(await fs.exists(path))) {
+          /* ⚠️ **A MISS IS ABOUT TO BECOME A DOWNLOAD, SO THE INDEX IS ASKED
+             FIRST.** Over an index that will not read, the fetch went ahead:
+             charged to the friend's budget, written to disk, and only then
+             refused at `keepIndexed` — a jacket kept where the cap could never
+             see it, once per digest. Read here it throws before the wire. */
+          await readIndex()
+          return null
+        }
         const bytes = await fs.readFile(path)
         /* Verified as it is drawn, as it was verified when it landed: a write
            cut short, or a file changed on disk, is not the jacket its digest
@@ -224,7 +272,7 @@ function createCoverCache({ fs, now, capBytes }: Pick<CoverFetchDeps, 'fs' | 'no
           await writeIndex(index)
           return null
         }
-        await keepIndexed(`${person}/${digest}`, bytes.length)
+        await keepIndexed(await readIndex(), `${person}/${digest}`, bytes.length)
         return bytes
       }),
     keep: (person, digest, bytes, fence) =>
@@ -233,22 +281,78 @@ function createCoverCache({ fs, now, capBytes }: Pick<CoverFetchDeps, 'fs' | 'no
            WAY.** A keep after it wrote the person's folder back into being
            around one picture, and an index entry with it. */
         if (purgesOf(person) !== fence) return false
+        /* ⚠️ **THE INDEX IS READ BEFORE THE JACKET IS WRITTEN, AND IT WAS READ
+           AFTER.** The miss asked it before the wire, but an index that read
+           then and fails now — damaged, or merely busy, while the bytes were on
+           their way — threw with the jacket already on disk and no entry naming
+           it: a file the cap could never see (2026-09-14 verify).
+
+           ⚠️ **AND THE CHARGE STANDS, DELIBERATELY.** The bytes crossed the wire
+           before the index failed, and the budget counts what crossed. `charge`
+           has no inverse, and one that refunded here would let an index failing
+           at the keep buy transfer after transfer off a friend's budget; an
+           index that STAYS unreadable is refused at the next miss, before the
+           wire, which is what spares the budget. */
+        const index = await readIndex()
+        const path = coverPathOf(person, digest)
         /* Atomic, as every file the capability keeps is: a write cut short
-           by a crash must not leave half a jacket under a whole digest. */
+           by a crash must not leave half a jacket under a whole digest. SPELLED
+           OUT rather than `path`: the capability fs footprint
+           (`scripts/capability-fs-footprint.test.mjs`) reviews every raw write
+           by what it names, and `path` names nothing a reviewer can read. */
         await atomicWrite(fs, coverPathOf(person, digest), bytes)
-        await keepIndexed(`${person}/${digest}`, bytes.length)
+        try {
+          await keepIndexed(index, `${person}/${digest}`, bytes.length)
+        } catch (cause) {
+          /* The jacket has to land before the entry that names it, so a failure
+             after it is UNDONE — left, it is the same unseen file by another
+             route.
+
+             ⚠️ **AND AN UNDO THAT FAILS IS SAID, NOT SWALLOWED.** It was
+             `.catch(() => {})`, so a removal that failed as well left the jacket
+             on disk, unindexed, with only the index error reported (2026-09-14
+             verify). Both go up together, so whoever warns says a jacket was
+             left behind. */
+          try {
+            await fs.remove(path)
+          } catch (undo) {
+            throw new AggregateError([cause, undo], 'circle: a jacket could not be indexed, and could not be taken back either')
+          }
+          throw cause
+        }
         return true
       }),
     purge: (person) => {
       /* The generation moves NOW, not when the purge's turn comes: a fetch
          that starts after the purge was asked for is already on the far side
          of it, and the fences it takes must say so. */
+      // Stryker disable next-line ArithmeticOperator: a fence is only ever compared for equality with an earlier reading of this count, and counting down is as strictly one-way as counting up.
       purges.set(person, purgesOf(person) + 1)
       return serial(async () => {
-        const index = await readIndex()
+        let index: CoverIndex
+        try {
+          index = await readIndex()
+        } catch (cause) {
+          /* ⚠️ **AN INDEX THAT WILL NOT READ MUST NOT STOP A PERSON BEING
+             FORGOTTEN — AND BYTES THAT WERE NOT JSON DID.** `index.ts` runs
+             this purge before `purgePerson`, so a rejection here left every
+             file of theirs on disk after the reader said to forget them. What
+             the purge promises still holds without the index: the fence moved
+             above, before this turn, and `purgePerson` removes the jackets
+             with the folder. What it cannot do is drop their entries without
+             rewriting everybody else's, so the index is left exactly as it is
+             and the reason is SAID. A later `evict` drops an entry whose file
+             is gone, once the index reads again. */
+          warn?.('circle.cover-index-unreadable', { person, message: messageOf(cause) })
+          return
+        }
         const prefix = `${person}/`
         const theirs = Object.keys(index).filter((key) => key.startsWith(prefix))
-        // Stryker disable next-line ConditionalExpression: with none of theirs the index written is the index read; the guard spares a write.
+        /* ⚠️ **A REWRITE IS NOT NOTHING, WHICH IS WHY THIS GUARD IS MEASURED
+           NOW.** The index written would be the index READ — re-serialised,
+           so the malformed entries `readIndex` passes over would be dropped
+           from somebody else's file by a purge that has nothing of theirs to
+           do. Disabled as "the guard spares a write" until 2026-09-14. */
         if (theirs.length === 0) return
         /* The files too, not only the index: between this and the folder's
            removal a hit would otherwise answer from the file and re-index it. */
@@ -282,7 +386,16 @@ async function fetchOne(
     const parts: Uint8Array[] = []
     let size: number | null = null
     let got = 0
-    /* Stryker disable ConditionalExpression,LogicalOperator,EqualityOperator: every guard here ends the fetch with nothing kept — and so would the digest check at the end, or the throw the guard forestalls, for anything a guard let through. One outcome, on purpose; the guards name the reason and spare the bytes. */
+    /* ⚠️ **EVERY GUARD HERE STOPS THE FETCH EARLY, AND EARLY IS THE WHOLE
+       POINT OF IT.** This block was disabled whole, on the reasoning that the
+       digest check at the end reaches the same answer. It does — and it
+       reaches it after the bytes have crossed the wire, been charged to a
+       friend's budget and been held in memory. What each guard saves is
+       therefore measurable, and `what each guard saves` below measures it:
+       the calls made, the bytes charged, and whether a guard that was removed
+       turned a damaged answer into a throw the log then reports as a failed
+       fetch. Of the 43 mutants the directive covered, 37 were already dying
+       against the tests it hid them from (2026-09-14 mutation debt). */
     for (;;) {
       /* Chunk by chunk is where a transfer can stop: a chunk in flight lands
          and is paid for; the next is not asked for once nobody wants it. */
@@ -292,25 +405,38 @@ async function fetchOne(
       if (size === null) size = answer.size
       else if (answer.size !== size) return null
       const chunk = bytesOfBase64(answer.bytes)
-      if (chunk === null || chunk.length === 0) return null
+      if (
+        chunk === null ||
+        // Stryker disable next-line ConditionalExpression: `parseCoverAnswer` refuses an empty `bytes`, and every base64 text it does accept spells at least one byte, so a chunk of nothing cannot arrive. Kept because the assembly below counts on one.
+        chunk.length === 0
+      )
+        return null
       /* ⚠️ **PAID FOR BEFORE IT IS KEPT**, as a page is: a friend's jacket
          draws on the same budget as their pages, and a chunk the budget
          refuses ends the fetch with nothing kept. */
       if (!charge(person, chunk.length)) return null
       got += chunk.length
-      // Stryker disable next-line ConditionalExpression,EqualityOperator,LogicalOperator: the answer's own bound holds `size` under the cap, so past the cap is past the size; the second clause spells the first.
-      if (got > size || got > MAX_COVER_BYTES) return null
+      if (
+        got > size ||
+        // Stryker disable next-line ConditionalExpression: `parseCoverAnswer` holds `size` at or under the cap, so anything past the cap is past the size and the clause above has returned already. Kept because it states the bound where it is spent. The `>` itself is measured — a jacket of exactly the cap is fetched whole.
+        got > MAX_COVER_BYTES
+      )
+        return null
       parts.push(chunk)
       if (!answer.more) break
     }
-    if (size === null || got !== size) return null
+    /* WHAT ARRIVED IS WHAT WAS PROMISED. `got` is a number whatever happened,
+       so this catches a `size` the loop never set as well — the `size === null
+       ||` that used to spell that out could not fail on its own, the loop
+       having set `size` from its first answer and broken only after
+       (2026-09-14 mutation debt). */
+    if (got !== size) return null
     const bytes = new Uint8Array(got)
     let at = 0
     for (const part of parts) {
       bytes.set(part, at)
       at += part.length
     }
-    /* Stryker restore ConditionalExpression,LogicalOperator,EqualityOperator */
     /* THE DIGEST ON THE SHELF ENTRY IS THE CONTRACT: the whole file, or nothing. */
     return verifies(bytes, digest) ? bytes : null
   } finally {

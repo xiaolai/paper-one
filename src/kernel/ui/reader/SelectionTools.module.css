@@ -29,6 +29,16 @@
   border: 1px solid var(--line-2);
   box-shadow: var(--shadow-pop);
   animation: rise var(--motion-popover) both;
+  /* SCROLLS WITHIN ITS BOUND, WHICHEVER FACE IT SHOWS. `SelectionTools` sets
+     `max-width` and `max-height` from the room the popup is placed in, because
+     placement can move a surface but cannot shrink one; this is what lets a
+     face bigger than that room still be reached — a row sideways, an answer
+     downwards. It was the lookup face's rule alone until 2026-09-14 (#159),
+     and a bound on a row with nothing to scroll only clips its last controls.
+     A row's controls do not shrink (`flex: 0 0 auto`), so a narrow bound
+     overflows rather than squeezing them, and the overflow runs to the END,
+     where it can be scrolled to. */
+  overflow: auto;
 }
 
 /* §08: the popover rises rather than fading in place, and only 4px — enough to
@@ -73,6 +83,27 @@
   .face {
     animation: none;
   }
+}
+
+/* THE LOOKUP FACE (phase 17, L1) — the one face that is not a row.
+ *
+ * Its height is its answer's, so the row's fixed height gives way to the
+ * content; the tools stay at the top edge, where the bar's were, rather than
+ * centring on a tall block. `SelectionTools` measures the height this comes to
+ * and places against it — see `surfaceHeight`. The vertical padding is the
+ * bar's own 6px, which is what centres a `--control-sm` tool in `--popup-h`. */
+.popup[data-face='lookup'] {
+  height: auto;
+  min-height: var(--popup-h);
+  align-items: flex-start;
+  padding: var(--space-6);
+  /* It scrolls within its bound as every face does — see `.popup`. The Back
+     control is sticky here, because an answer scrolls downwards and the way
+     out is at its top — see `LookUpFace`. */
+}
+
+.popup[data-face='lookup'] .face {
+  align-items: flex-start;
 }
 
 /* One control. Square, because every one of them is a glyph or a specimen

@@ -1,5 +1,5 @@
 import type { AnswerEnd, AskContext, CompanionProvider } from '../../../kernel'
-import { detailFor, errorKind, type Depth, type InferencePort } from '../../inference'
+import { errorKind, readerFailure, type Depth, type InferencePort } from '../../inference'
 import { messageOf } from '../../../kernel'
 import {
   COMPANION_SYSTEM_PROMPT,
@@ -72,8 +72,11 @@ const ROUTE_KINDS: ReadonlySet<string> = new Set<RouteKindName>(['local', 'agent
  */
 export function parseRoute(route: string): ParsedRoute | null {
   const at = route.indexOf(':')
-  /* `at <= 0` covers both no colon and an empty kind (`:qwen`). */
-  if (at <= 0) return null
+  /* No colon is no route. An empty kind (`:qwen`) is not caught here: it is
+     refused below with every other kind that is not one. This read `at <= 0`
+     and refused it twice, which left `at < 0` a mutant no test could tell
+     from the code (2026-09-14 mutation debt). */
+  if (at === -1) return null
   const kind = route.slice(0, at)
   const id = route.slice(at + 1)
   /* An empty identifier is not a route. `agent:` names no agent and
@@ -142,7 +145,10 @@ export function effectiveRoute(stored: string, probed: string | null): RouteId |
      NON-EMPTY: a stored value is whatever a previous build — or a hand-edited
      settings file — left there. */
   if (probed !== null && parseRoute(probed) !== null) return probed as RouteId
-  if (stored !== '' && parseRoute(stored) !== null) return stored as RouteId
+  /* `''` included, with no clause of its own: it has no colon, so `parseRoute`
+     refuses it along with every other shape that is not a route. A separate
+     `stored !== ''` beside the parse decided nothing (2026-09-14 mutation debt). */
+  if (parseRoute(stored) !== null) return stored as RouteId
   return null
 }
 
@@ -204,28 +210,24 @@ export function createCompanionProvider({
    * and with the maintainer's half only: the kind, the route and the crate's
    * own sentence. Never the question, never a passage; those are the reader's
    * and the book's, and a log line is not where either belongs.
+   *
+   * ⚠️ **AND "BRANCH FOR BRANCH" WAS A CLAIM NOTHING HELD, SO THE BRANCHES
+   * DRIFTED.** The last one read `String(cause)` here and `messageOf(cause)`
+   * there, so a rejection object carrying a message and no `kind` — anything
+   * the webview raises that is neither a bare string nor an `Error` — reached
+   * this reader as `[object Object]` and the gloss's with its own text. The
+   * conversion is `readerFailure`, in `inference` beside `detailFor`, and this
+   * is now the report and nothing else (2026-09-13 audit, round 2).
    */
   const failure = (cause: unknown, chosen: string, signal: AbortSignal): unknown => {
-    const kind = errorKind(cause)
     /* The reporter is a courtesy to the log; one that throws must not replace
        the failure the reader is about to be shown. */
     try {
-      report?.('companion.answer-failed', { kind, route: chosen, message: messageOf(cause) })
+      report?.('companion.answer-failed', { kind: errorKind(cause), route: chosen, message: messageOf(cause) })
     } catch (again) {
       console.error('companion: the failure reporter itself threw', again)
     }
-    /* THE READER'S OWN ABORT, and only when it really was one. `cancelled`
-       also arrives when the DAEMON cancels — it does so on stop — with a
-       signal nobody aborted, and passing that through would show the reader
-       nothing while the answer silently ends. */
-    if (kind === 'cancelled' && signal.aborted) return cause
-    if (kind !== null) return new Error(detailFor(cause), { cause })
-    /* NOT THE PLUGIN'S. A rejection with no `kind` is a Tauri or webview
-       failure — `Command agent_ask not found` is a bare string — and
-       `detailFor` would map it to its default, destroying the one sentence
-       that ends the search. Not translated, but made readable. */
-    if (cause instanceof Error) return cause
-    return new Error(String(cause), { cause })
+    return readerFailure(cause, signal)
   }
 
   return {
@@ -272,6 +274,7 @@ export function createCompanionProvider({
        * queue, wake-up and failure sentinel used to sit here, between the
        * route dispatch above and the citation map below; the one defect they
        * held was invisible among them and has a test of its own now. */
+      // Stryker disable next-line StringLiteral: only `resolveCitations` reads it, and text with no `[` in it can neither open nor close a `[n]` there — the substituted string has none.
       let answer = ''
       /* BOTH BRANCHES TAKE THE SIGNAL. The agent branch did not, so `ask`'s
          cancellation contract held for a local model and silently did not for

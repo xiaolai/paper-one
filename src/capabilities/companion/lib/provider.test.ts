@@ -173,6 +173,15 @@ describe('route ids', () => {
       expect(modelIdOf(notARoute), notARoute).toBeNull()
     }
   })
+
+  /* NO COLON IS NO ROUTE, even for a word that is a kind and one letter more.
+     Read past, `locals` splits at `-1` into the kind `local` and the id
+     `locals`, and `agents` becomes an agent. */
+  it('refuses a word with no colon, even one that is a kind and a letter', () => {
+    expect(modelIdOf('locals')).toBeNull()
+    expect(modelIdOf('endpoints')).toBeNull()
+    expect(isAgentRoute('agents')).toBe(false)
+  })
 })
 
 describe('the bound provider', () => {
@@ -466,6 +475,15 @@ describe('the effective route', () => {
   it('is null only when there is nothing to fall back to', () => {
     expect(effectiveRoute('', null)).toBeNull()
   })
+
+  /* PARSED, NOT MERELY PRESENT. A probe answer or a stored value is whatever
+     reached it — a previous build, a hand-edited settings file — and one that
+     does not parse is passed over, never dispatched. */
+  it('passes over a probe answer or a stored value it cannot parse', () => {
+    expect(effectiveRoute('agent:claude', 'not a route')).toBe('agent:claude')
+    expect(effectiveRoute('not a route', null)).toBeNull()
+    expect(effectiveRoute('local:', 'agent:')).toBeNull()
+  })
 })
 
 /**
@@ -664,6 +682,26 @@ describe('a failure says what failed', () => {
     )
   })
 
+  /**
+   * ⚠️ **AND A KIND-LESS REJECTION THAT IS NOT A STRING READ AS
+   * `[object Object]`.**
+   *
+   * This branch was `String(cause)` where the gloss's twin — written from the
+   * same argument, branch for branch — was `messageOf`. A bare string and an
+   * `Error` are the two shapes the test above happens to use, and both survive
+   * `String`; anything else the webview rejects with is an object, and the
+   * reader met the one sentence that names nothing at all. The two conversions
+   * are `readerFailure` now, so neither can drift again (2026-09-13 audit,
+   * round 2).
+   */
+  it('keeps the text of a kind-less rejection that is an object rather than a string', async () => {
+    const { provider } = failing({ message: 'the webview refused the call' })
+    const raised = await refusalOf(drain(provider.ask('why?', CONTEXT, new AbortController().signal)))
+    expect(raised.message, 'an object with no kind reached the reader as [object Object]').toBe(
+      'the webview refused the call',
+    )
+  })
+
   /* `cancelled` also arrives when the DAEMON cancels — it does so on stop —
      with a signal nobody aborted. Only the reader's own abort is passed
      through untranslated; the daemon's is a failure with a sentence. */
@@ -688,6 +726,47 @@ describe('a failure says what failed', () => {
     expect(raised).toBe(cause)
     /* Reported all the same — a cancellation is worth a line in the log. */
     expect(report).toHaveBeenCalledTimes(1)
+  })
+
+  /* THE REPORTER IS A COURTESY TO THE LOG. One that throws must not replace the
+     failure the reader is about to be shown — and its own failure is said, not
+     swallowed. */
+  it('still tells the reader what failed when the reporter itself throws, and says the reporter threw', async () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const broke = new Error('the log is full')
+      const { port } = portWith(async () => Promise.reject(refusal('agentSignedOut', 'codex is not signed in')))
+      const provider = createCompanionProvider({
+        port,
+        route: () => 'agent:codex',
+        depth: () => 'default',
+        report: () => {
+          throw broke
+        },
+      })
+
+      const raised = await refusalOf(drain(provider.ask('why?', CONTEXT, new AbortController().signal)))
+      expect(raised.message).toBe('That agent is not signed in')
+      expect(said.mock.calls).toEqual([['companion: the failure reporter itself threw', broke]])
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  /* NO REPORTER IS NOT A BROKEN ONE. `report` is optional, and a provider built
+     without it must not say on the console that it threw. */
+  it('says nothing about a reporter on a provider that has none', async () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { port } = portWith(async () => Promise.reject(refusal('agentSignedOut', 'codex is not signed in')))
+      const provider = createCompanionProvider({ port, route: () => 'agent:codex', depth: () => 'default' })
+
+      const raised = await refusalOf(drain(provider.ask('why?', CONTEXT, new AbortController().signal)))
+      expect(raised.message).toBe('That agent is not signed in')
+      expect(said, 'a reporter nobody supplied was said to have thrown').not.toHaveBeenCalled()
+    } finally {
+      said.mockRestore()
+    }
   })
 })
 

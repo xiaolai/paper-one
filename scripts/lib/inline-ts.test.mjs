@@ -1,8 +1,8 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, onTestFinished } from 'vitest'
 import { inlineModules } from './inline-ts.mjs'
 
 /**
@@ -28,9 +28,11 @@ import { inlineModules } from './inline-ts.mjs'
 /** A throwaway module directory, as the `file:` URL `inlineModules` wants.
  *  Fresh per case on purpose: `inlineModules` caches on the directory and the
  *  file list, so two cases sharing a directory would have the second reading
- *  the first's answer instead of its own. */
+ *  the first's answer instead of its own. Removed when the case finishes,
+ *  however it finishes. */
 function moduleDir(files) {
   const dir = mkdtempSync(join(tmpdir(), 'inline-ts-'))
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }))
   for (const [name, source] of Object.entries(files)) writeFileSync(join(dir, name), source, 'utf8')
   return pathToFileURL(join(dir, 'x')).href.replace(/x$/, '')
 }

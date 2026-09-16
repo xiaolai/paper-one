@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { SettingsSection } from '../../core/capability'
+import { ANSWER_LANGUAGES, isAnswerChoice, type AnswerChoice, type AnswerLanguage } from '../../core/glossLanguage'
 import {
   BRIGHTNESS,
   CONTRAST,
@@ -12,7 +13,14 @@ import {
 } from '../../core/metrics'
 import { PANE_TITLES, THEMES } from '../panes'
 
-/* A settings section is about no book. Stryker disable next-line ObjectLiteral: no section reads the context, so what it holds cannot be seen. */
+/* A settings section is about no book — no section reads the context, so what
+   it holds cannot be seen.
+
+   ⚠️ THIS COMMENT CARRIED A `Stryker disable next-line ObjectLiteral` AND IT
+   DISABLED NOTHING: a directive is read only where the comment BEGINS with it,
+   and there is no mutant here to disable anyway, because `as const` is what
+   stops Stryker mutating the literal. Measured both ways — 268 mutants with the
+   directive and without it, 269 with `as const` removed. */
 const NO_BOOK = { bookId: null } as const
 import type { Face } from '../../core/typefaces'
 import { FacePicker } from './FacePicker'
@@ -20,7 +28,7 @@ import type {
   Align,
   PageLayout,
   ReadingStyle,
-  ReadingStyleKey,
+  ReadingStyleArgs,
   Side,
   SpacingIndices,
   SpacingKey,
@@ -57,8 +65,9 @@ import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
  */
 
 /**
- * §05 theme chips — the page colour of each theme, as a literal, because a
- * swatch has to show the theme it offers rather than the one in use.
+ * §05 theme chips — each theme drawn in itself, because a swatch has to show
+ * the theme it offers rather than the one in use. This line said "the page
+ * colour of each theme, as a literal", which the paragraph below ended (#144).
  *
  * THE SWATCHES CARRY `data-theme` AND ARE DRAWN IN IT. There was a table of
  * one hex per theme here, which is a copy of a value `tokens.css` already
@@ -87,6 +96,8 @@ const GROUP = {
   blocks: 'blocks',
   figures: 'figures',
   page: 'page',
+  /** WI-17.5's answer language. */
+  lookUp: 'lookUp',
   /* ⚠️ **NO COLON, AND THESE WERE `developer:unfinished`.** A colon is the
      CONTRIBUTED-pane and contributed-section convention — `<capability>:<name>`
      — and these ids share one open/closed list with the sections a capability
@@ -194,7 +205,7 @@ export interface SettingsProps {
    *
    * A host that cannot do the thing does not pass its setter, and the row is
    * not drawn — the same convention as `onAddBooks` on the shelf, `cards` in
-   * Marginalia and `onInstallGloss` in the reader. The browser client mounts
+   * Marginalia and `LookUp.onInstall` in the reader. The browser client mounts
    * this pane and has no reading ruler, no scroll port it owns, no side pane
    * (a 393px screen has no side), and no brightness or contrast filter; drawing
    * those rows would name features that host will never have.
@@ -215,13 +226,41 @@ export interface SettingsProps {
   onAlign: (align: Align) => void
   /** WI-14.4's fifteen — see `ReadingStyle`. */
   style: ReadingStyle
-  onStyle: <K extends ReadingStyleKey>(key: K, value: ReadingStyle[K]) => void
+  /* THE CORRELATED PAIR, not a generic: see `ReadingStyleArgs` for the hole a
+     generic `K` left open here as well as in `setReadingStyle` (#212). */
+  onStyle: (...args: ReadingStyleArgs) => void
   brightness?: number | undefined
   onBrightness?: ((idx: number) => void) | undefined
   contrast?: number | undefined
   onContrast?: ((idx: number) => void) | undefined
   onTypeface: (typeface: Typeface) => void
+  /**
+   * What Look up writes its definitions in (WI-17.5), or absent where there is
+   * no Look up — the browser client, a phone, a desktop with no `inference`.
+   *
+   * `readerLanguage` IS WHAT "YOUR LANGUAGE" RESOLVES TO, so the row can name it:
+   * a reader whose system is in a language Paper does not answer well in is
+   * answered in English, and the list says so instead of letting them discover
+   * it from the first definition.
+   */
+  lookUp?:
+    | {
+        readonly choice: AnswerChoice
+        readonly readerLanguage: AnswerLanguage
+        readonly onChoice: (choice: AnswerChoice) => void
+      }
+    | undefined
+  /** A request to open one section and bring it into view — `AppState.settingsReveal`. */
+  reveal?: { readonly section: string; readonly nonce: number; readonly pending: boolean } | null | undefined
+  /** The request with this nonce has been acted on. */
+  onRevealed?: ((nonce: number) => void) | undefined
 }
+
+/** What each automatic choice is called — the named languages carry their own. */
+const MODE_LABELS = {
+  book: 'The book’s language',
+  both: 'The book’s language, then yours',
+} as const
 
 /**
  * What each of the three states is called in the row.
@@ -317,7 +356,15 @@ function CycleRow<T extends string>({
   )
 }
 
-/** The same row for a setting that is simply on or off. */
+/**
+ * The same row for a setting that is simply on or off.
+ *
+ * ⚠️ **A SWITCH, AND IT WAS A PLAIN BUTTON** (#140). Its text flipped between
+ * "On" and "Off", so assistive technology heard a different button on every
+ * press and no state at all. `aria-checked` says the state, and the name is
+ * the label alone so it does not change under the reader's finger; the value
+ * stays on screen for the readers who read it there.
+ */
 function ToggleRow({
   label,
   on,
@@ -330,7 +377,14 @@ function ToggleRow({
   readonly labels?: { readonly on: string; readonly off: string }
 }) {
   return (
-    <button type="button" className={styles.settingRow} onClick={() => onChange(!on)}>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      className={styles.settingRow}
+      onClick={() => onChange(!on)}
+    >
       <span style={{ flex: 1 }}>{label}</span>
       <span className={styles.settingValue}>{on ? labels.on : labels.off}</span>
     </button>
@@ -375,8 +429,39 @@ export function Settings({
   onContrast,
   onTypeface,
   developer,
+  lookUp,
+  reveal,
+  onRevealed,
 }: SettingsProps) {
   const step = readingStep(stepIdx)
+  /* THE INDEX OF THE STEP SHOWN, which is not always the one handed in.
+     `readingStep` shows the default for an index off the scale, and the stepper
+     measured its ends from the raw index — so Larger was dead and Smaller asked
+     for a step that does not exist (#142). `StepRow` clamps for the same
+     reason. */
+  const stepAt = READING_STEPS.indexOf(step)
+  /* WHETHER PAGE HAS A ROW TO SHOW (#141). Each of its rows is gated on a
+     setter, and the ruler and the scrollbar on scrolled flow as well — so a
+     phone or a browser, passing none of those setters, drew a "Page" heading
+     that opened onto nothing. The rows' own conditions, and 'a container with
+     nothing in it' holds each of them to this. */
+  const pageRowsDrawn =
+    onPageLayout !== undefined ||
+    (pageLayout === 'scrolled' && (onToggleRuler !== undefined || onToggleScrollbar !== undefined)) ||
+    onToggleProgressLine !== undefined ||
+    onSide !== undefined
+  /* THE SECTIONS THIS READER IS OFFERED, decided before the band is: a band
+     whose every section was filtered away, with nothing missing, captioned
+     nothing at all (#141). See the band for why they are filtered.
+
+     `developer?.hidden` WITH NO `?? []`: absent, the list is
+     `settingsSectionOffered`'s own default — and it is absent only with
+     developer options off, where the list is never read, so a fallback here
+     could not be told from none. */
+  const offeredSections = sections.filter((section) =>
+    settingsSectionOffered(section.id, developer !== undefined, developer?.hidden),
+  )
+  const appBandDrawn = offeredSections.length > 0 || (missing ?? []).length > 0
   const [faceMenuOpen, setFaceMenuOpen] = useState(false)
   /* ONE MECHANISM FOR EVERY GROUP, the kernel's own and the contributed ones
      alike. There were three — a boolean for Light, a boolean for Spacing, and
@@ -391,11 +476,79 @@ export function Settings({
   const groupOpen = (id: string) => openGroups.includes(id)
   const toggleGroup = (id: string) =>
     setOpenGroups((open) => (open.includes(id) ? open.filter((one) => one !== id) : [...open, id]))
+
+  /* ── "INSTALL ONE" LANDS ON ITS SECTION (phase 17, L3) ─────────────────────
+   *
+   * A PENDING REQUEST IS HONOURED ONCE: the group is opened — it is closed at
+   * rest — and brought into view, and the owner is told so a remount does not
+   * find the request again (see `AppState.settingsReveal`).
+   *
+   * ⚠️ THE SCROLL FRAME IS NOT CANCELLED WHEN THE REQUEST CHANGES — only when a
+   * NEWER pending request replaces it, and on unmount. `Marginalia`'s mark focus
+   * records why: reporting the request answered changes it, which re-runs this
+   * effect, and a cleanup that cancelled the frame would cancel the very scroll
+   * the request was for. */
+  const panel = useRef<HTMLDivElement | null>(null)
+  const revealFrame = useRef(0)
+  /* THE NONCE ANSWERED — scrolled to and reported. The effect re-runs whenever
+     the request or its handler changes identity — and `SidePane` hands a fresh
+     handler on every render — so a request still pending when that happened was
+     answered again and had its scroll queued again (#139). */
+  const revealed = useRef<number | null>(null)
+  /**
+   * The request whose frame is in flight, and how to answer it.
+   *
+   * ⚠️ **MARKING A NONCE ANSWERED WHEN ITS FRAME WAS MERELY QUEUED BROKE THE
+   * FIRST REVEAL** (#139, round 2). React mounts an effect, tears it down and
+   * mounts it again — which is what every developer runs — and the teardown
+   * below cancels the queued frame; on the second pass the guard found the
+   * nonce already answered and refused to queue another, so the request was
+   * reported answered and nothing moved. Answered means SCROLLED, and a
+   * cancelled frame takes its mark with it.
+   */
+  const revealing = useRef<{ readonly nonce: number; readonly answer: () => void } | null>(null)
+  useEffect(() => {
+    if (!reveal?.pending) return
+    const { section, nonce } = reveal
+    if (nonce === revealed.current || nonce === revealing.current?.nonce) return
+    setOpenGroups((open) => (open.includes(section) ? open : [...open, section]))
+    /* A NEWER REQUEST REPLACES THE ONE IN FLIGHT: its frame goes, and it is
+       answered where it stands — reported to the handler that came with it, so
+       the host is not left holding a request nothing will ever act on. */
+    cancelAnimationFrame(revealFrame.current)
+    revealing.current?.answer()
+    const answer = () => {
+      revealed.current = nonce
+      revealing.current = null
+      onRevealed?.(nonce)
+    }
+    revealing.current = { nonce, answer }
+    /* After paint, so the group that just opened has a body to bring in with
+       its heading. A section this reader is not offered finds nothing, and
+       nothing moves — and the request is answered either way. */
+    revealFrame.current = requestAnimationFrame(() => {
+      /* ESCAPED. A section id is a capability's string and the registry checks
+         only its prefix, so an id carrying a quote threw here — inside a frame,
+         where nothing catches it (#138). */
+      panel.current?.querySelector(`[data-group="${CSS.escape(section)}"]`)?.scrollIntoView({ block: 'start' })
+      answer()
+    })
+  }, [reveal, onRevealed])
+  /* AND THE MARK GOES WITH THE FRAME. See `revealing`: a nonce left marked here
+     refuses to queue a second frame, so the doubled mount would answer the
+     request without scrolling. Refs only, so every render's copy is the same. */
+  const forgetReveal = () => {
+    cancelAnimationFrame(revealFrame.current)
+    revealing.current = null
+  }
+  // Stryker disable next-line ArrayDeclaration: an effect whose only dependency is a constant runs once and cleans up once, exactly as one with none does, so no test can tell the two apart.
+  useEffect(() => () => forgetReveal(), [])
+
   /* Handed in, not probed here: `App` probes once and gives the same list to
      this panel and to the command palette, so the two cannot come to offer
      different faces. */
   return (
-    <div className={styles.panel}>
+    <div className={styles.panel} ref={panel}>
       {/* §11: say what happened and what it costs. Above the groups rather than
           inside one, because it is true of every control below it. */}
       {!persistent && (
@@ -500,9 +653,9 @@ export function Settings({
           <button
             type="button"
             className={styles.stepperButton}
-            disabled={stepIdx <= 0}
+            disabled={stepAt <= 0}
             aria-label="Smaller text"
-            onClick={() => onStepIdx(stepIdx - 1)}
+            onClick={() => onStepIdx(stepAt - 1)}
           >
             <span className={styles.stepperSmall} aria-hidden="true">
               A
@@ -516,9 +669,9 @@ export function Settings({
           <button
             type="button"
             className={styles.stepperButton}
-            disabled={stepIdx >= READING_STEPS.length - 1}
+            disabled={stepAt >= READING_STEPS.length - 1}
             aria-label="Larger text"
-            onClick={() => onStepIdx(stepIdx + 1)}
+            onClick={() => onStepIdx(stepAt + 1)}
           >
             <span className={styles.stepperLarge} aria-hidden="true">
               A
@@ -527,14 +680,6 @@ export function Settings({
         </div>
       </div>
 
-      {/* HOW OPEN THE TYPE IS SET. Four things, grouped, because a reader
-          adjusting one is usually adjusting the next — and separated from the
-          face and size above because those two decide what the page IS and
-          these decide how much air it has.
-
-          Nothing here touches the MEASURE. That is the size step's, and letting
-          a second control move it would make the line length depend on which
-          one was touched last. */}
       {/* ONE DECISION, NOT TWO — but three states rather than two. It was
           `justify` and `hyphenate`, two booleans and four combinations, of
           which one is simply worse and shipping it by accident was the reason
@@ -583,11 +728,17 @@ export function Settings({
       </PaneGroup>
 
       {/* THE FINE TUNING OF THE SAME TYPE, kept behind a click and kept next
-          to what it tunes. Four rows a reader sets once and then leaves for
-          months; open, they push everything below them off a 400px pane, and
-          that is the whole argument `PaneGroup` was built on. It sits
-          directly under Text rather than at the bottom of the panel so the
-          heading it refines is the one above it.
+          to what it tunes: the face and size above decide what the page IS,
+          and these decide how much air it has. Rows a reader sets once and
+          then leaves for months — the four spacings and the CJK gap; open,
+          they push everything below them off a 400px pane, and that is the
+          whole argument `PaneGroup` was built on. It sits directly under Text
+          rather than at the bottom of the panel so the heading it refines is
+          the one above it.
+
+          A copy of this note's opening, "Four things, grouped", stood above
+          Alignment inside Text, over none of the rows it counted (#144). What
+          only the copy said is the first sentence here.
 
           Nothing here touches the MEASURE. That is the size step's, and letting
           a second control move it would make the line length depend on which
@@ -769,6 +920,8 @@ export function Settings({
           either way, and the side pane is the furniture the page is set
           beside. One question — what does the reading surface look like and
           how does it advance — asked five ways. */}
+      {/* Only with a row to put in it — see `pageRowsDrawn`. */}
+      {pageRowsDrawn && (
       <PaneGroup
         title="Page"
         open={groupOpen(GROUP.page)}
@@ -825,6 +978,57 @@ export function Settings({
         <CycleRow label="Side pane position" states={SIDES} value={side} labels={SIDE_LABELS} onChange={onSide} />
       )}
       </PaneGroup>
+      )}
+
+      {/* WI-17.5 — IN THE READING BAND, because what a definition is written in
+          is a decision about reading, and the row the deleted Look up cycle
+          left behind was in the Companion's section, which a reader is not
+          shown.
+
+          A LIST, NOT A CYCLE, and phase 17 argued it before it was built: a
+          cycle suits a closed set of three, and the route list is a list
+          because it grows. Languages grow. Closed at rest: it is set once. */}
+      {lookUp !== undefined && (
+        <PaneGroup
+          title="Look up"
+          group={GROUP.lookUp}
+          open={groupOpen(GROUP.lookUp)}
+          onToggle={() => toggleGroup(GROUP.lookUp)}
+        >
+          <label className={styles.settingRow}>
+            <span style={{ flex: 1 }}>Define words in</span>
+            <select
+              className={styles.settingSelect}
+              value={lookUp.choice}
+              onChange={(event) => {
+                /* THE LIST IS THE BOUNDARY — a value is written only if it is
+                   one the setting accepts, whatever the element reports. */
+                const next = event.target.value
+                if (isAnswerChoice(next)) lookUp.onChoice(next)
+              }}
+            >
+              <option value="reader">Your language — {lookUp.readerLanguage.label}</option>
+              <option value="book">{MODE_LABELS.book}</option>
+              <option value="both">{MODE_LABELS.both}</option>
+              <optgroup label="Always in">
+                {ANSWER_LANGUAGES.map((one) => (
+                  <option key={one.tag} value={one.tag}>
+                    {one.label}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+          </label>
+          {/* THE CURATION, SAID. The list is the languages the model was
+              measured answering well in, and the automatic choices fall back
+              rather than route around it — a reader should learn that here, not
+              from a poor definition. */}
+          <p className={styles.groupHint}>
+            Paper offers the languages its model defines words well in. A book or a system in
+            another language is answered in yours, or in English.
+          </p>
+        </PaneGroup>
+      )}
 
       </PaneBand>
 
@@ -843,19 +1047,21 @@ export function Settings({
           a render, so a closed group never mounts the pane — which is what
           stops the Storage section reading the disk on every shelf write for
           a surface nobody has opened. */}
+      {/* Only with something to hold — see `appBandDrawn`. */}
+      {appBandDrawn && (
       <PaneBand title="The app">
       {/* ⚠️ **FILTERED, AND IT NEVER WAS.** `UNFINISHED_PANE_IDS` hid the
           Companion PANEL and left `Settings → Companion` in front of every
           reader — settings for a surface they cannot open. The rule is derived
           from that one list rather than restated here; see
           `settingsSectionOffered`, which also explains why `inference`'s two
-          sections stay (Look up ships on the same engine). */}
-      {sections
-        .filter((section) => settingsSectionOffered(section.id, developer !== undefined, developer?.hidden ?? []))
-        .map((section) => (
+          sections stay (Look up ships on the same engine). Filtered above, into
+          `offeredSections`, so the band can ask first whether it holds anything. */}
+      {offeredSections.map((section) => (
           <PaneGroup
             key={section.id}
             title={section.title}
+            group={section.id}
             open={groupOpen(section.id)}
             onToggle={() => toggleGroup(section.id)}
           >
@@ -877,6 +1083,7 @@ export function Settings({
         </div>
       ))}
       </PaneBand>
+      )}
 
       {/* ⚠️ **THE BAND EXISTS ONLY WHILE DEVELOPER OPTIONS ARE ON**, and there
           is deliberately no control here that turns them on. ⌘⌃⌥D is the way

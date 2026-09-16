@@ -1,6 +1,6 @@
-import { useEffect, useState, useSyncExternalStore, type ChangeEvent } from 'react'
+import { useEffect, useSyncExternalStore, type ChangeEvent } from 'react'
 import { CAPABILITY_UI as ui } from '../../../kernel'
-import { EMPTY_DRAFT, type EndpointsModel } from './endpointsModel'
+import { type EndpointsModel } from './endpointsModel'
 
 /**
  * The **Cloud endpoints** section (`inference:endpoints`, order 16), rendered
@@ -31,7 +31,12 @@ import { EMPTY_DRAFT, type EndpointsModel } from './endpointsModel'
 
 export function EndpointsPane({ model }: { readonly model: EndpointsModel }) {
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot)
-  const [draft, setDraft] = useState(EMPTY_DRAFT)
+  /* ⚠️ **THE MODEL'S, NOT `useState`'s.** `PaneGroup` unmounts a closed group
+     deliberately, so component state is exactly as long-lived as the group
+     being open — and a reader who pasted an address, went to another group for
+     their key and came back found the fields empty. See
+     `EndpointsSnapshot.draft`. */
+  const draft = snapshot.draft
 
   useEffect(() => {
     void model.refresh().catch(() => {})
@@ -43,16 +48,16 @@ export function EndpointsPane({ model }: { readonly model: EndpointsModel }) {
   const field =
     (key: 'id' | 'baseUrl' | 'key') =>
     (event: ChangeEvent<HTMLInputElement>): void => {
-      /* ⚠️ READ NOW, NOT INSIDE THE UPDATER. `setDraft`'s callback runs when
-         React chooses to, by which time the synthetic event is over and
-         `currentTarget` is null — so the keystroke arrived as a crash rather
-         than as a character. Found by mounting the pane. */
+      /* ⚠️ READ NOW, NOT LATER. The synthetic event is pooled and over by the
+         time anything deferred runs, and `currentTarget` is null by then — so
+         the keystroke arrived as a crash rather than as a character. Found by
+         mounting the pane. */
       const { value } = event.currentTarget
       /* TYPING TAKES BACK AN ARMED REMOVAL. The reader is plainly doing
          something else, and a press left armed is one click away from
          deleting a row they are no longer looking at. */
       model.disarm()
-      setDraft((was) => ({ ...was, [key]: value }))
+      model.edit(key, value)
     }
 
   return (
@@ -101,12 +106,9 @@ export function EndpointsPane({ model }: { readonly model: EndpointsModel }) {
       <form
         onSubmit={(event) => {
           event.preventDefault()
-          void model.save(draft).then((saved) => {
-            /* CLEARED ONLY ON SUCCESS. A refused draft stays in the fields so
-               the reader can correct the one thing that was wrong, rather than
-               retyping an address and a key they have already pasted once. */
-            if (saved) setDraft(EMPTY_DRAFT)
-          })
+          /* NO ARGUMENT, and no clearing here either: the draft is the model's,
+             and so is the rule that a refused one stays in the fields. */
+          void model.save()
         }}
       >
         <div className={ui.row}>

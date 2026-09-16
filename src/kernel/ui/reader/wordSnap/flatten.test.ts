@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { isWordLike } from './classify'
-import { buildFixture, elem, txt, type Fixture, type Spec } from './domFake.testkit'
-import { flatten, snapInDom, SENTINEL, type DomPosition } from './flatten'
+import { buildFixture, comment, elem, txt, type Fixture, type Spec } from './domFake.testkit'
+import { flatten, snapInDom, SENTINEL, walkRoot, type DomPosition } from './flatten'
 import { snapWordRange } from './snapWordRange'
 
 /**
@@ -825,6 +825,71 @@ describe('flatten — the bounded walk', () => {
   })
 })
 
+/**
+ * Phase 17, L8. `sentenceAt` has to tell the first sentence of a DOCUMENT from
+ * the first sentence of a WINDOW, and `truncatedStart` cannot: it is word-safety,
+ * and a budget cut that lands on a space reports it `false`. These two flags say
+ * whether the walk ran out of tree.
+ */
+describe('flatten — whether the window reached the tree’s own edges', () => {
+  it('says so at both ends when the whole tree fits', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [elem('p', {}, [txt('first block')]), elem('p', {}, [txt('second block')])]),
+    )
+
+    const flat = flatten(fixture.root, { anchors: [at(fixture, 'second block', 1)] })
+
+    expect([flat.reachedStart, flat.reachedEnd]).toEqual([true, true])
+  })
+
+  /* The word-safe cut: `truncatedEnd` is false, and the tree did NOT end there. */
+  it('says the budget ended the window, even where the cut was safe for words', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('span', {}, [txt('alpha beta ')]),
+        elem('span', {}, [txt('gamma delta ')]),
+        elem('span', {}, [txt('epsilon zeta ')]),
+      ]),
+    )
+
+    const flat = flatten(fixture.root, { maxChars: 30, anchors: [at(fixture, 'alpha beta ', 2)] })
+
+    expect(flat.truncatedEnd).toBe(false)
+    expect([flat.reachedStart, flat.reachedEnd]).toEqual([true, false])
+  })
+
+  it('says the budget ended the window behind the anchor', () => {
+    const behind = buildFixture(elem('p', {}, [txt('b'.repeat(1_001)), txt('the anchor node')]))
+
+    const flat = flatten(behind.root, { maxChars: 4_000, anchors: [at(behind, 'the anchor node', 4)] })
+
+    expect([flat.reachedStart, flat.reachedEnd]).toEqual([false, true])
+  })
+
+  /* With no anchor the walk starts AT the first text, so there is nothing
+     before it to have missed — whatever the budget did to the end. */
+  it('reaches the start by construction when there is no anchor', () => {
+    const fixture = buildFixture(elem('p', {}, [txt('from the top '), elem('span', {}, [txt('and onward')])]))
+
+    const flat = flatten(fixture.root, { maxChars: 5 })
+
+    expect([flat.reachedStart, flat.reachedEnd]).toEqual([true, false])
+  })
+
+  it('vouches for no edge when it read nothing', () => {
+    const fixture = buildFixture(elem('p', {}, [txt('the block')]))
+    const elsewhere = buildFixture(elem('p', {}, [txt('another document')]))
+    const empty = buildFixture(elem('div', {}, [elem('p', {}, [])]))
+
+    for (const flat of [
+      flatten(fixture.root, { anchors: [{ node: elsewhere.text('another document'), offset: 0 }] }),
+      flatten(empty.root),
+    ]) {
+      expect([flat.reachedStart, flat.reachedEnd]).toEqual([false, false])
+    }
+  })
+})
+
 describe('flatten — failing closed', () => {
   it('walks nothing when the anchor is not under the root', () => {
     const fixture = buildFixture(elem('p', {}, [txt('the block')]))
@@ -872,5 +937,490 @@ describe('flatten — failing closed', () => {
     expect(flat.strs).toEqual([])
     expect(flat.truncatedStart).toBe(false)
     expect(flat.truncatedEnd).toBe(false)
+  })
+
+  /* NOTHING MEANS NOTHING: no rows, and no position either way — not an
+     `undefined` a caller comparing against `null` would read as an answer. */
+  it('answers a walk that read nothing with no rows and no positions', () => {
+    const fixture = buildFixture(elem('p', {}, [txt('present')]))
+    const elsewhere = buildFixture(elem('p', {}, [txt('absent')]))
+
+    const flat = flatten(fixture.root, { anchors: [{ node: elsewhere.text('absent'), offset: 0 }] })
+
+    expect(flat.nodes).toEqual([])
+    expect(flat.toFlat(fixture.text('present'), 0)).toBeNull()
+    expect(flat.fromFlat(0, 0)).toBeNull()
+  })
+
+  it('walks nothing from an anchor that is not a text node', () => {
+    const fixture = buildFixture(elem('div', {}, [elem('p', { id: 'para' }, [txt('some text')])]))
+
+    const flat = flatten(fixture.root, {
+      anchors: [{ node: fixture.element('para') as unknown as Text, offset: 0 }],
+    })
+
+    expect(flat.strs).toEqual([])
+    expect([flat.truncatedStart, flat.truncatedEnd]).toEqual([true, true])
+  })
+
+  /* A text node under a fragment rather than an element has no computed style
+     above it to read, and must be refused rather than asked for one. */
+  it('walks nothing from a text node whose parent is not an element', () => {
+    const fixture = buildFixture(elem('p', {}, [txt('in the tree')]))
+    const loose = { nodeType: 3, data: 'loose', parentNode: { nodeType: 11, parentNode: null } } as unknown as Text
+
+    const flat = flatten(fixture.root, { anchors: [{ node: loose, offset: 0 }] })
+
+    expect(flat.strs).toEqual([])
+    expect(flat.truncatedEnd).toBe(true)
+  })
+
+  /* `visibility` inherits and can be undone, so only the anchor's OWN parent
+     says whether its text is drawn. */
+  it('walks from a visible text node inside a hidden ancestor, as CSS draws it', () => {
+    const fixture = buildFixture(
+      elem('div', { visibility: 'hidden' }, [elem('span', { visibility: 'visible' }, [txt('shown anyway')])]),
+    )
+
+    expect(flatten(fixture.root, { anchors: [at(fixture, 'shown anyway', 2)] }).strs).toEqual(['shown anyway'])
+  })
+
+  it('walks nothing from a text node that is itself hidden', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [txt('seen '), elem('span', { visibility: 'hidden' }, [txt('unseen')])]),
+    )
+
+    const flat = flatten(fixture.root, { anchors: [at(fixture, 'unseen', 2)] })
+
+    expect(flat.strs).toEqual([])
+    expect(flat.truncatedEnd).toBe(true)
+  })
+})
+
+/**
+ * What mutation testing found the cases above could not tell apart. Each case
+ * names the rule it holds, on the smallest tree that shows it.
+ */
+describe('flatten — what its mutants found', () => {
+  /* BY NAME, like `<script>`: a style or template given a display is still not text. */
+  it('skips a style and a template by name, whatever display they are given', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [
+        txt('kept'),
+        elem('style', { display: 'inline' }, [txt('.HIDDENF{}')]),
+        elem('template', { display: 'inline' }, [txt('HIDDENG')]),
+        txt('together'),
+      ]),
+    )
+
+    expect(flatText(fixture.root)).toBe('kepttogether')
+  })
+
+  /* A comment is neither text nor an element, and has no style to give. */
+  it('steps over a comment without asking it for a style', () => {
+    const fixture = buildFixture(elem('p', {}, [txt('before '), comment('a note to the typesetter'), txt('after')]))
+
+    expect(flatText(fixture.root)).toBe('before after')
+  })
+
+  /* ONCE PER ELEMENT: climbing out of a block asks the facts the way in read. */
+  it('reads each element’s style once, climbing out as well as in', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [elem('p', {}, [txt('one')]), elem('p', {}, [txt('two')]), elem('p', {}, [txt('three')])]),
+    )
+    fixture.resetCounters()
+
+    expect(flatText(fixture.root)).toBe('one\ntwo\nthree')
+    expect(fixture.styleReads).toBe(4)
+  })
+
+  it('excludes a visibility:collapse subtree as it excludes a hidden one', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [txt('shown '), elem('span', { visibility: 'collapse' }, [txt('HIDDENH')]), txt('after')]),
+    )
+
+    expect(flatText(fixture.root)).toBe('shown after')
+  })
+
+  /* Not one of these is a block box, and a `display` read by the wrong end of
+     its name — `inline-block`, `ruby-base` — would say otherwise. */
+  it('breaks at none of the displays that are not block boxes', () => {
+    const fixture = buildFixture(
+      elem('p', {}, [
+        txt('one '),
+        elem('span', { display: 'contents' }, [txt('two ')]),
+        elem('span', { display: 'inline-block' }, [txt('three ')]),
+        elem('span', { display: 'ruby-base' }, [txt('four ')]),
+        elem('span', { display: '' }, [txt('five ')]),
+        elem('span', { position: 'fixed' }, [txt('six')]),
+      ]),
+    )
+
+    expect(flatText(fixture.root)).toBe('one two three four five six')
+  })
+
+  /* Entering a block is a boundary, not only leaving one — and leaving one is
+     a boundary with no block after it. */
+  it('puts a sentinel where inline text meets a block after it, and where a block meets text', () => {
+    const into = buildFixture(elem('div', {}, [txt('before'), elem('p', {}, [txt('inside')])]))
+    const out = buildFixture(elem('div', {}, [elem('p', {}, [txt('within')]), txt('after')]))
+
+    expect(flatText(into.root)).toBe('before\ninside')
+    expect(flatText(out.root)).toBe('within\nafter')
+  })
+
+  /* A walk that ran out of TREE has nothing to retreat from, however its last
+     piece ends — there is no bound it could have cut a word at. */
+  it('keeps everything a complete walk found, under an inline root ending mid-word', () => {
+    const fixture = buildFixture(elem('span', {}, [txt('alpha '), elem('em', {}, [txt('beta')])]))
+
+    const flat = flatten(fixture.root)
+
+    expect([flat.strs.join(''), flat.truncatedEnd]).toEqual(['alpha beta', false])
+  })
+
+  /* Whitespace INSIDE a dropped piece is not a safe cut: the cut is at its edge. */
+  it('does not take whitespace inside a dropped piece for a safe cut', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('span', {}, [txt('alpha ')]),
+        elem('span', {}, [txt('Hel')]),
+        elem('span', {}, [txt('lo wor')]),
+        elem('span', {}, [txt('ld')]),
+        elem('span', {}, [txt('zulu')]),
+      ]),
+    )
+
+    expect(flatText(fixture.root, { maxChars: 18, anchors: [at(fixture, 'alpha ', 2)] })).toBe('alpha ')
+  })
+
+  it('does not take whitespace inside a dropped piece for a safe cut, walking back', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('span', {}, [txt('alpha')]),
+        elem('span', {}, [txt('Hel')]),
+        elem('span', {}, [txt('lo wor')]),
+        elem('span', {}, [txt('ld')]),
+        elem('span', {}, [txt(' omega')]),
+      ]),
+    )
+
+    expect(flatText(fixture.root, { maxChars: 48, anchors: [at(fixture, ' omega', 2)] })).toBe(' omega')
+  })
+
+  /* Four visits exactly: the paragraph, its text, the span, the span's text. */
+  it('walks exactly as many nodes as it is allowed, and not one more', () => {
+    const fixture = buildFixture(elem('p', {}, [txt('a b'), elem('span', {}, [txt('c')])]))
+
+    const fits = flatten(fixture.root, { maxNodes: 4 })
+    const short = flatten(fixture.root, { maxNodes: 3 })
+
+    expect([fits.strs.join(''), fits.truncatedEnd]).toEqual(['a bc', false])
+    expect([short.strs.join(''), short.truncatedEnd]).toEqual(['a b', true])
+  })
+
+  /* The budget ahead is what is left after the seed AND what the walk behind
+     actually took — nine characters here, out of a quarter of forty. */
+  it('gives the walk ahead what the walk behind did not use, and no more', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('span', {}, [txt('aaaa ')]),
+        elem('span', {}, [txt('bbb ')]),
+        elem('span', {}, [txt('Seed ')]),
+        elem('span', {}, [txt(`${'c'.repeat(13)} `)]),
+        elem('span', {}, [txt(`${'d'.repeat(14)} `)]),
+        elem('span', {}, [txt(`${'e'.repeat(14)} `)]),
+      ]),
+    )
+
+    expect(flatText(fixture.root, { maxChars: 40, anchors: [at(fixture, 'Seed ', 1)] })).toBe(
+      `aaaa bbb Seed ${'c'.repeat(13)} `,
+    )
+  })
+
+  /* A backward piece's break belongs to the gap on its LATER side, so each
+     sentinel behind the anchor has exactly one right place. */
+  it('writes each sentinel behind the anchor into the gap it was found in', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('p', {}, [txt('first '), elem('em', {}, [txt('block')])]),
+        elem('p', {}, [txt('second')]),
+        elem('p', {}, [txt('third')]),
+      ]),
+    )
+
+    expect(flatten(fixture.root, { anchors: [at(fixture, 'third', 2)] }).strs).toEqual([
+      'first ',
+      'block',
+      SENTINEL,
+      'second',
+      SENTINEL,
+      'third',
+    ])
+  })
+
+  it('writes no leading sentinel behind an anchor whose block has one before it', () => {
+    const fixture = buildFixture(elem('div', {}, [elem('p', {}, [txt('earlier')]), elem('p', {}, [txt('later')])]))
+
+    expect(flatten(fixture.root, { anchors: [at(fixture, 'later', 1)] }).strs[0]).toBe('earlier')
+  })
+
+  /* The second sentinel, so the node before it does not start at zero and its
+     length is its end MINUS its start. */
+  it('maps a later sentinel to the nodes on either side of it', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [elem('p', {}, [txt('aa')]), elem('p', {}, [txt('bbb')]), elem('p', {}, [txt('cccc')])]),
+    )
+    const flat = flatten(fixture.root)
+
+    expect(flat.strs[3]).toBe(SENTINEL)
+    expect(flat.fromFlat(3, 0)).toEqual({ node: fixture.text('bbb'), offset: 3 })
+    expect(flat.fromFlat(3, 1)).toEqual({ node: fixture.text('cccc'), offset: 0 })
+  })
+
+  it('refuses a position that is not a whole number inside what it names', () => {
+    const fixture = buildFixture(elem('div', {}, [elem('p', {}, [txt('aa')]), elem('p', {}, [txt('bbb')])]))
+    const flat = flatten(fixture.root)
+    const bbb = fixture.text('bbb')
+
+    expect(flat.strs).toEqual(['aa', SENTINEL, 'bbb'])
+    /* toFlat, on a node whose flat start is not zero. */
+    expect(flat.toFlat(bbb, 3)).toEqual({ index: 2, offset: 3 })
+    expect([flat.toFlat(bbb, 4), flat.toFlat(bbb, -1), flat.toFlat(bbb, 1.5)]).toEqual([null, null, null])
+    /* fromFlat, the entry. */
+    expect(flat.fromFlat(2, 3)).toEqual({ node: bbb, offset: 3 })
+    expect([flat.fromFlat(3, 0), flat.fromFlat(-1, 0), flat.fromFlat(0.5, 0)]).toEqual([null, null, null])
+    /* fromFlat, the offset inside a node's entry. */
+    expect([flat.fromFlat(2, 4), flat.fromFlat(2, -1), flat.fromFlat(2, 1.5)]).toEqual([null, null, null])
+  })
+})
+
+describe('snapInDom — what its mutants found', () => {
+  /* The window is CENTRED on the selection: walked from the top, a paragraph
+     longer than the whole budget hides everything after it. */
+  it('snaps a word deep in a long chapter, which only a window centred on it can reach', () => {
+    const far = 'the whale surfaced'
+    const fixture = buildFixture(
+      elem('div', {}, [elem('p', {}, [txt('Long ago. '.repeat(2_500))]), elem('p', {}, [txt(far)])]),
+    )
+
+    expect(snapInDom(fixture.root, at(fixture, far, 5), at(fixture, far, 7))).toEqual({
+      start: at(fixture, far, 4),
+      end: at(fixture, far, 9),
+    })
+  })
+
+  it('leaves a selection alone when its end is outside the window', () => {
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('p', {}, [txt('near words')]),
+        elem('p', {}, [txt('Far away. '.repeat(3_000))]),
+        elem('p', {}, [txt('the end')]),
+      ]),
+    )
+
+    expect(snapInDom(fixture.root, at(fixture, 'near words', 1), at(fixture, 'the end', 2))).toBeNull()
+  })
+})
+
+const PLAIN_DOCUMENT = {
+  defaultView: { getComputedStyle: () => ({ display: 'inline', visibility: 'visible', position: 'static' }) },
+}
+
+/** A plain-object node: the few fields `flatten` reads and nothing else. Two
+ *  cases below need what `domFake.testkit.ts` does not give — a tree deeper
+ *  than its recursive builder survives, and a count of sibling reads — and a
+ *  tree this small reads more plainly than a new capability in the fake. */
+type PlainNode = Record<string, unknown>
+
+function plainElement(parentNode: PlainNode | null): PlainNode {
+  return {
+    nodeType: 1,
+    tagName: 'SPAN',
+    parentNode,
+    firstChild: null,
+    lastChild: null,
+    nextSibling: null,
+    previousSibling: null,
+    ownerDocument: PLAIN_DOCUMENT,
+  }
+}
+
+/**
+ * What an audit found. Each case names the rule it holds, on the smallest tree
+ * that shows it.
+ */
+describe('flatten — what an audit found', () => {
+  /*
+   * NOT EVERY `\s` IS A PLACE NO WORD SPANS. U+FEFF is Format and U+202F is
+   * ExtendNumLet, and UAX #29 joins letters across both — so a window ending
+   * `abc<U+FEFF>` was called safe and snapped `abc`, where the whole walk
+   * selects the word. Asked of the segmenter for EVERY `\s` member rather than
+   * listed, the way the sentinel is pinned; four cuts per character, beside it
+   * on either side, walking either way.
+   */
+  it('takes no whitespace the word segmenter joins into a word for a safe cut, in either direction', () => {
+    const whitespace = Array.from({ length: 0x1_0000 }, (_, unit) => String.fromCharCode(unit)).filter((c) =>
+      /\s/.test(c),
+    )
+    const code = (c: string): string => c.charCodeAt(0).toString(16)
+    /* Whether a word runs across offset `cut` of `text`. */
+    const joins = (text: string, cut: number): boolean =>
+      [...new Intl.Segmenter('en', { granularity: 'word' }).segment(text)].some(
+        (part) => isWordLike(part.segment) && part.index < cut && cut < part.index + part.segment.length,
+      )
+
+    const measured = whitespace.map((c) => {
+      const trailing = buildFixture(elem('div', {}, [elem('span', {}, [txt(`abc${c}`)]), elem('span', {}, [txt('defgh')])]))
+      const leading = buildFixture(elem('div', {}, [elem('span', {}, [txt('abc')]), elem('span', {}, [txt(`${c}defgh`)])]))
+      return {
+        code: code(c),
+        aheadAfter: flatten(trailing.root, { maxChars: 4, anchors: [at(trailing, `abc${c}`, 1)] }).truncatedEnd,
+        aheadBefore: flatten(leading.root, { maxChars: 3, anchors: [at(leading, 'abc', 1)] }).truncatedEnd,
+        behindBefore: flatten(leading.root, { maxChars: 8, anchors: [at(leading, `${c}defgh`, 2)] }).truncatedStart,
+        behindAfter: flatten(trailing.root, { maxChars: 4, anchors: [at(trailing, 'defgh', 1)] }).truncatedStart,
+      }
+    })
+
+    expect(measured).toEqual(
+      whitespace.map((c) => ({
+        code: code(c),
+        aheadAfter: joins(`abc${c}defgh`, 4),
+        aheadBefore: joins(`abc${c}defgh`, 3),
+        behindBefore: joins(`abc${c}defgh`, 3),
+        behindAfter: joins(`abc${c}defgh`, 4),
+      })),
+    )
+    /* Non-vacuity for the oracle: it finds the two this was found on, and only those. */
+    expect(whitespace.filter((c) => joins(`abc${c}defgh`, 4)).map(code)).toEqual(['202f', 'feff'])
+  })
+
+  /*
+   * A NODE THE BUDGET REFUSES IS STILL EVIDENCE. It was read, and whitespace at
+   * the edge the walk arrived at makes the cut in front of it safe — so
+   * `['word', ' next sentence']` under a four-character budget was declined
+   * against a cut beside a space.
+   */
+  it('takes whitespace at the near edge of a node the budget refused for a safe cut', () => {
+    const ahead = buildFixture(elem('p', {}, [txt('word'), elem('span', {}, [txt(' next sentence')])]))
+    const behind = buildFixture(elem('p', {}, [elem('span', {}, [txt('earlier words ')]), txt('mot')]))
+
+    const forward = flatten(ahead.root, { maxChars: 4, anchors: [at(ahead, 'word', 1)] })
+    const backward = flatten(behind.root, { maxChars: 3, anchors: [at(behind, 'mot', 1)] })
+
+    expect([forward.strs, forward.truncatedEnd]).toEqual([['word'], false])
+    expect([backward.strs, backward.truncatedStart]).toEqual([['mot'], false])
+    expect(snapInDom(ahead.root, at(ahead, 'word', 1), at(ahead, 'word', 2), { maxChars: 4 })).toEqual({
+      start: at(ahead, 'word', 0),
+      end: at(ahead, 'word', 4),
+    })
+    /* Non-vacuity: a refused node that begins with a letter is no evidence. */
+    const welded = buildFixture(elem('p', {}, [txt('term'), elem('span', {}, [txt('inal words')])]))
+    expect(flatten(welded.root, { maxChars: 4, anchors: [at(welded, 'term', 1)] }).truncatedEnd).toBe(true)
+  })
+
+  /*
+   * ONCE THE BUDGET IS SPENT, NOTHING MORE IS READ — not a child, and not the
+   * pointer to the next one. Every call past the budget refused at its first
+   * line, which read as "touches nothing", while the loop making those calls
+   * stepped through every remaining sibling.
+   */
+  it('stops stepping through siblings the moment the node budget is spent', () => {
+    const root = plainElement(null)
+    const children = Array.from({ length: 10_000 }, () => plainElement(root))
+    let siblingReads = 0
+    children.forEach((child, i) => {
+      Object.defineProperty(child, 'nextSibling', {
+        get: () => {
+          siblingReads += 1
+          return children[i + 1] ?? null
+        },
+      })
+    })
+    root['firstChild'] = children[0]
+    root['lastChild'] = children[children.length - 1]
+
+    const flat = flatten(root as unknown as Element, { maxNodes: 2 })
+
+    expect(flat.truncatedEnd).toBe(true)
+    expect(siblingReads).toBeLessThanOrEqual(2)
+  })
+
+  /*
+   * A LOOP, NOT RECURSION. Nesting ten thousand deep threw `RangeError: Maximum
+   * call stack size exceeded` out of a walk whose contract is to decline, long
+   * before the node budget could. Fifty thousand, so the case does not depend
+   * on how large this machine's stack happens to be.
+   */
+  it('walks a tree nested far deeper than the stack, without throwing', () => {
+    const root = plainElement(null)
+    let deepest = root
+    for (let level = 0; level < 50_000; level += 1) {
+      const child = plainElement(deepest)
+      deepest['firstChild'] = child
+      deepest['lastChild'] = child
+      deepest = child
+    }
+    const leaf = { nodeType: 3, data: 'at the bottom', parentNode: deepest, nextSibling: null, previousSibling: null }
+    deepest['firstChild'] = leaf
+    deepest['lastChild'] = leaf
+
+    expect(flatten(root as unknown as Element, { maxNodes: 100_000 }).strs).toEqual(['at the bottom'])
+    /* And the budget still refuses the same tree when it is the smaller of the two. */
+    expect(flatten(root as unknown as Element, { maxNodes: 1_000 })).toMatchObject({ strs: [], truncatedEnd: true })
+  })
+
+  /*
+   * THE CLIMB FROM THE ANCHOR IS CHARGED TO THE BUDGET. It reads a style at
+   * every level on the way up, and reading them free let a one-node budget read
+   * a hundred and one.
+   */
+  it('charges the climb from the anchor to the node budget', () => {
+    let spec: Spec = txt('deep text')
+    for (let level = 0; level < 100; level += 1) spec = elem('span', {}, [spec])
+    const fixture = buildFixture(elem('div', {}, [spec]))
+    const anchor = at(fixture, 'deep text', 1)
+
+    fixture.resetCounters()
+    const refused = flatten(fixture.root, { maxNodes: 50, anchors: [anchor] })
+
+    expect(fixture.styleReads).toBeLessThanOrEqual(50)
+    expect([refused.strs, refused.truncatedStart, refused.truncatedEnd]).toEqual([[], true, true])
+    /* Non-vacuity: with room for the climb, the same anchor is read. */
+    expect(flatten(fixture.root, { maxNodes: 200, anchors: [anchor] }).strs).toEqual(['deep text'])
+  })
+
+  /* A sentinel's offset is held to the sentinel, as a node's is to the node. It was clamped. */
+  it('refuses an offset into a sentinel that is not 0 or 1', () => {
+    const fixture = buildFixture(elem('div', {}, [elem('p', {}, [txt('left')]), elem('p', {}, [txt('right')])]))
+    const flat = flatten(fixture.root)
+
+    expect(flat.strs).toEqual(['left', SENTINEL, 'right'])
+    expect(
+      [-1, 0.5, 2, Number.NaN, Number.POSITIVE_INFINITY].map((offset) => flat.fromFlat(1, offset)),
+    ).toEqual([null, null, null, null, null])
+    expect([flat.fromFlat(1, 0), flat.fromFlat(1, 1)]).toEqual([at(fixture, 'left', 4), at(fixture, 'right', 0)])
+  })
+})
+
+describe('walkRoot', () => {
+  it('climbs to the topmost element above a node', () => {
+    const fixture = buildFixture(elem('div', {}, [elem('p', {}, [elem('em', {}, [txt('deep')])])]))
+
+    expect(walkRoot(fixture.text('deep'))).toBe(fixture.root)
+    expect(walkRoot(fixture.root)).toBe(fixture.root)
+  })
+
+  /* The topmost ELEMENT: a fragment or document above it is not one. */
+  it('stops at the topmost element, stepping past a parent that is not one', () => {
+    const top = { nodeType: 11, parentNode: null }
+    const el = { nodeType: 1, parentNode: top }
+    const text = { nodeType: 3, parentNode: el }
+
+    expect(walkRoot(text as unknown as Node)).toBe(el)
+  })
+
+  it('answers null for a node with no element above it', () => {
+    expect(walkRoot({ nodeType: 3, parentNode: null } as unknown as Node)).toBeNull()
   })
 })

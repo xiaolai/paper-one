@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { INDEX_FILE } from './bookIndex'
+import { INDEX_DIRTY_FILE, INDEX_FILE } from './bookIndex'
 import { coverPathIn, folderOf, marksPathIn, recordPath, trashOf, type BookRecord } from './bookFolder'
 import type { Card } from './cards'
 import { createDiagnostics, redact } from './diagnostics'
@@ -513,6 +513,53 @@ describe("a mutator's promise settles only once the write is durable", () => {
     }
     await expect(w.kernel.cards.add(CARD_1)).rejects.toThrow('quota')
     expect(w.kernel.cards.getSnapshot().persistent).toBe(false)
+  })
+})
+
+/**
+ * `drain` — the one moment that cannot be deferred: the window closing.
+ *
+ * ⚠️ **IT WAS THREE AWAITS IN A ROW, AND BOTH WAYS THAT LOST WORK WERE MEASURED
+ * HERE.** The index was flushed BEFORE the queue went idle, so a position tick
+ * still on the queue marked the index dirty after its flush had run and the
+ * drain resolved with `index.dirty` on disk. And a flush that rejected skipped
+ * the idle and the flat store's flush outright — a failure in the shelf's cache
+ * abandoning the settings and cards that had nothing to do with it.
+ */
+describe('drain', () => {
+  it('flushes the index after the writes it waited for, so a queued tick leaves nothing dirty', async () => {
+    const w = world()
+    await w.kernel.library.add('book:a', REC_A)
+    await w.kernel.drain()
+    /* NOT AWAITED. The tick is on the queue and marks the index dirty only when
+       its record lands — which is after a drain that starts now has begun. */
+    const tick = w.kernel.library.rememberPosition('book:a', 'epubcfi(/6/4!/4/2/1:0)', 0.5)
+    await w.kernel.drain()
+    await tick
+    expect(w.fs.store.has(INDEX_DIRTY_FILE), 'the drain resolved with the index still behind a tick').toBe(false)
+  })
+
+  it('attempts every stage when the index flush fails, and still raises that failure', async () => {
+    const w = world()
+    await w.kernel.library.add('book:a', REC_A)
+    await w.kernel.library.rememberPosition('book:a', 'epubcfi(/6/4!/4/2/1:0)', 0.5)
+    const write = w.fs.writeFile
+    w.fs.writeFile = async (path, bytes) => {
+      if (path.startsWith(INDEX_FILE)) throw new Error('the index would not write')
+      return write(path, bytes)
+    }
+    let flushed = 0
+    w.storage.flush = async () => {
+      flushed += 1
+    }
+
+    const cause = await w.kernel.drain().then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(flushed, 'the flat store was abandoned because the index failed').toBe(1)
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/the index would not write/u)
   })
 })
 

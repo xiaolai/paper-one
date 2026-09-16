@@ -64,15 +64,21 @@ async function library(): Promise<string> {
  * one that is quietly tolerated.
  */
 afterEach(async () => {
-  while (hosts.length > 0) await hosts.pop()?.close()
-  while (roots.length > 0) {
-    const root = roots.pop()
-    if (!root) continue
-    try {
-      await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 })
-    } catch (cause) {
-      const left = await readdir(root, { recursive: true }).catch(() => ['<unreadable>'])
-      throw new Error(`the scratch library would not go: ${messageOf(cause)} — left behind: ${left.join(', ')}`)
+  /* The roots go whatever a close does: a close that threw ended this hook
+     before the removal, so the library waited for a later case with nothing
+     to close — and stayed for good when none came. */
+  try {
+    while (hosts.length > 0) await hosts.pop()?.close()
+  } finally {
+    while (roots.length > 0) {
+      const root = roots.pop()
+      if (!root) continue
+      try {
+        await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 })
+      } catch (cause) {
+        const left = await readdir(root, { recursive: true }).catch(() => ['<unreadable>'])
+        throw new Error(`the scratch library would not go: ${messageOf(cause)} — left behind: ${left.join(', ')}`)
+      }
     }
   }
 })

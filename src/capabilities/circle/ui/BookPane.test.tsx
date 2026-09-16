@@ -572,6 +572,46 @@ describe('every clause of the circle’s view and the lists on the pane — one 
     await screen.findByText('Bob has this.')
   })
 
+  it('reads the view through a new circle for the same book, and hears that circle rather than the last', async () => {
+    /* The book does not change, so the view is NOT remounted by its key: only
+       its own dependencies can notice the circle was replaced. The port is one
+       object throughout, or the opinion would be read again and the view
+       remounted behind the test's back. */
+    const port = portWith()
+    let tellFirst: (() => void) | null = null
+    let tellSecond: (() => void) | null = null
+    const first = circleWith(
+      { people: [{ person: 'a', name: 'Alice', has: true, status: null, stars: null, reviews: [] }], alsoRead: [] },
+      {
+        subscribe: (listener) => {
+          tellFirst = listener
+          return () => {
+            tellFirst = null
+          }
+        },
+      },
+    )
+    let bobs: CircleView = { people: [{ person: 'b', name: 'Bob', has: true, status: null, stars: null, reviews: [] }], alsoRead: [] }
+    const second = circleWith(bobs, {
+      book: vi.fn(() => Promise.resolve(bobs)),
+      subscribe: (listener) => {
+        tellSecond = listener
+        return () => {}
+      },
+    })
+    const view = render(<BookPane bookId="book:moby" port={port} circle={first} />)
+    await screen.findByText('Alice has this.')
+    view.rerender(<BookPane bookId="book:moby" port={port} circle={second} />)
+    await screen.findByText('Bob has this.')
+    expect(screen.queryByText('Alice has this.')).toBeNull()
+    expect(second.book).toHaveBeenCalledWith('book:moby')
+    expect(tellFirst).toBeNull()
+
+    bobs = { people: [{ person: 'c', name: 'Carol', has: true, status: null, stars: null, reviews: [] }], alsoRead: [] }
+    await fire(() => tellSecond)
+    await screen.findByText('Carol has this.')
+  })
+
   it('lets a slow view read neither overwrite nor empty a later one', async () => {
     const slow = deferred<CircleView>()
     let calls = 0

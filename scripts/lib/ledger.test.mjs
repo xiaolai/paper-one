@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { makeExists } from '../check-ledger.mjs'
 import { DELETED_ENV } from '../verify-without.mjs'
 import {
@@ -75,6 +75,14 @@ describe('splitRow', () => {
   it('keeps an escaped pipe inside its cell', () => {
     expect(splitRow(String.raw`| a | b \| c | d | e |`)).toEqual(['a', String.raw`b \| c`, 'd', 'e'])
   })
+
+  it('finds the outer pipes of a row with whitespace around it', () => {
+    expect(splitRow('  | a | b | c | d |  ')).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('splits a row that leaves off its outer pipes, as GFM allows', () => {
+    expect(splitRow('a | b | c | d')).toEqual(['a', 'b', 'c', 'd'])
+  })
 })
 
 describe('parseRows', () => {
@@ -105,6 +113,50 @@ describe('parseRows', () => {
     expect(findings[0].code).toBe('LEDGER_ROW_SHAPE')
     expect(findings[0].message).toContain('3 cells')
   })
+
+  it('names the line and the first cell of a row that is not four cells', () => {
+    expect(parseRows(table('| A | Shipped | — |')).findings).toEqual([
+      { code: 'LEDGER_ROW_SHAPE', where: 'line 3', message: '3 cells, expected 4 — A' },
+    ])
+  })
+
+  it('reads a table indented under a list item', () => {
+    const md = [`  ${TABLE_HEADER}`, `  ${SEP}`, '  | Cap | Shipped | `core/a.ts` | how |'].join('\n')
+    expect(parseRows(md)).toEqual({
+      rows: [{ line: 3, capability: 'Cap', state: 'Shipped', where: '`core/a.ts`', confirm: 'how' }],
+      findings: [],
+    })
+  })
+
+  it('reads a separator written with spaces and alignment colons as a separator', () => {
+    const md = [TABLE_HEADER, '| --- | :---: | ---: | :--- |', '| A | Shipped | — | x |'].join('\n')
+    expect(parseRows(md).rows.map((r) => r.capability)).toEqual(['A'])
+  })
+
+  /* A separator is pipes, dashes, colons and spaces from END TO END. A row
+     whose first or last cell is empty has a `|  |` at that end, and must not be
+     skipped as though it were one. */
+  it('reads a row whose first and last cells are empty, rather than taking it for a separator', () => {
+    const { rows, findings } = parseRows(table('|  | Shipped | `core/a.ts` |  |'))
+    expect(findings).toEqual([])
+    expect(rows).toEqual([{ line: 3, capability: '', state: 'Shipped', where: '`core/a.ts`', confirm: '' }])
+  })
+
+  it('stops at prose that ends in a pipe, even with no blank line before it', () => {
+    const { rows, findings } = parseRows(`${table('| A | Shipped | — | x |')}\nProse that ends in a pipe |`)
+    expect(rows.map((r) => r.capability)).toEqual(['A'])
+    expect(findings).toEqual([])
+  })
+
+  it('ignores a table inside an indented fence', () => {
+    const md = ['   ```', table('| A | Done | `src/nope.ts` | how |'), '   ```'].join('\n')
+    expect(parseRows(md)).toEqual({ rows: [], findings: [] })
+  })
+
+  it('does not open a fence on a line that only mentions one', () => {
+    const md = ['Write ``` on a line of its own to open a fence.', '', table('| A | Shipped | — | x |')].join('\n')
+    expect(parseRows(md).rows.map((r) => r.capability)).toEqual(['A'])
+  })
 })
 
 describe('normalizeState', () => {
@@ -118,6 +170,21 @@ describe('normalizeState', () => {
 
   it('leaves anything else alone, so the finding can name it', () => {
     expect(normalizeState('Mostly done')).toBe('Mostly done')
+  })
+
+  it('sees through whitespace around the word', () => {
+    expect(normalizeState(' Shipped ')).toBe('Shipped')
+  })
+
+  it('sees through a parenthetical however it is spaced', () => {
+    expect(normalizeState('Shipped(macOS)')).toBe('Shipped')
+    expect(normalizeState('Shipped (macOS) ')).toBe('Shipped')
+  })
+
+  /* Only a TRAILING parenthetical narrows a state. One anywhere else is part of
+     what the cell says, and `(not) Shipped` is not Shipped. */
+  it('keeps a parenthetical that does not end the cell', () => {
+    expect(normalizeState('(not) Shipped')).toBe('(not) Shipped')
   })
 })
 
@@ -149,6 +216,14 @@ describe('isPathClaim', () => {
   it.each([':12', ''])('rejects %o, which strips to nothing', (token) =>
     expect(isPathClaim(token)).toBe(false),
   )
+
+  it('strips a line suffix from a bare filename before reading its extension', () => {
+    expect(isPathClaim('paginator.js:12')).toBe(true)
+  })
+
+  it('strips only the line suffix that ends the token', () => {
+    expect(isPathClaim('chapter:2.md:14')).toBe(true)
+  })
 })
 
 describe('pathClaims', () => {
@@ -164,6 +239,10 @@ describe('pathClaims', () => {
   it('finds nothing in a cell that is only prose', () => {
     expect(pathClaims('Settings → Page → Flow')).toEqual([])
   })
+
+  it('leaves a colon and a number inside a path where they are', () => {
+    expect(pathClaims('`src/v:2/a.ts`')).toEqual(['src/v:2/a.ts'])
+  })
 })
 
 describe('resolveClaim', () => {
@@ -178,6 +257,10 @@ describe('resolveClaim', () => {
 
   it('drops a trailing slash so a directory and its name are one claim', () => {
     expect(resolveClaim('ui/reader/wordSnap/')).toEqual({ path: 'src/kernel/ui/reader/wordSnap' })
+  })
+
+  it('drops every trailing slash, not only the last', () => {
+    expect(resolveClaim('ui/reader/wordSnap//')).toEqual({ path: 'src/kernel/ui/reader/wordSnap' })
   })
 
   it('refuses a bare filename rather than searching for it', () => {
@@ -289,6 +372,137 @@ describe('checkLedger', () => {
     const [f] = checkLedger({ markdown: md, exists: treeOf() }).findings
     expect(f.code).toBe('LEDGER_PATH_VAGUE')
   })
+
+  it('says how to write a bare filename as a path', () => {
+    const md = table('| A | Shipped | `session.ts` | how |')
+    expect(checkLedger({ markdown: md, exists: treeOf() }).findings.map((f) => f.message)).toEqual([
+      'session.ts names no directory — write the path from the repo root, or from the kernel as core/… or ui/…',
+    ])
+  })
+
+  /* Ends in a brace, not an extension, so only the template characters taken
+     out leave `….ts` at the end to be recognised as path-like. */
+  it('reports a brace pair of filenames with no directory', () => {
+    const md = table('| A | Shipped | `{bookVault.ts,vaultFsTauri.ts}` | how |')
+    expect(checkLedger({ markdown: md, exists: treeOf() }).findings.map((f) => f.code)).toEqual(['LEDGER_PATH_VAGUE'])
+  })
+
+  it('counts a template it reports among the claims it checked', () => {
+    const md = table('| A | Shipped | `src/capabilities/{peer,sync}` | how |')
+    expect(checkLedger({ markdown: md, exists: treeOf() }).summary).toEqual({ rows: 1, claims: 1, findings: 1 })
+  })
+
+  it('says which external path it saw, and why it is excused', () => {
+    const md = table('| A | Shipped | fork `paginator.js` | how |')
+    const result = checkLedger({ markdown: md, exists: treeOf() })
+    expect(result.notes).toEqual(['note: line 3 paginator.js — foliate-js fork (github:xiaolai/foliate-js), not this repo'])
+    expect([...result.external]).toEqual(['paginator.js'])
+  })
+
+  it('names the state it refuses and the five it knows', () => {
+    const md = table('| A | Mostly | `core/a.ts` | how |')
+    expect(checkLedger({ markdown: md, exists: treeOf('src/kernel/core/a.ts') }).findings).toEqual([
+      { code: 'LEDGER_STATE', where: 'line 3', message: '"Mostly" is not one of Shipped, Partial, Stub, Absent, Unknown' },
+    ])
+  })
+})
+
+/**
+ * The legend, case by case. Every assertion reads the whole message, because a
+ * legend the check cannot read is reported too — so "a LEDGER_LEGEND finding
+ * exists" cannot tell a legend that was read and refused from one that was
+ * never read at all.
+ */
+describe('the State legend', () => {
+  const legendOf = (...rows) => ['| State | Meaning |', '|---|---|', ...rows].join('\n')
+  const bold = (...states) => states.map((s) => `| **${s}** | x |`)
+  const KNOWS = 'this check knows Shipped, Partial, Stub, Absent, Unknown'
+  /** The legend findings of a ledger that is this legend and one clean row. */
+  const legendFindings = (legend) =>
+    checkLedger({ markdown: `${legend}\n\n${table('| A | Shipped | — | how |')}`, exists: treeOf() }).findings.filter(
+      (f) => f.code === 'LEDGER_LEGEND',
+    )
+  const listed = (legend) => legendFindings(legend).map((f) => f.message)
+
+  it('says where a drifted legend is and what both sides list', () => {
+    expect(legendFindings(legendOf(...bold('Shipped', 'Nearly')))).toEqual([
+      { code: 'LEDGER_LEGEND', where: 'the State legend', message: `the State legend lists Shipped, Nearly; ${KNOWS}` },
+    ])
+  })
+
+  it('refuses a legend missing one of the five', () => {
+    expect(listed(legendOf(...bold('Shipped', 'Partial', 'Stub', 'Absent')))).toEqual([
+      `the State legend lists Shipped, Partial, Stub, Absent; ${KNOWS}`,
+    ])
+  })
+
+  it('refuses a legend that lists one state twice', () => {
+    expect(listed(legendOf(...bold('Shipped', 'Shipped', 'Partial', 'Stub', 'Absent')))).toEqual([
+      `the State legend lists Shipped, Shipped, Partial, Stub, Absent; ${KNOWS}`,
+    ])
+  })
+
+  it('refuses a legend of five with one of them wrong', () => {
+    expect(listed(legendOf(...bold('Shipped', 'Partial', 'Stub', 'Absent', 'Nearly')))).toEqual([
+      `the State legend lists Shipped, Partial, Stub, Absent, Nearly; ${KNOWS}`,
+    ])
+  })
+
+  it('finds a legend written without spaces, or with whitespace after it', () => {
+    const compact = ['|State|Meaning|', '|---|---|', '|**Shipped**|done|', '|**Nearly**|not done|'].join('\n')
+    const trailing = ['| State | Meaning |   ', '|---|---|', ...bold('Shipped', 'Nearly')].join('\n')
+    for (const legend of [compact, trailing]) {
+      expect(listed(legend), legend).toEqual([`the State legend lists Shipped, Nearly; ${KNOWS}`])
+    }
+  })
+
+  it('reads a legend indented under a list item', () => {
+    const legend = legendOf(...bold('Shipped', 'Nearly'))
+      .split('\n')
+      .map((line) => `  ${line}`)
+      .join('\n')
+    expect(listed(legend)).toEqual([`the State legend lists Shipped, Nearly; ${KNOWS}`])
+  })
+
+  it('reads a legend whose states are not bold', () => {
+    expect(listed(legendOf('| Shipped | done |', '| Nearly | not done |'))).toEqual([
+      `the State legend lists Shipped, Nearly; ${KNOWS}`,
+    ])
+  })
+
+  it('reads a legend row that leaves off its closing pipe', () => {
+    expect(listed(legendOf('| **Shipped** | done |', '| **Nearly** | not done'))).toEqual([
+      `the State legend lists Shipped, Nearly; ${KNOWS}`,
+    ])
+  })
+
+  it('skips a legend row whose first cell names no state, rather than reading the next cell', () => {
+    const legend = legendOf(...bold('Shipped', 'Partial', 'Stub', 'Absent', 'Unknown'), '|  | Deprecated |')
+    expect(listed(legend)).toEqual([])
+  })
+
+  /* A legend at the very end of the document has no line after it to stop at,
+     and the loop must stop at the last line rather than read past it. */
+  it('reads a legend that runs to the end of the document', () => {
+    const md = `${table('| A | Shipped | — | how |')}\n\n${legendOf(...bold(...STATES))}`
+    expect(checkLedger({ markdown: md, exists: treeOf() }).findings).toEqual([])
+  })
+
+  it('takes only a two-column table headed State and Meaning for the legend', () => {
+    const wider = ['| State | Meaning | Since |', '|---|---|---|', '| **Nearly** | x | 2026 |'].join('\n')
+    const later = ['| Area | State | Meaning |', '|---|---|---|', '| **Reader** | Shipped | done |'].join('\n')
+    for (const doc of [wider, later]) expect(listed(doc), doc).toEqual([])
+  })
+
+  /* ⚠️ A LEGEND WITH NO ROW THIS CHECK CAN READ USED TO SWITCH THE CHECK OFF
+     (2026-09-15, found by a surviving mutant). It was answered as "no legend",
+     so writing every state as `Shipped` in backticks or italics was silent,
+     while writing ONE of them that way was reported. */
+  it('refuses a legend with no state it can read, rather than skipping the check', () => {
+    const unreadable = `the State legend lists no state this check can read; ${KNOWS}`
+    expect(listed(legendOf('| `Shipped` | done |', '| *Partial* | some |'))).toEqual([unreadable])
+    expect(listed(legendOf())).toEqual([unreadable])
+  })
 })
 
 describe('output', () => {
@@ -350,12 +564,23 @@ describe('the constants the ledger and this check share', () => {
  * It declares its condition IN ITS TITLE, the convention `check-test-ledger.mjs`
  * keys on, so `tests/ledger.json` does not record names that only this machine
  * can collect. Everything above runs everywhere and is what binds CI. */
+/* ⚠️ **AND A SKIPPED SUITE'S BODY STILL RUNS** (2026-09-14). Vitest collects a
+ * `describe.skipIf` by CALLING its body, so the `it`s inside register as
+ * skipped; the condition skips the tests, not the code around them. The read
+ * sat at the top of this body, so on a checkout without the file `vitest list`
+ * threw ENOENT and `test:ledger` stopped `pnpm verify` on all three CI legs —
+ * every run on main from 2026-09-12, while this machine, which has the file,
+ * stayed green. The read is in `beforeAll` now, which a skipped suite never
+ * runs. */
 describe.skipIf(!existsSync(LEDGER_FILE))('the local ledger (skipped when this checkout has no dev-docs/feature-ledger.md)', () => {
-  const markdown = readFileSync(LEDGER_FILE, 'utf8')
-  /* Honours DELETED_ENV for the same reason the shell does: this suite runs
-   * inside `verify:without`'s copy, where one capability's directory is gone
-   * on purpose. */
-  const result = checkLedger({ markdown, exists: makeExists(REPO_ROOT), removed: process.env[DELETED_ENV] })
+  let result
+  beforeAll(() => {
+    const markdown = readFileSync(LEDGER_FILE, 'utf8')
+    /* Honours DELETED_ENV for the same reason the shell does: this suite runs
+     * inside `verify:without`'s copy, where one capability's directory is gone
+     * on purpose. */
+    result = checkLedger({ markdown, exists: makeExists(REPO_ROOT), removed: process.env[DELETED_ENV] })
+  })
 
   it('names only paths that exist', () => {
     expect(result.findings.map(formatFinding)).toEqual([])
@@ -369,7 +594,7 @@ describe.skipIf(!existsSync(LEDGER_FILE))('the local ledger (skipped when this c
   })
 
   it('names every path the EXTERNAL allowlist excuses, so the list cannot rot', () => {
-    expect([...EXTERNAL.keys()].filter((claim) => !result.external.has(claim))).toEqual([])
+    expect([...EXTERNAL].map(([claim]) => claim).filter((claim) => !result.external.has(claim))).toEqual([])
   })
 })
 
@@ -395,5 +620,40 @@ describe('a tree the removal proof has just edited', () => {
     expect(result.findings.map((f) => f.message)).toEqual([
       'src/capabilities/peer → src/capabilities/peer does not exist',
     ])
+  })
+
+  /* The measured defect beside the normalisation in `checkLedger`: a raw prefix
+     test handed a claim about PEER the excusal meant for the deleted `sync`. */
+  it('does not excuse a claim that climbs out of the deleted capability', () => {
+    const md = table('| Sync | Partial | `src/capabilities/sync/../peer/x.ts` | how |')
+    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync' })
+    expect(result.findings.map((f) => f.code)).toEqual(['LEDGER_PATH_MISSING'])
+    expect(result.notes).toEqual([])
+  })
+
+  it('excuses a claim that climbs into the deleted capability', () => {
+    const md = table('| Sync | Partial | `src/capabilities/peer/../sync/x.ts` | how |')
+    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync' })
+    expect(result.findings).toEqual([])
+    expect(result.notes).toHaveLength(1)
+  })
+
+  it('excuses a claim under the deleted capability spelled with a `.` or an empty segment', () => {
+    const md = table('| Sync | Partial | `src/capabilities/./sync/a.ts`, `src/capabilities//sync/b.ts` | how |')
+    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync' })
+    expect(result.findings).toEqual([])
+    expect(result.notes).toHaveLength(2)
+  })
+
+  /* `removed` goes into a template, so an absent one must never become the
+     text of one: `src/capabilities/undefined`, or a `null/` prefix. */
+  it('excuses nothing when no capability was removed, even a path the absent value would spell', () => {
+    const md = table('| A | Partial | `src/capabilities/undefined/x.ts`, `null/x.ts` | how |')
+    const result = checkLedger({ markdown: md, exists: treeOf() })
+    expect(result.findings.map((f) => f.message)).toEqual([
+      'src/capabilities/undefined/x.ts → src/capabilities/undefined/x.ts does not exist',
+      'null/x.ts → null/x.ts does not exist',
+    ])
+    expect(result.notes).toEqual([])
   })
 })

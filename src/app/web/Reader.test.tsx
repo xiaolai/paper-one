@@ -482,7 +482,7 @@ describe('Reader', () => {
       allBookmarks: [], allUnplaced: [],
       persistent: true,
       remove: (m: { id: string; bookId: string }) => removed.push(m),
-      setNote: () => {},
+      setNote: async () => {},
       loadAll: () => {},
       subscribe: () => () => {},
       refresh: () => {},

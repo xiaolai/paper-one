@@ -1,4 +1,5 @@
 import { notifyAll } from './notify'
+import { isAnswerChoice, type AnswerChoice } from './glossLanguage'
 import { MARK_TINTS, READER_STYLES, type MarkStorage, type MarkStyle, type MarkTint } from './marks'
 import {
   BRIGHTNESS,
@@ -13,7 +14,7 @@ import {
   SPACING,
   type SpacingScale,
 } from './metrics'
-import { defineSetting, type Setting, type SettingsStore } from './ports'
+import { defineSetting, frozen, type Setting, type SettingsStore } from './ports'
 import {
   ALIGNS,
   CODE_FACES,
@@ -88,6 +89,14 @@ export const keepValues: SettingsMigration = (found) => found?.values ?? {}
  * namespaced (anything with a dot) is passed through untouched, which is what
  * makes this safe to run over an envelope that has already been migrated.
  *
+ * ⚠️ **AND THE NAMESPACED VALUE WINS, WHATEVER ORDER THE FILE LISTS THEM IN.**
+ * One loop wrote both spellings to the same key as it met them, so
+ * `{ "kernel.theme": "sage", "theme": "night" }` came out `night` and the same
+ * two keys the other way round came out `sage` — property order deciding a
+ * preference. A namespaced key can only have been written by a build that
+ * already knew the namespace, so it is the newer of the two; a legacy key is
+ * carried only where its destination is still empty. Found by audit.
+ *
  * VALUES ARE NOT VALIDATED HERE. Each setting's own `parse` runs on `get`, so a
  * field the old file spelled differently, or a step index from a build with a
  * longer ramp, falls back or clamps exactly as it would from a current file —
@@ -97,7 +106,11 @@ export const carryLegacySettings: SettingsMigration = (found) => {
   const values = found?.values ?? {}
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(values)) {
-    out[key.includes('.') ? key : `kernel.${key}`] = value
+    if (key.includes('.')) out[key] = value
+  }
+  for (const [key, value] of Object.entries(values)) {
+    const carried = `kernel.${key}`
+    if (!key.includes('.') && !(carried in out)) out[carried] = value
   }
 
   return out
@@ -110,28 +123,61 @@ export interface SettingsStoreOptions {
 }
 
 /**
- * Read one envelope back, or `null` for anything that is not one.
+ * Read one envelope back, or `null` when NOTHING IS STORED.
  *
  * `version` may be missing or a non-number: that is an OLDER envelope for the
- * migration hook to see, reported with `version: 0`. `values` that are not an
- * object are no values.
+ * migration hook to see, reported with `version: 0`. `values` that are absent
+ * are no values; `values` that are there and are not an object THROW. (This
+ * sentence said they were no values too, which was the defect — see the
+ * comment at the check.)
+ *
+ * ⚠️ **AND BYTES THAT ARE NOT AN ENVELOPE THROW, WHERE THEY USED TO BE `null`
+ * TOO.** `null` is what the store reads as "this reader has no settings file",
+ * so answering it for a file that would not parse started the store empty with
+ * writes ON — and the next preference changed replaced the file with an
+ * envelope holding that one alone. That is the very defect the read-THROW path
+ * below was fixed for, arriving by the commoner route, and it survived that fix
+ * because the two answers were spelled the same (2026-09-13 audit). Only
+ * `null` — nothing stored — is nothing stored.
  */
 function parseEnvelope(raw: string | null): SettingsEnvelope | null {
-  if (!raw) return null
+  if (raw === null) return null
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
-  } catch {
-    return null
+  } catch (cause) {
+    throw new Error('the stored settings are not JSON', { cause })
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('the stored settings are not an envelope')
+  }
   const shape = parsed as { version?: unknown; values?: unknown }
-  const versioned = typeof shape.version === 'number' && Number.isFinite(shape.version)
+  /* `Number.isFinite` DOES NOT COERCE, so it answers false for a version that is
+     absent, a string, or `1e999` — which is what `JSON.parse` makes Infinity of,
+     and which counted as a version would outrank every version there will be. A
+     `typeof` test in front of it decided nothing and hid this line's own
+     mutants from the gate. */
+  const versioned = Number.isFinite(shape.version)
   const version = versioned ? (shape.version as number) : 0
-  const wrapped =
-    typeof shape.values === 'object' && shape.values !== null && !Array.isArray(shape.values)
-      ? (shape.values as Record<string, unknown>)
-      : null
+  /* ⚠️ **A `values` THAT IS THERE AND IS NOT A COLLECTION IS DAMAGE, AND IT
+   * READ AS NO VALUES.** The throws above were the 2026-09-13 audit's; this
+   * line survived them, so `{"version":1,"values":[…]}` still came up as `{}`
+   * with writes ON and the first preference changed replaced the file with an
+   * envelope holding that one alone — the same loss, one field further in
+   * (2026-09-13 verify). ABSENT is still nothing: a legacy flat file has no
+   * `values` key, and a versioned envelope without one carries nothing. And
+   * one preference that will not read still costs only itself, in its own
+   * `parse` on `get`: it is the collection that is refused here, not a row. */
+  if (
+    shape.values !== undefined &&
+    (typeof shape.values !== 'object' || shape.values === null || Array.isArray(shape.values))
+  ) {
+    throw new Error('the stored settings have values that are not a collection')
+  }
+  /* Absent stays absent: the `??` below reads `undefined` exactly as it read the
+     `null` this used to be turned into, so the turning was a branch that decided
+     nothing and hid its own line from the gate. */
+  const wrapped = shape.values as Record<string, unknown> | undefined
   /* AN ENVELOPE FROM BEFORE THERE WERE ENVELOPES is the object itself.
    * Paper's first settings file was a flat map of `AppState` field names under
    * this same key, with no `version` and no `values` — so reading it as "an
@@ -142,16 +188,46 @@ function parseEnvelope(raw: string | null): SettingsEnvelope | null {
   return { version, values }
 }
 
-export function createSettingsStore({ storage, migrate = keepValues }: SettingsStoreOptions): SettingsStore {
-  let read: string | null = null
+/**
+ * What is stored, and whether this launch could read it at all.
+ *
+ * A storage that throws on read — disabled, busy, or a hostile stub — is a
+ * store with nothing in it. The reader gets defaults, and the app still opens.
+ *
+ * ⚠️ **BUT NOTHING IN IT IS NOT NOTHING ON DISK, AND THE NEXT WRITE USED TO SAY
+ * IT WAS.** Writes stayed on, and `persist` writes the whole envelope — so one
+ * preference changed after a transient failure replaced the file with an
+ * envelope holding only that preference, and every other setting, a
+ * capability's included, was gone. Unreadable is not absent: the store keeps
+ * this session's choices and leaves the file it could not read alone, which is
+ * `persistent: false`. Found by audit.
+ *
+ * ⚠️ **AND THE COMMONER FAILURE IS THE FILE, NOT THE STORAGE — IT ARRIVED HERE
+ * ONLY WITH THE 2026-09-13 AUDIT.** A `getItem` that throws is rare; a file that
+ * will not parse is what damage actually looks like, and `parseEnvelope`
+ * answered it with the same `null` that means "no settings yet". So everything
+ * the paragraph above describes went on happening, past its own fix, to every
+ * reader whose file was merely corrupt. The parse throws for those bytes now
+ * and both failures land here.
+ *
+ * A FUNCTION RATHER THAN A `try` IN THE FACTORY, so `found` stays a `const`
+ * below: the narrowing that `fromTheFuture` carries is an aliased-condition
+ * narrowing, which TypeScript only performs for a constant.
+ */
+function openStored(storage: MarkStorage | null): {
+  readonly found: SettingsEnvelope | null
+  readonly unreadable: boolean
+} {
   try {
-    read = storage?.getItem(SETTINGS_STORAGE_KEY) ?? null
-  } catch {
-    // A storage that throws on read — disabled, or a hostile stub — is a store
-    // with nothing in it. The reader gets defaults, and the app still opens.
-    read = null
+    return { found: parseEnvelope(storage?.getItem(SETTINGS_STORAGE_KEY) ?? null), unreadable: false }
+  } catch (cause) {
+    console.error('Paper: settings could not be read, and will not be saved this session', cause)
+    return { found: null, unreadable: true }
   }
-  const found = parseEnvelope(read)
+}
+
+export function createSettingsStore({ storage, migrate = keepValues }: SettingsStoreOptions): SettingsStore {
+  const { found, unreadable } = openStored(storage)
   /* Unknown keys are KEPT, not dropped: a value under `sync.interval` in a
    * build without the sync capability composed belongs to a capability that
    * may be composed again, and forgetting it here would make removing and
@@ -176,14 +252,19 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
              is this build claiming the file. */
           (found.values as Readonly<Record<string, unknown>>)
         : migrate(found)
+  /* FROZEN, like everything `set` holds after it: `getSnapshot` hands this record
+     out whole, and a reader who changed a value in it changed memory under the
+     disk, with no write and no notification (2026-09-13 verify). */
+  values = frozen(values)
   const listeners = new Set<() => void>()
 
   /* WHETHER THE NEXT LAUNCH WILL SEE ANY OF THIS. No storage at all is the
    * plain case; a storage that has REFUSED a write is the earned one — and a
    * file written by a NEWER build is the third: refusing to write it is the
    * only way to leave it intact, and "these settings are not being saved" is
-   * already the sentence the panel draws for exactly this state. */
-  let persistent = storage !== null && !fromTheFuture
+   * already the sentence the panel draws for exactly this state. A file that
+   * would not READ is the fourth, for the same reason as the third. */
+  let persistent = storage !== null && !fromTheFuture && !unreadable
 
   /**
    * Tell every subscriber, and let none of them stop the others.
@@ -222,19 +303,37 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
    * wide margin.
    */
   const unchanged = (current: unknown, value: unknown): boolean => {
-    if (Object.is(current, value)) return true
+    /* NO `Object.is` SHORTCUT IN FRONT OF THIS. `value` is always a fresh JSON
+       copy, so wherever identity held the comparison below held too — a branch
+       nothing could observe, which is also a branch nothing could hold. */
+    let same = false
     try {
-      return JSON.stringify(current) === JSON.stringify(value)
+      same = JSON.stringify(current) === JSON.stringify(value)
     } catch {
-      return false
+      /* Left false: a difference it cannot prove is a difference. */
     }
+    return same
   }
 
   const persist = () => {
     if (!storage || !persistent) return
     const envelope: SettingsEnvelope = { version: SETTINGS_VERSION, values }
+    /* ⚠️ **SERIALISING IS NOT THE STORAGE, AND ONE CATCH USED TO ANSWER FOR
+     * BOTH.** A value `JSON.stringify` refused was read as a refused WRITE and
+     * turned persistence off for the session — so one capability's unsaveable
+     * value stopped every preference saving, and replacing it did not undo
+     * that. `set` now refuses such a value before it is held, so the envelope
+     * can only fail here through a migration hook's output; that says so and
+     * skips this write, and leaves a healthy storage marked healthy. */
+    let text: string
     try {
-      storage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(envelope))
+      text = JSON.stringify(envelope)
+    } catch (cause) {
+      console.error('Paper: settings could not be serialised, so this change was not saved', cause)
+      return
+    }
+    try {
+      storage.setItem(SETTINGS_STORAGE_KEY, text)
     } catch (cause) {
       /* ⚠️ **THIS USED TO THROW, AND NOTHING CAUGHT IT.**
        *
@@ -276,15 +375,16 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
       try {
         parsed = setting.parse(values[setting.key])
       } catch {
-        return setting.fallback
+        /* Left unset, which the line below already answers with the fallback:
+           a parser that throws is saying what one that returns `undefined` says. */
       }
       return parsed === undefined ? setting.fallback : parsed
     },
     set: (setting, value) => {
       /* BY VALUE, so a re-render that sets what is already set writes nothing:
        * the UI writes on every change of fifteen fields, and most of those
-       * changes are one field. Primitives compare directly; anything richer
-       * compares serialised, which is what will be stored anyway.
+       * changes are one field. Compared serialised, which is what will be
+       * stored anyway.
        *
        * AND AGAINST THE FALLBACK WHEN NOTHING IS STORED, because absent MEANS
        * the fallback — `get` returns it — so writing it back changes nothing a
@@ -292,10 +392,34 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
        * defaults to disk: the app reads its preferences before the first
        * render and writes them back in an effect, so a launch that changed
        * nothing still paid a write, on the one path that is already the
-       * slowest. */
+       * slowest.
+       *
+       * ⚠️ **A COPY, TAKEN AT THE BOUNDARY — AND IT USED TO BE THE CALLER'S OWN
+       * OBJECT.** Held by reference, a value mutated after `set` changed what
+       * every reader saw with no notification and no write, and setting the
+       * same object again compared equal to itself and wrote nothing: the disk
+       * kept the old value and memory showed the new one. The copy is exactly
+       * what would be written, so memory and disk can no longer disagree about
+       * a value's shape either.
+       *
+       * ⚠️ **AND A VALUE THAT WILL NOT SERIALISE IS REFUSED HERE, NOT HELD.**
+       * Held, it sat in the envelope and failed every later write, which read as
+       * a refused storage and turned persistence off for the session — one bad
+       * value from one capability stopped every preference saving. Refused, it
+       * costs that one change, said to the log. `undefined` is refused with it:
+       * JSON has no spelling for it, so it could never have reached the disk. */
+      let held: unknown
+      try {
+        const text = JSON.stringify(value)
+        if (text === undefined) throw new TypeError('JSON has no spelling for this value')
+        held = JSON.parse(text)
+      } catch (cause) {
+        console.error(`Paper: the setting ${setting.key} was not changed, because its value cannot be saved`, cause)
+        return
+      }
       const current = setting.key in values ? values[setting.key] : setting.fallback
-      if (unchanged(current, value)) return
-      values = { ...values, [setting.key]: value }
+      if (unchanged(current, held)) return
+      values = frozen({ ...values, [setting.key]: held })
       // Listeners first: what is held in memory is the truth the UI shows,
       // whether or not the disk then takes it. Then the write, whose failure
       // becomes `persistent` rather than an exception out of an event handler.
@@ -321,8 +445,11 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
 
 const oneOf =
   <T extends string>(allowed: readonly T[]) =>
+  /* `includes` DOES NOT COERCE and this list holds nothing but strings, so it
+     answers false for every value that is not one. A `typeof` test in front of
+     it decided nothing and hid this line's own mutants from the gate. */
   (raw: unknown): T | undefined =>
-    typeof raw === 'string' && (allowed as readonly string[]).includes(raw) ? (raw as T) : undefined
+    (allowed as readonly unknown[]).includes(raw) ? (raw as T) : undefined
 
 const boolean = (raw: unknown): boolean | undefined => (typeof raw === 'boolean' ? raw : undefined)
 
@@ -349,8 +476,12 @@ const stringList = (raw: unknown): readonly string[] | undefined =>
  */
 const index =
   (length: number) =>
+  /* `Number.isInteger` DOES NOT COERCE, so it answers false for a string, a
+     boolean and `null` as surely as for 1.5 — a `typeof` test in front of it
+     decided nothing and hid this line's own mutants from the gate. The cast is
+     what that test used to buy: it holds only under the check beside it. */
   (raw: unknown): number | undefined =>
-    typeof raw === 'number' && Number.isInteger(raw) ? Math.max(0, Math.min(length - 1, raw)) : undefined
+    Number.isInteger(raw) ? Math.max(0, Math.min(length - 1, raw as number)) : undefined
 
 /** The four spacing indices, each independently clamped; a broken one costs
  *  itself and not the other three. */
@@ -376,15 +507,25 @@ const spacingIndices = (raw: unknown): SpacingIndices | undefined => {
  * before this landed has none of them, and a reader upgrading must get the
  * defaults rather than an empty panel.
  */
+/**
+ * The fields of `ReadingStyle` whose value is a `V`.
+ *
+ * ⚠️ **THE HELPERS BELOW TOOK ANY FIELD AND CAST ITS DEFAULT**, so
+ * `pick('fidelity', SEPARATIONS)` type-checked and handed a fidelity value back
+ * as a separation's fallback. Keyed by value type, a helper can only be given a
+ * field its own default fits, and the list a `pick` validates against has to be
+ * that field's list — so the casts, and the mistake they hid, are gone.
+ */
+type StyleField<V> = { [K in keyof ReadingStyle]: ReadingStyle[K] extends V ? K : never }[keyof ReadingStyle]
+
 const readingStyle = (raw: unknown): ReadingStyle | undefined => {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const row = raw as Record<string, unknown>
-  const pick = <T extends string>(key: keyof ReadingStyle, from: readonly T[]): T =>
-    (oneOf(from)(row[key]) ?? DEFAULT_READING_STYLE[key]) as T
-  const step = (key: keyof ReadingStyle, scale: SpacingScale): number =>
-    index(scale.steps.length)(row[key]) ?? (DEFAULT_READING_STYLE[key] as number)
-  const flag = (key: keyof ReadingStyle): boolean =>
-    boolean(row[key]) ?? (DEFAULT_READING_STYLE[key] as boolean)
+  const pick = <K extends StyleField<string>>(key: K, from: readonly ReadingStyle[K][]): ReadingStyle[K] =>
+    oneOf(from)(row[key]) ?? DEFAULT_READING_STYLE[key]
+  const step = (key: StyleField<number>, scale: SpacingScale): number =>
+    index(scale.steps.length)(row[key]) ?? DEFAULT_READING_STYLE[key]
+  const flag = (key: StyleField<boolean>): boolean => boolean(row[key]) ?? DEFAULT_READING_STYLE[key]
   return {
     separation: pick('separation', SEPARATIONS),
     flourish: pick('flourish', FLOURISHES),
@@ -488,6 +629,19 @@ export const KERNEL_SETTINGS = {
      as long as it took an audit to notice that `theme`, `stepIdx`, `spacing`
      and `align` are all in this list and these fifteen were not. */
   readingStyle: defineSetting<ReadingStyle>('kernel.readingStyle', DEFAULT_READING_STYLE, readingStyle),
+  /**
+   * What Look up writes its definitions in (WI-17.5) — a mode, or a language
+   * from the measured list. See `core/glossLanguage.ts`.
+   *
+   * VALIDATED AGAINST THE LIST, so a file naming a language a later build
+   * stopped offering reads as the reader's own language rather than asking the
+   * model in a language measured to be poor. The orphaned `kernel.lookUp` of the
+   * deleted three-mode Look up is a different key and stays inert, as phase 17
+   * §3 decided.
+   */
+  lookUpLanguage: defineSetting<AnswerChoice>('kernel.lookUpLanguage', 'reader', (raw) =>
+    isAnswerChoice(raw) ? raw : undefined,
+  ),
 } as const satisfies Record<string, Setting<unknown>>
 
 export type KernelSettingName = keyof typeof KERNEL_SETTINGS
@@ -503,10 +657,24 @@ export type KernelPreferences = {
  * `store.get` NEVER FAILS — an absent or malformed value comes back as the
  * setting's fallback — so "not stored" and "stored as rubbish" are the same
  * answer, and the only way to ask the question is a fallback no real value can
- * take. `-1` is not a legal index, and `index()` rejects it, so both cases land
- * on it and both mean the same thing here: nothing to migrate.
+ * take. `-1` is not a legal index, and the parser refuses every negative before
+ * `index()` clamps what is left, so absent, rubbish and a stored negative all
+ * land on it and all mean the same thing here: nothing to migrate.
+ *
+ * ⚠️ **THIS SAID `index()` REJECTS `-1`. IT CLAMPS IT, TO 0** — so a stored
+ * `-1` read as the old ramp's first step and migrated to 17px. `index()` clamps
+ * both ends because a build with a longer ramp can run off the TOP; nothing
+ * runs off the bottom, and a negative here names no step at all. Found by
+ * audit.
  */
-const LEGACY_STEP_IDX = defineSetting<number>('kernel.stepIdx', -1, index(LEGACY_READING_SIZES.length))
+// Stryker disable next-line StringLiteral: `defineSetting` refuses an unnamespaced key, and it is called HERE, at module scope — so the empty-string mutant throws while this module is being imported, every covering suite fails to LOAD, no test fails, and Stryker's vitest runner reports it Survived with nothing able to kill it (measured 2026-09-14)
+const LEGACY_STEP_IDX = defineSetting<number>('kernel.stepIdx', -1, (raw) =>
+  /* THE SIGN IS READ OFF WHAT WAS STORED, before `index()` can clamp a negative
+     up to 0. Only a number can be negative here, and `index()` refuses
+     everything else whichever way this comparison goes — so a `typeof` test in
+     front of it decided nothing and hid this line from the gate. */
+  Number(raw) < 0 ? undefined : index(LEGACY_READING_SIZES.length)(raw),
+)
 
 /**
  * The reading size, migrating a stored index from the seven-step ramp once.
@@ -579,6 +747,7 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     markTint: store.get(KERNEL_SETTINGS.markTint),
     markStyle: store.get(KERNEL_SETTINGS.markStyle),
     readingStyle: store.get(KERNEL_SETTINGS.readingStyle),
+    lookUpLanguage: store.get(KERNEL_SETTINGS.lookUpLanguage),
   }
 }
 

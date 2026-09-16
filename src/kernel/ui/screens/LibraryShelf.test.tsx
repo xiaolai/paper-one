@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
+import { useLayoutEffect } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Library } from './Library'
-import type { BookStatus } from '../../core/capability'
+import styles from './Library.module.css'
+import { BOOK_DRAG_TYPE } from '../../core/bookDrag'
+import type { BookAction, BookStatus } from '../../core/capability'
 import type { IndexedBook } from '../../core/bookIndex'
 
 /**
@@ -81,6 +84,23 @@ const shelf = {
   bookActions: [],
   bookStatuses: [],
 } as const
+
+/** The titles the shelf is showing, in the order it is showing them. */
+const shown = () =>
+  [...document.querySelectorAll('[title^="Open "]')].map((el) =>
+    el.getAttribute('title')?.replace('Open ', ''),
+  )
+
+/** The grid — or the list — the cells are drawn into. */
+const rack = () => document.querySelector('[data-scroll] > div') as HTMLElement
+
+const press = (init: KeyboardEventInit, at: EventTarget = document.body) => {
+  const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+  act(() => {
+    at.dispatchEvent(event)
+  })
+  return event
+}
 
 describe('opening a book from the shelf', () => {
   it('hands the entry back, not its id', () => {
@@ -218,6 +238,28 @@ describe('the toolbar menus', () => {
     expect(typeof asked === 'function' ? asked('') : asked).toContain('tag:history')
   })
 
+  /* ⚠️ ONE ESCAPE, ONE LAYER. The menu's own Escape handler stops propagation,
+     which cannot stop the shelf's listener: both are on `document`. So the
+     shelf has to know a toolbar menu is open, and until 2026-09-13 it did not —
+     Escape closed Sort AND dropped the selection. */
+  it('lets Escape close a toolbar menu before it lets the selection go', () => {
+    render(<Library {...shelf} />)
+    const press = (init: KeyboardEventInit) =>
+      act(() => {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }))
+      })
+    press({ key: 'a', metaKey: true })
+    fireEvent.click(screen.getByLabelText('Sort: Recently opened'))
+    expect(screen.getByRole('menu', { name: 'Sort' })).toBeTruthy()
+
+    press({ key: 'Escape' })
+    expect(screen.queryByRole('menu', { name: 'Sort' })).toBeNull()
+    expect(screen.queryByLabelText('Clear the selection'), 'one Escape took the menu and the selection').toBeTruthy()
+
+    press({ key: 'Escape' })
+    expect(screen.queryByLabelText('Clear the selection')).toBeNull()
+  })
+
   it('switches between grid and list', () => {
     render(<Library {...shelf} />)
     fireEvent.click(screen.getByLabelText('Switch to list view'))
@@ -246,6 +288,37 @@ describe('a capability store that moves', () => {
     answer = { label: 'Downloading 25%' }
     await act(async () => { fire() })
     expect(screen.getAllByText('Downloading 25%').length).toBeGreaterThan(0)
+  })
+
+  /* ⚠️ THE SHELF READS `of` WHILE IT RENDERS AND SUBSCRIBES IN A PASSIVE EFFECT,
+     so a store that publishes in between reaches nobody. A layout effect is
+     exactly that moment — every layout effect runs before any passive one — and
+     until 2026-09-13 what it said was lost until something else re-rendered. */
+  it('hears what a store said before the shelf was listening', async () => {
+    let answer: { label: string } | null = null
+    const listeners = new Set<() => void>()
+    const status: BookStatus = {
+      id: 'test:early',
+      subscribe: (listener) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+      of: () => answer,
+    }
+    function PublishesFirst() {
+      useLayoutEffect(() => {
+        answer = { label: 'Downloaded just now' }
+        for (const listener of [...listeners]) listener()
+      }, [])
+      return <Library {...shelf} bookStatuses={[status]} />
+    }
+
+    await act(async () => {
+      render(<PublishesFirst />)
+    })
+
+    expect(listeners.size, 'the shelf never subscribed, so this proves nothing').toBe(1)
+    expect(screen.getAllByText('Downloaded just now').length).toBeGreaterThan(0)
   })
 })
 
@@ -296,5 +369,482 @@ describe('what boot had to say', () => {
     expect(screen.getByRole('status').textContent).toContain('The store could not be read.')
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
     expect(dismiss).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * THE FOUR ORDERINGS, EACH TELLING THE OTHER THREE APART.
+ *
+ * The fixtures are arranged so recency, title, author and progress all disagree
+ * — with any two of them coinciding, a menu row that wrote the wrong `id` into
+ * the shelf would sort the books into the right order by accident, which is
+ * what let four of these rows go unmeasured.
+ */
+describe('the order the shelf opens in, and the four it offers', () => {
+  const ordered = [
+    book({ bookId: 'a', title: 'Anna', author: 'Zeta', openedAt: 3000, progress: 0.1 }),
+    book({ bookId: 'b', title: 'Bede', author: 'Mu', openedAt: 1000, progress: 0.9 }),
+    book({ bookId: 'c', title: 'Cato', author: 'Alpha', openedAt: 2000, progress: 0.5 }),
+  ]
+  const openMenu = () => fireEvent.click(screen.getByLabelText(/^Sort: /))
+  const pick = (name: string) => {
+    openMenu()
+    fireEvent.click(screen.getByRole('menuitemradio', { name }))
+  }
+
+  it('opens on recency, which no other ordering here agrees with', () => {
+    render(<Library {...shelf} books={ordered} />)
+    expect(shown()).toEqual(['Anna', 'Cato', 'Bede'])
+  })
+
+  it('ticks the ordering it is actually in', () => {
+    /* The button's label falls back to the first option, so a menu that had
+       lost track of the current order still READ right. The tick is what says
+       which row the shelf is standing on. */
+    render(<Library {...shelf} books={ordered} />)
+    openMenu()
+    expect(screen.getByRole('menuitemradio', { name: 'Recently opened' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByRole('menuitemradio', { name: 'Title' }).getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('sorts by the row that was picked, and says which', () => {
+    render(<Library {...shelf} books={ordered} />)
+    pick('Author')
+    expect(shown(), 'by author').toEqual(['Cato', 'Bede', 'Anna'])
+    expect(screen.getByLabelText('Sort: Author')).toBeTruthy()
+
+    pick('Progress')
+    expect(shown(), 'by how far in').toEqual(['Bede', 'Cato', 'Anna'])
+    expect(screen.getByLabelText('Sort: Progress')).toBeTruthy()
+
+    pick('Recently opened')
+    expect(shown(), 'and back to recency').toEqual(['Anna', 'Cato', 'Bede'])
+  })
+})
+
+describe('the toolbar’s way in', () => {
+  /* ABSENT MEANS NOT DRAWN — a `+` wired to nothing is the shelf offering
+     something its host cannot do. Pinned in both directions, so the guard
+     cannot be satisfied by drawing it for everyone or for no one. */
+  it('offers a + that adds books, to a host that can add them', () => {
+    const onAddBooks = vi.fn()
+    render(<Library {...shelf} onAddBooks={onAddBooks} />)
+    const add = screen.getByRole('button', { name: 'Add books' })
+    expect(add.getAttribute('title')).toBe('Add books…')
+    fireEvent.click(add)
+    expect(onAddBooks).toHaveBeenCalledTimes(1)
+  })
+
+  it('draws no + for a host with no way to add a book', () => {
+    const { onAddBooks: _a, ...readOnly } = shelf
+    render(<Library {...readOnly} />)
+    expect(screen.getByLabelText('Search the library'), 'the toolbar is there').toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Add books' })).toBeNull()
+  })
+})
+
+describe('the view toggle', () => {
+  /* THE ICON IS THE DESTINATION and the label says so in words: a toggle that
+     wore the state it was IN would read as the opposite control. */
+  it('offers the view the reader is not in, and switches to it and back', () => {
+    render(<Library {...shelf} />)
+    const toggle = () => screen.getByRole('button', { name: /^Switch to (list|grid) view$/ })
+    expect(toggle().getAttribute('title')).toBe('List view')
+    expect(toggle().querySelector('svg')?.getAttribute('class')).toContain('lucide-list')
+    expect(rack().className).toBe(styles.shelf)
+
+    fireEvent.click(toggle())
+    expect(screen.getByLabelText('Switch to grid view').getAttribute('title')).toBe('Grid view')
+    expect(screen.getByLabelText('Switch to grid view').querySelector('svg')?.getAttribute('class')).toContain('lucide-layout-grid')
+    expect(rack().className).toBe(styles.list)
+
+    fireEvent.click(screen.getByLabelText('Switch to grid view'))
+    expect(screen.getByLabelText('Switch to list view')).toBeTruthy()
+    expect(rack().className, 'back in the grid, not in a third state').toBe(styles.shelf)
+  })
+})
+
+/**
+ * ONE MENU MAY ONLY CLOSE ITSELF.
+ *
+ * Both menus close through `useRowMenu`'s cleanup, which fires when `open` goes
+ * false — AFTER the other menu has already set the union to its own name. An
+ * unconditional close therefore erased the state the incoming menu had just
+ * written, and the menu the reader had pressed never appeared.
+ */
+describe('one toolbar menu opening another', () => {
+  it('leaves the incoming menu open when the outgoing one closes', () => {
+    render(<Library {...shelf} />)
+    fireEvent.click(screen.getByLabelText('Narrow the shelf'))
+    fireEvent.click(screen.getByLabelText(/^Sort: /))
+    expect(screen.getByRole('menu', { name: 'Sort' })).toBeTruthy()
+    expect(screen.queryByRole('menuitemcheckbox', { name: 'Untagged' }), 'the narrow menu went').toBeNull()
+  })
+
+  it('holds just as well the other way round', () => {
+    render(<Library {...shelf} />)
+    fireEvent.click(screen.getByLabelText(/^Sort: /))
+    fireEvent.click(screen.getByLabelText('Narrow the shelf'))
+    expect(screen.getByRole('menuitemcheckbox', { name: 'Untagged' })).toBeTruthy()
+    expect(screen.queryByRole('menu', { name: 'Sort' })).toBeNull()
+  })
+
+  it('still lets Escape close the narrow menu', () => {
+    render(<Library {...shelf} />)
+    fireEvent.click(screen.getByLabelText('Narrow the shelf'))
+    press({ key: 'Escape' })
+    expect(screen.queryByRole('menuitemcheckbox', { name: 'Untagged' })).toBeNull()
+  })
+})
+
+/**
+ * THE CHIPS READ THE QUERY BACK, and each one is a click from lifting the term
+ * it reports. A filter a reader cannot see is a shelf that has quietly lost
+ * most of its books.
+ */
+describe('the filter chips', () => {
+  const lifted = (onQueryChange: ReturnType<typeof vi.fn>, from: string) => {
+    const asked = onQueryChange.mock.calls.at(-1)![0]
+    return typeof asked === 'function' ? asked(from) : asked
+  }
+
+  it('draws no row at all over a shelf nothing is narrowing', () => {
+    const { container } = render(<Library {...shelf} />)
+    expect(container.querySelector(`.${styles.chips}`)).toBeNull()
+  })
+
+  it('offers the reading state back, and lifts it', () => {
+    const onQueryChange = vi.fn()
+    render(<Library {...shelf} libraryQuery="is:reading" onQueryChange={onQueryChange} />)
+    const chip = screen.getByRole('button', { name: 'reading ✕' })
+    expect(chip.hasAttribute('data-excluded'), 'a required term is not an exclusion').toBe(false)
+    fireEvent.click(chip)
+    expect(lifted(onQueryChange, 'is:reading').trim()).toBe('')
+  })
+
+  it('offers untagged back, and lifts it', () => {
+    const onQueryChange = vi.fn()
+    render(<Library {...shelf} libraryQuery="is:untagged" onQueryChange={onQueryChange} />)
+    fireEvent.click(screen.getByRole('button', { name: 'untagged ✕' }))
+    expect(lifted(onQueryChange, 'is:untagged').trim()).toBe('')
+  })
+
+  it('reads an exclusion as one, and lifts that too', () => {
+    /* "not Sea" rather than "Sea", so a reader glancing at the row knows which
+       way each chip is narrowing. Same ✕, same clear. */
+    const onQueryChange = vi.fn()
+    render(<Library {...shelf} libraryQuery="-tag:history" onQueryChange={onQueryChange} />)
+    const chip = screen.getByRole('button', { name: 'not history ✕' })
+    expect(chip.getAttribute('data-excluded')).toBe('true')
+    fireEvent.click(chip)
+    expect(lifted(onQueryChange, '-tag:history').trim()).toBe('')
+  })
+
+  it('gives every exclusion its own chip, and its own ✕', () => {
+    /* KEYED BY THE TAG, which is what makes the chips a list rather than two
+       positions. Lifting the first one leaves the second one's own element
+       standing — under one key shared by both, React matches them by position
+       instead, and the chip the reader is left with is the one they cleared,
+       wearing the other's words. */
+    const onQueryChange = vi.fn()
+    const { rerender } = render(
+      <Library {...shelf} libraryQuery="-tag:history -tag:sea" onQueryChange={onQueryChange} />,
+    )
+    expect(screen.getByRole('button', { name: 'not history ✕' })).toBeTruthy()
+    const sea = screen.getByRole('button', { name: 'not sea ✕' })
+
+    rerender(<Library {...shelf} libraryQuery="-tag:sea" onQueryChange={onQueryChange} />)
+    expect(screen.queryByRole('button', { name: 'not history ✕' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'not sea ✕' })).toBe(sea)
+  })
+})
+
+describe('the selection hint', () => {
+  it('names the modifier the reader’s own keyboard has', () => {
+    render(<Library {...shelf} />)
+    fireEvent.click(screen.getByTitle('Open Bad Blood'), { metaKey: true })
+    expect(screen.getByText(/click to add/).textContent).toBe('⌘-click to add · ⇧-click for a run')
+    cleanup()
+
+    render(<Library {...shelf} platform="windows" />)
+    fireEvent.click(screen.getByTitle('Open Bad Blood'), { ctrlKey: true })
+    expect(screen.getByText(/click to add/).textContent).toBe('Ctrl-click to add · ⇧-click for a run')
+  })
+})
+
+describe('what the shelf answers on the keyboard', () => {
+  it('takes Ctrl-A where the keyboard has no ⌘', () => {
+    render(<Library {...shelf} platform="windows" />)
+    press({ key: 'a', metaKey: true })
+    expect(screen.queryByLabelText('Clear the selection'), '⌘ is not this platform’s key').toBeNull()
+    press({ key: 'a', ctrlKey: true })
+    expect(screen.getByLabelText('Clear the selection')).toBeTruthy()
+  })
+
+  it('answers ⌘A and no other chord', () => {
+    render(<Library {...shelf} />)
+    press({ key: 'b', metaKey: true })
+    expect(screen.queryByLabelText('Clear the selection')).toBeNull()
+  })
+
+  it('leaves a bare letter to whatever else wants it', () => {
+    render(<Library {...shelf} />)
+    press({ key: 'a' })
+    expect(screen.queryByLabelText('Clear the selection')).toBeNull()
+  })
+
+  it('stays out of a textarea, as it stays out of the search field', () => {
+    render(<Library {...shelf} />)
+    const note = document.createElement('textarea')
+    document.body.append(note)
+    try {
+      press({ key: 'a', metaKey: true }, note)
+      expect(screen.queryByLabelText('Clear the selection')).toBeNull()
+    } finally {
+      note.remove()
+    }
+  })
+
+  it('takes the keystroke when it answers it, and leaves it when it does not', () => {
+    /* ⌘A over a shelf showing nothing is the browser's own select-all-text, and
+       swallowing it there would take a key the reader can still use away for
+       an act that gathers no books. */
+    const { rerender } = render(<Library {...shelf} />)
+    expect(press({ key: 'a', metaKey: true }).defaultPrevented).toBe(true)
+    rerender(<Library {...shelf} libraryQuery="nothing on this shelf is called this" />)
+    expect(press({ key: 'a', metaKey: true }).defaultPrevented).toBe(false)
+  })
+
+  it('lets the selection go on Escape and on nothing else', () => {
+    render(<Library {...shelf} />)
+    press({ key: 'a', metaKey: true })
+    press({ key: 'b' })
+    expect(screen.getByLabelText('Clear the selection'), 'an unrelated key kept it').toBeTruthy()
+    press({ key: 'Escape' })
+    expect(screen.queryByLabelText('Clear the selection')).toBeNull()
+  })
+})
+
+describe('dragging a book off the shelf', () => {
+  const dragged = (title: string) => {
+    const written: Record<string, string> = {}
+    const dataTransfer = {
+      setData: (type: string, value: string) => {
+        written[type] = value
+      },
+      effectAllowed: '',
+    }
+    fireEvent.dragStart(screen.getByTitle(title).closest('[draggable]')!, { dataTransfer })
+    return JSON.parse(written[BOOK_DRAG_TYPE] ?? 'null') as string[] | null
+  }
+
+  it('carries the whole selection when the card dragged is in it', () => {
+    render(<Library {...shelf} />)
+    press({ key: 'a', metaKey: true })
+    expect(dragged('Deselect Bad Blood')?.sort()).toEqual(['bk1', 'bk2'])
+  })
+
+  it('carries the one card when it is not', () => {
+    /* Finder's rule. A drag that quietly took the selection with it would move
+       books the reader had not picked up. */
+    render(<Library {...shelf} />)
+    fireEvent.click(screen.getByTitle('Open Bad Blood'), { metaKey: true })
+    expect(dragged('Select Seeing Like a State')).toEqual(['bk2'])
+  })
+})
+
+describe('the tags the editors suggest', () => {
+  it('follow the shelf when a book arrives wearing a new one', () => {
+    const { rerender } = render(<Library {...shelf} />)
+    rerender(
+      <Library
+        {...shelf}
+        books={[...BOOKS, book({ bookId: 'bk3', title: 'Sea Room', tags: ['islands'] })]}
+      />,
+    )
+    fireEvent.click(screen.getByLabelText('Narrow the shelf'))
+    expect(screen.getByRole('menuitemcheckbox', { name: /islands/ })).toBeTruthy()
+  })
+})
+
+/**
+ * THE LIST'S TIMES ARE A CLAIM ABOUT NOW, and a window left open over lunch
+ * kept whatever now its last unrelated render happened to read.
+ */
+describe('the minute the list keeps', () => {
+  it('moves its times on with no render to prompt it, and only in the list', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-09-14T12:00:00Z'))
+      render(<Library {...shelf} books={[book({ openedAt: Date.now() })]} />)
+      expect(vi.getTimerCount(), 'the grid has no times to keep').toBe(0)
+
+      fireEvent.click(screen.getByLabelText('Switch to list view'))
+      expect(screen.getByText('Just now')).toBeTruthy()
+      act(() => {
+        vi.advanceTimersByTime(60_000)
+      })
+      expect(screen.getByText('1 min')).toBeTruthy()
+      act(() => {
+        vi.advanceTimersByTime(60_000)
+      })
+      expect(screen.getByText('2 min')).toBeTruthy()
+
+      fireEvent.click(screen.getByLabelText('Switch to grid view'))
+      expect(vi.getTimerCount(), 'and it stops when the list goes').toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+/**
+ * WHAT A RENDER OF THE SHELF COSTS, counted through work it causes — an action's
+ * `when`, which every card asks while it draws.
+ */
+describe('the shelf’s own re-renders', () => {
+  const counter = () => {
+    const when = vi.fn(() => true)
+    const action: BookAction = {
+      id: 'test:fetch',
+      label: 'Download',
+      fetchesContent: true,
+      when,
+      run: () => {},
+    }
+    return { when, books: [book({ bookId: 'bk1', hasContent: false })], actions: [action] }
+  }
+
+  it('costs nothing at all when no capability has a store to watch', async () => {
+    const { when, books, actions } = counter()
+    render(<Library {...shelf} books={books} bookActions={actions} bookStatuses={[]} />)
+    when.mockClear()
+    await act(async () => {})
+    expect(when).not.toHaveBeenCalled()
+  })
+
+  it('costs one deferred tick for a burst, not one per publication', async () => {
+    /* The latch. A transfer publishes per frame, and each notification is a
+       closure queued on the microtask queue — fifty in a tick must be one. */
+    let fire = () => {}
+    const status: BookStatus = {
+      id: 'test:busy',
+      subscribe: (listener) => {
+        fire = listener
+        return () => {}
+      },
+      of: () => null,
+    }
+    render(<Library {...shelf} bookStatuses={[status]} />)
+    const queued = vi.spyOn(globalThis, 'queueMicrotask')
+    try {
+      await act(async () => {
+        for (let i = 0; i < 50; i++) fire()
+      })
+      expect(queued.mock.calls.length).toBeLessThan(5)
+    } finally {
+      queued.mockRestore()
+    }
+  })
+
+  it('asks again for every burst, not only for the first', async () => {
+    /* The latch is released by the tick it queued. Left set, the shelf answered
+       one publication and then went deaf for the session. */
+    let fire = () => {}
+    let answer: { label: string } | null = null
+    const status: BookStatus = {
+      id: 'test:twice',
+      subscribe: (listener) => {
+        fire = listener
+        return () => {}
+      },
+      of: () => answer,
+    }
+    render(<Library {...shelf} bookStatuses={[status]} />)
+    await act(async () => {})
+    answer = { label: 'Downloading 25%' }
+    await act(async () => {
+      fire()
+    })
+    expect(screen.getAllByText('Downloading 25%').length).toBeGreaterThan(0)
+  })
+
+  it('lets a store go when the shelf stops watching it', async () => {
+    const off = vi.fn()
+    const status: BookStatus = {
+      id: 'test:let-go',
+      subscribe: () => off,
+      of: () => null,
+    }
+    const { unmount } = render(<Library {...shelf} bookStatuses={[status]} />)
+    unmount()
+    expect(off).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a tick queued by a store it no longer holds', async () => {
+    /* A microtask queued just before the effect is torn down still fires — into
+       a shelf that has unsubscribed, or whose providers have just been swapped.
+       It must not spend a render on what it was told. */
+    const { when, books, actions } = counter()
+    let fire = () => {}
+    const status: BookStatus = {
+      id: 'test:going',
+      subscribe: (listener) => {
+        fire = listener
+        return () => {}
+      },
+      of: () => null,
+    }
+    /* ONE array, held: a fresh `bookStatuses` on every render would resubscribe
+       — and tick — for reasons that have nothing to do with what is measured. */
+    const stores = [status]
+    const { rerender } = render(
+      <Library {...shelf} books={books} bookActions={actions} bookStatuses={stores} />,
+    )
+    await act(async () => {})
+    /* What ONE render of this shelf costs, measured rather than assumed. */
+    when.mockClear()
+    act(() => {
+      rerender(<Library {...shelf} books={books} bookActions={actions} bookStatuses={stores} enriching={1} />)
+    })
+    const perRender = when.mock.calls.length
+    expect(perRender).toBeGreaterThan(0)
+
+    /* THREE FLUSHES, AND THAT IS THE WHOLE TEST. Publishing and swapping the
+       stores inside one `act` is one render whichever way the tick goes, which
+       passes either way and measures nothing. Nothing awaits between the two
+       lines below, so the microtask is still queued when the effect is torn
+       down — the moment this is about. */
+    when.mockClear()
+    act(() => {
+      fire()
+    })
+    act(() => {
+      rerender(<Library {...shelf} books={books} bookActions={actions} bookStatuses={[]} enriching={1} />)
+    })
+    await act(async () => {})
+    /* The swap itself, and nothing for the tick that arrived too late. */
+    expect(when.mock.calls.length).toBe(perRender)
+  })
+
+  it('subscribes to the store it is given now, not the one it was given first', async () => {
+    let fire = () => {}
+    let answer: { label: string } | null = null
+    const second: BookStatus = {
+      id: 'test:second',
+      subscribe: (listener) => {
+        fire = listener
+        return () => {}
+      },
+      of: () => answer,
+    }
+    const { rerender } = render(<Library {...shelf} bookStatuses={[]} />)
+    rerender(<Library {...shelf} bookStatuses={[second]} />)
+    await act(async () => {})
+    answer = { label: 'Added from Laptop' }
+    await act(async () => {
+      fire()
+    })
+    expect(screen.getAllByText('Added from Laptop').length).toBeGreaterThan(0)
   })
 })

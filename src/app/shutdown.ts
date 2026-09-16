@@ -31,6 +31,12 @@ export interface ShutdownDeps {
   readonly emit: (event: string) => Promise<void>
   /** Hand the write queue everything still held in the UI (`flushBeforeClose`). */
   readonly flush: () => void
+  /**
+   * Wait for work still RUNNING that has yet to hand itself over — an import
+   * mid-copy (`settleBeforeDrain`). Between the flush and the drain, and inside
+   * the drain's own bound.
+   */
+  readonly settle: () => Promise<void>
   /** Wait for the write queue. */
   readonly drain: () => Promise<void>
   /** End the capabilities' lifetime — unbinds the recorder, closes the journal. */
@@ -134,7 +140,8 @@ export function createTeardown(deps: ShutdownDeps): () => Promise<void> {
  *   1. `flush` — a queue can only drain what it has been GIVEN, and the thing
  *      most likely to be lost is the thing not yet handed over: a note being
  *      typed, a reading position still inside its throttle.
- *   2. `drain`, BOUNDED — a wedged queue must delay a quit, never prevent one.
+ *   2. `settle`, then `drain`, BOUNDED TOGETHER — a wedged queue must delay a
+ *      quit, never prevent one, and so must an import that will not stop.
  *   3. `abort` LAST of the three: aborting unbinds the recorder and closes the
  *      journal, so anything drained after it would reach disk with no journal
  *      entry — unreplicable, which is the defect this phase existed to remove.
@@ -181,10 +188,45 @@ async function runTeardown(deps: ShutdownDeps): Promise<void> {
      * anywhere recorded that it had not. The queue cannot be cancelled from
      * here and the journal's flag cannot be held up per capability, so what
      * this can do is SAY so, in the same line the other failed steps use. */
+    /* ⚠️ **AND THE DRAIN WAITS FOR AN IMPORT STILL COPYING, WHICH IT DID NOT**
+     * (2026-09-13 audit, #96). A queue drains what it has been given, and an
+     * import mid-copy gives its shelf writes a batch BEHIND the copying — so
+     * this drained, `abort` closed the journal, and the books already on disk
+     * reached the queue afterwards or not at all: bytes with no record. The
+     * window close had been taught to stop the import inside `App`; ⌘Q on a
+     * Mac never passes through there. `settle` is `settleBeforeDrain`, which
+     * `App` registers its stop with, so both paths wait on one list.
+     *
+     * ONE BOUND OVER BOTH, not a bound each: the shell's grace is one number,
+     * and two budgets in a row could spend it twice. The line that says the
+     * bound ran out names whichever of the two had not finished. */
     await step('drain', async () => {
-      const finished = await Promise.race([deps.drain().then(() => true), wait(deps.graceMs).then(() => false)])
+      let settled = false
+      const settleThenDrain = (async () => {
+        try {
+          await deps.settle()
+        } catch (error) {
+          failures.push(`settle: ${messageOf(error)}`)
+        }
+        settled = true
+        await deps.drain()
+        return true
+      })()
+      /* ⚠️ **A DRAIN THAT REJECTS AFTER THE BOUND WON IS NOT AN UNHANDLED
+         REJECTION, AND A `settleThenDrain.catch(() => {})` HERE SAID IT WOULD
+         BE.** `Promise.race` subscribes to each side with a rejection handler
+         before either settles, so a late rejection is already handled, and the
+         race — long since answered — ignores it. The line changed nothing a test
+         could tell from its absence (2026-09-14). `shutdown.test.ts` holds the
+         property instead, and fails against a race that does not subscribe. */
+      // Stryker disable next-line ArrowFunction: the losing side is read only as `!finished`, where `undefined` and `false` are the same answer.
+      const finished = await Promise.race([settleThenDrain, wait(deps.graceMs).then(() => false)])
       if (!finished) {
-        failures.push(`drain: the write queue did not finish within ${deps.graceMs}ms — writes may have been lost`)
+        failures.push(
+          settled
+            ? `drain: the write queue did not finish within ${deps.graceMs}ms — writes may have been lost`
+            : `settle: what the write queue waits for did not finish within ${deps.graceMs}ms — writes may have been lost`,
+        )
       }
     })
     await step('abort', () => deps.abort())

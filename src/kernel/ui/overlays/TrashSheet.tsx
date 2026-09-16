@@ -49,6 +49,18 @@ export interface TrashSheetProps {
    */
   readonly error: string | null
   /**
+   * Why the last RESTORE did not work, or null — shown above the rows.
+   *
+   * ⚠️ **A FOURTH STATE, AND IT WAS BEING SENT THROUGH THE THIRD.** `App` passed
+   * a restore's failure as `error`, so one book that came back `partial`
+   * replaced the whole list with "The trash could not be read" — a sentence
+   * about a read that had worked — and with it went every other Restore button,
+   * on the one surface that exists to undo a deletion (#97). The two cannot
+   * share a slot in either direction: an unreadable trash has no list to draw,
+   * and a failed restore has one and needs it.
+   */
+  readonly actionError?: string | null | undefined
+  /**
    * Put this book back. May return a promise; while it is pending the row's
    * own button is disabled.
    *
@@ -72,7 +84,7 @@ export interface TrashSheetProps {
  */
 const named = (row: TrashedBook): string => row.title.trim() || row.folder
 
-export function TrashSheet({ rows, loading, error, onRestore, onDismiss, now }: TrashSheetProps) {
+export function TrashSheet({ rows, loading, error, actionError, onRestore, onDismiss, now }: TrashSheetProps) {
   /* WHICH BOOKS ARE BEING RESTORED — a set, not a single id. A single id
      disabled EVERY row while any one was running, so restoring a large book
      froze the whole recovery surface; the restores are independent and the
@@ -89,6 +101,18 @@ export function TrashSheet({ rows, loading, error, onRestore, onDismiss, now }: 
   return (
     <OverlaySheet label="Removed books" onDismiss={onDismiss}>
       <div className={styles.list}>
+        {/* ABOVE THE ROWS, AND OUTSIDE THE UNREADABLE BRANCH — see
+            `actionError`. It is true of the sheet rather than of any one row,
+            and the rows have to stay: a restore that failed is a restore worth
+            pressing again. `role="alert"` because the reader is looking at the
+            button they just pressed, not at the top of the sheet. */}
+        {actionError != null && actionError !== '' && (
+          <div className={styles.empty} role="alert">
+            That book could not be put back.
+            <br />
+            {actionError}
+          </div>
+        )}
         {loading ? (
           <div className={styles.empty}>Reading the trash…</div>
         ) : error !== null ? (
@@ -140,8 +164,10 @@ export function TrashSheet({ rows, loading, error, onRestore, onDismiss, now }: 
                   /* Both failure shapes release the row — a throw before the
                      promise exists never reaches `.finally`, and the reader
                      would be left with a dead button on the surface that
-                     exists to undo a deletion. Reporting is the caller's;
-                     `App` puts the message above the list. */
+                     exists to undo a deletion. Reporting is the caller's, and
+                     it arrives back as `actionError`, which this sheet draws
+                     above the list — which is what that sentence used to claim
+                     while `App` was passing it as the LIST's own failure. */
                   try {
                     void Promise.resolve(onRestore(row.bookId))
                       .catch(() => {})
