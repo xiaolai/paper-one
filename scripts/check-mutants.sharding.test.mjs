@@ -2170,6 +2170,15 @@ describe('what a sweep asks Stryker for', () => {
       reporters: ['clear-text', 'json'],
       jsonReporter: { fileName: REPORT },
       coverageAnalysis: 'perTest',
+      /* ⚠️ **STRYKER'S DRY RUN HAS ITS OWN DEADLINE, DEFAULTING TO FIVE MINUTES,
+         AND THE MERGE BASE'S WIDE TEST SET PASSES IT** (2026-09-17). A base
+         measurement runs every test that reaches the subject before one mutant is
+         tried — `flatten.ts` pulls 1 079 of them — and the SETTLE run repeats
+         that dry run. Under load it went past five minutes: no report, the
+         measurement refused, and the change billed for debt it had not added.
+         Found by the first cross-shard run that completed; no unit test can see
+         it, because they all stand Stryker in and no dry run ever happens. */
+      dryRunTimeoutMinutes: 20,
       mutate: ['src/x.ts'],
       vitest: { configFile: 'v.mjs' },
       ignorePatterns: ['.agents', '.claude', '.codex', '.cc-suite', '.stryker-tmp', 'src-tauri/target', 'coverage', 'dist', 'dist-mobile', 'bin', 'dev-docs', 'docs', '.git'],

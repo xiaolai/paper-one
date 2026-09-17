@@ -6618,6 +6618,22 @@ export function strykerConfig(subject, vitestConfig, symlinks = [], deadline = F
     reporters: ['clear-text', 'json'],
     jsonReporter: { fileName: REPORT },
     coverageAnalysis: 'perTest',
+    /* ⚠️ **STRYKER'S DRY RUN HAS ITS OWN DEADLINE, AND ITS DEFAULT IS FIVE
+       MINUTES — WHICH THE MERGE BASE'S WIDE TEST SET PASSES** (measured
+       2026-09-17, by the first cross-shard run that completed). A base
+       measurement sweeps a subject against every test that reaches it, and the
+       dry run must execute all of them before a single mutant is tried:
+       `flatten.ts` pulls 1 079 tests and took 2 min 58 s quiet. The settle run
+       repeats that dry run, and under load it went past five minutes —
+       `ERROR DryRunExecutor Initial test run timed out!`, no report, and the
+       whole measurement refused as `did-not-run`. The change was then billed for
+       debt it had not added, which is fail-closed and still wrong.
+       `session.ts` never showed it at 527 tests, so only a file with a large
+       covering set meets this, and only when a settle run is needed — which is
+       exactly the combination no unit test and no plain sweep had reached.
+       Twenty minutes is far above any dry run measured here and still a bound: a
+       run that hangs fails rather than spending the whole sweep's budget. */
+    dryRunTimeoutMinutes: 20,
     mutate: [subject],
     vitest: { configFile: vitestConfig },
     /* ⚠️ Stryker copies the tree into a sandbox and `copyFile` REFUSES a
