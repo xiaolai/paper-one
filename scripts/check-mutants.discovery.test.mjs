@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,12 +18,14 @@ import {
   entryAt,
   importsOf,
   levelsAbove,
+  matchedSurvivors,
   mutantIdentitiesIn,
   resultFileFor,
   reverseImports,
   run,
   pathsRead,
   sourceReaders,
+  survivorIdentity,
 } from './check-mutants.mjs'
 
 /**
@@ -667,7 +669,29 @@ async function sweep(root, { argv = [], subjects = [], tree = [], ...options } =
  * resolve `vitest/config` through.
  */
 function checkout(root, files = {}) {
-  symlinkSync(path.resolve('node_modules'), path.join(root, 'node_modules'))
+  /* ⚠️ **WHERE THE INSTALL IS MUST BE FOUND, NOT ASSUMED — AND TWO WRONG
+     ASSUMPTIONS ABOUT IT EACH LOOKED RIGHT** (2026-09-17, both reproduced).
+
+     It was the bare name `node_modules` handed to `path.resolve`, which resolves
+     such a name against `process.cwd()`. From the repository that is the repository's install; from
+     anywhere else it is a path that does not exist, and the link dangles. That
+     is why a base measurement of a module the GATE imports — `lib/entry.mjs`,
+     `lib/specifiers.mjs` — could never be made: it sweeps this very file inside
+     a Stryker sandbox whose cwd is not the repository, so every case that loads
+     the generated config died with `Cannot find package 'vitest' imported from
+     <scratch>/vitest.mutants.mjs.timestamp-*.mjs`, and the measurement refused.
+
+     ⚠️ **AND `../node_modules` FROM THIS FILE IS NOT THE ANSWER EITHER.**
+     Measured inside a live sandbox rather than assumed: Stryker does NOT link
+     an install into its sandbox when the project's `node_modules` is itself a
+     symbolic link, which is exactly what a base worktree has. The sandbox has
+     none at all, and ordinary imports resolve only because Node walks UP to the
+     worktree's. A fixed relative depth therefore points at nothing.
+
+     So it is SEARCHED for, upwards, which is what Node itself does — and the
+     first one that exists is the one every other import in this process already
+     resolved through. `fileURLToPath`, never `.pathname`: see AGENTS.md. */
+  symlinkSync(installAbove(fileURLToPath(new URL('.', import.meta.url))), path.join(root, 'node_modules'))
   return plant(root, {
     'vitest.config.ts':
       'export default { test: {\n' +
@@ -985,3 +1009,789 @@ describe('the paths a sharded sweep resolves before it writes anything', () => {
     })
   })
 })
+
+describe('what makes a survivor here the same survivor as one at the merge base', () => {
+  /** Every mutant Stryker's own instrumenter makes in `source`, identified as a survivor of it would be. */
+  const identifiedIn = async (source, name = 'subject.ts') =>
+    await inScratch('mutants-identity-', async (root) => {
+      const at = plant(root, { [name]: source })
+      return (await mutantIdentitiesIn(at[name])).map((mutant) => survivorIdentity(mutant, source, name))
+    })
+
+  /** Those of one mutator, in the order they sit in the file. */
+  const byMutator = async (source, mutatorName, name) => (await identifiedIn(source, name)).filter((one) => one.mutatorName === mutatorName)
+
+  /* ⚠️ **STRYKER GIVES BOTH RETURNS ONE REPLACEMENT**, so an identity made of a
+     mutator and a replacement lets a line the change REWROTE inherit the debt of
+     the line it replaced. Reproduced here against the instrumenter itself rather
+     than described. */
+  it('separates two returns Stryker replaces with the same text, by the text that was there', async () => {
+    const source = 'class Reader {\n  read() {\n    return "old"\n  }\n}\nexport function other() {\n  return "new"\n}\n'
+
+    const strings = await byMutator(source, 'StringLiteral')
+    const blocks = await byMutator(source, 'BlockStatement')
+
+    expect(strings.map((one) => one.replacement)).toEqual(['""', '""'])
+    expect(strings.map((one) => one.original)).toEqual(['"old"', '"new"'])
+    expect(blocks.map((one) => one.replacement)).toEqual(['{}', '{}'])
+    expect(blocks.map((one) => one.original)).toEqual(['{\nreturn "old"\n}', '{\nreturn "new"\n}'])
+  })
+
+  it('carries the chain of enclosing declarations, so one class’s method is not another’s', async () => {
+    const source = 'export class One {\n  read() {\n    return null\n  }\n}\nexport class Two {\n  read() {\n    return null\n  }\n}\n'
+
+    const blocks = await byMutator(source, 'BlockStatement')
+
+    expect(blocks.map((one) => one.scope)).toEqual([
+      ['One', 'read'],
+      ['Two', 'read'],
+    ])
+    expect(blocks.map((one) => one.original)).toEqual(['{\nreturn null\n}', '{\nreturn null\n}'])
+  })
+
+  it('tells a nested function from one of the same name nested somewhere else', async () => {
+    const source =
+      'export function outer() {\n  function read() {\n    return "same"\n  }\n  return read\n}\n' +
+      'export function other() {\n  function read() {\n    return "same"\n  }\n  return read\n}\n'
+
+    const strings = await byMutator(source, 'StringLiteral')
+
+    expect(strings.map((one) => one.scope)).toEqual([
+      ['outer', 'read'],
+      ['other', 'read'],
+    ])
+  })
+
+  /* ⚠️ **`['run', 'ArrowFunction']` IS WHAT THIS CASE ASSERTED UNTIL 2026-09-17**,
+     and the callback's own call is in the name now — see the pair below, which is
+     what the kind alone let through. `Constructor` is the other half: nothing
+     holds it in a call, so it keeps its bare kind, and that is the branch a
+     mutation of the call test would take away. */
+  it('names a scope by what declares it, by its kind where nothing does, and by the call where one holds it', async () => {
+    const source =
+      'export const run = () => {\n  return [1].map(() => "each")\n}\n' +
+      'export const held = { read: () => "held" }\n' +
+      'export class Keeps {\n  kept = () => "kept"\n  constructor() {\n    this.made = "made"\n  }\n}\n'
+
+    const strings = await byMutator(source, 'StringLiteral')
+
+    expect(strings.map((one) => [one.original, one.scope])).toEqual([
+      ['"each"', ['run', 'ArrowFunction 1/1 in ArrayLiteralExpression.map()']],
+      ['"held"', ['read']],
+      ['"kept"', ['Keeps', 'kept']],
+      ['"made"', ['Keeps', 'Constructor']],
+    ])
+  })
+
+  /**
+   * ⚠️ **AND THE CALLEE'S OWN SPELLING, NEVER THE CALL'S TEXT.** A call holds its
+   * arguments, the callback among them, so a name taken from the call would put a
+   * callback's whole body inside the identity of every mutant in it — which is the
+   * 68 593-character identity `statementAround` exists to avoid, arriving through
+   * the fix for it. A callee that is not a name answers with its KIND, so nothing
+   * here grows with the code around it, and a class field is untouched by all of
+   * this because nothing holds it in a call at all.
+   */
+  it('spells a callee as far as it is a name, answers anything else with its kind, and leaves a class field small', async () => {
+    const chained = await byMutator('export function f(one) {\n  one.two.three(() => "deep")\n}\n', 'StringLiteral')
+    const curried = await byMutator('export function f(pick) {\n  pick()(() => "curried")\n}\n', 'StringLiteral')
+    const built = await byMutator('export function f(Thing) {\n  return new Thing(() => "made")\n}\n', 'StringLiteral')
+    /* A class big enough that any identity taking the text around the field would
+       be enormous — the measured failure was 68 593 characters. */
+    const wide = 'export class Reader {\n  #disposed = false\n' + '  step() {\n    return "step"\n  }\n'.repeat(40) + '}\n'
+    const [field] = await byMutator(wide, 'BooleanLiteral')
+
+    expect(chained.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 1/1 in one.two.three()']])
+    expect(curried.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 1/1 in CallExpression()']])
+    expect(built.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 1/1 in Thing()']])
+    expect([field.scope, field.statement]).toEqual([['Reader'], '#disposed = false'])
+    expect(JSON.stringify(field).length).toBeLessThan(200)
+  })
+
+  /**
+   * ⚠️ **TWO CALLBACKS TO ONE CALL SHARED ONE IDENTITY, SO PERMISSION PASSED
+   * BETWEEN THEM** (a second opinion's fifth round, 2026-09-17, reproduced with
+   * real instrumenter mutants). `p.then(onResolve, onReject)` named both arrows
+   * `ArrowFunction in p.then`. Swap the two bodies and update both tests with
+   * them — both suites pass, both sides show four survivors, and the success
+   * callback's NEW survivor is paid for by the rejection callback's old one.
+   *
+   * The position in the argument list is what separates `then`'s two roles, and
+   * a call's own literal arguments are what separate one registration from
+   * another. Neither grows with the code inside the callback, which is the
+   * constraint that rules out simply taking the call's text.
+   */
+  it('separates two callbacks passed to one call, by where each sits and by the call’s own literals', async () => {
+    const both = await byMutator('export function check(p) {\n  return p.then(() => "yes", () => "no")\n}\n', 'StringLiteral')
+    const bus = await byMutator('export function on(bus) {\n  bus.on("publish", () => "a")\n  bus.on("delete", () => "b")\n}\n', 'StringLiteral')
+
+    expect(both.map((one) => one.scope)).toEqual([
+      ['check', 'ArrowFunction 1/2 in p.then()'],
+      ['check', 'ArrowFunction 2/2 in p.then()'],
+    ])
+    /* Same position, same callee, different registration — told apart by the
+       literal the call carries, and by nothing that grows with the callback.
+       The registration literals are themselves mutants, and sit in `on`. */
+    expect(bus.map((one) => one.scope)).toEqual([
+      ['on'],
+      ['on', 'ArrowFunction 2/2 in bus.on("publish")'],
+      ['on'],
+      ['on', 'ArrowFunction 2/2 in bus.on("delete")'],
+    ])
+  })
+
+  /* ⚠️ **AND A LITERAL'S TEXT IS TAKEN FROM THE LITERAL, NEVER FROM THE TREE.**
+     The first version asked `getText()` for anything that was not a string —
+     which reads `node.getSourceFile().text`, and a node reached this way has no
+     source file bound to it. It threw `Cannot read properties of undefined
+     (reading 'text')` out of TypeScript and took a whole SHARD down with it: no
+     receipt, and an aggregate that could say only that the sweep was incomplete.
+     The unit tests above did not catch it because every one of them passed a
+     STRING, which is the one branch that never asked the tree. Found 2026-09-17
+     by the first sharded run that ran to the end. */
+  it('takes a call’s numeric and boolean literals without asking the tree for their text', async () => {
+    const numbered = await byMutator('export function f(bus) {\n  bus.on(404, () => "a")\n}\n', 'StringLiteral')
+    const flagged = await byMutator('export function f(bus) {\n  bus.on(true, () => "b")\n}\n', 'StringLiteral')
+
+    expect(numbered.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 2/2 in bus.on(404)']])
+    expect(flagged.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 2/2 in bus.on(true)']])
+  })
+
+  it('counts a top-level statement as sitting in no declaration at all', async () => {
+    const [top] = await byMutator('export const greeting = "top"\n', 'StringLiteral')
+
+    expect(top.scope).toEqual([])
+  })
+
+  /* ⚠️ **A MUTANT OF A WHOLE SCOPE IS IN THAT SCOPE, NOT BESIDE IT.** An
+     `ArrowFunction` mutant replaces the arrow entire, so its text begins exactly
+     where the arrow does — and a walk that descended only into children beginning
+     STRICTLY before it would stop at the declaration above, leaving two arrows
+     of the same text in the same nameless place and each able to answer for the
+     other. */
+  it('names the arrow a whole-arrow mutant replaces, though the mutant begins exactly where the arrow does', async () => {
+    const arrows = await byMutator('export const pick = () => 1\nexport const other = () => 1\n', 'ArrowFunction')
+
+    expect(arrows.map((one) => [one.original, one.scope])).toEqual([
+      ['( ) => 1', ['pick']],
+      ['( ) => 1', ['other']],
+    ])
+  })
+
+  /* ⚠️ **TEXT SPANNING TWO DECLARATIONS SITS IN NEITHER.** A node holding a
+     mutant must begin before it AND end after it. Asked only about the end, the
+     first sibling reaching past the mutant would claim it, and a survivor would
+     be filed under a declaration it is only half inside. */
+  it('counts a mutant whose text spans two declarations as sitting in neither', () => {
+    const source = 'export function one() {\n  return 1\n}\nexport function two() {\n  return 2\n}\n'
+    const spanning = { mutatorName: 'BlockStatement', replacement: '{}', location: { start: { line: 2, column: 3 }, end: { line: 5, column: 11 } } }
+
+    expect(survivorIdentity(spanning, source, 'subject.ts')).toEqual({
+      mutatorName: 'BlockStatement',
+      replacement: '{}',
+      original: 'return 1\n}\nexport function two ( ) {\nreturn 2',
+      /* Nothing encloses it, so there is no statement to name and its own text
+         answers for it — the same answer as a mutant of a whole scope. */
+      statement: 'return 1\n}\nexport function two ( ) {\nreturn 2',
+      scope: [],
+    })
+  })
+
+  /* Re-indenting is not rewriting: a block that moves under a new guard, or a
+     file run through a formatter, keeps every line break it had and changes only
+     the spaces around them, so it is the same code and keeps its pairing. */
+  it('reads any run of spaces around a line break as that one break, however deeply the code is indented', async () => {
+    const [tight] = await byMutator('export function f() {\n  return "x"\n}\n', 'BlockStatement')
+    const [loose] = await byMutator('export function f() {\n\n      return "x"\n\n}\n', 'BlockStatement')
+
+    expect(tight).toEqual(loose)
+    expect(tight.original).toBe('{\nreturn "x"\n}')
+  })
+
+  /* ⚠️ **SPACING WITHIN A LINE IS WHAT THE OLD RULE FAILED AT.** `\s*[\n\r]\s*`
+     as one space left `a+b` and `a + b` two identities for one expression, so a
+     formatter that spaced an operator billed the change for the debt under it —
+     which is the very case a normalisation exists for. */
+  it('reads any spacing within a line as one space, so a formatter’s operator keeps its pairing', async () => {
+    const [spaced] = await byMutator('export const g = (a, b) => a  +  b\n', 'ArithmeticOperator')
+    const [tightly] = await byMutator('export const g = (a, b) => a+b\n', 'ArithmeticOperator')
+    const [plain] = await byMutator('export const g = (a, b) => a + b\n', 'ArithmeticOperator')
+
+    expect(spaced).toEqual(plain)
+    expect(tightly).toEqual(plain)
+    expect(plain.original).toBe('a + b')
+  })
+
+  /* ⚠️ **A LINE BREAK INSIDE A LITERAL IS PART OF THE STRING, AND THE OLD RULE
+     READ IT AS A SPACE** (review, 2026-09-17, reproduced against the
+     instrumenter): two templates carrying different text had one identity, so a
+     survivor of one answered for a survivor of the other. A token's own text is
+     carried exactly as it was written. */
+  it('separates two templates whose text differs only by a line break, which is text and not layout', async () => {
+    const [across] = await byMutator('export const t = (n) => `a\nb`\n', 'StringLiteral')
+    const [along] = await byMutator('export const t = (n) => `a b`\n', 'StringLiteral')
+
+    expect(across.original).toBe('`a\nb`')
+    expect(along.original).toBe('`a b`')
+    expect(across).not.toEqual(along)
+  })
+
+  /* ⚠️ **AND A LINE BREAK BETWEEN TWO TOKENS CAN BE A STATEMENT ENDING.**
+     `return` ⏎ `1` returns nothing and `return 1` returns 1 — automatic semicolon
+     insertion, and one identity for both until the break was kept. */
+  it('separates a return a line break ends from one that carries a value, which the same tokens spell', async () => {
+    const [split] = await byMutator('export function f() {\n  return\n  1\n}\n', 'BlockStatement')
+    const [carried] = await byMutator('export function f() {\n  return 1\n}\n', 'BlockStatement')
+
+    expect(split.original).toBe('{\nreturn\n1\n}')
+    expect(carried.original).toBe('{\nreturn 1\n}')
+    expect(split).not.toEqual(carried)
+  })
+
+  /**
+   * ## The statement the mutated text sits in
+   *
+   * ⚠️ **TWO CALLS OF ONE METHOD WERE ONE DEBT, AND A DEVELOPER WAS BILLED FOR
+   * BOTH** (measured 2026-09-17 on the acceptance run). The mutated text of an
+   * `OptionalChaining` mutant is the callee and NOT the call, so
+   * `noteRenderer?.setAttribute('max-column-count', '1')` and the `('flow',
+   * 'scrolled')` line below it had one identity between them — three of them in
+   * that scope, four at the merge base, and every one refused as ambiguous
+   * although not a character of any had changed. These are the run's own two
+   * lines.
+   */
+  it('separates two calls of one method that differ only in what they are passed', async () => {
+    const source =
+      'export function f(noteRenderer) {\n' +
+      "  noteRenderer?.setAttribute('max-column-count', '1')\n" +
+      "  noteRenderer?.setAttribute('flow', 'scrolled')\n" +
+      '}\n'
+
+    const chained = await byMutator(source, 'OptionalChaining')
+
+    expect(chained.map((one) => one.original)).toEqual(['noteRenderer ?. setAttribute', 'noteRenderer ?. setAttribute'])
+    expect(chained.map((one) => one.statement)).toEqual([
+      "noteRenderer ?. setAttribute ( 'max-column-count' , '1' )",
+      "noteRenderer ?. setAttribute ( 'flow' , 'scrolled' )",
+    ])
+    expect(chained[0]).not.toEqual(chained[1])
+  })
+
+  /* ⚠️ **AND THREE SPELLINGS OF ONE GUARD ARE STILL ONE IDENTITY, BY
+     CONSTRUCTION.** `runSearch`'s three `if (signal.aborted) return` are the same
+     statement, mutated the same way, in the same scope: no text can tell them
+     apart, which is why `matchedSurvivors` counts them rather than refusing them.
+     The claim that they collide is measured here rather than assumed. */
+  it('gives three identical statements in one scope one identity between them', async () => {
+    const source = 'export function runSearch(signal) {\n' + '  if (signal.aborted) return\n'.repeat(3) + '}\n'
+
+    const guards = (await identifiedIn(source)).filter((one) => one.original === 'signal . aborted')
+
+    expect(guards.map((one) => one.statement)).toEqual(Array.from({ length: 6 }, () => 'if ( signal . aborted ) return'))
+    expect([...new Set(guards.map((one) => one.replacement))].sort()).toEqual(['false', 'true'])
+    expect(new Set(guards.map((one) => JSON.stringify(one))).size).toBe(2)
+  })
+
+  /* A statement is asked for INSIDE the mutant's own scope, so a guard that moved
+     under another guard — deeper indentation, the same statement — keeps its
+     pairing, exactly as the text of the mutant itself does. */
+  it('reads a statement’s indentation as layout, so one moved under a new guard keeps its pairing', async () => {
+    const [flat] = await byMutator('export function f(go) {\n  go("x")\n}\n', 'StringLiteral')
+    const [nested] = await byMutator('export function f(go) {\n  if (go) {\n        go("x")\n  }\n}\n', 'StringLiteral')
+
+    expect(flat.statement).toBe('go ( "x" )')
+    expect(nested).toEqual(flat)
+  })
+
+  /**
+   * ⚠️ **A CLASS IS A STATEMENT, AND TAKING ONE WOULD BE AN IDENTITY OF 68 593
+   * CHARACTERS** (measured on `src/kernel/ui/reader/session.ts`, whose
+   * `#disposed = false` is the file's one mutant sitting in no statement of its
+   * own scope, and whose only other is a default parameter's value). Every edit
+   * anywhere in the class would then re-bill it — the exact complaint this
+   * comparison exists to answer, wearing the fix's own clothes.
+   *
+   * So the walk stops at the scope the mutant sits in, and what it answers there
+   * is the smallest thing written around the mutant that the scope is made of:
+   * the field, the parameter.
+   */
+  it('names the field a class holds rather than the whole class, and a parameter rather than the whole function', async () => {
+    const source = 'export class Reader {\n  #disposed = false\n}\nexport function attach(view, remove = false) {\n  return [view, remove]\n}\n'
+
+    const booleans = await byMutator(source, 'BooleanLiteral')
+
+    expect(booleans.map((one) => [one.scope, one.statement])).toEqual([
+      [['Reader'], '#disposed = false'],
+      [['attach'], 'remove = false'],
+    ])
+  })
+
+  /* ⚠️ **THE ACCEPTANCE RUN'S OWN PREMISE, MEASURED.** It adds ONE COMMENT to an
+     untouched file and asks what that costs — which is a question about this
+     field, since a statement's span begins after its leading trivia. Between two
+     statements a comment changes nothing. INSIDE one it is an edit: two tokens
+     that sat on one line now sit on two, so the statement's text changes and
+     every survivor in it is re-billed. */
+  it('reads a comment between two statements as no change, and one written inside a statement as a change', async () => {
+    const [plain] = await byMutator('export function f(go) {\n  go("x", 1)\n}\n', 'StringLiteral')
+    const [after] = await byMutator('export function f(go) {\n  // a note\n  go("x", 1)\n}\n', 'StringLiteral')
+    const [within] = await byMutator('export function f(go) {\n  go("x",\n  // a note\n  1)\n}\n', 'StringLiteral')
+
+    expect(after).toEqual(plain)
+    expect(within.statement).toBe('go ( "x" ,\n1 )')
+    expect(within).not.toEqual(plain)
+  })
+
+  /* And a mutant OF a whole scope sits in no statement of that scope either — the
+     arrow is the scope. Its own text is the answer, which is what it would have
+     been with no statement at all, and `scope` is what tells two of them apart. */
+  it('answers a whole-arrow mutant with its own text, since the arrow is the scope it would ask', async () => {
+    const arrows = await byMutator('export const pick = () => 1\nexport const other = () => 1\n', 'ArrowFunction')
+
+    expect(arrows.map((one) => one.statement)).toEqual(['( ) => 1', '( ) => 1'])
+    expect(arrows[0]).not.toEqual(arrows[1])
+  })
+
+  /* The subject is parsed as its own name says, because a `.tsx` read as a `.ts`
+     is another tree: `<b>` is a type assertion there, `call("x")` becomes a
+     method of an object literal, and what encloses the mutant changes with it. */
+  it('parses the subject by its own name, so JSX in a .tsx file is JSX', async () => {
+    const source = 'export const View = () => <b>{call("x")}</b>\n'
+
+    await inScratch('mutants-jsx-', async (root) => {
+      const at = plant(root, { 'View.tsx': source })
+      const [mutant] = (await mutantIdentitiesIn(at['View.tsx'])).filter((one) => one.mutatorName === 'StringLiteral')
+
+      expect(survivorIdentity(mutant, source, 'View.tsx').scope).toEqual(['View'])
+      expect(survivorIdentity(mutant, source, 'View.ts').scope).toEqual(['View', 'call'])
+    })
+  })
+
+  it('refuses a mutant at no place in the source rather than identifying it as nothing at all', () => {
+    const mutant = { mutatorName: 'StringLiteral', replacement: '""', location: { start: { line: 9, column: 1 }, end: { line: 9, column: 4 } } }
+
+    const refusal = thrownBy(() => survivorIdentity(mutant, 'export const a = 1\n', 'a.ts'))
+
+    expect(refusal).toBeInstanceOf(Error)
+    expect(refusal.message).toMatch(/^check-mutants: StringLiteral at 9:1-9:4 replaced with "\\"\\"" is at no place in a\.ts — /u)
+  })
+})
+
+describe('which survivor at the merge base answers for which survivor here', () => {
+  /** A survivor as each side of a comparison carries one. `from` is the base file that may answer for it. */
+  const survivor = (file, identity = {}, from = file) => ({
+    file,
+    from,
+    identity: { mutatorName: 'StringLiteral', replacement: '""', original: '"x"', statement: 'first ( "x" )', scope: [], ...identity },
+  })
+  const why = (atBase, atHead) => matchedSurvivors(atBase, atHead).added.map((one) => one.why)
+  const paired = (atBase, atHead) => matchedSurvivors(atBase, atHead).authorised.map(({ base, here }) => [base.file, here.file])
+  /** Every mutant of one mutator the real instrumenter makes in `source`, as survivors of `a.ts` — what a run in which none was killed leaves. */
+  const survivorsOf = (source, mutatorName = 'StringLiteral') =>
+    inScratch('mutants-occurrence-', async (root) => {
+      const at = plant(root, { 'a.ts': source })
+      const mutants = (await mutantIdentitiesIn(at['a.ts'])).filter((one) => one.mutatorName === mutatorName)
+      return mutants.map((mutant) => ({ file: 'a.ts', from: 'a.ts', identity: survivorIdentity(mutant, source, 'a.ts') }))
+    })
+
+  it('answers for a survivor of the same file with the same identity, and adds nothing', () => {
+    const match = matchedSurvivors([survivor('a.ts')], [survivor('a.ts')])
+
+    expect(match.authorised).toEqual([{ base: survivor('a.ts'), here: survivor('a.ts') }])
+    expect(match.added).toEqual([])
+  })
+
+  it('does not answer for a survivor whose text is not the text that was there', () => {
+    expect(why([survivor('a.ts', { original: '"log"' })], [survivor('a.ts', { original: '"secret"' })])).toEqual([
+      'the merge base has no survivor with this identity in a.ts',
+    ])
+  })
+
+  it('does not let one mutator’s survivor answer for another’s, nor one replacement’s for another’s', () => {
+    expect(why([survivor('a.ts', { mutatorName: 'BooleanLiteral' })], [survivor('a.ts', { mutatorName: 'StringLiteral' })])).toEqual([
+      'the merge base has no survivor with this identity in a.ts',
+    ])
+    expect(why([survivor('a.ts', { replacement: 'true' })], [survivor('a.ts', { replacement: 'false' })])).toEqual([
+      'the merge base has no survivor with this identity in a.ts',
+    ])
+  })
+
+  it('does not let a survivor of one scope answer for the same code in another', () => {
+    expect(why([survivor('a.ts', { scope: ['One', 'read'] })], [survivor('a.ts', { scope: ['Two', 'read'] })])).toEqual([
+      'the merge base has no survivor with this identity in a.ts',
+    ])
+  })
+
+  /* ⚠️ **AND NOT ONE STATEMENT'S FOR ANOTHER'S**, which is the whole of what the
+     statement buys: the same mutated text in the same scope, in a call the merge
+     base never made, is not the debt the merge base had. */
+  it('does not let a survivor of one statement answer for the same code in another', () => {
+    expect(why([survivor('a.ts', { statement: 'second ( "x" )' })], [survivor('a.ts', { statement: 'third ( "x" )' })])).toEqual([
+      'the merge base has no survivor with this identity in a.ts',
+    ])
+  })
+
+  /* ⚠️ **ONE SURVIVOR AT THE MERGE BASE ANSWERS FOR ONE HERE, AND NO MORE.**
+     Otherwise copying an accepted survivor launders it into as many as the change
+     cares to make. Which of the two is named decides nothing — they are the same
+     statement mutated the same way in the same scope — but the count does. */
+  it('answers for one of two survivors here that share an identity the merge base has once', () => {
+    const match = matchedSurvivors([survivor('a.ts')], [survivor('a.ts'), survivor('a.ts')])
+
+    expect(match.authorised).toHaveLength(1)
+    expect(match.added.map((one) => one.why)).toEqual([
+      'the merge base has 1 survivor(s) with this identity in a.ts, and each of them answers for another survivor here',
+    ])
+  })
+
+  /* And the merge base having MORE of an identity than this change does answers
+     for every one here, with nothing owed for the ones it no longer has: a
+     deleted occurrence is not a debt anybody can pay. */
+  it('answers for the one survivor here where the merge base had two of its identity', () => {
+    const match = matchedSurvivors([survivor('a.ts'), survivor('a.ts')], [survivor('a.ts')])
+
+    expect(match.authorised).toHaveLength(1)
+    expect(match.added).toEqual([])
+  })
+
+  /**
+   * ⚠️ **THE THREE GUARDS THE COUNTING IS FOR** — `runSearch`'s three
+   * `if (signal.aborted) return`, which no text-based identity can tell apart.
+   * Three there and three here is three answered and nothing owed; a fourth here
+   * is one the merge base has nothing left for, whichever of the four is named.
+   */
+  it('answers for three identical survivors with the three the merge base had, and owes a fourth', () => {
+    const three = () => [survivor('a.ts'), survivor('a.ts'), survivor('a.ts')]
+
+    const kept = matchedSurvivors(three(), three())
+    expect(kept.authorised).toHaveLength(3)
+    expect(kept.added).toEqual([])
+
+    const grown = matchedSurvivors(three(), [...three(), survivor('a.ts')])
+    expect(grown.authorised).toHaveLength(3)
+    expect(grown.added.map((one) => one.why)).toEqual([
+      'the merge base has 3 survivor(s) with this identity in a.ts, and each of them answers for another survivor here',
+    ])
+  })
+
+  /**
+   * ⚠️ **A COUNT LAUNDERED A NEW OCCURRENCE, AND THIS IS THE SOURCE PAIR IT WAS
+   * REPRODUCED WITH** (review, 2026-09-17). `second`'s deleted call and `third`'s
+   * new one carried the same mutated `"x"` in the same scope, so counting two
+   * against two authorised both and billed the change for nothing — the deleted
+   * occurrence paying for the new one.
+   *
+   * The identity carries the STATEMENT now, so the two are not the same identity
+   * at all: `first("x")` keeps its pairing and `third("x")` is what the change
+   * added. The identities are built here by the real instrumenter rather than
+   * written by hand, because the whole claim is about what it makes of these two.
+   */
+  it('adds a new occurrence the merge base never had, and keeps the pairing of the one beside it', async () => {
+    const wasThere = 'export function f(first, second, third) {\n  first("x")\n  second("x")\n}\n'
+    const isHere = 'export function f(first, second, third) {\n  first("x")\n  third("x")\n}\n'
+
+    const [atBase, atHead] = await Promise.all([survivorsOf(wasThere), survivorsOf(isHere)])
+
+    expect(atBase).toHaveLength(2)
+    expect(atBase.map((one) => one.identity.statement)).toEqual(['first ( "x" )', 'second ( "x" )'])
+    expect(atHead.map((one) => one.identity.statement)).toEqual(['first ( "x" )', 'third ( "x" )'])
+    const match = matchedSurvivors(atBase, atHead)
+    expect(match.authorised.map(({ here }) => here.identity.statement)).toEqual(['first ( "x" )'])
+    expect(match.added.map((one) => [one.here.identity.statement, one.why])).toEqual([
+      ['third ( "x" )', 'the merge base has no survivor with this identity in a.ts'],
+    ])
+  })
+
+  /**
+   * ⚠️ **AND THE STATEMENT ANSWERS NOTHING INSIDE A CALLBACK, BECAUSE THE
+   * CALLBACK IS THE SCOPE** (review, 2026-09-17, reproduced against the real
+   * instrumenter). `first(() => false)` and `second(() => false)` each hold their
+   * mutant in a statement of `false` — the body of the arrow, which is where the
+   * walk stops — and the scope was `["f","ArrowFunction"]` for both, since
+   * `scopeAround` keeps only the scopes it passes through and the CALL is not one.
+   * So the laundering the statement closed everywhere else stood open here, in the
+   * shape most of this tree's code is written in.
+   *
+   * The call is in the anonymous scope's name now, so `second`'s deleted callback
+   * answers for nothing and `third`'s new one is what the change added.
+   */
+  it('adds a new callback the merge base never had, though nothing but the call it is passed to differs', async () => {
+    const wasThere = 'export function f(first, second, third) {\n  first(() => false)\n  second(() => false)\n}\n'
+    const isHere = 'export function f(first, second, third) {\n  first(() => false)\n  third(() => false)\n}\n'
+
+    const [atBase, atHead] = await Promise.all([survivorsOf(wasThere, 'BooleanLiteral'), survivorsOf(isHere, 'BooleanLiteral')])
+
+    /* The mutated text and the statement are the same four times over, which is
+       what left the scope carrying the whole of the difference. */
+    expect(atBase.map((one) => [one.identity.original, one.identity.statement])).toEqual([
+      ['false', 'false'],
+      ['false', 'false'],
+    ])
+    expect(atBase.map((one) => one.identity.scope)).toEqual([
+      ['f', 'ArrowFunction 1/1 in first()'],
+      ['f', 'ArrowFunction 1/1 in second()'],
+    ])
+    expect(atHead.map((one) => one.identity.scope)).toEqual([
+      ['f', 'ArrowFunction 1/1 in first()'],
+      ['f', 'ArrowFunction 1/1 in third()'],
+    ])
+    const match = matchedSurvivors(atBase, atHead)
+    expect(match.authorised.map(({ here }) => here.identity.scope)).toEqual([['f', 'ArrowFunction 1/1 in first()']])
+    expect(match.added.map((one) => [one.here.identity.scope, one.why])).toEqual([
+      [['f', 'ArrowFunction 1/1 in third()'], 'the merge base has no survivor with this identity in a.ts'],
+    ])
+  })
+
+  /**
+   * ## What the count gives up, measured rather than described
+   *
+   * ⚠️ **"SWAPPING ONE FOR ANOTHER CHANGES NOTHING A READER COULD OBSERVE" WAS
+   * FALSE, AND BOTH THIS FILE AND THE ADR SAID IT** (review, 2026-09-17). The
+   * identity carries the NEAREST statement and the scope, and nothing between
+   * them — so `emit("x")` and `if (isAdmin) emit("x")` are one identity, because
+   * the nearest statement of the second is still `emit("x")`. Three identical
+   * calls at the merge base therefore answer for three here even where one of them
+   * is now guarded, which is plainly something a reader can observe.
+   *
+   * It is the SAME weakness the re-indentation rule already takes deliberately — a
+   * statement moved under a new guard keeps its pairing — said at its full width.
+   * The alternative is to put what encloses a statement into the identity, which
+   * makes an edit anywhere in an enclosing `switch` or `if` re-bill every mutant
+   * under it: the file-wide re-billing this whole comparison exists to answer.
+   *
+   * What the count does NOT give up is the second case here: a call to a different
+   * function is a different statement, and the multiset gains one.
+   */
+  it('authorises a statement moved under a new guard, and adds one whose call changed', async () => {
+    const three = 'export function f(emit) {\n  emit("x")\n  emit("x")\n  emit("x")\n}\n'
+    const guarded = 'export function f(emit, isAdmin) {\n  emit("x")\n  emit("x")\n  if (isAdmin) emit("x")\n}\n'
+    const renamed = 'export function f(emit, other) {\n  emit("x")\n  emit("x")\n  other("x")\n}\n'
+
+    const [atBase, underGuard, elsewhere] = await Promise.all([survivorsOf(three), survivorsOf(guarded), survivorsOf(renamed)])
+
+    expect(underGuard.map((one) => one.identity.statement)).toEqual(['emit ( "x" )', 'emit ( "x" )', 'emit ( "x" )'])
+    const kept = matchedSurvivors(atBase, underGuard)
+    expect(kept.authorised).toHaveLength(3)
+    expect(kept.added).toEqual([])
+
+    expect(elsewhere.map((one) => one.identity.statement)).toEqual(['emit ( "x" )', 'emit ( "x" )', 'other ( "x" )'])
+    const grew = matchedSurvivors(atBase, elsewhere)
+    expect(grew.authorised).toHaveLength(2)
+    expect(grew.added.map((one) => [one.here.identity.statement, one.why])).toEqual([
+      ['other ( "x" )', 'the merge base has no survivor with this identity in a.ts'],
+    ])
+  })
+
+  it('does not let a survivor of one file answer for the same one in a file that came from somewhere else', () => {
+    expect(why([survivor('a.ts')], [survivor('b.ts')])).toEqual(['the merge base has no survivor with this identity in b.ts'])
+  })
+
+  it('answers for a survivor that moved into a file the merge base does not have', () => {
+    expect(paired([survivor('session.ts')], [survivor('sessionHelpers.ts', {}, 'session.ts')])).toEqual([['session.ts', 'sessionHelpers.ts']])
+  })
+
+  /* ⚠️ **THE FILE IT WAS ALREADY IN TAKES ITS OWN SURVIVORS FIRST**, so a file
+     copied rather than split keeps its own debt and the copy owes what it added.
+     Both passes are needed: one pass by origin alone would hand the copy the
+     survivor its source still has. */
+  it('gives a file its own survivors before a file that was copied from it', () => {
+    const match = matchedSurvivors(
+      [survivor('session.ts')],
+      [survivor('sessionHelpers.ts', {}, 'session.ts'), survivor('session.ts')],
+    )
+
+    expect(match.authorised.map(({ here }) => here.file)).toEqual(['session.ts'])
+    expect(match.added.map((one) => [one.here.file, one.why])).toEqual([
+      ['sessionHelpers.ts', 'the merge base has 1 survivor(s) with this identity in session.ts, and each of them answers for another survivor here'],
+    ])
+  })
+
+  /* ⚠️ **AND ONE SURVIVOR AT THE MERGE BASE CANNOT BE IN TWO FILES AT ONCE.** A
+     change that copies a file twice owes the second copy: the pool is spent
+     across the whole sweep, so the guarantee holds over the pair rather than
+     being spent once in each. */
+  it('answers for one of two files copied from one, since one survivor cannot be in both', () => {
+    const match = matchedSurvivors(
+      [survivor('session.ts')],
+      [survivor('one.ts', {}, 'session.ts'), survivor('two.ts', {}, 'session.ts')],
+    )
+
+    expect(match.authorised.map(({ here }) => here.file)).toEqual(['one.ts'])
+    expect(match.added.map((one) => [one.here.file, one.why])).toEqual([
+      ['two.ts', 'the merge base has 1 survivor(s) with this identity in session.ts, and each of them answers for another survivor here'],
+    ])
+  })
+
+  it('says a file the merge base has no origin for has nothing there to answer for it', () => {
+    expect(why([survivor('a.ts')], [survivor('new.ts', {}, null)])).toEqual([
+      'it is in a file the merge base does not have, and git names no file it was copied or renamed from',
+    ])
+  })
+
+  /**
+   * ## The two ways a survivor here goes unanswered, which are different sentences
+   *
+   * ⚠️ **A MUTANT THE MERGE BASE COULD NOT DECIDE IS NOT A MUTANT THIS CHANGE
+   * ADDED**, and until this distinction existed it was billed as one — worse, a
+   * single undecided mutant refused the whole file, so 540 survivors the merge
+   * base had decided perfectly well went with it. Neither class authorises
+   * anything and both fail the build; what differs is what a reader is told to do,
+   * and a reader acts differently on the two.
+   */
+  /** A mutant the merge base could not decide, as `survivorsAtBase` names one: a survivor's fields, and the base's own reason. */
+  const undecided = (file, identity = {}, reason = 'its settle run met the same wall-clock timeout again at 1:22') => ({
+    ...survivor(file, identity),
+    at: '1:22',
+    why: reason,
+  })
+
+  it('names a survivor the merge base could not decide its own way, rather than as one this change added', () => {
+    const match = matchedSurvivors([], [survivor('a.ts')], [undecided('a.ts')])
+
+    expect(match.authorised).toEqual([])
+    expect(match.added.map((one) => [one.class, one.why])).toEqual([
+      [
+        'undecided',
+        'the merge base could not decide this mutant in a.ts: its settle run met the same wall-clock timeout again at 1:22',
+      ],
+    ])
+  })
+
+  /* ⚠️ **AND WHAT THE MERGE BASE DID DECIDE STILL ANSWERS.** This is the whole
+     point of the split: one mutant it could not answer for leaves every other
+     mutant of that file exactly where it was. Measured on a real 1 403-mutant
+     file, five undecided mutants had made 540 decided ones worthless. */
+  it('authorises the survivors the merge base decided, and refuses only the identity it could not', () => {
+    const decided = { original: '"kept"' }
+    const match = matchedSurvivors(
+      [survivor('a.ts', decided), survivor('a.ts', { original: '"also"' })],
+      [survivor('a.ts', decided), survivor('a.ts', { original: '"also"' }), survivor('a.ts', { original: '"timed out"' })],
+      [undecided('a.ts', { original: '"timed out"' })],
+    )
+
+    expect(match.authorised.map(({ here }) => here.identity.original)).toEqual(['"kept"', '"also"'])
+    expect(match.added.map((one) => [one.here.identity.original, one.class])).toEqual([['"timed out"', 'undecided']])
+  })
+
+  /* A survivor nothing at the merge base could answer for, in a file where
+     nothing was left undecided, is the other sentence — and it is the one that
+     says this change added it. */
+  it('names a survivor the merge base plainly did not have as one this change added', () => {
+    const match = matchedSurvivors([], [survivor('a.ts')], [undecided('a.ts', { original: '"elsewhere"' })])
+
+    expect(match.added.map((one) => [one.class, one.why])).toEqual([
+      ['added', 'the merge base has no survivor with this identity in a.ts'],
+    ])
+  })
+
+  /* An undecided mutant travels with the file it was measured in, exactly as a
+     survivor does: a file renamed or copied asks the file it came FROM. */
+  it('takes an undecided mutant from the file a survivor here was renamed from', () => {
+    const match = matchedSurvivors([], [survivor('sessionHelpers.ts', {}, 'session.ts')], [undecided('session.ts')])
+
+    expect(match.added.map((one) => [one.class, one.why])).toEqual([
+      [
+        'undecided',
+        'the merge base could not decide this mutant in session.ts: its settle run met the same wall-clock timeout again at 1:22',
+      ],
+    ])
+  })
+
+  /**
+   * ⚠️ **ONE UNDECIDED OCCURRENCE EXCUSED THE DIAGNOSIS OF UNLIMITED ONES**
+   * (review, 2026-09-17). The unknowns were a map, looked up and never spent, so
+   * one mutant the merge base could not decide said "the merge base could not
+   * decide this mutant" over two survivors here — a sentence about a mutant it
+   * has only one of. Neither passed, so nothing was authorised that should not
+   * have been; what was wrong is what a reader was told, and a reader acts on it.
+   *
+   * They are spent one-to-one now, exactly as survivors are, and what is left over
+   * falls back to the count it is really against.
+   */
+  it('spends an undecided mutant one to one, so a second survivor here is not excused by the same one', () => {
+    const match = matchedSurvivors([], [survivor('a.ts'), survivor('a.ts')], [undecided('a.ts')])
+
+    expect(match.authorised).toEqual([])
+    expect(match.added.map((one) => [one.class, one.why])).toEqual([
+      ['undecided', 'the merge base could not decide this mutant in a.ts: its settle run met the same wall-clock timeout again at 1:22'],
+      [
+        'added',
+        'the merge base has no survivor with this identity in a.ts, and the 1 mutant(s) it could not decide there each answer for another survivor here',
+      ],
+    ])
+  })
+
+  /* And the same count beside a survivor the merge base DID have: one answered,
+     one undecided, one owed — three different sentences over one identity. */
+  it('names each of three survivors here against what the merge base had of that identity, one apiece', () => {
+    const match = matchedSurvivors([survivor('a.ts')], [survivor('a.ts'), survivor('a.ts'), survivor('a.ts')], [undecided('a.ts')])
+
+    expect(match.authorised).toHaveLength(1)
+    expect(match.added.map((one) => [one.class, one.why])).toEqual([
+      ['undecided', 'the merge base could not decide this mutant in a.ts: its settle run met the same wall-clock timeout again at 1:22'],
+      [
+        'added',
+        'the merge base has 1 survivor(s) with this identity in a.ts, and each of them answers for another survivor here, and the 1 mutant(s) it could not decide there each answer for another survivor here',
+      ],
+    ])
+  })
+
+  /* ⚠️ **AND AN UNDECIDED IDENTITY IS NOT A SURVIVOR AT THE MERGE BASE**, so it
+     answers for nothing: a mutant it could not decide in `a.ts` says nothing
+     about the same code in `b.ts`, which is where the pairing would otherwise
+     spend it. */
+  it('lets an undecided mutant authorise nothing, in its own file or in any other', () => {
+    const match = matchedSurvivors([], [survivor('b.ts')], [undecided('a.ts')])
+
+    expect(match.authorised).toEqual([])
+    expect(match.added.map((one) => [one.class, one.why])).toEqual([['added', 'the merge base has no survivor with this identity in b.ts']])
+  })
+})
+
+/**
+ * ⚠️ **A HELPER THAT RESOLVED `node_modules` AGAINST `process.cwd()` MADE TWO
+ * FILES UNMEASURABLE AT THE MERGE BASE** (2026-09-17, reproduced before it was
+ * fixed). `checkout()` passed the bare name `node_modules` through
+ * `path.resolve`, which resolves it against the working directory. Run from the
+ * repository that is the repository's own install; run from anywhere else it is
+ * a path that does not exist, and the link dangles.
+ *
+ * Where that bites is not obvious, which is why it stood: measuring a module the
+ * GATE imports — `lib/entry.mjs`, `lib/specifiers.mjs` — sweeps this gate's own
+ * test files, inside a Stryker sandbox whose cwd is not the repository. Every
+ * case that loads the generated config then died with `Cannot find package
+ * 'vitest' imported from <scratch>/vitest.mutants.mjs.timestamp-*.mjs`, the base
+ * measurement refused, and those two files could never be authorised for
+ * anything — so touching either billed its whole self.
+ *
+ * The fix is one expression and the trap is the shape, so this refuses the shape
+ * wherever it comes back. The files are read through a path built from a
+ * DIRECTORY LISTING, deliberately: `pathsRead` cannot resolve one, so this test
+ * blocks no subject from being mutated — a check that silently stopped the
+ * gate's own tests from running against it would cost more than it saves.
+ */
+describe('what a scratch checkout links its dependencies from', () => {
+  it('never resolves node_modules against the directory the process happens to be started in', () => {
+    /* Built rather than written, so this test is not its own first offender —
+       the literal it looks for would otherwise be in the file doing the looking. */
+    const cwdBound = new RegExp(String.raw`resolve\((['"])node_modules\1\)`)
+    const here = fileURLToPath(new URL('.', import.meta.url))
+    const offenders = readdirSync(here)
+      .filter((name) => name.endsWith('.test.mjs'))
+      .filter((name) => cwdBound.test(readFileSync(path.join(here, name), 'utf8')))
+
+    expect(offenders).toEqual([])
+  })
+})
+
+/**
+ * The nearest `node_modules` at or above `from`, which is the one Node resolves
+ * this file's own imports through. Searched rather than assumed: see `checkout`.
+ */
+function installAbove(from) {
+  for (let dir = from; ; dir = path.dirname(dir)) {
+    const at = path.join(dir, 'node_modules')
+    if (existsSync(at)) return at
+    if (path.dirname(dir) === dir) throw new Error(`no node_modules at or above ${from}`)
+  }
+}

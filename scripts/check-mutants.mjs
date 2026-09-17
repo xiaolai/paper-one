@@ -15,6 +15,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -1246,10 +1247,27 @@ export async function mutantsIn(file) {
  * one more than in memory, and the mutator and replacement were the same text.
  */
 export async function mutantIdentitiesIn(file) {
-  const core = createRequire(import.meta.url).resolve('@stryker-mutator/core')
+  return identitiesOfSource(file, readFileSync(file, 'utf8'))
+}
+
+/**
+ * The same, over a source that is not on this disk — the merge base's own
+ * content, as the evidence carrying it must be reconciled against.
+ *
+ * ⚠️ **AND THE INSTRUMENTER IS THE ONE INSTALLED WHERE THIS RUNS, NOT THE ONE
+ * BESIDE THIS FILE** (review, 2026-09-17). Resolved through `import.meta.url`,
+ * the base's mutants were enumerated by HEAD's instrumenter while the base's own
+ * Stryker executed them — two halves of one measurement from two installs, with
+ * only a major version compared between them. `process.cwd()` is the checkout
+ * being measured: the child that measures the merge base runs THERE, so it
+ * enumerates and executes out of one install, and a plain sweep, a plan, a shard
+ * and the aggregate all run in this checkout and are unchanged.
+ */
+export async function identitiesOfSource(name, source) {
+  const core = createRequire(path.resolve('package.json')).resolve('@stryker-mutator/core')
   const { Instrumenter } = await import(pathToFileURL(createRequire(core).resolve('@stryker-mutator/instrumenter')).href)
   const { mutants } = await new Instrumenter(QUIET).instrument(
-    [{ name: path.resolve(file), mutate: true, content: readFileSync(file, 'utf8') }],
+    [{ name: path.resolve(name), mutate: true, content: source }],
     {
       plugins: null,
       // Stryker disable next-line ArrayDeclaration: no mutator is named "Stryker was here", so excluding it excludes nothing and no count can differ
@@ -1293,6 +1311,558 @@ function namedIdentity(identity) {
 }
 
 /**
+ * A SURVIVOR'S identity — what a survivor at the merge base must share with one
+ * here before it may answer for it: the mutator, the replacement, the text of
+ * the node that was mutated, the text of the STATEMENT that node sat in, and the
+ * chain of named declarations around it.
+ *
+ * ⚠️ **A MUTANT'S own identity — `mutantIdentitiesIn` above — CANNOT BE USED FOR
+ * THIS, AND THE DIFFERENCE IS THE WHOLE POINT.** That one is a mutant's PLACE, so
+ * that one run's report can be held to what another counted in the same bytes;
+ * it is a line and a column, and every line below an inserted one moves. This one
+ * is what was mutated, so that the same code compared across two commits — and,
+ * since a file may be split, across two FILES — is recognised as the same debt.
+ *
+ * ⚠️ **THE REPLACEMENT ALONE LETS CHANGED CODE INHERIT OLD DEBT.** Measured
+ * against the instrumenter on 2026-09-16: Stryker gives `return "old"` and
+ * `return "new"` the same `StringLiteral` replacement `""` and the same
+ * `BlockStatement` replacement `{}`. So the identity carries the ORIGINAL TEXT,
+ * which is what separates "move the code, then fix it" from "move it and change
+ * it in the same breath" — the first keeps its pairing, the second does not.
+ *
+ * ⚠️ **AND THE MUTATED TEXT ALONE IS OFTEN A FRAGMENT OF A STATEMENT.** What
+ * Stryker replaces is not always what a reader would call the code: an
+ * `OptionalChaining` mutant's text is the CALLEE, so two calls of one method with
+ * different arguments shared an identity — and the acceptance run refused 14
+ * survivors of an untouched file on collisions of exactly that shape. So the
+ * statement the node sits in is part of the identity too; `statementAround` is
+ * what it is and what it costs.
+ *
+ * ⚠️ **AND AN ORDINAL WITHIN A SCOPE TRANSFERS ACCEPTANCE.** Numbering a scope's
+ * mutants makes `return "secret"` the first one the moment `audit("log")` above
+ * it is deleted, so an accepted survivor on the deleted line answers for a new
+ * one on the line that stayed. Nothing here counts occurrences: survivors that
+ * share an identity are told apart by `matchedSurvivors` counting them on both
+ * sides, never by where they sit.
+ *
+ * `mutant` is a mutant as a Stryker REPORT carries one, which is the convention
+ * `mutantIdentitiesIn` answers in: lines and columns from 1, the end one past the
+ * last character. `file` must be the subject's own name, because it decides how
+ * the source is parsed — a `.tsx` read as a `.ts` is another tree.
+ *
+ * ⚠️ **THE TEXT IS COMPARED AS TOKENS, BECAUSE A REGULAR EXPRESSION OVER IT
+ * ERASED MEANING AND STILL MISSED FORMATTING** (review, 2026-09-17). It read
+ * `\s*[\n\r]\s*` as one space, which made all three of these wrong at once:
+ *
+ * | | before | now |
+ * |---|---|---|
+ * | a template literal holding a line break, against one holding a space | the SAME identity — two different strings, one debt | different: a literal's own text is kept exactly as it is |
+ * | `return` ⏎ `1` against `return 1` | the same, though the first returns nothing and the second returns 1 | different: a line break between two tokens stays a line break |
+ * | `a+b` against `a + b` | different, which is the formatting case the rule existed for | the same |
+ *
+ * So the text is rebuilt from the tokens the parse found: each token's own text
+ * verbatim, and between two of them a single line break where the source had one
+ * and a single space where it did not. Re-indenting is then still not rewriting —
+ * a block that moves under a new guard, or a file run through a formatter, keeps
+ * every line break it had and changes only the spaces, so it keeps its pairing —
+ * while a formatter that JOINS two lines into one does change the identity, which
+ * is a pairing lost to a reflow and is the side to be wrong on.
+ *
+ * What this still cannot tell apart is two strings differing only in a run of
+ * spaces inside the quotes: both mutate to the same empty string, and a test that
+ * notices neither is the same gap twice.
+ */
+export function survivorIdentity(mutant, source, file) {
+  return identityIn(mutant, parsedSource(source, file))
+}
+
+/**
+ * A source parsed ONCE — its tree and every token in it — for every mutant of it
+ * to be identified against.
+ *
+ * ⚠️ **IT WAS PARSED PER MUTANT, AND A BASE NO TEST REACHES TAKES THAT PATH FOR
+ * EVERY MUTANT IT HAS** (review, 2026-09-17). A file of a thousand mutants was a
+ * thousand parses of the same bytes. Passed as a value rather than remembered in
+ * a cache of its own, because a cache is unobservable: every mutant of one would
+ * survive, and this gate may not hold a mutant nothing can kill.
+ */
+export function parsedSource(source, file) {
+  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest)
+  return { tree, file, source, tokens: tokensOf(tree) }
+}
+
+/** One mutant's identity against a source already parsed — see `survivorIdentity`, which is this over one mutant. */
+function identityIn(mutant, parsed) {
+  const [start, end] = positionsOf(parsed.tree, mutant, parsed.file)
+  return {
+    mutatorName: mutant.mutatorName,
+    replacement: mutant.replacement,
+    original: tokenisedBetween(parsed, start, end),
+    statement: statementAround(parsed, start, end),
+    scope: scopeAround(parsed.tree, start, end),
+  }
+}
+
+/**
+ * Every token of `tree` that has any text, in the order they sit in, each as the
+ * two offsets it spans. Whatever is BETWEEN two of them is whitespace or a
+ * comment, which is what `tokenisedBetween` is left free to normalise.
+ */
+function tokensOf(tree) {
+  const found = []
+  const walk = (node) => {
+    const children = node.getChildren(tree)
+    if (children.length === 0) {
+      /* The end-of-file token spans nothing, and a token of no text would put a
+         separator into the answer for a token nobody wrote. */
+      if (node.getEnd() > node.getStart(tree)) found.push([node.getStart(tree), node.getEnd()])
+      return
+    }
+    for (const child of children) walk(child)
+  }
+  walk(tree)
+  return found
+}
+
+/**
+ * The text between two offsets as an identity compares it: each token verbatim,
+ * separated by one line break where the source had one between them and one
+ * space where it did not — see `survivorIdentity`.
+ *
+ * The LINE MAP answers whether there was a break, rather than a search for a
+ * character: it is the same map `positionsOf` reads the mutant's own place out
+ * of, so a paragraph separator and a lone carriage return count here exactly as
+ * they count there.
+ */
+function tokenisedBetween({ tree, source, tokens }, start, end) {
+  const lineAt = (at) => tree.getLineAndCharacterOfPosition(at).line
+  const parts = []
+  let after = null
+  for (const [from, to] of tokens) {
+    if (to <= start || end <= from) continue
+    if (after !== null) parts.push(lineAt(from) > lineAt(after) ? '\n' : ' ')
+    parts.push(source.slice(Math.max(from, start), Math.min(to, end)))
+    after = to
+  }
+  return parts.join('')
+}
+
+/**
+ * Where a mutant's location falls in the source, as two offsets.
+ *
+ * TypeScript's own line map is what answers, rather than arithmetic over `\n`
+ * here: it counts a paragraph separator and a lone carriage return as line
+ * breaks, which is the set Babel counts and so the set the instrumenter's
+ * locations were made against. It REFUSES a line or a column that is at no place
+ * in the text — measured 2026-09-16, every one of a line past the end, a negative
+ * line, a column past the line's own end and a missing number throws — so a
+ * location that does not belong to this source is named here rather than sliced
+ * into an empty string that would then match every other empty one.
+ */
+function positionsOf(tree, mutant, file) {
+  try {
+    const { start, end } = mutant.location
+    return [
+      ts.getPositionOfLineAndCharacter(tree, start.line - 1, start.column - 1),
+      ts.getPositionOfLineAndCharacter(tree, end.line - 1, end.column - 1),
+    ]
+  } catch (cause) {
+    throw new Error(`check-mutants: ${namedIdentity(mutant)} is at no place in ${file} — ${messageOf(cause)}`)
+  }
+}
+
+/**
+ * The STATEMENT the text between two offsets sits in, as an identity compares it
+ * — the nearest one, looking outward from the mutated text itself, and never
+ * past the scope that text sits in.
+ *
+ * ⚠️ **WITHOUT IT, TWO CALLS OF ONE METHOD ARE ONE DEBT.** What Stryker mutates
+ * is often a fragment that says nothing about the statement it belongs to: an
+ * `OptionalChaining` mutant's text is the CALLEE, so
+ * `noteRenderer?.setAttribute('max-column-count', '1')` and
+ * `noteRenderer?.setAttribute('flow', 'scrolled')` had one identity between them
+ * — and the acceptance run billed a developer for both, for a file the change
+ * had added a comment to. Measured 2026-09-17: of the 14 survivors that run owed,
+ * every one was a collision this separates or a repetition `matchedSurvivors`
+ * now counts.
+ *
+ * ⚠️ **AND THE WALK STOPS AT THE MUTANT'S OWN SCOPE, BECAUSE A CLASS IS A
+ * STATEMENT TOO.** `ts.isStatement` is true of a `ClassDeclaration` and of a
+ * `FunctionDeclaration`, so a mutant sitting in no ordinary statement — a class
+ * field's initialiser, a default parameter's value — would take the whole
+ * declaration's text: measured on `src/kernel/ui/reader/session.ts`, whose
+ * `#disposed = false` would have carried an identity of 68 593 characters, re-billed
+ * by every edit anywhere in the class. That is the complaint this comparison
+ * exists to answer, so the answer there is the last thing the walk stood on
+ * instead — the field, the parameter — which is the smallest thing written around
+ * the mutant that its scope is made of.
+ *
+ * Where there is neither — a mutant OF a whole arrow, or a span covering parts of
+ * two declarations — the mutated text answers for itself, which is what the
+ * identity held before this field existed. `scope` is what tells two of those
+ * apart.
+ *
+ * The text is rebuilt from the parse's own tokens, exactly as `original` is, so a
+ * statement that moved under a new guard or through a formatter keeps its pairing
+ * and one whose tokens changed does not.
+ *
+ * ⚠️ **WHAT IT COSTS IS THAT A STATEMENT IS AS BIG AS IT IS.** A mutant on the
+ * condition of an `if` carries the whole `if` — its body included — so an edit
+ * inside that body re-bills the condition's survivors. Measured 2026-09-17, the
+ * statement runs past 300 characters for a tenth of the mutants in `session.ts`,
+ * an eighth of this file's, and a quarter of `kernel/ui/state.ts`'s, where a
+ * `switch` carries every mutant of every case it holds. Taking a statement's
+ * HEADER instead was considered and not done: it would make `if (a) return x` and
+ * `if (a) return y` one identity again, which is the collision this field exists
+ * to end.
+ *
+ * ⚠️ **AND A COMMENT WRITTEN INSIDE A STATEMENT IS AN EDIT TO IT.** A statement's
+ * span begins AFTER its leading trivia, so a comment between two statements
+ * changes no identity — which is the premise of the acceptance run, and is
+ * measured. One written on its own line INSIDE a statement puts two of its tokens
+ * on two lines where they sat on one, so the statement's text changes and every
+ * survivor in it is re-billed. A comment cost something before this field only
+ * where the mutated text ITSELF spanned the break; now it costs the statement.
+ */
+function statementAround(parsed, start, end) {
+  const { tree } = parsed
+  const holding = (node) => ts.forEachChild(node, (child) => (child.getStart(tree) <= start && end <= child.getEnd() ? child : undefined))
+  /* `found` is the nearest statement seen INSIDE the scope currently being
+     walked, and `below` the first node under that scope — both forgotten at each
+     scope the walk enters, which is what keeps an outer statement from answering
+     for a mutant in an inner scope. Recursion rather than a loop with a guard, for
+     `scopeAround`'s reason: each step takes a child of the node before it, so a
+     tree of finite depth ends the walk. */
+  const under = (node, found, below) => {
+    const child = holding(node)
+    if (child === undefined) return found ?? below ?? null
+    if (SCOPES.has(child.kind)) return under(child, null, null)
+    if (ts.isStatement(child)) return under(child, child, child)
+    return under(child, found, below ?? child)
+  }
+  const statement = under(tree, null, null)
+  if (statement === null) return tokenisedBetween(parsed, start, end)
+  return tokenisedBetween(parsed, statement.getStart(tree), statement.getEnd())
+}
+
+/**
+ * The named declarations enclosing the text between two offsets, outermost
+ * first — a class, then its method, then a function nested in that.
+ *
+ * ⚠️ **THE INNERMOST NAME ALONE IS NOT A PLACE.** Two classes may each have a
+ * `read`, and a `read` nested in `outer` is not the one nested in `other`; with
+ * only the last name, the same three lines in either would answer for the other.
+ *
+ * The walk descends into the mutated node itself where that node is a scope — an
+ * `ArrowFunction` mutant covers a whole arrow — so `const pick = () => …` and
+ * `const other = () => …` are told apart though their text is the same.
+ *
+ * Recursion rather than a loop with a guard: each step takes a child of the node
+ * before it, so a tree of finite depth ends the walk. A mutant that stopped it
+ * ending would overflow the stack, which fails a test rather than hanging a
+ * sweep — the trap `levelsAbove` records, avoided by having no turn to stay in.
+ */
+function scopeAround(tree, start, end) {
+  const holding = (node) => ts.forEachChild(node, (child) => (child.getStart(tree) <= start && end <= child.getEnd() ? child : undefined))
+  const under = (node) => {
+    const child = holding(node)
+    if (child === undefined) return []
+    const name = scopeNameOf(child, node)
+    return name === null ? under(child) : [name, ...under(child)]
+  }
+  return under(tree)
+}
+
+/** The declarations that make a scope of their own — a class, a function, a method however it is spelt. */
+const SCOPES = new Set([
+  ts.SyntaxKind.ArrowFunction,
+  ts.SyntaxKind.ClassDeclaration,
+  ts.SyntaxKind.ClassExpression,
+  ts.SyntaxKind.Constructor,
+  ts.SyntaxKind.FunctionDeclaration,
+  ts.SyntaxKind.FunctionExpression,
+  ts.SyntaxKind.GetAccessor,
+  ts.SyntaxKind.MethodDeclaration,
+  ts.SyntaxKind.SetAccessor,
+])
+
+/**
+ * What a node is CALLED where it makes a scope, and `null` where it makes none:
+ * its own name, else the name of whatever it is declared as, else its kind.
+ *
+ * The middle one is what most of this tree needs — nearly every function here is
+ * an arrow given to a `const` — and without it every one of them would be the
+ * same anonymous scope, so two identical expressions in two different functions
+ * would share an identity and neither could answer for the other.
+ *
+ * The last one keeps a genuinely anonymous scope from vanishing: a callback is
+ * `ArrowFunction`, a constructor `Constructor`.
+ *
+ * ⚠️ **AND THE KIND ALONE LET A DELETED CALLBACK PAY FOR A NEW ONE** (review,
+ * 2026-09-17, reproduced against the real instrumenter). `scopeAround` keeps only
+ * the scopes it passes through, so the CALL an anonymous callback is passed to is
+ * discarded — and with it the only thing that told two of them apart:
+ *
+ * | | |
+ * |---|---|
+ * | at the merge base | `function f() { first(() => false); second(() => false) }` |
+ * | here | `function f() { first(() => false); third(() => false) }` |
+ * | what the scope said | `["f","ArrowFunction"]` for all four, and the statement is `false` for all four — 2 authorised, 0 added |
+ *
+ * `second`'s deleted callback paid for `third`'s new one, which is the laundering
+ * the statement answers everywhere a statement exists — and inside a callback
+ * body there is no statement above it but the callback itself. So an anonymous
+ * scope carries WHAT HOLDS IT: `ArrowFunction in first` is not
+ * `ArrowFunction in third`.
+ *
+ * ⚠️ **AND IT IS THE CALLEE'S OWN SPELLING, NEVER THE CALL'S TEXT.** A call's
+ * text holds every argument, the callback among them, so taking it would put a
+ * scope's whole body inside the identity of every mutant in it — the 68 593-character
+ * identity `statementAround` exists to avoid, arriving through the fix. A callee
+ * that is not a name answers with its KIND, so nothing here grows with the code
+ * around it.
+ *
+ * What is left indistinguishable is narrower than it was and is still real: two
+ * identical callbacks passed to one call, which is why `matchedSurvivors` pairs a
+ * colliding group by COUNT rather than guessing which of them is which.
+ */
+function scopeNameOf(node, parent) {
+  if (!SCOPES.has(node.kind)) return null
+  return node.name?.text ?? declaringName(parent) ?? anonymousName(node, parent)
+}
+
+/** What a nameless scope is called: its kind, and the call that holds it where one does — see `scopeNameOf`. */
+function anonymousName(node, parent) {
+  const kind = ts.SyntaxKind[node.kind]
+  if (!ts.isCallExpression(parent) && !ts.isNewExpression(parent)) return kind
+  /* ⚠️ **TWO CALLBACKS TO ONE CALL SHARED ONE NAME, AND PERMISSION PASSED
+     BETWEEN THEM** (a second opinion's fifth round, 2026-09-17, reproduced with
+     real instrumenter mutants). `p.then(onResolve, onReject)` gave both arrows
+     the same `ArrowFunction in p.then`, so a change that swaps the two bodies —
+     updating both tests with them, so both suites pass — had the success
+     callback's new survivor paid for by the rejection callback's old one. Four
+     survivors, all four authorised, and one of them genuinely new.
+     `bus.on("publish", …)` beside `bus.on("delete", …)` collided the same way.
+
+     Two things separate them, and neither grows with the code inside the
+     callback — which is the whole constraint here, since an identity that
+     carries a function body changes whenever anything in it is edited: WHERE the
+     callback sits in the argument list, which is what distinguishes `then`'s two
+     roles, and the call's own LITERAL arguments, which is what distinguishes one
+     registration from another. */
+  const args = parent.arguments ?? []
+  const at = args.indexOf(node)
+  const where = at === -1 ? '' : ` ${at + 1}/${args.length}`
+  return `${kind}${where} in ${calledName(parent.expression)}(${literalArguments(args).join(', ')})`
+}
+
+/**
+ * A call's arguments that are literals, as their own text — bounded, because an
+ * identity that grows with the source is one that changes when anything near it
+ * is edited. Anything that is not a literal contributes nothing: its text is
+ * whatever expression was written, which is exactly what must not be in here.
+ */
+function literalArguments(args) {
+  return args
+    .filter((one) => ts.isStringLiteralLike(one) || ts.isNumericLiteral(one) || one.kind === ts.SyntaxKind.TrueKeyword || one.kind === ts.SyntaxKind.FalseKeyword)
+    /* ⚠️ **NEVER `getText()`, WHICH NEEDS A NODE'S SOURCE FILE AND CRASHED THE
+       SWEEP** (2026-09-17, found by the first sharded run that ever completed).
+       `getText()` reads `node.getSourceFile().text`, and a node reached the way
+       these are has no source file bound to it: it threw `Cannot read properties
+       of undefined (reading 'text')` out of TypeScript, out of `anonymousName`,
+       and took the whole shard down — no receipt, and an aggregate that could
+       only say the sweep was incomplete. Every literal carries its own value
+       without asking the tree for it, so nothing here needs the tree. */
+    .map((one) => {
+      if (ts.isStringLiteralLike(one)) return JSON.stringify(one.text.slice(0, 40))
+      if (ts.isNumericLiteral(one)) return one.text
+      return one.kind === ts.SyntaxKind.TrueKeyword ? 'true' : 'false'
+    })
+}
+
+/**
+ * How a callee is spelt, in as many characters as the name itself and no more: a
+ * name, a chain of property accesses ending in one, and the KIND of anything
+ * else — a call, an element access, a parenthesised expression — because those
+ * carry text that grows with the code inside them.
+ *
+ * Recursion rather than a loop with a guard: each step takes the expression
+ * BEFORE the dot, so a chain of finite length ends the walk.
+ */
+function calledName(expression) {
+  if (ts.isIdentifier(expression)) return expression.text
+  if (ts.isPropertyAccessExpression(expression)) return `${calledName(expression.expression)}.${expression.name.text}`
+  return ts.SyntaxKind[expression.kind]
+}
+
+/** The name the declaration holding a nameless class or function gives it, and nothing where it gives none. */
+function declaringName(parent) {
+  const declares = ts.isVariableDeclaration(parent) || ts.isPropertyAssignment(parent) || ts.isPropertyDeclaration(parent)
+  return declares ? parent.name.text : undefined
+}
+
+/**
+ * Which survivors HERE the merge base answers for, and which it does not: a
+ * one-to-one pairing over `survivorIdentity`, and a reason for every survivor
+ * left over.
+ *
+ * Each side is a list of `{ file, identity }`; a survivor HERE carries `from` as
+ * well — the base file that may answer for it, which is its own path where the
+ * base has that file, the file git says it was renamed or copied from where it
+ * does not, and `null` where it is new. Every `from` named must be a file that
+ * was MEASURED at the base: one that was not has no survivors here, so it answers
+ * for nothing, which fails closed.
+ *
+ * ⚠️ **ONE SURVIVOR AT THE MERGE BASE ANSWERS FOR AT MOST ONE HERE, WHATEVER
+ * FILE IT LANDS IN.** Without that, one accepted survivor copied into four files
+ * is four accepted survivors, and a duplication launders debt it did not have.
+ * So each is spent as it answers, and what is left over is named with how many
+ * there were and where.
+ *
+ * ⚠️ **AND A FILE TAKES ITS OWN SURVIVORS BEFORE A FILE COPIED FROM IT** — the
+ * two passes below. A change that copies `session.ts` into `sessionCopy.ts`
+ * leaves `session.ts` exactly as it was, so its own survivors are plainly the
+ * same debt; matching by origin alone would let the COPY take them and bill the
+ * untouched file for what it has always owed.
+ *
+ * ⚠️ **A GROUP THAT STILL COLLIDES IS COUNTED, AND THE COUNT IS THE EVIDENCE.**
+ * The laundering this rule was written against was a count over an identity too
+ * COARSE to carry the call it sat in — reproduced against the real instrumenter:
+ *
+ * | | |
+ * |---|---|
+ * | at the merge base | `function f() { first("x"); second("x") }` |
+ * | here | `function f() { first("x"); third("x") }` |
+ * | what the identity said without the statement | one identity for all four — 2 authorised, 0 added |
+ * | what it says with it | two a side; `first("x")` keeps its pairing, `third("x")` is added |
+ *
+ * `second`'s deleted occurrence paid for `third`'s new one. That is answered in
+ * the IDENTITY now — `statementAround` carries the statement, so those two are
+ * not the same debt and `third("x")` is added — and refusing the group as
+ * ambiguous on top of it billed the wrong people: measured 2026-09-17, one comment
+ * added to an untouched 1 403-mutant file owed 14 survivors, every one of them a
+ * refusal of this kind and not one of them changed code.
+ *
+ * ⚠️ **WHAT REMAINS AFTER THE STATEMENT IS A MULTISET, AND THIS PARAGRAPH USED TO
+ * CLAIM MORE THAN THAT** (review, 2026-09-17). It said a collision "means
+ * literally the same statement, mutated the same way, in the same scope", and
+ * that "swapping one for another changes nothing a reader could observe". **The
+ * second sentence is false**, and the first is narrower than what the identity
+ * actually compares. The identity carries the NEAREST statement and the scope and
+ * NOTHING BETWEEN THEM, so:
+ *
+ * | at the merge base | here | what the count says |
+ * |---|---|---|
+ * | `emit("x")` ×3 | `emit("x")` ×2 and `other("x")` | 2 answered, `other("x")` added — the call changed, so the statement did |
+ * | `emit("x")` ×3 | `emit("x")` ×2 and `if (isAdmin) emit("x")` | **all three answered** — the nearest statement of the third is still `emit("x")` |
+ *
+ * The second row is a change a reader can plainly observe, and it is authorised.
+ * What is true is the weaker thing: **a collision means the same statement,
+ * mutated the same way, in the same scope, and the identity cannot see what
+ * ENCLOSES that statement below the scope.** They are paired by count —
+ * `min(there, here)` answered, the remainder added — because no text this identity
+ * holds can tell them apart.
+ *
+ * ⚠️ **WHAT THAT GIVES UP, SAID PLAINLY.** Two things, and the second is the one
+ * that was missing: a change that deletes one of three identical statements and
+ * writes another identical one in the same scope is authorised for both, because
+ * the before and the after are the same multiset; and a statement that MOVED under
+ * a new guard keeps its pairing, because the guard is not in its identity.
+ *
+ * The second is the same trade the re-indentation rule already takes on purpose,
+ * at its full width. Putting the enclosing statements in would close it and would
+ * re-bill every mutant under a `switch` or an `if` for an edit anywhere inside it
+ * — the file-wide re-billing this whole comparison exists to answer. The
+ * alternative to the count was measured and is worse still: refusing a colliding
+ * group bills a developer for survivors in code nobody touched, every time such a
+ * repetition exists.
+ *
+ * The pairing is in the order given, which is the order a report lists mutants;
+ * where one base survivor answers for one here, which of them is named decides
+ * nothing.
+ *
+ * `undecided` is the mutants the merge base could not DECIDE — see
+ * `undecidedAtBase`. None of them authorises anything, so none is part of the
+ * pairing above; what they decide is which SENTENCE an unanswered survivor gets,
+ * and that is `classed`'s — where they are spent one-to-one, exactly as survivors
+ * are, so one undecided occurrence cannot describe two survivors here.
+ */
+export function matchedSurvivors(atBase, atHead, undecided = []) {
+  const pools = new Map()
+  for (const survivor of atBase) {
+    const at = pools.get(poolKey(survivor.file, survivor.identity)) ?? { counted: 0, unspent: [] }
+    pools.set(poolKey(survivor.file, survivor.identity), { counted: at.counted + 1, unspent: [...at.unspent, survivor] })
+  }
+  const unknown = new Map()
+  for (const one of undecided) {
+    const at = unknown.get(poolKey(one.file, one.identity)) ?? { counted: 0, unspent: [] }
+    unknown.set(poolKey(one.file, one.identity), { counted: at.counted + 1, unspent: [...at.unspent, one] })
+  }
+  const authorised = []
+  let waiting = atHead.map((here) => ({ here, why: null }))
+  for (const whose of [(here) => here.file, (here) => here.from]) {
+    const left = []
+    for (const { here } of waiting) {
+      const pool = pools.get(poolKey(whose(here), here.identity)) ?? { counted: 0, unspent: [] }
+      const base = pool.unspent.shift()
+      /* The LAST pass's reading is the one a refusal reports, and it is the pass
+         that asked the merge base's own file — which is the file the words below
+         name. */
+      if (base === undefined) left.push({ here, why: unanswered(here, pool.counted) })
+      else authorised.push({ base, here })
+    }
+    waiting = left
+  }
+  return { authorised, added: waiting.map(({ here, why }) => classed(here, why, unknown)) }
+}
+
+/**
+ * Which of the two things an unanswered survivor here IS, in the words a reader
+ * acts on: one this change added, or one the merge base could not decide.
+ *
+ * ⚠️ **THEY WERE ONE SENTENCE, AND IT WAS THE WRONG ONE** (2026-09-17). A mutant
+ * the merge base never answered for was billed as the change's own, which sends a
+ * reader to a diff that does not hold it. Neither class authorises anything and
+ * both fail the build; what differs is where the reader looks.
+ *
+ * The question is asked of `from` — the file this survivor is JUDGED AGAINST, and
+ * the name every measurement is under — and of nothing else. Asking a head file's
+ * own name would tell it about a measurement of a file it is not judged against,
+ * in the one case where the two differ: a name that is some OTHER subject's
+ * origin.
+ *
+ * ⚠️ **AND ONE UNDECIDED OCCURRENCE EXCUSED THE DIAGNOSIS OF UNLIMITED ONES**
+ * (review, 2026-09-17). The unknowns were a map, LOOKED UP and never spent, so one
+ * mutant the merge base could not decide labelled two survivors here "the merge
+ * base could not decide this mutant" — a sentence about a mutant it has only one
+ * of. Neither passed, so nothing was authorised that should not have been; what
+ * was wrong is what a reader was told. They are spent one-to-one now, exactly as
+ * survivors are, and the second such survivor here falls back to the count it is
+ * really against.
+ */
+function classed(here, why, unknown) {
+  const pool = unknown.get(poolKey(here.from, here.identity)) ?? { counted: 0, unspent: [] }
+  const undecided = pool.unspent.shift()
+  if (undecided !== undefined) {
+    return { here, why: `the merge base could not decide this mutant in ${undecided.file}: ${undecided.why}`, class: 'undecided' }
+  }
+  if (pool.counted === 0) return { here, why, class: 'added' }
+  return { here, why: `${why}, and the ${pool.counted} mutant(s) it could not decide there each answer for another survivor here`, class: 'added' }
+}
+
+/** A survivor's identity in one file, as one string: what two survivors must share to be the same debt. */
+function poolKey(file, identity) {
+  return JSON.stringify([file, identity.mutatorName, identity.replacement, identity.original, identity.statement, identity.scope])
+}
+
+/** Why the merge base answers for a survivor here with nothing: it had none of them, or it had none left. */
+function unanswered(here, counted) {
+  if (here.from === null) return 'it is in a file the merge base does not have, and git names no file it was copied or renamed from'
+  if (counted === 0) return `the merge base has no survivor with this identity in ${here.from}`
+  return `the merge base has ${counted} survivor(s) with this identity in ${here.from}, and each of them answers for another survivor here`
+}
+
+/**
  * The instrumenter's logger, silenced. It says how many mutants it placed, and
  * warns of a `Stryker disable` naming no mutator — which changes nothing
  * counted, since that directive disables nothing. Every method answers nothing,
@@ -1322,7 +1892,9 @@ const USAGE =
   '       node scripts/check-mutants.mjs --plan <manifest> --shards <count> [--isolate <heaviest>] [--base <ref>] [--only <substring>] [--require-base]\n' +
   '         (a plan and its shards assume clean checkouts: nothing .gitignore covers is fingerprinted, the install included, so a local run with ignored fixtures present is outside their guarantee)\n' +
   '       node scripts/check-mutants.mjs --shard <index>/<count> --manifest <manifest> --results <dir>\n' +
-  '       node scripts/check-mutants.mjs --aggregate --manifest <manifest> --results <dir>'
+  '       node scripts/check-mutants.mjs --aggregate --manifest <manifest> --results <dir>\n' +
+  '       node scripts/check-mutants.mjs --measure <path> --into <file>\n' +
+  '         (what one file owes in the checkout this runs in — how a sweep measures the merge base, in a worktree of its own)'
 
 /**
  * The command line, refused rather than guessed at.
@@ -1343,6 +1915,11 @@ const USAGE =
  * see `planSweep` — and each flag is read by the modes that use it and REFUSED by
  * the rest: a `--base` handed to a shard, which reads its plan's own, would
  * otherwise be ignored as quietly as the trailing flag above.
+ *
+ * `--measure` is the fourth, and is not a sweep at all: one named path, in this
+ * process's own directory, with no git and no lock — see `measureSweep`. Every
+ * other flag is refused to it, because each of them is about a scope it does not
+ * have.
  */
 export function argumentsOf(argv) {
   const { values } = parseArgs({ args: argv, options: FLAGS, strict: true, allowPositionals: false })
@@ -1351,18 +1928,13 @@ export function argumentsOf(argv) {
   for (const flag of Object.keys(FLAGS)) {
     if (values[flag] === '') throw new Error(`--${flag} needs a value, and was given an empty one`)
   }
-  const modes = ['plan', 'shard', 'aggregate'].filter((mode) => values[mode] !== undefined)
+  const modes = ['plan', 'shard', 'aggregate', 'measure'].filter((mode) => values[mode] !== undefined)
   if (modes.length > 1) throw new Error(`--${modes[0]} and --${modes[1]} are two modes, and one run is one of them`)
   const mode = modes[0] ?? 'sweep'
   for (const flag of Object.keys(FLAGS)) {
     if (values[flag] === undefined || READ_BY[mode].includes(flag)) continue
     const where = mode === 'sweep' ? 'a plain sweep' : `--${mode}`
-    /* Only a shard and the aggregate can be handed a flag a plain sweep reads:
-       a sweep reads its own, and a plan reads every one of them beside its own,
-       so neither reaches here with one. Asking which mode this was decided
-       nothing, and nothing could tell the question from its absence. */
-    const why = READ_BY.sweep.includes(flag) ? " — a shard and the aggregate read the plan's own from its manifest" : ''
-    throw new Error(`--${flag} is not read by ${where}${why}`)
+    throw new Error(`--${flag} is not read by ${where}${READ_BY.sweep.includes(flag) ? insteadOf(mode) : ''}`)
   }
   for (const flag of NEEDED_BY[mode]) {
     if (values[flag] === undefined) throw new Error(`--${mode} needs --${flag}`)
@@ -1371,6 +1943,7 @@ export function argumentsOf(argv) {
   if (mode === 'sweep') return scope
   if (mode === 'shard') return { mode, manifest: values.manifest, results: values.results, ...shardSpecOf(values.shard) }
   if (mode === 'aggregate') return { mode, manifest: values.manifest, results: values.results }
+  if (mode === 'measure') return { mode, measure: values.measure, into: values.into }
   const shards = wholeNumber(values.shards)
   /* `wholeNumber` answers `null` for anything that is not one, and `null < 1` is
      true, so asking about it separately decided nothing (2026-09-16). */
@@ -1385,6 +1958,18 @@ export function argumentsOf(argv) {
   return { mode, manifest: values.plan, shards, isolate, ...scope }
 }
 
+/**
+ * Where a mode that is not a plain sweep gets a scope from instead, for a flag
+ * that names one.
+ *
+ * Only a shard, the aggregate and a measurement reach here: a plain sweep reads
+ * all three of those flags, and a plan reads every one of them beside its own.
+ */
+function insteadOf(mode) {
+  if (mode === 'measure') return ' — a measurement of one named file has no scope of its own'
+  return " — a shard and the aggregate read the plan's own from its manifest"
+}
+
 /** Every flag, in the order a refusal meets them. */
 const FLAGS = {
   base: { type: 'string' },
@@ -1397,6 +1982,8 @@ const FLAGS = {
   manifest: { type: 'string' },
   results: { type: 'string' },
   aggregate: { type: 'boolean' },
+  measure: { type: 'string' },
+  into: { type: 'string' },
 }
 
 /** The flags each mode reads. A plain sweep is the mode no flag names. */
@@ -1405,10 +1992,17 @@ const READ_BY = {
   plan: ['plan', 'shards', 'isolate', 'base', 'only', 'require-base'],
   shard: ['shard', 'manifest', 'results'],
   aggregate: ['aggregate', 'manifest', 'results'],
+  measure: ['measure', 'into'],
 }
 
 /** The flags each mode cannot run without. */
-const NEEDED_BY = { sweep: [], plan: ['shards'], shard: ['manifest', 'results'], aggregate: ['manifest', 'results'] }
+const NEEDED_BY = {
+  sweep: [],
+  plan: ['shards'],
+  shard: ['manifest', 'results'],
+  aggregate: ['manifest', 'results'],
+  measure: ['into'],
+}
 
 /** `text` as a whole number written plainly in digits, or `null`. */
 function wholeNumber(text) {
@@ -1491,6 +2085,13 @@ export async function run(
     commits = commitsOf,
     worktree = worktreeOf,
     tracked = trackedUnder,
+    /* The three seams the merge-base comparison is made of: where the base IS,
+       which base file each subject may be answered by, and the measurement
+       itself. A plain sweep asks the first two only when a subject has a survivor
+       to authorise, so a tree at 100 % asks git nothing more than it did. */
+    mergeBase = mergeBaseOf,
+    origins = originsAtBase,
+    measure = measureAtBase,
     clock = () => performance.now(),
   },
 ) {
@@ -1501,7 +2102,7 @@ export async function run(
     stderr.write(`check-mutants: ${messageOf(cause)}\n${USAGE}\n`)
     return 2
   }
-  const world = { root, stdout, stderr, changed, files, lock, stryker, commits, worktree, tracked, clock }
+  const world = { root, stdout, stderr, changed, files, lock, stryker, commits, worktree, tracked, mergeBase, origins, measure, clock }
   try {
     return await (MODES[options.mode] ?? sweepChanges)(options, world)
   } catch (cause) {
@@ -1526,7 +2127,13 @@ class Refusal extends Error {
 /** A plain sweep: every changed file, one Stryker run each, in this checkout. */
 async function sweepChanges({ base, only, requireBase }, world) {
   const { root, stdout } = world
-  const subjects = chosen(world, base, only, requireBase).map(({ at }) => at)
+  const picked = chosen(world, base, only, requireBase)
+  /* Git's spelling of each subject, which is what the comparison with the merge
+     base is in: a base file is named as git names it, never as this run's root
+     happens to reach it. */
+  const named = new Map(picked.map(({ name, at }) => [at, name]))
+  const traced = tracedOnce([...named.values()], { base, requireBase }, world)
+  const subjects = picked.map(({ at }) => at)
   if (subjects.length === 0) {
     stdout.write('check-mutants: nothing changed to mutate\n')
     return 0
@@ -1584,11 +2191,100 @@ async function sweepChanges({ base, only, requireBase }, world) {
   }
   /* Nothing to sweep: neither the project's configuration nor the lock is needed. */
   if (toStryker.length === 0) return summarise({ noTestFound, nothingToKill }, world)
+  /* One measurement per BASE FILE, not per subject: two subjects traced to one
+     origin ask the same question of the same commit, and asking it twice costs a
+     second worktree, a second install and a second sweep of it — and then invites
+     the two answers to differ. `matchedAcross` leaves a mutant two measurements
+     disagree about undecided; this is why a plain sweep never has one to leave. */
+  const measured = new Map()
+  const measure = (origin, mergeBase, asked) => {
+    if (!measured.has(origin)) measured.set(origin, world.measure(origin, mergeBase, asked))
+    return measured.get(origin)
+  }
   const swept = await strykerEach(toStryker, found, await testOptionsOf(root), world, {
     judge: (subject, report) =>
       reportUnlike(reportEntryOf(subject, report), { named: subject, ...counted.get(subject), whose: 'this sweep' }),
+    base: (subject, reports, spent) => {
+      const { mergeBase, origins } = traced()
+      return judgedAtBase(subject, named.get(subject), origins.get(named.get(subject)) ?? null, reports, { mergeBase, measure, world, spent })
+    },
   })
-  return summarise({ ...swept, nothingToKill: [...nothingToKill, ...swept.nothingToKill], noTestFound }, world)
+  return summarise({ ...swept, ...sweptTogether(swept, world.stdout), nothingToKill: [...nothingToKill, ...swept.nothingToKill], noTestFound }, world)
+}
+
+/**
+ * A sweep's own verdict over every subject at once — see `matchedAcross` — as the
+ * outcomes `summarise` is given: the evidence each file carries with the sweep's
+ * numbers in place of its own, and the files whose survivors nothing at the merge
+ * base is left to answer for.
+ *
+ * ⚠️ **A SUBJECT'S OWN PAIRING IS OPTIMISTIC AND THIS IS THE ANSWER**, so what
+ * `strykerEach` decided per file is REPLACED rather than added to: a file it
+ * passed on its own pool can be a file the sweep's one pool cannot pay for.
+ */
+function sweptTogether(swept, stdout = null) {
+  const { byFile, contested, measurements } = matchedAcross(swept.paired)
+  if (stdout !== null) stdout.write(sayContested(contested, measurements))
+  /* The subject as a sweep NAMES it against the subject as git names it, which
+     is what the pairing answers under. Carried rather than computed back, because
+     computing it back is `path.relative` and a separator this gate would then
+     have to slash. */
+  const named = new Map(swept.paired.map(({ at, named: name }) => [at, name]))
+  const base = swept.base.map(([subject, evidence]) => [subject, { ...evidence, ...(byFile.get(named.get(subject)) ?? {}) }])
+  const stands = base.filter(([, evidence]) => survivorsStand(evidence)).map(([subject]) => subject)
+  return {
+    base,
+    /* Named once: a file already among them for another reason — a run that
+       scored nothing cannot reach here, but a file both timed out and survived
+       can — is not named twice for this one. */
+    unkilled: [...new Set([...swept.unkilled, ...stands])],
+  }
+}
+
+/**
+ * What two measurements of one base file disagreed about, as one line per file
+ * and nothing at all where they agreed — which is every sweep that measured each
+ * base file once, and so almost all of them.
+ *
+ * It is written whether the sweep passes or fails, deliberately: a contested
+ * identity only changes an ANSWER when a survivor here consumes it, so the
+ * signal that the base's runs are not reproducible is otherwise invisible in
+ * exactly the runs where it is still true and not yet expensive.
+ */
+function sayContested(contested, measurements) {
+  const twice = measurements.filter(([, runs]) => runs > 1)
+  if (contested.length === 0 || twice.length === 0) return ''
+  const where = new Map()
+  for (const one of contested) where.set(one.file, (where.get(one.file) ?? 0) + 1)
+  return (
+    `check-mutants: ${contested.length} mutant(s) were contested between measurements of the same merge-base file — this does not change what any file owes, and it does say the base's runs did not reproduce each other:\n` +
+    twice.map(([named, runs]) => `  ${named} — measured ${runs} time(s), ${where.get(named) ?? 0} identity(ies) contested\n`).join('')
+  )
+}
+
+/**
+ * Where the merge base is, and which base file may answer for each of `names` —
+ * asked ONCE, and only when something asks.
+ *
+ * ⚠️ **A TREE AT 100 % MUST ASK GIT NOTHING MORE THAN IT USED TO.** Both
+ * questions cost a git process, and the second of them a whole-repository
+ * rename detection with no limit — see `renamesAtBase` — which is a real cost to
+ * pay on every sweep that has nothing to authorise. Nothing is asked until the
+ * first survivor, and nothing is asked twice.
+ */
+function tracedOnce(names, { base, requireBase }, world) {
+  let asked = null
+  return () => {
+    if (asked !== null) return asked
+    let at
+    try {
+      at = world.mergeBase(base, requireBase, world.root)
+    } catch (cause) {
+      throw new Refusal(messageOf(cause))
+    }
+    asked = { mergeBase: at, origins: world.origins(names, at, world.root) }
+    return asked
+  }
 }
 
 /** The changed files `changed` names, narrowed by `only` — each as git names it, and at `root`. */
@@ -1608,15 +2304,21 @@ function chosen({ root, changed }, base, only, requireBase) {
  * What discovery found for each subject: the covering tests it is mutated
  * against, the covering tests left out of that run because they read its source
  * — see `sourceReaders` — and the modules it was reached through.
+ *
+ * `reaching` is which tests count as covering, and is asked rather than assumed
+ * because the two sides of a comparison answer it differently: a sweep here stops
+ * at the nearest level that reaches a subject, and a measurement at the merge base
+ * takes every test there is — see `reachingAtBase` for why, and `measuredHere` for
+ * what that asymmetry costs.
  */
-function discover(subjects, { root, files }) {
+function discover(subjects, { root, files }, reaching = coveringTests) {
   const tree = files(root)
   const inCheckout = (file) => path.join(root, file)
   const all = allTestFiles(tree).map(inCheckout)
   /* One parse per file for the whole sweep — see `remembered`. */
   const imports = remembered(importsOf)
   const importers = reverseImports(allSourceFiles(tree).map(inCheckout), imports)
-  const reach = new Map(subjects.map((subject) => [subject, coveringTests(subject, all, importers, imports)]))
+  const reach = new Map(subjects.map((subject) => [subject, reaching(subject, all, importers, imports)]))
   const readers = sourceReaders(subjects, all, (subject) => reach.get(subject).tests)
   return new Map(
     subjects.map((subject) => {
@@ -1686,13 +2388,20 @@ async function testOptionsOf(root) {
  * One Stryker run per subject, under the checkout's lock, each against only its
  * own covering tests. `record` is handed each subject's outcome the moment it has
  * one — see `shardSweep`. Answers the subjects, by outcome.
+ *
+ * `base` is asked about a subject whose run left a survivor, and about no other:
+ * it answers `{ outcome, evidence }` — see `judgedAtBase` — where the outcome
+ * REPLACES `survived` with what the merge base makes of it, and the evidence is
+ * what a result carries and the aggregate re-derives the answer from. A sweep at
+ * 100 % never reaches it, which is why measuring the base costs a tree with no
+ * survivors nothing at all.
  */
 async function strykerEach(
   reached,
   found,
   carried,
   { root, stdout, lock, stryker, clock },
-  { record = () => {}, before = () => {}, between = () => {}, after = () => {}, judge = () => null } = {},
+  { record = () => {}, before = () => {}, between = () => {}, after = () => {}, judge = () => null, base = () => null, settling = true } = {},
 ) {
   /* ⚠️ **BOTH GENERATED FILES LIVE IN THE REPOSITORY, NOT IN `tmpdir()`.**
    * Stryker copies the tree into a sandbox and runs from there, so a config in
@@ -1718,8 +2427,17 @@ async function strykerEach(
     notRun: [],
     unkilled: [],
     timedOut: [],
+    unresolved: [],
     staticSurvivors: [],
     mismatched: [],
+    /* What the merge base said, for each subject one was measured for — see
+       `summarise`, which is where a file whose survivors were all there too stops
+       being a failure. */
+    base: [],
+    /* And both sides' survivors, derived, for the one pairing that sees every
+       subject at once — see `matchedAcross`. A shard records the evidence and
+       leaves these where they are: the aggregate derives its own. */
+    paired: [],
   }
   const into = { killed: swept.killed, 'nothing-to-kill': swept.nothingToKill, 'did-not-run': swept.notRun, survived: swept.unkilled }
   /* Before the first write to any shared name — see `acquireLock`. */
@@ -1748,7 +2466,11 @@ async function strykerEach(
          scored run. */
       rmSync(report, { force: true })
       const started = clock()
-      const exitedCleanly = (await stryker(config)) === true
+      /* ⚠️ **THE ROOT IS WHERE STRYKER RUNS, NOT ONLY WHERE ITS FILES ARE
+         WRITTEN** (measured 2026-09-16). It sandboxes the project it is started
+         IN, so a sweep of a checkout other than this process's own — a measurement
+         at the merge base — must start it there. */
+      const exitedCleanly = (await stryker(config, root)) === true
       return { exitedCleanly, report: reportFrom(report), durationMs: Math.round(clock() - started) }
     }
     for (const [at, subject] of reached.entries()) {
@@ -1777,7 +2499,12 @@ async function strykerEach(
          run holds for it unchanged, this one included.
          A report that is not of this file is judged already, and its timeouts
          say nothing about anything, so there is nothing to settle. */
-      const toSettle = unlike === null ? timeoutsIn(reportEntryOf(subject, first.report)).unsettled.length : 0
+      /* `settling` is how a caller that cannot use a settle run says so. Every
+         caller in this gate wants one — see `killedWhenWidened`, which tried
+         going without and reverted, and says why. It is here because the option
+         is what makes that decision visible and reversible rather than implicit
+         in the absence of a flag. */
+      const toSettle = unlike === null && settling ? timeoutsIn(reportEntryOf(subject, first.report)).unsettled.length : 0
       let settle = null
       if (toSettle > 0) {
         /* Between the two runs, as before the first and after the second: a
@@ -1789,9 +2516,20 @@ async function strykerEach(
       const verdict = settledVerdict(subject, first, settle)
       const settleUnlike = settle === null ? null : judge(subject, settle.report)
       const problem = unlike ?? (settleUnlike === null ? null : `the settle run's report: ${settleUnlike}`)
+      /* What the merge base said about this file's survivors, and `null` where
+         nothing was asked of it — see `judgedAtBase`. A report that is not of this
+         file says nothing about its survivors either, so a mismatch is never
+         measured against the base. */
+      let evidence = null
       if (problem !== null) swept.mismatched.push([subject, problem])
       else {
         stdout.write(sayTimeouts(subject, verdict))
+        /* What this file's own sweep cost, which is what a second wide pass over
+           it would cost again — see `judgedAtBase`, which spends it or does not. */
+        const spent = first.durationMs + (settle === null ? 0 : settle.durationMs)
+        const judged = verdict.outcome === 'survived' ? await base(subject, [first.report, settle === null ? null : settle.report], spent) : null
+        evidence = judged === null ? null : judged.evidence
+        if (judged !== null && judged.paired !== null) swept.paired.push(judged.paired)
         /* A repeat is named whatever else the file also is: a survivor outranks
            it as the file's OUTCOME — a survivor is the finding, a repeat the
            absence of one — and does not replace it as a thing to fix. So a file
@@ -1799,7 +2537,17 @@ async function strykerEach(
            that has a repeat and nothing worse. The places come with the file:
            see `summarise`. */
         if (verdict.repeated.length > 0) swept.timedOut.push([subject, verdict.repeated])
-        if (verdict.outcome !== 'timed-out') into[verdict.outcome].push(subject)
+        /* And an unresolved mutant the same way, on its own channel — see
+           `unanswered`. It is NOT an outcome, because an outcome is one answer
+           per file and a survivor outranks every other; a mutant with no score
+           has to survive that precedence, and the base cannot excuse it. */
+        if (verdict.unresolved.length > 0) swept.unresolved.push([subject, verdict.unresolved])
+        /* A survivor the merge base answered for is no longer this file's
+           failure, so the file is not named among the ones a mutant survived in;
+           what the base said is carried instead, and `summarise` is where a base
+           that could not be measured becomes a failure of its own. */
+        if (verdict.outcome !== 'timed-out' && (evidence === null || survivorsStand(evidence))) into[verdict.outcome].push(subject)
+        if (evidence !== null) swept.base.push([subject, evidence])
         for (const place of staticSurvivorsIn(subject, [first.report, settle === null ? null : settle.report])) {
           swept.staticSurvivors.push(`${subject}:${place}`)
         }
@@ -1812,6 +2560,7 @@ async function strykerEach(
         durationMs: first.durationMs,
         report: first.report,
         settle,
+        base: evidence,
       })
       /* Nothing of this subject's is left for the next one's check of the
          checkout to find. */
@@ -1861,6 +2610,1631 @@ function writeFresh(file, data) {
      exclusivity are marked here rather than killed. */
   // Stryker disable next-line ObjectLiteral,StringLiteral: the removal a line above leaves nothing at this name, and nothing a test can do puts something back between two synchronous calls
   writeFileSync(file, data, { flag: 'wx' })
+}
+
+/**
+ * ## What the same file owed at the MERGE BASE
+ *
+ * A survivor here that was there too is debt the change did not make. Deciding
+ * that needs the file measured at the base — base content, base tests, base
+ * dependencies — and every one of the three is a way to get it wrong:
+ *
+ * ⚠️ **NEVER AN OVERLAY.** Base files written into this tree let a test from the
+ * base import a helper from here, which can leave a survivor that existed at
+ * neither commit — permission invented out of the mixture. The base is a
+ * `git worktree add --detach` of its own, OUTSIDE this checkout, removed when the
+ * measurement ends.
+ *
+ * ⚠️ **AND OUTSIDE IS NOT A TIDINESS RULE.** A shard compares the whole working
+ * tree around every file it sweeps, so a worktree checked out inside the checkout
+ * is a difference that stops the shard that asked for the measurement.
+ *
+ * ⚠️ **BASE CODE WITH BASE TESTS.** Head's tests against base code hide a
+ * weakened assertion — both sides survive, and the gap reads as old — and base's
+ * tests against head's code refuse an intended change of API. The POLICY is
+ * head's, this file's: the same identities, the same deadline, the same settle
+ * run for a wall-clock timeout. The PROJECT is the base's.
+ *
+ * ⚠️ **AND FAILING TO MEASURE IS NEVER PERMISSION.** Every way this can fail is a
+ * refusal that says which one it is, so that "could not run" can never be read as
+ * "it already survived": a merge base that is not here, a path the merge base
+ * does not have, an install that cannot run, a runner of another major version, a
+ * run that scored nothing, a wall-clock timeout that repeated, a report that is
+ * not of what was swept, a base no test reaches.
+ *
+ * ⚠️ **AND THE MEASUREMENT ITSELF RUNS IN A CHILD PROCESS, BECAUSE AN ABSOLUTE
+ * `mutate` GLOB MATCHES NOTHING** — measured rather than suspected, 2026-09-16,
+ * against a scratch project with `@stryker-mutator/core` 10.0.0. With an
+ * absolute `mutate` and an absolute `vitest.configFile`, Stryker answered
+ * *"Glob pattern … did not result in any files"*, instrumented 0 mutants, and
+ * died in the dry run; with both made relative and the run started IN that
+ * project, the same file gave 7 mutants, 6 killed and 1 survived, reported under
+ * `src/a.ts`. A plain sweep never meets this because its root is `.`, where
+ * relative and absolute are the same string — and `strykerEach`, `outcomeOf` and
+ * `reportEntryOf` all assume exactly that.
+ *
+ * So the base is swept by THIS FILE, run as `node <this gate> --measure <path>
+ * --into <file>` with its working directory set to the worktree. Its root is `.`
+ * there, so every path it writes and reads is relative in the one place that
+ * matters. **The POLICY is head's** — the settle run, the deadlines, the
+ * identities, every refusal — because the file the child runs is this one; **the
+ * PROJECT is the base's**, because `npx stryker`, vitest and the generated config
+ * all resolve from the directory the child runs in. `--measure` reads no git,
+ * takes no lock, plans nothing and discovers no changed file: it is handed one
+ * path and answers for that path alone — see `measureSweep`.
+ */
+
+/** A refusal that says WHICH failure it is, so a caller can tell a base it cannot measure from a file the base does not have. */
+class BaseRefusal extends Refusal {
+  constructor(reason, message) {
+    super(message)
+    this.reason = reason
+  }
+}
+
+/**
+ * What `subject` owed at the merge base: its survivors, each identified as
+ * `survivorIdentity` identifies one, or a refusal saying why that cannot be
+ * known. `subject` is a path as git names it — the BASE's own path, which is not
+ * this file's where a change renamed it; see `originAtBase`.
+ *
+ * `world` is the sweep's, with three seams of its own: `install`, because a real
+ * dependency install is the one thing a test may not run; `scratch`, so a case
+ * can put the worktree where it can watch it; and `child`, which is the
+ * measurement itself — see `spawnMeasurement`. The checkout's own `lock` is
+ * deliberately NOT used — the sweep that asked for this measurement is holding
+ * it, and the base worktree is this process's own under a name nothing else can
+ * know, so there is nothing there for a lock to protect.
+ */
+export async function measureAtBase(subject, baseCommit, world) {
+  const { root, install = installAt, scratch = baseScratch, child = spawnMeasurement, clock = () => performance.now() } = world
+  const started = clock()
+  if (!gitAnswers(['cat-file', '-e', `${baseCommit}^{commit}`], root)) {
+    throw new BaseRefusal(
+      'no-commit',
+      `check-mutants: the merge base ${baseCommit} is not in this checkout, so what ${subject} owed there cannot be ` +
+        'measured — fetch it (`fetch-depth: 0`) and run again',
+    )
+  }
+  if (!gitAnswers(['cat-file', '-e', `${baseCommit}:${subject}`], root)) {
+    throw new BaseRefusal(
+      'absent-at-base',
+      `check-mutants: the merge base ${baseCommit} has no ${subject}, so there is nothing there to measure — a file the ` +
+        'merge base does not have is new, and what a new file owes is not this measurement’s to say',
+    )
+  }
+  const temp = scratch()
+  const at = path.join(temp, 'base')
+  try {
+    const measured = await measuredIn(at, { subject, baseCommit, root, install, child, temp, clock, started })
+    /* ⚠️ **WHAT IT COST IS WHAT THE WHOLE OPERATION COST**, not what Stryker
+       reported: the child's own number leaves out the worktree, the install and
+       the child's own startup, which on a cold base is most of it — and those
+       numbers are what a CI bound is supposed to be re-derived from. */
+    return { ...measured, durationMs: Math.round(clock() - started) }
+  } finally {
+    /* Whatever happened: what is not removed here is a worktree git goes on
+       listing and a checkout of an old commit left on the disk. */
+    try {
+      execFileSync('git', ['worktree', 'remove', '--force', at], silently(root))
+    } catch {
+      /* There is none — refused before it was made. */
+    }
+    rmSync(temp, { recursive: true, force: true })
+  }
+}
+
+/** The measurement itself, with the worktree's removal already promised by `measureAtBase`. */
+async function measuredIn(at, { subject, baseCommit, root, install, child, temp, clock, started }) {
+  const under = path.relative(realPathOf(root), realPathOf(temp))
+  if (!outsideCheckout(under)) {
+    throw new BaseRefusal(
+      'scratch-inside',
+      `check-mutants: the merge base would be checked out at ${temp}, which is inside the checkout at ${root} — a ` +
+        'worktree there is a change to the very tree a plan fingerprints; give it a directory outside',
+    )
+  }
+  /* Given at all so `execFileSync` does not ALSO write git's stderr to this
+     process's own — it inherits it whenever `stdio` is left out — while the
+     refusal below still carries git's reason, which it reads from the pipe: the
+     same reasoning as `commitsOf`. No `encoding`, because nothing reads what this
+     run RETURNS and `cause.message` is a string whatever the encoding, so the
+     option decided nothing (measured 2026-09-17).
+
+     ⚠️ **EVERY ENTRY HERE IS LOAD-BEARING, THOUGH ONLY THE LAST ONE LOOKS IT**
+     (measured 2026-09-17). An entry Node does not know TRUNCATES the list rather
+     than defaulting: `['', 'pipe', 'pipe']` gives a child two streams, not
+     three, and git's reason is then in nobody's hands. So the case that asserts
+     git's own words is what holds all three, not just the pipe it names. */
+  // Stryker disable next-line ArrayDeclaration: a short stdio list is padded with pipes, so an empty one differs only in the child's stdin, which `git worktree add` never reads
+  const said = { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }
+  try {
+    execFileSync('git', ['worktree', 'add', '--detach', at, baseCommit], said)
+  } catch (cause) {
+    throw new BaseRefusal('worktree', `check-mutants: cannot check the merge base ${baseCommit} out at ${at} — ${messageOf(cause).trim()}`)
+  }
+  /* ⚠️ **THE ORDER OF THESE TWO LINES IS THE WHOLE OF WHETHER THE BASE CAN BE
+     MEASURED AT ALL.** A runner version is read out of an INSTALL, so the base's
+     can be read only once the base has one — and it cannot be read before the
+     worktree exists either. Provision first, then ask both sides. Asking earlier
+     to save the install on a base that turns out to be incompatible is not
+     possible: what the base pins is exactly what the answer would need. */
+  const supplied = suppliedTo(at, root, install, left(clock, started, INSTALL_DEADLINE_MS))
+  const unlike = runnerUnlike(runnerVersionsAt(root), runnerVersionsAt(at))
+  if (unlike !== null) throw new BaseRefusal('runner', `check-mutants: ${unlike} — refused rather than interpreted`)
+  const into = path.join(temp, 'measured.json')
+  /* ⚠️ **NOTHING BOUNDED ANY OF THIS UNTIL 2026-09-17** (review). Every subject
+     with a survivor makes another worktree, possibly another install, and a
+     Stryker run of a file whose history nothing about this branch predicts — and
+     a base no covering test was found for is now measured against the merge
+     base's WHOLE suite. A hung install or a hung child would take the sweep's
+     whole CI budget and report nothing at all; expiry refuses instead, which is
+     a failure to measure and so authorises nothing.
+     The caps are provisional and stated as such — re-derive them from measured
+     end-to-end durations on the runners that pay for them, which is why a
+     measurement now records what the WHOLE operation cost. What is not bounded
+     here is the SWEEP: a shard has no budget of its own to subtract from, so a
+     shard of many surviving files can still spend many of these. */
+  const remaining = left(clock, started, BASE_DEADLINE_MS)
+  if (remaining <= 0) {
+    throw new BaseRefusal(
+      'expired',
+      `check-mutants: measuring ${subject} at the merge base took longer than the ${BASE_DEADLINE_MS / 60_000} minute(s) ` +
+        'this gate allows for one file, so what it owed there is unmeasured — and unmeasured is never permission',
+    )
+  }
+  let ended = null
+  try {
+    await child(at, subject, into, { timeoutMs: remaining })
+  } catch (cause) {
+    /* Kept, not thrown: a child that REFUSED exits 2 having written its record,
+       and that record says which refusal it was. Only a child that left none is
+       answered with this. */
+    ended = messageOf(cause)
+  }
+  const { record, problem } = measurementIn(into)
+  if (problem !== undefined) {
+    throw new BaseRefusal(
+      'child',
+      `check-mutants: the run that was to measure ${subject} at the merge base left no measurement at ${into} — ${problem}` +
+        (ended === null ? '' : `; it ended with: ${ended}`),
+    )
+  }
+  /* ⚠️ **A MEASUREMENT OF ANOTHER FILE IS NOT THIS FILE'S**, and it would read as
+     one: the record is a file on disk, so a stale one from an earlier subject, or
+     a child handed the wrong path, would otherwise authorise this subject's
+     survivors with another subject's debt. */
+  if (record.subject !== subject) {
+    throw new BaseRefusal(
+      'mismatched',
+      `check-mutants: the run that was to measure ${subject} at the merge base measured ${JSON.stringify(record.subject)} instead`,
+    )
+  }
+  if (record.refusal !== null) throw new BaseRefusal(record.refusal.reason, record.refusal.message)
+  return {
+    install: supplied,
+    outcome: record.outcome,
+    durationMs: record.durationMs,
+    sha256: record.sha256,
+    source: record.source,
+    first: record.first,
+    settle: record.settle,
+  }
+}
+
+/**
+ * THIS gate, run over one path, in the checkout at `at` — the base measurement
+ * itself, and the whole of what makes the policy head's and the project base's.
+ *
+ * `process.execPath` and `import.meta.url` are both THIS process's: the child is
+ * the same node running the same file, so its deadlines, its identities, its
+ * settle run and every refusal it can make are the ones a sweep here would make.
+ * What differs is `cwd`, and that is what the whole child exists for — Stryker
+ * resolves `mutate`, `vitest.configFile` and its own sandbox from the directory
+ * it is started in, and an ABSOLUTE `mutate` matches nothing (see the section
+ * header above).
+ *
+ * Its stdin is closed, because nothing it runs reads one and a child left waiting
+ * on a terminal would hang the sweep; its output is this sweep's, so Stryker's
+ * own progress for the base run appears where the reader is already looking.
+ *
+ * ⚠️ **A NON-ZERO EXIT IS NOT THE ANSWER HERE.** A child that REFUSES writes its
+ * refusal to `into` and exits 2, and that record is the evidence; `execFileSync`
+ * throws on it, and `measuredIn` keeps the throw only to name a child that left
+ * no record at all.
+ */
+function spawnMeasurement(at, subject, into, { timeoutMs }) {
+  execFileSync(process.execPath, [fileURLToPath(import.meta.url), '--measure', subject, '--into', into], {
+    cwd: at,
+    /* A child that hangs would spend the sweep's whole budget and report
+       nothing — see `measuredIn`, which works out what is left of it. */
+    timeout: timeoutMs,
+    /* ⚠️ **THE LIST AND ITS ENTRIES ARE TWO DIFFERENT QUESTIONS HERE, AND THIS
+       LINE CARRIED A `Stryker disable ArrayDeclaration` UNTIL 2026-09-17** on
+       the ground that nothing reads the child's streams back. The ground was
+       false for the LIST: an empty one pads to PIPES, `execFileSync` puts a
+       failed child's stderr into the message it throws, and `measuredIn` carries
+       that message into its refusal — so the child's own words would arrive
+       spliced into this gate's. The case that asserts only how the run ended
+       kills it, and the directive was hiding it.
+
+       An ENTRY is the other way round. An entry Node does not know TRUNCATES the
+       list rather than defaulting — `['', 'inherit', 'inherit']` hands the child
+       one stream, not three — so what it takes away is a stream, never one that
+       reaches back here. What changes is what a person sees on a terminal, and
+       no test watches one (both measured 2026-09-17). */
+    // Stryker disable next-line StringLiteral: an unknown entry truncates the list, so what any of these takes away is a stream the child writes to and nothing here reads — a difference only a person at a terminal can see
+    stdio: ['ignore', 'inherit', 'inherit'],
+  })
+}
+
+/**
+ * `--measure <path> --into <file>`: what ONE named file owes, in the checkout
+ * this process is RUNNING IN, written to `into` as a record and nowhere else.
+ *
+ * It reads no git, takes no lock, plans nothing and discovers no changed file —
+ * it is handed a path and answers for that path. That is what makes it usable as
+ * the base half of a comparison: `measureAtBase` checks the merge base out, hands
+ * it the path, and reads the record back.
+ *
+ * ⚠️ **NO LOCK MEANS NO LOCK, AND A HAND-RUN IN THIS CHECKOUT IS NOT PROTECTED.**
+ * The base worktree a sweep makes is that process's own, under a name nothing
+ * else can know, and the checkout's lock is held by the sweep that asked — so
+ * taking one there would refuse this gate to itself. Run by HAND in an ordinary
+ * checkout, though, this writes `vitest.mutants.mjs`, `stryker.mutants.json` and
+ * the report at the same names a sweep does, with nothing stopping the two. Quit
+ * the sweep first, or measure a worktree of your own.
+ *
+ * ⚠️ **A REFUSAL IS WRITTEN DOWN AND THEN RAISED.** Every way a measurement can
+ * fail has to reach the sweep that asked for it, and a message on a child's
+ * stderr is not a value a parent can act on — so the reason and the words go into
+ * the record, the record is written, and the exit is 2. A defect — anything that
+ * is not a refusal — propagates instead, and leaves no record, which is what
+ * `measuredIn` reads as a child that could not measure.
+ *
+ * ⚠️ **WHERE THE RECORD GOES IS DECIDED BEFORE ANYTHING IS MEASURED, AND BEFORE
+ * ANYTHING IS WRITTEN.** An output over the subject is refused OUT of this
+ * function rather than recorded in it: a record written at that name is the very
+ * write the refusal exists to stop.
+ */
+async function measureSweep({ measure: subject, into }, world) {
+  const { stderr, root } = world
+  if (writtenOverSubject(subject, into, root)) {
+    throw new Refusal(
+      `check-mutants: --into ${into} is the file --measure ${subject} reads, and a record written there replaces the very ` +
+        'file this was to measure — name one outside the checkout, as a sweep does',
+    )
+  }
+  const named = { kind: 'measurement', version: RECORD_VERSION, subject }
+  let record
+  try {
+    record = { ...named, refusal: null, ...(await measuredHere(subject, world)) }
+  } catch (cause) {
+    if (!(cause instanceof Refusal)) throw cause
+    record = { ...named, refusal: { reason: cause.reason ?? 'refused', message: cause.message } }
+  }
+  mkdirSync(path.dirname(into), { recursive: true })
+  writeFresh(into, `${JSON.stringify(record, null, 2)}\n`)
+  if (record.refusal === null) return 0
+  stderr.write(`${record.refusal.message}\n`)
+  return 2
+}
+
+/**
+ * What `subject` owes in THIS checkout — the merge base's own — as the EVIDENCE
+ * a comparison is made from: the content that was measured, the reports of the
+ * runs that measured it, and the outcome they add up to. The survivors are not
+ * among them: they are derived from this, here and again by everything that
+ * reads it — see `survivorsAtBase`.
+ *
+ * ⚠️ **A FILE NO TEST REACHES WAS A FILE WHERE EVERY MUTANT SURVIVED, AND THAT
+ * MADE A DISCOVERY FAILURE INTO PERMISSION** (review, 2026-09-17). The reasoning
+ * was that nothing ran, so nothing killed anything — true of a file nothing
+ * tests, and equally true of a file whose test this gate could not FIND. A base
+ * test written `const p = './a'; await import(p)` kills mutants in `a.ts` and is
+ * in no import graph: delete it, leave a weak discoverable one, and the survivors
+ * it uncovered read as debt the base already had. Walking every level of the
+ * import graph does not make the graph complete.
+ *
+ * ⚠️ **AND FIRING ONLY WHERE NOTHING WAS FOUND LEFT THE SAME HOLE OPEN** (review,
+ * 2026-09-17). One weak static importer was enough to suppress the wider run —
+ * so a base with a discoverable `a.test.ts` that asserts almost nothing, BESIDE a
+ * computed-import test that kills half the file, was measured against the weak
+ * one alone. Deleting the strong test and keeping the weak one still read as debt
+ * the merge base already had, which is the very trade this fix was made against.
+ *
+ * So the merge base is measured against EVERY test it has, always, and discovery
+ * decides nothing there. The condition it replaces could never be written: what
+ * would have to hold is that the import graph is COMPLETE, and this gate follows
+ * relative specifiers and nothing else — an alias, a bare specifier that resolves
+ * back into the checkout, a plugin's own resolution and a computed path are each
+ * invisible to it. "At least one test was found" is not evidence of completeness
+ * and never was.
+ *
+ * It is sound in one direction only, which is why it is the BASE side's rule:
+ * more tests there can only KILL more, which can only leave less to be excused
+ * by. The same widening HERE would be a way to pass, so `sweepChanges` still
+ * fails a file no test was found for.
+ *
+ * ⚠️ **WHAT IT COSTS, AND THE ONE THING THAT COST IS COUPLED TO.** Stryker runs
+ * per-test coverage (`coverageAnalysis: 'perTest'`), so a wider set costs the
+ * merge base's whole suite ONCE, as a dry run plus its coverage pass, and not a
+ * wider run per mutant. What it couples to is the base suite being GREEN: a
+ * failed dry run there is `ConfigError: There were failed tests in the initial
+ * test run`, Stryker scores nothing, and the file is refused — which bills the
+ * change for every survivor in it. That is the correct answer to "the merge base
+ * cannot be measured" and it is now reachable for every file with a survivor,
+ * where before it was reachable only for one nothing was found for.
+ *
+ * ⚠️ **AND WHERE THAT LEAVES NO TEST AT ALL, IT REFUSES.** A merge base with
+ * nothing to run is a merge base this gate cannot measure, and never a file that
+ * survived everything: automatic survival is the shape of the defect above.
+ *
+ * What is authorised is bounded by the identity, not by the outcome: a survivor
+ * here is excused only if the SAME mutator, replacement, mutated text and scope
+ * path were there too — so a file nothing covered at the merge base still owes
+ * 100 % of whatever the change rewrote, and owes nothing for the code it left
+ * alone. That is the case this whole comparison exists for: a one-line fix in a
+ * large old file whose tests reach almost none of it.
+ *
+ * ⚠️ **AND IT IS THE BASE SIDE'S ANSWER ALONE.** A file no test reaches HERE is
+ * still `no-test-found` and still fails — see `sweepChanges` — because a sweep
+ * that cannot find a test cannot tell a testability failure from a discovery
+ * defect of its own. Widening to every test is the base side's rule because more
+ * tests there can only KILL more, which can only leave less to be excused by.
+ *
+ * ⚠️ **AND WHAT IS MEASURED MUST BE CONTENT THIS CHECKOUT HOLDS.** A tracked
+ * SYMBOLIC LINK is a path git has and content it does not: `cat-file -e` proves
+ * the merge base has an entry at the name, and every read below then follows the
+ * link to whatever the machine running this happens to have there. Committed at a
+ * subject's name it would hand the measurement a stranger's file. Refused by where
+ * the name really goes, so that a link among its directories is refused with it.
+ */
+async function measuredHere(subject, world, { settling = true } = {}) {
+  const { root, files = repositoryFiles } = world
+  const at = path.join(root, subject)
+  const elsewhere = reachedOutside(at, root)
+  if (elsewhere !== null) {
+    throw new BaseRefusal(
+      'outside',
+      `check-mutants: ${subject} is reached at ${elsewhere.real}, which is outside the checkout at ${elsewhere.top} — what ` +
+        'the merge base owes is measured in the merge base’s own content, never in whatever a link points at here',
+    )
+  }
+  const source = readFileSync(at, 'utf8')
+  const sha256 = digestOf(readFileSync(at))
+  const identities = await identifiedIn(at, 'what it owed at the merge base')
+  /* Nothing to kill, so nothing survived: answered without a run, and without
+     asking which tests reach it, because no answer to that could change this
+     one. */
+  if (identities.length === 0) return { outcome: 'no-mutants', durationMs: 0, sha256, source, first: null, settle: null, excluded: [] }
+  const found = discover([at], { root, files }, reachingAtBase)
+  if (found.get(at).tests.length === 0) {
+    throw new BaseRefusal(
+      'untested-base',
+      `check-mutants: the merge base has no test this gate can run against ${subject} — every test in it was offered and ` +
+        'none remains, so what it owed there cannot be measured, and a base nothing was run against is not a base where ' +
+        'everything survived',
+    )
+  }
+  /* ⚠️ **WHAT THE MEASUREMENT COULD NOT RUN IS PART OF THE MEASUREMENT.** A test
+     that reads the subject's source is left out of BOTH sweeps, because Stryker
+     rewrites the very file it reads — and a test may read the source AND assert
+     behaviour, so what is left out can be a real killer. While such a test is
+     the same on both sides that costs nothing: it is missing from head's run
+     too, so a mutant it would have killed survives in both and the comparison is
+     like with like. It stops being like with like the moment the CHANGE touches
+     that test, which is exactly the hole a second opinion's fifth round
+     reproduced — delete the strong reader, append a comment to the subject, and
+     the mutant it used to kill comes back authorised by a base that had excluded
+     its killer. So the base carries what it left out, by content, and
+     `judgedAtBase` refuses to authorise anything once one of them has changed. */
+  const excluded = found.get(at).leftOut.map((test) => ({
+    path: slashed(path.relative(root, test)),
+    sha256: digestOf(readFileSync(test)),
+  }))
+  let scored = null
+  const swept = await strykerEach([at], found, await testOptionsOf(root), { ...world, lock: unlocked }, {
+    settling,
+    record: (result) => void (scored = result),
+    judge: (file, report) => reportUnlike(reportEntryOf(file, report), { named: subject, sha256, identities, whose: 'the merge base' }),
+  })
+  const [mismatch] = swept.mismatched
+  if (mismatch !== undefined) {
+    throw new BaseRefusal('mismatched', `check-mutants: the merge base’s run of ${subject} did not report on what it swept — ${mismatch[1]}`)
+  }
+  const first = { exitedCleanly: scored.exitedCleanly, report: scored.report, durationMs: scored.durationMs }
+  const measured = {
+    /* ⚠️ **WHAT THE RUNS MADE OF THE FILE, NOT WHAT A SWEEP HERE WOULD REPORT.**
+       `scored.outcome` is `timed-out` for a repeat and `did-not-run` for a mutant
+       the settle run never answered for, which are findings about one MUTANT — and
+       neither is an outcome a measurement may carry, because the whole file was
+       measured. Those mutants are named by `undecidedAtBase`; see
+       `settledVerdict` for the two readings. */
+    outcome: settledVerdict(at, first, scored.settle).measured,
+    durationMs: scored.durationMs + (scored.settle === null ? 0 : scored.settle.durationMs),
+    sha256,
+    source,
+    first,
+    settle: scored.settle,
+    excluded,
+  }
+  /* The evidence is held to what it must answer for before it leaves here, so a
+     measurement that could not be read back is refused where it was made rather
+     than where it is used — and by exactly the reading every later one makes. */
+  const { problem } = await survivorsAtBase(measured, { at, named: subject, frozen: sha256 })
+  if (problem !== undefined) throw new BaseRefusal(problem.reason, `check-mutants: the merge base’s run of ${subject} ${problem.why}`)
+  return measured
+}
+
+/**
+ * Which tests a subject is measured against AT THE MERGE BASE: every test the
+ * merge base has — see `measuredHere` for why that is the closing of a bypass and
+ * not one.
+ *
+ * ⚠️ **IT USED TO ASK DISCOVERY FIRST AND WIDEN ONLY WHERE DISCOVERY FOUND
+ * NOTHING**, which one weak discoverable test was enough to suppress. The
+ * condition is gone rather than tightened, because no condition over an
+ * incomplete import graph can establish that the graph is complete.
+ *
+ * `through` is empty because nothing carried the subject to these tests: they are
+ * run because discovery could not prove they do not reach it, which is a
+ * different claim and is not one to dress as a chain of imports. A base
+ * measurement's own log says so by naming the subject with no `through` clause.
+ */
+export function reachingAtBase(subject, tests) {
+  return { tests, through: [] }
+}
+
+/**
+ * Every mutant these reports left alive, each as a survivor of `named` — the
+ * file as the comparison names it, which is git's spelling and not the path a
+ * run was given. `from` is the base file that may answer for it; at the base
+ * that is the file itself.
+ *
+ * A survivor in EITHER run is a survivor, counted once: the settle run is a
+ * second chance for a timeout, never a second chance to call an observed
+ * survivor a kill. Each is identified against the source ITS OWN report carries,
+ * which `reportUnlike` has already held to the content the run was counted over.
+ *
+ * `except` is the mutants a measurement could not DECIDE — see `undecidedAtBase`
+ * — and it is how the one the two runs disagreed about leaves the pool: it was
+ * observed alive in one of them, so the union holds it, and evidence that
+ * disagrees with itself authorises nothing. A sweep HERE passes none, because
+ * there the union is exactly what is wanted.
+ */
+function survivorsFound(subject, named, from, reports, except = new Set()) {
+  const found = new Map()
+  for (const report of reports) {
+    /* A report that is of no file left no survivor to find: `survivorsIn`
+       answers nothing for it, so the loop below simply does not run, and a guard
+       here would be one nothing could be observed through. */
+    const entry = reportEntryOf(subject, report)
+    /* Parsed once for the whole report rather than once per mutant — see
+       `parsedSource`. A report of no file has no source to parse, and no mutant
+       to ask for one. */
+    const parsed = entry === null ? null : parsedSource(entry.source, named)
+    for (const mutant of survivorsIn([entry])) {
+      if (!except.has(keyOf(mutant))) found.set(keyOf(mutant), survivorOf(mutant, named, from, parsed))
+    }
+  }
+  return [...found.values()]
+}
+
+/** One survivor as both sides of the comparison carry one: where it sits, for a reader, and what it IS, for the pairing. */
+function survivorOf(mutant, named, from, parsed) {
+  return { file: named, from, at: placeOf(mutant), identity: identityIn(mutant, parsed) }
+}
+
+/**
+ * What the merge base said about the survivors one run left here, as the
+ * evidence a result carries and the aggregate derives its answer from again.
+ *
+ * Three answers, and the difference between them is the whole of this design:
+ *
+ * | | evidence | what a sweep does with it |
+ * |---|---|---|
+ * | the merge base has no file this could have come from | `null` | it is a NEW file, it owes 100 %, and nothing is measured |
+ * | every survivor here was there too | no `added` | passes, and the numbers are printed |
+ * | one was not, or the base could not be measured | `added`, or a `refusal` | fails, naming which — see `survivorsStand` |
+ *
+ * ⚠️ **A FAILURE TO MEASURE IS ITS OWN OUTCOME AND NEVER AN EMPTY ANSWER.** Every
+ * refusal `measureAtBase` can make is carried into the evidence by name, so a
+ * base that could not be measured fails LOUDLY rather than silently authorising
+ * nothing, which is what an empty survivor list would have done — and rather than
+ * silently authorising everything, which is what a caught-and-ignored error
+ * would have done.
+ *
+ * ⚠️ **AND THIS SUBJECT'S VERDICT IS NOT THE SWEEP'S.** The pairing here is over
+ * one subject, because that is all a shard can see — two subjects traced to one
+ * base file are measured in two processes — and one base survivor spent in each
+ * of them is one historical occurrence spent twice. So this number is an
+ * arithmetic a reader can check and a lying shard is caught by, and the sweep's
+ * own answer is the one pairing that sees every subject at once: `matchedAcross`,
+ * run by the only two things that ever see a whole sweep — a plain sweep at its
+ * end, and the aggregate.
+ */
+/**
+ * The first test the merge base left out that is not here, unchanged — or `null`
+ * where every one of them still is.
+ *
+ * Only the BASE's exclusions are asked about, and deliberately: head's set is the
+ * narrower discovery's, so a reading test the base reached and head did not is
+ * ordinary and says nothing. What matters is evidence the base could not weigh
+ * and this change then moved. A reading test ADDED here is no risk either — it
+ * cannot have killed anything at a commit that did not have it.
+ */
+function changedSinceBase(excluded, root) {
+  for (const { path: named, sha256 } of excluded) {
+    const here = path.join(root, named)
+    if (!existsSync(here)) return { path: named, how: 'is gone' }
+    if (digestOf(readFileSync(here)) !== sha256) return { path: named, how: 'has changed' }
+  }
+  return null
+}
+
+/**
+ * Whether a second, wider pass over this file can be afforded — and a line
+ * saying so where it cannot.
+ *
+ * ⚠️ **THE WIDENED SWEEP HAD NO BOUND, AND A CI STEP HAS ONE** (2026-09-17). It
+ * costs a whole extra sweep of the file, plus that sweep's settle run: measured
+ * on `session.ts`, 31 and 30 minutes against a 12-minute narrow run. On the
+ * heaviest subject this gate has — itself, estimated at 204 minutes for ONE
+ * plain pass — starting a second one unbounded is how a 210-minute step ends
+ * with no answer at all, which is worse than the wrong answer it was trying to
+ * correct.
+ *
+ * A file's own sweep is the honest estimate of what sweeping it again costs, so
+ * that is what is spent against the budget. Refusing to widen leaves the NARROW
+ * bill standing, which is the conservative direction — this pass only ever
+ * removes a charge — and the reader is told, because the remedy is to re-run
+ * that one file alone, where there is no budget to share.
+ */
+function affordable(spent, named, stdout) {
+  if (spent <= WIDEN_BUDGET_MS) return true
+  stdout.write(
+    `check-mutants: ${named} took ${Math.round(spent / 60_000)} minute(s) to sweep here, past the ${WIDEN_BUDGET_MS / 60_000} this gate ` +
+      'will spend again to check a bill against the merge base\'s own wider set of tests. What it owes below is measured against ' +
+      `the nearest tests alone, which can only ever bill MORE than the wider set would: re-run this file by itself — node scripts/check-mutants.mjs --only ${named} — before taking it as owed.\n`,
+  )
+  return false
+}
+
+/**
+ * This subject's survivors HERE, measured against the same wide set of tests the
+ * merge base is measured against — or `null` where that could not be done.
+ *
+ * `measuredHere` is already exactly this sweep: a whole file, discovered with
+ * `reachingAtBase`, run with the settle run, reconciled against its own content.
+ * It is written for the base's checkout and takes the world it is handed, so
+ * handed head's world it answers for head. The one thing that must not be reused
+ * is its FRAME: the survivors are named against `origin.path`, as `here` is, so
+ * the two sides can be paired at all.
+ *
+ * A refusal answers `null` and the narrow bill stands. That is the conservative
+ * way round in the one place it has to be: this run exists to REMOVE a charge,
+ * so failing to make it may leave one standing but can never invent permission.
+ */
+async function killedWhenWidened(subject, named, origin, world) {
+  let measured
+  /* `named`, never `origin.path`: the first is what this file is called HERE and
+     the second what it was called at the merge base, and a renamed subject has
+     no file at the second one in this checkout. */
+  try {
+    measured = await measuredHere(named, world)
+  } catch (cause) {
+    if (!(cause instanceof BaseRefusal)) throw cause
+    return null
+  }
+  if (measured.first === null) return null
+  const at = path.join(world.root, named)
+  const entry = reportEntryOf(at, measured.first.report)
+  if (entry === null) return null
+  /* ⚠️ **AND THIS RUN DOES SETTLE ITS TIMEOUTS, THOUGH IT COSTS A SECOND PASS.**
+     Dropping the settle was tried and reverted the same day: it saves a
+     30-minute sweep, and it pays for that by keeping a charge on any mutant the
+     wide run merely ran out of clock on. A wall-clock timeout is usually LOAD —
+     this gate has measured `App.tsx` at 58 timeouts busy and 0 quiet — so that
+     trade re-introduces exactly the false bill this whole path exists to remove,
+     and re-introduces it on the machines least able to argue with it. The cost
+     is paid only by a file that would otherwise FAIL, which is the one case
+     where being right is worth thirty minutes.
+     A kill in EITHER run is evidence a test decided the mutant, which is all
+     that may discharge a charge; the settle run re-runs the whole file, so its
+     answer stands for any mutant it names. */
+  const settled = measured.settle === null ? new Map() : answersIn(reportEntryOf(at, measured.settle.report))
+  const parsed = parsedSource(entry.source, named)
+  return entry.mutants
+    .filter(isRecord)
+    .filter((mutant) => definitelyKilled(mutant) || definitelyKilled(settled.get(keyOf(mutant)) ?? mutant))
+    .map((mutant) => survivorOf(mutant, named, origin.path, parsed))
+}
+
+/**
+ * Whether a report says a test DECIDED this mutant — the only answer that may
+ * take a charge away.
+ *
+ * `KILLS` is too coarse for that: it holds `Timeout`, because Stryker scores one
+ * as a kill and the head side rightly keeps that. Here the question is narrower.
+ * A timeout at the ORIGINAL's hit limit is a detection and decides the mutant; a
+ * WALL-CLOCK timeout decides nothing, and is exactly what a settle run exists to
+ * resolve — which this sweep deliberately does not run. So it is not a kill here,
+ * the bill it would have discharged stands, and the conservative answer is the
+ * one reached by doing less work rather than more.
+ */
+function definitelyKilled(mutant) {
+  if (mutant.status === 'Killed') return true
+  return mutant.status === 'Timeout' && timeoutKindOf(mutant.statusReason) === 'hit-limit'
+}
+
+async function judgedAtBase(subject, named, origin, reports, { mergeBase, measure, world, spent = 0 }) {
+  if (origin === null) return null
+  const here = survivorsFound(subject, named, origin.path, reports)
+  // Stryker disable next-line ArrayDeclaration: a refusal carries no measurement, so nothing reads this list — it is here so every evidence has one shape
+  const empty = { origin, outcome: null, install: null, durationMs: 0, sha256: null, source: null, first: null, settle: null, authorised: 0, added: [], excluded: [] }
+  const refused = (reason, message) => ({ evidence: { ...empty, refusal: { reason, message } }, paired: null })
+  let measured
+  try {
+    measured = await measure(origin.path, mergeBase, world)
+  } catch (cause) {
+    if (!(cause instanceof BaseRefusal)) throw cause
+    return refused(cause.reason, cause.message)
+  }
+  const evidence = { ...empty, ...measured, refusal: null }
+  /* ⚠️ **AND WHAT THE MERGE BASE COULD NOT RUN MUST STILL BE THERE, UNCHANGED.**
+     See `measuredHere`: a test that reads the subject's source is left out of
+     both sweeps, so a mutant only it could kill survives on both sides and is
+     rightly authorised — but ONLY while that test is the same on both sides. A
+     change that deletes or edits one takes away evidence the base was never able
+     to weigh, and the base's silence about the mutant then reads as debt. It is
+     not: it is a killer this change removed. Nothing is authorised once one has
+     moved, and the file is billed instead — the conservative way round, and the
+     one a reader can act on, because the test is named. */
+  const moved = changedSinceBase(evidence.excluded ?? [], world.root)
+  if (moved !== null) {
+    return refused(
+      'reading-changed',
+      `check-mutants: ${moved.path} reads ${origin.path}'s own source, so neither sweep could run it — and it ${moved.how} ` +
+        'since the merge base, which is evidence this comparison cannot weigh. Nothing in this file is authorised by a base ' +
+        'whose excluded test is not the one here: kill the mutants it used to, or restore it.',
+    )
+  }
+  /* Read back exactly as the aggregate will read it, and against the content the
+     merge base itself holds — which the origin froze, and which is the whole of
+     what stops a measurement of something else being carried as this one's. */
+  const { survivors, undecided, problem } = await survivorsAtBase(evidence, {
+    at: path.join(world.root, origin.path),
+    named: origin.path,
+    frozen: origin.sha256,
+  })
+  /* ⚠️ **AND WHERE ITS REASON IS, BECAUSE THIS TRAVELS AND THE REASON DOES NOT.**
+     The child that measures the base writes Stryker's own words to THIS process's
+     stderr (`spawnMeasurement` inherits both streams), so in a plain sweep they
+     are already on screen above this line. In a sharded run they are in the log
+     of the shard that ran it — a different job from the aggregate that reports
+     this, with no stdout of that run anywhere near it. A refusal that says a run
+     scored nothing and does not say where it said why sends a reader to their own
+     diff for a failure that was never about their change; measured 2026-09-17,
+     when a shard's base measurement wrote no report and the container holding the
+     only copy of the reason had already been thrown away. */
+  if (problem !== undefined) {
+    return refused(
+      problem.reason,
+      `check-mutants: the merge base’s run of ${origin.path} ${problem.why}. Its own output is above in a plain sweep, and in the ` +
+        'log of the shard that ran it in a sharded one — read that before reading any test, because a run that scored nothing ' +
+        'failed for a reason of its own',
+    )
+  }
+  /* ⚠️ **THE TWO SIDES DO NOT DISCOVER THE SAME TESTS, AND THE DIFFERENCE WAS
+     BILLED TO THE CHANGE.** Head sweeps a subject against the NEAREST level of
+     tests that reaches it; the merge base sweeps it against every test that
+     reaches it by any chain — `coveringTests` against `reachingAtBase`. More
+     tests can only kill more, so the asymmetry can never authorise a mutant that
+     was not there, which is why it was taken as safe. It is safe in that
+     direction and wrong in the other: a mutant a DISTANT test kills at the base
+     and no near test even runs at head is a survivor here, no survivor there,
+     and therefore billed as one this change added — although the change added
+     nothing.
+
+     Measured 2026-09-17 on the real thing: one comment appended to
+     `session.ts`, head sweeping 215 tests and the base 527, and BOTH of the two
+     mutants it billed were of exactly this kind. The bill for a comment is zero.
+
+     So a bill is never taken on the narrow run alone. When the comparison would
+     charge for something, the subject is swept again HERE against the same wide
+     set the base used, and the answer is REPLACED rather than unioned — a union
+     would keep precisely the false bill the second run exists to discharge. It
+     costs a sweep, it is paid only by a file that would otherwise fail, and a
+     file that was going to pass never pays it. A run that cannot be made leaves
+     the narrow bill standing, because refusing to measure is never permission. */
+  const narrow = differenceAtBase(survivors, undecided, here)
+  if (narrow.added.some((one) => one.class === 'added') && affordable(spent, origin.path, world.stdout)) {
+    const wide = await killedWhenWidened(subject, named, origin, world)
+    if (wide !== null) {
+      /* ⚠️ **THE SECOND RUN MAY ONLY TAKE A CHARGE AWAY, NEVER ADD ONE.** The
+         whole argument for widening is that more tests kill more — and a second
+         opinion's fifth round declined to grant that of THIS runner, pointing at
+         a configuration in this gate's own history that turned 85 kills into
+         uncovered mutants. If the wide run can report a mutant the narrow one
+         killed as surviving, then replacing one answer with the other would
+         invent a bill, which is the very thing this is here to stop.
+
+         So the wide run is read for one thing only: which of these mutants a
+         test there DEFINITELY decided. Those stop being billed, which is the
+         point. Everything else — a survivor, a wall-clock timeout, no coverage,
+         a runner that died — leaves the charge exactly where the narrow run put
+         it. Nothing the wide run says can create one, so this needs no
+         monotonicity to be sound, and that is why it is a filter over kills
+         rather than the recomputation it looks like it should be. */
+      const killed = new Set(wide.map((one) => JSON.stringify(one.identity)))
+      const kept = here.filter((one) => !killed.has(JSON.stringify(one.identity)))
+      return {
+        evidence: { ...evidence, ...differenceAtBase(survivors, undecided, kept), widened: true },
+        paired: { at: subject, named, origin, here: kept, atBase: survivors, undecided },
+      }
+    }
+  }
+  return {
+    evidence: { ...evidence, ...narrow },
+    /* What the sweep's own pairing needs, and what no record carries: both sides'
+       survivors and the mutants the merge base could not decide, derived. A result
+       carries the evidence they were derived FROM. */
+    paired: { at: subject, named, origin, here, atBase: survivors, undecided },
+  }
+}
+
+/**
+ * What a merge base's evidence holds, derived from the evidence and never taken
+ * from a list beside it: the survivors it found, and the mutants it could not
+ * DECIDE — or `{ problem }` saying why it holds nothing that can be believed.
+ *
+ * ⚠️ **THOSE ARE TWO DIFFERENT FAILURES AND WERE ONE** (2026-09-17). A failure to
+ * MEASURE THE FILE is a `problem`: the file is refused whole and nothing in it is
+ * authorised. A failure to DECIDE ONE MUTANT — `undecidedAtBase` — leaves that
+ * identity unknown and every other mutant of the file exactly where it was.
+ * Measured on an isolated runner with real history: one comment added to a
+ * 1 403-mutant file left 545 mutants unkilled here, and five mutants the merge
+ * base could not decide had been refusing the 540 it could.
+ *
+
+ * ⚠️ **A SUPPLIED LIST BOUGHT EVERYTHING IT CLAIMED** (review, 2026-09-17). A
+ * result claiming `no-mutants` at the merge base with this file's own survivors
+ * copied into its `survivors` exited 0, with no base measurement having happened
+ * at all: the aggregate re-derived the PAIRING and then ran it against a list the
+ * shard wrote. So there is no such list any more. What a measurement carries is
+ * what head's own run carries — the content it swept, and Stryker's reports of
+ * sweeping it — and every reader hashes the content against what the merge base
+ * holds, holds each report to being of that content and of exactly its mutants,
+ * and reads the survivors out of the reports. A shard's word for what the merge
+ * base owed is now worth exactly what its word for its own outcome is worth: the
+ * reports it carries, which nothing can derive again, and everything else derived
+ * again from them.
+ *
+ * `frozen` is the content hash the merge base's own commit holds for this file —
+ * from the plan for a shard, from the traced origin for a plain sweep. The
+ * measurement itself passes its own, which is a tautology there and is the point:
+ * the child measures what it has, and the freezing is the caller's to enforce.
+ *
+ * ⚠️ **WHAT THIS IS STILL WORTH, SAID PLAINLY.** It is exactly what head's own
+ * reconciliation is worth and no more: the content is pinned, the report must be
+ * OF that content and hold exactly its mutants, and the survivors are read out of
+ * it — but a STATUS in a report is nobody's to derive again without running the
+ * measurement again. A shard that lies about a status is not caught here, and is
+ * not caught on the head side either.
+ *
+ * ⚠️ **AND THE MUTANTS ARE COUNTED HERE BY THIS CHECKOUT'S INSTRUMENTER.** The
+ * measurement's own were counted by the base's — see `identitiesOfSource` — so
+ * two installs that enumerate the same source differently, within one major
+ * version, make this refuse a report that was honest. That is a false refusal
+ * and it fails the build rather than passing it; the alternative is taking the
+ * inventory from the record, which is the supplied list this exists to remove.
+ */
+export async function survivorsAtBase(evidence, { at, named, frozen }) {
+  const { outcome, sha256, source, first, settle } = evidence
+  if (sha256 !== frozen) {
+    return { problem: { reason: 'content', why: `measured content hashing to ${shown(sha256)}, and the merge base holds ${shown(frozen)} at ${named}` } }
+  }
+  if (typeof source !== 'string' || digestOf(source) !== sha256) {
+    return { problem: { reason: 'content', why: 'carries a source that is not the content it says it measured' } }
+  }
+  const identities = await identitiesOfSource(named, source)
+  if (outcome === 'no-mutants') {
+    if (identities.length > 0) return { problem: { reason: 'mismatched', why: `says it had nothing to mutate, and this gate makes ${identities.length} mutant(s) in what it carries` } }
+    if (first !== null) return { problem: { reason: 'mismatched', why: 'says it had nothing to mutate and carries a run of it' } }
+    return { survivors: [], undecided: [] }
+  }
+  if (first === null) return { problem: { reason: 'did-not-run', why: `says ${outcome} and carries no run at all, and a run nobody has is not a survivor that was already there` } }
+  const against = { named, sha256, identities, whose: 'the merge base' }
+  const entry = reportEntryOf(at, first.report)
+  const unlike = reportUnlike(entry, against)
+  if (unlike !== null) return { problem: { reason: 'mismatched', why: `did not report on what it swept — ${unlike}` } }
+  const settled = settle === null ? null : reportUnlike(reportEntryOf(at, settle.report), against)
+  if (settled !== null) return { problem: { reason: 'mismatched', why: `did not report on what its settle run swept — ${settled}` } }
+  const verdict = settledVerdict(at, first, settle)
+  const unmeasured = unmeasuredAtBase(at, verdict, first, settle)
+  if (unmeasured !== null) return { problem: unmeasured }
+  /* ⚠️ **A REPORT OF NO FILE SAYS NOTHING, AND `reportUnlike` LETS IT PASS** —
+     deliberately, since `outcomeOf` makes it a run with no score, which the
+     verdict above has just refused. What it does NOT refuse is a first run that
+     reported on nothing beside a settle run that reported a survivor: a survivor
+     outranks every other outcome, so the whole verdict would rest on the second
+     run alone. */
+  if (entry === null) {
+    return { problem: { reason: 'did-not-run', why: `says ${outcome} over a run that reported on no file, and a report of nothing is no measurement` } }
+  }
+  /* ⚠️ **AND THE SETTLE RUN HAD NO SUCH CHECK, SO ITS SILENCE WAS READ AS A
+     MUTANT-LEVEL HOLE** (review, 2026-09-17). The check above exists because a
+     survivor outranks every other outcome, so a first run that reported on
+     nothing beside a settle run that found one would rest the whole verdict on
+     the second; the mirror image is exactly as bad and was not refused. With a
+     survivor in the FIRST run, `measured` is `survived` whatever the settle run
+     did — so a settle report that was `null`, `{files:{}}` or about another file
+     passed, the survivor was authorised, and the wall-clock timeout beside it was
+     named as one mutant the base could not decide. It is not one mutant: nothing
+     measured the settle run at all, and a settle run that measured nothing
+     settles nothing. `noScoreOf` says WHICH of its seven failures it was, because
+     this refusal travels as a value into an aggregate with no stdout of that run
+     anywhere near it. */
+  if (settle !== null && reportEntryOf(at, settle.report) === null) {
+    return {
+      problem: {
+        reason: 'did-not-run',
+        why:
+          `says ${outcome} over a settle run that measured nothing: it ${noScoreOf(at, settle.exitedCleanly, settle.report)}. ` +
+          'A run that could not measure is not a survivor that was already there',
+      },
+    }
+  }
+  if (verdict.measured !== outcome) return { problem: { reason: 'mismatched', why: `says ${outcome}, and its own report says ${verdict.measured}` } }
+  const unknown = alsoStatic(undecidedAtBase(entry, settle === null ? null : reportEntryOf(at, settle.report)), entry)
+  const spent = new Set(unknown.map(({ mutant }) => keyOf(mutant)))
+  const parsed = parsedSource(entry.source, named)
+  return {
+    survivors: survivorsFound(at, named, named, [first.report, settle === null ? null : settle.report], spent),
+    undecided: unknown.map(({ mutant, why }) => ({ ...survivorOf(mutant, named, named, parsed), why })),
+  }
+}
+
+/**
+ * The merge base's undecided mutants, plus every survivor its report marks
+ * `static` — which this gate already knows may not be a survivor at all.
+ *
+ * ⚠️ **A FALSE SURVIVOR AT THE BASE HAD BECOME PERMISSION HERE** (a second
+ * opinion's fifth round, 2026-09-17). Stryker's vitest runner reports a mutant
+ * that makes the module throw while it is IMPORTED as `Survived`, because a
+ * suite that fails to load fails no test — this file's own header measures it,
+ * and names three live examples. Until the merge base was consulted that error
+ * was harmless in the conservative direction: a false survivor FAILED a sweep,
+ * and the remedy was to check it by hand. Reading the same status at the base
+ * turns it the other way round, and a mutant that may never have run becomes a
+ * reason not to bill one here.
+ *
+ * So a static survivor at the base decides nothing, exactly like a mutant its
+ * two runs disagreed about: it is named, it is not permission, and the identity
+ * is the change's to settle. **That has an end**, and it is the one AGENTS.md
+ * already prescribes: verify it by hand and, where it does throw at import,
+ * disable it beside the code with that reason. A disabled mutant is `Ignored` in
+ * both sweeps, so it is never a survivor again on either side, and the file
+ * stops being billed for it for good.
+ */
+function alsoStatic(unknown, entry) {
+  const already = new Set(unknown.map(({ mutant }) => keyOf(mutant)))
+  const statics = entry.mutants
+    .filter(isRecord)
+    .filter((mutant) => mutant.static === true && SURVIVALS.has(mutant.status) && !already.has(keyOf(mutant)))
+    .map((mutant) => ({
+      mutant,
+      why:
+        'the merge base’s report marks it static, and a static mutant that throws while the module is imported is reported ' +
+        'Survived by Stryker’s vitest runner because the suite fails to load — so whether it survived there or never ran is ' +
+        'not something that report can say',
+    }))
+  return [...unknown, ...statics]
+}
+
+/**
+ * How a merge base's measurement failed to measure THE FILE, or `null` where it
+ * did measure it.
+ *
+ * ⚠️ **A SURVIVOR BESIDE IT SUPPRESSED THIS** (review, 2026-09-17). A survivor
+ * outranks everything else as a file's OUTCOME — rightly, on the head side, where
+ * the survivor is the finding — so a base run that scored nothing beside one came
+ * back `survived` and was taken as an answer. What is asked of the base is not an
+ * outcome but whether it MEASURED, so `measured` is what is read: the outcome with
+ * the mutant-level holes left out, which is `did-not-run` for a run Stryker scored
+ * nothing of, however many mutants it went on to answer for.
+ *
+ * ⚠️ **AND EVERY HOLE WAS ONCE READ THIS WAY, WHICH IS THE WRONG GRANULARITY**
+ * (2026-09-17). A repeated wall-clock timeout, a mutant the settle run never
+ * answered for and two runs that disagreed each refused the whole file — so five
+ * undecided mutants in a 1 403-mutant file made the 540 it had decided perfectly
+ * well worthless, and a one-comment change owed all of them. Those three are
+ * `undecidedAtBase`'s now: one identity each, and nothing else. What is left here
+ * is the file itself, and it is unchanged.
+ *
+ * ⚠️ **AND IT SAID "SCORED NOTHING" AND NOTHING ELSE, WHICH IS A REFUSAL NOBODY
+ * CAN ACT ON** (2026-09-17). Seven different failures reach here under one word —
+ * see `noScoreOf` — and this message carried none of them, so a base measurement
+ * that died on its runner read exactly like one that reported on the wrong file.
+ * The RUN that decided is named too, and which one it is follows from
+ * `settledVerdict`'s own rule: `measured` is the settle run's outcome where there
+ * is a settle run, and the first run's where there is not.
+ */
+function unmeasuredAtBase(at, verdict, first, settle) {
+  if (verdict.measured !== 'did-not-run') return null
+  const run = settle ?? first
+  const whose = settle === null ? 'it' : 'its settle run'
+  return {
+    reason: 'did-not-run',
+    why:
+      `scored nothing (did-not-run): ${whose} ${noScoreOf(at, run.exitedCleanly, run.report)}. ` +
+      'A run that could not measure is not a survivor that was already there',
+  }
+}
+
+/**
+ * Which mutants a merge base's two runs could not DECIDE, each with the reason in
+ * the base's own voice — a wall-clock timeout its settle run met again, a mutant
+ * the settle run never answered for, a mutant the runs ended at the original's HIT
+ * LIMIT, and a mutant the two runs disagreed about.
+ *
+ * ⚠️ **THE QUESTION IS WHAT THE BASE'S FINAL ANSWER WAS, AND A HIT LIMIT IS NOT
+ * ONE** (review, 2026-09-17). Every wall-clock timeout was read here and the four
+ * ways one can end were not told apart:
+ *
+ * | the first run | the settle run | the base's answer |
+ * |---|---|---|
+ * | a wall-clock timeout | `Survived` | a SURVIVOR — it was observed alive, and authorises a survivor here |
+ * | a wall-clock timeout | a test failed on it | a KILL — a survivor here is one this change added |
+ * | a wall-clock timeout | a wall-clock timeout | undecided, and it fails |
+ * | a wall-clock timeout | the original's hit limit | **undecided**, and it fails |
+ * | the original's hit limit | not re-run | **undecided**, and it fails |
+ *
+ * The last two are the change. Stryker SCORES a hit-limit timeout a kill and this
+ * gate keeps that on the head side, where "the mutated code ran a hundred times
+ * the original's hit count" is a perfectly good reason not to ask a developer for
+ * a test. As the merge base's answer it is a different thing: nothing ASSERTED
+ * anything about that mutant — a bound was reached — so "the merge base has no
+ * survivor with this identity" would send a reader to a diff on the strength of a
+ * resource observation. It authorises nothing either way, so what changes is the
+ * sentence and never the verdict. The reading it replaces is defensible — the
+ * detection is deterministic, measured 13 of 13 across three concurrency settings
+ * — which is exactly why this is a SENTENCE and not an authorisation.
+ *
+ * ⚠️ **NONE OF THESE IS A SURVIVOR AT THE MERGE BASE, AND NONE IS A FAILURE OF
+ * THE FILE.** An unanswered mutant is unanswered about ITSELF: every other mutant
+ * in the report carries its own observation, and load does not turn a kill into a
+ * survival. What it does turn is a survivor into a timeout — measured 2026-09-15,
+ * 42 of 140 replayed wall-clock timeouts came back `Survived` — so a loaded base
+ * run reports FEWER survivors than the truth, which authorises less rather than
+ * more. That is the whole of why one hole may be named without the file around it
+ * being refused.
+ *
+ * ⚠️ **THE UNION IS CONSERVATIVE FOR HEAD AND BACKWARDS FOR THE BASE** (review,
+ * 2026-09-17). `survivorsIn` takes a survivor in either run, because an observed
+ * survivor is never averaged away — which is right where a survivor is a failure,
+ * and inverted where it is PERMISSION. A mutant the first run killed and the
+ * settle run left alive entered the authorisation pool through that union, so a
+ * flaky base kill turned into a licence for a survivor here. It is named here
+ * instead, and `survivorsAtBase` takes it back out of the survivors: conflicting
+ * evidence authorises nothing.
+ *
+ * A wall-clock timeout in the FIRST run is the one status that is not a
+ * disagreement. It is the question the settle run exists to answer, so whatever
+ * the settle run says of it stands — which is what `settledVerdict` says of the
+ * same pair, and which the loop above has already decided.
+ */
+function undecidedAtBase(first, settle) {
+  const answers = answersIn(settle)
+  const found = []
+  const { detected, unsettled } = timeoutsIn(first)
+  for (const { mutant, answer, how } of settledEach(unsettled, answers)) {
+    if (how === 'repeated') found.push({ mutant, why: `its settle run met the same wall-clock timeout again at ${unrecognised(answer)}` })
+    else if (how === 'unresolved') {
+      const why =
+        settle === null
+          ? `its run left a wall-clock timeout at ${placeOf(mutant)} that nothing settled`
+          : `its settle run never answered for the mutant at ${placeOf(mutant)}`
+      found.push({ mutant, why })
+    } else if (how === 'killed' && answer.status === 'Timeout') {
+      found.push({ mutant, why: `its settle run answered the wall-clock timeout at ${placeOf(mutant)} by reaching the original’s hit limit, which is a bound and not a test` })
+    }
+  }
+  /* The first run's own hit limits, which nothing re-runs: Stryker scores them
+     kills and a sweep HERE keeps that, because a mutant that will not stop is not
+     a test a developer owes. At the merge base the same status is a bound the run
+     reached, not an answer about the mutant. */
+  for (const mutant of detected) {
+    found.push({ mutant, why: `its run reached the original’s hit limit at ${placeOf(mutant)}, which is a bound and not a test` })
+  }
+  const already = new Set(found.map(({ mutant }) => keyOf(mutant)))
+  for (const mutant of first.mutants) {
+    if (!isRecord(mutant)) continue
+    const again = answers.get(keyOf(mutant))
+    if (again === undefined) continue
+    if (mutant.status === 'Timeout' && timeoutKindOf(mutant.statusReason) !== 'hit-limit') continue
+    if (SURVIVALS.has(mutant.status) === SURVIVALS.has(again.status)) continue
+    /* Named once: a first-run hit limit is already here as the bound it is, and
+       naming it twice would put one identity in the list twice. */
+    if (already.has(keyOf(mutant))) continue
+    found.push({
+      mutant,
+      why: `its two runs answered for the mutant at ${placeOf(mutant)} with ${mutant.status} and then with ${again.status}`,
+    })
+  }
+  return found
+}
+
+/**
+ * Whether evidence leaves a survivor standing — one the merge base did not
+ * answer for, or a merge base that could not be measured at all.
+ *
+ * ⚠️ **"COULD NOT RUN" MUST NEVER READ AS "IT ALREADY SURVIVED".** A refusal
+ * carries no survivors, so anything that asked only whether `added` was empty
+ * would have passed every file whose base could not be measured — the exact
+ * inversion this comparison exists to refuse. Both questions, and either one
+ * standing fails the file.
+ */
+function survivorsStand(evidence) {
+  return evidence.refusal !== null || evidence.added.length > 0
+}
+
+/**
+ * Which of the survivors here the merge base's own survivors answer for, and
+ * which they do not — the difference a result records and the aggregate derives
+ * AGAIN from the same evidence, so that a shard's word for "authorised" is never
+ * taken.
+ */
+function differenceAtBase(atBase, undecided, here) {
+  const { authorised, added } = matchedSurvivors(atBase, here, undecided)
+  return {
+    authorised: authorised.length,
+    added: added.map(({ here: one, why, class: how }) => ({ file: one.file, at: one.at, identity: one.identity, why, class: how })),
+  }
+}
+
+/**
+ * The pairing over a WHOLE sweep: every subject's survivors against one pool per
+ * base file, answered `file → { authorised, added }`.
+ *
+ * ⚠️ **ONE HISTORICAL OCCURRENCE WAS SPENT ONCE PER SUBJECT** (review,
+ * 2026-09-17). `judgedAtBase` pairs one subject at a time, because a shard sees
+ * one subject at a time — so a change that copies a file into two, each traced to
+ * the same origin, had the origin's single survivor authorise BOTH, in two
+ * processes neither of which could see the other. The guarantee that survived
+ * that was only "each of them has an equivalent shape somewhere at the merge
+ * base", which is not the one this gate states.
+ *
+ * So the two things that ever see a whole sweep run it again over every subject
+ * at once: a plain sweep at its end, and the aggregate, which is the only mode
+ * that can say a sharded sweep passed. Each base file contributes ONE pool
+ * however many subjects were traced to it.
+ *
+ * ⚠️ **AND TWO MEASUREMENTS THAT DIFFERED THREW THE WHOLE FILE'S POOL AWAY**
+ * (review, 2026-09-17), which is the file-wide penalty the rest of this change
+ * exists to end, arriving through the fix for something else. Two shards measuring
+ * one origin, agreeing about A and B and differing about C, left both head
+ * subjects with ZERO authorisations — so a survivor of A, in code nobody touched,
+ * was billed because a THIRD mutant somewhere else in that file had answered twice.
+ *
+ * The reconciliation is per BASE MUTANT, which is the granularity every other hole
+ * in this design is read at. A mutant every measurement of the origin found alive
+ * stands in the pool; one only some of them found is UNDECIDED — it authorises
+ * nothing, and a survivor here matching it is named as one the merge base could
+ * not decide rather than as one the change added. The file around it is judged
+ * exactly as it would have been, and there is no file-level refusal left: this is
+ * the same flakiness `undecidedAtBase` already reads per mutant when ONE
+ * measurement's two runs disagree, at a larger radius.
+ *
+ * ⚠️ **AND THE UNDECIDED ARE TAKEN FROM EVERY MEASUREMENT.** An identity ANY
+ * measurement could not decide is one the merge base did not decide, and nothing
+ * about it authorises anything, so a union can only improve the sentence a reader
+ * gets.
+ */
+export function matchedAcross(entries) {
+  const measured = new Map()
+  for (const { origin, atBase } of entries) {
+    measured.set(origin.path, [...(measured.get(origin.path) ?? []), atBase])
+  }
+  const pooled = []
+  const contested = []
+  for (const [named, runs] of measured) {
+    const found = new Map()
+    for (const [which, run] of runs.entries()) {
+      for (const survivor of run) {
+        const at = found.get(survivorKey(survivor)) ?? { survivor, seen: new Set() }
+        at.seen.add(which)
+        found.set(survivorKey(survivor), at)
+      }
+    }
+    for (const { survivor, seen } of found.values()) {
+      if (seen.size === runs.length) pooled.push(survivor)
+      else contested.push({ ...survivor, why: `${seen.size} of the ${runs.length} measurements of ${named} found it alive and the rest did not` })
+    }
+  }
+  const { authorised, added } = matchedSurvivors(pooled, entries.flatMap(({ here }) => here), [
+    ...entries.flatMap(({ undecided }) => undecided),
+    ...contested,
+  ])
+  const byFile = new Map(entries.map(({ named }) => [named, { authorised: 0, added: [] }]))
+  for (const { here } of authorised) byFile.get(here.file).authorised += 1
+  for (const { here, why, class: how } of added) {
+    byFile.get(here.file).added.push({ file: here.file, at: here.at, identity: here.identity, why, class: how })
+  }
+  /* ⚠️ **AND THE DISAGREEMENTS THEMSELVES ARE REPORTED, NOT ONLY ACTED ON** (a
+     second opinion's fifth round, 2026-09-17). A contested identity changes what
+     a run SAYS only when a survivor here consumes it; where none does, two
+     measurements of one base file could disagree about any number of mutants and
+     the sweep would pass without a word. That is measurement health, and it is
+     the cheapest early sign of a base whose runs are not reproducible — which is
+     the thing this whole comparison rests on. The pass is unchanged; the reader
+     is told. */
+  return { byFile, contested, measurements: [...measured].map(([named, runs]) => [named, runs.length]) }
+}
+
+/** One survivor of one base file as two measurements of it name the same one: where it sits, and what it is. */
+function survivorKey(survivor) {
+  return JSON.stringify([survivor.at, poolKey(survivor.file, survivor.identity)])
+}
+
+/** A measurement read from `file`, as `{ record }`, or what is wrong with it, as `{ problem }`. */
+function measurementIn(file) {
+  let record
+  try {
+    // Stryker disable next-line StringLiteral: a read with no encoding answers a Buffer, and `JSON.parse` stringifies one as UTF-8 anyway — measured, both parse the same record
+    record = JSON.parse(readFileSync(file, 'utf8'))
+  } catch (cause) {
+    return { problem: messageOf(cause) }
+  }
+  const problem = measurementProblem(record)
+  return problem === null ? { record } : { problem }
+}
+
+/**
+ * The outcomes a measurement can end in — every one of them an answer, where a
+ * refusal is the absence of one.
+ *
+ * ⚠️ **`no-test-at-base` WAS ONE OF THEM AND IS NOW A REFUSAL** — see
+ * `measuredHere`. It said "nothing there reaches it, so everything survived",
+ * which is what a discovery failure says too.
+ */
+const MEASURED = new Set(['killed', 'survived', 'nothing-to-kill', 'no-mutants'])
+
+/** What is wrong with a measurement a child wrote, or `null` when nothing is. */
+function measurementProblem(record) {
+  if (!isRecord(record) || record.kind !== 'measurement') return 'it is not a measurement'
+  if (record.version !== RECORD_VERSION) return `its version is ${shown(record.version)}, and this gate reads version ${RECORD_VERSION}`
+  if (typeof record.subject !== 'string' || record.subject === '') return `its subject is ${shown(record.subject)}, which is not a path`
+  if (record.refusal !== null) {
+    if (!isRecord(record.refusal)) return `its refusal is ${shown(record.refusal)}, which is neither a refusal nor null`
+    for (const key of ['reason', 'message']) {
+      if (typeof record.refusal[key] !== 'string' || record.refusal[key] === '') {
+        return `its refusal.${key} is ${shown(record.refusal[key])}, which is not a reason`
+      }
+    }
+    return null
+  }
+  if (!MEASURED.has(record.outcome)) return `its outcome is ${shown(record.outcome)}, which this gate does not measure`
+  if (!isDuration(record.durationMs)) return `its durationMs is ${shown(record.durationMs)}, which is not a duration`
+  return measuredProblem(record, 'its ')
+}
+
+/**
+ * What is wrong with the EVIDENCE a measurement is made of — the content it
+ * swept and the runs that swept it — or `null` when nothing is. `whose` names it
+ * as a measurement's own fields or as a result's `base.` ones, which are the
+ * same fields read by the same derivation.
+ */
+function measuredProblem(record, whose) {
+  if (!isDigest(record.sha256)) return `${whose}sha256 is ${shown(record.sha256)}, which is not a digest`
+  if (typeof record.source !== 'string') return `${whose}source is ${shown(record.source)}, which is not the content it swept`
+  return runProblem(record.first, whose, 'first') ?? runProblem(record.settle, whose, 'settle')
+}
+
+/** A survivor as `survivorOf` writes one: a file, and the identity a pairing is made over. */
+function isSurvivor(value) {
+  if (!isRecord(value) || typeof value.file !== 'string' || value.file === '' || !isRecord(value.identity)) return false
+  const { mutatorName, replacement, original, statement, scope } = value.identity
+  if ([mutatorName, replacement, original, statement].some((one) => typeof one !== 'string')) return false
+  return Array.isArray(scope) && scope.every((one) => typeof one === 'string')
+}
+
+/**
+ * Whether the record a measurement writes would land on the file it measures.
+ *
+ * ⚠️ **`--measure src/a.ts --into src/a.ts` PARSED, MEASURED, AND THEN WROTE JSON
+ * OVER THE SOURCE** (review, 2026-09-17). Nothing inside this gate can spell
+ * that — a sweep names a file in a scratch directory of its own — but the mode is
+ * on the command line, and what a hand can type it must refuse.
+ *
+ * Both spellings are compared, as in `overlapOf` and for its reason: the output
+ * with its directories resolved but its own last part left alone, which is where
+ * a link at the output's name lives, and the output resolved the whole way. So
+ * neither a link planted at the name nor a link among the directories above it
+ * can reach the subject under another spelling. Git is not asked, because a
+ * measurement asks git nothing.
+ */
+function writtenOverSubject(subject, into, root) {
+  const { fold } = pathsAt(caselessAt(realPathOf(root)))
+  const measured = fold(realPathOf(path.join(root, subject)))
+  const asWritten = path.join(realPathOf(path.dirname(into)), path.basename(into))
+  return [asWritten, realPathOf(into)].some((one) => fold(one) === measured)
+}
+
+/**
+ * Where `at` really is when that is outside the checkout at `root`, as
+ * `{ real, top }`, and `null` when it is inside it — see `measuredHere`, which is
+ * the only caller and carries the argument.
+ *
+ * The checkout's own root is resolved too, rather than taken as it was given: a
+ * scratch checkout under `/tmp` on a Mac IS `/private/tmp`, so comparing a
+ * resolved path against an unresolved root would put every file in this suite
+ * outside its own checkout.
+ */
+function reachedOutside(at, root) {
+  const top = realPathOf(root)
+  const { fold } = pathsAt(caselessAt(top))
+  const real = realPathOf(at)
+  return outsideCheckout(path.relative(fold(top), fold(real))) ? { real, top } : null
+}
+
+/**
+ * Whether git exits cleanly, for a question whose answer is its exit and nothing
+ * else.
+ *
+ * ⚠️ **WRITTEN OVER A VARIABLE RATHER THAN AS TWO RETURNS, SO THAT EMPTYING THE
+ * CATCH IS A DIFFERENCE** (2026-09-17). `catch { return false }` emptied returns
+ * `undefined`, which every caller here reads through a `!` — so the mutant that
+ * removes the whole refusal is equivalent, and a directive cannot reach it
+ * either: Babel attaches no leading comment to a catch clause, so one written
+ * above `} catch {` is inert and looks exactly like one that works. With the
+ * answer in a variable, an emptied catch leaves it `true` and a commit that is
+ * not here reads as one that is.
+ */
+function gitAnswers(args, cwd) {
+  let answered = true
+  try {
+    execFileSync('git', args, silently(cwd))
+  } catch {
+    answered = false
+  }
+  return answered
+}
+
+/**
+ * How git is run where nothing it SAYS is wanted — neither this gate's output nor
+ * its evidence.
+ *
+ * The shorthand rather than a list of three, because each entry of a list is a
+ * `StringLiteral` mutant of its own and all three carry the same argument: one
+ * spelling, one argument, one directive (2026-09-17). There is no way to say
+ * "discard every stream" without a string, so unlike `spawnMeasurement`'s
+ * descriptors this one cannot be removed — only stated.
+ */
+function silently(cwd) {
+  // Stryker disable next-line StringLiteral: nothing this gate can observe reads what git says here — every caller discards both the answer and the throw — so what another spelling changes is what a person sees on a terminal, which no test watches
+  return { cwd, stdio: 'ignore' }
+}
+
+/** A base worktree's own lock: there is none — see `measureAtBase`. Written as
+ *  two declarations, because as one arrow returning another the inner one's
+ *  mutant is equivalent and shares its line with the outer one's, which is not. */
+function unlocked() {
+  return released
+}
+
+/** And so nothing to release. */
+function released() {}
+
+/** Where a base worktree is checked out, which is never inside the checkout it is measured against. */
+function baseScratch() {
+  return mkdtempSync(path.join(tmpdir(), 'check-mutants-base-'))
+}
+
+/**
+ * What the base's tests are run against: this checkout's install where the base
+ * pins exactly what this checkout pins, and the base's own otherwise.
+ *
+ * ⚠️ **THE LOCKFILE IS THE WHOLE OF THAT QUESTION, AND `package.json` IS THE
+ * REST OF IT.** A lockfile pins every dependency, so two commits carrying the
+ * same bytes there have the same dependency tree by identity — linking this
+ * checkout's `node_modules` is then not an overlay but the same install. What a
+ * lockfile does NOT carry is what pnpm reads beside it — its `pnpm` block, its
+ * `packageManager` — so the manifest is compared too. Neither the same, and the
+ * base is installed from its own lockfile.
+ *
+ * ⚠️ **AND AN INSTALL THAT CANNOT RUN IS A REFUSAL, NEVER THIS CHECKOUT'S
+ * INSTALL INSTEAD.** Base tests against head's dependency tree measure neither
+ * commit. The operational cost is that a base measurement needs a warm store or
+ * a network — and it is paid only for a file that has survivors.
+ */
+function suppliedTo(at, root, install, timeoutMs) {
+  if (PINS.every((name) => sameBytes(path.join(root, name), path.join(at, name)))) {
+    /* ⚠️ **AN ABSOLUTE TARGET, BECAUSE A RELATIVE ONE IS RESOLVED BESIDE THE LINK
+       AND NOT BESIDE THIS PROCESS** (measured 2026-09-17, and it made the whole
+       comparison inert). `run` passes `root` as `.`, so `path.join(root,
+       'node_modules')` is the bare name `node_modules` — which as a link's target
+       means "node_modules in the directory this link is in", and the link is IN
+       the base worktree. The base's `node_modules` therefore pointed at itself,
+       reading through it answered `ELOOP`, and every base measurement refused
+       with "the merge base's @stryker-mutator/core is missing" — a refusal that
+       reads exactly like a base on another major version. Every case here passed
+       an absolute root, which is why none of them saw it.
+
+       `junction`, because a Windows symbolic link to a directory needs a
+       privilege a runner may not have, and is ignored everywhere else. */
+    symlinkSync(path.resolve(root, 'node_modules'), path.join(at, 'node_modules'), 'junction')
+    return 'linked'
+  }
+  if (timeoutMs <= 0) {
+    throw new BaseRefusal(
+      'expired',
+      `check-mutants: there is no time left to install the merge base’s own dependencies at ${at} — this gate allows ` +
+        `${INSTALL_DEADLINE_MS / 60_000} minute(s) for one, and an install nobody waited for is not a measurement`,
+    )
+  }
+  try {
+    install(at, { timeoutMs })
+  } catch (cause) {
+    throw new BaseRefusal('install', `check-mutants: the merge base’s own dependencies cannot be installed at ${at} — ${messageOf(cause)}`)
+  }
+  return 'installed'
+}
+
+/** What decides whether two commits have the same install. */
+const PINS = ['pnpm-lock.yaml', 'package.json']
+
+/** Whether two files are there and are the same bytes — a file that is not there is not the same as anything. */
+function sameBytes(one, other) {
+  const digest = (file) => (entryAt(file) === null ? null : digestOf(readFileSync(file)))
+  const first = digest(one)
+  return first !== null && first === digest(other)
+}
+
+/**
+ * The base's own install, from the base's own lockfile.
+ *
+ * `--ignore-scripts` is deliberate: a lifecycle script from a commit somebody is
+ * merely comparing against is code this gate would be running on their machine,
+ * and nothing in this project needs one to run its tests.
+ */
+// Stryker disable all: a real install is the second thing a test may not do — it reaches the network and writes a dependency tree; `measureAtBase` takes it as a parameter, and every decision about it — the deadline it is given included — is measured there
+function installAt(at, { timeoutMs }) {
+  execFileSync('pnpm', ['install', '--frozen-lockfile', '--prefer-offline', '--ignore-scripts'], { cwd: at, stdio: 'inherit', timeout: timeoutMs })
+}
+// Stryker restore all
+
+/**
+ * How long one merge-base measurement may take, and how much of that its install
+ * may take — PROVISIONAL, and to be replaced by numbers measured end to end on
+ * the runners that pay for them. A measurement records what the whole operation
+ * cost for exactly that reason.
+ */
+const INSTALL_DEADLINE_MS = 10 * 60_000
+const BASE_DEADLINE_MS = 90 * 60_000
+/* What a file's own sweep may have cost and still be worth sweeping again wide
+   to check a bill — see `affordable`. Half of what one shard's CI step allows
+   for everything it holds, so one file can never spend the whole of it twice. */
+const WIDEN_BUDGET_MS = 20 * 60_000
+
+/**
+ * How much of `budget` is left, from `started`, by `clock` — whole milliseconds,
+ * because a clock answers fractions and `execFileSync`'s `timeout` refuses one:
+ * `The value of "timeout" is out of range. It must be an unsigned integer.`,
+ * thrown BEFORE the child starts, which reads as a child that left no
+ * measurement (measured 2026-09-17, by the case that runs the real command).
+ */
+function left(clock, started, budget) {
+  return Math.round(budget - (clock() - started))
+}
+
+/**
+ * The packages whose version decides whether this gate's settings mean anything
+ * for a checkout.
+ *
+ * ⚠️ **THE RUNNER PLUGIN WAS NOT AMONG THEM, AND IT IS HALF THE STACK** (review,
+ * 2026-09-17). `strykerConfig` names `@stryker-mutator/vitest-runner` as the
+ * runner and writes a per-project vitest block for it to carry; a base pinning
+ * another major of it is a base this gate's settings say nothing about, exactly
+ * as a base on another major of vitest is.
+ */
+const RUNNERS = ['@stryker-mutator/core', '@stryker-mutator/vitest-runner', 'vitest']
+
+/** Each runner's version in the install at `root`, and `null` for one that cannot be read. */
+export function runnerVersionsAt(root) {
+  return Object.fromEntries(RUNNERS.map((name) => [name, versionAt(path.join(root, 'node_modules', name, 'package.json'))]))
+}
+
+/** The `version` a package manifest declares, and `null` where there is no manifest, no JSON, or no string there. */
+function versionAt(file) {
+  try {
+    // Stryker disable next-line StringLiteral: a read with no encoding answers a Buffer, and `JSON.parse` stringifies one as UTF-8 anyway — measured, both read the same manifest, the same reasoning as `measurementIn`
+    const { version } = JSON.parse(readFileSync(file, 'utf8'))
+    return typeof version === 'string' ? version : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Why the merge base's runner is not one this gate's generated settings mean
+ * anything for, or `null` where it is.
+ *
+ * The gate writes a Stryker config and a Vitest config of its own — a runner
+ * name, a reporter, a per-project block — and both are a major version's shape.
+ * A base on another major version is REFUSED rather than run and interpreted: a
+ * dry run that fails because a key moved reads exactly like a base that could
+ * not measure, and neither is evidence. A version that cannot be read is refused
+ * on the same ground rather than assumed to match.
+ */
+export function runnerUnlike(here, atBase) {
+  for (const name of RUNNERS) {
+    if (majorOf(here[name]) !== null && majorOf(here[name]) === majorOf(atBase[name])) continue
+    return (
+      `the merge base’s ${name} is ${atBase[name] ?? 'missing'} and this checkout’s is ${here[name] ?? 'missing'}, ` +
+      'and a sweep’s settings are written for one major version'
+    )
+  }
+  return null
+}
+
+/** A version's major, and `null` for anything that does not begin with one — a
+ *  version that is not there among them, since `exec` reads `null` as the word. */
+function majorOf(version) {
+  const [, major] = /^(\d+)\./u.exec(version) ?? [null, null]
+  return major
+}
+
+/**
+ * Every mutant these report entries left alive — a `Survived` or a `NoCoverage`
+ * in ANY of them, each counted once.
+ *
+ * Both runs of a subject are asked, because a survivor in either is a survivor:
+ * the settle run is a second chance for a timeout to be answered, never a second
+ * chance to call an observed survivor a kill. An entry that is `null` is a run
+ * that reported on nothing, which left no survivor to find.
+ *
+ * The `null` entry is SKIPPED rather than read as an empty list: written as
+ * `entry === null ? [] : entry.mutants`, whatever stands in for that empty list
+ * is a mutant nothing can observe, since anything it holds fails the record test
+ * a line below (2026-09-17). Skipping leaves nothing to stand in for.
+ */
+export function survivorsIn(entries) {
+  const found = new Map()
+  for (const entry of entries) {
+    if (entry === null) continue
+    for (const mutant of entry.mutants) {
+      if (isRecord(mutant) && SURVIVALS.has(mutant.status)) found.set(keyOf(mutant), mutant)
+    }
+  }
+  return [...found.values()]
+}
+
+/**
+ * The base file whose survivors may answer for a subject's: the subject itself
+ * where the merge base has it, the file git traced it to where it does not, and
+ * `null` where there is none — which is a new file, and a new file owes all of
+ * its own.
+ *
+ * ⚠️ **A TRACED ORIGIN IS A CANDIDATE AND NEVER A PROOF.** What authorises a
+ * survivor is the identity — the mutator, the replacement, the mutated node's own
+ * text and its scope path — and this only bounds WHICH base file may be asked,
+ * which is what stops a copy-paste from laundering debt out of an unrelated file
+ * and what keeps the cost to one base measurement.
+ *
+ * ⚠️ **AND AN UNTRACKED FILE IS TRACED TO NOTHING.** `git diff` reads tracked
+ * content, so a new file that has not been committed is in no diff and has no
+ * origin here. In CI that case does not arise — every job checks out a commit —
+ * and locally it means an uncommitted extraction owes what a new file owes until
+ * it is committed. Named rather than worked around: the alternative is
+ * `git add -N`, and this gate does not write to anybody's index.
+ */
+export function originAtBase(subject, baseCommit, root, renames) {
+  const traced = tracedTo(subject, renames, gitAnswers(['cat-file', '-e', `${baseCommit}:${subject}`], root))
+  if (traced === null) return null
+  const held = blobAtBase(traced.path, baseCommit, root)
+  /* ⚠️ **A TRACED PATH WHOSE CONTENT CANNOT BE READ IS NO ORIGIN AT ALL.** Every
+     one of these comes from git — a name it says the commit has, or a name it
+     says a file came from — so a commit that then will not hand over the bytes is
+     a repository this gate cannot freeze anything against, and a candidate with
+     nothing frozen would be a base measurement nothing could be held to. */
+  if (held === null) return null
+  return { ...traced, sha256: digestOf(held) }
+}
+
+/** Which base file a subject may be answered by, before its content is asked for: itself where the merge base has it, what git traced it to otherwise. */
+function tracedTo(subject, renames, hasItself) {
+  if (hasItself) return { path: subject, how: 'itself' }
+  const traced = renames.get(subject)
+  /* A file a sweep could not mutate cannot have owed anything, so being traced
+     to one is being traced to nothing. */
+  if (traced === undefined || !SRC.test(traced.path) || NOT_A_SUBJECT.test(traced.path)) return null
+  return traced
+}
+
+/**
+ * The bytes a commit holds at `named`, or `null` where it holds none that can be
+ * read — the content a measurement of the merge base must turn out to have swept.
+ *
+ * ⚠️ **THE FROZEN HASH IS THE WHOLE OF WHAT MAKES BASE EVIDENCE EVIDENCE**, and
+ * it is taken from the commit rather than from any checkout: a shard measures in
+ * a worktree of its own making, and without this the only claim about what it
+ * measured would be its own.
+ *
+ * ⚠️ **AND IT IS THE BLOB, NOT THE WORKING-TREE FILE.** Where a repository runs
+ * content through a filter — `.gitattributes`, an end-of-line conversion — a
+ * checkout of that blob is not these bytes, and the measurement's own hash will
+ * not match. That is a refusal rather than a silent mismatch, and it is named
+ * here because nothing in this repository configures one.
+ */
+function blobAtBase(named, baseCommit, root) {
+  try {
+    return execFileSync('git', ['cat-file', 'blob', `${baseCommit}:${named}`], { cwd: root, maxBuffer: Infinity, stdio: ['ignore', 'pipe', 'ignore'] })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Every file git traces to another between the merge base and the working tree,
+ * as `destination → { path, how }`.
+ *
+ * ⚠️ **THE THRESHOLD IS 1 %, AND THE REASON IS ARITHMETIC RATHER THAN TASTE.**
+ * git scores a copy against the LARGER of the two files, so pulling a fifth of a
+ * module into a file of its own scores about a fifth — measured 2026-09-16:
+ * 12 of 60 functions extracted scored `C019`, 30 of 60 `C049`, 45 of 60 `C074`.
+ * At git's own default of 50 % an extraction is reported as an added file, which
+ * is precisely the refactor this comparison exists to make affordable.
+ *
+ * ⚠️ **AND THE THRESHOLD IS A FLOOR, NOT A DIAL.** Measured the same day: below
+ * roughly a tenth of its source, git reports an extraction as added at EVERY
+ * threshold, so nothing lower buys anything; and the answer is not monotonic in
+ * the threshold — a genuinely new file sharing one import line with another came
+ * back added at `-C5` and `C020` at `-C10`. So the number is what this gate lets
+ * through rather than what it can tune, and the identity comparison is what
+ * actually authorises.
+ *
+ * `-l0` because git SILENTLY stops looking when there are more pairs than its
+ * limit — an answer of "no origin" that is really "did not ask", which would bill
+ * a refactor for the whole of a file it moved.
+ */
+export function renamesAtBase(baseCommit, root) {
+  const told = gitNames(['diff', '--name-status', '-z', '--find-copies-harder', '-C1', '-l0', baseCommit, '--'], root)
+  const renames = new Map()
+  let record = []
+  for (const token of told) {
+    record.push(token)
+    /* A rename or a copy names two paths, and every other status names one — so
+       what a record IS decides both how long it is and what it leaves behind. A
+       record that leaves one under no name at all would be an entry nothing can
+       look up, and so one nothing can refuse. */
+    const how = TRACED[record[0][0]]
+    if (record.length < (how === undefined ? 2 : 3)) continue
+    if (how !== undefined) renames.set(record[2], { path: record[1], how })
+    record = []
+  }
+  return renames
+}
+
+/** The statuses that name where a file came from as well as where it is, by what each one is. */
+const TRACED = { C: 'copied', R: 'renamed' }
+
+/**
+ * Each of `names` against the base file whose survivors may answer for it, as
+ * `name → { path, how } | null` — `originAtBase` for a list, with git asked for
+ * the traced origins ONCE.
+ *
+ * A checkout with no merge base has no base file for anything, and git is not
+ * asked at all: there is nothing to diff against, so every subject is a subject
+ * nothing can answer for. That is the same fail-closed answer a new file gets,
+ * and it is how a local run with no base behaves — the scope is the working tree
+ * and 100 % is owed, exactly as before this comparison existed.
+ */
+export function originsAtBase(names, mergeBase, root) {
+  if (mergeBase === null) return new Map(names.map((name) => [name, null]))
+  const renames = renamesAtBase(mergeBase, root)
+  return new Map(names.map((name) => [name, originAtBase(name, mergeBase, root, renames)]))
 }
 
 /**
@@ -1935,11 +4309,19 @@ function summarise(outcomes, { stdout, stderr }, { complete = true, errors = 'It
     unkilled = [],
     timedOut = [],
     // Stryker disable next-line ArrayDeclaration: every caller passes its own, so no run reads this default and no answer can differ
+    unresolved = [],
+    // Stryker disable next-line ArrayDeclaration: every caller passes its own, so no run reads this default and no answer can differ
     noTestFound = [],
     // Stryker disable next-line ArrayDeclaration: the callers that leave this out pass no survivors either, and it is written out beside survivors alone
     staticSurvivors = [],
     mismatched = [],
+    base = [],
   } = outcomes
+  sayBase(base, stdout)
+  const refused = base.filter(([, evidence]) => evidence.refusal !== null)
+  /* Every survivor here the merge base answered for with nothing, in both of the
+     two ways it can fail to — see `classed`, and the two paragraphs below. */
+  const unanswered = base.flatMap(([, evidence]) => evidence.added)
   /* ⚠️ **"EVERY MUTANT WAS KILLED" WAS PRINTED OVER SUBJECTS THAT HAD NONE.**
    * Nothing to kill passes, but a reader could not tell it from a module whose
    * every mutant a test had caught. Finding #9, 2026-09-14. So those subjects
@@ -1951,17 +4333,71 @@ function summarise(outcomes, { stdout, stderr }, { complete = true, errors = 'It
         nothingToKill.map((f) => `  ${f}\n`).join(''),
     )
   }
+  /* ⚠️ **A STATIC MUTANT THAT THROWS AT IMPORT IS REPORTED `Survived`**
+   * (measured 2026-09-14, `/tmp/cc-audit/static-probe`). A suite whose module
+   * throws while loading fails no test, so Stryker's vitest runner saw nothing
+   * killed: `define('')` at module level, `if (true) throw` and `key !== ''` all
+   * came back `Survived` while vitest by hand failed the file. A generated load
+   * probe that killed them was tried and REMOVED — it made kills of its own
+   * where Vite excluded a test, where a DOM guard was reversed, and broke
+   * modules that touch `window` at import. So nothing passes differently: each
+   * static survivor is only named, with how to tell the false kind from a real
+   * one.
+   *
+   * ⚠️ **AND IT USED TO BE NAMED ONLY UNDER THE SURVIVORS, WHICH IS THE ONE CASE
+   * THAT NO LONGER ALWAYS HAPPENS** (a second opinion's fifth round,
+   * 2026-09-17). The notice sat inside the block that fails a file a mutant
+   * survived in — correct while every survivor failed, and wrong from the moment
+   * the merge base could answer for one. A file whose survivors the base
+   * authorised passes, and passed in silence, static survivors and all. It is
+   * written wherever there are any, on the same stream as the rest of the
+   * measurement, whether the file passes or fails. */
+  if (staticSurvivors.length > 0) {
+    stdout.write(
+      `check-mutants: ${staticSurvivors.length} survivor(s) are static, and a static mutant is the one kind this gate cannot read off a report:\n` +
+        staticSurvivors
+          .map(
+            (at) =>
+              `  static: ${at} — a static mutant that throws while the module is imported is reported Survived by Stryker's vitest runner, because the suite fails to load; verify it by hand, and if it does throw, disable it beside the code with that reason\n`,
+          )
+          .join(''),
+    )
+  }
   /* ⚠️ **A FILE AND THE PLACES ITS TIMEOUT REPEATED AT ARE ONE ENTRY, NOT TWO
      LISTS** (2026-09-16). They were two, filled under one condition and so empty
      together — which made a second test of the same fact a condition nothing
      could be observed through, and the second list's own default a value no
      caller ever read. Carried together, neither can be had without the other. */
-  if (unkilled.length === 0 && notRun.length === 0 && noTestFound.length === 0 && mismatched.length === 0 && timedOut.length === 0) {
+  /* A merge base that could not be measured is not tested for here, and that is
+     not an omission: `survivorsStand` has already put such a file among the ones
+     a mutant survived in, because a mutant DID survive in it and nothing
+     authorised it. Asking a second time would be a condition no run could be
+     observed through — measured by hand, 2026-09-16, and it survived. The
+     section below says which of them are there for that reason. */
+  if (
+    unkilled.length === 0 &&
+    notRun.length === 0 &&
+    noTestFound.length === 0 &&
+    mismatched.length === 0 &&
+    timedOut.length === 0 &&
+    unresolved.length === 0
+  ) {
     if (!complete) return 1
-    if (killed.length > 0) stdout.write('check-mutants: every mutant was killed\n')
+    /* ⚠️ **AND NOT OVER A SURVIVOR THE MERGE BASE MERELY AUTHORISED.** A file
+       that passed because its survivors were there too has mutants alive in it,
+       and saying every one was killed of a sweep that measured a base would be
+       the one sentence a reader would take at face value. What the base said is
+       above; this line is claimed only where nothing needed one. */
+    if (killed.length > 0 && base.length === 0) stdout.write('check-mutants: every mutant was killed\n')
     return 0
   }
   sayNoTestFound(noTestFound, stderr)
+  if (refused.length > 0) {
+    stderr.write(
+      `check-mutants: the merge base could not be measured for ${refused.length} file(s), so nothing authorises the mutants that survived in them — a failure to measure is never permission, and "could not run" is never "it already survived":\n` +
+        refused.map(([file, { refusal }]) => `  ${file} — ${refusal.reason}: ${refusal.message}\n`).join(''),
+    )
+  }
   if (mismatched.length > 0) {
     stderr.write(
       `check-mutants: the report does not match the file swept in ${mismatched.length} file(s) — Stryker's own report is not of what this sweep counted, so nothing about their mutants is known:\n` +
@@ -1990,6 +4426,21 @@ function summarise(outcomes, { stdout, stderr }, { complete = true, errors = 'It
         timedOut.flatMap(([file, places]) => places.map((at) => `  repeated: ${file}:${at}\n`)).join(''),
     )
   }
+  /* ⚠️ **AND A MUTANT THE SETTLE RUN LEFT WITH NO SCORE AT ALL, WHICH IS NOT THE
+     SAME FINDING AND USED TO BE OUTRANKED BY ONE** — see `noVerdictFor`. It is
+     reported and failed on its own, beside whatever else the file is, because a
+     mutant nothing scored is a mutant nothing measured: the merge base was never
+     asked about it, so no authorisation can answer for it. */
+  if (unresolved.length > 0) {
+    stderr.write(
+      `check-mutants: the settle run reached no verdict for ${unresolved.flatMap(([, places]) => places).length} mutant(s) in ${unresolved.length} file(s) — a crash, an OOM-killed runner, or a report that simply does not mention them. A mutant with no score was not measured, and an unmeasured mutant is never a pass.\n` +
+        unresolved.map(([file]) => `  ${file}\n`).join('') +
+        '  Re-run the file alone, on a quiet machine, and read the settle run’s log\n' +
+        '  for the runner that died:\n' +
+        `    node scripts/check-mutants.mjs --only ${unresolved[0][0]}\n` +
+        unresolved.flatMap(([file, places]) => places.map((at) => `  unresolved: ${file}:${at}\n`)).join(''),
+    )
+  }
   if (unkilled.length > 0) {
     stderr.write(
       `check-mutants: a mutant survived in ${unkilled.length} file(s) — a test that cannot fail is not a test.\n` +
@@ -1997,25 +4448,73 @@ function summarise(outcomes, { stdout, stderr }, { complete = true, errors = 'It
         '  Kill it by asserting the behaviour the mutation changed, or, if the\n' +
         '  mutation is genuinely equivalent, say so beside the code:\n' +
         "    // Stryker disable next-line <mutator>: <why it cannot be observed>\n" +
-        /* ⚠️ **A STATIC MUTANT THAT THROWS AT IMPORT IS REPORTED `Survived`**
-         * (measured 2026-09-14, `/tmp/cc-audit/static-probe`). A suite whose module
-         * throws while loading fails no test, so Stryker's vitest runner saw
-         * nothing killed: `define('')` at module level, `if (true) throw` and
-         * `key !== ''` all came back `Survived` while vitest by hand failed the
-         * file. A generated load probe that killed them was tried and REMOVED — it
-         * made kills of its own where Vite excluded a test, where a DOM guard was
-         * reversed, and broke modules that touch `window` at import. So nothing
-         * passes differently: each static survivor is only named, with how to
-         * tell the false kind from a real one. */
-        staticSurvivors
-          .map(
-            (at) =>
-              `  static: ${at} — a static mutant that throws while the module is imported is reported Survived by Stryker's vitest runner, because the suite fails to load; verify it by hand, and if it does throw, disable it beside the code with that reason\n`,
-          )
+        /* Which survivors the merge base did NOT answer for — the whole of what
+           a change is billed for, named one by one so that a reader is not left
+           to diff two survivor lists by eye. */
+        unanswered
+          .filter((one) => one.class === 'added')
+          .map(({ file, at, identity, why }) => `  added: ${file}:${at} — ${namedSurvivor(identity)} — ${why}\n`)
           .join(''),
     )
   }
+  /* ⚠️ **AND THE OTHER SENTENCE, WHICH WAS THE SAME ONE UNTIL 2026-09-17.** A
+     mutant the merge base could not decide was billed as one this change added,
+     which sends a reader to look for it in a diff that does not hold it — and
+     before that, one such mutant refused the whole file and billed them for every
+     survivor in it. Both classes fail, neither is authorised, and a reader acts on
+     them differently: the first is a gap to close in what they wrote, the second
+     is an old gap the merge base never answered for and has now fallen to them. */
+  const undecided = unanswered.filter((one) => one.class === 'undecided')
+  if (undecided.length > 0) {
+    stderr.write(
+      /* ⚠️ **AND THIS SENTENCE SAID "this change did not add them", WHICH THE
+         EVIDENCE DOES NOT SUPPORT** (review, 2026-09-17). The merge base never
+         answered for these, so nothing here can say whether the change added them
+         — that is the whole of what "could not decide" means, and claiming the
+         stronger thing would send a reader away from a diff that may well hold
+         it. What IS known is that nothing authorises them. */
+      `check-mutants: the merge base could not decide ${undecided.length} mutant(s) that survived here — it never answered for them, so whether this change added them is not something this run can say, and a mutant the merge base never answered for is not one it authorises; they are yours to settle:\n` +
+        undecided.map(({ file, at, identity, why }) => `  undecided: ${file}:${at} — ${namedSurvivor(identity)} — ${why}\n`).join('') +
+        '  Settle one by killing it here, or, if the mutation is genuinely\n' +
+        '  equivalent, say so beside the code:\n' +
+        '    // Stryker disable next-line <mutator>: <why it cannot be observed>\n',
+    )
+  }
   return 1
+}
+
+/**
+ * What the merge base owed, file by file, for every file one was measured for.
+ * Written on a PASS as well as on a failure: a sweep that passes because the
+ * merge base already owed these mutants has mutants alive in it, and a reader who
+ * is not told that reads a green gate as a clean file.
+ */
+function sayBase(base, stdout) {
+  if (base.length === 0) return
+  stdout.write(
+    `check-mutants: ${base.length} file(s) had a mutant survive, so the merge base was measured for what each already owed there:\n` +
+      base.map(([file, evidence]) => `  ${file} — ${saidAtBase(evidence)}\n`).join(''),
+  )
+}
+
+/** What one file's merge base said, in one line — the two ways it answered for nothing counted apart, because they are two different bills. */
+function saidAtBase(evidence) {
+  const { origin, refusal, authorised, added, outcome, install, durationMs } = evidence
+  const where = origin.how === 'itself' ? 'itself at the merge base' : `${origin.path}, which it was ${origin.how} from`
+  if (refusal !== null) return `it could not be measured (${refusal.reason}), so nothing here is authorised — ${refusal.message}`
+  const owed = added.filter((one) => one.class === 'added').length
+  const unknown = added.length - owed
+  return (
+    `${authorised} of ${authorised + added.length} survivor(s) were there too, in ${where} ` +
+    `(${outcome}, dependencies ${install}, ${durationMs} ms)` +
+    `${owed === 0 ? '' : `; ${owed} this change added`}${unknown === 0 ? '' : `; ${unknown} the merge base could not decide`}`
+  )
+}
+
+/** How a refusal names a survivor: what was mutated, what it became, and where in the file's own declarations it sat. */
+function namedSurvivor({ mutatorName, original, replacement, scope }) {
+  const where = scope.length === 0 ? 'the file itself' : scope.join(' → ')
+  return `${mutatorName} replacing ${JSON.stringify(original)} with ${JSON.stringify(replacement)} in ${where}`
 }
 
 /**
@@ -2043,7 +4542,7 @@ function summarise(outcomes, { stdout, stderr }, { complete = true, errors = 'It
  * The one-sweep-per-checkout lock is untouched: shards never share a checkout.
  */
 async function planSweep({ manifest, shards, isolate, base, only, requireBase }, world) {
-  const { root, stdout, commits, worktree, tracked } = world
+  const { root, stdout, commits, worktree, tracked, origins } = world
   const { head, mergeBase } = committed(commits, base, requireBase)
   const tree = treeOf(worktree, root)
   const picked = chosen(world, base, only, requireBase).sort((a, b) => byName(a.name, b.name))
@@ -2062,12 +4561,29 @@ async function planSweep({ manifest, shards, isolate, base, only, requireBase },
       `check-mutants: --plan ${manifest} is a path git tracks — it holds ${trespass.held} — so a plan written there would replace a tracked file its shards then leave out of drift detection; write the plan where git tracks nothing`,
     )
   }
+  /* ⚠️ **THE PLAN IS THE CONTRACT, SO IT FREEZES WHERE THE BASE IS AND WHAT EACH
+     SUBJECT CAME FROM** — the merge base as a COMMIT rather than the ref `base`
+     names, and per subject the base file whose survivors may answer for its own.
+     A shard re-resolving either would be a shard deciding its own scope from its
+     own checkout minutes later, which is the whole defect `shardSweep` exists to
+     refuse; a ref is the easiest of those to move. */
+  const traced = origins(
+    rows.map((row) => row.path),
+    mergeBase,
+    root,
+  )
   const counted = []
   for (const row of rows) {
     const identities = await identifiedIn(path.join(root, row.path))
     const mutants = identities.length
     /* No mutant is nothing to run, whether or not a test reaches it: see `sweepChanges`. */
-    counted.push({ ...row, class: mutants === 0 ? 'no-mutants' : row.tests.length > 0 ? 'mutated' : 'no-test-found', mutants, identities })
+    counted.push({
+      ...row,
+      class: mutants === 0 ? 'no-mutants' : row.tests.length > 0 ? 'mutated' : 'no-test-found',
+      mutants,
+      identities,
+      origin: traced.get(row.path) ?? null,
+    })
   }
   const assigned = assignShards(counted, shards, isolate)
   const plan = {
@@ -2086,6 +4602,7 @@ async function planSweep({ manifest, shards, isolate, base, only, requireBase },
       class: row.class,
       mutants: row.mutants,
       identities: row.identities,
+      origin: row.origin,
       shard: assigned[at],
       tests: row.tests,
       testsDigest: row.testsDigest,
@@ -2432,7 +4949,7 @@ async function shardSweep({ manifest, results, index, count }, world) {
     for (const subject of unrun) {
       recheck(subject.path, 'before')
       const { mutants, durationMs } = counts.get(subject.path)
-      resultOf(subject, { outcome: subject.class, exitedCleanly: null, mutants, durationMs, report: null, settle: null })
+      resultOf(subject, { outcome: subject.class, exitedCleanly: null, mutants, durationMs, report: null, settle: null, base: null })
       recheck(subject.path, 'after')
       /* A file with no mutant that tests DO reach had nothing to kill; one no test
          reaches is named for that as well — see `sweepChanges`. */
@@ -2441,12 +4958,33 @@ async function shardSweep({ manifest, results, index, count }, world) {
     }
     sayNoMutants(noMutants, stdout)
     const toRun = new Map(mine.filter((subject) => subject.class === 'mutated').map((subject) => [inCheckout(subject), subject]))
+    /* ⚠️ **ONE MEASUREMENT PER BASE FILE HERE TOO, AND THERE WAS NONE** (a second
+       opinion's fifth round, 2026-09-17). A plain sweep caches by origin, for the
+       reason written where it does: two subjects traced to one base file ask the
+       same question of the same commit, and asking twice costs a second
+       worktree, a second install and a second sweep of it — and then invites the
+       two answers to differ, which `matchedAcross` can only resolve by leaving
+       the identity undecided. A shard called `world.measure` per subject and so
+       had neither half. The plan puts every subject sharing an origin on one
+       shard only by accident, so this is a real cost as well as a real risk:
+       three near-budget base measurements already pass the 210-minute step. */
+    const measured = new Map()
+    const measureOnce = (origin, mergeBase, asked) => {
+      if (!measured.has(origin)) measured.set(origin, world.measure(origin, mergeBase, asked))
+      return measured.get(origin)
+    }
     if (toRun.size > 0) {
       swept = await strykerEach([...toRun.keys()], found, await testOptionsOf(root), world, {
         record: ({ subject, ...fields }) => resultOf(toRun.get(subject), fields),
         before: (at) => recheck(toRun.get(at).path, 'before'),
         between: (at) => recheck(toRun.get(at).path, 'between'),
         after: (at) => recheck(toRun.get(at).path, 'after'),
+        /* The plan's own merge base and the plan's own origin: a shard resolves
+           neither for itself — see `planSweep`. The measurement happens between
+           this subject's `between` and its `after`, so the checkout is asked
+           again once it is over, exactly as it is after a settle run. */
+        base: (at, reports, spent) =>
+          judgedAtBase(at, toRun.get(at).path, toRun.get(at).origin, reports, { mergeBase: plan.mergeBase, measure: measureOnce, world, spent }),
       })
     }
   } catch (cause) {
@@ -2561,6 +5099,9 @@ async function aggregateSweep({ manifest, results }, world) {
   const resultsOf = new Map(plan.subjects.map((subject) => [subject.path, []]))
   const receiptsOf = new Map(Array.from({ length: plan.shards }, (_, at) => [at + 1, []]))
   const problems = []
+  /* Every subject's two sides, derived, for the pairing this mode alone can make
+     — the one that sees the whole sweep at once. See `matchedAcross`. */
+  const paired = []
   for (const { file, regular } of filesUnder(results)) {
     const { record, problem } = recordIn(file, regular)
     if (problem !== undefined) {
@@ -2590,7 +5131,17 @@ async function aggregateSweep({ manifest, results }, world) {
       const mismatch = reportMismatch(record, subject, root)
       if (disagreement !== null) problems.push(`unreadable: ${file} — ${disagreement}`)
       else if (mismatch !== null) problems.push(`mismatched: ${file} — report does not match the plan: ${mismatch}`)
-      else resultsOf.get(record.subject).push({ file, record })
+      else {
+        /* Only once the report is known to be of the planned file: the difference
+           at the merge base is derived from that report's own source, so a report
+           of something else would be identified as something else. */
+        const unsupported = await baseDisagreement(record, subject, root)
+        if (unsupported?.why !== undefined) problems.push(`mismatched: ${file} — the merge base's evidence does not support it: ${unsupported.why}`)
+        else {
+          if (unsupported !== null) paired.push(unsupported.paired)
+          resultsOf.get(record.subject).push({ file, record })
+        }
+      }
     }
   }
   for (const [shard, files] of receiptsOf) {
@@ -2619,7 +5170,17 @@ async function aggregateSweep({ manifest, results }, world) {
   } else {
     stdout.write(`check-mutants: every file in ${manifest} has exactly one result, from ${plan.shards} shard(s) that each finished\n`)
   }
-  const outcomes = { killed: [], nothingToKill: [], notRun: [], unkilled: [], timedOut: [], noTestFound: [], staticSurvivors: [] }
+  /* ⚠️ **AND THE PAIRING IS THE SWEEP'S, NOT EACH SHARD'S.** Every shard paired
+     its own subject against its own measurement of the base file, which spends
+     one historical survivor once per shard; this is the only place every subject
+     is in one process, so this is where one pool answers for all of them — see
+     `matchedAcross`. */
+  const { byFile, contested, measurements } = matchedAcross(paired)
+  /* And here above all, because this is the mode where one base file really is
+     measured more than once: shards do not share a process, so two subjects of
+     one origin on two shards are two measurements. See `sayContested`. */
+  stdout.write(sayContested(contested, measurements))
+  const outcomes = { killed: [], nothingToKill: [], notRun: [], unkilled: [], timedOut: [], unresolved: [], noTestFound: [], staticSurvivors: [], base: [] }
   const noMutants = []
   for (const subject of plan.subjects) {
     const found = resultsOf.get(subject.path)
@@ -2637,7 +5198,20 @@ async function aggregateSweep({ manifest, results }, world) {
       stdout.write(sayTimeouts(at, verdict))
       /* Named in both lists where it is both, exactly as a plain sweep names it. */
       if (verdict.repeated.length > 0) outcomes.timedOut.push([at, verdict.repeated])
-      if (verdict.outcome !== 'timed-out') outcomes[SWEPT_AS[verdict.outcome]].push(at)
+      /* Derived here too, and not read off the shard's word, for the reason the
+         comment above gives — and on its own channel, which no authorisation
+         reaches. See `unanswered`. */
+      if (verdict.unresolved.length > 0) outcomes.unresolved.push([at, verdict.unresolved])
+      /* And a survivor the merge base answered for stops being this file's
+         failure here on the same terms a plain sweep applies — over evidence
+         `baseDisagreement` has already derived the answer from again, and over
+         the sweep's own pairing, so the shard's own word for "authorised" is
+         nowhere in this. */
+      const evidence = record.base === null ? null : { ...record.base, ...(byFile.get(subject.path) ?? {}) }
+      if (verdict.outcome !== 'timed-out' && (evidence === null || survivorsStand(evidence))) {
+        outcomes[SWEPT_AS[verdict.outcome]].push(at)
+      }
+      if (evidence !== null) outcomes.base.push([at, evidence])
       for (const place of staticSurvivorsIn(at, [record.report, record.settle === null ? null : record.settle.report])) {
         outcomes.staticSurvivors.push(`${at}:${place}`)
       }
@@ -2739,6 +5313,82 @@ function disagreementOf(result, subject, root) {
   }
   if (result.outcome !== subject.class) return `says ${result.outcome} for a file the plan counted as ${subject.class}`
   return result.mutants === subject.mutants ? null : `counts ${shown(result.mutants)} mutant(s) in a file the plan counted ${subject.mutants} in`
+}
+
+/**
+ * Why a result's merge-base evidence does not support what it records, or `null`
+ * when it does.
+ *
+ * ⚠️ **A SHARD'S WORD FOR "AUTHORISED" IS NOT TAKEN, EXACTLY AS ITS WORD FOR AN
+ * OUTCOME IS NOT** — see `disagreementOf`, which this is the companion of. The
+ * survivors HERE are identified again from the report the result carries; the
+ * survivors AT THE MERGE BASE are identified again from the base's own reports,
+ * which must be reports of the content the PLAN froze out of the merge base's
+ * commit; and the pairing is run again over both.
+ *
+ * ⚠️ **IT MATCHED AGAINST A SUPPLIED LIST UNTIL 2026-09-17, AND A SUPPLIED LIST
+ * IS NOT EVIDENCE.** A result claiming the merge base had nothing to mutate,
+ * with this file's own survivors copied into its `survivors`, exited 0 — no base
+ * measurement, no contradiction, nothing to notice. There is no such list now;
+ * see `survivorsAtBase` for what replaced it and what it is still worth.
+ *
+ * Which files owe evidence is derived too, from the PLAN rather than from the
+ * result's own claim: a run that left a survivor, in a file the plan traced to
+ * the merge base, owes it. What each of the checks below is left to decide is
+ * narrower than it looks, and deliberately so — `resultProblem` has already
+ * refused evidence beside any outcome but `survived`, and `disagreementOf` has
+ * already held that outcome to the result's own report, so a result that reaches
+ * here carrying evidence is one whose run left a survivor.
+ *
+ * Answers `null` where there is nothing to reconcile, `{ why }` where the
+ * evidence does not support the result, and `{ paired }` — both sides' derived
+ * survivors — where it does, for the one pairing that sees the whole sweep.
+ */
+async function baseDisagreement(result, subject, root) {
+  if (subject.origin === null) {
+    return result.base === null ? null : { why: "it carries the merge base's evidence for a file the plan traced to no file at the merge base" }
+  }
+  if (result.outcome !== 'survived') return null
+  if (result.base === null) {
+    return { why: `it leaves the mutants that survived in it with no evidence at all, and the plan traced it to ${subject.origin.path}` }
+  }
+  if (result.base.origin.path !== subject.origin.path || result.base.origin.how !== subject.origin.how) {
+    return {
+      why:
+        `it measured ${result.base.origin.path} (${result.base.origin.how}) at the merge base, and the plan traced this ` +
+        `file to ${subject.origin.path} (${subject.origin.how})`,
+    }
+  }
+  /* A refusal is evidence of its own and there is nothing in it to derive again:
+     it carries no measurement, and `survivorsStand` fails the file on it. */
+  if (result.base.refusal !== null) return null
+  const at = path.join(root, subject.path)
+  const here = survivorsFound(at, subject.path, subject.origin.path, [result.report, result.settle === null ? null : result.settle.report])
+  const { survivors, undecided, problem } = await survivorsAtBase(result.base, {
+    at: path.join(root, subject.origin.path),
+    named: subject.origin.path,
+    frozen: subject.origin.sha256,
+  })
+  if (problem !== undefined) return { why: `its run of ${subject.origin.path} at the merge base ${problem.why}` }
+  const derived = differenceAtBase(survivors, undecided, here)
+  if (derived.authorised !== result.base.authorised) {
+    return {
+      why:
+        `it says the merge base answered for ${result.base.authorised} of the mutants that survived, and its own evidence ` +
+        `answers for ${derived.authorised}`,
+    }
+  }
+  const unlike = addedUnlike(result.base.added, derived.added)
+  if (unlike !== null) return { why: `it says what this change added, and its own evidence says ${unlike}` }
+  return { paired: { at, named: subject.path, origin: subject.origin, here, atBase: survivors, undecided } }
+}
+
+/** How a recorded list of added survivors differs from the derived one, or `null` where it does not. */
+function addedUnlike(recorded, derived) {
+  if (JSON.stringify(recorded) === JSON.stringify(derived)) return null
+  const [first] = derived.filter((one, at) => JSON.stringify(one) !== JSON.stringify(recorded[at]))
+  if (first === undefined) return `${derived.length} survivor(s) were added, against the ${recorded.length} it records`
+  return `${derived.length} were added, the first differing one being ${namedSurvivor(first.identity)} at ${first.file}:${first.at}`
 }
 
 /**
@@ -2926,9 +5576,37 @@ function planProblem(plan) {
     if (subject.identities.length !== subject.mutants) {
       return `${name} counts ${subject.mutants} mutant(s) and names ${subject.identities.length}`
     }
+    const origin = originProblem(subject.origin, name, plan.mergeBase)
+    if (origin !== null) return origin
   }
   return null
 }
+
+/**
+ * What is wrong with the base file a plan says a subject's survivors may answer
+ * to, or `null` when nothing is.
+ *
+ * Two invariants beyond the shape, because each of them decides which base file
+ * a shard will go and MEASURE: a file that is its own origin is its own PATH, and
+ * a plan with no merge base has no origin for anything at all — see
+ * `originsAtBase`.
+ */
+function originProblem(origin, name, mergeBase) {
+  if (origin === null) return null
+  if (!isRecord(origin) || typeof origin.path !== 'string' || origin.path === '' || !TRACED_AS.has(origin.how)) {
+    return `${name} has origin ${shown(origin)}, which is not a base file this gate traces to`
+  }
+  /* The content the merge base's own commit holds there, frozen when the plan was
+     written — what every measurement of that file is then held to having swept,
+     and the reason a shard's evidence is evidence. */
+  if (!isDigest(origin.sha256)) return `${name} has origin.sha256 ${shown(origin.sha256)}, which is not a digest`
+  if (origin.how === 'itself' && origin.path !== name) return `${name} is its own origin at ${origin.path}, which is another file`
+  if (mergeBase === null) return `${name} has an origin at ${origin.path}, and the plan has no merge base for it to be in`
+  return null
+}
+
+/** How a subject reaches the base file that may answer for it — `originAtBase`'s own three answers, one of them being `null`. */
+const TRACED_AS = new Set(['itself', ...Object.values(TRACED)])
 
 /** What is wrong with a result a shard wrote, or `null`. */
 function resultProblem(result) {
@@ -2947,6 +5625,11 @@ function resultProblem(result) {
   const settle = settleProblem(result.settle)
   if (settle !== null) return settle
   if (!swept && result.settle !== null) return `its settle is an object, and ${result.outcome} is no run to settle`
+  const base = baseProblem(result.base)
+  if (base !== null) return base
+  if (result.outcome !== 'survived' && result.base !== null) {
+    return `its base is an object, and ${result.outcome} is no survivor for the merge base to answer for`
+  }
   if (result.stopped !== undefined && (typeof result.stopped !== 'string' || result.stopped === '')) {
     return `its stopped is ${shown(result.stopped)}, which is not a reason`
   }
@@ -2963,11 +5646,20 @@ function resultProblem(result) {
  * rather than read as a sweep that had nothing to settle.
  */
 function settleProblem(settle) {
-  if (settle === null) return null
-  if (!isRecord(settle)) return `its settle is ${shown(settle)}, which is neither a settle run nor null`
-  if (typeof settle.exitedCleanly !== 'boolean') return `its settle.exitedCleanly is ${shown(settle.exitedCleanly)}, which is not an exit`
-  if (!isDuration(settle.durationMs)) return `its settle.durationMs is ${shown(settle.durationMs)}, which is not a duration`
-  if (settle.report !== null && !isRecord(settle.report)) return `its settle.report is ${shown(settle.report)}, which is not a report`
+  return runProblem(settle, 'its ', 'settle')
+}
+
+/**
+ * What is wrong with one Stryker run as a record carries one — an exit, a report
+ * and what it cost — or `null`. `named` is the field it sits at, because a
+ * measurement carries two of them and a result's settle run is the same shape.
+ */
+function runProblem(run, whose, named) {
+  if (run === null) return null
+  if (!isRecord(run)) return `${whose}${named} is ${shown(run)}, which is neither a ${named} run nor null`
+  if (typeof run.exitedCleanly !== 'boolean') return `${whose}${named}.exitedCleanly is ${shown(run.exitedCleanly)}, which is not an exit`
+  if (!isDuration(run.durationMs)) return `${whose}${named}.durationMs is ${shown(run.durationMs)}, which is not a duration`
+  if (run.report !== null && !isRecord(run.report)) return `${whose}${named}.report is ${shown(run.report)}, which is not a report`
   return null
 }
 
@@ -2981,6 +5673,66 @@ function settleProblem(settle) {
 function isDuration(value) {
   return Number.isFinite(value) && value >= 0
 }
+
+/**
+ * What is wrong with the merge base's evidence a result carries, or `null` when
+ * nothing is.
+ *
+ * Every field the aggregate acts on is checked here, once — because a record is a
+ * file on disk and the aggregate's whole answer about a survivor comes out of
+ * this object. A refusal carries no measurement and a measurement carries no
+ * refusal: one record cannot be both, and reading it as either would be reading
+ * an unmeasured base as a measured one.
+ *
+ * ⚠️ **A RESULT FROM BEFORE THIS EXISTED CARRIES NO `base` AT ALL, AND
+ * `undefined` IS NOT `null`.** One would reconcile as a file whose survivors
+ * nobody asked the base about — which is a pass, over a survivor. So a record
+ * that does not say either way is refused here by name.
+ */
+function baseProblem(base) {
+  if (base === undefined) return 'its base is missing, and a result that does not say what the merge base owed cannot be reconciled'
+  if (base === null) return null
+  if (!isRecord(base)) return `its base is ${shown(base)}, which is neither the merge base's evidence nor null`
+  /* Never `null` here, where a plan's may be: evidence exists only for a subject
+     the merge base HAS a file for, and a measurement is of that file. Whether it
+     is the file the PLAN traced is the aggregate's question — see
+     `baseDisagreement`. */
+  const { path: from, how } = isRecord(base.origin) ? base.origin : {}
+  if (typeof from !== 'string' || from === '' || !TRACED_AS.has(how)) {
+    return `its base.origin is ${shown(base.origin)}, which is not a file at the merge base this gate traces to`
+  }
+  if (base.refusal !== null) {
+    if (!isRecord(base.refusal)) return `its base.refusal is ${shown(base.refusal)}, which is neither a refusal nor null`
+    for (const key of ['reason', 'message']) {
+      if (typeof base.refusal[key] !== 'string' || base.refusal[key] === '') {
+        return `its base.refusal.${key} is ${shown(base.refusal[key])}, which is not a reason`
+      }
+    }
+    return null
+  }
+  if (!MEASURED.has(base.outcome)) return `its base.outcome is ${shown(base.outcome)}, which this gate does not measure`
+  if (base.install !== 'linked' && base.install !== 'installed') {
+    return `its base.install is ${shown(base.install)}, which is not how a merge base's dependencies are supplied`
+  }
+  if (!isDuration(base.durationMs)) return `its base.durationMs is ${shown(base.durationMs)}, which is not a duration`
+  if (!isWhole(base.authorised)) return `its base.authorised is ${shown(base.authorised)}, which is not a count`
+  const measured = measuredProblem(base, 'its base.')
+  if (measured !== null) return measured
+  if (!Array.isArray(base.added)) return `its base.added is ${shown(base.added)}, which is not a list`
+  for (const [at, one] of base.added.entries()) {
+    if (!isSurvivor(one) || typeof one.why !== 'string' || one.why === '' || !UNANSWERED.has(one.class)) {
+      return `its base.added ${at + 1} is ${shown(one)}, which is not a survivor the merge base failed to answer for`
+    }
+  }
+  return null
+}
+
+/**
+ * The two ways the merge base can answer for a survivor here with nothing — see
+ * `classed`. A record naming neither says which sentence a reader gets, so it is
+ * refused rather than printed under whichever one a `filter` happens to leave.
+ */
+const UNANSWERED = new Set(['added', 'undecided'])
 
 /** What is wrong with a receipt a shard wrote, or `null`. */
 function receiptProblem(receipt) {
@@ -3000,11 +5752,17 @@ function sharedProblem(record) {
 }
 
 /** Each mode a command line can name, by name; a plain sweep names none. */
-const MODES = { plan: planSweep, shard: shardSweep, aggregate: aggregateSweep }
+const MODES = { plan: planSweep, shard: shardSweep, aggregate: aggregateSweep, measure: measureSweep }
 
 // Stryker disable all: the two things a real sweep does that no test may — start Stryker, and take this checkout's own lock, which a live sweep holds while these very tests run in its sandbox. `run` takes both as parameters, and every decision about either is measured there.
 /**
- * Stryker, run over one generated config: `true` when it exited 0.
+ * Stryker, run over one generated config IN the checkout at `root`: `true` when
+ * it exited 0.
+ *
+ * ⚠️ **WHERE IT RUNS DECIDES WHAT IT SWEEPS.** Stryker copies the project it is
+ * started in into its sandbox and resolves every pattern there, so a sweep of a
+ * checkout other than this process's own runs with that checkout as its
+ * directory. A plain sweep passes `.`, which is where it always ran.
  *
  * ⚠️ **WITH A TEMPORARY DIRECTORY OF ITS OWN, REMOVED WHEN THE RUN ENDS.**
  * Stryker ends a mutant that times out by restarting its test runner — killing
@@ -3013,10 +5771,10 @@ const MODES = { plan: planSweep, shard: shardSweep, aggregate: aggregateSweep }
  * carefully the test cleans up. Every process Stryker starts inherits this
  * directory as its `tmpdir()` instead, and it goes with the run.
  */
-function strykerRun(config) {
+function strykerRun(config, root) {
   const temp = mkdtempSync(path.join(tmpdir(), 'check-mutants-stryker-'))
   try {
-    execFileSync('npx', ['stryker', 'run', config], { stdio: 'inherit', env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp } })
+    execFileSync('npx', ['stryker', 'run', config], { cwd: root, stdio: 'inherit', env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp } })
     return true
   } catch {
     return false
@@ -3490,27 +6248,67 @@ const VERDICTS = new Set([...KILLS, ...SURVIVALS, ...NOT_A_MUTANT, ...NO_SCORE])
  * file, or another file beside it has no score for `subject`.
  */
 export function outcomeOf(subject, exitedCleanly, report) {
-  const files = report === null || typeof report !== 'object' ? undefined : report.files
-  if (files === null || typeof files !== 'object' || Array.isArray(files)) return 'did-not-run'
+  return scoredOutcome(subject, exitedCleanly, report).outcome
+}
+
+/**
+ * WHY a run scored nothing, as a phrase that follows the run — "wrote no report
+ * at all", "did not exit cleanly" — and `null` for a run that scored.
+ *
+ * ⚠️ **`did-not-run` IS SEVEN DIFFERENT FAILURES UNDER ONE WORD, AND EVERY
+ * MESSAGE BUILT ON IT CARRIED NONE OF THEM** (2026-09-17). The two cases beside
+ * each other in `check-mutants.base.test.mjs` — a Stryker that reported on no
+ * file, and one that fell over with a complete report — produced BYTE-IDENTICAL
+ * refusals, and so did a Stryker that died before writing anything. A sweep can
+ * afford that, because its stdout carries Stryker's own error a line above; a
+ * MEASUREMENT AT THE MERGE BASE cannot, because its refusal travels as a VALUE —
+ * into the record the child writes, into the evidence a result carries, and into
+ * an aggregate running in another job with no stdout of that run anywhere near
+ * it. Measured on the acceptance run of 2026-09-17: a base measurement of
+ * `src/kernel/ui/reader/session.ts` came back `did-not-run` in seconds, and
+ * neither the log nor the record could say whether Stryker had died, written a
+ * report of the wrong file, or never been started — three readings, three
+ * evenings, no evidence. The reason is derived HERE, beside the decision that
+ * makes it, rather than by a second reading of the same report somewhere else:
+ * two readings that could drift apart are one defect waiting.
+ */
+export function noScoreOf(subject, exitedCleanly, report) {
+  return scoredOutcome(subject, exitedCleanly, report).why
+}
+
+/** What one run amounted to, and why it amounted to nothing — see `outcomeOf` and `noScoreOf`, which are this answered one field each. */
+function scoredOutcome(subject, exitedCleanly, report) {
+  const scored = (outcome) => ({ outcome, why: null })
+  const nothing = (why) => ({ outcome: 'did-not-run', why })
+  if (report === null || typeof report !== 'object') return nothing('wrote no report at all')
+  const { files } = report
+  if (files === null || typeof files !== 'object' || Array.isArray(files)) {
+    return nothing(`wrote a report whose files are ${shown(files)}`)
+  }
   const names = Object.keys(files)
   /* A report about no file is a run that mutated nothing, whatever its exit —
      and one naming any file but the subject is not a report of this run. */
-  if (names.length !== 1 || path.resolve(names[0]) !== path.resolve(subject)) return 'did-not-run'
+  if (names.length !== 1) return nothing(`wrote a report of ${names.length} file(s), and this gate sweeps one at a time`)
+  if (path.resolve(names[0]) !== path.resolve(subject)) return nothing(`wrote a report of ${names[0]}, and this gate swept ${subject}`)
   const file = files[names[0]]
-  if (file === null || typeof file !== 'object' || !Array.isArray(file.mutants)) return 'did-not-run'
+  if (file === null || typeof file !== 'object' || !Array.isArray(file.mutants)) {
+    return nothing('wrote a report whose one file carries no list of mutants')
+  }
   const statuses = file.mutants.map((mutant) =>
     mutant === null || typeof mutant !== 'object' ? undefined : mutant.status,
   )
-  if (statuses.some((status) => SURVIVALS.has(status))) return 'survived'
-  if (statuses.some((status) => !VERDICTS.has(status))) return 'did-not-run'
-  if (!exitedCleanly) return 'did-not-run'
-  if (statuses.some((status) => KILLS.has(status))) return 'killed'
+  if (statuses.some((status) => SURVIVALS.has(status))) return scored('survived')
+  const unknown = statuses.filter((status) => !VERDICTS.has(status))
+  if (unknown.length > 0) return nothing(`wrote a report carrying ${shown(unknown[0])}, which is no verdict this gate knows`)
+  if (!exitedCleanly) return nothing('did not exit cleanly, and nothing in its report is a survivor or a kill')
+  if (statuses.some((status) => KILLS.has(status))) return scored('killed')
   /* ⚠️ **AND A SUBJECT WITH NOTHING TO KILL CAME BACK `killed`.** No mutant, or
    * every one `Ignored`, passes — the escape hatch above, used as written — but
    * under that name the summary said "every mutant was killed" about a module
    * no test had been tried against. Finding #9, 2026-09-14. It passes as
    * `nothing-to-kill` now, and `run` says so by name. */
-  return statuses.some((status) => NO_SCORE.has(status)) ? 'did-not-run' : 'nothing-to-kill'
+  if (!statuses.some((status) => NO_SCORE.has(status))) return scored('nothing-to-kill')
+  return nothing(`scored none of its ${statuses.length} mutant(s) — every one is Ignored, a CompileError or a RuntimeError`)
 }
 
 /**
@@ -3609,6 +6407,14 @@ function timeoutsIn(entry) {
  * That is a precedence between outcomes and not between findings: a file with
  * both is named in both lists, with both remedies — see `strykerEach`.
  *
+ * ⚠️ **`measured` IS THE SAME ANSWER WITH THE MUTANT-LEVEL HOLES LEFT OUT** —
+ * what the runs made of the FILE, `survived` where either saw a survivor and the
+ * settle run's own outcome otherwise. `outcome` is what a sweep HERE reports,
+ * where a repeat and an unresolved mutant are findings of their own; `measured`
+ * is what the merge base is asked, where they are not the file's failure but one
+ * identity's. See `survivorsAtBase`, which refuses on `measured` and names the
+ * holes by mutant.
+ *
  * A settle run that Stryker scored nothing for is `did-not-run` where it shows
  * no repeat, and `timed-out` where it shows one: both fail, and the repeat is
  * the half a reader can act on. Nothing here can pass on a settle run's silence
@@ -3630,23 +6436,23 @@ export function settledVerdict(subject, first, settle) {
   const { detected, unsettled } = timeoutsIn(entry)
   const ran = outcomeOf(subject, first.exitedCleanly, first.report)
   const counted = { detected: detected.length, unsettled: unsettled.length }
-  if (settle === null) return { ...counted, outcome: ran, repeated: [], answers: null }
-  const answers = answersIn(reportEntryOf(subject, settle.report))
-  const tally = { killed: 0, survived: 0, repeated: 0, unresolved: 0 }
-  const repeated = []
-  for (const mutant of unsettled) {
-    const answer = answers.get(keyOf(mutant))
-    const status = answer === undefined ? undefined : answer.status
-    const again = status === 'Timeout' && timeoutKindOf(answer.statusReason) !== 'hit-limit'
-    if (SURVIVALS.has(status)) tally.survived += 1
-    else if (again) {
-      tally.repeated += 1
-      repeated.push(unrecognised(answer))
-    } else if (KILLS.has(status)) tally.killed += 1
-    else tally.unresolved += 1
+  if (settle === null) {
+    /* Fail-closed: a wall-clock timeout with no settle run at all is a mutant
+       nothing answered for, which is the same hole as one the settle run
+       crashed on. The paragraph above `sayTimeouts` argues such a file is
+       refused before it reaches here; that argument is about the roads known
+       today, and naming them costs one map. */
+    const none = unsettled.map((mutant) => `${placeOf(mutant)} — there was no settle run, so nothing answered for it`)
+    return { ...counted, outcome: ran, measured: ran, repeated: [], unresolved: none, answers: null }
   }
+  const answered = settledEach(unsettled, answersIn(reportEntryOf(subject, settle.report)))
+  const tally = { killed: 0, survived: 0, repeated: 0, unresolved: 0 }
+  for (const { how } of answered) tally[how] += 1
+  const repeated = answered.filter(({ how }) => how === 'repeated').map(({ answer }) => unrecognised(answer))
+  const unresolved = answered.filter(({ how }) => how === 'unresolved').map(({ mutant, answer }) => noVerdictFor(mutant, answer))
   const settled = outcomeOf(subject, settle.exitedCleanly, settle.report)
   const survived = ran === 'survived' || settled === 'survived'
+  const measured = survived ? 'survived' : settled
   const outcome = survived
     ? 'survived'
     : repeated.length > 0
@@ -3654,7 +6460,50 @@ export function settledVerdict(subject, first, settle) {
       : tally.unresolved > 0
         ? 'did-not-run'
         : settled
-  return { ...counted, outcome, repeated, answers: tally, durationMs: settle.durationMs }
+  return { ...counted, outcome, measured, repeated, unresolved, answers: tally, durationMs: settle.durationMs }
+}
+
+/**
+ * How an unresolved timeout is named: the mutant, and which of the two silences
+ * it was.
+ *
+ * ⚠️ **AN UNRESOLVED MUTANT USED TO BE COUNTED AND THEN OUTRANKED** (found by a
+ * second opinion's fifth round, 2026-09-17, and reproduced). `settledVerdict`
+ * collapsed every finding into ONE `outcome`, and `survived` came first in that
+ * chain — so a file with a survivor and an unresolved timeout reported
+ * `survived`, the unresolved count was printed and decided nothing, and the
+ * merge base then authorised the survivor and the file PASSED. Both halves were
+ * needed to hide it, which is why neither alone was caught: the 2026-09-16 fix
+ * above made an unresolved mutant fail only where nothing survived.
+ *
+ * A mutant with no score is not a mutant that was measured, and no answer about
+ * a DIFFERENT mutant can stand in for it. So it travels beside the outcome now
+ * rather than inside it, and it fails the file on its own terms — which base
+ * authorisation cannot reach, because the merge base was never asked about a
+ * mutant this run never scored.
+ */
+function noVerdictFor(mutant, answer) {
+  if (answer === undefined) return `${placeOf(mutant)} — the settle run's report says nothing about it`
+  return `${placeOf(mutant)} — the settle run answered ${JSON.stringify(answer.status)}, which is no verdict`
+}
+
+/**
+ * What the settle run said about each wall-clock timeout the first run left, one
+ * entry each: `survived`, `repeated`, `killed`, or `unresolved` for an answer
+ * that is no verdict at all — the four rows of `settledVerdict`'s own table.
+ *
+ * Shared with `undecidedAtBase`, which needs the MUTANTS rather than a tally: two
+ * readings of one report that could drift apart are one defect waiting, and this
+ * one decides which mutants a base measurement never answered for.
+ */
+function settledEach(unsettled, answers) {
+  return unsettled.map((mutant) => {
+    const answer = answers.get(keyOf(mutant))
+    const status = answer === undefined ? undefined : answer.status
+    if (SURVIVALS.has(status)) return { mutant, answer, how: 'survived' }
+    if (status === 'Timeout' && timeoutKindOf(answer.statusReason) !== 'hit-limit') return { mutant, answer, how: 'repeated' }
+    return { mutant, answer, how: KILLS.has(status) ? 'killed' : 'unresolved' }
+  })
 }
 
 /**

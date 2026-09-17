@@ -18,6 +18,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { loadConfigFromFile } from 'vite'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import { resolveConfig } from 'vitest/node'
@@ -39,8 +40,11 @@ import {
   importsOf,
   loadTestConfig,
   loadViteTestBlock,
+  measureAtBase,
+  identitiesOfSource,
   mutantIdentitiesIn,
   mutantsIn,
+  noScoreOf,
   outcomeOf,
   pathsAt,
   remembered,
@@ -285,6 +289,84 @@ describe('what one Stryker run amounted to', () => {
     expect(config.reporters).toContain('json')
     expect(config.jsonReporter).toEqual({ fileName: REPORT })
   })
+
+  /**
+   * ⚠️ **SEVEN FAILURES WORE ONE WORD, AND EVERY MESSAGE BUILT ON IT CARRIED
+   * NONE OF THEM** (2026-09-17). `did-not-run` is a Stryker that died before
+   * writing anything, one that wrote a report of no file, one that wrote a report
+   * of the WRONG file, one whose report this gate cannot read, one carrying a
+   * status it does not know, one that fell over holding a complete report, and
+   * one that scored none of its mutants. A sweep can afford to say only the word,
+   * because Stryker's own error is a line above it on the terminal; the merge-base
+   * refusal cannot, because it travels as a value into another process and another
+   * job. Each phrase is asserted in its own words here — a shared prefix between
+   * two of them would let a mutant that picks the wrong reading survive.
+   */
+  it('says WHICH reading of a run made it a no-score, in words of that reading’s own', () => {
+    const why = (exitedCleanly, report, subject = SUBJECT) => noScoreOf(subject, exitedCleanly, report)
+
+    expect(why(false, null)).toBe('wrote no report at all')
+    expect(why(true, {})).toBe('wrote a report whose files are missing')
+    expect(why(true, { files: null })).toBe('wrote a report whose files are null')
+    expect(why(true, { files: [] })).toBe('wrote a report whose files are a list')
+    expect(why(true, { files: {} })).toBe('wrote a report of 0 file(s), and this gate sweeps one at a time')
+    expect(why(true, { files: { [SUBJECT]: mutantsOf('Killed'), 'src/y.ts': mutantsOf('Killed') } })).toBe(
+      'wrote a report of 2 file(s), and this gate sweeps one at a time',
+    )
+    expect(why(true, { files: { 'src/y.ts': mutantsOf('Killed') } })).toBe('wrote a report of src/y.ts, and this gate swept src/x.ts')
+    expect(why(true, { files: { [SUBJECT]: null } })).toBe('wrote a report whose one file carries no list of mutants')
+    expect(why(true, { files: { [SUBJECT]: { mutants: 'two of them' } } })).toBe('wrote a report whose one file carries no list of mutants')
+    expect(why(true, reportOf('Killed', 'Bogus'))).toBe('wrote a report carrying "Bogus", which is no verdict this gate knows')
+    expect(why(true, reportOf('Killed', 'Pending'))).toBe('wrote a report carrying "Pending", which is no verdict this gate knows')
+    expect(why(false, reportOf('Killed'))).toBe('did not exit cleanly, and nothing in its report is a survivor or a kill')
+    expect(why(true, reportOf('RuntimeError', 'CompileError'))).toBe(
+      'scored none of its 2 mutant(s) — every one is Ignored, a CompileError or a RuntimeError',
+    )
+  })
+
+  /* The first unreadable status is the one named, because naming a later one
+     would send a reader to a mutant that is not the one that stopped the read. */
+  it('names the first status it could not read, not a later one', () => {
+    expect(noScoreOf(SUBJECT, true, reportOf('Killed', 'Bogus', 'Nonsense'))).toBe(
+      'wrote a report carrying "Bogus", which is no verdict this gate knows',
+    )
+  })
+
+  /* A run that SCORED has no such reason, and answering one for it would put a
+     failure's words on a file that passed. */
+  it('answers nothing at all for a run that scored', () => {
+    expect(noScoreOf(SUBJECT, true, reportOf('Killed'))).toBeNull()
+    expect(noScoreOf(SUBJECT, false, reportOf('Survived'))).toBeNull()
+    expect(noScoreOf(SUBJECT, true, reportOf())).toBeNull()
+    expect(noScoreOf(SUBJECT, true, reportOf('Ignored'))).toBeNull()
+  })
+
+  /* One reading, asked twice: a reason for every run this gate calls a no-score,
+     and none for every run it does not. Two readings of one report that could
+     drift apart are one defect waiting, so they are derived together. */
+  it('answers a reason for exactly the runs it calls a no-score', () => {
+    const reports = [
+      null,
+      {},
+      { files: null },
+      { files: {} },
+      { files: { 'src/y.ts': mutantsOf('Killed') } },
+      { files: { [SUBJECT]: null } },
+      reportOf(),
+      reportOf('Ignored'),
+      reportOf('Killed'),
+      reportOf('Killed', 'Bogus'),
+      reportOf('Survived'),
+      reportOf('RuntimeError'),
+    ]
+
+    for (const report of reports) {
+      for (const exitedCleanly of [true, false]) {
+        const named = noScoreOf(SUBJECT, exitedCleanly, report) !== null
+        expect(named, `${JSON.stringify(report)} exited ${exitedCleanly}`).toBe(outcomeOf(SUBJECT, exitedCleanly, report) === 'did-not-run')
+      }
+    }
+  })
 })
 
 /**
@@ -340,7 +422,27 @@ describe('which kind of timeout a report says a mutant met', () => {
 
     const verdict = settledVerdict('src/x.ts', { exitedCleanly: true, report }, null)
 
-    expect(verdict).toEqual({ detected: 1, unsettled: 2, outcome: 'killed', repeated: [], answers: null })
+    /* `measured` is the same answer with the mutant-level holes left out — see
+       `survivorsAtBase`, which is what asks it. The two readings are one here,
+       because what the runs made of the FILE is a kill either way.
+
+       ⚠️ **AND THE TWO WALL-CLOCK TIMEOUTS ARE STILL HOLES, WITH NO SETTLE RUN
+       TO FILL THEM.** This expectation read `killed` and nothing else until
+       2026-09-17, which said a file with two mutants nothing had decided was a
+       file every mutant of which was killed. A settle run is what answers them;
+       where there is none, nothing has. See `noVerdictFor`. */
+    expect(verdict).toEqual({
+      detected: 1,
+      unsettled: 2,
+      outcome: 'killed',
+      measured: 'killed',
+      repeated: [],
+      unresolved: [
+        '2:3 — there was no settle run, so nothing answered for it',
+        '3:3 — there was no settle run, so nothing answered for it',
+      ],
+      answers: null,
+    })
   })
 
   /* The verdict table in `settledVerdict`, one row at a time. */
@@ -1016,6 +1118,37 @@ describe('the command line of a sharded sweep', () => {
       expect(refusal.message).toBe(words)
     }
     for (const flag of ['plan', 'shards', 'isolate', 'shard', 'manifest', 'results']) {
+      expect(thrownBy(() => argumentsOf([`--${flag}=`]))?.message, flag).toBe(`--${flag} needs a value, and was given an empty one`)
+    }
+  })
+
+  /* ⚠️ **`--measure` IS A MODE AND NOT A SWEEP**: one named path, in this
+     process's own directory, with no scope of its own — so every flag that names
+     a scope is refused to it, as loudly as one handed to a shard. */
+  it('reads a measurement of one named file as a mode of its own, and refuses it every flag about a scope', () => {
+    const NO_SCOPE = ' — a measurement of one named file has no scope of its own'
+    expect(argumentsOf(['--measure', 'src/a.ts', '--into', 'm.json'])).toEqual({
+      mode: 'measure',
+      measure: 'src/a.ts',
+      into: 'm.json',
+    })
+    const cases = [
+      [['--measure', 'src/a.ts'], '--measure needs --into'],
+      [['--into', 'm.json'], '--into is not read by a plain sweep'],
+      [['--measure', 'src/a.ts', '--into', 'm.json', '--base', 'origin/main'], `--base is not read by --measure${NO_SCOPE}`],
+      [['--measure', 'src/a.ts', '--into', 'm.json', '--only', 'x'], `--only is not read by --measure${NO_SCOPE}`],
+      [['--measure', 'src/a.ts', '--into', 'm.json', '--require-base'], `--require-base is not read by --measure${NO_SCOPE}`],
+      [['--measure', 'src/a.ts', '--into', 'm.json', '--manifest', 'm'], '--manifest is not read by --measure'],
+      [['--shard', '1/2', '--manifest', 'm', '--results', 'r', '--into', 'm.json'], '--into is not read by --shard'],
+      [['--plan', 'm', '--shards', '2', '--measure', 'src/a.ts'], '--plan and --measure are two modes, and one run is one of them'],
+    ]
+
+    for (const [argv, words] of cases) {
+      const refusal = thrownBy(() => argumentsOf(argv))
+      expect(refusal, words).toBeInstanceOf(Error)
+      expect(refusal.message).toBe(words)
+    }
+    for (const flag of ['measure', 'into']) {
       expect(thrownBy(() => argumentsOf([`--${flag}=`]))?.message, flag).toBe(`--${flag} needs a value, and was given an empty one`)
     }
   })
@@ -1950,7 +2083,29 @@ describe('what the mutation gate chooses to mutate', () => {
  * `vitest/config`, and `files` beside them.
  */
 function checkout(root, files = {}) {
-  symlinkSync(path.resolve('node_modules'), path.join(root, 'node_modules'))
+  /* ⚠️ **WHERE THE INSTALL IS MUST BE FOUND, NOT ASSUMED — AND TWO WRONG
+     ASSUMPTIONS ABOUT IT EACH LOOKED RIGHT** (2026-09-17, both reproduced).
+
+     It was the bare name `node_modules` handed to `path.resolve`, which resolves
+     such a name against `process.cwd()`. From the repository that is the repository's install; from
+     anywhere else it is a path that does not exist, and the link dangles. That
+     is why a base measurement of a module the GATE imports — `lib/entry.mjs`,
+     `lib/specifiers.mjs` — could never be made: it sweeps this very file inside
+     a Stryker sandbox whose cwd is not the repository, so every case that loads
+     the generated config died with `Cannot find package 'vitest' imported from
+     <scratch>/vitest.mutants.mjs.timestamp-*.mjs`, and the measurement refused.
+
+     ⚠️ **AND `../node_modules` FROM THIS FILE IS NOT THE ANSWER EITHER.**
+     Measured inside a live sandbox rather than assumed: Stryker does NOT link
+     an install into its sandbox when the project's `node_modules` is itself a
+     symbolic link, which is exactly what a base worktree has. The sandbox has
+     none at all, and ordinary imports resolve only because Node walks UP to the
+     worktree's. A fixed relative depth therefore points at nothing.
+
+     So it is SEARCHED for, upwards, which is what Node itself does — and the
+     first one that exists is the one every other import in this process already
+     resolved through. `fileURLToPath`, never `.pathname`: see AGENTS.md. */
+  symlinkSync(installAbove(fileURLToPath(new URL('.', import.meta.url))), path.join(root, 'node_modules'))
   return plant(root, {
     'vitest.config.ts':
       'export default { test: {\n' +
@@ -1995,6 +2150,16 @@ async function sweep(root, { argv = [], subjects = [], tree = [], ...options } =
     },
     worktree: () => ({}),
     tracked: () => [],
+    /* A checkout of its own has no history for git to trace through, so where
+       the merge base is and what each subject came from are both answered as
+       "nothing" here — which is what a NEW file gets, and leaves every survivor
+       standing exactly as it stood before this comparison existed. A case about
+       the merge base gives its own. */
+    mergeBase: () => null,
+    origins: (names) => new Map(names.map((name) => [name, null])),
+    measure: () => {
+      throw new Error('no sweep here should have measured a merge base')
+    },
     clock: ticking(),
     ...options,
   })
@@ -2037,6 +2202,16 @@ const reportFor = (subject, status) => ({ files: { [subject]: { mutants: [{ id: 
  * a real report's `source` hashes to the file's bytes — beside `mutants`.
  */
 const reportWith = (planted, mutants) => ({ files: { [planted]: { source: readFileSync(planted, 'utf8'), mutants } } })
+
+/** A report of `source` under the name `planted`, every mutant of it at `status` — a run of content that is not what is on the disk there, which is what the merge base's own is. */
+const reportOfSource = async (planted, source, status) => ({
+  files: {
+    [planted]: {
+      source,
+      mutants: (await identitiesOfSource(planted, source)).map((identity, id) => ({ id: String(id), static: false, ...identity, status })),
+    },
+  },
+})
 
 /** Where an `Ignored` mutant in a stood-in report sits: nowhere a counted one is. */
 const IGNORED_AT = { mutatorName: 'Ignored', replacement: '', location: { start: { line: 1, column: 1 }, end: { line: 1, column: 1 } } }
@@ -2155,7 +2330,9 @@ describe('a whole sweep, driven with no Stryker', () => {
         '       node scripts/check-mutants.mjs --plan <manifest> --shards <count> [--isolate <heaviest>] [--base <ref>] [--only <substring>] [--require-base]\n' +
         '         (a plan and its shards assume clean checkouts: nothing .gitignore covers is fingerprinted, the install included, so a local run with ignored fixtures present is outside their guarantee)\n' +
         '       node scripts/check-mutants.mjs --shard <index>/<count> --manifest <manifest> --results <dir>\n' +
-        '       node scripts/check-mutants.mjs --aggregate --manifest <manifest> --results <dir>\n',
+        '       node scripts/check-mutants.mjs --aggregate --manifest <manifest> --results <dir>\n' +
+        '       node scripts/check-mutants.mjs --measure <path> --into <file>\n' +
+        '         (what one file owes in the checkout this runs in — how a sweep measures the merge base, in a worktree of its own)\n',
     )
     expect(result.stdout).toBe('')
   })
@@ -2491,7 +2668,8 @@ describe('a whole sweep, driven with no Stryker', () => {
       const result = await sweep(root, { subjects: ['src/a.ts', 'src/b.ts'], tree: ['src/a.ts', 'src/a.test.mjs', 'src/b.ts', 'src/b.test.mjs'], stryker })
 
       expect(result.code).toBe(1)
-      expect(result.stderr).toBe(survivedIn(at['src/a.ts'], at['src/b.ts']) + staticNote(`${at['src/a.ts']}:1:18`))
+      expect(result.stderr).toBe(survivedIn(at['src/a.ts'], at['src/b.ts']))
+      expect(result.stdout).toContain(staticNote(`${at['src/a.ts']}:1:18`))
     })
   })
 
@@ -2609,7 +2787,7 @@ describe('a whole sweep, driven with no Stryker', () => {
       const { a, result, seen } = await settleSweep(root, { first: (planted) => plantedReport(planted, 'Timeout', 'Killed') })
 
       expect(result.code).toBe(1)
-      expect(result.stderr).toBe(notRunIn(RUN_TAIL, a))
+      expect(result.stderr).toBe(notRunIn(RUN_TAIL, a) + unresolvedIn(a, "1:18 — the settle run's report says nothing about it"))
       expect(seen.map(({ settling: again }) => again)).toEqual([false, true])
       expect(result.stdout).not.toContain('every mutant was killed')
     })
@@ -2623,7 +2801,7 @@ describe('a whole sweep, driven with no Stryker', () => {
       })
 
       expect(result.code).toBe(1)
-      expect(result.stderr).toBe(notRunIn(RUN_TAIL, a))
+      expect(result.stderr).toBe(notRunIn(RUN_TAIL, a) + unresolvedIn(a, "1:18 — the settle run's report says nothing about it"))
     })
   })
 
@@ -2709,7 +2887,8 @@ describe('a whole sweep, driven with no Stryker', () => {
       })
 
       expect(result.code).toBe(1)
-      expect(result.stderr).toBe(survivedIn(a) + staticNote(`${a}:1:18`) + staticNote(`${a}:2:18`))
+      expect(result.stderr).toBe(survivedIn(a))
+      expect(result.stdout).toContain(staticNote(`${a}:1:18`, `${a}:2:18`))
     })
   })
 
@@ -3889,10 +4068,910 @@ const notRunIn = (tail, ...files) =>
   tail
 const RUN_TAIL = "  Its own error is above; nothing about these files' tests is known yet.\n"
 
-/** What a sweep adds under its survivors for each one Stryker marks static, at `at`. */
-const staticNote = (at) =>
-  `  static: ${at} — a static mutant that throws while the module is imported is reported Survived by Stryker's vitest runner, because the suite fails to load; verify it by hand, and if it does throw, disable it beside the code with that reason\n`
+/**
+ * And what it adds for each mutant the settle run reached no verdict for. A file
+ * whose settle run scored NOTHING gets both this and `notRunIn`: the second says
+ * the run has no score, and this one says which mutants were left undecided by
+ * it — which is the half that survives a survivor in the same file, where the
+ * file-level outcome becomes `survived` and the no-score is lost. See
+ * `noVerdictFor`.
+ */
+const unresolvedIn = (file, ...places) =>
+  `check-mutants: the settle run reached no verdict for ${places.length} mutant(s) in 1 file(s) — a crash, an OOM-killed runner, or a report that simply does not mention them. A mutant with no score was not measured, and an unmeasured mutant is never a pass.\n` +
+  `  ${file}\n` +
+  '  Re-run the file alone, on a quiet machine, and read the settle run’s log\n' +
+  '  for the runner that died:\n' +
+  `    node scripts/check-mutants.mjs --only ${file}\n` +
+  places.map((at) => `  unresolved: ${file}:${at}\n`).join('')
+
+/**
+ * What a sweep writes for the survivors Stryker marks static — on stdout, beside
+ * the rest of the measurement, and whether the file passes or fails. It used to
+ * sit under the survivors on stderr, which stopped being everywhere it belonged
+ * the moment the merge base could authorise one. See `summarise`.
+ */
+const staticNote = (...ats) =>
+  `check-mutants: ${ats.length} survivor(s) are static, and a static mutant is the one kind this gate cannot read off a report:\n` +
+  ats
+    .map(
+      (at) =>
+        `  static: ${at} — a static mutant that throws while the module is imported is reported Survived by Stryker's vitest runner, because the suite fails to load; verify it by hand, and if it does throw, disable it beside the code with that reason\n`,
+    )
+    .join('')
 const AGGREGATE_TAIL = "  Its own error is in the log of the shard that ran it; nothing about these files' tests is known yet.\n"
+
+/**
+ * ## What a survivor costs, measured against the merge base
+ *
+ * ⚠️ **THE GATE BILLED WHOEVER TOUCHED A FILE FOR WHOEVER WROTE THE DEBT**, and
+ * the owner's verdict was that the repository had become undevelopable: removing
+ * one unused three-line reader from `scripts/lib/ledger.mjs` brought its 389
+ * mutants under the 100 % rule and left 97 unkilled, and fixing one word in a
+ * comment in `scripts/word-snap-live.mjs` left 240. A one-line fix in a large old
+ * file bills the fixer for years of accumulated debt, which argues for not making
+ * the fix. See `dev-docs/adr/0002-mutation-gate-judges-what-a-change-adds.md`.
+ *
+ * So: the file is still mutated WHOLE, and at 100 % nothing else happens. With a
+ * survivor, the same file is measured at the merge base and the two are compared
+ * by identity — and only what the change ADDED fails. Every way that measurement
+ * can fail is a refusal that fails the build, because "could not run" must never
+ * become "it already survived".
+ */
+describe('a survivor measured against the merge base', () => {
+  /** What the merge base holds at each file these cases plant, which is what they hold here too. */
+  const A_SOURCE = "export const a = 'a'\n"
+  const sourceOf = (named) => (named === 'src/b.ts' ? "export const b = 'b'\n" : A_SOURCE)
+  const hashOf = (text) => createHash('sha256').update(text).digest('hex')
+  const A_SHA = hashOf(A_SOURCE)
+  /**
+   * What a base measurement of `named` answers, with whatever `fields` change:
+   * the content it swept and Stryker's own report of sweeping it. The survivors
+   * are DERIVED from those by everything that reads them — a measurement carries
+   * no list of them, because a list beside the evidence is not evidence.
+   */
+  const measuredAt = async (root, named, fields = {}) => ({
+    install: 'linked',
+    outcome: 'survived',
+    durationMs: 900,
+    sha256: hashOf(sourceOf(named)),
+    source: sourceOf(named),
+    first: { exitedCleanly: false, durationMs: 900, report: await reportOfSource(path.join(root, named), sourceOf(named), 'Survived') },
+    settle: null,
+    ...fields,
+  })
+  /** And the same for a merge base that KILLED it: a complete measurement holding no survivor at all. */
+  const killedAt = async (root, named) =>
+    measuredAt(root, named, {
+      outcome: 'killed',
+      first: { exitedCleanly: true, durationMs: 900, report: await reportOfSource(path.join(root, named), sourceOf(named), 'Killed') },
+    })
+  /** Every subject is its own file at the merge base, at the content the merge base holds there. */
+  const itsOwn = (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(sourceOf(name)) }]))
+
+  /** A sweep of one file whose one mutant survived, with the merge base stood in for. */
+  const sweeping = (options) =>
+    inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutatedFile = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutatedFile]: await plantedReport(mutatedFile, 'Survived') },
+        exits: { [mutatedFile]: false },
+      })
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker,
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: (named, _commit, asked) => measuredAt(asked.root, named),
+        ...options,
+      })
+      return { ...result, subject: mutatedFile, root }
+    })
+
+  it('passes a survivor the merge base owed too, and says how many, from where, and what measuring it cost', async () => {
+    const result = await sweeping()
+
+    expect(result.stderr).toBe('')
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain(
+      'check-mutants: 1 file(s) had a mutant survive, so the merge base was measured for what each already owed there:\n' +
+        `  ${result.subject} — 1 of 1 survivor(s) were there too, in itself at the merge base (survived, dependencies linked, 900 ms)\n`,
+    )
+    /* ⚠️ **AND IT NEVER CLAIMS EVERY MUTANT WAS KILLED.** One is alive in that
+       file; the merge base owed it, which is a reason not to bill this change and
+       not a reason to tell a reader the file is clean. */
+    expect(result.stdout).not.toContain('every mutant was killed')
+  })
+
+  /* ⚠️ **AN UNRESOLVED TIMEOUT USED TO LEAVE UNDER A SURVIVOR THE BASE HAD
+     AUTHORISED, AND THE SWEEP PASSED** — found by a second opinion's fifth
+     round, 2026-09-17, and reproduced exactly here. Two findings shared one
+     `outcome`, and `survived` came first in that chain: the unresolved mutant
+     was counted, printed in the timeout line, and then decided nothing, after
+     which the merge base answered for the survivor and no failure was left. It
+     took BOTH halves to hide, which is why the 2026-09-16 fix — which made an
+     unresolved mutant fail where nothing survived — did not catch it.
+
+     A mutant with no score was never measured, and the merge base was never
+     asked about it, so no authorisation can answer for it. It fails on its own
+     channel now; see `noVerdictFor`. */
+  it('fails a mutant the settle run reached no verdict for, though the merge base answered for every survivor', async () =>
+    inScratch('mutants-unresolved-', async (root) => {
+      const source = "export const a = 'a'\nexport const b = 'b'\n"
+      const at = checkout(root, { 'src/a.ts': source, 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived', { status: 'Timeout' }) },
+        settled: { [mutated]: await plantedReport(mutated, 'Survived', { status: 'RuntimeError' }) },
+        exits: { [mutated]: false },
+      })
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker,
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(source) }])),
+        measure: async (named, _commit, asked) => ({
+          install: 'linked',
+          outcome: 'survived',
+          durationMs: 900,
+          sha256: hashOf(source),
+          source,
+          first: { exitedCleanly: false, durationMs: 900, report: await reportOfSource(path.join(asked.root, named), source, 'Survived') },
+          settle: null,
+        }),
+      })
+
+      /* The merge base did answer for the survivor, and that half is unchanged. */
+      expect(result.stdout).toContain('1 of 1 survivor(s) were there too')
+      /* And the file fails anyway, on the mutant nothing scored. */
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('check-mutants: the settle run reached no verdict for 1 mutant(s) in 1 file(s)')
+      expect(result.stderr).toContain(`  unresolved: ${mutated}:2:18 — the settle run answered "RuntimeError", which is no verdict\n`)
+    }))
+
+  /* ⚠️ **A TEST NEITHER SWEEP COULD RUN USED TO BE FREE EVIDENCE TO DELETE** — a
+     second opinion's fifth round, 2026-09-17. A test may read the subject's
+     source AND assert its behaviour; both sweeps leave it out, because Stryker
+     rewrites the file it reads. While it is the same on both sides that costs
+     nothing — the mutant it would kill survives in both, and authorising it is
+     right. Delete it, though, and head loses a real killer while the base still
+     shows the mutant surviving, so the base authorises a survivor THIS CHANGE
+     caused. The base carries what it left out by content now, and a file whose
+     excluded test has moved authorises nothing. */
+  it('authorises nothing when a test the merge base could not run is gone from here', async () => {
+    const result = await sweeping({
+      measure: async (named, _commit, asked) => ({
+        ...(await measuredAt(asked.root, named)),
+        excluded: [{ path: 'src/reads.test.mjs', sha256: 'f'.repeat(64) }],
+      }),
+    })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).toContain('it could not be measured (reading-changed)')
+    expect(result.stdout).toContain("check-mutants: src/reads.test.mjs reads src/a.ts's own source, so neither sweep could run it — and it is gone")
+  })
+
+  /* And the other half, which is what stops the rule above from billing every
+     file that has a reading test at all: one that is still here, unchanged, is
+     the same missing evidence on both sides and authorises exactly as before. */
+  it('authorises as usual when the test the merge base could not run is still here unchanged', async () => {
+    const result = await sweeping({
+      measure: async (named, _commit, asked) => ({
+        ...(await measuredAt(asked.root, named)),
+        excluded: [{ path: 'src/a.test.mjs', sha256: hashOf("import './a'\n") }],
+      }),
+    })
+
+    expect(result.stderr).toBe('')
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('1 of 1 survivor(s) were there too')
+  })
+
+  /* ⚠️ **A FALSE SURVIVOR AT THE BASE HAD BECOME PERMISSION** — a second
+     opinion's fifth round, 2026-09-17. Stryker's vitest runner reports a mutant
+     that throws while the module is IMPORTED as `Survived`, because a suite that
+     fails to load fails no test; this gate has measured that and names three
+     live examples. While every survivor failed a sweep, the error was harmless
+     in the safe direction. Read at the merge base it points the other way: a
+     mutant that may never have run becomes a reason not to bill one here. So it
+     decides nothing, and is named as undecided — see `alsoStatic`. */
+  it('authorises nothing from a base survivor Stryker marks static, because that status may mean the module never loaded', async () => {
+    const result = await sweeping({
+      measure: async (named, _commit, asked) => {
+        const measured = await measuredAt(asked.root, named)
+        const planted = path.join(asked.root, named)
+        const entry = measured.first.report.files[planted]
+        const statics = { ...entry, mutants: entry.mutants.map((one) => ({ ...one, static: true })) }
+        return { ...measured, first: { ...measured.first, report: { files: { [planted]: statics } } } }
+      },
+    })
+
+    expect(result.code).toBe(1)
+    /* Not authorised, and not billed as added either: it is an identity the base
+       could not answer for, which is its own class — see `differenceAtBase`. */
+    expect(result.stdout).toContain('0 of 1 survivor(s) were there too, in itself at the merge base (survived, dependencies linked, 900 ms); 1 the merge base could not decide')
+    expect(result.stderr).toContain('report marks it static')
+  })
+
+  /* ⚠️ **THE BILL FOR A ONE-COMMENT CHANGE WAS TWO, AND BOTH WERE THE
+     ASYMMETRY** — measured 2026-09-17 on the real `session.ts`, head sweeping
+     215 tests and the merge base 527. A mutant a distant test kills at the base,
+     which no near test even runs here, is a survivor here and none there, so it
+     was billed as one the change added. The change was a comment.
+
+     A bill is taken on the narrow run alone no longer: what would be charged is
+     swept again here against the base's own wide set, and that answer REPLACES
+     the narrow one. Here the second run kills it, so nothing is owed. */
+  it('drops a bill the wider set of tests kills here, rather than charging the discovery difference to the change', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const survived = await plantedReport(mutated, 'Survived')
+      const killed = await plantedReport(mutated, 'Killed')
+      /* The narrow run first, then the wide one — which is the only difference
+         between them, and stands in for the tests the near level never runs. */
+      let runs = 0
+      const stryker = async (config) => {
+        const settling = JSON.parse(readFileSync(config, 'utf8')).timeoutFactor !== undefined
+        const report = settling || runs++ === 0 ? survived : killed
+        writeFileSync(path.join(root, REPORT), JSON.stringify(report))
+        return report === killed
+      }
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker,
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        /* The merge base killed it, so the narrow comparison would bill it. */
+        measure: (named, _commit, asked) => killedAt(asked.root, named),
+      })
+
+      expect(result.stderr).toBe('')
+      expect(result.code).toBe(0)
+      /* And the second sweep really happened: three runs is narrow, then wide. */
+      expect(runs).toBe(2)
+    }))
+
+  /* And the property that makes the second run safe to trust at all: it may take
+     a survivor away and may never add one. A second opinion declined to grant
+     that more tests always kill more of THIS runner, naming a configuration in
+     this gate's own history that turned 85 kills into uncovered mutants — so the
+     wide answer is intersected with the narrow one rather than replacing it. The
+     mutant the wide run alone calls a survivor is discarded, not charged. */
+  it('never turns the wider run’s own new survivor into a bill', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const source = "export const a = 'a'\nexport const b = 'b'\n"
+      const at = checkout(root, { 'src/a.ts': source, 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const narrow = await plantedReport(mutated, 'Survived', 'Killed')
+      const wide = await plantedReport(mutated, 'Killed', 'Survived')
+      let runs = 0
+      const stryker = async (config) => {
+        const settling = JSON.parse(readFileSync(config, 'utf8')).timeoutFactor !== undefined
+        const report = settling || runs++ === 0 ? narrow : wide
+        writeFileSync(path.join(root, REPORT), JSON.stringify(report))
+        return false
+      }
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker,
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(source) }])),
+        /* The merge base killed both, so the narrow survivor would be billed. */
+        measure: async (named, _commit, asked) => ({
+          install: 'linked',
+          outcome: 'killed',
+          durationMs: 900,
+          sha256: hashOf(source),
+          source,
+          first: { exitedCleanly: true, durationMs: 900, report: await reportOfSource(path.join(asked.root, named), source, 'Killed') },
+          settle: null,
+        }),
+      })
+
+      expect(result.stderr).toBe('')
+      expect(result.code).toBe(0)
+      expect(runs).toBe(2)
+    }))
+
+  /* ⚠️ **AND THE WIDENED SWEEP SETTLES ITS OWN TIMEOUTS, THOUGH IT COSTS A
+     SECOND PASS.** Going without was tried and reverted the same day: it saves a
+     30-minute sweep and pays for it by keeping a charge on any mutant the wide
+     run merely ran out of clock on — and a wall-clock timeout is usually LOAD,
+     which this gate has measured at 58 timeouts busy against 0 quiet in one
+     file. That is the false bill this whole path exists to remove, arriving on
+     the machines least able to argue with it. Three runs, and the charge goes. */
+  it('settles the widened sweep’s own timeouts, so a mutant the clock beat still discharges its charge', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const survived = await plantedReport(mutated, 'Survived')
+      /* No `statusReason`, so a wall-clock timeout: no verdict on its own. */
+      const timedOut = await plantedReport(mutated, { status: 'Timeout' })
+      const killed = await plantedReport(mutated, 'Killed')
+      let runs = 0
+      const stryker = async (config) => {
+        const settling = JSON.parse(readFileSync(config, 'utf8')).timeoutFactor !== undefined
+        const report = settling ? killed : runs === 0 ? survived : timedOut
+        runs += 1
+        writeFileSync(path.join(root, REPORT), JSON.stringify(report))
+        return report === killed
+      }
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker,
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        /* The merge base killed it, so the narrow comparison bills it. */
+        measure: (named, _commit, asked) => killedAt(asked.root, named),
+      })
+
+      /* The narrow run, the widened one, and the widened one's settle pass. */
+      expect(runs).toBe(3)
+      /* And the settle run's kill is what discharges the charge. */
+      expect(result.stderr).toBe('')
+      expect(result.code).toBe(0)
+    }))
+
+  /* ⚠️ **AND A SECOND WIDE PASS IS NOT ALWAYS AFFORDABLE.** It costs a whole
+     sweep of the file again: measured on `session.ts`, 31 minutes against a
+     12-minute narrow run. On this gate's own heaviest subject — itself, at an
+     estimated 204 minutes for one plain pass — starting a second one unbounded
+     is how a 210-minute CI step ends with no answer at all, which is worse than
+     the answer it was trying to correct. The file's own sweep is what a second
+     one would cost, so that is what is spent against the budget; refusing leaves
+     the NARROW bill standing, which is the safe direction, and says so. */
+  it('spends no second sweep on a file whose own sweep was already too long, and names the bill as the narrow one', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived') },
+        exits: { [mutated]: false },
+      })
+      let runs = 0
+      /* Every reading is 21 minutes past the last, so the one sweep this file
+         gets is already over the budget a second one would need. */
+      let now = 0
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: (config) => {
+          runs += 1
+          return stryker(config)
+        },
+        clock: () => (now += 21 * 60_000),
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: (named, _commit, asked) => killedAt(asked.root, named),
+      })
+
+      /* The narrow sweep, and no second one. */
+      expect(runs).toBe(1)
+      expect(result.code).toBe(1)
+      expect(result.stdout).toContain('past the 20 this gate will spend again')
+      expect(result.stdout).toContain('can only ever bill MORE than the wider set would')
+    }))
+
+  it('fails a survivor the merge base did not owe, naming what was mutated and why nothing there answers for it', async () => {
+    const result = await sweeping({ measure: (named, _commit, { root }) => killedAt(root, named) })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).toContain(
+      `  ${result.subject} — 0 of 1 survivor(s) were there too, in itself at the merge base (killed, dependencies linked, 900 ms); 1 this change added\n`,
+    )
+    expect(result.stderr).toContain('check-mutants: a mutant survived in 1 file(s) — a test that cannot fail is not a test.\n')
+    expect(result.stderr).toContain(
+      '  added: src/a.ts:1:18 — StringLiteral replacing "\'a\'" with "\\"\\"" in the file itself — ' +
+        'the merge base has no survivor with this identity in src/a.ts\n',
+    )
+  })
+
+  /* ⚠️ **A SURVIVOR OF THE SAME SHAPE IN OTHER CODE IS NOT THE SAME SURVIVOR.**
+     The identity carries the text that was mutated, because Stryker gives
+     `return "old"` and `return "new"` one replacement — so without it a line the
+     change REWROTE would inherit the debt of the line it replaced. */
+  it('fails a survivor whose mutated text is not the text the merge base had', async () => {
+    /* The merge base's own content, which is where the difference lives: its one
+       survivor is a mutant of `'was'`, and nothing here mutated that. */
+    const wasThere = "export const a = 'was'\n"
+    const held = createHash('sha256').update(wasThere).digest('hex')
+
+    const result = await sweeping({
+      origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: held }])),
+      measure: async (named, _commit, { root }) => ({
+        ...(await measuredAt(root, named)),
+        sha256: held,
+        source: wasThere,
+        first: { exitedCleanly: false, durationMs: 900, report: await reportOfSource(path.join(root, named), wasThere, 'Survived') },
+      }),
+    })
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain('  added: src/a.ts:1:18 — StringLiteral replacing "\'a\'"')
+  })
+
+  /* ⚠️ **A FAILURE TO MEASURE IS NEVER PERMISSION.** The refusal here is the real
+     one: a merge base this checkout does not have, which is exactly what a
+     shallow clone gives — and the honest answer to it is to fetch the base, never
+     to read the silence as a survivor that was already there. */
+  it('fails a file whose merge base cannot be measured at all, in the refusal’s own words', async () => {
+    const missing = 'c'.repeat(40)
+
+    const result = await sweeping({ mergeBase: () => missing, measure: measureAtBase })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).toContain(
+      `  ${result.subject} — it could not be measured (no-commit), so nothing here is authorised — check-mutants: the merge base ${missing} is not in this checkout`,
+    )
+    expect(result.stderr).toContain(
+      'check-mutants: the merge base could not be measured for 1 file(s), so nothing authorises the mutants that survived in them — ' +
+        'a failure to measure is never permission, and "could not run" is never "it already survived":\n' +
+        `  ${result.subject} — no-commit: check-mutants: the merge base ${missing} is not in this checkout`,
+    )
+  })
+
+  /* ⚠️ **A DEFECT IN THE MEASUREMENT IS NOT EVIDENCE OF ANYTHING.** Only a
+     refusal — a named way the merge base could not be measured — becomes
+     evidence; anything else is a broken gate, and a broken gate that reported
+     "could not measure" would be indistinguishable from a shallow clone. */
+  it('lets a failure that is not a refusal out, rather than recording it as a merge base it could not measure', async () => {
+    const broke = await sweeping({
+      measure: () => {
+        throw new Error('the measurement broke')
+      },
+    }).then(
+      () => null,
+      (cause) => cause,
+    )
+
+    expect(broke).toBeInstanceOf(Error)
+    expect(broke.message).toBe('the measurement broke')
+  })
+
+  /* A file the merge base has no origin for is NEW, and a new file owes all of
+     its own: nothing is measured, and it fails exactly as it did before any of
+     this existed. */
+  it('measures nothing for a file the merge base has no origin for, and fails it as it always did', async () => {
+    const result = await sweeping({
+      origins: (names) => new Map(names.map((name) => [name, null])),
+      measure: () => {
+        throw new Error('a new file owes all of its own, and has nothing at the merge base to ask')
+      },
+    })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).not.toContain('the merge base was measured')
+    expect(result.stderr).toBe(
+      'check-mutants: a mutant survived in 1 file(s) — a test that cannot fail is not a test.\n' +
+        `  ${result.subject}\n` +
+        '  Kill it by asserting the behaviour the mutation changed, or, if the\n' +
+        '  mutation is genuinely equivalent, say so beside the code:\n' +
+        '    // Stryker disable next-line <mutator>: <why it cannot be observed>\n',
+    )
+  })
+
+  /* ⚠️ **AND A NAME THE ORIGINS ANSWER NOTHING FOR IS A NAME WITH NO ORIGIN** —
+     fail-closed, rather than a measurement of `undefined`. */
+  it('treats a subject the origins hold no answer for as a file with none', async () => {
+    const result = await sweeping({
+      origins: () => new Map(),
+      measure: () => {
+        throw new Error('there is no base file to measure')
+      },
+    })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).not.toContain('the merge base was measured')
+  })
+
+  /**
+   * ⚠️ **ONE HISTORICAL SURVIVOR WAS SPENT ONCE PER SUBJECT** (review,
+   * 2026-09-17). The pairing is one subject's, because a shard sees one subject —
+   * so a change that copies a file into two, both traced to one origin, had that
+   * origin's single survivor authorise both. Here they are in one process, and
+   * still each was judged alone.
+   *
+   * The sweep's own pairing is made over every subject at once, with one pool per
+   * base file: one of the two copies takes the survivor and the other owes it,
+   * so the one historical occurrence is spent once however many copies ask.
+   */
+  it('spends one survivor at the merge base once over the whole sweep, not once per file copied from it', async () => {
+    await inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, {
+        'src/one.ts': A_SOURCE,
+        'src/one.test.mjs': "import './one'\n",
+        'src/two.ts': A_SOURCE,
+        'src/two.test.mjs': "import './two'\n",
+      })
+      const { stryker } = strykerStandIn(root, {
+        reports: {
+          [at['src/one.ts']]: await plantedReport(at['src/one.ts'], 'Survived'),
+          [at['src/two.ts']]: await plantedReport(at['src/two.ts'], 'Survived'),
+        },
+        exits: { [at['src/one.ts']]: false, [at['src/two.ts']]: false },
+      })
+      const asked = []
+
+      const result = await sweep(root, {
+        subjects: ['src/one.ts', 'src/two.ts'],
+        tree: Object.keys(at),
+        stryker,
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: 'src/a.ts', how: 'copied', sha256: A_SHA }])),
+        measure: (named, _commit, world) => {
+          asked.push(named)
+          return measuredAt(world.root, named)
+        },
+      })
+
+      expect(result.code).toBe(1)
+      /* ⚠️ **AND THE MERGE BASE IS MEASURED ONCE PER BASE FILE**, not once per
+         subject: the second subject asks the same question of the same commit,
+         and asking it twice costs a second worktree and a second install — and
+         then invites the two answers to differ. */
+      expect(asked).toEqual(['src/a.ts'])
+      const spent = 'the merge base has 1 survivor(s) with this identity in src/a.ts, and each of them answers for another survivor here'
+      expect(result.stderr).toContain(`  added: src/two.ts:1:18 — StringLiteral replacing "'a'" with "\\"\\"" in the file itself — ${spent}\n`)
+      expect(result.stderr).not.toContain('  added: src/one.ts:')
+      expect(result.stdout).toContain(`  ${at['src/one.ts']} — 1 of 1 survivor(s) were there too`)
+      expect(result.stdout).toContain(`  ${at['src/two.ts']} — 0 of 1 survivor(s) were there too`)
+    })
+  })
+
+  it('measures the file the merge base traced it to, not the file it is now', async () => {
+    const asked = []
+
+    const result = await sweeping({
+      origins: (names) => new Map(names.map((name) => [name, { path: 'src/old.ts', how: 'renamed', sha256: A_SHA }])),
+      measure: (named, commit, { root }) => {
+        asked.push([named, commit])
+        /* Reported under the name the plan traced this file TO, which is the file
+           the merge base has and not the one this checkout holds. */
+        return measuredAt(root, named)
+      },
+    })
+
+    expect(asked).toEqual([['src/old.ts', BASE]])
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('1 of 1 survivor(s) were there too, in src/old.ts, which it was renamed from')
+  })
+
+  /* ⚠️ **A TREE AT 100 % MUST ASK GIT NOTHING MORE THAN IT USED TO.** Both
+     questions cost a git process, and the rename detection is a whole-repository
+     diff with no limit — a real cost to pay on every sweep that has nothing to
+     authorise. */
+  it('asks neither where the merge base is nor what anything came from when every mutant was killed', async () => {
+    await inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutatedFile = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, { reports: { [mutatedFile]: await plantedReport(mutatedFile, 'Killed') } })
+      const refuse = (what) => () => {
+        throw new Error(`a sweep with nothing to authorise asked ${what}`)
+      }
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker,
+        mergeBase: refuse('where the merge base is'),
+        origins: refuse('what each subject came from'),
+        measure: refuse('for a measurement'),
+      })
+
+      expect(result.code).toBe(0)
+      expect(result.stdout).toContain('check-mutants: every mutant was killed\n')
+    })
+  })
+
+  /* ⚠️ **"EVERY MUTANT WAS KILLED" OVER AN AUTHORISED SURVIVOR IS THE ONE
+     SENTENCE A READER WOULD TAKE AT FACE VALUE.** A file that passed because the
+     merge base owed its survivor has a mutant alive in it, and the sweep's own
+     summary must not say otherwise — even where every OTHER file was clean. */
+  it('does not claim every mutant was killed when a file passed only on what the merge base owed', async () => {
+    await inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, {
+        'src/a.ts': "export const a = 'a'\n",
+        'src/a.test.mjs': "import './a'\n",
+        'src/b.ts': "export const b = 'b'\n",
+        'src/b.test.mjs': "import './b'\n",
+      })
+      const { stryker } = strykerStandIn(root, {
+        reports: {
+          [at['src/a.ts']]: await plantedReport(at['src/a.ts'], 'Killed'),
+          [at['src/b.ts']]: await plantedReport(at['src/b.ts'], 'Survived'),
+        },
+        exits: { [at['src/b.ts']]: false },
+      })
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts', 'src/b.ts'],
+        tree: Object.keys(at),
+        stryker,
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: (named, _commit, asked) => measuredAt(asked.root, named),
+      })
+
+      expect(result.stderr).toBe('')
+      expect(result.code).toBe(0)
+      expect(result.stdout).toContain('check-mutants: 1 file(s) had a mutant survive')
+      expect(result.stdout).not.toContain('every mutant was killed')
+    })
+  })
+
+  it('asks where the merge base is once, however many files have survivors', async () => {
+    await inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, {
+        'src/a.ts': "export const a = 'a'\n",
+        'src/a.test.mjs': "import './a'\n",
+        'src/b.ts': "export const b = 'b'\n",
+        'src/b.test.mjs': "import './b'\n",
+      })
+      const { stryker } = strykerStandIn(root, {
+        reports: {
+          [at['src/a.ts']]: await plantedReport(at['src/a.ts'], 'Survived'),
+          [at['src/b.ts']]: await plantedReport(at['src/b.ts'], 'Survived'),
+        },
+        exits: { [at['src/a.ts']]: false, [at['src/b.ts']]: false },
+      })
+      let asked = 0
+      let traced = 0
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts', 'src/b.ts'],
+        tree: Object.keys(at),
+        stryker,
+        mergeBase: () => (asked += 1) && BASE,
+        origins: (names) => {
+          traced += 1
+          return itsOwn(names)
+        },
+        measure: (named, _commit, asked) => measuredAt(asked.root, named),
+      })
+
+      expect([asked, traced]).toEqual([1, 1])
+      expect(result.stderr).toBe('')
+      expect(result.code).toBe(0)
+      expect(result.stdout).toContain('check-mutants: 2 file(s) had a mutant survive')
+      /* One file to a line: run together, two files' accounts read as one
+         sentence about neither. */
+      expect(result.stdout).toContain(
+        `  ${at['src/a.ts']} — 1 of 1 survivor(s) were there too, in itself at the merge base (survived, dependencies linked, 900 ms)\n` +
+          `  ${at['src/b.ts']} — 1 of 1 survivor(s) were there too, in itself at the merge base (survived, dependencies linked, 900 ms)\n`,
+      )
+    })
+  })
+
+  /* ⚠️ **WHAT A CHANGE IS BILLED FOR IS NAMED ONE SURVIVOR TO A LINE**, so that
+     a reader is not left diffing two survivor lists by eye — and two names run
+     together are two survivors nobody can find. */
+  it('names every survivor the merge base did not answer for, one to a line', async () => {
+    await inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, {
+        'src/a.ts': "export const a = 'a'\n",
+        'src/a.test.mjs': "import './a'\n",
+        'src/b.ts': "export const b = 'b'\n",
+        'src/b.test.mjs': "import './b'\n",
+      })
+      const { stryker } = strykerStandIn(root, {
+        reports: {
+          [at['src/a.ts']]: await plantedReport(at['src/a.ts'], 'Survived'),
+          [at['src/b.ts']]: await plantedReport(at['src/b.ts'], 'Survived'),
+        },
+        exits: { [at['src/a.ts']]: false, [at['src/b.ts']]: false },
+      })
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts', 'src/b.ts'],
+        tree: Object.keys(at),
+        stryker,
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: (named, _commit, asked) => killedAt(asked.root, named),
+      })
+
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain(
+        '  added: src/a.ts:1:18 — StringLiteral replacing "\'a\'" with "\\"\\"" in the file itself — ' +
+          'the merge base has no survivor with this identity in src/a.ts\n' +
+          '  added: src/b.ts:1:18 — StringLiteral replacing "\'b\'" with "\\"\\"" in the file itself — ' +
+          'the merge base has no survivor with this identity in src/b.ts\n',
+      )
+    })
+  })
+
+  /**
+   * ## The two sentences, side by side
+   *
+   * ⚠️ **A MUTANT THE MERGE BASE COULD NOT DECIDE IS NOT ONE THIS CHANGE ADDED,
+   * AND UNTIL 2026-09-17 IT REFUSED THE WHOLE FILE.** Measured on an isolated
+   * 4-vCPU runner with real history: one comment added to a 1 403-mutant file left
+   * 545 mutants unkilled here, and the merge base — which ran fine — left five
+   * wall-clock timeouts its settle run met again. The file-wide refusal made the
+   * 540 it had decided perfectly well worthless, and billed a comment for all of
+   * them.
+   *
+   * Both classes fail the build and neither authorises anything. What differs is
+   * what a reader is told: one says the change added a gap, the other says the
+   * merge base never answered for this mutant and it is now theirs to settle.
+   */
+  it('bills a survivor the merge base could not decide as the reader’s to settle, and authorises the ones it did', async () => {
+    await inScratch('mutants-owed-', async (root) => {
+      const both = "export const a = 'a'\nexport const b = 'b'\n"
+      const at = checkout(root, { 'src/a.ts': both, 'src/a.test.mjs': "import './a'\n" })
+      const mutatedFile = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutatedFile]: await plantedReport(mutatedFile, 'Survived', 'Survived') },
+        exits: { [mutatedFile]: false },
+      })
+      /* The merge base held the same two mutants: it answered for the first with
+         a survivor, and met the second's wall-clock timeout again in its settle
+         run — which is the shape the acceptance run measured. */
+      const ran = async (statuses) => ({
+        files: {
+          [mutatedFile]: {
+            source: both,
+            mutants: (await identitiesOfSource(mutatedFile, both)).map((identity, id) => ({
+              id: String(id),
+              static: false,
+              ...identity,
+              status: statuses[id],
+            })),
+          },
+        },
+      })
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: Object.keys(at),
+        stryker,
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(both) }])),
+        measure: async () => ({
+          install: 'linked',
+          outcome: 'survived',
+          durationMs: 900,
+          sha256: hashOf(both),
+          source: both,
+          first: { exitedCleanly: false, durationMs: 600, report: await ran(['Survived', 'Timeout']) },
+          settle: { exitedCleanly: false, durationMs: 300, report: await ran(['Survived', 'Timeout']) },
+        }),
+      })
+
+      expect(result.code).toBe(1)
+      expect(result.stdout).toContain(
+        `  ${mutatedFile} — 1 of 2 survivor(s) were there too, in itself at the merge base (survived, dependencies linked, ` +
+          '900 ms); 1 the merge base could not decide\n',
+      )
+      /* The second sentence, in full — and no `added:` line, because nothing here
+         is answered for by the merge base's own survivors.
+
+         ⚠️ **IT SAID "this change did not add them" UNTIL 2026-09-17**, which the
+         evidence does not support: a merge base that never answered for a mutant
+         says nothing either way about who added it. What IS known is that nothing
+         authorises it. */
+      expect(result.stderr).toContain(
+        'check-mutants: the merge base could not decide 1 mutant(s) that survived here — it never answered for them, so ' +
+          'whether this change added them is not something this run can say, and a mutant the merge base never answered ' +
+          'for is not one it authorises; they are yours to settle:\n' +
+          '  undecided: src/a.ts:2:18 — StringLiteral replacing "\'b\'" with "\\"\\"" in the file itself — the merge base ' +
+          'could not decide this mutant in src/a.ts: its settle run met the same wall-clock timeout again at 2:18\n',
+      )
+      expect(result.stderr).not.toContain('  added:')
+    })
+  })
+
+  /* And every file whose merge base could not be measured is named the same way:
+     the refusals are different questions for the reader — one per file — and
+     glued together they read as one. */
+  it('names every file whose merge base could not be measured, one to a line', async () => {
+    await inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, {
+        'src/a.ts': "export const a = 'a'\n",
+        'src/a.test.mjs': "import './a'\n",
+        'src/b.ts': "export const b = 'b'\n",
+        'src/b.test.mjs': "import './b'\n",
+      })
+      const { stryker } = strykerStandIn(root, {
+        reports: {
+          [at['src/a.ts']]: await plantedReport(at['src/a.ts'], 'Survived'),
+          [at['src/b.ts']]: await plantedReport(at['src/b.ts'], 'Survived'),
+        },
+        exits: { [at['src/a.ts']]: false, [at['src/b.ts']]: false },
+      })
+      const missing = 'c'.repeat(40)
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts', 'src/b.ts'],
+        tree: Object.keys(at),
+        stryker,
+        mergeBase: () => missing,
+        origins: itsOwn,
+        measure: measureAtBase,
+      })
+
+      expect(result.code).toBe(1)
+      expect(result.stderr).toMatch(
+        /\n {2}\S*src\/a\.ts — no-commit: check-mutants: [^\n]+\n {2}\S*src\/b\.ts — no-commit: check-mutants: /u,
+      )
+    })
+  })
+
+  /* ⚠️ **A SURVIVOR ONLY THE SETTLE RUN FOUND IS STILL MEASURED AGAINST THE
+     MERGE BASE.** The first run here left the mutant timed out and the second
+     answered it with a survivor: counted from the first report alone the file has
+     nothing alive in it, so everything the merge base owed would go unclaimed and
+     the sweep would report a comparison of nothing against nothing. */
+  it('measures a survivor only the settle run found against the merge base, like any other', async () => {
+    await inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutatedFile = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutatedFile]: await plantedReport(mutatedFile, 'Timeout') },
+        exits: { [mutatedFile]: false },
+        settled: { [mutatedFile]: await plantedReport(mutatedFile, 'Survived') },
+        settleExits: { [mutatedFile]: false },
+      })
+
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: Object.keys(at),
+        stryker,
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: (named, _commit, asked) => measuredAt(asked.root, named),
+      })
+
+      expect(result.code).toBe(0)
+      expect(result.stdout).toContain(`  ${mutatedFile} — 1 of 1 survivor(s) were there too, in itself at the merge base`)
+    })
+  })
+
+  /* The base ref a sweep was given, and whether one is required, reach the
+     question about where the merge base IS — not only the question about which
+     files changed. A sweep told `--base origin/trunk` that resolved its merge
+     base against `main` would compare against another commit entirely, and the
+     numbers it printed would be about a comparison nobody asked for. */
+  it('asks where the merge base is with the base ref it was given, and whether one is required', async () => {
+    const asked = []
+
+    const result = await sweeping({
+      argv: ['--base', 'origin/trunk', '--require-base'],
+      mergeBase: (...args) => {
+        asked.push(args)
+        return BASE
+      },
+    })
+
+    expect(result.code).toBe(0)
+    expect(asked).toEqual([['origin/trunk', true, result.root]])
+  })
+
+  /* `--require-base` is what CI passes, and a base it cannot resolve there means
+     the comparison would be made against nothing. Refused in the words
+     `changedFiles` refuses it with, and with a refusal's exit. */
+  it('refuses a base it cannot resolve when one is required, rather than measuring against nothing', async () => {
+    const words = 'check-mutants: cannot resolve a merge base with "origin/main"'
+
+    const result = await sweeping({
+      mergeBase: () => {
+        throw new Error(words)
+      },
+    })
+
+    expect(result.code).toBe(2)
+    expect(result.stderr).toBe(`${words}\n`)
+  })
+})
 
 /**
  * ⚠️ **ONE RUNNER COULD NOT HOLD THIS SWEEP, AND THE JOB THAT TRIED HAD NEVER
@@ -3910,19 +4989,38 @@ describe('a sweep planned once, swept in shards and reconciled by an aggregate',
       const manifest = path.join(root, 'plan', 'plan.json')
       const again = path.join(root, 'plan', 'again.json')
       const argv = (file) => ['--plan', file, '--shards', '3', '--isolate', '1', '--base', 'origin/main', '--require-base']
+      /* ⚠️ **THE PLAN IS THE CONTRACT, SO THE BASE FILE EACH SUBJECT MAY BE
+         ANSWERED BY IS FROZEN IN IT** — a shard re-resolving it would decide its
+         own scope from its own checkout, minutes later. Git is asked ONCE, here,
+         at the merge base the plan records. */
+      const tracedAt = []
+      /* Each origin carries the content the merge base's own commit holds there —
+         frozen here, and what every measurement of it is later held to. */
+      const held = createHash('sha256').update('what the merge base held').digest('hex')
+      const origins = (names, mergeBase) => {
+        tracedAt.push(mergeBase)
+        return new Map(
+          names.map((name) => [
+            name,
+            name === 'src/b.ts' ? { path: 'src/moved.ts', how: 'renamed', sha256: held } : { path: name, how: 'itself', sha256: held },
+          ]),
+        )
+      }
 
-      const first = await sweep(root, { argv: argv(manifest), subjects: PLANNED, tree: PLANNED_TREE, commits: commitsAt() })
+      const first = await sweep(root, { argv: argv(manifest), subjects: PLANNED, tree: PLANNED_TREE, commits: commitsAt(), origins })
       const second = await sweep(root, {
         argv: argv(again),
         subjects: [...PLANNED].reverse(),
         tree: [...PLANNED_TREE].reverse(),
         commits: commitsAt(),
+        origins,
       })
 
       expect(first.stderr).toBe('')
       expect(first.code).toBe(0)
       expect(second.code).toBe(0)
       expect(first.asked).toEqual([['origin/main', true]])
+      expect(tracedAt).toEqual([BASE, BASE])
       const digest = expect.stringMatching(/^[0-9a-f]{64}$/u)
       expect(readJson(manifest)).toEqual({
         version: 1,
@@ -3935,22 +5033,23 @@ describe('a sweep planned once, swept in shards and reconciled by an aggregate',
         shards: 3,
         isolate: 1,
         subjects: [
-          { path: 'src/a.ts', sha256: sha(files['src/a.ts']), class: 'mutated', mutants: 1, identities: [literalAt(1)], shard: 2, tests: ['src/a.test.mjs'], testsDigest: digest, leftOut: [], through: [] },
-          { path: 'src/b.ts', sha256: sha(files['src/b.ts']), class: 'mutated', mutants: 2, identities: [literalAt(1), literalAt(2)], shard: 1, tests: ['src/c.test.mjs'], testsDigest: digest, leftOut: [], through: ['src/c.ts'] },
-          { path: 'src/n.ts', sha256: sha(files['src/n.ts']), class: 'no-test-found', mutants: 1, identities: [literalAt(1)], shard: 2, tests: [], testsDigest: digest, leftOut: [], through: [] },
+          { path: 'src/a.ts', sha256: sha(files['src/a.ts']), class: 'mutated', mutants: 1, identities: [literalAt(1)], origin: { path: 'src/a.ts', how: 'itself', sha256: held }, shard: 2, tests: ['src/a.test.mjs'], testsDigest: digest, leftOut: [], through: [] },
+          { path: 'src/b.ts', sha256: sha(files['src/b.ts']), class: 'mutated', mutants: 2, identities: [literalAt(1), literalAt(2)], origin: { path: 'src/moved.ts', how: 'renamed', sha256: held }, shard: 1, tests: ['src/c.test.mjs'], testsDigest: digest, leftOut: [], through: ['src/c.ts'] },
+          { path: 'src/n.ts', sha256: sha(files['src/n.ts']), class: 'no-test-found', mutants: 1, identities: [literalAt(1)], origin: { path: 'src/n.ts', how: 'itself', sha256: held }, shard: 2, tests: [], testsDigest: digest, leftOut: [], through: [] },
           {
             path: 'src/r.ts',
             sha256: sha(files['src/r.ts']),
             class: 'mutated',
             mutants: 1,
             identities: [literalAt(1)],
+            origin: { path: 'src/r.ts', how: 'itself', sha256: held },
             shard: 3,
             tests: ['src/r.behaviour.test.mjs', 'src/r.more.test.mjs'],
             testsDigest: digest,
             leftOut: ['src/r.test.mjs'],
             through: [],
           },
-          { path: 'src/z.ts', sha256: sha(files['src/z.ts']), class: 'no-mutants', mutants: 0, identities: [], shard: 2, tests: [], testsDigest: digest, leftOut: [], through: [] },
+          { path: 'src/z.ts', sha256: sha(files['src/z.ts']), class: 'no-mutants', mutants: 0, identities: [], origin: { path: 'src/z.ts', how: 'itself', sha256: held }, shard: 2, tests: [], testsDigest: digest, leftOut: [], through: [] },
         ],
       })
       expect(readFileSync(again, 'utf8')).toBe(readFileSync(manifest, 'utf8'))
@@ -4455,6 +5554,9 @@ describe('a sweep planned once, swept in shards and reconciled by an aggregate',
         durationMs: 250,
         report: first,
         settle: { exitedCleanly: true, report: answered, durationMs: 250 },
+        /* The settle run answered the timeout with a kill, so nothing survived
+           and the merge base was never asked. */
+        base: null,
       })
       expect(shard.stdout).toContain(settledIn(a, { killed: 1 }))
       expect(aggregate.code).toBe(0)
@@ -5294,6 +6396,9 @@ describe('a sweep planned once, swept in shards and reconciled by an aggregate',
         sha256: sha(files[subject]),
         durationMs: 250,
         settle: null,
+        /* Nothing the merge base was asked about: this plan traces no subject to
+           a file there, so `src/a.ts`'s survivor is the change's own. */
+        base: null,
         ...fields,
       })
       expect(readJson(resultIn(results, 2, 'src/a.ts'))).toEqual(result(2, 'src/a.ts', { outcome: 'survived', exitedCleanly: false, mutants: 1, report: survived }))
@@ -5431,12 +6536,9 @@ describe('a sweep planned once, swept in shards and reconciled by an aggregate',
       const result = await aggregateOf(root, manifest)
 
       expect(result.code).toBe(1)
-      expect(result.stdout).toBe(reconciled(manifest, 3) + noMutantIn(files['src/z.ts']))
+      expect(result.stdout).toBe(reconciled(manifest, 3) + noMutantIn(files['src/z.ts']) + staticNote(`${files['src/a.ts']}:1:18`))
       expect(result.stderr).toBe(
-        noTestFoundFor([files['src/n.ts'], 1]) +
-          notRunIn(AGGREGATE_TAIL, files['src/b.ts']) +
-          survivedIn(files['src/a.ts']) +
-          staticNote(`${files['src/a.ts']}:1:18`),
+        noTestFoundFor([files['src/n.ts'], 1]) + notRunIn(AGGREGATE_TAIL, files['src/b.ts']) + survivedIn(files['src/a.ts']),
       )
     })
   })
@@ -5943,3 +7045,15 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
     expect(shards).toBeGreaterThan(isolate)
   })
 })
+
+/**
+ * The nearest `node_modules` at or above `from`, which is the one Node resolves
+ * this file's own imports through. Searched rather than assumed: see `checkout`.
+ */
+function installAbove(from) {
+  for (let dir = from; ; dir = path.dirname(dir)) {
+    const at = path.join(dir, 'node_modules')
+    if (existsSync(at)) return at
+    if (path.dirname(dir) === dir) throw new Error(`no node_modules at or above ${from}`)
+  }
+}
