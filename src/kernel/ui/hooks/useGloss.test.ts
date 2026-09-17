@@ -61,13 +61,20 @@ function selectionOf(
 function spyProvider(): {
   provider: GlossProvider
   seen: { term: string; context: GlossContext }[]
+  /** How many times the hook asked it to get ready — see `GlossProvider.warm`. */
+  warmed: () => number
 } {
   const seen: { term: string; context: GlossContext }[] = []
+  let warmed = 0
   return {
     seen,
+    warmed: () => warmed,
     provider: {
       available: true,
       installAt: MODELS,
+      warm() {
+        warmed += 1
+      },
       async gloss(term, context) {
         seen.push({ term, context })
         return 'a definition'
@@ -392,6 +399,7 @@ describe('the handler itself', () => {
 describe('with no model installed', () => {
   const nothing: GlossProvider = {
     available: false,
+    warm() {},
     /* TRUE, because the case worth pinning is the desktop one: `inference` is
        composed, the Local models pane exists, and only the download is
        missing.
@@ -490,6 +498,7 @@ describe('with no model installed', () => {
     let signalled: AbortSignal | null = null
     let answer = (_text: string): void => {}
     const provider: GlossProvider = {
+      warm() {},
       get available() {
         return live.available
       },
@@ -549,6 +558,7 @@ describe('with a passage rather than a term', () => {
   const model: GlossProvider = {
     available: true,
     installAt: MODELS,
+    warm() {},
     async gloss() {
       throw new Error('a passage must not reach the provider')
     },
@@ -590,6 +600,7 @@ describe('with a passage rather than a term', () => {
     const nothingInstalled: GlossProvider = {
       available: false,
       installAt: MODELS,
+      warm() {},
       async gloss() {
         throw new Error('unreachable')
       },
@@ -643,6 +654,7 @@ describe('with a passage rather than a term', () => {
     const slow: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       gloss: (_term, _context, signal) => {
         signalled = signal
         return new Promise<string>((resolve) => {
@@ -683,6 +695,7 @@ describe('what an unavailable press records about installing', () => {
     return {
       available: false,
       installAt,
+      warm() {},
       async gloss() {
         throw new Error('unreachable')
       },
@@ -705,6 +718,7 @@ describe('what an unavailable press records about installing', () => {
   it('reads it at the press, not at the render that drew the button', () => {
     const live: { available: boolean; installAt: string | null } = { available: true, installAt: MODELS }
     const provider: GlossProvider = {
+      warm() {},
       get available() {
         return live.available
       },
@@ -745,6 +759,7 @@ describe('when a model arrives', () => {
           return live.available
         },
         installAt: MODELS,
+        warm() {},
         gloss,
       },
     }
@@ -811,10 +826,57 @@ describe('when a model arrives', () => {
  * foliate — the same argument that put `lookUpPress` and `askGloss` in files of
  * their own.
  */
+/*
+ * ⚠️ **THE FIRST LOOKUP OF A SESSION WAS THE SLOW ONE**, because nothing bound
+ * the runtime until a gloss was asked for: the first ask paid for a process, an
+ * accelerator probe and a model load with the reader watching an empty popover,
+ * and every later one was quick. One gesture, two very different waits.
+ *
+ * A selection is the earliest honest signal that a lookup MIGHT be coming, and
+ * it costs nothing for a reader who never selects. See `GlossProvider.warm`.
+ */
+describe('getting the runtime ready before anything is asked of it', () => {
+  it('asks the provider to get ready as soon as there is a selection to look up', () => {
+    const { provider, warmed } = spyProvider()
+
+    const initial: { at: string | null } = { at: null }
+    const { rerender } = renderHook(({ at }: { at: string | null }) => useGloss(provider, at), { initialProps: initial })
+    /* Nothing selected is nothing to get ready for. */
+    expect(warmed()).toBe(0)
+
+    rerender({ at: 'book-1|3|ch3.xhtml' })
+
+    expect(warmed()).toBe(1)
+  })
+
+  /* Warming a provider that cannot define anything would start a daemon to
+     answer a question it has no model for — and `available` is the field that
+     knows. */
+  it('gets nothing ready when nothing could define anything', () => {
+    let warmed = 0
+    const none: GlossProvider = {
+      available: false,
+      installAt: MODELS,
+      warm() {
+        warmed += 1
+      },
+      async gloss() {
+        throw new Error('nothing defines here')
+      },
+    }
+
+    renderHook(() => useGloss(none, 'book-1|3|ch3.xhtml'))
+
+    expect(warmed).toBe(0)
+  })
+})
+
 describe('when the passage stops being shown', () => {
   const model: GlossProvider = {
     available: true,
     installAt: MODELS,
+    /* An anchor is what asks for one — see the warm case below. */
+    warm() {},
     async gloss() {
       return 'a meeting between whaling ships'
     },
@@ -860,6 +922,7 @@ describe('when the passage stops being shown', () => {
     const slow: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       gloss(_term, _context, signal) {
         signalled = signal
         return new Promise<string>(() => {})
@@ -903,6 +966,7 @@ describe('when the passage stops being shown', () => {
     const slow: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       gloss(_term, _context, signal) {
         signalled = signal
         return new Promise<string>(() => {})
@@ -938,6 +1002,7 @@ describe('a lookup the reader has moved on from', () => {
       provider: {
         available: true,
         installAt: MODELS,
+        warm() {},
         gloss: (_term, _context, signal) =>
           new Promise<string>((resolve) => {
             calls.push({ signal, answer: resolve })
@@ -965,6 +1030,7 @@ describe('a lookup the reader has moved on from', () => {
     const aborting: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       gloss: (_term, _context, signal) =>
         new Promise<string>((_resolve, reject) => {
           signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
@@ -1025,6 +1091,7 @@ describe('a lookup the reader has moved on from', () => {
     const answering: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       async gloss(_term, _context, signal) {
         signals.push(signal)
         return 'A meeting between whaling ships.'
@@ -1055,6 +1122,7 @@ describe('a lookup the reader has moved on from', () => {
     const first: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       async gloss() {
         return 'from the first render'
       },
@@ -1062,6 +1130,7 @@ describe('a lookup the reader has moved on from', () => {
     const latest: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       async gloss() {
         return 'from the latest render'
       },
@@ -1178,6 +1247,7 @@ describe('an answered lookup', () => {
   const answering = (text = 'A meeting between whaling ships.'): GlossProvider => ({
     available: true,
     installAt: MODELS,
+    warm() {},
     async gloss() {
       return text
     },
@@ -1205,6 +1275,7 @@ describe('an answered lookup', () => {
     const failing: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       async gloss() {
         throw new Error('The runtime stopped')
       },
@@ -1226,6 +1297,7 @@ describe('an answered lookup', () => {
     const bare: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       gloss: () => Promise.reject({ kind: 'stopped' }),
     }
     const { result } = renderHook(() => useGloss(bare))
@@ -1245,6 +1317,7 @@ describe('an answered lookup', () => {
     const slow: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       gloss: () =>
         new Promise<string>((resolve) => {
           answer = resolve
@@ -1309,6 +1382,7 @@ describe('an answered lookup', () => {
     const provider: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       async gloss(_term, context) {
         seen.push(context)
         return 'x'
@@ -1336,6 +1410,7 @@ describe('an answered lookup', () => {
     const nothing: GlossProvider = {
       available: false,
       installAt: MODELS,
+      warm() {},
       async gloss() {
         throw new Error('unreachable')
       },
@@ -1363,6 +1438,7 @@ describe('a lookup that throws instead of rejecting', () => {
   const answering: GlossProvider = {
     available: true,
     installAt: MODELS,
+    warm() {},
     async gloss() {
       return 'Guarded.'
     },
@@ -1373,6 +1449,7 @@ describe('a lookup that throws instead of rejecting', () => {
     const slow: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       gloss(_term, _context, signal) {
         signalled = signal
         return new Promise<string>(() => {})
@@ -1418,6 +1495,7 @@ describe('a lookup that throws instead of rejecting', () => {
     const throwing: GlossProvider = {
       available: true,
       installAt: MODELS,
+      warm() {},
       gloss() {
         throw new Error('the runtime is gone')
       },

@@ -1015,3 +1015,68 @@ describe('audit-fix round 1 — the cache key', () => {
     )
   })
 })
+
+/*
+ * ⚠️ **THE FIRST LOOKUP OF A SESSION PAID FOR THE RUNTIME.** `gloss` races
+ * `controller.start()` against the reader's abort precisely because that start
+ * "can take seconds" — a process bound, accelerators probed, a model loaded —
+ * and every lookup after it is quick, because the daemon is shared. So the
+ * reader met one slow lookup and then a fast feature, with nothing saying why.
+ * `warm` moves that cost off the first ask; see `GlossProvider.warm`.
+ */
+describe('getting the runtime ready before anything is asked of it', () => {
+  it('starts the runtime, without asking it anything', async () => {
+    let started = 0
+    const controller = {
+      textModel: () => 'qwen',
+      start: async () => {
+        started += 1
+      },
+    } as unknown as Controller
+    const plugin = { gloss: vi.fn(), cancel: vi.fn(async () => {}) } as unknown as InferencePlugin
+
+    createGlossProvider({ plugin, controller, installAt: MODELS }).warm()
+    await Promise.resolve()
+
+    expect(started).toBe(1)
+    /* And nothing was generated: warming is not a question. */
+    expect(plugin.gloss).not.toHaveBeenCalled()
+  })
+
+  /* A build with no model has nothing to start, and starting a daemon that
+     cannot answer would spend a reader's battery on a selection. */
+  it('starts nothing when no model is installed', async () => {
+    let started = 0
+    const controller = {
+      textModel: () => null,
+      start: async () => {
+        started += 1
+      },
+    } as unknown as Controller
+    const plugin = { gloss: vi.fn(), cancel: vi.fn(async () => {}) } as unknown as InferencePlugin
+
+    createGlossProvider({ plugin, controller, installAt: MODELS }).warm()
+    await Promise.resolve()
+
+    expect(started).toBe(0)
+  })
+
+  /* ⚠️ **AND IT HAS NOBODY TO TELL.** The reader has selected a word and asked
+     for nothing, so a failure here must not reach them — the real `gloss` takes
+     the same road and reports its own failure in their words. A rejection that
+     escaped would be an unhandled rejection in a React effect. */
+  it('says nothing and throws nothing when the runtime will not start', async () => {
+    const controller = {
+      textModel: () => 'qwen',
+      start: async () => {
+        throw new Error('the runtime is not installed')
+      },
+    } as unknown as Controller
+    const plugin = { gloss: vi.fn(), cancel: vi.fn(async () => {}) } as unknown as InferencePlugin
+
+    const provider = createGlossProvider({ plugin, controller, installAt: MODELS })
+
+    expect(() => provider.warm()).not.toThrow()
+    await expect(Promise.resolve()).resolves.toBeUndefined()
+  })
+})

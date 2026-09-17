@@ -58,6 +58,9 @@ function answering(text = 'Structures along a shore where ships dock.') {
   const provider: GlossProvider = {
     available: true,
     installAt: 'inference:models',
+    /* A selection asks the runtime to get ready — see `GlossProvider.warm`.
+       Nothing here measures it; it is the port's, so it is answered. */
+    warm() {},
     async gloss(term, context) {
       seen.push({ term, context })
       return text

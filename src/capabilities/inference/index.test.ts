@@ -838,7 +838,7 @@ describe('starting and stopping the capability', () => {
     const stop = vi.spyOn(inferencePlugin, 'stop').mockResolvedValue(undefined)
     try {
       const taken = createKernelServices({ fs: null, storage: null, initialBooks: [] })
-      taken.bindGloss({ available: false, installAt: null, gloss: () => Promise.reject(new Error('never asked')) })
+      taken.bindGloss({ available: false, installAt: null, warm: () => {}, gloss: () => Promise.reject(new Error('never asked')) })
       const cleanups: (() => void)[] = []
       expect(
         () =>

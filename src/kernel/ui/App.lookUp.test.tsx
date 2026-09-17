@@ -94,6 +94,7 @@ const CFI = 'epubcfi(/6/4!/4/2,/1:8,/1:15)'
 const UNINSTALLED: GlossProvider = {
   available: false,
   installAt: 'inference:models',
+  warm() {},
   gloss: () => Promise.reject(new Error('nothing is installed to define with')),
 }
 
@@ -308,7 +309,7 @@ describe('the answer', () => {
   it('asks in the reader’s language, then in the one chosen in Settings, and files each answer under the open book', async () => {
     vi.spyOn(window.navigator, 'language', 'get').mockReturnValue('fr-FR')
     const gloss = vi.fn((_term: string, _context: GlossContext, _signal: AbortSignal) => Promise.resolve(DEFINITION))
-    const { services, bookId } = await readingMoby({ available: true, installAt: null, gloss })
+    const { services, bookId } = await readingMoby({ available: true, installAt: null, warm: () => {}, gloss })
     accel('2')
     await settle()
     await selectIshmael()
@@ -354,7 +355,7 @@ describe('the answer', () => {
       /* The port's own default: no model, and nowhere to get one. */
       [undefined, false],
       [UNINSTALLED, true],
-      [{ available: true, installAt: null, gloss: () => Promise.resolve(DEFINITION) }, true],
+      [{ available: true, installAt: null, warm: () => {}, gloss: () => Promise.resolve(DEFINITION) }, true],
     ]
     for (const [gloss, offered] of cases) {
       await readingNothing(gloss)

@@ -68,7 +68,7 @@ describe('the companion, gloss and work-line ports', () => {
 
   it('binds a gloss and restores it on dispose', async () => {
     const services = servicesWith(spyRecorder().recorder)
-    const provider: GlossProvider = { available: true, installAt: 'inference:models', gloss: async () => 'a meaning' }
+    const provider: GlossProvider = { available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => 'a meaning' }
     const unbind = services.bindGloss(provider)
     expect(services.gloss().available).toBe(true)
     await expect(services.gloss().gloss('w', { sentence: 's', bookTitle: 'X', answerIn: [{ tag: 'en', name: 'English', label: 'English' }] }, new AbortController().signal)).resolves.toBe('a meaning')
@@ -120,8 +120,8 @@ describe('the companion, gloss and work-line ports', () => {
     const services = servicesWith(spyRecorder().recorder)
     services.bindCompanion(fake('one'))
     expect(() => services.bindCompanion(fake('two'))).toThrow(/already bound/)
-    services.bindGloss({ available: true, installAt: 'inference:models', gloss: async () => 'x' })
-    expect(() => services.bindGloss({ available: true, installAt: 'inference:models', gloss: async () => 'y' })).toThrow(/already bound/)
+    services.bindGloss({ available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => 'x' })
+    expect(() => services.bindGloss({ available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => 'y' })).toThrow(/already bound/)
     services.bindWorkLine({ line: () => null, subscribe: () => () => {} })
     expect(() => services.bindWorkLine({ line: () => null, subscribe: () => () => {} })).toThrow(/already bound/)
   })

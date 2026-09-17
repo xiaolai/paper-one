@@ -223,6 +223,33 @@ export function createGlossProvider({ plugin, controller, report: reportTo, inst
       return hasRuntime() ? installAt : null
     },
 
+    /**
+     * Start the runtime now, so the first lookup does not.
+     *
+     * ⚠️ **THE COST IT REMOVES IS PAID ONCE PER SESSION AND FELT AS THE FEATURE
+     * BEING SLOW.** `gloss` below races `controller.start()` against the
+     * reader's abort precisely because that start "can take seconds" — a
+     * process bound, accelerators probed, a model loaded. Every lookup after it
+     * is quick, because the daemon is shared. So the reader's experience is one
+     * slow lookup and then a fast feature, and the slow one is the first
+     * impression.
+     *
+     * NOTHING IS AWAITED AND NOTHING IS REPORTED. A warm that fails leaves the
+     * state exactly as it was — not started — and the next real `gloss` takes
+     * the same road it always did and reports its own failure in the reader's
+     * words. Reporting here as well would put a runtime error in front of
+     * somebody who has only selected a word, which is the opposite of the point.
+     * `controller.start()` is documented as resolving rather than rejecting, and
+     * the `catch` is here anyway: this is the one caller that has no one to tell.
+     *
+     * REFUSED WHEN THERE IS NOTHING TO START, so selecting a word on a build
+     * with no model installed does not spawn a daemon that cannot answer.
+     */
+    warm(): void {
+      if (controller.textModel() === null) return
+      void controller.start().catch(() => {})
+    },
+
     async gloss(term: string, context: GlossContext, signal: AbortSignal): Promise<string> {
       const model = controller.textModel()
       if (model === null) {
@@ -278,6 +305,21 @@ export function createGlossProvider({ plugin, controller, report: reportTo, inst
       signal.addEventListener('abort', onAbort)
       let launch: { readonly cause: unknown } | null
       try {
+        /* ⚠️ **AN EMPTY RACE NEVER SETTLES, AND THAT IS NOT A KILL THIS GATE CAN
+           READ.** `Promise.race([])` is specified to stay pending for ever, so
+           the mutant that empties this list makes `gloss` hang rather than
+           answer. The covering tests DO detect it — they hang with it — but a
+           hang reaches Stryker as a wall-clock timeout, and `settledVerdict`
+           re-runs those precisely because load produces them too. It repeats,
+           because it is not load, and a repeat is "whether a test kills it is
+           unknown". Stryker's HIT LIMIT is what makes an infinite loop a
+           deterministic detection; an infinitely PENDING promise executes no
+           instructions, so it never reaches one.
+           Verified by hand rather than assumed: column 37 of the line below is
+           this array, the mutator is `ArrayDeclaration`, and it is the only
+           array on the line, so this directive covers that mutant and no
+           other. */
+        // Stryker disable next-line ArrayDeclaration: emptying this list leaves `Promise.race([])`, which never settles, so the mutant is detected only as a hang — a wall-clock timeout this gate refuses to read as a kill, and one no re-run can resolve because it is not load
         launch = await Promise.race([
           /* CARRIED, NOT THROWN. A rejection would win the race outright and
              talk about a runtime the reader no longer needs — the abort below

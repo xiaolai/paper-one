@@ -254,6 +254,29 @@ export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): G
     dismiss()
   }, [anchor, dismiss])
 
+  /*
+   * ⚠️ **THE FIRST LOOKUP OF A SESSION WAS SLOW AND EVERY LATER ONE WAS NOT**,
+   * which reads as a feature that is sometimes broken rather than a runtime
+   * that has to start. Nothing bound the daemon until a gloss was asked for, so
+   * the first ask paid for the process, the accelerator probe and the model
+   * load with the reader watching an empty popover — see `GlossProvider.warm`.
+   *
+   * AN ANCHOR IS THE EARLIEST HONEST SIGNAL. It is non-null exactly when the
+   * reader has a selection, which is a beat or two before they can press Look
+   * up, and it costs nothing at all for a reader who never selects — the
+   * library, a phone, a browser client, or somebody who only ever marks
+   * passages. Warming at book open would start a daemon for all of them.
+   *
+   * IT IS NOT A REQUEST, so there is nothing to abort, nothing to await and
+   * nothing to put in `state`: `warm` returns void and swallows its own
+   * failure. A reader who selects a word and never looks it up has started a
+   * daemon and that is all — the same one their next lookup would have started.
+   */
+  useEffect(() => {
+    if (anchor === null || !provider.available) return
+    provider.warm()
+  }, [anchor, provider])
+
   const ask = useCallback(
     (request: () => GlossRequest, fallbackTerm: string, context: AskGlossContext) => {
       /* NOT A TERM, AND SAID SO. `lookUpPress` used to hold this bound and

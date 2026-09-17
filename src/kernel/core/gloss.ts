@@ -133,6 +133,29 @@ export interface GlossProvider {
    */
   readonly installAt: string | null
   /**
+   * Get ready to define, without defining anything.
+   *
+   * ⚠️ **THE FIRST LOOKUP OF A SESSION PAID FOR THE RUNTIME, AND THE READER
+   * PAID IT STANDING STILL.** Nothing started the daemon before a gloss was
+   * asked for, so the first ask bound a process, probed accelerators and loaded
+   * a model before a single token was generated — `glossProvider`'s own words
+   * are *"a cold start can take seconds"* — while a popover sat empty beside a
+   * word. Every later lookup was quick, because the daemon is shared. One
+   * gesture, two very different waits, and nothing in the UI said why.
+   *
+   * VOID, NOT A PROMISE, and that is the whole shape of it: there is nothing to
+   * wait for and nothing to fail. A caller that could await it would be a
+   * caller that could block a reader on it, which is the thing being fixed. It
+   * must never throw and never reject — a warm that fails changes nothing about
+   * what the reader sees, because the real ask reports its own failure in their
+   * words, and reporting it twice would put a runtime error in front of someone
+   * who has not asked for anything yet.
+   *
+   * Idempotent, and cheap to call again: the implementation starts a daemon
+   * only when one is not already up.
+   */
+  warm(): void
+  /**
    * Define `term` as it is used in `context`.
    *
    * A PROMISE, not a generator, and that is a decision rather than an
@@ -168,6 +191,11 @@ export interface GlossProvider {
 export const NO_GLOSS: GlossProvider = {
   available: false,
   installAt: null,
+  /* Nothing to warm: there is no runtime behind this and never will be, which
+     is what `available: false` says. It is written out rather than left off
+     because the port requires it, and a caller warming whatever it was handed
+     must not have to ask which kind it got. */
+  warm() {},
   async gloss() {
     throw new Error('No gloss provider is bound. Check `available` before calling gloss().')
   },
