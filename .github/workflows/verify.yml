@@ -178,6 +178,31 @@ jobs:
   # private one's standard runner has 2, which doubles the arithmetic. Stryker
   # prints "Creating N test runner process(es)" in every shard's log: read it on
   # the first run before trusting the bound.
+  #
+  # ⚠️ AND THE ARITHMETIC ABOVE IS FOR ONE SWEEP PER FILE, WHICH STOPPED BEING
+  # WHAT A SWEEP COSTS. Since the merge-base comparison, a file's cost depends on
+  # whether a mutant survived in it:
+  #
+  #   no survivor          one sweep. The common path, and unchanged.
+  #   a survivor           + the merge base measured, which sweeps the file
+  #                        against EVERY test that reaches it rather than the
+  #                        nearest level — wider, so dearer than the sweep here.
+  #                        Measured 2026-09-17: session.ts 35 min quiet, 62 min
+  #                        loaded; wordSnap/flatten.ts 37 min. Capped per file by
+  #                        BASE_DEADLINE_MS (90 min), and taken ONCE per base
+  #                        file however many subjects trace to it.
+  #   a charge to take     + the subject swept again here against that wider set,
+  #                        which is refused outright when its own sweep already
+  #                        cost more than WIDEN_BUDGET_MS (20 min), so this one
+  #                        cannot double the heaviest file.
+  #
+  # So the bound below is no longer an estimate of the whole job on a branch that
+  # FAILS: one heavy file with survivors can spend most of a 210-minute step by
+  # itself. That is deliberate — every expensive path belongs to a build that was
+  # already going to be red — but it means a red branch can time out instead of
+  # reporting, which is a worse red. Re-derive from the first CI run that
+  # measures a base: every result records `durationMs`, and the aggregate prints
+  # what each base measurement cost.
   mutants-plan:
     name: mutants (plan)
     if: github.event_name == 'pull_request'
