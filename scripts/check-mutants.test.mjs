@@ -4,6 +4,7 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -795,25 +796,44 @@ describe('one sweep per checkout', () => {
 
   /* ⚠️ **A DESCRIPTOR THE HOLDER READ AND NEVER GAVE BACK IS A SWEEP THAT STOPS
      AFTER A FEW HUNDRED REFUSALS**, and nothing about the refusal itself would
-     look wrong until then. Counted rather than waited for: what the process has
-     open is on show in `/dev/fd`. */
+     look wrong until then. Found rather than waited for: what the process has
+     open is on show in `/dev/fd`.
+
+     ⚠️ **ONLY THE LOCK'S OWN DESCRIPTORS ARE LOOKED FOR, NOT THE PROCESS'S
+     COUNT** (2026-09-18). A worker thread shares its process's table — and
+     Stryker runs every test in one — so counting every descriptor read the other
+     threads' files opening and closing: in one thread, after the rest of the
+     suite, this saw 30 where it expected 33 and failed a dry run for a leak that
+     was not there. A descriptor is the lock's when it is the same file, device
+     and inode, which nothing else in the process can be. */
   it('gives back the descriptor it read the holder through, whether it takes the lock or is refused by it', (context) => {
     if (WINDOWS) return context.skip(WINDOWS_CANNOT.countDescriptors)
     inScratch('mutants-lock-', (root) => {
       const lock = path.join(root, 'check-mutants.lock')
-      const open = () => readdirSync('/dev/fd').length
+      /** The descriptors this process holds on the file `file` was, found by what they are rather than by how many there are. */
+      const openOn = (file) =>
+        readdirSync('/dev/fd').filter((name) => {
+          try {
+            const at = fstatSync(Number(name))
+            return at.dev === file.dev && at.ino === file.ino
+          } catch {
+            // closed between the listing and the look, which makes it nobody's
+            return false
+          }
+        })
       writeFileSync(lock, `${UNSIGNALLABLE}\n`)
       expect(thrownBy(() => process.kill(UNSIGNALLABLE, 0))?.code, `this case needs a user that may not signal pid ${UNSIGNALLABLE}`).toBe('EPERM')
+      const held = statSync(lock)
 
-      const before = open()
       for (let at = 0; at < 20; at += 1) expect(thrownBy(() => acquireLock(lock, 7))).toBeInstanceOf(Error)
-      const afterRefusals = open()
+      const afterRefusals = openOn(held)
       rmSync(lock)
       const release = acquireLock(lock, 7)
+      const taken = statSync(lock)
       release()
 
-      expect(afterRefusals, 'a descriptor was left open by every refusal').toBe(before)
-      expect(open(), 'a descriptor was left open by taking and releasing the lock').toBe(before)
+      expect(afterRefusals, 'a descriptor was left open by every refusal').toEqual([])
+      expect(openOn(taken), 'a descriptor was left open by taking and releasing the lock').toEqual([])
     })
   })
 
