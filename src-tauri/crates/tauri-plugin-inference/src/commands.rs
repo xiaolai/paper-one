@@ -293,9 +293,9 @@ pub async fn inference_probe<R: Runtime>(
     routes.push(probe::agent_route(&codex));
     routes.push(probe::agent_route(&claude));
 
-    /* Every one of them unusable — see `UnusableReason::NotConnected`. The
-    list reads the keychain once per endpoint, so it goes through the blocking
-    seam like every other store call (WI-20.20). */
+    /* Each one usable when its key and model name are in place — see
+    `probe::endpoint_route`. The list reads the keychain once per endpoint, so
+    it goes through the blocking seam like every other store call (WI-20.20). */
     for endpoint in state.on_store(&app, |store| store.list()).await? {
         routes.push(probe::endpoint_route(&endpoint));
     }

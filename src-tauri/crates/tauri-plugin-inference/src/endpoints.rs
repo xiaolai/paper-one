@@ -1,7 +1,8 @@
 //! Cloud endpoints, and the keys that are never read back.
 //!
 //! WI-15.8. What the reader stored — an id, a label, an OpenAI-compatible base
-//! URL, and a key in the OS keychain — and nothing that can USE them yet.
+//! URL, a model name, and a key in the OS keychain. `cloud.rs` is what uses
+//! them: Paper's own client, which sends a request straight to the endpoint.
 //!
 //! ⚠️ **THIS FILE WAS HALF OF A PATH THAT WENT AWAY ON 2026-09-18.** Lemonade
 //! was the API-key gateway: `POST /v1/install` registered a provider by
@@ -10,10 +11,11 @@
 //! store re-provisioned both on every start because Lemonade held them in
 //! memory only. That path was never measured against a real provider, the
 //! audit that preceded the removal found it probably never worked, and the
-//! daemon it ran through is gone. So the store keeps what the reader typed —
-//! it is theirs — and `probe::UnusableReason::NotConnected` says why no row is
-//! usable. The settings section is behind developer options until a
-//! Paper-side client exists and has been measured with a real key.
+//! daemon it ran through is gone. The same day, `cloud.rs` replaced it: the
+//! key is read from the keychain for each request and sent as that request's
+//! bearer token, and nothing holds it anywhere else. Measured against
+//! `llama-server` acting as a provider, with its real key and a wrong one; not
+//! yet against a paid provider.
 //!
 //! The keychain is still the store, for the reason it always was: the only
 //! honest durable store for a credential is the OS keychain — not a file in
@@ -23,9 +25,10 @@
 //! # Write-only, structurally
 //!
 //! [`EndpointStore::set_key`] exists. There is **no `get_key` reachable from
-//! a command**: the reader's key is written to the keychain and read back
-//! only by this module, and today only to learn whether it is there
-//! ([`KeyState`]). `build.rs` has `inference_set_endpoint_key` and
+//! a command**: the reader's key is written to the keychain and read back in
+//! two places only — here, to learn whether it is there ([`KeyState`]), and
+//! by the crate-private `EndpointStore::key`, for the request `cloud.rs`
+//! sends and nothing else. `build.rs` has `inference_set_endpoint_key` and
 //! no counterpart, so WI-15.8's acceptance — *"the key never appears in any
 //! webview-reachable value"* — is a property of the command list rather than
 //! of anybody's discipline. The settings field renders as dots because it is

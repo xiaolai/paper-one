@@ -103,7 +103,8 @@ pub struct InferenceState {
     /// serialised them; `#[tauri::command]`s run concurrently.
     endpoint_writes: Mutex<()>,
     // (`unregistered` lived here: the endpoints lemond refused to register at
-    // its last start. There is no registration now — `probe::NotConnected`.)
+    // its last start. There is no registration now — `cloud.rs` sends each
+    // request to the endpoint itself.)
     /// How many times the daemon has been dropped for a configuration change.
     /// For a test and a diagnostic — see [`InferenceState::reconfigurations`].
     reconfigured: AtomicU64,
