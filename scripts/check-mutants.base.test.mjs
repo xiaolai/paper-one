@@ -409,40 +409,53 @@ describe('the merge base as a checkout of its own', () => {
    * the command line does.
    */
   it('links this checkout’s install by a target that does not depend on where the link sits', async () => {
+    /* ⚠️ **IN A CHILD WHOSE WORKING DIRECTORY IS THE CHECKOUT, NOT BY `chdir`.**
+       This case called `process.chdir(root)`, which Node refuses inside a worker
+       thread — and Stryker runs every test in one, so the dry run of this gate's
+       own sweep died on it and the gate could not be mutation-tested at all
+       (found 2026-09-18). The same move as `changedFiles`' case: the question is
+       asked by a process started there. */
     await inScratch('mutants-base-', async (root) => {
       const { at } = repository(root)
-      const seen = []
-      const child = (where, subject, into) => {
+      const script = new URL('./check-mutants.mjs', import.meta.url).href
+      const program = [
+        "import { realpathSync, writeFileSync } from 'node:fs'",
+        "import path from 'node:path'",
+        `import { measureAtBase, runnerVersionsAt } from ${JSON.stringify(script)}`,
+        'const seen = []',
+        `const answer = await measureAtBase('src/a.ts', ${JSON.stringify(at)}, {`,
+        "  root: '.',",
+        '  child: (where, subject, into) => {',
         /* Read INSIDE the child, because the worktree is gone by the time
            `measureAtBase` answers. */
-        seen.push({ linked: realpathSync(path.join(where, 'node_modules')), versions: runnerVersionsAt(where) })
-        writeFileSync(into, JSON.stringify(measurement({ subject })))
-      }
-      const was = process.cwd()
-      process.chdir(root)
+        "    seen.push({ linked: realpathSync(path.join(where, 'node_modules')), versions: runnerVersionsAt(where) })",
+        `    writeFileSync(into, ${JSON.stringify(JSON.stringify(measurement({ subject: 'src/a.ts' })))})`,
+        '  },',
+        "  install: () => { throw new Error('two commits pinning the same bytes share an install') },",
+        '})',
+        "process.stdout.write('\\n' + RESULT + JSON.stringify({ install: answer.install, seen }))",
+      ].join('\n')
 
-      try {
-        const answer = await measureAtBase('src/a.ts', at, {
-          root: '.',
-          child,
-          install: () => {
-            throw new Error('two commits pinning the same bytes share an install')
-          },
-        })
+      const printed = execFileSync(process.execPath, ['--input-type=module', '-e', `const RESULT = ${JSON.stringify(RESULT)}\n${program}`], {
+        cwd: root,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      const { install, seen } = JSON.parse(printed.slice(printed.lastIndexOf(RESULT) + RESULT.length))
 
-        expect(answer.install).toBe('linked')
-        /* The measurement RAN, which is the half a refusal hides: with the link
-           pointing at itself the child was never started at all. */
-        expect(seen).toHaveLength(1)
-        expect(seen[0].linked).toBe(realpathSync(path.join(root, 'node_modules')))
-        /* And what is read THROUGH the link is this checkout's own install,
-           which is the question that refused every base measurement. */
-        expect(seen[0].versions).toEqual({ '@stryker-mutator/core': '10.0.0', '@stryker-mutator/vitest-runner': '10.0.0', vitest: '4.1.11' })
-      } finally {
-        process.chdir(was)
-      }
+      expect(install).toBe('linked')
+      /* The measurement RAN, which is the half a refusal hides: with the link
+         pointing at itself the child was never started at all. */
+      expect(seen).toHaveLength(1)
+      expect(seen[0].linked).toBe(realpathSync(path.join(root, 'node_modules')))
+      /* And what is read THROUGH the link is this checkout's own install,
+         which is the question that refused every base measurement. */
+      expect(seen[0].versions).toEqual({ '@stryker-mutator/core': '10.0.0', '@stryker-mutator/vitest-runner': '10.0.0', vitest: '4.1.11' })
     })
   })
+
+  /** Where a child's answer starts in what it printed — after anything else it said on the way. */
+  const RESULT = '@@measured@@'
 
   it('refuses when the merge base cannot be checked out at all, in git’s own words', async () => {
     await inScratch('mutants-base-', async (root) => {
