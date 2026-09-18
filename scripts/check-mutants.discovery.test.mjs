@@ -1782,6 +1782,30 @@ describe('what a scratch checkout links its dependencies from', () => {
 
     expect(offenders).toEqual([])
   })
+
+  /* ⚠️ **AND A FIXED DEPTH IS THE SAME TRAP ONE STEP REMOVED** (2026-09-18). A
+     sweep found five: `THIS_INSTALL` in `check-mutants.base.test.mjs`, and four
+     kernel tests that read `foliate-js` through `../../../node_modules/…`. From
+     inside the Stryker sandbox of a merge-base worktree, which has no install of
+     its own, each named nothing — the gate's own base measurement died on the
+     first, and a base measurement of any file the other four cover would have. An
+     install is searched for upwards — `installAbove`, or Node's own
+     `import.meta.resolve` — and never reached by counting directories. Every test
+     file in the checkout is read, through paths built from a listing for the
+     reason above. */
+  it('never reaches an install by a fixed number of directories up', () => {
+    /* The directory itself or anything in it: `'../node_modules'` was the shape
+       that started this, and a pattern wanting a `/` after the name missed it —
+       found by trying the pattern on the five before trusting it on none. */
+    const fixedDepth = new RegExp(String.raw`new URL\(\s*(['"\x60])(?:\.\.?/)+node_modules(?:/|\1)`)
+    const root = path.dirname(fileURLToPath(new URL('.', import.meta.url)))
+    const offenders = ['scripts', 'src']
+      .flatMap((top) => readdirSync(path.join(root, top), { recursive: true }).map((name) => path.join(top, String(name))))
+      .filter((name) => /\.test\.(?:ts|tsx|mjs)$/u.test(name))
+      .filter((name) => fixedDepth.test(readFileSync(path.join(root, name), 'utf8')))
+
+    expect(offenders).toEqual([])
+  })
 })
 
 /**

@@ -111,7 +111,7 @@ const PROJECT = {
  * `fileURLToPath` rather than a URL's `pathname`, which on Windows is
  * `/C:/…` and is no path at all — the trap the Windows leg found.
  */
-const THIS_INSTALL = fileURLToPath(new URL('../node_modules', import.meta.url))
+const THIS_INSTALL = installAbove(fileURLToPath(new URL('.', import.meta.url)))
 
 /**
  * A project the real toolchain can run: a function with mutants of several kinds,
@@ -1902,3 +1902,24 @@ describe('this file is no reader of the gate’s own source', () => {
     expect(readersOf(['scripts/check-mutants.mjs'], [mine], () => [mine])).toEqual([])
   })
 })
+
+/**
+ * The nearest `node_modules` at or above `from`, which is the one Node resolves
+ * this file's own imports through — SEARCHED, never assumed at a fixed depth.
+ *
+ * ⚠️ **`../node_modules` FROM THIS FILE MADE THE GATE UNMEASURABLE AT ITS OWN
+ * MERGE BASE** (found 2026-09-18, by a real sweep). Stryker links no install into
+ * the sandbox of a base worktree, whose own `node_modules` is a link, so from
+ * inside that sandbox the fixed depth named nothing: the real-Stryker case died
+ * with "@stryker-mutator/core is missing", the base's dry run failed, and every
+ * survivor in `check-mutants.mjs` was billed, however old. The same fix
+ * `check-mutants.sharding.test.mjs` and `check-mutants.discovery.test.mjs` made
+ * for their `checkout()`.
+ */
+function installAbove(from) {
+  for (let dir = from; ; dir = path.dirname(dir)) {
+    const at = path.join(dir, 'node_modules')
+    if (existsSync(at)) return at
+    if (path.dirname(dir) === dir) throw new Error(`no node_modules at or above ${from}`)
+  }
+}

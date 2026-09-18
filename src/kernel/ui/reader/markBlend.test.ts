@@ -40,7 +40,7 @@ const FOLIATE = ['paginator.js', 'view.js', 'fixed-layout.js', 'overlayer.js'] a
 
 function foliateSource(file: string): string {
   const source = readFileSync(
-    fileURLToPath(new URL(`../../../../node_modules/foliate-js/${file}`, import.meta.url)),
+    fileURLToPath(import.meta.resolve(`foliate-js/${file}`)),
     'utf8',
   )
   /* A SCAN OVER NOTHING FINDS NOTHING, and would report it as safety. The path

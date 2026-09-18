@@ -474,6 +474,7 @@
     "scripts/check-mutants.discovery.test.mjs > the reads a test’s own source is followed through > is no reader of the gate’s own source, whatever its fixtures spell",
     "scripts/check-mutants.discovery.test.mjs > the reads a test’s own source is followed through > names no file at all from a specifier it cannot know, and never the one called null beside the test",
     "scripts/check-mutants.discovery.test.mjs > the reads a test’s own source is followed through > takes a base from the test’s own url and from nothing else that is spelt like one",
+    "scripts/check-mutants.discovery.test.mjs > what a scratch checkout links its dependencies from > never reaches an install by a fixed number of directories up",
     "scripts/check-mutants.discovery.test.mjs > what a scratch checkout links its dependencies from > never resolves node_modules against the directory the process happens to be started in",
     "scripts/check-mutants.discovery.test.mjs > what a sweep takes for a subject > takes a changed file that ends in a test extension for a test, and not one that merely carries one inside its name",
     "scripts/check-mutants.discovery.test.mjs > what a sweep takes for a subject > takes a path that is under src or scripts and ends in a source extension, and nothing that merely spells one",

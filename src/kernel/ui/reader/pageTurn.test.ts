@@ -275,7 +275,7 @@ describe('the page the reader turns', () => {
  */
 describe('the renderer Paper actually ships', () => {
   const paginator = readFileSync(
-    fileURLToPath(new URL('../../../../node_modules/foliate-js/paginator.js', import.meta.url)),
+    fileURLToPath(import.meta.resolve('foliate-js/paginator.js')),
     'utf8',
   )
 

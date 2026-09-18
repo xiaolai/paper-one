@@ -1460,7 +1460,7 @@ describe('resolvePageKey', () => {
    */
   it('and the fork resolves that side from the book’s direction', () => {
     const view = readFileSync(
-      fileURLToPath(new URL('../../../node_modules/foliate-js/view.js', import.meta.url)),
+      fileURLToPath(import.meta.resolve('foliate-js/view.js')),
       'utf8',
     )
     expect(view).toMatch(/goRight\(\)\s*\{\s*return this\.book\.dir === 'rtl' \? this\.prev\(\) : this\.next\(\)/)
