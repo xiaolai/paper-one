@@ -1515,8 +1515,11 @@ describe('what the merge base’s run amounts to', () => {
    * the old rule measured the merge base WITHOUT the strong one — and a change that
    * deleted the strong test read as debt the base already had.
    *
-   * So the merge base is MEASURED against every test it has, always, and discovery
-   * decides nothing there.
+   * So the merge base is OFFERED every test it has, always, and discovery decides
+   * nothing there — which is what this asserts, through the config Stryker is
+   * handed. What Stryker then RUNS is narrower: Vitest's `related` filter drops a
+   * test that reaches the subject only through a computed import, so against a
+   * real Stryker the strong test here would not run. See `measuredHere`.
    */
   it('measures a base against every test it has, though discovery found a weak one beside the computed import', async () => {
     await inScratch('mutants-base-', async (root) => {

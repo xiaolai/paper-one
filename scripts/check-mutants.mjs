@@ -2951,6 +2951,21 @@ async function measureSweep({ measure: subject, into }, world) {
  * invisible to it. "At least one test was found" is not evidence of completeness
  * and never was.
  *
+ * ⚠️ **"EVERY TEST IT HAS" IS WHAT THIS OFFERS, NOT WHAT STRYKER RUNS** (measured
+ * 2026-09-18). Stryker's Vitest runner turns on Vitest's `related` filter by
+ * default, and that filter keeps only the offered files whose imports — static
+ * ones, and dynamic ones with a literal specifier — reach the mutated file. A
+ * test that reaches it through `await import(where)` is dropped: a two-file
+ * probe with that as its only test found no test at all, and with
+ * `vitest: { related: false }` the same test ran and killed four mutants. So the
+ * computed-import case above is still decided by an import graph — Vitest's
+ * rather than this gate's — and the hole is narrowed, not closed. Turning the
+ * filter off would run the merge base's whole suite in every base dry run, the
+ * gate's own tests that start Stryker themselves among them: a cost nobody has
+ * measured, and not one to take by default. No test in this tree reaches code
+ * by a computed import today; the fixture in `check-mutants.base.test.mjs` is
+ * the only one.
+ *
  * It is sound in one direction only, which is why it is the BASE side's rule:
  * more tests there can only KILL more, which can only leave less to be excused
  * by. The same widening HERE would be a way to pass, so `sweepChanges` still
@@ -2958,8 +2973,10 @@ async function measureSweep({ measure: subject, into }, world) {
  *
  * ⚠️ **WHAT IT COSTS, AND THE ONE THING THAT COST IS COUPLED TO.** Stryker runs
  * per-test coverage (`coverageAnalysis: 'perTest'`), so a wider set costs the
- * merge base's whole suite ONCE, as a dry run plus its coverage pass, and not a
- * wider run per mutant. What it couples to is the base suite being GREEN: a
+ * tests it runs ONCE, as a dry run plus its coverage pass, and not a wider run
+ * per mutant — the tests the `related` filter keeps, as above, which is how
+ * `flatten.ts`'s merge base ran 1 079 tests rather than the whole suite. What it
+ * couples to is the base suite being GREEN: a
  * failed dry run there is `ConfigError: There were failed tests in the initial
  * test run`, Stryker scores nothing, and the file is refused — which bills the
  * change for every survivor in it. That is the correct answer to "the merge base
