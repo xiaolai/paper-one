@@ -72,7 +72,7 @@ export const PANE_TRACK = PANE_W + CONCENTRIC_INSET * 2
  * it as 20 − 6 = 14, and both were injected as custom properties on every
  * render and referenced by NOTHING. Its comment claimed to be "the radius of
  * the window card and the pane card", which made it worse than merely dead: the
- * pane card is `LeadingCard` and takes `--leading-card-radius`, so anyone
+ * pane card is `LeadingCard` and takes `--radius-leading-card`, so anyone
  * reading the token to find out how a card is drawn was reading a token that
  * draws nothing and being told it drew that.
  *
@@ -790,14 +790,23 @@ export const SHEET = { max: 640, inset: 48, top: 96, maxHeight: 560 } as const
 export const FOOTNOTE = { maxWidth: 420, maxHeight: 320 } as const
 
 /**
- * How wide the selection popup's lookup face may grow (phase 17, L1).
+ * How wide the selection popup is while it is showing a lookup (phase 17, L1).
  *
  * NARROWER THAN A FOOTNOTE, for the footnote's own reason taken one step
  * further: a note is read and dismissed over the text it came from, and a
- * definition hangs directly over the LINE it defines, one gap away. At the
- * interface's 13px a line of this measure holds roughly fifty-five characters —
- * a definition's two sentences read in two or three short lines rather than one
- * that runs across the page it is covering.
+ * definition hangs directly over the LINE it defines, one gap away. Minus the
+ * back control and the padding, a line of this surface holds roughly
+ * forty-five characters at the interface's 13px — a definition's two sentences
+ * read in two or three short lines rather than one that runs across the page it
+ * is covering.
+ *
+ * ⚠️ **IT IS THE SURFACE'S WIDTH, AND THIS SAID IT WAS THE FACE'S CEILING.**
+ * It was spent as `max-width` on a `max-content` face, so it bounded the answer
+ * and every shorter state shrank inside it — which is how a popup came to be
+ * 135px wide saying "Looking…" and 374px a second later. It is a `width` on the
+ * popup now, so it decides the surface in every state; see
+ * `.popup[data-face='lookup']`. The character count above was also written as
+ * if the whole number reached the text, which it never did.
  */
 export const LOOKUP_MEASURE = 360
 
@@ -948,6 +957,25 @@ export const VIEWPORT_MIN = 320
  * little of it is filled.
  */
 export const TRACK_W = 3
+
+/**
+ * A KIND RULE: the coloured edge that says what a thing is rather than how much
+ * of it there is — a margin mark's tint, the companion's amber provenance.
+ *
+ * 2px, and the sibling above is why it is not `TRACK_W`. A track is a QUANTITY
+ * and has to read as a bar at any fill; this is a LABEL and only has to be seen
+ * as a colour, which `MarginMarks` states in its own words: *"2px of a pale
+ * band is not a colour, it is a smudge"* — the rule colour at this weight, not
+ * the fill at any.
+ *
+ * ⚠️ **IT WAS WRITTEN OUT THREE TIMES IN TWO SPELLINGS.**
+ * `MarginMarks.module.css` had `border-inline-start: 2px solid`, and
+ * `SidePane.module.css` twice had `box-shadow: inset 2px 0 0` — the same
+ * decision drawn two different ways, so neither could be found from the other.
+ * `--track-w` looked like the token for it and is not: 3px, and it means
+ * progress.
+ */
+export const KIND_RULE_W = 2
 
 /**
  * macOS's own traffic lights: 12px each, which is Apple's, not ours.
@@ -1140,8 +1168,22 @@ export const MOTION = {
 /** §08 icon ramp. One stroke weight everywhere, never filled, never two-tone. */
 export const ICON = {
   inline: 12,
-  /** The drawn window controls on Windows and Linux — smaller than a control,
-   *  because they sit in a 44px system row rather than in the app's chrome. */
+  /**
+   * ONE STEP UNDER A CONTROL'S GLYPH — for a control whose glyph IS its whole
+   * content, rather than one sitting in a row beside words and other icons.
+   *
+   * The drawn window controls on Windows and Linux are the first of those: they
+   * sit in a 44px system row rather than in the app's chrome, and at `control`'s
+   * 15 they read as the app's own buttons instead of as the system's. The
+   * composer's send and stop are the second — a round button at the end of a
+   * text field, where 15 fills the button edge to edge and reads as a glyph
+   * crammed into it.
+   *
+   * ⚠️ **THE NAME IS NARROWER THAN THE ROLE.** It was written for the window
+   * controls, which were its only caller; the composer's two buttons were
+   * `size={13}` and `size={11}` written out by hand, which is this rung and one
+   * below it arrived at twice by eye. Read it as the 13 rung.
+   */
   window: 13,
   control: 15,
   tab: 17,
@@ -1187,7 +1229,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
    * consumer. */
   const vars: Record<string, string> = {
     '--pane-track': px(PANE_TRACK),
-    '--leading-card-radius': px(LEADING_CARD_RADIUS),
+    '--radius-leading-card': px(LEADING_CARD_RADIUS),
     '--concentric-inset': px(CONCENTRIC_INSET),
     '--titlebar-h': px(TITLEBAR_H[platform]),
     '--sys-zone-w': px(SYS_ZONE_W[platform]),
@@ -1228,6 +1270,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--theme-swatch-h': px(THEME_SWATCH_H),
     '--qr-size': px(QR_SIZE),
     '--track-w': px(TRACK_W),
+    '--kind-rule-w': px(KIND_RULE_W),
     '--traffic-light': px(TRAFFIC_LIGHT),
     '--scrollbar-w': px(SCROLLBAR_W),
     '--row-book': px(ROW_BOOK),

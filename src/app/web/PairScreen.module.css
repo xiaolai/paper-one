@@ -99,5 +99,5 @@
   padding: var(--space-8) var(--space-12);
   margin: 0;
   max-width: var(--prose-narrow);
-  line-height: 1.45;
+  line-height: var(--leading-ui);
 }

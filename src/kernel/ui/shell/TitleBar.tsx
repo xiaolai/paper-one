@@ -7,7 +7,6 @@ import {
   Minus,
   PanelLeft,
   PanelRight,
-  Puzzle,
   Search,
   Sparkles,
   Square,
@@ -20,6 +19,8 @@ import type { Platform } from '../../core/metrics'
 import { inTauri } from '../inTauri'
 import { PANE_TITLES, comboFor } from '../panes'
 import type { ContributedScreenId } from '../../core/uiTypes'
+import type { ContributionIcon } from '../../core/capability'
+import { CONTRIBUTION_ICONS } from '../contributionIcon'
 import type { AppDispatch, AppState, KernelPaneId } from '../state'
 import type { Speech } from '../reader/useSpeech'
 import styles from './TitleBar.module.css'
@@ -73,7 +74,12 @@ export interface TitleBarProps {
    * would forget — leaving a reader in a room with no door. The kernel offers
    * the switch, so a screen cannot be entered without a way out of it.
    */
-  screens?: readonly { readonly id: ContributedScreenId; readonly label: string }[]
+  screens?: readonly {
+    readonly id: ContributedScreenId
+    readonly label: string
+    /** What to draw for it — see `CONTRIBUTION_ICONS`. */
+    readonly icon: ContributionIcon
+  }[]
 }
 
 /**
@@ -244,7 +250,13 @@ export function TitleBar({
                 data-on={state.screen === one.id}
                 onClick={() => dispatch({ type: 'goScreen', screen: one.id })}
               >
-                <Puzzle size={ICON.control} strokeWidth={ICON.stroke} />
+                {/* THE SCREEN'S OWN GLYPH. Every contributed screen drew a
+                    puzzle piece — see `CONTRIBUTION_ICONS` for what that
+                    cost the rail, which had the same defect. */}
+                {(() => {
+                  const Icon = CONTRIBUTION_ICONS[one.icon]
+                  return <Icon size={ICON.control} strokeWidth={ICON.stroke} />
+                })()}
               </button>
             ))}
           </div>

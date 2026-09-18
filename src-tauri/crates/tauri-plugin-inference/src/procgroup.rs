@@ -1,12 +1,14 @@
 //! Killing the whole tree, not just the child Paper can see.
 //!
 //! **This is the module WI-15.0's fourth acceptance line lives in**, and the
-//! line is easy to misread. *"`SIGTERM` leaves no child process"* is not a
-//! claim about `lemond`. `lemond` is a supervisor itself: loading a model
-//! spawns a backend — `llama-server` and friends, from `resources/` or from
-//! the cache — and signalling only the process Paper spawned leaves those
-//! backends holding the GPU, the model's several gigabytes of resident
-//! memory, and in the observed case a listening socket.
+//! line is easy to misread. *"`SIGTERM` leaves no child process"* was not a
+//! claim about the process Paper spawned. That was `lemond` until 2026-09-18,
+//! a supervisor that spawned `llama-server` to load a model — and signalling
+//! only the process Paper spawned left that backend holding the GPU, the
+//! model's several gigabytes of resident memory, and in the observed case a
+//! listening socket. Paper spawns `llama-server` itself now, which forks
+//! nothing; the group is still what is signalled, because the promise is
+//! about the tree and a program that grows a child should not break it.
 //!
 //! So the child is placed in its own process group (unix) or job object
 //! (Windows) at spawn, and the signal goes to the GROUP. Two calls, one per
@@ -143,7 +145,7 @@ pub async fn kill(child: &mut Child, group: Option<u32>) -> io::Result<()> {
 #[cfg(windows)]
 pub async fn kill(child: &mut Child, _group: Option<u32>) -> io::Result<()> {
     // `Child::kill` on Windows is TerminateProcess on the one handle. Any
-    // backend `lemond` spawned is not in it — which is the gap a Job Object
+    // child the server spawned is not in it — which is the gap a Job Object
     // closes, and `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is what makes the
     // whole tree die with the handle. See `JobHandle` below.
     child.kill().await
@@ -266,7 +268,8 @@ mod tests {
     /// The property the module exists for, on the platform that can prove it
     /// here: a grandchild started by the child dies with the group.
     ///
-    /// `sh -c 'sleep 30 & ...'` stands in for `lemond` spawning a backend.
+    /// `sh -c 'sleep 30 & ...'` stands in for a supervisor spawning a child —
+    /// `lemond` spawning its backend, when Paper launched `lemond`.
     /// Signalling the CHILD alone would leave the `sleep` running, which is
     /// exactly the failure this module closes — so a regression that swaps
     /// `killpg` for `kill` turns this red.

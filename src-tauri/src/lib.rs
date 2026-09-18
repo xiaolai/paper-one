@@ -526,8 +526,10 @@ pub fn run() {
      * commands are granted by `inference:default` in capabilities/default.json.
      *
      * DESKTOP ONLY, and it is the platform that decides rather than a
-     * preference: `lemond` ships for macOS, Windows and Linux and there is no
-     * mobile build of it, so a phone has nothing for this plugin to supervise.
+     * preference: the plugin supervises a `llama-server` PROCESS, and a phone
+     * cannot launch one (iOS forbids child processes; Android 10+ will not
+     * exec from app storage), so a phone has nothing for this plugin to
+     * supervise.
      * Not compiling it there also keeps its TLS provider off the mobile
      * targets — see the crate's Cargo.toml, where `tauri-plugin-peer` makes
      * the opposite choice for the opposite reason.

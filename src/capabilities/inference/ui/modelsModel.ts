@@ -2,9 +2,12 @@ import { messageOf, notifyAll } from '../../../kernel'
 import { createGenerations } from '../../../kernel'
 import type { Controller, InferenceSnapshot, ReportFailure, RuntimeState } from '../lib/controller'
 import type { InferencePlugin } from '../lib/plugin'
-import { createVoiceTester, type AudioSink, type VoiceTest } from './voiceTest'
 
-export { TEST_VOICE_LINE, type VoiceTest } from './voiceTest'
+/* ⚠️ **`Test voice` AND ITS SPEAKER WERE HERE, AND ARE DELETED WITH THE NEURAL
+ * VOICE.** The row played a line through the manifest's speech model; that
+ * model and `inference_speak` are gone, and pronunciation is the kernel's
+ * system voice — `core/voice.ts` records why. What this model draws now is the
+ * runtime, the catalogue, the memory figure and the folder. */
 
 /**
  * The Local models section's decisions — no React, so they can be tested.
@@ -28,7 +31,6 @@ export { TEST_VOICE_LINE, type VoiceTest } from './voiceTest'
 export interface ModelsSnapshot extends InferenceSnapshot {
   readonly modelsDir: string | null
   readonly residentBytes: number | null
-  readonly voiceTest: VoiceTest
 }
 
 export interface ModelsModel {
@@ -40,16 +42,6 @@ export interface ModelsModel {
   install(model: string): Promise<boolean>
   cancelInstall(): void
   uninstall(model: string): Promise<boolean>
-  /**
-   * Play a short line through an installed voice (WI-15.9).
-   *
-   * THE MINIMUM HONEST CONSUMER of a TTS model. Read-aloud — sentence
-   * alignment, highlight-follows-voice — is a separate phase, and shipping a
-   * model nothing uses would be worse than shipping neither.
-   */
-  testVoice(): Promise<void>
-  /** Stop the utterance AND the request behind it. */
-  stopVoice(): void
   dispose(): void
 }
 
@@ -58,24 +50,29 @@ export interface ModelsModel {
  * arithmetic: this number is compared against a download they were quoted in
  * the same units, and 2.5 GB shown as 2.3 GiB reads as a different file.
  *
- * `—` for an absent figure, NEVER `0`. Lemonade is specifically credited for
- * returning null rather than zero for accelerator memory it cannot read, and
- * that honesty has to survive translation — a `0` beside "Memory" is a claim
- * that nothing is resident, which is a different statement from "unknown".
+ * A NON-BREAKING SPACE between the number and its unit, in every branch: the
+ * value sits in a narrow right-hand cell, and a wrapped `2.5` / `GB` — measured
+ * in the running app on 2026-09-18, in Local models — is a figure with its unit
+ * on another line. A quantity and its unit are one token to a reader.
+ *
+ * `—` for an absent figure, NEVER `0`. `ResourceUsage.residentBytes` is null
+ * rather than zero when the plugin cannot read the figure, and that honesty has
+ * to survive translation — a `0` beside "Memory" is a claim that nothing is
+ * resident, which is a different statement from "unknown".
  */
 export function formatBytes(bytes: number | null): string {
   if (bytes === null) return '—'
-  if (bytes < 1_000) return `${bytes} B`
+  if (bytes < 1_000) return `${bytes}\u00a0B`
   /* ⚠️ THE UNIT IS CHOSEN AFTER ROUNDING, NOT BEFORE IT. Testing the raw
      figure against each threshold and rounding afterwards printed `1000 KB`
      for anything from 999 500 bytes up, and `1000 MB` at the next boundary —
      four digits in a unit that only ever has three, for a reader comparing it
      against a download quoted as 1 MB. */
   const kb = Math.round(bytes / 1_000)
-  if (kb < 1_000) return `${kb} KB`
+  if (kb < 1_000) return `${kb}\u00a0KB`
   const mb = Math.round(bytes / 1_000_000)
-  if (mb < 1_000) return `${mb} MB`
-  return `${(bytes / 1_000_000_000).toFixed(1)} GB`
+  if (mb < 1_000) return `${mb}\u00a0MB`
+  return `${(bytes / 1_000_000_000).toFixed(1)}\u00a0GB`
 }
 
 /**
@@ -194,12 +191,19 @@ export function modelAction(
 
 export interface ModelsModelOptions {
   readonly controller: Controller
-  readonly plugin: InferencePlugin
+  /**
+   * The two commands this model reads, and no others.
+   *
+   * `Pick`, and it was the whole plugin: the `Test voice` speaker reached
+   * `speak` and `cancel` through it. With the speaker gone the two reads below
+   * are all that is left, and naming them lets a test double be written with no
+   * cast — a cast is what stops the compiler checking the signatures.
+   */
+  readonly plugin: Pick<InferencePlugin, 'revealModelsDir' | 'resourceUsage'>
   /* ⚠️ **NO `settings`, AND IT WAS REQUIRED.** This model took a
    * `SettingsStore`, subscribed to it and never read it — `settings.get` is
    * called nowhere in this file, and the snapshot is the controller's plus a
-   * models directory, a memory figure and the voice-test state, none of which
-   * is a preference. The inference capability declares NO setting at all:
+   * models directory and a memory figure, neither of which is a preference. The inference capability declares NO setting at all:
    * `defineSetting` appears nowhere under it, so the scoped handle could not
    * have read anything that exists. What the subscription bought was a cache
    * invalidation and a re-render of the models pane on every settings write in
@@ -216,19 +220,10 @@ export interface ModelsModelOptions {
    * the reason was the mistake.
    */
   readonly report?: ReportFailure
-  /**
-   * Where a voice test plays, defaulting to the browser's `Audio`.
-   *
-   * Injected so a suite can watch playback rather than crash on it: these
-   * tests run on `node`, and before this seam existed `testVoice` reached
-   * `new Audio(...)`, threw `ReferenceError`, and was swallowed by a catch —
-   * a green test over a code path that could not run at all.
-   */
-  readonly audio?: AudioSink
 }
 
 
-export function createModelsModel({ controller, plugin, report, audio }: ModelsModelOptions): ModelsModel {
+export function createModelsModel({ controller, plugin, report }: ModelsModelOptions): ModelsModel {
   const listeners = new Set<() => void>()
   let modelsDir: string | null = null
   let residentBytes: number | null = null
@@ -253,17 +248,6 @@ export function createModelsModel({ controller, plugin, report, audio }: ModelsM
   }
   const unsubscribeController = controller.subscribe(invalidate)
 
-  const voice = createVoiceTester({
-    plugin,
-    ensureReady: () => controller.ensureReady(),
-    changed: invalidate,
-    /* Spread rather than assigned: under `exactOptionalPropertyTypes` an
-       optional property that is present-and-undefined is not the same as an
-       absent one, and both of these are genuinely absent when not supplied. */
-    ...(report === undefined ? {} : { report }),
-    ...(audio === undefined ? {} : { audio }),
-  })
-
   /** Best effort, but never silent: `null` when it could not be read, and the
       reason goes to the log rather than nowhere. */
   const attempt = async <T>(read: () => Promise<T>, event: string): Promise<T | null> => {
@@ -279,12 +263,7 @@ export function createModelsModel({ controller, plugin, report, audio }: ModelsM
     getSnapshot: () => {
       if (cached === null) {
         const base = controller.getSnapshot()
-        cached = {
-          ...base,
-          modelsDir,
-          residentBytes,
-          voiceTest: voice.state(),
-        }
+        cached = { ...base, modelsDir, residentBytes }
       }
       return cached
     },
@@ -314,24 +293,10 @@ export function createModelsModel({ controller, plugin, report, audio }: ModelsM
     },
     install: (model) => controller.install(model),
     cancelInstall: () => controller.cancelInstall(),
-    uninstall: (model) => {
-      /* STOPPED BEFORE IT IS DELETED. `Test voice`'s Stop button lives on the
-         voice's own row, so removing the model that is speaking took the only
-         control that could end it off the screen — and the audio played on. */
-      voice.stopIf(model)
-      return controller.uninstall(model)
-    },
-
-    testVoice: async () => {
-      const model = controller.getSnapshot().models.find((row) => row.modality === 'speech' && row.installed)
-      if (model === undefined) return
-      await voice.play(model.id)
-    },
-    stopVoice: () => voice.stop(),
+    uninstall: (model) => controller.uninstall(model),
 
     dispose: () => {
       disposed = true
-      voice.dispose()
       unsubscribeController()
       listeners.clear()
     },

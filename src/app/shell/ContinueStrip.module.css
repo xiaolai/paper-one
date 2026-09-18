@@ -63,7 +63,7 @@
   padding-top: var(--space-8);
   font-size: var(--text-small);
   font-weight: var(--weight-semibold);
-  line-height: 1.3;
+  line-height: var(--leading-snug);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -85,6 +85,6 @@
   overflow: hidden;
   padding: var(--space-8);
   font-size: var(--text-caption);
-  line-height: 1.3;
+  line-height: var(--leading-snug);
   color: var(--ink-2);
 }

@@ -15,11 +15,18 @@ import { type EndpointsModel } from './endpointsModel'
  * # Why this exists at all
  *
  * Everything under it was already built and tested — the endpoint file, the
- * key in the OS keychain, the provisioning into the daemon's environment at
- * spawn, the per-start registration, the probe route and `resolve_model`'s
- * acceptance of it. There was simply no way for a reader to add one, so none
- * of that could ever run in the app, and the feature ledger called it Shipped.
- * An audit found the four commands with no caller anywhere under `src/`.
+ * key in the OS keychain, the probe route. There was simply no way for a
+ * reader to add one, so none of that could ever run in the app, and the
+ * feature ledger called it Shipped. An audit found the four commands with no
+ * caller anywhere under `src/`.
+ *
+ * ⚠️ **FOR A WHILE NOTHING CONNECTED ONE AT ALL, AND THE SECTION WAS HIDDEN.**
+ * What turned an endpoint into an answer was Lemonade, which took the keys and
+ * the providers at spawn; `llama-server` has neither, so every endpoint route
+ * reported `notConnected` and this section was offered only under developer
+ * options. Paper talks to the endpoint itself now (the gloss routes contract,
+ * 2026-09-18), so an endpoint with a key and a model name can answer Look up,
+ * and the section is offered to every reader again.
  *
  * # The key is write-only, here as everywhere
  *
@@ -46,7 +53,7 @@ export function EndpointsPane({ model }: { readonly model: EndpointsModel }) {
      and a second name for the same thing is one more thing to type than this
      surface earns. */
   const field =
-    (key: 'id' | 'baseUrl' | 'key') =>
+    (key: 'id' | 'baseUrl' | 'model' | 'key') =>
     (event: ChangeEvent<HTMLInputElement>): void => {
       /* ⚠️ READ NOW, NOT LATER. The synthetic event is pooled and over by the
          time anything deferred runs, and `currentTarget` is null by then — so
@@ -67,9 +74,10 @@ export function EndpointsPane({ model }: { readonly model: EndpointsModel }) {
         <span className={ui.value}>{snapshot.loading ? 'Checking…' : ''}</span>
       </div>
       <div className={ui.hint}>
-        An OpenAI-compatible endpoint you host or pay for. Its key is kept in this
-        computer&rsquo;s keychain, handed to the local runtime when it starts, and
-        never read back — not by this pane and not by anything else.
+        An OpenAI-compatible endpoint you host or pay for — or one running on this
+        computer, at an http://localhost address. Its key is kept in this
+        computer&rsquo;s keychain and never read back — not by this pane and not
+        by anything else.
       </div>
 
       {snapshot.rows.map((row) => (
@@ -131,6 +139,20 @@ export function EndpointsPane({ model }: { readonly model: EndpointsModel }) {
             className={ui.field}
           />
         </div>
+        {/* THE PROVIDER'S NAME FOR THE MODEL, typed rather than picked: an
+            OpenAI-compatible server may serve one model or a hundred, and Paper
+            asks nothing of it before a lookup does. The row above it names the
+            server; this names what to ask it for. */}
+        <div className={ui.row}>
+          <span className={ui.grow}>Model</span>
+          <input
+            value={draft.model}
+            onChange={field('model')}
+            placeholder="gpt-4.1-mini"
+            aria-label="Endpoint model name"
+            className={ui.field}
+          />
+        </div>
         <div className={ui.row}>
           <span className={ui.grow}>API key</span>
           {/* `password`, so it is not read over the reader's shoulder or
@@ -154,8 +176,7 @@ export function EndpointsPane({ model }: { readonly model: EndpointsModel }) {
       </form>
       <div className={ui.hint}>
         Re-using a name replaces that endpoint and keeps its key, unless you type a
-        new one. Saving or removing restarts the local runtime, so an answer in
-        progress will stop.
+        new one.
       </div>
 
       {snapshot.failure === null ? null : <div className={ui.hint}>{snapshot.failure}</div>}

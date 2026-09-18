@@ -45,7 +45,7 @@ export interface PlacementResult {
  * placement uses a zero-size surface, and the layout effect re-runs once the
  * surface has a box. Both happen before paint; the reader sees one position.
  * For that to work the surface MUST be in the DOM from the first frame: render
- * it while `open` and park it off screen (`top: -9999`) until `style` is
+ * it while `open` and park it off screen (`top: PARK_OFFSET`) until `style` is
  * non-null. Rendering it only once placed means it is never measured and the
  * second pass never comes — the previous version of this comment advised
  * exactly that, and it was wrong.

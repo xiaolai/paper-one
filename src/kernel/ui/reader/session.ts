@@ -41,6 +41,8 @@ import {
 } from '../../core/marks'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { isEmptySource, type BookSource } from '../../core/formats'
+import { FOOTNOTE } from '../../core/metrics'
+import { PARK_OFFSET } from '../../core/placement'
 import type { OpenedBook } from './protection'
 import { coverFrom } from '../../core/coverArt'
 import { deferSnap } from './wordSnap/deferredSnap'
@@ -1754,12 +1756,24 @@ export class ReaderSession {
          with no dimensions. */
       const mount = this.#footnoteMount
       if (!mount) {
+        /* THE POPOVER'S OWN BOUNDS, not a second guess at them. This box stands
+           in for the popover the note would have been rendered into, so the
+           note has to columnize at the size the popover would have given it —
+           and it was written out as 400×320 beside a `FOOTNOTE` of 420×320.
+           The height agreed and the width was 20px adrift, which is the worst
+           kind of near-miss: a note measured in a box narrower than the one it
+           will be shown in comes out a line taller than it needs to be, and
+           nothing reports a box that is merely the wrong width.
+
+           There is no third number here for the same reason: `FOOTNOTE` is
+           already published to CSS as `--footnote-max-w` / `--footnote-max-h`,
+           which is what sizes the popover when there IS a mount. */
         view.style.cssText = [
           'position:absolute',
-          'left:-99999px',
+          `left:${PARK_OFFSET}px`,
           'top:0',
-          'width:400px',
-          'height:320px',
+          `width:${FOOTNOTE.maxWidth}px`,
+          `height:${FOOTNOTE.maxHeight}px`,
         ].join(';')
       }
       ;(mount ?? this.#host).appendChild(view)

@@ -426,6 +426,10 @@ export const publicSharing: Capability = {
     {
       id: 'public:book',
       label: 'Publish',
+      /* A GLOBE, not the circle's people: this pane is about readers nobody
+         has met. The two sat side by side in the rail as identical puzzle
+         pieces — see `CONTRIBUTION_ICONS`. */
+      icon: 'globe',
       screens: ['reader'],
       /* After the circle's pane, which is about people the reader knows.
          Publishing to strangers is the rarer act and sits below it. */

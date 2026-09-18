@@ -111,7 +111,7 @@ export function Companion({
               disabled
               data-disabled="true"
             >
-              <ArrowUp size={13} strokeWidth={ICON.stroke} />
+              <ArrowUp size={ICON.window} strokeWidth={ICON.stroke} />
             </button>
           </div>
         </div>
@@ -213,7 +213,12 @@ export function Companion({
               aria-label="Stop"
               onClick={() => thread.cancel()}
             >
-              <Square size={11} strokeWidth={ICON.stroke} />
+              {/* ONE RUNG BELOW THE ARROW IT REPLACES, and on the ramp rather than an
+                  eyeballed 11. A square fills its box corner to corner where an arrow
+                  leaves four empty corners, so at the same rung it reads as the larger
+                  glyph — the argument `MARK_SWATCH` makes about ink against outline,
+                  one step down. */}
+              <Square size={ICON.inline} strokeWidth={ICON.stroke} />
             </button>
           ) : (
             <button
@@ -225,7 +230,7 @@ export function Companion({
               data-disabled={draft.trim() === '' ? 'true' : undefined}
               onClick={submit}
             >
-              <ArrowUp size={13} strokeWidth={ICON.stroke} />
+              <ArrowUp size={ICON.window} strokeWidth={ICON.stroke} />
             </button>
           )}
         </div>

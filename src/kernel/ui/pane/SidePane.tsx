@@ -4,7 +4,6 @@ import {
   Layers,
   LibraryBig,
   List,
-  Puzzle,
   Search,
   Settings as SettingsIcon,
   Sparkles,
@@ -16,6 +15,7 @@ import type { MarkControl, PaneContribution } from '../../core/capability'
 import type { AskPassage, CompanionProvider } from '../../core/companion'
 import { ICON, type Platform } from '../../core/metrics'
 import { PANE_TITLES, shownPane } from '../panes'
+import { CONTRIBUTION_ICONS } from '../contributionIcon'
 import { isContributedScreenId } from '../../core/uiTypes'
 import { contributionFits, defaultPaneFor, paneFits, setReadingStyle, type AppDispatch, type AppState, type KernelPaneId, type PaneAudience } from '../state'
 import type { Book } from '../hooks/useBook'
@@ -327,7 +327,10 @@ export function SidePane({
       ...railFor(state.screen, audience),
       ...contributed
         .filter((entry) => contributionFits(state.screen, entry))
-        .map(({ id, label }) => ({ id, label, Icon: Puzzle })),
+        /* THE CONTRIBUTION'S OWN GLYPH, not one glyph for all of them — see
+           `CONTRIBUTION_ICONS`, which is also where the defect this replaces is
+           written down. Circle and Publish were both `Puzzle`. */
+        .map(({ id, label, icon }) => ({ id, label, Icon: CONTRIBUTION_ICONS[icon] })),
     ],
     [state.screen, contributed, state.developer, state.hiddenPanes],
   )
@@ -464,7 +467,7 @@ export function SidePane({
             missing={settings.missing}
             persistent={settings.persistent}
             lookUp={settings.lookUp}
-            /* "Install one" lands on its section (phase 17, L3). */
+            /* "Choose one" lands on its section (phase 17, L3). */
             reveal={state.settingsReveal}
             onRevealed={(nonce) => dispatch({ type: 'settingsRevealed', nonce })}
             theme={state.theme}

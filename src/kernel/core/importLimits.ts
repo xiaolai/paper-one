@@ -40,7 +40,7 @@ export const BOOK_MAX_BYTES = 512 * 1024 * 1024
 
 /** A size that exceeds `limit`, said the way a reader can act on. */
 export function tooLarge(what: string, bytes: number, limit: number): Error {
-  const mb = (n: number) => `${Math.round(n / (1024 * 1024))} MB`
+  const mb = (n: number) => `${Math.round(n / (1024 * 1024))}\u00a0MB`
   return new Error(
     `${what} is ${mb(bytes)}, which is past the ${mb(limit)} this can hold in memory.`,
   )

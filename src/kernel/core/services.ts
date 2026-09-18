@@ -10,6 +10,34 @@ import { createMarkStore, type MarkStore } from './markStore'
 import { folderOf, readBook, recordPath } from './bookFolder'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
 import { NO_GLOSS, type GlossProvider } from './gloss'
+import type { Voice } from './voice'
+/**
+ * ⚠️ **THE ONE `core → ui` IMPORT IN THIS TREE, AND IT IS DELIBERATE.**
+ *
+ * The voice port's default has to be the machine's own speech engine (see
+ * `core/voice.ts` for why), and everything that knows `window.speechSynthesis`
+ * lives in `ui/reader/` because the reading got there first. Three alternatives
+ * were weighed:
+ *
+ * - **A second, smaller speaker in `core/`** — a copy of the late-`end`
+ *   generation guard `speech.ts` exists to own, which is the defect that file
+ *   records in capitals.
+ * - **Passing the default in from each composition root** — five roots naming
+ *   the same value, and a root that forgot it would silently lose pronunciation.
+ *   That is the `hasDictionary` failure this repository keeps re-learning: an
+ *   omission on the way down reads as an answer.
+ * - **A `bindVoice` from the UI at boot** — the slot is exclusive on purpose,
+ *   and it belongs to whatever capability brings a voice of its own. (That was
+ *   `inference`'s neural voice, which is deleted; nothing writes the slot now,
+ *   and the argument stands for the next writer.)
+ *
+ * What the edge actually costs is four modules with no dependencies of their own
+ * and no DOM touched at import: `systemVoice.ts`, `speech.ts`, `coordinates.ts`,
+ * `direction.ts`. None is React, and `speech.ts` is a platform binding, which
+ * `core/` already holds several of. `src/kernel/index.ts` is pinned
+ * browser-safe and stays so — none of them reaches `@tauri-apps`.
+ */
+import { systemVoice } from '../ui/reader/systemVoice'
 import {
   NO_WORK_LINE,
   NOOP_DIAGNOSTICS,
@@ -236,6 +264,37 @@ export interface KernelServices {
    * a property of the wiring rather than a rule someone has to remember.
    */
   bindGloss(provider: GlossProvider): Disposable
+  /**
+   * Bind the VOICE — saying a word out loud in a BETTER voice than the default.
+   *
+   * SEPARATE FROM THE GLOSS, though the lookup popup is its first consumer and
+   * today its only one. `core/voice.ts` carries the argument in full; the short
+   * of it is that the two are different downloads with different availability,
+   * and that speaking is a fact about the machine rather than about the lookup —
+   * reading a chapter aloud will want the same port and has no business reaching
+   * through the gloss provider to find it.
+   *
+   * NOTHING BINDS IT TODAY. `inference` bound a neural voice here and it is
+   * deleted — `core/voice.ts` gives the reasons — so the machine's own voice
+   * (see `voice()`) is what every reader hears. The port stays: it is the seam
+   * a better voice would bind through, one writer at a time, as the gloss is.
+   *
+   * ⚠️ **A BIND IS AN IMPROVEMENT, NOT THE FEATURE.** The default already
+   * speaks, so whatever binds here next is a preference with the default
+   * behind it: read `voice()` BEFORE binding and keep that port as the
+   * fallback, or binding a voice that cannot serve takes the machine's own
+   * away.
+   */
+  bindVoice(voice: Voice): Disposable
+  /**
+   * The voice — the MACHINE'S OWN until one is bound, never `NO_VOICE`.
+   *
+   * ⚠️ **THIS SAID `NO_VOICE` AND THAT WAS THE DEFECT.** With nothing bound the
+   * lookup drew no pronunciation control at all, which on a machine where the
+   * neural voice failed was the whole feature. `ui/reader/systemVoice.ts` has
+   * the measurement of the voice that serves instead.
+   */
+  voice(): Voice
   /**
    * Bind the WORK LINE — the library status bar's third rung (WI-15.12).
    *
@@ -821,6 +880,12 @@ export function createKernelServices({
    * after construction, and the holders must not have to know that. */
   const companionSlot = exclusiveSlot<CompanionProvider>('bindCompanion: the companion port is already bound', NOT_CONFIGURED)
   const glossSlot = exclusiveSlot<GlossProvider>('bindGloss: the gloss port is already bound', NO_GLOSS)
+  /* THE MACHINE'S OWN VOICE IS THE DEFAULT, and `NO_VOICE` is not the fallback
+     any more — see the import's note and `core/voice.ts`. Constructed here and
+     not at module scope, and it touches no engine until something says
+     something, so every suite in this tree (all of them build services) can
+     hold it on `node`. */
+  const voiceSlot = exclusiveSlot<Voice>('bindVoice: the voice port is already bound', systemVoice())
   const workLineSlot = exclusiveSlot<WorkLine>('bindWorkLine: the work line port is already bound', NO_WORK_LINE)
 
   const writes = writeQueue()
@@ -952,6 +1017,11 @@ export function createKernelServices({
     companion: () => companionSlot.get(),
     bindGloss: (next) => glossSlot.bind(next),
     gloss: () => glossSlot.get(),
+    bindVoice: (next) => voiceSlot.bind(next),
+    /* Resolved per call, like the two providers above: `available` is a live
+       reading of what is installed, and a surface that captured the port at
+       mount would draw the same answer for the session. */
+    voice: () => voiceSlot.get(),
     bindWorkLine: (next) => workLineSlot.bind(next),
     workLine: () => workLineSlot.get(),
     serveServices: async (list) => {

@@ -168,18 +168,31 @@ export function paneOffered(
  * `UNFINISHED_PANE_IDS` is a list rather than a flag on each pane.
  *
  * ⚠️ **AND IT IS NOT A RULE ABOUT DEPENDENCIES.** `inference` contributes
- * `Local models` and `Cloud endpoints`, and the companion is only one of the
- * things it drives — the selection bar's **Look up** is the other, and that
- * one ships. Hiding a shipped feature's settings because an unfinished feature
- * shares its engine would take a working control away from the reader, so the
- * match is on the section's OWN capability and nothing it depends on.
+ * `Look up`, `Local models` and `Cloud endpoints`, and the companion is only
+ * one of the things it drives — the selection bar's **Look up** is the other,
+ * and that one ships. Hiding a shipped feature's settings because an
+ * unfinished feature shares its engine would take a working control away from
+ * the reader, so the match is on the section's OWN capability and nothing it
+ * depends on.
+ *
+ * **A SECTION CAN ALSO SAY IT IS UNFINISHED ITSELF** (`SettingsSection
+ * .unfinished`), for the one case the list cannot express: a single section of
+ * a capability whose others ship. `Cloud endpoints` is that case. Such a
+ * section needs developer options and nothing more — `hidden` names PANELS, and
+ * there is no panel here for it to name.
+ *
+ * TAKES THE SECTION, not its id: both facts that decide the answer are on it,
+ * so no caller can ask about a section and leave its flag behind. Structural
+ * rather than `SettingsSection` itself, because `capability.ts` already imports
+ * this file.
  */
 export function settingsSectionOffered(
-  sectionId: string,
+  section: { readonly id: string; readonly unfinished?: true },
   developer: boolean,
   hidden: readonly string[] = [],
 ): boolean {
-  const capability = sectionId.slice(0, sectionId.indexOf(':'))
+  if (section.unfinished === true && !developer) return false
+  const capability = section.id.slice(0, section.id.indexOf(':'))
   if (!(UNFINISHED_PANE_IDS as readonly string[]).includes(capability)) return true
   return paneOffered(capability as PaneId, developer, hidden)
 }

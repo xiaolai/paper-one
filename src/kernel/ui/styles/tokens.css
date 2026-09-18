@@ -9,6 +9,30 @@
  * The amber was darkened per theme during the design pass to clear 4.5:1
  * contrast. Do NOT revert it to #A9631C — see design system §10, which
  * publishes measured (not estimated) ratios for five pairs across five themes.
+ *
+ * ⚠️ **AND `--muted` WAS DARKENED ON THREE THEMES ON 2026-09-18, FOR THE SAME
+ * REASON AND BY A CHECK RATHER THAN BY A DESIGN PASS.** §10's five pairs all
+ * hold. `--muted` on `--bg` was not one of the five, and it is the app's
+ * commonest pairing of all — every secondary label sits on the page:
+ *
+ *   slate  #5C6367 → #53595D    on --bg 4.29 → 4.99   --wash 3.88 → 4.51
+ *   sage   #5A6653 → #515C4B    on --bg 4.36 → 5.06   --wash 3.94 → 4.57
+ *   sepia  #7A6A54 → #6F604C    on --bg 4.38 → 5.09   --wash 3.97 → 4.61
+ *
+ * 10% toward black, which is the least that clears 4.5:1 on all three of that
+ * theme's grounds at once. Paper and Night already passed and are untouched.
+ *
+ * ⚠️ **THE CALL-SITE FIX WAS TRIED FIRST AND IT DOES NOT WORK**, which is the
+ * part worth keeping. Two rules co-declared `--muted` on `--wash`, so both were
+ * moved to `--ink-2` — and then the pairing turned out to arrive by
+ * INHERITANCE as well: a `--wash` hover background with a `--muted` child, a
+ * `--wash` field with a `--muted` placeholder. A pairing that composes across
+ * rules cannot be hunted call site by call site, and a check that looks for it
+ * in one declaration block will report clean while the app still draws it. One
+ * value per theme fixes every instance, including the ones nobody has found.
+ *
+ * `tokens.hygiene.test.ts` computes every one of these from this file now, so
+ * the ratios above are a record of a measurement rather than a claim.
  */
 
 /* `:root` IS Paper, and `[data-theme='paper']` says so out loud.
@@ -26,7 +50,7 @@
   --line:#EDEEEB; --line-2:#E3E4E1; --line-3:#D6D8D3;
   --accent:#1B3A6B; --accent-bg:#EEF1F6; --accent-line:#DDE2EA;
   --amber:#9E5A16; --amber-bg:#FBF6EE; --amber-line:#E7D6BE;
-  --mark:#FAE8AF; --mark-rule:#D5B75A; --mark-ink:#9A8455; --ok:#7C9A6B;
+  --mark:#FAE8AF; --mark-rule:#D5B75A; --ok:#7C9A6B;
   /* §01's three mark tints: a pale FILL for a band behind the words and a
      saturated RULE for the line under them — and for the swatch that offers
      either. Mirrored in `bookCss.ts` for the book's own document, which
@@ -43,7 +67,6 @@
      rather than against the app's. */
   --swatch-edge:#D6D8D3;
   --tint-a:#F4F1EA; --tint-b:#EEF1F4; --tint-c:#F1F0F4; --tint-d:#EFF2F1; --tint-e:#F0E4D2;
-  --shadow-window: 0 1px 2px rgba(20,24,28,.04), 0 12px 32px -20px rgba(20,24,28,.22);
   --shadow-card: 0 1px 2px rgba(20,24,28,.05), 0 14px 34px -22px rgba(20,24,28,.26);
   /* A jacket on the shelf: a tight contact shadow so it sits ON something, and a
      longer, softer fall so it reads as lifted off the surface. Heavier than
@@ -52,19 +75,18 @@
   --shadow-jacket: 0 1px 2px rgba(20,24,28,.18), 0 6px 14px -4px rgba(20,24,28,.28), 0 18px 32px -14px rgba(20,24,28,.32);
   --shadow-pop: 0 24px 60px -28px rgba(20,24,28,.5);
   --shadow-pill: 0 1px 2px rgba(20,24,28,.07);
-  --shadow-knob: 0 1px 3px rgba(20,24,28,.16);
   --scrim: rgba(20,24,28,.35);
   --tl-red: #F4655A; --tl-amber: #F5BD4F; --tl-green: #61C555; --tl-rim: rgba(23,25,27,.14);
 }
 
 [data-theme="slate"] {
-  --ink:#1C2022; --ink-2:#3A4044; --muted:#5C6367;
+  --ink:#1C2022; --ink-2:#3A4044; --muted:#53595D;
   --surface:#DFE1DE; --bg:#D6D9D5; --wash:#CBCFCA;
   --line:#C6CAC5; --line-2:#B8BDB8; --line-3:#A6ABA6;
   --accent:#23456F; --accent-bg:#CFD7DF; --accent-line:#B4BFCB;
   --swatch-edge:#A6ABA6;
   --amber:#8A4C11; --amber-bg:#DDD8CB; --amber-line:#C6B79C;
-  --mark:#DCC992; --mark-rule:#B79A3B; --mark-ink:#6F6034; --ok:#6A8858;
+  --mark:#DCC992; --mark-rule:#B79A3B; --ok:#6A8858;
   /* §01's three mark tints: a pale FILL for a band behind the words and a
      saturated RULE for the line under them — and for the swatch that offers
      either. Mirrored in `bookCss.ts` for the book's own document, which
@@ -79,13 +101,13 @@
 }
 
 [data-theme="sage"] {
-  --ink:#1B2419; --ink-2:#37432F; --muted:#5A6653;
+  --ink:#1B2419; --ink-2:#37432F; --muted:#515C4B;
   --surface:#DDE6D8; --bg:#D3DECD; --wash:#C7D4C1;
   --line:#C6D2BF; --line-2:#B6C4AE; --line-3:#A2B29A;
   --accent:#2A4F6B; --accent-bg:#CDDCDE; --accent-line:#B3C6C9;
   --swatch-edge:#A2B29A;
   --amber:#8F5013; --amber-bg:#DDDCC3; --amber-line:#C3BE97;
-  --mark:#DDCC94; --mark-rule:#B99C3D; --mark-ink:#6A6231; --ok:#5F8050;
+  --mark:#DDCC94; --mark-rule:#B99C3D; --ok:#5F8050;
   /* §01's three mark tints: a pale FILL for a band behind the words and a
      saturated RULE for the line under them — and for the swatch that offers
      either. Mirrored in `bookCss.ts` for the book's own document, which
@@ -100,13 +122,13 @@
 }
 
 [data-theme="sepia"] {
-  --ink:#2B2117; --ink-2:#4A3B2A; --muted:#7A6A54;
+  --ink:#2B2117; --ink-2:#4A3B2A; --muted:#6F604C;
   --surface:#F8F0E1; --bg:#F3EAD9; --wash:#EBDFC9;
   --line:#E5D9C2; --line-2:#DCCDB0; --line-3:#C9B694;
   --accent:#2C5578; --accent-bg:#E7E9E4; --accent-line:#CFD6D2;
   --swatch-edge:#C9B694;
   --amber:#985614; --amber-bg:#F3E7D2; --amber-line:#DCC49E;
-  --mark:#ECDAA2; --mark-rule:#C7AA4C; --mark-ink:#8A7443; --ok:#6E8C5C;
+  --mark:#ECDAA2; --mark-rule:#C7AA4C; --ok:#6E8C5C;
   /* §01's three mark tints: a pale FILL for a band behind the words and a
      saturated RULE for the line under them — and for the swatch that offers
      either. Mirrored in `bookCss.ts` for the book's own document, which
@@ -129,7 +151,7 @@
      paper that means going the other way. */
   --swatch-edge:#FFFFFF;
   --amber:#D9A25E; --amber-bg:#241C12; --amber-line:#3B2E1D;
-  --mark:#62511C; --mark-rule:#85702A; --mark-ink:#C9B380; --ok:#86A874; --danger:#E5735F;
+  --mark:#62511C; --mark-rule:#85702A; --ok:#86A874; --danger:#E5735F;
   /* §01's three mark tints: a pale FILL for a band behind the words and a
      saturated RULE for the line under them — and for the swatch that offers
      either. Mirrored in `bookCss.ts` for the book's own document, which
@@ -140,12 +162,10 @@
   --tint-a:#2A2620; --tint-b:#1F262E; --tint-c:#262330; --tint-d:#202A26; --tint-e:#2E2716;
   /* Night is the only theme that re-values elevation: a light-theme shadow
    * disappears on a dark page. */
-  --shadow-window: 0 1px 2px rgba(0,0,0,.5), 0 12px 32px -20px rgba(0,0,0,.8);
   --shadow-card: 0 1px 2px rgba(0,0,0,.5), 0 14px 34px -22px rgba(0,0,0,.75);
   --shadow-jacket: 0 1px 2px rgba(0,0,0,.6), 0 6px 14px -4px rgba(0,0,0,.7), 0 18px 32px -14px rgba(0,0,0,.8);
   --shadow-pop: 0 24px 60px -28px rgba(0,0,0,.9);
   --shadow-pill: 0 1px 2px rgba(0,0,0,.55);
-  --shadow-knob: 0 1px 3px rgba(0,0,0,.6);
   --scrim: rgba(0,0,0,.6);
 }
 
@@ -292,6 +312,99 @@
   --text-title: 28px;
   /* The reader's empty state — the largest type in the app. */
   --text-display: 44px;
+}
+
+/* ── THE THREE FACES ────────────────────────────────────────────────────────
+ *
+ * §02 assigns the interface to Instrument Sans, prose to Crimson Pro and
+ * machine text to IBM Plex Mono. Those are three decisions; there were NINE
+ * declarations of them.
+ *
+ * ⚠️ **A FONT STACK IS THE WORST KIND OF LITERAL TO REPEAT**, and it is the one
+ * the guard could not see: `font-family` was not policed, so nothing noticed
+ * that the serif was written out five times and the mono three. A stack is
+ * long, so it is copied rather than retyped; it is a FALLBACK CHAIN, so a
+ * missing link fails only on the machines that needed it; and every copy has to
+ * change together when a face is added, dropped or renamed — which has already
+ * happened once here, when the variable builds arrived and `'Crimson Pro
+ * Variable'` had to go in front of `'Crimson Pro'`.
+ *
+ * The sans stack is the body default in `global.css` and is named here so all
+ * three live together; nothing else should need to declare it.
+ */
+:root {
+  --font-sans: 'Instrument Sans Variable', 'Instrument Sans', system-ui,
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-serif: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ── LEADING ────────────────────────────────────────────────────────────────
+ *
+ * NAMED BY ROLE, like type and for type's reason: how open a line box is IS a
+ * decision about what the text is. Large type is set tighter because the gaps a
+ * face builds in for 13px come apart at 44; a paragraph is set more openly than
+ * a row because the eye has to find the next line rather than the next word.
+ *
+ * ⚠️ **IT WAS EXEMPT FROM THE GUARD AS "A RATIO, NOT A QUANTITY", AND THAT IS
+ * THE ARGUMENT THAT ALREADY FAILED ONCE.** `font-weight` is a ratio by the same
+ * test and it accumulated twenty-eight hand-written values before it was named;
+ * `opacity` is a ratio and §07's one disabled rule had become five numbers.
+ * Leading went the same way: twenty-four chosen values over EIGHT unrelated
+ * numbers — 1.1, 1.2, 1.3, 1.4, 1.45, 1.5, 1.55, 1.6 — in twelve stylesheets.
+ *
+ * The proof that none of it was a decision is that the same SIZE got different
+ * answers with nothing said about why: `--text-small` was set at 1.3, 1.4, 1.45
+ * and 1.6; `--text-ui` at 1.5, 1.55 and 1.6; `--text-body` at 1.2, 1.5 and 1.6.
+ * A scale cannot be wrong about a distinction nobody was drawing.
+ *
+ * Five steps, and the collapse moves no line by more than 0.1 — the 1.5 group
+ * onto `--leading-body`, where it had no distinction from the 1.6 group to
+ * lose, and 1.45 onto `--leading-ui`. At 13px that is under 1.5px a line.
+ *
+ * `1` IS NOT ON THIS SCALE, and unlike opacity's 0 and 1 that is not because it
+ * is an absence — type set solid is a real setting. It is because the five
+ * declarations that use it all mean the same thing, "this box is exactly its
+ * glyphs", which is a structural claim about the box rather than a leading
+ * chosen for the text. The guard allows it for that reason and no other.
+ */
+:root {
+  /* The largest type in the app — the reader's empty state, at 44px. */
+  --leading-display: 1.1;
+  /* A heading, or a typeface specimen: type being LOOKED AT, not read. */
+  --leading-title: 1.2;
+  /* A compact row's own words — a title and its sub in a strip. */
+  --leading-snug: 1.3;
+  /* ONE OR TWO LINES OF INTERFACE TEXT: a caption, a hint, a margin mark. */
+  --leading-ui: 1.4;
+  /* A PARAGRAPH — an empty state's sentences, a note's own words, prose. */
+  --leading-body: 1.6;
+}
+
+/* ── A RING ─────────────────────────────────────────────────────────────────
+ *
+ * A hairline drawn as a shadow rather than a border, because it takes no space
+ * in the box — which is the whole reason a control that is already its own
+ * filled shape reaches for one.
+ *
+ * ⚠️ **THE GEOMETRY WAS COPIED EIGHT TIMES AND ONLY THE COLOUR EVER DIFFERED.**
+ * Four `0 0 0 1px` and four `inset 0 0 0 1px`, across five stylesheets. The
+ * colour is the legitimate parameter — a swatch's edge, a chip's hairline, a
+ * disc's own rule — and the four numbers in front of it are not a decision
+ * anybody was making. `box-shadow` was not policed either, so nothing said so.
+ *
+ * A PARTIAL VALUE, deliberately: the caller supplies the colour, which keeps
+ * the parameter at the call site where it belongs and composes with a real
+ * elevation beside it — `box-shadow: var(--shadow-pop), var(--ring) var(--line-2)`.
+ *
+ * ⚠️ **THE 0.5px RIM ON THE TRAFFIC LIGHTS IS NOT THIS TOKEN** and must not be
+ * folded into it. A sub-hairline is the one width that is not "the thinnest
+ * line a screen can draw" — it is a deliberate half of it, on a control whose
+ * size Apple owns, and `TitleBar.module.css` says so at the site.
+ */
+:root {
+  --ring: 0 0 0 1px;
+  --ring-inset: inset 0 0 0 1px;
 }
 
 /* ── TRACKING ───────────────────────────────────────────────────────────────

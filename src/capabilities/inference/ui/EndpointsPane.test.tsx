@@ -159,11 +159,14 @@ describe('the Cloud endpoints pane', () => {
     render(<EndpointsPane model={world.model} />)
     fireEvent.change(screen.getByLabelText('Endpoint name'), { target: { value: 'my-proxy' } })
     fireEvent.change(screen.getByLabelText('Endpoint address'), { target: { value: 'https://api.example.com' } })
+    /* THE MODEL NAME IS A FIELD OF ITS OWN, and a draft that lost it would be
+       refused by the crate: an OpenAI-compatible request names a model. */
+    fireEvent.change(screen.getByLabelText('Endpoint model name'), { target: { value: 'gpt-4.1-mini' } })
     fireEvent.change(screen.getByLabelText('Endpoint API key'), { target: { value: 'sk-secret' } })
     fireEvent.click(screen.getByText('Save'))
 
     expect(world.saved).toEqual([
-      { id: 'my-proxy', label: '', baseUrl: 'https://api.example.com', key: 'sk-secret' },
+      { id: 'my-proxy', label: '', baseUrl: 'https://api.example.com', model: 'gpt-4.1-mini', key: 'sk-secret' },
     ])
   })
 
@@ -255,8 +258,8 @@ describe('the Cloud endpoints pane', () => {
     expect(screen.getByText('That endpoint could not be saved.')).toBeTruthy()
   })
 
-  /* NOTHING IS PRESSABLE WHILE A MUTATION IS IN FLIGHT — both commands restart
-     the runtime, and two at once would race the same file. */
+  /* NOTHING IS PRESSABLE WHILE A MUTATION IS IN FLIGHT — both commands rewrite
+     the endpoint list, and two at once would race the same file. */
   it('disables Save and Remove while one is running', () => {
     const world = fakeModel({ rows: [row({ id: 'a', label: 'My proxy' })], busy: true })
     render(<EndpointsPane model={world.model} />)

@@ -5,9 +5,7 @@
     {
       "id": "qwen3-4b-instruct-2507-q4-k-m",
       "label": "Qwen3-4B-Instruct",
-      "modality": "text",
       "license": "Apache-2.0",
-      "backend": "llamacpp",
       "parameters": "4B",
       "quantization": "Q4_K_M",
       "artifacts": [
@@ -19,31 +17,7 @@
           "role": "weights"
         }
       ],
-      "note": "This codebase carries cjkSpacing in readingStyle and CJK typography throughout, and phase 13 found 7 books with substantial CJK content and none declaring it — Chinese books are expected, and Llama-3.2-3B is materially weaker there. 4B at Q4 fits a laptop that is also running a browser. Lemonade's own catalogue names this same checkpoint and quantization (Qwen3-4B-Instruct-2507-GGUF, recipe llamacpp), so it installs through the path being built."
-    },
-    {
-      "id": "kokoro-v1-onnx",
-      "label": "Kokoro",
-      "modality": "speech",
-      "license": "Apache-2.0",
-      "backend": "kokoro",
-      "artifacts": [
-        {
-          "file": "kokoro-v1.0.onnx",
-          "source": "https://huggingface.co/mikkoph/kokoro-onnx/resolve/main/kokoro-v1.0.onnx",
-          "sha256": "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
-          "bytes": 325532387,
-          "role": "weights"
-        },
-        {
-          "file": "voices-v1.0.bin",
-          "source": "https://huggingface.co/mikkoph/kokoro-onnx/resolve/main/voices-v1.0.bin",
-          "sha256": "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
-          "bytes": 28214398,
-          "role": "voices"
-        }
-      ],
-      "note": "Lemonade's shipped catalogue lists kokoro-v1 as checkpoint mikkoph/kokoro-onnx, recipe kokoro, size 0.354 — with no license and no digest, which is exactly the gap this manifest exists to fill. Two artifacts: the graph and the voice pack. 354 MB total is small enough that a reader will not refuse the download."
+      "note": "This codebase carries cjkSpacing in readingStyle and CJK typography throughout, and phase 13 found 7 books with substantial CJK content and none declaring it — Chinese books are expected, and Llama-3.2-3B is materially weaker there. 4B at Q4 fits a laptop that is also running a browser. One GGUF, loaded by the llama-server Paper stages and verifies itself (runtime.rs)."
     }
   ]
 }

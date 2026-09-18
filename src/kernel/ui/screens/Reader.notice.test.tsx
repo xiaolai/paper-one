@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { NO_VOICE } from '../../core/voice'
 import { initialState, type AppDispatch, type AppState } from '../state'
 import type { Book } from '../hooks/useBook'
 import type { Bookmarking } from '../hooks/useBookmarking'
@@ -136,6 +137,9 @@ function reader(over: Over = {}) {
       dispatch={dispatch ?? vi.fn()}
       platform="macos"
       book={{ ...book(), ...(bookOver ?? {}) } as unknown as Book}
+      /* Nothing can speak: the pronunciation control lives inside the lookup's
+         own face, which nothing here draws. */
+      voice={NO_VOICE}
       /* Nothing being looked up — this file is about the notice slot, and Look up
          is App's state since WI-17.2. */
       lookUp={{ state: { kind: 'idle' }, action: 'none', press: null, dismiss: vi.fn(), onInstall: undefined }}

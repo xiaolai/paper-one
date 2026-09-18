@@ -10,7 +10,7 @@
  * The concentric RULE is kept; the prototype's derived value is not. Its
  * 20 − 6 = 14 was concentric with a simulated 20px window card drawn in a
  * browser. Against a real window the parent is the OS's own corner, so the
- * radius comes from `--leading-card-radius`, measured off macOS 26 (see
+ * radius comes from `--radius-leading-card`, measured off macOS 26 (see
  * metrics.ts).
  */
 
@@ -21,7 +21,7 @@
   background: var(--bg);
   box-shadow: var(--shadow-card);
   overflow: hidden;
-  border-radius: var(--leading-card-radius);
+  border-radius: var(--radius-leading-card);
   /* Keeps scrolling content off the rounded bottom corners. At this radius a
    * list running flush to the edge collides with the curve. */
   padding-bottom: var(--space-12);

@@ -87,8 +87,9 @@ tauri-plugin-peer = { path = "crates/tauri-plugin-peer" }
 paper-data-root = { path = "crates/paper-data-root" }
 paper-process = { path = "crates/paper-process" }
 # The local inference runtime (crates/tauri-plugin-inference). DESKTOP ONLY and
-# therefore optional: `lemond` ships for macOS, Windows and Linux and there is
-# no mobile build of it, so a phone has nothing for this plugin to supervise.
+# therefore optional: the plugin supervises a `llama-server` PROCESS, and a
+# phone cannot launch one (iOS forbids child processes; Android 10+ will not
+# exec from app storage), so a phone has nothing for this plugin to supervise.
 # Gating it here — rather than only at the `.plugin()` call — is what keeps its
 # rustls provider from being compiled for iOS and Android at all.
 tauri-plugin-inference = { path = "crates/tauri-plugin-inference", optional = true }

@@ -6,6 +6,7 @@ import {
   DEFAULT_READING_STYLE,
   FIGURE_HEIGHTS,
   MOTION,
+  RADIUS,
   READING_RATIOS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
@@ -901,7 +902,7 @@ ${when('--paper-quote-tint')}blockquote {
   background: color-mix(in srgb, var(--paper-ink) 5%, transparent); /* constant: a tint at the threshold of visible, so the quote is set apart and not boxed */
   padding-block: calc(var(--paper-line) * 0.25);
   padding-inline-end: calc(var(--paper-line) * 0.5);
-  border-radius: 3px; /* constant: enough that the corner is not hard, as the ruler band is */
+  border-radius: ${RADIUS.mark}px;
 }
 
 /* NINE TENTHS OF THE PROSE, FOR EVERYTHING THAT IS NOT RUNNING TEXT.
@@ -964,7 +965,7 @@ pre, code, kbd, samp {
  * would have deleted this one exactly where it is hardest to draw. */
 pre, code, kbd, samp {
   background: color-mix(in srgb, var(--paper-ink) 6%, transparent);
-  border-radius: 3px; /* constant: enough that the corner is not hard, as the ruler band is */
+  border-radius: ${RADIUS.mark}px;
 }
 
 /* THE PANEL IS THE CONTEXT'S HEIGHT, NOT THE CODE'S.
@@ -1400,7 +1401,7 @@ ${MATTE}
   z-index: -1; /* constant: one layer behind the text, which is not a depth on any scale */
   inset-inline: -10px; /* constant: clear of the glyphs, so it reads as a band rather than a box */
   background: var(--paper-band);
-  border-radius: 3px; /* constant: enough that the corner is not hard, which is a threshold and not a size */
+  border-radius: ${RADIUS.mark}px;
   pointer-events: none;
   /* FROM THE MOTION TABLE, not a literal beside it. This was 90ms written out
      here while MOTION.rulerTrack held the same value and nothing read it — so

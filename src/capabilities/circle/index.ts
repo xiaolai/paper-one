@@ -429,6 +429,7 @@ export const circle: Capability = {
     {
       id: 'circle:circle',
       label: 'Circle',
+      icon: 'people',
       render: (context) =>
         /* Stryker disable all: wiring — each line hands one store, port or prop through; the port's own tests hold the behaviour, and `index.peer.test.ts` holds that the seams reach the peer. */
         createElement(CirclePane, {
@@ -471,6 +472,7 @@ export const circle: Capability = {
     {
       id: 'circle:book',
       label: 'Circle',
+      icon: 'people',
       screens: ['reader'],
       render: (context) =>
         /* Stryker disable all: wiring — each line hands one store, port or prop through; the port's own tests hold the behaviour, and `index.peer.test.ts` holds that the seams reach the peer. */

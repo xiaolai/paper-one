@@ -53,7 +53,7 @@ export interface PaneGroupProps {
   readonly hint?: string
   /**
    * The group's id in its panel, drawn as `data-group` so the panel can scroll
-   * a requested group into view — Settings does, for "Install one" (phase 17,
+   * a requested group into view — Settings does, for "Choose one" (phase 17,
    * L3). Absent draws nothing.
    */
   readonly group?: string

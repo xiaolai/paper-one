@@ -413,6 +413,197 @@ pub async fn ask(
     prompt: &str,
     depth: Depth,
     cancel: &Cancel,
+    on_delta: impl FnMut(String),
+) -> Result<String> {
+    run(
+        agent,
+        program,
+        workdir,
+        turn_args(agent, workdir, depth),
+        prompt,
+        parse_line,
+        cancel,
+        on_delta,
+    )
+    .await
+}
+
+/// Define a word, through an agent CLI, in the shape `gloss.rs` builds.
+///
+/// ⚠️ **THE OWNER'S DECISION, 2026-09-18, AND IT REVERSES F8.** The phase-15
+/// plan made "no selection can reach an agent" a property of the call graph,
+/// because a lookup through an agent is *"seconds, and a subscription turn
+/// spent, for a gesture a reader makes dozens of times a chapter"*. Measured
+/// the same day with the flags below: Claude `haiku` 6–9 s, Codex 12 s, against
+/// 1–2 s from the local model. The reader chooses it knowing that; the route
+/// list says what each costs.
+///
+/// THE SAME RUNNER AS [`ask`] — the process group, the stderr drain, the
+/// cancellation on every await, a nonzero exit as a failure — with arguments
+/// that ask for ONE structured answer and a parser that reads only it. See
+/// [`gloss_args`] for the lockdown, which is not [`turn_args`]'s.
+#[allow(clippy::too_many_arguments)] // one parameter per thing a lookup is made of
+pub async fn gloss(
+    agent: Agent,
+    program: &Path,
+    workdir: &Path,
+    schema_file: &Path,
+    schema: &serde_json::Value,
+    system: &str,
+    question: &str,
+    cancel: &Cancel,
+) -> Result<String> {
+    let args = gloss_args(agent, workdir, schema_file, schema, system)?;
+    /* THE QUESTION GOES ON STDIN, as every prompt in this module does: it is
+    the book's sentence. Claude takes the reader's instructions as its system
+    prompt (in argv — see `gloss_args`); Codex has no such flag, so they go
+    ahead of the question on stdin. */
+    let input = match agent {
+        Agent::Claude => question.to_owned(),
+        Agent::Codex => format!("{system}\n\n{question}"),
+    };
+    run(
+        agent,
+        program,
+        workdir,
+        args,
+        &input,
+        parse_gloss_line,
+        cancel,
+        |_| {},
+    )
+    .await
+}
+
+/// The arguments for one structured lookup.
+///
+/// ⚠️ **NOT `turn_args`'s LOCKDOWN, AND THE DIFFERENCE WAS MEASURED.** Claude
+/// implements `--json-schema` as a TOOL (`StructuredOutput`), and
+/// `--disallowed-tools "*"` — the one spelling that closes `turn_args` —
+/// blocked it: the model apologised in prose instead of answering. So this names
+/// the ONE tool the turn gets, `--tools StructuredOutput`, and the session's
+/// own `init` event was read back to confirm the rest are gone:
+/// `tools: ["StructuredOutput"]` (2026-09-18). Everything else `turn_args`
+/// states — no settings, no MCP, no agents, no session on disk — is stated
+/// here too.
+///
+/// THE READER'S INSTRUCTIONS ARE IN ARGV for Claude (`--system-prompt`), which
+/// this module's header otherwise forbids for prompts. The rule is about BOOK
+/// TEXT, which `ps` would show every user on the machine; the instructions are
+/// the reader's own Settings text, bounded by `MAX_SYSTEM`, and replacing the
+/// CLI's own system prompt is what took Claude from 6.7k input tokens to 1.5k.
+/// The schema is Paper's, built from two bounded language names.
+pub fn gloss_args(
+    agent: Agent,
+    workdir: &Path,
+    schema_file: &Path,
+    schema: &serde_json::Value,
+    system: &str,
+) -> Result<Vec<String>> {
+    let dir = workdir.to_string_lossy().into_owned();
+    Ok(match agent {
+        Agent::Claude => vec![
+            "-p".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--verbose".into(),
+            // The fastest model the CLI names: a lookup is a sentence, and the
+            // reader is waiting beside a word.
+            "--model".into(),
+            "haiku".into(),
+            "--system-prompt".into(),
+            system.to_owned(),
+            "--json-schema".into(),
+            schema.to_string(),
+            "--tools".into(),
+            "StructuredOutput".into(),
+            "--settings".into(),
+            r#"{"permissions":{"deny":[],"allow":["StructuredOutput"]}}"#.into(),
+            "--setting-sources".into(),
+            String::new(),
+            "--strict-mcp-config".into(),
+            "--mcp-config".into(),
+            r#"{"mcpServers":{}}"#.into(),
+            "--agents".into(),
+            "{}".into(),
+            "--no-session-persistence".into(),
+        ],
+        Agent::Codex => {
+            let schema_file = schema_file
+                .to_str()
+                .ok_or_else(|| Error::PathNotUnicode(schema_file.to_path_buf()))?
+                .to_owned();
+            vec![
+                "exec".into(),
+                "--json".into(),
+                "--ephemeral".into(),
+                "--ignore-user-config".into(),
+                "--ignore-rules".into(),
+                "--skip-git-repo-check".into(),
+                "-s".into(),
+                "read-only".into(),
+                "-C".into(),
+                dir,
+                // A lookup is not a problem to reason about.
+                "-c".into(),
+                "model_reasoning_effort=low".into(),
+                "--output-schema".into(),
+                schema_file,
+                "-".into(),
+            ]
+        }
+    })
+}
+
+/// Read one line of a structured lookup: Claude's final `result` event, whose
+/// `structured_output` is the answer; Codex's final `agent_message`, whose text
+/// is. Everything else — the `init` event with its paths and session id, usage,
+/// rate-limit notices — is dropped, for the module header's reason.
+pub fn parse_gloss_line(agent: Agent, line: &str) -> Result<Option<String>> {
+    match agent {
+        Agent::Codex => parse_line(agent, line),
+        Agent::Claude => {
+            let line = line.trim();
+            if line.is_empty() {
+                return Ok(None);
+            }
+            let event: serde_json::Value =
+                serde_json::from_str(line).map_err(|err| Error::AgentMalformed {
+                    agent: agent.name(),
+                    message: format!("unreadable event: {err}"),
+                })?;
+            if event["type"] != "result" {
+                return Ok(None);
+            }
+            match &event["structured_output"] {
+                serde_json::Value::Object(_) => Ok(Some(event["structured_output"].to_string())),
+                /* A result with no structured answer is a turn that did not do
+                what it was asked — an error result, or a model that answered in
+                prose. Not `Ok(None)`: that would read as "not an answer event"
+                and end in "finished without answering", which hides which. */
+                _ => Err(Error::AgentMalformed {
+                    agent: agent.name(),
+                    message: if event["is_error"] == true {
+                        "the turn ended in an error".to_owned()
+                    } else {
+                        "answered without the structured reply".to_owned()
+                    },
+                }),
+            }
+        }
+    }
+}
+
+/// The runner both kinds of turn share. See [`ask`] and [`gloss`].
+#[allow(clippy::too_many_arguments)] // one parameter per thing a turn is made of
+async fn run(
+    agent: Agent,
+    program: &Path,
+    workdir: &Path,
+    args: Vec<String>,
+    prompt: &str,
+    parse: fn(Agent, &str) -> Result<Option<String>>,
+    cancel: &Cancel,
     mut on_delta: impl FnMut(String),
 ) -> Result<String> {
     /* ⚠️ THE ARGV AND `current_dir` MUST BE THE SAME DIRECTORY. Codex is told
@@ -427,7 +618,7 @@ pub async fn ask(
     prepare_workdir(workdir).await?;
 
     let mut cmd = tokio::process::Command::new(program);
-    cmd.args(turn_args(agent, workdir, depth))
+    cmd.args(args)
         .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -548,7 +739,7 @@ pub async fn ask(
         };
         match next {
             Ok(Some(line)) => {
-                let parsed = match parse_line(agent, &line) {
+                let parsed = match parse(agent, &line) {
                     Ok(parsed) => parsed,
                     Err(failure) => {
                         turn.stop().await;

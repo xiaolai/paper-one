@@ -123,9 +123,16 @@ function declarations(src: string): { prop: string; value: string; line: number 
   const out: { prop: string; value: string; line: number }[] = []
   /* `[;}]|$` rather than `[;}]`: a final declaration with no semicolon before
      the closing brace is legal CSS, and so is one at the end of a file. */
-  for (const m of src.matchAll(/([a-z-]+)\s*:\s*([^;{}]+)(?:[;}]|$)/g)) {
+  /* ⚠️ **CASE-INSENSITIVE, AND IT WAS NOT.** CSS property names are
+   * case-insensitive, so `PADDING: 9px` is valid CSS that renders — and
+   * `[a-z-]+` without the `i` flag matched none of it. Every check in this file
+   * runs off this function, so one capital letter anywhere in a property name
+   * made that declaration invisible to the whole guard. Found by audit
+   * 2026-09-18; the property is lower-cased on the way out so `SCALED.has` and
+   * the `TOKENED` lookups still work on one spelling. */
+  for (const m of src.matchAll(/([a-z-]+)\s*:\s*([^;{}]+)(?:[;}]|$)/gi)) {
     out.push({
-      prop: m[1] ?? '',
+      prop: (m[1] ?? '').toLowerCase(),
       value: (m[2] ?? '').trim(),
       line: src.slice(0, m.index).split('\n').length,
     })
@@ -262,16 +269,102 @@ describe('the layout changes width at agreed places', () => {
  *                    `--z-*` publishes all of it now.
  *   `1px` / `0.5px`  the hairline, which `ALLOWED` already sanctions, and one
  *                    rim.
- *   `2px` border     exactly one, in `MarginMarks`, with its reason in its own
- *                    comment: "2px of a pale band is not a colour, it is a
- *                    smudge." One call site and a stated meaning is not the
- *                    failure tokens exist to prevent — drift between many call
- *                    sites is, and anonymity is.
+ * ⚠️ **AND ONE ENTRY IN THAT RESIDUE WAS WRONG ON ITS OWN TERMS.** It read:
+ * *"`2px` border — exactly one, in `MarginMarks` … One call site and a stated
+ * meaning is not the failure tokens exist to prevent — drift between many call
+ * sites is."* The premise was the part to check, and it was false. There were
+ * THREE, in TWO SPELLINGS: `MarginMarks` had `border-inline-start: 2px solid`
+ * and `SidePane` twice had `box-shadow: inset 2px 0 0` — the same decision drawn
+ * two different ways, so neither could be found from the other and a grep for
+ * `2px` looked like it had found the only one. It is `--kind-rule-w` now, with
+ * its reason in `metrics.ts`.
+ *
+ * The lesson is about this list rather than about that value: **an entry here
+ * asserting "only one call site" is a claim about the tree, and nothing checks
+ * it.** Anything left in the residue on those grounds should be counted again
+ * before it is believed.
  */
 describe('opacity and weight come from their scales', () => {
+  /**
+   * ⚠️ **THIS WAS TWO PROPERTIES AND THE ARGUMENT FOR IT COVERED MORE.**
+   *
+   * The reasoning above is that a property whose every value is a bare number
+   * cannot be policed by hunting for literals, so the value must BE a token of a
+   * named family. That was applied to `opacity` and `font-weight` and stopped
+   * there — and the 2026-09-18 audit found that the same mechanism was needed by
+   * everything below, for two different reasons.
+   *
+   * **The ratio properties, for the stated reason.** `line-height` was exempt as
+   * "a ratio, not a quantity" and had accumulated twenty-four chosen values over
+   * eight unrelated numbers; `z-index` is sanctioned as a count by `ALLOWED`, so
+   * `z-index: 9999` passed.
+   *
+   * **The others, because `SCALED` membership only asks whether a value is a
+   * TOKEN, never WHICH.** `font-size: var(--space-16)` passed the numeric guard
+   * — a spacing step used as a type size, which is exactly the confusion the two
+   * scales were separated to prevent. So the families are pinned:
+   *
+   *   `font-size`      `--text-*`     a role, not a length
+   *   `border-radius`  `--radius-*`   a shape, not a length
+   *   `letter-spacing` `--track-*`
+   *   `line-height`    `--leading-*`
+   *   `font-family`    `--font-*`     three faces, nine declarations of them
+   *   `box-shadow`     `--shadow-*` / `--ring*`
+   *   `z-index`        `--z-*`, or the documented 1..3 local residue
+   *   `transition` / `animation`  `--motion-*`
+   *
+   * Each allows the keywords that carry no value at all, and each was checked
+   * against every declaration in the tree before being switched on.
+   *
+   * ⚠️ **THE MULTI-VALUE PROPERTIES ARE POLICED BY FAMILY, NOT BY SHAPE** — see
+   * `FAMILIES` below. `border-radius: var(--radius-sheet) var(--radius-sheet) 0
+   * 0` and `transition: background var(--motion-popover), color
+   * var(--motion-popover)` are both correct and neither is an exact match
+   * against anything, so listing shapes would have meant enumerating CSS
+   * grammar. Asking instead "does every token in this value come from a family
+   * this property may draw on" catches the defect — a spacing step used as a
+   * type size — without caring how many of them there are.
+   */
+  const NOT_A_VALUE = String.raw`inherit|initial|unset|revert|revert-layer`
   const TOKENED: ReadonlyArray<readonly [string, RegExp]> = [
     ['opacity', /^(0|1|var\(--opacity-[\w-]+\)|inherit|initial|unset|revert)$/],
     ['font-weight', /^(var\(--weight-[\w-]+\)|inherit|initial|unset|revert)$/],
+    /* `normal` is the initial value and says "the face's own", which is not a
+       step and has no token. */
+    ['letter-spacing', new RegExp(String.raw`^(normal|var\(--track-[\w-]+\)|${NOT_A_VALUE})$`)],
+    /**
+     * `1` stays literal, and `tokens.css` argues why: the five declarations
+     * using it all mean "this box is exactly its glyphs", which is a structural
+     * claim rather than a leading chosen for the text.
+     */
+    ['line-height', new RegExp(String.raw`^(1|var\(--leading-[\w-]+\)|${NOT_A_VALUE})$`)],
+    /* `inherit` is how a control opts into its container's face — `.install` in
+       the lookup face does exactly that, deliberately. */
+    ['font-family', new RegExp(String.raw`^(var\(--font-[\w-]+\)|${NOT_A_VALUE})$`)],
+    /**
+     * ⚠️ **THE `font` SHORTHAND IS REFUSED OUTRIGHT, AND THAT IS THE STRONGEST
+     * RULE IN THIS FILE.** Two live declarations read `font: var(--text-title)`
+     * and `font: var(--text-ui)`. The shorthand REQUIRES a size and a family, so
+     * a value carrying only a size is invalid and the browser discards the whole
+     * declaration — which is why a heading was rendering at the user agent's
+     * `2em` bold for however long it had been there. The value *was* a token, so
+     * nothing in this file objected, and `font` was in no list to be read.
+     *
+     * Refusing it is better than validating it, because even a VALID `font`
+     * shorthand resets every font property it does not mention — weight, style,
+     * variant and `line-height` — to its initial value, silently undoing tokens
+     * set by another rule. The longhands cannot do that.
+     *
+     * ⚠️ **`font: inherit` IS THE ONE EXCEPTION, AND IT IS EXEMPT ON EXACTLY
+     * THE GROUND THAT CONDEMNS THE REST.** The objection above is that the
+     * shorthand resets what it does not mention; `inherit` mentions everything,
+     * by inheriting all of it. It is the standard reset that makes a `<button>`
+     * or an `<input>` take its container's type instead of the user agent's, and
+     * the tree holds twenty-one of them and not one other value — so this
+     * exemption is measured rather than assumed. Anything else, token or not, is
+     * a declaration that should have been longhands.
+     */
+    ['font', /^inherit$/],
   ]
 
   it('never writes one as a literal', () => {
@@ -287,6 +380,92 @@ describe('opacity and weight come from their scales', () => {
       }
     }
     expect(offences).toEqual([])
+  })
+
+  /**
+   * WHICH FAMILIES A PROPERTY MAY DRAW ON.
+   *
+   * ⚠️ **`SCALED` ASKS WHETHER A VALUE IS A TOKEN AND NEVER WHICH ONE**, so
+   * `font-size: var(--space-16)` and `border-radius: var(--space-4)` both passed
+   * the numeric guard — a spacing step standing in for a type size, which is the
+   * precise confusion `tokens.css` separated the two scales to prevent ("spacing
+   * is the one scale where naming by intent is a mistake … a font size IS a
+   * decision about what a piece of text is"). Two scales with one guard between
+   * them is one scale.
+   *
+   * A prefix list per property, checked against every `var()` in the value.
+   * Every entry below was derived by reading every declaration of that property
+   * in the tree first — this switches on a rule the app already follows, which
+   * is the cheapest moment to do it and the only moment it costs nothing.
+   *
+   * ⚠️ **THE `--leading-*` SCALE CREATED A PREFIX COLLISION AND THE FIX WAS TO
+   * RENAME, NOT TO ADD AN EXCEPTION.** `metrics.ts` published
+   * `--leading-card-radius` — a LENGTH, a floating card's concentric radius
+   * (`WINDOW_RADIUS − CONCENTRIC_INSET`) — and the leading scale added five
+   * RATIOS sharing its first nine characters. The first version of this check
+   * allowed it by exact name under `border-radius`, which stopped a radius
+   * being refused and left the far worse direction open: `line-height:
+   * var(--leading-card-radius)` would have PASSED, a 13px length accepted as a
+   * line-height by the very check written to stop a value from the wrong scale.
+   *
+   * It is `--radius-leading-card` now, which puts it in the family it always
+   * belonged to and needs no exception here. A token whose name has to be
+   * special-cased in the guard is a token that is named wrong.
+   */
+  const FAMILIES: ReadonlyArray<readonly [prop: string, allowed: readonly string[]]> = [
+    /* `--face-scale` is a multiplier the typeface specimen sets, not a size. */
+    ['font-size', ['text-', 'face-scale']],
+    /* `--space-*` because the sheet's inner radius is `sheet − space-4`, which
+       is §12's concentric rule written as the derivation it is. */
+    ['border-radius', ['radius-', 'space-']],
+    ['letter-spacing', ['track-']],
+    ['line-height', ['leading-']],
+    ['font-family', ['font-']],
+    /* A shadow's value is a geometry AND a colour, so both kinds of token are
+       legitimate here: the named elevations and rings, the widths a rule is
+       drawn at (`--kind-rule-w`, where a border would take space the box has not
+       got), and any ink the app can draw a line in. */
+    [
+      'box-shadow',
+      ['shadow-', 'ring', 'kind-rule-w', 'line', 'ink', 'amber', 'mark-', 'swatch-edge', 'disc', 'dot', 'tl-rim', 'accent'],
+    ],
+    ['z-index', ['z-']],
+    ['transition', ['motion-']],
+    ['animation', ['motion-']],
+    ['opacity', ['opacity-']],
+    ['font-weight', ['weight-']],
+  ]
+
+  it('draws each property from its own family of tokens', () => {
+    const offences: string[] = []
+    for (const file of stylesheets(SRC)) {
+      if (file.endsWith('tokens.css')) continue
+      const src = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '))
+      for (const { prop, value, line } of declarations(src)) {
+        const rule = FAMILIES.find(([name]) => name === prop)
+        if (!rule) continue
+        for (const m of value.matchAll(/var\(\s*--([\w-]+)/g)) {
+          const token = m[1] ?? ''
+          if (rule[1].some((prefix) => token.startsWith(prefix))) continue
+          offences.push(`${relative(SRC, file)}:${line}  ${prop}: --${token} is not from ${rule[1].join('/')}`)
+        }
+      }
+    }
+    expect(
+      offences,
+      `\n${offences.length} token(s) used by a property they do not belong to:\n  ${offences.join('\n  ')}\n`,
+    ).toEqual([])
+  })
+
+  /* The family check has to be able to fail, and on the shape it was bought
+     for: a real token, from the wrong scale, in a property that accepts it. */
+  it('would catch a token from the wrong family', () => {
+    const wrong = FAMILIES.find(([p]) => p === 'font-size')!
+    expect(wrong[1].some((prefix) => 'space-16'.startsWith(prefix))).toBe(false)
+    expect(wrong[1].some((prefix) => 'text-ui'.startsWith(prefix))).toBe(true)
+    const radius = FAMILIES.find(([p]) => p === 'border-radius')!
+    expect(radius[1].some((prefix) => 'leading-body'.startsWith(prefix))).toBe(false)
+    expect(radius[1].some((prefix) => 'radius-leading-card'.startsWith(prefix))).toBe(true)
   })
 
   /* Non-vacuity: the check has to be able to fail, and on the exact shape it

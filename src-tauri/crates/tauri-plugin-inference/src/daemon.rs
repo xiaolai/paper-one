@@ -1,29 +1,31 @@
-//! The supervised `lemond`: start it, prove it is ready, talk to it, stop it.
+//! The supervised `llama-server`: start it, prove it is ready, talk to it,
+//! stop it. ("The daemon" throughout this crate, a name it kept from the
+//! `lemond` it replaced on 2026-09-18 — see `spawn.rs`.)
 //!
-//! One process, owned outright. Paper writes its configuration, mints its
-//! credential, launches it into its own process group, waits for it to answer
-//! its own health route, and takes the whole group down again on the way out.
-//! Nothing here is a general runner: the program is the bundled binary
-//! (`paths::bundled_runtime`), the argv is `spawn::plan_spawn`'s closed list,
-//! and no caller supplies either.
+//! One process, owned outright. Paper mints its credential, launches it into
+//! its own process group, waits for it to answer its own health route, and
+//! takes the whole group down again on the way out. Nothing here is a general
+//! runner: the program is the verified server (`runtime.rs`), the argv is
+//! `spawn::plan_spawn`'s closed list, and no caller supplies either.
 //!
 //! # Readiness is asked, never assumed
 //!
-//! `spawn` returning is not readiness — the daemon binds its sockets some
-//! way into startup, and a request made before that fails with a connection
-//! refusal that looks nothing like "still starting". So [`Daemon::start`]
-//! polls `/api/v1/health` until it answers or the deadline passes, and a
-//! deadline that passes carries the child's own log tail, because the useful
-//! half of that failure is always what the child said before giving up.
+//! `spawn` returning is not readiness — the server binds its socket some way
+//! into startup and then LOADS THE MODEL, answering `/health` with 503 until it
+//! has. A request made before that fails in a way that looks nothing like
+//! "still starting". So [`Daemon::start`] polls `/health` until it answers
+//! `ok` or the deadline passes, and a deadline that passes carries the child's
+//! own log tail, because the useful half of that failure is always what the
+//! child said before giving up.
 //!
-//! # The token never leaves this process
+//! # The key never leaves this process
 //!
-//! F5: the webview renders untrusted book HTML, and the daemon's control
-//! plane installs and executes backend binaries. Handing the webview the
-//! bearer token to get native `fetch` streaming would hand book HTML a
-//! backend installer. So the token is minted here, lives in this struct, and
-//! every request to the daemon is made by this module. The webview gets typed
-//! commands and a `Channel`, and no URL it chooses.
+//! F5: the webview renders untrusted book HTML. Handing it the key to get
+//! native `fetch` streaming would hand book HTML the reader's model — and, on
+//! the runtime this replaced, a backend installer. So the key is minted here,
+//! lives in this struct, and every request to the server is made by this
+//! module. The webview gets typed commands and a `Channel`, and no URL it
+//! chooses.
 
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -37,16 +39,20 @@ use crate::error::{unreachable, Error, Result};
 use crate::lineage::{GroupHold, GroupRecord, OsProcesses, Processes};
 use crate::spawn::SpawnPlan;
 
-/// How long to wait for the daemon to answer its health route before giving
-/// up on the launch.
+/// How long to wait for the server to answer its health route `ok` before
+/// giving up on the launch.
 ///
-/// Generous, and the reason is measured: a cold start on the smoke-test
-/// machine answered in well under a second, but the first launch after an
-/// install also unpacks `resources/` and probes the accelerators, and a
-/// reader on a slow disk should get a working app rather than a failure that
-/// a retry fixes. A launch that has genuinely failed reports in 30s; nothing
-/// waits on this except the reader who just pressed Install.
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// ⚠️ **IT WAS 30 s, AND THE MODEL LOAD WAS NOT INSIDE IT.** lemond answered
+/// its health route in 0.1–0.2 s and loaded the model on the first REQUEST,
+/// so the 2.5 GB read was paid inside `GLOSS_CEILING` (90 s) by the reader's
+/// first lookup. `llama-server` loads at start and says `ok` only after, so the
+/// load moved here and the budget moved with it. Measured on an M5 (2026-09-18):
+/// 0.5–0.9 s warm, 7.9 s for a first launch. Ninety is for the reader on a slow
+/// disk, who should get a working app rather than a failure a retry fixes.
+///
+/// A launch that has genuinely FAILED does not wait this out: a child that
+/// exits is noticed on the next poll, with its own last words attached.
+const READY_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The gap between health polls while starting.
 const POLL_EVERY: Duration = Duration::from_millis(100);
@@ -61,12 +67,10 @@ const POLL_EVERY: Duration = Duration::from_millis(100);
 /// is what the ten seconds was reasoned about; it is wrong for a chat
 /// completion, whose body IS the answer arriving a token at a time.
 ///
-/// The daemon loads a model on the FIRST request that needs it — `await_ready`
-/// only polls for `status: "ok"`, and the health shape it parses reports
-/// `model_loaded: null` — so the first gloss after a launch pays a 2.5 GB GGUF
-/// read inside the same deadline as the generation. On a cold page cache that
-/// alone can exceed ten seconds, and the reader gets a failed lookup on the
-/// first thing they try.
+/// A generation's answer arrives a token at a time, and on a machine that has
+/// been busy for a minute it arrives slowly: measured on a fanless M5, decode
+/// fell from 45 to about 10 tokens a second after 100 s of sustained work. A
+/// total ten-second deadline cuts that answer off mid-sentence.
 ///
 /// So the streaming client is bounded by SILENCE instead, exactly as
 /// `state.rs`'s download client is and for the same stated reason — *"no
@@ -93,15 +97,16 @@ const MODEL_SILENCE: Duration = Duration::from_secs(120);
 ///
 /// Ten minutes is chosen against the work rather than as a round number:
 /// `MAX_ANSWER_TOKENS` is 1024, and 1024 tokens at a slow five per second is
-/// about three and a half minutes, plus a cold 2.5 GB model load. Nothing
-/// legitimate approaches ten minutes; a request that does is wedged.
+/// about three and a half minutes — twice that if it queued behind another on
+/// the server's one slot (`-np 1`). Nothing legitimate approaches ten minutes;
+/// a request that does is wedged.
 ///
 /// It is a REQUEST-level override, so it coexists with the client's
 /// `read_timeout` rather than replacing it — verified in reqwest 0.13.4, where
 /// `read_timeout` lives on the client config and is applied independently of
 /// the per-request deadline. Two different questions: "has it gone quiet?" and
 /// "has this gone on too long?"
-const MODEL_CEILING: Duration = Duration::from_secs(600);
+pub(crate) const MODEL_CEILING: Duration = Duration::from_secs(600);
 
 /// The ceiling on a GLOSS, which is a different question from the one above.
 ///
@@ -114,11 +119,14 @@ const MODEL_CEILING: Duration = Duration::from_secs(600);
 /// is the absence of one wearing the companion's clothes.
 ///
 /// Ninety seconds, against the work in the same way the ten minutes was:
-/// 160 tokens at a slow five per second is half a minute, and the first gloss
-/// after a launch pays a cold 2.5 GB GGUF read on top — the one case that
-/// legitimately takes tens of seconds, which is why this is not the two or
-/// three seconds a warm gloss actually costs. Past this the daemon is wedged,
-/// and the reader has been staring at a spinner for a minute and a half.
+/// 160 tokens at a slow five per second is half a minute, and the server has
+/// ONE slot, so a lookup can wait behind whatever else is being answered. It
+/// is not the one to three seconds a gloss actually costs on a cool machine.
+/// Past this the server is wedged, and the reader has been staring at a
+/// spinner for a minute and a half.
+///
+/// (It used to be sized for a cold 2.5 GB model load too, which the first
+/// gloss paid under lemond. The load happens at start now — `READY_TIMEOUT`.)
 ///
 /// A REQUEST-level override, like `MODEL_CEILING`, so it coexists with the
 /// client's `read_timeout` — and it is BELOW `MODEL_SILENCE` (120s), which
@@ -128,10 +136,11 @@ pub const GLOSS_CEILING: Duration = Duration::from_secs(90);
 
 /// How long the tree gets to shut down cleanly before it is killed.
 ///
-/// The daemon unloads models and releases GPU allocations on the way out
-/// (`Unload all models` → `Evict all completed` → `Cleanup complete` in the
-/// smoke test's log), and a loaded 2.4 GB model takes a moment to let go of.
-/// Past this, the reader closing the app matters more than a clean unload.
+/// The server frees the model and its GPU allocations on the way out, and a
+/// loaded 2.5 GB model takes a moment to let go of. Past this, the reader
+/// closing the app matters more than a clean unload. (lemond overran it on
+/// every stop measured, pausing two seconds of its own for "GPU driver
+/// cleanup".)
 ///
 /// `pub(crate)`: the launch-time recovery of a group a previous Paper left
 /// running (`lineage.rs`) gives it the same grace, for the same reason.
@@ -140,7 +149,7 @@ pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// How many lines of the child's output to keep.
 ///
 /// Only ever shown attached to a failure, and only ever from this process —
-/// it is not a log file and nothing persists it. Bounded because a daemon
+/// it is not a log file and nothing persists it. Bounded because a server
 /// that fails in a loop would otherwise grow this without limit.
 const LOG_TAIL_LINES: usize = 40;
 
@@ -163,8 +172,6 @@ pub struct Daemon {
     /// — see [`Daemon::drain_readers`]. Dropping a handle detaches the task,
     /// which is exactly what the drain does after its bounded wait.
     readers: Vec<tokio::task::JoinHandle<()>>,
-    /// The port its WebSocket chose for itself, once health has reported it.
-    websocket_port: Option<u16>,
     #[cfg(windows)]
     _job: crate::procgroup::JobHandle,
 }
@@ -189,17 +196,16 @@ impl LogTail {
     }
 }
 
-/// The daemon's health route, named once — see `SPEECH_ROUTE` in
-/// `commands.rs` for the same reason.
-const HEALTH_ROUTE: &str = "/api/v1/health";
+/// The server's health route, named once.
+///
+/// UNAUTHENTICATED in llama-server — it and `/v1/models` answer without the
+/// key, deliberately upstream — so a health answer proves the server is up
+/// and says NOTHING about whether the key works. The request still carries
+/// it, which costs nothing and keeps one request builder.
+const HEALTH_ROUTE: &str = "/health";
 
 impl Daemon {
-    /// Write the configuration, launch the child, and wait for it to answer.
-    ///
-    /// The cache directory is NOT created here. WI-15.0's first acceptance
-    /// line is that the daemon starts from a directory that did not exist,
-    /// and the daemon makes its own — creating it first would turn that test
-    /// into one that proves nothing.
+    /// Launch the child and wait for it to answer.
     pub async fn start(plan: SpawnPlan) -> Result<Daemon> {
         /* THE PLAN CARRIES THE KEY, checked at the door. `request` and
          * `model_request` index `env[API_KEY_ENV]`, and a plan without it
@@ -212,27 +218,21 @@ impl Daemon {
             "SpawnPlan carries no {} — spawn.rs always sets it",
             crate::spawn::API_KEY_ENV
         );
-        // The config file has to exist before the launch, and it lives inside
-        // the cache directory — so this one directory is created, and only
-        // this one. The daemon still populates everything under it.
-        if let Some(parent) = plan.config_path().parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(
-            plan.config_path(),
-            serde_json::to_vec_pretty(&plan.config).map_err(|e| {
-                Error::ManifestMalformed(format!("could not render the runtime config: {e}"))
-            })?,
-        )
-        .await?;
 
         let mut cmd = Command::new(&plan.program);
-        cmd.args(&plan.args);
+        cmd.args(&plan.args).current_dir(&plan.working_dir);
+        /* ⚠️ CLEARED FIRST, SET SECOND — the order is the guarantee. Paper's
+         * own `LLAMA_API_KEY` sits in the namespace being cleared, and
+         * `Command` keeps the LAST instruction per variable, so an inherited
+         * key is replaced and never survives beside ours. A name that is not
+         * Unicode cannot be one llama.cpp reads: it asks `getenv` for ASCII
+         * literals. */
+        let inherited = std::env::vars_os().filter_map(|(name, _)| name.into_string().ok());
+        for name in plan.inherited_removals(inherited) {
+            cmd.env_remove(name);
+        }
         for (key, value) in &plan.env {
             cmd.env(key, value);
-        }
-        for key in plan.env_removals() {
-            cmd.env_remove(key);
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -258,7 +258,7 @@ impl Daemon {
          * suspended-thread dance (CREATE_SUSPENDED, assign, ResumeThread),
          * which this crate does not attempt. In the microseconds between
          * spawn and hold, a descendant could be spawned outside the job.
-         * Accepted: `lemond` loads its config before it forks anything, and
+         * Accepted: `llama-server` in single-model mode forks nothing, and
          * the recovery record below covers the group by identity anyway. */
         #[cfg(windows)]
         let job = crate::procgroup::JobHandle::hold(&child)?;
@@ -334,7 +334,6 @@ impl Daemon {
             model_client,
             log,
             readers,
-            websocket_port: None,
             #[cfg(windows)]
             _job: job,
         };
@@ -342,12 +341,14 @@ impl Daemon {
          * drops the `Daemon`, and `kill_on_drop` sends SIGKILL to the LEADER
          * only — so a `lemond` that had already spawned a backend left it
          * holding the GPU and the model's several gigabytes, with nothing left
-         * that knew its pid. Found by audit; the `?` shorthand was the bug. */
+         * that knew its pid. Found by audit; the `?` shorthand was the bug.
+         * `llama-server` forks nothing, and the group is still what is
+         * stopped: the rule is about what the code can promise, not about
+         * which program happens to be behind it today. */
         if let Err(failure) = daemon.await_ready().await {
             daemon.stop().await;
             return Err(failure);
         }
-        daemon.note_websocket_port();
         Ok(daemon)
     }
 
@@ -365,12 +366,13 @@ impl Daemon {
                     tail: self.log.text(),
                 });
             }
-            /* THE STATUS IS CHECKED, not merely the parse. Every field of
-             * `Health` has a `#[serde(default)]` — which is right, because
-             * upstream adds fields — but it also means `{}` deserializes
-             * happily, so "the route answered with valid JSON" was being read
-             * as "the daemon is ready". A proxy, a captive portal or a
-             * half-initialised server can all produce that. */
+            /* THE STATUS IS CHECKED, not merely the parse. `Health` has a
+             * `#[serde(default)]` — which is right, because upstream adds
+             * fields — but it also means `{}` deserializes happily, so "the
+             * route answered with valid JSON" was being read as "the daemon is
+             * ready". A proxy, a captive portal or a half-initialised server
+             * can all produce that. And while the model LOADS, llama-server
+             * answers 503 — an `Err` here, so the poll simply goes round. */
             /* BOUNDED BY THE DEADLINE, not just checked against it. The
              * health client's own timeout is ten seconds, so a request
              * STARTED just before the deadline used to overshoot it by up to
@@ -378,7 +380,6 @@ impl Daemon {
              * cuts the in-flight request at the line. */
             if let Ok(Ok(health)) = tokio::time::timeout_at(deadline, self.health()).await {
                 if health.status == "ok" {
-                    self.websocket_port = health.websocket_port;
                     return Ok(());
                 }
             }
@@ -410,50 +411,7 @@ impl Daemon {
         }
     }
 
-    /// Note the WebSocket port the daemon chose for itself.
-    ///
-    /// ⚠️ **THERE IS NO RUNTIME CHECK HERE, AND TWO ATTEMPTS AT ONE WERE BOTH
-    /// WRONG.** This is worth recording, because the third attempt would be
-    /// wrong the same way.
-    ///
-    /// The daemon starts a WebSocket server on a port it picks itself, and
-    /// `websocket_port: 0` does NOT turn it off — verified against 11.7.0,
-    /// which chose 9000. What it DOES do is inherit `--host`, so with the host
-    /// pinned to the loopback the socket is loopback-only.
-    ///
-    /// The first attempt connected to `127.0.0.1:<port>` and, on success,
-    /// declared the socket loopback-only. That passes for a WILDCARD-bound
-    /// socket too — which accepts loopback connections — so it passed in
-    /// exactly the case it existed to catch.
-    ///
-    /// The second attempt tried to bind `0.0.0.0:<port>` and treated
-    /// `AddrInUse` as proof of a wildcard listener. That is worse: a socket
-    /// legitimately bound to `127.0.0.1:<port>` ALSO makes that bind fail, so
-    /// the check rejected every healthy daemon. It shipped for one round and
-    /// an audit caught it — an availability failure introduced by a fix for a
-    /// security check that was not load-bearing.
-    ///
-    /// The honest position: a process cannot portably learn another process's
-    /// bind address without walking the OS socket table, which is three
-    /// platform implementations for a property already enforced upstream of
-    /// it. **The enforcement is the `--host` pin in `spawn.rs`**, which is
-    /// set on both the CLI and the config, has a test that fails when it is
-    /// removed, and was confirmed by `lsof`/`Get-NetTCPConnection` on macOS,
-    /// Linux and Windows during WI-15.3 — 127.0.0.1 on all three.
-    ///
-    /// A check that cannot fail proves nothing; a check that fails when it
-    /// should not is worse than none. So this records the port for
-    /// diagnostics and asserts nothing it cannot establish.
-    fn note_websocket_port(&self) {
-        if let Some(port) = self.websocket_port {
-            log::info!(
-                "inference: the runtime's websocket chose port {port}; it inherits --host, which is pinned to {}",
-                crate::spawn::LOOPBACK
-            );
-        }
-    }
-
-    /// The daemon's health, authenticated.
+    /// The server's health. (The route is public; see `HEALTH_ROUTE`.)
     pub async fn health(&self) -> Result<Health> {
         self.get_json(HEALTH_ROUTE).await
     }
@@ -512,16 +470,14 @@ impl Daemon {
     pub fn request(&self, method: reqwest::Method, route: &str) -> reqwest::RequestBuilder {
         self.client
             .request(method, format!("{}{route}", self.plan.base_url()))
-            .bearer_auth(&self.plan.env[crate::spawn::API_KEY_ENV])
+            .bearer_auth(self.plan.api_key())
     }
 
-    /// The same, for a request a MODEL answers — a generation, a gloss, an
-    /// utterance.
+    /// The same, for a request a MODEL answers — a generation or a gloss.
     ///
-    /// Three call sites, all of them in `commands.rs`, and the split is by what
-    /// answers rather than by route so that a fourth long-running command
-    /// cannot inherit the control plane's deadline by accident. See
-    /// `MODEL_SILENCE`.
+    /// Two call sites, both in `commands.rs`, and the split is by what answers
+    /// rather than by route so that a third long-running command cannot
+    /// inherit the control plane's deadline by accident. See `MODEL_SILENCE`.
     pub fn model_request(&self, method: reqwest::Method, route: &str) -> ModelRequest {
         let built = self
             .model_client
@@ -530,7 +486,7 @@ impl Daemon {
             // this catches a request that never stops making just enough
             // progress to reset it. See `MODEL_CEILING`.
             .timeout(MODEL_CEILING)
-            .bearer_auth(&self.plan.env[crate::spawn::API_KEY_ENV]);
+            .bearer_auth(self.plan.api_key());
         ModelRequest(built, MODEL_CEILING)
     }
 
@@ -589,10 +545,12 @@ impl Daemon {
         }
         /* THE GROUP IS KILLED WHETHER OR NOT THE LEADER EXITED, and this is
          * the whole point of the module. The loop above used to `return` the
-         * moment `lemond` itself was gone — but `lemond` is a supervisor, and
-         * a backend that ignored SIGTERM outlives its parent. Returning early
+         * moment `lemond` itself was gone — but `lemond` was a supervisor, and
+         * a backend that ignored SIGTERM outlived its parent. Returning early
          * meant the group never received SIGKILL and the model stayed
-         * resident. SIGKILL to an empty group is a harmless ESRCH. */
+         * resident. The leader is the server itself now; the group is killed
+         * anyway, because SIGKILL to an empty group is a harmless ESRCH and a
+         * leader that grows a child next year should not reopen this. */
         if let Err(err) = crate::procgroup::kill(&mut self.child, self.hold.group()).await {
             log::warn!("inference: could not kill the runtime group: {err}");
         }
@@ -609,8 +567,8 @@ impl Daemon {
 
 /// Arm a death signal on the child where the platform has one.
 ///
-/// Linux: `PR_SET_PDEATHSIG(SIGKILL)`, the mechanism Lemonade itself uses on
-/// `llama-server`. Two things about it are easy to get wrong and are handled
+/// Linux: `PR_SET_PDEATHSIG(SIGKILL)` — the mechanism Lemonade used on the
+/// `llama-server` it launched, and now Paper's own. Two things about it are easy to get wrong and are handled
 /// here. First, the signal fires when the THREAD that forked the child dies,
 /// not the process — so the child is spawned from a keeper thread that lives
 /// for the process ([`spawn_child`]), never from a blocking-pool thread that
@@ -654,10 +612,10 @@ fn arm_death_signal(_cmd: &mut Command) {}
 /// answer — but tokio's `oneshot::Sender::send` returns `Ok` the moment the
 /// value is QUEUED and documents the receiver as free to drop immediately
 /// afterwards. The queued `Child` is then dropped by the channel with
-/// `kill_on_drop` and nothing else, which reaches the LEADER only: a
-/// `lemond` that had already forked a backend leaves it holding the GPU, the
-/// model's several gigabytes and the port, with nothing left that knows its
-/// pid. That is the same failure the whole `procgroup` module exists to
+/// `kill_on_drop` and nothing else, which reaches the LEADER only: a leader
+/// that had already forked a child (as `lemond` did) leaves it holding the
+/// GPU, the model's several gigabytes and the port, with nothing left that
+/// knows its pid. That is the same failure the whole `procgroup` module exists to
 /// prevent, arriving through the one path that had no owner. So the group
 /// travels ARMED and the handover is what disarms it — the state "spawned,
 /// unowned, unkillable" is no longer a value this code can hold.
@@ -759,22 +717,20 @@ async fn spawn_child(mut cmd: Command) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
-/// What `/api/v1/health` answers. Only the fields Paper acts on.
+/// What `/health` answers `ok` with. Only the field Paper acts on.
 ///
-/// Deliberately partial, and `#[serde(default)]` throughout: the daemon
-/// reports pinned-model counts, per-modality ceilings and a telemetry block
-/// that Paper has no use for, and a struct that named them would need
-/// changing every time upstream added one.
+/// `{"status":"ok"}` once the model is loaded; 503 with an error body while it
+/// loads, which never reaches this parse. `#[serde(default)]`, because
+/// upstream adds fields — which is also why an EMPTY object parses, and why
+/// readiness asks for `ok` rather than for a parse.
+///
+/// (There were `version`, `model_loaded` and `websocket_port` here, all
+/// lemond's. The version is the pinned build's now — `SpawnPlan::version` —
+/// and the loaded model is the one the server was launched on.)
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct Health {
     #[serde(default)]
     pub status: String,
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub model_loaded: Option<String>,
-    #[serde(default)]
-    pub websocket_port: Option<u16>,
 }
 
 /// Drain one of the child's pipes into the tail, line by line.
@@ -842,6 +798,23 @@ where
     })
 }
 
+/// The client for an endpoint's model requests — bounded by SILENCE, as the
+/// daemon's model client is (see [`MODEL_SILENCE`]).
+///
+/// `proxied` is false for a loopback endpoint (`http://localhost…`): a system
+/// proxy must never see a request for this machine, which carries the reader's
+/// key and their question. A remote endpoint takes the reader's system proxy,
+/// which is the only route to a provider some readers have.
+pub(crate) fn endpoint_client(proxied: bool) -> Result<reqwest::Client> {
+    let builder = reqwest::Client::builder()
+        .read_timeout(MODEL_SILENCE)
+        .user_agent(concat!("Paper/", env!("CARGO_PKG_VERSION")));
+    let builder = if proxied { builder } else { builder.no_proxy() };
+    builder
+        .build()
+        .map_err(|e| unreachable("endpoint client", e))
+}
+
 /// A request the MODEL client built, and the only thing a model answer can be
 /// read from.
 ///
@@ -857,9 +830,9 @@ where
 /// of the call.
 ///
 /// Every one of them failed the same way: a scan can only ask about the shapes
-/// somebody thought of. So this is a TYPE. `generate::stream` and
-/// `speech::collect` take a `ModelRequest`; the field is private to this
-/// module, so `Daemon::model_request` is the only thing in the crate that can
+/// somebody thought of. So this is a TYPE. `generate::stream` takes a
+/// `ModelRequest` (and `speech::collect` did, while there was one); the field
+/// is private to this module, so `Daemon::model_request` is the only thing in the crate that can
 /// make one, and an attempt to forge one elsewhere is `E0423`.
 ///
 /// ⚠️ **BE EXACT ABOUT WHAT THAT BUYS, because the first version of this
@@ -867,14 +840,13 @@ where
 /// client is a compile error. It is not, and a verify pass produced the
 /// counter-example: `daemon.request(POST, generate::CHAT_ROUTE).json(&b).send()`
 /// compiles, and so does `post_json` on a model route. Both bypass
-/// `stream`/`collect` entirely and never mention this type.
+/// `stream` entirely and never mention this type.
 ///
 /// What the type actually guarantees is narrower and still worth having: **an
 /// answer cannot be READ as a model answer unless the request came from the
 /// model client.** Every model-answered path in this crate goes through
-/// `stream` or `collect`, so the guarantee covers all of them today; what it
-/// cannot do is stop somebody hand-rolling a fourth path that reads a response
-/// itself. That is a smaller hole than the three scans left, and unlike them
+/// `stream`, so the guarantee covers all of them today; what it cannot do is
+/// stop somebody hand-rolling another path that reads a response itself. That is a smaller hole than the three scans left, and unlike them
 /// it is written down accurately.
 ///
 /// `post_json` and `get_json` stay on the control plane deliberately — health
@@ -915,7 +887,7 @@ impl ModelRequest {
 
     /// Hand the builder to whatever reads the answer.
     ///
-    /// `pub(crate)` rather than `pub`: `generate` and `speech` need it and
+    /// `pub(crate)` rather than `pub`: `generate` needs it and
     /// nothing outside this crate does. It does not weaken the invariant —
     /// what matters is that the CONSTRUCTOR is unreachable, and a private
     /// tuple field makes it so for every module but this one.
@@ -923,12 +895,33 @@ impl ModelRequest {
         self.0
     }
 
+    /// A request an OPENAI-COMPATIBLE ENDPOINT answers (`cloud.rs`).
+    ///
+    /// THE SAME TWO BOUNDS as [`Daemon::model_request`], and that is why this
+    /// constructor lives here rather than in `cloud.rs`: the invariant this type
+    /// holds is "a model answer is read only from a request carrying both", and
+    /// a second place that could build one would be a second place to forget
+    /// one. The silence bound comes from [`endpoint_client`], the ceiling from
+    /// here.
+    ///
+    /// `key` is `None` for a loopback endpoint the reader stored no key for —
+    /// Ollama and LM Studio want none — and the request then carries no
+    /// `Authorization` header at all rather than an empty one.
+    pub(crate) fn to_endpoint(client: &reqwest::Client, url: String, key: Option<&str>) -> Self {
+        let built = client.post(url).timeout(MODEL_CEILING);
+        let built = match key {
+            Some(key) => built.bearer_auth(key),
+            None => built,
+        };
+        ModelRequest(built, MODEL_CEILING)
+    }
+
     /// Build one from a bare builder, for a test that has no daemon.
     ///
     /// `#[cfg(test)]`, so it does not exist in a shipped build and cannot
     /// weaken the invariant the type is here to hold: in production
     /// `Daemon::model_request` remains the only constructor. A test that wants
-    /// to exercise `stream`/`collect` against a dead address has no daemon to
+    /// to exercise `stream` against a dead address has no daemon to
     /// ask, and making it spawn one to check a cancellation would be a worse
     /// test for no gain.
     #[cfg(test)]
@@ -979,7 +972,7 @@ mod tests {
 
     use super::*;
 
-    /// The three commands a model answers really do go through the model
+    /// The two commands a model answers really do go through the model
     /// client — non-vacuity for `ModelRequest`, and nothing more than that.
     ///
     /// ⚠️ **THIS TEST NO LONGER ENFORCES THE RULE, AND SAYING SO IS THE POINT.**
@@ -999,14 +992,14 @@ mod tests {
     /// wording overclaimed that too: this only finds the substring
     /// `model_request(` inside a roughly delimited function body, so a comment
     /// or a dead branch would satisfy it. It is a smoke check against the
-    /// three commands silently losing their model client in a refactor, and
+    /// two commands silently losing their model client in a refactor, and
     /// the compiler and `ModelRequest` are what actually hold the rule.
     #[test]
     fn the_commands_a_model_answers_are_wired_to_the_model_client() {
         let source = include_str!("commands.rs");
         let mut answered = Vec::new();
-        for (at, _) in source.match_indices("pub async fn ") {
-            let name: String = source[at + "pub async fn ".len()..]
+        for (at, _) in source.match_indices("async fn ") {
+            let name: String = source[at + "async fn ".len()..]
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
                 .collect();
@@ -1018,7 +1011,10 @@ mod tests {
                 answered.push(name);
             }
         }
-        for expected in ["inference_generate", "inference_gloss", "inference_speak"] {
+        /* The gloss's local route is `gloss_locally` since Look up gained
+        routes; an endpoint's model request is `cloud.rs`'s, built by
+        `ModelRequest::to_endpoint`, and an agent is not an HTTP request. */
+        for expected in ["inference_generate", "gloss_locally"] {
             assert!(
                 answered.iter().any(|name| name == expected),
                 "{expected} no longer reaches a model through the model client; found {answered:?}"
@@ -1048,9 +1044,10 @@ mod tests {
     /// AN ARMED CHILD NOBODY TOOK TAKES ITS GROUP WITH IT — the half of the
     /// keeper's race that `send` returning `Ok` hides. `kill_on_drop` alone
     /// would leave the grandchild running, which is exactly what this asserts
-    /// against: a `sleep` in the leader's group stands in for the backend
-    /// `lemond` forks. Disarming is the other half: the caller that receives
-    /// the child gets one nothing has signalled.
+    /// against: a `sleep` in the leader's group stands in for a child the
+    /// leader forked, as `lemond` forked its backend. Disarming is the other
+    /// half: the caller that receives the child gets one nothing has
+    /// signalled.
     #[cfg(unix)]
     #[tokio::test]
     async fn an_armed_child_nobody_disarms_takes_its_group_down() {
@@ -1129,27 +1126,12 @@ mod tests {
         assert_eq!(LogTail::default().text(), "");
     }
 
-    /// Health parses from the shape 11.7.0 actually answered with, captured
-    /// from the smoke test rather than written from the documentation.
+    /// Health parses from the shape b10375 actually answered with, captured
+    /// from a running server rather than written from the documentation.
     #[test]
     fn health_parses_the_observed_shape() {
-        let observed = serde_json::json!({
-            "all_models_loaded": [],
-            "max_models": { "llm": 1, "tts": 1 },
-            "model_loaded": null,
-            "pinned_helper_models": { "llm": 0 },
-            "pinned_models": { "llm": 0 },
-            "status": "ok",
-            "telemetry": { "enabled": false },
-            "update_check_done": true,
-            "version": "11.7.0",
-            "websocket_port": 9000
-        });
-        let health: Health = serde_json::from_value(observed).unwrap();
+        let health: Health = serde_json::from_value(serde_json::json!({ "status": "ok" })).unwrap();
         assert_eq!(health.status, "ok");
-        assert_eq!(health.version, "11.7.0");
-        assert_eq!(health.websocket_port, Some(9000));
-        assert_eq!(health.model_loaded, None);
     }
 
     /// ⚠️ AN EMPTY OBJECT PARSES, AND MUST NOT READ AS READY. Every field
@@ -1243,7 +1225,6 @@ mod tests {
     fn health_tolerates_a_changed_upstream_shape() {
         let sparse: Health = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(sparse.status, "");
-        assert_eq!(sparse.websocket_port, None);
 
         let extra: Health = serde_json::from_value(serde_json::json!({
             "status": "ok",

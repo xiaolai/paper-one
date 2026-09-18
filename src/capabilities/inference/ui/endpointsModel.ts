@@ -42,11 +42,18 @@ export interface EndpointDraft {
   readonly id: string
   readonly label: string
   readonly baseUrl: string
+  /**
+   * The model the endpoint is asked for, in the provider's own spelling —
+   * `gpt-4.1-mini`, `deepseek-chat`, `qwen2.5:7b`. REQUIRED: an
+   * OpenAI-compatible request names a model, and there is none Paper could
+   * honestly guess for somebody else's server (`noModelName`).
+   */
+  readonly model: string
   /** Blank means "leave the stored key alone" — see the module header. */
   readonly key: string
 }
 
-export const EMPTY_DRAFT: EndpointDraft = { id: '', label: '', baseUrl: '', key: '' }
+export const EMPTY_DRAFT: EndpointDraft = { id: '', label: '', baseUrl: '', model: '', key: '' }
 
 /** What a row's button does. */
 export type EndpointAction = 'remove' | 'confirm'
@@ -95,8 +102,8 @@ export interface EndpointsSnapshot {
 /* --------------------------- what a draft refuses ------------------------ */
 
 /**
- * ⚠️ **THE CRATE REMAINS THE AUTHORITY.** These rules mirror `valid_id` and
- * `valid_base_url` in `endpoints.rs`, and they exist so a reader is told what
+ * ⚠️ **THE CRATE REMAINS THE AUTHORITY.** These rules mirror `valid_id`,
+ * `valid_base_url` and `valid_model_name` in `endpoints.rs`, and they exist so a reader is told what
  * is wrong with what they typed — beside the field, in their own words —
  * rather than after a round trip, as a `ManifestMalformed` naming nothing they
  * can act on.
@@ -109,6 +116,20 @@ export interface EndpointsSnapshot {
  */
 const MAX_ID = 40
 const MAX_BASE_URL = 400
+/** `limits::MAX_ENDPOINT_MODEL`, in BYTES as the crate counts it. */
+const MAX_MODEL = 200
+
+/** A byte count as the crate takes one: UTF-8, not UTF-16 units. */
+const bytesOf = (text: string): number => new TextEncoder().encode(text).length
+
+/**
+ * The three spellings of THIS MACHINE that earn plain `http://`, each with an
+ * optional port — `is_loopback_authority` in the crate. No DNS answer or hosts
+ * file can send any of them elsewhere (`localhost` is reserved to the loopback),
+ * which is the whole argument for letting a key travel unencrypted to it:
+ * Ollama and LM Studio serve on one of these and speak no TLS.
+ */
+const LOOPBACK = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/
 
 export function validId(id: string): boolean {
   /* The pattern's `+` is the crate's `!id.is_empty()`: a separate length test
@@ -117,22 +138,31 @@ export function validId(id: string): boolean {
 }
 
 export function validBaseUrl(url: string): boolean {
-  const scheme = 'https://'
+  /* ⚠️ **`http://` IS ALLOWED, AND ONLY TO THIS MACHINE.** Everything else is
+     `https://` or nothing: an endpoint's key rides in a header, and a key sent
+     in the clear to another host is a key given away. The one exception is a
+     server on the loopback — Ollama, LM Studio — where there is no wire to
+     read it from (the gloss routes contract, §3). */
+  const loopback = url.startsWith('http://')
   /* BYTES, NOT CODE UNITS: the crate bounds `url.len()`, which is UTF-8 bytes,
      and `url.length` is UTF-16 units — a Unicode-heavy address passed here
      and was refused there. */
-  if (!url.startsWith(scheme) || new TextEncoder().encode(url).length > MAX_BASE_URL) return false
+  if (!(url.startsWith('https://') || loopback) || bytesOf(url) > MAX_BASE_URL) return false
   /* No whitespace or control characters anywhere: they cannot appear in a URL
      unescaped, and a header built from one would be split by them. */
   if (/[\s\p{Cc}]/u.test(url)) return false
-  const rest = url.slice(scheme.length)
+  const rest = url.slice(url.indexOf('://') + 3)
   /* No credentials, and no fragment — a base URL is a prefix Paper appends a
      route to, and `#` would make everything after it part of the fragment. */
   if (rest.includes('@') || rest.includes('#')) return false
   // Stryker disable next-line StringLiteral: `split` returns at least one part, so the fallback is never taken
   const authority = rest.split(/[/?]/)[0] ?? ''
+  /* THE LOOPBACK BY NAME, and nothing that merely resolves there: `127.0.0.2`,
+     `0.0.0.0` and `localhost.example.com` are all refused, as the crate
+     refuses them. The platform parser still has the last word on the port. */
+  if (loopback) return LOOPBACK.test(authority) && parses(url)
   /* There has to BE a host: an empty authority is `https://` wearing a URL's
-     clothes, and it reaches the daemon as a registration that cannot resolve.
+     clothes, and it reaches the crate as an address that cannot resolve.
      The `+` refuses the empty one, as the crate's `!authority.is_empty()` does. */
   if (!(/^[A-Za-z0-9.:-]+$/.test(authority) && /[A-Za-z0-9]/.test(authority))) return false
   /* AND IT HAS TO BE A HOST. The character class let `a:99999`, `a..b` and
@@ -143,15 +173,30 @@ export function validBaseUrl(url: string): boolean {
      refused above, so the parser never finds a user or a password, and `[` is
      outside the character class, so no IPv6 literal reaches the parser. An
      https URL that parses always has a host. */
-  let parsed: URL
+  if (!parses(url)) return false
+  const labels = new URL(url).hostname.split('.')
+  if (labels.some((label) => label === '' || label.startsWith('-') || label.endsWith('-'))) return false
+  return true
+}
+
+/** Whether the platform's URL parser takes the address at all — a port past 65535 it does not. */
+function parses(url: string): boolean {
   try {
-    parsed = new URL(url)
+    new URL(url)
   } catch {
     return false
   }
-  const labels = parsed.hostname.split('.')
-  if (labels.some((label) => label === '' || label.startsWith('-') || label.endsWith('-'))) return false
   return true
+}
+
+/**
+ * A model name as a provider spells it — `valid_model_name` in the crate. Any
+ * printable characters, because providers use `/`, `:`, `.` and `@`; no
+ * whitespace or control characters, because a stray newline in one is a paste
+ * accident rather than a model; and bounded in BYTES, as the crate counts.
+ */
+export function validModelName(name: string): boolean {
+  return name !== '' && bytesOf(name) <= MAX_MODEL && !/[\s\p{Cc}]/u.test(name)
 }
 
 /** Why this draft cannot be saved, in the reader's words, or null. */
@@ -162,7 +207,11 @@ export function refuseDraft(draft: EndpointDraft): string | null {
   }
   if (draft.baseUrl === '') return 'Give the endpoint its address.'
   if (!validBaseUrl(draft.baseUrl)) {
-    return 'An address is an https:// URL with a host, and no credentials in it.'
+    return 'An address is an https:// URL with a host and no credentials in it — or http:// to this computer (localhost).'
+  }
+  if (draft.model === '') return 'Give the name of the model to ask for — the provider’s own, like gpt-4.1-mini.'
+  if (!validModelName(draft.model)) {
+    return `A model name has no spaces in it, and is at most ${MAX_MODEL} characters.`
   }
   return null
 }
@@ -176,10 +225,13 @@ const KEY_STATE_WORDS: Readonly<Record<KeyState, string>> = {
   unreadable: 'key unreadable',
 }
 
-/** The host an address points at, for the row's value. */
+/**
+ * The host an address points at, for the row's value — and for the sentence
+ * Look up says about where a word is sent (`glossRouteModel.whereTheWordsGo`).
+ */
 export function hostOf(baseUrl: string): string {
-  // Stryker disable next-line Regex: every stored address begins with `https://` (`valid_base_url`), and a replace with no `g` removes that first occurrence anchored or not
-  const rest = baseUrl.replace(/^https:\/\//, '')
+  // Stryker disable next-line Regex: every stored address begins with `https://` or `http://` (`valid_base_url`), and a replace with no `g` removes that first occurrence anchored or not
+  const rest = baseUrl.replace(/^https?:\/\//, '')
   return rest.split(/[/?]/)[0] ?? baseUrl
 }
 
@@ -193,7 +245,10 @@ export function rowFor(endpoint: Endpoint, arming: string | null): EndpointRow {
        for that absence to be quietly undone. Three words for three states:
        "no key" on a key the keychain would not read sent the reader to
        re-enter a credential they already had. */
-    value: `${hostOf(endpoint.baseUrl)} · ${KEY_STATE_WORDS[endpoint.keyState]}`,
+    /* THE MODEL BESIDE THE HOST, because two rows for one provider differ by
+       nothing else — and an endpoint stored before the field existed says it
+       has none, which is why its route cannot answer (`noModelName`). */
+    value: `${hostOf(endpoint.baseUrl)} · ${endpoint.model === '' ? 'no model name' : endpoint.model} · ${KEY_STATE_WORDS[endpoint.keyState]}`,
     keyState: endpoint.keyState,
     action: endpoint.id === arming ? 'confirm' : 'remove',
   }
@@ -346,7 +401,7 @@ export function createEndpointsModel({ plugin, report }: EndpointsModelOptions):
          longer looking at. */
       arming = null
       const saved = await mutate('inference.add-endpoint-failed', 'That endpoint could not be saved.', async () => {
-        await plugin.addEndpoint(sending.id, sending.label === '' ? sending.id : sending.label, sending.baseUrl)
+        await plugin.addEndpoint(sending.id, sending.label === '' ? sending.id : sending.label, sending.baseUrl, sending.model)
         /* BLANK MEANS LEAVE IT ALONE — `set_key("")` clears, which would take
            the key off an endpoint the reader was only relabelling. */
         if (sending.key !== '') await plugin.setEndpointKey(sending.id, sending.key)

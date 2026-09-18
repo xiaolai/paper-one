@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Check, Copy, X } from 'lucide-react'
 import { FOOTNOTE, ICON } from '../../core/metrics'
-import { place } from '../../core/placement'
+import { PARK_OFFSET, SURFACE_EDGE, UNBOUNDED, place } from '../../core/placement'
 import { noteText } from './backlink'
 import type { FootnoteRender } from './session'
 import styles from './FootnotePopover.module.css'
@@ -65,7 +65,25 @@ export interface FootnotePopoverProps {
   onDismiss: () => void
 }
 
-/** Clear of the reference, so the marker itself stays readable. */
+/**
+ * Clear of the reference, so the marker itself stays readable.
+ *
+ * ⚠️ **IT WAS DOING TWO JOBS AND THE DOC DESCRIBED ONE.** This value was passed
+ * as `gap` AND as `edge`, and used a third time as the centred fallback's floor
+ * from the top of the stage — so one number named for the distance from a
+ * noteref also decided the distance from the column's edge, and moving it for
+ * the reason written here would have moved something the reason says nothing
+ * about. The other two are edge clearance and take `SURFACE_EDGE`, which is
+ * what every other popover in the app is inset by; this keeps the name and the
+ * reason it was given, and now does only that.
+ *
+ * WHY MORE THAN `SURFACE_GAP`, for the reason `SelectionTools`' own `GAP`
+ * gives: the anchor is a superscript marker inside running prose, not a control
+ * with an edge of its own, and a surface 4px off it sits on the line's
+ * descenders. A shade more than the selection popup's 8 because the reference
+ * is SMALLER than a selected line — there is less to hang from, so the note has
+ * to read as clearly separate from the sentence it came out of.
+ */
 const GAP = 10
 
 /**
@@ -293,7 +311,7 @@ export function FootnotePopover({
   /* Before the stage has a box there is nothing to clamp against, and a very
      large bound is the honest "no constraint" rather than a guess — the same
      reading `SelectionTools` takes at the same seam. */
-  const within = column ?? { left: 0, width: stageBox?.width ?? 1e6 }
+  const within = column ?? { left: 0, width: stageBox?.width ?? UNBOUNDED }
 
   /* WHERE IT GOES IS `place`'S DECISION. What used to be here was a `Math.max`
      of a `Math.min` for the left edge and a `bottom` fallback for the top, and
@@ -316,13 +334,17 @@ export function FootnotePopover({
             top: 0,
             left: within.left,
             width: within.width,
-            height: stageBox?.height ?? 1e6,
+            height: stageBox?.height ?? UNBOUNDED,
             space: 'container',
           },
           side: 'bottom',
           align: 'start',
           gap: GAP,
-          edge: GAP,
+          /* THE STAGE'S INSET, not the reference's gap — see `GAP`. This was
+             `GAP` too, which made the note the one popover in the app inset by
+             10 where everything else is inset by 8, for no reason anybody had
+             written down. */
+          edge: SURFACE_EDGE,
         })
       : null
 
@@ -345,7 +367,10 @@ export function FootnotePopover({
   const centred = box
     ? {
         left: within.left + Math.max(0, (within.width - box.width) / 2),
-        top: Math.max(GAP, ((stageBox?.height ?? box.height) - box.height) / 2),
+        /* ALSO AN EDGE, not a gap: there is no anchor in this branch to be
+           clear of, and this floor is how far the centred note stays below the
+           top of the stage. */
+        top: Math.max(SURFACE_EDGE, ((stageBox?.height ?? box.height) - box.height) / 2),
       }
     : null
 
@@ -357,7 +382,7 @@ export function FootnotePopover({
      would give the paginator a zero-sized document to columnize at the moment a
      note renders into it, which is the one thing this container exists to
      prevent; off-screen lays out and does not show. */
-  const parked: React.CSSProperties = { left: -99999, top: 0, visibility: 'hidden' }
+  const parked: React.CSSProperties = { left: PARK_OFFSET, top: 0, visibility: 'hidden' }
   const label = heading(note?.type ?? null)
 
   return (

@@ -12,9 +12,9 @@ import { Channel, invoke } from '@tauri-apps/api/core'
  * that appears in one and not the other is a mistake somebody can see.
  *
  * NOTE WHAT IS ABSENT. There is no `setBaseUrl`, no `request(url)`, no
- * `readKey`. Untrusted book HTML renders in this webview and the daemon
- * behind these commands installs and executes backend binaries — so the
- * closed surface is the boundary, not a convenience.
+ * `readKey`. Untrusted book HTML renders in this webview and the plugin
+ * behind these commands launches a native process and writes model files to
+ * disk — so the closed surface is the boundary, not a convenience.
  *
  * Every call returns a rejected promise carrying `{ kind, message }` from the
  * Rust side (`error.rs`), so a caller branches on `kind` and never parses
@@ -28,7 +28,12 @@ export type RuntimeStatus =
   | { readonly state: 'stopped' }
   | { readonly state: 'ready'; readonly version: string; readonly port: number }
 
-export type Modality = 'text' | 'speech'
+/* ⚠️ **NO `Modality`, AND THERE WAS ONE.** Every row and every route carried
+ * `modality: 'text' | 'speech'` while the catalogue shipped a speech model, and
+ * every reader of either had to filter on it. The neural voice is gone — the
+ * lookup's pronunciation is the kernel's system voice (`core/voice.ts` says
+ * why) — so everything here is text, and a field that can hold one value is a
+ * question nobody needs to ask. */
 
 /**
  * How much the reader is willing to spend on one answer.
@@ -45,7 +50,6 @@ export type Depth = (typeof DEPTHS)[number]
 export interface ModelRow {
   readonly id: string
   readonly label: string
-  readonly modality: Modality
   readonly license: string
   readonly bytes: number
   readonly installed: boolean
@@ -73,6 +77,18 @@ export type RouteKind = 'local' | 'agent' | 'endpoint'
  * agent-facing constant because of it.
  *
  * `probe.rs` emits both halves from one place, so they cannot disagree.
+ *
+ * AN ENDPOINT ROW IS DECIDED IN THIS ORDER: `noKey`, then `keyUnreadable`,
+ * then `noModelName`, then usable. `noModelName` is an endpoint stored before
+ * endpoints carried the provider's model name — a request needs one, and there
+ * is none Paper could honestly guess for somebody else's server.
+ *
+ * ⚠️ **`notConnected` STOOD WHERE `noModelName` IS, AND IT MEANT "NEVER".** While
+ * nothing connected an endpoint to an answer, every endpoint with a key reported
+ * it and no endpoint route could ever be used. Paper talks to an endpoint itself
+ * now (the gloss routes contract, 2026-09-18), so the reason went with the
+ * condition. (It had replaced `notRegistered`, which was a daemon refusing a
+ * registration; the daemon that took registrations is gone too.)
  */
 export const UNUSABLE_REASONS = [
   'notInstalled',
@@ -82,7 +98,7 @@ export const UNUSABLE_REASONS = [
   'versionUnsupported',
   'noKey',
   'keyUnreadable',
-  'notRegistered',
+  'noModelName',
 ] as const
 export type UnusableReason = (typeof UNUSABLE_REASONS)[number]
 
@@ -101,7 +117,6 @@ export interface Route {
   readonly reason?: { readonly [K in UnusableReason]?: unknown } | UnusableReason
   readonly installed: boolean
   readonly bytes?: number
-  readonly modality: Modality
 }
 
 /**
@@ -146,7 +161,14 @@ export type KeyState = 'set' | 'missing' | 'unreadable'
 export interface Endpoint {
   readonly id: string
   readonly label: string
+  /** `https://`, or `http://` to a loopback host — see `validBaseUrl`. */
   readonly baseUrl: string
+  /**
+   * The model the endpoint is asked for, in the PROVIDER'S spelling —
+   * `gpt-4.1-mini`, `deepseek-chat`, `qwen2.5:7b`. `""` for an endpoint stored
+   * before the field existed, whose route reports `noModelName`.
+   */
+  readonly model: string
   /** A STATE, never the key. */
   readonly keyState: KeyState
 }
@@ -205,7 +227,6 @@ export type InferenceCommand =
   | 'inference_probe'
   | 'inference_generate'
   | 'inference_gloss'
-  | 'inference_speak'
   | 'inference_endpoints'
   | 'inference_add_endpoint'
   | 'inference_remove_endpoint'
@@ -262,14 +283,38 @@ export const inferencePlugin = {
       question,
       chunks: streamTo(onChunk),
     }),
-  gloss: (requestId: string, model: string, system: string, question: string) =>
-    invoke<string>(command('inference_gloss'), { requestId, model, system, question }),
-  speak: (requestId: string, model: string, text: string, voice: string | null) =>
-    invoke<number[]>(command('inference_speak'), { requestId, model, text, voice }),
+  /**
+   * The answer, as JSON TEXT in the PORTABLE shape — `{ definition: { first,
+   * second? }, partOfSpeech }`, whichever route wrote it (`gloss.rs` builds the
+   * schema). One entry per language in `languages`, in this order, which is the
+   * question's own `Answer in:` line's: `glossProvider` derives both from one
+   * list. ONE OR TWO, by the type, as the command's two parameters are;
+   * `definitionOf` reads what comes back.
+   *
+   * `route` IS A PROBE ROUTE ID — `local:<id>`, `endpoint:<id>`, `agent:claude`
+   * or `agent:codex` — and it REPLACED `model`: which of four very different
+   * things answers is the caller's decision (`glossRoute.ts`), and the crate
+   * refuses a route its own probe calls unusable (`modelUnknown`).
+   */
+  gloss: (
+    requestId: string,
+    route: string,
+    system: string,
+    question: string,
+    languages: readonly [string] | readonly [string, string],
+  ) =>
+    invoke<string>(command('inference_gloss'), {
+      requestId,
+      route,
+      system,
+      question,
+      language: languages[0],
+      secondLanguage: languages[1] ?? null,
+    }),
 
   endpoints: () => invoke<readonly Endpoint[]>(command('inference_endpoints')),
-  addEndpoint: (id: string, label: string, baseUrl: string) =>
-    invoke<void>(command('inference_add_endpoint'), { id, label, baseUrl }),
+  addEndpoint: (id: string, label: string, baseUrl: string, model: string) =>
+    invoke<void>(command('inference_add_endpoint'), { id, label, baseUrl, model }),
   removeEndpoint: (id: string) => invoke<void>(command('inference_remove_endpoint'), { id }),
   /** WRITE-ONLY. There is deliberately no `getEndpointKey`. */
   setEndpointKey: (id: string, key: string) => invoke<void>(command('inference_set_endpoint_key'), { id, key }),

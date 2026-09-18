@@ -63,6 +63,14 @@ export const CAPABILITY_UI = Object.freeze({
   field: 'paper-cap-field',
   /** With `field`: holds a number, sized to the number. */
   fieldNarrow: 'paper-cap-field-narrow',
+  /**
+   * A multi-line field — a paragraph the reader edits.
+   *
+   * ⚠️ **NOT `field` ON A `<textarea>`.** That one is a fixed-height pill, so it
+   * shows one line of whatever it is given and rounds the ends off the first and
+   * last. This is the kernel's own note editor's shape. See the stylesheet.
+   */
+  textarea: 'paper-cap-textarea',
   /** A checkbox, in the reader's accent. */
   toggle: 'paper-cap-toggle',
   /** A long unbreakable string meant to be selected rather than read. */

@@ -106,8 +106,7 @@ button {
  * Instrument Sans, and the handoff README makes the design system the
  * tiebreaker where the two disagree. */
 body {
-  font-family: 'Instrument Sans Variable', 'Instrument Sans', system-ui,
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: var(--font-sans);
   font-size: var(--text-body);
   color: var(--ink, #17191B);
 }

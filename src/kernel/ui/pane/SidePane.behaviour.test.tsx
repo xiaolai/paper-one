@@ -237,8 +237,8 @@ describe('the panel a state shows', () => {
 })
 
 describe('the rail', () => {
-  const friends = { id: 'circle:friends', label: 'Friends', screens: ['library', 'reader'], render: () => <p>friends</p> } as unknown as SidePaneProps['contributed'][number]
-  const publish = { id: 'public:book', label: 'Publish', screens: ['reader'], render: () => <p>publish</p> } as unknown as SidePaneProps['contributed'][number]
+  const friends = { id: 'circle:friends', label: 'Friends', icon: 'people', screens: ['library', 'reader'], render: () => <p>friends</p> } as unknown as SidePaneProps['contributed'][number]
+  const publish = { id: 'public:book', label: 'Publish', icon: 'globe', screens: ['reader'], render: () => <p>publish</p> } as unknown as SidePaneProps['contributed'][number]
 
   it('offers the reader its finished panels, in rail order', () => {
     const { container } = draw()
@@ -533,7 +533,7 @@ describe('the settings panel', () => {
     expect(screen.getByText(/^Diagnostics are not being recorded on this build\./)).not.toBeNull()
   })
 
-  /* "Install one" lands on its section, and the request is reported spent so a
+  /* "Choose one" lands on its section, and the request is reported spent so a
      remount does not find it again. */
   it('reports a reveal request answered, by its nonce', () => {
     vi.stubGlobal('requestAnimationFrame', (run: FrameRequestCallback) => {
@@ -552,7 +552,7 @@ describe('the settings panel', () => {
  */
 describe('a contributed pane', () => {
   const friendsOn = (render: (context: { readonly bookId: string | null }) => unknown) =>
-    [{ id: 'circle:friends', label: 'Friends', screens: ['library', 'reader'], render }] as unknown as SidePaneProps['contributed']
+    [{ id: 'circle:friends', label: 'Friends', icon: 'people', screens: ['library', 'reader'], render }] as unknown as SidePaneProps['contributed']
   const onFriends = (screenId: 'library' | 'reader') => stateOf({ screen: screenId, pane: 'circle:friends', lastPane: 'circle:friends' })
 
   it('is handed no book on the library, and the open book in the reader', () => {

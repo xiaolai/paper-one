@@ -209,14 +209,15 @@ export function CompanionPane({ model }: CompanionPaneProps) {
        * route — through the same `use` the text rows call, so picking a
        * narrator set the companion to a speech model that cannot answer a
        * question. It never fired only because `voiceRows` needed two usable
-       * speech models and the manifest ships one, so the defect was held off
+       * speech models and the manifest shipped one, so the defect was held off
        * by an accident of the catalogue rather than by anything structural.
        *
-       * Narration does not exist: `Test voice` proves a model and nothing
-       * reads it, which the feature ledger records as Absent. A picker with
-       * nothing to pick for is the shape-guessed-at-in-advance this pane's
-       * own stylesheet was cleaned of once already. It comes back with the
-       * feature that needs it, and with selection state of its own. */}
+       * Narration does not exist, and neither does a neural voice now: the
+       * speech model, `Test voice` and every speech route went together, and
+       * pronunciation is the kernel's system voice. A picker with nothing to
+       * pick for is the shape-guessed-at-in-advance this pane's own stylesheet
+       * was cleaned of once already. It comes back with the feature that needs
+       * it, and with selection state of its own. */}
 
       {/* THE EFFORT, and it is absent rather than disabled unless an agent is
           answering — the two flags it maps to exist on the agent CLIs and

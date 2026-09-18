@@ -3,7 +3,7 @@ import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
 import { CONTINUE_GRACE_MS, CONTINUE_TICK_MS, TURN_SETTLE_MS, useSpeech, type Speech } from './useSpeech'
-import { collectText } from './speech'
+import { Speaker, collectText } from './speech'
 
 /**
  * The wiring: a section's document in, page turns and utterances out.
@@ -254,6 +254,40 @@ describe('the end of a section', () => {
     act(() => {
       synth.queued[0]?.dispatchEvent(new Event('error'))
     })
+    expect(speech().speaking).toBe(false)
+    expect(next).not.toHaveBeenCalled()
+    a.remove()
+  })
+
+  /**
+   * ⚠️ **AND IT STOPS WHEN SOMETHING ELSE TAKES THE ENGINE, RATHER THAN WALKING
+   * THE BOOK.** `window.speechSynthesis` serves one utterance, and the lookup
+   * popup's pronunciation speaks through the same one — so a reader who
+   * pronounces a word mid-reading cancels this utterance, whose `end` arrives
+   * anyway. Read as a section finishing, that ran `continueReading()`: pages
+   * turning forward hunting the next section while one word was being
+   * pronounced. `engineHeldBy` in `speech.ts` reports it as `taken` instead, and
+   * this is the half that acts on it.
+   *
+   * The reading ends VISIBLY — `speaking` goes false, so the Listen control
+   * shows what happened — and no page is turned.
+   */
+  it('stops when another speaker takes the engine, without turning a page', () => {
+    const a = section('First chapter.')
+    const { speech, next } = mount(a.doc)
+    act(() => speech().start())
+    const section_ = synth.queued[0]
+
+    /* What the pronunciation control is: another `Speaker` over this engine. */
+    const pronouncing = new Speaker(
+      { onWord: () => {}, onDone: () => {}, onNoBoundaries: () => {} },
+      synth as unknown as SpeechSynthesis,
+    )
+    act(() => {
+      pronouncing.speak('gam', null)
+      section_?.dispatchEvent(new Event('end'))
+    })
+
     expect(speech().speaking).toBe(false)
     expect(next).not.toHaveBeenCalled()
     a.remove()

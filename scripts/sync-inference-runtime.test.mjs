@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import path, { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { artifactKey, ARTIFACTS, bsdtar, isStaged, leaveEmpty, sha256, VENDOR, VERSION } from './sync-inference-runtime.mjs'
+import { artifactKey, BACKENDS, bsdtar, isStaged, leaveEmpty, sha256, VENDOR } from './sync-inference-runtime.mjs'
 import { existsSync } from 'node:fs'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -24,30 +24,6 @@ describe('the pinned artifacts', () => {
     expect(artifactKey('darwin', 'x64')).toBeNull()
     expect(artifactKey('android', 'arm64')).toBeNull()
     expect(artifactKey('ios', 'arm64')).toBeNull()
-  })
-
-  it('names a real digest for every entry', () => {
-    for (const [key, entry] of Object.entries(ARTIFACTS)) {
-      expect(entry.sha256, key).toMatch(/^[0-9a-f]{64}$/)
-      expect(entry.sha256, key).not.toBe('0'.repeat(64))
-      expect(entry.asset, key).toContain(VERSION)
-    }
-  })
-
-  it('gives each platform its own distinct archive and digest', () => {
-    const digests = new Set(Object.values(ARTIFACTS).map((e) => e.sha256))
-    const assets = new Set(Object.values(ARTIFACTS).map((e) => e.asset))
-    expect(digests.size).toBe(Object.keys(ARTIFACTS).length)
-    expect(assets.size).toBe(Object.keys(ARTIFACTS).length)
-  })
-
-  /* `paths::runtime_exe_name` in the Rust plugin looks for exactly these. A
-   * mismatch is a runtime that stages fine and is never found. */
-  it('names the executable the plugin actually looks for', () => {
-    expect(ARTIFACTS['win32-x64'].exe).toBe('lemond.exe')
-    for (const key of ['darwin-arm64', 'linux-x64', 'linux-arm64']) {
-      expect(ARTIFACTS[key].exe, key).toBe('lemond')
-    }
   })
 })
 
@@ -82,10 +58,11 @@ describe('the bundle wiring', () => {
     const from = Object.keys(resources).find((key) => key.includes('inference'))
     expect(from, `${name} must copy the staged runtime`).toBeTruthy()
     expect(from).toContain(VENDOR.split(path.sep).join('/'))
-    /* The plugin resolves `resource_dir()/runtime/lemond`, so the bundle has to
-       put it under `runtime/` for that to be true. */
+    /* The plugin resolves `resource_dir()/runtime/runtime.manifest.json`, and
+       every path in that manifest is relative to it, so the bundle has to put
+       the tree under `runtime/` for either to be true. */
     expect(resources[from]).toBe('runtime/')
-    for (const key of Object.keys(ARTIFACTS)) {
+    for (const key of Object.keys(BACKENDS)) {
       expect(from, 'the bundle path must not name a platform').not.toContain(key)
     }
   })

@@ -1,6 +1,6 @@
 import { useEffect, useRef, type RefObject } from 'react'
 import { usePlacement } from './usePlacement'
-import type { Placement } from '../../core/placement'
+import { PARK_OFFSET, type Placement } from '../../core/placement'
 
 /**
  * The behaviour every row menu shares: open from a `⋯`, placed by
@@ -231,9 +231,9 @@ export function useRowMenu(
     }
   }, [open, menu])
 
-  /* A DETACHED menu closes rather than parking at -9999. Parked, its items
-   * stayed focusable and exposed to assistive technology while the row was
-   * mounted but its anchor was off screen. */
+  /* A DETACHED menu closes rather than parking at `PARK_OFFSET`. Parked, its
+   * items stayed focusable and exposed to assistive technology while the row
+   * was mounted but its anchor was off screen. */
   useEffect(() => {
     if (open && placement?.fit === 'detached') closeRef.current()
   }, [open, placement?.fit])
@@ -241,7 +241,7 @@ export function useRowMenu(
   return {
     moreRef,
     menuRef,
-    menuStyle: style && placement?.fit !== 'detached' ? style : { top: -9999, left: -9999 },
+    menuStyle: style && placement?.fit !== 'detached' ? style : { top: PARK_OFFSET, left: PARK_OFFSET },
     placement,
     close: () => closeRef.current(),
   }

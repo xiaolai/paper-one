@@ -61,16 +61,34 @@ describe('the commands, as invoke receives them', () => {
     const table: [() => Promise<unknown>, unknown[]][] = [
       [() => inferencePlugin.removeModel('qwen'), ['plugin:inference|inference_remove_model', { model: 'qwen' }]],
       [
-        () => inferencePlugin.gloss('gloss-1', 'qwen', 'be brief', 'what is a gam?'),
-        ['plugin:inference|inference_gloss', { requestId: 'gloss-1', model: 'qwen', system: 'be brief', question: 'what is a gam?' }],
+        () => inferencePlugin.gloss('gloss-1', 'local:qwen', 'be brief', 'what is a gam?', ['English']),
+        [
+          'plugin:inference|inference_gloss',
+          { requestId: 'gloss-1', route: 'local:qwen', system: 'be brief', question: 'what is a gam?', language: 'English', secondLanguage: null },
+        ],
+      ],
+      /* THE SECOND LANGUAGE, IN ITS PLACE. The order is the schema's order, and
+         the schema's order is the order the reader reads the lines in. */
+      [
+        () => inferencePlugin.gloss('gloss-2', 'agent:claude', 'be brief', 'what is a gam?', ['Simplified Chinese', 'English']),
+        [
+          'plugin:inference|inference_gloss',
+          {
+            requestId: 'gloss-2',
+            route: 'agent:claude',
+            system: 'be brief',
+            question: 'what is a gam?',
+            language: 'Simplified Chinese',
+            secondLanguage: 'English',
+          },
+        ],
       ],
       [
-        () => inferencePlugin.speak('voice-1', 'kokoro', 'Call me Ishmael.', null),
-        ['plugin:inference|inference_speak', { requestId: 'voice-1', model: 'kokoro', text: 'Call me Ishmael.', voice: null }],
-      ],
-      [
-        () => inferencePlugin.addEndpoint('work', 'Work', 'https://llm.example.invalid/v1'),
-        ['plugin:inference|inference_add_endpoint', { id: 'work', label: 'Work', baseUrl: 'https://llm.example.invalid/v1' }],
+        () => inferencePlugin.addEndpoint('work', 'Work', 'https://llm.example.invalid/v1', 'gpt-4.1-mini'),
+        [
+          'plugin:inference|inference_add_endpoint',
+          { id: 'work', label: 'Work', baseUrl: 'https://llm.example.invalid/v1', model: 'gpt-4.1-mini' },
+        ],
       ],
       [() => inferencePlugin.removeEndpoint('work'), ['plugin:inference|inference_remove_endpoint', { id: 'work' }]],
       [
@@ -147,7 +165,7 @@ describe('reading a rejection', () => {
 
 describe('the reason a route cannot answer', () => {
   const route = (reason: unknown): Route =>
-    ({ id: 'qwen', kind: 'local', label: 'Qwen', detail: null, unusable: 'Not installed', reason, installed: false, modality: 'text' }) as Route
+    ({ id: 'qwen', kind: 'local', label: 'Qwen', detail: null, unusable: 'Not installed', reason, installed: false }) as Route
 
   it('reads a unit code, which serde writes as a bare string', () => {
     expect(reasonOf(route('notInstalled'))).toBe('notInstalled')

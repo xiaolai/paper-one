@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/xiaolai/paper-one/main/models.manifest.schema.json",
   "title": "Paper model manifest",
-  "description": "The models Paper will resolve, verify and activate. Lemonade's own server_models.json carries recipe, checkpoint and size and NO license and NO per-model digest — checked against 11.7.0's shipped resources/server_models.json, where `kokoro-v1` is a checkpoint, a recipe and a rounded gigabyte count and nothing else. So it cannot be the provenance record, and this is. A gallery entry is untrusted input until it has resolved to an entry here. Meaning of each field: dev-docs/plans/phase-15-the-companion.md, WI-15.1; the enforcement is src-tauri/crates/tauri-plugin-inference/src/manifest.rs.",
+  "description": "The models Paper will resolve, verify and activate. A download source carries a checkpoint and a size and NO license and NO per-model digest, so it cannot be the provenance record, and this is. A gallery entry is untrusted input until it has resolved to an entry here. Meaning of each field: dev-docs/plans/phase-15-the-companion.md, WI-15.1; the enforcement is src-tauri/crates/tauri-plugin-inference/src/manifest.rs.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "models"],
@@ -22,7 +22,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "label", "modality", "license", "backend", "artifacts"],
+        "required": ["id", "label", "license", "artifacts"],
         "properties": {
           "id": {
             "type": "string",
@@ -34,25 +34,15 @@
             "minLength": 1,
             "description": "What the settings pane calls it. Written for a reader, not derived from the checkpoint name."
           },
-          "modality": {
-            "type": "string",
-            "enum": ["text", "speech"],
-            "description": "What the model does. `text` binds the companion and the gloss; `speech` binds Test voice. The set is closed because each modality is a code path, not a label."
-          },
           "license": {
             "type": "string",
             "minLength": 1,
-            "description": "SPDX identifier where one exists, else the license's published name. Recorded because Lemonade's catalogue does not carry it and Paper resolves the artifact rather than redistributing it — the reader is entitled to know the terms before a multi-gigabyte download."
-          },
-          "backend": {
-            "type": "string",
-            "enum": ["llamacpp", "kokoro"],
-            "description": "Which runtime backend loads it. Closed, because an unrecognised backend is not something to pass through to the daemon and hope."
+            "description": "SPDX identifier where one exists, else the license's published name. Recorded because Paper resolves the artifact rather than redistributing it, and the reader is entitled to know the terms before a multi-gigabyte download."
           },
           "artifacts": {
             "type": "array",
             "minItems": 1,
-            "description": "The files this model is made of. AN ARRAY, not a single file, because one model is routinely more than one artifact: Kokoro is a graph plus a voice pack, and a large GGUF is published as numbered shards. A schema with one `file` field would have forced a fake second model entry to carry a voice file that is not a model.",
+            "description": "The files this model is made of. AN ARRAY, not a single file, because one model is routinely more than one artifact: a large GGUF is published as numbered shards, and a multimodal model carries a projector beside its weights. A schema with one `file` field would force a fake second model entry to carry a file that is not a model.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -81,8 +71,8 @@
                 },
                 "role": {
                   "type": "string",
-                  "enum": ["weights", "voices"],
-                  "description": "What this artifact is to the model. `weights` is the file the backend loads; `voices` is Kokoro's voice pack. Closed, so a new kind of artifact is a deliberate change rather than a string nobody validates."
+                  "enum": ["weights"],
+                  "description": "What this artifact is to the model. `weights` is the file llama-server loads with -m, and the only role today; a multimodal projector (`mmproj`) would be the next. Closed, so a new kind of artifact is a deliberate change rather than a string nobody validates."
                 }
               }
             }

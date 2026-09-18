@@ -279,7 +279,7 @@
   flex-direction: column;
   gap: var(--space-6);
   font-size: var(--text-body);
-  line-height: 1.6;
+  line-height: var(--leading-body);
 }
 
 /* The reader's own words are quiet chrome; they are not a claim about the
@@ -555,9 +555,9 @@
 }
 
 .noteBody {
-  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-family: var(--font-serif);
   font-size: var(--text-prose);
-  line-height: 1.5;
+  line-height: var(--leading-body);
   color: var(--ink);
 }
 
@@ -576,7 +576,7 @@
   text-align: start;
   font-family: inherit;
   font-size: var(--text-small);
-  line-height: 1.6;
+  line-height: var(--leading-body);
   color: var(--muted);
   cursor: text;
 }
@@ -591,7 +591,7 @@
   color: var(--ink);
   font-family: inherit;
   font-size: var(--text-small);
-  line-height: 1.6;
+  line-height: var(--leading-body);
   resize: vertical;
   min-height: var(--space-56);
 }
@@ -738,7 +738,7 @@
 /* `pre-line` for an answer in two languages, which is two lines. */
 .lookupSense {
   font-size: var(--text-ui);
-  line-height: 1.5;
+  line-height: var(--leading-body);
   color: var(--ink);
   white-space: pre-line;
   overflow-wrap: anywhere;
@@ -753,9 +753,9 @@
   -webkit-line-clamp: 3;
   overflow: hidden;
   padding-top: var(--space-4);
-  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-family: var(--font-serif);
   font-size: var(--text-body);
-  line-height: 1.5;
+  line-height: var(--leading-body);
   color: var(--ink-2);
 }
 
@@ -813,7 +813,7 @@
 .resultSnippet {
   padding-top: var(--space-4);
   font-size: var(--text-ui);
-  line-height: 1.55;
+  line-height: var(--leading-body);
   color: var(--ink-2);
 }
 
@@ -1228,7 +1228,7 @@
    the others", and choosing paper is not a stack. `aria-pressed` carries the
    same state for anyone who cannot see either. */
 .themeSwatch[data-on='true'] {
-  box-shadow: 0 0 0 1px var(--swatch-edge);
+  box-shadow: var(--ring) var(--swatch-edge);
 }
 
 /* The specimen. Large enough to have colour in it — an `Aa` at caption size is
@@ -1262,7 +1262,7 @@
 .emptyBody {
   padding-top: var(--space-8);
   font-size: var(--text-ui);
-  line-height: 1.6;
+  line-height: var(--leading-body);
   color: var(--muted);
   text-wrap: pretty;
 }
@@ -1362,7 +1362,7 @@
    classes the bundler emits last — see the note in `controls.module.css`. */
 .faceItemLabel {
   font-size: calc(var(--text-body) * var(--face-scale, 1));
-  line-height: 1.2;
+  line-height: var(--leading-title);
 }
 
 .faceItem[data-on='true'] {
@@ -1474,7 +1474,7 @@
    selection bar's tints follow, so a colour never needs a second colour to say
    it was picked. */
 .colourDot[data-on='true'] {
-  box-shadow: 0 0 0 1px var(--dot);
+  box-shadow: var(--ring) var(--dot);
 }
 
 .colourDot:focus-visible {
@@ -1749,12 +1749,12 @@
    one panel over. A rule in the gutter colours the entry without colouring what
    it says. */
 .devEntry[data-level='warn'] {
-  box-shadow: inset 2px 0 0 var(--amber);
+  box-shadow: inset var(--kind-rule-w) 0 0 var(--amber);
   padding-left: var(--space-8);
 }
 
 .devEntry[data-level='error'] {
-  box-shadow: inset 2px 0 0 var(--mark-rule);
+  box-shadow: inset var(--kind-rule-w) 0 0 var(--mark-rule);
   padding-left: var(--space-8);
 }
 
@@ -1762,7 +1762,7 @@
   display: flex;
   gap: var(--space-8);
   align-items: baseline;
-  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: var(--text-micro);
 }
 
@@ -1796,7 +1796,7 @@
   border-radius: var(--radius-chip);
   background: var(--wash);
   color: var(--muted);
-  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: var(--text-micro);
   white-space: pre-wrap;
   overflow-wrap: anywhere;

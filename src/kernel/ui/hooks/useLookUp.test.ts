@@ -63,7 +63,7 @@ function answering(text = 'Structures along a shore where ships dock.') {
     warm() {},
     async gloss(term, context) {
       seen.push({ term, context })
-      return text
+      return { text }
     },
   }
   return { provider, seen }

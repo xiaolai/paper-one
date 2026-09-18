@@ -8,10 +8,14 @@ import {
   type GlossContext,
 } from '../../kernel'
 import { refusalOf } from '../../kernel/testkit'
-import { MODELS_SECTION, detailFor, inference, inferencePort } from './index'
+import { GLOSS_SECTION, detailFor, inference, inferencePort } from './index'
 import { inferencePlugin, type InstallProgress } from './lib/plugin'
 import type { EndpointsModel } from './ui/endpointsModel'
+import type { GlossRouteModel } from './ui/glossRouteModel'
 import type { ModelsModel } from './ui/modelsModel'
+
+/** The Local models section's id, spelled as the section spells it. */
+const MODELS_SECTION = 'inference:models'
 
 /**
  * ⚠️ THE `inferenceDownloadLine()` CASE THAT WAS HERE TESTED A DEAD EXPORT.
@@ -105,27 +109,31 @@ describe('starting and stopping the capability', () => {
     expect(endpoints?.render({ bookId: null }), 'the section outlived the capability').toBeNull()
   })
 
-  /* THE INSTALL OFFER NAMES A SECTION THIS CAPABILITY DECLARES (phase 17, L3).
+  /* THE WAY OUT NAMES A SECTION THIS CAPABILITY DECLARES (phase 17, L3).
      The section spells its id as a literal — `scripts/surfaces.mjs` reads only
      literals — and the gloss provider reads the constant, so this is what holds
      the two spellings to one another: a renamed section would otherwise leave
-     "Install one" opening Settings on nothing. */
-  it('offers the install at the section it contributes as Local models', () => {
-    const models = inference.settings?.find((one) => one.id === MODELS_SECTION)
-    expect(models, `no contributed section is called ${MODELS_SECTION}`).toBeDefined()
-    expect(models?.title).toBe('Local models')
+     "Choose one" opening Settings on nothing. It was Local models while the
+     local model was the only thing that could answer; it is Look up, where the
+     choice is, since 2026-09-18. */
+  it('offers the way out at the section it contributes as Look up', () => {
+    const lookUp = inference.settings?.find((one) => one.id === GLOSS_SECTION)
+    expect(lookUp, `no contributed section is called ${GLOSS_SECTION}`).toBeDefined()
+    expect(lookUp?.title).toBe('Look up')
   })
 
-  /* ⚠️ **SHOWN TO EVERY READER, AND DELIBERATELY.** Companion's panel is hidden,
-     and a settings section is hidden with the capability its id names — but
-     these two are `inference`'s, and Look up ships on this engine, so hiding
-     them would take a finished feature's settings with them. The rule reads the
-     id before the colon against `UNFINISHED_PANE_IDS` (`settingsSectionOffered`,
-     which the kernel entry does not export); what this holds is that nothing
-     here answers to a name on that list. */
-  it('offers Local models and Cloud endpoints under its own name, which no unfinished panel shares', () => {
+  /* ⚠️ **NOT HIDDEN WITH THE COMPANION, AND DELIBERATELY.** Companion's panel is
+     hidden, and a settings section is hidden with the capability its id names —
+     but these are `inference`'s, and Look up ships on this engine, so hiding
+     them with the companion would take a finished feature's settings with
+     them. The rule reads the id before the colon against `UNFINISHED_PANE_IDS`
+     (`settingsSectionOffered`, which the kernel entry does not export); what
+     this holds is that nothing here answers to a name on that list — and none
+     of the three is hidden on its own account either (the case below). */
+  it('offers Look up, Local models and Cloud endpoints under its own name, which no unfinished panel shares', () => {
     expect(inference.id).toBe('inference')
     expect((inference.settings ?? []).map(({ id, title }) => [id, title])).toEqual([
+      ['inference:gloss', 'Look up'],
       ['inference:models', 'Local models'],
       ['inference:endpoints', 'Cloud endpoints'],
     ])
@@ -136,45 +144,72 @@ describe('starting and stopping the capability', () => {
     )
   })
 
+  /* ⚠️ **CLOUD ENDPOINTS IS OFFERED TO EVERY READER AGAIN — IT WAS THE ONE
+     `unfinished` SECTION UNTIL 2026-09-18.** Nothing connected an endpoint to an
+     answer once Lemonade went, so it sat behind developer options. The crate
+     talks to an endpoint itself now, and an endpoint is one of the routes Look
+     up answers with — so the section a reader adds one in cannot be hidden from
+     them while Look up's own section tells them to go there. The kernel's
+     `Settings.test.tsx` holds what the flag DOES; this holds that no section
+     here carries it. */
+  it('marks none of its sections unfinished', () => {
+    expect((inference.settings ?? []).map(({ id, unfinished }) => [id, unfinished === true])).toEqual([
+      ['inference:gloss', false],
+      ['inference:models', false],
+      ['inference:endpoints', false],
+    ])
+  })
+
   /* AND THE GLOSS `start` BINDS IS THAT OFFER. The provider is built from this
      start's own plugin and controller and names the section above; handed
      nothing, it has no runtime to follow and no section to name, and Look up
      reaches the kernel as a port that throws on first touch. */
-  it('binds a gloss that follows this runtime, offers Local models, and answers through the plugin', async () => {
-    const TEXT = { id: 'qwen-small', label: 'Qwen', modality: 'text', license: 'Apache-2.0', bytes: 1, installed: true } as const
+  it('binds a gloss that follows this runtime, offers Look up, and answers through the plugin', async () => {
+    const TEXT = { id: 'qwen-small', label: 'Qwen', license: 'Apache-2.0', bytes: 1, installed: true } as const
     const answer = 'Structures along a shore where ships dock.'
     const status = vi.spyOn(inferencePlugin, 'status').mockResolvedValue({ state: 'ready', version: '1', port: 1 })
     const catalogue = vi.spyOn(inferencePlugin, 'models').mockResolvedValue([TEXT])
     const launch = vi.spyOn(inferencePlugin, 'start').mockResolvedValue(1)
+    const probe = vi.spyOn(inferencePlugin, 'probe').mockResolvedValue({ routes: [], runtimeVersion: null })
     const gloss = vi.spyOn(inferencePlugin, 'gloss').mockResolvedValue(answer)
     let handle: ReturnType<typeof started> | undefined
     try {
       const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
       handle = started(services)
-      /* Before `start`'s own refresh lands the runtime reads absent, and there is nowhere to send a reader yet. */
-      expect(services.gloss().installAt).toBeNull()
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      expect(services.gloss().installAt).toBe(MODELS_SECTION)
+      /* Before `start`'s own probe lands the routes are UNKNOWN, and unknown
+         offers Look up rather than refusing it — a reader with only Claude or an
+         endpoint would otherwise be told there is nothing to answer with for the
+         first moments of every session (`glossProvider`'s `unprobed`). And there
+         is always somewhere to send a reader: an endpoint or an agent can answer
+         with no runtime at all. */
       expect(services.gloss().available).toBe(true)
+      expect(services.gloss().installAt).toBe(GLOSS_SECTION)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(services.gloss().installAt).toBe(GLOSS_SECTION)
+      expect(services.gloss().available).toBe(true)
+      /* THE PROBE WENT OUT ONCE, after the catalogue was read — not beside it,
+         which would spawn the agent CLIs twice on every launch (`followLocal`). */
+      expect(probe).toHaveBeenCalledTimes(1)
 
       const context: GlossContext = {
         sentence: 'The ships lay at the wharves.',
         bookTitle: 'X',
         answerIn: [{ tag: 'en', name: 'English', label: 'English' }],
       }
-      await expect(services.gloss().gloss('wharves', context, new AbortController().signal)).resolves.toBe(answer)
-      expect(gloss.mock.calls.map((call) => call[1]), 'the gloss was not asked of the installed text model').toEqual(['qwen-small'])
+      await expect(services.gloss().gloss('wharves', context, new AbortController().signal)).resolves.toEqual({ text: answer })
+      expect(gloss.mock.calls.map((call) => call[1]), 'the gloss was not asked of the installed text model').toEqual(['local:qwen-small'])
     } finally {
       handle?.dispose()
-      for (const spy of [status, catalogue, launch, gloss]) spy.mockRestore()
+      for (const spy of [status, catalogue, launch, probe, gloss]) spy.mockRestore()
     }
   })
 
-  /* AFTER Local models, because it is the same subject one step further out:
-     this machine's models, then somebody else's. */
-  it('puts the two inference sections in that order', () => {
+  /* THE FEATURE, THEN THE ENGINES THAT SERVE IT, THEN SOMEBODY ELSE'S ENGINE.
+     Look up is what the reader uses; Local models and Cloud endpoints are what
+     it runs on, this machine's first and then a stranger's. */
+  it('puts the three inference sections in that order', () => {
     const ids = (inference.settings ?? []).map((one) => one.id)
-    expect(ids).toEqual(['inference:models', 'inference:endpoints'])
+    expect(ids).toEqual(['inference:gloss', 'inference:models', 'inference:endpoints'])
     const orders = (inference.settings ?? []).map((one) => one.order)
     expect(orders).toEqual([...orders].sort((a, b) => (a ?? 0) - (b ?? 0)))
   })
@@ -263,6 +298,10 @@ describe('starting and stopping the capability', () => {
       .spyOn(inferencePlugin, 'status')
       .mockRejectedValue({ kind: 'runtimeUnreachable', message: 'connection refused on 13399' })
     const catalogue = vi.spyOn(inferencePlugin, 'models').mockResolvedValue([])
+    /* A PROBE THAT ANSWERS, so the lines below are the three this case is
+       about — a probe that failed would add its own, which the route store's
+       tests measure. */
+    const probe = vi.spyOn(inferencePlugin, 'probe').mockResolvedValue({ routes: [], runtimeVersion: null })
     const stop = vi
       .spyOn(inferencePlugin, 'stop')
       .mockRejectedValue({ kind: 'runtimeExited', message: 'the daemon had already gone' })
@@ -284,7 +323,102 @@ describe('starting and stopping the capability', () => {
       ])
     } finally {
       handle?.dispose()
-      for (const spy of [status, catalogue, stop]) spy.mockRestore()
+      for (const spy of [status, catalogue, probe, stop]) spy.mockRestore()
+    }
+  })
+
+  /* A MODEL INSTALLED IS A NEW ANSWER, and the probe that lists the local
+     model is asked again — once, when the download lands, not on each of the
+     progress events the controller notifies with (`followLocal`). */
+  it('probes again when a local model finishes installing, and not on each byte of it', async () => {
+    let installed = false
+    const status = vi.spyOn(inferencePlugin, 'status').mockResolvedValue({ state: 'stopped' })
+    const catalogue = vi
+      .spyOn(inferencePlugin, 'models')
+      .mockImplementation(async () => [{ id: 'qwen-small', label: 'Qwen', license: 'Apache-2.0', bytes: 1, installed }])
+    const probe = vi.spyOn(inferencePlugin, 'probe').mockResolvedValue({ routes: [], runtimeVersion: null })
+    let progress: (p: InstallProgress) => void = () => {}
+    let finish: () => void = () => {}
+    const installModel = vi.spyOn(inferencePlugin, 'installModel').mockImplementation(async (_requestId, _model, onProgress) => {
+      progress = onProgress
+      await new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      installed = true
+    })
+    const stop = vi.spyOn(inferencePlugin, 'stop').mockResolvedValue(undefined)
+    let handle: ReturnType<typeof started> | undefined
+    try {
+      handle = started()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(probe, 'the start probe did not go out, so this measures nothing').toHaveBeenCalledTimes(1)
+
+      const drawn = inference.settings?.find((one) => one.id === MODELS_SECTION)?.render({ bookId: null }) as {
+        readonly props: { readonly model: ModelsModel }
+      } | null
+      const model = drawn?.props.model
+      if (model === undefined) throw new Error('the section drew no model to drive')
+      const installing = model.install('qwen-small')
+      progress({ kind: 'downloading', received: 1, total: 2 })
+      progress({ kind: 'verifying' })
+      expect(probe, 'a byte of a download cost a probe').toHaveBeenCalledTimes(1)
+
+      finish()
+      await installing
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(probe, 'the installed model was not followed by a probe').toHaveBeenCalledTimes(2)
+    } finally {
+      handle?.dispose()
+      for (const spy of [status, catalogue, probe, installModel, stop]) spy.mockRestore()
+    }
+  })
+
+  /* THE LOOK UP SECTION DRAWS WHAT ANSWERS, from this lifetime's own probe and
+     settings — the choice a reader makes there is the one the bound gloss
+     reads — and its route list stops with the capability, as the other
+     sections' models do. */
+  it('draws Look up’s route list from this lifetime, and stops it with the capability', async () => {
+    const agent = (id: string, label: string) => ({ id, kind: 'agent' as const, label, detail: null, unusable: null, installed: true })
+    const probe = vi
+      .spyOn(inferencePlugin, 'probe')
+      .mockResolvedValue({ routes: [agent('agent:claude', 'Claude'), agent('agent:codex', 'Codex')], runtimeVersion: null })
+    const listed = vi.spyOn(inferencePlugin, 'endpoints').mockResolvedValue([])
+    const gloss = vi.spyOn(inferencePlugin, 'gloss').mockResolvedValue('Guarded.')
+    const stop = vi.spyOn(inferencePlugin, 'stop').mockResolvedValue(undefined)
+    let handle: ReturnType<typeof started> | undefined
+    try {
+      const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+      handle = started(services)
+      const section = inference.settings?.find((one) => one.id === GLOSS_SECTION)
+      const drawn = section?.render({ bookId: null }) as { readonly props: { readonly routes?: GlossRouteModel } } | null
+      const routes = drawn?.props.routes
+      if (routes === undefined) throw new Error('the Look up section drew no route list')
+
+      await routes.refresh()
+      expect(routes.getSnapshot().choices.map((choice) => choice.id)).toEqual(['', 'agent:claude', 'agent:codex'])
+      /* THE SAME CHOICE THE BOUND GLOSS READS: Automatic would send this to
+         Claude, so Codex answering is the choice made here and nothing else. */
+      routes.use('agent:codex')
+      const context: GlossContext = { sentence: 'He kept his counsel.', bookTitle: 'X', answerIn: [{ tag: 'en', name: 'English', label: 'English' }] }
+      await services.gloss().gloss('counsel', context, new AbortController().signal)
+      expect(gloss.mock.calls.map((call) => call[1]), 'the choice made in the section did not reach the bound gloss').toEqual(['agent:codex'])
+
+      let told = 0
+      routes.subscribe(() => {
+        told += 1
+      })
+      routes.use('')
+      expect(told, 'a running list told nobody, so the check below proves nothing').toBeGreaterThan(0)
+
+      handle.dispose()
+      handle = undefined
+      told = 0
+      routes.use('agent:claude')
+      expect(told, 'the route list outlived the capability that built it').toBe(0)
+      expect(section?.render({ bookId: null }), 'the section outlived the capability').toBeNull()
+    } finally {
+      handle?.dispose()
+      for (const spy of [probe, listed, gloss, stop]) spy.mockRestore()
     }
   })
 
@@ -293,7 +427,7 @@ describe('starting and stopping the capability', () => {
   it('draws Cloud endpoints from the plugin’s own list, and stops that model with the capability', async () => {
     const listed = vi
       .spyOn(inferencePlugin, 'endpoints')
-      .mockResolvedValue([{ id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', keyState: 'set' }])
+      .mockResolvedValue([{ id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.1-8b-instant', keyState: 'set' }])
     const stop = vi.spyOn(inferencePlugin, 'stop').mockResolvedValue(undefined)
     let handle: ReturnType<typeof started> | undefined
     try {
@@ -329,7 +463,7 @@ describe('starting and stopping the capability', () => {
      is cancelled rather than left pulling gigabytes for a composition that is
      gone. */
   it('puts a download on the status bar while it runs, and cancels it when the capability stops', async () => {
-    const TEXT = { id: 'qwen-small', label: 'Qwen', modality: 'text', license: 'Apache-2.0', bytes: 2_000_000, installed: false } as const
+    const TEXT = { id: 'qwen-small', label: 'Qwen', license: 'Apache-2.0', bytes: 2_000_000, installed: false } as const
     let progress: (update: InstallProgress) => void = () => {}
     let finish: () => void = () => {}
     const catalogue = vi.spyOn(inferencePlugin, 'models').mockResolvedValue([TEXT])
@@ -360,7 +494,7 @@ describe('starting and stopping the capability', () => {
       })
       const installing = model.install(TEXT.id)
       progress({ kind: 'downloading', received: 1_000_000, total: 2_000_000 })
-      expect(bar.line()).toBe('Downloading Qwen — 1 MB of 2 MB')
+      expect(bar.line()).toBe('Downloading Qwen — 1\u00a0MB of 2\u00a0MB')
       expect(told, 'the status bar was never told its line changed').toBeGreaterThan(0)
       unsubscribe()
 
@@ -731,8 +865,9 @@ describe('starting and stopping the capability', () => {
    * each step is owned under is read only on the day one does, and on that day
    * the name is the whole diagnostic. Every step that CAN be made to fail from
    * outside is made to here, by a plugin and a kernel that throw where the real
-   * ones reject. (The render slots and the endpoints model cannot, and are marked
-   * beside their `own`.)
+   * ones reject. (The render slots and both section models cannot, and are
+   * marked beside their `own`. The Local models one could, while it held the
+   * voice test's speaker; that went with the neural voice.)
    *
    * ON ITS OWN MODULE INSTANCES: a `running` step that throws never reaches its
    * slot's release, which would leave a port published in module scope for
@@ -742,8 +877,7 @@ describe('starting and stopping the capability', () => {
     vi.resetModules()
     const isolated = await import('./index')
     const { inferencePlugin: plugin } = await import('./lib/plugin')
-    const TEXT = { id: 'qwen-small', label: 'Qwen', modality: 'text', license: 'Apache-2.0', bytes: 1, installed: false } as const
-    const VOICE = { id: 'kokoro', label: 'Kokoro', modality: 'speech', license: 'Apache-2.0', bytes: 1, installed: true } as const
+    const TEXT = { id: 'qwen-small', label: 'Qwen', license: 'Apache-2.0', bytes: 1, installed: false } as const
     const gates: (() => void)[] = []
     const held = <T,>(value: T): Promise<T> =>
       new Promise<T>((resolve) => {
@@ -751,10 +885,10 @@ describe('starting and stopping the capability', () => {
       })
     const spies = [
       vi.spyOn(plugin, 'status').mockResolvedValue({ state: 'ready', version: '1', port: 1 }),
-      vi.spyOn(plugin, 'models').mockResolvedValue([TEXT, VOICE]),
+      vi.spyOn(plugin, 'models').mockResolvedValue([TEXT]),
       vi.spyOn(plugin, 'start').mockResolvedValue(1),
+      vi.spyOn(plugin, 'probe').mockResolvedValue({ routes: [], runtimeVersion: null }),
       vi.spyOn(plugin, 'installModel').mockImplementation(() => held(undefined)),
-      vi.spyOn(plugin, 'speak').mockImplementation(() => held([])),
       vi.spyOn(plugin, 'generate').mockImplementation(() => held('an answer')),
       vi.spyOn(plugin, 'cancel').mockImplementation(() => {
         throw new Error('the cancel command is gone')
@@ -789,23 +923,21 @@ describe('starting and stopping the capability', () => {
       if (handle === undefined || handle instanceof Promise) throw new Error('start returned no synchronous handle')
       await new Promise((resolve) => setTimeout(resolve, 0))
 
-      const section = isolated.inference.settings?.find((one) => one.id === isolated.MODELS_SECTION)
+      const section = isolated.inference.settings?.find((one) => one.id === MODELS_SECTION)
       const drawn = section?.render({ bookId: null }) as { readonly props: { readonly model: ModelsModel } } | null
       const model = drawn?.props.model
       const port = isolated.inferencePort()
       if (model === undefined || port === null) throw new Error('the composition published nothing to put work through')
       void model.install(TEXT.id)
-      void model.testVoice()
       void port.generate(TEXT.id, 'system', 'question', () => {}, new AbortController().signal)
       await new Promise((resolve) => setTimeout(resolve, 0))
-      expect(gates, 'the download, the voice and the question were not all out, so this measures nothing').toHaveLength(3)
+      expect(gates, 'the download and the question were not both out, so this measures nothing').toHaveLength(2)
 
       handle.dispose()
       /* Last owned, first released: the child process is stopped soonest. */
       expect(warned).toEqual(
         [
           ['daemon', 'the stop command is gone'],
-          ['modelsModel', 'the cancel command is gone'],
           ['running', 'the cancel command is gone'],
           ['unbindWorkLine', 'the work line would not let go'],
           ['unbindGloss', 'the gloss port would not let go'],

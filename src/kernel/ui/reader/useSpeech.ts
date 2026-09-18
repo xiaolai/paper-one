@@ -204,7 +204,16 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
         pagingRef.current.next()
       },
       onDone: (reason: DoneReason) => {
-        if (reason === 'error' || !readingRef.current) {
+        /* ⚠️ **`taken` MUST NOT CONTINUE, AND IT USED TO ARRIVE AS `ended`.**
+         * The lookup popup's pronunciation speaks through the same single
+         * engine, and `speak` cancels whatever is on it — so the reading's
+         * utterance ended, its `end` event fired, and this read it as "the
+         * section finished" and called `continueReading()`: pages walking
+         * forward hunting the next section while the reader listened to one
+         * word being pronounced. `engineHeldBy` in `speech.ts` is what tells
+         * the two apart now. Treated as an end rather than an error, because
+         * nothing failed — the reader asked for something else. */
+        if (reason === 'error' || reason === 'taken' || !readingRef.current) {
           finish()
           return
         }

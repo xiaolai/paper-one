@@ -501,7 +501,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
     /* THE PANEL AND THE REQUEST TOGETHER, through `openPane`'s own rule so a
        screen without Settings lands where `openPane` would land it. The nonce
        counts on from the last request whatever became of it, so a second
-       "Install one" after the first was honoured is a new request. */
+       "Choose one" after the first was honoured is a new request. */
     case 'revealSettings':
       return {
         ...reducer(state, { type: 'openPane', pane: 'settings' }, contributed),

@@ -39,6 +39,80 @@
 /** Which origin a rect is measured from. A brand so the two cannot be mixed. */
 export type Space = 'viewport' | 'container'
 
+/**
+ * The clearance between an anchor and the surface hanging from it.
+ *
+ * WHAT 4 IS FOR: enough that the surface's own border and shadow are drawn
+ * clear of the anchor's, so the two read as two objects; little enough that the
+ * eye takes them as ONE — a menu is the button's menu, and a menu floating 12px
+ * off its button reads as a panel that happens to be nearby. The pair is also
+ * what makes a flip legible: the surface moves from one side of the anchor to
+ * the other by twice this, which is a visible step rather than a jump.
+ *
+ * THE DEFAULT, AND EVERY CALLER TAKES IT. Nothing in the app passes `gap` — so
+ * this is not "the value when one is not given", it is the clearance every menu
+ * and popover in Paper is drawn at. It was written out twice in this file, once
+ * in `check` and once in `place`, and a third time in `placement.test.ts`: three
+ * copies of one decision, and the two here had to agree or the validator would
+ * accept a gap the placer did not use.
+ */
+export const SURFACE_GAP = 4
+
+/**
+ * The clearance a surface keeps from the edge of the bounds it must stay inside.
+ *
+ * WHAT 8 IS FOR, and it is not the same decision as `SURFACE_GAP` however
+ * tempting the arithmetic looks. A gap separates two objects from each other; an
+ * edge inset separates one object from the EDGE OF THE WORLD, and it has to be
+ * big enough that a surface pushed back inside reads as inset rather than as
+ * clipped by the window. `SHEET.inset` makes the same argument for the palette
+ * at a much larger value, for a much larger surface.
+ *
+ * ALSO A DEFAULT NOTHING OVERRIDES, with the same three copies as above —
+ * `SelectionTools` and `FootnotePopover` had a fourth and a fifth of their own.
+ *
+ * NOT `CONCENTRIC_INSET`, which is also 8: that is Finder's nesting rule for
+ * RADII (parent radius − inset) and is about corners, not about clearance. Two
+ * numbers that agree today and answer different questions.
+ */
+export const SURFACE_EDGE = 8
+
+/**
+ * "No constraint" — the bound to use when the real one has not been measured.
+ *
+ * A surface is placed before the box it is placed inside has been laid out: the
+ * stage has no rect on the first pass, and `place` needs a width and a height.
+ * A very large number is the honest stand-in, because the alternatives are both
+ * wrong in a way nothing reports — zero makes every anchor `detached` and the
+ * surface disappears, and a guessed 1000 clamps a surface that was never
+ * outside anything.
+ *
+ * A SENTINEL, deliberately not `Infinity`: it is spent in arithmetic
+ * (`UNBOUNDED - 2 * SURFACE_EDGE` reaches a CSS `max-height`), and `Infinity`
+ * there serialises to a length no engine accepts.
+ */
+export const UNBOUNDED = 1e6
+
+/**
+ * Where a surface waits while it is measured — off screen, still laid out.
+ *
+ * A surface's position depends on its size, and its size is unknown until it has
+ * rendered, so it has to be in the DOM for a frame before it can be placed.
+ * `display: none` would give it no box to measure; parking it at this offset
+ * lays it out and does not show it.
+ *
+ * ⚠️ **IT WAS SPELLED THREE WAYS, ONE OF THEM AN ORDER OF MAGNITUDE OUT** —
+ * `-9999` in `useRowMenu`, `-99999` in `FootnotePopover`, `-99999px` in
+ * `session`'s parked footnote view. The magnitude matters at both ends: too
+ * small and a wide surface on a wide window has part of itself on screen, and
+ * this is the number `place` then calls `detached` when something is measured
+ * against the parked surface rather than against the stage — which is a real
+ * bug this offset has already caused once, and which reads as the feature
+ * simply not appearing. One spelling, so the three cannot disagree about how
+ * far off screen "off screen" is.
+ */
+export const PARK_OFFSET = -99_999
+
 export interface Rect {
   readonly top: number
   readonly left: number
@@ -86,9 +160,9 @@ export interface PlacementInput<S extends Space = Space> {
   readonly side?: Side
   /** Where along that edge to line up. */
   readonly align?: Align
-  /** Clearance between anchor and surface. */
+  /** Clearance between anchor and surface. `SURFACE_GAP` when absent. */
   readonly gap?: number
-  /** Clearance kept from the bounds' edges. */
+  /** Clearance kept from the bounds' edges. `SURFACE_EDGE` when absent. */
   readonly edge?: number
   /**
    * When the surface flips to the OTHER side, may it lie over the anchor?
@@ -125,7 +199,7 @@ const isVertical = (side: Side): boolean => side === 'top' || side === 'bottom'
  * ends up debugging geometry that was never geometry. Fail at the boundary.
  */
 function check(input: PlacementInput): void {
-  const { anchor, surface, bounds, gap = 4, edge = 8, avoid } = input
+  const { anchor, surface, bounds, gap = SURFACE_GAP, edge = SURFACE_EDGE, avoid } = input
   const bad = (what: string): never => {
     throw new RangeError(`place: ${what}`)
   }
@@ -183,7 +257,7 @@ export function place<S extends Space>(input: PlacementInput<S>): Placement {
   check(input)
   const {
     anchor, surface, bounds, avoid,
-    side = 'bottom', align = 'start', gap = 4, edge = 8, overlayOnFlip = false,
+    side = 'bottom', align = 'start', gap = SURFACE_GAP, edge = SURFACE_EDGE, overlayOnFlip = false,
   } = input
 
   const vertical = isVertical(side)

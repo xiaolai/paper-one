@@ -7,12 +7,25 @@
  * measure a definition can be read at in one glance; `SelectionTools` measures
  * the height it comes to and places the popup against it. */
 
+/* FILLS THE POPUP RATHER THAN SIZING IT (2026-09-18).
+ *
+ * ⚠️ **IT WAS `width: max-content`, AND THE SURFACE JUMPED WHILE THE READER
+ * WAS LOOKING AT IT.** Measured in the running app on `upending`: the popup was
+ * 135×74 saying "Looking…" and 374×106 with the answer — 177% wider, and
+ * re-placed against the selection at the new size. §08 allows this surface a
+ * 4px rise on arrival, deliberately *"short enough not to be a transition the
+ * reader waits on"*; a card that trebles in width a second later is a much
+ * larger motion than the one the design budgeted, and it is the motion the
+ * reader gets on every lookup.
+ *
+ * The measure now lives on the popup, which holds it in every state — see
+ * `.popup[data-face='lookup']` in `SelectionTools.module.css`. §10's prototype
+ * draws this card at a fixed width for the same reason. */
 .lookUp {
   display: flex;
   align-items: flex-start;
   gap: var(--space-4);
-  width: max-content;
-  max-width: var(--lookup-measure);
+  width: 100%;
 }
 
 /* The bar's own tool, repeated rather than imported: this face is its own
@@ -57,27 +70,158 @@
      to 120 code points, and a URL or a long compound has no break in it; the
      face is capped at `--lookup-measure`. Until 2026-09-13 only `.body` and
      `.failedReason` wrapped, so the term in the definition, in "couldn't
-     define" and in "needs a language model" ran straight out of the popup. */
+     define" and in "needs something to answer with" ran straight out of the
+     popup. */
   overflow-wrap: anywhere;
 }
 
-/* THE DEFINITION — AMBER, and that is the point rather than decoration: a
- * definition from a dictionary is authoritative and a gloss from a 4B model is
- * not, and the reader must be able to tell without being told. */
+/* THE DEFINITION — AMBER, and that is the point rather than decoration: §01 is
+ * flat about it, *"Amber means a machine wrote it… no companion output appears
+ * without it"*, and the reader must be able to tell a model's gloss from the
+ * book's own words without being told.
+ *
+ * ⚠️ **IT CARRIED THE AMBER AS A FILLED, BORDERED, ROUNDED BOX, AND THAT WAS A
+ * CARD INSIDE A CARD** (fixed 2026-09-18, measured in the running app). The
+ * popup is ALREADY the card — `--radius-card`, a hairline in `--line-2`,
+ * `--shadow-pop` — so this drew a second surface 6px inside the first, and the
+ * uneven white margin left around it is most of what read as ugly.
+ *
+ * §12's concentric rule is what makes it wrong rather than merely busy: *"an
+ * inset card is the parent radius minus its inset"*, which the codebase states
+ * as `LEADING_CARD_RADIUS = WINDOW_RADIUS - CONCENTRIC_INSET`. Inside a 14px
+ * card at a 6px inset this box owed 8 and drew `--radius-chip`, 6 — and there
+ * is no 8 on the radius scale to have drawn, so a nested surface here could not
+ * have been right. The answer is not a better radius, it is one surface.
+ *
+ * §10's own prototype draws this surface as a single card with the words set
+ * straight onto it.
+ *
+ * ⚠️ **AND THE RULE WENT TOO.** The box became a 2px amber edge on the leading
+ * side, which is `MarginMarks`' idiom and was the right first step — but in a
+ * popup that is already one small card it is a second vertical line a few
+ * pixels from the card's own left edge, with the back control between them.
+ * Three parallel edges in 40px of width. The margin track can carry that rule
+ * because it has nothing else in it and the mark is one of a column; here it
+ * was competing with the surface that holds it.
+ *
+ * So the provenance is the TERM'S OWN COLOUR and nothing else, which is all §01
+ * asks for — *"Amber means a machine wrote it"*, not "amber must be a shape".
+ * `.term` is amber, semibold and first, so no companion output appears without
+ * it. See the doctrine test in `screens/Reader.layout.test.ts`, which is what
+ * holds this: it asserts the amber is SOMEWHERE in the definition's own
+ * elements and NOWHERE in the four states that are not definitions. */
 .definition {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-8) var(--space-12);
-  border: 1px solid var(--amber-line);
-  border-radius: var(--radius-chip);
-  background: var(--amber-bg);
   font-size: var(--text-ui);
 }
 
+/* THE HEADWORD LINE — the term, and the control that says it out loud.
+ *
+ * §10's prototype draws a pronunciation immediately after the headword, which is
+ * where IPA would have gone; a voice model says the word instead, because a
+ * language model asked for a transcription invents one (see `core/voice.ts`).
+ *
+ * A ROW INSIDE THE COLUMN rather than two more children of `.definition`: that
+ * box is a flex column with a gap, so a button placed beside the term as a
+ * sibling would take a line of its own between the headword and the part of
+ * speech — a dictionary entry with its speaker glyph on the wrong row.
+ *
+ * `flex-wrap`, for the one state that puts words in here. A pronunciation that
+ * could not be played says so beside the control, and the face is capped at
+ * `--lookup-measure`; wrapped, the notice drops under the term instead of
+ * squeezing it. `align-items: center` rather than `baseline`, because the
+ * control is a square box and a glyph has no baseline to share. */
+.headword {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .term {
+  /* A FLEX ITEM SINCE THE HEADWORD BECAME A ROW, and a flex item's `min-width`
+     defaults to `auto` — its min-content width, which for a 120-code-point URL
+     with no break in it is the whole string. `overflow-wrap: anywhere` inherited
+     from `.content` is what makes that min-content small (`break-word` would
+     not, which is why this face uses `anywhere`), and this says the same thing
+     the other way round so the term cannot push the control off the card. */
+  min-width: 0;
   color: var(--amber);
   font-weight: var(--weight-semibold);
+}
+
+/* THE PRONUNCIATION CONTROL. `.back`'s sizing exactly — the same `--control-sm`
+ * box, radius, hover wash and ring — because it is the same kind of thing: a
+ * bare glyph button inside this face. Written out rather than shared with
+ * `.back` for the reason that rule already gives about `SelectionTools`: a CSS
+ * module is a component's own, not a library.
+ *
+ * `data-on` IS THE TITLE BAR'S IDIOM, and deliberately not a second one. Listen
+ * marks "running now" with a wash and the accent, and the same button stops it;
+ * one drawing for one idea, rather than two glyphs a reader learns separately. */
+.say {
+  flex: 0 0 auto;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.say:hover,
+.say:focus-visible {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+.say:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--space-2));
+}
+
+/* SPEAKING — and it outranks the hover above it, so the accent survives a
+   pointer resting on the control that is about to stop it. */
+.say[data-on='true'],
+.say[data-on='true']:hover {
+  background: var(--wash);
+  color: var(--accent);
+}
+
+/* A PRONUNCIATION THAT DID NOT PLAY. The failure states' treatment — small,
+ * grey, no amber — because it is Paper speaking about itself and not part of the
+ * definition, which is the same line `.absent` and `.refused` are drawn on. It
+ * shares the headword's row and wraps under it when there is no room. */
+.unspoken {
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* THE PART OF SPEECH — §10's prototype's treatment exactly: small, italic,
+ * muted, between the headword and the meaning.
+ *
+ * QUIET ON PURPOSE. It is the least load-bearing line in a dictionary entry and
+ * the least reliable one here — whatever a local model marked (see
+ * `Definition.partOfSpeech`) — so it must not compete with either the term above
+ * it or the meaning below. Italic is what makes it read as a label rather than
+ * as the first word of the definition.
+ *
+ * ⚠️ **AND IT IS NOT AMBER, THOUGH IT IS PART OF A DEFINITION.** The amber is
+ * the term's and stays the term's: §01 asks that a machine's words carry the
+ * colour, not that each element of them repeats it, and a second amber element
+ * three pixels from the first is the "card inside a card" mistake in another
+ * shade. The doctrine test in `screens/Reader.layout.test.ts` holds both halves
+ * — amber somewhere in the definition, and not here. */
+.partOfSpeech {
+  color: var(--muted);
+  font-size: var(--text-small);
+  font-style: italic;
 }
 
 /* `pre-line`, because an answer in two languages is two lines (WI-17.5) and the

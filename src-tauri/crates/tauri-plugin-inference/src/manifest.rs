@@ -1,12 +1,10 @@
 //! `models.manifest.json` — the provenance record, and the only thing a
 //! gallery entry is allowed to become.
 //!
-//! WI-15.1. Lemonade's `server_models.json` carries a checkpoint, a recipe
-//! and a rounded gigabyte count, and **no license and no per-model digest** —
-//! confirmed against the `resources/server_models.json` inside
-//! `lemonade-embeddable-11.7.0`, where the whole of `kokoro-v1` is
-//! `{"checkpoint": "mikkoph/kokoro-onnx", "recipe": "kokoro", "suggested":
-//! true, "labels": ["tts"], "size": 0.354}`. That cannot be a provenance
+//! WI-15.1. A download source says where the bytes are and roughly how many,
+//! and **nothing about their license or their digest** — the catalogue Paper
+//! used to ship beside (Lemonade's `server_models.json`) was a checkpoint, a
+//! recipe and a rounded gigabyte count per model. That cannot be a provenance
 //! record, so Paper ships its own.
 //!
 //! # Embedded, not read from disk
@@ -23,10 +21,19 @@
 //!
 //! # Artifacts are a list
 //!
-//! One model is routinely more than one file: Kokoro is a graph plus a voice
-//! pack, and a large GGUF is published as numbered shards. An entry with a
-//! single `file` field would have forced a fake second model to carry a voice
-//! file that is not a model.
+//! One model is routinely more than one file: a large GGUF is published as
+//! numbered shards, and a multimodal model carries a projector beside its
+//! weights. An entry with a single `file` field would force a fake second
+//! model to carry a file that is not a model.
+//!
+//! # Every model is a TEXT model, and there is no field saying so
+//!
+//! ⚠️ **THERE WERE TWO FIELDS FOR THIS — `modality` AND `backend` — AND BOTH
+//! WENT WITH THE SPEECH MODEL** (2026-09-18). They existed to tell Kokoro from
+//! the language model, and nothing else ever branched on them. The runtime is
+//! one `llama-server` launched on one GGUF (`spawn.rs`); a model that needed a
+//! different engine would need a different launch, and that is a change to
+//! make with the model, not a field to keep waiting for it.
 
 use serde::{Deserialize, Serialize};
 
@@ -40,34 +47,15 @@ pub const MANIFEST_VERSION: u32 = 1;
 /// The manifest, as shipped. See the module header for why it is embedded.
 const EMBEDDED: &str = include_str!("../../../../models.manifest.json");
 
-/// What a model does. Closed, because each arm is a code path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Modality {
-    /// Binds the companion (WI-15.4) and the gloss (WI-15.13).
-    Text,
-    /// Binds `Test voice` (WI-15.9).
-    Speech,
-}
-
-/// Which runtime backend loads a model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Backend {
-    Llamacpp,
-    Kokoro,
-}
-
 /// What an artifact is to its model.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactRole {
-    /// The file the backend loads. The default, so an entry that names one
-    /// artifact need not spell out what it is.
+    /// The file `llama-server` loads with `-m`. The default, so an entry that
+    /// names one artifact need not spell out what it is — and the only role
+    /// today; a multimodal projector (`mmproj`) would be the next.
     #[default]
     Weights,
-    /// Kokoro's voice pack.
-    Voices,
 }
 
 /// One file a model is made of.
@@ -87,9 +75,7 @@ pub struct Artifact {
 pub struct ModelEntry {
     pub id: String,
     pub label: String,
-    pub modality: Modality,
     pub license: String,
-    pub backend: Backend,
     pub artifacts: Vec<Artifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<String>,
@@ -248,28 +234,20 @@ mod tests {
         assert!(!manifest.models.is_empty());
     }
 
-    /// The plan picks exactly two models and says a third is a later decision
-    /// with its own download. A manifest that quietly grew a third would be
-    /// that decision made without anyone taking it.
+    /// ONE model, and a second is a later decision with its own download.
+    ///
+    /// It was two — a language model and Kokoro — until the speech model went
+    /// on 2026-09-18 (see the module header). The runtime is launched on ONE
+    /// GGUF (`state::ensure_started`), so a manifest that quietly grew a
+    /// second text model would be a model the daemon never loads.
     #[test]
-    fn the_shipped_manifest_is_the_two_models_the_plan_picked() {
+    fn the_shipped_manifest_is_the_one_model_the_runtime_loads() {
         let manifest = Manifest::shipped().unwrap();
         assert_eq!(
             manifest.models.len(),
-            2,
-            "two models is the scope; a third is a later decision with its own download"
+            1,
+            "one model is the scope; a second is a later decision with its own download"
         );
-        let text = manifest
-            .models
-            .iter()
-            .filter(|m| m.modality == Modality::Text)
-            .count();
-        let speech = manifest
-            .models
-            .iter()
-            .filter(|m| m.modality == Modality::Speech)
-            .count();
-        assert_eq!((text, speech), (1, 1), "one LLM slot, one TTS slot");
     }
 
     /// Every artifact carries a real digest. The specific failure this
@@ -296,8 +274,8 @@ mod tests {
     }
 
     /// Every model names a license. The reason this is a test and not a
-    /// convention: it is the field Lemonade's own catalogue does not carry,
-    /// and the reason this manifest exists at all.
+    /// convention: it is the field a download source does not carry, and the
+    /// reason this manifest exists at all.
     #[test]
     fn every_model_names_a_license() {
         for model in Manifest::shipped().unwrap().models {
@@ -307,26 +285,6 @@ mod tests {
                 model.id
             );
         }
-    }
-
-    #[test]
-    fn kokoro_carries_its_voice_pack_as_a_second_artifact() {
-        let manifest = Manifest::shipped().unwrap();
-        let kokoro = manifest
-            .models
-            .iter()
-            .find(|m| m.modality == Modality::Speech)
-            .expect("a speech model");
-        assert_eq!(
-            kokoro.artifacts.len(),
-            2,
-            "a graph without its voices synthesises nothing"
-        );
-        assert!(kokoro
-            .artifacts
-            .iter()
-            .any(|a| a.role == ArtifactRole::Voices));
-        assert!(kokoro.weights().is_some());
     }
 
     #[test]
@@ -345,9 +303,7 @@ mod tests {
         let mut model = serde_json::json!({
             "id": "m",
             "label": "M",
-            "modality": "text",
             "license": "Apache-2.0",
-            "backend": "llamacpp",
             "artifacts": [{
                 "file": "m.gguf",
                 "source": "https://example.invalid/m.gguf",
@@ -412,8 +368,7 @@ mod tests {
     #[test]
     fn duplicate_ids_are_refused() {
         let model = serde_json::json!({
-            "id": "m", "label": "M", "modality": "text", "license": "X",
-            "backend": "llamacpp",
+            "id": "m", "label": "M", "license": "X",
             "artifacts": [{
                 "file": "m.gguf", "source": "https://e.invalid/m",
                 "sha256": "a".repeat(64), "bytes": 1
@@ -432,15 +387,21 @@ mod tests {
         assert_eq!(err.kind(), "modelUnknown");
     }
 
+    /// Summed over EVERY artifact, not read off the weights: a sharded GGUF
+    /// is several files and the reader waits for all of them. Two artifacts,
+    /// because the shipped model has one and a sum of one proves nothing.
     #[test]
     fn total_bytes_sums_every_artifact() {
-        let manifest = Manifest::shipped().unwrap();
-        let kokoro = manifest.model("kokoro-v1-onnx").unwrap();
-        assert_eq!(
-            kokoro.total_bytes(),
-            kokoro.artifacts.iter().map(|a| a.bytes).sum::<u64>()
-        );
-        assert!(kokoro.total_bytes() > kokoro.weights().unwrap().bytes);
+        let manifest = one_model(serde_json::json!({
+            "artifacts": [
+                { "file": "m-00001.gguf", "source": "https://e.invalid/1",
+                  "sha256": "a".repeat(64), "bytes": 10 },
+                { "file": "m-00002.gguf", "source": "https://e.invalid/2",
+                  "sha256": "b".repeat(64), "bytes": 32, "role": "weights" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(manifest.models[0].total_bytes(), 42);
     }
 
     /// The maintainer's note is for the manifest's readers, not the reader's

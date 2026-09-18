@@ -147,6 +147,12 @@ export function detailFor(error: unknown): string {
   switch (errorKind(error)) {
     case 'runtimeMissing':
       return 'The runtime is not installed'
+    /* THE RUNTIME IS THERE AND HAS NOTHING TO RUN. `inference_start` refuses
+     * rather than launch a server with no text model on disk to load. Worded
+     * apart from `runtimeMissing` because the fix differs: that one is Paper's
+     * own install, this one is a download in Local models. */
+    case 'noModelInstalled':
+      return 'No language model is installed yet'
     /* WI-20.24: the staged runtime is checked file by file against its
      * manifest before every spawn, and a byte that differs refuses the
      * launch. The plugin's message names the file; this is the sentence. */
@@ -190,6 +196,10 @@ export function detailFor(error: unknown): string {
       return 'That request was too large'
     case 'runtimeHttp':
       return 'The runtime refused the request'
+    /* `runtimeModelMissing` WAS HERE, and went with the only command that could
+     * raise it: the neural voice's `inference_speak`, deleted when pronunciation
+     * moved to the system voice. A case for a kind nothing raises is a sentence
+     * nothing can reach. */
     case 'runtimeMalformed':
       return 'The runtime’s answer could not be read'
     /* THE GLOSS'S OWN, and the only caller that can raise it: `inference_gloss`
@@ -220,6 +230,18 @@ export function detailFor(error: unknown): string {
       return 'That agent’s answer could not be read'
     case 'keychain':
       return 'The keychain refused'
+    /* ── REACHABLE FROM A CLOUD ENDPOINT, since Paper talks to one itself ──
+     *
+     * The gloss routes contract (2026-09-18, §4). An endpoint fails in two ways
+     * a reader can tell apart and act on differently: it ANSWERED and said no —
+     * a wrong key, a model name it does not serve, a spent quota — or nothing
+     * answered at all. "That endpoint", for the reason the agent sentences say
+     * "That agent": the crate's own message names the status and the host, in
+     * the maintainer's half, and a status code is not a sentence. */
+    case 'endpointHttp':
+      return 'That endpoint refused the request'
+    case 'endpointUnreachable':
+      return 'That endpoint could not be reached'
     default:
       return 'Something went wrong'
   }
@@ -283,27 +305,32 @@ export function readerFailure(cause: unknown, signal: AbortSignal): unknown {
  * first lookup after a launch and generates faster on every one after. Ties go
  * to the lower id, so the order is total and nothing is left to the array.
  *
- * **WHY THERE IS NO PICKER.** `models.manifest.json` holds exactly one text
- * model (`qwen3-4b-instruct-2507-q4-k-m`) and one speech model, counted
- * 2026-08-30, and a reader cannot add a local model outside the manifest —
- * `inference_models` reads it and `install::is_installed` resolves against it.
- * A settings row offering one choice is a control that cannot act, which §07
- * forbids for the same reason it forbids a dead button. The rule being stated
- * and total is what makes a picker a small change if a second text model ever
- * lands; guessing at one now would ship the UI and none of the reason.
+ * **WHY THERE IS NO PICKER.** `models.manifest.json` holds one text model
+ * (`qwen3-4b-instruct-2507-q4-k-m`) — the speech model it also held went with
+ * the neural voice — and a reader cannot add a local model outside the
+ * manifest: `inference_models` reads it and `install::is_installed` resolves
+ * against it. Read the manifest rather than this sentence before relying on
+ * the count. A settings row offering one choice is a control that cannot act,
+ * which §07 forbids for the same reason it forbids a dead button. The rule
+ * being stated and total is what makes a picker a small change if a second
+ * text model ever lands; guessing at one now would ship the UI and none of the
+ * reason.
  *
- * **WHY A CLOUD ENDPOINT IS NOT A CANDIDATE.** `resolve_model` accepts one for
- * `Modality::Text`, so the daemon would answer — this reads `models`, which is
- * the manifest's rows, and endpoints are deliberately not among them. F8's
- * argument against reaching an agent is about COST PER LOOKUP rather than about
- * agents: *"seconds, and a subscription turn spent, for a gesture a reader
- * makes dozens of times a chapter."* A metered endpoint is the same bill in a
- * different envelope, and silently spending a reader's credit dozens of times a
- * chapter is not a default anybody chose. Letting them choose it deliberately
- * is a spend decision and a picker, which is the paragraph above.
+ * **EVERY ROW IS TEXT**, so this filters on `installed` alone. There was a
+ * `modality` field and this read it; see the note where `Modality` stood in
+ * `plugin.ts`.
+ *
+ * **A CLOUD ENDPOINT OR AN AGENT IS NOT A CANDIDATE HERE, AND THAT IS SCOPE,
+ * NOT POLICY.** This answers "which LOCAL model", from the manifest's rows,
+ * and endpoints and agents are not among them. Which ROUTE answers a lookup —
+ * this model, an endpoint, Claude or Codex — is `glossRoute.ts`'s question,
+ * and this is one input to it. (This paragraph used to argue that a metered
+ * endpoint must never be a default, on F8's cost-per-lookup ground. The owner
+ * decided otherwise on 2026-09-18: any usable route may answer, the local model
+ * first, and the reader chooses in Settings → Look up.)
  */
 export function glossModel(models: readonly ModelRow[]): string | null {
-  const usable = models.filter((model) => model.modality === 'text' && model.installed)
+  const usable = models.filter((model) => model.installed)
   /* THE SMALLEST SIZE, THEN THE LOWEST ID AMONG THE ROWS OF THAT SIZE — with no
    * comparison between two rows. Picking a row pairwise had a boundary at which
    * both answers were the same id (`<` against `<=`), which no test can tell
@@ -358,7 +385,7 @@ interface Install {
 
 
 /**
- * The six commands this controller actually uses, of the plugin's nineteen.
+ * The six commands this controller actually uses, of the plugin's whole surface.
  *
  * NARROWED ON PURPOSE. Taking the whole `InferencePlugin` meant a test double
  * had to be cast through `unknown` to stand in for it, and once one cast is
@@ -683,11 +710,11 @@ export function createController(plugin: ControllerPlugin, reportTo?: ReportFail
          slot stopped this controller writing state for it and left the request
          downloading in Rust — for a pane that no longer counts the bytes, with
          no Cancel to press, against a staging path a re-composed capability
-         could start writing to as well. `voiceTest.dispose` aborts its own
-         request for the same reason. BEFORE `disposed`, so the cancel reads the
-         slot it is about to clear; the settle that follows writes nothing,
-         because `set` is a no-op by then and `mine()` is already false
-         (2026-09-13 audit, round 2). */
+         could start writing to as well. `index.ts`'s teardown cancels every
+         request its port has out for the same reason. BEFORE `disposed`, so
+         the cancel reads the slot it is about to clear; the settle that
+         follows writes nothing, because `set` is a no-op by then and `mine()`
+         is already false (2026-09-13 audit, round 2). */
       cancelInstall()
       disposed = true
       /* Release the slot and retire every refresh in flight, so a late settle

@@ -305,8 +305,18 @@ export function placeOfRange(
   return { box, place: placeOf(word, page, directionOf(doc)) }
 }
 
-/** Why an utterance is over. `ended` is the only one worth continuing from. */
-export type DoneReason = 'ended' | 'empty' | 'error'
+/**
+ * Why an utterance is over. `ended` is the only one worth continuing from.
+ *
+ * `taken` is the one that is about ANOTHER utterance: the single engine was
+ * handed something else to say, which cancels this one — see `engineHeldBy`.
+ * It is neither an ending nor a failure, and it has to be its own word because
+ * the two callers want opposite things from it. A reading treats it as an end
+ * and stops, visibly, rather than walking on into the next section; the
+ * lookup's pronunciation treats it as `idle` rather than drawing "Paper
+ * couldn't say that aloud" over a reader who has just pressed Listen.
+ */
+export type DoneReason = 'ended' | 'empty' | 'error' | 'taken'
 
 export interface SpeakerCallbacks {
   /**
@@ -336,6 +346,33 @@ export interface SpeakerCallbacks {
  */
 const BOUNDARY_GRACE_MS = 2500
 
+/**
+ * Which `Speaker` last handed each engine an utterance.
+ *
+ * ⚠️ **`window.speechSynthesis` IS ONE ENGINE SERVING ONE UTTERANCE, AND THIS
+ * APP NOW HAS TWO SPEAKERS OVER IT** — the reading (`useSpeech`) and the lookup
+ * popup's pronunciation (`systemVoice.ts`). `speak` begins with `stop()`, so the
+ * second one to speak CANCELS the first, and a cancelled utterance still
+ * delivers its `end` — late, but with the first speaker's own generation still
+ * current, so its `#finish` read that end as "the section finished". For a
+ * reading that means `continueReading()`: the pages walk forward hunting the
+ * next section while the reader is listening to one word being pronounced.
+ *
+ * So whoever speaks last HOLDS the engine, and a speaker that no longer holds it
+ * reports `taken` rather than whatever its stale event said. That is the only
+ * thing either caller needs to tell "my utterance ended" from "somebody took
+ * the engine out from under it", and no amount of per-utterance guarding can
+ * answer it: the event is indistinguishable from a real ending.
+ *
+ * PER ENGINE, and a `WeakMap` rather than one module-level holder, for a reason
+ * that is about the tests as much as the app: every suite here drives a
+ * `FakeSynth` of its own, and one shared holder would have a speaker over one
+ * fake stealing the engine from a speaker over another — reporting `taken` for
+ * utterances that were never cancelled by anything. Keyed on the engine, two
+ * speakers coordinate exactly when they share one.
+ */
+const engineHeldBy = new WeakMap<SpeechSynthesis, object>()
+
 export class Speaker {
   /**
    * Which utterance is current.
@@ -353,6 +390,8 @@ export class Speaker {
   #generation = 0
   #sawBoundary = false
   #graceTimer: ReturnType<typeof setTimeout> | null = null
+  /** This speaker's claim on the one engine — see `engineHeldBy`. */
+  readonly #token = {}
   readonly #synth: SpeechSynthesis
   readonly #cb: SpeakerCallbacks
 
@@ -378,6 +417,13 @@ export class Speaker {
    * leaving the Listen control stuck on with nothing playing.
    */
   speak(text: string, lang: string | null): boolean {
+    /* CLAIMED BEFORE THE CANCEL, not after it. `stop()` on the next line is
+       what cancels the other speaker's utterance, and an engine free to deliver
+       that utterance's `end` SYNCHRONOUSLY from inside `cancel()` would find the
+       previous holder still recorded and be told its section had finished. The
+       claim is honest either way: an empty text still cancels, so it has still
+       taken the engine. */
+    engineHeldBy.set(this.#synth, this.#token)
     this.stop()
     const generation = ++this.#generation
     if (!text.trim()) {
@@ -467,9 +513,21 @@ export class Speaker {
     // Retires the current generation, so the cancelled utterance's late end
     // cannot report itself as the current one finishing.
     this.#generation += 1
-    // cancel() on an idle synth is harmless, and calling it unconditionally is
-    // what clears an utterance queued by a previous section.
-    this.#synth.cancel()
+    /* ⚠️ **ONLY WHILE THIS SPEAKER HOLDS THE ENGINE, AND IT USED TO BE
+     * UNCONDITIONAL** — "cancel() on an idle synth is harmless", which is true
+     * of an idle one and false of an engine somebody else is using. With two
+     * speakers over one engine (see `engineHeldBy`) an unconditional cancel is a
+     * speaker silencing an utterance that is not its own: the lookup popup calls
+     * `Voice.stop` on EVERY selection change, so a reader listening to the book
+     * who merely opened and dismissed a lookup had the reading cancelled — and
+     * the engine still held by the READING, so its `end` came back as `ended`
+     * and the pages walked on into the next section.
+     *
+     * Not holding it means this speaker's own utterance is already gone, so
+     * there is nothing of its own left to cancel. `speak` claims the engine
+     * BEFORE calling this, which is what keeps a new utterance replacing the old
+     * one — including one this speaker queued for a previous section. */
+    if (engineHeldBy.get(this.#synth) === this.#token) this.#synth.cancel()
   }
 
   #finish(generation: number, reason: DoneReason): void {
@@ -481,7 +539,12 @@ export class Speaker {
      * started (audit round 1, #503). */
     this.#generation += 1
     this.#clearGrace()
-    this.#cb.onDone(reason)
+    /* AND WHOSE ENGINE IT IS DECIDES WHAT THIS EVENT MEANT. Another speaker
+       having taken it since is exactly what cancelled this utterance, so the
+       `end` (or `error`) the engine delivered is not this utterance ending —
+       see `engineHeldBy`, and `DoneReason.taken` for what each caller does
+       with it. */
+    this.#cb.onDone(engineHeldBy.get(this.#synth) === this.#token ? reason : 'taken')
   }
 
   #clearGrace(): void {
@@ -503,7 +566,26 @@ export function wordLengthAt(text: string, index: number): number {
   return match ? match[0].length : 1
 }
 
-/** Whether this build can read aloud at all. */
+/**
+ * Whether this build has a speech engine at all — the READING's question.
+ *
+ * ⚠️ **THE API'S PRESENCE, AND IT IS WEAKER THAN IT LOOKS.** An engine can be
+ * present with nothing behind it: WebKitGTK answers this with no
+ * speech-dispatcher installed, which is the DEFAULT state on Linux, and then
+ * accepts an utterance, raises no error and makes no sound. So a true here is
+ * "there is an engine to ask", not "the reader will hear something".
+ *
+ * ⚠️ **AND THE LOOKUP'S PRONUNCIATION MUST NOT SHARE THIS ANSWER** — this
+ * paragraph used to argue that it should, on the ground that one answer cannot
+ * be right by accident. That is true and beside the point: the two callers are
+ * asking different questions. Reading a chapter in whatever voice the machine
+ * has is still reading the chapter; saying one WORD in a voice for the wrong
+ * language is a wrong answer the reader cannot check. `Voice.canSay` is the
+ * stricter question, and it reads the voice list — which this deliberately does
+ * not, because `getVoices()` is empty until the engine has loaded it and an
+ * emptiness test here would drop the Listen control for the first moments of
+ * every session.
+ */
 export function speechAvailable(): boolean {
   return typeof window !== 'undefined' && 'speechSynthesis' in window
 }

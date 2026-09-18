@@ -31,7 +31,7 @@ describe('what Look up says', () => {
 
   it('says what is missing when nothing can answer', () => {
     expect(lookUpSays({ kind: 'unavailable', term: 'gam', installAt: null })).toEqual({
-      said: 'Paper needs a language model to define “gam”.',
+      said: 'Look up needs something to answer with before it can define “gam”.',
       because: null,
     })
   })

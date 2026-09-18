@@ -22,12 +22,11 @@
 //! - [`InferenceState::download_client`] speaks TLS to the `https://` sources
 //!   in `models.manifest.json`, which are constants in a file Paper ships.
 //! - The daemon's client lives in [`Daemon`] and addresses `127.0.0.1` only,
-//!   with `.no_proxy()` so a reader's `HTTP_PROXY` cannot route the bearer
-//!   token and their questions through somebody else's server.
+//!   with `.no_proxy()` so a reader's `HTTP_PROXY` cannot route the key and
+//!   their questions through somebody else's server.
 //!
 //! Nothing lets a caller choose a URL for either.
 
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -44,6 +43,32 @@ use crate::paths::{bundled_runtime, bundled_runtime_dir, data_root, Layout};
 use crate::requests::Registry;
 use crate::runtime::RuntimeManifest;
 use crate::spawn::{mint_token, plan_spawn, SpawnInputs};
+
+/// Which installed model the server is launched on, and where its weights are.
+///
+/// THE FIRST INSTALLED ENTRY, IN MANIFEST ORDER — which today is the only
+/// entry (`manifest.rs` pins one). `llama-server` runs in single-model mode, so
+/// this is the model every question is answered by until the server stops;
+/// `None` when nothing is installed, which `ensure_started` refuses by name
+/// rather than launching a server with nothing to load.
+async fn model_to_launch(
+    layout: &Layout,
+    manifest: &Manifest,
+) -> Result<Option<(String, std::path::PathBuf)>> {
+    for model in &manifest.models {
+        if !crate::install::is_installed(layout, model).await {
+            continue;
+        }
+        let weights = model.weights().ok_or_else(|| {
+            Error::ManifestMalformed(format!("model {:?} has no weights artifact", model.id))
+        })?;
+        return Ok(Some((
+            model.id.clone(),
+            layout.model_path(&model.id, &weights.file)?,
+        )));
+    }
+    Ok(None)
+}
 
 /// Where the runtime is in its lifecycle, as the settings section shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -77,20 +102,14 @@ pub struct InferenceState {
     /// list is the only record of what the reader configured. Nothing
     /// serialised them; `#[tauri::command]`s run concurrently.
     endpoint_writes: Mutex<()>,
-    /// The endpoints the DAEMON does not have, as of its last start: the ones
-    /// it refused to register, and the ones it was never offered because the
-    /// keychain would not read their key (WI-20.20).
-    ///
-    /// Registration is best-effort and per provider, so one endpoint the
-    /// daemon will not take must not stop the local model working. But the
-    /// refusal was only logged, and the probe went on reporting the row usable
-    /// from Paper's own persisted state — so the reader could select a route
-    /// that had already been turned down, and find out at the question.
-    unregistered: Mutex<BTreeSet<String>>,
+    // (`unregistered` lived here: the endpoints lemond refused to register at
+    // its last start. There is no registration now — `probe::NotConnected`.)
     /// How many times the daemon has been dropped for a configuration change.
     /// For a test and a diagnostic — see [`InferenceState::reconfigurations`].
     reconfigured: AtomicU64,
     downloads: OnceLock<reqwest::Client>,
+    /// The clients an endpoint lookup goes through (`cloud.rs`), built once.
+    endpoints_http: OnceLock<crate::cloud::Clients>,
 }
 
 impl std::fmt::Debug for InferenceState {
@@ -153,64 +172,9 @@ impl InferenceState {
         // Cloned rather than borrowed: `spawn_blocking` needs `'static`, and
         // the store is a path and a handle.
         let store = self.endpoints(app)?.clone();
-        Self::on_endpoints(store, work).await
-    }
-
-    /// [`InferenceState::on_store`] over a store already resolved — the half
-    /// a test can reach without an app.
-    async fn on_endpoints<T>(
-        store: EndpointStore,
-        work: impl FnOnce(&EndpointStore) -> Result<T> + Send + 'static,
-    ) -> Result<T>
-    where
-        T: Send + 'static,
-    {
         tokio::task::spawn_blocking(move || work(&store))
             .await
             .map_err(|join| Error::Io(std::io::Error::other(join.to_string())))?
-    }
-
-    /// Forget an endpoint, then drop the daemon so it forgets the key too.
-    ///
-    /// ⚠️ REGARDLESS of whether the keychain let the key go. The command used
-    /// to `?` the store's answer before `reconfigure`, so a keychain refusal
-    /// on the clear left the key live in the running child's environment,
-    /// with its provider still registered — the exact outcome the reconfigure
-    /// exists to prevent, on the one path where the reader has just been told
-    /// something is wrong with that key. The refusal is still the answer; it
-    /// just no longer decides whether the daemon keeps the credential.
-    pub(crate) async fn remove_endpoint<R: Runtime>(
-        &self,
-        app: &AppHandle<R>,
-        id: String,
-    ) -> Result<()> {
-        self.then_reconfigure(self.on_store(app, move |store| store.remove(&id)))
-            .await
-    }
-
-    /// [`InferenceState::remove_endpoint`] over a store already resolved —
-    /// the half a test can reach without an app, and `#[cfg(test)]` because
-    /// nothing else has a store the state did not resolve.
-    #[cfg(test)]
-    pub(crate) async fn remove_endpoint_from(
-        &self,
-        store: EndpointStore,
-        id: String,
-    ) -> Result<()> {
-        self.then_reconfigure(Self::on_endpoints(store, move |store| store.remove(&id)))
-            .await
-    }
-
-    /// Await a removal, reconfigure WHATEVER it answered, and hand its answer
-    /// back. The order lives here once so the two entry points cannot drift
-    /// on it.
-    async fn then_reconfigure(
-        &self,
-        removal: impl std::future::Future<Output = Result<()>>,
-    ) -> Result<()> {
-        let removed = removal.await;
-        self.reconfigure().await;
-        removed
     }
 
     /// How many times [`InferenceState::reconfigure`] has run. For a test and
@@ -268,6 +232,15 @@ impl InferenceState {
         })
     }
 
+    /// The clients for an OpenAI-compatible endpoint, built on first use.
+    pub fn cloud(&self) -> Result<&crate::cloud::Clients> {
+        if let Some(clients) = self.endpoints_http.get() {
+            return Ok(clients);
+        }
+        let clients = crate::cloud::Clients::new()?;
+        Ok(self.endpoints_http.get_or_init(|| clients))
+    }
+
     /// The manifest this build ships.
     pub fn manifest(&self) -> Result<Manifest> {
         Manifest::shipped()
@@ -281,24 +254,20 @@ impl InferenceState {
          * reconfiguration and every request-builder behind a read-only
          * question — the same trap `inference_resource_usage` already
          * documents at its `health_request` call. */
-        let probe = self
-            .daemon
-            .lock()
-            .await
-            .as_ref()
-            .map(|daemon| (daemon.plan().port, daemon.health_request()));
-        if let Some((port, request)) = probe {
+        let probe = self.daemon.lock().await.as_ref().map(|daemon| {
+            let plan = daemon.plan();
+            (plan.port, plan.version.clone(), daemon.health_request())
+        });
+        if let Some((port, version, request)) = probe {
             /* A HELD DAEMON IS NOT A LIVE ONE. This reported `Ready` for
              * anything in the slot and turned a failed health check into an
              * EMPTY VERSION STRING — so a daemon that had crashed read as
              * running with an unknown version, and the settings row said so.
              * A health check that will not answer is the definition of not
-             * ready. Found by audit. */
+             * ready. Found by audit. The version is the pinned llama.cpp
+             * build the plan was made from — the server reports none. */
             return match crate::daemon::Daemon::read_health(request).await {
-                Ok(health) if health.status == "ok" => RuntimeStatus::Ready {
-                    version: health.version,
-                    port,
-                },
+                Ok(health) if health.status == "ok" => RuntimeStatus::Ready { version, port },
                 _ => RuntimeStatus::Stopped,
             };
         }
@@ -324,7 +293,7 @@ impl InferenceState {
         let mut slot = self.daemon.lock().await;
         if let Some(daemon) = slot.as_ref() {
             /* THE CACHED PORT IS ONLY GOOD IF THE DAEMON IS STILL THERE.
-             * Returning it unconditionally meant a crashed `lemond` could
+             * Returning it unconditionally meant a crashed server could
              * never be restarted for the life of the app: every later call saw
              * an occupied slot and answered with the port of a process that
              * had gone. Found by audit. */
@@ -340,84 +309,44 @@ impl InferenceState {
                 dead.stop().await;
             }
         }
-        let program = bundled_runtime(app)?;
+        bundled_runtime(app)?;
+        let layout = self.layout(app)?.clone();
+        /* A MODEL FIRST, before anything is hashed or launched. The server is
+         * launched ON a model (single-model mode), so with none installed
+         * there is nothing to start — and lemond's answer, a daemon up with
+         * nothing to answer with, only moved this refusal to the question. */
+        let (model_id, model) = model_to_launch(&layout, &self.manifest()?)
+            .await?
+            .ok_or(Error::NoModelInstalled)?;
         /* VERIFIED BEFORE EVERY SPAWN, not once at install. The manifest
-         * names every file of the staged runtime — `lemond`, its resources,
-         * `llama-server` and the libraries it loads by name from its own
-         * directory — and a byte that differs, a file that is missing, or a
-         * file the manifest never heard of refuses the launch and names
-         * itself. This is the whole of what stands between the bytes on disk
-         * and `exec` (WI-20.24): upstream signs nothing, and a file that was
-         * never quarantined is a file Gatekeeper never looks at. */
+         * names every file of the staged runtime — `llama-server` and the
+         * libraries it loads by name from its own directory — and a byte that
+         * differs, a file that is missing, or a file the manifest never heard
+         * of refuses the launch and names itself. This is the whole of what
+         * stands between the bytes on disk and `exec` (WI-20.24): upstream
+         * signs nothing, and a file that was never quarantined is a file
+         * Gatekeeper never looks at. */
         let runtime_dir = bundled_runtime_dir(app)?;
         let backend = RuntimeManifest::load(&runtime_dir)
             .await?
             .verify(&runtime_dir)
             .await?;
-        let layout = self.layout(app)?.clone();
         /* A DAEMON A PREVIOUS PAPER LEFT RUNNING is collected before a new
          * one is spawned, under the lock this function holds — so the
          * record it reads can only be an earlier process's, never the one a
          * daemon of this process just wrote. `recover_orphans` does the
          * same at launch; whichever runs first finds it (WI-20.23). */
         self.collect_orphans(&layout).await;
-        /* OFF THE RUNTIME, and tolerant per endpoint. This was two direct
-         * store calls on a worker thread — the keychain prompt `on_store`'s
-         * header warns about, on the path every question takes — and each
-         * `?`'d a keychain refusal: a macOS "Deny", or a dev rebuild whose
-         * signature the entry's ACL no longer matches, stopped the daemon
-         * for the local model too. `provisioning` skips and names the
-         * endpoint instead; the daemon starts (WI-20.20). */
-        let provisioning = self.on_store(app, |store| store.provisioning()).await?;
-        for id in &provisioning.unreadable {
-            log::warn!(
-                "inference: endpoint {id} is not provisioned: the keychain would not read its key"
-            );
-        }
-
         let plan = plan_spawn(&SpawnInputs {
-            program,
             backend,
-            cache_dir: layout.cache_dir.clone(),
-            models_dir: layout.models_dir.clone(),
+            model,
+            model_id,
             record_path: layout.daemon_record(),
             port: free_port()?,
             api_key: mint_token(),
-            cloud_keys: provisioning.keys,
         });
         let port = plan.port;
         let daemon = Daemon::start(plan).await?;
-
-        /* REGISTER THE CLOUD PROVIDERS (F1, WI-15.8). Lemonade holds cloud
-         * providers in memory only, so this runs on EVERY start rather than
-         * once — and it is the half that was missing: the keys were being
-         * provisioned into the child's environment and the endpoints
-         * persisted, but nothing ever told the daemon a provider existed, so
-         * an endpoint route could be selected and could never answer.
-         *
-         * Best-effort per provider: one endpoint that will not register must
-         * not stop the local model from working, and the route list already
-         * reports a route that cannot answer. */
-        /* An endpoint whose key could not be read was never offered, and the
-         * daemon does not have it either — so it goes in the same set the
-         * probe reads, and is not offered as a route that would fail. */
-        let mut refused = provisioning.unreadable;
-        for registration in provisioning.registrations {
-            if let Err(failure) = daemon
-                .post_json::<_, serde_json::Value>("/api/v1/install", &registration)
-                .await
-            {
-                log::warn!(
-                    "inference: could not register endpoint {}: {failure}",
-                    registration.provider
-                );
-                /* RECORDED, NOT ONLY LOGGED. The probe reads this so a route
-                the daemon turned down is reported as unusable rather than
-                offered and then failing at the question. */
-                refused.insert(registration.provider.clone());
-            }
-        }
-        *self.unregistered.lock().await = refused;
 
         *slot = Some(daemon);
         Ok(port)
@@ -468,20 +397,14 @@ impl InferenceState {
         }
     }
 
-    /// The endpoint ids the daemon refused. Empty when it has not started.
-    pub async fn unregistered(&self) -> BTreeSet<String> {
-        self.unregistered.lock().await.clone()
-    }
-
-    /// Drop a running daemon so the next start picks up new endpoint config.
+    /// Drop a running daemon so the next start is made from what is on disk
+    /// now.
     ///
-    /// ⚠️ **KEYS ARE INJECTED AT SPAWN AND PROVIDERS REGISTERED AT START.**
-    /// So an endpoint added, re-keyed or removed while the daemon was up
-    /// changed nothing in the child: the new one could not answer until the
-    /// app restarted, and — the half that matters — a key the reader DELETED
-    /// stayed live in the child's environment and its provider stayed
-    /// registered. A credential somebody believes they removed is not
-    /// something to leave running until next launch.
+    /// ⚠️ **THE SERVER IS LAUNCHED ON ONE MODEL**, so a model the reader
+    /// removed stays loaded — its gigabytes resident, still answering — until
+    /// the server stops. `inference_remove_model` calls this. (It was called
+    /// for endpoint changes too, while cloud keys rode lemond's environment;
+    /// nothing about an endpoint reaches the server now.)
     ///
     /// Stopping rather than restarting: `ensure_started` runs before every
     /// question, so the next use brings it back with the current
@@ -507,14 +430,9 @@ impl InferenceState {
     /// `NotRunning` instead of registering against a process on its way out,
     /// and before the process goes, so a watched answer still ends in a
     /// cancellation rather than a stall.
-    ///
-    /// `unregistered` is cleared with the daemon it described: a repaired
-    /// endpoint must not stay refused on the strength of the LAST daemon's
-    /// registration failures.
     async fn take_down(&self) {
         let mut slot = self.daemon.lock().await;
         let taken = slot.take();
-        self.unregistered.lock().await.clear();
         self.requests.cancel_all();
         if let Some(daemon) = taken {
             daemon.stop().await;
@@ -580,11 +498,14 @@ mod tests {
     #[test]
     fn absent_is_a_state_rather_than_an_error() {
         let status = RuntimeStatus::Absent {
-            reason: "No runtime at /x/lemond".to_owned(),
+            reason: "No runtime at /x/runtime.manifest.json".to_owned(),
         };
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["state"], "absent");
-        assert!(json["reason"].as_str().unwrap().contains("lemond"));
+        assert!(json["reason"]
+            .as_str()
+            .unwrap()
+            .contains("runtime.manifest"));
     }
 
     #[test]
@@ -595,7 +516,7 @@ mod tests {
             },
             RuntimeStatus::Stopped,
             RuntimeStatus::Ready {
-                version: "11.7.0".to_owned(),
+                version: "b10375".to_owned(),
                 port: 1,
             },
         ];
@@ -629,43 +550,40 @@ mod tests {
         assert!(std::ptr::eq(a, b));
     }
 
-    /// WI-20.20 (d). `inference_remove_endpoint` used to `?` the store's
-    /// result BEFORE `reconfigure`, so a keychain that would not give the key
-    /// up left it live in the running child's environment, its provider still
-    /// registered — precisely the half the command's own comment calls "the
-    /// half that matters". The daemon is dropped regardless, and the refusal
-    /// is still the answer.
+    /// Nothing installed is a refusal BY NAME, and the name is the fix: the
+    /// server is launched on a model, and lemond's answer — a daemon up with
+    /// nothing to load — only moved the failure to the question.
     #[tokio::test]
-    async fn a_removal_the_keychain_refuses_still_reconfigures_the_daemon() {
+    async fn with_no_model_installed_there_is_nothing_to_launch() {
         let dir = crate::testutil::ScratchDir::new("state");
-        let keychain = crate::testutil::FakeKeychain::default()
-            .with_key("denied", "sk-denied")
-            .refusing(&["denied"]);
-        let store = crate::endpoints::EndpointStore::with_keychain(
-            dir.path(),
-            std::sync::Arc::new(keychain),
-        );
-        store
-            .add("denied", "D", "https://d.example.com/v1")
-            .unwrap();
-        let state = InferenceState::default();
-        assert_eq!(state.reconfigurations(), 0);
+        let layout = Layout::under(dir.path());
+        layout.ensure().unwrap();
+        let manifest = Manifest::shipped().unwrap();
+        assert!(model_to_launch(&layout, &manifest).await.unwrap().is_none());
+        assert_eq!(Error::NoModelInstalled.kind(), "noModelInstalled");
+    }
 
-        let err = state
-            .remove_endpoint_from(store.clone(), "denied".to_owned())
-            .await
-            .unwrap_err();
+    /// And an installed one is launched by its WEIGHTS' path, under its id.
+    #[tokio::test]
+    async fn the_installed_model_is_launched_by_its_weights() {
+        let dir = crate::testutil::ScratchDir::new("state");
+        let layout = Layout::under(dir.path());
+        layout.ensure().unwrap();
+        let manifest = Manifest::shipped().unwrap();
+        let model = &manifest.models[0];
+        let weights = model.weights().unwrap();
+        let path = layout.model_path(&model.id, &weights.file).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // `is_installed` checks the size, so a sparse file of the right length
+        // stands in for gigabytes this test has no business writing.
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(weights.bytes)
+            .unwrap();
         assert_eq!(
-            err.kind(),
-            "keychain",
-            "the refusal is surfaced, not swallowed"
+            model_to_launch(&layout, &manifest).await.unwrap(),
+            Some((model.id.clone(), path))
         );
-        assert_eq!(
-            state.reconfigurations(),
-            1,
-            "the daemon is reconfigured whether or not the keychain let the key go"
-        );
-        assert!(store.list().unwrap().is_empty(), "the row is gone");
     }
 
     /// WI-20.20 (c). The store is `std::fs` and the keychain can put a modal

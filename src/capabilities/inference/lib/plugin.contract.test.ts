@@ -190,7 +190,98 @@ describe('the plugin command surface', () => {
     expect(template, 'the command helper is not in plugin.ts in the shape this reads').not.toBeNull()
     expect(template?.[1]).toBe(`plugin:${registered}|`)
   })
+
+  /**
+   * ⚠️ **THE ARGUMENTS, NOT ONLY THE NAMES.** Tauri matches an invoke's keys to
+   * the command's Rust parameters BY NAME — `secondLanguage` to
+   * `second_language` — so a key that matches nothing, or a parameter no key
+   * fills, is a command that fails in a running app while every compiler and
+   * every test stays green: `plugin.test.ts` asserts what TypeScript SENDS, the
+   * crate's tests call Rust directly, and neither sees the seam between them.
+   * It is the prefix defect above, one field along.
+   *
+   * Written when `inference_gloss` gained `language` and `second_language`
+   * (2026-09-18) — and over EVERY command, because the seam is the same for all
+   * of them and fixing one instance leaves the class. `AppHandle` and `State`
+   * are Tauri's to inject and are not arguments.
+   */
+  it('sends every command exactly the arguments its Rust signature takes', () => {
+    const takes = rustArguments()
+    const sends = sentArguments()
+    /* A KNOWN POSITIVE, so a parser that read nothing cannot pass by
+       comparing two empty maps. */
+    expect(takes.get('inference_gloss'), 'commands.rs did not parse in the shape this reads').toContain('secondLanguage')
+    expect(sends.get('inference_gloss'), 'plugin.ts did not parse in the shape this reads').toContain('secondLanguage')
+
+    expect([...sends.keys()].sort()).toEqual([...takes.keys()].sort())
+    for (const [name, parameters] of takes) {
+      expect([...(sends.get(name) ?? [])].sort(), `${name}: plugin.ts sends these, commands.rs takes others`).toEqual(
+        [...parameters].sort(),
+      )
+    }
+  })
 })
+
+/** `a, b<c, d>, e(f, g)` split on its top-level commas only. */
+function topLevel(list: string): readonly string[] {
+  const parts: string[] = []
+  let depth = 0
+  let part = ''
+  for (const character of list) {
+    if ('<({['.includes(character)) depth += 1
+    if ('>)}]'.includes(character)) depth -= 1
+    if (character === ',' && depth === 0) {
+      parts.push(part)
+      part = ''
+    } else {
+      part += character
+    }
+  }
+  parts.push(part)
+  return parts.map((one) => one.trim()).filter((one) => one !== '')
+}
+
+/**
+ * Each command's IPC arguments, as the webview must name them: the Rust
+ * parameters Tauri does not inject, camel-cased the way Tauri maps them.
+ */
+function rustArguments(): ReadonlyMap<string, readonly string[]> {
+  const commands = bare(rust('src/commands.rs'))
+  const found = new Map<string, readonly string[]>()
+  for (const m of commands.matchAll(/#\[tauri::command\]\s*pub (?:async )?fn ([a-z_]+)(?:<[^>]*>)?\(([\s\S]*?)\)\s*->/g)) {
+    const parameters = topLevel(m[2] as string)
+      .map((parameter) => parameter.split(':').map((side) => side.trim()))
+      .filter(([, kind]) => !/^(AppHandle|State)</.test(kind ?? ''))
+      .map(([field]) => (field as string).replace(/_([a-z])/g, (_all, letter: string) => letter.toUpperCase()))
+    found.set(m[1] as string, parameters)
+  }
+  return found
+}
+
+/** Each command's argument keys, as `plugin.ts` actually sends them. */
+function sentArguments(): ReadonlyMap<string, readonly string[]> {
+  const code = PLUGIN_TS.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+  const found = new Map<string, readonly string[]>()
+  for (const m of code.matchAll(/command\('([a-z_]+)'\)\s*(,\s*\{)?/g)) {
+    if (m[2] === undefined) {
+      found.set(m[1] as string, [])
+      continue
+    }
+    /* The object literal, by its own braces — a value can hold a call or an
+       index (`streamTo(onChunk)`, `languages[1] ?? null`). */
+    const open = (m.index ?? 0) + m[0].length - 1
+    let depth = 0
+    let close = open
+    for (; close < code.length; close += 1) {
+      if (code[close] === '{') depth += 1
+      if (code[close] === '}') depth -= 1
+      if (depth === 0) break
+    }
+    const keys = topLevel(code.slice(open + 1, close)).map((entry) => (entry.split(':')[0] as string).trim())
+    found.set(m[1] as string, keys)
+  }
+  return found
+}
 
 /**
  * ⚠️ **ONE CANCEL PATH, BECAUSE THERE USED TO BE TWO AND ONLY ONE GOT FIXED.**
@@ -267,7 +358,7 @@ describe('cancelRequest', () => {
 
 describe('audit-fix round 1 — reasons and request ids', () => {
   it('reads only a reason this build knows, whichever serde shape carries it', () => {
-    const route = (reason: unknown) => ({ id: 'x', kind: 'local', unusable: 'no', reason, installed: false, modality: 'text' }) as never
+    const route = (reason: unknown) => ({ id: 'x', kind: 'local', unusable: 'no', reason, installed: false }) as never
     expect(reasonOf(route('notInstalled'))).toBe('notInstalled')
     expect(reasonOf(route({ versionUnsupported: { found: '1.0' } }))).toBe('versionUnsupported')
     expect(reasonOf(route('somethingNewer'))).toBeNull()

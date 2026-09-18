@@ -54,16 +54,33 @@
   gap: var(--space-24);
 }
 
+/* ⚠️ **THIS SAID `font: var(--text-title)`, AND THE WHOLE DECLARATION WAS
+ * THROWN AWAY.** The `font` shorthand requires a size AND a family, so a value
+ * carrying only a size does not parse — and an invalid declaration is dropped
+ * silently, with no console message and no fallback. So the heading has been
+ * rendering at the user agent's `h1` default, 2em bold, rather than at 28px:
+ * nothing was wrong with the token, the property could not accept it.
+ *
+ * Hence a size and a weight declared separately rather than a corrected
+ * shorthand. THE WEIGHT IS NOT OPTIONAL: without it the `<h1>` keeps the user
+ * agent's `bold` — an appearance nobody chose, and the one the broken rule was
+ * accidentally shipping. `--weight-semibold` is close to what is on screen
+ * today while putting the weight on the scale. The family stays inherited,
+ * which is the point — §02's sans, from `global.css`'s `body`. */
 .title {
   margin: 0;
-  font: var(--text-title);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
   color: var(--ink);
 }
 
 /* What a screen that could not draw says. Quiet: the fault is a capability's,
-   and the reader is being told the rest of the app is fine. */
+   and the reader is being told the rest of the app is fine.
+   `font-size` for the reason `.title` above states at length: the shorthand
+   could not take a size alone and dropped this line too, so the sentence has
+   been set at whatever it inherited — 15px, not 13. */
 .failure {
   margin: 0;
   color: var(--muted);
-  font: var(--text-ui);
+  font-size: var(--text-ui);
 }

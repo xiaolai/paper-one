@@ -208,7 +208,7 @@ describe('registration order (ADR decision 4)', () => {
 })
 
 describe('namespacing (ADR decision 5)', () => {
-  const pane = (id: string) => ({ id: id as `${string}:${string}`, label: 'x', screens: ['reader'] as const, render: () => null })
+  const pane = (id: string) => ({ id: id as `${string}:${string}`, label: 'x', icon: 'people' as const, screens: ['reader'] as const, render: () => null })
   const service = (name: string, grant = 'sync:x') => ({ name: name as `${string}.${string}`, grant, handler: async () => null })
 
   it('serves the composed services through the bound host after every start, and unserves on dispose', async () => {
@@ -459,9 +459,9 @@ describe('a capability that fails to start', () => {
     const boom = new Error('no network')
     const composition = await composeCapabilities(
       [
-        cap('a', { panes: [{ id: 'a:pane', label: 'A', screens: ['reader'], render: () => null }] }, events),
+        cap('a', { panes: [{ id: 'a:pane', label: 'A', icon: 'people', screens: ['reader'], render: () => null }] }, events),
         cap('b', { services: [{ name: 'b.ping', grant: 'b:ping', handler: async () => null }] }, events),
-        cap('c', { panes: [{ id: 'c:pane', label: 'C', screens: ['reader'], render: () => null }] }, events, { throwOnStart: boom }),
+        cap('c', { panes: [{ id: 'c:pane', label: 'C', icon: 'people', screens: ['reader'], render: () => null }] }, events, { throwOnStart: boom }),
         cap('d', {}, events),
       ],
       api(),
@@ -946,7 +946,7 @@ describe('dispose', () => {
     events = []
     composition = await composeCapabilities(
       [
-        cap('a', { panes: [{ id: 'a:pane', label: 'A', screens: ['reader'], render: () => null }] }, events),
+        cap('a', { panes: [{ id: 'a:pane', label: 'A', icon: 'people', screens: ['reader'], render: () => null }] }, events),
         cap(
           'b',
           {
@@ -1013,6 +1013,7 @@ describe('panes', () => {
     const pane = (id: string, order?: number) => ({
       id: id as `${string}:${string}`,
       label: id,
+      icon: 'people' as const,
       screens: ['reader'] as const,
       render: () => null,
       ...(order === undefined ? {} : { order }),
@@ -1199,7 +1200,7 @@ describe('capability id validation is not reachable from outside', () => {
 })
 
 describe('screens — a capability may own a whole view (WI-22.D3)', () => {
-  const screen = (id: string) => ({ id: id as `${string}:${string}`, label: 'Circle', render: () => null })
+  const screen = (id: string) => ({ id: id as `${string}:${string}`, label: 'Circle', icon: 'people' as const, render: () => null })
 
   it('collects them from every capability that started', async () => {
     const composition = await composeCapabilities(

@@ -459,7 +459,7 @@ export function Settings({
      developer options off, where the list is never read, so a fallback here
      could not be told from none. */
   const offeredSections = sections.filter((section) =>
-    settingsSectionOffered(section.id, developer !== undefined, developer?.hidden),
+    settingsSectionOffered(section, developer !== undefined, developer?.hidden),
   )
   const appBandDrawn = offeredSections.length > 0 || (missing ?? []).length > 0
   const [faceMenuOpen, setFaceMenuOpen] = useState(false)
@@ -1054,8 +1054,10 @@ export function Settings({
           Companion PANEL and left `Settings → Companion` in front of every
           reader — settings for a surface they cannot open. The rule is derived
           from that one list rather than restated here; see
-          `settingsSectionOffered`, which also explains why `inference`'s two
-          sections stay (Look up ships on the same engine). Filtered above, into
+          `settingsSectionOffered`, which also explains why `inference`'s
+          sections are not hidden with the companion (Look up ships on the same
+          engine), and the one flag a single section can carry instead —
+          `unfinished`, which Cloud endpoints does. Filtered above, into
           `offeredSections`, so the band can ask first whether it holds anything. */}
       {offeredSections.map((section) => (
           <PaneGroup

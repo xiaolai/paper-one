@@ -12,7 +12,7 @@
 //! | Local | the manifest's activation slot | `/api/v1/health` | n/a — the key is Paper's own |
 //! | Codex | executable on `PATH` | `codex --version` | `codex login status` |
 //! | Claude | executable on `PATH` | `claude --version` | `claude auth status --json` |
-//! | Endpoint | a registered `base_url` | n/a | whether a key is stored |
+//! | Endpoint | a stored `base_url` and model name | n/a | whether a key is stored |
 //!
 //! The local runtime enumerates models and **neither agent CLI does**. So a
 //! preflight that returns a menu is honest for the local runtime and
@@ -49,7 +49,8 @@ pub enum RouteKind {
     Local,
     /// A coding-agent CLI running under the reader's own subscription.
     Agent,
-    /// An OpenAI-compatible endpoint registered with the daemon (WI-15.8).
+    /// An OpenAI-compatible endpoint the reader stored (WI-15.8), answered by
+    /// Paper's own client (`cloud.rs`).
     Endpoint,
 }
 
@@ -83,7 +84,7 @@ pub enum UnusableReason {
     /// in fact the fix — a partial install, a Store stub, or a CLI NEWER than
     /// Paper whose auth wording this build does not recognise.
     VersionUnsupported { needs: Option<String> },
-    /// A registered endpoint with no API key. The fix is to add one.
+    /// A stored endpoint with no API key. The fix is to add one.
     NoKey,
     /// An endpoint whose key the keychain would not read (WI-20.20).
     ///
@@ -92,16 +93,16 @@ pub enum UnusableReason {
     /// rebuilt binary the entry's ACL no longer trusts — not with re-entering
     /// a credential that would be refused again on the next read.
     KeyUnreadable,
-    /// An endpoint the daemon refused to register.
+    /// An endpoint with its key in place and no model name to ask for.
     ///
-    /// ⚠️ A row's usability was decided ENTIRELY from what Paper had persisted
-    /// — an id, a URL and a key in the keychain — and registration with the
-    /// daemon happens separately, best-effort, at start. So an endpoint whose
-    /// registration failed (a URL the daemon will not accept, a provider it
-    /// does not know, a daemon that was mid-restart) was reported usable, was
-    /// selectable, and then failed at the question. Persisted is not
-    /// registered.
-    NotRegistered,
+    /// Paper's client sends `model` in every request, in the PROVIDER'S
+    /// spelling, and there is no name it could honestly guess for somebody
+    /// else's server. An endpoint stored before the field existed lands here.
+    ///
+    /// (`NotConnected` stood here from the day lemond, which reached cloud
+    /// providers, was removed until Paper's own client answered on 2026-09-18:
+    /// every keyed endpoint was unusable, because nothing could connect one.)
+    NoModelName,
 }
 
 impl UnusableReason {
@@ -125,7 +126,7 @@ impl UnusableReason {
             }
             UnusableReason::NoKey => "No key".to_owned(),
             UnusableReason::KeyUnreadable => "The keychain would not read its key".to_owned(),
-            UnusableReason::NotRegistered => "The runtime would not accept it".to_owned(),
+            UnusableReason::NoModelName => "No model name".to_owned(),
         }
     }
 }
@@ -160,27 +161,9 @@ pub struct Route {
     /// before the reader commits to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
-    /// What this route can be used for. A speech model does not answer
-    /// questions, and a text model does not read aloud.
-    pub modality: Modality,
-}
-
-/// What a route is good for. Mirrors the manifest's own split, widened by the
-/// agents and endpoints, which are text-only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Modality {
-    Text,
-    Speech,
-}
-
-impl From<crate::manifest::Modality> for Modality {
-    fn from(m: crate::manifest::Modality) -> Modality {
-        match m {
-            crate::manifest::Modality::Text => Modality::Text,
-            crate::manifest::Modality::Speech => Modality::Speech,
-        }
-    }
+    // No `modality`: every route answers in TEXT. There was a tag here while a
+    // speech model sat in the manifest, so a voice could never be chosen to
+    // answer a question; it went with the speech model (see `manifest.rs`).
 }
 
 impl Route {
@@ -226,9 +209,6 @@ impl Route {
                 }
                 if self.bytes.is_some() {
                     return Err("a non-local route quoting a download size".into());
-                }
-                if self.modality != Modality::Text {
-                    return Err("a non-local route that is not text".into());
                 }
             }
         }
@@ -290,13 +270,17 @@ pub fn endpoint_route_id(id: &str) -> String {
 /// Decimal, not binary: the reader is comparing this against a download they
 /// were quoted in the same units, and 2.5 GB shown as 2.3 GiB reads as a
 /// different file.
+///
+/// ⚠️ **A NON-BREAKING SPACE BETWEEN THE NUMBER AND ITS UNIT**, as in
+/// `formatBytes` — the two are read side by side, and a wrapped `2.5` / `GB` in
+/// a narrow cell was measured in the running app on 2026-09-18.
 pub fn human_bytes(bytes: u64) -> String {
     const GB: f64 = 1_000_000_000.0;
     const MB: f64 = 1_000_000.0;
     const KB: f64 = 1_000.0;
     let n = bytes as f64;
     if n < KB {
-        return format!("{bytes} B");
+        return format!("{bytes}\u{a0}B");
     }
     /* ⚠️ THE UNIT IS CHOSEN AFTER ROUNDING, NOT BEFORE IT. Testing the raw
      * figure against each threshold and rounding afterwards printed `1000 MB`
@@ -309,13 +293,13 @@ pub fn human_bytes(bytes: u64) -> String {
      * pane and must not disagree about where a boundary is. */
     let kb = (n / KB).round();
     if kb < 1_000.0 {
-        return format!("{kb:.0} KB");
+        return format!("{kb:.0}\u{a0}KB");
     }
     let mb = (n / MB).round();
     if mb < 1_000.0 {
-        return format!("{mb:.0} MB");
+        return format!("{mb:.0}\u{a0}MB");
     }
-    format!("{:.1} GB", n / GB)
+    format!("{:.1}\u{a0}GB", n / GB)
 }
 
 /// Build the local rows from the manifest and what is on disk.
@@ -354,7 +338,6 @@ pub fn local_routes(
                 reason,
                 installed: is_installed,
                 bytes: Some(bytes),
-                modality: model.modality.into(),
             }
         })
         .collect()
@@ -402,38 +385,42 @@ pub fn agent_route(probe: &AgentProbe) -> Route {
         reason,
         installed: false,
         bytes: None,
-        // An agent answers questions and never reads aloud: WI-15.9's TTS is
-        // the daemon's, and there is no code path from a voice to a session.
-        modality: Modality::Text,
     }
 }
 
-/// Turn a registered endpoint into a row.
+/// Turn a stored endpoint into a row.
 ///
-/// `registered` is whether the DAEMON accepted it, which is a separate fact
-/// from whether Paper has it stored — see [`UnusableReason::NotRegistered`].
-pub fn endpoint_route(endpoint: &Endpoint, registered: bool) -> Route {
-    // The key first: it is the one the reader can act on, and an endpoint
-    // whose key is missing or could not be read was never offered to the
-    // daemon to be refused.
+/// The key first: it is the one fact the reader can act on in the pane, and an
+/// endpoint whose key is missing or could not be read would fail at the
+/// question whatever its model. Then the model name, which a request needs.
+pub fn endpoint_route(endpoint: &Endpoint) -> Route {
+    /* A LOOPBACK ENDPOINT NEEDS NO KEY: Ollama and LM Studio want none, and
+    "No key" in front of one would have the reader invent a placeholder. The
+    request then goes without an `Authorization` header (`ModelRequest::
+    to_endpoint`). A remote endpoint without one is refused as before. */
+    let keyless_ok = crate::endpoints::is_loopback(&endpoint.base_url);
     let reason = match endpoint.key_state {
-        KeyState::Missing => Some(UnusableReason::NoKey),
+        KeyState::Missing if !keyless_ok => Some(UnusableReason::NoKey),
+        KeyState::Missing if endpoint.model.is_empty() => Some(UnusableReason::NoModelName),
+        KeyState::Missing => None,
         KeyState::Unreadable => Some(UnusableReason::KeyUnreadable),
-        KeyState::Set if !registered => Some(UnusableReason::NotRegistered),
+        KeyState::Set if endpoint.model.is_empty() => Some(UnusableReason::NoModelName),
         KeyState::Set => None,
     };
     Route {
         id: endpoint_route_id(&endpoint.id),
         kind: RouteKind::Endpoint,
         label: endpoint.label.clone(),
-        detail: (endpoint.key_state == KeyState::Set).then(|| "endpoint".to_owned()),
+        /* The MODEL, which is what distinguishes two endpoints on one
+        provider and what the reader typed; the word "endpoint" said nothing
+        the row's kind did not. */
+        detail: (!endpoint.model.is_empty()).then(|| endpoint.model.clone()),
         // An endpoint that cannot answer says why, with the action that fixes
         // it where there is one, rather than failing when pressed.
         unusable: reason.as_ref().map(UnusableReason::text),
         reason,
         installed: false,
         bytes: None,
-        modality: Modality::Text,
     }
 }
 
@@ -448,9 +435,9 @@ mod tests {
 
     #[test]
     fn human_bytes_reads_in_the_units_the_reader_was_quoted() {
-        assert_eq!(human_bytes(2_497_281_120), "2.5 GB");
-        assert_eq!(human_bytes(325_532_387), "326 MB");
-        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2_497_281_120), "2.5\u{a0}GB");
+        assert_eq!(human_bytes(325_532_387), "326\u{a0}MB");
+        assert_eq!(human_bytes(512), "512\u{a0}B");
     }
 
     /// EVERY THRESHOLD, FROM BOTH SIDES.
@@ -467,19 +454,19 @@ mod tests {
     #[test]
     fn human_bytes_promotes_its_unit_at_every_boundary() {
         for (bytes, expected) in [
-            (0_u64, "0 B"),
-            (999, "999 B"),
-            (1_000, "1 KB"),
-            (1_499, "1 KB"),
-            (1_500, "2 KB"),
-            (4_096, "4 KB"),
-            (999_499, "999 KB"),
-            (999_500, "1 MB"),
-            (1_000_000, "1 MB"),
-            (999_499_999, "999 MB"),
-            (999_500_000, "1.0 GB"),
-            (1_000_000_000, "1.0 GB"),
-            (1_050_000_000, "1.1 GB"),
+            (0_u64, "0\u{a0}B"),
+            (999, "999\u{a0}B"),
+            (1_000, "1\u{a0}KB"),
+            (1_499, "1\u{a0}KB"),
+            (1_500, "2\u{a0}KB"),
+            (4_096, "4\u{a0}KB"),
+            (999_499, "999\u{a0}KB"),
+            (999_500, "1\u{a0}MB"),
+            (1_000_000, "1\u{a0}MB"),
+            (999_499_999, "999\u{a0}MB"),
+            (999_500_000, "1.0\u{a0}GB"),
+            (1_000_000_000, "1.0\u{a0}GB"),
+            (1_050_000_000, "1.1\u{a0}GB"),
         ] {
             assert_eq!(human_bytes(bytes), expected, "{bytes}");
         }
@@ -516,16 +503,14 @@ mod tests {
             }));
         }
         for key_state in [KeyState::Missing, KeyState::Set, KeyState::Unreadable] {
-            for registered in [false, true] {
-                routes.push(endpoint_route(
-                    &Endpoint {
-                        id: "e".to_owned(),
-                        label: "E".to_owned(),
-                        base_url: "https://example.invalid".to_owned(),
-                        key_state,
-                    },
-                    registered,
-                ));
+            for model in ["", "gpt-4.1-mini"] {
+                routes.push(endpoint_route(&Endpoint {
+                    id: "e".to_owned(),
+                    label: "E".to_owned(),
+                    base_url: "https://example.invalid".to_owned(),
+                    model: model.to_owned(),
+                    key_state,
+                }));
             }
         }
 
@@ -552,61 +537,88 @@ mod tests {
         );
     }
 
-    /// ⚠️ PERSISTED IS NOT REGISTERED.
-    ///
-    /// A row's usability came entirely from what Paper had stored — an id, a
-    /// URL, a key in the keychain — while registration with the daemon happens
-    /// separately and best-effort at start. An endpoint the daemon refused was
-    /// reported usable, was selectable, and failed at the question.
+    /// A keyed endpoint with a model name answers; without one it says so,
+    /// and a missing key outranks both — it is the fact the reader can act on.
     #[test]
-    fn an_endpoint_the_daemon_refused_is_not_offered() {
+    fn a_keyed_endpoint_answers_when_it_knows_which_model_to_ask_for() {
         let endpoint = Endpoint {
             id: "proxy".to_owned(),
             label: "P".to_owned(),
             base_url: "https://e.example.com".to_owned(),
+            model: "gpt-4.1-mini".to_owned(),
             key_state: KeyState::Set,
         };
-        assert!(endpoint_route(&endpoint, true).usable());
+        assert!(endpoint_route(&endpoint).usable());
 
-        let refused = endpoint_route(&endpoint, false);
-        assert!(!refused.usable());
-        assert_eq!(refused.reason, Some(UnusableReason::NotRegistered));
-
-        /* A missing key outranks it: that is the one the reader can act on,
-        and an endpoint with no key was never offered to be refused. */
-        let keyless = Endpoint {
-            key_state: KeyState::Missing,
-            ..endpoint
+        let nameless = Endpoint {
+            model: String::new(),
+            ..endpoint.clone()
         };
         assert_eq!(
-            endpoint_route(&keyless, false).reason,
-            Some(UnusableReason::NoKey)
+            endpoint_route(&nameless).reason,
+            Some(UnusableReason::NoModelName)
+        );
+        assert_eq!(
+            endpoint_route(&nameless).unusable.as_deref(),
+            Some("No model name")
+        );
+
+        let keyless = Endpoint {
+            key_state: KeyState::Missing,
+            ..nameless
+        };
+        assert_eq!(endpoint_route(&keyless).reason, Some(UnusableReason::NoKey));
+        assert_eq!(
+            endpoint_route(&endpoint).detail.as_deref(),
+            Some("gpt-4.1-mini"),
+            "the row names the model it asks for"
+        );
+    }
+
+    /// Ollama and LM Studio on this machine want no key, so a loopback
+    /// endpoint without one answers — and still needs its model name.
+    #[test]
+    fn a_loopback_endpoint_needs_no_key() {
+        let local = Endpoint {
+            id: "ollama".to_owned(),
+            label: "Ollama".to_owned(),
+            base_url: "http://localhost:11434/v1".to_owned(),
+            model: "qwen2.5:7b".to_owned(),
+            key_state: KeyState::Missing,
+        };
+        assert!(endpoint_route(&local).usable());
+        let nameless = Endpoint {
+            model: String::new(),
+            ..local
+        };
+        assert_eq!(
+            endpoint_route(&nameless).reason,
+            Some(UnusableReason::NoModelName)
         );
     }
 
     /// WI-20.20 (b). "No key" is advice — go and add one — and it is wrong
     /// advice when the key is in the keychain and the keychain will not hand
     /// it over. That is a different fact with a different fix, and it outranks
-    /// registration for the same reason a missing key does: an endpoint whose
-    /// key could not be read was never offered to the daemon to be refused.
+    /// `NoModelName` for the same reason a missing key does: it is the one
+    /// the reader can act on.
     #[test]
     fn an_endpoint_whose_key_cannot_be_read_is_not_told_it_has_none() {
         let endpoint = Endpoint {
             id: "proxy".to_owned(),
             label: "P".to_owned(),
             base_url: "https://e.example.com".to_owned(),
+            model: "gpt-4.1-mini".to_owned(),
             key_state: KeyState::Unreadable,
         };
-        for registered in [false, true] {
-            let route = endpoint_route(&endpoint, registered);
-            assert!(!route.usable());
-            assert_eq!(route.reason, Some(UnusableReason::KeyUnreadable));
-            assert_ne!(
-                route.unusable,
-                Some(UnusableReason::NoKey.text()),
-                "the reader must not be told to add a key they already have"
-            );
-        }
+        let route = endpoint_route(&endpoint);
+        assert!(!route.usable());
+        assert_eq!(route.reason, Some(UnusableReason::KeyUnreadable));
+        assert_ne!(
+            route.unusable,
+            Some(UnusableReason::NoKey.text()),
+            "the reader must not be told to add a key they already have"
+        );
     }
 
     /// The three actionable codes are distinguishable without reading English.
@@ -641,7 +653,8 @@ mod tests {
     #[test]
     fn an_uninstalled_local_model_says_so_and_still_lists() {
         let routes = local_routes(&manifest(), |_| false, true);
-        assert_eq!(routes.len(), 2);
+        assert_eq!(routes.len(), manifest().models.len());
+        assert!(!routes.is_empty(), "a loop over no routes asserts nothing");
         for route in &routes {
             assert!(!route.usable());
             assert_eq!(route.unusable.as_deref(), Some("Not installed"));
@@ -722,22 +735,12 @@ mod tests {
             id: "proxy".to_owned(),
             label: "My proxy".to_owned(),
             base_url: "https://api.example.com/v1".to_owned(),
+            model: "gpt-4.1-mini".to_owned(),
             key_state: KeyState::Missing,
         };
-        let route = endpoint_route(&endpoint, true);
+        let route = endpoint_route(&endpoint);
         assert!(!route.usable());
         assert_eq!(route.unusable.as_deref(), Some("No key"));
-    }
-
-    #[test]
-    fn an_endpoint_with_a_key_is_usable() {
-        let endpoint = Endpoint {
-            id: "proxy".to_owned(),
-            label: "My proxy".to_owned(),
-            base_url: "https://api.example.com/v1".to_owned(),
-            key_state: KeyState::Set,
-        };
-        assert!(endpoint_route(&endpoint, true).usable());
     }
 
     /// Every route id is unique and namespaced, so the reader's persisted
@@ -747,15 +750,13 @@ mod tests {
         let mut routes = local_routes(&manifest(), |_| true, true);
         routes.push(agent_route(&AgentProbe::missing(Agent::Codex)));
         routes.push(agent_route(&AgentProbe::missing(Agent::Claude)));
-        routes.push(endpoint_route(
-            &Endpoint {
-                id: "proxy".to_owned(),
-                label: "P".to_owned(),
-                base_url: "https://e.example.com".to_owned(),
-                key_state: KeyState::Set,
-            },
-            true,
-        ));
+        routes.push(endpoint_route(&Endpoint {
+            id: "proxy".to_owned(),
+            label: "P".to_owned(),
+            base_url: "https://e.example.com".to_owned(),
+            model: "gpt-4.1-mini".to_owned(),
+            key_state: KeyState::Set,
+        }));
         let ids: std::collections::BTreeSet<_> = routes.iter().map(|r| &r.id).collect();
         assert_eq!(ids.len(), routes.len(), "ids must not collide");
         for route in &routes {
@@ -767,31 +768,13 @@ mod tests {
         }
     }
 
-    /// An agent is never a speech route. The gloss and Test voice must not be
-    /// able to reach one, and the modality tag is where that starts.
-    #[test]
-    fn no_agent_route_is_ever_a_speech_route() {
-        for agent in crate::agent::AGENTS {
-            let route = agent_route(&AgentProbe::missing(agent));
-            assert_eq!(route.modality, Modality::Text);
-        }
-    }
-
     #[test]
     fn the_probe_finds_a_route_by_id_and_lists_only_usable_ones() {
         let probe = Probe {
-            routes: local_routes(
-                &manifest(),
-                |m| m.modality == crate::manifest::Modality::Text,
-                true,
-            ),
-            runtime_version: Some("11.7.0".to_owned()),
+            routes: local_routes(&manifest(), |_| true, true),
+            runtime_version: Some("b10375".to_owned()),
         };
-        assert_eq!(
-            probe.usable().count(),
-            1,
-            "only the text model is installed"
-        );
+        assert_eq!(probe.usable().count(), 1, "the installed model answers");
         assert!(probe
             .route(&local_route_id("qwen3-4b-instruct-2507-q4-k-m"))
             .is_some());

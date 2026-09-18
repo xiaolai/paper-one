@@ -31,9 +31,17 @@
 
 /*
  * Fills the OS window. It deliberately does NOT carry the prototype's 10px
- * inset, 20px radius and --shadow-window: those simulate the application
- * window itself, drawn on a --wash field standing in for the desktop. The real
- * window already has corners, a border and a shadow from the OS.
+ * inset, 20px radius or drop shadow: those simulate the application window
+ * itself, drawn on a --wash field standing in for the desktop. The real window
+ * already has corners, a border and a shadow from the OS.
+ *
+ * ⚠️ **THIS SENTENCE USED TO NAME `--shadow-window`, AND THAT TOKEN IS GONE.**
+ * It was defined for Paper and re-valued by Night and drawn by nothing at all —
+ * this comment was its only appearance anywhere in the app. So the one place a
+ * reader could learn how the window is elevated pointed at a token that
+ * elevated nothing, in a sentence correctly explaining that we do not use it.
+ * `tokens.hygiene.test.ts` refuses a token nothing reads now, which is what
+ * found it; the prose is kept because the DECISION it records is still real.
  */
 .window {
   flex: 1;

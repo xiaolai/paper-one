@@ -2,10 +2,12 @@
 //! plugin.
 //!
 //! What it is (dev-docs/plans/phase-15-the-companion.md, WI-15.0): a supervised
-//! `lemond` child, the per-launch bearer token that authenticates to it, the
-//! Paper-owned cache and model directories, SHA-256 verification before any
-//! artifact is activated, and the probes that report what the two agent CLIs
-//! can honestly say about themselves. Policy-free in the same sense the peer
+//! `llama-server` child launched on the one installed model, the per-launch
+//! key that authenticates to it, the Paper-owned model directory, SHA-256
+//! verification before any artifact is activated or any runtime byte is
+//! executed, and the probes that report what the two agent CLIs can honestly
+//! say about themselves. (The child was Lemonade's `lemond` until 2026-09-18;
+//! `spawn.rs` says why it is not any more.) Policy-free in the same sense the peer
 //! plugin is: it knows nothing of books, chapters, citations or the reader's
 //! marks, and it never decides which route answers a question.
 //!
@@ -19,12 +21,13 @@
 //! > **No — it is a shape the reader sees** → it lives in TypeScript.
 //!
 //! Everything in this crate is an application of that question. Paper renders
-//! EPUB documents written by strangers, and the daemon's control plane
-//! (`/v1/install`, `/v1/pull`, `/v1/load`) downloads and executes backend
-//! binaries. Handing the webview the bearer token to get native `fetch`
-//! streaming would hand book HTML a backend installer, so the token stays
-//! here and streaming returns over a Tauri `Channel` instead. That costs an
-//! adapter and buys the only boundary that matters.
+//! EPUB documents written by strangers, and the server behind these commands
+//! is the reader's model on the reader's GPU. Handing the webview the key to
+//! get native `fetch` streaming would hand book HTML that model — and under
+//! lemond, whose control plane downloaded and executed backend binaries, a
+//! backend installer. So the key stays here and streaming returns over a
+//! Tauri `Channel` instead. That costs an adapter and buys the only boundary
+//! that matters.
 //!
 //! # What it is not
 //!
@@ -39,12 +42,14 @@
 
 mod agent;
 mod agentask;
+mod cloud;
 mod commands;
 mod daemon;
 mod digest;
 mod endpoints;
 mod error;
 mod generate;
+mod gloss;
 mod install;
 mod limits;
 mod lineage;
@@ -55,7 +60,6 @@ mod procgroup;
 mod requests;
 mod runtime;
 mod spawn;
-mod speech;
 mod state;
 #[cfg(test)]
 mod testutil;
@@ -67,22 +71,20 @@ pub use endpoints::{Endpoint, EndpointStore, KeyState};
 pub use error::{Error, Result};
 pub use install::Progress;
 pub use lineage::{GroupRecord, Processes, Recovery, RECORD_FILE};
-pub use manifest::{Manifest, Modality, ModelEntry, MANIFEST_VERSION};
-pub use paths::{
-    bundled_runtime, bundled_runtime_dir, data_root, runtime_exe_name, Layout, TEST_DATA_DIR_ENV,
-};
+pub use manifest::{Manifest, ModelEntry, MANIFEST_VERSION};
+pub use paths::{bundled_runtime, bundled_runtime_dir, data_root, Layout, TEST_DATA_DIR_ENV};
 pub use probe::{Probe, Route, RouteKind};
 pub use runtime::{RuntimeManifest, VerifiedBackend, MANIFEST_FILE, RUNTIME_MANIFEST_VERSION};
 pub use spawn::{
-    backend_bin_var, cloud_key_var, mint_token, plan_spawn, SpawnInputs, SpawnPlan, API_KEY_ENV,
-    CACHE_DIR_ENV, LOOPBACK,
+    clears, mint_token, plan_spawn, SpawnInputs, SpawnPlan, API_KEY_ENV, CONTEXT_TOKENS, LOOPBACK,
+    NO_BROWSER_ORIGIN,
 };
 pub use state::InferenceState;
 
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, RunEvent, Runtime};
 
-/// The plugin. Manages an [`InferenceState`] and stops the daemon on exit.
+/// The plugin. Manages an [`InferenceState`] and stops the server on exit.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("inference")
         .invoke_handler(tauri::generate_handler![
@@ -96,7 +98,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::inference_reveal_models_dir,
             commands::inference_generate,
             commands::inference_gloss,
-            commands::inference_speak,
             commands::inference_probe,
             commands::inference_endpoints,
             commands::inference_add_endpoint,
@@ -108,7 +109,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         ])
         .setup(|app, _api| {
             app.manage(InferenceState::default());
-            /* A DAEMON THE LAST PAPER LEFT RUNNING is collected now, at
+            /* A SERVER THE LAST PAPER LEFT RUNNING is collected now, at
              * launch, rather than at the first gloss — it is holding the GPU
              * and the model's several gigabytes the whole time in between.
              * Off the main thread: it may wait the shutdown grace on a group
@@ -124,7 +125,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         })
         .on_event(|app, event| {
             if let RunEvent::Exit = event {
-                // A daemon that just loses its parent keeps the port, the
+                // A server that just loses its parent keeps the port, the
                 // model's several gigabytes and the GPU. `Exit` runs on the
                 // main thread outside the async runtime, so blocking here is
                 // fine — and this is the ORDERED shutdown; `kill_on_drop` and

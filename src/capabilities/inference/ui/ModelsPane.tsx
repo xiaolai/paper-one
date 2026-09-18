@@ -13,11 +13,17 @@ import { formatBytes, modelAction, modelValue, runtimeValue, type ModelsModel } 
  *
  * # No progress bar, and no dropdown
  *
- * F3. The vocabulary is fourteen frozen class names and none of them is a
+ * F3. The vocabulary is a frozen table of class names and not one of them is a
  * bar, a spinner or a menu, so a download's progress goes in the same
  * right-hand `value` slot every other fact goes in. Reaching for a new class
  * on behalf of a feature that has not proved it needs one is how a design
  * system stops being one.
+ *
+ * (This said "fourteen" and the table held sixteen when the sentence was
+ * written; it is a name short again every time somebody adds one, which is the
+ * half-life AGENTS.md records for a count written into prose. The claim that
+ * matters is the one about what is NOT in the table, and that is checkable by
+ * reading it.)
  *
  * # It costs nothing until it is opened
  *
@@ -53,7 +59,7 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
       {/* WHAT WENT WRONG WITH THE LAST DOWNLOAD OR REMOVAL. Both buttons below
           are `void`-ed, so neither can report anything by rejecting; before
           this the reader pressed Remove, nothing happened, and nothing said
-          why. Same slot and same voice as `Test voice`'s failure line. */}
+          why. */}
       {snapshot.failure === null ? null : <div className={ui.hint}>{snapshot.failure}</div>}
       {/* WHY NOTHING BELOW OFFERS INSTALL (WI-20.21). Said once here rather
           than once per row: the rows show the reason in their value slot, and
@@ -109,30 +115,9 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
         </div>
       ))}
 
-      {/* `Test voice` — the minimum honest consumer of a TTS model (WI-15.9).
-          Absent entirely until a voice is installed: a control that cannot do
-          anything is §07's "disabled and says why" with nothing to say. */}
-      {snapshot.models.some((entry) => entry.modality === 'speech' && entry.installed) ? (
-        <div className={ui.row}>
-          <span className={ui.grow}>Test voice</span>
-          <span className={ui.value}>
-            {snapshot.voiceTest === 'speaking'
-              ? 'Speaking…'
-              : snapshot.voiceTest === 'failed'
-                ? 'That could not be played'
-                : ''}
-          </span>
-          {snapshot.voiceTest === 'speaking' ? (
-            <button type="button" className={ui.button} onClick={() => model.stopVoice()}>
-              Stop
-            </button>
-          ) : (
-            <button type="button" className={ui.button} onClick={() => void model.testVoice()}>
-              Play
-            </button>
-          )}
-        </div>
-      ) : null}
+      {/* `TEST VOICE` IS GONE WITH THE NEURAL VOICE IT TESTED. The lookup's
+          pronunciation is the machine's own speech engine, which needs no
+          download and no test row — see `core/voice.ts` in the kernel. */}
 
       {/* "KEEP MODEL LOADED" IS GONE, NOT HIDDEN. The checkbox persisted a
           setting that nothing read — no spawn flag, no daemon config, no
@@ -142,7 +127,7 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
 
           ⚠️ **AND ITS CAPTION OUTLIVED IT.** "Off frees the memory a few
           minutes after you stop asking" was still drawn here, unconditionally,
-          between `Test voice` and `Memory` — a sentence about switching
+          just above `Memory` — a sentence about switching
           something off, with no switch anywhere near it. The removal took the
           control and left the label; it goes with the rest. */}
 

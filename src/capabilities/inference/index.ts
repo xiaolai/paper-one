@@ -1,8 +1,9 @@
 import { messageOf } from '../../kernel'
 import { createElement } from 'react'
-import { createRenderSlot, openSession, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
+import { createRenderSlot, openSession, type Capability, type CapabilityContext, type Disposable, type SettingsStore } from '../../kernel'
 import { createController, type Controller } from './lib/controller'
-import { createGlossProvider } from './lib/glossProvider'
+import { createGlossProvider, GLOSS_PROMPT_SETTING } from './lib/glossProvider'
+import { GLOSS_ROUTE_SETTING, createRouteStore, followLocal, usableLocal } from './lib/glossRoute'
 import {
   cancelRequest,
   inferencePlugin,
@@ -15,6 +16,8 @@ import { createModelsModel, downloadLine, type ModelsModel } from './ui/modelsMo
 import { ModelsPane } from './ui/ModelsPane'
 import { createEndpointsModel, type EndpointsModel } from './ui/endpointsModel'
 import { EndpointsPane } from './ui/EndpointsPane'
+import { GlossPromptPane } from './ui/GlossPromptPane'
+import { createGlossRouteModel, type GlossRouteModel } from './ui/glossRouteModel'
 
 /**
  * The `inference` capability — the local runtime, the model catalogue, and
@@ -33,9 +36,11 @@ import { EndpointsPane } from './ui/EndpointsPane'
  * process at boot; the daemon starts on the first thing that genuinely needs
  * it, and only if a model is installed and the reader asked for it.
  *
- * **Not `lemonade`.** Naming a capability after a vendor would make the
- * fallback — LocalAI, if the Windows gate had failed — a rename of a
- * capability, a settings namespace and every persisted key under it.
+ * **Not named for its engine.** Naming a capability after a vendor would make
+ * a change of engine a rename of a capability, a settings namespace and every
+ * persisted key under it — and the engine has changed: Lemonade's daemon gave
+ * way to llama.cpp's `llama-server`, launched directly, and nothing under this
+ * name had to move.
  */
 
 /* ---------------------------------------------------------- runtime state */
@@ -85,6 +90,20 @@ const running = createRenderSlot<Running>()
 const section = createRenderSlot<ModelsModel>()
 /** The same slot again, for the Cloud endpoints section. */
 const endpointsSection = createRenderSlot<EndpointsModel>()
+/**
+ * The same slot once more, for the Look up section — the SETTINGS STORE, for
+ * the prompt, and the route list's model, for what answers.
+ *
+ * THE PROMPT HAS NO MODEL, still: it is one string that already lives in the
+ * store, and the store is a `useSyncExternalStore` pair — a model would be a
+ * second copy of a value with its own opinion of when it changed. The route
+ * list HAS one, because what it draws is made of three things that change on
+ * their own — the choice, the last probe and the local model — and deciding
+ * which row says `In use` is a rule to test, not a render to read back. The
+ * slot is a slot for the reason the others are: `render` takes no arguments,
+ * and two live compositions must not blank each other's pane.
+ */
+const promptSection = createRenderSlot<{ readonly settings: SettingsStore; readonly routes: GlossRouteModel }>()
 
 /**
  * Every lifetime that still owns the one daemon.
@@ -114,8 +133,11 @@ const daemonOwners = new Set<object>()
  *
  * Deliberately narrow. `companion` gets generation, one agent turn and the
  * probe, and it does NOT get the gloss: that port is this capability's to
- * bind, so there is exactly one writer per port and the agent adapters never
- * appear on the gloss path at all (F8).
+ * bind, so there is exactly one writer per port and the companion's agent turn
+ * never appears on the gloss path. (An agent MAY answer a lookup since
+ * 2026-09-18 — through `inference_gloss`, as one request in the portable
+ * shape, which is `glossRoute.ts`'s decision and not this port's. This said
+ * "the agent adapters never appear on the gloss path at all (F8)".)
  */
 export interface InferencePort {
   /** Stream an answer from a local model. */
@@ -259,23 +281,46 @@ export function inferencePort(): InferencePort | null {
 /* -------------------------------------------------------------- capability */
 
 /**
- * The Local models section's id, as the gloss provider hands it to the reader —
- * the place "Install one" goes (`GlossProvider.installAt`).
+ * The Look up section's id, as the gloss provider hands it to the reader — the
+ * place "Choose one" goes when nothing can answer (`GlossProvider.installAt`).
  *
- * ⚠️ **THE SECTION BELOW SPELLS IT AS A LITERAL, AND HAS TO.** It was
- * `id: MODELS_SECTION` for one change, and `scripts/surfaces.mjs` — which reads
- * every contribution id out of the source to build the surface inventory —
- * refused it: it understands string literals only, deliberately, rather than
- * guess at a name. So there are two spellings, and `index.test.ts` holds them
- * to one another: a reveal naming a section nothing declares would open
- * Settings on nothing, silently.
+ * ⚠️ **IT WAS THE LOCAL MODELS SECTION, `inference:models`**, while the local
+ * model was the only thing that could answer and "Install one" was the only way
+ * out. Since 2026-09-18 an endpoint, Claude or Codex can answer too, and the
+ * local model is an opt-in download rather than the road every reader is sent
+ * down — so the way out is the section where the choice is, which also says
+ * what each choice needs.
+ *
+ * ⚠️ **THE SECTION BELOW SPELLS IT AS A LITERAL, AND HAS TO.** `id: MODELS_SECTION`
+ * stood there for one change, and `scripts/surfaces.mjs` — which reads every
+ * contribution id out of the source to build the surface inventory — refused
+ * it: it understands string literals only, deliberately, rather than guess at a
+ * name. So there are two spellings, and `index.test.ts` holds them to one
+ * another: a reveal naming a section nothing declares would open Settings on
+ * nothing, silently.
  */
-export const MODELS_SECTION = 'inference:models'
+export const GLOSS_SECTION = 'inference:gloss'
 
 export const inference: Capability = {
   id: 'inference',
 
   settings: [
+    {
+      id: 'inference:gloss',
+      title: 'Look up',
+      /* FIRST OF THE THREE, and above Local models (15) rather than below it,
+       * because it is the FEATURE and the two under it are the engines that
+       * serve it: what the reader is looking for here is the thing they use,
+       * not the thing it runs on. 14 rather than 11 or 12 so it stays attached
+       * to the pair — the gaps between 10, 15 and 20 are there so a section can
+       * slot in without renumbering anybody (`peer/index.ts:53`), and this one
+       * belongs to the group below it rather than between it and Storage. */
+      order: 14,
+      render: () => {
+        const held = promptSection.current()
+        return held === null ? null : createElement(GlossPromptPane, held)
+      },
+    },
     {
       id: 'inference:models',
       title: 'Local models',
@@ -295,6 +340,15 @@ export const inference: Capability = {
       /* AFTER Local models (15), because it is the same subject one step
          further out: this machine's models, then somebody else's. */
       order: 16,
+      /* ⚠️ **OFFERED TO EVERY READER AGAIN — IT WAS `unfinished` UNTIL
+       * 2026-09-18.** What connected an endpoint to an answer was Lemonade,
+       * which registered it with the daemon at spawn; `llama-server` has no such
+       * thing, so every endpoint route reported `notConnected` and this section
+       * sat behind developer options rather than take a key for a route that
+       * could not answer. The crate talks to the endpoint itself now (the gloss
+       * routes contract), and an endpoint with a key and a model name is one of
+       * the routes Look up can answer with — so the section a reader adds one in
+       * is not hidden from them. */
       render: () => {
         const model = endpointsSection.current()
         return model === null ? null : createElement(EndpointsPane, { model })
@@ -308,7 +362,23 @@ export const inference: Capability = {
        times, once per consumer. */
     const report = (event: string, fields: Record<string, unknown>): void => api.diagnostics.warn(event, fields)
     const controller = createController(plugin, report)
-    const gloss = createGlossProvider({ plugin, controller, report, installAt: MODELS_SECTION })
+    /* THE LAST PROBE, held — what an endpoint or an agent can do is not asked
+       per lookup, because every probe spawns the agent CLIs (`RouteStore`). */
+    const routes = createRouteStore({ plugin, report })
+    /* READ PER LOOKUP, NOT CAPTURED — see `GlossProviderOptions.prompt`. A
+       reader who rewrites their prompt, or chooses another route, in Settings
+       gets it on the very next word they select, and the cache of answers
+       produced under the old one is dropped rather than served back
+       (`answeredBy`). */
+    const gloss = createGlossProvider({
+      plugin,
+      controller,
+      prompt: () => api.settings.get(GLOSS_PROMPT_SETTING),
+      route: () => api.settings.get(GLOSS_ROUTE_SETTING),
+      routes,
+      report,
+      installAt: GLOSS_SECTION,
+    })
 
     /* EVERYTHING THIS ACQUIRES, OWNED BY ONE THING — see `openSession`. The
      * `stopped` flag, the listener removal, the guarded-step loop and a
@@ -316,9 +386,29 @@ export const inference: Capability = {
      * that never made it into the list survived every teardown for months. */
     const session = openSession(api, signal, 'inference.teardown-step-failed')
     session.own('controller', () => controller.dispose())
+    // Stryker disable next-line StringLiteral: a label is read only when its release throws, and the route store's dispose only sets a flag and clears a set.
+    session.own('routes', () => routes.dispose())
 
     const unbindGloss = api.services.bindGloss(gloss)
     session.own('unbindGloss', () => unbindGloss.dispose())
+
+    /* ⚠️ **NO VOICE IS BOUND HERE ANY MORE, AND ONE WAS.** This capability bound
+     * a neural voice (Kokoro, through `inference_speak`) over the kernel's
+     * system voice, as a preference with the system voice as its fallback. It
+     * is deleted, for four reasons: a neural TTS model is at its weakest on
+     * exactly what a lookup asks of it — a single word, where quality drops
+     * below roughly ten to twenty tokens; Kokoro's Mandarin voices are graded C
+     * and D; `llama-server` has no speech route, so keeping it meant keeping
+     * Lemonade or staging a second engine beside the first; and the system
+     * voice was measured working in the running app (73 voices, 39 languages
+     * on this Mac). So the kernel's default `Voice` serves pronunciation, and
+     * `bindVoice` stays the kernel's port for whatever binds one next.
+     *
+     * (The neural voice did fail on this machine before it was deleted, and the
+     * comment that stood here blamed the platform. It was Paper: the request
+     * went to Lemonade's sound-effects route rather than its speech route, the
+     * backend that serves Kokoro was blocked from being fetched, and the model
+     * was registered under the wrong name.) */
 
     /* The library status bar's third rung (WI-15.12). A download is the
        reader's own action, it reports a count, and it stops — the import
@@ -360,7 +450,9 @@ export const inference: Capability = {
        that is invisible because each one on its own is small. Owning it is
        what makes forgetting it impossible. (This listed a settings
        subscription first, and that subscription is gone: the model never read
-       a setting, and the capability declares none.) */
+       a setting, and the capability declares none. The voice test went with
+       the neural voice, so what it holds now is its controller subscription.) */
+    // Stryker disable next-line StringLiteral: a label is read only when its release throws, and the models model's dispose only sets a flag, drops its controller subscription and clears a set.
     session.own('modelsModel', () => models.dispose())
     const showing = section.hold(models)
     // Stryker disable next-line StringLiteral: a label is read only when its release throws, and a render slot's disposer cannot.
@@ -377,6 +469,17 @@ export const inference: Capability = {
     const showingEndpoints = endpointsSection.hold(endpoints)
     // Stryker disable next-line StringLiteral: a label is read only when its release throws, and a render slot's disposer cannot.
     session.own('endpointsSection', () => showingEndpoints.dispose())
+
+    /* LOOK UP — the route that answers, and WI-17.5's prompt made the
+       reader's. The route list is a model this capability owns and disposes;
+       the prompt reads the capability's own settings store, which this
+       capability does not own and must not close. */
+    const lookUpRoutes = createGlossRouteModel({ settings: api.settings, routes, controller, plugin, report })
+    // Stryker disable next-line StringLiteral: a label is read only when its release throws, and the route list's dispose only sets a flag and drops its subscriptions.
+    session.own('lookUpRoutes', () => lookUpRoutes.dispose())
+    const showingPrompt = promptSection.hold({ settings: api.settings, routes: lookUpRoutes })
+    // Stryker disable next-line StringLiteral: a label is read only when its release throws, and a render slot's disposer cannot.
+    session.own('promptSection', () => showingPrompt.dispose())
 
     /* The daemon is a CHILD PROCESS, and it must not outlive the capability
      * that owns it. Best-effort and unawaited: `dispose` is synchronous and
@@ -422,8 +525,24 @@ export const inference: Capability = {
      * a `start` that throws — F2 again. */
     /* Not `.catch` — `refresh` never rejects, it degrades. The report goes
        through the controller's own hook, which is the only path a failure
-       here actually takes. */
-    void controller.refresh()
+       here actually takes.
+
+       THEN THE PROBE, ONCE — after the controller has read what is on disk,
+       not beside it, because the watch below probes again whenever the local
+       answer changes and the first read is such a change: started together,
+       every launch with a model installed would spawn the agent CLIs twice.
+       `refresh` never rejects either; a probe that fails is reported and read
+       as no routes, and the local model still answers. */
+    const localNow = (): readonly string[] => usableLocal(controller.getSnapshot(), controller.textModel())
+    void controller.refresh().then(() => {
+      /* OWNED AS IT IS TAKEN: a session that has already stopped releases it
+         on the spot (`openSession`), and a stopped route store ignores the
+         probe below — so a teardown during the first read leaves nothing
+         running. */
+      // Stryker disable next-line StringLiteral: a label is read only when its release throws, and dropping a subscription cannot.
+      session.own('followLocal', followLocal(controller, localNow, () => void routes.refresh()))
+      void routes.refresh()
+    })
 
     api.diagnostics.info('inference.started', {})
     return { dispose: session.stop }

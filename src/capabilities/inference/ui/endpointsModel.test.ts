@@ -10,6 +10,7 @@ import {
   rowFor,
   validBaseUrl,
   validId,
+  validModelName,
   type EndpointDraft,
   type EndpointsModel,
   type EndpointsPlugin,
@@ -28,6 +29,7 @@ function deferred(): { readonly promise: Promise<void>; open(): void } {
 const endpoint = (over: Partial<Endpoint> & Pick<Endpoint, 'id'>): Endpoint => ({
   label: over.id,
   baseUrl: 'https://api.example.com/v1',
+  model: 'gpt-4.1-mini',
   keyState: 'set',
   ...over,
 })
@@ -36,6 +38,7 @@ const draft = (over: Partial<EndpointDraft> = {}): EndpointDraft => ({
   ...EMPTY_DRAFT,
   id: 'my-proxy',
   baseUrl: 'https://api.example.com/v1',
+  model: 'gpt-4.1-mini',
   ...over,
 })
 
@@ -49,8 +52,12 @@ const draft = (over: Partial<EndpointDraft> = {}): EndpointDraft => ({
  */
 const type = (model: EndpointsModel, over: Partial<EndpointDraft> = {}): void => {
   const whole = draft(over)
-  for (const field of ['id', 'label', 'baseUrl', 'key'] as const) model.edit(field, whole[field])
+  for (const field of ['id', 'label', 'baseUrl', 'model', 'key'] as const) model.edit(field, whole[field])
 }
+
+/** What a refused address is told — every scheme the crate takes, in one sentence. */
+const ADDRESS_REFUSED =
+  'An address is an https:// URL with a host and no credentials in it — or http:// to this computer (localhost).'
 
 /**
  * ⚠️ ONE CORPUS, TWO VALIDATORS.
@@ -77,6 +84,7 @@ describe('the rules the crate and the pane both apply', () => {
   ) as {
     ids: { valid: string[]; invalid: string[] }
     baseUrls: { valid: string[]; invalid: string[] }
+    models: { valid: string[]; invalid: string[] }
   }
 
   /* NON-EMPTY, so a corpus that failed to parse into the shape this reads
@@ -87,6 +95,8 @@ describe('the rules the crate and the pane both apply', () => {
       ['ids', 'invalid'],
       ['baseUrls', 'valid'],
       ['baseUrls', 'invalid'],
+      ['models', 'valid'],
+      ['models', 'invalid'],
     ] as const) {
       expect(corpus[group][key], `${group}.${key} is empty`).not.toEqual([])
     }
@@ -100,6 +110,19 @@ describe('the rules the crate and the pane both apply', () => {
   it('accepts every address the crate accepts, and no others', () => {
     for (const url of corpus.baseUrls.valid) expect(validBaseUrl(url), JSON.stringify(url)).toBe(true)
     for (const url of corpus.baseUrls.invalid) expect(validBaseUrl(url), JSON.stringify(url)).toBe(false)
+  })
+
+  /* NON-VACUITY FOR THE LOOPBACK RULE: the corpus must carry both an http://
+     address the crate takes and one it refuses, or "no others" says nothing
+     about the one scheme the rule is about. */
+  it('carries plain-http cases on both sides', () => {
+    expect(corpus.baseUrls.valid.some((url) => url.startsWith('http://'))).toBe(true)
+    expect(corpus.baseUrls.invalid.some((url) => url.startsWith('http://'))).toBe(true)
+  })
+
+  it('accepts every model name the crate accepts, and no others', () => {
+    for (const name of corpus.models.valid) expect(validModelName(name), JSON.stringify(name)).toBe(true)
+    for (const name of corpus.models.invalid) expect(validModelName(name), JSON.stringify(name)).toBe(false)
   })
 })
 
@@ -163,6 +186,48 @@ describe('what the crate will accept', () => {
     }
   })
 
+  /* ⚠️ **PLAIN HTTP TO THIS MACHINE, AND TO NOTHING THAT MERELY SOUNDS LIKE
+     IT.** Ollama and LM Studio serve on the loopback and speak no TLS; the key
+     travels in a header, so any other host over http is a key sent in the
+     clear. The loopback is recognised by NAME — a lookalike host, another
+     loopback-range address, credentials or a path that says `localhost` are
+     all refused, as the crate refuses them. */
+  it('takes plain http only to localhost, 127.0.0.1 or [::1], with or without a port', () => {
+    for (const good of ['http://localhost', 'http://localhost:11434/v1', 'http://127.0.0.1:1234/v1', 'http://[::1]:8080/v1']) {
+      expect(validBaseUrl(good), good).toBe(true)
+    }
+    for (const bad of [
+      'http://api.example.com/v1',
+      'http://localhost.example.com/v1',
+      'http://evillocalhost:1234/v1',
+      'http://127a0a0a1:1234/v1',
+      'http://127.0.0.2:1234/v1',
+      'http://0.0.0.0:11434/v1',
+      'http://localhost@evil.example/v1',
+      'http://evil.example/localhost',
+      'http://localhost:/v1',
+      'http://localhost:80a/v1',
+      'http://[::1/v1',
+      /* The platform parser still has the last word on a port. */
+      'http://localhost:99999/v1',
+    ]) {
+      expect(validBaseUrl(bad), bad).toBe(false)
+    }
+  })
+
+  /* A model name as a provider spells it — `/`, `:`, `.` and `@` included —
+     and bounded in BYTES, as the crate counts. */
+  it('takes a model name with a provider’s punctuation, and no whitespace', () => {
+    for (const good of ['gpt-4.1-mini', 'qwen2.5:7b', 'meta-llama/Llama-3.1-8B-Instruct', 'claude@latest', 'm'.repeat(200)]) {
+      expect(validModelName(good), good).toBe(true)
+    }
+    for (const bad of ['', ' gpt', 'gpt 4', 'gpt\t4', 'gpt-4\n', 'gpt\u00004', 'm'.repeat(201), 'é'.repeat(101)]) {
+      expect(validModelName(bad), JSON.stringify(bad)).toBe(false)
+    }
+    expect(new TextEncoder().encode('é'.repeat(101)).length, 'the case is not past 200 bytes, so this measures nothing').toBe(202)
+    expect(validModelName('é'.repeat(100)), '200 bytes is the crate’s own bound, inclusive').toBe(true)
+  })
+
   /* A tab or a newline pasted with a URL is the ordinary way one arrives, and
      a header built from it would be split by it. */
   it('refuses whitespace and control characters wherever they sit', () => {
@@ -211,6 +276,14 @@ describe('refuseDraft', () => {
     expect(refuseDraft(draft({ id: 'My Proxy' }))).toMatch(/lower-case/i)
     expect(refuseDraft(draft({ baseUrl: '' }))).toMatch(/address/i)
     expect(refuseDraft(draft({ baseUrl: 'http://x' }))).toMatch(/https/i)
+    expect(refuseDraft(draft({ model: '' }))).toMatch(/model/i)
+    expect(refuseDraft(draft({ model: 'gpt 4' }))).toMatch(/model name/i)
+  })
+
+  /* THE ADDRESS FIRST: a draft wrong in two places names the first field on
+     the form, which is where the reader's eye starts. */
+  it('names the address before the model when both are wrong', () => {
+    expect(refuseDraft(draft({ baseUrl: 'http://x', model: '' }))).toMatch(/address/i)
   })
 
   /* THE WORDS THEMSELVES. A blank name and a malformed one both mention a
@@ -223,9 +296,9 @@ describe('refuseDraft', () => {
       'A name is lower-case letters, digits and hyphens, up to 40 characters.',
     )
     expect(refuseDraft(draft({ baseUrl: '' }))).toBe('Give the endpoint its address.')
-    expect(refuseDraft(draft({ baseUrl: 'http://x' }))).toBe(
-      'An address is an https:// URL with a host, and no credentials in it.',
-    )
+    expect(refuseDraft(draft({ baseUrl: 'http://x' }))).toBe(ADDRESS_REFUSED)
+    expect(refuseDraft(draft({ model: '' }))).toBe('Give the name of the model to ask for — the provider’s own, like gpt-4.1-mini.')
+    expect(refuseDraft(draft({ model: 'gpt 4' }))).toBe('A model name has no spaces in it, and is at most 200 characters.')
   })
 })
 
@@ -233,8 +306,14 @@ describe('rowFor', () => {
   it('says the host and whether a key is stored, and never the key', () => {
     const row = rowFor(endpoint({ id: 'p', label: 'My proxy' }), null)
     expect(row.label).toBe('My proxy')
-    expect(row.value).toBe('api.example.com · key set')
+    expect(row.value).toBe('api.example.com · gpt-4.1-mini · key set')
     expect(row.keyState).toBe('set')
+  })
+
+  /* AN ENDPOINT STORED BEFORE THE FIELD EXISTED reads `""`, and its route
+     cannot answer (`noModelName`) — the row says why, in the same words. */
+  it('says so when the endpoint has no model name', () => {
+    expect(rowFor(endpoint({ id: 'p', model: '' }), null).value).toBe('api.example.com · no model name · key set')
   })
 
   it('says so when there is no key, which is why the route cannot answer', () => {
@@ -267,6 +346,8 @@ describe('rowFor', () => {
   it('shows the host of an address with a port or a path', () => {
     expect(hostOf('https://127.0.0.1:11434/v1')).toBe('127.0.0.1:11434')
     expect(hostOf('https://api.example.com?x=1')).toBe('api.example.com')
+    /* And a loopback address over plain http, which is the Ollama case. */
+    expect(hostOf('http://localhost:11434/v1')).toBe('localhost:11434')
   })
 })
 
@@ -276,8 +357,8 @@ function fakePlugin(over: Partial<EndpointsPlugin> = {}) {
   let listed: Endpoint[] = []
   const spies = {
     endpoints: vi.fn(async (): Promise<readonly Endpoint[]> => listed),
-    addEndpoint: vi.fn(async (id: string, label: string, baseUrl: string) => {
-      listed = [...listed.filter((one) => one.id !== id), { id, label, baseUrl, keyState: 'missing' }]
+    addEndpoint: vi.fn(async (id: string, label: string, baseUrl: string, model: string) => {
+      listed = [...listed.filter((one) => one.id !== id), { id, label, baseUrl, model, keyState: 'missing' }]
     }),
     removeEndpoint: vi.fn(async (id: string) => {
       listed = listed.filter((one) => one.id !== id)
@@ -308,7 +389,7 @@ const watch = (model: EndpointsModel): EndpointsSnapshot[] => {
   return seen
 }
 
-const BLANK = { id: '', label: '', baseUrl: '', key: '' } as const
+const BLANK = { id: '', label: '', baseUrl: '', model: '', key: '' } as const
 
 describe('the endpoints store', () => {
   it('is empty and loading until the first read', async () => {
@@ -348,7 +429,7 @@ describe('the endpoints store', () => {
 
     type(model, { label: 'My proxy', key: 'sk-secret' })
     await expect(model.save()).resolves.toBe(true)
-    expect(world.addEndpoint.mock.calls).toEqual([['my-proxy', 'My proxy', 'https://api.example.com/v1']])
+    expect(world.addEndpoint.mock.calls).toEqual([['my-proxy', 'My proxy', 'https://api.example.com/v1', 'gpt-4.1-mini']])
     expect(world.setEndpointKey.mock.calls).toEqual([['my-proxy', 'sk-secret']])
     expect(model.getSnapshot().rows[0]?.keyState).toBe('set')
     model.dispose()
@@ -753,7 +834,7 @@ describe('the endpoints store', () => {
     const seen = watch(model)
 
     await model.save()
-    expect(seen.at(-1)?.failure).toBe('An address is an https:// URL with a host, and no credentials in it.')
+    expect(seen.at(-1)?.failure).toBe(ADDRESS_REFUSED)
     model.dispose()
   })
 

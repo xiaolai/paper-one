@@ -1,3 +1,4 @@
+import { RADIUS } from './metrics'
 /**
  * Last-resort error surface.
  *
@@ -5,6 +6,23 @@
  * that throws during startup renders a blank window that is indistinguishable
  * from a slow one. Anything that reaches here is painted into the DOM instead,
  * so a failure states itself rather than looking like an empty page.
+ *
+ * ⚠️ **THE ONE SURFACE IN THE APP THAT WRITES `var(--x, #hex)` ON PURPOSE.**
+ * Everywhere else a fallback inside a `var()` is a defect — the token does all
+ * the work, so the fallback is a second colour nobody re-values with the theme,
+ * and `tokens.test.ts` is built around finding them. Here the stylesheet is one
+ * of the things that may have failed: a banner styled only through custom
+ * properties would paint as unstyled black-on-transparent text at the exact
+ * moment it is the only thing on screen. The fallbacks are the amber palette's
+ * light values, and they are what this reads as when nothing else loaded.
+ *
+ * ⚠️ **AND FOR THE SAME REASON THE GEOMETRY IS TYPESCRIPT, NOT CSS.** `RADIUS`
+ * is imported rather than `var(--radius-card)`-ed: a constant interpolated here
+ * is in the string whether or not `applyMetrics` ever ran, which is the whole
+ * point of this file. The paddings and the offsets below are the SPACE SCALE's
+ * 12, 14 and 16 — and that scale exists only in `tokens.css`, with no mirror in
+ * `metrics.ts` and nothing published through `applyMetrics`, so there is no name
+ * in TypeScript to reach for. They stay written out, and this says why.
  */
 
 const HOST_ID = 'paper-fatal'
@@ -25,7 +43,11 @@ function host(): HTMLElement {
     'max-height:40vh',
     'overflow:auto',
     'padding:14px 16px',
-    'border-radius:14px',
+    /* THE CARD RADIUS, which is what this is: a floating surface over the app,
+       drawn like the palette and the popovers. It was a 14 written out beside
+       `RADIUS.card`'s 14 — agreeing today, and the one thing in the app that
+       would not follow the shape scale if it moved. */
+    `border-radius:${RADIUS.card}px`,
     'background:var(--amber-bg,#FBF6EE)',
     'border:1px solid var(--amber-line,#E7D6BE)',
     'color:var(--amber,#9E5A16)',

@@ -7,9 +7,9 @@
 /// NO GENERAL RUNNER AMONG THEM, and that is the list's whole design
 /// constraint (WI-15.0). There is no `inference_request(url)`, no
 /// `inference_exec`, no command taking a path, a host or an argv. The webview
-/// renders untrusted book HTML and the daemon's control plane installs and
-/// executes backend binaries; every entry below is a named verb over a closed
-/// set of arguments, and the routes they reach are literals in `commands.rs`.
+/// renders untrusted book HTML and these commands start processes and spend the
+/// reader's GPU; every entry below is a named verb over a closed set of
+/// arguments, and the routes they reach are literals in `commands.rs`.
 const COMMANDS: &[&str] = &[
     // WI-15.0 / WI-15.2 — the runtime's lifecycle
     "inference_status",
@@ -27,8 +27,8 @@ const COMMANDS: &[&str] = &[
     // because "no selection can reach an agent" is a property of the call
     // graph and not of a parameter.
     "inference_gloss",
-    // WI-15.9 — Kokoro
-    "inference_speak",
+    // (WI-15.9's `inference_speak` — Kokoro — went on 2026-09-18 with the
+    // speech model; pronunciation is the system voice's, in the webview.)
     // WI-15.10 — the probe
     "inference_probe",
     // WI-15.8 — cloud endpoints. `inference_set_endpoint_key` is WRITE-ONLY;

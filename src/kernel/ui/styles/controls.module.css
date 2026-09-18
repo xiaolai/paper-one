@@ -65,7 +65,7 @@
   composes: primary;
   background: transparent;
   color: inherit;
-  box-shadow: inset 0 0 0 1px var(--line-2);
+  box-shadow: var(--ring-inset) var(--line-2);
 }
 
 /* --- the row menu ------------------------------------------------------ */
@@ -113,7 +113,7 @@
   padding: var(--space-4);
   border-radius: var(--radius-control);
   background: var(--surface);
-  box-shadow: var(--shadow-pop), 0 0 0 1px var(--line-2);
+  box-shadow: var(--shadow-pop), var(--ring) var(--line-2);
 }
 
 .menuItem {

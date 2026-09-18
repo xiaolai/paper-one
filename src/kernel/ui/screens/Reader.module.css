@@ -674,10 +674,10 @@
 }
 
 .emptyTitle {
-  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-family: var(--font-serif);
   font-size: var(--text-display);
   font-weight: var(--weight-regular);
-  line-height: 1.1;
+  line-height: var(--leading-display);
   letter-spacing: var(--track-tight);
   color: var(--ink);
   margin: 0;
@@ -687,7 +687,7 @@
   max-width: var(--prose-wide);
   margin: 0;
   font-size: var(--text-body);
-  line-height: 1.6;
+  line-height: var(--leading-body);
   color: var(--muted);
   text-wrap: pretty;
 }
@@ -724,7 +724,7 @@
   border: 1px solid var(--amber-line);
   color: var(--amber);
   font-size: var(--text-ui);
-  line-height: 1.6;
+  line-height: var(--leading-body);
   text-align: start;
 }
 

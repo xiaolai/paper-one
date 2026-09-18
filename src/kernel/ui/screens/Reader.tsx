@@ -23,6 +23,7 @@ import { bookAccent } from '../../core/bookAccent'
 import { citation, type Source } from '../../core/citation'
 import { writeClipboard } from '../clipboard'
 import type { LookUp } from '../hooks/useLookUp'
+import type { Voice } from '../../core/voice'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
 import type { ForeignAnchor } from '../reader/session'
@@ -142,6 +143,15 @@ export interface ReaderProps {
    * screen draws it and presses it, and decides nothing about it.
    */
   lookUp: LookUp
+  /**
+   * The voice, for the pronunciation control in the lookup's own face — the
+   * machine's own in the app, `NO_VOICE` where nothing can speak, which is what
+   * makes the control absent rather than dead (§07).
+   *
+   * A PROP OF ITS OWN rather than a member of `lookUp`: see the note at the
+   * call site, and `core/voice.ts` for why the port is not the gloss's.
+   */
+  voice: Voice
   /**
    * A save that did not land — a position, a tag, a mark's record — with
    * the way to try it again. Drawn at the foot of the column with the other
@@ -272,6 +282,7 @@ export function Reader({
   platform,
   book,
   lookUp,
+  voice,
   saveFailure = null,
   onDismissSaveFailure,
   importNotice = null,
@@ -1074,6 +1085,14 @@ export function Reader({
                     lookUp={lookUp.state}
                     onLookUpBack={lookUp.dismiss}
                     onInstall={lookUp.onInstall}
+                    /* ⚠️ NOT A MEMBER OF `lookUp`, THOUGH IT IS DRAWN INSIDE
+                       ONE. The voice is a fact about the machine — the same one
+                       that will read a chapter aloud — and `useLookUp` is the
+                       lookup's state; carrying it there would make the next
+                       consumer reach through the lookup to find it. See
+                       `core/voice.ts`, which sets out the same argument against
+                       hanging it off `GlossProvider`. */
+                    voice={voice}
                     /* `selected!` for the reason the copy controls above give. */
                     onRemove={() => {
                       unmark(selected!)

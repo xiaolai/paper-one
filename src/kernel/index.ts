@@ -248,7 +248,14 @@ export type { AnswerEnd, AskContext, AskPassage, Citation, CompanionProvider } f
  * is reason enough on its own; the saving was a second reason that was not
  * true, and a false reason attached to a correct decision is how the decision
  * gets reversed when somebody checks it. Found by audit. */
-export type { GlossContext, GlossProvider } from './core/gloss'
+/* `Definition` is what `gloss()` resolves with — the definition and the part of
+ * speech — so a capability can type its own answer against the port rather than
+ * declaring a second shape of it. A type, so it costs the barrel nothing. */
+export type { Definition, GlossContext, GlossProvider } from './core/gloss'
+/* The VOICE port, types only and for `NO_GLOSS`'s reason: the port's default
+ * (the machine's own voice) is `services.ts`'s to install, and `NO_VOICE` is
+ * not a capability's to reach for. What a capability needs is the shape it implements to bind it. */
+export type { Speaking, Voice } from './core/voice'
 /* The shape `GlossContext.answerIn` carries (WI-17.5) — named so a provider can
  * type what it reads without reaching into the kernel's core. The resolution
  * itself stays the kernel's: a provider is TOLD what to answer in. */
@@ -649,11 +656,18 @@ export {
 export type { ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side, Theme, Typeface } from './core/uiTypes'
 
 
-/* The design system's icon sizes. Exported for a capability's UI: `lucide`
- * takes a number, and a capability picking its own would be the one control in
- * the app drawn at a size nothing else uses. `ICON.control` is the size every
- * icon inside a control already takes. */
-export { ICON } from './core/metrics'
+/* The design system's icon sizes, and the list view's jacket. Exported for a
+ * capability's UI: `lucide` takes a number, and a capability picking its own
+ * would be the one control in the app drawn at a size nothing else uses.
+ * `ICON.control` is the size every icon inside a control already takes.
+ *
+ * `LIST_COL` and `COVER_ASPECT` are here for the same reason one step further
+ * out: a capability that draws a book's jacket in a row — the circle's roster
+ * does — has to size it, and `RosterSection` wrote `24×36` on its `<img>`,
+ * which is 2:3 done by hand next to the two constants that say it. The shelf's
+ * own list draws a 22px thumb at `COVER_ASPECT`; a jacket in a capability's row
+ * is the same object and should be the same size. */
+export { COVER_ASPECT, ICON, LIST_COL } from './core/metrics'
 
 /* THE ENVELOPE — a service call as bytes, and bytes back.
  *

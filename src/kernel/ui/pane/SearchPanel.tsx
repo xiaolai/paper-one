@@ -169,7 +169,12 @@ export function SearchPanel({ book, onGoTo }: SearchPanelProps) {
   return (
     <div className={styles.panel}>
       <div className={styles.searchField}>
-        <Search size={14} strokeWidth={ICON.stroke} style={{ color: 'var(--muted)' }} />
+        {/* ON THE RAMP. It was 14, which `ICON` has no rung for — the ramp runs
+            12, 13, 15, 17, 19, 32 — so it was a size arrived at by eye between
+            two of them. `control` is the rung whose stated role is an icon
+            inside a control, and a search field is one; it is the same 15 the
+            rest of the app's field and button glyphs take. */}
+        <Search size={ICON.control} strokeWidth={ICON.stroke} style={{ color: 'var(--muted)' }} />
         <input
           className={styles.searchInput}
           placeholder={searchable ? 'Search this book…' : 'Open a book to search it'}

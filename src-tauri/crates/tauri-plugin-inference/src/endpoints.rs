@@ -1,35 +1,31 @@
 //! Cloud endpoints, and the keys that are never read back.
 //!
-//! WI-15.8. F1 settles the shape: Lemonade already **is** the API-key gateway
-//! — `POST /v1/install` registers an OpenAI-compatible cloud provider by
-//! `base_url`, and `collection.router` routes one request across local and
-//! cloud backends. So Paper writes no OpenAI client. Local models and every
-//! API-key route are one surface, one credential path, one adapter.
+//! WI-15.8. What the reader stored — an id, a label, an OpenAI-compatible base
+//! URL, and a key in the OS keychain — and nothing that can USE them yet.
 //!
-//! # Why the key goes in the child's environment and not through the API
+//! ⚠️ **THIS FILE WAS HALF OF A PATH THAT WENT AWAY ON 2026-09-18.** Lemonade
+//! was the API-key gateway: `POST /v1/install` registered a provider by
+//! `base_url`, the key rode the daemon's environment as
+//! `LEMONADE_<PROVIDER>_API_KEY` (which outranked any runtime key), and the
+//! store re-provisioned both on every start because Lemonade held them in
+//! memory only. That path was never measured against a real provider, the
+//! audit that preceded the removal found it probably never worked, and the
+//! daemon it ran through is gone. So the store keeps what the reader typed —
+//! it is theirs — and `probe::UnusableReason::NotConnected` says why no row is
+//! usable. The settings section is behind developer options until a
+//! Paper-side client exists and has been measured with a real key.
 //!
-//! `LEMONADE_<PROVIDER>_API_KEY` takes **precedence over runtime keys**. That
-//! is a security primitive rather than a convenience: because the environment
-//! outranks anything set at runtime, a key Paper provisioned at spawn cannot
-//! be overridden by a later call to `/v1/cloud/auth`. So Paper provisions in
-//! the environment and **never exposes `/v1/cloud/auth` to the webview**.
-//! There is no command for it in `build.rs`, and that absence is the
-//! mechanism — book HTML cannot reach a route that does not exist.
-//!
-//! # Why this is real work rather than a config line
-//!
-//! Lemonade holds cloud keys **in memory only**, so they are gone the moment
-//! the daemon restarts and Paper must re-provision on every start. That means
-//! a durable store, and the only honest durable store for a credential is the
-//! OS keychain — not a file in the data root, which syncs, backs up and reads
-//! as plaintext to anything with the reader's disk.
+//! The keychain is still the store, for the reason it always was: the only
+//! honest durable store for a credential is the OS keychain — not a file in
+//! the data root, which syncs, backs up and reads as plaintext to anything
+//! with the reader's disk.
 //!
 //! # Write-only, structurally
 //!
 //! [`EndpointStore::set_key`] exists. There is **no `get_key` reachable from
 //! a command**: the reader's key is written to the keychain and read back
-//! only by [`EndpointStore::provisioning`], inside this process, on the path
-//! to a child's environment. `build.rs` has `inference_set_endpoint_key` and
+//! only by this module, and today only to learn whether it is there
+//! ([`KeyState`]). `build.rs` has `inference_set_endpoint_key` and
 //! no counterpart, so WI-15.8's acceptance — *"the key never appears in any
 //! webview-reachable value"* — is a property of the command list rather than
 //! of anybody's discipline. The settings field renders as dots because it is
@@ -45,10 +41,9 @@
 //! was sitting in the keychain to go and add one, while the spawn path
 //! propagated it as an error, so one refused entry stopped the daemon — gloss
 //! and local companion both dead over a credential neither needs (WI-20.20).
-//! Now it is [`KeyState::Unreadable`] on the row and a skipped, named endpoint
-//! in [`Provisioning`], and the daemon starts.
+//! Now it is [`KeyState::Unreadable`] on the row, and no key is read on the
+//! way to the server at all.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -129,7 +124,7 @@ pub enum KeyState {
     Unreadable,
 }
 
-/// One registered OpenAI-compatible provider.
+/// One stored OpenAI-compatible provider.
 ///
 /// **No key field.** The key lives in the keychain under [`Endpoint::id`],
 /// and this struct is what crosses IPC — so there is nothing here for a
@@ -137,21 +132,31 @@ pub enum KeyState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Endpoint {
-    /// The provider id. Also the keychain account name and the
-    /// `LEMONADE_<ID>_API_KEY` stem, so it is a closed alphabet.
+    /// The provider id. Also the keychain account name, so it is a closed
+    /// alphabet.
     pub id: String,
     /// What the settings row calls it.
     pub label: String,
-    /// The OpenAI-compatible base URL. HTTPS only.
+    /// The OpenAI-compatible base URL: `https://`, or `http://` to a loopback
+    /// host — see [`valid_base_url`].
     pub base_url: String,
+    /// The model the endpoint is asked for, in the PROVIDER'S spelling.
+    ///
+    /// An endpoint stored before this field existed reads `""`, and its row
+    /// says `No model name` rather than being offered: a request needs one,
+    /// and there is no model name Paper could honestly guess for somebody
+    /// else's server.
+    #[serde(default)]
+    pub model: String,
     /// Whether a key is stored, and whether that could be found out. A STATE,
     /// never the key.
     #[serde(default)]
     pub key_state: KeyState,
 }
 
-/// A provider id: `[a-z0-9-]`, so it is safe as an environment-variable stem
-/// and as a keychain account.
+/// A provider id: `[a-z0-9-]`, so it is safe as a keychain account — and as
+/// the environment-variable stem it was while keys rode lemond's environment,
+/// which is a property worth keeping for whatever client comes next.
 ///
 /// The length comes from [`crate::limits::MAX_ENDPOINT_ID`] rather than a
 /// literal, because the commands bound the same field before it ever reaches
@@ -165,19 +170,28 @@ pub fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// A base URL Paper will hand the daemon.
+/// A base URL Paper will store and send the reader's key to.
 ///
-/// HTTPS only, and no credentials in the URL. `https://user:pass@host` is a
-/// key smuggled into a field that is displayed, logged and persisted in
-/// plaintext — refused here rather than discovered in a screenshot.
+/// HTTPS, and no credentials in the URL. `https://user:pass@host` is a key
+/// smuggled into a field that is displayed, logged and persisted in plaintext
+/// — refused here rather than discovered in a screenshot.
+///
+/// ⚠️ **`http://` ONLY TO THIS MACHINE**, since 2026-09-18: Ollama and LM Studio
+/// serve an OpenAI-compatible API on `http://localhost:<port>/v1`, and a reader
+/// who runs one is the reason to accept it — a local model Paper does not have
+/// to ship. The host must be written as `localhost`, `127.0.0.1` or `[::1]`;
+/// plain HTTP anywhere else would send the key across a network in the clear.
 pub fn valid_base_url(url: &str) -> bool {
     /* ⚠️ A PREFIX CHECK IS NOT VALIDATION, which is what this was:
      * `starts_with("https://")` accepted `https://` on its own, a URL with a
      * space in it, one with a fragment, and one with no host at all. Each
-     * reaches the daemon as a provider registration that cannot resolve, so it
-     * surfaces as a route that fails when pressed rather than as a value
+     * reached lemond as a provider registration that cannot resolve, so it
+     * surfaced as a route that failed when pressed rather than as a value
      * refused when it was typed. Found by audit. */
-    if !url.starts_with("https://") || url.len() > crate::limits::MAX_ENDPOINT_URL {
+    let loopback_http = url.starts_with("http://");
+    if !(url.starts_with("https://") || loopback_http)
+        || url.len() > crate::limits::MAX_ENDPOINT_URL
+    {
         return false;
     }
     /* No whitespace or control characters anywhere: they cannot appear in a
@@ -185,7 +199,7 @@ pub fn valid_base_url(url: &str) -> bool {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return false;
     }
-    let rest = &url["https://".len()..];
+    let rest = &url[url.find("://").map_or(0, |at| at + 3)..];
     /* No credentials, and no fragment — a base URL is a prefix Paper appends a
      * route to, and `#` would make everything after it part of the fragment. */
     if rest.contains('@') || rest.contains('#') {
@@ -194,11 +208,49 @@ pub fn valid_base_url(url: &str) -> bool {
     /* There has to BE a host. The authority is everything up to the first `/`
      * or `?`; an empty one is `https://` wearing a URL's clothes. */
     let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    if loopback_http {
+        return is_loopback_authority(authority);
+    }
     !authority.is_empty()
         && authority
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':')
         && authority.chars().any(|c| c.is_ascii_alphanumeric())
+}
+
+/// `localhost`, `127.0.0.1` or `[::1]`, with an optional port — the three
+/// spellings of this machine that no DNS answer or hosts file can redirect
+/// (`localhost` is resolved by the system resolver, which the RFC reserves to
+/// the loopback). Nothing else earns `http://`.
+fn is_loopback_authority(authority: &str) -> bool {
+    /* The IPv6 literal carries colons of its own, so it is split off by its
+    brackets; every other host ends at the first colon. */
+    let (host, port) = match authority.strip_prefix("[::1]") {
+        Some(port) => ("[::1]", port),
+        None => authority.split_at(authority.find(':').unwrap_or(authority.len())),
+    };
+    let port_ok = port.is_empty()
+        || port
+            .strip_prefix(':')
+            .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]") && port_ok
+}
+
+/// Whether a stored base URL addresses THIS MACHINE — which, for a URL
+/// [`valid_base_url`] accepted, is exactly the `http://` ones.
+pub fn is_loopback(base_url: &str) -> bool {
+    base_url.starts_with("http://")
+}
+
+/// A model name as a provider spells it: `gpt-4.1-mini`, `qwen2.5:7b`,
+/// `meta-llama/Llama-3.1-8B-Instruct`. Any printable characters, because
+/// providers use `/`, `:`, `.` and `@`; no whitespace or control characters,
+/// because the name goes into a JSON body and a stray newline in one is a paste
+/// accident, not a model; and bounded by [`crate::limits::MAX_ENDPOINT_MODEL`].
+pub fn valid_model_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= crate::limits::MAX_ENDPOINT_MODEL
+        && !name.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// The endpoint list and the keychain behind it.
@@ -219,6 +271,9 @@ struct StoredEndpoint {
     id: String,
     label: String,
     base_url: String,
+    /// See [`Endpoint::model`]: absent in a list written before it existed.
+    #[serde(default)]
+    model: String,
 }
 
 impl EndpointStore {
@@ -264,11 +319,11 @@ impl EndpointStore {
          * the bytes are in the page cache, so a rename could reach the disk
          * ahead of the contents it publishes: power lost in that window leaves
          * a zero-length `endpoints.json`, which `read` refuses as
-         * `ManifestMalformed`, which `provisioning` propagates, which
-         * `ensure_started` `?`s — so the daemon will not start at all, for the
-         * LOCAL model too, until somebody deletes the file by hand. The header
-         * two lines up says the write-then-rename exists to stop exactly that
-         * lockout; without the barrier it only stops the torn-write half of it.
+         * `ManifestMalformed` — and while keys were provisioned at every
+         * start, that stopped the daemon for the LOCAL model too, until
+         * somebody deleted the file by hand. The header two lines up says the
+         * write-then-rename exists to stop exactly that lockout; without the
+         * barrier it only stops the torn-write half of it.
          *
          * ⚠️ **A SECOND COPY OF `peer::store::write_atomic`, DELIBERATELY.**
          * That function does this correctly and is `pub` — within its own
@@ -325,6 +380,7 @@ impl EndpointStore {
                 id: e.id,
                 label: e.label,
                 base_url: e.base_url,
+                model: e.model,
             })
             .collect())
     }
@@ -348,13 +404,18 @@ impl EndpointStore {
     }
 
     /// Register an endpoint, or replace one with the same id.
-    pub fn add(&self, id: &str, label: &str, base_url: &str) -> Result<()> {
+    pub fn add(&self, id: &str, label: &str, base_url: &str, model: &str) -> Result<()> {
         if !valid_id(id) {
             return Err(Error::ModelUnknown(id.to_owned()));
         }
         if !valid_base_url(base_url) {
             return Err(Error::ManifestMalformed(format!(
-                "{base_url:?} must be an https URL without embedded credentials"
+                "{base_url:?} must be an https URL (or http to this machine) without embedded credentials"
+            )));
+        }
+        if !valid_model_name(model) {
+            return Err(Error::ManifestMalformed(format!(
+                "{model:?} is not a model name"
             )));
         }
         let mut stored = self.read()?;
@@ -363,6 +424,7 @@ impl EndpointStore {
             id: id.to_owned(),
             label: label.to_owned(),
             base_url: base_url.to_owned(),
+            model: model.to_owned(),
         });
         self.write(&stored)
     }
@@ -407,100 +469,18 @@ impl EndpointStore {
         self.keychain.delete(id)
     }
 
-    /// One key, for this process only. An empty key reads as absent:
-    /// `set_key("")` is a clear, and an empty `LEMONADE_X_API_KEY` still
-    /// outranks a runtime key, so it would authenticate as nobody and be
-    /// harder to diagnose than a missing variable.
+    /// One key, for THIS PROCESS only — the request a lookup sends to the
+    /// endpoint (`cloud.rs`) and nothing else. An empty key reads as absent:
+    /// `set_key("")` is a clear, and an empty key would authenticate as nobody
+    /// and be harder to diagnose than a missing one.
     ///
-    /// `pub(crate)` on purpose: no command may call this, and the module
-    /// boundary is what enforces it.
+    /// `pub(crate)` on purpose: no command may return this, and the module
+    /// boundary is what enforces it — there is still no command that reads a
+    /// key back (see the module header).
     pub(crate) fn key(&self, id: &str) -> Result<Option<String>> {
         Ok(self.keychain.read(id)?.filter(|key| !key.is_empty()))
     }
-
-    /// Everything a daemon start takes from the store — the ONE place keys
-    /// are read — with the keychain's refusals kept per endpoint.
-    ///
-    /// A refusal for one endpoint skips THAT endpoint: it is neither
-    /// provisioned nor registered, and it is named in `unreadable` so the
-    /// start can say so. It is not an error, because the daemon a local model
-    /// needs has nothing to do with the keychain (see the module header). The
-    /// list failing to read is still an error: that is every endpoint, not
-    /// one.
-    pub(crate) fn provisioning(&self) -> Result<Provisioning> {
-        let mut out = Provisioning::default();
-        for endpoint in self.read()?.endpoints {
-            match self.key(&endpoint.id) {
-                Ok(Some(key)) => {
-                    out.keys.insert(endpoint.id.clone(), key);
-                    out.registrations.push(Registration {
-                        backend: CLOUD_BACKEND,
-                        provider: endpoint.id,
-                        base_url: endpoint.base_url,
-                    });
-                }
-                /* No key: omitted from both, rather than provisioned empty or
-                 * registered as a provider that cannot authenticate. */
-                Ok(None) => {}
-                /* Refused: this endpoint's problem, and this endpoint's only.
-                 * It is a WARNING because it is one — the endpoint stays
-                 * listed, unusable, saying why — and it is not the `?` that
-                 * used to take the whole start down with it. */
-                Err(refused) => {
-                    log::warn!(
-                        "inference: the keychain would not read the key for endpoint {}; \
-                         skipping it: {refused}",
-                        endpoint.id
-                    );
-                    out.unreadable.insert(endpoint.id);
-                }
-            }
-        }
-        Ok(out)
-    }
 }
-
-/// What a daemon start takes from the store. See
-/// [`EndpointStore::provisioning`].
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct Provisioning {
-    /// Every key, by provider id, for the child's environment.
-    pub keys: BTreeMap<String, String>,
-    /// Every keyed endpoint, as a daemon registration.
-    pub registrations: Vec<Registration>,
-    /// The endpoints whose key the keychain would not read. Not provisioned,
-    /// not registered, and named — so the start can log them and the probe
-    /// can refuse to offer them.
-    pub unreadable: BTreeSet<String>,
-}
-
-/// What `POST /v1/install` needs to register an OpenAI-compatible provider.
-///
-/// F1's other half, and **it was missing**: the store persisted an endpoint
-/// and the spawn provisioned its key, but nothing ever told the daemon the
-/// provider existed — so an endpoint route could be selected, would be listed
-/// as usable, and could never answer. An audit caught it.
-///
-/// The key is NOT in this payload and must never be: `LEMONADE_<ID>_API_KEY`
-/// is provisioned in the child's environment at spawn, where it outranks any
-/// runtime key, and that precedence is the whole reason `/v1/cloud/auth` is
-/// not exposed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Registration {
-    /// ⚠️ **THE LITERAL STRING `"cloud"`, AND IT IS REQUIRED.**
-    /// `POST /v1/install` is dispatched BY THIS FIELD: the spec says "any
-    /// value other than `\"cloud\"` is treated as a local backend install".
-    /// Omitting it — which the first version of this struct did — makes the
-    /// daemon read a provider registration as a request to install a local
-    /// backend named by a missing recipe, reject it, and leave the endpoint
-    /// route listed and unable to answer. An audit caught it.
-    pub backend: &'static str,
-    pub provider: String,
-    pub base_url: String,
-}
-
-/// The one value [`Registration::backend`] may hold.
-pub const CLOUD_BACKEND: &str = "cloud";
 
 #[cfg(test)]
 mod tests {
@@ -552,8 +532,22 @@ mod tests {
             ("ids", "invalid"),
             ("baseUrls", "valid"),
             ("baseUrls", "invalid"),
+            ("models", "valid"),
+            ("models", "invalid"),
         ] {
             assert!(!cases(group, key).is_empty(), "{group}.{key} is empty");
+        }
+        for name in cases("models", "valid") {
+            assert!(
+                valid_model_name(&name),
+                "the corpus calls {name:?} a model name"
+            );
+        }
+        for name in cases("models", "invalid") {
+            assert!(
+                !valid_model_name(&name),
+                "the corpus refuses {name:?} as a model name"
+            );
         }
 
         for id in cases("ids", "valid") {
@@ -600,8 +594,8 @@ mod tests {
     }
 
     /// A prefix check is not validation. Each of these passed the old
-    /// `starts_with("https://")` test and reaches the daemon as a provider
-    /// registration that cannot resolve.
+    /// `starts_with("https://")` test, and would reach a provider as a request
+    /// that cannot resolve.
     #[test]
     fn a_url_that_is_only_a_scheme_is_refused() {
         for bad in [
@@ -622,51 +616,18 @@ mod tests {
         }
     }
 
-    /// An empty key is a CLEAR. Stored, it made `list` report a key while the
-    /// spawn omitted it — a row saying "configured" over a route that could
-    /// never authenticate.
+    /// An empty key is a CLEAR. Stored, it made `list` report a key over a
+    /// route that could never authenticate.
     #[test]
     fn an_empty_key_clears_rather_than_storing() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
         let keychain = crate::testutil::FakeKeychain::default().with_key("proxy", "sk-old");
         let store = EndpointStore::with_keychain(dir.path(), std::sync::Arc::new(keychain));
-        store.add("proxy", "P", "https://a.example.com/v1").unwrap();
+        store
+            .add("proxy", "P", "https://a.example.com/v1", "gpt-4.1-mini")
+            .unwrap();
         store.set_key("proxy", "").unwrap();
-        let provisioning = store.provisioning().unwrap();
-        assert!(!provisioning.keys.contains_key("proxy"));
-        assert!(provisioning.registrations.is_empty());
         assert_eq!(store.list().unwrap()[0].key_state, KeyState::Missing);
-    }
-
-    /// F1's other half: an endpoint with a key becomes a daemon registration,
-    /// and the KEY IS NOT IN IT — it rides the child's environment, where it
-    /// outranks any runtime key.
-    #[test]
-    fn a_registration_carries_the_base_url_and_never_the_key() {
-        let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = fake_store(&dir);
-        store.add("proxy", "P", "https://a.example.com/v1").unwrap();
-        /* No key stored, so nothing to register: a provider that cannot
-         * authenticate would be offered by the router and fail. */
-        assert!(store.provisioning().unwrap().registrations.is_empty());
-
-        let registration = Registration {
-            backend: CLOUD_BACKEND,
-            provider: "proxy".to_owned(),
-            base_url: "https://a.example.com/v1".to_owned(),
-        };
-        let json = serde_json::to_value(&registration).unwrap();
-        /* The dispatch field. Without it the daemon reads this as a LOCAL
-         * backend install and rejects it — the route then lists as usable and
-         * never answers. */
-        assert_eq!(json["backend"], "cloud");
-        assert_eq!(json["provider"], "proxy");
-        assert_eq!(json["base_url"], "https://a.example.com/v1");
-        assert_eq!(
-            json.as_object().unwrap().len(),
-            3,
-            "a registration has exactly three fields and none is a key"
-        );
     }
 
     #[test]
@@ -690,7 +651,12 @@ mod tests {
         let dir = crate::testutil::ScratchDir::new("endpoints");
         let store = fake_store(&dir);
         store
-            .add("proxy", "My proxy", "https://api.example.com/v1")
+            .add(
+                "proxy",
+                "My proxy",
+                "https://api.example.com/v1",
+                "gpt-4.1-mini",
+            )
             .unwrap();
 
         let listed = store.list().unwrap();
@@ -711,10 +677,15 @@ mod tests {
         let dir = crate::testutil::ScratchDir::new("endpoints");
         let store = fake_store(&dir);
         store
-            .add("proxy", "First", "https://a.example.com/v1")
+            .add("proxy", "First", "https://a.example.com/v1", "gpt-4.1-mini")
             .unwrap();
         store
-            .add("proxy", "Second", "https://b.example.com/v1")
+            .add(
+                "proxy",
+                "Second",
+                "https://b.example.com/v1",
+                "gpt-4.1-mini",
+            )
             .unwrap();
         let listed = store.list().unwrap();
         assert_eq!(listed.len(), 1);
@@ -726,9 +697,23 @@ mod tests {
     fn a_bad_id_or_url_is_refused_at_add() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
         let store = fake_store(&dir);
-        assert!(store.add("Bad Id", "x", "https://a.example.com").is_err());
-        assert!(store.add("ok", "x", "http://a.example.com").is_err());
+        assert!(store
+            .add("Bad Id", "x", "https://a.example.com", "gpt-4.1-mini")
+            .is_err());
+        assert!(store
+            .add("ok", "x", "http://a.example.com", "gpt-4.1-mini")
+            .is_err());
+        assert!(
+            store
+                .add("ok", "x", "https://a.example.com", "gpt 4")
+                .is_err(),
+            "a model name with a space in it is a paste accident"
+        );
         assert_eq!(store.list().unwrap().len(), 0, "nothing was written");
+        store
+            .add("local", "Ollama", "http://localhost:11434/v1", "qwen2.5:7b")
+            .expect("http to this machine is an endpoint Paper need not ship");
+        assert_eq!(store.list().unwrap()[0].model, "qwen2.5:7b");
     }
 
     /// The IPC shape carries a key STATE, never a key.
@@ -738,15 +723,20 @@ mod tests {
             id: "proxy".to_owned(),
             label: "My proxy".to_owned(),
             base_url: "https://api.example.com/v1".to_owned(),
+            model: "gpt-4.1-mini".to_owned(),
             key_state: KeyState::Set,
         };
         let json = serde_json::to_value(&endpoint).unwrap();
         assert_eq!(json["keyState"], "set");
+        assert_eq!(
+            json["model"], "gpt-4.1-mini",
+            "the model name is not a secret, and the pane shows it"
+        );
         let rendered = json.to_string();
         assert!(!rendered.contains("password"));
         assert!(!rendered.contains("apiKey"));
-        // Structurally: the struct has exactly four fields and none is a key.
-        assert_eq!(json.as_object().unwrap().len(), 4);
+        // Structurally: the struct has exactly five fields and none is a key.
+        assert_eq!(json.as_object().unwrap().len(), 5);
         /* The three states are three distinct words on the wire, so the
          * TypeScript side cannot read one as another. */
         let tags: std::collections::BTreeSet<String> =
@@ -763,24 +753,6 @@ mod tests {
         assert_eq!(tags.len(), 3);
     }
 
-    /// A stored endpoint with no key is omitted from the spawn environment
-    /// rather than provisioned empty — an empty value still outranks a
-    /// runtime key (F1) and would authenticate as nobody.
-    #[test]
-    fn an_endpoint_without_a_key_is_not_provisioned() {
-        let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = fake_store(&dir);
-        store
-            .add("proxy", "My proxy", "https://a.example.com/v1")
-            .unwrap();
-        // No key set for it.
-        let keys = store.provisioning().unwrap().keys;
-        assert!(
-            !keys.contains_key("proxy"),
-            "an unkeyed endpoint must not become an empty env var"
-        );
-    }
-
     /// Removing an endpoint clears its key too — an endpoint gone from the
     /// list while its key stayed is a credential the reader thinks they
     /// deleted.
@@ -790,12 +762,21 @@ mod tests {
         let keychain = crate::testutil::FakeKeychain::default().with_key("proxy", "sk-1");
         let store = EndpointStore::with_keychain(dir.path(), std::sync::Arc::new(keychain));
         store
-            .add("proxy", "My proxy", "https://a.example.com/v1")
+            .add(
+                "proxy",
+                "My proxy",
+                "https://a.example.com/v1",
+                "gpt-4.1-mini",
+            )
             .unwrap();
-        assert!(store.provisioning().unwrap().keys.contains_key("proxy"));
+        assert_eq!(store.key_state("proxy"), KeyState::Set);
         store.remove("proxy").unwrap();
         assert_eq!(store.list().unwrap().len(), 0);
-        assert!(!store.provisioning().unwrap().keys.contains_key("proxy"));
+        assert_eq!(
+            store.key_state("proxy"),
+            KeyState::Missing,
+            "the key went with the row"
+        );
     }
 
     /// `remove` on an unkeyed id is still clean: `clear_key` treats absent as
@@ -805,7 +786,12 @@ mod tests {
         let dir = crate::testutil::ScratchDir::new("endpoints");
         let store = fake_store(&dir);
         store
-            .add("proxy", "My proxy", "https://a.example.com/v1")
+            .add(
+                "proxy",
+                "My proxy",
+                "https://a.example.com/v1",
+                "gpt-4.1-mini",
+            )
             .unwrap();
         store.remove("proxy").unwrap();
         assert_eq!(store.list().unwrap().len(), 0);
@@ -820,10 +806,14 @@ mod tests {
             .with_key("denied", "sk-denied")
             .refusing(&["denied"]);
         let store = EndpointStore::with_keychain(dir.path(), std::sync::Arc::new(keychain));
-        store.add("keyed", "K", "https://k.example.com/v1").unwrap();
-        store.add("bare", "B", "https://b.example.com/v1").unwrap();
         store
-            .add("denied", "D", "https://d.example.com/v1")
+            .add("keyed", "K", "https://k.example.com/v1", "gpt-4.1-mini")
+            .unwrap();
+        store
+            .add("bare", "B", "https://b.example.com/v1", "gpt-4.1-mini")
+            .unwrap();
+        store
+            .add("denied", "D", "https://d.example.com/v1", "gpt-4.1-mini")
             .unwrap();
         store
     }
@@ -849,66 +839,6 @@ mod tests {
         assert_eq!(state_of("denied"), KeyState::Unreadable);
     }
 
-    /// WI-20.20 (a). One endpoint the keychain will not answer for must not
-    /// stop the daemon: it is skipped, named, and the rest are provisioned.
-    #[test]
-    fn provisioning_skips_the_unreadable_endpoint_and_keeps_the_rest() {
-        let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = store_with_one_refusal(&dir);
-        let provisioning = store.provisioning().unwrap();
-        assert_eq!(
-            provisioning.keys,
-            BTreeMap::from([("keyed".to_owned(), "sk-keyed".to_owned())])
-        );
-        assert_eq!(
-            provisioning
-                .registrations
-                .iter()
-                .map(|r| r.provider.as_str())
-                .collect::<Vec<_>>(),
-            ["keyed"]
-        );
-        assert_eq!(
-            provisioning.unreadable,
-            std::collections::BTreeSet::from(["denied".to_owned()]),
-            "the refused endpoint is named, so the start can say so"
-        );
-        /* A keyless endpoint is neither refused nor provisioned: it is the
-         * ordinary case the header describes, and it stays that way. */
-        assert!(!provisioning.unreadable.contains("bare"));
-    }
-
-    /// The daemon still starts when EVERY key is unreadable — an empty
-    /// provisioning, not an error. A local model has nothing to do with the
-    /// keychain and must keep working through a keychain that has locked
-    /// Paper out entirely.
-    #[test]
-    fn provisioning_succeeds_with_nothing_when_every_key_is_unreadable() {
-        let dir = crate::testutil::ScratchDir::new("endpoints");
-        let keychain = crate::testutil::FakeKeychain::default().refusing(&["a", "b"]);
-        let store = EndpointStore::with_keychain(dir.path(), std::sync::Arc::new(keychain));
-        store.add("a", "A", "https://a.example.com/v1").unwrap();
-        store.add("b", "B", "https://b.example.com/v1").unwrap();
-        let provisioning = store.provisioning().unwrap();
-        assert!(provisioning.keys.is_empty());
-        assert!(provisioning.registrations.is_empty());
-        assert_eq!(provisioning.unreadable.len(), 2);
-    }
-
-    /// The LIST failing is still a failure: a malformed file is not a keychain
-    /// refusal, and reading it as "no endpoints" would silently drop every
-    /// endpoint the reader configured.
-    #[test]
-    fn provisioning_still_refuses_a_malformed_list() {
-        let dir = crate::testutil::ScratchDir::new("endpoints");
-        std::fs::write(dir.path().join(ENDPOINTS_FILE), "{ not json").unwrap();
-        let store = fake_store(&dir);
-        assert_eq!(
-            store.provisioning().unwrap_err().kind(),
-            "manifestMalformed"
-        );
-    }
-
     /// WI-20.20 (d), the store's half. The row is gone from the list whether
     /// or not the keychain let the key go, and the refusal is reported rather
     /// than swallowed — a key the reader believes deleted and cannot see is
@@ -931,7 +861,12 @@ mod tests {
         let dir = crate::testutil::ScratchDir::new("endpoints");
         let store = fake_store(&dir);
         store
-            .add("proxy", "My proxy", "https://a.example.com/v1")
+            .add(
+                "proxy",
+                "My proxy",
+                "https://a.example.com/v1",
+                "gpt-4.1-mini",
+            )
             .unwrap();
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()

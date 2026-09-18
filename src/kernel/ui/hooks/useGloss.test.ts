@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { GlossContext, GlossProvider } from '../../core/gloss'
+import type { Definition, GlossContext, GlossProvider } from '../../core/gloss'
 import { buildFixture, elem, txt, type Fixture } from '../reader/wordSnap/domFake.testkit'
 import { askGloss, glossRequest, sentenceAround, useGloss, type GlossSelection, type GlossState } from './useGloss'
 
@@ -77,7 +77,7 @@ function spyProvider(): {
       },
       async gloss(term, context) {
         seen.push({ term, context })
-        return 'a definition'
+        return { text: 'a definition' }
       },
     },
   }
@@ -505,8 +505,8 @@ describe('with no model installed', () => {
       installAt: MODELS,
       gloss: (_term, _context, signal) => {
         signalled = signal
-        return new Promise<string>((resolve) => {
-          answer = resolve
+        return new Promise<Definition>((resolve) => {
+          answer = (text) => resolve({ text })
         })
       },
     }
@@ -657,8 +657,8 @@ describe('with a passage rather than a term', () => {
       warm() {},
       gloss: (_term, _context, signal) => {
         signalled = signal
-        return new Promise<string>((resolve) => {
-          answer = resolve
+        return new Promise<Definition>((resolve) => {
+          answer = (text) => resolve({ text })
         })
       },
     }
@@ -766,7 +766,7 @@ describe('when a model arrives', () => {
   }
 
   it('takes down the prompt to install one', () => {
-    const { provider, live } = liveProvider(async () => 'unreachable')
+    const { provider, live } = liveProvider(async () => ({ text: 'unreachable' }))
     const { result, rerender } = renderHook(() => useGloss(provider))
     act(() => {
       result.current.ask(() => ({ term: 'gam', sentence: 'A gam.' }), 'gam', CONTEXT)
@@ -782,7 +782,7 @@ describe('when a model arrives', () => {
   const settled: readonly (readonly [string, GlossProvider['gloss'], GlossState])[] = [
     [
       'a definition on screen',
-      async () => 'A meeting between whaling ships.',
+      async () => ({ text: 'A meeting between whaling ships.' }),
       { kind: 'ready', term: 'gam', text: 'A meeting between whaling ships.' },
     ],
     [
@@ -878,7 +878,7 @@ describe('when the passage stops being shown', () => {
     /* An anchor is what asks for one — see the warm case below. */
     warm() {},
     async gloss() {
-      return 'a meeting between whaling ships'
+      return { text: 'a meeting between whaling ships' }
     },
   }
 
@@ -925,7 +925,7 @@ describe('when the passage stops being shown', () => {
       warm() {},
       gloss(_term, _context, signal) {
         signalled = signal
-        return new Promise<string>(() => {})
+        return new Promise<Definition>(() => {})
       },
     }
     const { result, rerender } = renderHook(({ at }: { at: string | null }) => useGloss(slow, at), {
@@ -969,7 +969,7 @@ describe('when the passage stops being shown', () => {
       warm() {},
       gloss(_term, _context, signal) {
         signalled = signal
-        return new Promise<string>(() => {})
+        return new Promise<Definition>(() => {})
       },
     }
     const { result, unmount } = renderHook(() => useGloss(slow))
@@ -1004,8 +1004,8 @@ describe('a lookup the reader has moved on from', () => {
         installAt: MODELS,
         warm() {},
         gloss: (_term, _context, signal) =>
-          new Promise<string>((resolve) => {
-            calls.push({ signal, answer: resolve })
+          new Promise<Definition>((resolve) => {
+            calls.push({ signal, answer: (text) => resolve({ text }) })
           }),
       },
     }
@@ -1032,7 +1032,7 @@ describe('a lookup the reader has moved on from', () => {
       installAt: MODELS,
       warm() {},
       gloss: (_term, _context, signal) =>
-        new Promise<string>((_resolve, reject) => {
+        new Promise<Definition>((_resolve, reject) => {
           signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
         }),
     }
@@ -1094,7 +1094,7 @@ describe('a lookup the reader has moved on from', () => {
       warm() {},
       async gloss(_term, _context, signal) {
         signals.push(signal)
-        return 'A meeting between whaling ships.'
+        return { text: 'A meeting between whaling ships.' }
       },
     }
     const { result } = renderHook(() => useGloss(answering))
@@ -1124,7 +1124,7 @@ describe('a lookup the reader has moved on from', () => {
       installAt: MODELS,
       warm() {},
       async gloss() {
-        return 'from the first render'
+        return { text: 'from the first render' }
       },
     }
     const latest: GlossProvider = {
@@ -1132,7 +1132,7 @@ describe('a lookup the reader has moved on from', () => {
       installAt: MODELS,
       warm() {},
       async gloss() {
-        return 'from the latest render'
+        return { text: 'from the latest render' }
       },
     }
     const { result, rerender } = renderHook(({ provider }: { provider: GlossProvider }) => useGloss(provider), {
@@ -1249,7 +1249,7 @@ describe('an answered lookup', () => {
     installAt: MODELS,
     warm() {},
     async gloss() {
-      return text
+      return { text }
     },
   })
 
@@ -1319,8 +1319,8 @@ describe('an answered lookup', () => {
       installAt: MODELS,
       warm() {},
       gloss: () =>
-        new Promise<string>((resolve) => {
-          answer = resolve
+        new Promise<Definition>((resolve) => {
+          answer = (text) => resolve({ text })
         }),
     }
     const { result } = renderHook(() => useGloss(slow))
@@ -1385,7 +1385,7 @@ describe('an answered lookup', () => {
       warm() {},
       async gloss(_term, context) {
         seen.push(context)
-        return 'x'
+        return { text: 'x' }
       },
     }
     const chinese = { tag: 'zh-Hans', name: 'Simplified Chinese', label: '简体中文' } as const
@@ -1440,7 +1440,7 @@ describe('a lookup that throws instead of rejecting', () => {
     installAt: MODELS,
     warm() {},
     async gloss() {
-      return 'Guarded.'
+      return { text: 'Guarded.' }
     },
   }
 
@@ -1452,7 +1452,7 @@ describe('a lookup that throws instead of rejecting', () => {
       warm() {},
       gloss(_term, _context, signal) {
         signalled = signal
-        return new Promise<string>(() => {})
+        return new Promise<Definition>(() => {})
       },
     }
     const { result } = renderHook(() => useGloss(slow))

@@ -274,6 +274,7 @@ describe('what a contributed pane is handed', () => {
   const friends = {
     id: 'circle:friends' as const,
     label: 'Friends',
+    icon: 'people' as const,
     screens: ['library', 'reader'] as const,
     render: (context: { readonly bookId: string | null }) => <p>{`book=${String(context.bookId)}`}</p>,
   }

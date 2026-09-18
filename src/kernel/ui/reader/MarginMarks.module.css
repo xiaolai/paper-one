@@ -21,13 +21,13 @@
      scheme is invisible — which is the place they are reading it from. The
      rule colour rather than the fill: 2px of a pale band is not a colour, it
      is a smudge. Falls back to the gold for a mark made before tints. */
-  border-inline-start: 2px solid var(--mark-yellow-rule);
+  border-inline-start: var(--kind-rule-w) solid var(--mark-yellow-rule);
   border-radius: 0 var(--radius-chip) var(--radius-chip) 0;
   background: none;
   color: var(--muted);
   font-family: inherit;
   font-size: var(--text-small);
-  line-height: 1.45;
+  line-height: var(--leading-ui);
   text-align: start;
   cursor: pointer;
   pointer-events: auto;

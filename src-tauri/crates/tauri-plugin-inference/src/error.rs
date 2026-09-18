@@ -36,9 +36,10 @@ pub enum Error {
     #[error("the runtime root must be an absolute path, got {}", .0.display())]
     RootNotAbsolute(PathBuf),
 
-    /// The shipped `lemond` is not where the bundle says it is. Named rather
-    /// than falling back to a `PATH` lookup: resolving a supervised child
-    /// through `PATH` is F5's general runner wearing a different hat.
+    /// The shipped runtime's manifest is not where the bundle says it is.
+    /// Named rather than falling back to a `PATH` lookup: resolving a
+    /// supervised child through `PATH` is F5's general runner wearing a
+    /// different hat.
     #[error("the inference runtime is not installed at {}", .0.display())]
     RuntimeMissing(PathBuf),
 
@@ -56,7 +57,14 @@ pub enum Error {
     #[error("the inference runtime is not running")]
     NotRunning,
 
-    /// The daemon was launched but never answered `/api/v1/health` inside the
+    /// Nothing to launch the server ON. It runs in single-model mode, so a
+    /// start with no model installed has nothing to load — refused here, by
+    /// name, rather than starting a server that fails at the first question
+    /// (lemond did that: up in 0.2 s, with nothing to answer with).
+    #[error("no language model is installed")]
+    NoModelInstalled,
+
+    /// The daemon was launched but never answered `/health` `ok` inside the
     /// deadline. Its own log tail is the message, because the useful half of
     /// this failure is always what the child said before giving up.
     #[error("the inference runtime did not become ready within {secs}s: {tail}")]
@@ -75,6 +83,20 @@ pub enum Error {
     /// NOT CARRIED — see the module header.
     #[error("the inference runtime answered {status} for {route}")]
     RuntimeHttp { status: u16, route: String },
+
+    // ── an OpenAI-compatible endpoint (`cloud.rs`) ─────────────────────────
+    /// The endpoint answered with a status that is not success. Named by the
+    /// endpoint's ID, which the reader chose — never its key, and never the
+    /// response body, which `RuntimeHttp`'s reasoning applies to twice over:
+    /// a provider's 401 body is the likeliest place for a key to be echoed.
+    #[error("the endpoint {endpoint} answered {status}")]
+    EndpointHttp { endpoint: String, status: u16 },
+
+    /// The endpoint could not be reached at all — DNS, TLS, a refused
+    /// connection, a timeout. Distinct from `EndpointHttp` because the advice
+    /// is: check the address or the network, not the key.
+    #[error("the endpoint {endpoint} could not be reached: {message}")]
+    EndpointUnreachable { endpoint: String, message: String },
 
     /// The daemon's answer did not parse into the shape this build expects.
     #[error("the inference runtime's answer for {route} was malformed: {message}")]
@@ -213,11 +235,14 @@ impl Error {
             Error::RuntimeMissing(_) => "runtimeMissing",
             Error::RuntimeUnverified { .. } => "runtimeUnverified",
             Error::NotRunning => "notRunning",
+            Error::NoModelInstalled => "noModelInstalled",
             Error::NotReady { .. } => "notReady",
             Error::RuntimeExited { .. } => "runtimeExited",
             Error::RuntimeUnreachable { .. } => "runtimeUnreachable",
             Error::RuntimeHttp { .. } => "runtimeHttp",
             Error::RuntimeMalformed { .. } => "runtimeMalformed",
+            Error::EndpointHttp { .. } => "endpointHttp",
+            Error::EndpointUnreachable { .. } => "endpointUnreachable",
             Error::ModelUnknown(_) => "modelUnknown",
             Error::DigestMismatch { .. } => "digestMismatch",
             Error::SizeMismatch { .. } => "sizeMismatch",
@@ -313,6 +338,7 @@ mod tests {
             }
             .kind(),
             Error::NotRunning.kind(),
+            Error::NoModelInstalled.kind(),
             Error::NotReady {
                 secs: 0,
                 tail: String::new(),
@@ -335,6 +361,16 @@ mod tests {
             .kind(),
             Error::RuntimeMalformed {
                 route: String::new(),
+                message: String::new(),
+            }
+            .kind(),
+            Error::EndpointHttp {
+                endpoint: String::new(),
+                status: 0,
+            }
+            .kind(),
+            Error::EndpointUnreachable {
+                endpoint: String::new(),
                 message: String::new(),
             }
             .kind(),
@@ -398,15 +434,15 @@ mod tests {
         // could have echoed the key that failed.
         let err = Error::RuntimeHttp {
             status: 401,
-            route: "/api/v1/models".to_owned(),
+            route: "/v1/models".to_owned(),
         };
         let rendered = serde_json::to_string(&err).unwrap();
         assert!(rendered.contains("401"));
-        assert!(rendered.contains("/api/v1/models"));
+        assert!(rendered.contains("/v1/models"));
         // The rendering is total — there is no body field to leak through.
         assert_eq!(
             err.to_string(),
-            "the inference runtime answered 401 for /api/v1/models"
+            "the inference runtime answered 401 for /v1/models"
         );
     }
 }

@@ -615,9 +615,9 @@
    12px for it, and the well is bare so that artwork can meet the box's edges. */
 .coverTitle {
   padding: var(--space-12);
-  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-family: var(--font-serif);
   font-size: var(--text-body);
-  line-height: 1.2;
+  line-height: var(--leading-title);
   color: var(--ink-2);
   display: -webkit-box;
   -webkit-line-clamp: 4;
@@ -680,7 +680,7 @@ button.noCopy:hover {
 }
 
 .emptyTitle {
-  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-family: var(--font-serif);
   font-size: var(--text-title);
   color: var(--ink);
 }
@@ -688,7 +688,7 @@ button.noCopy:hover {
 .emptyBody {
   max-width: var(--prose-narrow);
   font-size: var(--text-body);
-  line-height: 1.6;
+  line-height: var(--leading-body);
   color: var(--muted);
   text-wrap: pretty;
 }

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Controller, InferenceSnapshot, RuntimeState } from '../lib/controller'
 import type { ModelRow, ResourceUsage } from '../lib/plugin'
-import type { AudioSink } from './voiceTest'
 import {
   createModelsModel,
   downloadLine,
@@ -24,7 +23,7 @@ function deferred(): { readonly promise: Promise<void>; open(): void } {
 
 const MODELS = [
   { id: 'qwen', label: 'Qwen3-4B', bytes: 2_497_281_120, installed: false },
-  { id: 'kokoro', label: 'Kokoro', bytes: 353_746_785, installed: false },
+  { id: 'gemma', label: 'Gemma', bytes: 353_746_785, installed: false },
 ]
 
 describe('formatBytes', () => {
@@ -32,10 +31,10 @@ describe('formatBytes', () => {
    * arithmetic: this is compared against a download they were quoted in the
    * same units, and 2.5 GB shown as 2.3 GiB reads as a different file. */
   it('reads in the units the reader was quoted', () => {
-    expect(formatBytes(2_497_281_120)).toBe('2.5 GB')
-    expect(formatBytes(353_746_785)).toBe('354 MB')
-    expect(formatBytes(4_096)).toBe('4 KB')
-    expect(formatBytes(512)).toBe('512 B')
+    expect(formatBytes(2_497_281_120)).toBe('2.5\u00a0GB')
+    expect(formatBytes(353_746_785)).toBe('354\u00a0MB')
+    expect(formatBytes(4_096)).toBe('4\u00a0KB')
+    expect(formatBytes(512)).toBe('512\u00a0B')
   })
 
   /**
@@ -49,28 +48,28 @@ describe('formatBytes', () => {
    * up, and no test above this line goes anywhere near either boundary.
    */
   it.each([
-    [0, '0 B'],
-    [999, '999 B'],
-    [1_000, '1 KB'],
-    [1_499, '1 KB'],
-    [1_500, '2 KB'],
-    [999_499, '999 KB'],
-    [999_500, '1 MB'],
-    [1_000_000, '1 MB'],
-    [999_499_999, '999 MB'],
-    [999_500_000, '1.0 GB'],
-    [1_000_000_000, '1.0 GB'],
-    [1_050_000_000, '1.1 GB'],
+    [0, '0\u00a0B'],
+    [999, '999\u00a0B'],
+    [1_000, '1\u00a0KB'],
+    [1_499, '1\u00a0KB'],
+    [1_500, '2\u00a0KB'],
+    [999_499, '999\u00a0KB'],
+    [999_500, '1\u00a0MB'],
+    [1_000_000, '1\u00a0MB'],
+    [999_499_999, '999\u00a0MB'],
+    [999_500_000, '1.0\u00a0GB'],
+    [1_000_000_000, '1.0\u00a0GB'],
+    [1_050_000_000, '1.1\u00a0GB'],
   ])('formats %i as %s', (bytes, expected) => {
     expect(formatBytes(bytes)).toBe(expected)
   })
 
-  /* `—`, NEVER `0`. Lemonade is specifically credited for returning null
-   * rather than zero for memory it cannot read, and a `0` beside "Memory" is
-   * a claim that nothing is resident — a different statement from "unknown". */
+  /* `—`, NEVER `0`. The plugin answers null rather than zero for memory it
+   * cannot read, and a `0` beside "Memory" is a claim that nothing is
+   * resident — a different statement from "unknown". */
   it('says `—` for an unknown figure, which a genuine zero is not', () => {
     expect(formatBytes(null)).toBe('—')
-    expect(formatBytes(0)).toBe('0 B')
+    expect(formatBytes(0)).toBe('0\u00a0B')
   })
 })
 
@@ -87,7 +86,7 @@ describe('runtimeValue', () => {
    * the same right-hand `value` slot every other fact goes in. */
   it('reports a download as two counts and no bar', () => {
     const state: RuntimeState = { kind: 'installing', model: 'qwen', received: 412_000_000, total: 2_497_281_120 }
-    expect(runtimeValue(state)).toBe('Downloading · 412 MB of 2.5 GB')
+    expect(runtimeValue(state)).toBe('Downloading · 412\u00a0MB of 2.5\u00a0GB')
   })
 
   it('does not quote a total it does not have yet', () => {
@@ -111,9 +110,9 @@ describe('isActiveInstall', () => {
   it('is true only for this model’s own download or verification', () => {
     const downloading: RuntimeState = { kind: 'installing', model: 'qwen', received: 0, total: 1 }
     expect(isActiveInstall(downloading, 'qwen')).toBe(true)
-    expect(isActiveInstall(downloading, 'kokoro')).toBe(false)
+    expect(isActiveInstall(downloading, 'gemma')).toBe(false)
     expect(isActiveInstall({ kind: 'verifying', model: 'qwen' }, 'qwen')).toBe(true)
-    expect(isActiveInstall({ kind: 'verifying', model: 'qwen' }, 'kokoro')).toBe(false)
+    expect(isActiveInstall({ kind: 'verifying', model: 'qwen' }, 'gemma')).toBe(false)
     expect(isActiveInstall({ kind: 'installed' }, 'qwen')).toBe(false)
     expect(isActiveInstall({ kind: 'ready', version: '1' }, 'qwen')).toBe(false)
   })
@@ -121,18 +120,18 @@ describe('isActiveInstall', () => {
 
 describe('modelValue', () => {
   it('quotes the download cost before the reader commits to it', () => {
-    expect(modelValue(MODELS[0]!, { kind: 'installed' })).toBe('2.5 GB')
+    expect(modelValue(MODELS[0]!, { kind: 'installed' })).toBe('2.5\u00a0GB')
   })
 
   it('says installed, with what it cost', () => {
-    expect(modelValue({ ...MODELS[0]!, installed: true }, { kind: 'installed' })).toBe('Installed · 2.5 GB')
+    expect(modelValue({ ...MODELS[0]!, installed: true }, { kind: 'installed' })).toBe('Installed · 2.5\u00a0GB')
   })
 
   /* The progress belongs to the row being downloaded and to no other. */
   it('shows progress on the row that is downloading', () => {
     const state: RuntimeState = { kind: 'installing', model: 'qwen', received: 1_000_000, total: 2_000_000 }
-    expect(modelValue(MODELS[0]!, state)).toBe('Downloading · 1 MB of 2 MB')
-    expect(modelValue(MODELS[1]!, state)).toBe('354 MB')
+    expect(modelValue(MODELS[0]!, state)).toBe('Downloading · 1\u00a0MB of 2\u00a0MB')
+    expect(modelValue(MODELS[1]!, state)).toBe('354\u00a0MB')
   })
 })
 
@@ -153,7 +152,7 @@ describe('modelAction', () => {
 
   it('does not offer Cancel on a row that is not the one downloading', () => {
     expect(
-      modelAction({ id: 'kokoro', installed: false }, { kind: 'installing', model: 'qwen', received: 0, total: 1 }),
+      modelAction({ id: 'gemma', installed: false }, { kind: 'installing', model: 'qwen', received: 0, total: 1 }),
     ).toBe('install')
   })
 })
@@ -178,11 +177,11 @@ describe('downloadLine', () => {
 
   it('names the model and both counts while downloading', () => {
     const state: RuntimeState = { kind: 'installing', model: 'qwen', received: 412_000_000, total: 2_497_281_120 }
-    expect(downloadLine(state, MODELS)).toBe('Downloading Qwen3-4B — 412 MB of 2.5 GB')
+    expect(downloadLine(state, MODELS)).toBe('Downloading Qwen3-4B — 412\u00a0MB of 2.5\u00a0GB')
   })
 
   it('says it is verifying, so a count that stopped moving does not read as a stall', () => {
-    expect(downloadLine({ kind: 'verifying', model: 'kokoro' }, MODELS)).toBe('Verifying Kokoro')
+    expect(downloadLine({ kind: 'verifying', model: 'gemma' }, MODELS)).toBe('Verifying Gemma')
   })
 
   it('falls back to the id when the catalogue has not loaded yet', () => {
@@ -204,7 +203,6 @@ describe('downloadLine', () => {
 describe('the models store', () => {
   const model = (over: Partial<ModelRow> & Pick<ModelRow, 'id'>): ModelRow => ({
     label: over.id,
-    modality: 'text',
     license: 'Apache-2.0',
     bytes: 1000,
     installed: false,
@@ -255,8 +253,8 @@ describe('the models store', () => {
           listeners.delete(listener)
         }
       },
-      /* The documented contract: the installed text row's OWN id. */
-      textModel: () => state.models.find((row) => row.modality === 'text' && row.installed)?.id ?? null,
+      /* The documented contract: the installed row's OWN id. */
+      textModel: () => state.models.find((row) => row.installed)?.id ?? null,
     }
     return {
       controller,
@@ -271,28 +269,23 @@ describe('the models store', () => {
 
   const USAGE: ResourceUsage = { residentBytes: 42, modelLoaded: 'qwen' }
 
-  /* Playback that goes nowhere. `voiceTest.test.ts` drives the sink itself;
-     here it only has to exist, because `Audio` does not on `node`. */
-  const silentAudio = (): AudioSink => ({ play: () => ({ stop: () => {} }) })
-
-  /** Only the three commands the store actually calls, each a real spy. */
+  /**
+   * The two commands the store calls, each a real spy.
+   *
+   * NO CAST. This ended in `as unknown as ModelsModelOptions['plugin']` while the
+   * store took the whole plugin; it takes the two reads it makes now, so the
+   * fake type-checks as written and a changed signature is a red test.
+   */
   function fakePlugin(
     over: Partial<{
       revealModelsDir: () => Promise<string>
       resourceUsage: () => Promise<ResourceUsage>
-      speak: (requestId: string, model: string, text: string, voice: string | null) => Promise<number[]>
-      cancel: (requestId: string) => Promise<void>
     }> = {},
   ) {
     return {
       revealModelsDir: vi.fn(over.revealModelsDir ?? (async () => '/models')),
       resourceUsage: vi.fn(over.resourceUsage ?? (async (): Promise<ResourceUsage> => USAGE)),
-      speak: vi.fn(over.speak ?? (async () => [1])),
-      cancel: vi.fn(over.cancel ?? (async () => {})),
-    } as unknown as ModelsModelOptions['plugin'] & {
-      revealModelsDir: ReturnType<typeof vi.fn>
-      resourceUsage: ReturnType<typeof vi.fn>
-    }
+    } satisfies ModelsModelOptions['plugin']
   }
 
   /* ⚠️ **`wiring()` STOOD HERE AND BUILT A WHOLE `KernelServices` FOR A
@@ -310,7 +303,6 @@ describe('the models store', () => {
     expect(snap.models).toHaveLength(1)
     expect(snap.modelsDir).toBe('/models')
     expect(snap.residentBytes).toBe(42)
-    expect(snap.voiceTest).toBe('idle')
     models.dispose()
   })
 
@@ -452,42 +444,6 @@ describe('the models store', () => {
     models.dispose()
   })
 
-  /**
-   * REMOVING THE VOICE THAT IS SPEAKING STOPS IT FIRST.
-   *
-   * `Test voice`'s Stop button lives on the voice's own row, so deleting that
-   * model takes the only control that could end the utterance off the screen —
-   * and the audio played on with the request still open at the daemon.
-   */
-  it('stops a voice test before removing the model it is playing through', async () => {
-    const world = fakeController({ models: [model({ id: 'kokoro', modality: 'speech', installed: true })] })
-    const plugin = fakePlugin()
-    const models = createModelsModel({ controller: world.controller, plugin, audio: silentAudio() })
-    await models.testVoice()
-    expect(models.getSnapshot().voiceTest).toBe('speaking')
-
-    await models.uninstall('kokoro')
-    expect(models.getSnapshot().voiceTest, 'the voice kept playing after its model was deleted').toBe('idle')
-    expect(plugin.cancel).toHaveBeenCalledTimes(1)
-    models.dispose()
-  })
-
-  it('leaves a voice test alone when a different model is removed', async () => {
-    const world = fakeController({
-      models: [model({ id: 'kokoro', modality: 'speech', installed: true }), model({ id: 'qwen', installed: true })],
-    })
-    const models = createModelsModel({
-      controller: world.controller,
-      plugin: fakePlugin(),
-      audio: silentAudio(),
-    })
-    await models.testVoice()
-    await models.uninstall('qwen')
-    expect(models.getSnapshot().voiceTest).toBe('speaking')
-    models.dispose()
-  })
-
-
   /* ⚠️ **THIS NAMED A REGRESSION THAT CAN NO LONGER HAPPEN.** It said
      `getSnapshot` *"reads settings through the scoped handle"*, and that
      reading outside `inference.` throws `namespace`. It read no settings even
@@ -500,30 +456,6 @@ describe('the models store', () => {
     const { controller } = fakeController()
     const models = createModelsModel({ controller, plugin: fakePlugin() })
     expect(() => models.getSnapshot()).not.toThrow()
-    models.dispose()
-  })
-
-  /* STOPPING WHEN NOTHING IS PLAYING IS A NO-OP, and it has to be: the pane's
-     stop control is reachable the moment a test starts, and the audio element
-     may not exist yet. */
-  it('stops a voice test that never started, without throwing', () => {
-    const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin() })
-    expect(() => models.stopVoice()).not.toThrow()
-    expect(models.getSnapshot().voiceTest).toBe('idle')
-    models.dispose()
-  })
-
-  /* NO VOICE, NO REQUEST. `Test voice` is absent from the pane until a speech
-     model is installed, but the method is reachable and must not synthesise
-     against a model that is not there. */
-  it('does nothing when no speech model is installed', async () => {
-    const world = fakeController({ models: [model({ id: 'qwen', installed: true })] })
-    const plugin = fakePlugin()
-    const models = createModelsModel({ controller: world.controller, plugin })
-    await models.testVoice()
-    expect(models.getSnapshot().voiceTest).toBe('idle')
-    expect(world.ensureReady).not.toHaveBeenCalled()
     models.dispose()
   })
 })
@@ -552,6 +484,6 @@ describe('a model without a runtime', () => {
 
   it('says why in the value slot, rather than quoting a download it will not offer', () => {
     expect(modelValue(MODELS[0]!, absent)).toBe('Runtime not installed')
-    expect(modelValue({ ...MODELS[0]!, installed: true }, absent)).toBe('Installed · 2.5 GB')
+    expect(modelValue({ ...MODELS[0]!, installed: true }, absent)).toBe('Installed · 2.5\u00a0GB')
   })
 })

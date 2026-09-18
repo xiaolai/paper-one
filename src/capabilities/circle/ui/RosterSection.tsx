@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CAPABILITY_UI, messageOf } from '../../../kernel'
+import { CAPABILITY_UI, COVER_ASPECT, LIST_COL, messageOf } from '../../../kernel'
 import type { KnownPerson, PersonPort } from '../../peer'
 import type { CirclePort, FriendBook, FriendView } from '../lib/circlePort'
 import { short } from './personId'
@@ -286,6 +286,28 @@ function PersonRow({
 }
 
 /**
+ * A jacket beside a row, at the size the shelf's own list draws one.
+ *
+ * DERIVED, and it was `24×36` written onto the `<img>` with no CSS sizing it —
+ * which IS 2:3, done by hand next to the two constants that say so. The list
+ * view's thumb is `LIST_COL.thumb` at `COVER_ASPECT`, and a book's jacket in a
+ * capability's row is the same object in the same kind of row: an anchor for the
+ * eye, not the subject of the line. So it takes the same numbers rather than a
+ * second pair that happen to have the same proportion.
+ *
+ * ⚠️ **THIS MAKES IT 22×33 WHERE IT WAS 24×36.** The proportion is unchanged;
+ * the jacket is 2px narrower, which is the shelf's number rather than this
+ * file's. `ROW_H`'s own doc describes the 33px jacket a 44px row carries, so 33
+ * is the height the rest of the app already draws a row's cover at.
+ *
+ * ROUNDED, because `COVER_ASPECT` is `2 / 3` and `22 / (2 / 3)` is exactly 33 —
+ * but only for a thumb divisible by 2; `cellHeightFor` rounds for the same
+ * reason and an `<img>` attribute may not carry a fraction.
+ */
+const JACKET_W = LIST_COL.thumb
+const JACKET_H = Math.round(LIST_COL.thumb / COVER_ASPECT)
+
+/**
  * A friend's jacket beside their row — WI-23.C5. Asked for when the row is
  * SEEN, never in the round and not merely when it is drawn; nothing drawn
  * until it has been fetched and verified, and nothing said when it cannot
@@ -327,7 +349,9 @@ function Jacket({ port, person, book }: { readonly port: CirclePort; readonly pe
   }, [port, person, pub, title, author, language, own, device, cover, seen])
   return (
     <span ref={slot} data-jacket-slot={book.pub}>
-      {url === null ? null : <img src={url} alt="" width={24} height={36} data-jacket={book.pub} />}
+      {url === null ? null : (
+        <img src={url} alt="" width={JACKET_W} height={JACKET_H} data-jacket={book.pub} />
+      )}
     </span>
   )
 }

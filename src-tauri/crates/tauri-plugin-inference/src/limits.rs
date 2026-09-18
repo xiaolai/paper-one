@@ -29,6 +29,10 @@
 //! - Speech is one line read aloud. 4 KiB is a paragraph.
 //! - A request id is minted by Paper as `<kind>-<n>`. 64 bytes is room for a
 //!   UUID and then some.
+//! - A gloss's answer language is a name from the kernel's curated list —
+//!   `Simplified Chinese` is the longest, at 18 bytes. 64 is room for any
+//!   language's English name, and it bounds what `gloss::response_format`
+//!   writes into the grammar as a `const`.
 //! - The accumulated answer is bounded because the daemon is a separate
 //!   process: a wedged or hostile one streaming without end would otherwise
 //!   grow a `String` until the app died. 1 MiB is far past any answer a
@@ -39,8 +43,8 @@ use crate::error::{Error, Result};
 pub const MAX_QUESTION: usize = 64 * 1024;
 pub const MAX_SYSTEM: usize = 8 * 1024;
 pub const MAX_AGENT_PROMPT: usize = 64 * 1024;
-pub const MAX_SPEECH_TEXT: usize = 4 * 1024;
 pub const MAX_REQUEST_ID: usize = 64;
+pub const MAX_LANGUAGE_NAME: usize = 64;
 pub const MAX_ANSWER_BYTES: usize = 1024 * 1024;
 /// A manifest id is a short slug; anything past this is not a model name,
 /// it is an allocation. Applied wherever a caller-minted model string
@@ -62,7 +66,7 @@ pub const MAX_MODEL_ID: usize = 256;
 /// [`crate::endpoints::valid_id`] is the real grammar — `[a-z0-9-]` — and
 /// reads its length from here so there is no second number to drift. This is
 /// applied at the command boundary as well, because the id is the keychain
-/// account name and the `LEMONADE_<ID>_API_KEY` stem, and because the store
+/// account name, and because the store
 /// refuses an invalid one by COPYING it into an error that crosses IPC:
 /// unbounded, that is a megabyte of caller's choosing echoed back.
 /// `inference_remove_endpoint` did not reach the grammar check at all — its
@@ -79,21 +83,11 @@ pub const MAX_ENDPOINT_URL: usize = 400;
 /// A pasted API credential. Generous — some providers issue long tokens —
 /// but bounded before it reaches the blocking keychain write.
 pub const MAX_ENDPOINT_KEY: usize = 8 * 1024;
-/// The longest utterance the daemon may hand back.
-///
-/// ⚠️ **THE SPEECH BODY WAS UNBOUNDED**, and it was hidden by a timeout rather
-/// than by a bound: the daemon client carried a ten-second TOTAL deadline, so
-/// nothing could arrive for very long. Splitting the streaming client off
-/// removed that deadline for the right reason — an answer legitimately takes
-/// longer than ten seconds — and took the accidental cap with it. Found by
-/// audit. `generate::stream` had a real bound all along
-/// (`MAX_ANSWER_BYTES`); `speech::collect` read `response.bytes()` whole.
-///
-/// 32 MiB against a real utterance: `MAX_SPEECH_TEXT` is 4 KiB, roughly four
-/// minutes of speech, and Kokoro's 24 kHz 16-bit mono is about 48 KB/s — call
-/// it 11 MB. Far above anything legitimate, far below what hurts.
-pub const MAX_SPEECH_BYTES: usize = 32 * 1024 * 1024;
-
+/// The model a cloud endpoint is asked for — the PROVIDER'S name for it
+/// (`gpt-4.1-mini`, `deepseek-chat`, `meta-llama/Llama-3.1-8B-Instruct`). The
+/// one number for it, as [`MAX_ENDPOINT_URL`] is for the address:
+/// [`crate::endpoints::valid_model_name`] reads its length from here.
+pub const MAX_ENDPOINT_MODEL: usize = 200;
 /// Refuse `value` if it is over `limit`, naming the field.
 ///
 /// BYTES, NOT CHARACTERS. What is being bounded is what gets allocated,
@@ -121,8 +115,8 @@ mod tests {
     /// parameters refusing "a field" tells nobody which one.
     #[test]
     fn the_refusal_names_the_field() {
-        let refused = within("speech text", &"x".repeat(10), 1).unwrap_err();
-        assert!(refused.to_string().contains("speech text"), "{refused}");
+        let refused = within("system prompt", &"x".repeat(10), 1).unwrap_err();
+        assert!(refused.to_string().contains("system prompt"), "{refused}");
     }
 
     /// BYTES, NOT CHARACTERS. A `char` count would let a book of CJK or emoji

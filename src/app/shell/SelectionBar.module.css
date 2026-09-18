@@ -40,7 +40,7 @@
   height: var(--control-sm);
   border: 0;
   border-radius: var(--radius-pill);
-  box-shadow: inset 0 0 0 1px var(--line-3);
+  box-shadow: var(--ring-inset) var(--line-3);
   cursor: pointer;
 }
 
@@ -58,7 +58,7 @@
 
 .swatch[aria-pressed='true'] {
   box-shadow:
-    inset 0 0 0 1px var(--line-3),
+    var(--ring-inset) var(--line-3),
     0 0 0 2px var(--ink);
 }
 

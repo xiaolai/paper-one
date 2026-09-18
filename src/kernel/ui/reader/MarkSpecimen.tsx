@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react'
+import { ICON, MARK_SWATCH } from '../../core/metrics'
 import type { MarkStyle, MarkTint } from '../../core/marks'
 import styles from './SelectionTools.module.css'
 
@@ -24,9 +25,27 @@ export interface MarkSpecimenProps {
   readonly style: MarkStyle
 }
 
-/** The drawing box. Sized to the icon ramp so a specimen sits with the glyphs. */
+/**
+ * The drawing box.
+ *
+ * ⚠️ **THE WIDTH IS NOT A RUNG OF THE ICON RAMP, AND THIS SAID IT WAS** —
+ * "sized to the icon ramp so a specimen sits with the glyphs", above a 16 that
+ * the ramp has no rung for at all: `ICON` runs 12, 13, 15, 17, 19, 32. What 16
+ * IS is the wave's own width — four half-periods of four units each, which is
+ * the path below — and it cannot be moved to `ICON.control`'s 15 without the
+ * last crest stopping a unit short of the box it is supposed to fill. So the
+ * comment is corrected rather than the number: this is a drawing, and a drawing
+ * is sized to what it has to draw.
+ *
+ * THE HEIGHT IS `MARK_SWATCH`, which is the constant this box does share with
+ * its neighbours — the tint discs one divider away in the same face are drawn
+ * at it, one under the ramp's 15 for the reason `MARK_SWATCH` gives: ink reads
+ * heavier than an outline of the same diameter, and a specimen's band is ink.
+ * Two marks-of-a-size in one row, at one height. It was a 14 written out beside
+ * the 14 that says so.
+ */
 const W = 16
-const H = 14
+const H = MARK_SWATCH
 /** Where a rule sits, and how thick — in the specimen's own coordinates. */
 const RULE_Y = 10
 const RULE_H = 2
@@ -61,12 +80,18 @@ export function MarkSpecimen({ tint, style }: MarkSpecimenProps) {
       {style === 'wave' && (
         /* Four half-periods across the box. `q` then three `t`s: each `t`
            mirrors the previous control point, so the crests stay even without
-           four sets of coordinates that could disagree. */
+           four sets of coordinates that could disagree.
+
+           ⚠️ THE STROKE WAS `1.6` AND HAD DRIFTED FROM `ICON.stroke`, which is
+           1.75 and which every other glyph in this bar passes. §08 says one
+           stroke weight everywhere, and a specimen drawn in a row of lucide
+           icons at a lighter weight than all of them is the one place where
+           the drift is visible side by side. */
         <path
           d={`M0 ${RULE_Y + 1} q2 -3 4 0 t4 0 t4 0 t4 0`}
           fill="none"
           stroke="var(--spec-rule)"
-          strokeWidth="1.6"
+          strokeWidth={ICON.stroke}
           strokeLinecap="round"
         />
       )}

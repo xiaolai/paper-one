@@ -12,7 +12,6 @@ import type { InstallProgress, ModelRow, RuntimeStatus } from './plugin'
 const MODEL: ModelRow = {
   id: 'qwen',
   label: 'Qwen3-4B',
-  modality: 'text',
   license: 'Apache-2.0',
   bytes: 2_497_281_120,
   installed: false,
@@ -87,6 +86,16 @@ describe('detailFor', () => {
     expect(detailFor({ kind: 'answerTruncated' })).toBe('The answer was cut off before it finished')
   })
 
+  /* ── A CLOUD ENDPOINT, which Paper talks to itself since the gloss routes
+   * contract. Two sentences for two different things to do: an endpoint that
+   * answered "no" wants its key or its model name looked at; one that never
+   * answered wants its address or the network looked at. One sentence for both
+   * would leave the reader guessing which. */
+  it('tells an endpoint that refused apart from one that could not be reached', () => {
+    expect(detailFor({ kind: 'endpointHttp' })).toBe('That endpoint refused the request')
+    expect(detailFor({ kind: 'endpointUnreachable' })).toBe('That endpoint could not be reached')
+  })
+
   /* EVERY OTHER KIND, BY ITS OWN SENTENCE. A `case` that goes missing falls
      through to the sentence beneath it — `runtimeUnreachable` would read "not
      running", `runtimeMalformed` "cut off" — and a test that names only some of
@@ -98,6 +107,7 @@ describe('detailFor', () => {
       sizeMismatch: 'The download did not verify — nothing was changed',
       runtimeUnreachable: 'The runtime is not answering',
       notRunning: 'The runtime is not running',
+      noModelInstalled: 'No language model is installed yet',
       modelUnknown: 'That model is not available',
       requestBusy: 'That request is already running',
       fieldTooLarge: 'That request was too large',
@@ -231,10 +241,6 @@ describe('glossModel', () => {
   it('has nothing to answer with when nothing is installed', () => {
     expect(glossModel([])).toBeNull()
     expect(glossModel([row({ id: 'a', installed: false })])).toBeNull()
-  })
-
-  it('never answers with a voice', () => {
-    expect(glossModel([row({ id: 'kokoro', modality: 'speech' })])).toBeNull()
   })
 
   /* SMALLEST FIRST, for the feature's own reason: a gloss is wanted in
@@ -481,13 +487,13 @@ describe('the controller', () => {
     controller.cancelInstall()
     gates[0]!.open()
     await expect(first).resolves.toBe(false)
-    const second = controller.install('kokoro')
+    const second = controller.install('gemma')
 
     told[0]!({ kind: 'downloading', received: 7, total: 9 })
     told[0]!({ kind: 'verifying' })
     expect(controller.getSnapshot().runtime, 'a replaced download wrote over the one that replaced it').toEqual({
       kind: 'installing',
-      model: 'kokoro',
+      model: 'gemma',
       received: 0,
       total: 0,
     })
@@ -530,7 +536,7 @@ describe('the controller', () => {
   /* ONE ROW, NOT THE CATALOGUE. The correction is keyed on the model the
      command named; every other row keeps what the last read said. */
   it('corrects only the row it installed or removed when the confirming refresh fails', async () => {
-    const OTHER: ModelRow = { ...MODEL, id: 'kokoro', modality: 'speech' }
+    const OTHER: ModelRow = { ...MODEL, id: 'gemma' }
     const rows = (controller: ReturnType<typeof createController>) =>
       controller.getSnapshot().models.map((row) => [row.id, row.installed])
     const withCatalogue = (listed: readonly ModelRow[]) => {
@@ -550,13 +556,13 @@ describe('the controller', () => {
     const installing = withCatalogue([MODEL, OTHER])
     await installing.refresh()
     await expect(installing.install('qwen')).resolves.toBe(true)
-    expect(rows(installing), 'the install marked a model it never touched').toEqual([['qwen', true], ['kokoro', false]])
+    expect(rows(installing), 'the install marked a model it never touched').toEqual([['qwen', true], ['gemma', false]])
     installing.dispose()
 
     const removing = withCatalogue([{ ...MODEL, installed: true }, { ...OTHER, installed: true }])
     await removing.refresh()
     await expect(removing.uninstall('qwen')).resolves.toBe(true)
-    expect(rows(removing), 'the removal unmarked a model it never touched').toEqual([['qwen', false], ['kokoro', true]])
+    expect(rows(removing), 'the removal unmarked a model it never touched').toEqual([['qwen', false], ['gemma', true]])
     removing.dispose()
   })
 
@@ -667,7 +673,7 @@ describe('the controller', () => {
     const first = controller.install('qwen')
     /* FALSE, NOT `undefined`. A refusal used to be indistinguishable from a
        completed download to every caller. */
-    await expect(controller.install('kokoro')).resolves.toBe(false)
+    await expect(controller.install('gemma')).resolves.toBe(false)
 
     /* AND IT NEVER REACHED THE PLUGIN. Reading `installing` alone would pass a
        controller that started the second download and then relabelled it. */
@@ -701,11 +707,11 @@ describe('the controller', () => {
     let listed: readonly ModelRow[] = [MODEL]
     const controller = createController(plugin({ models: async () => listed, installModel: async () => gate.promise }))
     const install = controller.install('qwen')
-    listed = [MODEL, { ...MODEL, id: 'kokoro', modality: 'speech' }]
+    listed = [MODEL, { ...MODEL, id: 'gemma' }]
     await controller.refresh()
     expect(controller.getSnapshot().models.map((row) => row.id), 'a download froze the catalogue').toEqual([
       'qwen',
-      'kokoro',
+      'gemma',
     ])
     expect(controller.getSnapshot().runtime.kind).toBe('installing')
     gate.open()
@@ -836,14 +842,14 @@ describe('the controller', () => {
     )
     const install = controller.install('qwen')
     controller.cancelInstall()
-    await expect(controller.install('kokoro')).resolves.toBe(false)
+    await expect(controller.install('gemma')).resolves.toBe(false)
     expect(started, 'a second install started while the first was still unwinding').toEqual(['qwen'])
 
     gate.open()
     await install
     /* And once it has settled, the next one is allowed through. */
-    await controller.install('kokoro')
-    expect(started).toEqual(['qwen', 'kokoro'])
+    await controller.install('gemma')
+    expect(started).toEqual(['qwen', 'gemma'])
     controller.dispose()
   })
 
@@ -980,12 +986,11 @@ describe('the controller', () => {
     controller.dispose()
   })
 
-  it('names an installed text model and ignores an uninstalled or speech one', async () => {
+  it('names an installed model and ignores an uninstalled one', async () => {
     const controller = createController(
       plugin({
         models: async () => [
           { ...MODEL, installed: false },
-          { ...MODEL, id: 'kokoro', modality: 'speech', installed: true },
           { ...MODEL, id: 'qwen-installed', installed: true },
         ],
       }),
@@ -1437,10 +1442,9 @@ describe('audit-fix round 2 — a start that failed says why', () => {
    * `dispose` cleared the install slot and told nobody, so the request it had
    * minted went on downloading in Rust for a controller that no longer exists —
    * no pane counting the bytes, no Cancel to press, and a staging path a
-   * re-composed capability could start writing to as well. `voiceTest.dispose`
-   * already aborts its own request and `inferencePort`'s teardown now cancels
-   * every request it has out; this was the third minting site of the four and
-   * the only one left (2026-09-13 audit, round 2).
+   * re-composed capability could start writing to as well. `inferencePort`'s
+   * teardown now cancels every request it has out; this was the last minting
+   * site that did not (2026-09-13 audit, round 2).
    */
   it('cancels a download it still had out when it is disposed', async () => {
     const gate = deferred()

@@ -16,8 +16,8 @@ import {
   TextQuote,
   Trash2,
 } from 'lucide-react'
-import { ICON } from '../../core/metrics'
-import { place } from '../../core/placement'
+import { CONTROL, ICON } from '../../core/metrics'
+import { SURFACE_EDGE, UNBOUNDED, place } from '../../core/placement'
 import {
   MARK_TINTS,
   READER_STYLES,
@@ -27,6 +27,7 @@ import {
   type MarkTint,
 } from '../../core/marks'
 import type { GlossState } from '../hooks/useGloss'
+import type { Voice } from '../../core/voice'
 import { BackToBar, LookUpFace } from './LookUpFace'
 import { MarkSpecimen } from './MarkSpecimen'
 import {
@@ -239,10 +240,33 @@ export interface SelectionToolsProps {
   lookUp: GlossState
   /** Back from the lookup face — puts the lookup away. */
   onLookUpBack: () => void
-  /** Where "Install one" goes, or absent where this screen has nowhere. */
+  /** Where "Choose one" goes, or absent where this screen has nowhere. */
   onInstall?: ((section: string) => void) | undefined
+  /**
+   * The voice that says the looked-up term aloud — the machine's own
+   * (`systemVoice`), since no capability binds another.
+   *
+   * REQUIRED, and `NO_VOICE` is the answer where nothing can speak. Optional it
+   * would be a fact a caller could forget, which is the `hasDictionary` failure
+   * `core/gloss.ts` records: a field that defaulted to `false` on the way down,
+   * so the production caller's omission removed a feature silently. Here the
+   * omission is a compile error.
+   */
+  voice: Voice
   onRemove: () => void
 }
+
+/**
+ * The air between the row's controls and the popup's own edge, per side.
+ *
+ * `--space-6`, and it is written out here because the space scale lives ONLY in
+ * `tokens.css` — `applyMetrics` publishes no `--space-*`, and `metrics.ts` has
+ * no scale for it — so there is nothing in TypeScript to derive it from. The
+ * popup's height has to be computed in TypeScript (see `POPUP_H`), so this is
+ * the one end of the arithmetic that cannot come from a shared name. If a space
+ * scale ever reaches `metrics.ts`, this is its first caller.
+ */
+const POPUP_PAD = 6
 
 /** Popup geometry. Kept here rather than in metrics: §03 defines the reading
  *  grid, and these are this component's own affordances.
@@ -252,18 +276,36 @@ export interface SelectionToolsProps {
  *  subtracting it, so a stylesheet that disagreed would put the popup its own
  *  height away from the line it belongs to.
  *
- *  40 is `--control-sm` plus 6px of padding on each side — derived from the
- *  controls in the bar rather than chosen and then divided up. Change the
- *  control size and this must change with it, which is why the arithmetic is
- *  written down here next to the number.
+ *  DERIVED, NOT SUMMED BY HAND. It is `CONTROL.sm` plus `POPUP_PAD` on each
+ *  side — and until now the arithmetic was in this comment while the answer,
+ *  40, sat in the code, which is a derivation nothing performs: moving the
+ *  control ramp would have left the popup the height of a ramp that no longer
+ *  exists, with a comment still claiming it followed one.
  *
  *  THE ROW'S HEIGHT, NOT THE POPUP'S. The lookup face is as tall as its
  *  answer — see `surfaceHeight`. */
-export const POPUP_H = 40
+export const POPUP_H = CONTROL.sm + 2 * POPUP_PAD
+
+/**
+ * How far the popup stays off the WORDS it hangs from.
+ *
+ * ITS OWN VALUE, and the two things it is NOT are worth stating, because it
+ * agrees with one of them and looks derivable from the other.
+ *
+ * NOT `SURFACE_GAP`. That is the clearance a menu takes from a BUTTON — a
+ * control with an edge of its own and nothing on it to read. This popup hangs
+ * over a line of prose the reader has just chosen, and a surface's shadow
+ * falling across the ascenders of the line above the selection is the one thing
+ * a toolbar over text may not do. It wants more air than a control's, and
+ * writing it as `2 * SURFACE_GAP` would claim the two must move together, which
+ * is a coupling nobody decided: "twice" is what this happens to be, not why.
+ *
+ * NOT `SURFACE_EDGE`, though they agree at 8 today. That one is the distance
+ * from the edge of the STAGE; this is the distance from the TEXT. Two questions
+ * whose answers happen to match, kept apart for the reason `TRACK_W` and
+ * `KIND_RULE_W` are kept apart in `metrics.ts`.
+ */
 const GAP = 8
-/** How close the popup may come to the edge of the stage before it is pushed
- *  back in. Enough that it reads as inset rather than as clipped. */
-const EDGE = 8
 
 /** What each tint is called, for the tooltip and the screen reader. */
 const TINT_NAMES: Record<MarkTint, string> = {
@@ -295,6 +337,7 @@ export function SelectionTools({
   lookUp,
   onLookUpBack,
   onInstall,
+  voice,
   onRemove,
 }: SelectionToolsProps) {
   /* EVERY VISIBLE LINE of the selection, in the range's own order: the first is
@@ -518,7 +561,7 @@ export function SelectionTools({
   const stageBox = stage?.getBoundingClientRect()
   /* Before the stage has a box there is nothing to clamp against, and a very
      large bound is the honest "no constraint" rather than a guess. */
-  const within = column ?? { left: 0, width: stageBox?.width ?? 1e6 }
+  const within = column ?? { left: 0, width: stageBox?.width ?? UNBOUNDED }
   const placed = place({
     /* `container` space: these rects are stage-relative, from
        `rangeRectsInHost`, and the bounds are the stage's own box at origin.
@@ -531,7 +574,7 @@ export function SelectionTools({
       top: 0,
       left: within.left,
       width: within.width,
-      height: stageBox?.height ?? 1e6,
+      height: stageBox?.height ?? UNBOUNDED,
       space: 'container',
     },
     // Clear of EVERY selected line, not just the one it hangs from.
@@ -539,7 +582,7 @@ export function SelectionTools({
     side: 'top',
     align: 'center',
     gap: GAP,
-    edge: EDGE,
+    edge: SURFACE_EDGE,
   })
 
   /* `place` REPORTS how well it did, and this is the one caller that has to
@@ -562,8 +605,8 @@ export function SelectionTools({
   if (current === 'bar') barPlacedAt = placed.left
   else if (barLeft.current !== null) {
     leftEdge = Math.max(
-      within.left + EDGE,
-      Math.min(barLeft.current, within.left + within.width - EDGE - width),
+      within.left + SURFACE_EDGE,
+      Math.min(barLeft.current, within.left + within.width - SURFACE_EDGE - width),
     )
   }
 
@@ -584,8 +627,8 @@ export function SelectionTools({
      column narrower than itself kept its leading edge in and ran the rest out
      over the margin notes the column exists to keep it off. */
   const bound: CSSProperties = {
-    maxWidth: within.width - 2 * EDGE,
-    maxHeight: (stageBox?.height ?? 1e6) - 2 * EDGE,
+    maxWidth: within.width - 2 * SURFACE_EDGE,
+    maxHeight: (stageBox?.height ?? UNBOUNDED) - 2 * SURFACE_EDGE,
   }
 
   /**
@@ -677,6 +720,7 @@ export function SelectionTools({
               onLookUpBack()
             }}
             onInstall={onInstall}
+            voice={voice}
           />
         )}
 

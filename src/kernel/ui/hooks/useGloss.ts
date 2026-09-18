@@ -38,8 +38,31 @@ import { sentenceOf } from '../reader/wordSnap/sentenceOf'
 
 export type GlossState =
   | { readonly kind: 'idle' }
-  | { readonly kind: 'asking'; readonly term: string }
-  | { readonly kind: 'ready'; readonly term: string; readonly text: string }
+  | { readonly kind: 'asking'; readonly term: string; readonly locale?: string | undefined }
+  /**
+   * Answered.
+   *
+   * `partOfSpeech` is the provider's, absent when it could not tell — see
+   * `Definition`. OPTIONAL rather than an empty string, so a surface asks
+   * "is there one" rather than "is it blank", and the popup can draw NO
+   * ELEMENT for it: an empty span in a flex column is a gap the reader sees.
+   *
+   * `locale` IS THE PASSAGE'S OWN LANGUAGE, and it travels with the term for
+   * the reason the term travels with the sentence (`sentenceAt`): it is a fact
+   * about the same range, resolved by the same climb, at the same press. The
+   * pronunciation control is what reads it — a term is spoken in the language
+   * of the book it was read in, not the language the interface happens to be in
+   * — and `answerIn` upstream is the other reader of the same climb. Absent is
+   * "the document declared none", which is a real answer and not a default: see
+   * `Voice.say` on why an empty `lang` is worse than no `lang`.
+   */
+  | {
+      readonly kind: 'ready'
+      readonly term: string
+      readonly text: string
+      readonly partOfSpeech?: string | undefined
+      readonly locale?: string | undefined
+    }
   | { readonly kind: 'failed'; readonly term: string; readonly reason: string }
   /**
    * Asked, with nothing installed to answer with.
@@ -97,6 +120,17 @@ export interface GlossAnswer {
   readonly term: string
   readonly sentence: string
   readonly text: string
+  /**
+   * The provider's part of speech, absent when it could not tell.
+   *
+   * CARRIED, NOT YET STORED. A recorder gets the whole answer — this is the
+   * answer, and withholding a field from the recorder would decide the store's
+   * shape from here. `useLookUp`'s recorder builds a `LookupEntry` by hand and
+   * does not read this, so nothing on disk changes; giving the stored lookup a
+   * part of speech is a store-format change with the absent/unreadable doctrine
+   * attached, and is deliberately not this one.
+   */
+  readonly partOfSpeech?: string | undefined
   /** What it was asked in, so a recorded lookup can say. */
   readonly answerIn: AnswerLanguages
 }
@@ -215,9 +249,11 @@ export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): G
   /*
    * ⚠️ **THE PROMPT HAS TO GO AWAY WHEN ITS REASON DOES.**
    *
-   * `unavailable` says "Paper needs a language model" and offers the download.
-   * Nothing cleared it when the download finished, so a reader who took the
-   * offer came back to a strip still telling them to take it — the app
+   * `unavailable` says Look up needs something to answer with, and offers the
+   * section where the reader chooses one (it said "Paper needs a language
+   * model" and offered the download until 2026-09-18). Nothing cleared it when
+   * the download finished, so a reader who took the offer came back to a strip
+   * still telling them to take it — the app
    * reporting a state it was no longer in, which is the failure the whole
    * amber/grey provenance scheme exists to avoid in the other direction.
    *
@@ -286,9 +322,9 @@ export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): G
        * come apart before either could be answered.
        *
        * FIRST, ahead of `available`, because it is a fact about what the
-       * READER chose and is true whether or not a model exists. "Paper needs a
-       * language model to define <a chapter>" is the wrong sentence twice
-       * over. An EMPTY selection is the one thing that genuinely has nothing
+       * READER chose and is true whether or not anything can answer. "Look up
+       * needs something to answer with before it can define <a chapter>" is
+       * the wrong sentence twice over. An EMPTY selection is the one thing that genuinely has nothing
        * to say — there is no passage to refuse and no message to write about
        * it — so it leaves the state alone rather than inventing a report. */
       const verdict = termVerdict(fallbackTerm)
@@ -333,11 +369,25 @@ export function useGloss(provider: GlossProvider, anchor: GlossAnchor = null): G
         const { term: spelled, sentence, locale } = request()
         term = spelled
         const answerIn = context.answerIn(locale)
-        setState({ kind: 'asking', term })
-        const text = await provider.gloss(term, { sentence, bookTitle: context.bookTitle, answerIn }, controller.signal)
+        /* THE LOCALE IS CARRIED FROM HERE, on both states the headword is drawn
+           in — see `GlossState.ready`. `asking` gets it too because the
+           pronunciation control is drawn while the definition is still coming:
+           the word is known from the press, so it can be heard before it has
+           been defined, and it must not be heard in the wrong language for the
+           first second of every lookup. */
+        setState({ kind: 'asking', term, locale })
+        /* THE PROVIDER'S WHOLE ANSWER, definition and part of speech — the
+           second one is UNPARSED HERE and always will be: the marker that
+           carries it is the capability's prompt's, and a kernel that read one
+           would be a kernel that knows what a capability asked for. */
+        const { text, partOfSpeech } = await provider.gloss(
+          term,
+          { sentence, bookTitle: context.bookTitle, answerIn },
+          controller.signal,
+        )
         if (controller.signal.aborted) return
-        setState({ kind: 'ready', term, text })
-        recordAnswer(context.onAnswer, { term, sentence, text, answerIn })
+        setState({ kind: 'ready', term, text, partOfSpeech, locale })
+        recordAnswer(context.onAnswer, { term, sentence, text, partOfSpeech, answerIn })
       }
 
       void define()

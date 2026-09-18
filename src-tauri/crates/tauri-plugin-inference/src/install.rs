@@ -113,15 +113,16 @@ pub async fn install(
     /* Every artifact is good. Promote them — a rename each, which is the
      * cheapest and least interruptible thing left to do.
      *
-     * ROLLED BACK AS A SET. A model is not half-installed: Kokoro is a graph
-     * plus a voice pack, and leaving the new graph beside the old voices is a
-     * pairing neither version was tested with. A rename that fails puts back
+     * ROLLED BACK AS A SET. A model is not half-installed: a sharded GGUF is
+     * several files, and leaving a new shard beside an old one is a pairing
+     * neither version was tested with (the case that taught it was Kokoro, a
+     * graph plus a voice pack). A rename that fails puts back
      * whatever each earlier rename displaced. */
     /* EVERY promoted target is recorded, not only the ones that displaced a
      * predecessor. The first version pushed to `promoted` only when there had
      * been a previous file — so on a later failure, a target this loop had
-     * NEWLY created was left in place: a model half-installed, which for
-     * Kokoro means a graph with no voices. Found by the third audit round.
+     * NEWLY created was left in place: a model half-installed — for a
+     * sharded GGUF, one shard with no partner. Found by the third audit round.
      * `Option` distinguishes "put the old one back" from "take the new one
      * away". */
     let mut promoted: Vec<(std::path::PathBuf, Option<std::path::PathBuf>)> = Vec::new();
@@ -349,6 +350,33 @@ mod tests {
         Manifest::shipped().unwrap().models[0].clone()
     }
 
+    /// A model made of TWO files — a GGUF published as two shards, the shape a
+    /// large model takes. The shipped manifest's one model is a single file,
+    /// and "every artifact" proven over one artifact proves nothing. (This was
+    /// Kokoro, a graph and a voice pack, until the speech model went.)
+    fn sharded() -> ModelEntry {
+        Manifest::parse(
+            &serde_json::json!({
+                "version": 1,
+                "models": [{
+                    "id": "sharded",
+                    "label": "Sharded",
+                    "license": "Apache-2.0",
+                    "artifacts": [
+                        { "file": "m-00001-of-00002.gguf", "source": "https://e.invalid/1",
+                          "sha256": "a".repeat(64), "bytes": 16 },
+                        { "file": "m-00002-of-00002.gguf", "source": "https://e.invalid/2",
+                          "sha256": "b".repeat(64), "bytes": 24 }
+                    ]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("the two-shard fixture is a valid manifest")
+        .models[0]
+            .clone()
+    }
+
     #[tokio::test]
     async fn a_model_with_nothing_on_disk_is_not_installed() {
         let dir = ScratchDir::new("install");
@@ -359,31 +387,30 @@ mod tests {
     async fn a_model_is_installed_only_when_every_artifact_is_the_right_size() {
         let dir = ScratchDir::new("install");
         let layout = layout(&dir);
-        let manifest = Manifest::shipped().unwrap();
-        // Kokoro: two artifacts, so "one arrived" must not read as installed.
-        let kokoro = manifest.model("kokoro-v1-onnx").unwrap();
+        // Two shards, so "one arrived" must not read as installed.
+        let sharded = sharded();
 
         let first = layout
-            .model_path(&kokoro.id, &kokoro.artifacts[0].file)
+            .model_path(&sharded.id, &sharded.artifacts[0].file)
             .unwrap();
         tokio::fs::create_dir_all(first.parent().unwrap())
             .await
             .unwrap();
-        tokio::fs::write(&first, vec![0u8; kokoro.artifacts[0].bytes as usize])
+        tokio::fs::write(&first, vec![0u8; sharded.artifacts[0].bytes as usize])
             .await
             .unwrap();
         assert!(
-            !is_installed(&layout, kokoro).await,
-            "a graph without its voices is not an installed model"
+            !is_installed(&layout, &sharded).await,
+            "half a model is not an installed model"
         );
 
         let second = layout
-            .model_path(&kokoro.id, &kokoro.artifacts[1].file)
+            .model_path(&sharded.id, &sharded.artifacts[1].file)
             .unwrap();
-        tokio::fs::write(&second, vec![0u8; kokoro.artifacts[1].bytes as usize])
+        tokio::fs::write(&second, vec![0u8; sharded.artifacts[1].bytes as usize])
             .await
             .unwrap();
-        assert!(is_installed(&layout, kokoro).await);
+        assert!(is_installed(&layout, &sharded).await);
     }
 
     #[tokio::test]
@@ -405,23 +432,22 @@ mod tests {
     async fn removing_takes_every_artifact_and_the_directory() {
         let dir = ScratchDir::new("install");
         let layout = layout(&dir);
-        let manifest = Manifest::shipped().unwrap();
-        let kokoro = manifest.model("kokoro-v1-onnx").unwrap();
-        for artifact in &kokoro.artifacts {
-            let path = layout.model_path(&kokoro.id, &artifact.file).unwrap();
+        let sharded = sharded();
+        for artifact in &sharded.artifacts {
+            let path = layout.model_path(&sharded.id, &artifact.file).unwrap();
             tokio::fs::create_dir_all(path.parent().unwrap())
                 .await
                 .unwrap();
             tokio::fs::write(&path, b"x").await.unwrap();
         }
-        remove(&layout, kokoro).await.unwrap();
-        for artifact in &kokoro.artifacts {
+        remove(&layout, &sharded).await.unwrap();
+        for artifact in &sharded.artifacts {
             assert!(!layout
-                .model_path(&kokoro.id, &artifact.file)
+                .model_path(&sharded.id, &artifact.file)
                 .unwrap()
                 .exists());
         }
-        assert!(!layout.models_dir.join(&kokoro.id).exists());
+        assert!(!layout.models_dir.join(&sharded.id).exists());
     }
 
     /// A promotion that fails part-way must leave NOTHING new behind — the

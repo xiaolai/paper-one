@@ -47,7 +47,7 @@ describe('the answer language', () => {
 })
 
 /**
- * "Install one" LANDS ON ITS SECTION (phase 17, L3). A request, with a nonce so
+ * "Choose one" LANDS ON ITS SECTION (phase 17, L3). A request, with a nonce so
  * asking twice is two requests, and a pending flag so a remount of the panel
  * does not answer it again.
  */

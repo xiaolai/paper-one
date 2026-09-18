@@ -11,7 +11,7 @@ import { PANES, PANE_SHORTCUTS, PANE_TITLES, THEMES, comboFor, panesFor, renderC
  */
 
 const contributed: PaneContribution[] = [
-  { id: 'example:pane', label: 'Example', screens: ['library', 'reader'], render: () => createElement('p', null, 'hi') },
+  { id: 'example:pane', label: 'Example', icon: 'people', screens: ['library', 'reader'], render: () => createElement('p', null, 'hi') },
 ]
 
 describe('shownPane', () => {

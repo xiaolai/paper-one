@@ -54,14 +54,14 @@ const BUILT = [
   { path: 'bin/paper.mjs', by: 'pnpm build:cli' },
   { path: '.types/app.tsbuildinfo', by: 'pnpm typecheck' },
   { path: 'vendor/pdfjs/pdf.worker.mjs', by: 'scripts/sync-pdfjs-assets.mjs' },
-  { path: 'vendor/inference/current/lemond', by: 'scripts/sync-inference-runtime.mjs' },
+  { path: 'vendor/inference/current/runtime.manifest.json', by: 'scripts/sync-inference-runtime.mjs' },
   { path: 'src-tauri/target/debug/paper', by: 'cargo' },
   /* THE TWO ASSET DIRECTORIES, which are the same defect on two platforms —
      the frontend dist and every `bundle.resources` entry, copied in for
      packaging. */
   { path: 'src-tauri/gen/apple/assets/index.html', by: 'tauri ios build — resources phase' },
   { path: 'src-tauri/gen/android/app/src/main/assets/index.html', by: 'tauri android build — asset merge' },
-  { path: 'src-tauri/gen/android/app/src/main/assets/runtime/lemond', by: 'tauri android build — bundle resources' },
+  { path: 'src-tauri/gen/android/app/src/main/assets/runtime/runtime.manifest.json', by: 'tauri android build — bundle resources' },
   /* COMPILED OUTPUT for each mobile platform. */
   { path: 'src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libpaper_lib.so', by: 'cargo, via the NDK' },
   /* ⚠️ **NOT A `.so`, DELIBERATELY.** The Tauri template's own rule is

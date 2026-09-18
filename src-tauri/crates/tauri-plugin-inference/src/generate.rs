@@ -7,13 +7,16 @@
 //!
 //! # What is dropped, and why it is not tidiness
 //!
-//! Observed against 11.7.0: every streamed chunk carries a `model` field, and
-//! for a model registered through `extra_models_dir` **its value is the
-//! artifact's absolute path** —
+//! Observed against lemond 11.7.0: every streamed chunk carries a `model`
+//! field, and for a model registered through `extra_models_dir` **its value
+//! was the artifact's absolute path** —
 //! `/Users/…/Paper/inference/models/qwen…/Qwen3-4B-Instruct-2507-Q4_K_M.gguf`.
 //! Forwarding a chunk verbatim would put the reader's home directory into the
-//! webview on every token. So the parser reads `choices[0].delta.content` and
-//! carries nothing else: not the id, not the fingerprint, not the model.
+//! webview on every token. The server is launched with `--alias <id>` now, so
+//! the field names the model by id — and the rule stands anyway, because it
+//! costs nothing and a launch that loses the flag would bring the path back:
+//! the parser reads `choices[0].delta.content` and carries nothing else — not
+//! the id, not the fingerprint, not the model.
 //!
 //! # `[DONE]` is a sentinel, not JSON
 //!
@@ -28,8 +31,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{unreachable, Error, Result};
 use crate::requests::Cancel;
 
-/// The route the thread and the gloss both use.
-pub const CHAT_ROUTE: &str = "/api/v1/chat/completions";
+/// The route the thread and the gloss both use — llama-server's own. (It was
+/// lemond's `/api/v1/chat/completions`, a proxy of this one.)
+pub const CHAT_ROUTE: &str = "/v1/chat/completions";
 
 /// One message in a request. Paper sends exactly two — a system prompt it
 /// wrote and the reader's question with its numbered passages — and never a
@@ -48,6 +52,13 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     pub temperature: f32,
     pub stream: bool,
+    /// The shape the answer must take, compiled by the daemon into a grammar
+    /// that constrains every sampled token. Only the gloss sends one — see
+    /// `gloss.rs` for what describing that shape in prose instead cost — and
+    /// the companion's answer is prose a reader watches arrive, so for it this
+    /// is ABSENT from the body rather than `null`, exactly as before it existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
 }
 
 /// The sentinel that ends an SSE stream.
@@ -79,7 +90,7 @@ struct Delta {
 
 /// The one `finish_reason` that means the model said what it had to say.
 ///
-/// The OpenAI streaming vocabulary, which `lemond` speaks: `stop` is the model
+/// The OpenAI streaming vocabulary, which `llama-server` speaks: `stop` is the model
 /// deciding it is done, `length` is `max_tokens` cutting it off mid-thought,
 /// and there are others (`content_filter`, `tool_calls`) plus whatever a future
 /// backend invents.
@@ -370,7 +381,8 @@ mod tests {
 
     #[test]
     fn a_delta_line_yields_its_text() {
-        // The exact shape observed from 11.7.0, minus nothing.
+        // The exact shape observed from b10375 (through lemond 11.7.0, which
+        // forwarded the server's chunks as they were), minus nothing.
         let line = r#"data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":"One"}}],"created":1787418132,"id":"chatcmpl-xnR9","model":"/Users/someone/Paper/models/x.gguf","system_fingerprint":"b10375","object":"chat.completion.chunk"}"#;
         assert_eq!(parse_line(line).delta.as_deref(), Some("One"));
     }
@@ -577,7 +589,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(hold_ms));
         });
-        format!("http://{address}/api/v1/chat/completions")
+        format!("http://{address}{CHAT_ROUTE}")
     }
 
     async fn answered_parts(parts: Vec<Vec<u8>>, hold_ms: u64) -> Answer {
@@ -827,10 +839,15 @@ mod tests {
             max_tokens: 512,
             temperature: 0.2,
             stream: true,
+            response_format: None,
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["messages"].as_array().unwrap().len(), 2);
         assert_eq!(json["stream"], true);
         assert_eq!(json["model"], "qwen");
+        /* ABSENT, not `null`: a backend that reads `"response_format": null`
+        as "a format was named" is within its rights, and the prose request
+        must not find out. */
+        assert!(json.get("response_format").is_none(), "{json}");
     }
 }

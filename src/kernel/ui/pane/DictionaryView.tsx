@@ -217,6 +217,12 @@ function LiveLookUp({ state }: { readonly state: Exclude<GlossState, { readonly 
   const { said, because } = lookUpSays(state)
   if (state.kind === 'asking' || state.kind === 'ready') {
     return (
+      /* ⚠️ **NO PART OF SPEECH HERE, THOUGH A `ready` STATE CARRIES ONE** — the
+         popup's face draws it and this row does not, on purpose. A live row sits
+         directly above history rows built from the lookups store, which keeps no
+         part of speech; a line on the live entry that none of the rows below it
+         can have reads as the older lookups having lost something. See
+         `lookUpWords.ts`, where the decision is written out. */
       <div className={styles.note} data-kind="companion" role="status">
         <div className={styles.noteKind}>{state.kind === 'asking' ? 'Looking up' : 'Looked up'}</div>
         <div className={styles.lookupTerm}>{state.term}</div>

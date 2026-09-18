@@ -10,8 +10,11 @@ import { CompanionPane } from './ui/CompanionPane'
  * The `companion` capability — the provider binding, and which route answers.
  *
  * It `requires` `inference` and delegates to it, rather than the two sharing
- * a binding: there is exactly one writer per port, and **the agent adapters
- * never appear on the gloss path at all** (F8). With `companion` absent,
+ * a binding: there is exactly one writer per port, and **the companion's
+ * agent turn never appears on the gloss path**. (This said "the agent adapters
+ * never appear on the gloss path at all (F8)"; since 2026-09-18 an agent may
+ * answer a lookup, through `inference`'s own `inference_gloss` and its own
+ * choice of route — never through this capability.) With `companion` absent,
  * failed, or set to an agent, the gloss still works — the two features fail
  * separately because they are two features.
  *

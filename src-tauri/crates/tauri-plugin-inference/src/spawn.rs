@@ -1,211 +1,243 @@
-//! THE SPAWN CONFIGURATION — every default this crate overrides, and why.
+//! THE LAUNCH PLAN — every flag `llama-server` is started with, and why.
 //!
 //! This module is pure: it turns a [`SpawnInputs`] into a [`SpawnPlan`] — a
-//! program, an argv, an environment and a `config.json` — and touches no
-//! filesystem and no process. That is what makes WI-15.0's acceptance
-//! ("each line of the configuration table has a test that breaks when it is
-//! removed" — the table has grown since it was eight)
-//! something a unit test can hold rather than something an integration run
-//! has to notice.
+//! program, an argv and the environment to set — and touches no filesystem and
+//! no process. That is what makes WI-15.0's acceptance ("each line of the
+//! configuration table has a test that breaks when it is removed") something a
+//! unit test can hold rather than something an integration run has to notice.
 //!
-//! # The configuration is not defaults plus overrides
+//! # One process, launched on one model
 //!
-//! Every line below is a shipped default pointing the wrong way for an app
-//! that redistributes and supervises this daemon. Measured against
-//! `lemonade-embeddable-11.7.0-macos-arm64` on 2026-08-23 — the values are
-//! quoted from the `resources/defaults.json` in that artifact, and each
-//! "found" note is something the smoke test actually observed rather than
-//! something read off the documentation:
+//! ⚠️ **THIS LAUNCHED `lemond` UNTIL 2026-09-18**, Lemonade's daemon, which in
+//! turn launched the same `llama-server` this launches now. What it added was
+//! measured before it went (the benchmark and the audit are in AGENTS.md, "The
+//! inference runtime"): about one millisecond per request, and three costs.
 //!
-//! | key | ships as | Paper sets | found |
+//! - **The model's port had no key.** lemond held the per-launch token on ITS
+//!   port and started `llama-server` one port over with none, and with CORS
+//!   reflecting any origin: an unauthenticated `POST /v1/chat/completions`
+//!   answered 200, and `/slots` could show the text of recent lookups.
+//! - **It sized the context from free memory at each launch** — 66 816 to
+//!   117 018 tokens on one machine in one afternoon, a 10–16 GB footprint for
+//!   a 2.5 GB model. The context below is fixed, and the same launch measured
+//!   1.2 GB.
+//! - **It loaded the model on the first request**, so the reader's first
+//!   lookup paid 6–8 s of model load. A bare server loads at start, which
+//!   `ensureReady` begins when a word is SELECTED, before Look up is pressed.
+//!
+//! Everything else it offered — a model registry, a backend installer, cloud
+//! providers, a speech route — Paper had switched off, replaced, or never
+//! measured working. So the launch is `llama-server` itself, in single-model
+//! mode: one process, one port, one model, one key.
+//!
+//! # The table
+//!
+//! | flag | ships as | Paper sets | why |
 //! |---|---|---|---|
-//! | `LEMONADE_CACHE_DIR` | `~/.cache/lemonade` | Paper-owned | `lemond --help` alone creates it |
-//! | `models_dir` | `"auto"` | Paper-owned | `auto` resolved to `~/.cache/huggingface/hub` EVEN with the cache dir moved |
-//! | `host` | `"localhost"` | `127.0.0.1` | `localhost` also resolves `::1`; the literal binds one stack |
-//! | `broadcast` | `true` | `false` | UDP discovery beacon on by default |
-//! | api key | none required | random per launch | without one, every route is open |
-//! | `auto_check_model_updates` | `true` | `false` | Paper owns the manifest, not upstream |
-//! | `llamacpp.prefer_system` | `true` | `false` | prefers a llama.cpp found on PATH over the vetted builtin |
-//! | `inhibit_suspend` | `true` | `false` | a reader must not hold the machine awake |
-//! | `no_fetch_executables` | `false` | `true` | the daemon fetched llama.cpp from GitHub inside the first gloss, unhashed (WI-20.24) |
-//! | `llamacpp.<backend>_bin` | `"builtin"` | the verified `llama-server` | "builtin" is whatever the fetch left in the cache; a path is never downloaded |
+//! | `--host` | `127.0.0.1` | `127.0.0.1` | stated, because "the default is loopback" is not a property Paper controls |
+//! | `--port` | 8080 | a free port the OS chose | a fixed port collides with the reader's other software |
+//! | `-m`, `--alias` | none | the installed GGUF, named by its manifest id | single-model mode; answers name the model by id, never by path |
+//! | `LLAMA_API_KEY` | none — every route open | a key minted per launch | the hole lemond's arrangement left |
+//! | `--cors-origins` | `*`, echoing any `Origin` with credentials | an origin no page can have | nothing in a browser has any business here |
+//! | `--no-cors-credentials` | credentials allowed | refused | the same, for the other half of the header |
+//! | `--no-slots` | `/slots` on | off | it exposes recent prompts, and Paper never reads it |
+//! | `--no-ui` | a web UI on the port | off | a chat page in front of the reader's model |
+//! | `--offline` | may download | never | the model is a verified file; nothing is fetched |
+//! | `-c` | from the model (262 144) | [`CONTEXT_TOKENS`] | see the constant |
+//! | `-np` | auto | 1 | one reader, one question at a time; the whole context to it |
+//! | `--jinja`, `--reasoning-format auto` | the same | stated | the launch the lookup's quality was measured under |
 //!
-//! The last two are the same decision from two sides. `<backend>_bin` takes
-//! the EXECUTABLE'S path — `lemond` execs it directly, with its directory as
-//! the working directory (`llamacpp_server.cpp`) — and is read from the
-//! environment before the config (`LEMONADE_LLAMACPP_<BACKEND>_BIN`,
-//! `backend_utils.cpp`'s `get_bin_config_value`), so it is set on both, the
-//! way `--no-broadcast` is: the config file is the one the daemon rewrites.
-//! `llamacpp.backend` is pinned to the staged backend's name rather than
-//! left `auto`, because `auto` on a machine with a GPU would pick a backend
-//! nothing staged and, with fetching forbidden, fail at the first model.
+//! Anything not in the table is llama.cpp's default. The table is what Paper
+//! DECIDED; a flag that decides nothing Paper cares about is not restated here.
 //!
-//! # Three channels, and they are not interchangeable
+//! # The key rides the environment, never the argv
 //!
-//! The smoke test's most useful finding is that these settings arrive by
-//! three different routes and each key accepts only its own:
+//! `--api-key KEY` puts the key in the process's argument list, which every
+//! user on the machine can read with `ps`. `LLAMA_API_KEY` is the same setting
+//! through the environment, which only the process's own user (and root) can
+//! read — the same exposure lemond's `LEMONADE_API_KEY` had, and no file on
+//! disk to clean up after a crash.
 //!
-//! - **`config.json`, pre-written into the cache dir.** The ONLY channel for
-//!   `models_dir`, `llamacpp.prefer_system`, `auto_check_model_updates` and
-//!   `inhibit_suspend` — none of them has a CLI flag. Paper writes this file
-//!   before every launch rather than once, because it is also the file the
-//!   daemon rewrites at runtime.
-//! - **CLI flags**, for `--host`, `--port` and `--no-broadcast`.
-//! - **The environment**, for `LEMONADE_CACHE_DIR`, `LEMONADE_API_KEY` and
-//!   the per-provider cloud keys (F1: `LEMONADE_<PROVIDER>_API_KEY` outranks
-//!   any runtime key, which is what stops a client swapping the reader's).
+//! # And the child inherits NOTHING llama.cpp would read
 //!
-//! `--no-broadcast` IS BOTH, and the redundancy is deliberate: the flag was
-//! observed to disable broadcasting for the run while leaving `broadcast:
-//! true` in the config the daemon then rewrote. Either channel alone leaves a
-//! way for the beacon to come back — the flag omitted from one spawn, or the
-//! config file rewritten by the daemon — so both are set on every launch.
-//!
-//! # What could not be turned off
-//!
-//! The daemon starts a WebSocket server on a port it picks itself (9000 in
-//! the smoke test; the plan's earlier probe saw 9002). `websocket_port: 0`
-//! does NOT disable it — verified. What IS true, and is the reason this is
-//! recorded rather than escalated: it inherits `--host`, so with the host
-//! pinned to `127.0.0.1` it binds the loopback only, which `lsof` confirmed.
-//! The plan asked to "prove bind/auth or disable"; disable is not on offer, so
-//! this proves bind — by the `--host` pin above, and by nothing else.
-//!
-//! ⚠️ **THERE IS NO `websocket_is_loopback` CHECK, AND THIS SENTENCE CITED ONE.**
-//! `daemon.rs` says the opposite in capitals — "THERE IS NO RUNTIME CHECK HERE,
-//! AND TWO ATTEMPTS AT ONE WERE BOTH WRONG" — and `note_websocket_port` only
-//! logs the port it saw. So the loopback bind rests on the argument being
-//! pinned, which is a real guarantee and a different one from an assertion.
+//! ⚠️ **llama.cpp READS ITS WHOLE CONFIGURATION FROM THE ENVIRONMENT TOO.**
+//! Every flag has an `LLAMA_ARG_*` twin, and among them are `LLAMA_ARG_TOOLS`
+//! (whose `all` enables a built-in `exec_shell_command`), `LLAMA_ARG_AGENT`,
+//! `LLAMA_ARG_MEDIA_PATH` and `LLAMA_ARG_MODEL_URL`. A flag on the command line
+//! outranks its variable, but a variable for a flag Paper does not pass is
+//! simply obeyed — so a reader's shell, launcher or CI decides what the child
+//! does. Every inherited variable in the namespaces below is cleared before
+//! Paper's own are set ([`clears`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rand::RngCore;
 
-/// The loopback address the daemon binds, written out rather than named.
+/// The loopback address the server binds, written out rather than named.
 ///
-/// `localhost` is what ships, and it is not the same thing: it resolves to
-/// both `127.0.0.1` and `::1`, so the daemon binds two stacks and a reader's
-/// `/etc/hosts` decides what "local" means. The literal binds what Paper
-/// meant.
+/// `localhost` resolves to both `127.0.0.1` and `::1`, so a server bound to it
+/// binds two stacks and a reader's `/etc/hosts` decides what "local" means.
+/// The literal binds what Paper meant.
 pub const LOOPBACK: &str = "127.0.0.1";
 
-/// The environment variable naming the daemon's cache directory.
-pub const CACHE_DIR_ENV: &str = "LEMONADE_CACHE_DIR";
+/// The environment variable carrying the per-launch key — `--api-key`'s own
+/// variable, which is `LLAMA_API_KEY` and not the `LLAMA_ARG_API_KEY` the rest
+/// of the table's pattern would suggest (read off `llama-server --help` for
+/// b10375).
+pub const API_KEY_ENV: &str = "LLAMA_API_KEY";
 
-/// The environment variable carrying the per-launch bearer token.
-pub const API_KEY_ENV: &str = "LEMONADE_API_KEY";
+/// How many tokens one request may hold — prompt and answer together.
+///
+/// A LOOKUP needs under a thousand: a 700-character system prompt, one
+/// sentence and 160 tokens of answer. 8 192 is that several times over, and
+/// measured at a 1.2 GB footprint against lemond's 10–16 GB for the context it
+/// sized from free memory.
+///
+/// ⚠️ **THE COMPANION IS THE ONE CALLER THIS BOUNDS**, and it is unfinished
+/// (`UNFINISHED_PANE_IDS`). `limits.rs` lets it send 64 KB of question, which
+/// in Chinese is more than this holds. A prompt that does not fit is REFUSED by
+/// the server with an HTTP error, never silently cut, so the reader sees a
+/// failure rather than an answer to half a question. When the companion
+/// ships, size this against what it actually sends — do not raise it here on
+/// a guess, because it is paid in memory on every reader's machine.
+pub const CONTEXT_TOKENS: u32 = 8192;
 
-/// The config format this crate writes. The shipped `defaults.json` declares
-/// `config_version: 2`; writing a file without it would leave the daemon to
-/// guess which shape it is reading.
-pub const CONFIG_VERSION: u32 = 2;
+/// An `Origin` no web page can have.
+///
+/// `.invalid` is reserved (RFC 6761) and never resolves, so no document is ever
+/// served from it and no browser ever sends it. Naming it is how the CORS
+/// allow-list says "nobody": llama-server's own default is `*`, which echoes
+/// whatever `Origin` arrives and allows credentials with it.
+pub const NO_BROWSER_ORIGIN: &str = "https://paper.invalid";
 
-/// What a caller must decide before a daemon can be launched.
-#[derive(Debug, Clone)]
-pub struct SpawnInputs {
-    /// The `lemond` executable Paper ships and supervises. Absolute.
-    pub program: PathBuf,
-    /// The backend the manifest verified — the only kind there is. A plan
-    /// for an unverified backend cannot be built; see `runtime.rs`.
-    pub backend: crate::runtime::VerifiedBackend,
-    /// The Paper-owned cache directory. Need not exist — the daemon creates
-    /// it, which WI-15.0's first acceptance line turns on.
-    pub cache_dir: PathBuf,
-    /// Where the daemon's process-group record goes (`lineage.rs`), so a
-    /// Paper killed outright leaves the next launch something to collect.
-    pub record_path: PathBuf,
-    /// The Paper-owned model directory. Kept OUT of the cache directory on
-    /// purpose: models are the expensive, reader-visible artifact ("Models
-    /// folder … [Reveal]" in the settings sketch) and the cache is scratch.
-    pub models_dir: PathBuf,
-    /// The loopback port. Chosen by the caller, which is what lets a test
-    /// bind its own and the app ask the OS for a free one.
-    pub port: u16,
-    /// The per-launch bearer token, hex. [`mint_token`] makes one.
-    pub api_key: String,
-    /// Cloud provider keys, by provider id (F1/WI-15.8). Provisioned into the
-    /// CHILD'S ENVIRONMENT at spawn and never through `/v1/cloud/auth`,
-    /// because `LEMONADE_<PROVIDER>_API_KEY` outranks a runtime key and that
-    /// precedence is the thing stopping a client swapping the reader's.
-    pub cloud_keys: BTreeMap<String, String>,
+/// The namespaces an inherited variable is cleared from. See the module header.
+///
+/// `LLAMA_` is llama.cpp's own (`LLAMA_ARG_*`, `LLAMA_API_KEY`, `LLAMA_CACHE`,
+/// `LLAMA_LOG_*`); `GGML_` is its tensor library's, where a variable can move
+/// which Metal shader library is loaded; `HF_` is Hugging Face's, which decides
+/// where a download lands and with whose token.
+pub const CLEARED_PREFIXES: &[&str] = &["LLAMA_", "GGML_", "HF_"];
+
+/// Two Hugging Face cache variables outside its `HF_` prefix.
+pub const CLEARED_NAMES: &[&str] = &["HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE"];
+
+/// Whether an inherited environment variable must not reach the child.
+///
+/// Case-insensitive, because Windows' environment is: `llama_arg_tools` and
+/// `LLAMA_ARG_TOOLS` are one variable there.
+pub fn clears(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    CLEARED_PREFIXES
+        .iter()
+        .any(|prefix| upper.starts_with(prefix))
+        || CLEARED_NAMES.contains(&upper.as_str())
 }
 
-/// A launch, fully decided: nothing below this reads a default.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a caller must decide before a server can be launched.
+#[derive(Debug, Clone)]
+pub struct SpawnInputs {
+    /// The backend the runtime manifest verified — the only kind there is. A
+    /// plan for an unverified executable cannot be built; see `runtime.rs`.
+    pub backend: crate::runtime::VerifiedBackend,
+    /// The installed GGUF, absolute.
+    pub model: PathBuf,
+    /// Its manifest id — what answers are named by (`--alias`), and what
+    /// `inference_resource_usage` reports as loaded.
+    pub model_id: String,
+    /// Where the server's process-group record goes (`lineage.rs`), so a
+    /// Paper killed outright leaves the next launch something to collect.
+    pub record_path: PathBuf,
+    /// The loopback port. Chosen by the caller, which is what lets a test bind
+    /// its own and the app ask the OS for a free one.
+    pub port: u16,
+    /// The per-launch key, hex. [`mint_token`] makes one.
+    pub api_key: String,
+}
+
+/// A launch, fully decided.
+#[derive(Clone, PartialEq, Eq)]
 pub struct SpawnPlan {
     pub program: PathBuf,
     pub args: Vec<String>,
-    /// Variables to SET on the child. See [`SpawnPlan::env_removals`] for the
-    /// ones to clear.
+    /// Variables to SET on the child, AFTER every inherited one [`clears`]
+    /// names has been removed — see [`SpawnPlan::inherited_removals`].
     pub env: BTreeMap<String, String>,
-    /// The `config.json` to write into `cache_dir` before launching.
-    pub config: serde_json::Value,
-    pub cache_dir: PathBuf,
     /// See [`SpawnInputs::record_path`].
     pub record_path: PathBuf,
     pub port: u16,
+    /// See [`SpawnInputs::model_id`].
+    pub model_id: String,
+    /// The llama.cpp build the runtime manifest pinned, e.g. `b10375` — what
+    /// the settings row reports as the runtime's version.
+    pub version: String,
+    /// The directory the server runs IN — its own, which the manifest verified.
+    ///
+    /// ⚠️ **ggml LOADS BACKENDS FROM THE WORKING DIRECTORY TOO.** Its registry
+    /// scans the executable's folder AND the current directory for
+    /// `libggml-<backend>-*` / `ggml-*.dll` and loads the best-scoring one
+    /// (`ggml-backend-reg.cpp`, b10375) — which is how the Linux and Windows
+    /// builds find their CPU backends at all. The server inherited PAPER'S
+    /// working directory, so a library planted there was loaded without the
+    /// manifest ever seeing it (found 2026-09-18, reading the loader). Run in
+    /// its own folder, both places the scan looks are the verified tree. lemond
+    /// did the same for the server it launched.
+    pub working_dir: PathBuf,
 }
 
-/// The prefix of a per-provider cloud key (F1).
-pub fn cloud_key_var(provider: &str) -> String {
-    format!("LEMONADE_{}_API_KEY", provider.to_ascii_uppercase())
+/* THE KEY IS NOT PRINTED. `SpawnPlan` derived `Debug` while the key sat in
+ * `env`, so any `{plan:?}` — a log line, a failed `assert_eq!` — would have
+ * written a live credential out. The shape is kept; the values are not. */
+impl std::fmt::Debug for SpawnPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnPlan")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("record_path", &self.record_path)
+            .field("port", &self.port)
+            .field("model_id", &self.model_id)
+            .field("version", &self.version)
+            .field("working_dir", &self.working_dir)
+            .finish()
+    }
 }
-
-/// The environment variable naming a llama.cpp backend's executable — the
-/// channel `lemond` reads BEFORE the config key of the same name.
-pub fn backend_bin_var(backend: &str) -> String {
-    format!("LEMONADE_LLAMACPP_{}_BIN", backend.to_ascii_uppercase())
-}
-
-/// Environment variables the child must NOT inherit.
-///
-/// The parent is Paper, and Paper's own environment is whatever the reader's
-/// shell, launcher or CI happened to export. Two of these decide where
-/// gigabytes land and one decides whether the daemon phones an observability
-/// endpoint; inheriting any of them would silently undo a line above.
-pub const ENV_REMOVALS: &[&str] = &[
-    // Would move the model store back out from under `models_dir`.
-    "HF_HOME",
-    "HF_HUB_CACHE",
-    "HUGGINGFACE_HUB_CACHE",
-    "TRANSFORMERS_CACHE",
-    // Would point the daemon at a different resources/defaults.json than the
-    // one Paper ships beside the binary it is launching.
-    "LEMONADE_DEFAULTS_PATH",
-    // A second key, separate from LEMONADE_API_KEY, that gates the control
-    // plane. Paper mints its own; an inherited one is somebody else's.
-    "LEMONADE_ADMIN_API_KEY",
-    // Would widen the CORS origins the daemon accepts.
-    "LEMONADE_ALLOWED_ORIGINS",
-    // Would re-point the host/port the client half then would not find.
-    "LEMONADE_HOST",
-    "LEMONADE_PORT",
-];
 
 impl SpawnPlan {
-    /// The variables to clear on the child, so an inherited one cannot undo a
-    /// decision made here. See [`ENV_REMOVALS`].
-    pub fn env_removals(&self) -> &'static [&'static str] {
-        ENV_REMOVALS
+    /// The inherited variables to clear on the child, given the names in
+    /// Paper's own environment.
+    ///
+    /// Everything [`clears`] names, EXCEPT what this plan sets itself: Paper's
+    /// own `LLAMA_API_KEY` is in the cleared namespace, and the launch removes
+    /// before it sets, so an inherited key is replaced rather than kept.
+    pub fn inherited_removals<I, S>(&self, inherited: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        inherited
+            .into_iter()
+            .map(|name| name.as_ref().to_owned())
+            .filter(|name| clears(name) && !self.env.contains_key(name))
+            .collect()
     }
 
-    /// The base URL of the daemon's HTTP API.
+    /// The base URL of the server's HTTP API.
     pub fn base_url(&self) -> String {
         format!("http://{LOOPBACK}:{}", self.port)
     }
 
-    /// Where the `config.json` goes.
-    pub fn config_path(&self) -> PathBuf {
-        self.cache_dir.join("config.json")
+    /// The per-launch key.
+    pub fn api_key(&self) -> &str {
+        &self.env[API_KEY_ENV]
     }
 }
 
-/// Mint a per-launch bearer token: 32 random bytes, hex.
+/// Mint a per-launch key: 32 random bytes, hex.
 ///
-/// Per LAUNCH and not per install — a token that outlived the process would
-/// be a credential at rest, and there is nothing for it to authenticate to
-/// once the daemon it was minted for has exited.
+/// Per LAUNCH and not per install — a key that outlived the process would be a
+/// credential at rest, and there is nothing for it to authenticate to once the
+/// server it was minted for has exited.
 pub fn mint_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -214,118 +246,58 @@ pub fn mint_token() -> String {
 
 /// Turn inputs into a launch. Pure.
 pub fn plan_spawn(inputs: &SpawnInputs) -> SpawnPlan {
-    /* The per-launch token invariant, ENFORCED rather than assumed:
-     * `mint_token` is 64 lowercase hex characters, and a plan built with an
-     * empty or hand-rolled key would authenticate nothing while looking
-     * configured. Loud here, where the plan is made, not at the question. */
+    /* The per-launch key invariant, ENFORCED rather than assumed: `mint_token`
+     * is 64 lowercase hex characters, and a plan built with an empty or
+     * hand-rolled key would authenticate nothing while looking configured.
+     * Loud here, where the plan is made, not at the question. */
     assert!(
         inputs.api_key.len() == 64 && inputs.api_key.chars().all(|c| c.is_ascii_hexdigit()),
         "SpawnInputs.api_key is not a minted token — use mint_token()"
     );
     let mut env = BTreeMap::new();
-    env.insert(CACHE_DIR_ENV.to_owned(), path_string(&inputs.cache_dir));
     env.insert(API_KEY_ENV.to_owned(), inputs.api_key.clone());
-    for (provider, key) in &inputs.cloud_keys {
-        env.insert(cloud_key_var(provider), key.clone());
-    }
-    let server = path_string(inputs.backend.server());
-    env.insert(backend_bin_var(inputs.backend.name()), server.clone());
 
     let args = vec![
+        "-m".to_owned(),
+        inputs.model.to_string_lossy().into_owned(),
+        "--alias".to_owned(),
+        inputs.model_id.clone(),
         "--host".to_owned(),
         LOOPBACK.to_owned(),
         "--port".to_owned(),
         inputs.port.to_string(),
-        // Both channels, on every launch — see the module header.
-        "--no-broadcast".to_owned(),
+        "-c".to_owned(),
+        CONTEXT_TOKENS.to_string(),
+        "-np".to_owned(),
+        "1".to_owned(),
+        "--cors-origins".to_owned(),
+        NO_BROWSER_ORIGIN.to_owned(),
+        "--no-cors-credentials".to_owned(),
+        "--no-slots".to_owned(),
+        "--no-ui".to_owned(),
+        "--offline".to_owned(),
+        "--jinja".to_owned(),
+        "--reasoning-format".to_owned(),
+        "auto".to_owned(),
     ];
 
-    let config = serde_json::json!({
-        "config_version": CONFIG_VERSION,
-        // The only channel for this one: there is no --models-dir flag, and
-        // `auto` resolves to the HuggingFace hub cache even with the cache
-        // directory moved. Verified, not assumed.
-        "models_dir": path_string(&inputs.models_dir),
-        /* ⚠️ **THE KEY THAT MAKES AN INSTALLED MODEL VISIBLE**, and it was
-         * empty — which is why the gloss answered `runtimeHttp` 404 on every
-         * lookup with a 2.3 GB model sitting on disk.
-         *
-         * `models_dir` is the HUGGINGFACE HUB CACHE. Its shipped default is
-         * `auto`, which resolves to `~/.cache/huggingface/hub`, and the layout
-         * it expects is `models--<org>--<repo>/snapshots/<rev>/…`. Paper
-         * writes `models/<manifest-id>/<artifact>.gguf`, which is not that, so
-         * pointing `models_dir` at it hands the daemon an EMPTY cache:
-         * `/api/v1/models` answered `{"data":[]}` while the Local models pane
-         * said `Installed · 2.5 GB`.
-         *
-         * `extra_models_dir` is the one that takes a folder of loose GGUF
-         * files — the daemon's own strings are `Scanning for GGUF models in: `
-         * and three validations about it being a readable directory. Both are
-         * set: the hub cache stays Paper-owned so nothing is written to the
-         * reader's real `~/.cache`, and the scan finds what Paper downloaded.
-         *
-         * Paper never registers a model over the API — `install.rs` calls no
-         * daemon endpoint at all — so this config key is the ONLY way an
-         * installed model becomes reachable. That is what made the failure
-         * total rather than intermittent. */
-        "extra_models_dir": path_string(&inputs.models_dir),
-        "host": LOOPBACK,
-        "port": inputs.port,
-        // The second half of the belt-and-braces above.
-        "broadcast": false,
-        // Paper owns the manifest (WI-15.1). An upstream update check would
-        // make the activation slot disagree with the digest Paper recorded.
-        "auto_check_model_updates": false,
-        // A reader's laptop sleeps. A daemon idling behind a shut side pane
-        // has no claim on that.
-        "inhibit_suspend": false,
-        // Telemetry is already off in the shipped defaults; stated anyway,
-        // because "off by default upstream" is not a property Paper controls.
-        "telemetry": { "enabled": false },
-        /* NOTHING IS FETCHED. Ships `false`: the daemon downloaded llama.cpp
-         * from GitHub inside the first gloss, with no hash Paper checked and
-         * no quarantine flag for Gatekeeper to act on, and this file called
-         * the result "the vetted builtin". The backend is the one the
-         * manifest verified before this plan was built (WI-20.24). */
-        "no_fetch_executables": true,
-        "llamacpp": {
-            // Ships `true`, which prefers a llama.cpp binary found on the
-            // SYSTEM over the one inside the artifact Paper verified. That is
-            // an unverified executable on the reader's PATH deciding how the
-            // reader's book is read.
-            "prefer_system": false,
-            // Pinned rather than `auto`: on a machine with a GPU, `auto`
-            // picks a backend nothing staged and fetching is forbidden.
-            "backend": inputs.backend.name(),
-            // The executable's path, which `lemond` execs directly and never
-            // downloads. Also in the environment above, which outranks this
-            // and survives the daemon rewriting the file.
-            format!("{}_bin", inputs.backend.name()): server,
-        },
-    });
-
     SpawnPlan {
-        program: inputs.program.clone(),
+        program: inputs.backend.server().to_path_buf(),
         args,
         env,
-        config,
-        cache_dir: inputs.cache_dir.clone(),
-        // No `models_dir` on the PLAN: the path is already inside `config`,
-        // and the plan's copy was read by nothing — a second place for one
-        // fact to drift.
         record_path: inputs.record_path.clone(),
         port: inputs.port,
+        model_id: inputs.model_id.clone(),
+        version: inputs.backend.tag().to_owned(),
+        /* The server's own directory. `server()` is `dir.join(<relative>)` of a
+        verified tree, so it always has a parent; the fallback is never taken
+        and would be a refusal-worthy tree anyway. */
+        working_dir: inputs
+            .backend
+            .server()
+            .parent()
+            .map_or_else(|| inputs.backend.server().to_path_buf(), Path::to_path_buf),
     }
-}
-
-/// A path as the string an environment variable or a JSON field carries.
-///
-/// Lossy on purpose and ONLY here: a non-Unicode path would otherwise fail
-/// the launch, and the caller has already validated the roots it built these
-/// from (`paths.rs`). Every path that crosses IPC goes through the typed
-/// error instead.
-fn path_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
@@ -333,162 +305,100 @@ mod tests {
     use super::*;
 
     const SERVER: &str = "/opt/paper/runtime/backend/llamacpp/metal/llama-server";
+    const MODEL: &str = "/data/Paper/inference/models/qwen/Qwen.gguf";
 
     fn inputs() -> SpawnInputs {
         SpawnInputs {
-            program: PathBuf::from("/opt/paper/runtime/lemond"),
             backend: crate::runtime::VerifiedBackend::for_test("metal", SERVER),
-            cache_dir: PathBuf::from("/data/Paper/inference/runtime"),
-            models_dir: PathBuf::from("/data/Paper/inference/models"),
+            model: PathBuf::from(MODEL),
+            model_id: "qwen".to_owned(),
             record_path: PathBuf::from("/data/Paper/inference/daemon.json"),
             port: 13399,
-            // A real minted shape — `plan_spawn` asserts the invariant now.
+            // A real minted shape — `plan_spawn` asserts the invariant.
             api_key: "deadbeef".repeat(8),
-            cloud_keys: BTreeMap::new(),
         }
     }
 
-    /// WI-20.24. The shipped default lets the daemon fetch a backend from
-    /// GitHub — inside the first gloss, with no hash Paper controls — and
-    /// `spawn.rs` used to call that "the vetted builtin". Nothing is fetched:
-    /// the backend is the one the manifest verified, and the daemon is told
-    /// so on BOTH channels, because the env var outranks the config key and
-    /// the config file is the one the daemon rewrites.
-    #[test]
-    fn executables_are_never_fetched() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(
-            plan.config["no_fetch_executables"],
-            serde_json::Value::Bool(true),
-            "ships false — the daemon downloads llama.cpp from GitHub with no hash Paper checks"
-        );
+    /// The value after `flag`, or `None`.
+    fn value_of(plan: &SpawnPlan, flag: &str) -> Option<String> {
+        plan.args
+            .windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
     }
 
-    #[test]
-    fn the_backend_is_the_verified_one_on_both_channels() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(plan.config["llamacpp"]["backend"], "metal");
-        assert_eq!(
-            plan.config["llamacpp"]["metal_bin"], SERVER,
-            "lemond's `<backend>_bin` takes the executable's path and never downloads"
-        );
-        assert_eq!(
-            plan.env
-                .get("LEMONADE_LLAMACPP_METAL_BIN")
-                .map(String::as_str),
-            Some(SERVER),
-            "the env var outranks the config key, and survives the daemon rewriting config.json"
-        );
-    }
+    /* Each test below names one line of the table in the module header, and is
+     * written to FAIL WHEN THE LINE IS REMOVED — WI-15.0's acceptance restated
+     * as code. The last test pins the whole argv, so a flag ADDED without a
+     * line in the table fails too. */
 
     #[test]
-    fn the_record_path_travels_with_the_plan() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(
-            plan.record_path,
-            PathBuf::from("/data/Paper/inference/daemon.json")
-        );
-    }
-
-    /* Each test below names one line of the table in the module header. They
-     * are written to FAIL WHEN THE LINE IS REMOVED, which is WI-15.0's
-     * acceptance restated as code: deleting the `broadcast` key, the
-     * `models_dir` key or the `--no-broadcast` argument each turns exactly
-     * one of these red. */
-
-    #[test]
-    fn cache_dir_is_paper_owned() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(
-            plan.env.get(CACHE_DIR_ENV).map(String::as_str),
-            Some("/data/Paper/inference/runtime"),
-            "the cache dir must be set, or the daemon writes to ~/.cache/lemonade"
-        );
-    }
-
-    /// ⚠️ **AN INSTALLED MODEL THE DAEMON CANNOT SEE.**
-    ///
-    /// `models_dir` is the HuggingFace hub cache — default `auto`, resolving
-    /// to `~/.cache/huggingface/hub`, laid out as
-    /// `models--<org>--<repo>/snapshots/<rev>/…`. Paper writes
-    /// `models/<manifest-id>/<artifact>.gguf`, so pointing only `models_dir`
-    /// at it hands the daemon an empty cache.
-    ///
-    /// Measured in the running app: `/api/v1/models` answered `{"data":[]}`
-    /// with a 2.3 GB GGUF on disk, the Local models pane said
-    /// `Installed · 2.5 GB`, and every gloss came back
-    /// `the inference runtime answered 404 for /api/v1/chat/completions`.
-    ///
-    /// `extra_models_dir` is the folder-of-loose-GGUFs key — the daemon's own
-    /// strings are `Scanning for GGUF models in: ` plus three validations
-    /// about it being a readable directory. Paper registers nothing over the
-    /// API (`install.rs` calls no daemon endpoint), so this key is the only
-    /// route from "downloaded" to "answerable".
-    #[test]
-    fn extra_models_dir_points_at_the_models_paper_downloaded() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(
-            plan.config["extra_models_dir"],
-            "/data/Paper/inference/models"
-        );
-        assert_ne!(
-            plan.config["extra_models_dir"], "",
-            "an empty extra_models_dir is the daemon scanning nowhere, which is a 404 per lookup"
-        );
-    }
-
-    #[test]
-    fn models_dir_is_paper_owned_and_not_auto() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(plan.config["models_dir"], "/data/Paper/inference/models");
-        assert_ne!(
-            plan.config["models_dir"], "auto",
-            "`auto` resolves to ~/.cache/huggingface/hub even with the cache dir moved"
-        );
+    fn the_program_is_the_verified_server_and_nothing_else() {
+        assert_eq!(plan_spawn(&inputs()).program, PathBuf::from(SERVER));
     }
 
     #[test]
     fn host_is_the_loopback_literal_not_localhost() {
-        let plan = plan_spawn(&inputs());
-        let host = plan
-            .args
-            .windows(2)
-            .find(|w| w[0] == "--host")
-            .map(|w| w[1].clone());
-        assert_eq!(host.as_deref(), Some("127.0.0.1"));
-        assert_eq!(plan.config["host"], "127.0.0.1");
-        assert_ne!(
-            plan.config["host"], "localhost",
-            "`localhost` binds ::1 as well and lets /etc/hosts decide what local means"
+        assert_eq!(
+            value_of(&plan_spawn(&inputs()), "--host").as_deref(),
+            Some("127.0.0.1")
         );
     }
 
     #[test]
-    fn broadcast_is_off_on_both_channels() {
+    fn the_port_is_the_one_the_caller_chose() {
         let plan = plan_spawn(&inputs());
-        assert!(
-            plan.args.iter().any(|a| a == "--no-broadcast"),
-            "the flag is what disables the beacon for THIS run"
-        );
-        assert_eq!(
-            plan.config["broadcast"],
-            serde_json::Value::Bool(false),
-            "the config is what stops it coming back on a spawn that omits the flag"
-        );
+        assert_eq!(value_of(&plan, "--port").as_deref(), Some("13399"));
+        assert_eq!(plan.base_url(), "http://127.0.0.1:13399");
     }
 
+    /// Single-model mode, and the model is NAMED by its manifest id: an answer
+    /// carries `model`, and under lemond that was the artifact's absolute path
+    /// — the reader's home directory on every chunk (`generate.rs`).
     #[test]
-    fn an_api_key_is_always_provisioned() {
+    fn the_model_is_loaded_by_path_and_named_by_id() {
+        let plan = plan_spawn(&inputs());
+        assert_eq!(value_of(&plan, "-m").as_deref(), Some(MODEL));
+        assert_eq!(value_of(&plan, "--alias").as_deref(), Some("qwen"));
+        assert_eq!(plan.model_id, "qwen");
+    }
+
+    /// THE HOLE THIS REPLACED: lemond's backend listened with no key at all.
+    #[test]
+    fn a_key_is_always_provisioned_through_the_environment() {
         let plan = plan_spawn(&inputs());
         assert_eq!(
-            plan.env.get(API_KEY_ENV).map(String::as_str),
+            plan.env.get("LLAMA_API_KEY").map(String::as_str),
             Some("deadbeef".repeat(8).as_str())
         );
+        assert_eq!(plan.api_key(), "deadbeef".repeat(8));
     }
 
-    /// The invariant `plan_spawn` now asserts: a plan cannot be built around
-    /// a key that is not a minted token — empty, short, or non-hex all die
-    /// at construction, where the stack names the builder.
+    /// ⚠️ NEVER IN THE ARGV, which every user on the machine can read.
+    #[test]
+    fn the_key_is_never_on_the_command_line() {
+        let plan = plan_spawn(&inputs());
+        assert!(
+            !plan
+                .args
+                .iter()
+                .any(|arg| arg.contains(&"deadbeef".repeat(8)) || arg.starts_with("--api-key")),
+            "{:?}",
+            plan.args
+        );
+    }
+
+    /// And never in a `{:?}`: a failed assertion or a log line printing the
+    /// plan would otherwise write the credential out.
+    #[test]
+    fn the_key_is_never_printed() {
+        let rendered = format!("{:?}", plan_spawn(&inputs()));
+        assert!(!rendered.contains("deadbeef"), "{rendered}");
+        assert!(rendered.contains("LLAMA_API_KEY"), "{rendered}");
+    }
+
+    /// The invariant `plan_spawn` asserts: a plan cannot be built around a key
+    /// that is not a minted token.
     #[test]
     #[should_panic(expected = "not a minted token")]
     fn a_plan_with_an_unminted_key_dies_at_construction() {
@@ -497,41 +407,98 @@ mod tests {
         let _ = plan_spawn(&bad);
     }
 
+    /// `*` is llama-server's default, and with credentials on it echoes any
+    /// `Origin` — measured: a preflight from `https://evil.example` came back
+    /// allowed. Nothing in a browser is a client of this port.
     #[test]
-    fn model_update_checks_are_off() {
+    fn no_browser_origin_is_allowed() {
         let plan = plan_spawn(&inputs());
         assert_eq!(
-            plan.config["auto_check_model_updates"],
-            serde_json::Value::Bool(false)
+            value_of(&plan, "--cors-origins").as_deref(),
+            Some("https://paper.invalid")
+        );
+        assert!(plan.args.iter().any(|a| a == "--no-cors-credentials"));
+    }
+
+    #[test]
+    fn the_slots_endpoint_is_off_because_it_shows_prompts() {
+        assert!(plan_spawn(&inputs()).args.iter().any(|a| a == "--no-slots"));
+    }
+
+    #[test]
+    fn there_is_no_web_ui_on_the_port() {
+        assert!(plan_spawn(&inputs()).args.iter().any(|a| a == "--no-ui"));
+    }
+
+    #[test]
+    fn nothing_is_fetched() {
+        assert!(plan_spawn(&inputs()).args.iter().any(|a| a == "--offline"));
+    }
+
+    #[test]
+    fn the_context_is_fixed_rather_than_sized_from_free_memory() {
+        let plan = plan_spawn(&inputs());
+        assert_eq!(value_of(&plan, "-c").as_deref(), Some("8192"));
+        assert_eq!(value_of(&plan, "-np").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn the_template_settings_are_the_ones_quality_was_measured_under() {
+        let plan = plan_spawn(&inputs());
+        assert!(plan.args.iter().any(|a| a == "--jinja"));
+        assert_eq!(
+            value_of(&plan, "--reasoning-format").as_deref(),
+            Some("auto")
+        );
+    }
+
+    /// THE WHOLE ARGV, pinned — the closed list of flags this module wrote.
+    /// Nothing in it comes from a caller except the port, the model's path
+    /// and its id, and a flag added without a line in the table fails here.
+    #[test]
+    fn the_argv_is_exactly_the_table() {
+        assert_eq!(
+            plan_spawn(&inputs()).args,
+            [
+                "-m",
+                MODEL,
+                "--alias",
+                "qwen",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "13399",
+                "-c",
+                "8192",
+                "-np",
+                "1",
+                "--cors-origins",
+                "https://paper.invalid",
+                "--no-cors-credentials",
+                "--no-slots",
+                "--no-ui",
+                "--offline",
+                "--jinja",
+                "--reasoning-format",
+                "auto",
+            ]
+        );
+    }
+
+    /// ⚠️ ggml scans the WORKING DIRECTORY for backend libraries, so the
+    /// server runs in its own verified folder — never in whatever directory
+    /// Paper happened to be started from.
+    #[test]
+    fn the_server_runs_in_its_own_verified_folder() {
+        assert_eq!(
+            plan_spawn(&inputs()).working_dir,
+            PathBuf::from("/opt/paper/runtime/backend/llamacpp/metal")
         );
     }
 
     #[test]
-    fn a_system_llamacpp_is_never_preferred() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(
-            plan.config["llamacpp"]["prefer_system"],
-            serde_json::Value::Bool(false),
-            "ships true — an unverified binary on the reader's PATH would win"
-        );
-    }
-
-    #[test]
-    fn the_machine_may_still_sleep() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(
-            plan.config["inhibit_suspend"],
-            serde_json::Value::Bool(false)
-        );
-    }
-
-    #[test]
-    fn telemetry_is_stated_off_rather_than_assumed() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(
-            plan.config["telemetry"]["enabled"],
-            serde_json::Value::Bool(false)
-        );
+    fn the_version_is_the_pinned_llamacpp_build() {
+        assert_eq!(plan_spawn(&inputs()).version, "b0000");
     }
 
     #[test]
@@ -547,72 +514,41 @@ mod tests {
         assert_ne!(a, b, "per launch, not per install");
     }
 
+    /// ⚠️ `LLAMA_ARG_TOOLS=all` is a shell tool, obeyed from the environment.
     #[test]
-    fn cloud_keys_ride_the_environment_under_the_documented_name() {
-        let mut i = inputs();
-        i.cloud_keys
-            .insert("openai".to_owned(), "sk-test".to_owned());
-        let plan = plan_spawn(&i);
-        assert_eq!(
-            plan.env.get("LEMONADE_OPENAI_API_KEY").map(String::as_str),
-            Some("sk-test"),
-            "F1: the env var outranks a runtime key, which is what /v1/cloud/auth must never be able to undo"
-        );
-    }
-
-    #[test]
-    fn inherited_cache_and_control_plane_vars_are_cleared() {
-        let plan = plan_spawn(&inputs());
-        let removals = plan.env_removals();
-        for must in [
+    fn every_inherited_llama_ggml_and_hf_variable_is_cleared() {
+        for name in [
+            "LLAMA_ARG_TOOLS",
+            "LLAMA_ARG_AGENT",
+            "LLAMA_ARG_HOST",
+            "LLAMA_ARG_MODEL_URL",
+            "LLAMA_CACHE",
+            "GGML_METAL_PATH_RESOURCES",
             "HF_HOME",
-            "HF_HUB_CACHE",
-            "LEMONADE_ADMIN_API_KEY",
-            "LEMONADE_DEFAULTS_PATH",
-            "LEMONADE_ALLOWED_ORIGINS",
+            "HF_TOKEN",
+            "HUGGINGFACE_HUB_CACHE",
+            "TRANSFORMERS_CACHE",
+            // Windows' environment is case-insensitive.
+            "llama_arg_tools",
         ] {
-            assert!(
-                removals.contains(&must),
-                "{must} would silently undo a decision made in plan_spawn"
-            );
+            assert!(clears(name), "{name} would reach the child");
         }
-        // And nothing Paper itself sets may also be on the removal list, or
-        // the launch would clear its own configuration.
+        for name in ["PATH", "HOME", "TMPDIR", "LANG", "LLAMAS", "HFX"] {
+            assert!(!clears(name), "{name} is not llama.cpp's to read");
+        }
+    }
+
+    /// Removed BEFORE Paper's own are set, and never Paper's own: the launch's
+    /// key is in the cleared namespace, and clearing it would start a server
+    /// with no key — the exact hole this module exists to close.
+    #[test]
+    fn what_paper_sets_is_never_among_what_it_clears() {
+        let plan = plan_spawn(&inputs());
+        let removals = plan.inherited_removals(["LLAMA_API_KEY", "LLAMA_ARG_TOOLS", "PATH"]);
+        assert_eq!(removals, ["LLAMA_ARG_TOOLS"]);
         for key in plan.env.keys() {
-            assert!(
-                !removals.contains(&key.as_str()),
-                "{key} is both set and cleared"
-            );
+            assert!(clears(key), "{key} is set but in no cleared namespace");
+            assert!(!plan.inherited_removals([key.as_str()]).contains(key));
         }
-    }
-
-    #[test]
-    fn the_base_url_is_loopback() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(plan.base_url(), "http://127.0.0.1:13399");
-    }
-
-    #[test]
-    fn the_config_goes_beside_the_cache() {
-        let plan = plan_spawn(&inputs());
-        assert_eq!(
-            plan.config_path(),
-            PathBuf::from("/data/Paper/inference/runtime/config.json")
-        );
-    }
-
-    #[test]
-    fn the_plan_names_no_general_runner() {
-        let plan = plan_spawn(&inputs());
-        // The argv is a closed list of flags this module wrote. Nothing in it
-        // may come from a caller except the port, and nothing may name a
-        // shell — F5's boundary, asserted rather than assumed.
-        for arg in &plan.args {
-            assert!(
-                !arg.contains("sh") || arg == "--host",
-                "unexpected argument {arg:?}"
-            );
-        }
-        assert_eq!(plan.program, PathBuf::from("/opt/paper/runtime/lemond"));
     }
 }

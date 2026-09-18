@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { nextPlacement, place, samePlacement, type SpacedRect } from './placement'
+import {
+  SURFACE_EDGE,
+  SURFACE_GAP,
+  nextPlacement,
+  place,
+  samePlacement,
+  type SpacedRect,
+} from './placement'
 
 /* A 1440×900 window, and a 190×110 menu — the book cell's, at the sizes it
  * actually draws. Every case below is a place a reader can put the pointer. */
@@ -10,7 +17,13 @@ const menu = { width: 190, height: 110 }
 const anchorAt = (left: number, top: number, width = 24, height = 24): SpacedRect<'viewport'> =>
   ({ top, left, width, height, space: V })
 
-const inside = (p: { top: number; left: number }, b = bounds, s = menu, edge = 8) =>
+/* THE DEFAULTS COME FROM THE MODULE, not from a copy here. `gap` and `edge`
+ * were written out as 4 and 8 through this file while `place` and `check` each
+ * held their own copy — three restatements of one decision, and a test that
+ * restates a default cannot notice the default moving. Every expected number
+ * below is still arithmetic a reader can check; what changed is where the
+ * clearance in it comes from. */
+const inside = (p: { top: number; left: number }, b = bounds, s = menu, edge = SURFACE_EDGE) =>
   p.left >= b.left + edge &&
   p.left + s.width <= b.left + b.width - edge &&
   p.top >= b.top + edge &&
@@ -28,7 +41,7 @@ const touchesX = (p: { left: number }, s: { width: number }, r: SpacedRect) =>
 describe('place — the ordinary cases', () => {
   it('hangs below and starts at the anchor when there is room everywhere', () => {
     const p = place({ anchor: anchorAt(600, 300), surface: menu, bounds })
-    expect(p).toMatchObject({ side: 'bottom', align: 'start', fit: 'placed', top: 300 + 24 + 4, left: 600 })
+    expect(p).toMatchObject({ side: 'bottom', align: 'start', fit: 'placed', top: 300 + 24 + SURFACE_GAP, left: 600 })
   })
 
   it('keeps the requested alignment when nothing is in the way', () => {
@@ -48,7 +61,7 @@ describe('place — the ordinary cases', () => {
     expect(p.side).toBe('top')
     expect(p.fit).toBe('placed')
     expect(inside(p)).toBe(true)
-    expect(p.top).toBe(860 - 4 - 110)
+    expect(p.top).toBe(860 - SURFACE_GAP - 110)
   })
 
   it('flips below when asked for above and there is no room above', () => {
@@ -112,14 +125,14 @@ describe('place — the cross axis keeps contact', () => {
   it('slides `center` rather than snapping it to an edge', () => {
     const p = place({ anchor: anchorAt(20, 300, 60, 22), surface: { width: 200, height: 40 }, bounds, align: 'center' })
     expect(p.align).toBe('center')
-    expect(p.left).toBe(8)
+    expect(p.left).toBe(SURFACE_EDGE)
   })
 
   /* CODEX #2. A slid surface used to report `align: 'start'` when it was not
    * at start. It reports the request; the position says how far it slid. */
   it('reports the requested alignment when it merely slid', () => {
     const p = place({ anchor: anchorAt(4, 100), surface: menu, bounds, align: 'end' })
-    expect(p.left).toBe(8)
+    expect(p.left).toBe(SURFACE_EDGE)
     expect(p.align).toBe('end')
   })
 
@@ -188,15 +201,15 @@ describe('place — honesty when it cannot do what was asked', () => {
   it('pins the leading edges of an oversized surface and says so', () => {
     const tiny: SpacedRect<'viewport'> = { top: 0, left: 0, width: 100, height: 100, space: V }
     const p = place({ anchor: anchorAt(40, 40, 20, 20), surface: { width: 120, height: 120 }, bounds: tiny })
-    expect(p.top).toBe(8)
-    expect(p.left).toBe(8)
+    expect(p.top).toBe(SURFACE_EDGE)
+    expect(p.left).toBe(SURFACE_EDGE)
     expect(p.fit).toBe('pinned')
   })
 
   it('pins the leading edge when the surface is wider than the bounds', () => {
     const narrow: SpacedRect<'viewport'> = { top: 0, left: 0, width: 150, height: 900, space: V }
     const p = place({ anchor: anchorAt(60, 300), surface: menu, bounds: narrow, align: 'center' })
-    expect(p.left).toBe(8)
+    expect(p.left).toBe(SURFACE_EDGE)
     expect(p.fit).toBe('pinned')
   })
 
@@ -223,7 +236,7 @@ describe('place — avoid', () => {
     const withAvoid = place({ anchor: firstLine, surface: toolbar, bounds: b, side: 'top', align: 'center', avoid: selection })
     expect(overlaps(without, toolbar, selection)).toBe(true) // the old defect
     expect(overlaps(withAvoid, toolbar, selection)).toBe(false)
-    expect(withAvoid.top).toBeGreaterThanOrEqual(50 + 80 + 4)
+    expect(withAvoid.top).toBeGreaterThanOrEqual(50 + 80 + SURFACE_GAP)
   })
 })
 
@@ -252,7 +265,7 @@ describe('place — what the branch audit found', () => {
     const anchor = anchorAt(100, 100, 20, 20)
     const farRight = { top: 120, left: 700, width: 20, height: 400, space: V }
     const p = place({ anchor, surface: { width: 50, height: 40 }, bounds, side: 'bottom', avoid: farRight })
-    expect(p.top).toBe(100 + 20 + 4)
+    expect(p.top).toBe(100 + 20 + SURFACE_GAP)
     expect(p.side).toBe('bottom')
   })
 
@@ -263,7 +276,7 @@ describe('place — what the branch audit found', () => {
     // Hangs BELOW the obstacle, not below the anchor: there is room there, so
     // no flip — but it must clear the whole of `avoid` first.
     expect(p.side).toBe('bottom')
-    expect(p.top).toBe(120 + 400 + 4)
+    expect(p.top).toBe(120 + 400 + SURFACE_GAP)
     expect(overlaps(p, { width: 50, height: 40 }, belowInPath)).toBe(false)
   })
 
@@ -278,7 +291,7 @@ describe('place — what the branch audit found', () => {
     expect(p.side).toBe('top')
     // Overlay would put it over the anchor's top; `avoid` sits there, so the
     // overlay edge is `avoid`'s top instead and the surface lands above it.
-    expect(p.top + 60).toBe(250 - 4)
+    expect(p.top + 60).toBe(250 - SURFACE_GAP)
     expect(overlaps(p, { width: 120, height: 60 }, above)).toBe(false)
   })
 })
@@ -290,10 +303,10 @@ describe('place — four sides', () => {
     const tip = { width: 120, height: 30 }
     const r = place({ anchor: anchorAt(100, 300), surface: tip, bounds, side: 'right' })
     expect(r.side).toBe('right')
-    expect(r.left).toBe(100 + 24 + 4)
+    expect(r.left).toBe(100 + 24 + SURFACE_GAP)
     const l = place({ anchor: anchorAt(1400, 300), surface: tip, bounds, side: 'right' })
     expect(l.side).toBe('left')
-    expect(l.left + tip.width).toBe(1400 - 4)
+    expect(l.left + tip.width).toBe(1400 - SURFACE_GAP)
     expect(inside(l, bounds, tip)).toBe(true)
   })
 
@@ -323,8 +336,8 @@ describe('place — every anchor, every option, always on screen', () => {
   it('respects the bounds origin when the bounds are not at 0,0', () => {
     const offset: SpacedRect<'viewport'> = { top: 100, left: 200, width: 600, height: 400, space: V }
     const p = place({ anchor: anchorAt(210, 110), surface: menu, bounds: offset, align: 'end' })
-    expect(p.left).toBeGreaterThanOrEqual(200 + 8)
-    expect(p.top).toBeGreaterThanOrEqual(100 + 8)
+    expect(p.left).toBeGreaterThanOrEqual(200 + SURFACE_EDGE)
+    expect(p.top).toBeGreaterThanOrEqual(100 + SURFACE_EDGE)
   })
 })
 
@@ -357,8 +370,8 @@ describe('nextPlacement — what the hook decides from what it measured', () => 
   it('moves when only the anchor changed size', () => {
     const before = nextPlacement({ anchor: anchorAt(600, 100, 24, 20), surface: menu, bounds: win }, {})
     const after = nextPlacement({ anchor: anchorAt(600, 100, 24, 80), surface: menu, bounds: win }, {})
-    expect(before?.top).toBe(100 + 20 + 4)
-    expect(after?.top).toBe(100 + 80 + 4)
+    expect(before?.top).toBe(100 + 20 + SURFACE_GAP)
+    expect(after?.top).toBe(100 + 80 + SURFACE_GAP)
     expect(samePlacement(before, after)).toBe(false)
   })
 
@@ -368,7 +381,7 @@ describe('nextPlacement — what the hook decides from what it measured', () => 
     const pane: SpacedRect<'viewport'> = { top: 200, left: 1000, width: 400, height: 300, space: V }
     const p = nextPlacement({ anchor: anchorAt(1010, 450), surface: menu, bounds: pane }, { side: 'bottom' })
     expect(p?.side).toBe('top') // 450+24+4+110 > 500: no room below in the pane
-    expect(p!.top + menu.height).toBeLessThanOrEqual(200 + 300 - 8)
+    expect(p!.top + menu.height).toBeLessThanOrEqual(200 + 300 - SURFACE_EDGE)
   })
 
   it('samePlacement is what lets the hook skip a re-render on a no-op measurement', () => {

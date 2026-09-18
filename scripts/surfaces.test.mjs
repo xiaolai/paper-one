@@ -113,7 +113,11 @@ describe('the capability contributions it reads', () => {
     })
     expect(surfaces.capabilities.public.panes).toEqual(['public:book'])
     expect(surfaces.capabilities.public.markControls).toEqual(['public:publish'])
-    expect(surfaces.capabilities.inference.settings).toEqual(['inference:models', 'inference:endpoints'])
+    expect(surfaces.capabilities.inference.settings).toEqual([
+      'inference:gloss',
+      'inference:models',
+      'inference:endpoints',
+    ])
   })
 
   it('gives a capability that contributes nothing an empty object, not a crash', () => {

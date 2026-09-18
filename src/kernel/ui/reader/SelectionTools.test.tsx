@@ -3,6 +3,7 @@ import { startTransition, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Mark, MarkStyle, MarkTint } from '../../core/marks'
+import { NO_VOICE } from '../../core/voice'
 import type { GlossState } from '../hooks/useGloss'
 import type { SelectionSnapshot } from './session'
 import { SelectionTools, type SelectionToolsProps } from './SelectionTools'
@@ -128,6 +129,10 @@ function propsFor({ selection, stage }: Scene, over: Partial<SelectionToolsProps
     onLookUp: () => {},
     lookUp: { kind: 'idle' },
     onLookUpBack: () => {},
+    /* NOTHING CAN SPEAK, which is the port's own default and what every case in
+       this file is about the absence of: the pronunciation control belongs to
+       `LookUpFace`, and is asserted there. */
+    voice: NO_VOICE,
     onRemove: () => {},
     ...over,
   }

@@ -246,7 +246,7 @@ describe('the Look up language', () => {
 })
 
 /**
- * "Install one" LANDS ON ITS SECTION (phase 17, L3): opened — it is closed at
+ * "Choose one" LANDS ON ITS SECTION (phase 17, L3): opened — it is closed at
  * rest — brought into view, and reported, once.
  */
 describe('a request to reveal a section', () => {
@@ -945,6 +945,46 @@ describe('the two bands', () => {
     })
     const revealed = render(<Settings {...(dev as ComponentProps<typeof Settings>)} />)
     expect(bandOf('Companion', revealed.container)).toBe('The app')
+  })
+
+  /**
+   * ⚠️ **ONE SECTION CAN BE UNFINISHED WHILE ITS CAPABILITY SHIPS.** Cloud
+   * endpoints was never measured against a real provider and nothing connects
+   * one to an answer, so `inference` marks that section `unfinished` — while
+   * Local models, beside it and from the same capability, is what Look up runs
+   * on. The list of unfinished PANELS cannot say that; the flag can.
+   *
+   * BOTH HALVES, and a sibling from the same capability in each, so what is
+   * measured is the flag and not the capability's prefix.
+   */
+  it('offers a section marked unfinished only under developer options, and its finished sibling always', () => {
+    const sections = [
+      section('inference:models', 'Local models'),
+      { ...section('inference:endpoints', 'Cloud endpoints'), unfinished: true as const },
+    ]
+    const { props } = full({ sections })
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    expect(bandOf('Local models', container)).toBe('The app')
+    expect(bandOf('Cloud endpoints', container), 'an unfinished section was offered to every reader').toBeNull()
+    cleanup()
+
+    const { props: dev } = full({ sections, developer: { hidden: [], onSetHidden: () => {}, recording: false } })
+    const revealed = render(<Settings {...(dev as ComponentProps<typeof Settings>)} />)
+    expect(bandOf('Local models', revealed.container)).toBe('The app')
+    expect(bandOf('Cloud endpoints', revealed.container), 'developer options did not reveal it').toBe('The app')
+  })
+
+  /* `hidden` NAMES PANELS, so it cannot take an unfinished section away again:
+     there is no panel of that name to have ticked. Hiding every unfinished
+     panel leaves the section where developer options put it. */
+  it('keeps an unfinished section offered under developer options whatever panels are hidden', () => {
+    const sections = [{ ...section('inference:endpoints', 'Cloud endpoints'), unfinished: true as const }]
+    const { props } = full({
+      sections,
+      developer: { hidden: ['companion', 'cards', 'inference'], onSetHidden: () => {}, recording: false },
+    })
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    expect(bandOf('Cloud endpoints', container)).toBe('The app')
   })
 
   it('captions each band with a real heading, so the split is structure and not a drawn line', () => {

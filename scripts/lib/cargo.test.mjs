@@ -147,9 +147,12 @@ ignored = "1"
     for (const platform of ['desktop', 'ios', 'android']) expect(real.features.has(platform)).toBe(true)
     expect(real.features.has('web'), 'a web Cargo feature would compile nothing').toBe(false)
     /* The desktop-only set. `tauri-plugin-inference` joined it in phase 15:
-       `lemond` ships for macOS, Windows and Linux and has no mobile build, so
-       gating the DEPENDENCY (not just the `.plugin()` call) is what keeps its
-       rustls provider off the iOS and Android targets entirely.
+       the runtime it launches is staged for macOS, Windows and Linux only —
+       Lemonade's `lemond` then, which had no mobile build, and llama.cpp's
+       `llama-server` since 2026-09-18, which `sync-inference-runtime.mjs`
+       stages for no phone — so gating the DEPENDENCY (not just the
+       `.plugin()` call) is what keeps its rustls provider off the iOS and
+       Android targets entirely.
 
        `axum` joined it in phase 18 for the same reason in a different shape:
        it serves the browser client, a phone is never a shelf, and a dependency
@@ -159,7 +162,7 @@ ignored = "1"
        exactly the point, and it has now caught three deliberate changes: the
        third was WI-20.32's `single-instance` and `window-state`, both
        `#![cfg(not(mobile))]` upstream and desktop-only here for the same
-       reason `lemond` started the list. The fourth deliberate change was the
+       reason the inference runtime started the list. The fourth deliberate change was the
        audit-fix round REMOVING the app's vestigial direct `axum`: app code
        never referenced it, and the server crate under the webhost plugin
        declares it with the identical feature set. */

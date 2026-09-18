@@ -19,7 +19,6 @@ import type { ModelsModel, ModelsSnapshot } from './modelsModel'
 const QWEN: ModelRow = {
   id: 'qwen',
   label: 'Qwen3-4B',
-  modality: 'text',
   license: 'Apache-2.0',
   bytes: 2_497_281_120,
   installed: false,
@@ -34,7 +33,6 @@ function snapshotWith(runtime: RuntimeState, models: readonly ModelRow[] = [QWEN
     failure: null,
     modelsDir: null,
     residentBytes: null,
-    voiceTest: 'idle',
   }
 }
 
@@ -47,8 +45,6 @@ function fakeModel(snapshot: ModelsSnapshot): ModelsModel {
     install: async () => true,
     cancelInstall: () => {},
     uninstall: async () => true,
-    testVoice: async () => {},
-    stopVoice: () => {},
     dispose: () => {},
   }
 }
@@ -78,6 +74,20 @@ describe('the Local models pane', () => {
       <ModelsPane model={fakeModel(snapshotWith({ kind: 'absent', reason: 'not staged' }, [{ ...QWEN, installed: true }]))} />,
     )
     expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy()
+  })
+})
+
+/* `Test voice` AND ITS THREE CASES WERE HERE — the row's failure sentence,
+   its fallback sentence, and its silence at rest. The row went with the neural
+   voice it tested; pronunciation is the kernel's system voice now. */
+describe('a running runtime', () => {
+  /* THE VERSION IS llama.cpp's BUILD TAG, and it is shown as given — the pane
+     does not parse it, so a tag that is not a semver cannot be mangled. */
+  it('names its build, and offers no voice test whatever is installed', () => {
+    render(<ModelsPane model={fakeModel(snapshotWith({ kind: 'ready', version: 'b10375' }, [{ ...QWEN, installed: true }]))} />)
+    expect(screen.getByText('Running · b10375')).toBeTruthy()
+    expect(screen.queryByText('Test voice')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Play' })).toBeNull()
   })
 })
 

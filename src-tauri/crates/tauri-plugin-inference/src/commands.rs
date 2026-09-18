@@ -12,15 +12,15 @@
 //! model file. A caller names a MODEL ID that must resolve in
 //! `models.manifest.json`, or a ROUTE ID the probe minted, and nothing else.
 //! Untrusted book HTML renders in the webview that calls these, and the
-//! daemon behind them installs and executes backend binaries — so the closed
+//! commands start processes and spend the reader's GPU — so the closed
 //! argument set is not defensiveness, it is the boundary the whole crate
 //! exists to hold.
 //!
 //! # Streaming goes over a Channel, not a returned stream
 //!
-//! F5 again: handing the webview the bearer token to get native `fetch`
-//! streaming would hand book HTML a backend installer. So the token stays in
-//! Rust and text comes back over a Tauri `Channel<T>` the caller supplies.
+//! F5 again: handing the webview the key to get native `fetch` streaming would
+//! hand book HTML the reader's model. So the key stays in Rust and text comes
+//! back over a Tauri `Channel<T>` the caller supplies.
 //! Every streaming command takes a `request_id` the CALLER minted, and
 //! `inference_cancel(requestId)` cancels any of them — see `requests.rs` for
 //! why the caller mints it.
@@ -38,7 +38,6 @@ use crate::install::{self, Progress};
 use crate::limits;
 use crate::manifest::ModelEntry;
 use crate::probe::{self, Probe, Route};
-use crate::speech;
 use crate::state::{InferenceState, RuntimeStatus};
 
 /* ────────────────────────────── the runtime ─────────────────────────────── */
@@ -52,7 +51,9 @@ pub async fn inference_status<R: Runtime>(
     Ok(state.status(&app).await)
 }
 
-/// Start the daemon. Idempotent; answers the loopback port.
+/// Start the server on the installed model. Idempotent; answers the loopback
+/// port. With no model installed, `NoModelInstalled` — there is nothing to
+/// launch it on.
 #[tauri::command]
 pub async fn inference_start<R: Runtime>(
     app: AppHandle<R>,
@@ -76,7 +77,6 @@ pub async fn inference_stop(state: State<'_, InferenceState>) -> Result<()> {
 pub struct ModelRow {
     pub id: String,
     pub label: String,
-    pub modality: crate::manifest::Modality,
     pub license: String,
     pub bytes: u64,
     pub installed: bool,
@@ -99,7 +99,6 @@ pub async fn inference_models<R: Runtime>(
         rows.push(ModelRow {
             id: model.id.clone(),
             label: model.label.clone(),
-            modality: model.modality,
             license: model.license.clone(),
             bytes: model.total_bytes(),
             installed: install::is_installed(layout, model).await,
@@ -194,7 +193,15 @@ pub async fn inference_remove_model<R: Runtime>(
     let _artifacts = lock_model(&state, &model)?;
     let layout = state.layout(&app)?;
     let manifest = state.manifest()?;
-    install::remove(layout, manifest.model(&model)?).await
+    let entry = manifest.model(&model)?;
+    /* ⚠️ THE SERVER STOPS FIRST, THEN THE FILE GOES. It is launched on this
+     * model and maps its weights, so removing the file under it left the
+     * gigabytes resident and still answering — and on Windows the delete
+     * itself fails, because a file another process has mapped cannot be
+     * removed there. Stopping is cheap: the next question starts it again,
+     * and with nothing installed that start refuses by name. */
+    state.reconfigure().await;
+    install::remove(layout, entry).await
 }
 
 /// What the runtime is holding. `None` rather than zero when unknown.
@@ -202,22 +209,18 @@ pub async fn inference_remove_model<R: Runtime>(
 #[serde(rename_all = "camelCase")]
 pub struct ResourceUsage {
     /// Resident bytes, or `None`. NEVER `0` for "unknown": the settings row
-    /// shows `—` for an absent figure, and Lemonade is specifically credited
-    /// for returning null rather than zero for memory it cannot read. That
-    /// honesty has to survive translation.
+    /// shows `—` for an absent figure, and a plausible zero is a lie the
+    /// reader cannot catch.
     pub resident_bytes: Option<u64>,
-    /// Which model is resident, as a MANIFEST ID — never the daemon's own
-    /// string.
+    /// Which model is resident, as a MANIFEST ID — the one the server was
+    /// launched on, while it answers `ok`.
     ///
-    /// ⚠️ **THE DAEMON'S MODEL FIELDS CARRY ABSOLUTE ARTIFACT PATHS**, which
-    /// is documented in `daemon.rs` and is why this used to hand the webview a
-    /// path under the reader's home directory. The webview renders untrusted
-    /// book HTML; `agentask.rs` drops paths at its parse boundary for exactly
-    /// this reason, and a health reading is not an exemption from it.
-    ///
-    /// So the daemon's answer is matched against the catalogue and the
-    /// catalogue's id is what crosses. Anything that matches nothing is
-    /// `None`: an unrecognised string is not a fact worth leaking to say.
+    /// ⚠️ **NEVER A STRING THE SERVER REPORTS.** lemond's model fields carried
+    /// the artifact's absolute path, which put the reader's home directory in
+    /// front of a webview that renders untrusted book HTML; this matched that
+    /// string back against the catalogue to avoid it. The server is launched
+    /// on a model by manifest id now (`--alias`), so the id is simply known —
+    /// nothing the server says is forwarded at all.
     pub model_loaded: Option<String>,
 }
 
@@ -225,44 +228,17 @@ pub struct ResourceUsage {
 pub async fn inference_resource_usage(state: State<'_, InferenceState>) -> Result<ResourceUsage> {
     /* The guard is dropped before the request, as in `inference_generate` —
     otherwise a memory reading blocks behind whatever is streaming. */
-    let request = {
+    let (request, launched_on) = {
         let daemon = state.daemon().await?;
-        daemon.health_request()
+        (daemon.health_request(), daemon.plan().model_id.clone())
     };
     let health = crate::daemon::Daemon::read_health(request).await?;
     Ok(ResourceUsage {
-        // Not reported by `/api/v1/health`; `None` until it is read from a
-        // route that genuinely carries it, rather than a plausible zero.
+        // Not reported by `/health`; `None` until it is read from a route that
+        // genuinely carries it, rather than a plausible zero.
         resident_bytes: None,
-        model_loaded: health
-            .model_loaded
-            .and_then(|loaded| manifest_id_for(&state, &loaded)),
+        model_loaded: (health.status == "ok").then_some(launched_on),
     })
-}
-
-/// The manifest id whose artifacts the daemon's `model_loaded` string names.
-///
-/// Matched by SHAPE rather than by equality, because the daemon answers with
-/// whatever it was handed — a path, a file name, or the id — and only one of
-/// those is safe to forward. `None` when nothing matches.
-fn manifest_id_for(state: &InferenceState, loaded: &str) -> Option<String> {
-    let manifest = state.manifest().ok()?;
-    manifest
-        .models
-        .iter()
-        .find(|model| {
-            /* By FILE NAME, not by suffix: `ends_with` on the raw string let
-             * `/tmp/not-model.gguf` claim the manifest entry for
-             * `model.gguf`. The daemon reports a path; the path's last
-             * component either IS the artifact's file or it is not ours. */
-            loaded == model.id
-                || model.artifacts.iter().any(|artifact| {
-                    std::path::Path::new(&loaded)
-                        .file_name()
-                        .is_some_and(|name| name.to_string_lossy() == artifact.file)
-                })
-        })
-        .map(|model| model.id.clone())
 }
 
 /// The models folder. Returns the path; the caller decides what to do with it.
@@ -317,14 +293,11 @@ pub async fn inference_probe<R: Runtime>(
     routes.push(probe::agent_route(&codex));
     routes.push(probe::agent_route(&claude));
 
-    /* Whether the DAEMON took each one, which is a separate fact from whether
-    Paper has it stored — see `UnusableReason::NotRegistered`. The list reads
-    the keychain once per endpoint, so it goes through the blocking seam like
-    every other store call (WI-20.20). */
-    let unregistered = state.unregistered().await;
+    /* Every one of them unusable — see `UnusableReason::NotConnected`. The
+    list reads the keychain once per endpoint, so it goes through the blocking
+    seam like every other store call (WI-20.20). */
     for endpoint in state.on_store(&app, |store| store.list()).await? {
-        let registered = !unregistered.contains(&endpoint.id);
-        routes.push(probe::endpoint_route(&endpoint, registered));
+        routes.push(probe::endpoint_route(&endpoint));
     }
 
     let runtime_version = match state.status(&app).await {
@@ -345,6 +318,15 @@ const MAX_ANSWER_TOKENS: u32 = 1024;
 
 /// A gloss is one or two sentences. Bounded much lower, because the reader is
 /// waiting beside a word rather than reading a reply.
+///
+/// ⚠️ **THE REPLY IS JSON NOW, AND JSON COSTS TOKENS PROSE DID NOT** — keys,
+/// quotes, and the indentation the grammar lets the model write between them.
+/// Measured 2026-09-18 with the default prompt and `gloss::response_format`, 3
+/// terms × 3 runs: one language used 51–56 tokens, two used 60–90, and all 27
+/// finished `stop`. So the bound still has 70 tokens in hand and did not move.
+/// What CAN reach it is a reader's own prompt asking for more (three senses,
+/// measured: one of three replies spent its budget on tabs and ended `length`)
+/// — and that ends in `AnswerTruncated`, a named refusal, never a fragment.
 const MAX_GLOSS_TOKENS: u32 = 160;
 
 /// Low, and the same for both: this answers from a passage in front of the
@@ -360,10 +342,10 @@ const TEMPERATURE: f32 = 0.2;
 /// knows, including one it would pull from a remote registry. An audit caught
 /// it, and it is the exact gap the surrounding comments claimed did not exist.
 ///
-/// # Membership is not usability, and it is not modality
+/// # Membership is not usability
 ///
 /// ⚠️ The first version checked only that the string appeared in the catalogue,
-/// which is three separate holes at once:
+/// which was three separate holes at once:
 ///
 /// - **an uninstalled model resolved.** `inference_probe` reports it as
 ///   `notInstalled` and the pane offers `[Install]`, and this said yes to it —
@@ -372,9 +354,9 @@ const TEMPERATURE: f32 = 0.2;
 /// - **a keyless endpoint resolved.** The probe marks it `noKey` for the same
 ///   reason and this did not, so the request went out to be rejected upstream.
 /// - **the modality was never checked.** A speech model resolved for
-///   `inference_generate` and a text model for `inference_speak`. Untrusted
-///   book HTML naming a voice as its answering model is not a hypothetical:
-///   the whole point of the closed set is that the caller is not trusted.
+///   `inference_generate`, and a text model for the speech command. That hole
+///   closed twice: a check here, and then the speech model and its command
+///   going altogether (2026-09-18), so every model is a text model.
 ///
 /// So the check is the same one the probe publishes — `usable()` — rather than
 /// a second, laxer opinion sitting behind it. One decision, two readers.
@@ -387,15 +369,11 @@ async fn resolve_model<R: Runtime>(
     app: &AppHandle<R>,
     state: &InferenceState,
     model: &str,
-    wanted: probe::Modality,
 ) -> Result<String> {
     let route = route_for(app, state, model).await?;
     if !route.usable() {
         /* The reason is already the reader's sentence, and the pane draws the
         action that fixes it — this only has to refuse. */
-        return Err(Error::ModelUnknown(model.to_owned()));
-    }
-    if route.modality != wanted {
         return Err(Error::ModelUnknown(model.to_owned()));
     }
     Ok(model.to_owned())
@@ -427,14 +405,13 @@ async fn route_for<R: Runtime>(
         .find(|route| route.id == probe::local_route_id(model))
         .ok_or_else(|| Error::ModelUnknown(model.to_owned()));
     }
-    /* The daemon's own verdict, so a route it refused is refused here too
-    rather than reaching it a second time to be refused again. */
-    let unregistered = state.unregistered().await;
+    /* The probe's own row, which for an endpoint is never usable — so this
+    refuses it at `resolve_model` rather than sending it anywhere. */
     let endpoints = state.on_store(app, |store| store.list()).await?;
     endpoints
         .iter()
         .find(|endpoint| endpoint.id == model)
-        .map(|endpoint| probe::endpoint_route(endpoint, !unregistered.contains(&endpoint.id)))
+        .map(probe::endpoint_route)
         .ok_or_else(|| Error::ModelUnknown(model.to_owned()))
 }
 
@@ -458,8 +435,15 @@ fn parse_agent_route(route: &str) -> Result<Agent> {
 }
 
 /// The one chat request builder, so the two callers cannot drift on roles,
-/// temperature or streaming.
-fn chat_request(model: String, system: String, question: String, max_tokens: u32) -> ChatRequest {
+/// temperature or streaming. `response_format` is the gloss's alone — see
+/// `ChatRequest::response_format`.
+fn chat_request(
+    model: String,
+    system: String,
+    question: String,
+    max_tokens: u32,
+    response_format: Option<serde_json::Value>,
+) -> ChatRequest {
     ChatRequest {
         model,
         messages: vec![
@@ -475,7 +459,30 @@ fn chat_request(model: String, system: String, question: String, max_tokens: u32
         max_tokens,
         temperature: TEMPERATURE,
         stream: true,
+        response_format,
     }
+}
+
+/// The gloss's request, and the ONE place its schema is attached.
+///
+/// A function of its own rather than an inline `chat_request(…, Some(…))` so
+/// the request `inference_gloss` sends is the request its tests serialise —
+/// the schema going missing from it is the one regression no parse test can
+/// see, because every reply a parse test reads is one somebody supplied.
+fn gloss_request(
+    model: String,
+    system: String,
+    question: String,
+    language: &str,
+    second_language: Option<&str>,
+) -> ChatRequest {
+    chat_request(
+        model,
+        system,
+        question,
+        MAX_GLOSS_TOKENS,
+        Some(crate::gloss::response_format(language, second_language)),
+    )
 }
 
 /// Ask the local runtime, streaming text back over `chunks`.
@@ -503,66 +510,195 @@ pub async fn inference_generate<R: Runtime>(
      * checked against it. */
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
-    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+    /* A SEND THAT FAILS CANCELS THE REQUEST. The webview dropped the channel —
+     * the pane closed, the reader left — and going on would keep the model
+     * generating into nothing, which on a loaded machine is a GPU spent on an
+     * answer nobody will read, and on an endpoint is tokens paid for. */
+    let sink = cancel.clone();
+    let on_text = move |text: String| {
+        if chunks.send(text).is_err() {
+            sink.trip();
+        }
+    };
+    /* ⚠️ AN ENDPOINT IS ANSWERED BY THE ENDPOINT. Once an endpoint could be
+     * usable, the companion's route list could choose one, and this sent its id
+     * to the LOCAL server as `model` — which, in single-model mode, answered
+     * with the local model and named nothing. Found when Look up gained routes
+     * (2026-09-18). A manifest model is local; anything else that resolves is a
+     * stored endpoint. */
+    if state.manifest()?.model(&model).is_err() {
+        let (endpoint, key) = endpoint_and_key(&app, &state, &model).await?;
+        cancel.check()?;
+        let body = chat_request(
+            endpoint.model.clone(),
+            system,
+            question,
+            MAX_ANSWER_TOKENS,
+            None,
+        );
+        return Ok(crate::cloud::ask(
+            state.cloud()?,
+            &endpoint,
+            key.as_deref(),
+            body,
+            crate::daemon::MODEL_CEILING,
+            &cancel,
+            on_text,
+        )
+        .await?
+        .text);
+    }
+    let model = resolve_model(&app, &state, &model).await?;
     cancel.check()?;
     /* ⚠️ THE DAEMON LOCK IS DROPPED BEFORE THE NETWORK WAIT. `state.daemon()`
      * hands back a mapped mutex guard, and holding it across a streamed
      * generation serialised every other daemon command behind this one — the
-     * status poll, the memory reading, a voice test, a second question. A
+     * status poll, the memory reading, a second question. A
      * `RequestBuilder` owns its client, so the guard is needed only to build
      * it. */
     let request = {
         let daemon = state.daemon().await?;
         daemon
             .model_request(reqwest::Method::POST, generate::CHAT_ROUTE)
-            .json(&chat_request(model, system, question, MAX_ANSWER_TOKENS))
+            .json(&chat_request(
+                model,
+                system,
+                question,
+                MAX_ANSWER_TOKENS,
+                None,
+            ))
     };
-    /* A SEND THAT FAILS CANCELS THE REQUEST. The webview dropped the channel —
-     * the pane closed, the reader left — and going on would keep the daemon
-     * generating into nothing, which on a loaded machine is a GPU spent on an
-     * answer nobody will read. */
-    let sink = cancel.clone();
     /* THE TEXT, not the whole `Answer`. A generation STREAMS, so a reader
      * watching it arrive sees it stop — see `Error::AnswerTruncated` for why
      * that is the difference between this command and the gloss, and not a
      * looser rule here. */
-    Ok(generate::stream(request, &cancel, move |text| {
-        if chunks.send(text).is_err() {
-            sink.trip();
-        }
-    })
-    .await?
-    .text)
+    Ok(generate::stream(request, &cancel, on_text).await?.text)
 }
 
-/// Define a term in the sentence it sits in (WI-15.13).
+/// A stored endpoint the probe calls usable, and its key for this one request.
+///
+/// THE PROBE'S OWN ROW DECIDES — the one usability decision — and the key is
+/// read afterwards, in Rust, never handed to the webview. Both through the
+/// blocking seam: the keychain can put a prompt in front of the reader. `None`
+/// for a loopback endpoint stored without a key, which the probe allows.
+async fn endpoint_and_key<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &InferenceState,
+    id: &str,
+) -> Result<(crate::endpoints::Endpoint, Option<String>)> {
+    let wanted = id.to_owned();
+    let endpoint = state
+        .on_store(app, move |store| store.list())
+        .await?
+        .into_iter()
+        .find(|endpoint| endpoint.id == wanted)
+        .ok_or_else(|| Error::ModelUnknown(id.to_owned()))?;
+    if !probe::endpoint_route(&endpoint).usable() {
+        return Err(Error::ModelUnknown(id.to_owned()));
+    }
+    let account = endpoint.id.clone();
+    let key = state
+        .on_store(app, move |store| store.key(&account))
+        .await?;
+    if key.is_none() && !crate::endpoints::is_loopback(&endpoint.base_url) {
+        /* The probe said usable a moment ago and the key has gone since. */
+        return Err(Error::ModelUnknown(id.to_owned()));
+    }
+    Ok((endpoint, key))
+}
+
+/// Define a term in the sentence it sits in (WI-15.13) — by whichever ROUTE the
+/// reader's Look up answers with.
 ///
 /// A PROMISE, not a stream: two sentences streamed into a popover beside a
-/// word is jitter, not progress. And it is its own command rather than a mode
-/// of `inference_generate` because "no selection can reach an agent" is a
-/// property of the call graph — there is no branch here that could reach
-/// `agentask`, and no parameter that could ask for one.
+/// word is jitter, not progress.
+///
+/// ⚠️ **FOUR ROUTES SINCE 2026-09-18, AND ONE OF THEM REVERSES F8.** `route` is
+/// a probe route id — `local:<model>`, `endpoint:<id>`, `agent:claude`,
+/// `agent:codex` — and the owner decided Look up may be answered by any of
+/// them, the local model becoming an opt-in download rather than the only way
+/// to define a word. This used to be its own command precisely so that "no
+/// selection can reach an agent" was a property of the call graph; it is now a
+/// choice the reader makes, with the cost of each route measured and shown
+/// (agents: 6–12 s a word, against 1–2 s). A route the probe calls unusable is
+/// refused here as it is everywhere.
+///
+/// THE ANSWER IS JSON, CONSTRAINED BY THE SAME SCHEMA ON EVERY ROUTE, and
+/// `language` / `second_language` are what it is built from. Two parameters
+/// rather than a list, so that no languages and three are not things a caller
+/// can send. See `gloss.rs` for the schema and why it is the portable one.
+///
+/// (The `allow` sits ABOVE `#[tauri::command]` deliberately: `limits.rs` and
+/// `plugin.contract.test.ts` find a command's parameters as the first `(`
+/// after that attribute, and an attribute's own parenthesis in between would
+/// hand them the wrong text.)
+#[allow(clippy::too_many_arguments)] // one parameter per fact a gloss needs; a struct would hide which field `limits` bounds
 #[tauri::command]
 pub async fn inference_gloss<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, InferenceState>,
     request_id: String,
-    model: String,
+    route: String,
     system: String,
     question: String,
+    language: String,
+    second_language: Option<String>,
 ) -> Result<String> {
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     limits::within("system prompt", &system, limits::MAX_SYSTEM)?;
     limits::within("question", &question, limits::MAX_QUESTION)?;
-    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
-    /* RESOLVED, like `inference_generate`. The first version of the closed
-     * argument set covered only the generate path, which left two commands
-     * forwarding a caller-supplied model straight to the daemon — the exact
-     * hole the header claims does not exist. An audit caught the omission.
-     * And registered BEFORE the resolve, for generate's reason. */
+    limits::within("route id", &route, limits::MAX_MODEL_ID)?;
+    limits::within("answer language", &language, limits::MAX_LANGUAGE_NAME)?;
+    if let Some(second_language) = &second_language {
+        limits::within(
+            "second answer language",
+            second_language,
+            limits::MAX_LANGUAGE_NAME,
+        )?;
+    }
+    /* REGISTERED BEFORE ANYTHING SLOW — the resolve, a keychain read, a
+     * process spawn — for `inference_generate`'s reason: a Stop pressed in that
+     * window must find a request to cancel. */
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
-    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+    let ask = GlossAsk {
+        system,
+        question,
+        language,
+        second_language,
+    };
+    if let Some(model) = route.strip_prefix("local:") {
+        gloss_locally(&app, &state, model, ask, &cancel).await
+    } else if let Some(id) = route.strip_prefix("endpoint:") {
+        gloss_at_endpoint(&app, &state, id, ask, &cancel).await
+    } else {
+        gloss_by_agent(&app, &state, &route, &ask, &cancel).await
+    }
+}
+
+/// What one lookup asks, whichever route answers it: the command's parameters,
+/// already bounded by `limits`, in one value that each route takes whole.
+struct GlossAsk {
+    system: String,
+    question: String,
+    language: String,
+    second_language: Option<String>,
+}
+
+/// The local server's half of `inference_gloss` — what the command was, whole,
+/// before it had routes.
+async fn gloss_locally<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &InferenceState,
+    model: &str,
+    ask: GlossAsk,
+    cancel: &crate::requests::Cancel,
+) -> Result<String> {
+    /* RESOLVED, like `inference_generate`. The first version of the closed
+     * argument set covered only the generate path, which left the gloss
+     * forwarding a caller-supplied model straight to the daemon — the exact
+     * hole the header claims does not exist. An audit caught the omission. */
+    let model = resolve_model(app, state, model).await?;
     cancel.check()?;
     /* Dropped before the wait, as in `inference_generate` — see there. */
     let request = {
@@ -574,37 +710,138 @@ pub async fn inference_gloss<R: Runtime>(
              * A reader has stopped reading to wait for this one. See
              * `daemon::GLOSS_CEILING`. */
             .deadline(crate::daemon::GLOSS_CEILING)
-            .json(&chat_request(model, system, question, MAX_GLOSS_TOKENS))
+            .json(&gloss_request(
+                model,
+                ask.system,
+                ask.question,
+                &ask.language,
+                ask.second_language.as_deref(),
+            ))
     };
     // Streamed on the wire, delivered whole: the daemon's non-streaming path
     // holds the whole answer before replying, and cancelling that is a
     // request nobody is reading rather than a generation that stopped.
-    let answer = generate::stream(request, &cancel, |_| {}).await?;
-    /* ⚠️ **A CUT-OFF DEFINITION IS NOT A DEFINITION**, and this command used to
-     * return one as though it were. `MAX_GLOSS_TOKENS` is Paper's own bound, so
-     * hitting it is an ordinary outcome rather than a daemon misbehaving — and
-     * because the gloss is delivered WHOLE rather than streamed, nobody watches
-     * it stop: `glossProvider` cached the fragment and the strip drew it in
-     * amber, which is the mark that says "this is the definition". The reasoning
-     * is `generate::stream`'s own, applied to the bound it did not cover:
-     * *half an answer presented as a whole one is the shape this crate refuses
-     * everywhere else.*
-     *
-     * Refused rather than trimmed to the last full sentence: a model that ran
-     * past 160 tokens ignored a six-line prompt asking for one or two, so its
-     * first 160 are not a gloss that happens to be long. */
-    /* ⚠️ **AND `length` WAS NOT THE ONLY WAY NOT TO FINISH**, which the first
-     * version of this check missed: it refused `length` and accepted
-     * everything else, including a stream that ended saying NOTHING — a daemon
-     * killed mid-answer, a body that stopped without `[DONE]`. `generate.rs`'s
-     * own doc for `Answer::finish` says that case is "a daemon that went away
-     * mid-answer", and returning it as a definition is the same defect this
-     * check exists to close, arriving by the other door. Found by audit.
-     *
-     * So the test is POSITIVE — only an explicit `stop` is a finished answer —
-     * which is the fail-closed direction: a backend that stops reporting
-     * `finish_reason` breaks the gloss loudly instead of quietly shipping
-     * fragments in amber. */
+    finished(generate::stream(request, cancel, |_| {}).await?)
+}
+
+/// The endpoint's half: the reader's URL, key and model, through `cloud.rs`.
+async fn gloss_at_endpoint<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &InferenceState,
+    id: &str,
+    ask: GlossAsk,
+    cancel: &crate::requests::Cancel,
+) -> Result<String> {
+    let (endpoint, key) = endpoint_and_key(app, state, id).await?;
+    cancel.check()?;
+    let body = gloss_request(
+        endpoint.model.clone(),
+        ask.system,
+        ask.question,
+        &ask.language,
+        ask.second_language.as_deref(),
+    );
+    finished(
+        crate::cloud::ask(
+            state.cloud()?,
+            &endpoint,
+            key.as_deref(),
+            body,
+            crate::daemon::GLOSS_CEILING,
+            cancel,
+            |_| {},
+        )
+        .await?,
+    )
+}
+
+/// An agent CLI's half: one structured turn, through `agentask::gloss`.
+async fn gloss_by_agent<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &InferenceState,
+    route: &str,
+    ask: &GlossAsk,
+    cancel: &crate::requests::Cancel,
+) -> Result<String> {
+    let which = parse_agent_route(route)?;
+    /* `which`, NOT `agent::probe`. The probe spawns the CLI twice more — its
+    version and its sign-in — and a lookup is already 6–12 s through an agent;
+    the route list ran the probe when it offered this route. A reader signed
+    out since then gets the CLI's own refusal, redacted, from the turn. */
+    let program = agent::which(which.exe()).ok_or_else(|| Error::AgentMissing(which.name()))?;
+    let base = state.layout(app)?.base.clone();
+    let schema = crate::gloss::schema(&ask.language, ask.second_language.as_deref());
+    let schema_file = schema_file(&base, &schema).await?;
+    cancel.check()?;
+    /* THE LOOKUP'S CEILING, which the turn runner does not know about: its own
+    are ten minutes and two of silence, sized for a companion's answer. Dropping
+    the turn on the deadline takes its process group down (`agentask::Turn`). */
+    tokio::time::timeout(
+        crate::daemon::GLOSS_CEILING,
+        agentask::gloss(
+            which,
+            std::path::Path::new(&program),
+            &base.join("agent-root"),
+            &schema_file,
+            &schema,
+            &ask.system,
+            &ask.question,
+            cancel,
+        ),
+    )
+    .await
+    .map_err(|_| Error::AgentMalformed {
+        agent: which.name(),
+        message: format!(
+            "gave no answer within {}s",
+            crate::daemon::GLOSS_CEILING.as_secs()
+        ),
+    })?
+}
+
+/// Where Codex reads the schema from — `--output-schema` takes a FILE.
+///
+/// Named by the schema's own digest, so one file per language pair, written
+/// once and reused; written to a temporary name and renamed, so a reader of the
+/// path never sees half a schema. Outside the agent's working root, which must
+/// stay empty (`agentask::prepare_workdir`).
+async fn schema_file(
+    base: &std::path::Path,
+    schema: &serde_json::Value,
+) -> Result<std::path::PathBuf> {
+    use sha2::Digest;
+    let bytes = schema.to_string();
+    let digest = data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(bytes.as_bytes()));
+    let folder = base.join("gloss-schemas");
+    let path = folder.join(format!("{}.json", &digest[..16]));
+    if tokio::fs::metadata(&path)
+        .await
+        .is_ok_and(|meta| meta.is_file())
+    {
+        return Ok(path);
+    }
+    tokio::fs::create_dir_all(&folder).await?;
+    let partial = folder.join(format!("{}.json.part", &digest[..16]));
+    tokio::fs::write(&partial, bytes.as_bytes()).await?;
+    tokio::fs::rename(&partial, &path).await?;
+    Ok(path)
+}
+
+/// A gloss that FINISHED, or a refusal saying how it did not.
+///
+/// ⚠️ **A CUT-OFF DEFINITION IS NOT A DEFINITION**, and the gloss used to return
+/// one as though it were. `MAX_GLOSS_TOKENS` is Paper's own bound, so hitting it
+/// is an ordinary outcome rather than a daemon misbehaving — and because the
+/// gloss is delivered WHOLE rather than streamed, nobody watches it stop. The
+/// answer is JSON, so a cut-off one is not even a readable fragment: it is an
+/// object with no closing brace, which `definitionOf` cannot parse and so draws
+/// whole, keys and quotes and all, as the definition.
+///
+/// POSITIVE, and that is the fail-closed direction: only an explicit `stop` is
+/// a finished answer. `length` is refused, and so is a stream that ended saying
+/// NOTHING — a server killed mid-answer, a body that stopped without `[DONE]` —
+/// which the first version of this check let through. Found by audit.
+fn finished(answer: generate::Answer) -> Result<String> {
     if !answer.complete() {
         return Err(Error::AnswerTruncated {
             finish: answer.finish_label(),
@@ -745,6 +982,7 @@ pub async fn inference_add_endpoint<R: Runtime>(
     id: String,
     label: String,
     base_url: String,
+    model: String,
 ) -> Result<()> {
     /* THE ID IS BOUNDED HERE AND NOT ONLY IN THE STORE. `EndpointStore::add`
      * refuses an invalid id by copying it into `ModelUnknown`, and that error
@@ -754,18 +992,15 @@ pub async fn inference_add_endpoint<R: Runtime>(
     limits::within("endpoint id", &id, limits::MAX_ENDPOINT_ID)?;
     limits::within("endpoint label", &label, limits::MAX_ENDPOINT_LABEL)?;
     limits::within("endpoint url", &base_url, limits::MAX_ENDPOINT_URL)?;
+    limits::within("endpoint model", &model, limits::MAX_ENDPOINT_MODEL)?;
     /* ⚠️ ONE WRITER AT A TIME. `add` and `remove` read the list, edit it and
      * write it back through the same temporary path; nothing serialised them
      * and `#[tauri::command]`s run concurrently, so two at once lose an edit
      * or rename a half-written file over the reader's only copy. */
     let _writing = state.endpoint_writes().lock().await;
     state
-        .on_store(&app, move |store| store.add(&id, &label, &base_url))
-        .await?;
-    /* The daemon takes its keys and its provider registrations at spawn, so a
-     * running one knows nothing about this until it is restarted. */
-    state.reconfigure().await;
-    Ok(())
+        .on_store(&app, move |store| store.add(&id, &label, &base_url, &model))
+        .await
 }
 
 #[tauri::command]
@@ -781,13 +1016,11 @@ pub async fn inference_remove_endpoint<R: Runtime>(
      * be here rather than borrowed from a sibling command. */
     limits::within("endpoint id", &id, limits::MAX_ENDPOINT_ID)?;
     let _writing = state.endpoint_writes().lock().await;
-    /* ⚠️ THE RECONFIGURE IS THE HALF THAT MATTERS, and it is unconditional.
-     * Without it a key the reader deleted stayed live in the running child's
-     * environment, with its provider still registered, until the app was next
-     * launched — and a `?` between the removal and the reconfigure put it
-     * back for exactly the case where the keychain refused to give the key
-     * up. `remove_endpoint` holds the order; see it for why. */
-    state.remove_endpoint(&app, id).await
+    /* (This stopped the daemon afterwards, unconditionally, while cloud keys
+     * rode lemond's environment: a key the reader deleted must not stay live
+     * in a running child. No key reaches the server now, so there is nothing
+     * to stop.) */
+    state.on_store(&app, move |store| store.remove(&id)).await
 }
 
 /// Store an endpoint's key. WRITE-ONLY — there is deliberately no command
@@ -807,60 +1040,7 @@ pub async fn inference_set_endpoint_key<R: Runtime>(
     let _writing = state.endpoint_writes().lock().await;
     state
         .on_store(&app, move |store| store.set_key(&id, &key))
-        .await?;
-    // A changed key is a changed spawn environment; an empty one is a clear.
-    state.reconfigure().await;
-    Ok(())
-}
-
-/* ──────────────────────────────── narration ─────────────────────────────── */
-
-/// Synthesise speech (WI-15.9's `Test voice`).
-///
-/// The route, its one surprising field name and the cancellation are
-/// `speech.rs`'s; what is left here is the policy every command in this module
-/// is supposed to be.
-#[tauri::command]
-pub async fn inference_speak<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, InferenceState>,
-    request_id: String,
-    model: String,
-    text: String,
-    voice: Option<String>,
-) -> Result<Vec<u8>> {
-    limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
-    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
-    limits::within("speech text", &text, limits::MAX_SPEECH_TEXT)?;
-    /* THE VOICE IS A CALLER STRING TOO, and it was the one field on this
-     * command left unbounded — `speech::body` copies it into the JSON body
-     * that goes to the daemon, so an unbounded voice is an unbounded request
-     * whatever `MAX_SPEECH_TEXT` says about the text beside it. An
-     * `Option<String>` reads as "optional, therefore small"; it is neither. */
-    if let Some(voice) = voice.as_deref() {
-        limits::within("voice", voice, limits::MAX_MODEL_ID)?;
-    }
-    /* SPEECH, and this is where the modality check earns itself: without it a
-     * caller could name the text model here and the answering model in
-     * `inference_generate` could be a voice. Registered BEFORE the resolve,
-     * for generate's reason. */
-    let guard = state.requests().begin(&request_id)?;
-    let cancel = guard.cancel();
-    let model = resolve_model(&app, &state, &model, probe::Modality::Speech).await?;
-    cancel.check()?;
-    let body = speech::body(&model, &text, voice.as_deref());
-    /* Dropped before the wait, as in `inference_generate` — see there. */
-    let request = {
-        let daemon = state.daemon().await?;
-        daemon
-            .model_request(reqwest::Method::POST, speech::SPEECH_ROUTE)
-            .json(&body)
-    };
-    /* THE TRANSPORT IS `speech`'s. This command is policy — bound the input,
-    resolve the model at the right modality, take the request slot — and
-    everything after it was HTTP, which is what `commands.rs`'s own header
-    says does not live here. */
-    speech::collect(request, &cancel).await
+        .await
 }
 
 /* ────────────────────────────── cancellation ────────────────────────────── */
@@ -925,7 +1105,6 @@ mod tests {
         let row = ModelRow {
             id: "m".to_owned(),
             label: "M".to_owned(),
-            modality: crate::manifest::Modality::Text,
             license: "Apache-2.0".to_owned(),
             bytes: 100,
             installed: false,
@@ -942,9 +1121,7 @@ mod tests {
         assert!(json.get("quantization").is_none());
     }
 
-    /// `—`, never `0`. Lemonade is specifically credited for returning null
-    /// rather than zero for memory it cannot read, and that honesty has to
-    /// survive translation.
+    /// `—`, never `0`: a plausible zero is a lie the reader cannot catch.
     #[test]
     fn unknown_memory_is_null_and_never_zero() {
         let usage = ResourceUsage {
@@ -976,5 +1153,481 @@ mod tests {
                 "invention is the failure §13 exists to prevent"
             )
         };
+    }
+
+    /// ⚠️ **THE SCHEMA GOING MISSING IS THE REGRESSION NO PARSE TEST CAN SEE.**
+    /// Every reply `definitionOf`'s tests read is one somebody supplied, so
+    /// they stay green against a request that asks for prose — which is how
+    /// the `pos:` line broke 7 of 9 real answers past a green suite. So the
+    /// request itself is asserted: the gloss carries exactly the format
+    /// `gloss.rs` builds, from the languages it was handed, and the companion's
+    /// carries none (it streams prose a reader watches arrive).
+    #[test]
+    fn the_gloss_asks_for_its_schema_and_the_companion_does_not() {
+        let gloss = serde_json::to_value(gloss_request(
+            "qwen".to_owned(),
+            "rules".to_owned(),
+            "a question".to_owned(),
+            "Simplified Chinese",
+            Some("English"),
+        ))
+        .unwrap();
+        assert_eq!(
+            gloss["response_format"],
+            crate::gloss::response_format("Simplified Chinese", Some("English"))
+        );
+        assert_eq!(gloss["max_tokens"], MAX_GLOSS_TOKENS);
+
+        let one = serde_json::to_value(gloss_request(
+            "qwen".to_owned(),
+            "rules".to_owned(),
+            "a question".to_owned(),
+            "English",
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            one["response_format"],
+            crate::gloss::response_format("English", None)
+        );
+
+        let companion = serde_json::to_value(chat_request(
+            "qwen".to_owned(),
+            "rules".to_owned(),
+            "a question".to_owned(),
+            MAX_ANSWER_TOKENS,
+            None,
+        ))
+        .unwrap();
+        assert!(companion.get("response_format").is_none(), "{companion}");
+    }
+
+    /// AND THE COMMAND SENDS THAT REQUEST. `inference_gloss` needs a Tauri app
+    /// to run, so the half of the claim above that a unit test cannot reach —
+    /// that the command builds its body with `gloss_request` and not with a
+    /// bare `chat_request` — is read off its source, the way `limits.rs` reads
+    /// its parameters.
+    #[test]
+    fn the_gloss_command_sends_the_request_with_the_schema() {
+        let source = include_str!("commands.rs");
+        let body_of = |name: &str| {
+            let start = source
+                .find(&format!("fn {name}<"))
+                .unwrap_or_else(|| panic!("{name} is in commands.rs"));
+            &source[start..start + source[start..].find("\n}\n").expect("its body ends")]
+        };
+        /* EVERY ROUTE, since there are four: the local server and an endpoint
+        send the chat request with the schema, an agent is handed the schema
+        itself, and none of them builds a bare `chat_request`. */
+        for (route, sends_the_schema) in [
+            ("gloss_locally", ".json(&gloss_request("),
+            ("gloss_at_endpoint", "gloss_request("),
+            ("gloss_by_agent", "crate::gloss::schema("),
+        ] {
+            let body = body_of(route);
+            assert!(body.contains(sends_the_schema), "{route}: {body}");
+            assert!(!body.contains("chat_request("), "{route}: {body}");
+        }
+        /* And the command reaches them all: a route kind with no branch would
+        be a lookup that silently went somewhere else. */
+        let command = body_of("inference_gloss");
+        for route in ["gloss_locally(", "gloss_at_endpoint(", "gloss_by_agent("] {
+            assert!(
+                command.contains(route),
+                "inference_gloss does not dispatch to {route}"
+            );
+        }
+    }
+
+    /// A server launched EXACTLY as the app launches one — the staged runtime,
+    /// verified by `runtime.rs`, handed to `plan_spawn` and `Daemon::start` —
+    /// on the GGUF named by `PAPER_LIVE_MODEL`. The live tests below measure
+    /// the real launch, flags and all, rather than a server somebody started
+    /// by hand with flags of their own.
+    async fn live_server() -> crate::daemon::Daemon {
+        let model = std::env::var("PAPER_LIVE_MODEL")
+            .expect("PAPER_LIVE_MODEL, the path of an installed GGUF");
+        let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../vendor/inference/current")
+            .canonicalize()
+            .expect("vendor/inference/current is staged — pnpm runtime:sync");
+        let backend = crate::RuntimeManifest::load(&runtime)
+            .await
+            .expect("the staged runtime's manifest")
+            .verify(&runtime)
+            .await
+            .expect("the staged runtime verifies");
+        let port = std::net::TcpListener::bind((crate::LOOPBACK, 0))
+            .and_then(|listener| listener.local_addr())
+            .expect("a free port")
+            .port();
+        crate::daemon::Daemon::start(crate::plan_spawn(&crate::SpawnInputs {
+            backend,
+            model: model.into(),
+            model_id: crate::Manifest::shipped().unwrap().models[0].id.clone(),
+            record_path: std::env::temp_dir().join(format!("paper-live-{port}.json")),
+            port,
+            api_key: crate::mint_token(),
+        }))
+        .await
+        .expect("the server started and answered its health route")
+    }
+
+    /// ⚠️ **THE ONE CHECK NOTHING OFFLINE CAN MAKE: THAT THE SERVER HONOURS
+    /// THE SCHEMA.** Every test above proves what Paper SENDS. Whether it is
+    /// compiled into a grammar — with `stream: true`, which is how the gloss
+    /// asks — is a property of a process this crate does not own, and a server
+    /// that dropped it would answer in prose, which the parse would fail soft
+    /// on and draw whole, raw, beside every word.
+    ///
+    /// Run by hand; it launches its own server (`live_server`):
+    ///
+    /// ```sh
+    /// PAPER_LIVE_MODEL="$HOME/Library/Application Support/one.paper.reader/inference/models/<id>/<file>.gguf" \
+    /// cargo test -p tauri-plugin-inference --lib live_ -- --ignored --nocapture --test-threads=1
+    /// ```
+    ///
+    /// (Until 2026-09-18 this attached to a running `lemond` by its port and
+    /// the key read out of its environment. The 27-reply baseline recorded in
+    /// AGENTS.md was taken that way, the last run against lemond.)
+    ///
+    /// `PAPER_LIVE_SYSTEM_PROMPT` names a file holding the system prompt to
+    /// send — the app's `DEFAULT_GLOSS_PROMPT`, to measure what a reader gets;
+    /// without it a one-line instruction is sent, which is enough for what this
+    /// ASSERTS: the shape, which the grammar guarantees whatever the prompt
+    /// says. `PAPER_LIVE_RUNS` repeats each case (default 1). Each reply is
+    /// printed as `gloss-live` + the question and the raw text, both as JSON
+    /// strings, for a harness that feeds them to `definitionOf`.
+    ///
+    /// The question is written in `glossQuestion`'s shape — a copy, because the
+    /// builder is TypeScript; a copy that drifts changes the wording the model
+    /// is asked in, not the shape this asserts.
+    #[tokio::test]
+    #[ignore = "launches a real server: PAPER_LIVE_MODEL and a staged runtime — see the doc comment"]
+    async fn live_gloss_answers_in_the_shape_it_asked_for() {
+        let daemon = live_server().await;
+        let system = match std::env::var("PAPER_LIVE_SYSTEM_PROMPT") {
+            Ok(path) => std::fs::read_to_string(path).expect("the system prompt file"),
+            Err(_) => "You define a word as it is used in one sentence from a book.".to_owned(),
+        };
+        let runs: usize = std::env::var("PAPER_LIVE_RUNS")
+            .map(|n| n.parse().expect("a count"))
+            .unwrap_or(1);
+        let manifest = crate::Manifest::shipped().expect("the shipped manifest");
+        let model = manifest.models[0].id.clone();
+        let cases = [
+            ("quarter", "Most of our top-level objectives endured from quarter to quarter, typically for eighteen months."),
+            ("upending", "Beginning with the personal computer in the 1980s, our history reflects a series of tech disruptions, with each new platform upending its predecessor."),
+            ("transparent", "The system is powerful precisely because it is so simple—and so transparent."),
+        ];
+        let languages: [(&str, Option<&str>); 3] = [
+            ("English", None),
+            ("English", Some("Simplified Chinese")),
+            ("Simplified Chinese", Some("English")),
+        ];
+        let registry = crate::requests::Registry::default();
+        let mut failures = Vec::new();
+        let mut asked = 0;
+        for (first, then) in languages {
+            for (term, sentence) in cases {
+                for _ in 0..runs {
+                    asked += 1;
+                    let answer_in = std::iter::once(first)
+                        .chain(then)
+                        .collect::<Vec<_>>()
+                        .join(", then ");
+                    let question = format!(
+                        "Book: Measure What Matters\nSentence: {sentence}\nAnswer in: {answer_in}\nDefine, in this sentence: {term}"
+                    );
+                    let guard = registry.begin("gloss-live").expect("a fresh request");
+                    let request = daemon
+                        .model_request(reqwest::Method::POST, generate::CHAT_ROUTE)
+                        .deadline(crate::daemon::GLOSS_CEILING)
+                        .json(&gloss_request(
+                            model.clone(),
+                            system.clone(),
+                            question.clone(),
+                            first,
+                            then,
+                        ));
+                    let answer = generate::stream(request, &guard.cancel(), |_| {})
+                        .await
+                        .expect("the server answered");
+                    drop(guard);
+                    println!(
+                        "gloss-live\t{}\t{}",
+                        serde_json::to_string(&question).unwrap(),
+                        serde_json::to_string(&answer.text).unwrap()
+                    );
+                    if let Some(why) = off_shape(&answer, first, then) {
+                        failures.push(format!("{term} in {answer_in}: {why} — {:?}", answer.text));
+                    }
+                }
+            }
+        }
+        daemon.stop().await;
+        assert!(
+            failures.is_empty(),
+            "{} of {asked} replies were not in the shape asked for:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    /// ⚠️ **THE HOLE THE SWAP CLOSED, MEASURED ON THE REAL LAUNCH.** lemond held
+    /// the key on its own port and started `llama-server` one port over with
+    /// none: measured 2026-09-18, an unauthenticated `POST /v1/chat/completions`
+    /// there answered 200, `/slots` answered 200, and a CORS preflight from
+    /// `https://evil.example` came back allowed, credentials and all. Every
+    /// line of that is asserted refused here, against a server `plan_spawn`
+    /// launched — so a flag dropped from the table fails this, not a review.
+    ///
+    /// Run beside `live_gloss_…`; see its doc comment for the command.
+    #[tokio::test]
+    #[ignore = "launches a real server: PAPER_LIVE_MODEL and a staged runtime — see live_gloss_answers_in_the_shape_it_asked_for"]
+    async fn live_server_refuses_whoever_lacks_the_key() {
+        let daemon = live_server().await;
+        let base = daemon.plan().base_url();
+        let chat = format!("{base}{}", generate::CHAT_ROUTE);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let body = serde_json::json!({
+            "messages": [{ "role": "user", "content": "Say ok." }],
+            "max_tokens": 2,
+        });
+        let status = |response: reqwest::Result<reqwest::Response>| {
+            response.expect("the server answered").status().as_u16()
+        };
+
+        let no_key = status(client.post(&chat).json(&body).send().await);
+        let wrong_key = status(
+            client
+                .post(&chat)
+                .bearer_auth("0".repeat(64))
+                .json(&body)
+                .send()
+                .await,
+        );
+        let preflight = client
+            .request(reqwest::Method::OPTIONS, &chat)
+            .header("Origin", "https://evil.example")
+            .header("Access-Control-Request-Method", "POST")
+            .header(
+                "Access-Control-Request-Headers",
+                "content-type, authorization",
+            )
+            .send()
+            .await
+            .expect("the server answered the preflight");
+        let allowed = preflight
+            .headers()
+            .get("access-control-allow-origin")
+            .map(|value| value.to_str().unwrap_or("").to_owned());
+        let slots = status(
+            client
+                .get(format!("{base}/slots"))
+                .bearer_auth(daemon.plan().api_key())
+                .send()
+                .await,
+        );
+        let answered: serde_json::Value = client
+            .post(&chat)
+            .bearer_auth(daemon.plan().api_key())
+            .json(&body)
+            .send()
+            .await
+            .expect("the server answered the key")
+            .json()
+            .await
+            .expect("a JSON answer");
+        daemon.stop().await;
+
+        assert_eq!(no_key, 401, "a request with no key must be refused");
+        assert_eq!(
+            wrong_key, 401,
+            "a request with the wrong key must be refused"
+        );
+        assert!(
+            !matches!(allowed.as_deref(), Some("https://evil.example" | "*")),
+            "a foreign origin was allowed: {allowed:?}"
+        );
+        assert_ne!(slots, 200, "/slots shows recent prompts and must be off");
+        assert_eq!(
+            answered["model"],
+            crate::Manifest::shipped().unwrap().models[0].id,
+            "an answer names the model by id — never by the artifact's path, which is the reader's home directory"
+        );
+        assert!(
+            answered["choices"][0]["message"]["content"].is_string(),
+            "the key opens the door it is for: {answered}"
+        );
+    }
+
+    /// ⚠️ **PAPER'S ENDPOINT CLIENT, MEASURED AGAINST A REAL OPENAI-COMPATIBLE
+    /// SERVER WITH A REAL KEY** — the local `llama-server`, which speaks the
+    /// same protocol, so the client's request, key, schema and error mapping are
+    /// proved with no provider account. What it cannot show is a provider's own
+    /// quirks; see `cloud.rs`'s header. Run beside `live_gloss_…`.
+    #[tokio::test]
+    #[ignore = "launches a real server: PAPER_LIVE_MODEL and a staged runtime — see live_gloss_answers_in_the_shape_it_asked_for"]
+    async fn live_endpoint_answers_through_papers_own_client() {
+        let daemon = live_server().await;
+        let plan = daemon.plan();
+        let endpoint = crate::endpoints::Endpoint {
+            id: "local-llama".to_owned(),
+            label: "This machine".to_owned(),
+            base_url: format!("http://127.0.0.1:{}/v1", plan.port),
+            model: plan.model_id.clone(),
+            key_state: crate::endpoints::KeyState::Set,
+        };
+        assert!(crate::endpoints::valid_base_url(&endpoint.base_url));
+        let clients = crate::cloud::Clients::new().expect("the clients build");
+        let registry = crate::requests::Registry::default();
+        let question = "Book: Measure What Matters\nSentence: The system is powerful precisely because it is so simple—and so transparent.\nAnswer in: Simplified Chinese, then English\nDefine, in this sentence: transparent";
+        let body = || {
+            gloss_request(
+                endpoint.model.clone(),
+                "You define a word as it is used in one sentence from a book.".to_owned(),
+                question.to_owned(),
+                "Simplified Chinese",
+                Some("English"),
+            )
+        };
+        let guard = registry.begin("endpoint-live").unwrap();
+        let answered = crate::cloud::ask(
+            &clients,
+            &endpoint,
+            Some(plan.api_key()),
+            body(),
+            crate::daemon::GLOSS_CEILING,
+            &guard.cancel(),
+            |_| {},
+        )
+        .await;
+        drop(guard);
+        let guard = registry.begin("endpoint-live-wrong-key").unwrap();
+        let refused = crate::cloud::ask(
+            &clients,
+            &endpoint,
+            Some(&"0".repeat(64)),
+            body(),
+            crate::daemon::GLOSS_CEILING,
+            &guard.cancel(),
+            |_| {},
+        )
+        .await;
+        drop(guard);
+        daemon.stop().await;
+
+        let answer = answered.expect("the endpoint answered the right key");
+        println!("endpoint-live\t{}", answer.text);
+        assert_eq!(
+            off_shape(&answer, "Simplified Chinese", Some("English")),
+            None,
+            "{}",
+            answer.text
+        );
+        let refusal = refused.expect_err("a wrong key is refused");
+        assert_eq!(refusal.kind(), "endpointHttp", "{refusal}");
+        assert!(refusal.to_string().contains("401"), "{refusal}");
+    }
+
+    /// ⚠️ **THE AGENT ROUTES, THROUGH THE REAL CLIs.** Each is asked one
+    /// two-language lookup with the lockdown `agentask::gloss_args` builds, and
+    /// the answer must be in the shape the schema asked for. It spends a turn of
+    /// the reader's subscription per agent, which is why it is ignored and names
+    /// the agents it may use: `PAPER_LIVE_AGENTS=claude,codex`.
+    #[tokio::test]
+    #[ignore = "spends subscription turns: PAPER_LIVE_AGENTS=claude,codex"]
+    async fn live_agents_answer_in_the_shape_asked_for() {
+        let wanted = std::env::var("PAPER_LIVE_AGENTS").expect("PAPER_LIVE_AGENTS=claude,codex");
+        let scratch = crate::testutil::ScratchDir::new("agent-gloss");
+        let schema = crate::gloss::schema("English", Some("Simplified Chinese"));
+        let schema_file = schema_file(scratch.path(), &schema).await.unwrap();
+        let system =
+            std::fs::read_to_string(std::env::var("PAPER_LIVE_SYSTEM_PROMPT").unwrap_or_default())
+                .unwrap_or_else(|_| {
+                    "You define a word as it is used in one sentence from a book.".to_owned()
+                });
+        let question = "Book: Measure What Matters\nSentence: The system is powerful precisely because it is so simple—and so transparent.\nAnswer in: English, then Simplified Chinese\nDefine, in this sentence: transparent";
+        let registry = crate::requests::Registry::default();
+        for name in wanted.split(',') {
+            let which = parse_agent_route(&format!("agent:{}", name.trim())).unwrap();
+            let program = agent::which(which.exe()).expect("the CLI is installed");
+            let guard = registry.begin("agent-live").unwrap();
+            let started = std::time::Instant::now();
+            let text = agentask::gloss(
+                which,
+                std::path::Path::new(&program),
+                &scratch.path().join("agent-root"),
+                &schema_file,
+                &schema,
+                &system,
+                question,
+                &guard.cancel(),
+            )
+            .await
+            .unwrap_or_else(|failure| panic!("{name}: {failure}"));
+            drop(guard);
+            println!(
+                "agent-live\t{name}\t{:.1}s\t{text}",
+                started.elapsed().as_secs_f64()
+            );
+            assert_eq!(
+                off_shape_text(&text, "English", Some("Simplified Chinese")),
+                None,
+                "{name}: {text}"
+            );
+        }
+    }
+
+    /// What `live_gloss_answers_in_the_shape_it_asked_for` refuses: anything
+    /// the schema should have made impossible. NOT a second `definitionOf` —
+    /// this asks whether the grammar held, not what a reader is shown.
+    fn off_shape(answer: &generate::Answer, first: &str, then: Option<&str>) -> Option<String> {
+        if !answer.complete() {
+            return Some(format!("finished {}", answer.finish_label()));
+        }
+        off_shape_text(&answer.text, first, then)
+    }
+
+    /// The shape half of [`off_shape`], for an answer that arrived whole — an
+    /// agent's, which has no finish reason to read.
+    fn off_shape_text(text: &str, first: &str, then: Option<&str>) -> Option<String> {
+        let reply: serde_json::Value = match serde_json::from_str(text) {
+            Ok(reply) => reply,
+            Err(error) => return Some(format!("not JSON: {error}")),
+        };
+        if !reply["partOfSpeech"]
+            .as_str()
+            .is_some_and(|label| !label.trim().is_empty())
+        {
+            return Some("no part of speech".to_owned());
+        }
+        let wanted: Vec<&str> = std::iter::once(first).chain(then).collect();
+        let Some(slots) = reply["definition"].as_object() else {
+            return Some("no definition object".to_owned());
+        };
+        if slots.len() != wanted.len() {
+            return Some(format!("{} slots, asked {}", slots.len(), wanted.len()));
+        }
+        let entries: Vec<&serde_json::Value> = crate::gloss::SLOTS
+            .iter()
+            .filter_map(|slot| slots.get(*slot))
+            .collect();
+        let named: Vec<&str> = entries
+            .iter()
+            .map(|one| one["language"].as_str().unwrap_or("?"))
+            .collect();
+        if named != wanted {
+            return Some(format!("languages {named:?}, asked {wanted:?}"));
+        }
+        if entries.iter().any(|one| {
+            !one["text"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty())
+        }) {
+            return Some("an empty meaning".to_owned());
+        }
+        None
     }
 }

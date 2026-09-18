@@ -72,12 +72,12 @@ afterEach(cleanup)
 
 describe('formatBytes', () => {
   it('scales to the unit a reader can hold in their head', () => {
-    expect(formatBytes(0)).toBe('0 B')
-    expect(formatBytes(1023)).toBe('1023 B')
-    expect(formatBytes(1024)).toBe('1.0 KB')
-    expect(formatBytes(1024 * 1024 - 1)).toBe('1024.0 KB')
-    expect(formatBytes(1024 * 1024)).toBe('1.0 MB')
-    expect(formatBytes(5 * 1024 * 1024 + 512 * 1024)).toBe('5.5 MB')
+    expect(formatBytes(0)).toBe('0\u00a0B')
+    expect(formatBytes(1023)).toBe('1023\u00a0B')
+    expect(formatBytes(1024)).toBe('1.0\u00a0KB')
+    expect(formatBytes(1024 * 1024 - 1)).toBe('1024.0\u00a0KB')
+    expect(formatBytes(1024 * 1024)).toBe('1.0\u00a0MB')
+    expect(formatBytes(5 * 1024 * 1024 + 512 * 1024)).toBe('5.5\u00a0MB')
   })
 
   /* NULL IS "NOBODY CAN SAY", and it is reachable: `SizePort` answers null for
@@ -146,6 +146,9 @@ describe('the downloads list', () => {
   it('counts and lists what the model published', () => {
     render(<StoragePane model={fakeModel({ downloads })} />)
     expect(screen.getByText('Moby-Dick')).toBeTruthy()
+    /* A PLAIN SPACE HERE, though `formatBytes` writes a non-breaking one:
+       `getByText` collapses every whitespace character, U+00A0 included, before
+       it compares. The unit tests above pin the non-breaking space itself. */
     expect(screen.getByText('1.0 MB')).toBeTruthy()
     expect(screen.getByText('2.0 KB')).toBeTruthy()
   })

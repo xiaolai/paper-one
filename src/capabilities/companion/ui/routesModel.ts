@@ -114,9 +114,9 @@ export interface RoutesSnapshot {
   /**
    * The effort label, or null when the control does not apply.
    *
-   * NULL FOR A LOCAL MODEL, because neither flag exists there: `lemond` is
-   * handed a model id, not a reasoning effort or an alias. A row that did
-   * nothing when pressed is the thing §07 exists to prevent.
+   * NULL FOR A LOCAL MODEL, because neither flag exists there: the local
+   * runtime is handed a model id, not a reasoning effort or an alias. A row
+   * that did nothing when pressed is the thing §07 exists to prevent.
    */
   readonly depth: string | null
   readonly loading: boolean
@@ -137,7 +137,10 @@ export function resolveRoute(
   chosen: string,
   routes: readonly Route[],
 ): { readonly inUse: string | null; readonly fellBack: boolean } {
-  const usable = routes.filter((route) => route.unusable === null && route.modality === 'text')
+  /* USABLE IS THE WHOLE TEST. This also asked `modality === 'text'`, while the
+     probe could report a speech route; the neural voice is gone and every route
+     is text, so there is nothing left for a second clause to exclude. */
+  const usable = routes.filter((route) => route.unusable === null)
   if (usable.length === 0) return { inUse: null, fellBack: chosen !== '' }
   if (usable.some((route) => route.id === chosen)) return { inUse: chosen, fellBack: false }
   /* Local before agent before endpoint: the local route costs the reader
@@ -269,9 +272,7 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
     const chosen = settings.get(ROUTE_SETTING)
     const { inUse, fellBack } = resolveRoute(chosen, probe.routes)
     return {
-      rows: probe.routes
-        .filter((route) => route.modality === 'text')
-        .map((route) => rowFor(route, inUse, signingIn)),
+      rows: probe.routes.map((route) => rowFor(route, inUse, signingIn)),
       signInFailure,
       inUse,
       fellBack,
@@ -312,7 +313,11 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
            `signIn` below uses it. The ANSWER is unchanged: a probe that failed
            offers nothing, which is the safe reading. */
         report?.('companion.probe-failed', { message: messageOf(thrown) })
-        // Stryker disable next-line ArrayDeclaration: the element put here is a string, with no `modality`, `unusable` or `id`, so every reader of `probe.routes` passes over it and the snapshot is the one an empty list gives.
+        /* ⚠️ **NO DIRECTIVE HERE ANY MORE, AND THERE WAS ONE.** It hid the
+           `ArrayDeclaration` mutant as unobservable: the element it puts here is
+           a string with no `modality`, and the rows filtered on `modality`. With
+           that filter gone the string becomes a row, which is observable — so
+           the mutant is killed by the failed-probe case asserting no rows. */
         found = { routes: [], runtimeVersion: null }
       }
       /* Superseded, or the pane closed while the children ran. Either way this

@@ -12,8 +12,9 @@
 //! There is no parent-death signal on macOS (verified: no `prctl.h` in the
 //! SDK), and the cooperative patterns — Chromium's IPC-disconnect exit, the
 //! LSP `processId` watchdog — need a child that watches, which a third-party
-//! `lemond` does not. So the answer is the one Ollama and psutil converge on:
-//! write down what was started, and at the next launch decide whether what is
+//! server does not (`lemond` did not, and `llama-server` does not either). So
+//! the answer is the one Ollama and psutil converge on: write down what was
+//! started, and at the next launch decide whether what is
 //! running under that number is still it.
 //!
 //! # Identity is pid PLUS start time
@@ -141,7 +142,7 @@ pub fn read_record(path: &Path) -> io::Result<Option<GroupRecord>> {
 ///
 /// While the leader lives, its start time decides — a reused pid has a
 /// different one. Once the leader has gone, a member running something from
-/// the runtime tree (`lemond` itself, or a backend beside it) is ours; a
+/// the runtime tree (the server itself, or anything beside it) is ours; a
 /// wholly dead group whose number a stranger inherited has no such member.
 ///
 /// `Err` is "the OS would not say", which is neither yes nor no: a caller
@@ -738,7 +739,7 @@ mod tests {
             pgid,
             leader_pid: pgid,
             leader_started_at: 1_700_000_000_000_000,
-            exe: PathBuf::from(format!("{RUNTIME}/lemond")),
+            exe: PathBuf::from(format!("{RUNTIME}/llama-server")),
             port: 13399,
         }
     }
@@ -851,7 +852,7 @@ mod tests {
             600,
             600,
             ours.leader_started_at,
-            &format!("{RUNTIME}/lemond"),
+            &format!("{RUNTIME}/llama-server"),
         );
         assert!(matches!(
             recover(&path, &same, Duration::from_millis(50)).await,
@@ -864,7 +865,7 @@ mod tests {
             600,
             600,
             ours.leader_started_at + 1,
-            &format!("{RUNTIME}/lemond"),
+            &format!("{RUNTIME}/llama-server"),
         );
         assert_eq!(
             recover(&path, &reused, Duration::from_millis(50)).await,
@@ -915,7 +916,7 @@ mod tests {
         let dir = ScratchDir::new("lineage");
         let path = written(&dir, &record(900));
         let procs = FakeProcesses::default()
-            .with(901, 900, 7, &format!("{RUNTIME}/lemond"))
+            .with(901, 900, 7, &format!("{RUNTIME}/llama-server"))
             .refusing_to_enumerate();
 
         let outcome = recover(&path, &procs, Duration::from_millis(30)).await;
@@ -943,7 +944,7 @@ mod tests {
                 910,
                 910,
                 record(910).leader_started_at,
-                &format!("{RUNTIME}/lemond"),
+                &format!("{RUNTIME}/llama-server"),
             )
             .ignoring_terminate()
             .stranger_after_terminate();
@@ -1041,7 +1042,8 @@ mod tests {
 
     /// The whole thing against a real group: a leader that starts `sleep`,
     /// records nothing itself and exits, leaving the grandchild in its group
-    /// — the shape `lemond` spawning `llama-server` takes when Paper dies.
+    /// — the shape a supervisor's child takes when Paper dies (as `lemond`'s
+    /// `llama-server` did, while Paper launched `lemond`).
     #[cfg(unix)]
     #[tokio::test]
     async fn a_real_orphan_is_collected_by_its_group() {
@@ -1070,7 +1072,7 @@ mod tests {
                 pgid,
                 leader_pid: pgid,
                 leader_started_at: 0,
-                exe: sleep_exe.with_file_name("lemond"),
+                exe: sleep_exe.with_file_name("llama-server"),
                 port: 1,
             },
         );

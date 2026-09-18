@@ -3,6 +3,8 @@ import { NOT_CONFIGURED, type CompanionProvider } from './companion'
 import { ZERO_DEVICE, compareHlc, makeHlc, parseHlc, type Hlc } from './hlc'
 import { createKernelServices, monotonicClock } from './services'
 import { NO_GLOSS, type GlossProvider } from './gloss'
+import { systemVoice } from '../ui/reader/systemVoice'
+import { NO_VOICE, type Voice } from './voice'
 import { NO_WORK_LINE, type Diagnostics, type WorkLine } from './ports'
 import type { PublicPassage } from './public/envelope'
 import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY } from './settings'
@@ -68,12 +70,58 @@ describe('the companion, gloss and work-line ports', () => {
 
   it('binds a gloss and restores it on dispose', async () => {
     const services = servicesWith(spyRecorder().recorder)
-    const provider: GlossProvider = { available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => 'a meaning' }
+    const provider: GlossProvider = { available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => ({ text: 'a meaning' }) }
     const unbind = services.bindGloss(provider)
     expect(services.gloss().available).toBe(true)
-    await expect(services.gloss().gloss('w', { sentence: 's', bookTitle: 'X', answerIn: [{ tag: 'en', name: 'English', label: 'English' }] }, new AbortController().signal)).resolves.toBe('a meaning')
+    await expect(services.gloss().gloss('w', { sentence: 's', bookTitle: 'X', answerIn: [{ tag: 'en', name: 'English', label: 'English' }] }, new AbortController().signal)).resolves.toEqual({ text: 'a meaning' })
     unbind.dispose()
     expect(services.gloss()).toBe(NO_GLOSS)
+  })
+
+  /* THE VOICE — a port beside the gloss rather than a field on it, because the
+     two are different engines with different availability and speaking is a
+     fact about the machine. `core/voice.ts` carries the argument; what belongs
+     here is that the slot behaves like every other one. */
+  /*
+   * ⚠️ **THE DEFAULT IS THE MACHINE'S OWN VOICE, AND THIS CASE ASSERTED
+   * `NO_VOICE`.** That was the defect rather than the contract: with nothing
+   * bound the lookup drew no pronunciation control at all, which on a machine
+   * where the neural voice failed was the whole feature —
+   * `ui/reader/systemVoice.ts` has the measurement of what serves instead. The
+   * identity is asserted because the object is shared: anything that binds a
+   * voice reads this port first and keeps it as its fallback, so two of them
+   * would be two `Voice`s over one engine.
+   *
+   * It answers `canSay` false HERE because these suites run on `node`, where
+   * there is no engine to ask — which is also why the default can be built in
+   * every one of them.
+   */
+  it('defaults to the machine’s own voice, which says nothing where there is no engine', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    expect(services.voice()).toBe(systemVoice())
+    expect(services.voice()).not.toBe(NO_VOICE)
+    expect(services.voice().canSay(null)).toBe(false)
+    expect(() => services.voice().say('gam')).not.toThrow()
+  })
+
+  it('binds a voice and restores the default on dispose', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const said: { text: string; lang: string | null | undefined }[] = []
+    const voice: Voice = {
+      canSay: () => true,
+      state: () => 'idle',
+      subscribe: () => () => {},
+      say: (text, lang) => void said.push({ text, lang }),
+      stop: () => {},
+    }
+    const unbind = services.bindVoice(voice)
+    expect(services.voice().canSay(null)).toBe(true)
+    /* THE LANGUAGE CROSSES THE PORT. A term is spoken in the book's language,
+       not the interface's, so the binding has to receive it — see `Voice.say`. */
+    services.voice().say('gam', 'en-GB')
+    expect(said).toEqual([{ text: 'gam', lang: 'en-GB' }])
+    unbind.dispose()
+    expect(services.voice()).toBe(systemVoice())
   })
 
   /* AT REST THE BAR IS WHAT IT ALWAYS WAS. `line()` is null and `subscribe`
@@ -120,8 +168,8 @@ describe('the companion, gloss and work-line ports', () => {
     const services = servicesWith(spyRecorder().recorder)
     services.bindCompanion(fake('one'))
     expect(() => services.bindCompanion(fake('two'))).toThrow(/already bound/)
-    services.bindGloss({ available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => 'x' })
-    expect(() => services.bindGloss({ available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => 'y' })).toThrow(/already bound/)
+    services.bindGloss({ available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => ({ text: 'x' }) })
+    expect(() => services.bindGloss({ available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => ({ text: 'y' }) })).toThrow(/already bound/)
     services.bindWorkLine({ line: () => null, subscribe: () => () => {} })
     expect(() => services.bindWorkLine({ line: () => null, subscribe: () => () => {} })).toThrow(/already bound/)
   })

@@ -259,7 +259,7 @@ describe('the live entry', () => {
 
   it.each([
     ['failed', { kind: 'failed', term: 'gam', reason: 'The runtime stopped' } as const, 'Paper couldn’t define “gam”. The runtime stopped'],
-    ['unavailable', { kind: 'unavailable', term: 'gam', installAt: null } as const, 'Paper needs a language model to define “gam”.'],
+    ['unavailable', { kind: 'unavailable', term: 'gam', installAt: null } as const, 'Look up needs something to answer with before it can define “gam”.'],
     ['tooLong', { kind: 'tooLong' } as const, 'That passage is too long to look up — select a word or a short phrase.'],
   ])('is not amber when %s', (_name, live: GlossState, said) => {
     draw({ live })
@@ -272,6 +272,25 @@ describe('the live entry', () => {
        nothing to run after its sentence, and running the missing one on anyway
        showed the reader the word "null" where a reason would be. */
     expect(screen.getByText(said)).not.toBeNull()
+  })
+
+  /*
+   * ⚠️ **THE PART OF SPEECH IS THE POPUP'S AND NOT THE ROW'S** (2026-09-18),
+   * and this is the decision rather than an oversight — `lookUpWords.ts` has the
+   * reasoning. The live row sits directly above history rows drawn from the
+   * lookups store, which keeps no part of speech, so a line on the live entry
+   * that no row beneath it can carry reads as the older lookups having lost
+   * something. The popup draws one answer with no such neighbour.
+   *
+   * It is a test rather than a comment because the state CARRIES the field: the
+   * row would start showing it the moment somebody spread the state into it.
+   */
+  it('shows no part of speech, even when the live answer carries one', () => {
+    draw({ live: { kind: 'ready', term: 'precisely', text: 'In exact terms.', partOfSpeech: 'adverb' } })
+
+    const entry = screen.getByRole('status')
+    expect(entry.textContent).toContain('In exact terms.')
+    expect(entry.textContent).not.toContain('adverb')
   })
 
   it('draws no live entry while nothing is being looked up', () => {

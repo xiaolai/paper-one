@@ -11,7 +11,7 @@
     "`endpointsModel.test.ts`. A case added here fails whichever side is",
     "wrong, and a rule changed on one side alone fails immediately.",
     "",
-    "Every case is one the crate's own `valid_id`/`valid_base_url` decide."
+    "Every case is one the crate's own `valid_id`/`valid_base_url`/`valid_model_name` decide."
   ],
   "ids": {
     "valid": [
@@ -45,7 +45,11 @@
       "https://api.example.com:8443/v1",
       "https://api.example.com/v1?x=1",
       "https://127.0.0.1:11434/v1",
-      "https://my-host.example.com"
+      "https://my-host.example.com",
+      "http://localhost:11434/v1",
+      "http://127.0.0.1:1234/v1",
+      "http://[::1]:8080/v1",
+      "http://localhost"
     ],
     "invalid": [
       "",
@@ -62,7 +66,30 @@
       "https://api.example.com ",
       "https://api.example.com\n",
       "https://api.\texample.com",
-      "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "http://localhost.example.com/v1",
+      "http://127.0.0.2:1234/v1",
+      "http://localhost@evil.example/v1",
+      "http://localhost:/v1",
+      "http://localhost:80a/v1",
+      "http://[::1/v1",
+      "http://evil.example/localhost"
+    ]
+  },
+  "models": {
+    "valid": [
+      "gpt-4.1-mini",
+      "deepseek-chat",
+      "qwen2.5:7b",
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "a"
+    ],
+    "invalid": [
+      "",
+      " gpt-4.1-mini",
+      "gpt 4",
+      "gpt-4\n",
+      "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
     ]
   }
 }

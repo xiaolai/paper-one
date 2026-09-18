@@ -139,6 +139,25 @@ describe('the capability vocabulary, measured against the kernel it sits in', ()
     )
   })
 
+  /**
+   * A MULTI-LINE FIELD IS THE KERNEL'S NOTE EDITOR, not a second idea of one.
+   *
+   * `.paper-cap-field` cannot be one — it is a fixed-height pill, so it shows a
+   * single line of a paragraph and rounds the ends off it — so the vocabulary
+   * grew a class rather than a caller widening that one. The failure to guard
+   * against is the one the row height and the inset above were bought for: a
+   * contributed control that is styled, from tokens, and simply not styled like
+   * Paper. `.noteInput` in the side pane is the app's only other textarea, so it
+   * is what "like Paper" means here.
+   */
+  it('gives a contributed textarea the kernel note editor’s shape', () => {
+    for (const property of ['border-radius', 'font-size', 'line-height', 'resize', 'padding'] as const) {
+      expect(declared(CSS, '.paper-cap-textarea', property), property).toBe(
+        declared(PANE_CSS, '.noteInput', property),
+      )
+    }
+  })
+
   /* The palette's field is a step off the ramp on purpose. Nothing that sits
      in a row may reach for it — which is how it got here in the first place.
      Comments stripped first: the rule above EXPLAINS the token by name, and a

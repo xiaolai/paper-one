@@ -113,6 +113,121 @@ describe('Speaker', () => {
     expect(onDone).toHaveBeenLastCalledWith('error')
   })
 
+  /**
+   * ⚠️ **TWO SPEAKERS OVER ONE ENGINE, WHICH IS WHAT THE APP NOW HAS.** The
+   * reading owns one and the lookup popup's pronunciation owns another, and
+   * `speak` begins with `stop()` — so the second one to speak cancels the
+   * first's utterance, and a cancelled utterance still delivers its `end`. With
+   * the first speaker's own generation still current, its `#finish` read that
+   * `end` as "the section finished" and `useSpeech` walked the pages forward
+   * hunting the next section while the reader listened to one word being
+   * pronounced. `taken` is what separates "my utterance ended" from "somebody
+   * took the engine".
+   */
+  it('does not report a section finished when another speaker took the engine', () => {
+    const reading = make()
+    const pronouncing = make()
+    reading.speaker.speak('a whole section', null)
+    const section = synth.queued[0]
+
+    pronouncing.speaker.speak('gam', null)
+    section?.dispatchEvent(new Event('end'))
+
+    expect(reading.onDone).toHaveBeenCalledTimes(1)
+    expect(reading.onDone).toHaveBeenCalledWith('taken')
+  })
+
+  /* AND THE ONE THAT TOOK IT STILL REPORTS ITS OWN ENDING — the guard is about
+     whose engine it is, not about there having been two speakers. */
+  it('still reports its own ending for the speaker holding the engine', () => {
+    const reading = make()
+    const pronouncing = make()
+    reading.speaker.speak('a whole section', null)
+    pronouncing.speaker.speak('gam', null)
+
+    synth.queued[1]?.dispatchEvent(new Event('end'))
+
+    expect(pronouncing.onDone).toHaveBeenCalledWith('ended')
+  })
+
+  /*
+   * ⚠️ **AND THE CLAIM IS MADE BEFORE THE CANCEL, WHICH A SYNCHRONOUS ENGINE IS
+   * WHAT DISTINGUISHES.** `speak` calls `stop()` — the cancel — on its second
+   * line, and an engine free to deliver the cancelled utterance's `end` from
+   * inside `cancel()` would find the previous holder still recorded and be told
+   * its section had finished. Driven with a synth that does exactly that.
+   */
+  it('claims the engine before cancelling, so even a synchronous end is taken', () => {
+    const reading = make()
+    reading.speaker.speak('a whole section', null)
+    const section = synth.queued[0]
+    /* An engine that ends the cancelled utterance from inside `cancel()`. */
+    synth.cancel = () => {
+      synth.cancelled += 1
+      synth.speaking = false
+      section?.dispatchEvent(new Event('end'))
+    }
+
+    const pronouncing = new Speaker(
+      { onWord: vi.fn(), onDone: vi.fn(), onNoBoundaries: vi.fn() },
+      synth as unknown as SpeechSynthesis,
+    )
+    pronouncing.speak('gam', null)
+
+    expect(reading.onDone).toHaveBeenCalledWith('taken')
+  })
+
+  /**
+   * ⚠️ **AND `stop()` MAY NOT CANCEL AN ENGINE IT DOES NOT HOLD.** It was
+   * unconditional, on the ground that "cancel() on an idle synth is harmless" —
+   * true of an idle engine and false of one somebody else is using. The lookup
+   * popup calls `Voice.stop` on EVERY selection change, so a reader listening to
+   * the book who merely opened and dismissed a lookup had the reading cancelled,
+   * by a speaker whose own utterance was long finished.
+   */
+  it('does not cancel an engine another speaker is holding', () => {
+    const reading = make()
+    const pronouncing = make()
+    pronouncing.speaker.speak('gam', null)
+    synth.queued[0]?.dispatchEvent(new Event('end'))
+    reading.speaker.speak('a whole section', null)
+    const cancels = synth.cancelled
+
+    /* The popup going away, which is a `stop` on a speaker that finished long
+       ago and does not hold the engine. */
+    pronouncing.speaker.stop()
+
+    expect(synth.cancelled).toBe(cancels)
+    expect(reading.onDone).not.toHaveBeenCalled()
+  })
+
+  /* AND IT STILL CANCELS ITS OWN, which is the behaviour the unconditional
+     version existed for — including an utterance queued for a previous
+     section, because `speak` claims the engine before stopping. */
+  it('cancels its own utterance when it is the one holding the engine', () => {
+    const { speaker } = make()
+    speaker.speak('first', null)
+    const before = synth.cancelled
+
+    speaker.stop()
+
+    expect(synth.cancelled).toBe(before + 1)
+  })
+
+  /* ONE SPEAKER ON ONE ENGINE IS UNAFFECTED: its own second utterance retires
+     the first by generation, exactly as it always did, and nothing is reported
+     as taken. */
+  it('says nothing about a speaker replacing its own utterance', () => {
+    const { speaker, onDone } = make()
+    speaker.speak('first', null)
+    const first = synth.queued[0]
+
+    speaker.speak('second', null)
+    first?.dispatchEvent(new Event('end'))
+
+    expect(onDone).not.toHaveBeenCalled()
+  })
+
   it('waits for the voice to start before timing the boundary grace', () => {
     // A cold voice can take seconds to begin. A timer started at queue time
     // spends that wait counting down and then concludes, from silence that has

@@ -2526,6 +2526,13 @@ export function App({
              the port keeps `NO_GLOSS`, `installAt` is null, and no control is
              drawn at all. */
           lookUp={lookUp}
+          /* THE VOICE that says the looked-up term aloud — a port beside the
+             gloss rather than a member of it, for the reasons `core/voice.ts`
+             sets out. Read per render like the gloss provider above, so a voice
+             bound after composition is heard without a restart. Nothing binds
+             one today, so the port is the machine's own voice (`systemVoice`),
+             and the control is drawn wherever it `canSay` the word. */
+          voice={services.voice()}
           libraryCount={library.books.length}
           saveFailure={library.saveFailure}
           onDismissSaveFailure={library.dismissSaveFailure}

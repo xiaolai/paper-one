@@ -151,7 +151,7 @@
 
 .combo {
   flex: 0 0 auto;
-  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: var(--text-caption);
   color: var(--muted);
 }
@@ -165,7 +165,7 @@
   padding: var(--space-28) var(--space-16);
   text-align: center;
   font-size: var(--text-ui);
-  line-height: 1.6;
+  line-height: var(--leading-body);
   color: var(--muted);
 }
 

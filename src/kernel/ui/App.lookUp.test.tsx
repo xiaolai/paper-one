@@ -18,7 +18,7 @@ import { createKernelServices } from '../core/services'
  * popup (a book in error replaces the stage). The wrappers run the REAL hooks
  * and only keep hold of two things: `setSelection`, which is exactly what the
  * session calls when the reader selects a passage, and the `LookUp` App built,
- * whose `onInstall` is exactly what the popup's "Install one" calls. Everything
+ * whose `onInstall` is exactly what the popup's "Choose one" calls. Everything
  * between those two and the screen — the anchor, the press, the gloss, the
  * history, Settings — is the production code.
  */
@@ -85,12 +85,17 @@ const settle = () =>
 
 const WILL_NOT_PARSE = 'File type not supported'
 const LOOK_UP_ROW = 'Look up the selection'
-const NEEDS_A_MODEL = 'Paper needs a language model to define “Ishmael”.'
+const NEEDS_SOMETHING = 'Look up needs something to answer with before it can define “Ishmael”.'
 const MODELS_BODY = 'Where a model is installed from'
 const DEFINITION = 'the name the narrator asks to be called by'
 const CFI = 'epubcfi(/6/4!/4/2,/1:8,/1:15)'
 
-/** A build with `inference` composed and no model downloaded: nothing can define, and there is somewhere to go. */
+/**
+ * A build with `inference` composed and nothing set up to answer: nothing can
+ * define, and there is somewhere to go. The section it names is the stand-in
+ * capability's below — the kernel opens whatever section the provider names and
+ * never learns which one it is (`GlossProvider.installAt`).
+ */
 const UNINSTALLED: GlossProvider = {
   available: false,
   installAt: 'inference:models',
@@ -209,7 +214,7 @@ describe('starting a lookup', () => {
     await selectIshmael()
     await runCommand('Look up', LOOK_UP_ROW)
     expect(probe.lookUp!.state).toEqual({ kind: 'unavailable', term: 'Ishmael', installAt: 'inference:models' })
-    expect(screen.getByText(NEEDS_A_MODEL)).toBeTruthy()
+    expect(screen.getByText(NEEDS_SOMETHING)).toBeTruthy()
   })
 
   it('looks the selection up on the chord, and with nothing selected leaves the key to the platform', async () => {
@@ -222,13 +227,13 @@ describe('starting a lookup', () => {
     expect(lookUpChord()).toBe(true)
     await settle()
     expect(probe.lookUp!.state).toEqual({ kind: 'idle' })
-    expect(screen.queryByText(NEEDS_A_MODEL)).toBeNull()
+    expect(screen.queryByText(NEEDS_SOMETHING)).toBeNull()
 
     await selectIshmael()
     expect(lookUpChord()).toBe(false)
     await settle()
     expect(probe.lookUp!.state).toEqual({ kind: 'unavailable', term: 'Ishmael', installAt: 'inference:models' })
-    expect(screen.getByText(NEEDS_A_MODEL)).toBeTruthy()
+    expect(screen.getByText(NEEDS_SOMETHING)).toBeTruthy()
   })
 
   it('offers nothing to look up in a reader with no book, whatever is selected', async () => {
@@ -251,7 +256,7 @@ describe('Escape', () => {
     await selectIshmael()
     lookUpChord()
     await settle()
-    expect(screen.getByText(NEEDS_A_MODEL)).toBeTruthy()
+    expect(screen.getByText(NEEDS_SOMETHING)).toBeTruthy()
 
     accel('k')
     await settle()
@@ -261,12 +266,12 @@ describe('Escape', () => {
     /* The palette, and only the palette. */
     expect(screen.queryByRole('textbox', { name: 'Search or ask' })).toBeNull()
     expect(probe.lookUp!.state.kind).toBe('unavailable')
-    expect(screen.getByText(NEEDS_A_MODEL)).toBeTruthy()
+    expect(screen.getByText(NEEDS_SOMETHING)).toBeTruthy()
 
     escape()
     await settle()
     expect(probe.lookUp!.state).toEqual({ kind: 'idle' })
-    expect(screen.queryByText(NEEDS_A_MODEL)).toBeNull()
+    expect(screen.queryByText(NEEDS_SOMETHING)).toBeNull()
   })
 
   /* ⚠️ **AND IT LEAVES AN IDLE ONE ALONE.** `dismiss` publishes a new idle
@@ -286,14 +291,14 @@ describe('Escape', () => {
   })
 })
 
-describe('“Install one”', () => {
+describe('“Choose one”', () => {
   it('opens Settings with the section the provider named already open', async () => {
     await readingMoby(UNINSTALLED)
     await selectIshmael()
     lookUpChord()
     await settle()
     const said = probe.lookUp!.state
-    if (said.kind !== 'unavailable' || said.installAt === null) throw new Error(`expected an install offer, got ${JSON.stringify(said)}`)
+    if (said.kind !== 'unavailable' || said.installAt === null) throw new Error(`expected a way to something that answers, got ${JSON.stringify(said)}`)
     /* Closed at rest, and Settings is not the panel on screen. */
     expect(screen.queryByText(MODELS_BODY)).toBeNull()
 
@@ -308,7 +313,7 @@ describe('“Install one”', () => {
 describe('the answer', () => {
   it('asks in the reader’s language, then in the one chosen in Settings, and files each answer under the open book', async () => {
     vi.spyOn(window.navigator, 'language', 'get').mockReturnValue('fr-FR')
-    const gloss = vi.fn((_term: string, _context: GlossContext, _signal: AbortSignal) => Promise.resolve(DEFINITION))
+    const gloss = vi.fn((_term: string, _context: GlossContext, _signal: AbortSignal) => Promise.resolve({ text: DEFINITION }))
     const { services, bookId } = await readingMoby({ available: true, installAt: null, warm: () => {}, gloss })
     accel('2')
     await settle()
@@ -350,12 +355,12 @@ describe('the answer', () => {
     expect(services.lookups.getSnapshot().all[0]!.occurrences[0]).toEqual(expect.objectContaining({ bookId, cfi: CFI, language: 'de' }))
   })
 
-  it('offers the answer-language row only where there is a Look up — a model, or somewhere to install one', async () => {
+  it('offers the answer-language row only where there is a Look up — something to answer, or somewhere to choose it', async () => {
     const cases: readonly (readonly [GlossProvider | undefined, boolean])[] = [
       /* The port's own default: no model, and nowhere to get one. */
       [undefined, false],
       [UNINSTALLED, true],
-      [{ available: true, installAt: null, warm: () => {}, gloss: () => Promise.resolve(DEFINITION) }, true],
+      [{ available: true, installAt: null, warm: () => {}, gloss: () => Promise.resolve({ text: DEFINITION }) }, true],
     ]
     for (const [gloss, offered] of cases) {
       await readingNothing(gloss)

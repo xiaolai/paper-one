@@ -33,8 +33,9 @@ import { webhost } from '../capabilities/webhost'
 /* `inference` before `companion`, which the registry would work out anyway
  * from `requires` — stated here because the pair is the phase-15 split and
  * reading them adjacent is how the split stays legible. Both are DESKTOP
- * ONLY: `lemond` ships for macOS, Windows and Linux and there is no mobile
- * build of it, so the mobile compositions do not list them. */
+ * ONLY: the runtime Paper stages, llama.cpp's `llama-server`, is staged for
+ * the desktop platforms alone, and the plugin that supervises it compiles only
+ * under the `desktop` feature — so the mobile compositions do not list them. */
 /* `webhost` last, and after `peer`, which it declares in `requires`.
  *
  * ⚠️ **THE REASON HERE HAS NOW BEEN WRONG TWICE.** It first said *"it needs

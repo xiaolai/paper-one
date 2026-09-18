@@ -2,13 +2,13 @@
 
 The commands a Paper webview needs from the inference plugin: the runtime's
 status, start and stop; the model catalogue with install, remove, reveal and
-resource usage; generation and the gloss; speech; the route probe; cloud
-endpoint registration with a write-only key; one tool-free agent turn; and
-cancellation for any streaming request.
+resource usage; generation and the gloss; the route probe; cloud endpoint
+storage with a write-only key; one tool-free agent turn; and cancellation for
+any streaming request.
 
 NO GENERAL RUNNER IS AMONG THEM. No command takes a URL, a path, a host or an
 argv: a caller names a model id that must resolve in models.manifest.json, or
-a route id the probe minted. The bearer token, the loopback port and the cloud
+a route id the probe minted. The runtime's key, the loopback port and the cloud
 API keys never cross to the webview, and there is deliberately no command that
 reads a stored key back.
 
@@ -24,7 +24,6 @@ reads a stored key back.
 - `allow-inference-reveal-models-dir`
 - `allow-inference-generate`
 - `allow-inference-gloss`
-- `allow-inference-speak`
 - `allow-inference-probe`
 - `allow-inference-endpoints`
 - `allow-inference-add-endpoint`
@@ -429,32 +428,6 @@ Enables the inference_set_endpoint_key command without any pre-configured scope.
 <td>
 
 Denies the inference_set_endpoint_key command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`inference:allow-inference-speak`
-
-</td>
-<td>
-
-Enables the inference_speak command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`inference:deny-inference-speak`
-
-</td>
-<td>
-
-Denies the inference_speak command without any pre-configured scope.
 
 </td>
 </tr>

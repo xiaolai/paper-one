@@ -1,18 +1,17 @@
 //! The staged runtime's manifest, and the verification nothing spawns without.
 //!
-//! WI-20.24. The staged archive used to hold `lemond` alone; the backend it
-//! actually runs — `llama-server` and the ten `@rpath` libraries beside it,
-//! sixty-two files on macOS — was fetched by the daemon from GitHub inside
-//! the first gloss, with no hash Paper controlled, and `spawn.rs` called it
-//! "the vetted builtin". Upstream publishes neither signatures nor a
-//! codesign step, `lemond`'s own checksum table has no llama.cpp entry, and
-//! a binary libcurl downloaded carries no quarantine flag, so Gatekeeper
-//! never looks at it. Only a hash Paper records itself stands between GitHub
-//! and `exec`.
+//! WI-20.24. The staged archive used to hold Lemonade's `lemond` alone; the
+//! backend it actually ran — `llama-server` and the ten `@rpath` libraries
+//! beside it — was fetched by the daemon from GitHub inside the first gloss,
+//! with no hash Paper controlled. Upstream publishes neither signatures nor a
+//! codesign step, and a binary libcurl downloaded carries no quarantine flag,
+//! so Gatekeeper never looks at it. Only a hash Paper records itself stands
+//! between GitHub and `exec`.
 //!
-//! So the staging script (`scripts/sync-inference-runtime.mjs`) carries the
-//! whole backend directory beside `lemond` and writes [`MANIFEST_FILE`]: one
-//! entry per file — size and SHA-256. This module reads it back and, BEFORE
+//! So the staging script (`scripts/sync-inference-runtime.mjs`) stages the
+//! llama.cpp release itself and writes [`MANIFEST_FILE`]: one entry per file —
+//! size and SHA-256. Since 2026-09-18 that is the WHOLE runtime: `lemond` is
+//! gone, and the server this verifies is the program Paper launches. This module reads it back and, BEFORE
 //! EVERY SPAWN, checks every entry against the tree and the tree against
 //! every entry. A byte flipped in a library refuses the spawn and names the
 //! file; so does a file the manifest never heard of, because `llama-server`
@@ -48,11 +47,16 @@ use serde::Deserialize;
 use crate::digest::sha256_file;
 use crate::error::{Error, Result};
 
-/// Beside `lemond`, written by the staging script.
+/// At the root of the runtime directory, written by the staging script.
 pub const MANIFEST_FILE: &str = "runtime.manifest.json";
 
 /// The manifest format this crate reads; the script writes the same number.
-pub const RUNTIME_MANIFEST_VERSION: u32 = 1;
+///
+/// 2 since 2026-09-18, when the `lemonade` field and `lemond` itself left the
+/// tree. A version-1 tree still holds a daemon nothing launches, and reading
+/// it as this version would verify and ship it; refused instead, it is
+/// re-staged by `predev`.
+pub const RUNTIME_MANIFEST_VERSION: u32 = 2;
 
 /// Files that may sit in the tree without an entry: the staging script's own
 /// stamp, the manifest itself, and the Finder's droppings. None is loadable.
@@ -78,11 +82,13 @@ struct RawEntry {
     sha256: String,
 }
 
+/// `deny_unknown_fields` for [`RawEntry`]'s reason: a field this build does
+/// not read — the old `lemonade`, say — is a manifest of another shape.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawManifest {
     version: u32,
     platform: String,
-    lemonade: String,
     llamacpp: LlamaCppPin,
     files: Vec<RawEntry>,
 }
@@ -111,7 +117,6 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeManifest {
     platform: String,
-    lemonade: String,
     llamacpp: LlamaCppPin,
     files: Vec<Entry>,
 }
@@ -120,16 +125,22 @@ pub struct RuntimeManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedBackend {
     name: String,
+    tag: String,
     server: PathBuf,
 }
 
 impl VerifiedBackend {
-    /// The backend's name in `lemond`'s vocabulary: `metal`, `cpu`, …
+    /// The build's accelerator: `metal`, `cpu`, …
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// The absolute path of `llama-server`, which is what `<backend>_bin` takes.
+    /// The llama.cpp build it is, e.g. `b10375` — the runtime's version.
+    pub fn tag(&self) -> &str {
+        &self.tag
+    }
+
+    /// The absolute path of `llama-server` — the program Paper launches.
     pub fn server(&self) -> &Path {
         &self.server
     }
@@ -140,6 +151,7 @@ impl VerifiedBackend {
     pub(crate) fn for_test(name: &str, server: &str) -> Self {
         VerifiedBackend {
             name: name.to_owned(),
+            tag: "b0000".to_owned(),
             server: PathBuf::from(server),
         }
     }
@@ -234,27 +246,26 @@ impl RuntimeManifest {
                 "the server executable is not a file the manifest lists",
             ));
         }
-        /* The backend NAME becomes an environment variable
-         * (`LEMONADE_LLAMACPP_<NAME>_BIN`) and a JSON config key. The files
-         * are digest-verified; the name was not constrained at all, so a
-         * hand-edited manifest could smuggle whitespace, `=` or control
-         * bytes into the child's environment. A closed alphabet, checked
-         * where every other manifest invariant is. */
-        if raw.llamacpp.backend.is_empty()
-            || !raw
-                .llamacpp
-                .backend
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        {
-            return Err(refused(
-                &raw.llamacpp.backend,
-                "the backend name is not lowercase ascii",
-            ));
+        /* The backend NAME and the build TAG reach the reader — the tag is the
+         * runtime's version in the settings row — and the name used to become
+         * an environment variable of lemond's. The files are digest-verified;
+         * these two were not constrained at all, so a hand-edited manifest
+         * could carry whitespace or control bytes anywhere they are shown. A
+         * closed alphabet, checked where every other manifest invariant is. */
+        for (what, value) in [
+            ("backend name", &raw.llamacpp.backend),
+            ("build tag", &raw.llamacpp.tag),
+        ] {
+            if value.is_empty()
+                || !value
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return Err(refused(value, format!("the {what} is not lowercase ascii")));
+            }
         }
         Ok(RuntimeManifest {
             platform: raw.platform,
-            lemonade: raw.lemonade,
             llamacpp: raw.llamacpp,
             files,
         })
@@ -286,11 +297,6 @@ impl RuntimeManifest {
     /// [`platform_key`] by [`parse`](Self::parse).
     pub fn platform(&self) -> &str {
         &self.platform
-    }
-
-    /// The Lemonade version the staging script recorded.
-    pub fn lemonade(&self) -> &str {
-        &self.lemonade
     }
 
     /// The llama.cpp pin: the tag, the backend name and the server's path
@@ -325,7 +331,7 @@ impl RuntimeManifest {
     /// Both of these stand, and they stand as a DECISION rather than an
     /// oversight — D8, 2026-08-27. The runtime is in Application Support
     /// because it is not in the bundle yet, and the alternative it replaced
-    /// was worse by a wide margin: lemond fetching `llama-server` from GitHub
+    /// was worse by a wide margin: `lemond` fetching `llama-server` from GitHub
     /// inside the first gloss, with no hash Paper controlled, over a libcurl
     /// download that carries no quarantine flag so Gatekeeper never looks at
     /// it. Two things bound the exposure meanwhile. This runs BEFORE EVERY
@@ -413,6 +419,7 @@ impl RuntimeManifest {
 
         Ok(VerifiedBackend {
             name: self.llamacpp.backend.clone(),
+            tag: self.llamacpp.tag.clone(),
             server: dir.join(&self.llamacpp.server),
         })
     }
@@ -426,8 +433,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// A staged runtime the way `scripts/sync-inference-runtime.mjs` lays one
-    /// out: `lemond`, its `resources/`, a backend directory with an
-    /// executable and a library.
+    /// out: the release's licence at the root, and the backend directory with
+    /// an executable and a library.
     struct Fixture {
         dir: ScratchDir,
         entries: Vec<serde_json::Value>,
@@ -441,11 +448,10 @@ mod tests {
         let dir = ScratchDir::new("runtime");
         let root = dir.path();
         let backend = root.join("backend").join("llamacpp").join("metal");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
         std::fs::create_dir_all(&backend).unwrap();
         let files: [(&str, &[u8]); 4] = [
-            ("lemond", b"lemond-bytes"),
-            ("resources/defaults.json", b"{}"),
+            ("LICENSE", b"licence-bytes"),
+            ("backend/llamacpp/metal/LICENSE", b"{}"),
             ("backend/llamacpp/metal/llama-server", b"server-bytes"),
             ("backend/llamacpp/metal/libggml.0.dylib", b"library-bytes"),
         ];
@@ -458,7 +464,7 @@ mod tests {
                 "sha256": hex(bytes),
             }));
         }
-        std::fs::write(root.join(".version"), "11.7.0 test llamacpp-b1 metal\n").unwrap();
+        std::fs::write(root.join(".version"), "llamacpp-b1 test metal\n").unwrap();
         Fixture { dir, entries }
     }
 
@@ -467,7 +473,6 @@ mod tests {
             serde_json::json!({
                 "version": RUNTIME_MANIFEST_VERSION,
                 "platform": platform,
-                "lemonade": "11.7.0",
                 "llamacpp": { "tag": "b10375", "backend": "metal", "server": server },
                 "files": self.entries,
             })
@@ -506,6 +511,7 @@ mod tests {
         let manifest = RuntimeManifest::load(fx.root()).await.unwrap();
         let backend = manifest.verify(fx.root()).await.unwrap();
         assert_eq!(backend.name(), "metal");
+        assert_eq!(backend.tag(), "b10375");
         assert_eq!(
             backend.server(),
             fx.root()
@@ -669,22 +675,22 @@ mod tests {
         let fx = fixture();
         let traversing = fx
             .manifest()
-            .replace("\"path\":\"lemond\"", "\"path\":\"../lemond\"");
+            .replace("\"path\":\"LICENSE\"", "\"path\":\"../LICENSE\"");
         assert_eq!(
             RuntimeManifest::parse(&traversing).unwrap_err().kind(),
             "runtimeUnverified"
         );
         let absolute = fx
             .manifest()
-            .replace("\"path\":\"lemond\"", "\"path\":\"/lemond\"");
+            .replace("\"path\":\"LICENSE\"", "\"path\":\"/LICENSE\"");
         assert!(RuntimeManifest::parse(&absolute).is_err());
         let backslashed = fx
             .manifest()
-            .replace("\"path\":\"lemond\"", "\"path\":\"a\\\\lemond\"");
+            .replace("\"path\":\"LICENSE\"", "\"path\":\"a\\\\LICENSE\"");
         assert!(RuntimeManifest::parse(&backslashed).is_err());
         let repeated = fx.manifest().replace(
-            "\"path\":\"resources/defaults.json\"",
-            "\"path\":\"lemond\"",
+            "\"path\":\"backend/llamacpp/metal/LICENSE\"",
+            "\"path\":\"LICENSE\"",
         );
         assert!(RuntimeManifest::parse(&repeated).is_err());
     }
@@ -707,15 +713,43 @@ mod tests {
             &format!("\"version\":{}", RUNTIME_MANIFEST_VERSION + 1),
         );
         assert!(RuntimeManifest::parse(&future).is_err());
-        let short = fx.manifest().replace(&hex(b"lemond-bytes"), "abc");
+        let short = fx.manifest().replace(&hex(b"licence-bytes"), "abc");
         assert!(RuntimeManifest::parse(&short).is_err());
         // A `link` entry — the first draft's shape — is refused outright
         // rather than read as a file with two fields missing.
         let linked = fx.manifest().replace(
-            "\"path\":\"resources/defaults.json\"",
-            "\"link\":\"x\",\"path\":\"resources/defaults.json\"",
+            "\"path\":\"backend/llamacpp/metal/LICENSE\"",
+            "\"link\":\"x\",\"path\":\"backend/llamacpp/metal/LICENSE\"",
         );
         assert!(RuntimeManifest::parse(&linked).is_err());
+    }
+
+    /// ⚠️ A VERSION-1 TREE IS REFUSED, NOT READ. It carries `lemond` and a
+    /// `lemonade` field, and a build that read it as version 2 would verify a
+    /// daemon nothing launches and ship it in the bundle.
+    #[test]
+    fn a_lemonade_era_manifest_is_refused() {
+        let fx = fixture();
+        let old = fx.manifest().replace(
+            &format!("\"version\":{RUNTIME_MANIFEST_VERSION}"),
+            "\"version\":1",
+        );
+        let (_, why) = refusal(RuntimeManifest::parse(&old).unwrap_err());
+        assert!(why.contains("version 1"), "{why}");
+        let with_field = fx
+            .manifest()
+            .replace("\"platform\"", "\"lemonade\":\"11.7.0\",\"platform\"");
+        assert!(RuntimeManifest::parse(&with_field).is_err());
+    }
+
+    /// The tag is the runtime's version in the settings row, so it is held to
+    /// the backend name's alphabet.
+    #[test]
+    fn a_build_tag_that_is_not_plain_ascii_is_refused() {
+        let fx = fixture();
+        let bad = fx.manifest().replace("\"b10375\"", "\"b1 0375\\n\"");
+        let (_, why) = refusal(RuntimeManifest::parse(&bad).unwrap_err());
+        assert!(why.contains("build tag"), "{why}");
     }
 
     /// The key the staging script uses for the host — Node's
@@ -749,7 +783,7 @@ mod tests {
         let backend = manifest.verify(&dir).await.unwrap();
         assert!(backend.server().is_file(), "{}", backend.server().display());
         assert!(
-            manifest.files().len() > 40,
+            manifest.files().len() > 10,
             "the backend is in the tree: {} entries",
             manifest.files().len()
         );
@@ -761,14 +795,13 @@ mod tests {
     fn the_manifest_the_script_writes_parses() {
         let text = format!(
             r#"{{
-  "version": 1,
+  "version": 2,
   "platform": "{}",
-  "lemonade": "11.7.0",
   "llamacpp": {{ "tag": "b10375", "backend": "metal", "server": "backend/llamacpp/metal/llama-server" }},
   "files": [
+    {{ "path": "LICENSE", "bytes": 19411, "sha256": "{}" }},
     {{ "path": "backend/llamacpp/metal/libggml.dylib", "bytes": 59872, "sha256": "{}" }},
-    {{ "path": "backend/llamacpp/metal/llama-server", "bytes": 33472, "sha256": "{}" }},
-    {{ "path": "lemond", "bytes": 10722528, "sha256": "{}" }}
+    {{ "path": "backend/llamacpp/metal/llama-server", "bytes": 33472, "sha256": "{}" }}
   ]
 }}"#,
             platform_key(),
@@ -779,7 +812,6 @@ mod tests {
         let manifest = RuntimeManifest::parse(&text).unwrap();
         assert_eq!(manifest.llamacpp().backend, "metal");
         assert_eq!(manifest.llamacpp().tag, "b10375");
-        assert_eq!(manifest.lemonade(), "11.7.0");
         assert_eq!(manifest.files().len(), 3);
     }
 }

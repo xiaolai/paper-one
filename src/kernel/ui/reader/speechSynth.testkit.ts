@@ -21,11 +21,28 @@ export class FakeUtterance extends EventTarget {
   }
 }
 
-export class FakeSynth {
+/**
+ * ⚠️ **AN `EventTarget`, BECAUSE THE ENGINE IS ONE.** `voiceschanged` is how a
+ * real engine says its voice list has arrived, and `Voice.canSay` subscribes to
+ * it so a control drawn against an empty list corrects itself rather than
+ * staying wrong for the session. A plain object cannot be told that happened,
+ * and a fake that cannot reproduce the event is a fake the case cannot use.
+ */
+export class FakeSynth extends EventTarget {
   readonly queued: FakeUtterance[] = []
   speaking = false
   paused = false
   cancelled = 0
+  /**
+   * What `getVoices()` answers — EMPTY BY DEFAULT, which is what a real engine
+   * answers before its list has loaded, and the case `canSay` treats as
+   * unknown. A case that wants a known list assigns one.
+   */
+  voices: { lang: string }[] = []
+
+  getVoices(): { lang: string }[] {
+    return this.voices
+  }
 
   speak(utterance: FakeUtterance): void {
     this.queued.push(utterance)

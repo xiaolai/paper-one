@@ -21,7 +21,7 @@
    * place it must not cover. */
   right: 0;
   font-size: var(--text-caption);
-  line-height: 1.4;
+  line-height: var(--leading-ui);
   color: var(--muted);
   text-wrap: pretty;
   cursor: pointer;

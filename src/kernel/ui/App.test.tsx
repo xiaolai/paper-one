@@ -257,6 +257,7 @@ async function mount(
           {
             id: 'cap:one',
             label: 'Circle',
+            icon: 'people',
             render: (context) => {
               handed.push(context)
               return <p>drawn by the capability</p>
@@ -2210,8 +2211,8 @@ describe('the titlebar and the screens under it', () => {
         {
           id: 'cap',
           screens: [
-            { id: 'cap:one', label: 'Circle', render: () => <p>drawn by the circle</p> },
-            { id: 'cap:two', label: 'Commons', render: () => <p>drawn by the commons</p> },
+            { id: 'cap:one', label: 'Circle', icon: 'people', render: () => <p>drawn by the circle</p> },
+            { id: 'cap:two', label: 'Commons', icon: 'people', render: () => <p>drawn by the commons</p> },
           ],
         },
       ],

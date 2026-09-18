@@ -31,7 +31,7 @@ const REASONS: Readonly<Record<UnusableReason, string>> = {
   versionUnsupported: 'Version not supported',
   noKey: 'No key',
   keyUnreadable: 'The keychain would not read its key',
-  notRegistered: 'The runtime would not accept it',
+  noModelName: 'No model name',
 }
 
 const because = (reason: UnusableReason | null) =>
@@ -44,7 +44,6 @@ const agentRoute = (
   label: over.id,
   detail: null,
   installed: true,
-  modality: 'text',
   ...over,
   ...because(over.reason ?? null),
   kind: 'agent',
@@ -57,7 +56,6 @@ const endpointRoute = (
   label: over.id,
   detail: null,
   installed: true,
-  modality: 'text',
   ...over,
   ...because(over.reason ?? null),
   kind: 'endpoint',
@@ -70,7 +68,6 @@ const localRoute = (
 ): Route => ({
   label: over.id,
   detail: null,
-  modality: 'text',
   ...over,
   kind: 'local',
   ...because(over.installed ? null : 'notInstalled'),
@@ -90,11 +87,6 @@ const route = (
       : endpointRoute(over)
 
 const localReady = localRoute({ id: 'local:qwen', label: 'Qwen3-4B', detail: 'local · 2.5 GB', installed: true })
-/* INSTALLED AND USABLE, and still not an answer — the only thing wrong with it
-   is that it speaks. The absent speech model this replaces was unusable for a
-   second reason, so it could not tell modality filtering from usability
-   filtering. */
-const voiceReady = localRoute({ id: 'local:kokoro', label: 'Kokoro', installed: true, modality: 'speech' })
 const codexReady = agentRoute({ id: 'agent:codex', label: 'Codex', detail: 'ChatGPT · 0.149.0' })
 const claudeOut = agentRoute({ id: 'agent:claude', label: 'Claude', reason: 'signedOut', detail: '2.1.240' })
 const endpointKeyless = endpointRoute({ id: 'endpoint:proxy', label: 'My proxy', reason: 'noKey' })
@@ -133,32 +125,9 @@ describe('resolveRoute', () => {
     expect(inUse).toBe('agent:codex')
   })
 
-  /* A speech model answers no questions. Picking one would make the composer
-   * offer a route that cannot reply. */
-  it('never picks a speech route to answer with', () => {
-    /* `voiceReady` is INSTALLED and has no `unusable` reason, so the only
-       thing that can exclude it is its modality. Passing an absent voice here
-       — which the earlier fixture did — proved nothing: the usability filter
-       alone would have dropped it. */
-    const { inUse } = resolveRoute('', [voiceReady, codexReady])
-    expect(inUse).toBe('agent:codex')
-  })
-
-  /* AND NOT EVEN WHEN IT IS THE STORED CHOICE. `use` cannot write one today,
-     but a settings file carried over from the build whose voice picker shared
-     this setter can, and honouring it would leave the composer pointed at a
-     model that cannot reply. */
-  it('refuses a stored speech route and falls back, saying so', () => {
-    const { inUse, fellBack } = resolveRoute('local:kokoro', [voiceReady, codexReady])
-    expect(inUse).toBe('agent:codex')
-    expect(fellBack).toBe(true)
-  })
-
-  /* A speech route is not a usable route, so a shelf of nothing else answers
-     nothing at all rather than answering with the voice. */
-  it('reports nothing in use when only speech routes exist', () => {
-    expect(resolveRoute('', [voiceReady]).inUse).toBeNull()
-  })
+  /* THREE SPEECH-ROUTE CASES WERE HERE — never pick one, refuse a stored one,
+     answer nothing when only speech routes exist. The probe reports no speech
+     route any more: the neural voice is gone and every route is text. */
 
   it('prefers local, then agent, then endpoint', () => {
     const endpointReady = endpointRoute({ id: 'endpoint:p', label: 'P', detail: 'endpoint' })
@@ -221,6 +190,17 @@ describe('rowFor', () => {
     const row = rowFor(agentRoute({ id: 'agent:codex', label: 'Codex', reason: 'agentMissing' }), null)
     expect(row.value, 'the two still read the same to the reader').toBe('Not installed')
     expect(row.action).toBe('none')
+  })
+
+  /* AN ENDPOINT WITH A KEY AND NO MODEL NAME IS STILL UNUSABLE — one stored
+     before endpoints carried the provider's model name — and says why rather
+     than offering anything: the name is added in Cloud endpoints, not here.
+     (It read `notConnected` while nothing connected an endpoint to an answer at
+     all; Paper talks to one itself since the gloss routes contract.) */
+  it('offers no action for an endpoint with no model name, and says so', () => {
+    const row = rowFor(endpointRoute({ id: 'endpoint:proxy', label: 'My proxy', reason: 'noModelName' }), null)
+    expect(row.action).toBe('none')
+    expect(row.value).toBe('No model name')
   })
 
   it('offers no action for a route whose version is unsupported', () => {
@@ -718,7 +698,9 @@ describe('the routes store', () => {
   })
 
   /* A failed probe is drawn as no routes, so the log is the only place a dead
-     plugin and an empty machine differ. */
+     plugin and an empty machine differ. BOTH HALVES are asserted: the rows are
+     what the reader sees, and nothing else here would notice a failed probe
+     drawing a row it invented. */
   it('reports a probe that fails, with what it said', async () => {
     const events: { event: string; fields: Record<string, unknown> }[] = []
     const { port } = portWith(async () => {
@@ -727,6 +709,8 @@ describe('the routes store', () => {
     const model = createRoutesModel({ port, ...wiring(), report: (event, fields) => void events.push({ event, fields }) })
     await model.refresh()
     expect(events).toEqual([{ event: 'companion.probe-failed', fields: { message: 'the daemon is not there' } }])
+    expect(model.getSnapshot().loading, 'the failed probe was never taken as an answer').toBe(false)
+    expect(model.getSnapshot().rows).toEqual([])
     model.dispose()
   })
 
@@ -900,42 +884,5 @@ describe('the effort control', () => {
      and tested one. */
   it('puts the account default first in the cycle', () => {
     expect(DEPTH_ORDER[0]).toBe('default')
-  })
-})
-
-/**
- * NOTHING THE PANE CAN PRESS SETS A NON-TEXT ANSWERING ROUTE.
- *
- * `use` writes `companion.route`, which is the route that ANSWERS. A voice
- * picker used to call the same setter with a speech route, so choosing a
- * narrator set the companion to a model that cannot answer a question; it
- * never fired only because the picker needed two usable speech models and the
- * catalogue ships one. The picker is gone, and this is what stops the next one
- * reaching for the same setter: every row the pane renders a `Use` on comes
- * from `rows`, and `rows` is text-only however many voices the probe returns.
- */
-describe('the rows the pane can act on', () => {
-  it('are text routes only, even when speech routes are usable', async () => {
-    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
-    const port = {
-      generate: async () => '',
-      agentAsk: async () => '',
-      probe: async () =>
-        probeOf(
-          route({ id: 'agent:codex', kind: 'agent' }),
-          route({ id: 'local:kokoro', kind: 'local', installed: true, modality: 'speech' }),
-          route({ id: 'local:kokoro-2', kind: 'local', installed: true, modality: 'speech' }),
-        ),
-      ensureReady: async () => true,
-      signIn: async () => {},
-    } satisfies InferencePort
-    const model = createRoutesModel({
-      port,
-      settings: scopeSettings(services.settings, 'companion'),
-    })
-    await model.refresh()
-    const ids = model.getSnapshot().rows.map((r) => r.id)
-    expect(ids).toEqual(['agent:codex'])
-    model.dispose()
   })
 })

@@ -20,11 +20,16 @@
  * lifetime independent of the conversation: with `companion` absent, failed,
  * or set to an agent, the gloss still works.
  *
- * ⚠️ **THE GLOSS MUST NOT REACH AN AGENT**, and most of that is enforced by
- * construction. Codex or Claude would open a session and start a turn to
- * define one word — seconds, and a subscription turn spent, for a gesture a
- * reader makes dozens of times a chapter. The agent adapters implement `ask`
- * and nothing else, and there is no code path from a selection to a session.
+ * ⚠️ **AN AGENT MAY ANSWER A GLOSS NOW, AND THIS SAID IT MUST NOT.** The rule
+ * was F8 — Codex or Claude "would open a session and start a turn to define one
+ * word, seconds and a subscription turn spent" — and the owner overturned it on
+ * 2026-09-18, because the only alternative was a 2.5 GB download every reader
+ * had to take before Look up worked at all. The provider `inference` binds
+ * chooses among the local model, an endpoint, Claude and Codex (its
+ * `glossRoute.ts` has the order and the reasons). What is still true, and still
+ * by construction: a gloss is ONE request for one definition in one fixed
+ * shape, never the companion's conversational `ask`, and the kernel knows
+ * nothing of which route answered it.
  *
  * ⚠️ **WHO BINDS THIS PORT IS A CONVENTION, NOT A CHECK — THIS PARAGRAPH SAID
  * THE REGISTRY WOULD THROW IF `companion` TRIED, AND IT WOULD NOT.** The
@@ -95,12 +100,65 @@ export interface GlossContext {
   readonly answerIn: AnswerLanguages
 }
 
+/**
+ * What a lookup comes back with: the definition, and the part of speech when
+ * the provider could tell.
+ *
+ * ⚠️ **IT WAS A BARE STRING UNTIL 2026-09-18**, and the reader asked for the
+ * line §10's prototype draws between the headword and the meaning — a part of
+ * speech, small, italic, muted. It belongs to the PROVIDER rather than to any
+ * surface, because it is a fact about the word IN THIS SENTENCE and only the
+ * thing that read the sentence knows it: `close` is a verb on one page and an
+ * adjective on the next, and no word list can settle which. A UI that guessed
+ * would be inventing the one part of a dictionary entry that looks most like a
+ * fact.
+ *
+ * ⚠️ **`text` IS THE DEFINITION AND IS NEVER EMPTY.** A provider that cannot
+ * tell the part of speech leaves it ABSENT — it must never move the answer into
+ * `partOfSpeech` and leave `text` blank, because `text` is what is drawn under
+ * the amber term, and an empty amber mark beside a word reads as *this word
+ * means nothing*. That is the same rule that makes an empty answer a rejection
+ * rather than a definition, one field along. `definitionOf` in `inference`'s
+ * `glossProvider.ts` is the reference implementation, and it fails in exactly
+ * that direction: a reply it cannot read is drawn WHOLE as the definition, and
+ * a part of speech it cannot read is dropped, never the meaning beside it.
+ */
+export interface Definition {
+  /**
+   * The meaning, as the reader reads it. One or two sentences — and TWO LINES
+   * when two languages were asked for (WI-17.5), which is why no surface may
+   * collapse its line breaks.
+   */
+  readonly text: string
+  /**
+   * The word class, written the way the answer is written — `adverb`, `名词`,
+   * `nom`.
+   *
+   * OPTIONAL BECAUSE IT CANNOT BE RELIED ON, and that is not a defect to be
+   * fixed later: it is whatever a local model wrote, so a model that wrote
+   * nothing usable, or something that is not a label, leaves this absent rather
+   * than the reader reading a fabrication. There is no closed vocabulary to
+   * check it against either — `GlossContext.answerIn` may name any language, so
+   * a list of English part-of-speech words would reject every correct answer in
+   * every other one.
+   */
+  readonly partOfSpeech?: string | undefined
+}
+
 export interface GlossProvider {
   /** False when nothing can define anything — see `installAt` for why not. */
   readonly available: boolean
   /**
-   * WHERE the reader goes to install something that can define — the id of a
+   * WHERE the reader goes to get something that can define — the id of a
    * settings section — or `null` when there is nowhere.
+   *
+   * ⚠️ **"INSTALL" IS THE FIELD'S NAME AND NO LONGER ITS MEANING.** It was the
+   * Local models section, and the offer read "Install one": the local model was
+   * the only thing that could answer. Since 2026-09-18 an endpoint, Claude or
+   * Codex can answer too and the local model is an opt-in download, so
+   * `inference` names its Look up section (`inference:gloss`), where the reader
+   * chooses what answers, and the offer reads "Choose one". The kernel never
+   * learns which section it is, which is the rule below.
    *
    * ⚠️ **IT WAS A BOOLEAN, `installable`, AND "WHETHER" WAS NOT ENOUGH.** The
    * install offer opened Settings at its top, with the section that installs a
@@ -113,13 +171,14 @@ export interface GlossProvider {
    * it is why `available: false` is not enough on its own. Two situations look
    * identical to the reader UI and are not the same at all:
    *
-   * - `inference` is composed and no model is downloaded yet. Nothing can
-   *   define anything **today**, and a 2.5 GB download away it can. The Look
-   *   up control stays and offers the download — §07's rule is about controls
-   *   that cannot act, and one that starts an install acts.
+   * - `inference` is composed and nothing is set up to answer yet. Nothing can
+   *   define anything **today**, and an endpoint, a signed-in CLI or a 2.5 GB
+   *   download away it can. The Look up control stays and offers the section
+   *   where the choice is — §07's rule is about controls that cannot act, and
+   *   one that opens the way to an answer acts.
    * - `inference` is not composed at all — a browser client, iOS, Android.
-   *   There is no models pane to send anybody to, so offering an install would
-   *   be the app naming a feature that host will never have. The control is
+   *   There is no Look up section to send anybody to, so offering one would be
+   *   the app naming a feature that host will never have. The control is
    *   absent, which is the same answer Windows and Linux got before the gloss
    *   existed.
    *
@@ -171,20 +230,23 @@ export interface GlossProvider {
    * the only lookup Paper has: with the Dictionary.app hand-off deleted there
    * is nothing behind it, so "it did not work" with no reason attached is the
    * end of the road rather than a nudge toward the other mode.
+   *
+   * Resolves with a `Definition` rather than the definition's text, so the part
+   * of speech arrives from the one place that can know it — see `Definition`.
    */
-  gloss(term: string, context: GlossContext, signal: AbortSignal): Promise<string>
+  gloss(term: string, context: GlossContext, signal: AbortSignal): Promise<Definition>
 }
 
 /**
  * The default: there is nothing to define with, and nowhere to get one.
  *
  * `installAt` is NULL, which is what stops a host with no `inference` from
- * drawing a Look up button that offers a download it cannot perform. A build
+ * drawing a Look up button that offers a choice it cannot make. A build
  * that composes `inference` replaces this whole object at `bindGloss`.
  *
  * `gloss` throws rather than returning a sentence, because the UI must never
  * reach it — `available` is false, so every affordance that would call it is
- * either absent or showing the install prompt per §07. If this ever throws,
+ * either absent or showing the way to something that can answer, per §07. If this ever throws,
  * that is a bug in the caller and it should be loud rather than showing the
  * reader a fabricated definition under an amber mark.
  */

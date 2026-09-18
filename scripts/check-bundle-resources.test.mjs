@@ -9,17 +9,18 @@ import { describe, expect, it } from 'vitest'
  *
  * `tauri.conf.json` mapped `../vendor/inference/current/` to `runtime/` for
  * every platform. That directory is the LOCAL INFERENCE RUNTIME staged by
- * `scripts/sync-inference-runtime.mjs`: `lemond`, `lemonade`, and llama.cpp's
- * backend for whichever accelerator this machine has — on a Mac, the Metal
- * `.dylib`s.
+ * `scripts/sync-inference-runtime.mjs` — then Lemonade's `lemond` and
+ * `lemonade` beside llama.cpp's backend, and since 2026-09-18 the llama.cpp
+ * build alone — for whichever accelerator this machine has: on a Mac, the
+ * Metal `.dylib`s.
  *
  * So an Android build copied 70 MB of macOS shared libraries into the APK, for
  * a platform that cannot load them and does not compose the capability that
- * would use them: `composition.android.ts` is `[peer, sync]`, and the Cargo
- * feature that brings `tauri-plugin-inference` is `desktop`, which mobile
- * builds turn off. They also reached a commit, because Tauri's Android template
- * does not ignore `app/src/main/assets/` the way its Apple one ignores
- * `assets/`.
+ * would use them: `composition.android.ts` composes no `inference`, and the
+ * Cargo feature that brings `tauri-plugin-inference` is `desktop`, which
+ * mobile builds turn off. They also reached a commit, because Tauri's Android
+ * template does not ignore `app/src/main/assets/` the way its Apple one
+ * ignores `assets/`.
  *
  * ## Why a platform config and not an override
  *

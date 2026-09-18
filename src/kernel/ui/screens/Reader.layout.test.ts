@@ -139,16 +139,92 @@ function glossRule(selector: string): string {
  * "because an apology rendered in amber reads as a definition".
  */
 describe('the gloss that did not arrive', () => {
+  /**
+   * ⚠️ **THIS REQUIRED `.definition` ITSELF TO BE AMBER, AND THAT WAS A CLAIM
+   * ABOUT THE SHAPE RATHER THAN ABOUT THE DOCTRINE** (2026-09-18). The rule
+   * `core/gloss.ts` states is that a machine's words are amber and an apology
+   * is not; it says nothing about which ELEMENT carries the colour. Pinning it
+   * to the definition's own rule meant the test failed when the amber moved
+   * from a filled box, to a 2px rule, to the term — three times, for three
+   * appearance changes that all kept the doctrine perfectly.
+   *
+   * So it asks the question the doctrine actually asks: amber appears SOMEWHERE
+   * among the elements a definition is drawn from, and NOWHERE among the four
+   * states that are not definitions. That survives the next appearance change
+   * and still fails the only thing worth failing — an apology in amber.
+   */
   it('is not amber, while the definition still is', () => {
-    // Non-vacuity first: amber is the point of the definition box, and a test
-    // that only asserted the absence would pass if both lost their colour.
-    expect(glossRule('.definition')).toMatch(/var\(--amber/)
-    expect(glossRule('.term')).toMatch(/var\(--amber/)
+    /* Non-vacuity first: a test that only asserted the absence would pass if
+       every one of them lost its colour. */
+    const definition = ['.definition', '.term', '.body'].map(glossRule).join('\n')
+    expect(definition).toMatch(/var\(--amber/)
     expect(glossRule('.failed')).not.toMatch(/var\(--amber/)
     expect(glossRule('.failedReason')).not.toMatch(/var\(--amber/)
     /* The two non-answers that are not failures borrow none of it either. */
     expect(glossRule('.absent')).not.toMatch(/var\(--amber/)
     expect(glossRule('.refused')).not.toMatch(/var\(--amber/)
+    /* ⚠️ **AND THE PART OF SPEECH DOES NOT, THOUGH IT IS PART OF A DEFINITION.**
+       The doctrine asks that a machine's words carry the colour, not that each
+       element of them repeats it (the correction above) — and §10's prototype
+       draws this line small, italic and muted, which is also what keeps the
+       term the one amber thing in a 40px-wide card. Its own assertion, because
+       it is the one element inside a definition that the clause above would
+       otherwise let drift into amber unremarked. */
+    expect(glossRule('.partOfSpeech')).not.toMatch(/var\(--amber/)
+    /* ⚠️ **AND NEITHER DOES A PRONUNCIATION THAT WOULD NOT PLAY**, though it is
+       drawn INSIDE the definition's own box — which is what makes it the one
+       element the clause above could not reach. It is Paper speaking about
+       itself, exactly like `.absent` and `.refused`, so it wears the failure
+       states' grey; amber here would be a machine's apology dressed as part of
+       the answer, which is the doctrine in miniature. */
+    expect(glossRule('.unspoken')).not.toMatch(/var\(--amber/)
+  })
+
+  /*
+   * PRONUNCIATION — the control that replaced IPA, because a language model has
+   * no phonetic data and would invent a transcription (`core/voice.ts`).
+   *
+   * Its BEHAVIOUR is asserted by rendering, in `reader/LookUpFace.test.tsx`.
+   * What only the stylesheet can answer is the same two questions every other
+   * state gets here: is the notice actually drawn, and does the headword's new
+   * row take back the wrapping the face is built on.
+   */
+  it('draws a pronunciation that would not play, rather than hiding it', () => {
+    expect(glossRule('.unspoken')).not.toMatch(/display\s*:\s*none/)
+    expect(glossRule('.unspoken')).not.toMatch(/visibility\s*:\s*(hidden|collapse)/)
+    for (const value of opacitiesOf('.unspoken')) {
+      expect(value).toBeGreaterThan(0)
+    }
+    /* The failure states' own treatment: small and grey, not the definition's. */
+    expect(glossRule('.unspoken')).toMatch(/color\s*:\s*var\(--muted\)/)
+    expect(glossRule('.unspoken')).toMatch(/font-size\s*:\s*var\(--text-small\)/)
+  })
+
+  /* THE CONTROL IS SIZED LIKE THE FACE'S OTHER GLYPH BUTTON. `.back` is the
+     precedent, and the number is the one thing the two have to agree about — a
+     bar of glyphs with one odd-sized button in it reads as a mistake. */
+  it('sizes the pronunciation control like the face’s way back', () => {
+    for (const rule of ['.back', '.say']) {
+      expect(glossRule(rule)).toMatch(/width\s*:\s*var\(--control-sm\)/)
+      expect(glossRule(rule)).toMatch(/height\s*:\s*var\(--control-sm\)/)
+    }
+  })
+
+  /* IT IS ALSO DRAWN, and quietly rather than invisibly — the same question the
+     failure states get below, asked of the element §10 makes muted on purpose:
+     `--muted` is a colour, and a rule that reached `opacity: 0` or
+     `display: none` would leave every rendered case green. */
+  it('draws the part of speech quietly, not invisibly', () => {
+    expect(glossRule('.partOfSpeech')).not.toMatch(/display\s*:\s*none/)
+    expect(glossRule('.partOfSpeech')).not.toMatch(/visibility\s*:\s*(hidden|collapse)/)
+    for (const value of opacitiesOf('.partOfSpeech')) {
+      expect(value).toBeGreaterThan(0)
+    }
+    /* §10's treatment, which is the whole of the design decision here: small,
+       italic, muted. Read from the stylesheet because jsdom has none. */
+    expect(glossRule('.partOfSpeech')).toMatch(/font-style\s*:\s*italic/)
+    expect(glossRule('.partOfSpeech')).toMatch(/font-size\s*:\s*var\(--text-small\)/)
+    expect(glossRule('.partOfSpeech')).toMatch(/color\s*:\s*var\(--muted\)/)
   })
 
   /*
@@ -200,8 +276,11 @@ describe('the lookup face’s own words', () => {
   it('wraps a term with no break in it, in every state that names one', () => {
     /* By inheritance, from the one box every state is drawn inside. */
     expect(glossRule('.content')).toMatch(/overflow-wrap\s*:\s*anywhere/)
-    /* And nothing in between takes it back. */
-    for (const rule of ['.definition', '.term', '.failed', '.absent']) {
+    /* And nothing in between takes it back — `.headword` included, which is a
+       NEW LINK IN THAT CHAIN: the term became a flex item when the pronunciation
+       control joined it on one row, and a flex item that refuses to wrap pushes
+       the control off the card instead of breaking. */
+    for (const rule of ['.definition', '.headword', '.term', '.failed', '.absent']) {
       expect(glossRule(rule)).not.toMatch(/overflow-wrap\s*:\s*normal/)
       expect(glossRule(rule)).not.toMatch(/word-break\s*:\s*keep-all/)
       expect(glossRule(rule)).not.toMatch(/white-space\s*:\s*(nowrap|pre)\s*(;|$)/)

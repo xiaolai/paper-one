@@ -1,20 +1,20 @@
-//! Where the runtime, its cache and the reader's models live.
+//! Where the reader's models live, and where the runtime is.
 //!
-//! Four directories, all under the app data root, all owned by Paper:
+//! Three directories under the app data root, all owned by Paper:
 //!
 //! ```text
 //! <data root>/
 //!   inference/
-//!     runtime/      LEMONADE_CACHE_DIR — the daemon's scratch and config.json
-//!     models/       models_dir — the artifacts the reader downloaded
+//!     models/       the artifacts the reader downloaded
 //!     staging/      partial downloads, promoted only after verification
+//!     daemon.json   the running server's process-group record (lineage.rs)
 //! ```
 //!
-//! **Models are NOT inside the cache**, and the split is not tidiness.
-//! `runtime/` is scratch the daemon rewrites and Paper may delete to fix a
-//! bad state; `models/` holds gigabytes the reader waited for and the
-//! settings pane offers to `[Reveal]`. Putting the second inside the first
-//! makes "clear the cache" and "throw away the download" the same gesture.
+//! ⚠️ **THERE WAS A FOURTH, `runtime/`, AND NOTHING WRITES IT NOW.** It was
+//! `LEMONADE_CACHE_DIR` — lemond's scratch and the `config.json` Paper wrote
+//! before every launch — and `llama-server`, launched on one verified file with
+//! `--offline`, has no cache to keep. A machine that ran a lemond-era build
+//! still has the directory; it is small, and nothing reads it.
 //!
 //! `staging/` is what makes WI-15.2's acceptance — *"killing the daemon
 //! mid-download leaves no partially active artifact"* — true by construction
@@ -41,18 +41,13 @@ pub use paper_data_root::TEST_DATA_DIR_ENV;
 /// The subdirectory this plugin owns under the data root.
 pub const INFERENCE_DIR: &str = "inference";
 
-/// The four directories, RESOLVED — not created. `under` is pure; `ensure`
-/// creates `base`, `models_dir` and `staging_dir`, and deliberately NOT
-/// `cache_dir`, which the daemon makes for itself (WI-15.0's acceptance is a
-/// start from a directory that did not exist). The old first sentence said
-/// "every one exists on return", which was true of neither function.
+/// The directories, RESOLVED — not created. `under` is pure; `ensure` creates
+/// every one of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     /// `<data root>/inference`
     pub base: PathBuf,
-    /// `LEMONADE_CACHE_DIR` — scratch, deletable.
-    pub cache_dir: PathBuf,
-    /// `models_dir` — the reader's artifacts.
+    /// The reader's artifacts.
     pub models_dir: PathBuf,
     /// Partial downloads, promoted only after verification.
     pub staging_dir: PathBuf,
@@ -64,7 +59,6 @@ impl Layout {
     pub fn under(root: &Path) -> Layout {
         let base = root.join(INFERENCE_DIR);
         Layout {
-            cache_dir: base.join("runtime"),
             models_dir: base.join("models"),
             staging_dir: base.join("staging"),
             base,
@@ -73,9 +67,6 @@ impl Layout {
 
     /// Create every directory. Idempotent.
     pub fn ensure(&self) -> Result<()> {
-        // NOT the cache dir: WI-15.0's first acceptance line is that the
-        // daemon starts from a directory that did not exist, and creating it
-        // here would make that test prove nothing. The daemon makes its own.
         std::fs::create_dir_all(&self.base)?;
         std::fs::create_dir_all(&self.models_dir)?;
         std::fs::create_dir_all(&self.staging_dir)?;
@@ -107,10 +98,10 @@ impl Layout {
             .join(safe_component(file)?))
     }
 
-    /// The daemon's process-group record — `lineage.rs`. Under `base` rather
-    /// than the cache, because the cache is the directory Paper may delete to
-    /// fix a bad state, and the record is what makes the next launch able to
-    /// collect a daemon the last one left running.
+    /// The server's process-group record — `lineage.rs`. Under `base`, beside
+    /// the models and nowhere Paper would clear to fix a bad state, because
+    /// the record is what makes the next launch able to collect a server the
+    /// last one left running.
     pub fn daemon_record(&self) -> PathBuf {
         crate::lineage::record_path(&self.base)
     }
@@ -142,31 +133,40 @@ pub fn data_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     paper_data_root::data_root(app).map_err(Error::from)
 }
 
-/// The `lemond` Paper ships, beside the app's own executable.
+/// The runtime this build ships, as its MANIFEST — the file that names the
+/// server and vouches for every byte beside it (`runtime.rs`).
 ///
 /// RESOLVED FROM THE BUNDLE, NEVER FROM `PATH`. WI-15.10 states the rule for
 /// the agent probes and it applies with more force here: a `PATH` lookup is
-/// the reader's shell deciding which binary Paper supervises, and this one is
-/// handed a bearer token and a control plane that installs backends. If the
-/// bundled file is missing the answer is [`Error::RuntimeMissing`] — never a
-/// fallback to whatever else answers to the name.
+/// the reader's shell deciding which binary Paper supervises. If the manifest
+/// is missing the answer is [`Error::RuntimeMissing`] — never a fallback to
+/// whatever else answers to the name.
+///
+/// ⚠️ **THE MANIFEST, NOT AN EXECUTABLE, IS WHAT "PRESENT" MEANS NOW.** This
+/// looked for `lemond[.exe]`; the program Paper launches is whatever the
+/// manifest's `llamacpp.server` names, and nothing launches without the
+/// manifest verifying first — so a tree with a server and no manifest is not a
+/// runtime this build can use, and saying "present" of it would offer a local
+/// model that fails at the question.
 pub fn bundled_runtime<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
-    let exe = bundled_runtime_dir(app)?.join(runtime_exe_name());
+    let manifest = bundled_runtime_dir(app)?.join(crate::runtime::MANIFEST_FILE);
     /* `metadata`, not `is_file`: `is_file()` folds EVERY failure — a
      * permission refusal, an I/O error — into `false`, and the reader was
      * then told the runtime is not installed when the truth was that Paper
      * could not look. Only "not there" is `RuntimeMissing`. */
-    match std::fs::metadata(&exe) {
-        Ok(meta) if meta.is_file() => Ok(exe),
-        Ok(_) => Err(Error::RuntimeMissing(exe)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(Error::RuntimeMissing(exe)),
+    match std::fs::metadata(&manifest) {
+        Ok(meta) if meta.is_file() => Ok(manifest),
+        Ok(_) => Err(Error::RuntimeMissing(manifest)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(Error::RuntimeMissing(manifest))
+        }
         Err(err) => Err(Error::Io(err)),
     }
 }
 
-/// The staged runtime directory: `lemond`, its `resources/`, the backend
-/// under `backend/llamacpp/<name>/`, and the manifest that vouches for all
-/// of it (`runtime.rs`). `bundle.resources` in `tauri.conf.json` copies
+/// The staged runtime directory: the llama.cpp build under
+/// `backend/llamacpp/<name>/`, and the manifest that vouches for all of it
+/// (`runtime.rs`). `bundle.resources` in `tauri.conf.json` copies
 /// `vendor/inference/current/` here as `runtime/`.
 pub fn bundled_runtime_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     Ok(app
@@ -176,30 +176,14 @@ pub fn bundled_runtime_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
         .join("runtime"))
 }
 
-/// `lemond`, plus the extension Windows needs.
-pub const fn runtime_exe_name() -> &'static str {
-    if cfg!(windows) {
-        "lemond.exe"
-    } else {
-        "lemond"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn models_are_not_inside_the_cache() {
+    fn the_models_live_under_the_inference_directory() {
         let layout = Layout::under(Path::new("/data/Paper"));
-        assert!(
-            !layout.models_dir.starts_with(&layout.cache_dir),
-            "clearing the cache must not be the same gesture as throwing away a 2.4 GB download"
-        );
-        assert_eq!(
-            layout.cache_dir,
-            PathBuf::from("/data/Paper/inference/runtime")
-        );
+        assert_eq!(layout.base, PathBuf::from("/data/Paper/inference"));
         assert_eq!(
             layout.models_dir,
             PathBuf::from("/data/Paper/inference/models")
@@ -216,16 +200,14 @@ mod tests {
     }
 
     #[test]
-    fn ensure_does_not_create_the_cache_dir() {
+    fn ensure_creates_every_directory_and_is_idempotent() {
         let tmp = crate::testutil::ScratchDir::new("x");
         let layout = Layout::under(tmp.path());
         layout.ensure().unwrap();
+        layout.ensure().unwrap();
+        assert!(layout.base.is_dir());
         assert!(layout.models_dir.is_dir());
         assert!(layout.staging_dir.is_dir());
-        assert!(
-            !layout.cache_dir.exists(),
-            "WI-15.0 acceptance: the daemon must start from a directory that did not exist"
-        );
     }
 
     #[test]
@@ -260,15 +242,5 @@ mod tests {
             .unwrap_err(),
         );
         assert_eq!(err.kind(), "rootNotAbsolute");
-    }
-
-    #[test]
-    fn the_runtime_name_carries_the_windows_extension() {
-        let name = runtime_exe_name();
-        if cfg!(windows) {
-            assert_eq!(name, "lemond.exe");
-        } else {
-            assert_eq!(name, "lemond");
-        }
     }
 }

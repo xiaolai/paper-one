@@ -95,6 +95,15 @@
 .popup[data-face='lookup'] {
   height: auto;
   min-height: var(--popup-h);
+  /* ONE WIDTH FOR EVERY STATE OF THE LOOKUP, so the surface does not resize
+     between "Looking…" and the answer — see `.lookUp`, which measured the jump.
+     The same number the face was capped at before, moved from `max-width` on
+     the face to `width` here: what changes is that the narrow states now fill
+     it instead of shrinking to their own words, so the answer's width is no
+     longer news. `max-width` — set inline from the room the popup is placed in
+     — still wins over `width`, so a narrow stage shrinks this rather than
+     overflowing it. */
+  width: var(--lookup-measure);
   align-items: flex-start;
   padding: var(--space-6);
   /* It scrolls within its bound as every face does — see `.popup`. The Back
@@ -188,7 +197,7 @@
  * than judging one in isolation. Anything heavier stops reading as the same
  * colour, more of it, and starts reading as a ringed colour. */
 .disc[data-lit='true'] {
-  box-shadow: 0 0 0 1px var(--disc);
+  box-shadow: var(--ring) var(--disc);
 }
 
 /* A drawing of the mark itself — see `MarkSpecimen`. */

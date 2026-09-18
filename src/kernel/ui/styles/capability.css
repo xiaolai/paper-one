@@ -97,7 +97,7 @@
   margin-bottom: var(--space-6);
   color: var(--muted);
   font-size: var(--text-small);
-  line-height: 1.4;
+  line-height: var(--leading-ui);
 }
 
 /* Buttons offered together. */
@@ -139,7 +139,7 @@
   border-radius: var(--radius-pill);
   background: transparent;
   color: inherit;
-  box-shadow: inset 0 0 0 1px var(--line-2);
+  box-shadow: var(--ring-inset) var(--line-2);
   font: inherit;
   font-size: var(--text-small);
   cursor: pointer;
@@ -160,6 +160,41 @@
 
 .paper-cap-button-primary:hover,
 .paper-cap-button-primary:focus-visible {
+  background: var(--accent);
+}
+
+/* ⚠️ **A DISABLED CONTRIBUTED BUTTON LOOKED EXACTLY LIKE A LIVE ONE, AND STILL
+   LIT UP UNDER THE POINTER.** This vocabulary had no disabled state at all,
+   while 54 contributed controls across 16 files already set the attribute —
+   every Pair mid-pairing, every Evict mid-eviction, every Create over an empty
+   field — so the whole of the feedback for pressing one was nothing happening.
+   Worse than nothing, in fact: `:hover` MATCHES a disabled element, so the wash
+   above fired under the pointer and said the control was live.
+
+   §07's one rule for this is 45%, which is `--opacity-disabled`. The wash is
+   taken back on the same states that set it, so the two cannot disagree —
+   `:focus-visible` is named although a disabled button cannot be focused,
+   because the rule being undone names it and a reader comparing them should
+   not have to work out which halves correspond.
+
+   ⚠️ **AFTER THE PRIMARY'S OWN RULES, AND THAT IS LOAD-BEARING.** The override
+   below and `.paper-cap-button:disabled:hover` have the same specificity, so
+   order alone decides which of them a disabled primary takes. */
+.paper-cap-button:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}
+
+.paper-cap-button:disabled:hover,
+.paper-cap-button:disabled:focus-visible {
+  background: transparent;
+}
+
+/* The filled one KEEPS ITS FILL. `transparent` above would strip it on hover,
+   which turns "not available yet" into "gone" — and the dimming the reader
+   should see is the opacity, which applies to the fill and the label together. */
+.paper-cap-button-primary:disabled:hover,
+.paper-cap-button-primary:disabled:focus-visible {
   background: var(--accent);
 }
 
@@ -280,6 +315,55 @@
 
 .paper-cap-field::placeholder {
   color: var(--muted);
+}
+
+/* A MULTI-LINE FIELD, WHICH `.paper-cap-field` CANNOT BE MADE INTO.
+ *
+ * Every reason that one is a pill is a reason it cannot hold a paragraph: it
+ * is `--control-sm` tall, fixed, so it would show one line of what may be
+ * twenty, and a `--radius-pill` corner cuts the ends off the first and last
+ * lines of a block of prose. Widening a class until it covers a second shape
+ * is how a vocabulary stops describing anything.
+ *
+ * SO IT IS THE KERNEL'S OWN NOTE EDITOR'S SHAPE, not a second opinion about
+ * what a text box looks like. `.noteInput` in `SidePane.module.css` is the only
+ * other multi-line field in the app — a bordered rectangle at the control
+ * radius, the body's leading, the reader's own type — and this takes the same
+ * steps from the same scale. The file header's rule, applied: two consumers of
+ * one scale, not two copies of one block.
+ */
+.paper-cap-textarea {
+  width: 100%;
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  /* The container's face, which is the app's — the same opt-in `.paper-cap-field`
+     makes with `font: inherit`. A textarea's user-agent default is monospace,
+     and what goes in here is prose. */
+  font-family: inherit;
+  font-size: var(--text-small);
+  line-height: var(--leading-body);
+  /* VERTICAL ONLY. A textarea the reader can drag wider than its section
+     overflows the pane, and the pane's width is not theirs to choose. */
+  resize: vertical;
+  /* ABOUT EIGHT LINES, as a floor rather than a height — a derivation because
+     the spacing scale stops at 56 and this is a text box, not a gap. The one
+     thing that goes in here today is 861 characters, which is roughly twenty
+     lines at this width, so a box sized to hold all of it would be taller than
+     the section it sits in; eight is enough to read a paragraph of it at once,
+     and `resize` hands the rest to whoever wants it. */
+  min-height: calc(var(--space-56) * 3);
+}
+
+/* THE RING SITS ON THE BORDER, not two pixels clear of it — §07's global
+   offset describes a control whose visible edge is its background, and this
+   one's is its border box. `.noteInput` reaches the same value for the same
+   reason, and `.paper-cap-field` above says so at greater length. */
+.paper-cap-textarea:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -1px;
 }
 
 /* A field holding a number, sized to the number. `flex: none` so it does not
