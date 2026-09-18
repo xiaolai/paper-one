@@ -47,7 +47,22 @@
 //     (first process whose unix id is PID) to get {position, size} of front window'
 //
 // Usage:  drive-window click  <x> <y>
+//         drive-window double <x> <y>
 //         drive-window scroll <x> <y> <ticks>   (negative ticks scroll down)
+//
+// # Why `double` exists, when two `click`s ought to have done it
+//
+// **A double-click is one event stream, not two clicks.** The click state rides
+// on the event (`mouseEventClickState`), and `click` hardcodes 1 — so however
+// fast they are posted, two invocations of it are two single clicks and WebKit
+// selects nothing. Each invocation is also its own process, which puts the
+// system's double-click interval between them with certainty.
+//
+// It is here because SELECTING A WORD is the reader's central gesture and this
+// tool could not make one, so every question about the selection popup — the
+// tools, the mark styles, the lookup face — could only be asked through the MCP
+// bridge, which is the confound this file exists to remove. Three single clicks
+// on a word produced no selection at all, which reads as a wrong coordinate.
 
 import CoreGraphics
 import Foundation
@@ -82,7 +97,7 @@ func event(_ made: CGEvent?, _ what: String) -> CGEvent {
 
 let args = CommandLine.arguments
 guard args.count >= 4 else {
-    fail("usage: drive-window click <x> <y> | drive-window scroll <x> <y> <ticks>")
+    fail("usage: drive-window click|double <x> <y> | drive-window scroll <x> <y> <ticks>")
 }
 guard let x = Double(args[2]), let y = Double(args[3]) else {
     fail("x and y must be numbers")
@@ -104,18 +119,34 @@ event(
 ).post(tap: .cghidEventTap)
 usleep(80_000)
 
-switch args[1] {
-case "click":
+/// One down/up pair at `point`, carrying `clickState`.
+///
+/// The state is what makes a click a click — see the header — and what makes the
+/// second one of a pair a DOUBLE click rather than another single one.
+func press(_ clickState: Int64) {
     for type in [CGEventType.leftMouseDown, CGEventType.leftMouseUp] {
         let click = event(
             CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left),
             "\(type == .leftMouseDown ? "mouse-down" : "mouse-up")"
         )
         /* See the header: without this WebKit does not forward the click. */
-        click.setIntegerValueField(.mouseEventClickState, value: 1)
+        click.setIntegerValueField(.mouseEventClickState, value: clickState)
         click.post(tap: .cghidEventTap)
         usleep(60_000)
     }
+}
+
+switch args[1] {
+case "click":
+    press(1)
+
+case "double":
+    /* ONE PROCESS, TWO STATES. The pair must arrive inside the system's
+     * double-click interval, which is why this cannot be two `click` calls, and
+     * the 40ms gap is well inside the shortest interval the mouse pane offers. */
+    press(1)
+    usleep(40_000)
+    press(2)
 
 case "scroll":
     guard args.count >= 5, let ticks = Int32(args[4]) else {
@@ -140,5 +171,5 @@ case "scroll":
     }
 
 default:
-    fail("unknown action \(args[1]) — expected click or scroll")
+    fail("unknown action \(args[1]) — expected click, double or scroll")
 }

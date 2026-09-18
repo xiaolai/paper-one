@@ -7,6 +7,7 @@
 # seconds and a driving script makes many calls.
 #
 #   ./scripts/drive-window.sh click  1958 1143
+#   ./scripts/drive-window.sh double 851 703      # selects the word under it
 #   ./scripts/drive-window.sh scroll 1790 785 -120
 #
 # Coordinates are screen points, origin at the top-left of the main display.
