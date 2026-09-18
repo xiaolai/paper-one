@@ -5787,12 +5787,26 @@ const MODES = { plan: planSweep, shard: shardSweep, aggregate: aggregateSweep, m
  * run that wrote no report. A shell is no way out, because `config` is a path
  * `cmd.exe` would have to be trusted to quote. So Stryker's own entry, the script
  * `.bin/stryker` points at, is run by this node: see `strykerEntry`.
+ *
+ * ⚠️ **AND IT RUNS IN `root` AS THE FILESYSTEM SPELLS IT, BECAUSE ON WINDOWS
+ * THAT IS NOT ALWAYS HOW IT WAS GIVEN** (found 2026-09-18, on CI's Windows
+ * runner). There the temporary directory is `C:\Users\RUNNER~1\…`, an 8.3 short
+ * name, so a merge-base worktree made under it — and Stryker's sandbox, and
+ * Vitest's root, and the file Stryker marks as mutated — all carried
+ * `RUNNER~1`. Vite resolves every import to its native real path,
+ * `C:\Users\runneradmin\…`, and Vitest's `related` filter compares the two as
+ * strings: the test that imports the subject was judged to import something
+ * else, the dry run found no test, and the measurement was refused. A Windows
+ * process keeps the spelling of the directory it was started in, where macOS
+ * and Linux answer `getcwd` with the real path, so this is Windows' alone. Every
+ * path a run's configs carry is relative to `root`, so the same directory under
+ * its own name changes nothing else.
  */
 function strykerRun(config, root) {
   const temp = mkdtempSync(path.join(tmpdir(), 'check-mutants-stryker-'))
   try {
     execFileSync(process.execPath, [strykerEntry(root), 'run', config], {
-      cwd: root,
+      cwd: realpathSync.native(path.resolve(root)),
       stdio: 'inherit',
       env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp },
     })
