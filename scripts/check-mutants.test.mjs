@@ -160,6 +160,11 @@ const NO_REPOSITORY = "the deletion proof's copy has no .git, so git cannot answ
  *  spelling is `\` on Windows, and the gate records none of those. */
 const throughName = (file) => path.relative(process.cwd(), file).split(path.sep).join('/')
 
+/** How the generated vitest config spells a covering test: its own path, with
+ *  `/` on every platform — `include` is a list of globs, and a glob reads `\` as
+ *  an escape. See `vitestConfigFor`. */
+const asGlob = (file) => file.split(path.sep).join('/')
+
 /** The subjects `sourceReaders` found a reading test for, in the order they were asked about. */
 const subjectsRead = (...args) => [...sourceReaders(...args).keys()]
 
@@ -2421,7 +2426,7 @@ describe('a whole sweep, driven with no Stryker', () => {
           'check-mutants: every mutant was killed\n',
       )
       expect(seen.map(({ subject, vitest }) => [subject, vitest.test.include])).toEqual([
-        [at['src/a.ts'], [at['src/a.behaviour.test.mjs']]],
+        [at['src/a.ts'], [asGlob(at['src/a.behaviour.test.mjs'])]],
       ])
       expect(result.locks).toEqual({ taken: 1, released: 1 })
       expect(leftAt(root)).toEqual(NOTHING_LEFT)
@@ -2562,7 +2567,7 @@ describe('a whole sweep, driven with no Stryker', () => {
           mutate: [at['src/a.ts']],
           configFile: path.join(root, 'vitest.mutants.mjs'),
           linkIgnored: true,
-          include: [at['src/a.test.mjs']],
+          include: [asGlob(at['src/a.test.mjs'])],
           reportLeft: false,
           sandboxLeft: false,
         },
@@ -2571,7 +2576,7 @@ describe('a whole sweep, driven with no Stryker', () => {
           mutate: [at['src/b.ts']],
           configFile: path.join(root, 'vitest.mutants.mjs'),
           linkIgnored: true,
-          include: [at['src/c.test.mjs']],
+          include: [asGlob(at['src/c.test.mjs'])],
           reportLeft: false,
           sandboxLeft: false,
         },
@@ -2727,8 +2732,8 @@ describe('a whole sweep, driven with no Stryker', () => {
         vitest.test.include,
         [settings.timeoutMS, settings.timeoutFactor, settings.concurrency],
       ])).toEqual([
-        [false, a, [a], [path.join(root, 'src/a.test.mjs')], [20_000, undefined, undefined]],
-        [true, a, [a], [path.join(root, 'src/a.test.mjs')], [30_000, 4, undefined]],
+        [false, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [20_000, undefined, undefined]],
+        [true, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [30_000, 4, undefined]],
       ])
       expect(leftAt(root)).toEqual(NOTHING_LEFT)
     })
@@ -3166,7 +3171,7 @@ describe('how a sweep runs the covering tests', () => {
         setupFiles: ['./vitest.setup.ts'],
         testTimeout: 60_000,
         passWithNoTests: false,
-        include: [at['src/a.test.mjs']],
+        include: [asGlob(at['src/a.test.mjs'])],
       })
     })
   })
@@ -3188,7 +3193,7 @@ describe('how a sweep runs the covering tests', () => {
       const loaded = await loadConfigFromFile({ command: 'serve', mode: 'test' }, generated, root, 'silent')
 
       expect(loaded.config.test.passWithNoTests).toBe(false)
-      expect(loaded.config.test.include).toEqual(covering)
+      expect(loaded.config.test.include).toEqual(covering.map(asGlob))
     })
   })
 
@@ -4900,8 +4905,10 @@ describe('a survivor measured against the merge base', () => {
       })
 
       expect(result.code).toBe(1)
+      /* The files are named as the reader's own paths, so in the host's
+         separator — `\` on Windows, where `src\/a` never matched. */
       expect(result.stderr).toMatch(
-        /\n {2}\S*src\/a\.ts — no-commit: check-mutants: [^\n]+\n {2}\S*src\/b\.ts — no-commit: check-mutants: /u,
+        /\n {2}\S*src[\\/]a\.ts — no-commit: check-mutants: [^\n]+\n {2}\S*src[\\/]b\.ts — no-commit: check-mutants: /u,
       )
     })
   })
@@ -6383,9 +6390,9 @@ describe('a sweep planned once, swept in shards and reconciled by an aggregate',
       const first = await shardOf(root, manifest, '1/3', { stryker })
 
       expect(seen.map(({ subject, vitest }) => [subject, vitest.test.include])).toEqual([
-        [files['src/a.ts'], [files['src/a.test.mjs']]],
-        [files['src/r.ts'], [files['src/r.behaviour.test.mjs'], files['src/r.more.test.mjs']]],
-        [files['src/b.ts'], [files['src/c.test.mjs']]],
+        [files['src/a.ts'], [asGlob(files['src/a.test.mjs'])]],
+        [files['src/r.ts'], [asGlob(files['src/r.behaviour.test.mjs']), asGlob(files['src/r.more.test.mjs'])]],
+        [files['src/b.ts'], [asGlob(files['src/c.test.mjs'])]],
       ])
       const result = (shard, subject, fields) => ({
         kind: 'result',

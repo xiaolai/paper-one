@@ -4001,7 +4001,16 @@ function sameBytes(one, other) {
  */
 // Stryker disable all: a real install is the second thing a test may not do — it reaches the network and writes a dependency tree; `measureAtBase` takes it as a parameter, and every decision about it — the deadline it is given included — is measured there
 function installAt(at, { timeoutMs }) {
-  execFileSync('pnpm', ['install', '--frozen-lockfile', '--prefer-offline', '--ignore-scripts'], { cwd: at, stdio: 'inherit', timeout: timeoutMs })
+  const install = ['pnpm', 'install', '--frozen-lockfile', '--prefer-offline', '--ignore-scripts']
+  const options = { cwd: at, stdio: 'inherit', timeout: timeoutMs }
+  /* ⚠️ **PNPM IS A `.cmd` ON WINDOWS**, which Node will not spawn without a
+     shell — the same death as `strykerRun`'s `npx` (2026-09-18). The command is
+     fixed words with nothing from anywhere, so the shell has nothing to quote,
+     and it goes as ONE string because a command plus arguments under
+     `shell: true` is what Node's DEP0190 warns about; `assert-bundle.test.mjs`
+     measured the same fix on the Windows leg. */
+  if (process.platform === 'win32') execFileSync(install.join(' '), { ...options, shell: true })
+  else execFileSync(install[0], install.slice(1), options)
 }
 // Stryker restore all
 
@@ -5770,17 +5779,42 @@ const MODES = { plan: planSweep, shard: shardSweep, aggregate: aggregateSweep, m
  * flight had made under `tmpdir()` stayed there: once per timeout, however
  * carefully the test cleans up. Every process Stryker starts inherits this
  * directory as its `tmpdir()` instead, and it goes with the run.
+ *
+ * ⚠️ **IT WAS `npx stryker`, AND ON WINDOWS STRYKER NEVER STARTED** (found
+ * 2026-09-18, by the Windows leg). `npx` is a `.cmd` there, and since the fix
+ * for CVE-2024-27980 Node will not spawn one without a shell — so the spawn threw
+ * before Stryker printed a line, this answered `false`, and the sweep called it a
+ * run that wrote no report. A shell is no way out, because `config` is a path
+ * `cmd.exe` would have to be trusted to quote. So Stryker's own entry, the script
+ * `.bin/stryker` points at, is run by this node: see `strykerEntry`.
  */
 function strykerRun(config, root) {
   const temp = mkdtempSync(path.join(tmpdir(), 'check-mutants-stryker-'))
   try {
-    execFileSync('npx', ['stryker', 'run', config], { cwd: root, stdio: 'inherit', env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp } })
+    execFileSync(process.execPath, [strykerEntry(root), 'run', config], {
+      cwd: root,
+      stdio: 'inherit',
+      env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp },
+    })
     return true
   } catch {
     return false
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }
+}
+
+/**
+ * The script Stryker's own `bin` names, in the install at `root` — what
+ * `npx stryker` would have found there, read from the package rather than
+ * spelled out, so it follows the package if the package moves it. Absolute,
+ * because the child resolves a relative one against `root` and this process
+ * against its own directory.
+ */
+function strykerEntry(root) {
+  const core = path.resolve(root, 'node_modules', '@stryker-mutator', 'core')
+  const { bin } = JSON.parse(readFileSync(path.join(core, 'package.json'), 'utf8'))
+  return path.join(core, typeof bin === 'string' ? bin : bin.stryker)
 }
 
 /** The lock's name inside the git directory — see `acquireLock`. Beside the one
@@ -5998,13 +6032,20 @@ export function carriedTestOptions(test) {
  * inherited value and no Vitest default can undo; and `loadViteTestBlock`
  * refuses the rest of that block before this is ever written, because an
  * inherited array is concatenated rather than overridden.
+ *
+ * ⚠️ **`include` IS A LIST OF GLOBS, AND A GLOB READS `\` AS AN ESCAPE.** Vitest
+ * hands it to its glob library unchanged, so a Windows path — `C:\…\a.test.ts`,
+ * which is what `covering` holds there — is a pattern with its separators
+ * escaped away. Each is written with `/`, the separator every glob reads, which
+ * on macOS and Linux changes nothing.
  */
 export function vitestConfigFor(covering, carried) {
+  const include = covering.map(slashed)
   return (
     "import { mergeConfig } from 'vitest/config'\n" +
     "import viteConfig from './vite.config'\n\n" +
     '/* Written by scripts/check-mutants.mjs for one subject, and removed when the sweep ends. */\n' +
-    `export default mergeConfig(viteConfig, { test: ${JSON.stringify({ ...carried, passWithNoTests: false, include: covering }, null, 2)} })\n`
+    `export default mergeConfig(viteConfig, { test: ${JSON.stringify({ ...carried, passWithNoTests: false, include }, null, 2)} })\n`
   )
 }
 

@@ -40,6 +40,11 @@ import {
  * own sweep — silently, looking exactly like a pass. The last case asserts it.
  */
 
+/** How the generated vitest config spells a covering test: its own path, with
+ *  `/` on every platform — `include` is a list of globs, and a glob reads `\` as
+ *  an escape. See `vitestConfigFor`. */
+const asGlob = (file) => file.split(path.sep).join('/')
+
 /** A scratch directory, removed after `act` whatever `act` does, and again when the case finishes. */
 function inScratch(prefix, act) {
   const root = mkdtempSync(path.join(tmpdir(), prefix))
@@ -1532,8 +1537,8 @@ describe('what the merge base’s run amounts to', () => {
       /* It RAN, and it ran against BOTH — the one nothing could trace to it and
          the one that would have stood in for it. */
       expect(reporting.seen).toHaveLength(1)
-      expect(reporting.seen[0].against).toContain(path.join(root, 'src/a.test.ts'))
-      expect(reporting.seen[0].against).toContain(path.join(root, 'src/weak.test.ts'))
+      expect(reporting.seen[0].against).toContain(asGlob(path.join(root, 'src/a.test.ts')))
+      expect(reporting.seen[0].against).toContain(asGlob(path.join(root, 'src/weak.test.ts')))
       /* And nothing is claimed about HOW they reach it: they are run because
          discovery could not prove they do not, which is a different sentence. */
       expect(stdout).toContain(`  [1/1] ${path.join(root, 'src/a.ts')}\n`)
