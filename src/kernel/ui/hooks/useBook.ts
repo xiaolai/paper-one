@@ -112,14 +112,6 @@ export interface Book extends BookState {
   goLeft: () => void
   goRight: () => void
   /**
-   * A counter that advances on every page turn, from every route.
-   *
-   * For a surface anchored to the page the reader is on — see the note beside
-   * the verbs. NOT a position: it moves only when a turn was ASKED for, so a
-   * re-pagination cannot move it.
-   */
-  navigation: number
-  /**
    * Where the reader is, as everything a bookmark is made from — null before
    * the renderer is up, and for a place that cannot be pinned down.
    *
@@ -344,24 +336,16 @@ export function useBook(): Book {
    * surface anchored to the page appears — so an anchor keyed on it would take
    * down the thing that caused the reflow, and loop.
    */
-  const [navigation, setNavigation] = useState(0)
-  const turned = useCallback(() => setNavigation((n) => n + 1), [])
-  const next = useCallback(() => {
-    turned()
-    navigatorRef.current?.next()
-  }, [turned])
-  const prev = useCallback(() => {
-    turned()
-    navigatorRef.current?.prev()
-  }, [turned])
-  const goLeft = useCallback(() => {
-    turned()
-    navigatorRef.current?.goLeft()
-  }, [turned])
-  const goRight = useCallback(() => {
-    turned()
-    navigatorRef.current?.goRight()
-  }, [turned])
+  /* ⚠️ **A `navigation` COUNTER RODE ON THESE FOUR AND IS GONE** (2026-09-19
+   * audit). It advanced on every asked-for turn, for a surface anchored to the
+   * page the reader was on — the deleted gloss's anchor, its only consumer. Left
+   * behind, it called `setNavigation` on the app's hottest interaction and
+   * re-rendered every reader of this hook for a value nothing read. The verbs
+   * delegate and nothing else now. */
+  const next = useCallback(() => navigatorRef.current?.next(), [])
+  const prev = useCallback(() => navigatorRef.current?.prev(), [])
+  const goLeft = useCallback(() => navigatorRef.current?.goLeft(), [])
+  const goRight = useCallback(() => navigatorRef.current?.goRight(), [])
   const placeHere = useCallback(() => navigatorRef.current?.placeHere() ?? null, [])
   /* GENERATION-TAGGED like every other renderer callback. It was the only one
    * that was not, so a session being torn down could install ITS navigator over
@@ -451,7 +435,6 @@ export function useBook(): Book {
       prev,
       goLeft,
       goRight,
-      navigation,
       placeHere,
       setNavigator,
       setToc,
@@ -492,7 +475,6 @@ export function useBook(): Book {
       prev,
       goLeft,
       goRight,
-      navigation,
       placeHere,
       setNavigator,
       setToc,

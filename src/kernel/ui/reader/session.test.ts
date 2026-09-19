@@ -2016,6 +2016,69 @@ describe('ReaderSession gesture provenance', () => {
     expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('right')
   })
 
+  /**
+   * ⚠️ **A DRAGGED LINK NAVIGATED THE WEBVIEW AWAY** (2026-09-19 audit).
+   *
+   * `drop` fires only where `dragover` was cancelled. `#watchDrops` cancelled
+   * it for `Files` alone, so a URL or text drag never reached `onDrop` — and
+   * the whole application was replaced by whatever the link pointed at, which
+   * is the exact failure the method's own header says it exists to prevent.
+   * `onDrop`'s comment claimed it prevented default "unconditionally"; it did,
+   * and it could not run.
+   *
+   * The two questions are separate and are asserted separately: WHETHER the
+   * drop happens (`preventDefault` on the drag) and WHAT the pointer promises
+   * (`dropEffect`). Only the second is file-only.
+   */
+  const dragEvent = (types: readonly string[], file: File | null = null) => {
+    const dataTransfer = {
+      types,
+      dropEffect: 'none',
+      files: { item: () => file },
+    }
+    return { type: 'drag', dataTransfer, prevented: false, preventDefault() { this.prevented = true } }
+  }
+
+  it.each([
+    ['a link', ['text/uri-list']],
+    ['plain text', ['text/plain']],
+    ['nothing it can read', []],
+  ])('cancels the drag for %s, so the drop reaches the reader instead of the webview', async (_what, types) => {
+    const { doc } = await loadedSection()
+    for (const kind of ['dragenter', 'dragover']) {
+      const event = dragEvent(types)
+      doc.dispatch(kind, event)
+      expect(event.prevented, `${kind} was not cancelled, so no drop event fires and the webview navigates`).toBe(true)
+    }
+  })
+
+  it('promises a copy only for files, while still cancelling everything', async () => {
+    const { doc } = await loadedSection()
+
+    const link = dragEvent(['text/uri-list'])
+    doc.dispatch('dragover', link)
+    expect(link.prevented).toBe(true)
+    expect(link.dataTransfer.dropEffect, 'a copy cursor over a link promises an import that never happens').toBe('none')
+
+    const files = dragEvent(['Files'])
+    doc.dispatch('dragover', files)
+    expect(files.prevented).toBe(true)
+    expect(files.dataTransfer.dropEffect).toBe('copy')
+  })
+
+  /* AND THE DROP ITSELF STILL REFUSES WHAT IS NOT A FILE. Cancelling every
+     drag is only safe because this half ignores everything else. */
+  it('takes a dropped file and ignores a dropped link', async () => {
+    const { doc, cb } = await loadedSection()
+
+    doc.dispatch('drop', dragEvent(['text/uri-list']))
+    expect(cb.calls['onFileDropped'] ?? []).toHaveLength(0)
+
+    const book = new File(['x'], 'book.epub')
+    doc.dispatch('drop', dragEvent(['Files'], book))
+    expect(cb.calls['onFileDropped']?.[0]?.[0]).toBe(book)
+  })
+
   /* The window must not move. An unconsumed wheel chains outwards until
    * something bounces, and on macOS that is the viewport — the whole
    * application dragged sideways and sprung back on every swipe. */

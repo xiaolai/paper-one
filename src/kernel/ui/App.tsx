@@ -209,18 +209,14 @@ export function App({
      directly above it. That snapshot existed to resolve the `Look up` mode and
      went with it; the sentence outlived it by one commit and was caught by
      audit. */
-  /* ONE READER FOR BOTH SNAPSHOTS, as `workLine.line` is below. The second is
-     read only when a server render is hydrated, which this window never is, so
-     as an arrow of its own it was a function nothing could call — a mutation
-     sweep said so (2026-09-15). */
+  /* ONE READER FOR BOTH SNAPSHOTS. The second is read only when a server
+     render is hydrated, which this window never is, so as an arrow of its own
+     it was a function nothing could call — a mutation sweep said so
+     (2026-09-15). The sentence used to cite `workLine.line` beside it as the
+     other example; that port was the model download's and went with the AI
+     features (2026-09-19). */
   const readPersistent = () => services.settings.persistent
   const settingsPersistent = useSyncExternalStore(services.settings.subscribe, readPersistent, readPersistent)
-  /* The status bar's third rung, through the kernel's own port — the kernel
-     imports nothing from a capability, so `inference` binds this and App reads
-     it here. Null at rest, which is what keeps the bar byte-for-byte what it
-     was when nothing is downloading. */
-  const workLine = services.workLine()
-  const download = useSyncExternalStore(workLine.subscribe, workLine.line, workLine.line)
   /* The open book lives here, not in the reader: Contents and Search read
    * from it and they are panels of the side pane now. */
   const book = useBook()
@@ -2516,7 +2512,6 @@ export function App({
             onDismissBootNotice={() => setBootNotice(null)}
             shelfUnread={shelfUnread}
             enriching={enrichment.pending}
-            download={download}
             onAddBooks={addBooks}
             bookActions={composition.bookActions}
             bookStatuses={composition.bookStatuses}

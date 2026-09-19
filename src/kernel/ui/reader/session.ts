@@ -1921,6 +1921,21 @@ export class ReaderSession {
   #noteFailed(view: View, what: string, detail: LinkDetail, event: Event, cause: unknown): void {
     console.warn(`Paper: ${what}`, detail.href, cause)
     this.#noteSeq += 1
+    /* ⚠️ **THE MOUNTED VIEW WAS LEFT BEHIND ON THIS ROAD ALONE** (2026-09-19
+     * audit). `onFootnote(null)` tells the HOST to stop drawing the popover; it
+     * does not touch the view the SESSION mounted. A failure arriving after
+     * `before-render` had already attached one therefore hid the note and left
+     * its renderer — and every blob it held — live in the host, until the next
+     * note or `dispose` happened to release it.
+     *
+     * Every other way out of a note goes through here: `closeFootnote`,
+     * supersession at `render`, and `dispose`. This one did not, which is what
+     * made the ownership rule partial rather than total. Null-safe, so the
+     * common case — a failure before anything mounted — costs nothing.
+     *
+     * `view` is the READER's view, not the note's; it is what `goTo` navigates
+     * below. The note's view is only ever reachable through `#footnoteView`. */
+    this.#releaseFootnoteView()
     this.#cb.onFootnote(null)
     this.#cb.onLink(detail, event)
     void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
@@ -2850,6 +2865,19 @@ export class ReaderSession {
    * `dragover` is the load-bearing prevention: without it there is no drop
    * event and the navigation happens regardless of what the drop handler says.
    *
+   * ⚠️ **AND IT WAS CANCELLED ONLY FOR `Files`, WHICH LEFT THE WHOLE POINT
+   * UNGUARDED** (2026-09-19 audit). `drop` fires only where `dragover` was
+   * cancelled, so a URL or text drag never reached `onDrop` — and `onDrop`'s
+   * own comment, *"Unconditional: a dropped URL navigates away just as a file
+   * does"*, described a handler that could not run for the payload it named.
+   * Dragging a link onto the open book navigated the webview away, which is the
+   * exact failure this whole method exists to prevent.
+   *
+   * So the cancel is unconditional and the CURSOR is what stays file-only:
+   * `preventDefault` decides whether the drop happens at all, `dropEffect`
+   * only decides what the pointer promises. Accepting everything and acting on
+   * files alone is the shape that makes those two questions separate.
+   *
    * The file is handed over directly rather than re-dispatched. A DragEvent
    * cannot carry its dataTransfer across a synthetic re-dispatch, and the
    * documents are same-origin, so passing the File itself is both simpler and
@@ -2857,9 +2885,13 @@ export class ReaderSession {
    */
   #watchDrops(doc: Document): void {
     const allow = (event: DragEvent) => {
-      if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return
+      /* EVERY PAYLOAD, so `drop` always fires and `onDrop` can refuse it. */
       event.preventDefault()
-      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+      /* THE CURSOR, ONLY FOR WHAT WILL ACTUALLY BE TAKEN — a copy cursor over
+         a link would promise an import that `onDrop` then ignores. */
+      if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) {
+        event.dataTransfer.dropEffect = 'copy'
+      }
     }
     const onDrop = (event: DragEvent) => {
       // Unconditional: a dropped URL navigates away just as a file does.

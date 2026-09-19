@@ -1,75 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { compareHlc, parseHlc } from './hlc'
 import { createKernelServices, monotonicClock } from './services'
-import { NO_WORK_LINE, type Diagnostics, type WorkLine } from './ports'
+import type { Diagnostics } from './ports'
 import type { PublicPassage } from './public/envelope'
 import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY } from './settings'
 import { servicesWith, spyRecorder } from './servicesWorld.testkit'
-
-/**
- * THE WORK-LINE PORT, at rest and after a bind.
- *
- * ⚠️ **THREE PORTS STOOD HERE, AND TWO ARE DELETED.** The companion and the
- * gloss went with the AI features, and the voice port with them — nothing binds
- * a voice any more, and what says a word aloud is `ui/reader/speech.ts` over the
- * system speaker, reached by the reading rather than through a kernel port.
- *
- * What the remaining one is still here to say is the CONTRACT all three shared,
- * and it is the part a test is most likely to skip: the port is late-bound by a
- * capability that may not be installed, so the DEFAULT is the state most readers
- * are in; the accessor is resolved PER CALL rather than captured, which is what
- * lets a capability arrive after composition; and the disposer restores the
- * PREVIOUS value rather than the default — the same contract `bindRecorder` has,
- * for the same reason: a torn-down capability must not leave the kernel pointing
- * at it.
- */
-describe('the work-line port', () => {
-  /* AT REST THE BAR IS WHAT IT ALWAYS WAS. `line()` is null and `subscribe`
-     hands back a working unsubscribe rather than undefined — a store that
-     returned nothing there would throw inside `useSyncExternalStore`'s
-     cleanup, on unmount, in a build nobody had bound a work line in. */
-  it('defaults to a work line that reports nothing and notifies nobody', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    expect(services.workLine()).toBe(NO_WORK_LINE)
-    expect(services.workLine().line()).toBeNull()
-    const stop = services.workLine().subscribe(() => {})
-    expect(typeof stop).toBe('function')
-    expect(() => stop()).not.toThrow()
-  })
-
-  it('binds a work line and restores it on dispose', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    const listeners: (() => void)[] = []
-    const work: WorkLine = {
-      line: () => 'Importing 3 books',
-      subscribe: (listener) => {
-        listeners.push(listener)
-        return () => {
-          /* GUARDED. `splice(-1, 1)` removes the LAST listener, so a repeated
-             or stale unsubscribe in this double would have quietly detached
-             somebody else — a fake that misbehaves in a way the real store
-             does not is a test that can only mislead. */
-          const at = listeners.indexOf(listener)
-          if (at >= 0) listeners.splice(at, 1)
-        }
-      },
-    }
-    const unbind = services.bindWorkLine(work)
-    expect(services.workLine().line()).toBe('Importing 3 books')
-    const stop = services.workLine().subscribe(() => {})
-    expect(listeners).toHaveLength(1)
-    stop()
-    expect(listeners).toHaveLength(0)
-    unbind.dispose()
-    expect(services.workLine().line()).toBeNull()
-  })
-
-  it('refuses a second bind, by name', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    services.bindWorkLine({ line: () => null, subscribe: () => () => {} })
-    expect(() => services.bindWorkLine({ line: () => null, subscribe: () => () => {} })).toThrow(/already bound/)
-  })
-})
 
 /**
  * THE SERVICE HOST'S DISPOSER IS ITS CONTRACT.

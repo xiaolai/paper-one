@@ -212,14 +212,22 @@ describe('the ladder in the foot', () => {
     expect(screen.getByRole('status').textContent).toBe('Importing 2 of 4')
   })
 
-  it('puts a model download below the import and above the parse pass', () => {
+  /* ⚠️ **A MODEL DOWNLOAD WAS A FOURTH RUNG HERE, AND THIS TEST DROVE IT.**
+     It was the `inference` capability's, through the kernel's `WorkLine` port;
+     both went on 2026-09-19 with the AI features, and `Library`'s `download`
+     prop with them. What the deletion opened is this adjacency — the download
+     sat between the boot notice and the parse pass, so with it gone nothing
+     held those two in order. That is what this asserts now, in its place. */
+  it('puts what boot had to say about the store above the parse pass', () => {
     const { rerender } = render(
-      <Library {...shelf} download="Downloading Qwen3-4B — 412 MB of 2.5 GB" enriching={12} />,
+      <Library {...shelf} bootNotice="The store could not be read." enriching={12} />,
     )
-    expect(screen.getByRole('status').textContent).toBe('Downloading Qwen3-4B — 412 MB of 2.5 GB')
+    expect(screen.getByRole('status').textContent).toBe('The store could not be read.')
 
-    rerender(<Library {...shelf} importNotice="Added 3 books." download="Downloading Qwen3-4B" enriching={12} />)
-    expect(screen.getByRole('status').textContent).toBe('Added 3 books.')
+    /* And with nothing to report about the store, the pass has the slot — so
+       the line above is a PRIORITY rather than the only thing that draws. */
+    rerender(<Library {...shelf} enriching={12} />)
+    expect(foot()).toBe('2 booksReading books for their titles and covers — 12 to go')
   })
 
   it('reports the parse pass when nothing the reader asked for is running', () => {

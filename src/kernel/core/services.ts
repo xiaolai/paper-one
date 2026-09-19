@@ -8,7 +8,6 @@ import { createLibrary, type Library } from './libraryStore'
 import { createMarkStore, type MarkStore } from './markStore'
 import { folderOf, readBook, recordPath } from './bookFolder'
 import {
-  NO_WORK_LINE,
   NOOP_DIAGNOSTICS,
   NOOP_RECORDER,
   REMOVABLE_BLOB_KINDS,
@@ -23,7 +22,6 @@ import {
   type ShelfPort,
   type HashPort,
   type SizePort,
-  type WorkLine,
 } from './ports'
 import { carryLegacySettings, createSettingsStore, type SettingsMigration } from './settings'
 import { writeQueue, type WriteQueue } from './writeQueue'
@@ -204,16 +202,6 @@ export interface KernelServices {
   /** Bind the HASH port — BLAKE3 in Rust, by the peer capability. The same slot rule as the size port. */
   bindHashPort(port: HashPort): Disposable
   hashes(): HashPort | null
-  /**
-   * Bind the WORK LINE — the library status bar's third rung (WI-15.12).
-   *
-   * Same late-bound, once-at-a-time rule and the same restoring disposer as
-   * `bindRecorder`. Until bound the default reports nothing, and the bar is
-   * exactly the two-rung ladder it has always been.
-   */
-  bindWorkLine(work: WorkLine): Disposable
-  /** The work line — `NO_WORK_LINE` until one is bound. */
-  workLine(): WorkLine
   /**
    * Serve a composed set of services through the bound host, once every
    * capability has started (so a delegating handler's target is ready). The
@@ -764,7 +752,6 @@ export function createKernelServices({
   const shelfSlot = exclusiveSlot<ShelfPort | null>('bindShelfPort: the shelf port is already bound', null)
   const sizeSlot = exclusiveSlot<SizePort | null>('bindSizePort: the size port is already bound', null)
   const hashSlot = exclusiveSlot<HashPort | null>('bindHashPort: the hash port is already bound', null)
-  const workLineSlot = exclusiveSlot<WorkLine>('bindWorkLine: the work line port is already bound', NO_WORK_LINE)
 
   const writes = writeQueue()
   const library = createLibrary({ fs, queue: writes, initial: initialBooks, recorder: recorderPort, clock: clockPort, hashes: () => hashSlot.get() })
@@ -883,8 +870,6 @@ export function createKernelServices({
     sizes: () => sizeSlot.get(),
     bindHashPort: (next) => hashSlot.bind(next),
     hashes: () => hashSlot.get(),
-    bindWorkLine: (next) => workLineSlot.bind(next),
-    workLine: () => workLineSlot.get(),
     serveServices: async (list) => {
       /* NO HOST IS THE OFFLINE CASE, not a failure — see `bindServiceHost`.
        * With none bound there is nothing to serve and nothing to dispose: an

@@ -486,4 +486,43 @@ describe('a note that fails after a newer one has opened', () => {
     expect(calls['onFootnote']?.at(-1)).toEqual([null])
     warn.mockRestore()
   })
+
+  /**
+   * ⚠️ **AND IT LEFT THE MOUNTED VIEW BEHIND** (2026-09-19 audit).
+   *
+   * `onFootnote(null)` tells the HOST to stop drawing the popover. It does not
+   * touch the view the SESSION mounted — so a failure arriving after
+   * `before-render` had already attached one hid the note and left its renderer
+   * live in the host, holding every blob the note document referenced, until
+   * the next note or `dispose` happened to release it.
+   *
+   * Every other road out of a note releases it: `closeFootnote`, supersession
+   * at `render`, and `dispose`. This one did not, which made the rule partial —
+   * and a partial ownership rule is one nobody can state, which is how the leak
+   * survived the round that fixed the other three.
+   */
+  it('releases the view it had already mounted, rather than only hiding the popover', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { book, calls } = await started()
+
+    let refuse: (cause: unknown) => void = () => {}
+    foliate.answers.push(
+      new Promise<void>((_resolve, reject) => {
+        refuse = reject
+      }),
+    )
+    const request = clickNote(book)
+    /* MOUNTED FIRST — this is the case the leak needed: `before-render` has
+       attached the view and the session owns it when the failure lands. */
+    const note = noteView()
+    renderInto(request, note)
+    expect(note.calls, 'the note was never mounted, so this proves nothing').toEqual([])
+
+    refuse(new Error('the note would not render'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(calls['onFootnote']?.at(-1)).toEqual([null])
+    expect(note.calls, 'the mounted note view was left live after the failure').toEqual(['close', 'remove'])
+    warn.mockRestore()
+  })
 })
