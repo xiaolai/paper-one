@@ -73,6 +73,84 @@ export function runtimeSpecifiers(source, fileName) {
 }
 
 /**
+ * Every place a module loads or runs code by a route no static import graph can
+ * follow, named in source order — `[]` where there is none.
+ *
+ * `runtimeSpecifiers` answers each of these with NOTHING, because there is no
+ * single module to name, and so does Vitest's `related` filter, which drops a
+ * test that reaches its subject only this way. Nothing can say where such a load
+ * lands, so what `check-mutants` needs is to know that one is THERE: a test whose
+ * route holds one is a test neither it nor Vitest can prove unrelated.
+ *
+ * - a dynamic `import()` of a computed path;
+ * - `require` of a path, or of a computed value — CommonJS never enters Vite's
+ *   graph, however literal the path; one of a builtin or a package cannot land
+ *   in the checkout's own code, and is not named;
+ * - `createRequire()`, whose result may load anything under any name;
+ * - `vi.importActual` and `vi.importMock`, which load at run time;
+ * - code run from text — `eval`, `new Function`, and `vm`'s runners and `Script`.
+ *
+ * An import of something that is not a file — an alias, a plugin's `virtual:`
+ * module — is a literal specifier and so is not named here: whether it resolves
+ * to an installed package is a question about a checkout, which the caller asks.
+ */
+export function hiddenLoads(source, fileName) {
+  /* Stryker disable next-line BooleanLiteral: as in `runtimeSpecifiers` — no
+     parent is read, and `getText` is not called — so a tree built without
+     parent pointers answers the same. */
+  const tree = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+  const found = []
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const said = hiddenCall(node)
+      if (said !== null) found.push(said)
+    } else if (ts.isNewExpression(node)) {
+      const built = nameOf(node.expression)
+      if (built === 'Function' || built === 'Script') found.push(`new ${built}()`)
+    }
+    ts.forEachChild(node, visit)
+  }
+  ts.forEachChild(tree, visit)
+  return found
+}
+
+/** Code run from text, by the name its runner is called. */
+const RUNS_TEXT = new Set(['eval', 'runInContext', 'runInNewContext', 'runInThisContext', 'compileFunction'])
+
+/** What one call loads that no import graph shows, or `null` where it loads nothing hidden. */
+function hiddenCall(node) {
+  const argument = erased(node.arguments[0])
+  const text = isLiteral(argument) ? argument.text : null
+  if (node.expression.kind === ts.SyntaxKind.ImportKeyword) return text === null ? 'a computed import()' : null
+  const callee = nameOf(node.expression)
+  if (callee === 'require' && ts.isIdentifier(node.expression)) {
+    if (text === null) return 'a computed require()'
+    return text.startsWith('.') || text.startsWith('/') ? `require('${text}')` : null
+  }
+  if (callee === 'createRequire') return 'createRequire()'
+  if ((callee === 'importActual' || callee === 'importMock') && isVi(node.expression)) {
+    return text === null ? `vi.${callee}()` : `vi.${callee}('${text}')`
+  }
+  return RUNS_TEXT.has(callee) ? `${callee}()` : null
+}
+
+/** The name a callee or a constructor is called by — `b` for both `b` and `a.b` — or `null` for anything else. */
+function nameOf(expression) {
+  if (ts.isIdentifier(expression)) return expression.text
+  return ts.isPropertyAccessExpression(expression) ? expression.name.text : null
+}
+
+/** Whether a callee is a member of `vi`, Vitest's own object. */
+function isVi(expression) {
+  return ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression) && expression.expression.text === 'vi'
+}
+
+/** A string the source spells out whole — a quoted one, or a template with nothing substituted in. */
+function isLiteral(node) {
+  return node !== undefined && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
+}
+
+/**
  * `node` with every wrapper that cannot change its value taken off: parentheses,
  * and the type-only `as`, `satisfies`, `!` and `<T>`, which the emit erases.
  *

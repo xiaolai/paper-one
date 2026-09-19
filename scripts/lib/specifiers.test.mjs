@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { runtimeSpecifiers } from './specifiers.mjs'
+import { hiddenLoads, runtimeSpecifiers } from './specifiers.mjs'
 
 /**
  * The one reading of an import that both `check-browser-safe` and
@@ -183,3 +183,93 @@ describe('runtimeSpecifiers', () => {
     expect(read("const n = <number>(x)\nimport a from './a'", 'cast.ts')).toEqual(['./a'])
   })
 })
+
+/** How a module named `fileName` loads code that no static import graph shows — a `.ts` unless the case says. */
+const hidden = (source, fileName = 'module.ts') => hiddenLoads(source, fileName)
+
+/**
+ * ⚠️ **WHAT NO IMPORT GRAPH CAN FOLLOW, NAMED RATHER THAN SKIPPED.**
+ * `runtimeSpecifiers` answers a computed `import(where)` with nothing — there is
+ * no single module to name — and so does Vitest's `related` filter, which drops
+ * a test that reaches its subject only that way. The mutation gate cannot see
+ * where such a load lands, so it records that one is there; these are the
+ * shapes it recognises.
+ */
+describe('hiddenLoads', () => {
+  it('finds nothing hidden in the loads an import graph does show', () => {
+    expect(
+      hidden(
+        "import a from './a'\nexport { b } from './b'\nconst c = await import('./c')\nconst d = await import(`./d`)\n" +
+          "const e = await import(('./e'))",
+      ),
+    ).toEqual([])
+  })
+
+  it('names a dynamic import whose path is computed', () => {
+    expect(hidden("const where = './a'\nconst m = await import(where)")).toEqual(['a computed import()'])
+    expect(hidden('const m = await import(`./pages/${name}`)')).toEqual(['a computed import()'])
+    expect(hidden("const m = await import(flag ? './a' : './b')")).toEqual(['a computed import()'])
+  })
+
+  /* CommonJS never enters Vite's graph at all, so a `require` of a path is hidden
+     however literal it is — while one of a builtin or a package cannot land in
+     the checkout's own code. */
+  it('names a require of a path or of a computed value, and not one of a builtin or a package', () => {
+    expect(hidden("const a = require('./a')\nconst b = require('../b.cjs')\nconst c = require('/abs/c.js')")).toEqual([
+      "require('./a')",
+      "require('../b.cjs')",
+      "require('/abs/c.js')",
+    ])
+    expect(hidden('const d = require(name)')).toEqual(['a computed require()'])
+    expect(hidden("const fs = require('node:fs')\nconst p = require('path')\nconst r = require('react')\nconst s = require('@scope/pkg/x')")).toEqual([])
+  })
+
+  it('names a require made by createRequire, which may load anything under any name', () => {
+    expect(hidden("import { createRequire } from 'node:module'\nconst load = createRequire(import.meta.url)")).toEqual([
+      'createRequire()',
+    ])
+  })
+
+  it("names Vitest's own runtime loads", () => {
+    expect(hidden("const a = await vi.importActual('./a')\nconst b = await vi.importMock('./b')")).toEqual([
+      "vi.importActual('./a')",
+      "vi.importMock('./b')",
+    ])
+    expect(hidden('const a = await vi.importActual(where)')).toEqual(['vi.importActual()'])
+  })
+
+  /* `vi` is Vitest's own object; the same method on anything else, or another
+     member of `vi`, loads nothing of a module's. */
+  it('names neither the same method on another object nor another member of vi', () => {
+    expect(
+      hidden(
+        "importActual('./a')\nmock.importActual('./a')\nthe.vi.importMock('./b')\nvi.mock('./c')\nvi.fn()\n" +
+          "const u = new URL('./d', import.meta.url)\nconst m = new Map()\nconst v = new vm.Context()",
+      ),
+    ).toEqual([])
+  })
+
+  it('names code run from text', () => {
+    expect(
+      hidden(
+        "eval('1')\nconst f = new Function('return 1')\nvm.runInNewContext(code)\nvm.runInContext(code, box)\n" +
+          'runInThisContext(code)\nconst s = new vm.Script(code)\nconst g = vm.compileFunction(code)',
+      ),
+    ).toEqual(['eval()', 'new Function()', 'runInNewContext()', 'runInContext()', 'runInThisContext()', 'new Script()', 'compileFunction()'])
+  })
+
+  /* A call with no argument has nothing to read a path from: a `require()` of
+     nothing names no module, which is as computed as a load gets. */
+  it('reads a call with no argument without tripping on it', () => {
+    expect(hidden('run()\nconst r = require()\nsetup()')).toEqual(['a computed require()'])
+  })
+
+  it('is not fooled by the same words in a comment or a string', () => {
+    expect(hidden("// await import(where), require('./a'), eval(x)\nconst note = \"require('./b') and new Function()\"")).toEqual([])
+  })
+
+  it('reads the dialect its file name gives it', () => {
+    expect(hidden("const n = <number>(x)\nconst m = await import(where)", 'cast.ts')).toEqual(['a computed import()'])
+  })
+})
+
