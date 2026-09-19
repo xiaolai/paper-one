@@ -3295,6 +3295,39 @@ describe('a whole sweep, driven with no Stryker', () => {
       })
     })
 
+    it('stops BEFORE the settle run, not after it, when an input moved during the first', async () => {
+      await inScratch('mutants-inputs-', async (root) => {
+        writeFileSync(path.join(root, 'notes.md'), 'one\n')
+        const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': READS_NOTES })
+        const a = at['src/a.ts']
+        const [identity] = await mutantIdentitiesIn(a)
+        /* A WALL-CLOCK timeout — no `statusReason`, so it is not a hit-limit
+           detection — which is what gives the first run something to settle. */
+        const report = reportWith(a, [{ id: '0', status: 'Timeout', static: false, ...identity }])
+        const { stryker, seen } = strykerStandIn(root, { reports: { [a]: report } })
+        const result = await sweep(root, {
+          subjects: ['src/a.ts'],
+          tree: ['src/a.ts', 'src/a.test.mjs', 'notes.md'],
+          stryker: async (config) => {
+            const answer = await stryker(config)
+            writeFileSync(path.join(root, 'notes.md'), 'two\n')
+            return answer
+          },
+        })
+
+        expect(result.code).toBe(2)
+        expect(result.stderr).toContain('notes.md — its bytes changed')
+        /* ⚠️ **THE CHECK BETWEEN THE TWO RUNS IS A SEPARATE CALL AND NEEDED ITS
+           OWN CASE.** Removing it survived every test above, because the check
+           after the last run caught the same move a few seconds later — the
+           difference is that the SETTLE RUN had by then been carried out
+           against a project that had changed, which is the whole thing this
+           refuses. So what is asserted is that no settle run ever started. */
+        expect(seen.filter(({ settling }) => settling)).toEqual([])
+        expect(seen).toHaveLength(1)
+      })
+    })
+
     it("records WHY it stopped in a shard's own result, short, and names every file", async () => {
       await inScratch('mutants-inputs-', async (root) => {
         writeFileSync(path.join(root, 'notes.md'), 'one\n')

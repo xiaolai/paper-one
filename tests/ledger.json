@@ -695,6 +695,7 @@
     "scripts/check-mutants.test.mjs > a whole sweep, driven with no Stryker > a file the subject's tests read, changing mid-run > says how many files it is watching, and how many it cannot",
     "scripts/check-mutants.test.mjs > a whole sweep, driven with no Stryker > a file the subject's tests read, changing mid-run > says the line even when it can watch NOTHING, because the count it cannot watch is the news",
     "scripts/check-mutants.test.mjs > a whole sweep, driven with no Stryker > a file the subject's tests read, changing mid-run > says what it CANNOT watch on the same line, where there is any",
+    "scripts/check-mutants.test.mjs > a whole sweep, driven with no Stryker > a file the subject's tests read, changing mid-run > stops BEFORE the settle run, not after it, when an input moved during the first",
     "scripts/check-mutants.test.mjs > a whole sweep, driven with no Stryker > a file the subject's tests read, changing mid-run > stops the sweep and names the file, rather than scoring two different projects as one",
     "scripts/check-mutants.test.mjs > a whole sweep, driven with no Stryker > fails a settle run that wrote no report, as a run Stryker never scored",
     "scripts/check-mutants.test.mjs > a whole sweep, driven with no Stryker > fails a settle run whose report does not hold the mutants the sweep counted, naming it as the settle run’s",
