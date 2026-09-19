@@ -3224,8 +3224,143 @@ describe('a whole sweep, driven with no Stryker', () => {
         })
         expect(result.code).toBe(0)
         /* PRINTED, on the rule the excluded-reader list already follows: a
-           guard nobody can see the reach of is a guard nobody can argue with. */
-        expect(result.stdout).toContain('watching 1 file(s) its tests read')
+           guard nobody can see the reach of is a guard nobody can argue with.
+           ⚠️ **AND THE SECOND HALF OF THE LINE NEEDS ITS OWN CASE** — this
+           asserted only the first, with a fixture whose `unwatched` was 0, so
+           the clause that says what it CANNOT watch was covered by nothing.
+           Five mutants of that ternary survived the first sweep to run on this
+           code, which is the gate doing precisely its job: a test whose TITLE
+           claims more than its assertion is the shape it exists to catch. */
+        expect(result.stdout).toContain('watching 1 file(s) its tests read\n')
+        expect(result.stdout).not.toContain('it cannot')
+      })
+    })
+
+    it('says the line even when it can watch NOTHING, because the count it cannot watch is the news', async () => {
+      await inScratch('mutants-inputs-', async (root) => {
+        mkdirSync(path.join(root, 'fixtures'), { recursive: true })
+        const at = checkout(root, {
+          'src/a.ts': "export const a = 'a'\n",
+          /* A DIRECTORY and nothing else, so `files` is empty and `unwatched`
+             is 1 — the shape `capability-remove.mjs` has in a real sweep. */
+          'src/a.test.mjs':
+            "import { readFileSync } from 'node:fs'\nimport './a'\n" +
+            `readFileSync(${JSON.stringify(path.join(root, 'fixtures'))}, 'utf8')\n`,
+        })
+        const a = at['src/a.ts']
+        const [identity] = await mutantIdentitiesIn(a)
+        const report = reportWith(a, [{ id: '0', status: 'Killed', static: false, ...identity }])
+        const result = await sweep(root, {
+          subjects: ['src/a.ts'],
+          tree: ['src/a.ts', 'src/a.test.mjs'],
+          stryker: strykerStandIn(root, { reports: { [a]: report } }).stryker,
+        })
+        expect(result.code).toBe(0)
+        /* ⚠️ **THE GUARD USED TO SAY NOTHING AT ALL HERE**, because the line was
+           printed only where it had something to report — and "I watched none of
+           this subject's inputs" is the one answer a reader most needs. */
+        expect(result.stdout).toContain('watching 0 file(s) its tests read, and 1 it cannot\n')
+      })
+    })
+
+    it('names EVERY file that moved, separated, rather than only the first', async () => {
+      await inScratch('mutants-inputs-', async (root) => {
+        writeFileSync(path.join(root, 'notes.md'), 'one\n')
+        writeFileSync(path.join(root, 'other.md'), 'one\n')
+        const at = checkout(root, {
+          'src/a.ts': "export const a = 'a'\n",
+          'src/a.test.mjs':
+            READS_NOTES + `readFileSync(${JSON.stringify(path.join(root, 'other.md'))}, 'utf8')\n`,
+        })
+        const a = at['src/a.ts']
+        const [identity] = await mutantIdentitiesIn(a)
+        const report = reportWith(a, [{ id: '0', status: 'Killed', static: false, ...identity }])
+        const { stryker } = strykerStandIn(root, { reports: { [a]: report } })
+        const result = await sweep(root, {
+          subjects: ['src/a.ts'],
+          tree: ['src/a.ts', 'src/a.test.mjs', 'notes.md', 'other.md'],
+          stryker: async (config) => {
+            const answer = await stryker(config)
+            writeFileSync(path.join(root, 'notes.md'), 'two\n')
+            rmSync(path.join(root, 'other.md'))
+            return answer
+          },
+        })
+        expect(result.code).toBe(2)
+        /* Both, and the separator between them: a message that named one of two
+           would send a reader to fix half of what moved. */
+        expect(result.stderr).toContain(
+          'notes.md — its bytes changed; other.md — gone, or no longer a file',
+        )
+      })
+    })
+
+    it("records WHY it stopped in a shard's own result, short, and names every file", async () => {
+      await inScratch('mutants-inputs-', async (root) => {
+        writeFileSync(path.join(root, 'notes.md'), 'one\n')
+        writeFileSync(path.join(root, 'other.md'), 'one\n')
+        const at = checkout(root, {
+          'src/a.ts': "export const a = 'a'\n",
+          'src/a.test.mjs':
+            READS_NOTES + `readFileSync(${JSON.stringify(path.join(root, 'other.md'))}, 'utf8')\n`,
+        })
+        const a = at['src/a.ts']
+        const [identity] = await mutantIdentitiesIn(a)
+        const report = reportWith(a, [{ id: '0', status: 'Killed', static: false, ...identity }])
+        const subjects = ['src/a.ts']
+        const tree = ['src/a.ts', 'src/a.test.mjs', 'notes.md', 'other.md']
+        const results = path.join(root, 'results')
+        const manifest = await planOver(root, { subjects, tree, shards: 1, isolate: 0 })
+
+        const { stryker } = strykerStandIn(root, { reports: { [a]: report } })
+        const shard = await shardOf(root, manifest, '1/1', {
+          subjects,
+          tree,
+          stryker: async (config) => {
+            const answer = await stryker(config)
+            writeFileSync(path.join(root, 'notes.md'), 'two\n')
+            rmSync(path.join(root, 'other.md'))
+            return answer
+          },
+        })
+
+        expect(shard.code).toBe(2)
+        /* ⚠️ **THE REASON A SHARD RECORDS IS A SEPARATE STRING FROM THE ONE IT
+           PRINTS**, and nothing observed it until this case: the long sentence
+           goes to stderr, and this short one is stamped onto the result the
+           shard had already written, which is what the aggregate reads back.
+           Both joins matter — a reader sent to repair one of two moved files
+           repairs half of what moved. */
+        expect(readJson(resultIn(results, 1, 'src/a.ts')).stopped).toBe(
+          'read-input-changed: notes.md — its bytes changed; other.md — gone, or no longer a file',
+        )
+        expect(existsSync(receiptIn(results, 1))).toBe(false)
+      })
+    })
+
+    it('says what it CANNOT watch on the same line, where there is any', async () => {
+      await inScratch('mutants-inputs-', async (root) => {
+        writeFileSync(path.join(root, 'notes.md'), 'one\n')
+        mkdirSync(path.join(root, 'fixtures'), { recursive: true })
+        const at = checkout(root, {
+          'src/a.ts': "export const a = 'a'\n",
+          /* One file, one DIRECTORY and one read no static answer can resolve —
+             so the count is 1 watched and 2 it cannot. */
+          'src/a.test.mjs':
+            READS_NOTES +
+            `readFileSync(${JSON.stringify(path.join(root, 'fixtures'))}, 'utf8')\n` +
+            "readFileSync(whateverThisIs(), 'utf8')\n",
+        })
+        const a = at['src/a.ts']
+        const [identity] = await mutantIdentitiesIn(a)
+        const report = reportWith(a, [{ id: '0', status: 'Killed', static: false, ...identity }])
+        const result = await sweep(root, {
+          subjects: ['src/a.ts'],
+          tree: ['src/a.ts', 'src/a.test.mjs', 'notes.md'],
+          stryker: strykerStandIn(root, { reports: { [a]: report } }).stryker,
+        })
+        expect(result.code).toBe(0)
+        expect(result.stdout).toContain('watching 1 file(s) its tests read, and 2 it cannot\n')
       })
     })
   })

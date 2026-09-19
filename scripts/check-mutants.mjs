@@ -4988,10 +4988,12 @@ function readsIn(test) {
   } catch {
     /* A test that cannot be read is the dry run's failure to report, not this
        function's: it answers about inputs, and there are none. */
+    // Stryker disable next-line ArrayDeclaration: a path in this list is resolved by `realpathSync` in the caller and a made-up one throws ENOENT there, so a non-empty answer is indistinguishable from an empty one
     return []
   }
   /* The same cheap first pass `sourceReaders` takes, and for its reason: a file
      naming no read reads nothing, and parsing it costs a sweep seconds. */
+  // Stryker disable next-line MethodExpression,StringLiteral,ArrayDeclaration: `pathsRead` finds no read in a file that names none, so widening the test only costs time; and a made-up path in the empty branch is resolved by `realpathSync` in the caller, which throws ENOENT on it
   return source.includes('readFile') ? pathsRead(source, test) : []
 }
 
@@ -5029,8 +5031,13 @@ export function readInputsOf(tests, root, parsed = new Map()) {
       }
       const rel = path.relative(base, real)
       /* Outside the checkout, which a test's own tmpdir fixture is and is meant
-         to be. Not counted as unwatched: it is not an input to the project. */
-      if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) continue
+         to be. Not counted as unwatched: it is not an input to the project.
+         ⚠️ **`rel === ''` — THE CHECKOUT ROOT ITSELF — USED TO BE SKIPPED HERE**
+         and it was both a wart and two surviving mutants (2026-09-20 sweep). A
+         test that reads the root is reading a DIRECTORY, which is exactly what
+         the count below means by "cannot watch", so letting it fall through is
+         the truer answer as well as the one with no branch to mutate. */
+      if (rel.startsWith('..') || path.isAbsolute(rel)) continue
       if (!statSync(real).isFile()) {
         unwatched += 1
         continue
