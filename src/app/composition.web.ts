@@ -6,9 +6,9 @@ import type { Capability } from '../kernel'
  *
  * **It is empty, and that is the answer rather than a gap.** Every capability
  * that exists is Tauri-bound: `peer` reaches an iroh endpoint through a plugin,
- * `sync` requires `peer`, `inference` supervises a local process, `companion`
- * requires `inference`, and `webhost` IS the shelf's server — the thing this
- * build talks to, not something it runs. A browser can compose none of them, so
+ * `sync`, `circle` and `public` all require `peer`, and `webhost` IS the
+ * shelf's server — the thing this build talks to, not something it runs. A
+ * browser can compose none of them, so
  * this build is the kernel and the reader, and `assert-bundle` fails it if any
  * capability module reaches the bundle.
  *

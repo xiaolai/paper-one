@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { PLATFORMS } from './lib/architecture.mjs'
+import { compositionFile, maskTemplates, stripComments } from './lib/compositions.mjs'
 import { isProcessEntry } from './lib/entry.mjs'
 import { REPO_ROOT, runSteps, spawnStep } from './verify.mjs'
 
@@ -49,7 +51,7 @@ export const COPY_EXCLUDE = Object.freeze([
   '.DS_Store',
 ])
 
-const USAGE = 'usage: node scripts/verify-without.mjs <id> [--keep]'
+const USAGE = 'usage: node scripts/verify-without.mjs [id] [--keep]'
 
 /** The steps run in the copy after the removal. */
 export const COPY_STEPS = Object.freeze([
@@ -72,8 +74,102 @@ export function parseArgs(argv) {
     else if (id !== undefined) return { error: 'exactly one capability id is expected' }
     else id = arg
   }
-  if (id === undefined) return { error: 'a capability id is required' }
-  return { id, keep }
+  /* NO ID IS THE ORDINARY CALL — see `removableCapabilities`. */
+  return { keep, ...(id === undefined ? {} : { id }) }
+}
+
+/**
+ * The capabilities `capability:remove` can actually take out of this tree.
+ *
+ * ⚠️ **CI NAMED ONE BY HAND AND WAS WRONG TWICE.** It said `example` for months
+ * after the capability called `example` was deleted (19bac0e), and the step
+ * failed on every push while the deletion proof proved nothing; it then said
+ * `sync`, which `src/cli/paper.ts` imports for `openLocalJournal`, so the
+ * removal succeeded and the TYPECHECK failed two steps later. It said
+ * `companion` until every AI feature was removed. A hand-written id is a fact
+ * with a half-life, and this one goes stale silently — the proof still RUNS,
+ * it just stops proving anything.
+ *
+ * So the id is DERIVED, from the same three conditions the suite asserts:
+ *
+ *   1. the manifest declares it — `capability:remove` refuses an id it does
+ *      not know, which is how the `example` years happened;
+ *   2. nothing `requires` it — the remover refuses a capability another
+ *      depends on, so naming `peer` would fail as surely as naming a ghost;
+ *   3. no HOST imports it. `.dependency-cruiser.cjs` permits a composition
+ *      root and `src/cli/` to import a capability index, so this is not a
+ *      boundary violation caught elsewhere — it is a fact about which
+ *      capabilities are removable, and `capability:remove` has never edited a
+ *      host. A composition root is exempt because the remover already edits
+ *      those.
+ *
+ * Returns every one that qualifies, SORTED, and `main` takes the first — so the
+ * choice is deterministic and a run is reproducible. It prints the whole list
+ * beside what it took, because the two say different things.
+ *
+ * ⚠️ **WHAT THIS PROVES IS WEAKER THAN WHAT THE HAND-WRITTEN ID CLAIMED, AND
+ * THAT IS THE POINT.** Naming `circle` asserted *this capability is removable*;
+ * deriving it asserts *some capability is*. The stronger claim is the one that
+ * went stale in silence three times. If `circle` grows a host import the picker
+ * moves to the next and CI stays green — correctly, because the property being
+ * proved is that deletion is an operation, not that any particular leaf is
+ * still a leaf.
+ */
+export function removableCapabilities(repo = REPO_ROOT) {
+  const manifest = JSON.parse(readFileSync(path.join(repo, 'capabilities.manifest.json'), 'utf8'))
+  const src = path.join(repo, 'src')
+  const sources = readdirSync(src, { recursive: true, encoding: 'utf8' }).filter((rel) => /\.tsx?$/.test(rel))
+  /* THE COMPOSITION ROOTS, BY NAME — the four files `capability:remove` already
+     edits. ⚠️ It was `/^app[\\/]composition\./`, which also exempted any
+     helper somebody put beside them (`composition.shared.ts`): such a file could
+     hold an import the remover never touches while this still called the
+     capability removable. `compositionFile` is the same helper the checker
+     resolves them with, so there is one answer to "which files are those". */
+  const roots = new Set(PLATFORMS.map((platform) => compositionFile(platform).replace(/^src\//, '')))
+  return manifest.capabilities
+    .filter((cap) => !manifest.capabilities.some((c) => (c.requires ?? []).includes(cap.id)))
+    /* ⚠️ **PATHS ARE `ts`, DEPENDENCIES ARE `id`, AND THIS USED `id` FOR BOTH.**
+       The manifest lets a capability's directory differ from its id — that is
+       what the `ts` field is for — so one that did would have been checked at a
+       path that does not exist and reported removable on the strength of finding
+       no importers of nothing. Every entry has `ts === id` today, which is
+       exactly why it would have gone unnoticed. */
+    .filter((cap) => !importedOutside(src, sources, cap.ts ?? cap.id, roots))
+    .map((cap) => cap.id)
+    .sort()
+}
+
+/**
+ * Whether any source outside `dir`'s own tree and outside the composition roots
+ * imports `src/capabilities/<dir>`.
+ *
+ * ⚠️ **THIS WAS `new RegExp("from '[^']*capabilities/" + id + "'")` AND IT WAS
+ * WRONG FOUR WAYS** (2026-09-19 audit): it read only single quotes, so a
+ * double-quoted import was invisible; it matched inside COMMENTS, so a
+ * paragraph naming the path counted as an importer; it missed
+ * `await import("…")`; and with no boundary after the name, `public` matched
+ * `public-extra`. A picker that under-reports importers hands CI a capability
+ * whose removal breaks the typecheck — the exact failure this whole function
+ * exists to prevent.
+ *
+ * Comments are stripped and templates masked with the checker's own helpers, so
+ * both gates read a source the same way.
+ *
+ * ⚠️ **A TYPE-ONLY IMPORT COUNTS HERE**, though `parseCompositionImports` skips
+ * one: `capability:remove` deletes the DIRECTORY, so `import type { X } from
+ * '…/capabilities/x'` stops resolving exactly as a value import does. That is
+ * why this does not simply call that helper.
+ */
+function importedOutside(src, sources, dir, roots) {
+  const own = path.join('capabilities', dir) + path.sep
+  /* Either quote, `import`/`export … from`, a bare `import '…'`, and
+     `import(…)`; the specifier must end at the directory or continue with `/`. */
+  const NAMES = new RegExp(
+    String.raw`(?:from|import)\s*\(?\s*['"][^'"]*capabilities/${dir}(?:/[^'"]*)?['"]`,
+  )
+  return sources
+    .filter((rel) => !rel.startsWith(own) && !roots.has(rel.split(path.sep).join('/')))
+    .some((rel) => NAMES.test(maskTemplates(stripComments(readFileSync(path.join(src, rel), 'utf8')))))
 }
 
 /**
@@ -179,8 +275,25 @@ function main(argv) {
     process.stderr.write(`verify-without: ${args.error}\n${USAGE}\n`)
     return 2
   }
-  const { code } = verifyWithout(args.id, { keep: args.keep })
-  process.stdout.write(code === 0 ? `\n✓ verify-without: the tree passes without ${JSON.stringify(args.id)}\n` : `\n✗ verify-without: exit ${code}\n`)
+  /* AN ID MAY STILL BE NAMED — for asking about one in particular, which is
+     what a person debugging the remover wants. With none, the tree is asked. */
+  let id = args.id
+  if (id === undefined) {
+    const removable = removableCapabilities()
+    if (removable.length === 0) {
+      /* NOT A PASS. Every capability being unremovable is the thing this proof
+         exists to notice — it means every leaf has grown a host import — and
+         answering 0 here would retire the gate by accident. */
+      process.stderr.write(
+        'verify-without: no capability can be removed from this tree — every one is required by another or imported by a host outside a composition root\n',
+      )
+      return 2
+    }
+    id = removable[0]
+    process.stdout.write(`verify-without: chose ${JSON.stringify(id)} of ${removable.length} removable (${removable.join(', ')})\n`)
+  }
+  const { code } = verifyWithout(id, { keep: args.keep })
+  process.stdout.write(code === 0 ? `\n✓ verify-without: the tree passes without ${JSON.stringify(id)}\n` : `\n✗ verify-without: exit ${code}\n`)
   return code
 }
 

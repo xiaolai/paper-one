@@ -2,26 +2,24 @@
 import { startTransition, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Mark, MarkStyle, MarkTint } from '../../core/marks'
-import { NO_VOICE } from '../../core/voice'
-import type { GlossState } from '../hooks/useGloss'
+import type { Annotation, MarkStyle, MarkTint } from '../../core/marks'
 import type { SelectionSnapshot } from './session'
 import { SelectionTools, type SelectionToolsProps } from './SelectionTools'
 
 /**
  * The popup itself, RENDERED — which faces it draws and where it puts them.
  *
- * `LookUpFace.test.tsx` runs the two decisions this component makes about a
- * lookup (`shownFace`, `surfaceHeight`) as functions; nothing ran the component
- * that acts on them, so a popup that measured its height and then placed itself
- * as a row, or drew the bar under the answer, passed every test there was.
+ * THE THREE FACES — the bar, the mark styles and the copy options — and where
+ * the popup puts each of them. A fourth face drew a language model's definition
+ * and is deleted with the rest of the AI features; the cases that were about it
+ * went with it, and the placement rules it shared with the rows did not.
  *
  * jsdom lays nothing out, so the geometry is supplied: a 1000×800 stage with the
  * book's frame filling it, a selected line at (400, 300) 200×20, and a popup
  * whose size is decided by the face it is showing — which is what the real one
- * does, every face being a different width and the lookup a different height.
- * With that, `place` is real and every expected number below is arithmetic:
- * above the line is `300 − GAP(8) − height`, and centred is `500`.
+ * does, every face being a different width. With that, `place` is real and every
+ * expected number below is arithmetic: above the line is `300 − GAP(8) − height`,
+ * and centred is `500`.
  */
 
 afterEach(cleanup)
@@ -63,7 +61,6 @@ beforeEach(() => {
     bar: { width: 240, height: 40 },
     marks: { width: 320, height: 40 },
     copy: { width: 160, height: 40 },
-    lookup: { width: 300, height: 132 },
   }
 })
 
@@ -126,13 +123,6 @@ function propsFor({ selection, stage }: Scene, over: Partial<SelectionToolsProps
     onNote: () => {},
     onCopy: () => {},
     onCite: () => {},
-    onLookUp: () => {},
-    lookUp: { kind: 'idle' },
-    onLookUpBack: () => {},
-    /* NOTHING CAN SPEAK, which is the port's own default and what every case in
-       this file is about the absence of: the pronunciation control belongs to
-       `LookUpFace`, and is asserted there. */
-    voice: NO_VOICE,
     onRemove: () => {},
     ...over,
   }
@@ -146,7 +136,6 @@ const drawn = () => ({
   bar: screen.queryByRole('button', { name: 'Write a note on this passage' }) !== null,
   marks: screen.queryByRole('button', { name: 'Highlight marks' }) !== null,
   copy: screen.queryByRole('button', { name: 'Copy the passage with its book, author and place' }) !== null,
-  lookup: screen.queryByRole('status') !== null,
 })
 
 const press = (name: string) => fireEvent.click(screen.getByRole('button', { name }))
@@ -170,7 +159,7 @@ const controls = () =>
 const plain = (name: string, title: string) => ({ name, title, pressed: null, lit: null })
 
 /** A reader's mark or a companion's, on the passage `sceneOn` selects. */
-const markOn = (kind: Mark['kind'], tint: MarkTint, style: MarkStyle): Mark => ({
+const markOn = (kind: Annotation['kind'], tint: MarkTint, style: MarkStyle): Annotation => ({
   id: 'mark-1',
   bookId: 'book-1',
   cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:4)',
@@ -191,14 +180,14 @@ describe('the selection popup, rendered', () => {
     render(<SelectionTools {...propsFor(sceneOn(LINE))} />)
 
     expect(toolbar().getAttribute('data-face')).toBe('bar')
-    expect(drawn()).toEqual({ bar: true, marks: false, copy: false, lookup: false })
+    expect(drawn()).toEqual({ bar: true, marks: false, copy: false })
     expect(placedAt()).toEqual({ top: '252px', left: '500px' })
   })
 
   /* ⚠️ **A PASSAGE WITH NO ANCHOR WAS OFFERED MARK AND NOTE** (2026-09-13 audit,
      #202). `useMarking` refuses to mark it — an empty CFI is not an anchor —
-     so both buttons did nothing when pressed. Hidden the way Look up is hidden
-     where nothing can answer it: a control that cannot act is not drawn. */
+     so both buttons did nothing when pressed. A control that cannot act is not
+     drawn. */
   it('offers neither Mark, its styles, nor a note for a passage that cannot be marked', () => {
     render(<SelectionTools {...propsFor(sceneOn(LINE), { canMark: false })} />)
 
@@ -208,7 +197,6 @@ describe('the selection popup, rendered', () => {
     /* What needs no anchor is still there. */
     expect(screen.getByRole('button', { name: 'Copy this passage' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'More ways to copy this passage' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Look up' })).toBeTruthy()
   })
 
   it('turns to one face at a time through its own controls', () => {
@@ -216,15 +204,15 @@ describe('the selection popup, rendered', () => {
 
     press('Choose a colour and a style')
     expect(toolbar().getAttribute('data-face')).toBe('marks')
-    expect(drawn()).toEqual({ bar: false, marks: true, copy: false, lookup: false })
+    expect(drawn()).toEqual({ bar: false, marks: true, copy: false })
 
     press('Back to the selection tools')
     expect(toolbar().getAttribute('data-face')).toBe('bar')
-    expect(drawn()).toEqual({ bar: true, marks: false, copy: false, lookup: false })
+    expect(drawn()).toEqual({ bar: true, marks: false, copy: false })
 
     press('More ways to copy this passage')
     expect(toolbar().getAttribute('data-face')).toBe('copy')
-    expect(drawn()).toEqual({ bar: false, marks: false, copy: true, lookup: false })
+    expect(drawn()).toEqual({ bar: false, marks: false, copy: true })
   })
 
   /* The chevron must stay under the pointer that pressed it: every face is a
@@ -275,109 +263,63 @@ describe('the selection popup, rendered', () => {
     expect(placedAt().left).toBe('368px')
   })
 
-  describe('with a lookup on', () => {
-    it('draws the lookup alone over the face the reader had, and hands that face back', () => {
-      const scene = sceneOn(LINE)
-      const onLookUpBack = vi.fn()
-      const { rerender } = render(<SelectionTools {...propsFor(scene, { onLookUpBack })} />)
-      press('Choose a colour and a style')
+  /* ⚠️ **A POPUP CAN CHANGE SIZE WITH NOTHING RE-RENDERING IT** — a face whose
+     font arrives late re-wraps — and it used to stay placed at the size it had
+     been. The popup is CENTRED on the selection, so its width decides its left
+     edge and a width that moves under it leaves it off-centre.
 
-      rerender(<SelectionTools {...propsFor(scene, { onLookUpBack, lookUp: { kind: 'asking', term: 'gams' } })} />)
-      expect(toolbar().getAttribute('data-face')).toBe('lookup')
-      expect(drawn()).toEqual({ bar: false, marks: false, copy: false, lookup: true })
-      expect(screen.getByRole('status').textContent).toContain('Looking…')
+     ⚠️ **THIS WAS ABOUT THE DELETED LOOKUP FACE'S HEIGHT**, which was as tall as
+     a language model's answer and was measured for exactly this reason. Every
+     face left is one row, so the height is the constant `POPUP_H` and what a
+     re-measure can still change is the width. The observer is the same one and
+     is still the only thing that can report either. */
+  describe('when it changes size on its own', () => {
+    it('is placed again', () => {
+      render(<SelectionTools {...propsFor(sceneOn(LINE))} />)
+      // Centred on the line: 500 is the line's own centre, whatever the width.
+      expect(placedAt()).toEqual({ top: '252px', left: '500px' })
 
-      /* Back belongs to App's lookup, not to this popup's face. */
-      press('Back to the selection tools')
-      expect(onLookUpBack).toHaveBeenCalledTimes(1)
-
-      rerender(<SelectionTools {...propsFor(scene, { onLookUpBack, lookUp: { kind: 'idle' } })} />)
-      expect(toolbar().getAttribute('data-face')).toBe('marks')
-      expect(drawn()).toEqual({ bar: false, marks: true, copy: false, lookup: false })
-    })
-
-    /* No bar was ever placed, so there is no edge to keep — it is centred. */
-    it('hangs a lookup opened with the selection above the line by its measured height, centred', () => {
-      render(<SelectionTools {...propsFor(sceneOn(LINE), { lookUp: { kind: 'ready', term: 'gams', text: 'Meetings of whaling ships.' } })} />)
-
-      expect(toolbar().getAttribute('data-face')).toBe('lookup')
-      // 300 − 8 − 132: placed as a 40px row it would sit at 252 and cover the line.
-      expect(placedAt()).toEqual({ top: '160px', left: '500px' })
-    })
-
-    it('rises as the answer grows it, from the bar’s edge, and ignores half a pixel', () => {
-      const scene = sceneOn(LINE)
-      const { rerender } = render(<SelectionTools {...propsFor(scene)} />)
-      const lookUp = (state: GlossState) => rerender(<SelectionTools {...propsFor(scene, { lookUp: state })} />)
-
-      sizes.lookup = { width: 300, height: 60 }
-      lookUp({ kind: 'asking', term: 'gams' })
-      // 300 − 8 − 60 = 232; 300 wide from the bar's edge at 380.
-      expect(placedAt()).toEqual({ top: '232px', left: '530px' })
-
-      sizes.lookup = { width: 300, height: 132 }
-      lookUp({ kind: 'ready', term: 'gams', text: 'Meetings of whaling ships.' })
-      expect(placedAt()).toEqual({ top: '160px', left: '530px' })
-
-      /* Exactly half a pixel is not a move: a sub-pixel rounding of the same
-         box must not re-place the popup on every render. */
-      sizes.lookup = { width: 300, height: 132.5 }
-      lookUp({ kind: 'ready', term: 'gams', text: 'Meetings of whaling ships.' })
-      expect(placedAt().top).toBe('160px')
-
-      sizes.lookup = { width: 300, height: 133 }
-      lookUp({ kind: 'ready', term: 'gams', text: 'Meetings of whaling ships.' })
-      expect(placedAt().top).toBe('159px')
-    })
-
-    /* ⚠️ A POPUP CAN CHANGE SIZE WITH NOTHING RE-RENDERING IT — a face whose font
-       arrives late re-wraps the answer — and it used to stay placed at the size
-       it had been. */
-    it('is placed again when it changes size on its own', () => {
-      render(<SelectionTools {...propsFor(sceneOn(LINE), { lookUp: { kind: 'ready', term: 'gams', text: 'Meetings of whaling ships.' } })} />)
-      expect(placedAt().top).toBe('160px')
-
-      sizes.lookup = { width: 300, height: 200 }
+      /* Wider than the room can centre: 990 on a 1000 stage leaves 5px each
+         side, inside the 8px inset, so `place` PINS the leading edge and the
+         popup is no longer centred on the line. */
+      sizes.bar = { width: 990, height: 40 }
       const popup = watching.filter(({ target }) => target === toolbar())
       expect(popup.length, 'nothing is watching the popup itself').toBeGreaterThan(0)
       act(() => {
         for (const one of popup) one.changed()
       })
 
-      // 300 − 8 − 200.
-      expect(placedAt().top).toBe('92px')
+      // Pinned at the 8px inset, then turned back into a centre: 8 + 990 / 2.
+      expect(placedAt()).toEqual({ top: '252px', left: '503px' })
     })
 
     /* Every time, not only the first: a signal that re-renders once and then
        carries the same value re-renders nothing the second time it is sent. */
-    it('is placed again each time it changes size on its own, not only the first', () => {
-      render(<SelectionTools {...propsFor(sceneOn(LINE), { lookUp: { kind: 'ready', term: 'gams', text: 'Meetings of whaling ships.' } })} />)
-      const resized = (height: number) => {
-        sizes.lookup = { width: 300, height }
+    it('is placed again each time, not only the first', () => {
+      render(<SelectionTools {...propsFor(sceneOn(LINE))} />)
+      const resized = (width: number) => {
+        sizes.bar = { width, height: 40 }
         act(() => {
           for (const one of watching.filter(({ target }) => target === toolbar())) one.changed()
         })
       }
 
-      resized(200)
-      expect(placedAt().top).toBe('92px')
-      resized(100)
-      // 300 − 8 − 100.
-      expect(placedAt().top).toBe('192px')
+      resized(990)
+      expect(placedAt().left).toBe('503px')
+      resized(600)
+      // Still centred on the line — 600 fits either side of 500 inside the stage.
+      expect(placedAt().left).toBe('500px')
+      resized(1000)
+      // Pinned again, one step further out: 8 + 1000 / 2.
+      expect(placedAt().left).toBe('508px')
     })
 
-    /* `place` can move a surface and cannot shrink one, so an answer taller than
-       the stage ran on past its foot. The face is told its room here; that it
-       scrolls inside it is the stylesheet's half, asserted in
-       `screens/Reader.layout.test.ts` beside the lookup face's other rules. */
+    /* `place` can move a surface and cannot shrink one, so a face bigger than
+       the room it is in ran on past the edge. The face is told its room here;
+       that it scrolls inside it is the stylesheet's half, asserted in
+       `screens/Reader.layout.test.ts`. */
     it('is bounded by the room it is placed in', () => {
-      render(
-        <SelectionTools
-          {...propsFor(sceneOn(rect(400, 100, 200, 20), rect(0, 0, 1000, 200)), {
-            lookUp: { kind: 'ready', term: 'gams', text: 'Meetings of whaling ships.' },
-          })}
-        />,
-      )
+      render(<SelectionTools {...propsFor(sceneOn(rect(400, 100, 200, 20), rect(0, 0, 1000, 200)))} />)
 
       // A 200-tall, 1000-wide stage, less the 8px inset at each edge.
       expect(toolbar().style.maxHeight).toBe('184px')
@@ -416,16 +358,6 @@ describe('the selection popup, rendered', () => {
       render(<SelectionTools {...propsFor(scene(), { column: narrow })} />)
       press('More ways to copy this passage')
       expect(toolbar().getAttribute('data-face')).toBe('copy')
-      expect(bound()).toEqual(room)
-    })
-
-    it('bounds the lookup face', () => {
-      render(
-        <SelectionTools
-          {...propsFor(scene(), { column: narrow, lookUp: { kind: 'ready', term: 'gams', text: 'Meetings of whaling ships.' } })}
-        />,
-      )
-      expect(toolbar().getAttribute('data-face')).toBe('lookup')
       expect(bound()).toEqual(room)
     })
   })
@@ -470,21 +402,6 @@ describe('the selection popup, rendered', () => {
       expect(focused()).toBe('Choose a colour and a style')
     })
 
-    it('does the same for a lookup, which App opens and puts away', () => {
-      const scene = sceneOn(LINE)
-      const { rerender } = render(<SelectionTools {...propsFor(scene)} />)
-      const lookUp = screen.getByRole('button', { name: 'Look up' })
-      lookUp.focus()
-
-      fireEvent.click(lookUp)
-      rerender(<SelectionTools {...propsFor(scene, { lookUp: { kind: 'asking', term: 'gams' } })} />)
-      expect(focused()).toBe('Back to the selection tools')
-
-      fireEvent.click(document.activeElement as HTMLElement)
-      rerender(<SelectionTools {...propsFor(scene, { lookUp: { kind: 'idle' } })} />)
-      expect(focused()).toBe('Look up')
-    })
-
     /* A pointer never puts focus in the popup — its pointerdown is cancelled to
        keep the book's selection — so a press that began outside moves nothing. */
     it('leaves focus where it was for a press that did not start inside the popup', () => {
@@ -516,57 +433,42 @@ describe('the selection popup, rendered', () => {
       expect(document.activeElement).toBe(document.body)
     })
 
-    /* Pressing Look up asks App, and App may answer with no lookup at all. The
-       face the press was made from is still the face on screen, so focus stays
-       on the control that was pressed rather than jumping to the first one. */
+    /* A PRESS THAT DOES NOT TURN THE POPUP LEAVES FOCUS ALONE. Copy acts on the
+       passage and stays on the bar, so the control that was pressed is still
+       there and focus has no reason to move.
+
+       ⚠️ **THIS WAS WRITTEN ABOUT LOOK UP**, whose press asked App and could be
+       answered with no lookup at all — the same shape, on a control that is
+       deleted. Copy is the one that is left, and it is the stronger case: Look
+       up called `turnFrom` first, so the effect ran and decided to do nothing,
+       while Copy never sets the ref at all. */
     it('leaves focus on a control whose press did not turn the popup', () => {
       const scene = sceneOn(LINE)
       const { rerender } = render(<SelectionTools {...propsFor(scene)} />)
-      const lookUp = screen.getByRole('button', { name: 'Look up' })
-      lookUp.focus()
+      const copy = screen.getByRole('button', { name: 'Copy this passage' })
+      copy.focus()
 
-      fireEvent.click(lookUp)
+      fireEvent.click(copy)
       rerender(<SelectionTools {...propsFor(scene)} />)
 
       expect(toolbar().getAttribute('data-face')).toBe('bar')
-      expect(focused()).toBe('Look up')
-    })
-
-    /* A lookup arrives a render after the press. A reader who moved focus out of
-       the popup in between did it on purpose, and the answer arriving must not
-       take it back. */
-    it('leaves focus with a reader who moved it out of the popup before the face arrived', () => {
-      const field = document.createElement('input')
-      document.body.append(field)
-      try {
-        const scene = sceneOn(LINE)
-        const { rerender } = render(<SelectionTools {...propsFor(scene)} />)
-        const lookUp = screen.getByRole('button', { name: 'Look up' })
-        lookUp.focus()
-        fireEvent.click(lookUp)
-        field.focus()
-
-        rerender(<SelectionTools {...propsFor(scene, { lookUp: { kind: 'asking', term: 'gams' } })} />)
-
-        expect(toolbar().getAttribute('data-face')).toBe('lookup')
-        expect(document.activeElement).toBe(field)
-      } finally {
-        field.remove()
-      }
+      expect(focused()).toBe('Copy this passage')
     })
 
     /* `document.activeElement` is null for a document with no element to
        report, and that is not a reader who moved on. */
     it('carries focus in even when the document names no active element', () => {
-      const scene = sceneOn(LINE)
-      const { rerender } = render(<SelectionTools {...propsFor(scene)} />)
-      const lookUp = screen.getByRole('button', { name: 'Look up' })
-      lookUp.focus()
-      fireEvent.click(lookUp)
+      render(<SelectionTools {...propsFor(sceneOn(LINE))} />)
+      const chevron = screen.getByRole('button', { name: 'Choose a colour and a style' })
+      chevron.focus()
 
-      const nothing = vi.spyOn(document, 'activeElement', 'get').mockReturnValue(null)
+      const nothing = vi.spyOn(document, 'activeElement', 'get')
       try {
-        rerender(<SelectionTools {...propsFor(scene, { lookUp: { kind: 'asking', term: 'gams' } })} />)
+        /* Live for `turnFrom`'s own read, which has to find the chevron INSIDE
+           the popup or nothing is turned at all, and null for the effect's. */
+        nothing.mockReturnValueOnce(chevron)
+        nothing.mockReturnValue(null)
+        fireEvent.click(chevron)
       } finally {
         nothing.mockRestore()
       }
@@ -591,22 +493,23 @@ describe('the selection popup, rendered', () => {
       }
     })
 
-    /* The popup can vanish in the very render that turns it — here the column
-       moves off the line as the lookup opens. There is no face to put focus in,
-       and when the popup comes back it comes back without a crash. */
+    /* The popup can vanish in the very render that turns it — the column moves
+       off the line as the face changes. There is no face to put focus in, and
+       when the popup comes back it comes back without a crash. */
     it('turns nothing when the popup goes away in the same render', () => {
       const scene = sceneOn(LINE)
       const { rerender } = render(<SelectionTools {...propsFor(scene)} />)
-      const lookUp = screen.getByRole('button', { name: 'Look up' })
-      lookUp.focus()
-      fireEvent.click(lookUp)
+      const chevron = screen.getByRole('button', { name: 'Choose a colour and a style' })
+      chevron.focus()
 
-      const asking: GlossState = { kind: 'asking', term: 'gams' }
-      rerender(<SelectionTools {...propsFor(scene, { lookUp: asking, column: { left: 700, width: 300 } })} />)
+      act(() => {
+        fireEvent.click(chevron)
+        rerender(<SelectionTools {...propsFor(scene, { column: { left: 700, width: 300 } })} />)
+      })
       expect(screen.queryByRole('toolbar')).toBeNull()
 
-      rerender(<SelectionTools {...propsFor(scene, { lookUp: asking })} />)
-      expect(toolbar().getAttribute('data-face')).toBe('lookup')
+      rerender(<SelectionTools {...propsFor(scene)} />)
+      expect(toolbar().getAttribute('data-face')).toBe('marks')
     })
   })
 
@@ -655,13 +558,12 @@ describe('the selection popup, rendered', () => {
      so each face's controls are pinned exactly: which, in what order, and what a
      screen reader hears for each. */
   describe('what it offers', () => {
-    it('offers an unmarked passage exactly Mark, its styles, Note, Copy, the other ways to copy and Look up', () => {
+    it('offers an unmarked passage exactly Mark, its styles, Note, Copy and the other ways to copy', () => {
       const onApply = vi.fn()
       const onNote = vi.fn()
       const onCopy = vi.fn()
       const onCite = vi.fn()
-      const onLookUp = vi.fn()
-      render(<SelectionTools {...propsFor(sceneOn(LINE), { onApply, onNote, onCopy, onCite, onLookUp })} />)
+      render(<SelectionTools {...propsFor(sceneOn(LINE), { onApply, onNote, onCopy, onCite })} />)
 
       expect(controls()).toEqual([
         plain('Mark this passage — highlight, yellow', 'Highlight · Yellow'),
@@ -669,7 +571,6 @@ describe('the selection popup, rendered', () => {
         plain('Write a note on this passage', 'Note'),
         plain('Copy this passage', 'Copy'),
         plain('More ways to copy this passage', 'Copy options'),
-        plain('Look up', 'Look up'),
       ])
       /* The glyph is drawn in the tint a press lays down. */
       expect(screen.getByRole('button', { name: 'Mark this passage — highlight, yellow' }).style.color).toBe(
@@ -679,10 +580,9 @@ describe('the selection popup, rendered', () => {
       press('Mark this passage — highlight, yellow')
       press('Write a note on this passage')
       press('Copy this passage')
-      press('Look up')
       /* A press on the bar is a decision, so Mark does not keep the selection. */
       expect(onApply.mock.calls).toEqual([[{ tint: 'yellow', style: 'fill' }, false]])
-      expect([onNote, onCopy, onCite, onLookUp].map((one) => one.mock.calls.length)).toEqual([1, 1, 0, 1])
+      expect([onNote, onCopy, onCite].map((one) => one.mock.calls.length)).toEqual([1, 1, 0])
 
       press('More ways to copy this passage')
       expect(controls()).toEqual([
@@ -695,12 +595,12 @@ describe('the selection popup, rendered', () => {
       expect([onCopy, onCite].map((one) => one.mock.calls.length)).toEqual([2, 1])
     })
 
-    it('offers a marked passage its own mark to repeat and a way to remove it, and no Look up where nothing can answer', () => {
+    it('offers a marked passage its own mark to repeat and a way to remove it', () => {
       const onApply = vi.fn()
       const onRemove = vi.fn()
       render(
         <SelectionTools
-          {...propsFor(sceneOn(LINE), { marked: markOn('highlight', 'green', 'underline'), onLookUp: null, onApply, onRemove })}
+          {...propsFor(sceneOn(LINE), { marked: markOn('highlight', 'green', 'underline'), onApply, onRemove })}
         />,
       )
 
@@ -746,27 +646,9 @@ describe('the selection popup, rendered', () => {
       ])
     })
 
-    /* The wave is the companion's. Adopting a companion mark's appearance would
-       lay down a reader-owned wave — the reservation leaking through the one
-       surface meant to keep it. */
-    it('repeats the last appearance over a companion’s mark rather than adopting its reserved wave', () => {
-      const onApply = vi.fn()
-      render(
-        <SelectionTools
-          {...propsFor(sceneOn(LINE), {
-            marked: markOn('companion', 'green', 'wave'),
-            appearance: { tint: 'purple', style: 'underline' },
-            onApply,
-          })}
-        />,
-      )
-
-      press('Mark this passage — underline, purple')
-      expect(onApply.mock.calls).toEqual([[{ tint: 'purple', style: 'underline' }, false]])
-    })
-
-    /* No reader can choose a wave now, but the appearance handed down is typed
-       for one, and a control is named for what it would do. */
+    /* No reader can choose a wave, but the appearance handed down is typed for
+       one — `MARK_STYLES` still admits a stored one — and a control is named
+       for what it would do. */
     it('names the wave, when that is the appearance a press would repeat', () => {
       render(<SelectionTools {...propsFor(sceneOn(LINE), { appearance: { tint: 'purple', style: 'wave' } })} />)
       expect(controls()[0]).toEqual(plain('Mark this passage — wave, purple', 'Wave · Purple'))

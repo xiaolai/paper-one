@@ -16,13 +16,13 @@ const contributed: PaneContribution[] = [
 
 describe('shownPane', () => {
   it('names a kernel pane by the registry title, a contributed one by its label', () => {
-    expect(shownPane('marginalia', contributed, 'companion')).toEqual({ id: 'marginalia', title: 'Marginalia', contribution: null })
-    expect(shownPane('example:pane', contributed, 'companion')).toEqual({ id: 'example:pane', title: 'Example', contribution: contributed[0] })
+    expect(shownPane('marginalia', contributed, 'cards')).toEqual({ id: 'marginalia', title: 'Marginalia', contribution: null })
+    expect(shownPane('example:pane', contributed, 'cards')).toEqual({ id: 'example:pane', title: 'Example', contribution: contributed[0] })
   })
 
   it('shows the fallback for a contributed id nobody composed — a remembered pane from a capability that is gone', () => {
     expect(shownPane('gone:pane', contributed, 'library')).toEqual({ id: 'library', title: 'Library', contribution: null })
-    expect(shownPane('example:pane', [], 'companion').id).toBe('companion')
+    expect(shownPane('example:pane', [], 'cards').id).toBe('cards')
   })
 
   /* A FALLBACK IS RESOLVED AGAINST THE COMPOSITION TOO. Handed a contributed id
@@ -214,7 +214,6 @@ describe('the kernel registry keeps its shortcuts', () => {
       marginalia: 'Marginalia',
       search: 'Search',
       cards: 'Cards',
-      companion: 'Companion',
       library: 'Library',
       settings: 'Settings',
       dev: 'Developer',
@@ -224,9 +223,9 @@ describe('the kernel registry keeps its shortcuts', () => {
 
 /**
  * WHICH PANELS A SCREEN OFFERS, in registry order — `state`'s rule applied to
- * the registry. Companion and Cards are unfinished (`UNFINISHED_PANE_IDS`) and
- * Developer is developer-only, so none of the three is offered to a reader who
- * has not pressed the chord.
+ * the registry. Cards is unfinished (`UNFINISHED_PANE_IDS`) and Developer is
+ * developer-only, so neither is offered to a reader who has not pressed the
+ * chord.
  */
 describe('panesFor', () => {
   const ids = (panes: readonly { id: string }[]) => panes.map((pane) => pane.id)
@@ -236,13 +235,12 @@ describe('panesFor', () => {
     expect(ids(panesFor('library'))).toEqual(['marginalia', 'library', 'settings'])
   })
 
-  it('offers the unfinished panels and Developer under developer options, less any hidden', () => {
+  it('offers the unfinished panel and Developer under developer options, less any hidden', () => {
     expect(ids(panesFor('reader', { developer: true }))).toEqual([
       'toc',
       'marginalia',
       'search',
       'cards',
-      'companion',
       'settings',
       'dev',
     ])
@@ -250,7 +248,6 @@ describe('panesFor', () => {
       'toc',
       'marginalia',
       'search',
-      'companion',
       'settings',
       'dev',
     ])

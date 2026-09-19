@@ -45,11 +45,6 @@ export type AccelAction =
   | { readonly kind: 'closePane' }
   | { readonly kind: 'jumpBack' }
   | { readonly kind: 'jumpForward' }
-  /**
-   * Look up the selection — ⌃⌘D on macOS, Ctrl+Shift+D elsewhere (phase 17,
-   * L4). See `bind` for why the two platforms need two chords.
-   */
-  | { readonly kind: 'lookUp' }
   /** Ctrl+Q, where there is no application menu to own it — see the map. */
   | { readonly kind: 'quit' }
   /**
@@ -114,13 +109,6 @@ export interface AccelContext {
    */
   readonly developer?: boolean
   readonly hiddenPanes?: readonly string[]
-  /**
-   * Whether Look up has a selection and something to act with — `LookUp.press`
-   * being non-null, which is also what decides whether the palette offers the
-   * row. Absent is false: the key is left to the platform, which on macOS is
-   * the system's own Look Up.
-   */
-  readonly canLookUp?: boolean
   /**
    * Whether the press a REPEAT belongs to was taken — resolved to an action
    * rather than left to the platform. Read only on a repeat; absent is false.
@@ -276,25 +264,12 @@ function bind(event: Omit<AccelEvent, 'repeat'>, context: AccelContext): AccelAc
     return { kind: 'toggleDeveloper' }
   }
 
-  /* ⌃⌘D — LOOK UP — AND THE SAME TRAP AS THE CHORD ABOVE: `d` is ⌘D below, so
-   * this is matched first and exclusively, on the physical key.
-   *
-   * TWO SPELLINGS, BECAUSE THE PLATFORMS DISAGREE ABOUT WHAT CONTROL IS. On
-   * macOS ⌃⌘D is the system's own Look Up chord, which a Mac reader already
-   * knows — binding the same meaning to it is the point. Elsewhere the
-   * accelerator IS Control, so "Control and the accelerator" is one key and the
-   * chord would collapse into ⌘D; Ctrl+Alt+D is already the developer chord
-   * there. Shift is the free modifier, and `comboFor` prints it as such.
-   *
-   * WITH NOTHING TO LOOK UP THE KEY IS LEFT ALONE, which on macOS hands it back
-   * to the platform's Look Up rather than swallowing it to do nothing.
-   *
-   * AND NO THIRD MODIFIER: ⇧⌃⌘D on a Mac looked up too, until the 2026-09-13
-   * audit. Off a Mac Control is the accelerator, which `App` has checked — and
-   * Meta is the stray, which Ctrl+Shift+⊞+D carried unread until round 3. */
-  if (event.code === DEVELOPER_CODE && !alt && (mac ? control && !shift : shift && !stray)) {
-    return context.canLookUp === true ? { kind: 'lookUp' } : null
-  }
+  /* ⚠️ **⌃⌘D — LOOK UP — WAS BOUND HERE, AND THE KEY IS FREE AGAIN.** It ran
+   * the same press the popup's button and the palette row ran; all three are
+   * deleted with the AI features. On macOS that hands ⌃⌘D back to the system's
+   * own Look Up, which is what a reader who presses it is expecting. The
+   * developer chord above still has to be matched FIRST and exclusively — `d`
+   * is ⌘D below — which is why that note stays where it is. */
 
   /* ⚠️ **ALTGR IS CONTROL AND ALT OFF A MAC** (2026-09-14). Chromium on Windows —
    * and so WebView2 — reports AltGr as `ctrlKey` and `altKey` together, with

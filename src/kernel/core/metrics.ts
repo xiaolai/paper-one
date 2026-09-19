@@ -790,27 +790,6 @@ export const SHEET = { max: 640, inset: 48, top: 96, maxHeight: 560 } as const
 export const FOOTNOTE = { maxWidth: 420, maxHeight: 320 } as const
 
 /**
- * How wide the selection popup is while it is showing a lookup (phase 17, L1).
- *
- * NARROWER THAN A FOOTNOTE, for the footnote's own reason taken one step
- * further: a note is read and dismissed over the text it came from, and a
- * definition hangs directly over the LINE it defines, one gap away. Minus the
- * back control and the padding, a line of this surface holds roughly
- * forty-five characters at the interface's 13px — a definition's two sentences
- * read in two or three short lines rather than one that runs across the page it
- * is covering.
- *
- * ⚠️ **IT IS THE SURFACE'S WIDTH, AND THIS SAID IT WAS THE FACE'S CEILING.**
- * It was spent as `max-width` on a `max-content` face, so it bounded the answer
- * and every shorter state shrank inside it — which is how a popup came to be
- * 135px wide saying "Looking…" and 374px a second later. It is a `width` on the
- * popup now, so it decides the surface in every state; see
- * `.popup[data-face='lookup']`. The character count above was also written as
- * if the whole number reached the text, which it never did.
- */
-export const LOOKUP_MEASURE = 360
-
-/**
  * A menu's narrowest. Wide enough that "Remove from library" — the longest
  * thing any menu in the app says — does not wrap, which is what actually
  * decides it.
@@ -960,7 +939,7 @@ export const TRACK_W = 3
 
 /**
  * A KIND RULE: the coloured edge that says what a thing is rather than how much
- * of it there is — a margin mark's tint, the companion's amber provenance.
+ * of it there is — a margin mark's tint.
  *
  * 2px, and the sibling above is why it is not `TRACK_W`. A track is a QUANTITY
  * and has to read as a bar at any fill; this is a LABEL and only has to be seen
@@ -1261,7 +1240,6 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--sheet-max-h': px(SHEET.maxHeight),
     '--footnote-max-w': px(FOOTNOTE.maxWidth),
     '--footnote-max-h': px(FOOTNOTE.maxHeight),
-    '--lookup-measure': px(LOOKUP_MEASURE),
     '--menu-min-w': px(MENU_MIN_W),
     '--menu-scroll-h': px(MENU_SCROLL_H),
     '--tag-editor-w': px(TAG_EDITOR_W),

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { BUNDLED_FACES, faceById } from '../core/typefaces'
-import { KERNEL_SETTINGS, createSettingsStore, readKernelPreferences } from '../core/settings'
+import { createSettingsStore, readKernelPreferences } from '../core/settings'
 import { bootState, contributionFits, defaultPaneFor, initialState, paneFits, preferencesOf, readerTakesInput, reducer, screenFor, type AppState } from './state'
 import { paneOffered } from '../core/uiTypes'
 
@@ -20,75 +20,6 @@ import { paneOffered } from '../core/uiTypes'
 
 const step = (state: AppState, idx: number): AppState =>
   reducer(state, { type: 'setStepIdx', idx })
-
-/** WI-17.5 — what Look up writes its definitions in, as a durable preference. */
-describe('the answer language', () => {
-  it('starts as the reader’s own language', () => {
-    expect(initialState.lookUpLanguage).toBe('reader')
-  })
-
-  it('stores a choice, and is the same state when nothing changed', () => {
-    const chinese = reducer(initialState, { type: 'setLookUpLanguage', choice: 'zh-Hans' })
-
-    expect(chinese.lookUpLanguage).toBe('zh-Hans')
-    expect(reducer(chinese, { type: 'setLookUpLanguage', choice: 'zh-Hans' })).toBe(chinese)
-  })
-
-  it('survives a launch through the settings store', () => {
-    const map = new Map<string, string>()
-    const storage = { getItem: (key: string) => map.get(key) ?? null, setItem: (key: string, value: string) => void map.set(key, value) }
-    createSettingsStore({ storage }).set(KERNEL_SETTINGS.lookUpLanguage, 'both')
-
-    const relaunched = bootState('', readKernelPreferences(createSettingsStore({ storage })))
-
-    expect(relaunched.lookUpLanguage).toBe('both')
-    expect(preferencesOf(relaunched).lookUpLanguage).toBe('both')
-  })
-})
-
-/**
- * "Choose one" LANDS ON ITS SECTION (phase 17, L3). A request, with a nonce so
- * asking twice is two requests, and a pending flag so a remount of the panel
- * does not answer it again.
- */
-describe('revealing a settings section', () => {
-  it('opens Settings and files a pending request for the section', () => {
-    const next = reducer({ ...initialState, screen: 'reader', pane: null }, { type: 'revealSettings', section: 'inference:models' })
-
-    expect(next.pane).toBe('settings')
-    expect(next.settingsReveal).toEqual({ section: 'inference:models', nonce: 1, pending: true })
-  })
-
-  it('numbers each request after the last, whether or not that one was answered', () => {
-    const first = reducer(initialState, { type: 'revealSettings', section: 'inference:models' })
-    const answered = reducer(first, { type: 'settingsRevealed', nonce: 1 })
-    const second = reducer(answered, { type: 'revealSettings', section: 'inference:models' })
-
-    expect(second.settingsReveal).toEqual({ section: 'inference:models', nonce: 2, pending: true })
-  })
-
-  it('marks the request answered — only the one the report names', () => {
-    const first = reducer(initialState, { type: 'revealSettings', section: 'a:one' })
-    const second = reducer(first, { type: 'revealSettings', section: 'a:two' })
-
-    /* A late report about the first must not answer the second. */
-    expect(reducer(second, { type: 'settingsRevealed', nonce: 1 })).toBe(second)
-    expect(reducer(second, { type: 'settingsRevealed', nonce: 2 }).settingsReveal).toEqual({
-      section: 'a:two',
-      nonce: 2,
-      pending: false,
-    })
-  })
-
-  it('is the same state for a report with nothing pending', () => {
-    expect(reducer(initialState, { type: 'settingsRevealed', nonce: 1 })).toBe(initialState)
-    const answered = reducer(reducer(initialState, { type: 'revealSettings', section: 'a:one' }), {
-      type: 'settingsRevealed',
-      nonce: 1,
-    })
-    expect(reducer(answered, { type: 'settingsRevealed', nonce: 1 })).toBe(answered)
-  })
-})
 
 describe('setStepIdx', () => {
   it('stores a step in range', () => {
@@ -364,12 +295,12 @@ describe('the pane follows the screen', () => {
      * show, so the panel could only ever say 'open a book first'. Notes
      * browses every book's marks, which is why it stays.
      *
-     * ⚠️ `companion` AND `cards` NOW NEED A SECOND THING as well as a book —
-     * they are unfinished, so they need a reader who asked to see them. The
-     * screen rule below is asked with developer options ON, which is the only
-     * state in which the screen rule is the one that decides. */
+     * ⚠️ `cards` NEEDS A SECOND THING as well as a book — it is unfinished, so
+     * it needs a reader who asked to see it. The screen rule below is asked
+     * with developer options ON, which is the only state in which the screen
+     * rule is the one that decides. */
     const dev = { developer: true }
-    for (const pane of ['toc', 'search', 'companion'] as const) {
+    for (const pane of ['toc', 'search'] as const) {
       expect(paneFits('reader', pane, dev)).toBe(true)
       expect(paneFits('library', pane, dev)).toBe(false)
     }
@@ -427,30 +358,29 @@ describe('the pane follows the screen', () => {
    */
   describe('the unfinished panels', () => {
     it('fit nowhere until developer options are on', () => {
-      for (const pane of ['companion', 'cards'] as const) {
-        expect(paneFits('reader', pane)).toBe(false)
-        expect(paneFits('library', pane)).toBe(false)
-      }
+      expect(paneFits('reader', 'cards')).toBe(false)
+      expect(paneFits('library', 'cards')).toBe(false)
     })
 
     it('fit their own screens once they are', () => {
-      expect(paneFits('reader', 'companion', { developer: true })).toBe(true)
       expect(paneFits('reader', 'cards', { developer: true })).toBe(true)
       expect(paneFits('library', 'cards', { developer: true })).toBe(true)
     })
 
     /* THE SCREEN RULE STILL APPLIES. Developer options reveal a panel; they do
-       not put a book-only panel on the shelf. */
+       not put a book-only panel on the shelf. Asked on a FINISHED book-only
+       panel, because the list of unfinished ones no longer holds one — which is
+       the point: the two rules are independent, and this is the half that says
+       so. */
     it('still obey the screen they belong to', () => {
-      expect(paneFits('library', 'companion', { developer: true })).toBe(false)
+      expect(paneFits('library', 'toc', { developer: true })).toBe(false)
     })
 
     /* Hiding one is only meaningful under developer options, and turning the
        master switch off gives the plain app back whatever was ticked. */
     it('can be hidden individually while developer options are on', () => {
-      const hidden = { developer: true, hiddenPanes: ['cards'] }
-      expect(paneFits('reader', 'cards', hidden)).toBe(false)
-      expect(paneFits('reader', 'companion', hidden)).toBe(true)
+      expect(paneFits('reader', 'cards', { developer: true, hiddenPanes: ['cards'] })).toBe(false)
+      expect(paneFits('reader', 'cards', { developer: true, hiddenPanes: ['dev'] })).toBe(true)
     })
 
     /* The Developer panel is the mirror image: it exists only under the switch,
@@ -493,7 +423,7 @@ describe('the pane follows the screen', () => {
        something the reader is no longer offered. */
     it('do not leave an unreachable panel remembered', () => {
       const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
-      const opened = reducer(on, { type: 'openPane', pane: 'companion' })
+      const opened = reducer(on, { type: 'openPane', pane: 'cards' })
       const off = reducer(opened, { type: 'toggleDeveloper' })
       expect(off.lastPane).toBe('toc')
     })
@@ -516,7 +446,7 @@ describe('the pane follows the screen', () => {
     it('an unofferable request leaves the remembered panel alone rather than overwriting it', () => {
       const reading = at({ screen: 'reader', pane: 'marginalia', lastPane: 'marginalia' })
       /* The click the titlebar used to offer every reader. */
-      const asked = reducer(reading, { type: 'openPane', pane: 'companion' })
+      const asked = reducer(reading, { type: 'openPane', pane: 'cards' })
       expect(asked.pane).toBe('toc') // the request cannot be honoured...
       expect(asked.lastPane).toBe('marginalia') // ...and must not cost the memory
 
@@ -531,7 +461,7 @@ describe('the pane follows the screen', () => {
       expect(reducer(reading, { type: 'openPane', pane: 'marginalia' }).lastPane).toBe('marginalia')
       /* And under the chord, so is an unfinished one — it is offered then. */
       const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
-      expect(reducer(on, { type: 'openPane', pane: 'companion' }).lastPane).toBe('companion')
+      expect(reducer(on, { type: 'openPane', pane: 'cards' }).lastPane).toBe('cards')
     })
 
     it('hide and show one panel at a time', () => {
@@ -539,7 +469,9 @@ describe('the pane follows the screen', () => {
       const hidden = reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: true })
       expect(hidden.hiddenPanes).toEqual(['cards'])
       expect(paneFits('reader', 'cards', hidden)).toBe(false)
-      expect(paneFits('reader', 'companion', hidden)).toBe(true)
+      /* AND ONLY THE ONE NAMED. Developer is not unfinished, so hiding Cards
+         must leave it exactly where it was. */
+      expect(paneFits('reader', 'dev', hidden)).toBe(true)
 
       const shown = reducer(hidden, { type: 'setPaneHidden', pane: 'cards', hidden: false })
       expect(shown.hiddenPanes).toEqual([])
@@ -623,7 +555,6 @@ describe('the pane follows the screen', () => {
   /* NON-VACUITY: the check must be able to fail. An unfinished panel is exactly
      what it is guarding against, so it has to answer false for one. */
   it('would notice a default that is not offered', () => {
-    expect(paneOffered('companion', false)).toBe(false)
     expect(paneOffered('cards', false)).toBe(false)
   })
 
@@ -638,7 +569,7 @@ describe('the pane follows the screen', () => {
   })
 
   it('moves off a book-only panel on the way to the library', () => {
-    const next = reducer(at({ screen: 'reader', pane: 'companion' }), {
+    const next = reducer(at({ screen: 'reader', pane: 'toc' }), {
       type: 'goScreen',
       screen: 'library',
     })
@@ -682,12 +613,12 @@ describe('the pane follows the screen', () => {
    * open", and asking it about a null pane opened one on every screen change —
    * the same conflation as a pane that shuts itself, from the other side. */
   it('does not open a pane the reader had closed', () => {
-    const shut = at({ screen: 'reader', pane: null, lastPane: 'companion' })
+    const shut = at({ screen: 'reader', pane: null, lastPane: 'toc' })
     expect(reducer(shut, { type: 'goScreen', screen: 'library' }).pane).toBeNull()
   })
 
   it('reopens a fitting panel when the toggle is used on the library', () => {
-    const shut = at({ screen: 'library', pane: null, lastPane: 'companion' })
+    const shut = at({ screen: 'library', pane: null, lastPane: 'toc' })
     expect(reducer(shut, { type: 'togglePane' }).pane).toBe('library')
   })
 
@@ -866,7 +797,6 @@ describe('bootState with remembered preferences', () => {
       },
       /* WI-17.5, and NOT the default `reader`, for the reason the fifteen above
          give. */
-      lookUpLanguage: 'both' as const,
     }
     expect(preferencesOf(bootState('', remembered))).toEqual(remembered)
   })

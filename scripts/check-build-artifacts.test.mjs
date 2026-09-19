@@ -54,7 +54,6 @@ const BUILT = [
   { path: 'bin/paper.mjs', by: 'pnpm build:cli' },
   { path: '.types/app.tsbuildinfo', by: 'pnpm typecheck' },
   { path: 'vendor/pdfjs/pdf.worker.mjs', by: 'scripts/sync-pdfjs-assets.mjs' },
-  { path: 'vendor/inference/current/runtime.manifest.json', by: 'scripts/sync-inference-runtime.mjs' },
   { path: 'src-tauri/target/debug/paper', by: 'cargo' },
   /* THE TWO ASSET DIRECTORIES, which are the same defect on two platforms —
      the frontend dist and every `bundle.resources` entry, copied in for

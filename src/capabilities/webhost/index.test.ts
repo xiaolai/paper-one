@@ -5,11 +5,12 @@ import type { CapabilityContext, Disposable, ServiceContribution } from '../../k
  * ⚠️ **THE ONE CAPABILITY OF THE THREE WITH NO TEST AT ALL, AND THE ONE THAT
  * STILL HAD THE DEFECT THE OTHER TWO WERE CONVERTED TO AVOID.**
  *
- * `renderSlot.test.ts` records the shape: with two live compositions "the
- * second overwrote the first, and then stopping the SECOND…". `inference` and
- * `companion` were moved onto `createRenderSlot` because of it; `webhost` was
- * not, and its `stop` closure read the module-level `pump` rather than the one
- * its own lifetime created. Tearing down an outgoing composition therefore
+ * The shape: with two live compositions the second overwrote the first, and
+ * then stopping the SECOND cleared the slot while the first was still running.
+ * `inference` and `companion` were moved onto a `core/renderSlot.ts` because of
+ * it — that module is deleted now, with them — and `webhost` was never
+ * converted, so its `stop` closure read the module-level `pump` rather than the
+ * one its own lifetime created. Tearing down an outgoing composition therefore
  * stopped the INCOMING one's pump — after which every connected browser had its
  * frames drained by nothing, silently, because a stopped pump is exactly as
  * quiet as an idle one — and left its own pump running for ever, because

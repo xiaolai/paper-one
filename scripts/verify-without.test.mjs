@@ -1,10 +1,9 @@
-import { spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { COPY_EXCLUDE, COPY_STEPS, DELETED_ENV, copyTree, digestTree, parseArgs, verifyWithout } from './verify-without.mjs'
+import { COPY_EXCLUDE, COPY_STEPS, DELETED_ENV, copyTree, digestTree, parseArgs, removableCapabilities, verifyWithout } from './verify-without.mjs'
 
 /**
  * `pnpm verify:without <id>` — the mechanics: the copy leaves out what it
@@ -15,12 +14,23 @@ import { COPY_EXCLUDE, COPY_STEPS, DELETED_ENV, copyTree, digestTree, parseArgs,
  * Verify, run once by hand and by CI.
  */
 
-const SCRIPT = fileURLToPath(new URL('./verify-without.mjs', import.meta.url))
 
 const roots = []
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true })
 })
+
+/**
+ * A scratch repository the caller fills in, cleaned up with the rest.
+ *
+ * `realpathSync` on the tmpdir because macOS's is a symlink and the picker
+ * compares repo-relative paths it built itself.
+ */
+function inScratch(prefix, body) {
+  const root = mkdtempSync(path.join(realpathSync(tmpdir()), prefix))
+  roots.push(root)
+  body(root)
+}
 
 /** A small "repository": a package.json, a kernel, an excluded directory of each kind. */
 function source() {
@@ -170,12 +180,153 @@ describe('parseArgs and the CLI', () => {
   it('reads the id and --keep, refuses the rest', () => {
     expect(parseArgs(['example'])).toEqual({ id: 'example', keep: false })
     expect(parseArgs(['example', '--keep'])).toEqual({ id: 'example', keep: true })
-    expect(parseArgs([])).toEqual({ error: 'a capability id is required' })
     expect(parseArgs(['a', 'b'])).toEqual({ error: 'exactly one capability id is expected' })
     expect(parseArgs(['--x'])).toEqual({ error: 'unknown argument "--x"' })
-    const bad = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' })
-    expect(bad.status).toBe(2)
-    expect(bad.stderr).toContain('a capability id is required')
+  })
+
+  /* NO ID IS THE ORDINARY CALL, and it used to be an error. The id is derived
+     now — see `removableCapabilities` — so what an empty argv carries is the
+     absence of an OVERRIDE, not a missing required value. `keep` still rides
+     along, which is the pair a reader is most likely to get wrong. */
+  it('takes no id at all, and still reads --keep', () => {
+    expect(parseArgs([])).toEqual({ keep: false })
+    expect(parseArgs(['--keep'])).toEqual({ keep: true })
+  })
+})
+
+/**
+ * WHICH CAPABILITY THE PROOF REMOVES IS DERIVED, NOT TYPED.
+ *
+ * The three conditions are `removableCapabilities`' own, and the cases below
+ * are what stops that function answering vacuously — a picker that returns
+ * everything, or nothing, would leave CI green either way.
+ */
+describe('removableCapabilities', () => {
+  const manifest = () =>
+    JSON.parse(readFileSync(fileURLToPath(new URL('../capabilities.manifest.json', import.meta.url)), 'utf8'))
+
+  it('finds at least one, or the proof has quietly retired', () => {
+    expect(removableCapabilities().length).toBeGreaterThan(0)
+  })
+
+  it('never offers one another capability requires', () => {
+    const required = new Set(manifest().capabilities.flatMap((c) => c.requires ?? []))
+    for (const id of removableCapabilities()) {
+      expect(required.has(id), `${id} is required by another capability, so the remover refuses it`).toBe(false)
+    }
+  })
+
+  /* THE CONDITION THAT WAS MISSING WHEN THIS WAS TYPED BY HAND. A host import
+     survives `capability:remove`, so the tree stops typechecking and the lane
+     is red for a reason its own argument check could not see. `sync` is the
+     live example: `src/cli/paper.ts` imports it for `openLocalJournal`.
+
+     ⚠️ **THIS CASE USED TO RE-IMPLEMENT THE SCAN IT WAS CHECKING** — the same
+     `from '…'` regex, character for character — so it shared every defect the
+     production copy had and could not have failed on one (2026-09-19 audit).
+     A guard whose test stands in for the path it guards is a guard nobody has
+     seen work, which is the lesson `measuredIn` paid for. It is a FIXTURE tree
+     now, with one capability per defect the old regex had, and the assertion is
+     on `removableCapabilities`' own answer. */
+  it('reads an importer through either quote, a dynamic import, and neither a comment nor a longer name', () => {
+    inScratch('picker-', (root) => {
+      const cap = (id) => ({ id, ts: id, requires: [] })
+      writeFileSync(
+        path.join(root, 'capabilities.manifest.json'),
+        JSON.stringify({ capabilities: ['alpha', 'beta', 'gamma', 'delta'].map(cap) }),
+      )
+      const src = path.join(root, 'src')
+      for (const dir of ['alpha', 'beta', 'gamma', 'delta', 'delta-extra']) {
+        mkdirSync(path.join(src, 'capabilities', dir), { recursive: true })
+        writeFileSync(path.join(src, 'capabilities', dir, 'index.ts'), 'export const x = 1\n')
+      }
+      mkdirSync(path.join(src, 'host'), { recursive: true })
+      /* Each host file is one defect the old regex had. */
+      writeFileSync(path.join(src, 'host/a.ts'), 'import { x } from "../capabilities/alpha"\n')
+      writeFileSync(path.join(src, 'host/b.ts'), "/* see from '../capabilities/beta' for why */\nexport const y = 1\n")
+      writeFileSync(path.join(src, 'host/c.ts'), "const m = await import('../capabilities/gamma')\n")
+      writeFileSync(path.join(src, 'host/d.ts'), "import { z } from '../capabilities/delta-extra'\n")
+
+      expect(
+        removableCapabilities(root),
+        'alpha is double-quoted, gamma is dynamic — both are imported; beta is named only in a comment and delta only as a longer name, so both are free',
+      ).toEqual(['beta', 'delta'])
+    })
+  })
+
+  /* AND A TYPE-ONLY IMPORT IS STILL AN IMPORTER. `capability:remove` deletes the
+     DIRECTORY, so `import type` stops resolving exactly as a value import does —
+     which is why the picker does not simply call `parseCompositionImports`, the
+     checker's helper, which skips them by design. */
+  it('counts a type-only import, which the composition helper deliberately does not', () => {
+    inScratch('picker-type-', (root) => {
+      writeFileSync(
+        path.join(root, 'capabilities.manifest.json'),
+        JSON.stringify({ capabilities: [{ id: 'solo', ts: 'solo', requires: [] }] }),
+      )
+      const src = path.join(root, 'src')
+      mkdirSync(path.join(src, 'capabilities/solo'), { recursive: true })
+      writeFileSync(path.join(src, 'capabilities/solo/index.ts'), 'export type X = 1\n')
+      mkdirSync(path.join(src, 'host'), { recursive: true })
+      writeFileSync(path.join(src, 'host/a.ts'), "import type { X } from '../capabilities/solo'\nexport type Y = X\n")
+
+      expect(removableCapabilities(root)).toEqual([])
+    })
+  })
+
+  /* THE DIRECTORY IS `ts`, THE DEPENDENCY IS `id`, and they may differ. Every
+     entry in the real manifest has them equal, which is why using `id` for both
+     went unnoticed — the path simply existed. Here they differ, so a picker
+     reading `id` for the path looks for `capabilities/one`, finds nothing, and
+     reports the capability removable although a host imports it. */
+  it('resolves the directory from ts, not from id', () => {
+    inScratch('picker-ts-', (root) => {
+      writeFileSync(
+        path.join(root, 'capabilities.manifest.json'),
+        JSON.stringify({ capabilities: [{ id: 'one', ts: 'the-one', requires: [] }] }),
+      )
+      const src = path.join(root, 'src')
+      mkdirSync(path.join(src, 'capabilities/the-one'), { recursive: true })
+      writeFileSync(path.join(src, 'capabilities/the-one/index.ts'), 'export const x = 1\n')
+      mkdirSync(path.join(src, 'host'), { recursive: true })
+      writeFileSync(path.join(src, 'host/a.ts'), "import { x } from '../capabilities/the-one'\n")
+
+      expect(removableCapabilities(root)).toEqual([])
+    })
+  })
+
+  /* A COMPOSITION ROOT IS EXEMPT — the remover edits those — AND ONLY THOSE. A
+     helper beside them is an ordinary host: it was exempt under the old
+     `composition.*` prefix, so an import there made a capability look free. */
+  it('exempts the four composition roots and nothing else beside them', () => {
+    inScratch('picker-roots-', (root) => {
+      writeFileSync(
+        path.join(root, 'capabilities.manifest.json'),
+        JSON.stringify({ capabilities: [{ id: 'inroot', ts: 'inroot', requires: [] }, { id: 'inhelper', ts: 'inhelper', requires: [] }] }),
+      )
+      const src = path.join(root, 'src')
+      for (const dir of ['inroot', 'inhelper']) {
+        mkdirSync(path.join(src, 'capabilities', dir), { recursive: true })
+        writeFileSync(path.join(src, 'capabilities', dir, 'index.ts'), 'export const x = 1\n')
+      }
+      mkdirSync(path.join(src, 'app'), { recursive: true })
+      writeFileSync(path.join(src, 'app/composition.desktop.ts'), "import { x } from '../capabilities/inroot'\n")
+      writeFileSync(path.join(src, 'app/composition.shared.ts'), "import { x } from '../capabilities/inhelper'\n")
+
+      expect(
+        removableCapabilities(root),
+        'a real root is exempt; composition.shared.ts is an ordinary host and its import counts',
+      ).toEqual(['inroot'])
+    })
+  })
+
+  /* AND IT DOES NOT SIMPLY ANSWER EVERY CAPABILITY. `peer` is required by every
+     other one, so a picker with no `requires` rule would hand CI an id the
+     remover refuses — which is the shape the `example` years had. */
+  it('leaves out a capability the manifest shows is depended on', () => {
+    const required = manifest().capabilities.flatMap((c) => c.requires ?? [])
+    expect(required.length, 'the manifest declares no dependencies, so this case proves nothing').toBeGreaterThan(0)
+    expect(removableCapabilities()).not.toContain(required[0])
   })
 })
 
@@ -214,10 +365,11 @@ describe('parseArgs and the CLI', () => {
  * index, so this is not a boundary violation to be caught elsewhere — it is a
  * fact about which capabilities are removable, and it belongs here.
  *
- * Measured when this was written: `peer` has three host imports and `sync` one,
- * all in `src/cli/`; `inference` is required by `companion`. `companion` is the
- * only capability in the tree that can actually be removed, which is a much
- * smaller claim than the one this lane was making.
+ * Measured when this was last checked: `peer` is required by every other
+ * capability; `sync`, `public` and `webhost` are each imported outside a
+ * composition root. `circle` is the only capability in the tree that can
+ * actually be removed, which is a much smaller claim than the one this lane was
+ * making. (It was `companion` until the AI features were deleted whole.)
  */
 describe('the workflow names a capability that can actually be removed', () => {
   const WORKFLOW = fileURLToPath(new URL('../.github/workflows/verify.yml', import.meta.url))
@@ -244,8 +396,13 @@ describe('the workflow names a capability that can actually be removed', () => {
     for (const [at, line] of lines.entries()) {
       if (/^\s*#/.test(line)) continue
       if (!/^\s*(-\s*)?run:/.test(line)) continue
-      const ids = [...line.matchAll(/verify:without\s+([A-Za-z0-9._-]+)/g)].map((m) => m[1])
-      if (ids.length === 0) continue
+      /* THE ID IS OPTIONAL NOW — with none, the script derives it (see
+         `removableCapabilities`), which is the ordinary call. So what is
+         matched is the STEP, and an id is recorded only when one is written
+         out. `(?!\S)` stops `verify:withoutx` counting as this step. */
+      const runs = [...line.matchAll(/verify:without(?!\S)(?:\s+([A-Za-z0-9._-]+))?/g)]
+      if (runs.length === 0) continue
+      const ids = runs.map((m) => m[1]).filter((one) => one !== undefined)
       /* AND THE STEP HAS TO BE ONE THAT ACTUALLY RUNS.
        *
        * A step can be switched off without being deleted: `if: false`, or any
@@ -277,16 +434,18 @@ describe('the workflow names a capability that can actually be removed', () => {
       const value = guard ? guard[1].replace(/\s+#.*$/, '').trim() : ''
       const off = /^(false|'false'|"false"|\$\{\{\s*false\s*\}\})$/.test(value)
       if (off) continue
-      found.push(...ids)
+      found.push({ ids })
     }
     return found
   }
 
-  const named = () => namedIn(WORKFLOW)
+  /** Every live `verify:without` step, and the ids any of them writes out. */
+  const stepsIn = (file) => namedIn(file)
+  const named = () => stepsIn(WORKFLOW).flatMap((step) => step.ids)
 
   it('runs the deletion proof at all', () => {
-    // A regex that matches nothing passes every assertion below it.
-    expect(named().length).toBeGreaterThan(0)
+    // A scanner that matches nothing passes every assertion below it.
+    expect(stepsIn(WORKFLOW).length).toBeGreaterThan(0)
   })
 
   /* THE SCANNER IS HELD TO ITS OWN CLAIM. Every shape it says it ignores is
@@ -296,13 +455,30 @@ describe('the workflow names a capability that can actually be removed', () => {
   it('ignores a commented, documented, or switched-off proof', () => {
     const dir = mkdtempSync(path.join(realpathSync(tmpdir()), 'wf-'))
     roots.push(dir)
+    /** The ids a scanned document names — `[]` for no live step AND for a live
+        step with no id, which the two cases below tell apart. */
     const scan = (yaml) => {
       const file = path.join(dir, 'verify.yml')
       writeFileSync(file, yaml)
-      return namedIn(file)
+      return namedIn(file).flatMap((step) => step.ids)
+    }
+    /** How many live steps it found, which is the other half of the answer. */
+    const steps = (yaml) => {
+      const file = path.join(dir, 'verify.yml')
+      writeFileSync(file, yaml)
+      return namedIn(file).length
     }
 
     expect(scan('jobs:\n  a:\n    steps:\n      - run: pnpm verify:without sync\n')).toEqual(['sync'])
+    /* ⚠️ **A STEP WITH NO ID IS THE ORDINARY ONE**, and it has to be told from
+       a document with no step at all — the whole point of this scanner is to
+       refuse a workflow that has stopped running the proof, and both answer
+       `[]` for the ids. */
+    expect(steps('jobs:\n  a:\n    steps:\n      - run: pnpm verify:without\n')).toBe(1)
+    expect(scan('jobs:\n  a:\n    steps:\n      - run: pnpm verify:without\n')).toEqual([])
+    expect(steps('jobs:\n  a:\n    steps:\n      - run: pnpm test\n')).toBe(0)
+    /* AND NOT A LONGER WORD THAT STARTS THE SAME WAY. */
+    expect(steps('jobs:\n  a:\n    steps:\n      - run: pnpm verify:withoutx\n')).toBe(0)
     expect(scan('jobs:\n  a:\n    steps:\n      # - run: pnpm verify:without sync\n')).toEqual([])
     expect(scan('jobs:\n  a:\n    steps:\n      - name: pnpm verify:without sync\n')).toEqual([])
     expect(
@@ -326,6 +502,10 @@ describe('the workflow names a capability that can actually be removed', () => {
         'jobs:\n  a:\n    steps:\n      - if: github.ref == \'refs/heads/main\'\n        run: pnpm verify:without sync\n',
       ),
     ).toEqual(['sync'])
+    expect(
+      steps('jobs:\n  a:\n    steps:\n      - if: false\n        run: pnpm verify:without\n'),
+      'a switched-off step with no id still has to read as switched off',
+    ).toBe(0)
   })
 
   /**

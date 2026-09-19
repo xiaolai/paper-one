@@ -22,7 +22,7 @@ import { requestWindowClose, useWindowClose } from './hooks/useWindowClose'
 import { takeOpened, type OpenRequests } from './openedFiles'
 import { closePrepare } from './closeWindow'
 import { openExternal } from './openExternal'
-import { hasOpenLayer, paneFits, readerTakesInput, screenJump, useAppState } from './state'
+import { hasOpenLayer, readerTakesInput, screenJump, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
 import type { Composition } from '../core/registry'
@@ -33,9 +33,6 @@ import { flushBeforeClose, onBeforeClose, onBeforeDrain, settleBeforeDrain } fro
 import { useFileDrop, type DropHaul } from './hooks/useFileDrop'
 import { useLibrary } from './hooks/useLibrary'
 import { useCards } from './hooks/useCards'
-import { useLookUp } from './hooks/useLookUp'
-import { useLookups } from './hooks/useLookups'
-import { readerLanguage } from '../core/glossLanguage'
 import { useMarks } from './hooks/useMarks'
 import { useMarking } from './hooks/useMarking'
 import { useBookmarking } from './hooks/useBookmarking'
@@ -200,12 +197,6 @@ export function App({
    * hook, which explains why there is deliberately no control for it. */
   const reducedMotion = usePrefersReducedMotion()
   const [state, dispatch] = useAppState(services.settings, composition.panes)
-  /* ⚠️ THE `Look up` PREFERENCE USED TO BE READ HERE, through a second
-     `useSyncExternalStore` on the settings store, so that cycling the row in
-     Settings changed what the popover did without a remount. There is no row
-     and no preference: the system-dictionary hand-off is deleted and the gloss
-     is the whole of Look up. The subscription went with it — it had exactly
-     one reader. */
   /* ⚠️ IT SUBSCRIBES TO THE FLAG, NOT TO THE VALUES, and that is the whole
      point. `persistent` flips the first time the store's write is REFUSED, and
      that refusal happens after `values` has already changed and been published
@@ -230,7 +221,7 @@ export function App({
      was when nothing is downloading. */
   const workLine = services.workLine()
   const download = useSyncExternalStore(workLine.subscribe, workLine.line, workLine.line)
-  /* The open book lives here, not in the reader: Contents and Companion read
+  /* The open book lives here, not in the reader: Contents and Search read
    * from it and they are panels of the side pane now. */
   const book = useBook()
   /* Marks outlive the open book — the Marginalia panel browses every book's — so the
@@ -243,64 +234,14 @@ export function App({
   /* Beside marking, not inside it. Marking acts on a selection and
    * bookmarking acts on a place — see `useBookmarking`. */
   const bookmarking = useBookmarking(book, marks)
-  /* ── LOOK UP (phase 17) ───────────────────────────────────────────────────
-   *
-   * HERE, ABOVE THE READER AND THE PANE, because both draw it: the selection
-   * popup's lookup face and Marginalia's Dictionary view read one state, and the
-   * palette, ⌃⌘D and Escape act on it (WI-17.2).
-   *
-   * The gloss port is read per render rather than captured: `inference` binds
-   * it after composition, and a reader who installs a model must not have to
-   * restart to get Look up back. */
-  const lookups = useLookups(services.lookups)
-  const glossProvider = services.gloss()
-  const readerLocale = typeof navigator === 'undefined' ? undefined : navigator.language
   /* Whether the reader is actually LOOKING at the book. The reader screen stays
    * mounted under the library — see `Reader.inert` — so nothing downstream of
    * it can be trusted to say which screen is on top.
    *
-   * DECLARED HERE, above Look up, because Look up asks it too — and asking it
-   * as a second `state.screen === 'reader'` is the defect the keyboard map's
-   * note records about its own copy. */
+   * DECLARED ONCE, because asking it a second time as `state.screen ===
+   * 'reader'` is the defect the keyboard map's note records about its own
+   * copy. */
   const onReader = state.screen === 'reader'
-  /* TO THE SECTION, not to the top of Settings (phase 17, L3). The id is the
-     provider's — the kernel names no capability's section.
-
-     ⚠️ **A STABLE CALLBACK, AND IT WAS AN INLINE ARROW.** `useLookUp` returns
-     its object through a memo that lists this, so a new arrow per render made
-     `lookUp` a new object on every render — and the palette's memo and the
-     keyboard map's effect both list `lookUp`, so both were rebuilt on every
-     render whatever the reader did (2026-09-13 audit). */
-  // Stryker disable next-line ArrayDeclaration: `dispatch` is `useReducer`'s, the same function for the component's whole life — an empty list holds the same callback.
-  const onInstall = useCallback((section: string) => dispatch({ type: 'revealSettings', section }), [dispatch])
-  const lookUp = useLookUp({
-    provider: glossProvider,
-    selection: marking.selection,
-    /* ONLY WHILE THE READER IS THE SCREEN — the reader stays mounted under the
-       library, and a lookup must not outlive the trip there. */
-    reading:
-      onReader && book.bookId !== null
-        ? {
-            bookId: book.bookId,
-            title: book.meta?.title ?? '',
-            // Stryker disable next-line ArrayDeclaration: the only reader is `languages[0]`, taken as a locale, and Stryker's filler is not one — `supportedLanguage` answers null for it exactly as for no first element.
-            languages: book.meta?.languages ?? [],
-            fixedLayout: book.fixedLayout,
-            chapterLabel: book.position.chapterLabel,
-            generation: book.generation,
-            sectionIndex: book.position.sectionIndex,
-            chapterHref: book.position.chapterHref,
-            navigation: book.navigation,
-          }
-        : null,
-    choice: state.lookUpLanguage,
-    readerLocale,
-    lookups: services.lookups,
-    /* Whether a lookup found a real sentence or fell back — counted, never
-       shown (WI-16.4, §F4). */
-    diagnostics: services.diagnostics,
-    onInstall,
-  })
   /* Pins, colours, hidden subjects and saved views — the reader's decisions
      ABOUT their tags, as opposed to which books carry them. See `tagPrefs`. */
   const tagPrefs = useTagPrefs(services.storage)
@@ -1925,9 +1866,6 @@ export function App({
            is a selection `mark` refuses, and the row ran and did nothing
            (#202). The rule is `useMarking`'s; this asks it. */
         markSelection: marking.canMark ? markSelection : null,
-        /* THE SAME PRESS the popup's button and ⌃⌘D run (phase 17, L4) — null
-           with nothing to look up, so the row is simply not offered. */
-        lookUp: onReader ? lookUp.press : null,
         /* Null where there is no place to keep — the palette then does not
            offer the row at all, rather than offering one that does nothing.
            AND ONLY ON THE READER, which is not the same condition. The reader
@@ -1981,9 +1919,6 @@ export function App({
       composition,
       jumps,
       archives,
-      /* The palette row reads `lookUp.press`, which changes with the selection
-         and the provider — the `bookmarking` lesson above, not repeated. */
-      lookUp,
       markSelection,
       closeBook,
     ],
@@ -2007,22 +1942,7 @@ export function App({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        /* THE TOPMOST THING FIRST. A layer is above everything; the lookup is
-           a face of the selection popup under it. Escape used to reach only the
-           layers, so a definition on screen could be put away by its own
-           control and nothing else (phase 17, L2). */
-        if (hasOpenLayer(state)) {
-          dispatch({ type: 'dismissTop' })
-        } else {
-          /* ⚠️ **AND ONLY A LOOKUP THAT IS UP, WHICH A DIRECTIVE HERE USED TO
-             CALL UNOBSERVABLE.** `dismiss` publishes a NEW idle state, so
-             dismissing an idle one hands back a new `LookUp` object — and this
-             effect lists `lookUp`, so it would take the window's keyboard
-             listener down and put it back on every Escape pressed with nothing
-             on screen. Measured by the 2026-09-14 audit; the guard is what
-             keeps the key free. */
-          if (lookUp.state.kind !== 'idle') lookUp.dismiss()
-        }
+        if (hasOpenLayer(state)) dispatch({ type: 'dismissTop' })
         return
       }
 
@@ -2165,8 +2085,6 @@ export function App({
            as a digit for a panel this screen has not got — see `AccelContext`. */
         developer: state.developer,
         hiddenPanes: state.hiddenPanes,
-        /* ⌃⌘D's condition is the palette row's — see `canLookUp`. */
-        canLookUp: onReader && lookUp.press !== null,
         /* Who took this key's first press — see `pressTaken`, and `taken`. */
         pressTaken: event.repeat && taken.current === pressed,
       })
@@ -2237,10 +2155,6 @@ export function App({
         case 'jumpForward':
           jumps.forward()
           return
-        case 'lookUp':
-          // Stryker disable next-line OptionalChaining: `resolveAccel` returns this action only when `canLookUp` is true, which is this same `press` being non-null in this same closure.
-          lookUp.press?.()
-          return
         /* THE WINDOW'S CLOSE, not an exit: `useWindowClose` intercepts it and
            runs the teardown the quit handshake runs, so Ctrl+Q closes the
            journal as ⌘Q and the red button do. */
@@ -2300,9 +2214,6 @@ export function App({
        jump behind. Exactly the `state.markTint` defect above, on a different
        object. */
     jumps,
-    /* ⌃⌘D and Escape both read it — the same stale-closure defect as every
-       note in this list, on the newest object. */
-    lookUp,
   ])
 
   /* Titlebar metadata comes from the OPEN book, and from nothing else.
@@ -2343,27 +2254,14 @@ export function App({
                 commands={commands}
                 platform={platform}
                 onDismiss={() => dispatch({ type: 'closeLayer', layer: 'paletteOpen' })}
-                /* The companion has no model configured, so an unmatched query
-                 * goes to the panel that says so rather than being answered.
-                 * §13 forbids producing content about the book that is not
-                 * grounded in it.
-                 *
-                 * ⚠️ **AND ONLY WHERE THAT PANEL CAN BE REACHED.** Arriving at
-                 * the panel IS the action this offers — it explains itself, it
-                 * does not answer — so where `paneFits` refuses the companion
-                 * there is nothing to offer, and handing the palette a callback
-                 * anyway drew the promise over an `openPane` the reducer
-                 * redirected to Contents. Passed conditionally rather than
-                 * tested inside the palette, because the palette must not
-                 * acquire an opinion about which panels exist; it asks whether
-                 * it was given somewhere to send the query. */
-                {...(paneFits(state.screen, 'companion', {
-                  contributed: composition.panes,
-                  developer: state.developer,
-                  hiddenPanes: state.hiddenPanes,
-                })
-                  ? { onAsk: () => dispatch({ type: 'openPane', pane: 'companion' }) }
-                  : {})}
+                /* ⚠️ **NO `onAsk`, AND THERE WAS ONE.** An unmatched query went
+                 * to the companion's panel, which said it had no model
+                 * configured rather than answering — §13 forbids producing
+                 * content about the book that is not grounded in it. The
+                 * companion is deleted, so an unmatched query is simply no
+                 * match. The prop stays OPTIONAL on the palette: it never had
+                 * an opinion about which panels exist, only about whether it
+                 * was given somewhere to send the query. */
               />
             )}
             {state.switcherOpen && (
@@ -2447,18 +2345,6 @@ export function App({
             markFocus={marking.focus}
             onMarkFocusDone={marking.clearFocus}
             markControls={composition.markControls}
-            selection={marking.selection?.text ?? null}
-            /* The one place the app decides what the companion is — and this
-               IS the line the old comment said would change when a provider
-               arrived. It reads the kernel's port rather than a constant, so
-               `companion`'s bind reaches here without App knowing the
-               capability exists. Resolved per render, never captured: a
-               reader who installs a model must not have to restart. */
-            companion={services.companion()}
-            /* The grounding, as a GETTER: assembling it walks the rendered
-               document, and the thread calls it when the reader asks rather
-               than on every render. */
-            companionPassages={book.passages}
             books={library.books}
             /* GROUPED BY THE PANEL THEY SERVE — see `SidePaneProps`. Eight of
                these were flat props on a component that reads none of them. */
@@ -2476,19 +2362,7 @@ export function App({
               sections: composition.settings,
               missing: composition.failures,
               persistent: settingsPersistent,
-              /* THE LANGUAGE ROW ONLY WHERE THERE IS A LOOK UP — a model, or
-                 somewhere to get one. `decideLookUp`'s own two facts. */
-              lookUp:
-                glossProvider.available || glossProvider.installAt !== null
-                  ? {
-                      choice: state.lookUpLanguage,
-                      readerLanguage: readerLanguage(readerLocale),
-                      onChoice: (choice) => dispatch({ type: 'setLookUpLanguage', choice }),
-                    }
-                  : undefined,
             }}
-            lookups={lookups}
-            liveLookUp={lookUp.state}
             /* ⚠️ **SUPPLIED UNCONDITIONALLY — AND THIS SAID "ONLY WHILE
                DEVELOPER OPTIONS ARE ON"**, the contract `SidePaneProps.developer`
                has since reversed: whether the band and the panel are DRAWN is
@@ -2520,19 +2394,6 @@ export function App({
             foliate down mid-flight and loses the reading position — see the
             note on Library's own stacking. */}
         <Reader
-          /* LOOK UP, lifted — see `useLookUp` above. The install offer goes to
-             the provider's own section through `revealSettings`; on a build with
-             no `inference` — the phones compose `[peer, sync, publicSharing]` —
-             the port keeps `NO_GLOSS`, `installAt` is null, and no control is
-             drawn at all. */
-          lookUp={lookUp}
-          /* THE VOICE that says the looked-up term aloud — a port beside the
-             gloss rather than a member of it, for the reasons `core/voice.ts`
-             sets out. Read per render like the gloss provider above, so a voice
-             bound after composition is heard without a restart. Nothing binds
-             one today, so the port is the machine's own voice (`systemVoice`),
-             and the control is drawn wherever it `canSay` the word. */
-          voice={services.voice()}
           libraryCount={library.books.length}
           saveFailure={library.saveFailure}
           onDismissSaveFailure={library.dismissSaveFailure}

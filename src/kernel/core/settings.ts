@@ -1,5 +1,4 @@
 import { notifyAll } from './notify'
-import { isAnswerChoice, type AnswerChoice } from './glossLanguage'
 import { MARK_TINTS, READER_STYLES, type MarkStorage, type MarkStyle, type MarkTint } from './marks'
 import {
   BRIGHTNESS,
@@ -629,19 +628,6 @@ export const KERNEL_SETTINGS = {
      as long as it took an audit to notice that `theme`, `stepIdx`, `spacing`
      and `align` are all in this list and these fifteen were not. */
   readingStyle: defineSetting<ReadingStyle>('kernel.readingStyle', DEFAULT_READING_STYLE, readingStyle),
-  /**
-   * What Look up writes its definitions in (WI-17.5) — a mode, or a language
-   * from the measured list. See `core/glossLanguage.ts`.
-   *
-   * VALIDATED AGAINST THE LIST, so a file naming a language a later build
-   * stopped offering reads as the reader's own language rather than asking the
-   * model in a language measured to be poor. The orphaned `kernel.lookUp` of the
-   * deleted three-mode Look up is a different key and stays inert, as phase 17
-   * §3 decided.
-   */
-  lookUpLanguage: defineSetting<AnswerChoice>('kernel.lookUpLanguage', 'reader', (raw) =>
-    isAnswerChoice(raw) ? raw : undefined,
-  ),
 } as const satisfies Record<string, Setting<unknown>>
 
 export type KernelSettingName = keyof typeof KERNEL_SETTINGS
@@ -747,7 +733,6 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     markTint: store.get(KERNEL_SETTINGS.markTint),
     markStyle: store.get(KERNEL_SETTINGS.markStyle),
     readingStyle: store.get(KERNEL_SETTINGS.readingStyle),
-    lookUpLanguage: store.get(KERNEL_SETTINGS.lookUpLanguage),
   }
 }
 

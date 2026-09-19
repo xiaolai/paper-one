@@ -121,7 +121,6 @@ describe('every preference a reader changes is saved', () => {
     markTint: { type: 'setMarkTint', tint: 'purple' },
     markStyle: { type: 'setMarkStyle', style: 'underline' },
     readingStyle: setReadingStyle('separation', 'both'),
-    lookUpLanguage: { type: 'setLookUpLanguage', choice: 'both' },
   }
 
   it('has a change for every setting in the table', () => {

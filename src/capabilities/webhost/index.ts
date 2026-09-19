@@ -73,17 +73,24 @@ export const webhost: Capability = {
      *
      * ⚠️ **IT STOPPED WHATEVER `pump` HELD, NOT ITS OWN.** `pump` is module
      * state and this closure ran on teardown, so with two live compositions —
-     * a test that starts a second before stopping the first, and the shape
-     * `renderSlot.test.ts` records for `inference` and `companion`: "the second
-     * overwrote the first, and then stopping the SECOND…" — A's stop reached
-     * into B's pump and stopped it. Every connected browser then had its frames
-     * drained by nothing, with no error anywhere, because a stopped pump is
-     * exactly as quiet as an idle one.
+     * two `start`s with no `stop` between them, which the registry permits and
+     * a test does routinely — the second overwrote the first, and then stopping
+     * the SECOND reached into the FIRST's pump and stopped it. Every connected
+     * browser had its frames drained by nothing, with no error anywhere,
+     * because a stopped pump is exactly as quiet as an idle one.
      *
      * The inner disposer twenty lines below already guarded this
      * (`if (pump === running)`); this one did not, which is why the defect
-     * survived. `webhost` was also the one capability of the three never
-     * converted to `createRenderSlot` and the one with no `index.test.ts`. */
+     * survived. `index.test.ts` measures it by the LEAK rather than by the
+     * stop, for the reason its own header gives.
+     *
+     * ⚠️ **A `core/renderSlot.ts` HELD THE GENERAL ANSWER — A STACK, so
+     * releasing any holder restores the most recent one still live — AND IT IS
+     * DELETED.** Its only two callers were `inference` and `companion`, which
+     * went with every other AI feature; `webhost` was the one capability never
+     * converted to it. The ownership check here is the hand-rolled version and
+     * is what actually ships. If a third capability meets this, rebuild the
+     * stack from this paragraph rather than looking for the module. */
     let mine: Pump | null = null
     const stop = () => {
       mine?.stop()

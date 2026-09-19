@@ -1,10 +1,10 @@
 /* The reader.
  *
- * §03: gutter 56 / measure 660 / margin 250, gap 32. With the companion column
- * open the measure narrows to 620 and the gutter to 40, the margin collapses,
- * and the gap closes to 22. The gutter and margin are HOST columns — companion
- * marks and the ruler hint live there, outside the text, which is why they are
- * grid tracks rather than padding on the book.
+ * §03: gutter 56 / measure 660 / margin 250, gap 32. With the side pane open
+ * the measure narrows to 620 and the gutter to 40, the margin collapses, and
+ * the gap closes to 22. The gutter and margin are HOST columns — margin notes
+ * and the ruler hint live there, outside the text, which is why they are grid
+ * tracks rather than padding on the book.
  */
 
 .reader {

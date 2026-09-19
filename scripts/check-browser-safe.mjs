@@ -66,7 +66,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
-import { runtimeSpecifiers } from './lib/specifiers.mjs'
+import { hiddenLoads, runtimeSpecifiers } from './lib/specifiers.mjs'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const USAGE = 'usage: node scripts/check-browser-safe.mjs [--root <dir>] [--survey [<dir>] | <module>...]'
@@ -127,11 +127,6 @@ export const PINNED = Object.freeze([
   /* `inTauri` is a two-line `window` check and MUST stay answerable without a
    * filesystem: the modules that ask it are the ones that cannot assume one. */
   'src/kernel/ui/inTauri.ts',
-  /* PURE BY CONSTRUCTION SINCE THE HAND-OFF WENT. This was freed by splitting
-   * `lookUpTauri.ts` out of it; that file is now deleted with the command it
-   * wrapped, so there is no binding left to split. The pin stays — it is what
-   * makes putting one back loud. */
-  'src/kernel/ui/lookUp.ts',
 ])
 
 /**
@@ -282,6 +277,8 @@ export function blockersOf(root, entry, shared = null) {
   const start = path.resolve(root, entry)
   const seen = new Set()
   const blockers = new Map()
+  /** file → the loads this gate cannot follow, so cannot clear. See `readEdges`. */
+  const unprovable = new Map()
   const cache = shared ?? newWalkCache(root)
   const walk = (file) => {
     if (seen.has(file)) return
@@ -290,6 +287,9 @@ export function blockersOf(root, entry, shared = null) {
      * see `newWalkCache`. `seen` and `blockers` stay per-entry, because each
      * entry reports its OWN module count and its own blocking files. */
     const edges = cache.edgesOf(file)
+    /* AFTER `edgesOf`, which is the read that fills this. */
+    const loads = cache.hiddenIn(file)
+    if (loads.length > 0) unprovable.set(toPosix(path.relative(root, file)), loads)
     for (const { spec, next } of edges) {
       if (spec.startsWith(PLATFORM_PREFIX)) {
         const rel = toPosix(path.relative(root, file))
@@ -302,9 +302,9 @@ export function blockersOf(root, entry, shared = null) {
   /* ⚠️ `existsSync` HERE TOO, after `existsAt` was written to replace it: an
      entry behind a directory this user may not search came back MISSING,
      "renamed or deleted?", when it was neither. 2026-09-14. */
-  if (!existsAt(root, start)) return { modules: 0, blockers, missing: true }
+  if (!existsAt(root, start)) return { modules: 0, blockers, unprovable, missing: true }
   walk(start)
-  return { modules: seen.size, blockers, missing: false }
+  return { modules: seen.size, blockers, unprovable, missing: false }
 }
 
 /**
@@ -335,6 +335,8 @@ export function blockersOf(root, entry, shared = null) {
 function newWalkCache(root) {
   const aliasList = aliases(root)
   const edges = new Map()
+  /** Per file, the loads no import graph can follow — see `readEdges`. */
+  const hidden = new Map()
   /** `file`'s edges, read off disk and parsed, and remembered for the next asker. */
   function readEdges(file) {
     let source
@@ -353,6 +355,17 @@ function newWalkCache(root) {
       spec,
       next: resolveModule(root, file, spec, aliasList),
     }))
+    /* ⚠️ **A LOAD NO GRAPH CAN FOLLOW MADE THIS GATE ANSWER "CLEAN".**
+       `runtimeSpecifiers` names each of `import(p)`, `require(p)` and
+       `createRequire()` with NOTHING — there is no single module to name — so a
+       module whose only reach to the platform was one of those walked to a leaf
+       with no edges and was certified browser-safe. The gate cannot see where
+       such a load lands, and "I could not look" is not "there is nothing
+       there": stating it as a proof is the one failure mode a gate must not
+       have. Read from the same bytes, through the same shared helper
+       `check-mutants` uses, so the two cannot come to read one clause two
+       ways. Found by the 2026-09-19 audit. */
+    hidden.set(file, hiddenLoads(source, file))
     // Stryker disable next-line CallExpression: with nothing remembered the next asker reads and parses the file again and is given the same list — the cache decides the cost, never the answer
     edges.set(file, out)
     return out
@@ -367,6 +380,11 @@ function newWalkCache(root) {
      * but the one that remembers. 2026-09-14. */
     edgesOf(file) {
       return edges.get(file) ?? readEdges(file)
+    },
+    /* Populated by the same read as the edges, so asking for one has always
+       filled the other — `edgesOf` first is the walk's own order. */
+    hiddenIn(file) {
+      return hidden.get(file) ?? []
     },
   }
 }
@@ -402,12 +420,13 @@ export function checkBrowserSafe(root, modules) {
   /* ONE CACHE FOR THE WHOLE CALL — see `newWalkCache`. */
   const shared = newWalkCache(root)
   return modules.map((module) => {
-    const { modules: count, blockers, missing } = blockersOf(root, module, shared)
+    const { modules: count, blockers, unprovable, missing } = blockersOf(root, module, shared)
     return {
       module,
       missing,
       modules: count,
       blockers: [...blockers].map(([file, pkgs]) => ({ file, packages: [...pkgs].sort() })),
+      unprovable: [...unprovable].map(([file, loads]) => ({ file, loads })),
     }
   })
 }
@@ -511,12 +530,17 @@ function command(argv, { out, err }) {
     const causes = new Map()
     let clean = 0
     for (const file of sources) {
-      const { blockers } = blockersOf(root, file)
-      if (blockers.size === 0) {
+      const { blockers, unprovable } = blockersOf(root, file)
+      if (blockers.size === 0 && unprovable.size === 0) {
         clean += 1
         continue
       }
-      const key = [...blockers.keys()].sort().join(' + ')
+      /* A file the walk could not follow is grouped by the LOAD, beside the
+         blocking modules, so a survey answers the same question the module
+         check does: what stops this reaching a browser, or stops us saying. */
+      const key = [...blockers.keys(), ...[...unprovable.keys()].map((f) => `${f} (not followable)`)]
+        .sort()
+        .join(' + ')
       if (!causes.has(key)) causes.set(key, [])
       causes.get(key).push(file)
     }
@@ -553,14 +577,22 @@ function command(argv, { out, err }) {
       failed += 1
       continue
     }
-    if (report.blockers.length === 0) continue
+    if (report.blockers.length === 0 && report.unprovable.length === 0) continue
     failed += 1
     out(`${report.module}  (${report.modules} modules)`)
     for (const b of report.blockers) out(`    ${b.file}  →  ${b.packages.join(', ')}`)
+    /* A SEPARATE LINE FROM A BLOCKER, because the remedy differs: a blocker is
+       split into its own file, while this is made static or moved off the
+       closure. Same exit code — both mean the module is not cleared. */
+    for (const u of report.unprovable) out(`    ${u.file}  ?  ${u.loads.join(', ')} — not followable`)
   }
 
   const scope = pinned ? `${modules.length} pinned` : `${modules.length}`
-  out(`check-browser-safe: ${scope} module(s) checked, ${failed} blocked`)
+  const unprovable = reports.reduce((n, r) => n + r.unprovable.length, 0)
+  out(
+    `check-browser-safe: ${scope} module(s) checked, ${failed} blocked` +
+      (unprovable > 0 ? `, ${unprovable} file(s) not followable` : ''),
+  )
   if (failed > 0) {
     out(
       `\nA module reaches ${PLATFORM_PREFIX} through the closure above, so it cannot be\n` +

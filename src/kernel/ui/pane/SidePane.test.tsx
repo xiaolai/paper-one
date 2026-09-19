@@ -3,7 +3,6 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SidePane, type SidePaneProps } from './SidePane'
 import { initialState } from '../state'
-import type { AnswerEnd, AskContext, CompanionProvider } from '../../core/companion'
 import type { Book } from '../hooks/useBook'
 import type { SearchHit } from '../hooks/useBook'
 import type { MarksView } from '../hooks/useMarks'
@@ -17,15 +16,16 @@ import type { TagPrefsStore } from '../hooks/useTagPrefs'
  *
  * Every panel here is tested on its own and every one of those tests passed
  * while the app did not do what the ledger said: `SearchPanel` took an
- * `onGoTo` and was mounted without one, so a hit never entered the jump stack;
- * `Companion` took a `selection` and was mounted without one, so no question
- * ever carried the passage. A component test cannot see a prop its host forgot,
- * which is why this file mounts the host.
+ * `onGoTo` and was mounted without one, so a hit never entered the jump stack.
+ * A component test cannot see a prop its host forgot, which is why this file
+ * mounts the host.
  *
- * Only the two wires the phase-20 audit found are pinned. The other panels'
- * props are typed as required, which is the compile-time version of the same
- * check; these two were optional, and an optional prop is one a host can omit
- * with nothing said.
+ * ⚠️ **THE PHASE-20 AUDIT FOUND TWO SUCH WIRES, AND THE SECOND IS DELETED** —
+ * the companion took a `selection` and was mounted without one, so no question
+ * it asked ever carried the passage. The lesson it paid for is the one above:
+ * both were OPTIONAL props, and an optional prop is one a host can omit with
+ * nothing said. Every panel's props here are required now, which is the
+ * compile-time version of the same check.
  */
 
 afterEach(cleanup)
@@ -36,20 +36,6 @@ const HIT: SearchHit = {
   pre: 'Call me ',
   match: 'Ishmael',
   post: '.',
-}
-
-function provider(): CompanionProvider & { asked: AskContext[] } {
-  const asked: AskContext[] = []
-  return {
-    name: 'fake',
-    configured: true,
-    asked,
-    async *ask(_question: string, context: AskContext): AsyncGenerator<string, AnswerEnd> {
-      asked.push(context)
-      yield 'an answer'
-      return { citations: [], hadUnknownCitation: false }
-    },
-  }
 }
 
 /** An open, searchable book — enough of one for the two panels under test. */
@@ -65,7 +51,6 @@ const book = () =>
       yield HIT
     },
     goTo: vi.fn(),
-    passages: () => [],
   }) as unknown as Book
 
 const marksView = () =>
@@ -74,13 +59,13 @@ const marksView = () =>
 /**
  * The pane in the reader, on one panel, with only what that panel reads varied.
  *
- * `developerOptions` because Companion is an UNFINISHED panel: it is offered —
- * and so drawn — only with developer options on (`UNFINISHED_PANE_IDS`).
+ * `developerOptions` because an UNFINISHED panel — `cards` — is offered, and so
+ * drawn, only with developer options on (`UNFINISHED_PANE_IDS`).
  */
 function draw({
   developerOptions = false,
   ...over
-}: Partial<SidePaneProps> & { pane: 'search' | 'companion' | 'library'; developerOptions?: boolean }) {
+}: Partial<SidePaneProps> & { pane: 'search' | 'cards' | 'library'; developerOptions?: boolean }) {
   const onGoTo = vi.fn()
   const props: SidePaneProps = {
     state: { ...initialState, screen: 'reader', pane: over.pane, lastPane: over.pane, developer: developerOptions },
@@ -94,8 +79,6 @@ function draw({
     onDeleteMark: vi.fn(),
     markFocus: null,
     onMarkFocusDone: vi.fn(),
-    selection: null,
-    companion: provider(),
     books: [],
     library: {
       onRenameTag: vi.fn(),
@@ -113,7 +96,6 @@ function draw({
   const view = render(<SidePane {...props} />)
   return {
     onGoTo,
-    companion: props.companion as ReturnType<typeof provider>,
     book: props.book,
     /** Re-render the same pane over a different open book. */
     openAnother: (bookId: string) =>
@@ -136,67 +118,18 @@ describe('the search panel', () => {
   })
 })
 
-describe('the companion panel', () => {
-  it('is handed the reader\'s selection, so a question carries it', () => {
-    const { companion } = draw({ pane: 'companion', selection: 'Call me Ishmael.', developerOptions: true })
-    const input = screen.getByLabelText('Ask the companion about this chapter')
-    fireEvent.change(input, { target: { value: 'who is speaking?' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
-    expect(companion.asked[0]?.selection).toBe('Call me Ishmael.')
-  })
-
-  /**
-   * ⚠️ **THE THREAD OUTLIVED THE BOOK IT WAS ABOUT.**
-   *
-   * The pane stays mounted across an open, and nothing tied the exchange or
-   * the composer's draft to a book — so switching books left the previous
-   * book's questions and answers on screen under the new book's heading, and
-   * a half-typed question ready to be sent grounded in a book it was not
-   * asked about. "grounded in this book only" is the panel's own line.
-   */
-  it('starts a new thread when the reader opens another book', async () => {
-    const { openAnother } = draw({ pane: 'companion', developerOptions: true })
-    const input = screen.getByLabelText('Ask the companion about this chapter')
-    fireEvent.change(input, { target: { value: 'who is speaking?' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
-    expect(await screen.findByText('who is speaking?')).toBeTruthy()
-
-    openAnother('another-book')
-    expect(
-      screen.queryByText('who is speaking?'),
-      'the previous book’s exchange was shown under the new book',
-    ).toBeNull()
-    expect(
-      (screen.getByLabelText('Ask the companion about this chapter') as HTMLInputElement).value,
-      'the draft followed the reader into a book it was not about',
-    ).toBe('')
-  })
-
-  /* The draft too: a question typed and not sent is about the book it was
-     typed in. */
-  it('clears a half-typed question when the book changes', () => {
-    const { openAnother } = draw({ pane: 'companion', developerOptions: true })
-    fireEvent.change(screen.getByLabelText('Ask the companion about this chapter'), {
-      target: { value: 'what is a gam?' },
-    })
-    openAnother('another-book')
-    expect(
-      (screen.getByLabelText('Ask the companion about this chapter') as HTMLInputElement).value,
-    ).toBe('')
-  })
-})
-
 /**
  * ⚠️ **A PANE THE READER IS NOT OFFERED WAS DRAWN IF IT WAS ASKED FOR BY NAME.**
  * Only the remembered `lastPane` was fitted; `state.pane` went straight to the
- * panel switch, so a state naming Companion with developer options off drew the
- * Companion beside a rail with no button for it (#145). The reducer does not
+ * panel switch, so a state naming an unfinished panel with developer options
+ * off drew it beside a rail with no button for it (#145). The reducer does not
  * produce that state — this is the pane not depending on it.
  */
 describe('a pane asked for that this reader is not offered', () => {
   it('shows the screen’s own default, as the rail does', () => {
-    draw({ pane: 'companion' })
-    expect(screen.queryByLabelText('Ask the companion about this chapter')).toBeNull()
+    draw({ pane: 'cards' })
+    /* The pane's TITLE, which is the one thing every panel puts on screen. */
+    expect(screen.queryByText('Cards')).toBeNull()
     expect(screen.getByText('Contents')).not.toBeNull()
   })
 })

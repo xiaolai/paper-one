@@ -566,36 +566,21 @@ describe('the palette’s own commands', () => {
     expect(screen.queryByTitle('Open Moby-Dick')).toBeNull()
   })
 
-  it('takes a question no command matches to the companion, once the developer has revealed it', async () => {
-    /* Enter on a query that matches nothing dismisses the palette and opens
-       the companion pane — a reader's pane, so the reader screen; and one of
-       the unfinished panes, so only after the chord. */
-    await mount(null)
-    fireEvent.click(screen.getByRole('button', { name: 'Open a book' }))
-    await settle()
-    developerChord()
-    await settle()
-    accel('k')
-    await settle()
-    const input = screen.getByRole('textbox', { name: 'Search or ask' })
-    fireEvent.change(input, { target: { value: 'what is a whale' } })
-    await settle()
-    expect(screen.getByText(/No command matches/u)).toBeTruthy()
-    fireEvent.keyDown(input, { key: 'Enter' })
-    await settle()
-    expect(screen.queryByRole('textbox', { name: 'Search or ask' })).toBeNull()
-    expect(screen.getAllByRole('button', { name: 'Companion' }).some((one) => one.getAttribute('aria-pressed') === 'true')).toBe(true)
-  })
-
   /**
    * ⚠️ **THE RULE HAD FOUR READERS AND SIX SURFACES.**
    *
    * `UNFINISHED_PANE_IDS` says removing an id from it is "the only edit
    * required" to ship a panel, and `paneFits` says it has five callers. Two
-   * surfaces in this window never asked either: the titlebar drew a Companion
-   * button for every reader (whose click `paneFor` sent to Contents, and whose
-   * `aria-pressed` could therefore never be true), and the palette promised
-   * "Press Enter to take it to the companion" over the same redirect.
+   * surfaces in this window never asked either: the titlebar drew the deleted
+   * companion's button for every reader (whose click `paneFor` sent to
+   * Contents, and whose `aria-pressed` could therefore never be true), and the
+   * palette promised to take an unmatched query to that panel over the same
+   * redirect.
+   *
+   * ⚠️ **THE PALETTE'S HALF IS GONE RATHER THAN FIXED.** Its `onAsk` had one
+   * producer, the companion's panel, and that went with the AI features — so
+   * an unmatched query now says so and Enter is inert, on every screen and
+   * whatever the chord. The titlebar's half is still a live filter.
    *
    * Written over the LIST rather than over those two controls, so it is a rule
    * and not a pair of pins: a third unfinished panel, or a seventh surface that
@@ -632,10 +617,9 @@ describe('the palette’s own commands', () => {
     const input = screen.getByRole('textbox', { name: 'Search or ask' })
     fireEvent.change(input, { target: { value: 'what is a whale' } })
     await settle()
-    /* The palette still says it found nothing — it just does not offer a panel
-       the reader cannot open. */
+    /* The palette still says it found nothing, and offers nowhere to send it. */
     expect(screen.getByText(/No command matches/u)).toBeTruthy()
-    expect(screen.queryByText(/take it to the companion/u)).toBeNull()
+    expect(screen.queryByText(/take it to/u)).toBeNull()
 
     /* And Enter is inert rather than dismissing the palette for a pane change
        that then lands somewhere else. */

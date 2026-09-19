@@ -51,14 +51,13 @@ describe('the seed a launch starts from', () => {
     })
   })
 
-  it('sets the pane on the right, the book at its designed spacing, yellow bands, and answers in the reader’s language', () => {
-    const { side, spacing, markTint, markStyle, lookUpLanguage } = initialState
-    expect({ side, spacing, markTint, markStyle, lookUpLanguage }).toEqual({
+  it('sets the pane on the right, the book at its designed spacing, and yellow bands', () => {
+    const { side, spacing, markTint, markStyle } = initialState
+    expect({ side, spacing, markTint, markStyle }).toEqual({
       side: 'right',
       spacing: DEFAULT_SPACING,
       markTint: 'yellow',
       markStyle: 'fill',
-      lookUpLanguage: 'reader',
     })
   })
 
@@ -162,54 +161,6 @@ describe('the side pane, by behaviour', () => {
   })
 })
 
-describe('the answer language, by behaviour', () => {
-  it('stores a choice, and is the same state when it has not moved', () => {
-    const chinese = reducer(initialState, { type: 'setLookUpLanguage', choice: 'zh-Hans' })
-    expect(chinese).toEqual({ ...initialState, lookUpLanguage: 'zh-Hans' })
-    expect(reducer(chinese, { type: 'setLookUpLanguage', choice: 'zh-Hans' })).toBe(chinese)
-  })
-})
-
-describe('a request to reveal a settings section, by behaviour', () => {
-  it('opens Settings as openPane would, and files the first request as pending', () => {
-    const reading = at({ screen: 'reader', pane: null, lastPane: 'toc' })
-    expect(reducer(reading, { type: 'revealSettings', section: 'inference:models' })).toEqual({
-      ...reading,
-      pane: 'settings',
-      lastPane: 'settings',
-      settingsReveal: { section: 'inference:models', nonce: 1, pending: true },
-    })
-  })
-
-  it('numbers a second request after the first', () => {
-    const first = reducer(initialState, { type: 'revealSettings', section: 'a:one' })
-    expect(reducer(first, { type: 'revealSettings', section: 'a:two' }).settingsReveal).toEqual({
-      section: 'a:two',
-      nonce: 2,
-      pending: true,
-    })
-  })
-
-  it('is answered by the report that names it, and by no other', () => {
-    const first = reducer(initialState, { type: 'revealSettings', section: 'a:one' })
-    const second = reducer(first, { type: 'revealSettings', section: 'a:two' })
-    expect(reducer(second, { type: 'settingsRevealed', nonce: 2 })).toEqual({
-      ...second,
-      settingsReveal: { section: 'a:two', nonce: 2, pending: false },
-    })
-    expect(reducer(second, { type: 'settingsRevealed', nonce: 1 })).toBe(second)
-  })
-
-  it('is the same state for a report with nothing pending — none filed, or already answered', () => {
-    expect(reducer(initialState, { type: 'settingsRevealed', nonce: 1 })).toBe(initialState)
-    const answered = reducer(reducer(initialState, { type: 'revealSettings', section: 'a:one' }), {
-      type: 'settingsRevealed',
-      nonce: 1,
-    })
-    expect(reducer(answered, { type: 'settingsRevealed', nonce: 1 })).toBe(answered)
-  })
-})
-
 describe('developer options, by behaviour', () => {
   it('turn on keeping the open panel, reveal an unfinished one, and take it away again', () => {
     const reading = at({ screen: 'reader', pane: 'toc', lastPane: 'toc' })
@@ -235,11 +186,17 @@ describe('developer options, by behaviour', () => {
     expect(reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: false })).toBe(on)
   })
 
+  /* TWO IDS, so showing one is visibly not "clear the list". `hiddenPanes` is
+     `readonly string[]` rather than `PaneId[]` — a remembered id may name a
+     panel this build no longer has — which is why `dev` serves here even though
+     it is not itself an unfinished panel, and why the pair used to be
+     `['cards', 'companion']` and typechecked long after `companion` stopped
+     being a pane at all. */
   it('show one hidden panel again and leave the others hidden', () => {
-    const both = at({ screen: 'reader', pane: 'toc', lastPane: 'toc', developer: true, hiddenPanes: ['cards', 'companion'] })
+    const both = at({ screen: 'reader', pane: 'toc', lastPane: 'toc', developer: true, hiddenPanes: ['cards', 'dev'] })
     expect(reducer(both, { type: 'setPaneHidden', pane: 'cards', hidden: false })).toEqual({
       ...both,
-      hiddenPanes: ['companion'],
+      hiddenPanes: ['dev'],
     })
   })
 })
@@ -402,8 +359,8 @@ describe('which panel fits where, by behaviour', () => {
   })
 
   it('reads an audience that does not say as one with developer options off', () => {
-    expect(paneFits('reader', 'companion')).toBe(false)
-    expect(paneFits('reader', 'companion', { developer: true })).toBe(true)
+    expect(paneFits('reader', 'cards')).toBe(false)
+    expect(paneFits('reader', 'cards', { developer: true })).toBe(true)
   })
 
   it('fits no kernel panel on a screen a capability owns', () => {
@@ -411,7 +368,7 @@ describe('which panel fits where, by behaviour', () => {
   })
 
   it('keeps every book-only panel off the shelf, developer options or not', () => {
-    for (const pane of ['toc', 'search', 'companion'] as const) {
+    for (const pane of ['toc', 'search'] as const) {
       expect(paneFits('library', pane, { developer: true }), pane).toBe(false)
     }
   })

@@ -49,8 +49,14 @@ import type { TrashedBook } from '../bookTrash'
  * wire never performed. `string` there is the honest type.
  */
 
-/** What a mark IS. */
-export type MarkRowKind = 'highlight' | 'companion' | 'bookmark'
+/** What a mark IS.
+ *  ⚠️ **`'companion'` IS RETIRED FROM HERE** (the AI features went whole). That
+ *  is exactly the "retiring a published value without touching the domain"
+ *  case the note above allows, in the other direction: the domain lost the kind
+ *  first, so `markRow` can no longer produce one. A peer on an older build may
+ *  still SEND one, and `parseMarks` drops that row as it drops any row whose
+ *  kind it does not know. */
+export type MarkRowKind = 'highlight' | 'bookmark'
 /** A highlight's colour. */
 export type MarkRowTint = 'yellow' | 'green' | 'purple'
 /** How a highlight is drawn. */

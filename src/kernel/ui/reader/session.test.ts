@@ -242,7 +242,7 @@ function fakeView(overrides: FakeViewOptions = {}): FakeView {
 const PALETTE: MarkPalette = {
   fill: { yellow: '#F3E6C0', green: '#D1EED3', purple: '#F2E0FF' },
   rule: { yellow: '#E0BE55', green: '#85D288', purple: '#DDAFFF' },
-  companion: '#9E5A16', foreign: '#teal', stranger: '#grey',
+  foreign: '#teal', stranger: '#grey',
 }
 
 function callbacks(
@@ -1608,7 +1608,7 @@ describe('ReaderSession marks', () => {
 
   it.each([
     ['a reader’s rule', { kind: 'highlight', tint: 'purple', style: 'underline' }],
-    ['the companion’s wave', { kind: 'companion' }],
+    ['a wave', { kind: 'highlight', tint: 'purple', style: 'wave' }],
     ['a friend’s underline', { kind: 'circle', readers: 1 }],
     ['a stranger’s underline', { kind: 'public', readers: 1 }],
   ])('tells the painter which way the text runs — %s', async (_what, annotation) => {
@@ -1716,21 +1716,21 @@ describe('ReaderSession marks', () => {
     ])
   })
 
-  it('draws the companion’s mark as an amber WAVE whatever the reader chose', async () => {
-    /* Here the colour is not a preference, it is whose mark this is — and so is
-       the shape. The wave is reserved to the companion (`READER_STYLES`), which
-       is what keeps a machine's claim from looking like the reader's own once
-       the reader can draw rules too. A departure from §01, which specified an
-       underline back when every reader's mark was a fill. */
-    expect(await paintOne({ kind: 'companion', tint: 'green', style: 'fill' })).toEqual([
-      { fn: 'WAVE', color: '#9E5A16' },
+  it('draws a reader’s underline as an underline', async () => {
+    expect(await paintOne({ kind: 'highlight', tint: 'green', style: 'underline' })).toEqual([
+      { fn: 'UNDERLINE', color: '#85D288' },
     ])
   })
 
-  it('draws a reader’s underline as an underline, not the companion’s wave', async () => {
-    // The pair above only means something if the reader's rule is a different one.
-    expect(await paintOne({ kind: 'highlight', tint: 'green', style: 'underline' })).toEqual([
-      { fn: 'UNDERLINE', color: '#85D288' },
+  /* ⚠️ **A WAVE STILL REACHES A PAINTER, AND NO READER CAN MAKE ONE.**
+     `READER_STYLES` does not offer it and the store reads a stored one back as
+     an underline — but `styleOf` reads what foliate hands back, untyped, so the
+     painter has to answer for a value the type system never saw. It was the
+     deleted companion's shape, drawn in amber; a wave that arrives now is the
+     reader's own mark and wears the reader's own rule colour. */
+  it('draws a wave that reaches it in the reader’s own rule colour', async () => {
+    expect(await paintOne({ kind: 'highlight', tint: 'green', style: 'wave' })).toEqual([
+      { fn: 'WAVE', color: '#85D288' },
     ])
   })
 

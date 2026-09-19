@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
-import type { AnswerChoice } from '../core/glossLanguage'
 import { BRIGHTNESS, CONTRAST, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
 import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
@@ -200,32 +199,6 @@ export interface AppState {
    * test holds it.
    */
   readonly readingStyle: ReadingStyle
-  /**
-   * What a definition is written in — WI-17.5's four answers.
-   *
-   * A DURABLE PREFERENCE, mirrored here like the rest, because `useLookUp`
-   * reads it at every press and the Settings list writes it.
-   */
-  readonly lookUpLanguage: AnswerChoice
-  /**
-   * A request to open Settings ON ONE SECTION — the id, and a nonce so asking
-   * twice is two requests (phase 17, L3).
-   *
-   * ⚠️ **"INSTALL ONE" LANDED ON THE TOP OF A PANE WITH THE SECTION COLLAPSED.**
-   * `openPane: 'settings'` was the finest target there was, and Local models
-   * sits under The app band, closed at rest — so the offer to install a model
-   * left the reader to scroll past the reading settings and find and open the
-   * right group themselves. The section id comes from the provider
-   * (`GlossProvider.installAt`), so the kernel still names no capability's
-   * section.
-   *
-   * `pending` IS WHAT MAKES IT A REQUEST AND NOT A STATE. The panel honours a
-   * pending request once and reports it; a remount of the panel — Contents and
-   * back — then finds a request already answered, rather than re-opening a
-   * group the reader has since closed. `Marginalia`'s mark focus learned the
-   * same lesson; this one keeps its nonce so the next request is still new.
-   */
-  readonly settingsReveal: { readonly section: string; readonly nonce: number; readonly pending: boolean } | null
 }
 
 /**
@@ -288,10 +261,6 @@ export const initialState: AppState = {
      gets no change. Imported rather than restated, so the seed and the
      stylesheet's own defaults cannot come to disagree. */
   readingStyle: DEFAULT_READING_STYLE,
-  /* The reader's own language — WI-17.5's default, and the one a reader who
-     never opens the list is asking for without knowing there is a list. */
-  lookUpLanguage: 'reader',
-  settingsReveal: null,
 }
 
 export type Action =
@@ -325,12 +294,6 @@ export type Action =
   | { type: 'setPageLayout'; layout: PageLayout }
   | { type: 'setMarkTint'; tint: MarkTint }
   | { type: 'setMarkStyle'; style: MarkStyle }
-  /** WI-17.5. */
-  | { type: 'setLookUpLanguage'; choice: AnswerChoice }
-  /** Open Settings on one section — see `AppState.settingsReveal`. */
-  | { type: 'revealSettings'; section: string }
-  /** The panel acted on the request with this nonce. */
-  | { type: 'settingsRevealed'; nonce: number }
   /**
    * One action for all fifteen — see `readingStyle`.
    *
@@ -494,26 +457,6 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
 
     case 'closePane':
       return { ...state, pane: null }
-
-    case 'setLookUpLanguage':
-      return state.lookUpLanguage === action.choice ? state : { ...state, lookUpLanguage: action.choice }
-
-    /* THE PANEL AND THE REQUEST TOGETHER, through `openPane`'s own rule so a
-       screen without Settings lands where `openPane` would land it. The nonce
-       counts on from the last request whatever became of it, so a second
-       "Choose one" after the first was honoured is a new request. */
-    case 'revealSettings':
-      return {
-        ...reducer(state, { type: 'openPane', pane: 'settings' }, contributed),
-        settingsReveal: { section: action.section, nonce: (state.settingsReveal?.nonce ?? 0) + 1, pending: true },
-      }
-
-    /* ONLY THE REQUEST IT NAMES. A report about an older request, arriving after
-       a newer one, must not mark the newer one answered. */
-    case 'settingsRevealed':
-      return state.settingsReveal !== null && state.settingsReveal.pending && state.settingsReveal.nonce === action.nonce
-        ? { ...state, settingsReveal: { ...state.settingsReveal, pending: false } }
-        : state
 
     /* ⚠️ **THE OPEN PANEL IS RE-RESOLVED, AND IT HAS TO BE.** Turning developer
      * options OFF takes the unfinished panels away — including, quite possibly,
@@ -723,11 +666,10 @@ export function setReadingStyle(...[key, value]: ReadingStyleArgs): Action {
  * The panels that have nothing to show without an open book.
  *
  * Not a style question, and not a list anyone should keep a second copy of.
- * `Contents` lists the open book's own table of contents, `Companion` says as
- * much in its own subtitle — "grounded in this book only" — and `Search` takes
- * a `Book` and scans it. On the library screen all three are a title above an
- * apology, and the pane OPENED ONTO ONE OF THEM: the first thing Paper showed a
- * reader with a full shelf was a panel saying it was not available.
+ * `Contents` lists the open book's own table of contents and `Search` takes a
+ * `Book` and scans it. On the library screen both are a title above an apology,
+ * and the pane OPENED ONTO ONE OF THEM: the first thing Paper showed a reader
+ * with a full shelf was a panel saying it was not available.
  *
  * Marginalia and Cards are deliberately absent. Both are cross-book by design —
  * Marginalia shows every book's marks, notes and places — and they are why the
@@ -738,7 +680,7 @@ export function setReadingStyle(...[key, value]: ReadingStyleArgs): Action {
  * It lives here rather than in the pane registry because the ids are declared
  * here and the reducer below needs the same answer. The registry reads it.
  */
-const BOOK_ONLY: readonly PaneId[] = ['toc', 'search', 'companion']
+const BOOK_ONLY: readonly PaneId[] = ['toc', 'search']
 
 /**
  * The panels that mean something only on the SHELF.
@@ -1046,9 +988,6 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
        object when an index has not moved. The indices stay listed, which is
        harmless; the reason given was false (2026-09-13 audit). */
     prefs.readingStyle,
-    /* WI-17.5 — named here in the same change that added it, which is the
-       whole lesson of the two notes above. */
-    prefs.lookUpLanguage,
   ])
   return [state, dispatch]
 }
@@ -1078,7 +1017,6 @@ export function preferencesOf(state: AppState): KernelPreferences {
     markTint: state.markTint,
     markStyle: state.markStyle,
     readingStyle: state.readingStyle,
-    lookUpLanguage: state.lookUpLanguage,
   }
 }
 

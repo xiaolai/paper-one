@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Asterisk,
-  BookA,
   /* Aliased: `Bookmark` is also the record type this file is largely about,
      and the icon is the lesser of the two claims on the name. */
   Bookmark as BookmarkIcon,
@@ -10,7 +9,6 @@ import {
   Layers,
   LibraryBig,
   PenLine,
-  Sparkles,
   Trash2,
 } from 'lucide-react'
 import { cardFromMark } from '../../core/cards'
@@ -22,7 +20,6 @@ import {
   type Annotation,
   type Bookmark,
   type Mark,
-  isHighlight,
   MAX_MARK_NOTE,
 } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
@@ -42,9 +39,6 @@ import { onBeforeClose } from '../../core/beforeClose'
 import { relativeTime } from '../../core/relativeTime'
 import type { CardsView } from '../hooks/useCards'
 import type { MarkControl } from '../../core/capability'
-import type { Lookup } from '../../core/lookups'
-import type { GlossState } from '../hooks/useGloss'
-import { DictionaryView } from './DictionaryView'
 
 /* The context a mark control's contribution is drawn under: the open book, which the control's own render never reads — it is handed the mark. */
 // Stryker disable next-line ObjectLiteral,ArrowFunction: no control reads the context, so what it holds — or that it is nothing — cannot be seen.
@@ -59,9 +53,6 @@ const controlContext = (bookId: string | null): { readonly bookId: string | null
  * row with nothing on it.
  */
 const hasNote = (mark: { readonly note: string }): boolean => mark.note.trim() !== ''
-
-/** No lookup on — the default for a host that passes none. */
-const IDLE: GlossState = { kind: 'idle' }
 
 /** §11: say what happened and what to do. A store that has quietly stopped saving looks exactly like one that works. */
 const NOT_SAVING = "Marginalia is not being saved — this device's storage is unavailable."
@@ -99,7 +90,7 @@ import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
  * IT WAS CALLED NOTES, and the name stopped being true when bookmarks joined
  * it. §15's lexicon is precise about the two words it owns — a **mark** is the
  * highlight, a **note** is what you wrote on it — and a panel holding marks,
- * notes, the companion's claims AND places named itself after one of the four.
+ * notes AND places named itself after one of the three.
  * "Annotations" was the obvious replacement and is the one word §15 rules out
  * for this panel. Marginalia is what a reader leaves in a book, which is
  * exactly the union; a bookmark is not written, which is the one place the word
@@ -110,12 +101,12 @@ import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
  * "This book" mutually exclusive with "Marks", which is not what either means.
  */
 
-/* `Dictionary` IS A FILTER AND NOT A MARK KIND (phase 17 §2). A lookup is a
-   term, cross-book and undrawn; as a `MarkKind` it would write a row into each
-   book's marks file per press and travel in the sync feed. The chip swaps the
-   panel's BODY instead — see `DictionaryView`. */
-type KindFilter = 'All' | 'Marks' | 'Notes' | 'Bookmarks' | 'Companion' | 'Dictionary'
-const KINDS: readonly KindFilter[] = ['All', 'Marks', 'Notes', 'Bookmarks', 'Companion', 'Dictionary']
+/* ⚠️ **TWO CHIPS ARE GONE FROM HERE**: `Companion`, which filtered on a mark
+   kind that no longer exists, and `Dictionary`, which was not a mark kind at
+   all — it swapped the panel's whole BODY for the lookup history. Both went
+   with the AI features. */
+type KindFilter = 'All' | 'Marks' | 'Notes' | 'Bookmarks'
+const KINDS: readonly KindFilter[] = ['All', 'Marks', 'Notes', 'Bookmarks']
 
 /** The scope chips. Only offered with a book open — see the render. */
 type ScopeFilter = 'All books' | 'This book'
@@ -125,13 +116,13 @@ const SCOPES: readonly ScopeFilter[] = ['All books', 'This book']
  * The chips are icons, and each one BORROWS AN ASSOCIATION THE APP HAS ALREADY
  * TAUGHT rather than inventing a glyph.
  *
- * Sparkles is the Companion's own rail icon and LibraryBig is the Library's, so
- * a reader who has used either panel already knows what those two mean here.
+ * LibraryBig is the Library's own rail icon, so a reader who has used that
+ * panel already knows what it means here.
  * Bookmark is the ribbon the toggle draws on the page. Highlighter is this
  * panel's own rail icon, which is right for the kind of thing this panel is
  * mostly made of. PenLine is the note — §15's word for what you wrote on a
  * mark — and BookOpen is the one you have open. Asterisk is the wildcard, which
- * is the only one of the seven that is a convention rather than a recall.
+ * is the only one of the five that is a convention rather than a recall.
  *
  * Typed as a total Record, so adding a filter without an icon fails to compile
  * instead of drawing an empty button — see `FilterChipsProps.icons`.
@@ -141,10 +132,6 @@ const KIND_ICONS: Readonly<Record<KindFilter, typeof Asterisk>> = {
   Marks: Highlighter,
   Notes: PenLine,
   Bookmarks: BookmarkIcon,
-  Companion: Sparkles,
-  /* The selection popup's own dictionary glyph — the association the app has
-     already taught, which is the rule for every icon in this row. */
-  Dictionary: BookA,
 }
 
 const SCOPE_ICONS: Readonly<Record<ScopeFilter, typeof Asterisk>> = {
@@ -153,22 +140,12 @@ const SCOPE_ICONS: Readonly<Record<ScopeFilter, typeof Asterisk>> = {
 }
 
 function matches(mark: Mark, filter: KindFilter): boolean {
+  /* EVERY CHIP WRITTEN OUT, never a default, so the day `KindFilter` grows
+     again this switch fails to compile instead of quietly filing marks under
+     the wrong chip. */
   switch (filter) {
-    /* NO MARK IS EVER A LOOKUP — written out rather than left to a default, so
-       the day `KindFilter` grows again this switch fails to compile instead of
-       quietly filing marks under the wrong chip.
-
-       FIRST, and not for tidiness: a case that loses its `return` falls into
-       the next one, so here a lost `return false` files every mark under this
-       chip, which a test can see. Last, it fell off the end as `undefined`,
-       which every caller reads exactly as `false`. */
-    // Stryker disable next-line StringLiteral: a label matching nothing sends 'Dictionary' off the end as `undefined`, and every caller — `filter`, `!`, `&&` — reads that as the `false` it returns.
-    case 'Dictionary':
-      return false
     case 'All':
       return true
-    case 'Companion':
-      return mark.kind === 'companion'
     /* A BOOKMARK HAS NO NOTE and never will — `bookmarkFrom` writes an empty
      * one and says why — so it cannot appear under Notes by accident. Stated
      * rather than relied on: the filters are read by someone deciding what a
@@ -795,27 +772,6 @@ export interface MarginaliaProps {
    * at all.
    */
   markControls?: readonly MarkControl[] | undefined
-  /**
-   * The lookup history (phase 17, WI-17.3), or absent where there is none.
-   *
-   * ABSENT MEANS NO CHIP, not an empty one. The browser client mounts this
-   * panel with no Look up at all, and a Dictionary chip there would name a
-   * feature that host does not have. `remove` is optional for `setNote`'s
-   * reason: a host that can read the history may not be able to change it.
-   */
-  lookups?:
-    | {
-        readonly all: readonly Lookup[]
-        readonly persistent: boolean
-        readonly remove?: ((term: string) => void) | undefined
-      }
-    | undefined
-  /**
-   * The lookup happening now — WI-17.2's lifted state. Drawn at the top of the
-   * Dictionary view, and a lookup that STARTS while this panel is open turns it
-   * to that view: "when looking up, show what is currently being looked up".
-   */
-  liveLookUp?: GlossState | undefined
 }
 
 export function Marginalia({
@@ -832,33 +788,8 @@ export function Marginalia({
   now: injectedNow,
   titleOf,
   markControls,
-  lookups,
-  liveLookUp = IDLE,
 }: MarginaliaProps) {
-  const [filter, setFilter] = useState<KindFilter>('All')
-  /* The chips this host has — no Dictionary without a history to show. */
-  const kinds = lookups === undefined ? KINDS.filter((kind) => kind !== 'Dictionary') : KINDS
-  /* THE KIND SHOWN, which is the kind chosen unless its chip has gone: a host
-     that withdraws its history under the Dictionary chip takes the chip away,
-     and a choice the reader can neither see nor undo is not one to keep drawing
-     — the panel shows All. The choice itself is kept, so a history that comes
-     back brings its view back with it. */
-  const kind: KindFilter = lookups === undefined && filter === 'Dictionary' ? 'All' : filter
-
-  /* A LOOKUP THAT STARTS TURNS THE PANEL TO IT — on the transition from idle,
-     once, so a reader who then picks another chip is not pulled back on every
-     render the lookup stays on screen. The pane is already open, so nothing
-     re-lays-out; opening it is still never a lookup's doing (phase 17 §1). */
-  const liveKind = liveLookUp.kind
-  /* THE KIND THE EFFECT LAST SAW, seeded with the kind at mount — so a lookup
-     already on when the panel opens has not started. Kept as the kind rather
-     than as "was it live": seeded `liveKind !== 'idle'`, the seed was read only
-     when it was `true`, so nothing could tell it from a bare `true`. */
-  const lastKind = useRef(liveKind)
-  useEffect(() => {
-    if (liveKind !== 'idle' && lastKind.current === 'idle' && lookups !== undefined) setFilter('Dictionary')
-    lastKind.current = liveKind
-  }, [liveKind, lookups])
+  const [kind, setFilter] = useState<KindFilter>('All')
   /* ALL BOOKS BY DEFAULT, which is what this panel has always shown. Narrowing
      is the reader's move, and defaulting to it would silently change what a
      panel they already know shows them. */
@@ -1068,17 +999,8 @@ export function Marginalia({
          the fix and this is the surface refusing to depend on it. */
       notes: inScope.filter((mark) => isAnnotation(mark) && hasNote(mark)).length,
       places: inScope.filter(isBookmark).length,
-      /* Words with a place in the chosen scope — the Dictionary view's own
-         rule, so the number and its list agree. */
-      words:
-        lookups === undefined
-          ? 0
-          : lookups.all.filter(
-              (lookup) =>
-                scope === 'All books' || !bookId || lookup.occurrences.some((place) => place.bookId === bookId),
-            ).length,
     }),
-    [inScope, lookups, scope, bookId],
+    [inScope],
   )
 
   /* AN EDITOR WHOSE ROW LEFT THE LIST CLOSES. Filtered out, scoped out, or its
@@ -1088,10 +1010,8 @@ export function Marginalia({
     if (editing !== null && !inScope.some((mark) => mark.id === editing && matches(mark, kind))) setEditing(null)
   }, [editing, inScope, kind])
 
-  /* NOTHING AT ALL — no marks, no lookups, no lookup on. A reader with only
-     lookups must still reach the Dictionary chip, which the empty state has no
-     room for. */
-  if (everything.length === 0 && (lookups?.all.length ?? 0) === 0 && liveLookUp.kind === 'idle') {
+  /* NOTHING AT ALL. */
+  if (everything.length === 0) {
     /* NOT YET AN ANSWER. The cross-book scan costs a read per book and the
        panel mounts before it lands, so "Nothing kept yet" stood over a
        library that had not finished being read — a false empty state for as
@@ -1147,12 +1067,6 @@ export function Marginalia({
           {counted.marks} {counted.marks === 1 ? 'mark' : 'marks'} · {counted.notes}{' '}
           {counted.notes === 1 ? 'note' : 'notes'} · {counted.places}{' '}
           {counted.places === 1 ? 'bookmark' : 'bookmarks'}
-          {lookups !== undefined && (
-            <>
-              {' · '}
-              {counted.words} {counted.words === 1 ? 'word' : 'words'}
-            </>
-          )}
         </span>
       </div>
 
@@ -1174,10 +1088,9 @@ export function Marginalia({
       )}
 
       {/* THE SCAN, SAID ABOVE WHAT IS LISTED AS WELL AS OVER NOTHING (#129,
-          #130). Kept to the nothing-at-all branch, a failed scan under a
-          lookup history read "No marginalia yet.", and a running one let a
-          partial list pass for the whole of it. Running wins over failed, as
-          it does in that branch: a scan under way is the newer answer. */}
+          #130). Kept to the nothing-at-all branch, a running scan let a partial
+          list pass for the whole of it. Running wins over failed, as it does in
+          that branch: a scan under way is the newer answer. */}
       {marks.scanning && (
         <div className={styles.panelMeta}>
           <span>{SCANNING_MARKS}</span>
@@ -1191,9 +1104,8 @@ export function Marginalia({
         </div>
       )}
 
-      {/* HERE, because this is where cards are made — and above both bodies,
-          because the mark rows and the Dictionary view both make them (#122,
-          #132). */}
+      {/* HERE, because this is where cards are made, above the rows that make
+          them (#122, #132). */}
       {cards !== undefined && !cards.persistent && (
         <div className={styles.panelMeta}>
           <span>{NOT_SAVING_CARDS}</span>
@@ -1201,14 +1113,14 @@ export function Marginalia({
       )}
 
       {/* BOTH AXES ON ONE LINE, with a rule between them.
-          As words the seven wrapped to three lines of chrome above the list at
+          As words the chips wrapped to three lines of chrome above the list at
           the pane's 400px. As icons they are one, and the rule is what keeps
-          them legible as two questions rather than one row of seven — a reader
-          has to be able to see that picking "Notes" does not un-pick "This
+          them legible as two questions rather than one long row — a reader has
+          to be able to see that picking "Notes" does not un-pick "This
           book". */}
       <div className={styles.filterBar}>
         <FilterChips
-          options={kinds}
+          options={KINDS}
           active={kind}
           onSelect={setFilter}
           label="Filter by kind"
@@ -1232,24 +1144,6 @@ export function Marginalia({
         )}
       </div>
 
-      {/* THE BODY SWAPS for the Dictionary chip — see `DictionaryView`. */}
-      {filter === 'Dictionary' && lookups !== undefined ? (
-        <DictionaryView
-          lookups={lookups.all}
-          persistent={lookups.persistent}
-          live={liveLookUp}
-          bookId={bookId}
-          thisBookOnly={scope === 'This book'}
-          now={now}
-          platform={platform}
-          titleOf={titleOf}
-          onShelf={onShelf}
-          onGoTo={onGoTo}
-          onRemove={lookups.remove}
-          cards={cards}
-        />
-      ) : (
-      <>
       {/* NOT WHILE THE LIST IS UNFINISHED OR UNREAD — the line above says which,
           and "No notes yet." under it would claim an answer nobody has yet
           (#129, #130). */}
@@ -1307,14 +1201,6 @@ export function Marginalia({
               Asking `isAnnotation` first narrows the branch that needs it. */}
           {isAnnotation(mark) ? (
           <>
-          {mark.kind === 'companion' && (
-            // The kind is stated as data as well as text: the amber that means
-            // "the companion wrote this" is keyed on it — see `.noteKind`.
-            <div className={styles.noteKind} data-kind="Companion">
-              Companion
-            </div>
-          )}
-
           {/* A control that silently does nothing is worse than none — the
               rule stands; its subject narrowed. It used to be "only the open
               book", because a mark from another book had nowhere to jump to.
@@ -1361,19 +1247,13 @@ export function Marginalia({
               is the capability's own, narrowed by `renderContribution` the
               way a contributed pane is; the kernel supplies the mark and
               never learns what the control does. */}
-          {/* ⚠️ THE READER'S OWN HIGHLIGHTS ONLY. A companion annotation is a
-              claim somebody else's model made about the text, and a control
-              that shares "what I marked" must not be offered on it as though
-              the reader had. */}
-          {isHighlight(mark)
-            ? markControls?.map((control) => (
-                <div key={control.id} data-mark-control={control.id}>
-                  <ContributionBoundary label="A mark control" id={control.id} resetKey={control.id}>
-                    <ContributionBody id={control.id} render={() => control.render(mark)} context={controlContext(bookId)} />
-                  </ContributionBoundary>
-                </div>
-              ))
-            : null}
+          {markControls?.map((control) => (
+            <div key={control.id} data-mark-control={control.id}>
+              <ContributionBoundary label="A mark control" id={control.id} resetKey={control.id}>
+                <ContributionBody id={control.id} render={() => control.render(mark)} context={controlContext(bookId)} />
+              </ContributionBoundary>
+            </div>
+          ))}
 
           <div className={styles.noteSource}>
             <span>{mark.chapter || 'Unknown chapter'}</span>
@@ -1420,8 +1300,6 @@ export function Marginalia({
           ) : null}
         </div>
       ))}
-      </>
-      )}
     </div>
   )
 }

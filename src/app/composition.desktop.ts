@@ -1,7 +1,5 @@
 import type { Capability } from '../kernel'
 import { circle } from '../capabilities/circle'
-import { companion } from '../capabilities/companion'
-import { inference } from '../capabilities/inference'
 import { peer } from '../capabilities/peer'
 import { publicSharing } from '../capabilities/public'
 import { sync } from '../capabilities/sync'
@@ -15,11 +13,18 @@ import { webhost } from '../capabilities/webhost'
  * STATIC, and its own list: this file imports exactly the capabilities whose
  * manifest `platforms` name `desktop`; there is no runtime filtering of a
  * longer one. `.ios.ts` and `.android.ts` sit beside it with their own lists.
- * `src/main.tsx` reaches whichever composition its build is for through
- * `virtual:paper-composition`, which `vite.config.ts` resolves from
- * `TAURI_ENV_PLATFORM` at build time (unset, `darwin`, `windows`, `linux` →
- * this file); the other compositions are never in that build's module graph, and
- * `assert-bundle` fails the build if one is.
+ * ⚠️ **`app/bootApp.ts` IS WHAT IMPORTS IT, NOT AN ENTRY** (2026-09-19 audit;
+ * this said `src/main.tsx`, and `vite.config.ts` said the same). There are
+ * THREE entries — `main.tsx` (desktop), `main.mobile.tsx` (phones) and
+ * `main.web.tsx` (browser) — and the first two reach a composition only through
+ * `bootApp()`, which holds the one `virtual:paper-composition` import between
+ * them. `main.web.tsx` imports it directly, because the browser client boots
+ * without `bootApp`. Naming one entry made the sentence wrong for the other two.
+ *
+ * `vite.config.ts` resolves that module from `TAURI_ENV_PLATFORM` at build time
+ * (unset, `darwin`, `windows`, `linux` → this file); the other compositions are
+ * never in that build's module graph, and `assert-bundle` fails the build if one
+ * is.
  *
  * ⚠️ **THERE ARE FOUR, AND THIS SAID "the other two".** `composition.web.ts`
  * joined `.ios.ts` and `.android.ts` and `scripts/lib/compositions.mjs` handles
@@ -30,12 +35,6 @@ import { webhost } from '../capabilities/webhost'
  * A composition root is the one place allowed to import every capability's
  * `index.ts` and both kernel entries (`.dependency-cruiser.cjs`).
  */
-/* `inference` before `companion`, which the registry would work out anyway
- * from `requires` — stated here because the pair is the phase-15 split and
- * reading them adjacent is how the split stays legible. Both are DESKTOP
- * ONLY: the runtime Paper stages, llama.cpp's `llama-server`, is staged for
- * the desktop platforms alone, and the plugin that supervises it compiles only
- * under the `desktop` feature — so the mobile compositions do not list them. */
 /* `webhost` last, and after `peer`, which it declares in `requires`.
  *
  * ⚠️ **THE REASON HERE HAS NOW BEEN WRONG TWICE.** It first said *"it needs
@@ -45,14 +44,27 @@ import { webhost } from '../capabilities/webhost'
  * serves every bound host once, AFTER every capability has started. Neither
  * capability can start too early for the other. Found by audit.
  *
- * What the `requires` buys is the ORDER OF THE LIST, which is what a reader of
- * this file is looking at: the transport that carries the circle comes before
- * the transport that carries a browser, and a build that drops `peer` drops
- * `webhost` with it rather than leaving a shelf serving a library nothing
- * replicates. That is a composition decision and not a startup dependency, and
- * saying so is the difference between a coupling somebody can evaluate and one
- * they have to take on trust.
+ * ⚠️ **AND THE THIRD ANSWER WAS WRONG TOO** (2026-09-19 audit). It said *"what
+ * the `requires` buys is the ORDER OF THE LIST"* and that *"a build that drops
+ * `peer` drops `webhost` with it"*. Neither is what the code does, and both are
+ * checkable:
+ *
+ *   - THE LIST'S ORDER IS THE MANIFEST'S, not a consequence of `requires`.
+ *     `compositions:check` builds the expected order as
+ *     `manifest.capabilities.filter(imported)` and compares this array to it
+ *     (`scripts/lib/compositions.mjs`), so reordering this line fails there
+ *     whatever any `requires` says.
+ *   - DROPPING `peer` DOES NOT DROP `webhost` — it REFUSES the composition.
+ *     `composeCapabilities` throws `missing-requires` for a capability whose
+ *     dependency is not composed (`core/registry.ts`), which is a louder and
+ *     more useful guarantee than the silent pruning this claimed.
+ *
+ * What `requires` actually buys: registration order is topological by it (ties
+ * by list position, ADR decision 4), a missing dependency is refused by name, a
+ * cycle is refused, and a dependency that fails to start propagates as
+ * `requires-failed`. Written out because this comment has now been wrong three
+ * times about one field, each time in a way that reads as authoritative.
  *
  * DESKTOP ONLY: a phone is a satchel, never a shelf, and has nothing to
  * serve. */
-export const capabilities: readonly Capability[] = [peer, sync, inference, companion, circle, publicSharing, webhost]
+export const capabilities: readonly Capability[] = [peer, sync, circle, publicSharing, webhost]

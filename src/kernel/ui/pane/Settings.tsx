@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import type { SettingsSection } from '../../core/capability'
-import { ANSWER_LANGUAGES, isAnswerChoice, type AnswerChoice, type AnswerLanguage } from '../../core/glossLanguage'
 import {
   BRIGHTNESS,
   CONTRAST,
@@ -96,8 +95,6 @@ const GROUP = {
   blocks: 'blocks',
   figures: 'figures',
   page: 'page',
-  /** WI-17.5's answer language. */
-  lookUp: 'lookUp',
   /* ⚠️ **NO COLON, AND THESE WERE `developer:unfinished`.** A colon is the
      CONTRIBUTED-pane and contributed-section convention — `<capability>:<name>`
      — and these ids share one open/closed list with the sections a capability
@@ -204,8 +201,8 @@ export interface SettingsProps {
    * ⚠️ THE SEVEN OPTIONAL SETTERS BELOW, and why absence is the right signal.
    *
    * A host that cannot do the thing does not pass its setter, and the row is
-   * not drawn — the same convention as `onAddBooks` on the shelf, `cards` in
-   * Marginalia and `LookUp.onInstall` in the reader. The browser client mounts
+   * not drawn — the same convention as `onAddBooks` on the shelf and `cards` in
+   * Marginalia. The browser client mounts
    * this pane and has no reading ruler, no scroll port it owns, no side pane
    * (a 393px screen has no side), and no brightness or contrast filter; drawing
    * those rows would name features that host will never have.
@@ -234,33 +231,7 @@ export interface SettingsProps {
   contrast?: number | undefined
   onContrast?: ((idx: number) => void) | undefined
   onTypeface: (typeface: Typeface) => void
-  /**
-   * What Look up writes its definitions in (WI-17.5), or absent where there is
-   * no Look up — the browser client, a phone, a desktop with no `inference`.
-   *
-   * `readerLanguage` IS WHAT "YOUR LANGUAGE" RESOLVES TO, so the row can name it:
-   * a reader whose system is in a language Paper does not answer well in is
-   * answered in English, and the list says so instead of letting them discover
-   * it from the first definition.
-   */
-  lookUp?:
-    | {
-        readonly choice: AnswerChoice
-        readonly readerLanguage: AnswerLanguage
-        readonly onChoice: (choice: AnswerChoice) => void
-      }
-    | undefined
-  /** A request to open one section and bring it into view — `AppState.settingsReveal`. */
-  reveal?: { readonly section: string; readonly nonce: number; readonly pending: boolean } | null | undefined
-  /** The request with this nonce has been acted on. */
-  onRevealed?: ((nonce: number) => void) | undefined
 }
-
-/** What each automatic choice is called — the named languages carry their own. */
-const MODE_LABELS = {
-  book: 'The book’s language',
-  both: 'The book’s language, then yours',
-} as const
 
 /**
  * What each of the three states is called in the row.
@@ -429,9 +400,6 @@ export function Settings({
   onContrast,
   onTypeface,
   developer,
-  lookUp,
-  reveal,
-  onRevealed,
 }: SettingsProps) {
   const step = readingStep(stepIdx)
   /* THE INDEX OF THE STEP SHOWN, which is not always the one handed in.
@@ -477,78 +445,11 @@ export function Settings({
   const toggleGroup = (id: string) =>
     setOpenGroups((open) => (open.includes(id) ? open.filter((one) => one !== id) : [...open, id]))
 
-  /* ── "INSTALL ONE" LANDS ON ITS SECTION (phase 17, L3) ─────────────────────
-   *
-   * A PENDING REQUEST IS HONOURED ONCE: the group is opened — it is closed at
-   * rest — and brought into view, and the owner is told so a remount does not
-   * find the request again (see `AppState.settingsReveal`).
-   *
-   * ⚠️ THE SCROLL FRAME IS NOT CANCELLED WHEN THE REQUEST CHANGES — only when a
-   * NEWER pending request replaces it, and on unmount. `Marginalia`'s mark focus
-   * records why: reporting the request answered changes it, which re-runs this
-   * effect, and a cleanup that cancelled the frame would cancel the very scroll
-   * the request was for. */
-  const panel = useRef<HTMLDivElement | null>(null)
-  const revealFrame = useRef(0)
-  /* THE NONCE ANSWERED — scrolled to and reported. The effect re-runs whenever
-     the request or its handler changes identity — and `SidePane` hands a fresh
-     handler on every render — so a request still pending when that happened was
-     answered again and had its scroll queued again (#139). */
-  const revealed = useRef<number | null>(null)
-  /**
-   * The request whose frame is in flight, and how to answer it.
-   *
-   * ⚠️ **MARKING A NONCE ANSWERED WHEN ITS FRAME WAS MERELY QUEUED BROKE THE
-   * FIRST REVEAL** (#139, round 2). React mounts an effect, tears it down and
-   * mounts it again — which is what every developer runs — and the teardown
-   * below cancels the queued frame; on the second pass the guard found the
-   * nonce already answered and refused to queue another, so the request was
-   * reported answered and nothing moved. Answered means SCROLLED, and a
-   * cancelled frame takes its mark with it.
-   */
-  const revealing = useRef<{ readonly nonce: number; readonly answer: () => void } | null>(null)
-  useEffect(() => {
-    if (!reveal?.pending) return
-    const { section, nonce } = reveal
-    if (nonce === revealed.current || nonce === revealing.current?.nonce) return
-    setOpenGroups((open) => (open.includes(section) ? open : [...open, section]))
-    /* A NEWER REQUEST REPLACES THE ONE IN FLIGHT: its frame goes, and it is
-       answered where it stands — reported to the handler that came with it, so
-       the host is not left holding a request nothing will ever act on. */
-    cancelAnimationFrame(revealFrame.current)
-    revealing.current?.answer()
-    const answer = () => {
-      revealed.current = nonce
-      revealing.current = null
-      onRevealed?.(nonce)
-    }
-    revealing.current = { nonce, answer }
-    /* After paint, so the group that just opened has a body to bring in with
-       its heading. A section this reader is not offered finds nothing, and
-       nothing moves — and the request is answered either way. */
-    revealFrame.current = requestAnimationFrame(() => {
-      /* ESCAPED. A section id is a capability's string and the registry checks
-         only its prefix, so an id carrying a quote threw here — inside a frame,
-         where nothing catches it (#138). */
-      panel.current?.querySelector(`[data-group="${CSS.escape(section)}"]`)?.scrollIntoView({ block: 'start' })
-      answer()
-    })
-  }, [reveal, onRevealed])
-  /* AND THE MARK GOES WITH THE FRAME. See `revealing`: a nonce left marked here
-     refuses to queue a second frame, so the doubled mount would answer the
-     request without scrolling. Refs only, so every render's copy is the same. */
-  const forgetReveal = () => {
-    cancelAnimationFrame(revealFrame.current)
-    revealing.current = null
-  }
-  // Stryker disable next-line ArrayDeclaration: an effect whose only dependency is a constant runs once and cleans up once, exactly as one with none does, so no test can tell the two apart.
-  useEffect(() => () => forgetReveal(), [])
-
   /* Handed in, not probed here: `App` probes once and gives the same list to
      this panel and to the command palette, so the two cannot come to offer
      different faces. */
   return (
-    <div className={styles.panel} ref={panel}>
+    <div className={styles.panel}>
       {/* §11: say what happened and what it costs. Above the groups rather than
           inside one, because it is true of every control below it. */}
       {!persistent && (
@@ -980,56 +881,6 @@ export function Settings({
       </PaneGroup>
       )}
 
-      {/* WI-17.5 — IN THE READING BAND, because what a definition is written in
-          is a decision about reading, and the row the deleted Look up cycle
-          left behind was in the Companion's section, which a reader is not
-          shown.
-
-          A LIST, NOT A CYCLE, and phase 17 argued it before it was built: a
-          cycle suits a closed set of three, and the route list is a list
-          because it grows. Languages grow. Closed at rest: it is set once. */}
-      {lookUp !== undefined && (
-        <PaneGroup
-          title="Look up"
-          group={GROUP.lookUp}
-          open={groupOpen(GROUP.lookUp)}
-          onToggle={() => toggleGroup(GROUP.lookUp)}
-        >
-          <label className={styles.settingRow}>
-            <span style={{ flex: 1 }}>Define words in</span>
-            <select
-              className={styles.settingSelect}
-              value={lookUp.choice}
-              onChange={(event) => {
-                /* THE LIST IS THE BOUNDARY — a value is written only if it is
-                   one the setting accepts, whatever the element reports. */
-                const next = event.target.value
-                if (isAnswerChoice(next)) lookUp.onChoice(next)
-              }}
-            >
-              <option value="reader">Your language — {lookUp.readerLanguage.label}</option>
-              <option value="book">{MODE_LABELS.book}</option>
-              <option value="both">{MODE_LABELS.both}</option>
-              <optgroup label="Always in">
-                {ANSWER_LANGUAGES.map((one) => (
-                  <option key={one.tag} value={one.tag}>
-                    {one.label}
-                  </option>
-                ))}
-              </optgroup>
-            </select>
-          </label>
-          {/* THE CURATION, SAID. The list is the languages the model was
-              measured answering well in, and the automatic choices fall back
-              rather than route around it — a reader should learn that here, not
-              from a poor definition. */}
-          <p className={styles.groupHint}>
-            Paper offers the languages its model defines words well in. A book or a system in
-            another language is answered in yours, or in English.
-          </p>
-        </PaneGroup>
-      )}
-
       </PaneBand>
 
       {/* The contributed sections — a capability's own settings surface,
@@ -1051,14 +902,14 @@ export function Settings({
       {appBandDrawn && (
       <PaneBand title="The app">
       {/* ⚠️ **FILTERED, AND IT NEVER WAS.** `UNFINISHED_PANE_IDS` hid the
-          Companion PANEL and left `Settings → Companion` in front of every
-          reader — settings for a surface they cannot open. The rule is derived
-          from that one list rather than restated here; see
-          `settingsSectionOffered`, which also explains why `inference`'s
-          sections are not hidden with the companion (Look up ships on the same
-          engine), and the one flag a single section can carry instead —
-          `unfinished`, which Cloud endpoints does. Filtered above, into
-          `offeredSections`, so the band can ask first whether it holds anything. */}
+          deleted companion's PANEL and left its settings section in front of
+          every reader — settings for a surface they cannot open. The rule is
+          derived from that one list rather than restated here; see
+          `settingsSectionOffered`, which also explains why a section is matched
+          on its OWN capability and never on one it depends on, and the one flag
+          a single section can carry instead — `unfinished`. Filtered above,
+          into `offeredSections`, so the band can ask first whether it holds
+          anything. */}
       {offeredSections.map((section) => (
           <PaneGroup
             key={section.id}

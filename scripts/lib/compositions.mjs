@@ -710,23 +710,23 @@ const TAURI_PLATFORM_NAMES = Object.freeze(Object.values(TAURI_PLATFORMS).flat()
  * with no `platforms`, which applies EVERYWHERE. Nothing asked the other
  * question: "does every grant of a manifest plugin sit on a platform that
  * COMPILES that plugin?" tauri-build asks it at build time, per target, and
- * refuses the whole capability — `Permission inference:default not found` —
+ * refuses the whole capability — `Permission webhost:default not found` —
  * because a plugin that is not compiled for the target contributes no
- * permission manifest to check against. `inference:default` and
- * `webhost:default` sat in the platform-less `default.json` for a phase, both
- * plugins are desktop-only, and the iOS and Android compositions did not
- * compile. `pnpm verify` runs only default-feature cargo, and the weekly
- * mobile workflow had never fired, so the first thing to notice was a hand
- * run of the iOS `cargo check`.
+ * permission manifest to check against. `webhost:default` and the deleted
+ * inference plugin's grant sat in the platform-less `default.json` for a
+ * phase, both plugins were desktop-only, and the iOS and Android compositions
+ * did not compile. `pnpm verify` runs only default-feature cargo, and the
+ * weekly mobile workflow had never fired, so the first thing to notice was a
+ * hand run of the iOS `cargo check`.
  *
  * SCOPED TO MANIFEST PLUGINS, deliberately. A grant's namespace is the text
  * before its first `:`; only namespaces that belong to a manifest entry are
  * this rule's business. `core:*`, `dialog:*`, `fs:*`, `log:*` are Tauri's own
  * and its first-party plugins, compiled on every target that has one, and a
  * rule that named them would report every capability file in the tree. The
- * exemption cannot hide the regression above: `inference` IS a manifest
- * entry, so its grants are checked wherever they are spelled —
- * `inference:default` and `inference:allow-x` alike.
+ * exemption cannot hide the regression above: `webhost` IS a manifest entry,
+ * so its grants are checked wherever they are spelled — `webhost:default` and
+ * `webhost:allow-x` alike.
  *
  * One finding per (file, grant), naming the platforms the file applies to
  * that the entry does not compose — so a reader knows which file to scope

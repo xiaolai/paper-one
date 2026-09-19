@@ -3,7 +3,6 @@ import { act, cleanup, configure, fireEvent, render, screen, waitFor, within } f
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { IndexFs, IndexedBook } from '../core/bookIndex'
 import type { BookMeta, ReaderPosition } from '../core/bookMeta'
-import type { AskContext, CompanionProvider } from '../core/companion'
 import type { MutationRecorder } from '../core/ports'
 import type { SelectionSnapshot } from './reader/session'
 import { META_SCHEMA, folderOf } from '../core/bookFolder'
@@ -213,7 +212,6 @@ vi.mock('./reader/session', async (importActual) => {
       drawMark: () => {},
       eraseMark: () => {},
       deselect: () => {},
-      passages: () => [],
       closeFootnote: () => {},
       setFootnoteMount: () => {},
       next: () => this.own.turns.push('next'),
@@ -1265,49 +1263,6 @@ describe('a link that leaves the book, opened', () => {
     await eventually(() => expect(shell.invoked, 'the link was never handed to the shell').toContain('open_external'))
     await settle()
     expect(noticed(), 'a link that opened wiped the notice before it').toContain('Paper only opens web links')
-  })
-})
-
-describe('the companion, asked about a selection', () => {
-  it('hands the question the passage the reader has selected', async () => {
-    const asked: AskContext[] = []
-    const companion: CompanionProvider = {
-      name: 'A companion that listens',
-      configured: true,
-      ask: async function* (_question, context) {
-        asked.push(context)
-        yield 'an answer'
-      },
-    }
-    const moby = await shelved(BYTES, 'Moby-Dick')
-    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [], undefined, (services) => {
-      services.bindCompanion(companion)
-    })
-    await open('Moby-Dick')
-    /* The companion is one of the unfinished panels — behind the chord. */
-    fireEvent.keyDown(window, { key: 'd', code: 'KeyD', ctrlKey: true, altKey: true })
-    await settle()
-    await runCommand('Companion', 'Open Companion')
-
-    const passage = document.createElement('p')
-    passage.textContent = 'Call me Ishmael.'
-    document.body.append(passage)
-    try {
-      const range = document.createRange()
-      range.setStart(passage.firstChild!, 8)
-      range.setEnd(passage.firstChild!, 15)
-      await act(async () =>
-        reader.live!.select({ cfi: HERE, sectionIndex: 0, text: 'Ishmael', prefix: 'Call me ', suffix: '.', range }),
-      )
-      await settle()
-      const question = screen.getByRole('textbox', { name: 'Ask the companion about this chapter' })
-      fireEvent.change(question, { target: { value: 'Who is he?' } })
-      fireEvent.keyDown(question, { key: 'Enter' })
-      await eventually(() => expect(asked, 'the companion was never asked').toHaveLength(1))
-      expect(asked[0]!.selection, 'the question went without the passage it was about').toBe('Ishmael')
-    } finally {
-      passage.remove()
-    }
   })
 })
 

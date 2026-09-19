@@ -3,7 +3,6 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SidePane, type SidePaneProps } from './SidePane'
 import { initialState, type AppState } from '../state'
-import type { AnswerEnd, AskContext, AskPassage, CompanionProvider } from '../../core/companion'
 import type { IndexedBook } from '../../core/bookIndex'
 import type { Card } from '../../core/cards'
 import { createDiagnosticLog } from '../../core/diagnosticsLog'
@@ -63,20 +62,6 @@ const HIT: SearchHit = {
   post: '.',
 }
 
-function provider(): CompanionProvider & { asked: AskContext[] } {
-  const asked: AskContext[] = []
-  return {
-    name: 'fake',
-    configured: true,
-    asked,
-    async *ask(_question: string, context: AskContext): AsyncGenerator<string, AnswerEnd> {
-      asked.push(context)
-      yield 'an answer'
-      return { citations: [], hadUnknownCitation: false }
-    },
-  }
-}
-
 /** An open book with one chapter in its contents. */
 const openBook = (over: Record<string, unknown> = {}): Book =>
   ({
@@ -90,7 +75,6 @@ const openBook = (over: Record<string, unknown> = {}): Book =>
       yield HIT
     },
     goTo: vi.fn(),
-    passages: () => [],
     ...over,
   }) as unknown as Book
 
@@ -141,8 +125,6 @@ function propsOf(over: Partial<SidePaneProps> = {}): SidePaneProps {
     onDeleteMark: vi.fn(),
     markFocus: null,
     onMarkFocusDone: vi.fn(),
-    selection: null,
-    companion: provider(),
     books: [],
     library: {
       onRenameTag: vi.fn(),
@@ -179,7 +161,6 @@ const railNames = (container: HTMLElement): (string | null)[] => railOf(containe
 /** One thing only each panel draws, so a panel drawn beside another is seen. */
 const MARKERS = {
   toc: () => screen.queryByRole('button', { name: 'Loomings' }),
-  companion: () => screen.queryByLabelText('Ask the companion about this chapter'),
   marginalia: () => screen.queryByText('Nothing kept yet'),
   cards: () => screen.queryByText('No cards yet'),
   search: () => screen.queryByLabelText('Search this book'),
@@ -199,7 +180,6 @@ function expectOnlyPanel(shown: Marked): void {
 describe('the panel a state shows', () => {
   it.each([
     ['toc', 'reader', 'Contents'],
-    ['companion', 'reader', 'Companion'],
     ['marginalia', 'reader', 'Marginalia'],
     ['cards', 'reader', 'Cards'],
     ['search', 'reader', 'Search'],
@@ -225,7 +205,7 @@ describe('the panel a state shows', () => {
   })
 
   it('draws the screen’s own default for a panel this reader is not offered', () => {
-    draw({ state: stateOf({ pane: 'companion', lastPane: 'companion', developer: false }) })
+    draw({ state: stateOf({ pane: 'cards', lastPane: 'cards', developer: false }) })
     expectOnlyPanel('toc')
   })
 
@@ -245,14 +225,14 @@ describe('the rail', () => {
     expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Search', 'Settings'])
   })
 
-  it('adds the unfinished panels and Developer under developer options, in rail order', () => {
+  it('adds the unfinished panel and Developer under developer options, in rail order', () => {
     const { container } = draw({ state: stateOf({ developer: true }) })
-    expect(railNames(container)).toEqual(['Contents', 'Companion', 'Marginalia', 'Cards', 'Search', 'Settings', 'Developer'])
+    expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Cards', 'Search', 'Settings', 'Developer'])
   })
 
   it('leaves out an unfinished panel the developer hid', () => {
     const { container } = draw({ state: stateOf({ developer: true, hiddenPanes: ['cards'] }) })
-    expect(railNames(container)).toEqual(['Contents', 'Companion', 'Marginalia', 'Search', 'Settings', 'Developer'])
+    expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Search', 'Settings', 'Developer'])
   })
 
   it('offers the library its own panels and none of the book’s', () => {
@@ -289,100 +269,13 @@ describe('the rail', () => {
     const { container, redraw } = draw()
     expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Search', 'Settings'])
     redraw({ state: stateOf({ developer: true }) })
-    expect(railNames(container)).toEqual(['Contents', 'Companion', 'Marginalia', 'Cards', 'Search', 'Settings', 'Developer'])
-    redraw({ state: stateOf({ developer: true, hiddenPanes: ['companion'] }) })
     expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Cards', 'Search', 'Settings', 'Developer'])
-    redraw({ state: stateOf({ developer: true, hiddenPanes: ['companion'], screen: 'library', pane: 'library', lastPane: 'library' }) })
-    expect(railNames(container)).toEqual(['Marginalia', 'Cards', 'Library', 'Settings', 'Developer'])
-    redraw({ state: stateOf({ developer: true, hiddenPanes: ['companion'], screen: 'library', pane: 'library', lastPane: 'library' }), contributed: [friends] })
-    expect(railNames(container)).toEqual(['Marginalia', 'Cards', 'Library', 'Settings', 'Developer', 'Friends'])
-  })
-})
-
-describe('what the companion is handed', () => {
-  const companionState = stateOf({ pane: 'companion', lastPane: 'companion', developer: true })
-  const PASSAGE: AskPassage = { cfi: 'epubcfi(/6/4!/4/2)', text: 'Call me Ishmael.', label: '¶1' }
-
-  const ask = (question = 'who is speaking?') => {
-    const input = screen.getByLabelText('Ask the companion about this chapter')
-    fireEvent.change(input, { target: { value: question } })
-    fireEvent.keyDown(input, { key: 'Enter' })
-  }
-
-  it('asks with the open book’s title, the chapter, the selection and the host’s passages', () => {
-    const { props } = draw({ state: companionState, selection: 'Call me Ishmael.', companionPassages: () => [PASSAGE] })
-    ask()
-    expect((props.companion as ReturnType<typeof provider>).asked).toEqual([
-      { bookTitle: 'Moby-Dick', chapterLabel: 'Loomings', selection: 'Call me Ishmael.', passages: [PASSAGE] },
-    ])
-  })
-
-  it('asks with no passages when the host supplies none', () => {
-    const { props } = draw({ state: companionState })
-    ask()
-    expect((props.companion as ReturnType<typeof provider>).asked.map((context) => context.passages)).toEqual([[]])
-  })
-
-  /* Known the moment the parse lands, before the shelf row exists — and the
-     shelf's title as the fallback when the book's own metadata has none. */
-  it('names the book from the shelf when its own metadata carries no title', () => {
-    const { props } = draw({ state: companionState, book: openBook({ meta: {} }), books: [shelved('open-book', 'Moby-Dick; or, The Whale')] })
-    ask()
-    expect((props.companion as ReturnType<typeof provider>).asked[0]?.bookTitle).toBe('Moby-Dick; or, The Whale')
-  })
-
-  it('names no book when neither its metadata nor the shelf has a title for it', () => {
-    const { props } = draw({ state: companionState, book: openBook({ meta: {} }), books: [shelved('another-book', 'Typee')] })
-    ask()
-    expect((props.companion as ReturnType<typeof provider>).asked[0]?.bookTitle).toBe('')
-  })
-
-  it('reads the shelf the host has now, not the one it was first drawn with', () => {
-    const { props, redraw } = draw({ state: companionState, book: openBook({ meta: {} }), books: [shelved('open-book', 'Old title')] })
-    redraw({ books: [shelved('open-book', 'New title')] })
-    ask()
-    expect((props.companion as ReturnType<typeof provider>).asked[0]?.bookTitle).toBe('New title')
-  })
-
-  /* A book that is OPEN and READ, not merely chosen. */
-  it.each([
-    ['no file handed over', { source: null }],
-    ['a file that has not parsed', { meta: null }],
-    ['a book that failed to open', { error: 'this file is not a book' }],
-  ])('says no book is open for %s', (_case, over) => {
-    draw({ state: companionState, book: openBook(over) })
-    expect(screen.getByText('No book open')).not.toBeNull()
-    expect(screen.queryByLabelText('Ask the companion about this chapter')).toBeNull()
-  })
-
-  it('offers the composer for a book that is open and read', () => {
-    draw({ state: companionState })
-    expect(screen.queryByText('No book open')).toBeNull()
-    expect(screen.getByLabelText('Ask the companion about this chapter')).not.toBeNull()
-  })
-
-  it('starts a new thread when the reader opens another book', async () => {
-    const { redraw } = draw({ state: companionState })
-    ask()
-    expect(await screen.findByText('who is speaking?')).not.toBeNull()
-    redraw({ book: openBook({ bookId: 'another-book' }) })
-    expect(screen.queryByText('who is speaking?')).toBeNull()
-  })
-
-  it('clears a half-typed question when the open book leaves the shelf', () => {
-    const { redraw } = draw({ state: companionState })
-    fireEvent.change(screen.getByLabelText('Ask the companion about this chapter'), { target: { value: 'what is a gam?' } })
-    redraw({ book: openBook({ bookId: null }) })
-    expect((screen.getByLabelText('Ask the companion about this chapter') as HTMLInputElement).value).toBe('')
-  })
-
-  /* The thread was keyed on `bookId ?? 'no-book'`, so an id spelled like the
-     sentinel was the same thread as no id at all. No id is a key of its own. */
-  it('keeps no book’s thread apart from every book’s, whatever the id reads', () => {
-    const { redraw } = draw({ state: companionState, book: openBook({ bookId: null }) })
-    fireEvent.change(screen.getByLabelText('Ask the companion about this chapter'), { target: { value: 'what is a gam?' } })
-    redraw({ book: openBook({ bookId: 'no-book' }) })
-    expect((screen.getByLabelText('Ask the companion about this chapter') as HTMLInputElement).value).toBe('')
+    redraw({ state: stateOf({ developer: true, hiddenPanes: ['cards'] }) })
+    expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Search', 'Settings', 'Developer'])
+    redraw({ state: stateOf({ developer: true, hiddenPanes: ['cards'], screen: 'library', pane: 'library', lastPane: 'library' }) })
+    expect(railNames(container)).toEqual(['Marginalia', 'Library', 'Settings', 'Developer'])
+    redraw({ state: stateOf({ developer: true, hiddenPanes: ['cards'], screen: 'library', pane: 'library', lastPane: 'library' }), contributed: [friends] })
+    expect(railNames(container)).toEqual(['Marginalia', 'Library', 'Settings', 'Developer', 'Friends'])
   })
 })
 
@@ -533,17 +426,6 @@ describe('the settings panel', () => {
     expect(screen.getByText(/^Diagnostics are not being recorded on this build\./)).not.toBeNull()
   })
 
-  /* "Choose one" lands on its section, and the request is reported spent so a
-     remount does not find it again. */
-  it('reports a reveal request answered, by its nonce', () => {
-    vi.stubGlobal('requestAnimationFrame', (run: FrameRequestCallback) => {
-      run(0)
-      return 1
-    })
-    vi.stubGlobal('cancelAnimationFrame', () => {})
-    const { dispatch } = draw({ state: settingsState({ settingsReveal: { section: 'nowhere', nonce: 4, pending: true } }) })
-    expect(dispatch.mock.calls).toEqual([[{ type: 'settingsRevealed', nonce: 4 }]])
-  })
 })
 
 /**

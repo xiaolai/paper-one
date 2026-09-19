@@ -146,13 +146,12 @@ ignored = "1"
        feature and must not grow one. */
     for (const platform of ['desktop', 'ios', 'android']) expect(real.features.has(platform)).toBe(true)
     expect(real.features.has('web'), 'a web Cargo feature would compile nothing').toBe(false)
-    /* The desktop-only set. `tauri-plugin-inference` joined it in phase 15:
-       the runtime it launches is staged for macOS, Windows and Linux only —
-       Lemonade's `lemond` then, which had no mobile build, and llama.cpp's
-       `llama-server` since 2026-09-18, which `sync-inference-runtime.mjs`
-       stages for no phone — so gating the DEPENDENCY (not just the
-       `.plugin()` call) is what keeps its rustls provider off the iOS and
-       Android targets entirely.
+    /* The desktop-only set. `tauri-plugin-inference` started it in phase 15 —
+       it launched a local model runtime staged for macOS, Windows and Linux
+       only, so gating the DEPENDENCY rather than just the `.plugin()` call is
+       what kept its rustls provider off the iOS and Android targets entirely.
+       It is deleted with the rest of the AI features, which is the FIFTH
+       deliberate change to this set.
 
        `axum` joined it in phase 18 for the same reason in a different shape:
        it serves the browser client, a phone is never a shelf, and a dependency
@@ -162,13 +161,12 @@ ignored = "1"
        exactly the point, and it has now caught three deliberate changes: the
        third was WI-20.32's `single-instance` and `window-state`, both
        `#![cfg(not(mobile))]` upstream and desktop-only here for the same
-       reason the inference runtime started the list. The fourth deliberate change was the
-       audit-fix round REMOVING the app's vestigial direct `axum`: app code
-       never referenced it, and the server crate under the webhost plugin
-       declares it with the identical feature set. */
+       reason the runtime started the list. The fourth was the audit-fix round
+       REMOVING the app's vestigial direct `axum`: app code never referenced
+       it, and the server crate under the webhost plugin declares it with the
+       identical feature set. */
     expect(dependenciesOfFeature('desktop', real)).toEqual(
       new Set([
-        'tauri-plugin-inference',
         'tauri-plugin-mcp-bridge',
         'tauri-plugin-persisted-scope',
         'tauri-plugin-single-instance',

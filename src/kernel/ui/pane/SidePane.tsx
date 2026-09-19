@@ -6,13 +6,11 @@ import {
   List,
   Search,
   Settings as SettingsIcon,
-  Sparkles,
   Wrench,
 } from 'lucide-react'
 import type { IndexedBook } from '../../core/bookIndex'
 import type { JumpTarget } from '../hooks/useJumps'
 import type { MarkControl, PaneContribution } from '../../core/capability'
-import type { AskPassage, CompanionProvider } from '../../core/companion'
 import { ICON, type Platform } from '../../core/metrics'
 import { PANE_TITLES, shownPane } from '../panes'
 import { CONTRIBUTION_ICONS } from '../contributionIcon'
@@ -22,11 +20,8 @@ import type { Book } from '../hooks/useBook'
 import type { Annotation } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
 import type { CardsView } from '../hooks/useCards'
-import type { GlossState } from '../hooks/useGloss'
-import type { LookupsView } from '../hooks/useLookups'
 import type { MarksView } from '../hooks/useMarks'
 import type { Bookmarking } from '../hooks/useBookmarking'
-import { Companion } from './Companion'
 import { Contents } from './Contents'
 import { LibraryPanel, type LibraryPanelProps } from './LibraryPanel'
 import { Cards } from './Cards'
@@ -46,9 +41,9 @@ import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
  * said "seven" over a rail of eight, and a count in a sentence has no way to
  * notice a panel being added. The check below the list is what notices.
  *
- * Contents and Companion used to live in a separate 340px card beside the
- * reader. One pane holds them all, so there is a single place to look for a
- * tool and a single surface competing with the text.
+ * Contents used to live in a separate 340px card beside the reader. One pane
+ * holds every tool, so there is a single place to look for one and a single
+ * surface competing with the text.
  *
  * This component selects a panel and builds the rail beside it. Each panel owns
  * its own state and markup — previously every one of them was inline here,
@@ -59,9 +54,8 @@ import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
  * a total Record for the icons and an ordered array of ids — which meant two
  * edits per panel and two structures to keep agreeing; the compile-time check
  * below covers the merged list exactly as it covered the array. The ORDER is
- * this file's; the membership is not: Companion sits second here, beside
- * Contents, because §03 groups the two surfaces that read the book. Labels
- * still come from `ui/panes`, which the palette and the titlebar read too —
+ * this file's; the membership is not. Labels still come from `ui/panes`,
+ * which the palette and the titlebar read too —
  * this file once carried its own copy of the ids, the labels and the
  * accelerators, under a comment about registries that drift.
  *
@@ -71,7 +65,6 @@ import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
  * paragraph above. */
 const RAIL_ENTRIES = [
   { id: 'toc', Icon: List },
-  { id: 'companion', Icon: Sparkles },
   { id: 'marginalia', Icon: Highlighter },
   { id: 'cards', Icon: Layers },
   { id: 'search', Icon: Search },
@@ -108,11 +101,6 @@ const RAIL = RAIL_ENTRIES.map(({ id, Icon }) => ({
  */
 const railFor = (screen: AppState['screen'], audience: PaneAudience) =>
   RAIL.filter((tab) => paneFits(screen, tab.id, audience))
-
-/** The companion's passages when the host supplies none — one function, not a
- *  fresh `() => []` per render that re-rendered the pane for nothing. */
-// Stryker disable next-line ArrowFunction: `Companion` reads its passages as `passages?.() ?? []`, so a function answering undefined reaches the provider as this same empty list and no test can tell the two apart
-const NO_PASSAGES = (): AskPassage[] => []
 
 export interface SidePaneProps {
   state: AppState
@@ -159,36 +147,6 @@ export interface SidePaneProps {
   /** Notes has revealed it — the request is spent. See `Marking.clearFocus`. */
   onMarkFocusDone: (nonce: number) => void
   /**
-   * The reader's live selection, as text, for the companion.
-   *
-   * REQUIRED, NOT OPTIONAL. `Companion` takes `selection` and defaults it to
-   * null, and this pane mounted it without one — so every question ever asked
-   * went out with no passage, while `core/companion.ts`, the ledger and
-   * `numberPassages` all described one. An optional prop is a prop a host can
-   * forget with nothing said; a required one is the compile-time half of
-   * `SidePane.test.tsx`.
-   */
-  selection: string | null
-  /**
-   * The companion's provider.
-   *
-   * A prop, not a constant reached for inside this file. `NOT_CONFIGURED` was
-   * imported and passed straight down, which made the configured branch
-   * unreachable by construction — the seam existed in the types and nowhere in
-   * the wiring, so nothing could be substituted for it, including in a test.
-   * App supplies it; App is where a real one would arrive.
-   */
-  companion: CompanionProvider
-  /**
-   * The book text the companion may ground an answer in, in reading order.
-   *
-   * A prop for the same reason the provider is: the passages are assembled
-   * from the rendered view, which is App's business, and a Companion that
-   * reached for them itself would be reading the reader's page from inside a
-   * side panel.
-   */
-  companionPassages?: () => readonly AskPassage[]
-  /**
    * Everything the Library panel needs, as ONE prop.
    *
    * These were eight flat props on a component that does not read a single one
@@ -215,16 +173,9 @@ export interface SidePaneProps {
    * state, as one prop — same reason as `library`, and picked from
    * `SettingsProps` for the same reason: `offered`, the contributed `sections`
    * (WI-C.5), the capabilities that are `missing`, whether a choice is
-   * `persistent`, and Look up's answer language.
+   * `persistent`.
    */
-  settings: Readonly<Pick<SettingsProps, 'offered' | 'sections' | 'missing' | 'persistent' | 'lookUp'>>
-  /**
-   * The lookup history, for Marginalia's Dictionary chip (WI-17.3). Absent: no
-   * chip — see `MarginaliaProps.lookups`.
-   */
-  lookups?: LookupsView | undefined
-  /** The lookup happening now — `useLookUp`'s state, lifted for exactly this. */
-  liveLookUp?: GlossState | undefined
+  settings: Readonly<Pick<SettingsProps, 'offered' | 'sections' | 'missing' | 'persistent'>>
   /**
    * The panes the composed capabilities contributed. They take the rail
    * AFTER the kernel's, in the composition's order, on the screens each one
@@ -253,17 +204,12 @@ export function SidePane({
   onDeleteMark,
   markFocus,
   onMarkFocusDone,
-  selection,
-  companion,
-  companionPassages,
   books,
   library,
   settings,
   contributed,
   markControls,
   developer,
-  lookups,
-  liveLookUp,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -282,10 +228,10 @@ export function SidePane({
    * rather than a title over nothing — see `shownPane`.
    *
    * ⚠️ **AND THE PANE ASKED FOR BY NAME IS FITTED TOO.** Only `lastPane` was:
-   * `state.pane` went straight to the switch below, so a state naming Companion
-   * with developer options off drew the Companion beside a rail that has no
-   * button for it (#145). The reducer never builds that state; the rail and the
-   * panel asking one question is what stops this pane depending on it. */
+   * `state.pane` went straight to the switch below, so a state naming an
+   * unfinished panel with developer options off drew it beside a rail that has
+   * no button for it (#145). The reducer never builds that state; the rail and
+   * the panel asking one question is what stops this pane depending on it. */
   /* WHO IS LOOKING, as one value — the screen fit and the developer's own
      answer travel together through `paneFits`, and building it once here is
      what stops the rail, the fallback and the contributed list asking three
@@ -351,45 +297,6 @@ export function SidePane({
           <Contents toc={book.toc} currentHref={book.position.chapterHref} {...goToProps} />
         )}
 
-        {pane === 'companion' && (
-          <Companion
-            /* ⚠️ **THE THREAD BELONGS TO A BOOK, AND NOTHING SAID SO.** The
-               pane stays mounted across an open, so switching books kept the
-               previous book's exchange and the half-typed question in the
-               composer — under the new book's heading, and grounded in the new
-               book the moment the reader pressed send. "grounded in this book
-               only" is the panel's own promise and this is where it was broken:
-               amber marks provenance, and provenance carried over is worse than
-               none. Keyed, so the session is rebuilt rather than reset by hand
-               — and the unmount aborts a generation still streaming, which is a
-               subscription turn spent on an answer nobody will read.
-
-               NO KEY FOR NO BOOK, rather than a sentinel. `'no-book'` was a
-               string in the same namespace as book ids — a book carrying it
-               would have shared a thread with no book, and which string it was
-               could not be told from any other. `undefined` is not a key at
-               all; `null` would not do, because React makes it `"null"`. */
-            key={book.bookId ?? undefined}
-            currentChapter={book.position.chapterLabel}
-            /* A book that is OPEN and READ, not merely chosen: `source` is set
-               the instant a file is handed over, while it is still parsing and
-               after it has failed to open — and a companion accepting
-               questions about a book that did not open answers about nothing. */
-            hasBook={book.source !== null && book.meta !== null && book.error === null}
-            provider={companion}
-            /* The open book's own metadata first — it is known the moment the
-               parse lands, before the shelf row exists or when the book is not
-               shelved at all — and the shelf's title as the fallback. */
-            bookTitle={book.meta?.title ?? (book.bookId ? titleOf(book.bookId) : undefined) ?? ''}
-            selection={selection}
-            passages={companionPassages ?? NO_PASSAGES}
-            /* A bare cfi IS a `JumpTarget` — the union's string arm — so a
-               citation navigates through exactly the path a search hit does,
-               jump stack included. */
-            {...goToProps}
-          />
-        )}
-
         {pane === 'marginalia' && (
           <Marginalia
             marks={marks}
@@ -411,8 +318,6 @@ export function SidePane({
             focus={markFocus}
             onFocusDone={onMarkFocusDone}
             markControls={markControls}
-            lookups={lookups}
-            liveLookUp={liveLookUp}
             {...goToProps}
           />
         )}
@@ -466,10 +371,6 @@ export function SidePane({
             sections={settings.sections}
             missing={settings.missing}
             persistent={settings.persistent}
-            lookUp={settings.lookUp}
-            /* "Choose one" lands on its section (phase 17, L3). */
-            reveal={state.settingsReveal}
-            onRevealed={(nonce) => dispatch({ type: 'settingsRevealed', nonce })}
             theme={state.theme}
             themeFollowsOs={state.themeFollowsOs}
             pageLayout={state.pageLayout}

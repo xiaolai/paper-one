@@ -29,10 +29,10 @@ import type { ResolvedCfi } from './resolvedCfi'
  * WHAT A RECORD IS — no longer only whose it is.
  *
  * This field was PROVENANCE for as long as there were two things in the world
- * that could be written against a passage: §01 gives marks two of them and
- * draws them differently, your own highlight a gold fill and the companion's an
- * amber underline, and they were one type rather than two because everything
- * else about them — anchor, note, lifecycle, the Marginalia list — is identical.
+ * that could be written against a passage: the reader's own highlight in a gold
+ * fill, and the deleted companion's claim in an amber underline. They were one
+ * type rather than two because everything else about them — anchor, note,
+ * lifecycle, the Marginalia list — was identical.
  *
  * A bookmark broke that reading, and it is worth being plain about how rather
  * than quietly widening the union. A bookmark is not a third author; it is a
@@ -43,9 +43,11 @@ import type { ResolvedCfi } from './resolvedCfi'
  * drawing: nothing paints it into the text, so `tint` and `style` mean nothing
  * on one, and it never reaches a painter, the margin or the Marginalia list.
  *
- * PROVENANCE IS NOW DERIVED, not stored: the companion's is the one kind that
- * is not the reader's. That is the same information as before, asked as a
- * question instead of read off a field.
+ * ⚠️ **AND THERE IS ONLY ONE AUTHOR AGAIN.** The companion kind went with the
+ * AI features, so `ANNOTATION_KINDS` has one member and every annotation is the
+ * reader's. The two lists below stay — the class question they answer is about
+ * BOOKMARKS, which is the split that actually keeps an undrawable record away
+ * from the painters, and it was never about who wrote the thing.
  *
  * The separation this buys is in `annotationsIn` and `bookmarksIn`, applied at
  * the ONE door the store publishes through — see `MarkSnapshot`. Nothing
@@ -62,7 +64,7 @@ import type { ResolvedCfi } from './resolvedCfi'
  * choosing that. Adding a kind now means putting it in one of these two lists,
  * which is a decision rather than an omission.
  */
-export const ANNOTATION_KINDS = ['highlight', 'companion'] as const
+export const ANNOTATION_KINDS = ['highlight'] as const
 export const BOOKMARK_KINDS = ['bookmark'] as const
 
 export const MARK_KINDS = [...ANNOTATION_KINDS, ...BOOKMARK_KINDS] as const
@@ -89,12 +91,10 @@ export type AnnotationKind = (typeof ANNOTATION_KINDS)[number]
 /**
  * Which of the three tints the reader chose for a mark.
  *
- * SEPARATE FROM `kind`, and the separation is the whole point: `kind` is
- * PROVENANCE — whose mark this is — and this is APPEARANCE. The two were one
- * field for as long as there were only two marks in the world, yours and the
- * companion's, and "gold fill" was simply what "yours" looked like. A reader
- * who can choose green needs the two to come apart, or choosing a colour would
- * be claiming a passage was written by somebody else.
+ * SEPARATE FROM `kind`, and the separation is the whole point: `kind` says what
+ * KIND OF THING a record is and this says how it is drawn. The two were one
+ * field for as long as there were only two marks in the world — yours and the
+ * deleted companion's — and "gold fill" was simply what "yours" looked like.
  */
 export type MarkTint = 'yellow' | 'green' | 'purple'
 
@@ -119,26 +119,20 @@ export const MARK_STYLES: readonly MarkStyle[] = ['fill', 'underline', 'wave']
 /**
  * The styles the reader may choose. NOT the wave.
  *
- * THE WAVE IS THE COMPANION'S, and reserving it is what keeps provenance
- * readable. §01 gave the companion an amber underline back when your own mark
- * was always a gold fill — shape and colour both said whose it was, redundantly.
- * That redundancy went when the reader gained styles of their own: with both
- * able to draw rules, the only thing separating a machine's claim from your own
- * reading was amber against yellow on a two-pixel line, and that is the one
- * distinction in this app that must never blur.
+ * ⚠️ **IT WAS RESERVED FOR THE COMPANION, AND IT STAYS OUT WITHOUT IT.** The
+ * wave was held back so a machine's claim could never be mistaken for the
+ * reader's own reading; the companion is deleted, so that argument is spent.
+ * What survives it is the second reason, which was always the stronger one: a
+ * squiggle under prose is the strongest convention there is for "something is
+ * wrong here" — every spell checker ever written — and that is the wrong note
+ * for *this is worth remembering*. Reserving it costs the reader a style they
+ * should not want.
  *
- * The wave rather than every rule, which was the other candidate. A squiggle is
- * the strongest convention there is for "something automated has an opinion
- * here" — every spell checker ever written — so it reads as provisional without
- * being taught, which is exactly what a companion's claim is. And for the same
- * reason it is a poor shape for a reader's OWN mark: a squiggle under prose
- * reads as an error, which is the wrong note for "this is worth remembering".
- * Reserving it costs the reader a style they should not want.
- *
- * So the companion is distinguished on three independent channels rather than
- * one: a hue outside the reader's palette, a shape no reader's mark can be, and
- * the word — §10 is explicit that colour never carries meaning alone, and Notes
- * and the margin both label a companion row as well as tinting it.
+ * ⚠️ **AND IT STAYS IN `MARK_STYLES`, WHICH IS THE PERSISTED UNION.** A row on
+ * disk or from a peer may carry a wave; `readerStyle` reads one back as the
+ * nearest thing a reader could have meant. Taking it out of the parser would
+ * turn a mark into an unreadable row, which is the defect `parseMarks` exists
+ * not to have.
  */
 export const READER_STYLES: readonly MarkStyle[] = ['fill', 'underline']
 
@@ -415,15 +409,18 @@ export function liveMarks(marks: readonly Mark[]): readonly Mark[] {
 export type Annotation = Mark & { readonly kind: AnnotationKind }
 /**
  * The reader's OWN mark on the text — the one kind a mark control is offered
- * on. A companion annotation is a claim somebody else's model made, and a
- * control that shares "what I marked" must not be handed one as though the
- * reader had; the type says so where the row's `kind` check used to.
+ * on.
+ *
+ * ⚠️ **IT IS `Annotation` NOW, AND IT USED TO NARROW ONE.** There was a second
+ * annotation kind, the deleted companion's claim, and `Highlight` was the arm
+ * of the union a mark control could be handed; `isHighlight` was the predicate
+ * that narrowed to it. With one annotation kind left, the narrowing is a
+ * tautology and the predicate answered `true` for every input a caller could
+ * construct — a branch no test can fail and no reader can reach. The name is
+ * kept because the call sites say what they mean with it; a second kind would
+ * make it a narrowing again.
  */
-export type Highlight = Annotation & { readonly kind: 'highlight' }
-
-export function isHighlight(mark: Annotation): mark is Highlight {
-  return mark.kind === 'highlight'
-}
+export type Highlight = Annotation
 export type Bookmark = Mark & { readonly kind: (typeof BOOKMARK_KINDS)[number] }
 
 /**
@@ -453,10 +450,11 @@ export function isAnnotation(mark: Mark): mark is Annotation {
  * Whether two records are the same KIND OF THING — both places, or both about
  * a passage.
  *
- * THE LINE THAT REPLACEMENT RESPECTS, and it is not `kind === kind`. A reader
- * marking over a passage the companion has claimed replaces it, and always
- * has; that is two kinds, one class, and it stays. What must never happen is a
- * bookmark and a highlight superseding one another because they share an
+ * THE LINE THAT REPLACEMENT RESPECTS, and it is not `kind === kind`. It was
+ * two annotation kinds and one class — a reader marking over a passage the
+ * deleted companion had claimed replaced it — and the rule is written as the
+ * CLASS question so a second annotation kind would inherit it. What must never
+ * happen is a bookmark and a highlight superseding one another because they share an
  * anchor — bookmarking the page you are reading would silently delete the
  * highlight you made on it, and re-marking that highlight would delete the
  * bookmark back. The two are not competing for the same place; they are not
@@ -534,8 +532,7 @@ export function unplacedIn(marks: readonly Annotation[]): readonly Annotation[] 
 }
 
 /**
- * The records that are ABOUT A PASSAGE — a highlight of the reader's, or a
- * claim of the companion's.
+ * The records that are ABOUT A PASSAGE, as opposed to a place in it.
  *
  * This is what gets painted into the text, listed in Notes, counted for the
  * margin and resolved against a selection. A bookmark is none of those things,
@@ -634,14 +631,17 @@ export function mergeMarks(a: readonly Mark[], b: readonly Mark[]): readonly Mar
  * A bare highlight does not: it is already visible as a fill on the words
  * themselves, and repeating it in the margin would fill the column with dots
  * that say nothing the text does not. What goes there is what cannot be read
- * off the page — a written note, and the companion's own marks.
+ * off the page — a written note.
+ *
+ * ⚠️ **THE COMPANION'S OWN MARKS WERE THE OTHER HALF**, and they are deleted,
+ * so this is one condition rather than two.
  *
  * This is also what `markCount` counts, so the column is reserved exactly when
  * there is something to put in it. Counting every highlight instead would open
  * a 250px column to display nothing.
  */
 export function marginMarks(marks: readonly Annotation[]): Annotation[] {
-  return marks.filter((mark) => mark.note !== '' || mark.kind === 'companion')
+  return marks.filter((mark) => mark.note !== '')
 }
 
 /**
@@ -1083,7 +1083,7 @@ function readStoredMark(value: unknown): Mark | null {
     suffix: readContext(m['suffix']),
     tint: readTint(m['tint']),
     note: noteForKind(cutAt(note, MAX_MARK_NOTE), which),
-    style: styleForKind(readStyle(m['style']), which),
+    style: readerStyle(readStyle(m['style'])),
     /* Absent for every placed mark, which is all of them until an archive brings one across. */
     ...(unplaced === undefined ? {} : { unplaced }),
     ...(updated !== undefined ? { updatedAt: updated } : {}),
@@ -1207,19 +1207,19 @@ function readStyle(value: unknown): MarkStyle {
  * The style a mark of this KIND may actually wear.
  *
  * Enforced on the way IN as well as on the way out, because a guarantee the
- * store does not keep is decoration. The reader can no longer choose a wave —
- * `READER_STYLES` does not offer one — but marks made before that was true are
- * on disk, and a reader's mark drawn as a wave says "a machine wrote this"
- * about a passage the reader marked themselves. It is read back as the nearest
- * thing the reader could have meant, which is the plain rule under it.
+ * store does not keep is decoration. The reader cannot choose a wave —
+ * `READER_STYLES` does not offer one — but rows on disk and rows from a peer
+ * carry whatever they carry, and one is read back as the nearest thing a reader
+ * could have meant.
  *
- * The other direction is left alone: a companion mark carries whatever it
- * carries, because the painter ignores it entirely and draws amber regardless.
+ * ⚠️ **IT TOOK THE KIND AND LET THE COMPANION'S THROUGH**, whose painter drew
+ * amber whatever the style said. There is no companion, so there is no
+ * exception, and the parameter went with it.
  */
 /**
  * The note a mark of this KIND may actually carry — empty, for a bookmark.
  *
- * The same door and the same reasoning as `styleForKind`: a guarantee the store
+ * The same door and the same reasoning as `readerStyle`: a guarantee the store
  * does not keep is decoration. `bookmarkFrom` writes an empty note and says
  * why, but that only governs bookmarks THIS build makes. A row hand-edited on
  * disk, or arriving from a peer, is whatever it is — and Marginalia's Notes
@@ -1230,8 +1230,7 @@ function noteForKind(note: string, kind: MarkKind): string {
   return kind === 'bookmark' ? '' : note
 }
 
-function styleForKind(style: MarkStyle, kind: MarkKind): MarkStyle {
-  if (kind === 'companion') return style
+function readerStyle(style: MarkStyle): MarkStyle {
   return READER_STYLES.includes(style) ? style : 'underline'
 }
 

@@ -45,16 +45,18 @@ describe('the registries it evaluates', () => {
     ])
   })
 
-  it('reads the eight kernel panes and the two that are unfinished', () => {
-    expect(surfaces.panes).toEqual(['toc', 'companion', 'marginalia', 'cards', 'search', 'library', 'settings', 'dev'])
-    expect(surfaces.unfinishedPanes).toEqual(['companion', 'cards'])
+  it('reads the seven kernel panes and the one that is unfinished', () => {
+    expect(surfaces.panes).toEqual(['toc', 'marginalia', 'cards', 'search', 'library', 'settings', 'dev'])
+    expect(surfaces.unfinishedPanes).toEqual(['cards'])
   })
 
   it('reads three tints, three mark styles, and only two offered to the reader', () => {
     expect(surfaces.markTints).toEqual(['yellow', 'green', 'purple'])
     expect(surfaces.markStyles).toEqual(['fill', 'underline', 'wave'])
-    /* `wave` is reserved for the companion and must never be offered — the one
-     * relationship here that is a product decision rather than a count. */
+    /* `wave` is never offered to a reader — the one relationship here that is a
+     * product decision rather than a count. It was reserved for the deleted
+     * companion's marks; what keeps it out now is that a squiggle under prose
+     * reads as an error, which `marks.ts` sets out. */
     expect(surfaces.readerStyles).toEqual(['fill', 'underline'])
     expect(surfaces.markStyles).toContain('wave')
     expect(surfaces.readerStyles).not.toContain('wave')
@@ -76,10 +78,10 @@ describe('the registries it evaluates', () => {
   })
 
   it('reads the counts this phase measured', () => {
-    /* 19 since phase 17 added `kernel.lookUpLanguage` — Look up's answer
-       language (WI-17.5), a durable preference like the rest. */
-    expect(surfaces.kernelSettings).toHaveLength(19)
-    expect(surfaces.kernelSettings).toContain('lookUpLanguage')
+    /* 18 since `kernel.lookUpLanguage` went with Look up and the rest of the
+       AI features. */
+    expect(surfaces.kernelSettings).toHaveLength(18)
+    expect(surfaces.kernelSettings).not.toContain('lookUpLanguage')
     expect(surfaces.services).toHaveLength(31)
     expect(surfaces.readingSteps).toHaveLength(14)
     expect(surfaces.spacingAxes).toEqual(['letter', 'word', 'line', 'paragraph'])
@@ -104,20 +106,36 @@ describe('the capability contributions it reads', () => {
     expect(Object.keys(surfaces.capabilities).sort()).toEqual(declared)
   })
 
+  /* ⚠️ **NAMED CAPABILITIES, AND ONE OF THEM GETS DELETED UNDER THIS TEST.**
+     `pnpm verify:without` copies the tree, removes a capability and runs the
+     suite — and it now DERIVES which one, so `circle` and `public` are both
+     candidates. Asserting on a fixed pair made this fail in the copy for a
+     defect in neither the surfaces reader nor the removal.
+
+     So each expectation is skipped when its capability is absent, and the
+     COUNT is asserted: on a real tree both run, in a copy one does, and a
+     reader who deletes the last of them gets a failure rather than a green
+     test that checks nothing. */
   it('finds the seams each capability actually contributes', () => {
-    expect(surfaces.capabilities.circle).toEqual({
-      panes: ['circle:book'],
-      screens: ['circle:circle'],
-      markControls: ['circle:share'],
-      overlays: ['circle:shared'],
-    })
-    expect(surfaces.capabilities.public.panes).toEqual(['public:book'])
-    expect(surfaces.capabilities.public.markControls).toEqual(['public:publish'])
-    expect(surfaces.capabilities.inference.settings).toEqual([
-      'inference:gloss',
-      'inference:models',
-      'inference:endpoints',
-    ])
+    const expected = {
+      circle: {
+        panes: ['circle:book'],
+        screens: ['circle:circle'],
+        markControls: ['circle:share'],
+        overlays: ['circle:shared'],
+      },
+      public: { panes: ['public:book'], markControls: ['public:publish'] },
+    }
+    let asserted = 0
+    for (const [id, seams] of Object.entries(expected)) {
+      const found = surfaces.capabilities[id]
+      if (found === undefined) continue
+      for (const [seam, ids] of Object.entries(seams)) {
+        expect(found[seam], `${id} contributes different ${seam}`).toEqual(ids)
+      }
+      asserted += 1
+    }
+    expect(asserted, 'every capability this case knows about is gone, so it asserts nothing').toBeGreaterThan(0)
   })
 
   it('gives a capability that contributes nothing an empty object, not a crash', () => {

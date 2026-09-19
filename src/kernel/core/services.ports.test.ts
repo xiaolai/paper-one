@@ -1,129 +1,29 @@
 import { describe, expect, it, vi } from 'vitest'
-import { NOT_CONFIGURED, type CompanionProvider } from './companion'
-import { ZERO_DEVICE, compareHlc, makeHlc, parseHlc, type Hlc } from './hlc'
+import { compareHlc, parseHlc } from './hlc'
 import { createKernelServices, monotonicClock } from './services'
-import { NO_GLOSS, type GlossProvider } from './gloss'
-import { systemVoice } from '../ui/reader/systemVoice'
-import { NO_VOICE, type Voice } from './voice'
 import { NO_WORK_LINE, type Diagnostics, type WorkLine } from './ports'
 import type { PublicPassage } from './public/envelope'
 import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY } from './settings'
 import { servicesWith, spyRecorder } from './servicesWorld.testkit'
 
 /**
- * THE THREE PORTS PHASE 15 ADDED, at rest and after a bind.
+ * THE WORK-LINE PORT, at rest and after a bind.
  *
- * Each is late-bound by a capability that may not be installed, so the DEFAULT
- * is the state most readers are in and is the one a test is most likely to
- * skip. Two of the three defaults refuse rather than answer, and a refusal
- * nobody calls is a refusal nobody has read: `NOT_CONFIGURED.ask` is an async
- * generator, so its throw does not happen until the first `next()` — a caller
- * that merely invoked it and dropped the result would see no error at all.
+ * ⚠️ **THREE PORTS STOOD HERE, AND TWO ARE DELETED.** The companion and the
+ * gloss went with the AI features, and the voice port with them — nothing binds
+ * a voice any more, and what says a word aloud is `ui/reader/speech.ts` over the
+ * system speaker, reached by the reading rather than through a kernel port.
  *
- * The accessors are resolved PER CALL rather than captured, which is what lets
- * a reader install a model without restarting, and the disposer restores the
- * previous provider rather than the default — the same contract `bindRecorder`
- * has, for the same reason: a torn-down capability must not leave the kernel
- * pointing at it.
+ * What the remaining one is still here to say is the CONTRACT all three shared,
+ * and it is the part a test is most likely to skip: the port is late-bound by a
+ * capability that may not be installed, so the DEFAULT is the state most readers
+ * are in; the accessor is resolved PER CALL rather than captured, which is what
+ * lets a capability arrive after composition; and the disposer restores the
+ * PREVIOUS value rather than the default — the same contract `bindRecorder` has,
+ * for the same reason: a torn-down capability must not leave the kernel pointing
+ * at it.
  */
-describe('the companion, gloss and work-line ports', () => {
-  const fake = (name: string): CompanionProvider => ({
-    name,
-    configured: true,
-    async *ask() {
-      return { citations: [], hadUnknownCitation: false }
-    },
-  })
-
-  it('defaults to a companion that says it is not configured', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    expect(services.companion()).toBe(NOT_CONFIGURED)
-    expect(services.companion().configured).toBe(false)
-    expect(services.companion().name).toBe('No model configured')
-  })
-
-  it('refuses to ask when nothing is bound, and refuses on ITERATION', async () => {
-    /* The generator is created without complaint; the throw is on the first
-       `next()`. A test that only called `ask()` would pass over a provider
-       that never refuses at all. */
-    const services = servicesWith(spyRecorder().recorder)
-    const stream = services
-      .companion()
-      .ask('q', { bookTitle: 'X', chapterLabel: 'One', selection: null, passages: [] }, new AbortController().signal)
-    await expect(stream.next()).rejects.toThrow(/no provider/i)
-  })
-
-  it('binds a companion and restores the previous one on dispose', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    const unbind = services.bindCompanion(fake('Local'))
-    expect(services.companion().name).toBe('Local')
-    unbind.dispose()
-    expect(services.companion()).toBe(NOT_CONFIGURED)
-  })
-
-  it('defaults to a gloss that is unavailable and refuses', async () => {
-    const services = servicesWith(spyRecorder().recorder)
-    expect(services.gloss()).toBe(NO_GLOSS)
-    expect(services.gloss().available).toBe(false)
-    await expect(services.gloss().gloss('word', { sentence: 'a word here', bookTitle: 'X', answerIn: [{ tag: 'en', name: 'English', label: 'English' }] }, new AbortController().signal)).rejects.toThrow(/no gloss provider/i)
-  })
-
-  it('binds a gloss and restores it on dispose', async () => {
-    const services = servicesWith(spyRecorder().recorder)
-    const provider: GlossProvider = { available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => ({ text: 'a meaning' }) }
-    const unbind = services.bindGloss(provider)
-    expect(services.gloss().available).toBe(true)
-    await expect(services.gloss().gloss('w', { sentence: 's', bookTitle: 'X', answerIn: [{ tag: 'en', name: 'English', label: 'English' }] }, new AbortController().signal)).resolves.toEqual({ text: 'a meaning' })
-    unbind.dispose()
-    expect(services.gloss()).toBe(NO_GLOSS)
-  })
-
-  /* THE VOICE — a port beside the gloss rather than a field on it, because the
-     two are different engines with different availability and speaking is a
-     fact about the machine. `core/voice.ts` carries the argument; what belongs
-     here is that the slot behaves like every other one. */
-  /*
-   * ⚠️ **THE DEFAULT IS THE MACHINE'S OWN VOICE, AND THIS CASE ASSERTED
-   * `NO_VOICE`.** That was the defect rather than the contract: with nothing
-   * bound the lookup drew no pronunciation control at all, which on a machine
-   * where the neural voice failed was the whole feature —
-   * `ui/reader/systemVoice.ts` has the measurement of what serves instead. The
-   * identity is asserted because the object is shared: anything that binds a
-   * voice reads this port first and keeps it as its fallback, so two of them
-   * would be two `Voice`s over one engine.
-   *
-   * It answers `canSay` false HERE because these suites run on `node`, where
-   * there is no engine to ask — which is also why the default can be built in
-   * every one of them.
-   */
-  it('defaults to the machine’s own voice, which says nothing where there is no engine', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    expect(services.voice()).toBe(systemVoice())
-    expect(services.voice()).not.toBe(NO_VOICE)
-    expect(services.voice().canSay(null)).toBe(false)
-    expect(() => services.voice().say('gam')).not.toThrow()
-  })
-
-  it('binds a voice and restores the default on dispose', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    const said: { text: string; lang: string | null | undefined }[] = []
-    const voice: Voice = {
-      canSay: () => true,
-      state: () => 'idle',
-      subscribe: () => () => {},
-      say: (text, lang) => void said.push({ text, lang }),
-      stop: () => {},
-    }
-    const unbind = services.bindVoice(voice)
-    expect(services.voice().canSay(null)).toBe(true)
-    /* THE LANGUAGE CROSSES THE PORT. A term is spoken in the book's language,
-       not the interface's, so the binding has to receive it — see `Voice.say`. */
-    services.voice().say('gam', 'en-GB')
-    expect(said).toEqual([{ text: 'gam', lang: 'en-GB' }])
-    unbind.dispose()
-    expect(services.voice()).toBe(systemVoice())
-  })
-
+describe('the work-line port', () => {
   /* AT REST THE BAR IS WHAT IT ALWAYS WAS. `line()` is null and `subscribe`
      hands back a working unsubscribe rather than undefined — a store that
      returned nothing there would throw inside `useSyncExternalStore`'s
@@ -164,12 +64,8 @@ describe('the companion, gloss and work-line ports', () => {
     expect(services.workLine().line()).toBeNull()
   })
 
-  it('refuses a second bind on each of the three, by name', () => {
+  it('refuses a second bind, by name', () => {
     const services = servicesWith(spyRecorder().recorder)
-    services.bindCompanion(fake('one'))
-    expect(() => services.bindCompanion(fake('two'))).toThrow(/already bound/)
-    services.bindGloss({ available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => ({ text: 'x' }) })
-    expect(() => services.bindGloss({ available: true, installAt: 'inference:models', warm: () => {}, gloss: async () => ({ text: 'y' }) })).toThrow(/already bound/)
     services.bindWorkLine({ line: () => null, subscribe: () => () => {} })
     expect(() => services.bindWorkLine({ line: () => null, subscribe: () => () => {} })).toThrow(/already bound/)
   })
@@ -795,56 +691,5 @@ describe('the settings store, as composed', () => {
       settingsMigration: (found) => ({ 'kernel.theme': (found?.values['theme'] === 'sage' ? 'night' : 'paper') as string }),
     })
     expect(services.settings.get(KERNEL_SETTINGS.theme)).toBe('night')
-  })
-})
-
-/**
- * THE LOOKUP HISTORY IS COMPOSED OVER THE STORAGE AND THE CLOCK THE ROOT HANDS IN.
- *
- * `createLookups` has a fallback for both — no storage, and stamps from
- * `Date.now()` — and both fallbacks WORK: a history that lives for the session,
- * stamped from outside the shared clock. So a composition that forgot either
- * looks fine until the next launch finds nothing, or a merge reads stamps the
- * clock never issued. What is asserted is where the record lands and what
- * stamps it.
- */
-describe('the lookup history, as composed', () => {
-  const WHARVES = {
-    bookId: 'book_x',
-    cfi: 'epubcfi(/6/4!/4/2/1:0)',
-    chapter: 'One',
-    spelled: 'wharves',
-    sentence: 'The ships lay at the wharves.',
-    gloss: 'Structures along a shore where ships dock.',
-    language: 'en',
-    at: 1,
-  }
-
-  it('keeps it in the storage it was handed, and stamps it with the clock it was handed', async () => {
-    const held = new Map<string, string>()
-    const storage = {
-      getItem: (key: string) => held.get(key) ?? null,
-      setItem: (key: string, value: string) => void held.set(key, value),
-    }
-    /* A millisecond no wall clock reads, so a stamp from `Date.now()` cannot pass for one of these. */
-    const handed: Hlc[] = []
-    const clock = (): Hlc => {
-      const stamp = makeHlc(42_000, handed.length, ZERO_DEVICE)
-      handed.push(stamp)
-      return stamp
-    }
-
-    const first = createKernelServices({ fs: null, storage, clock })
-    await first.lookups.record(WHARVES)
-    const written = JSON.parse(held.get('paper.lookups.v1') ?? '[]') as readonly { readonly term: string; readonly updatedAt?: string }[]
-    expect(written.map((row) => row.term)).toEqual(['wharves'])
-    expect(written[0]?.updatedAt).toBe(handed.at(-1))
-
-    /* A SECOND COMPOSITION over the same storage is the next launch. */
-    const second = createKernelServices({ fs: null, storage, clock })
-    expect(second.lookups.getSnapshot().all.map((row) => row.term)).toEqual(['wharves'])
-
-    await second.lookups.remove('wharves')
-    expect(second.lookups.stored().map((row) => row.deletedAt)).toEqual([handed.at(-1)])
   })
 })

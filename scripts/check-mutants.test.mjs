@@ -1363,24 +1363,23 @@ describe('what the mutation gate chooses to mutate', () => {
     })
   })
 
+  /* ⚠️ **REAL FILES, AND THEY USED TO BE A CAPABILITY'S.** This pair read
+     `capabilities/circle/`, which `pnpm verify:without` deletes in its copy —
+     so the two cases threw ENOENT the first time the deletion proof chose
+     `circle`, for a defect in neither the gate nor the removal. A KERNEL pair
+     cannot be cut: the proof asserts no file under `src/kernel/` changes. */
   it('follows imports rather than matching names', () => {
     /* ⚠️ **NAME MATCHING WOULD REPORT MOST OF THIS REPOSITORY AS UNTESTED.**
-       `store.ts` is covered by `circle.test.ts`, `panes.ts` by
-       `commands.test.ts`. A gate that looked for `store.test.ts` would find
-       none, call the module uncovered, and turn every one of its mutants into
-       a finding nobody can act on. */
-    const found = testsCovering(
-      ['src/capabilities/circle/lib/store.ts'],
-      ['src/capabilities/circle/circle.test.ts'],
-    )
-    expect(found).toEqual(['src/capabilities/circle/circle.test.ts'])
+       `panes.ts` is covered by `commands.test.ts`. A gate that looked for
+       `panes.test.ts` would find none — it exists, and it is not the only
+       cover — call the module uncovered, and turn every one of its mutants
+       into a finding nobody can act on. */
+    const found = testsCovering(['src/kernel/ui/panes.ts'], ['src/kernel/ui/commands.test.ts'])
+    expect(found).toEqual(['src/kernel/ui/commands.test.ts'])
   })
 
   it('does not claim a test covers a module it never imports', () => {
-    const found = testsCovering(
-      ['src/capabilities/circle/lib/store.ts'],
-      ['src/kernel/ui/state.test.ts'],
-    )
+    const found = testsCovering(['src/kernel/ui/panes.ts'], ['src/kernel/core/marks.test.ts'])
     expect(found).toEqual([])
   })
 

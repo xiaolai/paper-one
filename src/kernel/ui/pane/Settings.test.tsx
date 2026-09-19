@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
-import { StrictMode, type ComponentProps } from 'react'
+import { type ComponentProps } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Settings } from './Settings'
-import type { SettingsSection } from '../../core/capability'
 import {
   DEFAULT_ALIGN,
   DEFAULT_READING_STYLE,
@@ -180,321 +179,6 @@ function narrow() {
   }
   return { props, spy }
 }
-
-/** WI-17.5 — the answer language, as a list in the Reading band. */
-describe('the Look up language', () => {
-  const ENGLISH = { tag: 'en', name: 'English', label: 'English' } as const
-  const withLookUp = (onChoice = vi.fn(), choice = 'reader') =>
-    full({ lookUp: { choice, readerLanguage: ENGLISH, onChoice } }).props as ComponentProps<typeof Settings>
-  const openGroup = () => fireEvent.click(screen.getByRole('button', { name: 'Look up' }))
-
-  /* A host with no Look up draws no row for it — a browser, a phone, a desktop
-     with no `inference`. */
-  it('is drawn only where there is a Look up', () => {
-    const { props } = full()
-    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
-
-    expect(screen.queryByRole('button', { name: 'Look up' })).toBeNull()
-  })
-
-  it('names what “your language” resolves to', () => {
-    render(<Settings {...withLookUp()} />)
-    openGroup()
-
-    expect(screen.getByRole('option', { name: 'Your language — English' })).not.toBeNull()
-  })
-
-  it('writes the language a reader picks', () => {
-    const onChoice = vi.fn()
-    render(<Settings {...withLookUp(onChoice)} />)
-    openGroup()
-
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'zh-Hans' } })
-
-    expect(onChoice).toHaveBeenCalledWith('zh-Hans')
-  })
-
-  /* THE LIST IS THE BOUNDARY: a language the model was measured poor in is not
-     an option, and a value the element reports that the setting does not hold
-     writes nothing. */
-  it('offers no language the measurement refused, and writes nothing for one', () => {
-    const onChoice = vi.fn()
-    render(<Settings {...withLookUp(onChoice)} />)
-    openGroup()
-
-    expect(screen.queryByRole('option', { name: /日本語|Japanese/ })).toBeNull()
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ja' } })
-    expect(onChoice).not.toHaveBeenCalled()
-  })
-
-  it('says why the list is short', () => {
-    render(<Settings {...withLookUp()} />)
-    openGroup()
-
-    expect(screen.getByText(/languages its model defines words well in/)).not.toBeNull()
-  })
-
-  /* THE LABEL TAKES THE ROW'S SPARE WIDTH, so the list sits at the row's end
-     the way every other row's control does. */
-  it('lets the label take the row’s spare width', () => {
-    render(<Settings {...withLookUp()} />)
-    openGroup()
-
-    /* `flexGrow`, not `flex`: jsdom expands the shorthand to `1 1 0%`, and growing is the part the row relies on. */
-    expect(screen.getByText('Define words in').style.flexGrow).toBe('1')
-  })
-})
-
-/**
- * "Choose one" LANDS ON ITS SECTION (phase 17, L3): opened — it is closed at
- * rest — brought into view, and reported, once.
- */
-describe('a request to reveal a section', () => {
-  const models = { id: 'inference:models', title: 'Local models', order: 15, render: () => null } as unknown as SettingsSection
-
-  beforeEach(() => {
-    vi.stubGlobal('requestAnimationFrame', (run: FrameRequestCallback) => {
-      run(0)
-      return 1
-    })
-    vi.stubGlobal('cancelAnimationFrame', () => {})
-  })
-
-  it('opens the section, brings it into view, and reports the request answered', () => {
-    const scrolled = vi.fn()
-    Element.prototype.scrollIntoView = scrolled
-    const onRevealed = vi.fn()
-    const { props } = full({ sections: [models], reveal: { section: 'inference:models', nonce: 3, pending: true }, onRevealed })
-    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
-
-    expect(screen.getByRole('button', { name: 'Local models' }).getAttribute('aria-expanded')).toBe('true')
-    expect(scrolled).toHaveBeenCalledTimes(1)
-    expect(onRevealed).toHaveBeenCalledWith(3)
-  })
-
-  /* A remount finds the request already answered, and leaves alone a group the
-     reader may since have closed. */
-  it('does nothing for a request already answered', () => {
-    const onRevealed = vi.fn()
-    const { props } = full({ sections: [models], reveal: { section: 'inference:models', nonce: 3, pending: false }, onRevealed })
-    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
-
-    expect(screen.getByRole('button', { name: 'Local models' }).getAttribute('aria-expanded')).toBe('false')
-    expect(onRevealed).not.toHaveBeenCalled()
-  })
-
-  /**
-   * THE FRAME, HELD RATHER THAN RUN. The stub above runs it on the spot, which
-   * cannot say what is still queued, what a newer request replaced, or what an
-   * unmount left behind. `land` delivers every frame still queued, as the next
-   * paint would.
-   */
-  function heldFrames() {
-    let issued = 0
-    const pending = new Map<number, FrameRequestCallback>()
-    vi.stubGlobal('requestAnimationFrame', (run: FrameRequestCallback) => {
-      issued += 1
-      pending.set(issued, run)
-      return issued
-    })
-    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
-      pending.delete(id)
-    })
-    return {
-      pending,
-      land: () => {
-        const due = [...pending.values()]
-        pending.clear()
-        for (const run of due) run(0)
-      },
-    }
-  }
-
-  /** Which group each scroll moved, and how. */
-  function scrolls() {
-    const seen: { readonly group: string | null; readonly options: unknown }[] = []
-    Element.prototype.scrollIntoView = function (this: Element, options?: boolean | ScrollIntoViewOptions) {
-      seen.push({ group: this.getAttribute('data-group'), options })
-    }
-    return seen
-  }
-
-  /* `Devices` is drawn FIRST, so a selector that matched any group rather than
-     the one asked for would move the wrong one. */
-  const devices = { id: 'peer:devices', title: 'Devices', render: () => null } as unknown as SettingsSection
-  const request = (section: string, nonce: number, pending = true) => ({ section, nonce, pending })
-  const settings = (over: Record<string, unknown>) =>
-    full({ sections: [devices, models], ...over }).props as ComponentProps<typeof Settings>
-  const AT_THE_TOP = { block: 'start' }
-
-  it('scrolls the requested group, and only it, to the top of the panel once painted', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    render(<Settings {...settings({ reveal: request('inference:models', 1) })} />)
-    expect(seen, 'it scrolled before the opened group had painted').toEqual([])
-
-    frames.land()
-    expect(seen).toEqual([{ group: 'inference:models', options: AT_THE_TOP }])
-  })
-
-  /* A SECTION THIS READER IS NOT OFFERED finds no group and nothing moves — and
-     the request is still answered, so a remount does not find it again. */
-  it('moves nothing, and throws nothing, for a section that is not drawn', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    const onRevealed = vi.fn()
-    render(<Settings {...settings({ sections: [devices], reveal: request('inference:models', 4), onRevealed })} />)
-
-    expect(() => frames.land()).not.toThrow()
-    expect(seen).toEqual([])
-    expect(onRevealed.mock.calls).toEqual([[4]])
-  })
-
-  /* A SECTION ID IS A CAPABILITY'S STRING, and the registry checks only its
-     prefix — so an id no CSS selector can spell reached `querySelector` and
-     threw inside the frame, where nothing catches it (#138). */
-  it('finds a section whose id no selector could spell', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    const odd = { id: 'inference:a"b]', title: 'Odd', render: () => null } as unknown as SettingsSection
-    render(<Settings {...settings({ sections: [devices, odd], reveal: request('inference:a"b]', 8) })} />)
-
-    expect(() => frames.land()).not.toThrow()
-    expect(seen).toEqual([{ group: 'inference:a"b]', options: AT_THE_TOP }])
-  })
-
-  /* ONE ANSWER PER NONCE. A host that hands the same request over again — a
-     fresh handler on every render is the ordinary case — had it answered again
-     and its scroll queued again (#139). */
-  it('answers a request once, however often it is handed over', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    const first = vi.fn()
-    const second = vi.fn()
-    const { rerender } = render(<Settings {...settings({ reveal: request('inference:models', 9), onRevealed: first })} />)
-    rerender(<Settings {...settings({ reveal: request('inference:models', 9), onRevealed: second })} />)
-
-    frames.land()
-    expect(seen).toEqual([{ group: 'inference:models', options: AT_THE_TOP }])
-    expect([...first.mock.calls, ...second.mock.calls]).toEqual([[9]])
-  })
-
-  /* ⚠️ AND ANSWERING ONCE MUST NOT COST THE FIRST REVEAL. React mounts an
-     effect, tears it down and mounts it again, which is what every developer
-     runs: the teardown cancels the frame, and a nonce marked answered when the
-     frame was merely QUEUED refused to queue another — the request was reported
-     answered and nothing moved (#139, round 2). */
-  it('still scrolls the first reveal when React mounts its effects twice', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    const onRevealed = vi.fn()
-    render(
-      <StrictMode>
-        <Settings {...settings({ reveal: request('inference:models', 11), onRevealed })} />
-      </StrictMode>,
-    )
-
-    frames.land()
-    expect(seen).toEqual([{ group: 'inference:models', options: AT_THE_TOP }])
-    expect(onRevealed.mock.calls).toEqual([[11]])
-  })
-
-  /* A NEWER REQUEST BEFORE THE FIRST HAS PAINTED replaces it: one scroll, to the
-     newer section, and each request reported to the handler that came with it. */
-  it('lets a newer request replace one whose frame has not landed', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    const first = vi.fn()
-    const second = vi.fn()
-    const { rerender } = render(<Settings {...settings({ reveal: request('peer:devices', 1), onRevealed: first })} />)
-    rerender(<Settings {...settings({ reveal: request('inference:models', 2), onRevealed: second })} />)
-    expect(frames.pending.size, 'the replaced request’s frame is still queued').toBe(1)
-
-    frames.land()
-    expect(seen).toEqual([{ group: 'inference:models', options: AT_THE_TOP }])
-    expect(first.mock.calls).toEqual([[1]])
-    expect(second.mock.calls).toEqual([[2]])
-  })
-
-  /* BUT THE ANSWER IS NOT A NEWER REQUEST. Reporting the request answered
-     changes it, and the frame it scheduled must survive that — cancelling on
-     every change would cancel the very scroll the request was for. */
-  it('still scrolls when the request is marked answered before its frame lands', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    const onRevealed = vi.fn()
-    const { rerender } = render(<Settings {...settings({ reveal: request('inference:models', 3), onRevealed })} />)
-    rerender(<Settings {...settings({ reveal: request('inference:models', 3, false), onRevealed })} />)
-
-    frames.land()
-    expect(seen).toEqual([{ group: 'inference:models', options: AT_THE_TOP }])
-    expect(onRevealed.mock.calls).toEqual([[3]])
-  })
-
-  /* ⚠️ **AND ONCE ITS FRAME HAS LANDED, THE REQUEST STAYS ANSWERED.** A host
-     that has not yet caught up hands the same pending request over again, with a
-     fresh handler — the ordinary case, since `SidePane` makes one per render.
-     The in-flight mark is gone by then, so only the answered nonce stands
-     between that and a second scroll, a second report, and a group the reader
-     had closed in between springing open again. */
-  it('does not answer a request again after its frame has landed', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    const first = vi.fn()
-    const second = vi.fn()
-    const { rerender } = render(<Settings {...settings({ reveal: request('inference:models', 12), onRevealed: first })} />)
-    frames.land()
-    const toggle = screen.getByRole('button', { name: 'Local models' })
-    fireEvent.click(toggle)
-    expect(toggle.getAttribute('aria-expanded'), 'the reader closed the revealed group').toBe('false')
-
-    rerender(<Settings {...settings({ reveal: request('inference:models', 12), onRevealed: second })} />)
-    frames.land()
-    expect(seen).toEqual([{ group: 'inference:models', options: AT_THE_TOP }])
-    expect(first.mock.calls).toEqual([[12]])
-    expect(second).not.toHaveBeenCalled()
-    expect(toggle.getAttribute('aria-expanded'), 'an answered request opened the group again').toBe('false')
-  })
-
-  /* A HOST THAT DOES NOT TRACK THE REQUEST passes no handler. The section is
-     still opened and brought into view, and the panel is still there. */
-  it('opens and scrolls with no handler to report to', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    render(<Settings {...settings({ reveal: request('inference:models', 5) })} />)
-
-    frames.land()
-    expect(screen.getByRole('button', { name: 'Local models' }).getAttribute('aria-expanded')).toBe('true')
-    expect(seen).toEqual([{ group: 'inference:models', options: AT_THE_TOP }])
-  })
-
-  it('cancels a frame still queued when the panel unmounts', () => {
-    const frames = heldFrames()
-    const { unmount } = render(<Settings {...settings({ reveal: request('inference:models', 6) })} />)
-    expect(frames.pending.size).toBe(1)
-
-    unmount()
-    expect(frames.pending.size, 'a frame outlived the panel that queued it').toBe(0)
-  })
-
-  /**
-   * AND ONE ALREADY ON ITS WAY FINDS NO PANEL. React clears the ref in the
-   * commit that removes the panel, and runs the cleanup that cancels the frame
-   * after it — at the end of that commit only for a discrete update, otherwise
-   * as a later task, and a frame can land in between.
-   */
-  it('moves nothing when a frame lands after the panel is gone', () => {
-    const frames = heldFrames()
-    const seen = scrolls()
-    const { unmount } = render(<Settings {...settings({ reveal: request('inference:models', 7) })} />)
-    const [landing] = [...frames.pending.values()]
-    if (landing === undefined) throw new Error('no frame was queued, so this proves nothing')
-    unmount()
-
-    expect(() => landing(0)).not.toThrow()
-    expect(seen).toEqual([])
-  })
-})
 
 describe('what it writes', () => {
   it('reports a theme the reader picked', () => {
@@ -915,27 +599,24 @@ describe('the two bands', () => {
 
   /**
    * ⚠️ **THE PANEL SHOWED SETTINGS FOR A PANEL THE READER COULD NOT OPEN.**
-   * `UNFINISHED_PANE_IDS` hid the Companion pane and never touched
-   * `Settings → Companion`, which sat in The app band from the day the
+   * `UNFINISHED_PANE_IDS` hid the deleted companion's pane and never touched
+   * its settings section, which sat in The app band from the day the
    * capability contributed it. A section configuring a surface that is not
    * offered is worse than either half alone: it is evidence the feature is
    * there.
    *
-   * `inference:models` is in the same assertion deliberately. It ships — the
-   * selection bar's Look up runs on it — so a rule that hid it because the
-   * companion shares its engine would take a working control away.
+   * ASKED ON THE SECTION'S OWN CAPABILITY and nothing it depends on, which is
+   * the second half of the rule: one capability commonly drives several
+   * features, and hiding a shipped feature's settings because an unfinished
+   * one shares its engine would take a working control away. `peer:devices` is
+   * in the same assertion for that.
    */
   it('hides an unfinished capability’s settings, and only that capability’s', () => {
-    const both = [
-      section('companion:provider', 'Companion'),
-      section('inference:models', 'Local models'),
-      section('inference:endpoints', 'Cloud endpoints'),
-    ]
+    const both = [section('cards:study', 'Study'), section('peer:devices', 'Devices')]
     const { props } = full({ sections: both })
     const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
-    expect(bandOf('Local models', container)).toBe('The app')
-    expect(bandOf('Cloud endpoints', container)).toBe('The app')
-    expect(bandOf('Companion', container)).toBeNull()
+    expect(bandOf('Devices', container)).toBe('The app')
+    expect(bandOf('Study', container)).toBeNull()
 
     /* One chord later it is there, which is what makes the line above about
        the gate rather than about the section having been dropped. */
@@ -944,48 +625,16 @@ describe('the two bands', () => {
       developer: { hidden: [], onSetHidden: () => {}, recording: false },
     })
     const revealed = render(<Settings {...(dev as ComponentProps<typeof Settings>)} />)
-    expect(bandOf('Companion', revealed.container)).toBe('The app')
+    expect(bandOf('Study', revealed.container)).toBe('The app')
   })
 
-  /**
-   * ⚠️ **ONE SECTION CAN BE UNFINISHED WHILE ITS CAPABILITY SHIPS.** Cloud
-   * endpoints was never measured against a real provider and nothing connects
-   * one to an answer, so `inference` marks that section `unfinished` — while
-   * Local models, beside it and from the same capability, is what Look up runs
-   * on. The list of unfinished PANELS cannot say that; the flag can.
-   *
-   * BOTH HALVES, and a sibling from the same capability in each, so what is
-   * measured is the flag and not the capability's prefix.
-   */
-  it('offers a section marked unfinished only under developer options, and its finished sibling always', () => {
-    const sections = [
-      section('inference:models', 'Local models'),
-      { ...section('inference:endpoints', 'Cloud endpoints'), unfinished: true as const },
-    ]
-    const { props } = full({ sections })
-    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
-    expect(bandOf('Local models', container)).toBe('The app')
-    expect(bandOf('Cloud endpoints', container), 'an unfinished section was offered to every reader').toBeNull()
-    cleanup()
-
-    const { props: dev } = full({ sections, developer: { hidden: [], onSetHidden: () => {}, recording: false } })
-    const revealed = render(<Settings {...(dev as ComponentProps<typeof Settings>)} />)
-    expect(bandOf('Local models', revealed.container)).toBe('The app')
-    expect(bandOf('Cloud endpoints', revealed.container), 'developer options did not reveal it').toBe('The app')
-  })
-
-  /* `hidden` NAMES PANELS, so it cannot take an unfinished section away again:
-     there is no panel of that name to have ticked. Hiding every unfinished
-     panel leaves the section where developer options put it. */
-  it('keeps an unfinished section offered under developer options whatever panels are hidden', () => {
-    const sections = [{ ...section('inference:endpoints', 'Cloud endpoints'), unfinished: true as const }]
-    const { props } = full({
-      sections,
-      developer: { hidden: ['companion', 'cards', 'inference'], onSetHidden: () => {}, recording: false },
-    })
-    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
-    expect(bandOf('Cloud endpoints', container)).toBe('The app')
-  })
+  /* ⚠️ **A SECTION COULD DECLARE ITSELF UNFINISHED, AND TWO CASES HERE COVERED
+     THAT FLAG.** `SettingsSection.unfinished` is deleted — it had one declarer
+     ever, the deleted inference capability's cloud endpoints — so the list is
+     the only way a section is hidden again, which is what the cases above
+     measure. The spread that set the flag in a fixture also slipped past
+     `tsc`'s excess-property check, so the two cases went on passing over a
+     field the component no longer reads; they are gone rather than adapted. */
 
   it('captions each band with a real heading, so the split is structure and not a drawn line', () => {
     /* A SECTION TO SHOW, or there is no "The app" band to caption — see
@@ -1284,6 +933,11 @@ describe('developer options', () => {
     expect(screen.queryByRole('button', { name: 'Unfinished panels' })).toBeNull()
   })
 
+  /* ⚠️ **TWO PANELS WERE LISTED HERE**, so the row for one and the row for the
+     other each said a different thing and the pair pinned both. `companion` is
+     deleted, so `UNFINISHED_PANE_IDS` holds one id and the band draws one row;
+     both STATES are still asserted, by rendering the row hidden and then
+     shown. */
   it('list each unfinished panel as shown or hidden, and a press asks for the other', () => {
     const onSetHidden = vi.fn()
     const { props } = full({ developer: developer({ hidden: ['cards'], onSetHidden }) })
@@ -1296,16 +950,21 @@ describe('developer options', () => {
         'These panels are drawn but do not yet answer what they promise. They are hidden from every reader who has not turned developer options on.',
       ),
     ).not.toBeNull()
-    const companion = screen.getByRole('switch', { name: 'Companion' })
-    const cards = screen.getByRole('switch', { name: 'Cards' })
-    expect([companion.getAttribute('aria-checked'), valueOf(companion)]).toEqual(['true', 'Shown'])
-    expect([cards.getAttribute('aria-checked'), valueOf(cards)]).toEqual(['false', 'Hidden'])
+    const hidden = screen.getByRole('switch', { name: 'Cards' })
+    expect([hidden.getAttribute('aria-checked'), valueOf(hidden)]).toEqual(['false', 'Hidden'])
+    fireEvent.click(hidden)
+    cleanup()
 
-    fireEvent.click(companion)
-    fireEvent.click(cards)
+    const { props: shownProps } = full({ developer: developer({ hidden: [], onSetHidden }) })
+    render(<Settings {...(shownProps as ComponentProps<typeof Settings>)} />)
+    open('Unfinished panels')
+    const shown = screen.getByRole('switch', { name: 'Cards' })
+    expect([shown.getAttribute('aria-checked'), valueOf(shown)]).toEqual(['true', 'Shown'])
+    fireEvent.click(shown)
+
     expect(onSetHidden.mock.calls).toEqual([
-      ['companion', true],
       ['cards', false],
+      ['cards', true],
     ])
   })
 
@@ -1329,19 +988,16 @@ describe('developer options', () => {
   })
 
   /* HIDING A PANEL INSIDE DEVELOPER OPTIONS HIDES ITS SETTINGS WITH IT — the
-     same list, read the same way — and leaves `inference`'s two alone, because
-     Look up ships on them. */
+     same list, read the same way — and leaves every other capability's alone. */
   it('hide an unfinished capability’s settings again when its panel is hidden', () => {
     const sections = [
-      { id: 'companion:provider', title: 'Companion', render: () => null },
-      { id: 'inference:models', title: 'Local models', render: () => null },
-      { id: 'inference:endpoints', title: 'Cloud endpoints', render: () => null },
+      { id: 'cards:study', title: 'Study', render: () => null },
+      { id: 'peer:devices', title: 'Devices', render: () => null },
     ]
-    const { props } = full({ sections, developer: developer({ hidden: ['companion'] }) })
+    const { props } = full({ sections, developer: developer({ hidden: ['cards'] }) })
     render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
-    expect(screen.queryByRole('button', { name: 'Companion' })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Local models' })).not.toBeNull()
-    expect(screen.getByRole('button', { name: 'Cloud endpoints' })).not.toBeNull()
+    expect(screen.queryByRole('button', { name: 'Study' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Devices' })).not.toBeNull()
   })
 })
 
@@ -1390,10 +1046,10 @@ describe('a container with nothing in it', () => {
     expect(captions(container)).toEqual(['Reading'])
   })
 
-  /* NOR FOR SECTIONS THIS READER IS NOT OFFERED — Companion's, with developer
-     options off, is filtered before the band is decided. */
+  /* NOR FOR SECTIONS THIS READER IS NOT OFFERED — an unfinished panel's, with
+     developer options off, is filtered before the band is decided. */
   it('draws none when every section is one this reader is not offered', () => {
-    const { props } = full({ sections: [{ id: 'companion:provider', title: 'Companion', render: () => null }] })
+    const { props } = full({ sections: [{ id: 'cards:study', title: 'Study', render: () => null }] })
     const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
     expect(captions(container)).toEqual(['Reading'])
   })

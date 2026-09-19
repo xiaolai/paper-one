@@ -29,29 +29,6 @@
       ]
     },
     {
-      "id": "inference",
-      "requires": [],
-      "ts": "inference",
-      "platforms": [
-        "desktop"
-      ],
-      "crate": "tauri-plugin-inference",
-      "plugin": "inference",
-      "permissions": [
-        "inference:default"
-      ]
-    },
-    {
-      "id": "companion",
-      "requires": [
-        "inference"
-      ],
-      "ts": "companion",
-      "platforms": [
-        "desktop"
-      ]
-    },
-    {
       "id": "circle",
       "requires": [
         "peer"

@@ -101,8 +101,8 @@ describe("the kernel's public entry", () => {
       .map(([from]) => from)
     /* ⚠️ **THE DELETION PROOF MAKES THIS FIRE BY CONSTRUCTION.** Cutting a
        capability deletes the only importer of the contract the kernel declares
-       for it — `./core/companion` for `companion` — and the proof forbids
-       touching a kernel file, so the clause stays with no importer. Found
+       for it — `./core/circle/*` for `circle` — and the proof forbids touching
+       a kernel file, so the clause stays with no importer. Found
        2026-09-15 running the proof on a clean tree; it failed on `main` too.
        `PAPER_VERIFY_WITHOUT` is set only by `verify:without`, which names the
        id it cut, and on the real tree this is a hard assertion — the same rule

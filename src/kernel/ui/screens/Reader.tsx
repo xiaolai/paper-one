@@ -22,8 +22,6 @@ import {
 import { bookAccent } from '../../core/bookAccent'
 import { citation, type Source } from '../../core/citation'
 import { writeClipboard } from '../clipboard'
-import type { LookUp } from '../hooks/useLookUp'
-import type { Voice } from '../../core/voice'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
 import type { ForeignAnchor } from '../reader/session'
@@ -132,26 +130,6 @@ export interface ReaderProps {
   dispatch: AppDispatch
   platform: Platform
   book: Book
-  /**
-   * Look up — what the selection popup's dictionary control does, and the
-   * answer it draws (phase 17).
-   *
-   * ⚠️ **APP'S STATE, NOT THIS SCREEN'S, AND IT USED TO BE THIS SCREEN'S.**
-   * `useGloss` was called here, below the side pane, so the Dictionary view in
-   * Marginalia could not see a live lookup and the palette and the keyboard
-   * could not start one. `useLookUp` holds it above both (WI-17.2); this
-   * screen draws it and presses it, and decides nothing about it.
-   */
-  lookUp: LookUp
-  /**
-   * The voice, for the pronunciation control in the lookup's own face — the
-   * machine's own in the app, `NO_VOICE` where nothing can speak, which is what
-   * makes the control absent rather than dead (§07).
-   *
-   * A PROP OF ITS OWN rather than a member of `lookUp`: see the note at the
-   * call site, and `core/voice.ts` for why the port is not the gloss's.
-   */
-  voice: Voice
   /**
    * A save that did not land — a position, a tag, a mark's record — with
    * the way to try it again. Drawn at the foot of the column with the other
@@ -281,8 +259,6 @@ export function Reader({
   dispatch,
   platform,
   book,
-  lookUp,
-  voice,
   saveFailure = null,
   onDismissSaveFailure,
   importNotice = null,
@@ -350,14 +326,6 @@ export function Reader({
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
 
-  /* ⚠️ **LOOK UP IS NOT DECIDED HERE ANY MORE.** The gloss hook, its anchor,
-     the install decision and the sentence walk lived in this body; they moved
-     to `useLookUp` (WI-17.2), in `App`, so the Dictionary view, the palette and
-     the keyboard can reach the same lookup this popup draws. The anchor's
-     reasoning — the keyboard page turn that never reaches `onPageIntent`, and
-     why the selection is part of it now that nothing reflows — moved with it,
-     to `GlossAnchor`. */
-
   /** What the next mark takes, as one value, so nothing has to pair them up. */
   const appearance = useMemo<MarkAppearance>(
     () => ({ tint: state.markTint, style: state.markStyle }),
@@ -381,9 +349,9 @@ export function Reader({
   const measured = useElementWidth(stage)
   const available = measured ?? estimated
 
-  /* What actually goes in the margin: notes and companion marks, not every
-   * highlight. Counting highlights too would open a 250px column to show a
-   * column of dots that repeat what the gold fill on the words already says. */
+  /* What actually goes in the margin: notes, not every highlight. Counting
+   * highlights too would open a 250px column to show a column of dots that
+   * repeat what the gold fill on the words already says. */
   /* SPREAD RATHER THAN PASSED, because `exactOptionalPropertyTypes`
      distinguishes an absent prop from one that is present and
      undefined. `overlays` is optional at both ends, so a host with no
@@ -682,14 +650,6 @@ export function Reader({
        * cheaper side of the trade by a wide margin. */
       clearSelection()
 
-      /* ⚠️ NO `gloss.dismiss()` HERE, AND THERE WAS ONE. It covered this route
-       * and only this route, while `App`'s key handler turns pages without ever
-       * calling it — so the teardown fired for a wheel gesture and not for the
-       * arrow key beside it. `book.navigation` counts turns where both routes
-       * meet and feeds the gloss anchor; a second copy here would be the same
-       * decision in two places, and the copy that was missing a route is
-       * exactly how this was wrong the first time. */
-
       /* Four intents, two pairs, because the axes mean different things. A
        * horizontal gesture named a SIDE and foliate resolves which page that is
        * from the book's own direction; a vertical one named a DIRECTION OF
@@ -702,9 +662,7 @@ export function Reader({
       else book.prev()
     },
     /* `clearSelection` is what the body calls; `selection` and `setSelection`
-       were what an earlier body read, and had outlived it in this list.
-       The gloss is no longer named at all — its teardown moved to the anchor,
-       which sees the keyboard route this callback cannot. */
+       were what an earlier body read, and had outlived it in this list. */
     [state, book, paneVisible, clearSelection],
   )
 
@@ -1074,25 +1032,6 @@ export function Reader({
                     onCite={() =>
                       copyToClipboard(citation(selection!.text, sourceFor(selection!.sectionIndex)))
                     }
-                    /* ONE PRESS FOR THE BUTTON, THE PALETTE AND THE KEY — see
-                       `LookUp.press`, which is null exactly where no control
-                       should be drawn. */
-                    onLookUp={lookUp.press}
-                    /* AND THE ANSWER IS DRAWN HERE, in the popup beside the
-                       word — not in a strip under the page, whose appearance
-                       re-paginated the book and pushed the word off it
-                       (phase 17, L1; see `LookUpFace`). */
-                    lookUp={lookUp.state}
-                    onLookUpBack={lookUp.dismiss}
-                    onInstall={lookUp.onInstall}
-                    /* ⚠️ NOT A MEMBER OF `lookUp`, THOUGH IT IS DRAWN INSIDE
-                       ONE. The voice is a fact about the machine — the same one
-                       that will read a chapter aloud — and `useLookUp` is the
-                       lookup's state; carrying it there would make the next
-                       consumer reach through the lookup to find it. See
-                       `core/voice.ts`, which sets out the same argument against
-                       hanging it off `GlossProvider`. */
-                    voice={voice}
                     /* `selected!` for the reason the copy controls above give. */
                     onRemove={() => {
                       unmark(selected!)
@@ -1253,7 +1192,8 @@ export function Reader({
             displacing the text, and it dismisses itself" — neither was true.
             Each of these is a flex row beside `.stage`, so one appearing takes
             its height from the stage and the book re-paginates around it —
-            what phase 17 measured and removed for the lookup (`LookUpFace`).
+            what phase 17 measured and removed for the deleted lookup face,
+            which was a strip under the page for exactly this reason.
             It stands here, and moving the notices out of flow is a layout
             change to measure in the running app. Nor does any of them go on its
             own: each waits for Dismiss, or for its own success to clear it. */}

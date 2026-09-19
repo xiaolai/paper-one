@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "desktop",
-  "description": "the grants that exist only where their plugins compile: inference and webhost are desktop-only crates, and a platform-less file granting them fails tauri-build's ACL validation on iOS and Android with `Permission inference:default not found`. Scoped, so the three desktop OSes get them and the phones never ask.",
+  "description": "the grants that exist only where their plugins compile: webhost is a desktop-only crate, and a platform-less file granting it fails tauri-build's ACL validation on iOS and Android with `Permission webhost:default not found`. Scoped, so the three desktop OSes get it and the phones never ask. (It granted the deleted inference plugin too, which is the pair that made the file worth having.)",
   "platforms": [
     "macOS",
     "windows",
@@ -11,7 +11,6 @@
     "main"
   ],
   "permissions": [
-    "inference:default",
     "webhost:default"
   ]
 }

@@ -38,7 +38,6 @@ export const PANES: readonly PaneEntry[] = [
   { id: 'marginalia', label: 'Marginalia', combo: '⌘2' },
   { id: 'search', label: 'Search', combo: '⌘3' },
   { id: 'cards', label: 'Cards', combo: '⌘4' },
-  { id: 'companion', label: 'Companion' },
   { id: 'library', label: 'Library' },
   { id: 'settings', label: 'Settings' },
   /* NO COMBO. ⌘5 is free, and leaving it that way is deliberate: a reader who

@@ -11,7 +11,7 @@
   "scripts": {
     "dev": "vite",
     "build": "pnpm typecheck && vite build",
-    "build:desktop": "node scripts/sync-pdfjs-assets.mjs && node scripts/sync-inference-runtime.mjs && TAURI_ENV_PLATFORM=darwin vite build",
+    "build:desktop": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=darwin vite build",
     "build:ios": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=ios vite build",
     "build:android": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=android vite build",
     "build:web": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=web vite build",
@@ -36,8 +36,8 @@
     "boundaries": "node scripts/check-boundaries.mjs",
     "boundaries:selftest": "node scripts/check-boundaries.selftest.mjs",
     "boundaries:decls": "node scripts/check-kernel-declarations.mjs",
-    "predev": "node scripts/sync-pdfjs-assets.mjs && node scripts/sync-inference-runtime.mjs",
-    "prebuild": "node scripts/sync-pdfjs-assets.mjs && node scripts/sync-inference-runtime.mjs",
+    "predev": "node scripts/sync-pdfjs-assets.mjs",
+    "prebuild": "node scripts/sync-pdfjs-assets.mjs",
     "architecture:check": "node scripts/architecture-check.mjs",
     "compositions:check": "node scripts/check-compositions.mjs",
     "css:check": "node scripts/check-dead-css.mjs",
@@ -49,7 +49,6 @@
     "capability:remove": "node scripts/capability-remove.mjs",
     "verify": "node scripts/verify.mjs",
     "verify:without": "node scripts/verify-without.mjs",
-    "runtime:sync": "node scripts/sync-inference-runtime.mjs",
     "mutants": "node scripts/check-mutants.mjs"
   },
   "pnpm": {

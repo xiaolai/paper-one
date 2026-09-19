@@ -252,229 +252,6 @@
 .tocRow[data-depth='1'] { padding-left: calc(var(--space-10) + var(--toc-indent)); }
 .tocRow[data-depth='2'] { padding-left: calc(var(--space-10) + 2 * var(--toc-indent)); }
 
-/* --- companion ------------------------------------------------------- */
-
-/* THE THREAD. These styles were deleted once, and the note that replaced them
- * was right at the time: they described a companion UI the build deliberately
- * did not ship, and keeping a guessed-at shape alive in the stylesheet is what
- * makes the eventual real thread harder to write rather than easier.
- *
- * They are back because the thread is (phase 15, WI-15.4), and every rule
- * below has a `styles.*` consumer in `Companion.tsx` — which `css:check` is
- * what holds true. Nothing here is speculative: there is no rule for a shape
- * the thread does not currently render. */
-
-.thread {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 0 var(--space-16) var(--space-12);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-12);
-}
-
-.turn {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-  font-size: var(--text-body);
-  line-height: var(--leading-body);
-}
-
-/* The reader's own words are quiet chrome; they are not a claim about the
- * book and carry no provenance. */
-.turn[data-role='reader'] .turnBody {
-  color: var(--muted);
-}
-
-/* EVERYTHING THE COMPANION PRODUCED IS AMBER, EVERYWHERE, FOREVER. The tint
- * is the provenance mark, and it is the same amber the companion's marks and
- * cards carry — one meaning, one colour, wherever machine-written text
- * appears in the reader. */
-.turn[data-role='companion'] .turnBody {
-  padding: var(--space-10) var(--space-12);
-  border: 1px solid var(--amber-line);
-  border-radius: var(--radius-chip);
-  background: var(--amber-bg);
-  white-space: pre-wrap;
-}
-
-/* The answer is still arriving. A caret rather than a spinner: the vocabulary
- * has no spinner, and a blinking caret is what a stream of text already means.
- *
- * DRAWN AS A CHARACTER, not as a sized box. A box needs a width and a height,
- * and the only honest values for those are `0.5em`/`1em` — the text's own
- * size, which is exactly what a glyph gives for free. It also means the caret
- * tracks the reader's font size without a second rule. */
-.caret::before {
-  content: '▌';
-  color: var(--amber);
-  animation: companion-caret var(--motion-caret) steps(2, start) infinite;
-}
-
-@keyframes companion-caret {
-  50% { opacity: 0; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .caret::before { animation: none; }
-}
-
-.citations {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-6);
-}
-
-/* §13: every claim cites a location and LINKS to it. The chip is the link. */
-.citation {
-  padding: var(--space-2) var(--space-8);
-  border: 1px solid var(--amber-line);
-  border-radius: var(--radius-pill);
-  background: none;
-  color: var(--amber);
-  font-family: inherit;
-  font-size: var(--text-caption);
-  cursor: pointer;
-}
-
-.citation:hover:not(:disabled) {
-  background: var(--amber-bg);
-}
-
-.citation:disabled {
-  cursor: default;
-  opacity: var(--opacity-disabled);
-}
-
-/* A failed answer says what happened, in the reader's words, and does NOT
- * wear the amber: nothing was produced, so there is no provenance to mark. */
-.turnFailure {
-  font-size: var(--text-caption);
-  color: var(--muted);
-}
-
-/* A citation that was removed because it named a passage nobody sent.
- *
- * The same voice as `.turnFailure` and deliberately not louder: the answer
- * STANDS and its other citations are real, so this is a note about one claim
- * rather than a failure of the turn. §13's rule is that such a claim must not
- * stand unmarked — the requirement is that it is said, not that it shouts. */
-.turnNotice {
-  font-size: var(--text-caption);
-  color: var(--muted);
-}
-
-.companionHead {
-  flex: 0 0 auto;
-  padding: 0 var(--space-16) var(--space-10);
-  font-size: var(--text-caption);
-  color: var(--muted);
-}
-
-/* Everything the companion produced is amber, everywhere, forever. */
-.footerActions {
-  flex: 0 0 auto;
-}
-
-.composer {
-  display: flex;
-  align-items: center;
-  gap: var(--space-8);
-  height: var(--control-lg);
-  margin: 0 var(--space-12);
-  padding: 0 var(--space-6) 0 var(--space-14);
-  border-radius: var(--radius-pill);
-  background: var(--wash);
-}
-
-/* One bare-input treatment, shared by the composer and the search field —
- * they are the same control inside a filled pill, differing only in
- * placeholder. */
-.composerInput,
-.searchInput {
-  flex: 1;
-  min-width: 0;
-  border: none;
-  background: transparent;
-  font-family: inherit;
-  font-size: var(--text-ui);
-  color: var(--ink);
-}
-
-.composerInput::placeholder,
-.searchInput::placeholder {
-  color: var(--muted);
-}
-
-/* ⚠️ **LIGHT THE PILL, NOT THE BARE INPUT INSIDE IT.**
- *
- * These two inputs are transparent and unpadded inside a pill their PARENT
- * draws, so the global `:focus-visible` ring drew itself around the INPUT's
- * box. Measured in the running app, on the composer:
- *
- *   ring   324 x 22, radius 6px   (`--radius-chip`, from the global rule)
- *   pill   376 x 44, radius 999px (`--radius-pill`)
- *
- * — eleven pixels of pill showing above and below the ring and twenty-six on
- * each side. A small square-cornered box floating inside a fully rounded one,
- * which is not what any other focused control in this app looks like.
- *
- * `global.css` names this very control as the case its default was designed
- * for, on the grounds that "the two pixels land in the parent's fill and the
- * whole thing reads as one focused control". The two pixels do land there; so
- * do another nine on every side, because the input does not fill the pill. That
- * paragraph reasoned about the OFFSET and never about the size or the radius,
- * and it has been corrected.
- *
- * The container carries it instead, which is `Library.module.css`'s
- * `.searchField:focus-within` idiom — the same problem, solved there first.
- *
- * `:has(:focus-visible)` RATHER THAN `:focus-within`, which is where this
- * departs from that precedent and deliberately. `:focus-within` matches a
- * POINTER click too, and §07 is explicit that focus is `:focus-visible` only so
- * pointer users never see it. The rule being replaced here was already
- * keyboard-only; switching to `:focus-within` would have fixed the shape by
- * regressing the policy. `:has(:focus-visible)` keeps both, and this webview
- * supports it (checked, not assumed).
- *
- * ⚠️ **THE OFFSET IS `.paper-cap-field`'s, NOT A NUMBER PICKED HERE.** Both of
- * these pills are their own filled shape at `--radius-pill`, which is the case
- * `design-tokens.md` names as breaking the global `+--space-2` precondition:
- * the ring lands outside the pill's own background and the pane shows through
- * the gap, a pill drawn around a pill. `capability.css` states the value and
- * the mechanism — negative, and *"not zero: on a 999px radius the two curves
- * meet at a tangent, and a hairline of pane background survives antialiasing
- * between them"*. `.noteInput` had already reached the same value for the same
- * reason. This is the third control of that shape and it takes the same rule. */
-.composer:has(:focus-visible),
-.searchField:has(:focus-visible) {
-  outline: var(--focus-ring);
-  outline-offset: -1px;
-}
-
-/* The container shows focus — see above. Dropping the input's own ring
- * unconditionally is only safe BECAUSE of that rule, which is why the two sit
- * together: on its own this line would leave keyboard users with no visible
- * focus at all, and §07's focus requirement is not optional. */
-.composerInput:focus,
-.searchInput:focus {
-  outline: none;
-}
-
-.send {
-  width: var(--control-sm);
-  height: var(--control-sm);
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--surface);
-  cursor: pointer;
-}
-
 /* --- notes ----------------------------------------------------------- */
 
 /* A container, not a control: the passage, the note and the delete action are
@@ -500,9 +277,8 @@
 /* THE MARK'S OWN TINT, down the leading edge. A reader who marks agreements in
  * green and questions in purple has categorised the passages; a list of notes
  * that shows none of it makes them re-open each one to find out which is which.
- * A bar rather than a tinted row, because the row already uses its background
- * to say "the companion wrote this" and two meanings on one surface is one
- * meaning nobody can read. */
+ * A bar rather than a tinted row: the row's background is spoken for, and two
+ * meanings on one surface is one meaning nobody can read. */
 .note::before {
   content: '';
   position: absolute;
@@ -519,17 +295,6 @@
 
 .note[data-tint='purple']::before {
   background: var(--mark-purple-rule);
-}
-
-/* Everything the companion produced carries the amber, forever. §15: the word
- * is companion — never ai, assistant or bot — in code as well as in the UI. */
-.note[data-kind='companion']::before {
-  background: var(--amber);
-}
-
-.note[data-kind='companion'] {
-  background: var(--amber-bg);
-  border-color: var(--amber-line);
 }
 
 /* The marked passage, and the control that jumps to it. */
@@ -648,17 +413,6 @@
   color: var(--muted);
 }
 
-/* §01: amber is the COMPANION's provenance, and it says who wrote a thing.
- *
- * This label is shared: in Notes it appears only above a companion mark, where
- * amber is right, but in Cards it appears above every card and takes the kind
- * as its text — so Excerpt, Idea and Question, all written by the reader, were
- * being attributed to the companion by their colour. Amber now needs the
- * companion kind to say so, and everything else is ordinary muted chrome. */
-.noteKind[data-kind='Companion'] {
-  color: var(--amber);
-}
-
 /* --- bookmarks -------------------------------------------------------- */
 
 /* A bookmark row is the note row's shape, and it borrows the whole of it —
@@ -698,81 +452,6 @@
   display: block;
   font-size: var(--text-small);
   color: var(--ink-2);
-}
-
-/* --- lookups (phase 17, WI-17.3) ---------------------------------------- */
-
-/* A lookup row is the note row's shape, as a bookmark row is. Its bar is AMBER,
- * because what the row mostly holds is definitions a model wrote — the same
- * provenance `.note[data-kind='companion']` marks, said on the edge rather than
- * across the background, since the row is the reader's history and not the
- * companion's claim. */
-.note[data-kind='lookup']::before {
-  background: var(--amber);
-}
-
-.lookupHead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-8);
-}
-
-.lookupTerm {
-  font-size: var(--text-body);
-  font-weight: var(--weight-semibold);
-  color: var(--ink);
-  overflow-wrap: anywhere;
-}
-
-.lookupPlace {
-  padding-top: var(--space-8);
-}
-
-/* Two places of one word are two senses — a hairline says where one ends. */
-.lookupPlace + .lookupPlace {
-  margin-top: var(--space-8);
-  border-top: 1px solid var(--line);
-}
-
-/* `pre-line` for an answer in two languages, which is two lines. */
-.lookupSense {
-  font-size: var(--text-ui);
-  line-height: var(--leading-body);
-  color: var(--ink);
-  white-space: pre-line;
-  overflow-wrap: anywhere;
-}
-
-/* The sentence it was met in — clamped, because it is there to say WHERE, not to
- * be read; the page is one click away. The prose face, like every passage in
- * this pane. */
-.lookupSentence {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-  padding-top: var(--space-4);
-  font-family: var(--font-serif);
-  font-size: var(--text-body);
-  line-height: var(--leading-body);
-  color: var(--ink-2);
-}
-
-.noteJump:disabled .lookupSentence {
-  color: var(--muted);
-}
-
-/* The remembered opening line, one line of it. It is there to confirm the
- * place, not to be read — the reader has the whole page one click away — so it
- * is clamped rather than allowed to set the height of every row. */
-.placeLine {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  overflow: hidden;
-  padding-top: var(--space-4);
 }
 
 /* --- search ---------------------------------------------------------- */
@@ -1076,27 +755,6 @@
 .settingValue {
   font-size: var(--text-small);
   color: var(--muted);
-}
-
-/* A setting chosen from a LIST rather than cycled — WI-17.5's answer language,
- * the first. The native `<select>`, dressed as `.settingValue`: a list of a
- * dozen languages opened by the platform is keyboard-, screen-reader- and
- * touch-correct for free, where a hand-built menu would have to earn each. */
-.settingSelect {
-  max-width: 60%;
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  font-family: inherit;
-  font-size: var(--text-small);
-  text-align: end;
-  cursor: pointer;
-}
-
-.settingSelect:focus-visible {
-  outline: var(--focus-ring);
-  outline-offset: var(--space-2);
-  border-radius: var(--radius-chip);
 }
 
 /* A row that holds its own controls rather than being one. `.settingRow` is a

@@ -214,23 +214,6 @@ export interface SettingsSection {
    * anywhere would have said so.
    */
   readonly order?: number
-  /**
-   * A section whose feature does not yet do what it promises — offered only
-   * under developer options (⌘⌃⌥D), the same rule `UNFINISHED_PANE_IDS`
-   * applies to a panel.
-   *
-   * A FLAG ON THE SECTION, where the panels have a list, and the difference is
-   * who can know. `UNFINISHED_PANE_IDS` names a capability, which hides every
-   * section it contributes; this is for the case that list cannot express — one
-   * section of a capability whose others ship (`inference`'s Cloud endpoints,
-   * beside the Local models Look up runs on). Only the capability knows which
-   * of its own sections are finished, so the capability says so.
-   *
-   * `true` OR ABSENT, never `false`: there is one thing to declare, and a
-   * `false` would be a second spelling of "finished" for a reader to wonder
-   * about. `settingsSectionOffered` is the one place it is read.
-   */
-  readonly unfinished?: true
   readonly render: PaneRenderer
 }
 

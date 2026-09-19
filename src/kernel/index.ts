@@ -56,8 +56,7 @@
  * imports `isFormat` from the other, and this file re-exports both of those.
  * What dropping the clauses bought is a smaller API — names nothing outside the
  * kernel asked for — which is reason enough; the loading saving was a second
- * reason that was not true, the same mistake the `NO_GLOSS` note below records.
- * Found by audit.
+ * reason that was not true. Found by audit.
  *
  * `kernel-entry.test.mjs` holds the NAMES, not the loading: it refuses a value
  * clause none of whose names anything outside the entry imports, whether or not
@@ -111,8 +110,8 @@ export {
   resolvePaneId,
   /* THE CAPABILITY SETTINGS CONTRACT, exported so a capability's own tests can
    * hold themselves to it. A store built by hand in a test is a guard that can
-   * drift from the real one — and it did: both phase-15 panes read
-   * `kernel.lookUp` through their scoped handle and threw `namespace` on their
+   * drift from the real one — and it did: two deleted phase-15 panes read a
+   * `kernel.` key through their scoped handle and threw `namespace` on their
    * first render, while every unit test passed because each had been handed an
    * UNSCOPED store. */
   scopeSettings,
@@ -207,12 +206,22 @@ export {
 export type { DiagnosticEntry, DiagnosticLog, DiagnosticSpool } from './core/diagnosticsLog'
 export { CAPABILITY_UI, type CapabilityUiClass } from './core/capabilityUi'
 export { inlineQrSvg } from './core/qrSvg'
-/* EVERYTHING A CAPABILITY'S `start` ACQUIRED — see `core/capabilitySession.ts`. */
-export { openSession } from './core/capabilitySession'
-export type { CapabilitySession } from './core/capabilitySession'
-/* WHAT A CONTRIBUTED `render()` DRAWS — see `core/renderSlot.ts`. */
-export { createRenderSlot } from './core/renderSlot'
-export type { RenderSlot } from './core/renderSlot'
+/* ⚠️ **`core/capabilitySession.ts` AND `core/renderSlot.ts` ARE DELETED**, with
+ * the clauses that re-exported them. `openSession` released everything a
+ * capability's `start` acquired; `createRenderSlot` was a STACK for the value a
+ * no-argument `render()` draws, so two live compositions could not leave the
+ * older one rendering nothing. Both were right, and both had exactly two
+ * callers — the deleted `companion` and `inference`.
+ *
+ * They were kept for one round on the ground that `webhost` hand-rolls the same
+ * ownership check and would be the next caller. That is a plan, not a caller.
+ * Code with no caller and a comment explaining who might want it is the shape
+ * this repository keeps having to delete twice.
+ *
+ * THE DEFECT IS RECORDED WHERE IT HAPPENS, not here and not in a deleted
+ * header: `capabilities/webhost/index.ts` and its `index.test.ts` carry it,
+ * because webhost is the one capability that still has it. A third case is
+ * rebuilt from that incident rather than from the abstraction. */
 /* The first half of a shutdown: hand over what memory holds, so the queue has
  * something to drain. The composition root needs it for the QUIT path, which
  * is not the window-close path `App` already covers — see `beforeClose.ts`.
@@ -224,42 +233,15 @@ export type { RenderSlot } from './core/renderSlot'
  * reaches the kernel through this entry and no other. The waiting half stays on
  * `ui/boot.ts`, beside the bound it runs under. */
 export { flushBeforeClose, onBeforeClose, onBeforeDrain } from './core/beforeClose'
-/* The companion and the gloss (phase 15). The types a capability implements
- * to bind `KernelServices.bindCompanion` / `bindGloss`.
- *
- * ⚠️ **THE LOOK-UP CONSTANTS ARE GONE FROM HERE** — `LOOK_UP_MODES`,
- * `LOOK_UP_LABELS`, `LOOK_UP_SETTING`, `LookUpMode`, `isLookUpMode`,
- * `availableModes` and `effectiveMode` were exported so a capability's
- * settings pane could render the Look up cycle. There is no cycle: the system
- * dictionary hand-off is deleted and the gloss is the whole feature. A barrel's
- * re-exports evaluate with the barrel, so this is a saving as well as a
- * deletion. */
-export { NOT_CONFIGURED, NOT_CONFIGURED_REASON, UNKNOWN_CITATION_NOTE } from './core/companion'
-export type { AnswerEnd, AskContext, AskPassage, Citation, CompanionProvider } from './core/companion'
-/* ⚠️ `NO_GLOSS` IS NOT RE-EXPORTED. It is the port's unbound default and it is
- * `services.ts`'s to install, not a capability's to reach for — and an audit
- * confirmed no capability ever did. The TYPES stay: they are what a capability
- * implements to bind the port.
- *
- * ⚠️ **THIS ALSO CLAIMED A LOADING SAVING, AND THERE IS NONE.** `core/gloss`
- * is imported by `core/services.ts`, which this barrel re-exports a few lines
- * above — so the module is in the graph either way and dropping one name from
- * it saves nothing at all. What the omission buys is the API boundary, which
- * is reason enough on its own; the saving was a second reason that was not
- * true, and a false reason attached to a correct decision is how the decision
- * gets reversed when somebody checks it. Found by audit. */
-/* `Definition` is what `gloss()` resolves with — the definition and the part of
- * speech — so a capability can type its own answer against the port rather than
- * declaring a second shape of it. A type, so it costs the barrel nothing. */
-export type { Definition, GlossContext, GlossProvider } from './core/gloss'
-/* The VOICE port, types only and for `NO_GLOSS`'s reason: the port's default
- * (the machine's own voice) is `services.ts`'s to install, and `NO_VOICE` is
- * not a capability's to reach for. What a capability needs is the shape it implements to bind it. */
-export type { Speaking, Voice } from './core/voice'
-/* The shape `GlossContext.answerIn` carries (WI-17.5) — named so a provider can
- * type what it reads without reaching into the kernel's core. The resolution
- * itself stays the kernel's: a provider is TOLD what to answer in. */
-export type { AnswerLanguage, AnswerLanguages } from './core/glossLanguage'
+/* ⚠️ **THE COMPANION, THE GLOSS AND THE VOICE PORTS ARE ALL GONE FROM HERE.**
+ * `NOT_CONFIGURED`, `CompanionProvider`, `Definition`, `GlossProvider`,
+ * `Voice`, `AnswerLanguage` and the rest were the shapes a capability
+ * implemented to bind `bindCompanion` / `bindGloss` / `bindVoice`. There are no
+ * such ports: every AI feature — the companion, Look up, the neural voice and
+ * the inference capability behind all three — was removed in one pass, and a
+ * barrel that still named their types would be the surface by which they came
+ * back one import at a time. A barrel's re-exports evaluate with the barrel, so
+ * this is a loading saving as well as a deletion. */
 /* WHAT A BOOK'S LINK MAY DO TO THE HOST, decided once and in one place.
  *
  * foliate hands any link whose scheme leaves the package to `globalThis.open`
@@ -363,10 +345,11 @@ export type { FileStore, FileStoreOptions, FileSystem } from './core/fileStore'
  * Public because sync's contentHash backfill is one of the two passes that
  * need it, and the other is the kernel's own enrichment. */
 export { breathe, restThenBreathe } from './core/breath'
-/* LAST-ISSUED WINS. Two subsystems raced their own async results and each
-   had grown a private counter; see `core/generations.ts`. */
-export { createGenerations } from './core/generations'
-export type { Generations } from './core/generations'
+/* ⚠️ **`createGenerations` IS NOT RE-EXPORTED EITHER**, for the same reason and
+   with the same module left in place: `ui/App.tsx` imports it directly, which
+   is a kernel file reaching a kernel file, and no capability asks for it.
+   Last-issued wins — two subsystems raced their own async results and each had
+   grown a private counter; see `core/generations.ts`. */
 export { MAX_APPENDED, MAX_APPENDED_SHARED, WriteQueueFull, writeQueue } from './core/writeQueue'
 export type { WriteQueue } from './core/writeQueue'
 /* The circle's own store lives beside `marks.json` and never inside it — see
@@ -616,7 +599,6 @@ export {
   createMark,
   isAnnotation,
   isBookmark,
-  isHighlight,
   liveMarks,
   markStamp,
   mergeMarks,

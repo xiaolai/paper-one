@@ -45,12 +45,6 @@ export interface KernelCommandContext {
   /** Marks the current selection, when there is one. */
   markSelection: (() => void) | null
   /**
-   * Looks the selection up — `LookUp.press`, null where there is no selection
-   * or nothing to look it up with (phase 17, L4). The same handler the popup's
-   * button and ⌃⌘D run, so the three cannot disagree about whether it works.
-   */
-  lookUp: (() => void) | null
-  /**
    * Keeps the place the reader is at, or gives it back. Null when no place can
    * be pinned down — see `Bookmarking.canBookmark`.
    */
@@ -364,20 +358,6 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
       combo: '⌘D',
       keywords: 'highlight annotate',
       run: mark,
-    })
-  }
-
-  /* LOOK UP, beside Mark and for Mark's reason: omitted with nothing selected.
-     It was reachable ONLY from the popup's button, so a reader who had
-     dismissed the popup, or who reaches for the keyboard, had no way to it. */
-  if (ctx.lookUp) {
-    commands.push({
-      id: 'book:look-up',
-      label: 'Look up the selection',
-      group: 'Book',
-      combo: '⌃⌘D',
-      keywords: 'define definition dictionary meaning gloss word translate',
-      run: ctx.lookUp,
     })
   }
 

@@ -68,12 +68,12 @@ export type Typeface = string
 /**
  * The panels of the single side pane — see `ui/panes.ts` for their metadata.
  *
- * Contents and Companion used to live in a separate 340px leading card, which
- * meant two surfaces competing for the same job. One pane holds every tool;
- * the reader stays the only permanent full-width surface.
+ * Contents used to live in a separate 340px leading card, which meant two
+ * surfaces competing for the same job. One pane holds every tool; the reader
+ * stays the only permanent full-width surface.
  *
  * `marginalia` is everything the reader put in a book — marks, the notes on
- * them, the companion's claims, and the places they kept. It was `notes`, and
+ * them, and the places they kept. It was `notes`, and
  * that stopped being true when bookmarks joined it: §15 owns the words mark and
  * note precisely, so a panel holding four things could not name itself after
  * one of them. "Annotations" is the obvious replacement and is the one word §15
@@ -98,7 +98,6 @@ export type Typeface = string
  */
 export const KERNEL_PANE_IDS = [
   'toc',
-  'companion',
   'marginalia',
   'cards',
   'search',
@@ -117,16 +116,20 @@ export type KernelPaneId = (typeof KERNEL_PANE_IDS)[number]
  * map and the Developer settings band — and four copies of it would drift the
  * way §11's three copies of the pane ids drifted before `panes.ts` existed.
  *
- * `companion` is a whole capability with a settings section and a model behind
- * it; `cards` is the kernel's own and has a study surface with no scheduler
- * under it yet. Both draw a panel a reader can open and neither answers what
- * the panel promises, which is the property this list names — not "new", not
- * "experimental", but *the reader would be right to expect more than this*.
+ * `cards` has a study surface with no scheduler under it yet: it draws a panel
+ * a reader can open and does not answer what the panel promises, which is the
+ * property this list names — not "new", not "experimental", but *the reader
+ * would be right to expect more than this*.
+ *
+ * ⚠️ **IT HELD `companion` TOO, AND THAT ONE LEFT BY THE OTHER DOOR.** A panel
+ * on this list is one that will be finished; the companion was deleted with the
+ * rest of the AI features instead. A list of unfinished work is not a graveyard
+ * — an id that is never coming back belongs in neither list.
  *
  * ⚠️ **REMOVING AN ID FROM HERE IS HOW A FEATURE SHIPS.** It is the only edit
  * required: the rail, the palette, the digit and the band all read this.
  */
-export const UNFINISHED_PANE_IDS: readonly KernelPaneId[] = ['companion', 'cards']
+export const UNFINISHED_PANE_IDS: readonly KernelPaneId[] = ['cards']
 
 /**
  * Whether a panel is one the reader may see right now.
@@ -154,44 +157,46 @@ export function paneOffered(
  *
  * ⚠️ **`UNFINISHED_PANE_IDS` HID A PANEL AND NEVER ITS SETTINGS**, and the
  * paragraph above claiming that removing an id from it is "the only edit
- * required" was written without noticing. `Settings → Companion` sat in the
- * The app band for every reader from the day it was contributed, configuring a
- * panel that same reader could not open — a section about a surface that is
- * not there is worse than either half alone, because it is evidence the
- * feature exists.
+ * required" was written without noticing. The deleted companion's settings
+ * section sat in the The app band for every reader from the day it was
+ * contributed, configuring a panel that same reader could not open — a section
+ * about a surface that is not there is worse than either half alone, because it
+ * is evidence the feature exists.
  *
  * DERIVED FROM THE ONE LIST, NOT A SECOND ONE. A section id is
  * `${capabilityId}:${name}` by construction (`SettingsSection.id`), and the
- * capability whose feature a panel promises carries the panel's id —
- * `companion` the capability, `companion` the pane. So the question "is this
- * feature unfinished" is still asked in exactly one place, which is the reason
- * `UNFINISHED_PANE_IDS` is a list rather than a flag on each pane.
+ * capability whose feature a panel promises carries the panel's id. So the
+ * question "is this feature unfinished" is still asked in exactly one place,
+ * which is the reason `UNFINISHED_PANE_IDS` is a list rather than a flag on
+ * each pane.
  *
- * ⚠️ **AND IT IS NOT A RULE ABOUT DEPENDENCIES.** `inference` contributes
- * `Look up`, `Local models` and `Cloud endpoints`, and the companion is only
- * one of the things it drives — the selection bar's **Look up** is the other,
- * and that one ships. Hiding a shipped feature's settings because an
+ * ⚠️ **AND IT IS NOT A RULE ABOUT DEPENDENCIES.** The match is on the section's
+ * OWN capability and nothing it depends on: one capability commonly drives
+ * several features, and hiding a shipped feature's settings because an
  * unfinished feature shares its engine would take a working control away from
- * the reader, so the match is on the section's OWN capability and nothing it
- * depends on.
+ * the reader.
  *
- * **A SECTION CAN ALSO SAY IT IS UNFINISHED ITSELF** (`SettingsSection
- * .unfinished`), for the one case the list cannot express: a single section of
- * a capability whose others ship. `Cloud endpoints` is that case. Such a
- * section needs developer options and nothing more — `hidden` names PANELS, and
- * there is no panel here for it to name.
+ * ⚠️ **A SECTION COULD ALSO DECLARE ITSELF UNFINISHED, AND THAT FLAG IS GONE.**
+ * `SettingsSection.unfinished` existed for the one case the list cannot
+ * express — a single section of a capability whose others ship — and had
+ * exactly one declarer, the deleted inference capability's cloud endpoints. It
+ * was kept for one round as "the contract's, not that capability's"; a contract
+ * field nothing declares is a second way to answer this question that no caller
+ * exercises, which is how the two answers drift. The list is the one way again.
+ * Recoverable from history if a second case turns up, along with the two rules
+ * it needed: `true` or absent and never `false`, and developer options alone —
+ * `hidden` names PANELS, and such a section has no panel to name.
  *
- * TAKES THE SECTION, not its id: both facts that decide the answer are on it,
- * so no caller can ask about a section and leave its flag behind. Structural
- * rather than `SettingsSection` itself, because `capability.ts` already imports
- * this file.
+ * TAKES THE SECTION, not its id, though the id is now all it reads: a caller
+ * that had to unpack the field would be a caller that could forget it, and the
+ * next fact this needs will live on the section too. Structural rather than
+ * `SettingsSection` itself, because `capability.ts` already imports this file.
  */
 export function settingsSectionOffered(
-  section: { readonly id: string; readonly unfinished?: true },
+  section: { readonly id: string },
   developer: boolean,
   hidden: readonly string[] = [],
 ): boolean {
-  if (section.unfinished === true && !developer) return false
   const capability = section.id.slice(0, section.id.indexOf(':'))
   if (!(UNFINISHED_PANE_IDS as readonly string[]).includes(capability)) return true
   return paneOffered(capability as PaneId, developer, hidden)

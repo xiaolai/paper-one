@@ -23,10 +23,15 @@ import styles from './SelectionBar.module.css'
  *
  * ## No "Explain"
  *
- * The mockup's fourth action is the companion. This client has no companion
- * provider (`composition.web.ts` is empty), so the control is absent — the
- * same rule as every other capability this host lacks. A button that answered
- * "not configured" would be a control that cannot act.
+ * The mockup's fourth action is "Explain". This component exposes no such
+ * callback, so it draws no such control — a button that answered "not
+ * configured" would be a control that cannot act.
+ *
+ * Stated as the component's OWN contract rather than as a fact about the app:
+ * a leaf shared by more than one host cannot know what any of them composes,
+ * and a dated claim about the whole repository goes stale here without anyone
+ * reading this file. (An earlier version said exactly that and was flagged for
+ * it by the 2026-09-19 audit.)
  */
 export interface SelectionBarProps {
   /** The selected text, for the word count. */

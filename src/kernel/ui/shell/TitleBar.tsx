@@ -8,7 +8,6 @@ import {
   PanelLeft,
   PanelRight,
   Search,
-  Sparkles,
   Square,
   Type,
   X,
@@ -32,19 +31,18 @@ const LIGHTS = ['var(--tl-red)', 'var(--tl-amber)', 'var(--tl-green)'] as const
  * Shortcuts into the pane. They used to toggle a separate 340px card; now they
  * open the pane on that panel, and clicking the active one closes it.
  *
- * Two panels of the eight, chosen here — but their LABELS come from the shared
+ * A few panels of the rail, chosen here — but their LABELS come from the shared
  * registry, not from a third copy of them. The name is `TITLEBAR_PANES` rather
  * than `PANE_SHORTCUTS`, which is what this was called: that name already
  * means §11's ⌘1…5 map in `ui/panes`, and two different things under one name
  * in one codebase is a trap for whoever greps for it next.
  *
  * ⚠️ **FILTERED THROUGH `paneFits`, WHICH THIS WAS THE ONE SURFACE NOT TO DO.**
- * `UNFINISHED_PANE_IDS` names `companion`, and the rail, the palette and the
- * digit accelerators all refuse it — so this drew, for every reader, a button
- * whose click `paneFor` redirected to Contents. It could never light
- * (`aria-pressed={state.pane === 'companion'}` with a pane that cannot become
- * `companion`), so a second press re-opened Contents rather than closing it,
- * and the control named one destination while performing another.
+ * It drew the deleted companion's button for every reader, although the rail,
+ * the palette and the digit accelerators all refused the panel — so the click
+ * was redirected to Contents by `paneFor`. It could never light, so a second
+ * press re-opened Contents rather than closing it, and the control named one
+ * destination while performing another.
  *
  * That also falsifies what `UNFINISHED_PANE_IDS` says about itself — "the only
  * edit required" to ship a panel — for as long as a surface reads the list
@@ -52,7 +50,6 @@ const LIGHTS = ['var(--tl-red)', 'var(--tl-amber)', 'var(--tl-green)'] as const
  */
 const TITLEBAR_PANES: readonly { key: KernelPaneId; Icon: typeof ListTree }[] = [
   { key: 'toc', Icon: ListTree },
-  { key: 'companion', Icon: Sparkles },
 ]
 
 export interface TitleBarProps {

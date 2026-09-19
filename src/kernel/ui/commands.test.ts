@@ -36,21 +36,6 @@ function context(over: Partial<AppState> = {}) {
 const find = (commands: Command[], id: string) => commands.find((c) => c.id === id)
 
 describe('buildCommands', () => {
-  /* LOOK UP, beside Mark (phase 17, L4): it was reachable only from the popup's
-     button. Offered exactly when there is something to look up, and running the
-     very handler the button and the key run. */
-  it('offers Look up only with something to look up, and runs the one handler', () => {
-    expect(find(buildCommands(context().ctx), 'book:look-up')).toBeUndefined()
-
-    let pressed = 0
-    const row = find(buildCommands({ ...context().ctx, lookUp: () => (pressed += 1) }), 'book:look-up')
-
-    expect(row?.label).toBe('Look up the selection')
-    expect(row?.combo).toBe('⌃⌘D')
-    row?.run()
-    expect(pressed).toBe(1)
-  })
-
   it('names the action, not the thing — a pane that is open offers to close', () => {
     const open = buildCommands(context({ pane: 'marginalia' }).ctx)
     expect(find(open, 'pane:marginalia')?.label).toBe('Close Marginalia')
@@ -83,27 +68,28 @@ describe('buildCommands', () => {
    *
    * The rail, the palette and the digits all read `paneFits`, which is the
    * point of folding `paneOffered` into it: a reader who has not turned
-   * developer options on cannot reach Cards or Companion by any of the three,
-   * and there is no fourth route that was forgotten.
+   * developer options on cannot reach Cards by any of the three, and there is
+   * no fourth route that was forgotten.
    */
-  it('does not offer the unfinished panels until developer options are on', () => {
+  it('does not offer the unfinished panel until developer options are on', () => {
     const plain = buildCommands(context({ screen: 'reader' }).ctx)
     expect(find(plain, 'pane:cards')).toBeUndefined()
-    expect(find(plain, 'pane:companion')).toBeUndefined()
     expect(find(plain, 'pane:dev')).toBeUndefined()
 
     const developer = buildCommands(context({ screen: 'reader', developer: true }).ctx)
     expect(find(developer, 'pane:cards')).toBeDefined()
-    expect(find(developer, 'pane:companion')).toBeDefined()
     expect(find(developer, 'pane:dev')).toBeDefined()
   })
 
+  /* HIDING ONE LEAVES THE REST. Developer is not unfinished and is not hidden
+     by `hiddenPanes`, so it is what says the switch is per-panel rather than a
+     second master. */
   it('drops one that developer options hid', () => {
     const commands = buildCommands(
       context({ screen: 'reader', developer: true, hiddenPanes: ['cards'] }).ctx,
     )
     expect(find(commands, 'pane:cards')).toBeUndefined()
-    expect(find(commands, 'pane:companion')).toBeDefined()
+    expect(find(commands, 'pane:dev')).toBeDefined()
   })
 
   /**
@@ -329,7 +315,6 @@ describe('every row the palette prints', () => {
       { id: 'typeface:plex', label: 'Typeface — IBM Plex Mono', group: 'Appearance', keywords: 'font family type monospaced', on: false, ran: [{ type: 'setTypeface', typeface: 'plex' }] },
       { id: 'theme:follow', label: 'Follow the system appearance', group: 'Appearance', on: false, ran: [{ type: 'setThemeFollowsOs', follows: true }] },
       { id: 'book:mark', label: 'Mark the selection', group: 'Book', combo: '⌘D', keywords: 'highlight annotate', ran: ['markSelection'] },
-      { id: 'book:look-up', label: 'Look up the selection', group: 'Book', combo: '⌃⌘D', keywords: 'define definition dictionary meaning gloss word translate', ran: ['lookUp'] },
       { id: 'book:bookmark', label: 'Bookmark this place', group: 'Book', combo: '⌘B', keywords: 'bookmark place keep return ribbon', on: false, ran: ['toggleBookmark'] },
       { id: 'book:tags', label: 'Tags for this book…', group: 'Book', combo: '⌘T', keywords: 'tag label subject shelve', ran: ['editTags'] },
       { id: 'jump:back', label: 'Back to where you were', group: 'Book', combo: '⌘[', keywords: 'back return jump history previous where was undo navigate', ran: ['jumpBack'] },
@@ -383,7 +368,6 @@ describe('every row the palette prints', () => {
     const without = buildCommands(bare).map((command) => command.id)
     const GATED = [
       ['book:mark', { markSelection: () => {} }],
-      ['book:look-up', { lookUp: () => {} }],
       ['book:bookmark', { toggleBookmark: () => {} }],
       ['book:tags', { editTags: () => {} }],
       ['jump:back', { jumpBack: () => {} }],
@@ -439,7 +423,6 @@ describe('advertised combos are bound', () => {
     hasBook: true,
     canJumpBack: true,
     canJumpForward: true,
-    canLookUp: true,
   } as const
 
   /**
@@ -517,8 +500,6 @@ describe('advertised combos are bound', () => {
      down and `accel.ts` binds such a chord on the physical key. */
   type Press = string | { readonly key: string; readonly code: string; readonly ctrlKey: boolean }
   const KEYS_FOR_COMBO: Record<string, readonly Press[]> = {
-    /* ⌃⌘D — Look up (phase 17, L4) — as the running app reports it. */
-    '⌃⌘D': [{ key: 'd', code: 'KeyD', ctrlKey: true }],
     '⌘K': ['k'],
     /* ONE BACKSLASH, which it could not be while this searched App's source:
        the source spells that key as an escaped pair, so the table had to
@@ -581,7 +562,6 @@ describe('advertised combos are bound', () => {
     // The commands this test exists for must actually be in the set it checks.
     expect(advertised.has('⌘B')).toBe(true)
     expect(advertised.has('⌘D')).toBe(true)
-    expect(advertised.has('⌃⌘D')).toBe(true)
 
     for (const combo of advertised) {
       const keys = KEYS_FOR_COMBO[combo]
@@ -693,15 +673,18 @@ describe('advertised combos are bound', () => {
     })
 
     /* Two of the three modifiers is not the chord.
-       ⌃⌘D ALONE WAS "markSelection" HERE UNTIL PHASE 17 bound it to Look up —
-       macOS's own Look Up chord (L4). What this case exists to hold is that it
-       is NOT the developer chord, which is still true.
+       ⌃⌘D WAS "markSelection" HERE, THEN Look up (phase 17, L4), AND IS NOW
+       UNBOUND — see the chord's own describe below. What this case exists to
+       hold is that it is NOT the developer chord, which has been true
+       throughout.
        ⌥⌘D WAS "markSelection" TOO, until the 2026-09-13 audit: a letter is
        bound under the accelerator alone, so with Option it is no binding. */
     it('needs both Control and Option', () => {
+      /* Control alone was Look up until that feature was deleted; the key is
+         the platform's again, which is still not the developer chord. */
       expect(
         resolveAccel({ key: 'd', code: 'KeyD', repeat: false, ctrlKey: true }, anything),
-      ).toEqual({ kind: 'lookUp' })
+      ).toBeNull()
       expect(
         resolveAccel({ key: 'd', code: 'KeyD', repeat: false, altKey: true }, anything),
       ).toBeNull()
@@ -729,59 +712,37 @@ describe('advertised combos are bound', () => {
   })
 
   /**
-   * ⌃⌘D — Look up (phase 17, L4). macOS's own Look Up chord on a Mac; off a Mac
-   * the accelerator IS Control, so the chord is Shift there — see `bind`.
+   * ⚠️ **⌃⌘D WAS LOOK UP AND IS NOW UNBOUND.** Phase 17 gave it macOS's own
+   * Look Up meaning; the whole feature is deleted, and the key went back to the
+   * platform rather than to something else. On a Mac that means the system's
+   * Look Up answers it again, which is what a reader pressing it expects.
+   *
+   * The DEVELOPER chord shares the physical key and is matched before the
+   * letters, so it is asserted here beside its neighbour rather than taken on
+   * trust — that ordering is the thing a removal could quietly break.
    */
-  describe('the look up chord', () => {
+  describe('⌃⌘D, and the developer chord beside it', () => {
     const press = (over: Record<string, unknown>) => ({ key: 'd', code: 'KeyD', repeat: false, ...over })
 
-    it('looks up on ⌃⌘D on a Mac', () => {
-      expect(resolveAccel(press({ ctrlKey: true }), anything)).toEqual({ kind: 'lookUp' })
-    })
-
-    it('looks up on Ctrl+Shift+D off a Mac', () => {
+    it('leaves ⌃⌘D to the platform on a Mac, and Ctrl+Shift+D off one', () => {
+      expect(resolveAccel(press({ ctrlKey: true }), anything)).toBeNull()
       for (const platform of ['windows', 'linux'] as const) {
-        expect(resolveAccel(press({ key: 'D', ctrlKey: true, shiftKey: true }), { ...anything, platform }), platform).toEqual({
-          kind: 'lookUp',
-        })
+        expect(resolveAccel(press({ key: 'D', ctrlKey: true, shiftKey: true }), { ...anything, platform }), platform).toBeNull()
       }
     })
 
-    /* Off a Mac, Control is the accelerator on EVERY combo, so Control alone
-       cannot mean Look up there — it would take ⌘D from marking. */
-    it('does not take Ctrl+D from marking off a Mac', () => {
+    /* Off a Mac, Control IS the accelerator, so Ctrl+D there is the plain ⌘D
+       this key has always been — the one binding the removal must not disturb. */
+    it('leaves Ctrl+D marking off a Mac, and ⌘D marking on one', () => {
       expect(resolveAccel(press({ ctrlKey: true }), { ...anything, platform: 'windows' })).toEqual({ kind: 'markSelection' })
-    })
-
-    /* And on a Mac, Shift is not the chord. */
-    it('does not look up on ⇧⌘D on a Mac', () => {
-      expect(resolveAccel(press({ key: 'D', shiftKey: true }), anything)).toBeNull()
-    })
-
-    it('leaves ⌘D marking and ⌘⌃⌥D toggling developer options', () => {
       expect(resolveAccel(press({}), anything)).toEqual({ kind: 'markSelection' })
+    })
+
+    it('still toggles developer options on ⌘⌃⌥D, on every platform', () => {
       expect(resolveAccel(press({ ctrlKey: true, altKey: true }), anything)).toEqual({ kind: 'toggleDeveloper' })
       expect(
         resolveAccel(press({ ctrlKey: true, altKey: true }), { ...anything, platform: 'windows' }),
       ).toEqual({ kind: 'toggleDeveloper' })
-    })
-
-    /* WITH NOTHING TO LOOK UP, THE KEY IS THE PLATFORM'S — which on a Mac is
-       the system's Look Up. Swallowing it to do nothing would take that away. */
-    it('leaves the key to the platform when there is nothing to look up', () => {
-      expect(resolveAccel(press({ ctrlKey: true }), { ...anything, canLookUp: false })).toBeNull()
-      const { canLookUp: _unused, ...absent } = anything
-      expect(resolveAccel(press({ ctrlKey: true }), absent)).toBeNull()
-    })
-
-    it('does not fire again while the key is held', () => {
-      expect(resolveAccel(press({ ctrlKey: true, repeat: true }), { ...anything, pressTaken: true })).toEqual({ kind: 'held' })
-    })
-
-    /* NO THIRD MODIFIER: ⇧⌃⌘D on a Mac looked up too (2026-09-13 audit). */
-    it('does not look up on ⇧⌃⌘D on a Mac', () => {
-      expect(resolveAccel(press({ key: 'D', ctrlKey: true, shiftKey: true }), anything)).toBeNull()
-      expect(resolveAccel(press({ ctrlKey: true, shiftKey: true }), anything)).toBeNull()
     })
   })
 
@@ -871,15 +832,13 @@ describe('advertised combos are bound', () => {
        case above this block leaves ⌘ off a Mac event, because `App` checks it
        before asking. A map that counted Meta as extra on a Mac would pass all of
        them and bind nothing in the running app. */
-    it('still binds every key and both chords with the accelerator itself down', () => {
+    it('still binds every key and the developer chord with the accelerator itself down', () => {
       for (const key of KEYS) {
         expect(resolveAccel({ key, repeat: false, metaKey: true }, mac), `⌘${key}`).not.toBeNull()
       }
       const d = { key: 'd', code: 'KeyD', repeat: false } as const
       expect(resolveAccel({ ...d, metaKey: true, ctrlKey: true, altKey: true }, mac)).toEqual({ kind: 'toggleDeveloper' })
-      expect(resolveAccel({ ...d, metaKey: true, ctrlKey: true }, mac)).toEqual({ kind: 'lookUp' })
       expect(resolveAccel({ ...d, ctrlKey: true, altKey: true }, windows)).toEqual({ kind: 'toggleDeveloper' })
-      expect(resolveAccel({ ...d, key: 'D', ctrlKey: true, shiftKey: true }, windows)).toEqual({ kind: 'lookUp' })
     })
 
     /* ⚠️ **ALTGR ARRIVES AS CONTROL AND ALT OFF A MAC** (2026-09-14). Chromium on
@@ -971,9 +930,6 @@ describe('advertised combos are bound', () => {
     expect(resolveAccel({ key: 'd', repeat: true }, { ...anything, hasSelection: false, pressTaken: true })).toEqual({ kind: 'held' })
     expect(resolveAccel({ key: '[', repeat: true }, { ...anything, canJumpBack: false, pressTaken: true })).toEqual({ kind: 'held' })
     expect(resolveAccel({ key: ']', repeat: true }, { ...anything, canJumpForward: false, pressTaken: true })).toEqual({ kind: 'held' })
-    expect(
-      resolveAccel({ key: 'd', code: 'KeyD', repeat: true, ctrlKey: true }, { ...anything, canLookUp: false, pressTaken: true }),
-    ).toEqual({ kind: 'held' })
   })
 
   /* And the other owner keeps it too: a press the platform had is the

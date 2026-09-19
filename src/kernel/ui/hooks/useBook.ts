@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
 import type { BookmarkPlace, MarkAnchor, SearchHit, SessionNavigator } from '../reader/session'
 import type { PassOutcome, PendingMark } from '../reader/reanchorPass'
-import type { AskPassage } from '../../core/companion'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { bookIdFor } from '../../core/marks'
 
@@ -12,10 +11,10 @@ export type { SearchHit }
  * The open book.
  *
  * Lifted out of the reader because the book is no longer the reader's private
- * business: Contents needs its table of contents and Companion needs the
- * current chapter, and both now live in the side pane rather than in a column
- * the reader owns. One pane holding every tool means one place holding the
- * state those tools read.
+ * business: Contents needs its table of contents and Search needs the book to
+ * scan, and both live in the side pane rather than in a column the reader
+ * owns. One pane holding every tool means one place holding the state those
+ * tools read.
  */
 
 /* `ReaderPosition` and `BookMeta` are declared in `core/bookMeta` — they are
@@ -86,8 +85,6 @@ export interface Book extends BookState {
   eraseMark: (anchor: MarkAnchor) => void
   /** Clear the book's own text selection. */
   deselect: () => void
-  /** The book text on screen, as passages a companion answer can cite. */
-  passages: () => readonly AskPassage[]
   /**
    * Walk this book for marks with no anchor here — WI-22.A2, `useReanchor`'s.
    *
@@ -298,7 +295,6 @@ export function useBook(): Book {
   /* Reads through the ref like everything else here, so it answers about
      whatever book is open now rather than the one this callback was made
      for. `[]` before a navigator exists — the honest empty. */
-  const passages = useCallback((): readonly AskPassage[] => navigatorRef.current?.passages() ?? [], [])
   /* `complete: false` for the absent navigator — see the interface. */
   const reanchor = useCallback(
     (pending: readonly PendingMark[]): Promise<PassOutcome> =>
@@ -448,7 +444,6 @@ export function useBook(): Book {
       drawMark,
       eraseMark,
       deselect,
-      passages,
       reanchor,
       closeFootnote,
       setFootnoteMount,
@@ -490,7 +485,6 @@ export function useBook(): Book {
       drawMark,
       eraseMark,
       deselect,
-      passages,
       reanchor,
       closeFootnote,
       setFootnoteMount,

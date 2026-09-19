@@ -451,15 +451,11 @@ describe('upsertMark is idempotent by id', () => {
 })
 
 describe('marginMarks', () => {
-  it('keeps notes and companion marks, and drops bare highlights', () => {
+  it('keeps what was written and drops bare highlights', () => {
     const bare = annotation({ id: 'bare' })
     const noted = annotation({ id: 'noted', note: 'why this matters' })
-    const companion = annotation({ id: 'companion', kind: 'companion' })
 
-    expect(marginMarks([bare, noted, companion]).map((m) => m.id)).toEqual([
-      'noted',
-      'companion',
-    ])
+    expect(marginMarks([bare, noted]).map((m) => m.id)).toEqual(['noted'])
   })
 
   it('leaves the column collapsed when every mark is a bare highlight', () => {
@@ -577,20 +573,17 @@ describe('parseMarks', () => {
   })
 })
 
-describe('the wave belongs to the companion', () => {
+describe('the wave is not a style the reader may wear', () => {
   /* Reserving a shape only means something if the store keeps it reserved. The
-     reader can no longer CHOOSE a wave, but marks made before that was true are
-     on disk — and a reader's mark drawn as a wave says "a machine wrote this"
-     about a passage the reader marked themselves. */
-  it('reads a reader’s stored wave back as a plain underline', () => {
+     reader cannot CHOOSE a wave — `READER_STYLES` does not offer one, because a
+     squiggle under prose is every spell checker's "something is wrong here" and
+     that is the wrong note for *this is worth remembering* — but rows written
+     before that was true are on disk, and rows arrive from peers. `MARK_STYLES`
+     still admits a wave so such a row PARSES; what the read answers is the
+     nearest thing a reader could have meant. */
+  it('reads a stored wave back as a plain underline', () => {
     const stored = JSON.stringify([{ ...mark(), kind: 'highlight', style: 'wave' }])
     expect(parseMarks(stored)[0]?.style).toBe('underline')
-  })
-
-  it('leaves the companion’s own style alone', () => {
-    // The painter ignores it and draws amber regardless; nothing needs rewriting.
-    const stored = JSON.stringify([{ ...mark(), kind: 'companion', style: 'wave' }])
-    expect(parseMarks(stored)[0]?.style).toBe('wave')
   })
 
   it('does not disturb the styles the reader may still choose', () => {
@@ -635,12 +628,12 @@ describe('re-marking a passage keeps what was written about it', () => {
  */
 describe('bookmarks and annotations are told apart', () => {
   const highlight = mark({ id: 'h', kind: 'highlight' })
-  const claim = mark({ id: 'c', kind: 'companion' })
+  const second = mark({ id: 'h2', kind: 'highlight', cfi: 'epubcfi(/6/4!/4/6)' })
   const place = mark({ id: 'b', kind: 'bookmark', cfi: 'epubcfi(/6/4!/4/8)' })
 
   it('splits a mixed list both ways, and nothing falls between them', () => {
-    const all = [highlight, place, claim]
-    expect(annotationsIn(all).map((m) => m.id)).toEqual(['h', 'c'])
+    const all = [highlight, place, second]
+    expect(annotationsIn(all).map((m) => m.id)).toEqual(['h', 'h2'])
     expect(bookmarksIn(all).map((m) => m.id)).toEqual(['b'])
     expect(annotationsIn(all).length + bookmarksIn(all).length).toBe(all.length)
   })
@@ -649,7 +642,7 @@ describe('bookmarks and annotations are told apart', () => {
    * that removed nothing must hand back the SAME array, or the store publishes
    * a change nobody can see and writes the file over itself. */
   it('returns its input by identity when there is no bookmark to drop', () => {
-    const annotations = [highlight, claim]
+    const annotations = [highlight, second]
     expect(annotationsIn(annotations)).toBe(annotations)
   })
 
@@ -669,12 +662,14 @@ describe('bookmarks and annotations are told apart', () => {
     expect(bookmarksIn([tenth, fourth]).map((m) => m.id)).toEqual(['b3', 'b4'])
   })
 
-  /* The line replacement respects, and it is NOT `kind === kind`: a reader
-   * marking over the companion's claim replaces it, and always has. */
-  it('puts the companion on the reader’s side of the line, and a bookmark alone on the other', () => {
-    expect(sameClass(highlight, claim)).toBe(true)
+  /* The line replacement respects, and it is the CLASS question rather than
+   * `kind === kind`: a second annotation kind would inherit the answer without
+   * anyone writing it down, and what must never happen is a bookmark and a
+   * highlight superseding one another because they share an anchor. */
+  it('puts every annotation on one side of the line and a bookmark on the other', () => {
+    expect(sameClass(highlight, second)).toBe(true)
     expect(sameClass(highlight, place)).toBe(false)
-    expect(sameClass(claim, place)).toBe(false)
+    expect(sameClass(place, mark({ id: 'b2', kind: 'bookmark' }))).toBe(true)
   })
 
   /* THE FAILURE THIS PREVENTS: a bookmark anchors to the visible page, so it
@@ -701,12 +696,11 @@ describe('bookmarks and annotations are told apart', () => {
    * takes `readonly Annotation[]`, so handing it one is a compile error rather
    * than a filtered row — the guarantee moved out of this assertion and into
    * the signature. What is left to assert is the SECOND barrier, the one that
-   * is still a runtime predicate: `marginMarks` admits a mark for its note or
-   * for being the companion's, and a bookmark is neither. Both halves are
-   * asserted against the predicate itself rather than read off a fixture's
-   * fields, which was the old version's weakness — it checked that the bookmark
-   * builder writes an empty note, which is `bookmarkFrom`'s own test, and never
-   * asked what the margin does with one. */
+   * is still a runtime predicate: `marginMarks` admits a mark for its note, and
+   * a bookmark has none. Asserted against the predicate itself rather than read
+   * off a fixture's fields, which was the old version's weakness — it checked
+   * that the bookmark builder writes an empty note, which is `bookmarkFrom`'s
+   * own test, and never asked what the margin does with one. */
   it('would still keep a bookmark out of the margin if one reached the predicate', () => {
     /* THE BOOKMARK IS ACTUALLY PUT THROUGH IT. Asserting that a bookmark
        fixture has an empty note is `bookmarkFrom`'s test, not this one, and it
@@ -716,11 +710,9 @@ describe('bookmarks and annotations are told apart', () => {
        runtime guard can be held to its promise. */
     expect(marginMarks([place as Annotation])).toEqual([])
 
-    /* And the guard is a real filter rather than one that drops everything:
-       both ways IN are open to what they are for — something the reader wrote,
-       and the companion's claim, which earns its place with or without a note. */
+    /* And the guard is a real filter rather than one that drops everything: the
+       one way IN is open to what it is for, something the reader wrote. */
     expect(marginMarks([annotation({ id: 'n', note: 'said' })]).map((m) => m.id)).toEqual(['n'])
-    expect(marginMarks([annotation({ id: 'c', kind: 'companion' })]).map((m) => m.id)).toEqual(['c'])
     expect(marginMarks([annotation({ id: 'q', note: '' })])).toEqual([])
   })
 })

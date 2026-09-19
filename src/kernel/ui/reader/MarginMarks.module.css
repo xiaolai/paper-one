@@ -52,29 +52,6 @@
   border-inline-start-color: var(--mark-purple-rule);
 }
 
-/* §01: the companion's provenance is amber in every theme, Night included.
- * AFTER the tints, and it must stay after them: the companion's mark carries a
- * tint like any other row — nothing stops one being stored — and amber is what
- * says whose mark it is, so it wins. */
-.mark[data-kind='companion'] {
-  border-inline-start-color: var(--amber-line);
-  color: var(--amber);
-}
-
-.mark[data-kind='companion']:hover {
-  background: var(--amber-bg);
-}
-
-.kind {
-  display: block;
-  margin-bottom: var(--space-2);
-  font-size: var(--text-micro);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--track-caps);
-  text-transform: uppercase;
-  color: var(--amber);
-}
-
 /* Two lines, then ellipsis. A margin note is a pointer to the note, not the
  * note itself — the full text is one click away in the Marginalia panel, and a
  * column of eight-line notes would compete with the prose it annotates. */

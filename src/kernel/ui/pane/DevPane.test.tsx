@@ -6,12 +6,20 @@ import type { CopyOutcome } from '../clipboard'
 import { DevPane } from './DevPane'
 
 /**
- * ⚠️ **RENDERED, NOT READ BACK.** `LookUpFace` carries the argument for this
- * file's existence: a panel whose states are asserted by scanning its source
- * survives `display: none` on the rule that draws them. The Developer panel has
+ * ⚠️ **RENDERED, NOT READ BACK.** A panel whose states are asserted by scanning
+ * its source survives `display: none` on the rule that draws them — the source
+ * still says the words, and no reader ever sees one. The Developer panel has
  * four states a reader can land in — not recording, recording with nothing,
  * recording with entries, and filtered to nothing — and three of them look like
  * "empty" unless something puts them on screen and reads the words.
+ *
+ * The argument was carried by `LookUpFace`, whose own suite made it; that file
+ * went with every other AI feature, so the argument lives here now. Its CSS
+ * half is the part worth remembering: `Reader.layout.test.ts` had about two
+ * hundred lines asserting that face's stylesheet — that an apology is never
+ * amber, that a part of speech is not hidden by a rule — precisely because
+ * rendering alone cannot see a stylesheet jsdom never applies. Neither half
+ * substitutes for the other.
  */
 
 afterEach(cleanup)

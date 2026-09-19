@@ -62,9 +62,8 @@ const GAP = 6
  *
  * Two passes, not one, and by MEASURED height rather than by the line box:
  *
- *   - A note is not a line tall. It is two lines of 12px text plus padding —
- *     about 43px — and a companion note carries a label above that, about 59px.
- *     Advancing the floor by the reading grid's 34px therefore permitted
+ *   - A note is not a line tall. It is two lines of 12px text plus padding,
+ *     about 43px. Advancing the floor by the reading grid's 34px therefore permitted
  *     precisely the overlap the stacking exists to prevent, which is why the
  *     heights come from the rendered elements instead of a constant.
  *
@@ -238,9 +237,6 @@ export function MarginMarks({ marks, ranges, stage, doc, position, onSelect }: M
           style={{ top }}
           onClick={() => onSelect(mark)}
         >
-          {/* §10: colour never carries meaning alone, so the companion's marks
-              are labelled as well as amber. */}
-          {mark.kind === 'companion' && <span className={styles.kind}>Companion</span>}
           <span className={styles.body}>{mark.note || mark.text}</span>
         </button>
       ))}

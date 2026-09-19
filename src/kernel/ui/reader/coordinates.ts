@@ -10,7 +10,7 @@
  *
  * There are two distinct jobs, and conflating them is the mistake to avoid:
  *
- *   1. Marks ON the text — highlights, the companion's amber underline. These
+ *   1. Marks ON the text — the reader's highlights, a friend's underline. These
  *      belong to foliate-js's Overlayer, which keeps an SVG sized and
  *      positioned to the book's viewport and draws into it from
  *      `range.getClientRects()`, so it shares the text's coordinate space for

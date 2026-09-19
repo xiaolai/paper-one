@@ -10,8 +10,6 @@ import { useMarks, type MarksView } from '../hooks/useMarks'
 import type { MarkSnapshot, MarkStore } from '../../core/markStore'
 import type { CardsView } from '../hooks/useCards'
 import type { JumpTarget } from '../hooks/useJumps'
-import type { GlossState } from '../hooks/useGloss'
-import { cardFromLookup, type Lookup, type LookupOccurrence } from '../../core/lookups'
 
 /**
  * The rows this panel draws across every book, and whether each one can be
@@ -580,14 +578,19 @@ describe('a contributed mark control', () => {
 describe('a mark control — on the reader’s own highlights, inside a boundary', () => {
   const control = (render: (mark: Annotation) => unknown): MarkControl => ({ id: 'circle:share', render })
 
-  it('is drawn on a highlight and not on a companion annotation', () => {
+  /* ⚠️ **IT WAS DRAWN ON HIGHLIGHTS AND NOT ON A COMPANION'S CLAIM**, which was
+     a claim somebody else's model made about the text — a control that shares
+     "what I marked" must not be offered on one. That kind is deleted with the
+     rest of the AI features, so every annotation is the reader's own and every
+     one of them gets the control. */
+  it('is drawn on every annotation, one element each', () => {
     draw({
-      all: [ANNOTATION(), ANNOTATION({ id: 'm2', kind: 'companion', text: 'a model claims this' })],
+      all: [ANNOTATION(), ANNOTATION({ id: 'm2', text: 'another passage' })],
       markControls: [control((mark) => <button type="button">{`share ${mark.id}`}</button>)],
     })
     expect(screen.getByRole('button', { name: 'share m1' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'share m2' })).toBeNull()
-    expect(document.querySelectorAll('[data-mark-control]')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'share m2' })).toBeTruthy()
+    expect(document.querySelectorAll('[data-mark-control]')).toHaveLength(2)
   })
 
   it('cannot take the row with it when it throws', () => {
@@ -646,392 +649,32 @@ describe('a marks file that could not be read, over an empty list', () => {
   })
 })
 
-/**
- * THE DICTIONARY CHIP (phase 17, WI-17.3) — the lookup on now and the lookups
- * already made, in the panel that holds everything else the reader left in a
- * book, without a lookup ever becoming a mark.
- */
-describe('the Dictionary view', () => {
-  const PLACE = (over: Partial<LookupOccurrence> = {}): LookupOccurrence => ({
-    bookId: 'open-book',
-    cfi: 'epubcfi(/6/4!/4/2,/1:66,/1:73)',
-    chapter: 'Loomings',
-    spelled: 'wharves',
-    sentence: 'Belted round by wharves as Indian isles by coral reefs.',
-    gloss: 'Structures along a shore where ships dock.',
-    language: 'en',
-    at: 1_000,
-    ...over,
-  })
-  const LOOKUP = (over: Partial<Lookup> = {}): Lookup => ({
-    term: 'wharves',
-    occurrences: [PLACE()],
-    firstAt: 1_000,
-    lastAt: 1_000,
-    ...over,
-  })
+/* THE CHIPS, BY NAME AND IN ORDER, and each one turns on itself and nothing
+   else.
 
-  /** What the host may change from one render to the next. */
-  type Moment = {
-    readonly live?: GlossState | undefined
-    readonly all?: readonly Lookup[] | undefined
-    readonly withLookups?: boolean | undefined
-    readonly bookId?: string | null | undefined
-    readonly focus?: { id: string; edit: boolean; nonce: number } | undefined
-  }
+   ⚠️ **THERE WERE SIX, AND TWO ARE GONE.** `Companion` filtered on a mark kind
+   that no longer exists, and `Dictionary` was not a mark kind at all — it swapped
+   the panel's whole body for the lookup history, and everything behind it went
+   with the AI features. What is left is one axis with one meaning. */
+describe('the kind chips', () => {
+  /** The kind row's chips, in the order they are drawn. */
+  const kindChips = (): HTMLElement[] =>
+    within(screen.getByRole('group', { name: 'Filter by kind' })).getAllByRole('button')
 
-  function drawLookups(over: {
-    all?: readonly Lookup[]
-    marks?: readonly Annotation[]
-    persistent?: boolean
-    live?: GlossState
-    onShelf?: (bookId: string) => boolean
-    withLookups?: boolean
-  } = {}) {
-    const onGoTo = vi.fn()
-    const remove = vi.fn()
-    const make = vi.fn()
-    let moment: Moment = { live: over.live, all: over.all, withLookups: over.withLookups }
-    const props = ({ live, all, withLookups, bookId, focus }: Moment) => (
-      <Marginalia
-        marks={marksView({ all: over.marks ?? [] })}
-        cards={{ make, persistent: true } as unknown as CardsView}
-        bookId={bookId === undefined ? 'open-book' : bookId}
-        platform="macos"
-        now={2_000}
-        titleOf={(id) => (id === 'other-book' ? 'Ulysses' : undefined)}
-        {...(over.onShelf ? { onShelf: over.onShelf } : {})}
-        onGoTo={onGoTo}
-        {...(withLookups === false
-          ? {}
-          : { lookups: { all: all ?? [LOOKUP()], persistent: over.persistent ?? true, remove } })}
-        {...(live ? { liveLookUp: live } : {})}
-        {...(focus ? { focus } : {})}
-      />
-    )
-    const view = render(props(moment))
-    /* A rerender with what `change` names changed and everything else as it was. */
-    const redraw = (change: Moment) => {
-      moment = { ...moment, ...change }
-      view.rerender(props(moment))
-    }
-    const openDictionary = () => fireEvent.click(screen.getByRole('button', { name: 'Dictionary' }))
-    return { onGoTo, remove, make, openDictionary, redraw, relive: (live: GlossState) => redraw({ live }) }
-  }
-
-  /** The count row under the title, whole — every clause, in order. */
-  const counts = () => screen.getByText(/^\d+ marks? · /u).textContent
-
-  /** Which kind chips are drawn, by name, in the order they are drawn. */
-  const kindChips = () => within(screen.getByRole('group', { name: 'Filter by kind' })).getAllByRole('button')
-  const pressed = (name: string) => screen.getByRole('button', { name }).getAttribute('aria-pressed')
-
-  /* ABSENT HISTORY, ABSENT CHIP — the browser client mounts this panel with no
-     Look up, and a chip would name a feature that host does not have. */
-  it('offers the chip only where there is a history', () => {
-    drawLookups({ withLookups: false, marks: [ANNOTATION()] })
-    expect(screen.queryByRole('button', { name: 'Dictionary' })).toBeNull()
-    cleanup()
-
-    drawLookups({ marks: [ANNOTATION()] })
-    expect(screen.getByRole('button', { name: 'Dictionary' })).not.toBeNull()
-  })
-
-  /* A reader with lookups and no marks must still reach the chip — the empty
-     state has no room for it. */
-  it('is reachable with lookups and no marks at all', () => {
-    const { openDictionary } = drawLookups()
-
-    expect(screen.queryByText(/Nothing kept yet/)).toBeNull()
-    openDictionary()
-    expect(screen.getByText('wharves')).not.toBeNull()
-  })
-
-  it('shows each word with its sense and the sentence it was met in, which jumps there', () => {
-    const { onGoTo, openDictionary } = drawLookups()
-    openDictionary()
-
-    expect(screen.getByText('Structures along a shore where ships dock.')).not.toBeNull()
-    rowFor('Belted round by wharves').click()
-    expect(onGoTo).toHaveBeenCalledWith({ bookId: 'open-book', cfi: 'epubcfi(/6/4!/4/2,/1:66,/1:73)' })
-  })
-
-  /* Marginalia's reachability rule, for a place: another book names itself,
-     and a book that has left the shelf cannot be jumped to. */
-  it('names another book, and disables a place whose book has left the shelf', () => {
-    const { openDictionary } = drawLookups({
-      all: [LOOKUP({ occurrences: [PLACE({ bookId: 'other-book', sentence: 'Stately, plump wharves.' })] })],
-      onShelf: () => false,
-    })
-    openDictionary()
-
-    expect(screen.getByText(/Ulysses/)).not.toBeNull()
-    expect(rowFor('Stately, plump wharves').hasAttribute('disabled')).toBe(true)
-  })
-
-  it('narrows to this book’s places under This book, and hides a word with none', () => {
-    const { openDictionary } = drawLookups({
-      all: [
-        LOOKUP(),
-        LOOKUP({ term: 'gam', occurrences: [PLACE({ bookId: 'other-book', spelled: 'gam', sentence: 'A gam.' })] }),
-      ],
-    })
-    openDictionary()
-    expect(screen.getByText('gam')).not.toBeNull()
-
-    fireEvent.click(screen.getByRole('button', { name: 'This book' }))
-
-    expect(screen.queryByText('gam')).toBeNull()
-    expect(screen.getByText('wharves')).not.toBeNull()
-  })
-
-  it('removes a word by its term', () => {
-    const { remove, openDictionary } = drawLookups()
-    openDictionary()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Remove “wharves” from your lookups' }))
-
-    expect(remove).toHaveBeenCalledWith('wharves')
-  })
-
-  /* WI-17.6 — the one gesture between history and something kept. */
-  it('makes a Recall card of a place — the word in its sentence, the sense behind it', () => {
-    const { make, openDictionary } = drawLookups()
-    openDictionary()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Make a card of “wharves”' }))
-
-    expect(make).toHaveBeenCalledWith(cardFromLookup(PLACE()))
-    expect(make.mock.calls[0]?.[0]).toMatchObject({ kind: 'Recall', answer: 'Structures along a shore where ships dock.' })
-  })
-
-  it('counts words beside the marks, and states what it keeps', () => {
-    const { openDictionary } = drawLookups({ marks: [ANNOTATION()] })
-
-    expect(screen.getByText(/1 word$/)).not.toBeNull()
-    openDictionary()
-    expect(screen.getByText(/Paper keeps the last 500 words you looked up, and 3 places for each/)).not.toBeNull()
-  })
-
-  it('says a history that is not being saved', () => {
-    const { openDictionary } = drawLookups({ persistent: false })
-    openDictionary()
-
-    expect(screen.getByText(/lookups are not being saved/)).not.toBeNull()
-  })
-
-  /* NO MARK IS A LOOKUP: the view shows lookups and nothing of the mark list. */
-  it('never lists a mark under Dictionary', () => {
-    const { openDictionary } = drawLookups({ marks: [ANNOTATION({ text: 'call me ishmael' })] })
-    openDictionary()
-
-    expect(screen.queryByText('call me ishmael')).toBeNull()
-  })
-
-  /* THE LIVE ENTRY keeps the lookup face's doctrine: amber for a definition,
-     never for a failure. */
-  it('shows the lookup on now at the top — amber for a definition, not for a failure', () => {
-    const { openDictionary, relive } = drawLookups({ live: { kind: 'ready', term: 'gam', text: 'A meeting of whaling ships.' } })
-    openDictionary()
-    expect(screen.getByRole('status').getAttribute('data-kind')).toBe('companion')
-
-    relive({ kind: 'failed', term: 'gam', reason: 'The runtime stopped' })
-
-    const failed = screen.getByRole('status')
-    expect(failed.getAttribute('data-kind')).not.toBe('companion')
-    expect(failed.textContent).toMatch(/couldn.t define “gam”\. The runtime stopped/)
-  })
-
-  /* "When looking up, show what is currently being looked up" — a lookup that
-     STARTS with the panel open turns it to the Dictionary view, once. */
-  it('turns to the Dictionary view when a lookup starts', () => {
-    const { relive } = drawLookups({ marks: [ANNOTATION({ text: 'call me ishmael' })], live: { kind: 'idle' } })
-    expect(screen.getByText('call me ishmael')).not.toBeNull()
-
-    relive({ kind: 'asking', term: 'gam' })
-
-    expect(screen.queryByText('call me ishmael')).toBeNull()
-    expect(screen.getByText('Looking…')).not.toBeNull()
-  })
-
-  /* THE CHIPS, BY NAME AND IN ORDER — Dictionary last, after every kind a mark
-     can be — and each one turns on itself and nothing else. */
-  it('offers the kinds in order with Dictionary last, and each chip turns on only itself', () => {
-    const { redraw } = drawLookups({ marks: [ANNOTATION()] })
+  it('offers the kinds in order, and each chip turns on only itself', () => {
+    draw({ all: [ANNOTATION()] })
 
     expect(kindChips().map((chip) => chip.getAttribute('aria-label'))).toEqual([
       'All',
       'Marks',
       'Notes',
       'Bookmarks',
-      'Companion',
-      'Dictionary',
     ])
-    for (const name of ['Marks', 'Notes', 'Bookmarks', 'Companion', 'Dictionary', 'All']) {
+    for (const name of ['Marks', 'Notes', 'Bookmarks', 'All']) {
       fireEvent.click(screen.getByRole('button', { name }))
       const on = kindChips().filter((chip) => chip.getAttribute('aria-pressed') === 'true')
       expect(on.map((chip) => chip.getAttribute('aria-label'))).toEqual([name])
     }
-
-    redraw({ withLookups: false })
-    expect(kindChips().map((chip) => chip.getAttribute('aria-label'))).toEqual([
-      'All',
-      'Marks',
-      'Notes',
-      'Bookmarks',
-      'Companion',
-    ])
-  })
-
-  /* A HOST THAT WITHDRAWS ITS HISTORY under the Dictionary chip takes the chip
-     with it, and the panel falls back to All rather than go on drawing a choice
-     the reader can neither see nor undo — which used to leave "No dictionary
-     yet." over a list of marks nobody could reach. */
-  it('falls back to All when the history is withdrawn under the Dictionary chip', () => {
-    const { openDictionary, redraw } = drawLookups({ marks: [ANNOTATION({ text: 'call me ishmael' })] })
-    openDictionary()
-    expect(screen.getByText('wharves')).not.toBeNull()
-
-    redraw({ withLookups: false })
-
-    expect(counts()).toBe('1 mark · 0 notes · 0 bookmarks')
-    expect(screen.queryByText('wharves')).toBeNull()
-    expect(screen.getByText('call me ishmael')).not.toBeNull()
-    expect(screen.queryByText(/No dictionary/)).toBeNull()
-    expect(
-      kindChips()
-        .filter((chip) => chip.getAttribute('aria-pressed') === 'true')
-        .map((chip) => chip.getAttribute('aria-label')),
-    ).toEqual(['All'])
-  })
-
-  /* A MARK ASKED FOR FROM THE PAGE TURNS THE PANEL BACK TO THE LIST: no mark is
-     under Dictionary, so staying there would scroll to a row that is not drawn. */
-  it('turns back to the mark list when a mark is asked for while Dictionary is on', () => {
-    const { openDictionary, redraw } = drawLookups({ marks: [ANNOTATION({ text: 'call me ishmael' })] })
-    openDictionary()
-    expect(screen.queryByText('call me ishmael')).toBeNull()
-
-    redraw({ focus: { id: 'm1', edit: false, nonce: 1 } })
-
-    expect(screen.getByText('call me ishmael')).not.toBeNull()
-    expect(pressed('All')).toBe('true')
-  })
-
-  /* A LOOKUP ALREADY ON WHEN THE PANEL OPENS HAS NOT STARTED — opening the pane
-     is never a lookup's doing, and neither is choosing its view. */
-  it('stays on its list when the panel opens onto a lookup already on', () => {
-    drawLookups({ marks: [ANNOTATION({ text: 'call me ishmael' })], live: { kind: 'asking', term: 'gam' } })
-
-    expect(screen.getByText('call me ishmael')).not.toBeNull()
-    expect(pressed('All')).toBe('true')
-    expect(pressed('Dictionary')).toBe('false')
-  })
-
-  it('turns once per lookup — not again while it stays on, and again for the next one', () => {
-    const { relive } = drawLookups({ marks: [ANNOTATION({ text: 'call me ishmael' })], live: { kind: 'idle' } })
-    relive({ kind: 'asking', term: 'gam' })
-    expect(pressed('Dictionary')).toBe('true')
-
-    /* The reader leaves; the lookup answers and stays on screen. */
-    fireEvent.click(screen.getByRole('button', { name: 'All' }))
-    relive({ kind: 'ready', term: 'gam', text: 'A meeting of whaling ships.' })
-    expect(screen.getByText('call me ishmael')).not.toBeNull()
-    expect(pressed('All')).toBe('true')
-
-    relive({ kind: 'idle' })
-    relive({ kind: 'asking', term: 'isles' })
-    expect(pressed('Dictionary')).toBe('true')
-    expect(screen.queryByText('call me ishmael')).toBeNull()
-  })
-
-  /* NO HISTORY, NOWHERE TO TURN: a host with no Dictionary chip keeps its list. */
-  it('does not turn for a lookup where the host has no history', () => {
-    const { relive } = drawLookups({
-      withLookups: false,
-      marks: [ANNOTATION({ text: 'call me ishmael' })],
-      live: { kind: 'idle' },
-    })
-
-    relive({ kind: 'asking', term: 'gam' })
-
-    expect(screen.getByText('call me ishmael')).not.toBeNull()
-    expect(pressed('All')).toBe('true')
-  })
-
-  /* AND A HISTORY THAT ARRIVES LATER DOES NOT BRING A TURN WITH IT: the lookup
-     started where there was nothing to turn to, so nothing was chosen — the
-     panel shows All while the chip it could have turned to appears. */
-  it('does not turn later for a lookup that started before there was a history', () => {
-    const { relive, redraw } = drawLookups({
-      withLookups: false,
-      marks: [ANNOTATION({ text: 'call me ishmael' })],
-      live: { kind: 'idle' },
-    })
-    relive({ kind: 'asking', term: 'gam' })
-
-    redraw({ withLookups: true })
-
-    expect(pressed('All')).toBe('true')
-    expect(screen.getByText('call me ishmael')).not.toBeNull()
-  })
-
-  /* NOTHING KEPT IS NOT NOTHING HAPPENING: a lookup that starts over an empty
-     shelf and an empty history is shown, not covered by the empty state. */
-  it('gives up the empty state to a lookup that starts over nothing kept', () => {
-    const { relive } = drawLookups({ all: [], live: { kind: 'idle' } })
-    expect(screen.getByText('Nothing kept yet')).not.toBeNull()
-
-    relive({ kind: 'asking', term: 'gam' })
-
-    expect(screen.queryByText('Nothing kept yet')).toBeNull()
-    expect(screen.getByText('Looking…')).not.toBeNull()
-  })
-
-  /* FOUR WORDS, THREE MET IN THE OPEN BOOK: `gam` only elsewhere, and `isles`
-     in both — so "a place here", "every place here" and "a place elsewhere"
-     each give a different number. */
-  const SPREAD = [
-    LOOKUP(),
-    LOOKUP({ term: 'gam', occurrences: [PLACE({ bookId: 'other-book', spelled: 'gam', sentence: 'A gam.' })] }),
-    LOOKUP({
-      term: 'isles',
-      occurrences: [
-        PLACE({ spelled: 'isles', sentence: 'Indian isles.' }),
-        PLACE({ bookId: 'other-book', spelled: 'isles', sentence: 'Other isles.' }),
-      ],
-    }),
-    LOOKUP({ term: 'coral', occurrences: [PLACE({ spelled: 'coral', sentence: 'Coral reefs.' })] }),
-  ]
-
-  it('counts every word under All books, and under This book only the words met in it', () => {
-    drawLookups({ all: SPREAD })
-    expect(counts()).toBe('0 marks · 0 notes · 0 bookmarks · 4 words')
-
-    fireEvent.click(screen.getByRole('button', { name: 'This book' }))
-
-    expect(counts()).toBe('0 marks · 0 notes · 0 bookmarks · 3 words')
-  })
-
-  it('recounts for another book, for no book, and for a changed history — and one word is "1 word"', () => {
-    const { redraw } = drawLookups({ all: SPREAD })
-    fireEvent.click(screen.getByRole('button', { name: 'This book' }))
-
-    redraw({ bookId: 'other-book' })
-    expect(counts()).toBe('0 marks · 0 notes · 0 bookmarks · 2 words')
-
-    /* "This book" names nothing with no book open, so every word is counted. */
-    redraw({ bookId: null })
-    expect(counts()).toBe('0 marks · 0 notes · 0 bookmarks · 4 words')
-
-    redraw({ bookId: 'open-book', all: [LOOKUP()] })
-    expect(counts()).toBe('0 marks · 0 notes · 0 bookmarks · 1 word')
-  })
-
-  it('says nothing of words for a host with no history', () => {
-    drawLookups({ withLookups: false, marks: [ANNOTATION()] })
-
-    expect(counts()).toBe('1 mark · 0 notes · 0 bookmarks')
   })
 })
 
@@ -1595,40 +1238,19 @@ describe('a card made straight after writing a note', () => {
 /**
  * ⚠️ **THE SCAN WAS SAID ONLY OVER AN EMPTY PANEL.** "Reading your marks…" and
  * "Your marks could not be read" lived inside the nothing-at-all branch, so a
- * reader with a lookup history was told "No marginalia yet." over a scan that
- * had failed, and one with marks already listed was shown a running scan's
- * partial list as though it were final (#129, #130).
+ * reader with something else in the panel was told "No marginalia yet." over a
+ * scan that had failed, and one with marks already listed was shown a running
+ * scan's partial list as though it were final (#129, #130).
  */
 describe('the cross-book scan, beside what is already listed', () => {
-  const WORD: Lookup = {
-    term: 'wharves',
-    occurrences: [
-      {
-        bookId: 'open-book',
-        cfi: 'epubcfi(/6/4!/4/2,/1:66,/1:73)',
-        chapter: 'Loomings',
-        spelled: 'wharves',
-        sentence: 'Belted round by wharves.',
-        gloss: 'Structures along a shore where ships dock.',
-        language: 'en',
-        at: 1_000,
-      },
-    ],
-    firstAt: 1_000,
-    lastAt: 1_000,
-  }
-  const panel = (over: Partial<MarksView>, lookups?: readonly Lookup[]) =>
-    render(
-      <Marginalia
-        marks={marksView(over)}
-        bookId="open-book"
-        platform="macos"
-        {...(lookups ? { lookups: { all: lookups, persistent: true } } : {})}
-      />,
-    )
+  const panel = (over: Partial<MarksView>) =>
+    render(<Marginalia marks={marksView(over)} bookId="open-book" platform="macos" />)
 
-  it('says a failed scan over a lookup history, and not that there is nothing', () => {
-    panel({ scanFailed: true }, [WORD])
+  /* A FAILED SCAN OVER ROWS THAT ARE ALREADY LISTED. The nothing-at-all branch
+     has its own words; what this holds is that the line is said BESIDE a list
+     rather than only instead of one. */
+  it('says a failed scan beside the marks it has, and not that there is nothing', () => {
+    panel({ all: [ANNOTATION()], scanFailed: true })
     expect(screen.getByText(/Your marks could not be read/u)).not.toBeNull()
     expect(screen.queryByText(/^No marginalia/u)).toBeNull()
   })
@@ -1651,9 +1273,8 @@ describe('the cross-book scan, beside what is already listed', () => {
 
 /**
  * ⚠️ **A CARD THAT WAS NOT SAVED WAS NOT SAID, HERE.** The panel took `make`
- * alone, so the one surface that makes cards — from marks and from lookups —
- * could not see `persistent`, and the Cards panel, which can, is not offered to
- * a reader at all (#122, #132).
+ * alone, so the one surface that makes cards could not see `persistent`, and
+ * the Cards panel, which can, is not offered to a reader at all (#122, #132).
  */
 describe('cards that are not being saved', () => {
   const notice = /Cards you make are not being saved/u
@@ -1664,14 +1285,11 @@ describe('cards that are not being saved', () => {
         {...(cards ? { cards: { make: vi.fn(), ...cards } as unknown as CardsView } : {})}
         bookId="open-book"
         platform="macos"
-        lookups={{ all: [], persistent: true }}
       />,
     )
 
-  it('is said where cards are made, over the marks and over the Dictionary', () => {
+  it('is said where cards are made, over the marks', () => {
     panel({ persistent: false })
-    expect(screen.getByText(notice)).not.toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Dictionary' }))
     expect(screen.getByText(notice)).not.toBeNull()
   })
 
@@ -1698,7 +1316,6 @@ describe('a kind chip', () => {
       all: [
         ANNOTATION({ id: 'h-noted', text: 'a noted passage', note: 'a thought', createdAt: 1 }),
         ANNOTATION({ id: 'h-bare', text: 'a bare passage', createdAt: 2 }),
-        ANNOTATION({ id: 'c1', kind: 'companion', text: 'a model claims this', createdAt: 3 }),
       ],
       allBookmarks: [BOOKMARK({ id: 'b1', chapter: 'Etymology', createdAt: 4 })],
     })
@@ -1710,8 +1327,7 @@ describe('a kind chip', () => {
     expect(under('Marks')).toEqual(['a noted passage', 'a bare passage'])
     expect(under('Notes')).toEqual(['a noted passage'])
     expect(under('Bookmarks')).toEqual(['Etymology'])
-    expect(under('Companion')).toEqual(['a model claims this'])
-    expect(under('All')).toEqual(['a noted passage', 'a bare passage', 'a model claims this', 'Etymology'])
+    expect(under('All')).toEqual(['a noted passage', 'a bare passage', 'Etymology'])
   })
 })
 
@@ -1813,14 +1429,6 @@ describe('a row’s parts', () => {
     expect(
       rowsDrawn().map((row) => (row.firstElementChild?.tagName === 'DIV' ? row.firstElementChild.textContent : null)),
     ).toEqual([null, 'Another book', 'Ulysses'])
-  })
-
-  it('labels a companion’s claim as the companion’s, and no other row', () => {
-    draw({ all: [ANNOTATION(), ANNOTATION({ id: 'c1', kind: 'companion', text: 'a model claims this' })] })
-    const labels = screen.getAllByText('Companion')
-    expect(labels).toHaveLength(1)
-    expect(labels[0]!.getAttribute('data-kind')).toBe('Companion')
-    expect(labels[0]!.closest('[data-focused]')?.getAttribute('data-kind')).toBe('companion')
   })
 
   it('says a mark’s chapter, or that its chapter is not known', () => {

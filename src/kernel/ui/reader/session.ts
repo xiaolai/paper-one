@@ -13,11 +13,9 @@ import {
   type FootnoteRenderDetail,
   type FootnoteType,
 } from 'foliate-js/footnotes.js'
-import type { AskPassage } from '../../core/companion'
 import type { ResolvedCfi } from './reanchor'
 import { foreignWeight, type OverlayAudience } from '../../core/circle/foreign'
 import { reanchorPass, type PassOutcome, type PendingMark } from './reanchorPass'
-import { screenPassages } from './passages'
 import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
 import { directionOf } from './direction'
@@ -206,9 +204,10 @@ export interface MarkAnchor {
  * passage you will remember marking and did not."* So this type has neither
  * field, and the wire does not carry them either. There is nothing to ignore.
  *
- * The companion is the precedent and the mechanism: *"a companion mark is an
- * amber underline whatever the reader has chosen for their own, because here
- * the colour is not a preference — it is what says whose mark this is."*
+ * The deleted companion's amber is the precedent and the mechanism: its mark
+ * was an amber underline whatever the reader had chosen for their own, because
+ * there too the colour was not a preference — it was what said whose mark it
+ * was.
  */
 export interface ForeignAnchor {
   /** `ResolvedCfi` — the compiler refuses an unanchored passage here (A1). */
@@ -289,18 +288,16 @@ export interface MarkPalette {
    *  stylesheet. */
   readonly rule: Record<MarkTint, string>
   /**
-   * §01's companion hue. A companion mark is an amber underline whatever the
-   * reader has chosen for their own, because here the colour is not a
-   * preference — it is what says whose mark this is.
-   */
-  readonly companion: string
-  /**
    * The hue every foreign mark is drawn in — one, for every reader.
    *
    * ⚠️ **ONE HUE AND NOT A PALETTE.** Giving each friend a colour would put
    * them in competition with the reader's own three, and `MarkTint` is where
    * the reader's meaning lives. A single neutral rule says *"somebody else"*;
    * `readers` says how many, through weight.
+   *
+   * ⚠️ **THE DELETED COMPANION'S AMBER WAS THE PRECEDENT FOR THIS** — a hue
+   * that is not a preference but a statement of whose mark it is. The mark is
+   * gone and the argument is not.
    */
   readonly foreign: string
   /**
@@ -310,9 +307,8 @@ export interface MarkPalette {
    * be admitted; a stranger needs only a key, and keys are free. So the public
    * layer is the one an attacker can fill, and a treatment that competed with
    * the reader's own marks would make filling it worth doing. Same SHAPE as a
-   * friend's rule, because a second shape would compete with the companion's
-   * wave — hue is the channel, exactly as it already is between the companion
-   * and a friend.
+   * friend's rule — hue is the channel, and one shape for everybody who is not
+   * the reader keeps it that way.
    */
   readonly stranger: string
 }
@@ -320,9 +316,14 @@ export interface MarkPalette {
 /**
  * The Overlayer's draw functions, passed in so foliate stays lazily loaded.
  *
- * One per `MarkStyle`, plus the companion's, which reuses `underline`. Named
- * for the STYLE rather than for the Overlayer function behind it — `wave` is
- * foliate's `squiggly`, and §15's word is the one the interface uses.
+ * One per `MarkStyle`. Named for the STYLE rather than for the Overlayer
+ * function behind it — `wave` is foliate's `squiggly`, and §15's word is the
+ * one the interface uses.
+ *
+ * ⚠️ **`wave` HAS NO READER-FACING PRODUCER** — `READER_STYLES` does not offer
+ * it and the store reads a stored one back as an underline. It stays because
+ * `styleOf` reads what foliate hands back, untyped, and a value the type system
+ * never saw must still land on a painter rather than on `undefined`.
  */
 export interface MarkPainters {
   readonly fill: unknown
@@ -685,15 +686,6 @@ export interface SessionNavigator {
   eraseMark: (anchor: MarkAnchor) => void
   /** Clear the book's selection — after acting on it, per §07. */
   deselect: () => void
-  /**
-   * The book text on screen, as passages a companion answer can cite.
-   *
-   * READ AT THE MOMENT THE QUESTION IS ASKED, never cached: the reader turns
-   * pages, and an answer grounded in the page before is an answer about
-   * somewhere else. Empty before the first section loads, which is honest —
-   * the companion then has nothing to cite and says so.
-   */
-  passages: () => readonly AskPassage[]
   /**
    * Dismiss the note popover and release the view it was rendered in.
    *
@@ -1352,33 +1344,20 @@ export class ReaderSession {
        * `writingMode` and put the rule on the block's far edge — under the
        * words horizontally, beside the column in a vertical book. Omitted, the
        * default is horizontal, so in a `vertical-rl` book every rule Paper
-       * draws — the reader's own, the companion's wave, and a friend's — is
-       * struck across the text instead of alongside it. The fill painter is
+       * draws — the reader's own and a friend's — is struck across the text
+       * instead of alongside it. The fill painter is
        * the only one that noticed vertical writing, and it noticed in order to
        * bail (`balanceRects`); the three that could simply have been told were
        * the ones left wrong. */
       const writingMode = writingModeAt(doc, at)
-      /* §01 SAID AMBER UNDERLINE, and this is an amber WAVE — the one place
-       * this file departs from the section it implements, deliberately.
-       * The underline was provenance back when the reader's own mark was
-       * always a gold fill: shape and colour both said whose it was. Once the
-       * reader could draw rules too, an amber rule and a yellow rule were two
-       * pixels and a hue apart. The wave is reserved to the companion now
-       * (`READER_STYLES` is what enforces it), so the shape carries the
-       * provenance again — and a squiggle is what every spell checker on earth
-       * uses to say "something automated has an opinion here", which is what a
-       * companion's claim is.
-       * Not a style the reader picks, either way. Everything else is the
-       * reader's own tint and their own choice of band or rule.
-       *
-       * The three values ride along on the annotation so the painter does not
+      /* The three values ride along on the annotation so the painter does not
        * have to look the mark up again: `annotation` carries whatever
        * `annotationFor` put on it, and reading the store from in here would be
        * a second answer to "what does this mark look like", resolved at a
        * different moment from the first. */
-      /* WHAT MAY BE DRAWN, ASKED AS A WHITELIST. The next branch treats
-       * everything that is not the companion's as a reader's highlight, which
-       * classifies by exclusion — so a `bookmark` arriving here would be
+      /* WHAT MAY BE DRAWN, ASKED AS A WHITELIST. The last branch treats
+       * everything it is handed as a reader's highlight, which would classify
+       * by exclusion without this — so a `bookmark` arriving here would be
        * painted as a gold band over a passage the reader never marked. The
        * compile-time split makes that unreachable today: `getMarks` hands over
        * annotations and `MarkAnchor.kind` is `AnnotationKind`. This is the same
@@ -1399,18 +1378,12 @@ export class ReaderSession {
       if (typeof kind !== 'string' || !(PAINTABLE_KINDS as readonly string[]).includes(kind)) {
         return
       }
-      if (kind === 'companion') {
-        detail.draw(painters.wave, { color: palette.companion, writingMode })
-        drawn()
-        return
-      }
       if (kind === FOREIGN_KIND || kind === PUBLIC_KIND) {
         /* ⚠️ **AN UNDERLINE, IN ONE HUE, WITH WEIGHT CARRYING MULTIPLICITY.**
          * The reader's three tints say what THEY meant by a passage; a
          * friend's mark must not claim that vocabulary, so it gets none of
          * them and the colour is not a preference — it is what says whose mark
-         * this is. The companion's amber rule is the precedent and the same
-         * sentence covers both.
+         * this is.
          *
          * A RULE and not a fill, because the central case is several people on
          * one sentence and fills stack illegibly. Weight is then the only
@@ -1418,9 +1391,8 @@ export class ReaderSession {
          * readable without a click. */
         /* ⚠️ **AND A STRANGER'S IS QUIETER THAN A FRIEND'S, NOT LOUDER.**
          * `palette.stranger` is the only channel that separates them — the
-         * shape is the same rule, because a second shape would compete with
-         * the companion's wave — and it is the more recessive of the two on
-         * every theme. A passage somebody you admitted marked is worth more
+         * shape is the same rule for both — and it is the more recessive of
+         * the two on every theme. A passage somebody you admitted marked is worth more
          * of your attention than one anybody at all did, and free keys mean
          * the public layer is the one an attacker can fill. */
         detail.draw(painters.underline, {
@@ -1635,10 +1607,6 @@ export class ReaderSession {
       drawMark: (anchor) => attachMark(view, anchor, { report: true }),
       eraseMark: (anchor) => attachMark(view, anchor, { remove: true, report: true }),
       deselect: () => view.deselect(),
-      /* Bound to the SESSION, not to this closure's `view`: the method reads
-         `#view` and `#disposed`, so a navigator held past a teardown answers
-         with the honest empty rather than reaching into a dead renderer. */
-      passages: () => this.passages(),
       closeFootnote: () => this.closeFootnote(),
       setFootnoteMount: (mount, within) => this.setFootnoteMount(mount, within),
       next: () => void view.next()?.catch?.(reportNavigation('next')),
@@ -1646,9 +1614,10 @@ export class ReaderSession {
       goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),
       goRight: () => void view.goRight()?.catch?.(reportNavigation('goRight')),
       placeHere: () => this.placeHere(),
-      /* Bound to the SESSION for `passages`' reason — it reads `#view` and
-         `#disposed`, so a navigator held past a teardown answers with an empty
-         walk rather than parsing sections of a book nobody is reading. */
+      /* Bound to the SESSION, not to this closure's `view`: the method reads
+         `#view` and `#disposed`, so a navigator held past a teardown answers
+         with an empty walk rather than parsing sections of a book nobody is
+         reading. */
       reanchor: (pending) => this.reanchorUnplaced(pending),
     })
 
@@ -2093,36 +2062,6 @@ export class ReaderSession {
     const view = this.#view
     if (!view || this.#disposed) return
     for (const index of this.#sections) this.#drawSection(view, index)
-  }
-
-  /**
-   * The book text on screen, as passages a companion answer can cite.
-   *
-   * WI-15.5's grounding, read from the live documents at the moment the
-   * question is asked — not cached, because the reader turns pages and an
-   * answer grounded in the page before is an answer about somewhere else.
-   *
-   * `renderer.getContents()` is THE ONLY WAY IN: both renderers call
-   * `attachShadow({ mode: 'closed' })`, so an embedder cannot reach the
-   * iframe from the DOM side at all.
-   *
-   * Empty rather than throwing when nothing is rendered — the companion then
-   * has nothing to cite and says so, which is the honest state before the
-   * first section loads.
-   */
-  passages(): readonly AskPassage[] {
-    const view = this.#view
-    if (!view || this.#disposed) return []
-    const renderer = view.renderer
-    if (!renderer) return []
-    try {
-      return screenPassages(renderer.getContents(), (index, range) => view.getCFI(index, range))
-    } catch {
-      /* A renderer mid-teardown, or one that has no contents to give. The
-         companion loses its grounding for this question, which the provider
-         reports; it must not take the reader's pane down with it. */
-      return []
-    }
   }
 
   /** Offer every mark belonging to one section to that section's overlay. */
@@ -3220,8 +3159,8 @@ const PUBLIC_KIND = 'public'
 /**
  * What the painter will draw, asked as a WHITELIST.
  *
- * ⚠️ The handler's own note explains why this is not "anything that is not the
- * companion's": classifying by exclusion means a `bookmark` arriving here is
+ * ⚠️ The handler's own note explains why this is a whitelist rather than "not
+ * a bookmark": classifying by exclusion means a `bookmark` arriving here is
  * painted as a band over a passage the reader never marked. Widening the
  * whitelist by one entry keeps that property; widening the *stored* kinds
  * would not.

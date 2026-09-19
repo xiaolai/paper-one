@@ -247,22 +247,6 @@
     ]
   },
   {
-    "name": "aws-lc-rs",
-    "version": "1.18.0",
-    "license": "ISC AND (Apache-2.0 OR ISC)",
-    "texts": [
-      "efbbbcefb4b8"
-    ]
-  },
-  {
-    "name": "aws-lc-sys",
-    "version": "0.44.0",
-    "license": "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)",
-    "texts": [
-      "49f5cc2a2e4d"
-    ]
-  },
-  {
     "name": "axum",
     "version": "0.8.9",
     "license": "MIT",
@@ -1279,16 +1263,6 @@
     "texts": [
       "954f335b8baf",
       "ccb6d4349ee0"
-    ]
-  },
-  {
-    "name": "encoding_rs",
-    "version": "0.8.35",
-    "license": "(Apache-2.0 OR MIT) AND BSD-3-Clause",
-    "texts": [
-      "283ea6cc2997",
-      "7dc2f6402447",
-      "b1d6d97b0476"
     ]
   },
   {
@@ -3644,33 +3618,6 @@
     "license": "MIT",
     "texts": [
       "12bfa73c9eac"
-    ]
-  },
-  {
-    "name": "quinn",
-    "version": "0.11.11",
-    "license": "MIT OR Apache-2.0",
-    "texts": [
-      "283ea6cc2997",
-      "05fa1ba3228a"
-    ]
-  },
-  {
-    "name": "quinn-proto",
-    "version": "0.11.17",
-    "license": "MIT OR Apache-2.0",
-    "texts": [
-      "283ea6cc2997",
-      "05fa1ba3228a"
-    ]
-  },
-  {
-    "name": "quinn-udp",
-    "version": "0.5.15",
-    "license": "MIT OR Apache-2.0",
-    "texts": [
-      "283ea6cc2997",
-      "05fa1ba3228a"
     ]
   },
   {

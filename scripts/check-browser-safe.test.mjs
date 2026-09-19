@@ -548,6 +548,66 @@ function thrownBy(act) {
  * a tree with no aliases. Each is the failure this file's header names twice —
  * nothing found, indistinguishable from nowhere looked.
  */
+/**
+ * ⚠️ **A LOAD NO IMPORT GRAPH CAN FOLLOW USED TO REPORT THE MODULE CLEAN.**
+ *
+ * `runtimeSpecifiers` names `import(p)`, `require(p)` and `createRequire()` with
+ * NOTHING — there is no single module to name — so a module whose only reach to
+ * the platform ran through one of them walked to a leaf with no edges and was
+ * CERTIFIED browser-safe. The gate could not look, and said there was nothing
+ * there. Found by the 2026-09-19 audit; the cases below are the known positive
+ * it was tested against, because a detector that finds nothing looks exactly
+ * like a clean result — the lesson this gate's own header already records.
+ */
+describe('a load this gate cannot follow', () => {
+  const unprovableIn = (root, entry) => [...blockersOf(root, entry).unprovable.values()].flat()
+
+  it('refuses a module whose only reach to the platform is a computed import', () => {
+    const root = fixture({
+      'tsconfig.base.json': '{"compilerOptions":{"paths":{}}}',
+      'src/sneaky.ts': "const where = '@tauri-apps/api/core'\nexport const go = async () => (await import(where)).invoke('x')\n",
+    })
+    /* NO BLOCKER — that is the point. Nothing static reaches the platform, so
+       the old gate had nothing to report and exited 0 on this file. */
+    expect(blockedFiles(root, 'src/sneaky.ts')).toEqual([])
+    expect(unprovableIn(root, 'src/sneaky.ts')).toEqual(['a computed import()'])
+  })
+
+  it.each([
+    ['a computed require', "const p = './x'\nexport const v = require(p)\n", 'a computed require()'],
+    ['a relative require', "export const v = require('./x')\n", "require('./x')"],
+    ['createRequire', "import { createRequire } from 'node:module'\nexport const r = createRequire(import.meta.url)\n", 'createRequire()'],
+  ])('refuses %s', (_what, body, named) => {
+    const root = fixture({ 'tsconfig.base.json': '{"compilerOptions":{"paths":{}}}', 'src/a.ts': body })
+    expect(unprovableIn(root, 'src/a.ts')).toContain(named)
+  })
+
+  /* NON-VACUITY, and it is the half that matters: a check that refused
+     everything would pass every case above and make the gate useless. */
+  it('still clears a module that loads nothing it cannot see', () => {
+    const root = fixture({
+      'tsconfig.base.json': '{"compilerOptions":{"paths":{}}}',
+      'src/clean.ts': "import { two } from './two'\nexport const v = two\n",
+      'src/two.ts': 'export const two = 2\n',
+    })
+    expect(unprovableIn(root, 'src/clean.ts')).toEqual([])
+    expect(blockedFiles(root, 'src/clean.ts')).toEqual([])
+  })
+
+  /* AND IT IS A FAILURE, not a note. The command's exit code is the whole
+     contract — a finding nobody exits non-zero for is a finding nobody reads. */
+  it('exits non-zero and names the load', () => {
+    const root = fixture({
+      'tsconfig.base.json': '{"compilerOptions":{"paths":{}}}',
+      'src/sneaky.ts': "const where = '@tauri-apps/api/core'\nexport const go = async () => (await import(where)).invoke('x')\n",
+    })
+    const ran = cli('--root', root, 'src/sneaky.ts')
+    expect(ran.status).toBe(1)
+    expect(ran.stdout).toContain('not followable')
+    expect(ran.stdout).toContain('a computed import()')
+  })
+})
+
 describe('a path this gate cannot read', () => {
   const UNCHECKED = '— nothing past it was checked, and a path this gate could not check is not a clean one'
 

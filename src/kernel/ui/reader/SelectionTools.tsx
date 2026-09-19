@@ -8,7 +8,7 @@ import {
   type CSSProperties,
 } from 'react'
 import {
-  BookA,
+  ChevronLeft,
   ChevronRight,
   Copy,
   Highlighter,
@@ -21,14 +21,11 @@ import { SURFACE_EDGE, UNBOUNDED, place } from '../../core/placement'
 import {
   MARK_TINTS,
   READER_STYLES,
-  type Mark,
+  type Annotation,
   type MarkAppearance,
   type MarkStyle,
   type MarkTint,
 } from '../../core/marks'
-import type { GlossState } from '../hooks/useGloss'
-import type { Voice } from '../../core/voice'
-import { BackToBar, LookUpFace } from './LookUpFace'
 import { MarkSpecimen } from './MarkSpecimen'
 import {
   frameBoxInHost,
@@ -78,33 +75,6 @@ import styles from './SelectionTools.module.css'
 
 /** Which face of the popup the READER turned to. */
 type Face = 'bar' | 'marks' | 'copy'
-
-/**
- * Which face is drawn: the lookup whenever one is on, else the reader's own.
- *
- * DERIVED, NOT A FOURTH `Face`. The lookup is not a place the reader turned the
- * popup to — it is App's state (`useLookUp`), started by the button, the
- * palette or a key — so storing it here would be a second copy of a fact that
- * already has an owner, and the two would disagree the first time a lookup was
- * started from somewhere other than this popup. Back puts the lookup away, and
- * the face the reader had is still underneath.
- */
-export function shownFace(face: Face, lookUp: GlossState): Face | 'lookup' {
-  return lookUp.kind === 'idle' ? face : 'lookup'
-}
-
-/**
- * The height the popup is PLACED as.
- *
- * The bar and its two sibling faces are one row, exactly `POPUP_H` tall — see
- * the constant. The lookup is not: it is as tall as its answer, and `place`
- * hangs the popup above the selection by subtracting this number, so a lookup
- * placed as a row would hang down over the words it defines. Until it has been
- * measured once it is placed as a row, which is what it is while it mounts.
- */
-export function surfaceHeight(face: Face | 'lookup', measured: number): number {
-  return face === 'lookup' && measured > 0 ? measured : POPUP_H
-}
 
 /**
  * Whether two snapshots are the same passage — what the face reset asks, see
@@ -177,8 +147,17 @@ export interface SelectionToolsProps {
    * The MARK rather than a boolean, because its tint is what the marks face
    * lights up: a passage marked in green shows green as the chosen disc, so the
    * popup says what this passage already is as well as what it can become.
+   *
+   * ⚠️ **`Annotation`, AND IT WAS THE WIDER `Mark`** (2026-09-19 audit). `Mark`
+   * admits a BOOKMARK, which this popup must never be handed — a bookmark is a
+   * place, has no tint or style, and nothing here could draw one. No caller ever
+   * passed one (`useMarking.selected` is `Placed<Annotation> | null`), so the
+   * width bought nothing and cost a guard: `shown` tested `kind === 'highlight'`
+   * to exclude the deleted companion's, and once that kind was gone the test was
+   * a tautology over a type no caller could produce. The narrower prop makes the
+   * guard unnecessary rather than merely unused.
    */
-  marked: Mark | null
+  marked: Annotation | null
   /**
    * The reader's position, as a re-measure trigger — see `MarginMarks`. A page
    * turn with a selection still live moves the text out from under the popup
@@ -212,47 +191,16 @@ export interface SelectionToolsProps {
   /**
    * Whether this passage can be marked — `Marking.canMark`, handed down.
    *
-   * False hides Mark, its chevron and Note, exactly as a null `onLookUp` hides
-   * Look up: a passage with no anchor cannot hold a mark, and both buttons did
-   * nothing when pressed (#202). ASKED, NOT WORKED OUT HERE: `cfi === ''` in
-   * this file would be a second copy of the rule `useMarking` owns.
+   * False hides Mark, its chevron and Note: a passage with no anchor cannot
+   * hold a mark, and both buttons did nothing when pressed (#202). ASKED, NOT
+   * WORKED OUT HERE: `cfi === ''` in this file would be a second copy of the
+   * rule `useMarking` owns.
    */
   canMark: boolean
   onNote: () => void
   onCopy: () => void
   /** Copy the passage with its source — see `citation`. */
   onCite: () => void
-  /**
-   * Look the passage up, or null where there is nothing to look it up in.
-   *
-   * Null rather than a disabled button: a control that cannot act is the app
-   * describing a feature it does not have on this platform, and the reader
-   * cannot tell a permanently dead button from a broken one.
-   */
-  onLookUp: (() => void) | null
-  /**
-   * The lookup — anything but idle turns the popup to its lookup face.
-   *
-   * ⚠️ **THE ANSWER IS DRAWN HERE, AND IT USED TO BE A STRIP UNDER THE PAGE**
-   * whose appearance re-paginated the book and pushed the defined word off it —
-   * see `LookUpFace` for the measurement. The popup floats and moves nothing.
-   */
-  lookUp: GlossState
-  /** Back from the lookup face — puts the lookup away. */
-  onLookUpBack: () => void
-  /** Where "Choose one" goes, or absent where this screen has nowhere. */
-  onInstall?: ((section: string) => void) | undefined
-  /**
-   * The voice that says the looked-up term aloud — the machine's own
-   * (`systemVoice`), since no capability binds another.
-   *
-   * REQUIRED, and `NO_VOICE` is the answer where nothing can speak. Optional it
-   * would be a fact a caller could forget, which is the `hasDictionary` failure
-   * `core/gloss.ts` records: a field that defaulted to `false` on the way down,
-   * so the production caller's omission removed a feature silently. Here the
-   * omission is a compile error.
-   */
-  voice: Voice
   onRemove: () => void
 }
 
@@ -282,8 +230,11 @@ const POPUP_PAD = 6
  *  control ramp would have left the popup the height of a ramp that no longer
  *  exists, with a comment still claiming it followed one.
  *
- *  THE ROW'S HEIGHT, NOT THE POPUP'S. The lookup face is as tall as its
- *  answer — see `surfaceHeight`. */
+ *  THE ROW'S HEIGHT, AND EVERY FACE IS ONE ROW, so it is also the popup's —
+ *  which is what `place` is handed. It was not always: a fourth face, the
+ *  lookup, was as tall as the answer a language model returned, and a
+ *  `surfaceHeight` here chose between the two. That face is gone with the rest
+ *  of the AI features, so the choice is gone with it. */
 export const POPUP_H = CONTROL.sm + 2 * POPUP_PAD
 
 /**
@@ -333,11 +284,6 @@ export function SelectionTools({
   onNote,
   onCopy,
   onCite,
-  onLookUp,
-  lookUp,
-  onLookUpBack,
-  onInstall,
-  voice,
   onRemove,
 }: SelectionToolsProps) {
   /* EVERY VISIBLE LINE of the selection, in the range's own order: the first is
@@ -357,10 +303,15 @@ export function SelectionTools({
   /* RE-MEASURED WHEN IT RESIZES ON ITS OWN, not only when React renders it
      (2026-09-13). The layout effect below measures after every render, and a
      popup can change size with no render at all — a face whose font arrives
-     late re-wraps the answer — which left it placed at its old size until
-     something unrelated re-rendered it: an answer grown by a line hung down over
-     the word it defines. A callback ref, because the node comes and goes with
-     the selection and the observer has to go with it.
+     late re-wraps — which left it placed at its old size until something
+     unrelated re-rendered it. The popup is CENTRED on the selection, so its
+     width decides its left edge and a width that moves under it leaves it
+     off-centre. A callback ref, because the node comes and goes with the
+     selection and the observer has to go with it.
+     ⚠️ **THE CASE THIS WAS WRITTEN FOR WAS THE DELETED LOOKUP FACE**, whose
+     answer grew by a line and hung down over the word it defined — a HEIGHT.
+     Every face left is one row, so what a re-measure can still change is the
+     width, and `SelectionTools.test.tsx` measures it that way.
      ⚠️ NEVER HANDED NULL, so the node is typed without it (2026-09-14). A ref
      callback that returns its cleanup is given the cleanup on detach and not a
      null — React 19's contract — and the `if (node === null) return` that stood
@@ -381,11 +332,8 @@ export function SelectionTools({
     [],
   )
   const [width, setWidth] = useState(0)
-  /** And its height — which only the lookup face varies. See `surfaceHeight`. */
-  const [height, setHeight] = useState(0)
   // Stryker disable next-line StringLiteral: the passage reset below sets the bar in the commit a selection first arrives in, and no face is drawn before one has
-  const [face, setFace] = useState<Face>('bar')
-  const current = shownFace(face, lookUp)
+  const [current, setFace] = useState<Face>('bar')
 
   /**
    * The left edge the bar was placed at, held while another face is showing.
@@ -423,7 +371,7 @@ export function SelectionTools({
    * cancels pointerdown to keep the book's selection alive — so a pointer
    * reader's focus is left exactly where it was.
    */
-  const turning = useRef<Face | 'lookup' | null>(null)
+  const turning = useRef<Face | null>(null)
 
   /* A NEW PASSAGE GETS THE BAR. A face is about the passage in hand, so
    * carrying one across would open the popup mid-task on a passage the reader
@@ -532,18 +480,19 @@ export function SelectionTools({
    * then jump. Its width does not depend on where it is put, so this settles in
    * one pass. */
   useLayoutEffect(() => {
-    const rect = popupRef.current?.getBoundingClientRect()
-    const measured = rect?.width ?? 0
+    const measured = popupRef.current?.getBoundingClientRect().width ?? 0
     if (Math.abs(measured - width) > 0.5) setWidth(measured)
-    /* THE HEIGHT FEEDS THE SAME PLACEMENT, and settles the same way: the answer
-       arriving grows the face, this re-measures before paint, and the popup is
-       placed against what it now is rather than what it was while looking. */
-    const tall = rect?.height ?? 0
-    if (Math.abs(tall - height) > 0.5) setHeight(tall)
   })
 
+  /* ⚠️ **AND THE STAGE, BECAUSE `lines` IS ONE FRAME BEHIND IT** (2026-09-19
+   * audit). `measure` runs in a PASSIVE effect, so the render in which `stage`
+   * becomes null still holds the rects measured against the old one — and
+   * without a stage `place` is handed `UNBOUNDED` bounds and puts the popup
+   * somewhere arbitrary for that frame. Asked here rather than trusted to the
+   * effect: there is nowhere to draw a popup that is positioned inside a stage
+   * that is not there, so this is the honest guard rather than a race patch. */
   const box = lines[0]
-  if (!selection || !box) return null
+  if (!selection || !stage || !box) return null
 
   /* WHERE IT GOES IS `place`'S DECISION, and the reasoning that used to live
    * here as thirty lines of arithmetic lives there now, once, for every
@@ -569,7 +518,7 @@ export function SelectionTools({
        numerically valid and wrong by the stage's offset, and nothing else
        could tell. */
     anchor: { top: box.top, left: box.left, width: box.width, height: box.height, space: 'container' },
-    surface: { width, height: surfaceHeight(current, height) },
+    surface: { width, height: POPUP_H },
     bounds: {
       top: 0,
       left: within.left,
@@ -620,15 +569,23 @@ export function SelectionTools({
      stage's height and the column's width, less the inset at each edge, scrolls
      inside that (see the stylesheet), and is measured — and so placed — at the
      size it is allowed to be.
-     ⚠️ ONE RULE FOR ALL FOUR, AND IT WAS THE LOOKUP'S ALONE until 2026-09-14
-     (2026-09-13 audit, #159). The rows were left out because "a bound could only
-     clip a control" — true of a bound with nothing to scroll, and the popup
-     scrolls now whichever face it shows. Unbounded, a bar or a palette in a
+     ⚠️ ONE RULE FOR EVERY FACE, AND IT WAS ONE FACE'S ALONE until 2026-09-14
+     (2026-09-13 audit, #159) — the deleted lookup's, which is why the sentence
+     above still talks about an answer taller than the stage. The rows were left
+     out because "a bound could only clip a control" — true of a bound with
+     nothing to scroll, and the popup scrolls now whichever face it shows. Unbounded, a bar or a palette in a
      column narrower than itself kept its leading edge in and ran the rest out
      over the margin notes the column exists to keep it off. */
+  /* ⚠️ **CLAMPED AT ZERO, BECAUSE A NEGATIVE MAXIMUM IS NOT A BOUND — IT IS NO
+     BOUND.** A stage or column narrower than twice the inset makes these
+     negative, and CSS rejects a negative `max-width`/`max-height` outright: the
+     declaration is dropped and the popup goes UNBOUNDED, which is the one
+     outcome this object exists to prevent. Found by the 2026-09-19 audit. Zero
+     is the honest answer — the surface has no room, and `place` has already
+     reported `detached` for the cases where that means "do not draw". */
   const bound: CSSProperties = {
-    maxWidth: within.width - 2 * SURFACE_EDGE,
-    maxHeight: (stageBox?.height ?? UNBOUNDED) - 2 * SURFACE_EDGE,
+    maxWidth: Math.max(0, within.width - 2 * SURFACE_EDGE),
+    maxHeight: Math.max(0, (stageBox?.height ?? UNBOUNDED) - 2 * SURFACE_EDGE),
   }
 
   /**
@@ -640,15 +597,14 @@ export function SelectionTools({
    * passage there is nothing to show but the last one, which is what pressing
    * the bar's control will lay down.
    */
-  const shown: MarkAppearance =
-    /* ONLY THE READER'S OWN MARK is worth adopting. A companion's carries the
-     * reserved wave, and every control here writes what it shows: pressing the
-     * bar over one would have laid down a reader-owned wave and dispatched
-     * `setMarkStyle('wave')` into the app's own appearance, so the reservation
-     * would have leaked through the one surface that is meant to enforce it. */
-    marked && marked.kind === 'highlight'
-      ? { tint: marked.tint, style: marked.style }
-      : appearance
+  /* ⚠️ **IT USED TO ASK WHOSE MARK THIS WAS.** Only the reader's own was worth
+   * adopting: the deleted companion's carried the reserved wave, and every
+   * control here writes what it shows, so pressing the bar over one would have
+   * laid down a reader-owned wave and dispatched `setMarkStyle('wave')` into the
+   * app's own appearance — the reservation leaking through the one surface meant
+   * to enforce it. There is one annotation kind now, so there is nobody to ask
+   * about; `marked` is typed to say so. */
+  const shown: MarkAppearance = marked ? { tint: marked.tint, style: marked.style } : appearance
 
   /* Where focus was as a face is turned — see `turning`. Every control that
      turns the popup calls this first. */
@@ -658,14 +614,24 @@ export function SelectionTools({
       popupRef.current?.contains(document.activeElement) ? current : null
   }
 
+  /* Back to the bar, from either of the two faces that have one.
+     INLINE, and it used to be a `BackToBar` exported by the lookup face — the
+     one component both that face and this file drew, which is why it took a
+     `className`. The lookup is gone, so the second caller is gone, and a
+     component with one caller is a layer between a reader and a button. */
   const back = (
-    <BackToBar
+    <button
+      type="button"
       className={styles.tool}
-      onBack={() => {
+      onClick={() => {
         turnFrom()
         setFace('bar')
       }}
-    />
+      title="Back"
+      aria-label="Back to the selection tools"
+    >
+      <ChevronLeft size={ICON.control} strokeWidth={ICON.stroke} />
+    </button>
   )
 
   /* A chevron that turns the popup to one of its faces.
@@ -709,21 +675,6 @@ export function SelectionTools({
           from its own previous contents, which reads as a cross-fade of two
           states rather than as one arriving. */}
       <div key={current} className={styles.face}>
-        {/* THE LOOKUP, over whichever face the reader had — see `shownFace`,
-            which makes `current` 'lookup' exactly when this holds. Tested on
-            the lookup itself because that is the half that narrows it. */}
-        {lookUp.kind !== 'idle' && (
-          <LookUpFace
-            state={lookUp}
-            onBack={() => {
-              turnFrom()
-              onLookUpBack()
-            }}
-            onInstall={onInstall}
-            voice={voice}
-          />
-        )}
-
         {current === 'bar' && (
           <>
             {/* ONE CONTROL RATHER THAN A PALETTE: a reader picks a scheme and
@@ -779,29 +730,6 @@ export function SelectionTools({
               <Copy size={ICON.control} strokeWidth={ICON.stroke} />
             </button>
             {opener('copy', 'Copy options', 'More ways to copy this passage')}
-
-            {onLookUp && (
-              <button
-                type="button"
-                className={styles.tool}
-                data-opens="lookup"
-                onClick={() => {
-                  turnFrom()
-                  onLookUp()
-                }}
-                title="Look up"
-                /* ⚠️ IT SAID "Look this up in the dictionary", and there is no
-                   dictionary: the Dictionary.app hand-off, the mode cycle, the
-                   `kernel.lookUp` setting and the Rust `look_up` command were
-                   all deleted together. This is the only label a screen-reader
-                   user hears, so it was the last place still naming the deleted
-                   feature — and the one place where naming it could not be
-                   checked by looking at the screen. */
-                aria-label="Look up"
-              >
-                <BookA size={ICON.control} strokeWidth={ICON.stroke} />
-              </button>
-            )}
 
             {marked && (
               <button

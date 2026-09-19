@@ -315,7 +315,7 @@ describe('what an audit of the CLI found', () => {
     const root = await library()
     const bad = await cli(root, ['mark', 'add', 'aaa', 'epubcfi(/6/4)', 'x', '--kind', 'nonsense'])
     expect(bad.code).toBe(EXIT.usage)
-    expect(bad.err).toContain('must be one of highlight, companion, bookmark')
+    expect(bad.err).toContain('must be one of highlight, bookmark')
   })
 
   /* A title, an author and a note are all strings SOMEBODY ELSE WROTE. A
