@@ -2405,6 +2405,27 @@ async function testOptionsOf(root) {
  * 100 % never reaches it, which is why measuring the base costs a tree with no
  * survivors nothing at all.
  */
+/**
+ * Stop the sweep when a file this subject's tests read has moved under it.
+ *
+ * ⚠️ **A REFUSAL RATHER THAN A FAILED SUBJECT, AND THAT IS THE WHOLE POINT.**
+ * What changed is an INPUT to the measurement, so the measurement did not
+ * happen — it is the `untested-base` argument on the other side of the gate:
+ * *could not run* must never become an answer. Marking the subject failed would
+ * bill whoever is editing for a run that measured two different projects, and
+ * passing it would be worse. Every later subject is equally suspect, because
+ * whatever is writing is still writing, so the sweep ends here and says which
+ * file moved.
+ */
+function stillTheInputs(subject, inputs, root) {
+  const moved = inputsMoved(inputs, root)
+  if (moved.length === 0) return
+  throw new Refusal(
+    `check-mutants: a file ${subject}'s covering tests read changed during its run, so the run measured two different projects — ${moved.join('; ')}`,
+    `read-input-changed: ${moved.join('; ')}`,
+  )
+}
+
 async function strykerEach(
   reached,
   found,
@@ -2466,6 +2487,10 @@ async function strykerEach(
     rmSync(sandbox, { recursive: true, force: true })
     /* Once per sweep: the tree does not grow symlinks between subjects. */
     const symlinks = symlinksIn(root)
+    /* And once per sweep: what each test READS, parsed at most once however
+       many subjects it covers — see `readInputsOf`, which measured the other
+       way at 10.3 s for this gate's own three. */
+    const readPaths = new Map()
     /* One Stryker run of one subject, under `deadline`, and what it amounted to.
        The generated vitest config is the subject's own and is written once, so a
        settle run is the same subject against the same covering tests. */
@@ -2490,6 +2515,21 @@ async function strykerEach(
       /* Immediately before this subject's run: a shard asks the checkout again
          here, and stops if it changed — see `shardSweep`. */
       await before(subject)
+      /* And what this subject's covering tests READ, which no drift check above
+         can see: git's working tree leaves out everything `.gitignore` covers,
+         and a plain sweep compares nothing at all. See `readInputsOf` for the
+         file that found it. Taken AFTER `before`, so a shard that is stopping
+         stops on its own reason rather than on a consequence of one. */
+      const inputs = readInputsOf(covering, root, readPaths)
+      /* PRINTED, because a guard nobody can see the reach of is a guard nobody
+         can argue with — the rule the excluded-reader list already follows. The
+         second number is what it could not watch: a read `pathsRead` cannot
+         resolve, or a directory. */
+      if (inputs.files.size > 0 || inputs.unwatched > 0) {
+        stdout.write(
+          `      watching ${inputs.files.size} file(s) its tests read${inputs.unwatched > 0 ? `, and ${inputs.unwatched} it cannot` : ''}\n`,
+        )
+      }
       /* Only THIS subject's tests, so per-test coverage attribution stays
          sound — see the header. */
       writeFresh(vitestConfig, vitestConfigFor(covering, carried))
@@ -2516,6 +2556,7 @@ async function strykerEach(
       const toSettle = unlike === null && settling ? timeoutsIn(reportEntryOf(subject, first.report)).unsettled.length : 0
       let settle = null
       if (toSettle > 0) {
+        stillTheInputs(subject, inputs, root)
         /* Between the two runs, as before the first and after the second: a
            checkout that changes mid-settle stops a shard exactly as one that
            changes mid-sweep does. */
@@ -2584,6 +2625,7 @@ async function strykerEach(
       /* And again now the run is over: what changed DURING it changed what
          Stryker swept — see `shardSweep`. Last subject included, which is the
          one a check only before each run never covered. */
+      stillTheInputs(subject, inputs, root)
       await after(subject)
     }
   } finally {
@@ -4896,6 +4938,131 @@ function inventory(picked, world) {
     }
   })
   return { found, rows }
+}
+
+/**
+ * The files a subject's covering tests READ, by digest — the one class of input
+ * a sweep's answer depends on and nothing else watches.
+ *
+ * ⚠️ **A FILE A TEST READS CAN CHANGE UNDER A SWEEP, AND EVERY GUARD AROUND IT
+ * LOOKS THE OTHER WAY** (2026-09-19). The shard's drift check compares the HEAD
+ * commit, the merge base and the working tree — and the working tree is git's
+ * answer, so **nothing `.gitignore` covers is in it**. `ledger.test.mjs` reads
+ * `dev-docs/feature-ledger.md`, which is gitignored whole; editing that file
+ * during a sweep of `scripts/lib/ledger.mjs` changes what the subject's covering
+ * tests assert, between the first run and the settle run, with no signal
+ * anywhere. The measurement is then of two different projects and reads as one.
+ *
+ * A plain sweep had no such check at all, tracked or not, which is the wider
+ * half: `SidePane.test.tsx` reads `SidePane.module.css`, `commands.test.ts`
+ * reads `ui/commands.ts`, and an agent editing either mid-sweep moves the same
+ * ground. 59 paths inside this checkout are read by its 381 test files, measured
+ * the day this was written — a small set, which is why watching it is cheap.
+ *
+ * **What it covers, said exactly, because a guard that quietly covers less than
+ * it claims is the defect this file keeps finding.** A read whose path
+ * `pathsRead` can resolve, that is inside the checkout, and that is a FILE. Not
+ * a directory — a `readdir`'s answer changes with its entries and hashing a
+ * recursive listing per subject is a cost this does not carry. Not a path
+ * outside the checkout — a test's own tmpdir fixture is meant to change. Not a
+ * read `pathsRead` cannot resolve, which is the case its own header calls the
+ * LOUD one. **Everything it cannot watch is COUNTED rather than dropped**, so
+ * the number a sweep prints is the number it actually watched.
+ *
+ * ⚠️ **`pathsRead` ANSWERS IN FOUR SPELLINGS AND ONLY TWO ARE PATHS** — found
+ * by writing this function's own test, which is the only reason it was found.
+ * A bare `new URL(spec, import.meta.url)` comes back as `file:///…`, a string
+ * `path.relative` reads as somewhere else entirely; a `path.join(here, '..', x)`
+ * comes back unnormalised, with the `..` still in it. Both were silently
+ * dropped by a `startsWith('..')` test — a guard that watched nothing and said
+ * nothing, which is the shape it exists to prevent. A `file:` URL is converted,
+ * and every path is resolved through the operating system's own `realpath`
+ * rather than `path.resolve`, which collapses `link/..` textually and is the
+ * defect this file records against its own writes.
+ */
+/** The paths one test reads, or none where it names no read or cannot be read. */
+function readsIn(test) {
+  let source
+  try {
+    source = readFileSync(test, 'utf8')
+  } catch {
+    /* A test that cannot be read is the dry run's failure to report, not this
+       function's: it answers about inputs, and there are none. */
+    return []
+  }
+  /* The same cheap first pass `sourceReaders` takes, and for its reason: a file
+     naming no read reads nothing, and parsing it costs a sweep seconds. */
+  return source.includes('readFile') ? pathsRead(source, test) : []
+}
+
+export function readInputsOf(tests, root, parsed = new Map()) {
+  const files = new Map()
+  let unwatched = 0
+  /* The checkout's own real path, so a scratch root under a symlinked `/tmp`
+     — which is what macOS gives — compares against what `realpath` answers. */
+  const base = realpathSync.native(root)
+  for (const test of tests) {
+    /* ⚠️ **PARSED ONCE PER SWEEP, NOT ONCE PER SUBJECT** (measured 2026-09-19,
+       after writing it the other way). `pathsRead` builds a TypeScript source
+       file, and this gate's own three covering tests cost **10.3 s** to parse —
+       every test file in the tree, 56 s. Paid per subject that is minutes added
+       to a sweep for an answer that cannot change between two subjects of the
+       same run: the test's own bytes are what the parse reads, and a test that
+       changed mid-sweep is what this whole function exists to refuse. The
+       caller passes one map for the whole sweep; `sourceReaders` already takes
+       the same shape of answer for the same reason. */
+    if (!parsed.has(test)) parsed.set(test, readsIn(test))
+    for (const found of parsed.get(test)) {
+      if (found === null) {
+        unwatched += 1
+        continue
+      }
+      let real
+      try {
+        real = realpathSync.native(found.startsWith('file:') ? fileURLToPath(found) : found)
+      } catch {
+        /* Named but absent — a fixture the test writes itself, or a path built
+           from a value this cannot know. It is watched from the moment it
+           exists and not before: appearing is not a change to an input a run
+           has already read. */
+        continue
+      }
+      const rel = path.relative(base, real)
+      /* Outside the checkout, which a test's own tmpdir fixture is and is meant
+         to be. Not counted as unwatched: it is not an input to the project. */
+      if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) continue
+      if (!statSync(real).isFile()) {
+        unwatched += 1
+        continue
+      }
+      files.set(slashed(rel), digestOf(readFileSync(real)))
+    }
+  }
+  return { files, unwatched }
+}
+
+/**
+ * Which of `inputs` are no longer what they were — by name, with what happened.
+ *
+ * Absent counts, and so does a file that has become something else: the claim is
+ * *the bytes this subject's tests read have not moved*, and a deleted file
+ * breaks it exactly as an edited one does.
+ */
+export function inputsMoved({ files }, root) {
+  const moved = []
+  const base = realpathSync.native(root)
+  for (const [rel, was] of files) {
+    const at = path.join(base, rel)
+    let now
+    try {
+      now = statSync(at).isFile() ? digestOf(readFileSync(at)) : null
+    } catch {
+      now = null
+    }
+    if (now === null) moved.push(`${rel} — gone, or no longer a file`)
+    else if (now !== was) moved.push(`${rel} — its bytes changed`)
+  }
+  return moved
 }
 
 /** `data`'s SHA-256, as hex. */

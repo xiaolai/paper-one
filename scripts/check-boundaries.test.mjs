@@ -15,6 +15,7 @@ import {
   unusedRequires,
 } from './check-boundaries.mjs'
 import { CASES, LEGAL_TREE, caseFailure, runAll, runCli } from './check-boundaries.selftest.mjs'
+import { stripComments } from './lib/compositions.mjs'
 
 /**
  * The boundary selftest under Vitest, so `pnpm test` proves the boundary
@@ -420,19 +421,33 @@ describe('the cruiser is not handed a file set to compile', () => {
        edge no rule can judge — the gate would go green by seeing less. The
        cases above already prove every rule still fires; this names the reason
        they can. */
-    /* Read as TEXT: `tsconfig.base.json` is JSONC and carries `//` comments,
-       which `JSON.parse` refuses. The cruiser config is plain JSON and is
-       parsed above; this one is matched. */
-    const base = readFileSync(path.join(REPO_ROOT, 'tsconfig.base.json'), 'utf8')
-    expect(base).toContain('"@/*": ["src/*"]')
-    expect(base).toContain('"virtual:paper-composition"')
-    expect(base).toContain('"jsx": "react-jsx"')
+    /* ⚠️ **THIS MATCHED THE FILE'S TEXT, AND STRYKER REWRITES THAT FILE**
+       (found 2026-09-19, the first time the mutation gate was pointed at this
+       module). `tsconfig.base.json` is JSONC and carries `//` comments, which
+       `JSON.parse` refuses — so the assertions were substrings, pinned to one
+       spelling: `'"@/*": ["src/*"]'`, that object on one line. Stryker's
+       TSConfig preprocessor PARSES every tsconfig into its sandbox and
+       re-serialises it, which drops the comments and puts `paths` over several
+       lines. Every assertion here then failed in the sandbox, the dry run
+       failed with them, and the subject was skipped with no score — which this
+       gate reports as "Stryker did not finish", not as a pass, so it was loud.
+       It was also a FALSE failure: nothing about the config had changed, only
+       its formatting.
+
+       The comments are strippable — `stripComments` is string-aware, and JSONC
+       has only `"` strings — so the values are asserted instead of their
+       spelling. That is stronger as well as sandbox-proof: a `paths` moved
+       somewhere meaningless would have satisfied the substring. */
+    const base = JSON.parse(stripComments(readFileSync(path.join(REPO_ROOT, 'tsconfig.base.json'), 'utf8')))
+    expect(base.compilerOptions.paths['@/*']).toEqual(['src/*'])
+    expect(base.compilerOptions.paths).toHaveProperty('virtual:paper-composition')
+    expect(base.compilerOptions.jsx).toBe('react-jsx')
     /* And the base still names no file set of its own — which is WHY it must
        not be the cruiser's config, and is left alone rather than "fixed":
        `tsc -b` builds through the referenced projects, each of which brings
        its own `include`. */
-    expect(base).not.toContain('"include"')
-    expect(base).not.toContain('"files"')
+    expect(base).not.toHaveProperty('include')
+    expect(base).not.toHaveProperty('files')
   })
 
   /* ⚠️ **A STOPWATCH WAS TRIED HERE AND DELETED, BECAUSE IT COULD NOT FAIL.**

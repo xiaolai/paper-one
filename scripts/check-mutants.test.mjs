@@ -63,6 +63,8 @@ import {
   trackedUnder,
   vitestConfigFor,
   worktreeOf,
+  readInputsOf,
+  inputsMoved,
 } from './check-mutants.mjs'
 import { DELETED_ENV } from './verify-without.mjs'
 
@@ -2991,6 +2993,243 @@ describe('a whole sweep, driven with no Stryker', () => {
      reports against the plan since the second review; a plain sweep reconciles
      against what it counted ITSELF — the source it hashed, and every mutant
      identity it counted — the same way. */
+  /**
+   * ⚠️ **A FILE A COVERING TEST READS CAN CHANGE UNDER A SWEEP, AND EVERY GUARD
+   * AROUND IT LOOKED THE OTHER WAY** (2026-09-19).
+   *
+   * The shard's drift check compares the HEAD commit, the merge base and the
+   * WORKING TREE — and the working tree is git's answer, so nothing
+   * `.gitignore` covers is in it. `scripts/lib/ledger.test.mjs` reads
+   * `dev-docs/feature-ledger.md`, gitignored whole; editing that document during
+   * a sweep of `scripts/lib/ledger.mjs` changes what the subject's covering
+   * tests assert, between the first run and the settle run, with no signal
+   * anywhere. A plain sweep compared nothing at all, tracked or not, which is
+   * the wider half — `SidePane.test.tsx` reads `SidePane.module.css`.
+   *
+   * It is a REFUSAL rather than a failed subject: what moved is an INPUT, so
+   * the measurement did not happen, and *could not run* must never become an
+   * answer. Whatever is writing is still writing, so every later subject is
+   * equally suspect and the sweep ends.
+   */
+  /**
+   * ⚠️ **`pathsRead` ANSWERS IN FOUR SPELLINGS AND ONLY TWO OF THEM ARE PATHS**,
+   * which `readInputsOf` did not know until this case was written — and which is
+   * the whole argument for writing it. A bare `new URL(spec, import.meta.url)`
+   * comes back `file:///…`, and a `path.join(here, '..', x)` comes back with the
+   * `..` still in it. A `path.relative(root, …)` on either starts with `..`, so
+   * both were dropped by the test meant to exclude a tmpdir fixture: the guard
+   * watched nothing and said nothing, in exactly the two forms a test in this
+   * repository is most likely to use.
+   */
+  describe('readInputsOf', () => {
+    const reading = (body) =>
+      "import { readFileSync } from 'node:fs'\n" +
+      "import path from 'node:path'\n" +
+      "import { fileURLToPath } from 'node:url'\n" +
+      body +
+      '\n'
+
+    it('resolves every spelling `pathsRead` can answer in — a bare file: URL and an unnormalised join included', async () => {
+      await inScratch('mutants-reads-', async (root) => {
+        writeFileSync(path.join(root, 'notes.md'), 'one\n')
+        mkdirSync(path.join(root, 'src'), { recursive: true })
+        const spellings = {
+          bareUrl: "readFileSync(new URL('../notes.md', import.meta.url), 'utf8')",
+          fileUrlToPath: "readFileSync(fileURLToPath(new URL('../notes.md', import.meta.url)), 'utf8')",
+          joinDotDot:
+            "const here = path.dirname(fileURLToPath(import.meta.url))\nreadFileSync(path.join(here, '..', 'notes.md'), 'utf8')",
+          literal: `readFileSync(${JSON.stringify(path.join(root, 'notes.md'))}, 'utf8')`,
+        }
+        for (const [name, body] of Object.entries(spellings)) {
+          const test = path.join(root, 'src', `${name}.test.mjs`)
+          writeFileSync(test, reading(body))
+          const { files, unwatched } = readInputsOf([test], root)
+          expect([...files.keys()], name).toEqual(['notes.md'])
+          expect(unwatched, name).toBe(0)
+        }
+      })
+    })
+
+    it('counts what it cannot watch rather than dropping it — a directory, and a read it cannot resolve', async () => {
+      await inScratch('mutants-reads-', async (root) => {
+        mkdirSync(path.join(root, 'src'), { recursive: true })
+        mkdirSync(path.join(root, 'fixtures'), { recursive: true })
+        const test = path.join(root, 'src', 'a.test.mjs')
+        writeFileSync(
+          test,
+          reading(
+            `readFileSync(${JSON.stringify(path.join(root, 'fixtures'))}, 'utf8')\nreadFileSync(whateverThisIs(), 'utf8')`,
+          ),
+        )
+        const { files, unwatched } = readInputsOf([test], root)
+        expect([...files.keys()]).toEqual([])
+        /* Both of them, and a number a sweep prints beside what it watched —
+           the rule the excluded-reader list already follows. */
+        expect(unwatched).toBe(2)
+      })
+    })
+
+    it('leaves a path OUTSIDE the checkout alone, and does not count it against the guarantee', async () => {
+      await inScratch('mutants-reads-', async (root) => {
+        await inScratch('mutants-elsewhere-', async (other) => {
+          writeFileSync(path.join(other, 'fixture.json'), '{}\n')
+          mkdirSync(path.join(root, 'src'), { recursive: true })
+          const test = path.join(root, 'src', 'a.test.mjs')
+          writeFileSync(test, reading(`readFileSync(${JSON.stringify(path.join(other, 'fixture.json'))}, 'utf8')`))
+          const { files, unwatched } = readInputsOf([test], root)
+          /* A test's own tmpdir fixture is MEANT to change, and it is not an
+             input to the project — so it is neither watched nor counted. */
+          expect([...files.keys()]).toEqual([])
+          expect(unwatched).toBe(0)
+        })
+      })
+    })
+
+    it('skips a path named but absent, because appearing is not a change to an input already read', async () => {
+      await inScratch('mutants-reads-', async (root) => {
+        mkdirSync(path.join(root, 'src'), { recursive: true })
+        const test = path.join(root, 'src', 'a.test.mjs')
+        writeFileSync(test, reading(`readFileSync(${JSON.stringify(path.join(root, 'written-later.json'))}, 'utf8')`))
+        expect(readInputsOf([test], root)).toEqual({ files: new Map(), unwatched: 0 })
+      })
+    })
+
+    /* ⚠️ **PARSING COSTS 10.3 s FOR THIS GATE'S OWN THREE COVERING TESTS**,
+       measured 2026-09-19, and it was written once per SUBJECT before it was
+       measured — minutes added to a sweep for an answer that cannot change
+       between two subjects of one run. The caller passes one map for the whole
+       sweep. Asserted by DELETING the test after the first call: a second call
+       that still answers did not go back to the file. */
+    it('parses a test at most once, however many subjects it covers', async () => {
+      await inScratch('mutants-reads-', async (root) => {
+        writeFileSync(path.join(root, 'notes.md'), 'one\n')
+        mkdirSync(path.join(root, 'src'), { recursive: true })
+        const test = path.join(root, 'src', 'a.test.mjs')
+        writeFileSync(test, `import { readFileSync } from 'node:fs'\nreadFileSync(${JSON.stringify(path.join(root, 'notes.md'))}, 'utf8')\n`)
+        const parsed = new Map()
+        expect([...readInputsOf([test], root, parsed).files.keys()]).toEqual(['notes.md'])
+
+        rmSync(test)
+        expect([...readInputsOf([test], root, parsed).files.keys()]).toEqual(['notes.md'])
+        /* And without the map it goes back to the file, which is now gone — so
+           the assertion above is about the map and not about some other cache. */
+        expect([...readInputsOf([test], root).files.keys()]).toEqual([])
+      })
+    })
+
+    it('reads nothing from a test that names no read at all', async () => {
+      await inScratch('mutants-reads-', async (root) => {
+        mkdirSync(path.join(root, 'src'), { recursive: true })
+        const test = path.join(root, 'src', 'a.test.mjs')
+        writeFileSync(test, "import './a'\nexport const x = 1\n")
+        expect(readInputsOf([test], root)).toEqual({ files: new Map(), unwatched: 0 })
+      })
+    })
+  })
+
+  describe('inputsMoved', () => {
+    const watching = async (root, contents) => {
+      writeFileSync(path.join(root, 'notes.md'), contents)
+      mkdirSync(path.join(root, 'src'), { recursive: true })
+      const test = path.join(root, 'src', 'a.test.mjs')
+      writeFileSync(test, `import { readFileSync } from 'node:fs'\nreadFileSync(${JSON.stringify(path.join(root, 'notes.md'))}, 'utf8')\n`)
+      return readInputsOf([test], root)
+    }
+
+    it('answers nothing while the bytes hold, names the file when they change, and names it when it goes', async () => {
+      await inScratch('mutants-moved-', async (root) => {
+        const inputs = await watching(root, 'one\n')
+        expect(inputsMoved(inputs, root)).toEqual([])
+
+        writeFileSync(path.join(root, 'notes.md'), 'two\n')
+        expect(inputsMoved(inputs, root)).toEqual(['notes.md — its bytes changed'])
+
+        /* CONTENT, not mtime: a file written back identically has not moved,
+           and refusing there would fail a sweep beside any editor that saves. */
+        writeFileSync(path.join(root, 'notes.md'), 'one\n')
+        expect(inputsMoved(inputs, root)).toEqual([])
+
+        rmSync(path.join(root, 'notes.md'))
+        expect(inputsMoved(inputs, root)).toEqual(['notes.md — gone, or no longer a file'])
+      })
+    })
+
+    it('names a file that has become a directory, because the claim is about the bytes and there are none', async () => {
+      await inScratch('mutants-moved-', async (root) => {
+        const inputs = await watching(root, 'one\n')
+        rmSync(path.join(root, 'notes.md'))
+        mkdirSync(path.join(root, 'notes.md'))
+        expect(inputsMoved(inputs, root)).toEqual(['notes.md — gone, or no longer a file'])
+      })
+    })
+  })
+
+  /** A test that imports the subject AND reads `notes.md` beside the checkout. */
+  const READS_NOTES =
+    "import { readFileSync } from 'node:fs'\n" +
+    "import './a'\n" +
+    "readFileSync(new URL('../notes.md', import.meta.url), 'utf8')\n"
+
+  describe('a file the subject\'s tests read, changing mid-run', () => {
+    it('stops the sweep and names the file, rather than scoring two different projects as one', async () => {
+      await inScratch('mutants-inputs-', async (root) => {
+        writeFileSync(path.join(root, 'notes.md'), 'one\n')
+        const at = checkout(root, {
+          'src/a.ts': "export const a = 'a'\n",
+          /* `pathsRead` follows `new URL(spec, import.meta.url)` — see its own
+             header — so this read resolves to `<root>/notes.md`. */
+          'src/a.test.mjs': READS_NOTES,
+        })
+        const a = at['src/a.ts']
+        const [identity] = await mutantIdentitiesIn(a)
+        const report = reportWith(a, [{ id: '0', status: 'Killed', static: false, ...identity }])
+        const { stryker } = strykerStandIn(root, { reports: { [a]: report } })
+        const result = await sweep(root, {
+          subjects: ['src/a.ts'],
+          tree: ['src/a.ts', 'src/a.test.mjs', 'notes.md'],
+          /* The edit lands WHILE Stryker is running, which is the real shape:
+             an agent writing a document beside a sweep it did not start. */
+          stryker: async (config) => {
+            const answer = await stryker(config)
+            writeFileSync(path.join(root, 'notes.md'), 'two\n')
+            return answer
+          },
+        })
+        expect(result.code).toBe(2)
+        /* The subject is named as every other message in this gate names one —
+           absolutely, the way Stryker was given it. */
+        expect(result.stderr).toContain(`a file ${a}'s covering tests read changed during its run`)
+        expect(result.stderr).toContain('notes.md — its bytes changed')
+        expect(result.stderr).toContain('measured two different projects')
+        expect(result.stdout).not.toContain('every mutant was killed')
+      })
+    })
+
+    it('says how many files it is watching, and how many it cannot', async () => {
+      await inScratch('mutants-inputs-', async (root) => {
+        writeFileSync(path.join(root, 'notes.md'), 'one\n')
+        const at = checkout(root, {
+          'src/a.ts': "export const a = 'a'\n",
+          /* `pathsRead` follows `new URL(spec, import.meta.url)` — see its own
+             header — so this read resolves to `<root>/notes.md`. */
+          'src/a.test.mjs': READS_NOTES,
+        })
+        const a = at['src/a.ts']
+        const [identity] = await mutantIdentitiesIn(a)
+        const report = reportWith(a, [{ id: '0', status: 'Killed', static: false, ...identity }])
+        const result = await sweep(root, {
+          subjects: ['src/a.ts'],
+          tree: ['src/a.ts', 'src/a.test.mjs', 'notes.md'],
+          stryker: strykerStandIn(root, { reports: { [a]: report } }).stryker,
+        })
+        expect(result.code).toBe(0)
+        /* PRINTED, on the rule the excluded-reader list already follows: a
+           guard nobody can see the reach of is a guard nobody can argue with. */
+        expect(result.stdout).toContain('watching 1 file(s) its tests read')
+      })
+    })
+  })
+
   it('fails a subject whose report is not of what the sweep counted — no mutant of its own, another identity, or other source — and names it', async () => {
     await inScratch('mutants-sweep-', async (root) => {
       const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
