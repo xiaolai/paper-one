@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { COPY_EXCLUDE, COPY_STEPS, DELETED_DIRS_ENV, DELETED_ENV, EXCLUDED, copyTree, deletedDirs, digestTree, main, parseArgs, removableCapabilities, verifyWithout } from './verify-without.mjs'
 import { STEPS } from './verify.mjs'
 
@@ -71,12 +71,23 @@ function source() {
  * time it was run, on 2026-09-19, long after either could have been caught.
  */
 describe('which capabilities the proof runs on', () => {
+  /* ⚠️ **`removableCapabilities()` COSTS 2.7 s — IT SCANS EVERY SOURCE FILE**,
+     and the first version of these cases called it once per assertion on top of
+     the call `main` makes itself. Three of them then took 8 s of scanning each,
+     which under load is a 60 s test timeout and reads as a defect in the code
+     under test. Read ONCE for the block, and in `beforeAll` rather than in the
+     body — a `describe` body runs even when its tests are skipped. */
+  let removable
+  beforeAll(() => {
+    removable = removableCapabilities()
+  })
+
   it('proves EVERY removable capability when none is named, in order', () => {
     const proved = []
     const lines = []
     const code = main([], { prove: (id) => (proved.push(id), { code: 0, dir: '' }), out: (l) => lines.push(l), err: () => {} })
     expect(code).toBe(0)
-    expect(proved).toEqual(removableCapabilities())
+    expect(proved).toEqual(removable)
     expect(proved.length).toBeGreaterThan(1)
     expect(lines.join()).toContain(`proving all ${proved.length} removable`)
   })
@@ -90,14 +101,14 @@ describe('which capabilities the proof runs on', () => {
   it('stops at the first failure and names the id, rather than a bare exit code', () => {
     const proved = []
     const lines = []
-    const failing = removableCapabilities()[1]
+    const failing = removable[1]
     const code = main([], {
       prove: (id) => (proved.push(id), { code: id === failing ? 7 : 0, dir: '' }),
       out: (l) => lines.push(l),
       err: () => {},
     })
     expect(code).toBe(7)
-    expect(proved).toEqual(removableCapabilities().slice(0, 2))
+    expect(proved).toEqual(removable.slice(0, 2))
     expect(lines.join()).toContain(`exit 7 without ${JSON.stringify(failing)}`)
   })
 
