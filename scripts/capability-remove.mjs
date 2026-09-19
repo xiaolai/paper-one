@@ -184,12 +184,33 @@ export function planRemoval(root, id, options = {}) {
   }
 
   if (deleteFiles) {
-    for (const dir of [`src/capabilities/${entry.ts}`, ...(crate !== null ? [`src-tauri/crates/${crate}`] : [])]) {
+    for (const dir of deletedDirsFor(entry)) {
       deletions.push({ dir, tracked: hooks.isTracked(root, dir) })
     }
   }
 
   return { id, entry, edits, deletions, notes, crate }
+}
+
+/**
+ * Every directory removing `entry` deletes — ONE DECLARATION, because two
+ * readers need the same answer and they are in different files.
+ *
+ * ⚠️ **THE SECOND READER WAS MISSING AND A GATE UNDER-EXCUSED BECAUSE OF IT**
+ * (2026-09-19). `checkLedger` excused ledger claims under the deleted
+ * capability, and derived that directory itself as `src/capabilities/<id>` —
+ * which is wrong twice over: a capability whose `ts` differs from its `id`
+ * lives somewhere else, and one with a `crate` loses `src-tauri/crates/<crate>`
+ * too. `verify:without webhost` therefore failed on a ledger row naming the
+ * crate it had just correctly deleted. `circle` has no crate, which is why the
+ * proof had only ever been run on a capability that could not show it.
+ *
+ * `ts` rather than `id` for the same reason `verify-without.mjs`'s picker uses
+ * it: the manifest permits the two to differ, and the filesystem follows `ts`.
+ */
+export function deletedDirsFor(entry) {
+  const crate = typeof entry.crate === 'string' ? entry.crate : null
+  return [`src/capabilities/${entry.ts}`, ...(crate !== null ? [`src-tauri/crates/${crate}`] : [])]
 }
 
 /* ----------------------------------------------------------------- apply */

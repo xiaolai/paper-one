@@ -421,20 +421,33 @@ export function resolveClaim(claim) {
  *
  * `removed` is a capability id that has just been DELETED from this tree —
  * `verify-without.mjs`'s `DELETED_ENV`, which exists because a gate inside the
- * removal copy cannot otherwise tell where it is. Claims under that
- * capability's directory become notes rather than findings: the ledger
- * describes the app as SHIPPED, and a copy with `sync` deleted is a proof
- * harness, not a state anyone runs. Only that one directory is excused, so a
- * removal that took something else with it is still a finding.
+ * removal copy cannot otherwise tell where it is — and `removedDirs` is what
+ * that removal actually deleted, from `DELETED_DIRS_ENV`. Claims under those
+ * directories become notes rather than findings: the ledger describes the app
+ * as SHIPPED, and a copy with `sync` deleted is a proof harness, not a state
+ * anyone runs. ONLY those directories are excused, so a removal that took
+ * something else with it is still a finding.
+ *
+ * ⚠️ **`removedDirs` REPLACED A GUESS THAT WAS WRONG TWICE** (2026-09-19). This
+ * derived the directory itself as `src/capabilities/<removed>`, which misses a
+ * capability whose `ts` differs from its `id` — the manifest permits that — and
+ * misses `src-tauri/crates/<crate>` entirely, which `capability-remove` deletes
+ * for every capability that has one. `verify:without webhost` failed on a
+ * ledger row naming the crate the removal had just correctly deleted, and the
+ * comment here said only one directory was ever deleted. `circle`, the one
+ * capability the proof had been run on, has no crate, so nothing showed it.
+ *
+ * `removed` is now only the NAME in the note. With no `removedDirs` nothing is
+ * excused, which is the fail-closed direction: an under-excused claim is a
+ * visible finding, where an over-excused one is silence.
  */
-export function checkLedger({ markdown, exists, removed }) {
+export function checkLedger({ markdown, exists, removed, removedDirs = [] }) {
   const { rows, findings } = parseRows(markdown)
-  const removedDir =
-    typeof removed === 'string' &&
-    // Stryker disable next-line ConditionalExpression,StringLiteral: an empty id would make `src/capabilities/`, which no normalised claim equals or begins with plus `/`, so dropping this test excuses nothing
-    removed !== ''
-      ? `src/capabilities/${removed}`
-      : null
+  /* Named for what it holds rather than `excused`, which this file already
+     uses for something else one function up. */
+  const excusedDirs = Array.isArray(removedDirs)
+    ? removedDirs.filter((dir) => typeof dir === 'string' && dir !== '')
+    : []
   const notes = []
   const seenExternal = new Set()
   let claimCount = 0
@@ -488,7 +501,7 @@ export function checkLedger({ markdown, exists, removed }) {
         if (part === '..') return parts.slice(0, -1)
         return [...parts, part]
       }, []).join('/')
-      if (removedDir !== null && (normalised === removedDir || normalised.startsWith(`${removedDir}/`))) {
+      if (excusedDirs.some((dir) => normalised === dir || normalised.startsWith(`${dir}/`))) {
         notes.push(`note: ${at} ${claim} — capability "${removed}" was deleted by this run; the ledger describes the shipped app`)
         continue
       }

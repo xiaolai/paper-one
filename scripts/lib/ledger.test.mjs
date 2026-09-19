@@ -3,7 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { makeExists } from '../check-ledger.mjs'
-import { DELETED_ENV } from '../verify-without.mjs'
+import { DELETED_DIRS_ENV, DELETED_ENV } from '../verify-without.mjs'
 import {
   EXTERNAL,
   STATES,
@@ -579,7 +579,18 @@ describe.skipIf(!existsSync(LEDGER_FILE))('the local ledger (skipped when this c
     /* Honours DELETED_ENV for the same reason the shell does: this suite runs
      * inside `verify:without`'s copy, where one capability's directory is gone
      * on purpose. */
-    result = checkLedger({ markdown, exists: makeExists(REPO_ROOT), removed: process.env[DELETED_ENV] })
+    result = checkLedger({
+      markdown,
+      exists: makeExists(REPO_ROOT),
+      removed: process.env[DELETED_ENV],
+      /* ⚠️ **THE ID ALONE USED TO BE PASSED, AND THAT FAILED THE PROOF ON THE
+         FIRST CAPABILITY WITH A CRATE.** `checkLedger` spelled the excused
+         directory itself from the id; `verify:without webhost` then reported
+         `src-tauri/crates/tauri-plugin-webhost/` — which the removal had just
+         correctly deleted — as a missing path. What was deleted is now carried
+         in, from `capability-remove`'s own rule. */
+      removedDirs: (process.env[DELETED_DIRS_ENV] ?? '').split(':').filter((dir) => dir !== ''),
+    })
   })
 
   it('names only paths that exist', () => {
@@ -610,13 +621,13 @@ describe('a tree the removal proof has just edited', () => {
   })
 
   it('is a note when that capability is the one the run deleted', () => {
-    const result = checkLedger({ markdown: md, exists: tree, removed: 'sync' })
+    const result = checkLedger({ markdown: md, exists: tree, removed: 'sync', removedDirs: ['src/capabilities/sync'] })
     expect(result.findings).toEqual([])
     expect(result.notes.join()).toContain('was deleted by this run')
   })
 
   it('excuses only that capability, not a sibling the removal should not have touched', () => {
-    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync' })
+    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync', removedDirs: ['src/capabilities/sync'] })
     expect(result.findings.map((f) => f.message)).toEqual([
       'src/capabilities/peer → src/capabilities/peer does not exist',
     ])
@@ -626,27 +637,68 @@ describe('a tree the removal proof has just edited', () => {
      test handed a claim about PEER the excusal meant for the deleted `sync`. */
   it('does not excuse a claim that climbs out of the deleted capability', () => {
     const md = table('| Sync | Partial | `src/capabilities/sync/../peer/x.ts` | how |')
-    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync' })
+    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync', removedDirs: ['src/capabilities/sync'] })
     expect(result.findings.map((f) => f.code)).toEqual(['LEDGER_PATH_MISSING'])
     expect(result.notes).toEqual([])
   })
 
   it('excuses a claim that climbs into the deleted capability', () => {
     const md = table('| Sync | Partial | `src/capabilities/peer/../sync/x.ts` | how |')
-    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync' })
+    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync', removedDirs: ['src/capabilities/sync'] })
     expect(result.findings).toEqual([])
     expect(result.notes).toHaveLength(1)
   })
 
   it('excuses a claim under the deleted capability spelled with a `.` or an empty segment', () => {
     const md = table('| Sync | Partial | `src/capabilities/./sync/a.ts`, `src/capabilities//sync/b.ts` | how |')
-    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync' })
+    const result = checkLedger({ markdown: md, exists: treeOf(), removed: 'sync', removedDirs: ['src/capabilities/sync'] })
     expect(result.findings).toEqual([])
     expect(result.notes).toHaveLength(2)
   })
 
-  /* `removed` goes into a template, so an absent one must never become the
-     text of one: `src/capabilities/undefined`, or a `null/` prefix. */
+  /* ⚠️ **THE DEFECT THAT FAILED `verify:without webhost` (2026-09-19).** The
+     excuse was derived here as `src/capabilities/<id>`, so a capability with a
+     Rust crate lost `src-tauri/crates/<crate>` to the removal and then had the
+     ledger's row about it reported as a missing path. Every capability the
+     proof had been run on until then had no crate. What was deleted is passed
+     in now, from `capability-remove`'s own `deletedDirsFor`. */
+  it('excuses the deleted capability’s CRATE as well as its directory', () => {
+    const md = table(
+      '| Web host | Shipped | `src/capabilities/webhost`, `src-tauri/crates/tauri-plugin-webhost/` | how |',
+    )
+    const result = checkLedger({
+      markdown: md,
+      exists: treeOf(),
+      removed: 'webhost',
+      removedDirs: ['src/capabilities/webhost', 'src-tauri/crates/tauri-plugin-webhost'],
+    })
+    expect(result.findings).toEqual([])
+    expect(result.notes).toHaveLength(2)
+  })
+
+  it('excuses the directory and NOT the crate when only the directory was deleted', () => {
+    /* The other half of the pair: the list is what was deleted, not a licence
+       to excuse anything that looks related. A capability with no crate must
+       not excuse a crate claim that happens to name it. */
+    const md = table(
+      '| Web host | Shipped | `src/capabilities/webhost`, `src-tauri/crates/tauri-plugin-webhost/` | how |',
+    )
+    const result = checkLedger({
+      markdown: md,
+      exists: treeOf(),
+      removed: 'webhost',
+      removedDirs: ['src/capabilities/webhost'],
+    })
+    expect(result.findings.map((f) => f.message)).toEqual([
+      'src-tauri/crates/tauri-plugin-webhost/ → src-tauri/crates/tauri-plugin-webhost does not exist',
+    ])
+    expect(result.notes).toHaveLength(1)
+  })
+
+  /* `removed` used to go into a template, so an absent one must never become
+     the text of one: `src/capabilities/undefined`, or a `null/` prefix. It goes
+     into no template now — the excused directories are given — and this holds
+     the stronger property that with none given, nothing is excused at all. */
   it('excuses nothing when no capability was removed, even a path the absent value would spell', () => {
     const md = table('| A | Partial | `src/capabilities/undefined/x.ts`, `null/x.ts` | how |')
     const result = checkLedger({ markdown: md, exists: treeOf() })

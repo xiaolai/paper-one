@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { COPY_EXCLUDE, COPY_STEPS, DELETED_ENV, EXCLUDED, copyTree, digestTree, parseArgs, removableCapabilities, verifyWithout } from './verify-without.mjs'
+import { COPY_EXCLUDE, COPY_STEPS, DELETED_DIRS_ENV, DELETED_ENV, EXCLUDED, copyTree, deletedDirs, digestTree, main, parseArgs, removableCapabilities, verifyWithout } from './verify-without.mjs'
 import { STEPS } from './verify.mjs'
 
 /**
@@ -58,6 +58,64 @@ function source() {
   }
   return root
 }
+
+/**
+ * ⚠️ **THE GATE MEASURED ONE THIRD OF ITS SUBJECT, AND THE THIRD IT MEASURED
+ * WAS THE ONE THAT COULD NOT FAIL.**
+ *
+ * With no id, `main` took `removable[0]` and printed the rest as an aside.
+ * `removableCapabilities()` sorts, so the choice was always `circle` — and
+ * `circle` is the only removable capability in this tree with no Rust crate.
+ * Two gates inside the copy assumed a removal deletes ONE directory, which is
+ * true only without a crate; `verify:without webhost` failed on both the first
+ * time it was run, on 2026-09-19, long after either could have been caught.
+ */
+describe('which capabilities the proof runs on', () => {
+  it('proves EVERY removable capability when none is named, in order', () => {
+    const proved = []
+    const lines = []
+    const code = main([], { prove: (id) => (proved.push(id), { code: 0, dir: '' }), out: (l) => lines.push(l), err: () => {} })
+    expect(code).toBe(0)
+    expect(proved).toEqual(removableCapabilities())
+    expect(proved.length).toBeGreaterThan(1)
+    expect(lines.join()).toContain(`proving all ${proved.length} removable`)
+  })
+
+  it('proves only the one named, when one is', () => {
+    const proved = []
+    expect(main(['circle'], { prove: (id) => (proved.push(id), { code: 0, dir: '' }), out: () => {}, err: () => {} })).toBe(0)
+    expect(proved).toEqual(['circle'])
+  })
+
+  it('stops at the first failure and names the id, rather than a bare exit code', () => {
+    const proved = []
+    const lines = []
+    const failing = removableCapabilities()[1]
+    const code = main([], {
+      prove: (id) => (proved.push(id), { code: id === failing ? 7 : 0, dir: '' }),
+      out: (l) => lines.push(l),
+      err: () => {},
+    })
+    expect(code).toBe(7)
+    expect(proved).toEqual(removableCapabilities().slice(0, 2))
+    expect(lines.join()).toContain(`exit 7 without ${JSON.stringify(failing)}`)
+  })
+
+  it('carries --keep to every proof', () => {
+    const kept = []
+    main(['--keep'], { prove: (_id, opts) => (kept.push(opts.keep), { code: 0, dir: '' }), out: () => {}, err: () => {} })
+    expect(kept.length).toBeGreaterThan(1)
+    expect([...new Set(kept)]).toEqual([true])
+  })
+
+  it('refuses a bad argument with 2, and proves nothing', () => {
+    const proved = []
+    const errs = []
+    expect(main(['--nope'], { prove: (id) => (proved.push(id), { code: 0, dir: '' }), out: () => {}, err: (l) => errs.push(l) })).toBe(2)
+    expect(proved).toEqual([])
+    expect(errs.join()).toContain('unknown argument')
+  })
+})
 
 describe('copyTree', () => {
   it('copies everything but the excluded names and stale temp files, and links node_modules', () => {
@@ -164,6 +222,58 @@ describe('verifyWithout', () => {
     })
     expect(seen.length).toBeGreaterThan(0)
     for (const [name, id] of seen) expect(id, `${name} was not told`).toBe('example')
+  })
+
+  /* ⚠️ **THE ID ALONE LEFT A GATE GUESSING, AND IT GUESSED WRONG** (2026-09-19).
+     `checkLedger` and `cargo.test.mjs` both needed to know what the removal
+     DELETED, and one of them spelled it from the id as `src/capabilities/<id>`
+     — which misses a capability whose `ts` differs, and misses
+     `src-tauri/crates/<crate>` entirely. `verify:without webhost` then failed
+     on a ledger row naming the crate it had just correctly deleted; `circle`,
+     the only capability the proof had been run on, has no crate.
+
+     READ FROM THE SOURCE AND ONCE. The first step takes the entry out of the
+     copy's manifest, so asking the copy afterwards answers about a capability
+     that is already gone — and asking per step would re-read it for each. */
+  it('tells every gate in the copy WHAT it deleted, not only which id', () => {
+    const src = source()
+    writeFileSync(
+      path.join(src, 'capabilities.manifest.json'),
+      JSON.stringify({ capabilities: [{ id: 'example', ts: 'example-dir', platforms: ['desktop'], crate: 'tauri-plugin-example' }] }),
+    )
+    const seen = []
+    verifyWithout('example', {
+      source: src,
+      run: (step, _cwd, env) => (seen.push([step.name, env?.[DELETED_DIRS_ENV]]), 0),
+      log: () => {},
+    })
+    expect(seen.length).toBeGreaterThan(0)
+    for (const [name, dirs] of seen) {
+      expect(dirs, `${name} was not told`).toBe('src/capabilities/example-dir:src-tauri/crates/tauri-plugin-example')
+    }
+  })
+
+  it('tells them nothing was deleted when the source has no manifest, rather than throwing', () => {
+    /* The fixture tree above has none, and `capability:remove` is the step that
+       refuses such a tree by name. Excusing nothing is the fail-closed answer. */
+    const seen = []
+    verifyWithout('example', {
+      source: source(),
+      run: (step, _cwd, env) => (seen.push(env?.[DELETED_DIRS_ENV]), 0),
+      log: () => {},
+    })
+    expect(seen.length).toBeGreaterThan(0)
+    expect([...new Set(seen)]).toEqual([''])
+  })
+
+  it('THROWS on a manifest that is present and will not parse, rather than excusing nothing quietly', () => {
+    /* The other side of the ENOENT answer above. Absent means "this tree has no
+       capabilities", which the fixture genuinely is; unreadable means something
+       is wrong, and a proof that answered "nothing was deleted" for it would
+       excuse every stale reference in the copy for a reason nobody was told. */
+    const src = source()
+    writeFileSync(path.join(src, 'capabilities.manifest.json'), '{ not json')
+    expect(() => deletedDirs('example', src)).toThrow(SyntaxError)
   })
 
   it("returns the first failing step's code and stops there", () => {

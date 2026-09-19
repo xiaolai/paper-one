@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { DELETED_DIRS_ENV } from '../verify-without.mjs'
 import {
   dependenciesOfFeature,
   dependencyForCrate,
@@ -165,16 +167,32 @@ ignored = "1"
        REMOVING the app's vestigial direct `axum`: app code never referenced
        it, and the server crate under the webhost plugin declares it with the
        identical feature set. */
-    expect(dependenciesOfFeature('desktop', real)).toEqual(
-      new Set([
-        'tauri-plugin-mcp-bridge',
-        'tauri-plugin-persisted-scope',
-        'tauri-plugin-single-instance',
-        'tauri-plugin-webhost',
-        'tauri-plugin-window-state',
-        'tauri',
-      ]),
-    )
+    const pinned = new Set([
+      'tauri-plugin-mcp-bridge',
+      'tauri-plugin-persisted-scope',
+      'tauri-plugin-single-instance',
+      'tauri-plugin-webhost',
+      'tauri-plugin-window-state',
+      'tauri',
+    ])
+    /* ⚠️ **AND THIS SET IS ONE CRATE SHORTER INSIDE THE DELETION PROOF, WHICH
+       IS THE PROOF WORKING.** `verify:without <id>` copies the tree, deletes
+       one capability — its directory AND, when it has one, its Rust crate — and
+       runs these gates over the result. A capability with a crate is exactly
+       the case where the desktop-only set legitimately changes, and asserting
+       the shipped set there is asserting the removal did not happen. Measured
+       2026-09-19: `verify:without webhost` failed here, on the first capability
+       with a crate the proof had ever been run on.
+
+       SUBTRACTED RATHER THAN SKIPPED. The set stays a hard assertion in the
+       copy too — a removal that took a SECOND crate with it still fails, which
+       a `context.skip` would have let through. The crates come from
+       `DELETED_DIRS_ENV`, which only `verify:without` sets; on the real tree it
+       is unset and nothing is subtracted. */
+    for (const dir of (process.env[DELETED_DIRS_ENV] ?? '').split(':')) {
+      if (dir.startsWith('src-tauri/crates/')) pinned.delete(path.posix.basename(dir))
+    }
+    expect(dependenciesOfFeature('desktop', real)).toEqual(pinned)
     // Data-driven over whatever crates the tree has: each path dependency is found by its directory name.
     for (const dep of real.dependencies.values()) {
       if (dep.path === null) continue

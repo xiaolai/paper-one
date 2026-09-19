@@ -3,6 +3,7 @@ import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, realpathSyn
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { PLATFORMS } from './lib/architecture.mjs'
+import { deletedDirsFor } from './capability-remove.mjs'
 import { compositionFile, maskTemplates, stripComments } from './lib/compositions.mjs'
 import { isProcessEntry } from './lib/entry.mjs'
 import { REPO_ROOT, runSteps, spawnStep } from './verify.mjs'
@@ -275,8 +276,57 @@ export function digestTree(dir) {
  */
 export const DELETED_ENV = 'PAPER_VERIFY_WITHOUT'
 
+/**
+ * The directories that removal DELETED, colon-separated, in the child's env.
+ *
+ * ⚠️ **THE ID ALONE IS NOT ENOUGH, AND A GATE GUESSED THE REST AND GUESSED
+ * WRONG** (2026-09-19). `checkLedger` excused ledger claims under the deleted
+ * capability by spelling the directory itself as `src/capabilities/<id>` — but
+ * the manifest permits `ts` to differ from `id`, and a capability with a
+ * `crate` also loses `src-tauri/crates/<crate>`. So `verify:without webhost`
+ * reported the crate it had just correctly deleted as a missing path, and
+ * `circle` — the only capability the proof had ever been run on — has no crate,
+ * so nothing had shown it.
+ *
+ * The guess is gone: the answer is `capability-remove`'s own `deletedDirsFor`,
+ * read from the SOURCE manifest before the entry is cut out of the copy, which
+ * is the only moment it can still be asked.
+ *
+ * COLON-SEPARATED because these are repository-relative POSIX paths and none
+ * of them can contain a colon; an empty value means nothing was deleted, which
+ * is what every gate outside this proof sees.
+ */
+export const DELETED_DIRS_ENV = 'PAPER_VERIFY_WITHOUT_DIRS'
+
+/**
+ * The directories `capability:remove <id>` will delete, read before it runs.
+ *
+ * An ABSENT manifest answers with none, and an unknown id likewise: both are
+ * `capability:remove`'s refusals to make, not this helper's — it is the proof's
+ * FIRST step and it names either by hand. Answering with no directories excuses
+ * nothing downstream, which is the fail-closed direction, and this function's
+ * tests drive a synthetic source tree that has no manifest at all.
+ *
+ * ⚠️ **ENOENT ONLY.** A manifest that is present and will not parse is a real
+ * problem and throws here: swallowing it would turn a corrupt tree into a proof
+ * that excused nothing for a reason nobody was told.
+ */
+export function deletedDirs(id, repo = REPO_ROOT) {
+  let text
+  try {
+    text = readFileSync(path.join(repo, 'capabilities.manifest.json'), 'utf8')
+  } catch (cause) {
+    if (cause?.code === 'ENOENT') return []
+    throw cause
+  }
+  const entry = JSON.parse(text).capabilities.find((cap) => cap.id === id)
+  return entry === undefined ? [] : deletedDirsFor(entry)
+}
+
 export function verifyWithout(id, { source = REPO_ROOT, keep = false, run = spawnStep, log = (l) => process.stdout.write(`${l}\n`) } = {}) {
   const dir = copyTree(source)
+  /* BEFORE THE FIRST STEP RUNS, for the reason beside the env line below. */
+  const deleted = deletedDirs(id, source).join(':')
   log(`verify-without: copied ${source} → ${dir} (node_modules linked)`)
   let code
   try {
@@ -300,8 +350,11 @@ export function verifyWithout(id, { source = REPO_ROOT, keep = false, run = spaw
         },
         ...COPY_STEPS,
       ],
-      /* `env` carries the deleted id into every child — see `DELETED_ENV`. */
-      (step) => (step.local ? step.local() : run(step, dir, { [DELETED_ENV]: id })),
+      /* `env` carries the deleted id AND what it deleted into every child —
+         see `DELETED_ENV` and `DELETED_DIRS_ENV`. ONCE, and from `source`: the
+         first step removes the entry from the copy's manifest, so asking the
+         copy afterwards answers about a capability that is already gone. */
+      (step) => (step.local ? step.local() : run(step, dir, { [DELETED_ENV]: id, [DELETED_DIRS_ENV]: deleted })),
       log,
     )
   } finally {
@@ -311,32 +364,63 @@ export function verifyWithout(id, { source = REPO_ROOT, keep = false, run = spaw
   return { code, dir }
 }
 
-function main(argv) {
+/**
+ * The CLI. `prove` and `out` are injectable so the SELECTION and the
+ * stop-at-first-failure can be tested without copying the tree three times —
+ * the same shape `verifyWithout` gives its own `run` and `log`.
+ */
+export function main(argv, { prove = verifyWithout, out = (l) => process.stdout.write(l), err = (l) => process.stderr.write(l) } = {}) {
   const args = parseArgs(argv)
   if (args.error !== undefined) {
-    process.stderr.write(`verify-without: ${args.error}\n${USAGE}\n`)
+    err(`verify-without: ${args.error}\n${USAGE}\n`)
     return 2
   }
   /* AN ID MAY STILL BE NAMED — for asking about one in particular, which is
-     what a person debugging the remover wants. With none, the tree is asked. */
-  let id = args.id
-  if (id === undefined) {
+     what a person debugging the remover wants. With none, the tree is asked,
+     and EVERY removable capability is proved. */
+  let ids
+  if (args.id === undefined) {
     const removable = removableCapabilities()
     if (removable.length === 0) {
       /* NOT A PASS. Every capability being unremovable is the thing this proof
          exists to notice — it means every leaf has grown a host import — and
          answering 0 here would retire the gate by accident. */
-      process.stderr.write(
+      err(
         'verify-without: no capability can be removed from this tree — every one is required by another or imported by a host outside a composition root\n',
       )
       return 2
     }
-    id = removable[0]
-    process.stdout.write(`verify-without: chose ${JSON.stringify(id)} of ${removable.length} removable (${removable.join(', ')})\n`)
+    ids = removable
+    /* ⚠️ **THIS TOOK `removable[0]` AND PRINTED THE REST AS AN ASIDE** — so the
+       gate measured ONE THIRD of its subject, and the third it measured was the
+       one that could not fail. `removable` sorts, so `circle` was always the
+       choice, and `circle` is the only removable capability with no Rust crate.
+       Two gates inside the copy — `checkLedger` and `cargo.test.mjs` — assumed
+       a removal deletes one directory, which is true only for a capability
+       without a crate; `verify:without webhost` failed on both the first time
+       anybody ran it, on 2026-09-19, long after either could have been caught.
+
+       So all of them are proved. Roughly 140–170 s each here, and the honest
+       lever if that ever matters is a CI matrix over `removableCapabilities()`,
+       not measuring fewer of them. */
+    out(`verify-without: proving all ${removable.length} removable (${removable.join(', ')})\n`)
+  } else {
+    ids = [args.id]
   }
-  const { code } = verifyWithout(id, { keep: args.keep })
-  process.stdout.write(code === 0 ? `\n✓ verify-without: the tree passes without ${JSON.stringify(id)}\n` : `\n✗ verify-without: exit ${code}\n`)
-  return code
+  for (const id of ids) {
+    if (ids.length > 1) out(`\nverify-without: ── ${id} ──\n`)
+    const { code } = prove(id, { keep: args.keep })
+    if (code !== 0) {
+      /* STOPS AT THE FIRST FAILURE, and names it. Carrying on would spend ten
+         minutes producing a second copy of a failure that is almost always the
+         same defect — and the id that failed is what the reader needs, which a
+         combined exit code cannot carry. */
+      out(`\n✗ verify-without: exit ${code} without ${JSON.stringify(id)}\n`)
+      return code
+    }
+    out(`\n✓ verify-without: the tree passes without ${JSON.stringify(id)}\n`)
+  }
+  return 0
 }
 
 if (isProcessEntry(import.meta)) {
