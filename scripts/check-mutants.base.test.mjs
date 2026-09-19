@@ -22,6 +22,7 @@ import {
   sourceReaders,
   survivorsAtBase,
   survivorsIn,
+  unseenAtBase,
 } from './check-mutants.mjs'
 
 /**
@@ -152,7 +153,7 @@ function strykerReporting(...plans) {
     const settings = JSON.parse(await readFile(config, 'utf8'))
     const [subject] = settings.mutate
     const source = await readFile(subject, 'utf8')
-    const { survived = [], timedOut = [], hitLimit = [], errored = [], exit } = plans[seen.length] ?? {}
+    const { survived = [], timedOut = [], hitLimit = [], errored = [], statics = [], exit, ran } = plans[seen.length] ?? {}
     seen.push({
       subject,
       root,
@@ -175,8 +176,17 @@ function strykerReporting(...plans) {
          answering for nothing looks like, mutant by mutant. */
       return { status: errored.includes(at) ? 'RuntimeError' : 'Killed' }
     }
-    const mutants = (await mutantIdentitiesIn(subject)).map((one, at) => ({ ...one, id: String(at), ...statusOf(at) }))
-    await writeFile(path.join(path.dirname(config), REPORT), JSON.stringify({ files: { [subject]: { source, mutants } } }))
+    /* `static` as Stryker's own report spells it — only where a plan says. */
+    const mutants = (await mutantIdentitiesIn(subject)).map((one, at) => ({
+      ...one,
+      id: String(at),
+      ...statusOf(at),
+      ...(statics.includes(at) ? { static: true } : {}),
+    }))
+    /* The test files the run executed, as Stryker's own report names them — only
+       where a plan says, because a report that names none is a case too. */
+    const testFiles = ran === undefined ? {} : { testFiles: Object.fromEntries(ran.map((name) => [name, { tests: [] }])) }
+    await writeFile(path.join(path.dirname(config), REPORT), JSON.stringify({ files: { [subject]: { source, mutants } }, ...testFiles }))
     return exit ?? (survived.length === 0 && timedOut.length === 0)
   }
   return { stryker, seen }
@@ -211,6 +221,9 @@ const measurement = (fields = {}) => ({
   source: A_SOURCE,
   first: null,
   settle: null,
+  /* What the merge base could not weigh — see `changedSinceBase` and `unseenAtBase`. */
+  excluded: [],
+  unseen: [],
   ...fields,
 })
 
@@ -611,6 +624,33 @@ describe('the child that does the measuring, and what it is refused for', () => 
           JSON.stringify(measurement({ outcome: 'killed', settle: { exitedCleanly: true, report: [], durationMs: 1 } })),
           /its settle\.report is a list, which is not a report$/u,
         ],
+        /* ⚠️ **AND WHAT THE MERGE BASE COULD NOT WEIGH, WHICH `judgedAtBase` READS
+           FILES BY.** Each entry names a path that is joined to the checkout and
+           read, so one that could leave it is refused here, not followed there. */
+        [JSON.stringify(measurement({ outcome: 'killed', excluded: undefined })), /its excluded is missing, which is not a list$/u],
+        [JSON.stringify(measurement({ outcome: 'killed', unseen: {} })), /its unseen is an object, which is not a list$/u],
+        [
+          JSON.stringify(measurement({ outcome: 'killed', excluded: [{ path: '../outside.test.ts', sha256: 'e'.repeat(64) }] })),
+          /its excluded 1 is .+, which is not a test the merge base left out$/u,
+        ],
+        [
+          JSON.stringify(measurement({ outcome: 'killed', excluded: [{ path: 'src/reads.test.ts', sha256: 'short' }] })),
+          /its excluded 1 is .+, which is not a test the merge base left out$/u,
+        ],
+        ...['/abs/hidden.test.ts', 'C:/hidden.test.ts', 'src\\hidden.test.ts', 'src/../../hidden.test.ts', ''].map((named) => [
+          JSON.stringify(measurement({ outcome: 'killed', unseen: [{ path: named, sha256: 'f'.repeat(64), why: 'a route' }] })),
+          /its unseen 1 is .+, which is not a file on a route the merge base never ran$/u,
+        ]),
+        /* An unseen file carries why it is on the route, because that is the
+           sentence the refusal is made of — see `judgedAtBase`. */
+        ...[undefined, '', 5].map((said) => [
+          JSON.stringify(measurement({ outcome: 'killed', unseen: [{ path: 'src/hidden.test.ts', sha256: 'f'.repeat(64), why: said }] })),
+          /its unseen 1 is .+, which is not a file on a route the merge base never ran$/u,
+        ]),
+        ...[null, 'src/hidden.test.ts', { path: 5, sha256: 'f'.repeat(64), why: 'a route' }].map((entry) => [
+          JSON.stringify(measurement({ outcome: 'killed', unseen: [entry] })),
+          /its unseen 1 is .+, which is not a file on a route the merge base never ran$/u,
+        ]),
       ]
 
       for (const [bytes, why] of written) {
@@ -619,6 +659,23 @@ describe('the child that does the measuring, and what it is refused for', () => 
         expect(refusal.reason, bytes).toBe('child')
         expect(refusal.message, bytes).toMatch(why)
       }
+    })
+  })
+
+  /* ⚠️ **WHAT THE MERGE BASE COULD NOT WEIGH WAS WRITTEN BY THE CHILD AND DROPPED
+     BY THE READER** until 2026-09-18, so `reading-changed` could never fire in a
+     real sweep while both of its cases passed: they hand `judgedAtBase` a
+     measurement directly. This one comes through the reader. */
+  it('carries what the merge base could not weigh from the child’s record into its answer', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      const { at } = repository(root)
+      const excluded = [{ path: 'src/reads.test.ts', sha256: 'e'.repeat(64) }]
+      const unseen = [{ path: 'src/hidden.test.ts', sha256: 'f'.repeat(64), why: 'src/hidden.test.ts reaches a computed import()' }]
+
+      const { answer } = await measure(root, 'src/a.ts', at, { child: childWriting(() => ({ outcome: 'killed', excluded, unseen })).child })
+
+      expect(answer.excluded).toEqual(excluded)
+      expect(answer.unseen).toEqual(unseen)
     })
   })
 
@@ -713,6 +770,10 @@ describe('the child that does the measuring, and what it is refused for', () => 
         source: "export { grade } from './b'\n",
         first: null,
         settle: null,
+        /* Carried from the child's record, which is the whole of how they reach
+           `judgedAtBase` — see `measuredIn`, which used to drop `excluded`. */
+        excluded: [],
+        unseen: [],
       })
       expect(worktreesOf(root)).toEqual([])
     })
@@ -780,6 +841,52 @@ describe('the child that does the measuring, and what it is refused for', () => 
         scope: ['grade'],
       })
       expect(survivors.every((one) => one.file === 'src/a.ts' && one.from === 'src/a.ts')).toBe(true)
+      expect(worktreesOf(root)).toEqual([])
+    })
+  }, 300_000)
+
+  /**
+   * ⚠️ **AND WHAT VITEST NEVER RAN, AS THE REAL THING REPORTS IT.** The same
+   * project with a second test that reaches the subject only through a computed
+   * `import()`: Vitest's `related` filter cannot trace it, so the merge base never
+   * runs it, and what it would kill there is weighed by nobody. The report says
+   * which tests ran, the child records the one that did not, and the answer
+   * carries it — the whole route from Stryker to `judgedAtBase`, none of it
+   * stood in for.
+   */
+  it('records a test the merge base offered and Vitest never ran — a real Stryker, a real report', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      const hidden =
+        "import { expect, it } from 'vitest'\n\nit('grades a small number through a computed import', async () => {\n" +
+        "  const where = './a'\n  const { grade } = await import(where)\n  expect(grade(0)).toBe('small')\n})\n"
+      /* The test Vitest CAN trace holds a hidden load too, never called: it ran,
+         so what it could kill was counted, and nothing about it is recorded —
+         which is what reading the report, rather than assuming, decides. */
+      const traced = `${INSTALLED_PROJECT['src/a.test.ts']}\nexport const later = (where: string) => import(where)\n`
+      const { at } = repository(
+        root,
+        { ...INSTALLED_PROJECT, 'src/a.test.ts': traced, 'src/hidden.test.ts': hidden },
+        Object.keys(RUNNERS),
+      )
+      symlinkSync(THIS_INSTALL, path.join(root, 'node_modules'), 'junction')
+
+      const answer = await measureAtBase('src/a.ts', at, {
+        root,
+        install: () => {
+          throw new Error('two commits pinning the same bytes share an install')
+        },
+      })
+
+      /* Both were offered; Vitest ran the one it could trace. */
+      expect(Object.keys(answer.first.report.testFiles)).toEqual(['src/a.test.ts'])
+      expect(answer.unseen).toEqual([
+        {
+          path: 'src/hidden.test.ts',
+          sha256: digestOf(hidden),
+          why: 'src/hidden.test.ts reaches a computed import() in src/hidden.test.ts, which the merge base never ran',
+        },
+      ])
+      expect(answer.excluded).toEqual([])
       expect(worktreesOf(root)).toEqual([])
     })
   }, 300_000)
@@ -935,6 +1042,27 @@ describe('the dependencies the merge base’s own tests are run with', () => {
           'file, so what it owed there is unmeasured — and unmeasured is never permission',
       )
       expect(worktreesOf(root)).toEqual([])
+    })
+  })
+
+  /* At the very moment the time is spent, not a moment after: none left is none. */
+  it('refuses a merge base whose time is exactly spent, before starting anything', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      const { at } = repository(root)
+      let readings = 0
+      /* The start, and then exactly the whole allowance gone. */
+      const clock = () => ((readings += 1) === 1 ? 0 : 90 * 60_000)
+
+      const refusal = await refusedBy(() =>
+        measure(root, 'src/a.ts', at, {
+          clock,
+          child: () => {
+            throw new Error('a measurement with no time left is never started')
+          },
+        }),
+      )
+
+      expect(refusal.reason).toBe('expired')
     })
   })
 
@@ -1137,10 +1265,103 @@ describe('what the merge base’s run amounts to', () => {
       const { record } = await measuring(root, 'src/a.ts', { stryker: reporting.stryker })
 
       expect(reporting.seen).toHaveLength(2)
-      const { survivors } = await derived(root, record)
+      const { survivors, undecided } = await derived(root, record)
       expect(survivors.map((one) => one.identity.original)).toEqual(["'big'"])
+      /* A survivor, which is an answer — not a mutant it could not decide. */
+      expect(undecided).toEqual([])
       /* Both runs are what the file cost, because both were run on its account. */
       expect(record.durationMs).toBe(500)
+    })
+  })
+
+  /**
+   * ⚠️ **EVERY WAY A RECORD CAN FAIL TO BE WHAT IT SAYS, ONE FIELD AT A TIME**
+   * (2026-09-18). These refusals were killed in a sweep only by the real-Stryker
+   * case, which never feeds them a bad record — its "kills" did not reproduce by
+   * hand, and a sweep of this file billed them as surviving. So each is reached
+   * here the only way it can be: a real record, with one thing about it wrong.
+   */
+  it('refuses a record whose content, runs or reports are not what it says, each in its own words', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      repository(root)
+      const { record } = await measuring(root, 'src/a.ts', { stryker: strykerReporting({ survived: [BIG] }).stryker })
+      const [name] = Object.keys(record.first.report.files)
+      const ofOther = { ...record.first.report, files: { [name]: { ...record.first.report.files[name], source: 'export const other = 1\n' } } }
+      const OTHER = 'its source of src/a.ts is not the content the merge base hashed'
+
+      for (const source of [42, `${record.source}// and more\n`]) {
+        expect((await derived(root, { ...record, source })).problem, String(source)).toEqual({
+          reason: 'content',
+          why: 'carries a source that is not the content it says it measured',
+        })
+      }
+      expect((await derived(root, { ...record, first: null })).problem).toEqual({
+        reason: 'did-not-run',
+        why: 'says survived and carries no run at all, and a run nobody has is not a survivor that was already there',
+      })
+      expect((await derived(root, { ...record, first: { ...record.first, report: ofOther } })).problem).toEqual({
+        reason: 'mismatched',
+        why: `did not report on what it swept — ${OTHER}`,
+      })
+      expect((await derived(root, { ...record, settle: { exitedCleanly: true, durationMs: 1, report: ofOther } })).problem).toEqual({
+        reason: 'mismatched',
+        why: `did not report on what its settle run swept — ${OTHER}`,
+      })
+    })
+  })
+
+  /* A first run that reported on nothing, beside a settle run that found a
+     survivor: the verdict would rest on the second run alone. */
+  it('refuses a first run that reported on no file, though its settle run reported a survivor', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      repository(root)
+      const reporting = strykerReporting({ timedOut: [BIG], exit: false }, { survived: [BIG], exit: false })
+      const { record } = await measuring(root, 'src/a.ts', { stryker: reporting.stryker })
+
+      const { problem } = await derived(root, { ...record, first: { ...record.first, report: { files: {} } } })
+
+      expect(problem).toEqual({
+        reason: 'did-not-run',
+        why: 'says survived over a run that reported on no file, and a report of nothing is no measurement',
+      })
+    })
+  })
+
+  /* One mutant the merge base could not decide is named once, however many of
+     the reasons there are to name it: here it reached the hit limit in the first
+     run, and the settle run — brought on by another mutant's wall-clock
+     timeout — answered it differently. */
+  it('names a mutant it could not decide once, though two things say so', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      repository(root)
+      const reporting = strykerReporting({ hitLimit: [BIG], timedOut: [0], exit: false }, { survived: [BIG], exit: false })
+      const { record } = await measuring(root, 'src/a.ts', { stryker: reporting.stryker })
+
+      const { undecided } = await derived(root, record)
+
+      expect(reporting.seen).toHaveLength(2)
+      /* Only it: the other mutant timed out on the wall clock and its settle run
+         killed it plainly, which is an answer. */
+      expect(undecided.map((one) => [one.identity.original, one.why])).toEqual([
+        ["'big'", `its run reached the original’s hit limit at ${undecided[0]?.at}, which is a bound and not a test`],
+      ])
+    })
+  })
+
+  /* And the same where the second reason is that the report marks it static. */
+  it('names a static mutant it could not decide once, not again as static', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      repository(root)
+      const reporting = strykerReporting({ survived: [BIG], statics: [BIG], timedOut: [0], exit: false }, { exit: false })
+      const { record } = await measuring(root, 'src/a.ts', { stryker: reporting.stryker })
+
+      const { undecided } = await derived(root, record)
+
+      expect(reporting.seen).toHaveLength(2)
+      /* Named for what its two runs said, which is the reason found first. */
+      expect(undecided.map((one) => [one.identity.original, one.why])).toEqual([
+        ["'big'", `its two runs answered for the mutant at ${undecided[0]?.at} with Survived and then with Killed`],
+      ])
     })
   })
 
@@ -1532,7 +1753,9 @@ describe('what the merge base’s run amounts to', () => {
    * nothing there — which is what this asserts, through the config Stryker is
    * handed. What Stryker then RUNS is narrower: Vitest's `related` filter drops a
    * test that reaches the subject only through a computed import, so against a
-   * real Stryker the strong test here would not run. See `measuredHere`.
+   * real Stryker the strong test here would not run — and the merge base records
+   * it as unseen instead, which the real case in "the child that does the
+   * measuring" shows. See `unseenAtBase`.
    */
   it('measures a base against every test it has, though discovery found a weak one beside the computed import', async () => {
     await inScratch('mutants-base-', async (root) => {
@@ -1558,6 +1781,57 @@ describe('what the merge base’s run amounts to', () => {
       /* And nothing is claimed about HOW they reach it: they are run because
          discovery could not prove they do not, which is a different sentence. */
       expect(stdout).toContain(`  [1/1] ${path.join(root, 'src/a.ts')}\n`)
+    })
+  })
+
+  /* A base file with no mutant is answered without a run, and its record still
+     carries both lists — empty, because nothing was left out of a run that did
+     not happen. Asked in this process, since a child's mutants are not this
+     sweep's to see. */
+  it('carries empty lists of what it could not weigh for a base file with no mutant', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      repository(root, { 'src/a.ts': "export { grade } from './b'\n", 'src/b.ts': 'export const grade = 1\n' })
+
+      const { code, record } = await measuring(root, 'src/a.ts')
+
+      expect(code).toBe(0)
+      expect(record.outcome).toBe('no-mutants')
+      expect(record.excluded).toEqual([])
+      expect(record.unseen).toEqual([])
+    })
+  })
+
+  /* ⚠️ **WHAT VITEST NEVER RAN, READ FROM THE RUNS THAT HAPPENED.** Both tests
+     hold a hidden load; the report of the first run names only the one Vitest
+     could trace, so only the other is recorded. A settle run that reached the
+     second counts too — a test any run of the file reached ran. */
+  it('records the offered tests no run of the file reached, and none that any run did', async () => {
+    const files = {
+      'src/a.test.ts': "import { grade } from './a'\nit('grades', () => grade(2))\nexport const later = (where: string) => import(where)\n",
+      'src/hidden.test.ts': "const where = './a'\nit('grades', async () => (await import(where)).grade(0))\n",
+    }
+    await inScratch('mutants-base-', async (root) => {
+      repository(root, files)
+
+      const { code, record } = await measuring(root, 'src/a.ts', { stryker: strykerReporting({ ran: ['src/a.test.ts'] }).stryker })
+
+      expect(code).toBe(0)
+      expect(record.unseen).toEqual([
+        {
+          path: 'src/hidden.test.ts',
+          sha256: digestOf(files['src/hidden.test.ts']),
+          why: 'src/hidden.test.ts reaches a computed import() in src/hidden.test.ts, which the merge base never ran',
+        },
+      ])
+    })
+    await inScratch('mutants-base-', async (root) => {
+      repository(root, files)
+      const settled = strykerReporting({ timedOut: [BIG], ran: ['src/a.test.ts'] }, { ran: ['src/a.test.ts', 'src/hidden.test.ts'] })
+
+      const { record } = await measuring(root, 'src/a.ts', { stryker: settled.stryker })
+
+      expect(settled.seen).toHaveLength(2)
+      expect(record.unseen).toEqual([])
     })
   })
 
@@ -1893,6 +2167,175 @@ describe('the survivors a run leaves', () => {
    THE RUN**, and `pathsRead` follows a name across a whole FILE rather than one
    scope. So a path bound to a name here that also reaches a read would leave the
    gate out of its own sweep — silently, and looking exactly like a pass. */
+/**
+ * ⚠️ **WHAT THE MERGE BASE WAS OFFERED IS NOT WHAT VITEST RAN.** Stryker's runner
+ * turns on Vitest's `related` filter, which keeps a test only where its import
+ * graph reaches the subject — and cannot follow a computed `import()`, a plugin's
+ * `virtual:` module, or a path under `node_modules`. A test dropped that way is
+ * missing from both sides, like an excluded reader, so what is recorded is the
+ * route that makes it unprovable: the test, every file on the way, and the file
+ * holding the load.
+ */
+describe('what the merge base offered and Vitest never ran', () => {
+  /** A Stryker report naming the test files it ran, and nothing else of one. */
+  const ran = (...names) => ({ testFiles: Object.fromEntries(names.map((name) => [name, { tests: [] }])) })
+  const offered = (root, ...names) => names.map((name) => path.join(root, name))
+  const why = (test, how, site) => `${test} reaches ${how} in ${site}, which the merge base never ran`
+
+  it('records a test it never ran whose route reaches a hidden load — the test, the way there and the load — and nothing it ran', () => {
+    inScratch('mutants-unseen-', (root) => {
+      const files = {
+        'src/a.ts': 'export const a = 1\n',
+        'src/a.test.ts': "import { a } from './a'\nimport { boot } from './boot'\n",
+        'src/hidden.test.ts': "import { mid } from './mid'\n",
+        'src/mid.ts': "export { boot as mid } from './boot'\n",
+        'src/boot.ts': 'export const boot = (where: string) => import(where)\n',
+        'src/other.test.ts': "import { b } from './b'\n",
+        'src/b.ts': 'export const b = 2\n',
+      }
+      plant(root, files)
+
+      const unseen = unseenAtBase(offered(root, 'src/a.test.ts', 'src/hidden.test.ts', 'src/other.test.ts'), [ran('src/a.test.ts')], root)
+
+      /* `a.test.ts` holds the same load, and ran — so what it could kill was
+         counted. `other.test.ts` never ran and reaches nothing hidden, so it is
+         proven unrelated by the graph itself. */
+      const said = why('src/hidden.test.ts', 'a computed import()', 'src/boot.ts')
+      expect(unseen).toEqual([
+        { path: 'src/boot.ts', sha256: digestOf(files['src/boot.ts']), why: said },
+        { path: 'src/hidden.test.ts', sha256: digestOf(files['src/hidden.test.ts']), why: said },
+        { path: 'src/mid.ts', sha256: digestOf(files['src/mid.ts']), why: said },
+      ])
+    })
+  })
+
+  /* One file on two routes is recorded once, with the first reason given for it
+     — and a cycle on the way, or an import that resolves to nothing, ends the
+     walk rather than the run. */
+  it('records a file two routes share once, and walks a cycle and an unresolvable import without looping', () => {
+    inScratch('mutants-unseen-', (root) => {
+      const files = {
+        'src/one.test.ts': "import { boot } from './boot'\nimport './missing'\n",
+        'src/two.test.ts': "import { boot } from './boot'\n",
+        'src/boot.ts': "import { back } from './back'\nexport const boot = (where: string) => import(where)\n",
+        'src/back.ts': "import { boot } from './boot'\nexport const back = boot\n",
+      }
+      plant(root, files)
+
+      const unseen = unseenAtBase(offered(root, 'src/one.test.ts', 'src/two.test.ts'), [ran()], root)
+
+      expect(unseen).toEqual([
+        { path: 'src/boot.ts', sha256: digestOf(files['src/boot.ts']), why: why('src/one.test.ts', 'a computed import()', 'src/boot.ts') },
+        { path: 'src/one.test.ts', sha256: digestOf(files['src/one.test.ts']), why: why('src/one.test.ts', 'a computed import()', 'src/boot.ts') },
+        { path: 'src/two.test.ts', sha256: digestOf(files['src/two.test.ts']), why: why('src/two.test.ts', 'a computed import()', 'src/boot.ts') },
+      ])
+    })
+  })
+
+  /* Where two routes reach the load, the first one found is the route: the walk
+     goes breadth first and a file keeps the route that reached it, so a longer
+     way round met later changes nothing already decided. */
+  it('keeps the route that first reached a file, though a longer one reaches it later', () => {
+    inScratch('mutants-unseen-', (root) => {
+      const files = {
+        'src/diamond.test.ts': "import './left'\nimport './right'\n",
+        'src/left.ts': "import './join'\n",
+        'src/right.ts': "import './join'\n",
+        'src/join.ts': 'export const run = (where: string) => import(where)\n',
+      }
+      plant(root, files)
+
+      const unseen = unseenAtBase(offered(root, 'src/diamond.test.ts'), [ran()], root)
+
+      const said = why('src/diamond.test.ts', 'a computed import()', 'src/join.ts')
+      expect(unseen.map(({ path: named }) => named)).toEqual(['src/diamond.test.ts', 'src/join.ts', 'src/left.ts'])
+      expect(unseen.every((entry) => entry.why === said)).toBe(true)
+    })
+  })
+
+  it('takes an import of no installed package as hidden — an alias, a virtual module — and not a builtin or a package that is there', () => {
+    inScratch('mutants-unseen-', (root) => {
+      const files = {
+        'node_modules/react/package.json': '{"name":"react"}\n',
+        'node_modules/@scope/kit/package.json': '{"name":"@scope/kit"}\n',
+        'node_modules/stray/README.md': 'a directory, and no package\n',
+        'src/plain.test.ts': "import 'react'\nimport 'react/jsx-runtime'\nimport '@scope/kit/deep'\nimport 'node:fs'\nimport 'path'\n",
+        'src/virtual.test.ts': "import 'virtual:paper-composition'\n",
+        'src/alias.test.ts': "import '@/kernel/core'\n",
+        'src/stray.test.ts': "import 'stray'\n",
+      }
+      plant(root, files)
+
+      const unseen = unseenAtBase(
+        offered(root, 'src/plain.test.ts', 'src/virtual.test.ts', 'src/alias.test.ts', 'src/stray.test.ts'),
+        [ran()],
+        root,
+      )
+
+      expect(unseen).toEqual([
+        {
+          path: 'src/alias.test.ts',
+          sha256: digestOf(files['src/alias.test.ts']),
+          why: why('src/alias.test.ts', "import '@/kernel/core', which is no installed package", 'src/alias.test.ts'),
+        },
+        /* A directory is a package by its manifest, and this one has none. */
+        {
+          path: 'src/stray.test.ts',
+          sha256: digestOf(files['src/stray.test.ts']),
+          why: why('src/stray.test.ts', "import 'stray', which is no installed package", 'src/stray.test.ts'),
+        },
+        {
+          path: 'src/virtual.test.ts',
+          sha256: digestOf(files['src/virtual.test.ts']),
+          why: why('src/virtual.test.ts', "import 'virtual:paper-composition', which is no installed package", 'src/virtual.test.ts'),
+        },
+      ])
+    })
+  })
+
+  it('takes a relative import that lands under node_modules as hidden, because Vitest skips every such path', () => {
+    inScratch('mutants-unseen-', (root) => {
+      const files = { 'vendor/node_modules/lib.ts': 'export const lib = 1\n', 'src/vendored.test.ts': "import '../vendor/node_modules/lib'\n" }
+      plant(root, files)
+
+      const [entry] = unseenAtBase(offered(root, 'src/vendored.test.ts'), [ran()], root)
+
+      expect(entry).toEqual({
+        path: 'src/vendored.test.ts',
+        sha256: digestOf(files['src/vendored.test.ts']),
+        why: why('src/vendored.test.ts', "an import under node_modules, '../vendor/node_modules/lib'", 'src/vendored.test.ts'),
+      })
+    })
+  })
+
+  /* A report that names no test file leaves every offered test unrun — the
+     reading that records more, never less. */
+  it('counts every offered test as unrun when no report names what it ran', () => {
+    inScratch('mutants-unseen-', (root) => {
+      const files = { 'src/hidden.test.ts': 'await import(`./${name}`)\n' }
+      plant(root, files)
+
+      for (const reports of [[], [null, undefined], [{}], [{ testFiles: null }]]) {
+        expect(unseenAtBase(offered(root, 'src/hidden.test.ts'), reports, root), JSON.stringify(reports)).toEqual([
+          { path: 'src/hidden.test.ts', sha256: digestOf(files['src/hidden.test.ts']), why: why('src/hidden.test.ts', 'a computed import()', 'src/hidden.test.ts') },
+        ])
+      }
+    })
+  })
+
+  /* Every run the file had counts: a test the settle run reached ran. */
+  it('takes a test named by any of the reports as run, and one named by its real path as the same test', () => {
+    inScratch('mutants-unseen-', (root) => {
+      plant(root, { 'src/one.test.ts': 'await import(where)\n', 'src/two.test.ts': 'await import(where)\n' })
+      const real = realpathSync.native(root)
+
+      expect(
+        unseenAtBase(offered(root, 'src/one.test.ts', 'src/two.test.ts'), [ran('src/one.test.ts'), ran(path.join(real, 'src', 'two.test.ts'))], root),
+      ).toEqual([])
+    })
+  })
+})
+
 describe('this file is no reader of the gate’s own source', () => {
   const readersOf = (...args) => [...sourceReaders(...args).keys()]
 

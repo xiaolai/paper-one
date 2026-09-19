@@ -18,7 +18,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { createRequire } from 'node:module'
+import { createRequire, isBuiltin } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -27,7 +27,7 @@ import ts from 'typescript'
 import { loadConfigFromFile } from 'vite'
 import { configDefaults } from 'vitest/config'
 import { isProcessEntry } from './lib/entry.mjs'
-import { runtimeSpecifiers } from './lib/specifiers.mjs'
+import { hiddenLoads, runtimeSpecifiers } from './lib/specifiers.mjs'
 
 /**
  * `pnpm mutants` — a test that cannot fail is a red gate.
@@ -1264,7 +1264,16 @@ export async function mutantIdentitiesIn(file) {
  * and the aggregate all run in this checkout and are unchanged.
  */
 export async function identitiesOfSource(name, source) {
-  const core = createRequire(path.resolve('package.json')).resolve('@stryker-mutator/core')
+  /* The file the require is anchored at, on a line of its own so the directive
+     below covers it alone. Anchored instead at the directory — `""` — resolution
+     starts one level up, which outside a sandbox finds nothing and fails loudly;
+     but every mutant run happens INSIDE Stryker's sandbox, which sits inside the
+     checkout, so one level up still reaches the checkout's own install and no
+     run under Stryker can tell the two apart (a sweep left it surviving,
+     2026-09-18; the merge base's apparent kill of it was not reproducible). */
+  // Stryker disable next-line StringLiteral: indistinguishable inside a sandbox that sits in the checkout — see above
+  const anchor = path.resolve('package.json')
+  const core = createRequire(anchor).resolve('@stryker-mutator/core')
   const { Instrumenter } = await import(pathToFileURL(createRequire(core).resolve('@stryker-mutator/instrumenter')).href)
   const { mutants } = await new Instrumenter(QUIET).instrument(
     [{ name: path.resolve(name), mutate: true, content: source }],
@@ -2811,6 +2820,11 @@ async function measuredIn(at, { subject, baseCommit, root, install, child, temp,
     )
   }
   if (record.refusal !== null) throw new BaseRefusal(record.refusal.reason, record.refusal.message)
+  /* ⚠️ **`excluded` WAS WRITTEN BY THE CHILD AND DROPPED HERE** (found
+     2026-09-18). This copied the record field by field and left it out, so
+     `judgedAtBase` always saw an empty list and `reading-changed` could never
+     fire in a real sweep — while both of its cases passed, because they hand
+     `judgedAtBase` a measurement directly and never come through this reader. */
   return {
     install: supplied,
     outcome: record.outcome,
@@ -2819,6 +2833,8 @@ async function measuredIn(at, { subject, baseCommit, root, install, child, temp,
     source: record.source,
     first: record.first,
     settle: record.settle,
+    excluded: record.excluded,
+    unseen: record.unseen,
   }
 }
 
@@ -2959,12 +2975,12 @@ async function measureSweep({ measure: subject, into }, world) {
  * probe with that as its only test found no test at all, and with
  * `vitest: { related: false }` the same test ran and killed four mutants. So the
  * computed-import case above is still decided by an import graph — Vitest's
- * rather than this gate's — and the hole is narrowed, not closed. Turning the
- * filter off would run the merge base's whole suite in every base dry run, the
- * gate's own tests that start Stryker themselves among them: a cost nobody has
- * measured, and not one to take by default. No test in this tree reaches code
- * by a computed import today; the fixture in `check-mutants.base.test.mjs` is
- * the only one.
+ * rather than this gate's. Turning the filter off is not the way out: it runs
+ * the whole suite in worker threads, and the first test that calls
+ * `process.chdir()` ends the dry run (measured, 20 s in). So what Vitest drops
+ * is recorded instead — every offered test it never ran whose route reaches a
+ * load no graph can follow, by content — and `judgedAtBase` authorises nothing
+ * once a file on such a route has moved (`unseen-changed`). See `unseenAtBase`.
  *
  * It is sound in one direction only, which is why it is the BASE side's rule:
  * more tests there can only KILL more, which can only leave less to be excused
@@ -3024,7 +3040,7 @@ async function measuredHere(subject, world, { settling = true } = {}) {
   /* Nothing to kill, so nothing survived: answered without a run, and without
      asking which tests reach it, because no answer to that could change this
      one. */
-  if (identities.length === 0) return { outcome: 'no-mutants', durationMs: 0, sha256, source, first: null, settle: null, excluded: [] }
+  if (identities.length === 0) return { outcome: 'no-mutants', durationMs: 0, sha256, source, first: null, settle: null, excluded: [], unseen: [] }
   const found = discover([at], { root, files }, reachingAtBase)
   if (found.get(at).tests.length === 0) {
     throw new BaseRefusal(
@@ -3061,6 +3077,10 @@ async function measuredHere(subject, world, { settling = true } = {}) {
     throw new BaseRefusal('mismatched', `check-mutants: the merge base’s run of ${subject} did not report on what it swept — ${mismatch[1]}`)
   }
   const first = { exitedCleanly: scored.exitedCleanly, report: scored.report, durationMs: scored.durationMs }
+  /* And what Vitest never ran of what it was offered, where nothing proves it
+     unrelated — the same kind of evidence as `excluded`, missing from both sides
+     for a different reason. See `unseenAtBase`. */
+  const unseen = unseenAtBase(found.get(at).tests, [scored.report, scored.settle?.report], root)
   const measured = {
     /* ⚠️ **WHAT THE RUNS MADE OF THE FILE, NOT WHAT A SWEEP HERE WOULD REPORT.**
        `scored.outcome` is `timed-out` for a repeat and `did-not-run` for a mutant
@@ -3075,6 +3095,7 @@ async function measuredHere(subject, world, { settling = true } = {}) {
     first,
     settle: scored.settle,
     excluded,
+    unseen,
   }
   /* The evidence is held to what it must answer for before it leaves here, so a
      measurement that could not be read back is refused where it was made rather
@@ -3182,12 +3203,124 @@ function survivorOf(mutant, named, from, parsed) {
  * cannot have killed anything at a commit that did not have it.
  */
 function changedSinceBase(excluded, root) {
-  for (const { path: named, sha256 } of excluded) {
+  for (const { path: named, sha256, why } of excluded) {
     const here = path.join(root, named)
-    if (!existsSync(here)) return { path: named, how: 'is gone' }
-    if (digestOf(readFileSync(here)) !== sha256) return { path: named, how: 'has changed' }
+    if (!existsSync(here)) return { path: named, how: 'is gone', why }
+    if (digestOf(readFileSync(here)) !== sha256) return { path: named, how: 'has changed', why }
   }
   return null
+}
+
+/**
+ * What the merge base offered and Vitest never ran, where nothing can prove the
+ * test unrelated: each such test, every file on its import route to a load no
+ * static graph can follow, and the file holding that load — by content, so that
+ * `judgedAtBase` can refuse once one of them has moved.
+ *
+ * ⚠️ **VITEST RUNS WHAT IT CAN TRACE, NOT WHAT IT IS OFFERED** (measured
+ * 2026-09-18). Stryker's runner turns on Vitest's `related` filter, which keeps
+ * only the offered files whose import graph reaches the subject. That graph
+ * cannot follow a computed `import(where)` — a probe with such a test as its only
+ * test found none — nor, read in Vitest 4.1.11's `filterTestsBySource`, a module
+ * that is not a file on disk (a plugin's `virtual:` one) or a path containing
+ * `node_modules`. Turning the filter off is not the way out: the base is offered
+ * every test it has, Stryker runs them in worker threads, and the first test that
+ * calls `process.chdir()` ends the dry run — measured the same day, 20 s in.
+ *
+ * So a killer on such a route is missing from BOTH sides, exactly as a test that
+ * reads the subject's source is (`excluded`), and the answer is the same one:
+ * like with like while it is unchanged, and nothing authorised once the change
+ * has touched it. What is recorded is the route as well as the test, because a
+ * helper that stops making the hidden load weakens the test as surely as an edit
+ * to the test does. What the load then REACHES is unknowable by construction —
+ * that is what makes it hidden — and is the one part of the evidence this cannot
+ * hold.
+ *
+ * Which tests ran is read from Stryker's own report, `testFiles`. A report that
+ * names none leaves every offered test unrun, which records more rather than
+ * less.
+ */
+export function unseenAtBase(offered, reports, root, { imports = remembered(importsOf), loads = remembered(hiddenIn(root)) } = {}) {
+  const ran = new Set()
+  for (const report of reports) {
+    for (const name of Object.keys(report?.testFiles ?? {})) {
+      ran.add(slashed(path.isAbsolute(name) ? path.relative(realPathOf(root), name) : path.normalize(name)))
+    }
+  }
+  const entries = new Map()
+  const record = (file, why) => {
+    const named = slashed(path.relative(root, file))
+    if (!entries.has(named)) entries.set(named, { path: named, sha256: digestOf(readFileSync(file)), why })
+  }
+  for (const test of offered) {
+    const named = slashed(path.relative(root, test))
+    if (ran.has(named)) continue
+    for (const { route, how } of hiddenRoutes(test, imports, loads)) {
+      const site = slashed(path.relative(root, route.at(-1)))
+      for (const file of route) record(file, `${named} reaches ${how} in ${site}, which the merge base never ran`)
+    }
+  }
+  /* In code-unit order, which no locale decides. */
+  return [...entries.keys()].sort().map((named) => entries.get(named))
+}
+
+/**
+ * Every load on `test`'s import route that no static graph can follow, each with
+ * the route that reaches it — `test` first, the file holding the load last. The
+ * shortest route to each file is the one kept: while it is unchanged the load is
+ * still reached, which is all the record needs to know.
+ */
+function hiddenRoutes(test, imports, loads) {
+  const found = []
+  /* ⚠️ **THE MAP IS THE WALK, SO NO MUTANT OF IT CAN HANG** (2026-09-18). A
+     queue with a parent map and a loop reading routes back through it had four
+     mutants that looped for ever — a dropped cycle guard, a start with no entry —
+     which a sweep can only time out on, never kill. A Map is iterated in
+     insertion order and visits what is added while it is iterated, and setting a
+     key it already has adds nothing, so every walk ends; each file keeps the
+     route that first reached it. */
+  const routes = new Map([[path.resolve(test), [path.resolve(test)]]])
+  for (const [file, route] of routes) {
+    for (const how of loads(file)) found.push({ route, how })
+    for (const next of imports(file).map((target) => path.resolve(target))) {
+      if (!routes.has(next)) routes.set(next, [...route, next])
+    }
+  }
+  return found
+}
+
+/**
+ * What one module loads that no static graph can follow, in a checkout at `root`:
+ * `hiddenLoads`, plus an import that resolves to no installed package — an alias,
+ * a plugin's `virtual:` module, a package's own `#` import, a root-absolute path —
+ * and a relative one that lands under `node_modules`, which Vitest's walk skips.
+ */
+function hiddenIn(root) {
+  return (file) => {
+    const source = readFileSync(file, 'utf8')
+    const found = hiddenLoads(source, file)
+    for (const specifier of runtimeSpecifiers(source, file)) {
+      if (specifier.startsWith('.')) {
+        const target = resolveRelative(file, specifier)
+        if (target !== null && target.split(path.sep).includes('node_modules')) found.push(`an import under node_modules, '${specifier}'`)
+      } else if (!isBuiltin(specifier) && !isInstalled(specifier, root)) {
+        found.push(`import '${specifier}', which is no installed package`)
+      }
+    }
+    return found
+  }
+}
+
+/**
+ * Whether a bare specifier names a package installed at `root` — `@scope/name` or
+ * `name`, before any subpath — by its manifest, which is what makes a directory a
+ * package. A root-absolute path or a `#` import names none, and needs no case of
+ * its own: no `node_modules/<name>/package.json` is spelled by either.
+ */
+function isInstalled(specifier, root) {
+  const parts = specifier.split('/')
+  const name = specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+  return existsSync(path.join(root, 'node_modules', name, 'package.json'))
 }
 
 /**
@@ -3289,7 +3422,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
   if (origin === null) return null
   const here = survivorsFound(subject, named, origin.path, reports)
   // Stryker disable next-line ArrayDeclaration: a refusal carries no measurement, so nothing reads this list — it is here so every evidence has one shape
-  const empty = { origin, outcome: null, install: null, durationMs: 0, sha256: null, source: null, first: null, settle: null, authorised: 0, added: [], excluded: [] }
+  const empty = { origin, outcome: null, install: null, durationMs: 0, sha256: null, source: null, first: null, settle: null, authorised: 0, added: [], excluded: [], unseen: [] }
   const refused = (reason, message) => ({ evidence: { ...empty, refusal: { reason, message } }, paired: null })
   let measured
   try {
@@ -3315,6 +3448,20 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
       `check-mutants: ${moved.path} reads ${origin.path}'s own source, so neither sweep could run it — and it ${moved.how} ` +
         'since the merge base, which is evidence this comparison cannot weigh. Nothing in this file is authorised by a base ' +
         'whose excluded test is not the one here: kill the mutants it used to, or restore it.',
+    )
+  }
+  /* ⚠️ **AND THE SAME FOR A TEST VITEST NEVER RAN.** A test on a route no static
+     graph follows was offered at the merge base and dropped by Vitest's
+     `related` filter there, as it is here — missing from both sides, exactly as
+     an excluded reader is, and for the same reason harmless only while nothing on
+     that route has moved. See `unseenAtBase`. */
+  const unseen = changedSinceBase(evidence.unseen, world.root)
+  if (unseen !== null) {
+    return refused(
+      'unseen-changed',
+      `check-mutants: ${unseen.path} ${unseen.how} since the merge base — ${unseen.why}. A killer on that route was never run ` +
+        `on either side, so nothing in ${origin.path} is authorised by a base whose route is not the one here: kill the ` +
+        'mutants with a test Vitest can trace to the file, or leave the route as it was.',
     )
   }
   /* Read back exactly as the aggregate will read it, and against the content the
@@ -3537,8 +3684,9 @@ export async function survivorsAtBase(evidence, { at, named, frozen }) {
  */
 function alsoStatic(unknown, entry) {
   const already = new Set(unknown.map(({ mutant }) => keyOf(mutant)))
+  /* Every entry is a mutant: `survivorsAtBase`, the only caller, reaches here only
+     after `reportUnlike` has matched each one to a mutant this gate counted. */
   const statics = entry.mutants
-    .filter(isRecord)
     .filter((mutant) => mutant.static === true && SURVIVALS.has(mutant.status) && !already.has(keyOf(mutant)))
     .map((mutant) => ({
       mutant,
@@ -3665,16 +3813,19 @@ function undecidedAtBase(first, settle) {
   for (const mutant of detected) {
     found.push({ mutant, why: `its run reached the original’s hit limit at ${placeOf(mutant)}, which is a bound and not a test` })
   }
-  const already = new Set(found.map(({ mutant }) => keyOf(mutant)))
+  /* Every entry is a mutant — see `alsoStatic`, which is reached by the same road. */
   for (const mutant of first.mutants) {
-    if (!isRecord(mutant)) continue
     const again = answers.get(keyOf(mutant))
     if (again === undefined) continue
-    if (mutant.status === 'Timeout' && timeoutKindOf(mutant.statusReason) !== 'hit-limit') continue
+    /* ⚠️ **A TIMEOUT OF EITHER KIND IS ALREADY ANSWERED FOR ABOVE**, and every
+       mutant in `found` is one: a wall-clock timeout by what its settle run said,
+       a hit-limit one as the bound it is, whatever the settle run said. So
+       skipping them here is also what names each mutant once — which a set of
+       what was found used to do, and which after this line could never match
+       (2026-09-18: both it and a test of the timeout's KIND here were mutants no
+       test could kill). */
+    if (mutant.status === 'Timeout') continue
     if (SURVIVALS.has(mutant.status) === SURVIVALS.has(again.status)) continue
-    /* Named once: a first-run hit limit is already here as the bound it is, and
-       naming it twice would put one identity in the list twice. */
-    if (already.has(keyOf(mutant))) continue
     found.push({
       mutant,
       why: `its two runs answered for the mutant at ${placeOf(mutant)} with ${mutant.status} and then with ${again.status}`,
@@ -3846,7 +3997,40 @@ function measurementProblem(record) {
 function measuredProblem(record, whose) {
   if (!isDigest(record.sha256)) return `${whose}sha256 is ${shown(record.sha256)}, which is not a digest`
   if (typeof record.source !== 'string') return `${whose}source is ${shown(record.source)}, which is not the content it swept`
-  return runProblem(record.first, whose, 'first') ?? runProblem(record.settle, whose, 'settle')
+  return (
+    runProblem(record.first, whose, 'first') ??
+    runProblem(record.settle, whose, 'settle') ??
+    unweighedProblem(record.excluded, `${whose}excluded`, 'a test the merge base left out') ??
+    unweighedProblem(record.unseen, `${whose}unseen`, 'a file on a route the merge base never ran', true)
+  )
+}
+
+/**
+ * What is wrong with a list of files the merge base could not weigh — `excluded`
+ * or `unseen` — or `null` when nothing is.
+ *
+ * Each names a file `changedSinceBase` will read, by a path joined to the
+ * checkout, so a path that could leave it is refused here rather than followed
+ * there: relative, `/`-separated, and with no `..` in it — the same rule every
+ * path given to this gate is held to.
+ */
+function unweighedProblem(list, field, what, explained = false) {
+  if (!Array.isArray(list)) return `${field} is ${shown(list)}, which is not a list`
+  for (const [at, one] of list.entries()) {
+    const said = !explained || (typeof one?.why === 'string' && one.why !== '')
+    if (!isRecord(one) || !isCheckoutPath(one.path) || !isDigest(one.sha256) || !said) {
+      return `${field} ${at + 1} is ${shown(one)}, which is not ${what}`
+    }
+  }
+  return null
+}
+
+/** A path inside a checkout as a record spells one: relative, `/`-separated, and never climbing out. */
+function isCheckoutPath(named) {
+  if (typeof named !== 'string' || named === '' || named.includes('\\') || path.posix.isAbsolute(named) || path.win32.isAbsolute(named)) {
+    return false
+  }
+  return !named.split('/').includes('..')
 }
 
 /** A survivor as `survivorOf` writes one: a file, and the identity a pairing is made over. */

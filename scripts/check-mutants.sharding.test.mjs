@@ -949,6 +949,7 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
     added: [],
     /* What the merge base could not run, by content — see `changedSinceBase`. */
     excluded: [],
+    unseen: [],
     refusal: null,
     ...fields,
   })
@@ -974,6 +975,7 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
     added: [],
     /* One shape for every evidence, measured or refused — see `judgedAtBase`. */
     excluded: [],
+    unseen: [],
     refusal,
   })
   /** Every subject is its own file at the merge base. */
@@ -1065,6 +1067,7 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
         durationMs: 900,
         /* This stand-in measured nothing it had to leave out — see `changedSinceBase`. */
         excluded: [],
+        unseen: [],
         sha256: A_SHA,
         source: A_SOURCE,
         first: atBase,

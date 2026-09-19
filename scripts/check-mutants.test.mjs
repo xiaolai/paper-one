@@ -4294,6 +4294,48 @@ describe('a survivor measured against the merge base', () => {
     expect(result.stdout).toContain('1 of 1 survivor(s) were there too')
   })
 
+  /* ⚠️ **AND THE SAME FOR A TEST VITEST NEVER RAN** (2026-09-18). One whose route
+     reaches a load no import graph can follow is dropped by Vitest's `related`
+     filter at the merge base and here alike — missing from both sides, as a
+     reader is — so the base carries that route by content, and authorises
+     nothing once a file on it has moved. */
+  const UNSEEN = 'src/a.test.mjs reaches a computed import() in src/a.test.mjs, which the merge base never ran'
+
+  it('authorises nothing when a file on a route the merge base never ran has changed or gone', async () => {
+    for (const [sha256, named, how] of [
+      ['f'.repeat(64), 'src/a.test.mjs', 'has changed'],
+      [hashOf("import './a'\n"), 'src/gone.test.mjs', 'is gone'],
+    ]) {
+      const result = await sweeping({
+        measure: async (subject, _commit, asked) => ({
+          ...(await measuredAt(asked.root, subject)),
+          unseen: [{ path: named, sha256, why: UNSEEN }],
+        }),
+      })
+
+      expect(result.code, how).toBe(1)
+      expect(result.stdout, how).toContain('it could not be measured (unseen-changed)')
+      expect(result.stdout, how).toContain(
+        `check-mutants: ${named} ${how} since the merge base — ${UNSEEN}. A killer on that route was never run on either side, ` +
+          'so nothing in src/a.ts is authorised by a base whose route is not the one here: kill the mutants with a test Vitest ' +
+          'can trace to the file, or leave the route as it was.',
+      )
+    }
+  })
+
+  it('authorises as usual when every file on a route the merge base never ran is unchanged', async () => {
+    const result = await sweeping({
+      measure: async (named, _commit, asked) => ({
+        ...(await measuredAt(asked.root, named)),
+        unseen: [{ path: 'src/a.test.mjs', sha256: hashOf("import './a'\n"), why: UNSEEN }],
+      }),
+    })
+
+    expect(result.stderr).toBe('')
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('1 of 1 survivor(s) were there too')
+  })
+
   /* ⚠️ **A FALSE SURVIVOR AT THE BASE HAD BECOME PERMISSION** — a second
      opinion's fifth round, 2026-09-17. Stryker's vitest runner reports a mutant
      that throws while the module is IMPORTED as `Survived`, because a suite that
