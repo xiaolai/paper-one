@@ -102,6 +102,23 @@ describe('build output never reaches the repository', () => {
     if (process.env[DELETED_ENV] !== undefined && inside !== 'true') {
       context.skip("the deletion proof's copy has no .git, so git cannot say what this repository ignores; the real tree's pnpm verify runs this")
     }
+    /* ⚠️ **AND NOT INSIDE A COPY GIT IGNORES WHOLESALE, WHICH A STRYKER SANDBOX
+       IS.** The mutation gate copies the tree into `.stryker-tmp/sandbox-N/`,
+       which is inside the checkout and gitignored — so git DOES find a work
+       tree there and `check-ignore` answers "ignored" for every path under it,
+       `src/main.tsx` included. The probe then reports that a source file is
+       ignored, which is the case above failing, and with it the whole dry run:
+       `scripts/verify-without.mjs` scored nothing in the 2026-09-20 sweep for
+       exactly this, and "Stryker did not finish" is not a pass.
+
+       The condition is asked, not assumed, and it is asked with the SAME probe
+       every case below uses: a tree whose own root git ignores cannot answer
+       what this repository ignores. In a real checkout the root is not ignored
+       — measured — so this skips nowhere else and a broken `check-ignore`
+       still fails loudly. */
+    if (inside === 'true' && ignored('.')) {
+      context.skip('this tree is one git ignores wholesale — a Stryker sandbox under .stryker-tmp — so check-ignore answers "ignored" for everything in it, this repository included; the real tree runs this')
+    }
   })
 
   /* THE PROBE ITSELF FIRST. If `check-ignore` stopped working — a git that
