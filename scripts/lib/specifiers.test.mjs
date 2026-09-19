@@ -230,6 +230,52 @@ describe('hiddenLoads', () => {
     ])
   })
 
+  /**
+   * ⚠️ **`createRequire(x).resolve(y)` LOADS NOTHING, AND FLAGGING IT COST THE
+   * MERGE-BASE GATE ITS REACH** (2026-09-20). `resolve` answers where a package
+   * is; the rule matched the callee's NAME and so made every module holding one
+   * a route no static graph can follow. `check-mutants.mjs` records such routes
+   * per subject, and the base offers every test for every subject, so one
+   * `.resolve` of a package put its file into every subject's evidence — and
+   * changing that file then refused every base measurement in a sweep.
+   *
+   * The line is the one `require` already draws two rules up: a BARE package
+   * specifier reaches a package and never a file in the checkout. Everything
+   * else about a `createRequire` stays hidden, the catch-all included — a
+   * require function kept under a name can load anything, and the name it is
+   * called by is not one this can match.
+   */
+  it('does not name a createRequire immediately resolved on a bare package', () => {
+    expect(hidden("import { createRequire } from 'node:module'\nconst at = createRequire(import.meta.url).resolve('@stryker-mutator/core')")).toEqual([])
+  })
+
+  it('still names one resolved on a PATH, which answers a file in the project', () => {
+    for (const spec of ['./local.mjs', '../up.mjs', '/abs.mjs']) {
+      expect(
+        hidden(`import { createRequire } from 'node:module'\nconst at = createRequire(import.meta.url).resolve('${spec}')`),
+        spec,
+      ).toEqual(['createRequire()'])
+    }
+  })
+
+  it('still names one whose specifier is not spelled out, and one resolved later', () => {
+    /* A specifier this cannot read could name anything, and a `resolve` reached
+       through a variable is the catch-all case the rule above is carved out of. */
+    expect(hidden("import { createRequire } from 'node:module'\nconst at = createRequire(import.meta.url).resolve(wherever)")).toEqual([
+      'createRequire()',
+    ])
+    expect(hidden("import { createRequire } from 'node:module'\nconst req = createRequire(import.meta.url)\nconst at = req.resolve('pkg')")).toEqual([
+      'createRequire()',
+    ])
+  })
+
+  it('still names one whose result is CALLED rather than resolved, under any name', () => {
+    expect(hidden("import { createRequire } from 'node:module'\nconst load = createRequire(import.meta.url)\nload('./thing')")).toEqual([
+      'createRequire()',
+    ])
+    expect(hidden("import { createRequire } from 'node:module'\ncreateRequire(import.meta.url)('pkg')")).toEqual(['createRequire()'])
+  })
+
   it("names Vitest's own runtime loads", () => {
     expect(hidden("const a = await vi.importActual('./a')\nconst b = await vi.importMock('./b')")).toEqual([
       "vi.importActual('./a')",

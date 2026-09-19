@@ -127,11 +127,37 @@ function hiddenCall(node) {
     if (text === null) return 'a computed require()'
     return text.startsWith('.') || text.startsWith('/') ? `require('${text}')` : null
   }
-  if (callee === 'createRequire') return 'createRequire()'
+  /* ⚠️ **`createRequire(x).resolve(y)` LOADS NOTHING — IT ANSWERS A PATH.**
+     Flagged on the callee's name alone, it made every module holding one a
+     route no static graph can follow, which is right for a require FUNCTION
+     that is kept and called (`const req = createRequire(x); req('./thing')` —
+     `req` is a name this cannot match, so the catch-all is what covers it) and
+     wrong for a resolution. `.resolve` immediately on the call, with a bare
+     package specifier, reaches a package and never a file in the checkout —
+     the same ground on which `require('<bare package>')` is already not a load,
+     two rules up. Anything else about a `createRequire` stays hidden. */
+  if (callee === 'createRequire') return resolvesAPackage(node) ? null : 'createRequire()'
   if ((callee === 'importActual' || callee === 'importMock') && isVi(node.expression)) {
     return text === null ? `vi.${callee}()` : `vi.${callee}('${text}')`
   }
   return RUNS_TEXT.has(callee) ? `${callee}()` : null
+}
+
+/**
+ * Whether this `createRequire(…)` is immediately `.resolve`d on a bare package
+ * name — `createRequire(x).resolve('pkg')`, which answers where a package is
+ * and loads nothing from the checkout.
+ *
+ * A specifier that names a PATH is not one: `.resolve('./x')` answers a file in
+ * the project, and a route to it is a route the static graph cannot follow.
+ */
+function resolvesAPackage(node) {
+  const access = node.parent
+  if (access === undefined || !ts.isPropertyAccessExpression(access) || access.name.text !== 'resolve') return false
+  if (access.parent === undefined || !ts.isCallExpression(access.parent) || access.parent.expression !== access) return false
+  const asked = erased(access.parent.arguments[0])
+  if (!isLiteral(asked)) return false
+  return !asked.text.startsWith('.') && !asked.text.startsWith('/')
 }
 
 /** The name a callee or a constructor is called by — `b` for both `b` and `a.b` — or `null` for anything else. */
