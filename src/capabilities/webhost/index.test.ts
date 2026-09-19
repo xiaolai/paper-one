@@ -96,4 +96,46 @@ describe('two live compositions of the webhost', () => {
     await settle(900)
     expect(probe.polls, 'both pumps stopped, so nothing is left polling').toBe(afterBothStopped)
   })
+
+  /**
+   * ⚠️ **TWO LIVE COMPOSITIONS LEFT TWO PUMPS ON ONE WIRE** (2026-09-19 audit).
+   *
+   * `wire` is a module singleton. The service-host callback assigned over
+   * `pump` without stopping what it replaced, so the second composition JOINED
+   * the first rather than taking over: two pumps polling one session inbox,
+   * each with its own router and `openedBy`, so related frames from one browser
+   * could be answered by different pumps. Only the newer was reachable to stop.
+   *
+   * ASSERTED BY DISPOSING THE SECOND ALONE, which is deterministic where a
+   * poll-rate comparison is not: if taking the wire releases it first, the
+   * first pump is already stopped and nothing is left polling. Before the fix
+   * the first pump polled on for ever, because its own disposer had not run.
+   */
+  it('takes the wire from the pump before it, so disposing the newer leaves nothing polling', async () => {
+    const first = composition()
+    const firstStop = await webhost.start!(first.api, first.controller.signal)
+    await settle()
+    const second = composition()
+    const secondStop = await webhost.start!(second.api, second.controller.signal)
+    await settle()
+
+    /* NON-VACUOUS: something is polling before the teardown. */
+    const before = probe.polls
+    await settle()
+    expect(probe.polls, 'a pump is polling with both compositions live').toBeGreaterThan(before)
+
+    /* ONLY THE SECOND. The first is never disposed in this case — the point is
+       that it is already stopped, not that its disposer is tidy. */
+    secondStop.dispose()
+    await settle()
+
+    const afterSecondStopped = probe.polls
+    await settle(900)
+    expect(
+      probe.polls,
+      'the first composition’s pump was still polling — the second joined the wire instead of taking it',
+    ).toBe(afterSecondStopped)
+
+    firstStop.dispose()
+  })
 })

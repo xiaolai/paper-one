@@ -98,6 +98,7 @@ export const webhost: Capability = {
       mine = null
       host?.dispose()
       host = null
+      signal.removeEventListener('abort', stop)
     }
     let host: Disposable | null = null
     if (signal.aborted) return { dispose: stop }
@@ -109,6 +110,20 @@ export const webhost: Capability = {
      * services, which is what a transport is for. */
     host = api.services.bindServiceHost(async (services) => {
       if (signal.aborted || services.length === 0) return { dispose: () => {} }
+      /* ⚠️ **ONE PUMP ON THE WIRE, AND THE SECOND USED TO JOIN THE FIRST.**
+       * `wire` is a module singleton, and this assigned over `pump` without
+       * stopping what it replaced — so two live compositions (two `start`s with
+       * no `stop` between them, which the registry permits and this file's own
+       * tests do) left TWO pumps polling one session inbox, each with its own
+       * router and `openedBy`. Related frames of one browser could then be
+       * answered by different pumps, and only the newer was reachable to stop.
+       * The disposers below were already ownership-checked; what was missing is
+       * that taking the wire has to RELEASE it first. Found by the 2026-09-19
+       * audit.
+       *
+       * `stop()` is idempotent (`pump.ts` returns early once stopped), so this
+       * is safe when the previous holder has already gone. */
+      pump?.stop()
       pump = servePipe({
         wire: wireOf(),
         services,
@@ -128,6 +143,18 @@ export const webhost: Capability = {
       }
     })
 
+    /* ⚠️ **`api.onCleanup(stop)` WAS ADDED HERE AND TAKEN OUT AGAIN**, on the
+     * 2026-09-19 audit's suggestion that the teardown was never registered with
+     * the kernel. It is: `registry.ts` folds the RETURNED `Disposable` into
+     * teardown and runs it before the `onCleanup` stack ("Both run on normal
+     * dispose"), and `stop` is that disposer. Registering it twice would only
+     * call an idempotent function twice. Written down because the suggestion is
+     * a reasonable reading of the comment above, and the next reader deserves
+     * the answer rather than the round trip.
+     *
+     * THE ABORT LISTENER IS REMOVED BY `stop` ITSELF, so a manual dispose does
+     * not leave this closure retained until the signal is collected — that half
+     * of the finding was real. */
     signal.addEventListener('abort', stop, { once: true })
     return { dispose: stop }
   },

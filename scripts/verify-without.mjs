@@ -53,7 +53,23 @@ export const COPY_EXCLUDE = Object.freeze([
 
 const USAGE = 'usage: node scripts/verify-without.mjs [id] [--keep]'
 
-/** The steps run in the copy after the removal. */
+/**
+ * The steps run in the copy after the removal.
+ *
+ * ⚠️ **IT WAS MISSING TWO SHIPPING BUILDS** (2026-09-19 audit): `build:web` and
+ * `build:cli` are in the canonical `STEPS` and were never run here, so the
+ * proof could pass while the post-removal BROWSER bundle or the CLI was broken.
+ * Both are exactly the surfaces a capability removal can break — `build:web`
+ * runs `assert-bundle`, which fails if any capability module reaches a build
+ * that composes none, and `build:cli` bundles `src/cli/`, which imports a
+ * capability directly and is the reason the host-import condition exists at
+ * all. Neither was a decision; the omissions below are, and say so.
+ *
+ * `EXCLUDED` names every canonical step this deliberately does NOT run, with
+ * the reason, and `verify-without.test.mjs` holds the two lists to each other —
+ * so the next step added to `verify.mjs` is either run here or excused by name,
+ * and cannot simply go missing again.
+ */
 export const COPY_STEPS = Object.freeze([
   { name: 'typecheck', cmd: 'pnpm', args: ['typecheck'] },
   { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
@@ -63,7 +79,33 @@ export const COPY_STEPS = Object.freeze([
   { name: 'build', cmd: 'pnpm', args: ['build'] },
   { name: 'build:ios', cmd: 'pnpm', args: ['build:ios'] },
   { name: 'build:android', cmd: 'pnpm', args: ['build:android'] },
+  { name: 'build:web', cmd: 'pnpm', args: ['build:web'] },
+  { name: 'build:cli', cmd: 'pnpm', args: ['build:cli'] },
 ])
+
+/**
+ * The canonical steps this proof deliberately does not run, and why.
+ *
+ * A REASON PER STEP, because "not in the list" is indistinguishable from an
+ * oversight — which is precisely how `build:web` and `build:cli` went missing.
+ */
+export const EXCLUDED = Object.freeze({
+  'test:coverage':
+    'coverage floors were measured with the capability\'s own tests in the tree, so a removal that lowers the number is not a defect of the removal',
+  'test:ledger':
+    'the ledger records this tree\'s tests; the copy has fewer by construction, which is the point rather than a finding',
+  'ledger:check': 'reads `dev-docs/`, which is gitignored and not in every checkout',
+  'css:check': 'a removal takes stylesheets with it; unreachable CSS in the copy is the removal working',
+  'css:tokens': 'as `css:check` — the token set is the real tree\'s',
+  'browser:check': 'its pinned list names modules of the real tree',
+  'directives:check': 'counts Stryker directives across the real tree',
+  'test:projects': 'counts this tree\'s test files',
+  'cargo metadata --locked': 'the Cargo steps cost minutes on a fresh target directory, and `pnpm verify` runs them on the real tree',
+  'cargo fmt --check': 'as `cargo metadata --locked`',
+  'cargo clippy -D warnings': 'as `cargo metadata --locked`',
+  'cargo test --workspace': 'as `cargo metadata --locked`',
+  'docs:rust-notices --check': 'as `cargo metadata --locked`',
+})
 
 export function parseArgs(argv) {
   let id

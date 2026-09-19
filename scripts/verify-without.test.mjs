@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { COPY_EXCLUDE, COPY_STEPS, DELETED_ENV, copyTree, digestTree, parseArgs, removableCapabilities, verifyWithout } from './verify-without.mjs'
+import { COPY_EXCLUDE, COPY_STEPS, DELETED_ENV, EXCLUDED, copyTree, digestTree, parseArgs, removableCapabilities, verifyWithout } from './verify-without.mjs'
+import { STEPS } from './verify.mjs'
 
 /**
  * `pnpm verify:without <id>` — the mechanics: the copy leaves out what it
@@ -120,7 +121,10 @@ describe('verifyWithout', () => {
     expect(code).toBe(0)
     expect(dir).toBe(copyDir)
     expect(ran).toEqual(['capability:remove example', ...COPY_STEPS.map((s) => s.name)])
-    expect(ran).toEqual(['capability:remove example', 'typecheck', 'boundaries', 'architecture:check', 'compositions:check', 'test', 'build', 'build:ios', 'build:android'])
+    /* THE REMOVAL FIRST, THEN THE STEPS IN `COPY_STEPS` ORDER — derived rather
+       than restated, so adding a step is one edit and this still pins that the
+       removal runs before any of them and that none is skipped. */
+    expect(ran).toEqual(['capability:remove example', ...COPY_STEPS.map((step) => step.name)])
     expect(log.some((l) => l.startsWith('verify-without: src/kernel/ unchanged (sha256 '))).toBe(true)
     expect(existsSync(dir)).toBe(false)
     expect(existsSync(path.join(src, 'src/capabilities/example/index.ts'))).toBe(true)
@@ -173,6 +177,57 @@ describe('verifyWithout', () => {
     expect(code).toBe(5)
     expect(ran).toEqual(['capability:remove example', 'typecheck', 'boundaries'])
     expect(existsSync(dir)).toBe(false)
+  })
+})
+
+/**
+ * ⚠️ **THE COPY'S STEP LIST DRIFTED FROM THE CANONICAL ONE AND NOTHING SAID SO.**
+ *
+ * `build:web` and `build:cli` are in `verify.mjs`'s `STEPS` and were absent
+ * here, so the deletion proof could pass while the post-removal browser bundle
+ * or the CLI was broken — the two surfaces a capability removal is most likely
+ * to break, since one runs `assert-bundle` and the other bundles the host that
+ * imports a capability directly (2026-09-19 audit).
+ *
+ * The list is not shared outright: the copy deliberately skips the slow and the
+ * tree-specific steps. What is shared is the OBLIGATION — every canonical step
+ * is run here or named in `EXCLUDED` with a reason, so the next step added to
+ * `verify.mjs` cannot simply go missing.
+ */
+describe('the steps the copy runs', () => {
+  const run = () => new Set(COPY_STEPS.map((step) => step.name))
+
+  it('runs or excuses every canonical step, by name', () => {
+    const excused = new Set(Object.keys(EXCLUDED))
+    const orphans = STEPS.map((step) => step.name).filter((name) => !run().has(name) && !excused.has(name))
+    expect(orphans, 'a step in verify.mjs is neither run in the copy nor excused in EXCLUDED').toEqual([])
+  })
+
+  /* EVERY SHIPPING BUILD, spelled out rather than derived — these are the ones
+     the omission actually cost, and a case that names them fails if one is
+     dropped again even were it excused by mistake. */
+  it('builds every artefact the project ships', () => {
+    for (const build of ['build', 'build:web', 'build:cli', 'build:ios', 'build:android']) {
+      expect(run(), `the deletion proof does not run ${build}`).toContain(build)
+    }
+  })
+
+  /* AN EXCUSE IS A REASON, not a name in a list. An empty string would satisfy
+     the orphan check above and explain nothing to the next reader. */
+  it('gives every excused step a reason, and excuses nothing it also runs', () => {
+    for (const [name, why] of Object.entries(EXCLUDED)) {
+      expect(why.length, `${name} is excused with no reason`).toBeGreaterThan(20)
+      expect(run(), `${name} is both run and excused`).not.toContain(name)
+    }
+  })
+
+  /* AND EVERY EXCUSE NAMES A REAL STEP — an excuse for a step that no longer
+     exists is a line that outlived its reason, the `example` shape again. */
+  it('excuses only steps that are in the canonical list', () => {
+    const canonical = new Set(STEPS.map((step) => step.name))
+    for (const name of Object.keys(EXCLUDED)) {
+      expect(canonical, `${name} is excused but is not a step verify.mjs runs`).toContain(name)
+    }
   })
 })
 

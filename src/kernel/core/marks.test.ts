@@ -1036,6 +1036,32 @@ describe('a row the read refuses', () => {
     expect(refused[0]).toBe(bad)
   })
 
+  /**
+   * ⚠️ **A KIND THAT LEAVES `MARK_KINDS` IS A ROW ON SOMEBODY'S DISK.**
+   *
+   * `companion` was retired with the AI features. A row carrying it must be
+   * dropped ALONE — never taking the file, and never the payload a peer sent —
+   * which is the rule this whole describe exists for, applied to the one value
+   * this repository has actually removed from a persisted union.
+   *
+   * The 2026-09-19 audit read the removal as "one legacy row can cause the
+   * entire marks payload to be rejected repeatedly". It cannot: `readStoredMark`
+   * answers `null` for an unknown kind and `readStoredMarks` collects it into
+   * `refused` beside the rows that read, and `mergeRemote` warns and merges the
+   * rest. This case is here so that stays true — the claim was checkable, and
+   * the way to keep it checkable is a test rather than a paragraph.
+   */
+  it('drops a row carrying the retired `companion` kind, and keeps every row beside it', () => {
+    const retired = { ...mark({ id: 'from-an-older-build' }), kind: 'companion' }
+    const { marks, refused } = readStoredMarks([mark({ id: 'mine' }), retired, mark({ id: 'also-mine' })])
+
+    expect(marks.map((one) => one.id)).toEqual(['mine', 'also-mine'])
+    /* HANDED BACK VERBATIM, so the store writes it out again rather than
+       deleting a row it merely could not read — see `keptAside`. */
+    expect(refused).toEqual([retired])
+    expect(refused[0]).toBe(retired)
+  })
+
   it('has its `unplaced` read ONCE — the gate and the projection are one read', () => {
     let reads = 0
     const row = {
