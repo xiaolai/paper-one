@@ -1,6 +1,5 @@
 import {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useReducer,
   useRef,
@@ -27,13 +26,8 @@ import {
   type MarkTint,
 } from '../../core/marks'
 import { MarkSpecimen } from './MarkSpecimen'
-import {
-  frameBoxInHost,
-  overlaps,
-  rangeRectsInHost,
-  watchGeometry,
-  type HostRect,
-} from './coordinates'
+import type { HostRect } from './coordinates'
+import { useSelectionGeometry } from './selectionGeometry'
 import type { SelectionSnapshot } from './session'
 import styles from './SelectionTools.module.css'
 
@@ -99,10 +93,6 @@ function samePassage(a: SelectionSnapshot, b: SelectionSnapshot): boolean {
     a.text === b.text
   )
 }
-
-/** No visible line — the popup has nothing to hang from. One value, so a
- *  measurement that finds nothing again is not a change. */
-const NO_LINES: readonly HostRect[] = []
 
 /**
  * The union of the visible lines — what the popup stays clear of, see `lines`.
@@ -286,18 +276,12 @@ export function SelectionTools({
   onCite,
   onRemove,
 }: SelectionToolsProps) {
-  /* EVERY VISIBLE LINE of the selection, in the range's own order: the first is
-   * the line the popup hangs from, and all of them, unioned, are what it stays
-   * clear of. Anchored to the first line alone, a toolbar over a three-line
-   * selection sat on top of lines two and three: the very words the reader
-   * had just chosen.
-   *
-   * ONE STATE, AND THE ANCHOR AND THE EXTENT ARE BOTH READ OFF IT (2026-09-14).
-   * They were two states set side by side, so either could be written without
-   * the other — and an extent with no anchor beside it, which nothing can read
-   * because without an anchor nothing is drawn, was a value the code took care
-   * to clear. */
-  const [lines, setLines] = useState<readonly HostRect[]>(NO_LINES)
+  /* WHERE THE SELECTION IS AND HOW BIG THE STAGE IS, as ONE snapshot — see
+   * `selectionGeometry.ts`, which says why the two cannot be measured apart.
+   * Anchored to the first line alone, a toolbar over a three-line selection sat
+   * on top of lines two and three: the very words the reader had just chosen,
+   * which is why every line is here and not just the anchor. */
+  const { lines, stageBox } = useSelectionGeometry(selection, stage, position)
   /** The popup's own width, for the edge clamp below. */
   const popupRef = useRef<HTMLDivElement | null>(null)
   /* RE-MEASURED WHEN IT RESIZES ON ITS OWN, not only when React renders it
@@ -430,51 +414,6 @@ export function SelectionTools({
     into?.focus({ preventScroll: true })
   })
 
-  /* Measured in an effect rather than during render: the rect depends on laid
-   * out DOM in another document, and reading it while rendering would both tear
-   * and force a synchronous layout on every keystroke elsewhere in the app. */
-  const measure = useCallback(() => {
-    if (!selection || !stage) {
-      setLines(NO_LINES)
-      return
-    }
-    const doc = selection.range.startContainer.ownerDocument
-    const page = doc ? frameBoxInHost(doc, stage) : null
-    /* The VISIBLE line rects, and the popup hangs from the first of them — not
-     * from the range's bounding box.
-     *
-     * A bounding box over a selection that crosses a column break spans both
-     * columns, and its centre — which is what the popup is placed on — lands in
-     * the gutter between them, or on a page that is not being shown. One line's
-     * rect is always somewhere real. The same clip keeps a selection that has
-     * scrolled off the page from putting the popup over whatever text now
-     * occupies that spot, offering to mark a passage nowhere on screen.
-     *
-     * EVERY LINE IS CLIPPED THE SAME WAY, not only the anchor: a line on a page
-     * that is not being shown must not push the popup around either. */
-    setLines(
-      rangeRectsInHost(selection.range, stage).filter(
-        (candidate) =>
-          (candidate.width > 0 || candidate.height > 0) &&
-          (!page || overlaps(candidate, page)),
-      ),
-    )
-  }, [selection, stage])
-
-  useEffect(() => {
-    measure()
-  }, [measure, position])
-
-  /* A selection outlives the gesture that made it, so the popup has to follow
-   * the text through every later reflow: the pane opening, a font-size step, a
-   * window resize. Measuring once at selection time pins it where the text used
-   * to be. */
-  useEffect(() => {
-    const doc = selection?.range.startContainer.ownerDocument
-    if (!stage || !doc) return
-    return watchGeometry(stage, doc, measure)
-  }, [selection, stage, measure])
-
   /* Measured before paint, because the value feeds back into the position. An
    * ordinary effect would let the reader see the popup appear off-centre and
    * then jump. Its width does not depend on where it is put, so this settles in
@@ -484,13 +423,12 @@ export function SelectionTools({
     if (Math.abs(measured - width) > 0.5) setWidth(measured)
   })
 
-  /* ⚠️ **AND THE STAGE, BECAUSE `lines` IS ONE FRAME BEHIND IT** (2026-09-19
-   * audit). `measure` runs in a PASSIVE effect, so the render in which `stage`
-   * becomes null still holds the rects measured against the old one — and
-   * without a stage `place` is handed `UNBOUNDED` bounds and puts the popup
-   * somewhere arbitrary for that frame. Asked here rather than trusted to the
-   * effect: there is nowhere to draw a popup that is positioned inside a stage
-   * that is not there, so this is the honest guard rather than a race patch. */
+  /* ⚠️ **AND THE STAGE, BECAUSE THE GEOMETRY IS ONE FRAME BEHIND IT**
+   * (2026-09-19 audit). The measurement runs in a PASSIVE effect, so the render
+   * in which `stage` becomes null still holds the rects measured against the
+   * old one — and there is nowhere to draw a popup positioned inside a stage
+   * that is not there. Asked here rather than trusted to the effect: this is
+   * the honest guard rather than a race patch. */
   const box = lines[0]
   if (!selection || !stage || !box) return null
 
@@ -507,8 +445,13 @@ export function SelectionTools({
    * is for. `place` returns a left EDGE; the stylesheet centres the popup with
    * `translateX(-50%)` for its enter animation, so the edge is turned back
    * into a centre at this one seam. */
-  const stageBox = stage?.getBoundingClientRect()
-  /* Before the stage has a box there is nothing to clamp against, and a very
+  /* ⚠️ **`stageBox` USED TO BE `stage.getBoundingClientRect()` READ RIGHT HERE,
+     DURING RENDER**, while `lines` came from a past commit's effect — two
+     layout snapshots from different moments, clamped against each other by
+     arithmetic that cannot tell (2026-09-19 audit). It arrives measured in the
+     same pass as the lines now; `selectionGeometry.ts` carries the argument.
+
+     Before the stage has a box there is nothing to clamp against, and a very
      large bound is the honest "no constraint" rather than a guess. */
   const within = column ?? { left: 0, width: stageBox?.width ?? UNBOUNDED }
   const placed = place({
@@ -656,6 +599,20 @@ export function SelectionTools({
     </button>
   )
 
+  /* COPY IS DRAWN TWICE — on the bar and on the copy face — and it is ONE
+     control both times (2026-09-19 audit). Same handler, same glyph, same
+     tooltip; only what a screen reader is told differs, and it has to, because
+     on the copy face it sits beside "Copy with citation" and "this passage"
+     would no longer say which of the two it is. Written out twice, the two
+     could drift into being different controls by accident: the second could
+     lose the handler's meaning, or gain a glyph, and nothing would object. The
+     same argument as `opener` above, whose labels also stay distinct. */
+  const copyButton = (label: string) => (
+    <button type="button" className={styles.tool} onClick={onCopy} title="Copy" aria-label={label}>
+      <Copy size={ICON.control} strokeWidth={ICON.stroke} />
+    </button>
+  )
+
   return (
     <div
       ref={popupNode}
@@ -720,15 +677,7 @@ export function SelectionTools({
 
             {/* Copy stays one click; the other way to copy is one chevron
                 away, exactly as another mark style is. */}
-            <button
-              type="button"
-              className={styles.tool}
-              onClick={onCopy}
-              title="Copy"
-              aria-label="Copy this passage"
-            >
-              <Copy size={ICON.control} strokeWidth={ICON.stroke} />
-            </button>
+            {copyButton('Copy this passage')}
             {opener('copy', 'Copy options', 'More ways to copy this passage')}
 
             {marked && (
@@ -809,15 +758,7 @@ export function SelectionTools({
           <>
             {back}
             <span className={styles.divider} aria-hidden="true" />
-            <button
-              type="button"
-              className={styles.tool}
-              onClick={onCopy}
-              title="Copy"
-              aria-label="Copy the passage on its own"
-            >
-              <Copy size={ICON.control} strokeWidth={ICON.stroke} />
-            </button>
+            {copyButton('Copy the passage on its own')}
             <button
               type="button"
               className={styles.tool}

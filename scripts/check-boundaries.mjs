@@ -9,12 +9,17 @@ import { isProcessEntry } from './lib/entry.mjs'
  * `pnpm boundaries` — the kernel/capability boundary, enforced.
  *
  * Runs dependency-cruiser over `src/` with `.dependency-cruiser.cjs` and
- * prints every violation, one per line, then adds the one rule that config
- * cannot express: `capability-requires-declared` — a capability may import
- * another capability's `index.ts` only if its entry in
- * `capabilities.manifest.json` lists that capability in `requires`. That
- * needs the manifest, which a cruiser rule cannot read, so it is a pass over
- * the cruise's own JSON output here.
+ * prints every violation, one per line, then adds the two rules that config
+ * cannot express, which are the same question from both ends:
+ *
+ *   - `capability-requires-declared` — a capability may import another
+ *     capability's `index.ts` only if its entry in
+ *     `capabilities.manifest.json` lists that capability in `requires`.
+ *   - `capability-requires-used` — and a listed one it imports nothing from is
+ *     a grant nothing needs. See `unusedRequires` for what that cost.
+ *
+ * Both need the manifest, which a cruiser rule cannot read, so they are passes
+ * over the cruise's own JSON output here.
  *
  * Fails closed at every step that could otherwise turn into a quiet pass:
  * a manifest that will not parse or validate, a cruise that returns no
@@ -199,6 +204,86 @@ export function undeclaredRequires(modules, manifest) {
   return violations
 }
 
+/**
+ * The other direction: a `requires` entry the declaring capability imports
+ * nothing from.
+ *
+ * ⚠️ **`capability-requires-declared` ONLY EVER ASKED WHETHER AN IMPORT WAS
+ * PERMITTED, NEVER WHETHER A PERMISSION WAS USED**, so an over-declaration was
+ * invisible to every check in the tree. `webhost` declared `requires: ['peer']`
+ * because it needed the envelope, which lived under `peer`; the envelope moved
+ * to the kernel in phase 18 and the declaration stayed, wrong and unwatched,
+ * until the 2026-09-19 audit read it. `requires` is a GRANT — this file's own
+ * rule is what makes it one — so an unused entry is a capability holding the
+ * right to reach inside another it has no reason to touch, and it drags two
+ * other behaviours with it: registration order is topological by `requires`,
+ * and a composition missing the named capability is refused by name.
+ *
+ * ANY edge into the other capability's directory counts as a use, not only one
+ * to its `index.ts`: reaching deeper is already reported by the cruiser as
+ * `cap-to-other-cap-internal`, and a capability that does it is unarguably
+ * using the one it reached into. Judging only `index.ts` here would report the
+ * requires as unused as well, which reads as "delete the declaration" — the
+ * opposite of the repair that edge needs.
+ *
+ * ⚠️ **A RUNTIME-ONLY DEPENDENCY WOULD FAIL THIS, AND THAT IS DELIBERATE.**
+ * Nothing in the tree declares one today — `sync`, `circle` and `public` each
+ * import `peer` — so the rule has no exemption and no list, because an
+ * exemption by name outlives its reason. The day a capability genuinely needs
+ * another to have STARTED without importing it, this rule is what forces that
+ * to be stated rather than assumed.
+ */
+export const REQUIRES_USED_RULE = 'capability-requires-used'
+
+export function unusedRequires(modules, manifest) {
+  /* Which capability directories were cruised at all, and what each reached
+     into. A directory with no modules cannot be judged — see below. */
+  const seen = new Set()
+  const reaches = new Map()
+  for (const module of modules) {
+    const from = CAPABILITY_FILE.exec(module.source)
+    if (!from) continue
+    const fromDir = from[1]
+    seen.add(fromDir)
+    const into = reaches.get(fromDir) ?? new Set()
+    for (const dependency of module.dependencies) {
+      const to = CAPABILITY_FILE.exec(dependency.resolved)
+      if (to && to[1] !== fromDir) into.add(to[1])
+    }
+    reaches.set(fromDir, into)
+  }
+  const byId = new Map(manifest.capabilities.map((entry) => [entry.id, entry]))
+  const violations = []
+  for (const entry of manifest.capabilities) {
+    const needs = entry.requires ?? []
+    if (needs.length === 0) continue
+    /* FAIL CLOSED ON A CAPABILITY THE CRUISE DID NOT SEE. "It imports nothing"
+       and "nothing of it was read" are the same absence, and only one of them
+       means the declaration is wrong. */
+    if (!seen.has(entry.ts)) {
+      throw new Error(
+        `no module under src/capabilities/${entry.ts} was cruised, so ${entry.id}'s requires cannot be judged`,
+      )
+    }
+    const into = reaches.get(entry.ts) ?? new Set()
+    for (const need of needs) {
+      const target = byId.get(need)
+      /* An unresolvable id is `architecture:check`'s finding, not this one's,
+         and `loadManifest` has already validated the manifest — so reaching
+         here means the id resolves. Guarded anyway rather than indexed
+         blindly: a violation naming `undefined` teaches nobody anything. */
+      if (target === undefined || into.has(target.ts)) continue
+      violations.push({
+        rule: REQUIRES_USED_RULE,
+        from: MANIFEST_NAME,
+        to: `src/capabilities/${target.ts}`,
+        message: `${entry.id} lists ${need} in requires and imports nothing from it`,
+      })
+    }
+  }
+  return violations
+}
+
 /** The cruiser's own violations, in this script's shape. A cycle is reported
  *  once per edge the cruiser reports, with the cycle spelled out. */
 export function cruiserViolations(cruiseResult) {
@@ -223,7 +308,11 @@ export async function checkBoundaries(root) {
   if (kernelModules === 0) {
     throw new Error(`nothing under src/kernel/ was cruised in ${root} (${result.modules.length} modules) — wrong root?`)
   }
-  const violations = [...cruiserViolations(result), ...undeclaredRequires(result.modules, manifest)]
+  const violations = [
+    ...cruiserViolations(result),
+    ...undeclaredRequires(result.modules, manifest),
+    ...unusedRequires(result.modules, manifest),
+  ]
   violations.sort((a, b) => a.rule.localeCompare(b.rule) || a.from.localeCompare(b.from) || a.to.localeCompare(b.to))
   return { violations, cruised: { modules: result.modules.length, dependencies: result.summary.totalDependenciesCruised } }
 }

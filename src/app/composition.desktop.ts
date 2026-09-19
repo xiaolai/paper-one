@@ -35,7 +35,15 @@ import { webhost } from '../capabilities/webhost'
  * A composition root is the one place allowed to import every capability's
  * `index.ts` and both kernel entries (`.dependency-cruiser.cjs`).
  */
-/* `webhost` last, and after `peer`, which it declares in `requires`.
+/* `webhost` last, and it now declares NO `requires` at all.
+ *
+ * ⚠️ **THE DECLARATION IT USED TO CARRY WAS STALE, AND THIS COMMENT ARGUED
+ * FROM IT THREE TIMES.** `webhost` listed `peer` because it needed the
+ * envelope, which moved to the kernel in phase 18; the entry outlived the
+ * reason and was dropped on 2026-09-19, with `capability-requires-used` added
+ * to `check-boundaries` so the next one fails rather than waits for an audit.
+ * The order of this list is unchanged by that, for the reason spelled out
+ * below: the order is the MANIFEST'S.
  *
  * ⚠️ **THE REASON HERE HAS NOW BEEN WRONG TWICE.** It first said *"it needs
  * peer's envelope"*, and the envelope moved to the kernel in phase 19. It was

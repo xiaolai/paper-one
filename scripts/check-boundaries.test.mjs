@@ -7,10 +7,12 @@ import {
   CRUISE_TIMEOUT_MS,
   DEPCRUISE,
   REQUIRES_RULE,
+  REQUIRES_USED_RULE,
   cruise,
   cruiserViolations,
   formatViolation,
   undeclaredRequires,
+  unusedRequires,
 } from './check-boundaries.mjs'
 import { CASES, LEGAL_TREE, caseFailure, runAll, runCli } from './check-boundaries.selftest.mjs'
 
@@ -109,6 +111,89 @@ describe('undeclaredRequires', () => {
 
   it('accepts index.tsx as an index too', () => {
     expect(undeclaredRequires([edge('src/capabilities/alpha-dir/index.ts', 'src/capabilities/beta/index.tsx')], manifest)).toEqual([])
+  })
+})
+
+/**
+ * The same question from the other end — see `unusedRequires`.
+ *
+ * ⚠️ **THE DEFECT THIS RULE EXISTS FOR PASSED EVERY CHECK IN THE TREE FOR FOUR
+ * PHASES.** `webhost` declared `requires: ['peer']` for the envelope, the
+ * envelope moved to the kernel, and nothing asked again — because
+ * `capability-requires-declared` reads permission→import and never
+ * import→permission. The first case below is that shape exactly.
+ */
+describe('unusedRequires', () => {
+  const manifest = {
+    capabilities: [
+      { id: 'alpha', ts: 'alpha-dir', platforms: ['desktop'], requires: ['beta'] },
+      { id: 'beta', ts: 'beta', platforms: ['desktop'] },
+    ],
+  }
+  const edge = (source, resolved) => ({ source, dependencies: resolved === undefined ? [] : [{ resolved }] })
+  /* Every case needs `beta` to have been cruised too, or the fail-closed check
+     fires first and hides what the case is about. `beta` requires nothing, so
+     one module of it is enough and it can never itself be a violation. */
+  const betaSeen = edge('src/capabilities/beta/index.ts', 'src/kernel/index.ts')
+
+  it('reports a required capability the declarer imports nothing from', () => {
+    const out = unusedRequires([edge('src/capabilities/alpha-dir/index.ts', 'src/kernel/index.ts'), betaSeen], manifest)
+    expect(out).toEqual([
+      {
+        rule: REQUIRES_USED_RULE,
+        from: 'capabilities.manifest.json',
+        to: 'src/capabilities/beta',
+        message: 'alpha lists beta in requires and imports nothing from it',
+      },
+    ])
+  })
+
+  it('accepts an edge to the required capability’s index', () => {
+    const modules = [edge('src/capabilities/alpha-dir/index.ts', 'src/capabilities/beta/index.ts'), betaSeen]
+    expect(unusedRequires(modules, manifest)).toEqual([])
+  })
+
+  it('accepts a DEEPER edge as a use, so the two rules never ask for opposite repairs', () => {
+    /* An edge to another capability's internals is `cap-to-other-cap-internal`,
+       the cruiser's own violation. Counting it as "not a use" here would add
+       "so delete the requires" on top — advice that would make the cruiser's
+       violation worse rather than better. */
+    const modules = [edge('src/capabilities/alpha-dir/lib/x.ts', 'src/capabilities/beta/lib/deep.ts'), betaSeen]
+    expect(unusedRequires(modules, manifest)).toEqual([])
+  })
+
+  it('does not count a capability’s edges to ITSELF or to the kernel as using anything', () => {
+    const modules = [
+      edge('src/capabilities/alpha-dir/index.ts', 'src/capabilities/alpha-dir/lib/own.ts'),
+      edge('src/capabilities/alpha-dir/lib/own.ts', 'src/kernel/index.ts'),
+      betaSeen,
+    ]
+    expect(unusedRequires(modules, manifest).map((v) => v.message)).toEqual([
+      'alpha lists beta in requires and imports nothing from it',
+    ])
+  })
+
+  it('says nothing about a capability that requires nothing', () => {
+    expect(unusedRequires([betaSeen], { capabilities: [manifest.capabilities[1]] })).toEqual([])
+  })
+
+  it('REFUSES rather than reports when the declarer was not cruised at all', () => {
+    /* "It imports nothing" and "nothing of it was read" are the same absence in
+       the data, and only one of them means the declaration is wrong. Reading
+       the second as the first would turn a wrong `--root`, or a cruise that
+       silently skipped a directory, into a demand to delete a live grant. */
+    expect(() => unusedRequires([betaSeen], manifest)).toThrow(
+      /no module under src\/capabilities\/alpha-dir was cruised, so alpha's requires cannot be judged/u,
+    )
+  })
+
+  it('names a requires whose id resolves to no entry without indexing blindly', () => {
+    /* `loadManifest` validates before this runs, so an unresolvable id cannot
+       reach here in the real check — but a guard that would print `undefined`
+       into a violation is worse than one that stays quiet, and this pins which
+       it does. */
+    const ghosted = { capabilities: [{ id: 'alpha', ts: 'alpha-dir', platforms: ['desktop'], requires: ['ghost'] }] }
+    expect(unusedRequires([edge('src/capabilities/alpha-dir/index.ts', 'src/kernel/index.ts')], ghosted)).toEqual([])
   })
 })
 

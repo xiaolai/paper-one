@@ -30,18 +30,26 @@ import { servePipe, type Pump } from './lib/pump'
  * check, no permissions audit, and `capability:remove` cannot cut it out. This
  * repository's whole discipline is that unwatched things drift.
  *
- * ## Why it declares `requires: ['peer']` when it uses no peer-to-peer anything
+ * ## Why it requires nothing
  *
- * It needs the ENVELOPE — the code that turns a service call into bytes and
- * back — and that currently lives in `src/capabilities/peer/lib/envelope.ts`.
- * Nothing about the envelope is peer-to-peer; it was simply written where its
- * first caller was.
+ * ⚠️ **IT DECLARED `requires: ['peer']` FOR FOUR PHASES AFTER THE REASON WENT.**
+ * The reason was the ENVELOPE — the code that turns a service call into bytes
+ * and back — which was written under `peer` because `peer` was its first
+ * caller, though nothing about it is peer-to-peer. Phase 18 gave it a second
+ * transport and **moved it to `src/kernel/core/envelope.ts`**; the paragraph
+ * here even asked for that move, and then stayed as written once it happened.
+ * Nothing under `src/capabilities/webhost/` imports from another capability at
+ * all — `peer/lib/envelope.ts` is a re-export shim that says so itself.
  *
- * So this dependency is honest but misshapen, and the fix is not to fake it
- * here. **The envelope's home is the real question**, and now that two
- * transports need it, the kernel is the defensible answer. Revisit when a third
- * caller appears or when `peer` is next opened; until then this declaration
- * says what is true.
+ * What the stale declaration cost is not nothing: `requires` is a GRANT, the
+ * only thing `check-boundaries`'s `capability-requires-declared` rule consults
+ * before permitting a cross-capability import, so this held the standing right
+ * to reach inside `peer` on the strength of a dependency that had ended. It
+ * also refused any composition without `peer`, by name, for no reason.
+ *
+ * The rule that would have caught it is `capability-requires-used`, added in
+ * the same change (2026-09-19). Registration order is unaffected: this is last
+ * in the desktop list either way.
  *
  * ## Serving the router
  *
@@ -65,7 +73,6 @@ let pump: Pump | null = null
 
 export const webhost: Capability = {
   id: 'webhost',
-  requires: ['peer'],
 
   start(api, signal): Disposable {
     /* TEARDOWN REGISTERED BEFORE ANYTHING IS ACQUIRED, the order `peer`'s own

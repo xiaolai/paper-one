@@ -761,6 +761,27 @@ describe('the selection popup, rendered', () => {
       expect(watching.some(({ target }) => target === popup)).toBe(false)
     })
 
+    /* ⚠️ **AND THE STAGE, WHICH IS A SEPARATE OBSERVER AND WAS UNTESTED.**
+       `useSelectionGeometry` watches the stage and the book's view for every
+       later reflow, and hands back `watchGeometry`'s disposer so React can undo
+       it. Dropping that `return` is invisible: the popup still draws, every
+       placement assertion in this file still passes, and what is left behind is
+       a ResizeObserver on the stage plus a scroll and a resize listener, each
+       holding a closure over a selection that has gone — measuring, on every
+       scroll of a book nobody has selected anything in, for ever.
+
+       Found 2026-09-19 by mutating the module: it was the one surviving mutant
+       of the extraction, and it had survived in `SelectionTools.tsx` before it
+       for as long as the code had been there. */
+    it('stops watching the STAGE once the selection has gone', () => {
+      const scene = sceneOn(LINE)
+      const { rerender } = render(<SelectionTools {...propsFor(scene)} />)
+      expect(watching.some(({ target }) => target === scene.stage)).toBe(true)
+
+      rerender(<SelectionTools {...propsFor(scene, { selection: null })} />)
+      expect(watching.some(({ target }) => target === scene.stage)).toBe(false)
+    })
+
     /* A line with no width is still a line — a selection ending at a line break
        can report one — and so is one with no height; a rect with neither is
        nothing, and must not be what the popup hangs from. */
