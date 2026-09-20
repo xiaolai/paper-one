@@ -228,6 +228,35 @@ function openStored(storage: MarkStorage | null): {
   }
 }
 
+/**
+ * ⚠️ **THIS STORE ASSUMES IT IS THE ONLY WRITER, AND THAT IS A DECISION.**
+ *
+ * It reads the envelope once at construction and writes that whole cached
+ * record back on every change, so a SECOND store over the same backing
+ * storage — two browser tabs of the shelf share one `localStorage` — can
+ * overwrite the other's newer values, including keys belonging to capabilities
+ * this build does not compose. An audit asked for revisions or a
+ * compare-and-set. Three reasons it is written down instead of built:
+ *
+ * - The fix is not local. `MarkStorage` is `getItem`/`setItem` over one key
+ *   and has no compare-and-set, no change notification and no transaction, so
+ *   a revision would have to be read-modify-write through the same racing
+ *   door it is meant to close. Doing it properly means a new port, and a
+ *   format bump on a file every reader already has.
+ * - The same absence is why `persistent` can lag a real failure by one write
+ *   (`fileStore.ts` reports a refused disk write on the NEXT `setItem`), and
+ *   why `writeKernelPreferences` cannot be atomic: N `set` calls are N writes,
+ *   and a storage that refuses half way leaves a prefix on disk. That prefix
+ *   is REPORTED — it turns the store session-only, which the panel draws — so
+ *   the failure is visible even though it is not prevented.
+ * - The native app is single-instance (`tauri_plugin_single_instance`), so the
+ *   racing pair is two browser tabs, and what is lost there is a preference,
+ *   not a book.
+ *
+ * So: a known limit with a named cost, not an oversight. Anything that gives
+ * `MarkStorage` a compare-and-set should close all three at once, and this
+ * comment is the list of what to check when it does.
+ */
 export function createSettingsStore({ storage, migrate = keepValues }: SettingsStoreOptions): SettingsStore {
   const { found, unreadable } = openStored(storage)
   /* Unknown keys are KEPT, not dropped: a value under `sync.interval` in a
@@ -580,23 +609,33 @@ export const PARAGRAPH_GAP_MIN = PARAGRAPH_GAP.steps[0] ?? 0
 export const PARAGRAPH_GAP_MAX = PARAGRAPH_GAP.steps[PARAGRAPH_GAP.steps.length - 1] ?? 0
 
 /**
- * A stored gap, in milliseconds.
+ * A stored number on a continuous range — a gap in milliseconds, a speaking
+ * rate — CLAMPED to it rather than rejected.
  *
- * CLAMPED RATHER THAN REJECTED, as every other scale here is: a file written by a
- * build offering a longer pause is not corrupt, it is a reader who chose "as long
- * as it goes", and the nearest this build offers honours that where falling back
+ * As every other scale here is: a file written by a build offering a longer
+ * pause, or a faster voice, is not corrupt. It is a reader who chose "as far as
+ * it goes", and the nearest this build offers honours that where falling back
  * to the default would throw it away. Non-finite is refused, because `Infinity`
- * as a timer duration is a reading that never continues.
+ * as a timer duration is a reading that never continues, and as a rate it is a
+ * voice that never speaks.
+ *
+ * ⚠️ **THIS WAS TWO FUNCTIONS WITH ONE BODY.** `withinRange(min, max)` and a separate
+ * `rate` differed only in where the bounds came from — the second had
+ * `READING_RATE_MIN`/`MAX` written into it instead of taking them — so the
+ * clamping rule for the reader's speaking rate could be changed without
+ * touching the rule for the pauses around it, and neither would look wrong.
+ *
+ * `index` below is deliberately NOT folded in with them, though it also clamps:
+ * its acceptance test is `Number.isInteger`, not `Number.isFinite`, because it
+ * addresses a position on a discrete ramp rather than a quantity. Two clamps
+ * that accept different things are two rules, and the comment there says why.
  */
-const gapMs = (min: number, max: number) => (raw: unknown): number | undefined =>
-  typeof raw === 'number' && Number.isFinite(raw)
-    ? Math.max(min, Math.min(max, raw))
-    : undefined
+const withinRange =
+  (min: number, max: number) =>
+  (raw: unknown): number | undefined =>
+    typeof raw === 'number' && Number.isFinite(raw) ? Math.max(min, Math.min(max, raw)) : undefined
 
-const rate = (raw: unknown): number | undefined =>
-  typeof raw === 'number' && Number.isFinite(raw)
-    ? Math.max(READING_RATE_MIN, Math.min(READING_RATE_MAX, raw))
-    : undefined
+const rate = withinRange(READING_RATE_MIN, READING_RATE_MAX)
 
 /**
  * The voice the reader chose, per primary language subtag — `{ en: '…', zh: '…' }`.
@@ -803,12 +842,12 @@ export const KERNEL_SETTINGS = {
   sentenceGapMs: defineSetting<number>(
     'kernel.sentenceGapMs',
     SENTENCE_GAP.steps[SENTENCE_GAP.def] ?? 0,
-    gapMs(SENTENCE_GAP_MIN, SENTENCE_GAP_MAX),
+    withinRange(SENTENCE_GAP_MIN, SENTENCE_GAP_MAX),
   ),
   paragraphGapMs: defineSetting<number>(
     'kernel.paragraphGapMs',
     PARAGRAPH_GAP.steps[PARAGRAPH_GAP.def] ?? 0,
-    gapMs(PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX),
+    withinRange(PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX),
   ),
 } as const satisfies Record<string, Setting<unknown>>
 
@@ -879,8 +918,25 @@ function readTextSize(store: SettingsStore): number {
    * the current one, and with nothing stored the current one is the FALLBACK —
    * so a reader choosing exactly the default size stored nothing, and the next
    * read came back here and answered with the legacy index instead. Writing it
-   * once makes every later read and write ordinary, and removes the ordering
-   * dependency altogether.
+   * once makes every later read and write ordinary.
+   *
+   * ⚠️ **AND THIS WRITE IS ITSELF SKIPPED WHEN `carried` IS THE FALLBACK,
+   * WHICH IS REACHABLE — SO IT DOES NOT "REMOVE THE ORDERING DEPENDENCY
+   * ALTOGETHER", AS THIS COMMENT CLAIMED.** `set` declines a value equal to the
+   * current one, and with nothing stored the current one IS the fallback, so
+   * the very case the paragraph above describes is the case this `set` cannot
+   * record. It is not hypothetical: `LEGACY_READING_SIZES[2]` is 21 and
+   * `READING_STEPS[DEFAULT_STEP_IDX].size` is 21, so a reader on legacy step 2
+   * takes this path on every launch for ever.
+   *
+   * It is nevertheless HARMLESS, which is why the write is left as it is rather
+   * than given a way around the dedup: in the skipped case `carried` and the
+   * fallback are the same number, so "absent" and "the legacy value" answer
+   * identically and no reader can observe a difference. What it costs is
+   * durability, not correctness — `LEGACY_STEP_IDX` can never be retired for
+   * those readers, because something still reads it. Said here rather than
+   * fixed with a second write path, because one caller is not a reason to give
+   * the store an unconditional `set` that every other caller could reach for.
    *
    * Today the app happens not to lose the choice — `useAppState`'s effect
    * writes every preference on mount, which materialises this before anything
@@ -932,6 +988,19 @@ export function writeKernelPreferences(store: SettingsStore, prefs: KernelPrefer
    * here is nothing at all, and the setting simply never persists. WI-14.4's
    * fifteen were shipped that way for exactly as long as it took an audit to
    * ask why the panel reset on every launch.
+   *
+   * ⚠️ **AND THE ASYMMETRY IS THE POINT, NOT A LEFTOVER** — an audit has since
+   * read it the other way and asked for the READER to be derived too. It must
+   * not be. The two halves fail differently and only one of them fails safely:
+   * omitting a field from `readKernelPreferences` is a COMPILE ERROR, measured
+   * rather than assumed by deleting `paragraphGapMs` from it and running the
+   * gate — `settings.ts(926,3): error TS2741: Property 'paragraphGapMs' is
+   * missing in type … but required in type 'KernelPreferences'`. So the reader
+   * is already held to the table by the type system, which is a stronger guard
+   * than a loop, and it is what lets `textSize` go through `readTextSize`
+   * instead of `store.get` without that exception costing the guarantee.
+   * Deriving it would buy symmetry and sell the one thing that makes a
+   * hand-written list safe.
    *
    * The cast is the one place the derivation cannot be expressed: `store.set`
    * is generic in the setting's own type, and iterating the table erases the
