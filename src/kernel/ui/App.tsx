@@ -294,14 +294,22 @@ export function App({
    */
   const speechPaging = useMemo(() => {
     const here = book.position.chapterHref
-    const placed = here !== '' && stepChapter(book.toc, here, 1) !== null
-    const before = here !== '' && stepChapter(book.toc, here, -1) !== null
-    if (!placed && !before) return { next: book.next }
+    /* ONE LOOKUP SERVING BOTH HALVES, so the answer the transport draws and the
+       answer the step takes cannot disagree. They were computed separately —
+       `placed`/`before` here, a fresh `stepChapter` inside the action — and the
+       two were only ever reconciled by both being correct. */
+    const to = (by: -1 | 1) => (here === '' ? null : stepChapter(book.toc, here, by))
+    if (to(1) === null && to(-1) === null) return { next: book.next }
     return {
       next: book.next,
-      chapter: (by: -1 | 1) => {
-        const href = stepChapter(book.toc, book.position.chapterHref, by)
-        if (href !== null) book.goTo(href)
+      chapter: {
+        can: (by: -1 | 1) => to(by) !== null,
+        go: (by: -1 | 1) => {
+          const href = to(by)
+          if (href === null) return false
+          book.goTo(href)
+          return true
+        },
       },
     }
   }, [book.next, book.goTo, book.toc, book.position.chapterHref])

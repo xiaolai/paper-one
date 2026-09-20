@@ -114,15 +114,26 @@ function ends(at = synth.queued.length - 1) {
 
 function mount(
   doc: Document | null,
-  { chapters = false, prefs }: { chapters?: boolean; prefs?: SpeakPrefs } = {},
+  {
+    chapters = false,
+    lands = true,
+    prefs,
+  }: { chapters?: boolean; lands?: boolean; prefs?: SpeakPrefs } = {},
 ) {
   const next = vi.fn()
-  const chapter = vi.fn()
+  /* ⚠️ `lands` IS THE WHOLE POINT OF THE RETURN VALUE. A `chapter` that
+     declines is what a reader meets at either end of a book, and the reading
+     must survive it — see the case that presses a dead direction mid-gap. */
+  const chapter = vi.fn(() => lands)
   const api: { current: Speech | null } = { current: null }
   function Probe({ doc }: { doc: Document | null }) {
     /* ABSENT rather than a no-op when the book cannot step chapters — the
        transport reads its presence to decide whether to draw the buttons. */
-    api.current = useSpeech(doc, chapters ? { next, chapter } : { next }, prefs)
+    api.current = useSpeech(
+      doc,
+      chapters ? { next, chapter: { can: () => lands, go: chapter } } : { next },
+      prefs,
+    )
     return null
   }
   const view = render(<Probe doc={doc} />)
@@ -686,6 +697,39 @@ describe('stepping by chapter', () => {
     act(() => speech().stepChapter(1))
     expect(chapter).toHaveBeenCalledWith(1)
     expect(spoken()).toEqual(['One here.'])
+    a.remove()
+  })
+
+  /**
+   * ⚠️ **A DIRECTION THAT DECLINES USED TO KILL THE READING.** `stepChapter`
+   * cleared the pending sentence gap and the section continuation BEFORE asking
+   * the book to navigate, and `chapter` answered nothing at all, so a press at
+   * either end of the book — where a reader is very likely to press — threw
+   * away the only future work the reading had. The voice fell silent,
+   * `speaking` stayed true, and no timer was left to restart it: the transport
+   * showed a reading in progress that only stop could end.
+   *
+   * The book is the only thing that knows whether a step lands, which is why
+   * `chapter.go` reports it rather than the hook guessing.
+   */
+  it('keeps reading when a chapter step declines, instead of stranding it mid-gap', () => {
+    const a = section('One here. Two there.')
+    const { speech, chapter } = mount(a.doc, { chapters: true, lands: false, prefs: { sentenceGapMs: 300 } })
+    act(() => speech().start())
+    /* MID-GAP: the first sentence is done and the timer for the second is the
+       pending work the old teardown destroyed. */
+    ends()
+    expect(spoken()).toEqual(['One here.'])
+
+    act(() => speech().stepChapter(1))
+
+    expect(chapter, 'the book was still asked').toHaveBeenCalledWith(1)
+    expect(speech().speaking, 'and the reading is still under way').toBe(true)
+    act(() => vi.advanceTimersByTime(300))
+    expect(spoken(), 'the sentence the gap was waiting for still arrives').toEqual([
+      'One here.',
+      'Two there.',
+    ])
     a.remove()
   })
 

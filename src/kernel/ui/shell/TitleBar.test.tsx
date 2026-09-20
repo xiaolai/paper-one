@@ -22,7 +22,7 @@ const speech: Speech = {
   speaking: false,
   paused: false,
   followsWords: false,
-  chapters: false,
+  chapters: { back: false, forward: false },
   start: () => {},
   stop: () => {},
   pause: () => {},

@@ -72,14 +72,21 @@ export interface Speech {
   stepParagraph: (by: -1 | 1) => void
   stepChapter: (by: -1 | 1) => void
   /**
-   * Whether `stepChapter` can actually go anywhere.
+   * Which directions `stepChapter` can actually go.
    *
    * ⚠️ **PUBLISHED SO THE TRANSPORT CAN LEAVE THE BUTTON OUT RATHER THAN DRAW A
    * DEAD ONE.** Without it the control would have to guess, and the honest answer
    * is known only here — see `SpeechPaging.chapter`, which a book that cannot
    * place the reader in its own contents does not supply.
+   *
+   * ⚠️ **AND IT WAS ONE BOOLEAN FOR BOTH DIRECTIONS, WHICH IS A DEAD BUTTON BY
+   * ANOTHER ROUTE.** True meant "at least one direction exists", so in the first
+   * chapter of every book the transport drew a Previous control that could not
+   * go anywhere, and in the last chapter a Next one — the exact thing the flag
+   * was added to prevent, at the two places a reader is most likely to be. The
+   * caller already knew both answers separately and threw one away.
    */
-  readonly chapters: boolean
+  readonly chapters: { readonly back: boolean; readonly forward: boolean }
 }
 
 /**
@@ -99,8 +106,28 @@ export interface SpeechPaging {
    * `tocOrder.ts` over `position.chapterHref` — and a book whose current spine
    * item no contents entry points at genuinely has no next chapter to offer. A
    * control that navigates nowhere is worse than one that is not there.
+   *
+   * ⚠️ **`go` ANSWERS WHETHER IT MOVED, AND IT USED TO ANSWER NOTHING.**
+   * Returning `void`, it could not be distinguished from a no-op — so
+   * `stepChapter` tore down the pending sentence gap and the section
+   * continuation BEFORE asking, and a press at either end of the book destroyed
+   * the only future work the reading had while leaving `speaking` true. The
+   * voice stopped, the transport went on showing a reading in progress, and
+   * nothing could restart it but the reader pressing stop.
+   *
+   * `can` is the same question WITHOUT taking the step, which is what a render
+   * needs and what an action cannot give it: asking by navigating is not asking.
+   * Both live under one field so they cannot drift into disagreeing about the
+   * same book — a separate `chapters` flag beside a `chapter` function is two
+   * statements of one fact, and this file has just finished removing a set of
+   * those.
    */
-  chapter?: ((by: -1 | 1) => void) | undefined
+  chapter?:
+    | {
+        readonly can: (by: -1 | 1) => boolean
+        readonly go: (by: -1 | 1) => boolean
+      }
+    | undefined
 }
 
 /**
@@ -683,12 +710,22 @@ export function useSpeech(
    * new one — the same path a reader taking a chapter from the contents already
    * goes down while listening. Nothing to do but ask.
    */
-  const stepChapter = useCallback((by: -1 | 1) => {
-    if (!readingRef.current) return
-    clearGap()
-    clearContinuation()
-    pagingRef.current.chapter?.(by)
-  }, [clearGap, clearContinuation])
+  const stepChapter = useCallback(
+    (by: -1 | 1) => {
+      if (!readingRef.current) return
+      /* ASKED FIRST, TORN DOWN AFTER — and it used to be the other way round.
+         A `chapter` that declines is a legitimate answer at either end of a
+         book, and clearing ahead of it threw away the pending gap or the
+         section continuation for a navigation that never happened: the voice
+         went silent with `speaking` still true and no timer left to wake it.
+         Nothing is cleared unless the document is actually changing, in which
+         case the document effect below takes over the reading. */
+      if (pagingRef.current.chapter?.go(by) !== true) return
+      clearGap()
+      clearContinuation()
+    },
+    [clearGap, clearContinuation],
+  )
 
   /* The spine document changing is a step INSIDE the reading, not its end.
    *
@@ -736,8 +773,15 @@ export function useSpeech(
 
   /* READ FROM THE PROP, not from `pagingRef`: this decides what is RENDERED, so
    * it has to be a value the render sees change. The ref exists for callbacks
-   * that need the value as of now, which is the opposite problem. */
-  const chapters = paging.chapter !== undefined
+   * that need the value as of now, which is the opposite problem.
+   *
+   * MEMOISED ON THE TWO BOOLEANS rather than built inline, because `Speech` is
+   * itself a memo and an object literal here would be a fresh identity on every
+   * render — which would make every consumer of `Speech` re-render on every one
+   * of the reading's own state changes, several a second while the voice runs. */
+  const canBack = paging.chapter?.can(-1) ?? false
+  const canForward = paging.chapter?.can(1) ?? false
+  const chapters = useMemo(() => ({ back: canBack, forward: canForward }), [canBack, canForward])
 
   return useMemo<Speech>(
     () => ({

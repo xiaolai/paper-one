@@ -9663,6 +9663,7 @@
     "src/kernel/ui/reader/useSpeech.test.tsx > stepping by chapter > asks the book, and does not restart the reading itself",
     "src/kernel/ui/reader/useSpeech.test.tsx > stepping by chapter > does nothing at all when the book cannot step chapters",
     "src/kernel/ui/reader/useSpeech.test.tsx > stepping by chapter > does nothing when no reading is under way",
+    "src/kernel/ui/reader/useSpeech.test.tsx > stepping by chapter > keeps reading when a chapter step declines, instead of stranding it mid-gap",
     "src/kernel/ui/reader/useSpeech.test.tsx > stepping by paragraph > crosses into the previous paragraph from that paragraph first sentence",
     "src/kernel/ui/reader/useSpeech.test.tsx > stepping by paragraph > goes to the first sentence of the next paragraph",
     "src/kernel/ui/reader/useSpeech.test.tsx > stepping by paragraph > needs the block index collectText records, which a single space cannot carry",

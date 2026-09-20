@@ -463,7 +463,7 @@ function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps) {
 
   return (
     <div className={styles.transport} role="group" aria-label="Reading aloud">
-      {speech.chapters ? step('Previous chapter', ChevronsLeft, () => speech.stepChapter(-1)) : null}
+      {speech.chapters.back ? step('Previous chapter', ChevronsLeft, () => speech.stepChapter(-1)) : null}
       {step('Previous paragraph', SkipBack, () => speech.stepParagraph(-1))}
       {step('Previous sentence', ChevronLeft, () => speech.stepSentence(-1))}
       <button
@@ -482,7 +482,7 @@ function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps) {
       </button>
       {step('Next sentence', ChevronRight, () => speech.stepSentence(1))}
       {step('Next paragraph', SkipForward, () => speech.stepParagraph(1))}
-      {speech.chapters ? step('Next chapter', ChevronsRight, () => speech.stepChapter(1)) : null}
+      {speech.chapters.forward ? step('Next chapter', ChevronsRight, () => speech.stepChapter(1)) : null}
       <button
         type="button"
         className={`${styles.action} ${styles.transportButton} ${styles.rate}`}
