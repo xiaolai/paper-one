@@ -373,7 +373,13 @@ export function useBook(): Book {
        for exactly no books — see `setFootnoteMount`. */
     if (navigator && footnoteMountRef.current)
       navigator.setFootnoteMount(footnoteMountRef.current, footnoteSpaceRef.current)
-  }, [])
+    /* `[current]` like every sibling setter, and this declared `[]` while calling
+       it. Not observable today — `current` has no dependencies of its own, so its
+       identity never moves — which is exactly what makes it a trap: the day
+       `current` gains one, this is the only guarded setter that keeps the old
+       one, and the symptom is a torn-down session installing its navigator over
+       the book that replaced it. That is the defect the comment above describes. */
+  }, [current])
   const setToc = useCallback(
     (generation: number, value: readonly TocItem[]) => {
       if (current(generation)) setTocState(value)

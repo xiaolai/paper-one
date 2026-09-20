@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
 import { ExportCancelled, exportAudiobook, planChapters, type SectionText } from '../reader/audiobook'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
@@ -128,8 +128,22 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
     })()
   }, [running, source, voices, chosen, rate, say])
 
+  /**
+   * ⚠️ **MEMOISED BECAUSE A CONSUMER HAS TO BE ABLE TO DEPEND ON IT.** A fresh
+   * object per render is why `App`'s `commands` memo left `audiobook` out of its
+   * dependency list — including it would have rebuilt every command on every
+   * render, and every position update is a render. So the palette kept the first
+   * `running: false` and the first `run` closure: selecting the row again started
+   * a SECOND export instead of stopping the first, and the label never changed to
+   * "Stop exporting the audiobook".
+   *
+   * That memo's own comment says a stale command is worse than a missing one
+   * because it looks like it worked, which is exactly what happened. A stable
+   * identity is what lets the dependency be declared honestly.
+   */
+  const control = useMemo<AudiobookControl>(() => ({ running, run }), [running, run])
   if (!available || !source) return null
-  return { running, run }
+  return control
 }
 
 /** The file's own name, since the whole path is longer than a notice. */

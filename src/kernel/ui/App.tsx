@@ -241,6 +241,8 @@ export function App({
    * DECLARED ONCE, because asking it a second time as `state.screen ===
    * 'reader'` is the defect the keyboard map's note records about its own
    * copy. */
+  /* Every overlay, as ONE value — see the keyboard effect's dependency list. */
+  const anyLayerOpen = hasOpenLayer(state)
   const onReader = state.screen === 'reader'
   /* Pins, colours, hidden subjects and saved views — the reader's decisions
      ABOUT their tags, as opposed to which books carry them. See `tagPrefs`. */
@@ -2001,6 +2003,12 @@ export function App({
       archives,
       markSelection,
       closeBook,
+      /* ⚠️ **READ AT LINE 1934 AND OMITTED HERE.** `running` and `run` both change
+         when an export starts, and without this the palette kept the first pair:
+         selecting the row again started a second export rather than stopping the
+         first. Safe to depend on because `useAudiobook` memoises it — a fresh
+         object per render is what kept it out. */
+      audiobook,
     ],
   )
 
@@ -2260,9 +2268,18 @@ export function App({
     platform,
     state.screen,
     state.pane,
-    state.paletteOpen,
-    state.switcherOpen,
-    state.tagsOpen,
+    /* ⚠️ **THREE OF THE FOUR LAYERS WERE LISTED AND `trashOpen` WAS NOT**, so
+       closing the trash alone left the handler holding the previous layer state.
+       This array has already been bitten twice by the same shape — see the digits
+       note and the tint note below — so the fix is not a fourth entry.
+
+       The handler never reads an individual layer: they reach it only through
+       `hasOpenLayer(state)`, and through `readerTakesInput`, which calls the same
+       function. So the dependency IS that one boolean, which is exactly what is
+       read and nothing more. Adding a layer to `LAYER_ORDER` now cannot leave
+       this list stale, because there is no longer a list of layers to forget one
+       from. */
+    anyLayerOpen,
     state.stepIdx,
     /* ⚠️ THE DIGITS READ THESE, AND THEY WERE MISSING — the same defect the
        tint note below records, on the day developer options landed. The handler
