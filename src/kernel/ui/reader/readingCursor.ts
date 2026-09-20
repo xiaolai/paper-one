@@ -93,33 +93,30 @@ export function stepParagraph(plan: ReadingPlan, at: number, by: Step): number |
   if (by === 1) {
     const nextBlock = plan.blocks[here + 1]
     if (nextBlock === undefined) return null
-    return firstSentenceFrom(plan, nextBlock)
+    const target = sentenceIndexAt(plan, nextBlock)
+    /**
+     * ⚠️ **A FORWARD STEP MUST ADVANCE, AND THIS RETURNED `at` ITSELF.** A block
+     * boundary need not be a sentence boundary: a heading with no full stop
+     * leaves one sentence spanning the heading AND the paragraph after it, so
+     * the sentence CONTAINING the next block's start is the one already being
+     * spoken. Answering it made "next paragraph" cancel the current sentence and
+     * speak it again — a button that looks broken because it is.
+     *
+     * The remaining words of that next paragraph begin at the following
+     * sentence, so that is where the step goes. Found by an audit, which also
+     * found that `readingCursor.test.ts` asserted the defect as correct.
+     */
+    if (target > at) return target
+    return at + 1 < plan.sentences.length ? at + 1 : null
   }
 
   const blockStart = plan.blocks[here]
   const sentenceStart = plan.sentences[at]?.start
   /* Not already at the paragraph's first sentence: restart this paragraph. */
   if (blockStart !== undefined && sentenceStart !== undefined && sentenceStart > blockStart) {
-    return firstSentenceFrom(plan, blockStart)
+    return sentenceIndexAt(plan, blockStart)
   }
   const previousBlock = plan.blocks[here - 1]
   if (previousBlock === undefined) return null
-  return firstSentenceFrom(plan, previousBlock)
-}
-
-/**
- * The first sentence beginning at or after `offset`.
- *
- * A block boundary need not be a sentence boundary — a paragraph can open
- * mid-sentence where the previous one had no terminator, and a heading with no
- * full stop is exactly that case. So this takes the sentence CONTAINING the
- * offset when none starts there, which keeps a paragraph step inside the
- * paragraph the reader asked for rather than overshooting into the next.
- */
-function firstSentenceFrom(plan: ReadingPlan, offset: number): number {
-  for (const [at, span] of plan.sentences.entries()) {
-    if (span.start >= offset) return at
-    if (offset < span.end) return at
-  }
-  return Math.max(0, plan.sentences.length - 1)
+  return sentenceIndexAt(plan, previousBlock)
 }

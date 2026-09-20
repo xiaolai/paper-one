@@ -145,8 +145,24 @@ describe('a paragraph that does not begin a sentence', () => {
     expect(blocks[1]).toBeLessThan(first?.end ?? 0)
   })
 
-  it('steps to the sentence containing the boundary, not past it', () => {
-    expect(stepParagraph(p, 0, 1)).toBe(0)
+  it('advances, rather than answering the sentence it is already speaking', () => {
+    /* ⚠️ **THIS ASSERTED `0` — THE CURRENT SENTENCE — AND CALLED IT CORRECT.**
+       The case was written to stop a forward step OVERSHOOTING the paragraph the
+       reader asked for, and it did that by letting the step stand still instead:
+       "next paragraph" cancelled the sentence being spoken and spoke it again.
+       A forward step that cannot move is a button that looks broken.
+
+       The boundary falls inside sentence 0, so the words of the second paragraph
+       that are not already in that sentence begin at sentence 1. Found by an
+       audit; the mutation check that "proved" the old guard was load-bearing was
+       proving the wrong behaviour load-bearing. */
+    expect(stepParagraph(p, 0, 1)).toBe(1)
+  })
+
+  it('does not overshoot, which is what the old case was defending', () => {
+    /* The step lands in the paragraph asked for — sentence 1 is inside block 1,
+       not past it — so the original concern is still covered. */
+    expect(blockIndexAt(p, 1)).toBe(1)
   })
 })
 
