@@ -52,6 +52,8 @@ export interface AudiobookDeps {
 
 export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
   const [running, setRunning] = useState(false)
+  /** The synchronous claim — see `run`. `running` is what the controls render. */
+  const inFlight = useRef(false)
   /* A REF, not state: it is read inside the export loop between chapters, and a
    * captured `running` would be the value at the moment the export started. */
   const stop = useRef(false)
@@ -59,7 +61,17 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
   const { available, source, voices, chosen, rate, say } = deps
 
   const run = useCallback(() => {
-    if (running) {
+    /**
+     * ⚠️ **`running` IS A RENDER SNAPSHOT, NOT A LOCK, AND IT WAS USED AS ONE.**
+     * Two calls before React commits `setRunning(true)` both read `false` and both
+     * start an export — sharing one `stop` flag, so either can cancel the other,
+     * and until each got its own scratch directory they deleted each other's
+     * chapters too. A palette row and an accelerator firing together is enough.
+     *
+     * The claim has to be synchronous, so it is a ref. `running` stays as the
+     * thing the CONTROLS read, which is what state is for.
+     */
+    if (inFlight.current) {
       /* The same command stops it — see `commands.ts`. Nothing is awaited here:
        * the loop notices between chapters and unwinds itself. */
       stop.current = true
@@ -68,6 +80,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
     }
     if (!source) return
 
+    inFlight.current = true
     void (async () => {
       stop.current = false
       setRunning(true)
@@ -140,6 +153,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
         say(`The export failed: ${messageOf(cause)}`)
       } finally {
         stop.current = false
+        inFlight.current = false
         setRunning(false)
       }
     })()

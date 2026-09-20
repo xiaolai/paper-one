@@ -80,6 +80,16 @@ export interface AudiobookPlatform {
   scratchFor: (index: number) => string
   /** Remove one, whatever happened. */
   discard: (path: string) => Promise<void>
+  /**
+   * Remove whatever is left of THIS export's scratch, once the chapters are gone.
+   *
+   * ⚠️ **PER-EXPORT, WHICH IS THE WHOLE POINT.** Scratch used to be
+   * `chapter-<index>.wav` under one shared directory, so two exports running at
+   * once wrote over each other's chapters and each tidy-up deleted the other's
+   * files — and a crash left them there for ever, because nothing owned them.
+   * Every export gets its own directory now, and this removes it.
+   */
+  discardScratch: () => Promise<void>
 }
 
 export interface AudiobookRequest {
@@ -186,5 +196,8 @@ export async function exportAudiobook(
        * the other scratch files being removed. */
       await platform.discard(path).catch(() => {})
     }
+    /* AFTER the files, and swallowed for the same reason: the directory is this
+       export's own, so removing it cannot affect another one. */
+    await platform.discardScratch().catch(() => {})
   }
 }

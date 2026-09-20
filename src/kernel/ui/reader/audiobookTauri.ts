@@ -19,7 +19,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { appDataDir, join } from '@tauri-apps/api/path'
 import { save } from '@tauri-apps/plugin-dialog'
-import { BaseDirectory, mkdir, remove } from '@tauri-apps/plugin-fs'
+import { BaseDirectory, mkdir, readDir, remove } from '@tauri-apps/plugin-fs'
 import type { AudiobookPlatform } from './audiobook'
 
 /** Under `$APPDATA`, so the fs grant already covers it. */
@@ -141,10 +141,65 @@ function withinBytes(text: string): string {
  */
 const RESERVED_ON_WINDOWS = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/iu
 
+/**
+ * How long an abandoned run directory is left alone before it is removed.
+ *
+ * Long enough that a run genuinely in flight on another window is never touched —
+ * a ten-hour book at 22× real time is under half an hour — and short enough that
+ * a crash does not leave gigabytes indefinitely.
+ */
+const ABANDONED_AFTER_MS = 6 * 60 * 60 * 1000
+
+/**
+ * Remove run directories no export can still own.
+ *
+ * ⚠️ **AGE IS THE ONLY OWNERSHIP SIGNAL AVAILABLE, SO IT IS USED CAREFULLY.**
+ * Nothing records which window owns which run, and a second window may be
+ * exporting right now — so a directory is removed only when its own id says it
+ * was created longer ago than any export could plausibly still be running, and
+ * never the one this call just made. Reading the id rather than the filesystem's
+ * timestamps keeps it honest across a copied or restored profile.
+ *
+ * `fs:allow-read-dir` and `fs:allow-remove` are already granted for `$APPDATA`,
+ * so this needs no new permission — which the note at the top of this file says
+ * is the condition for a tidy-up existing at all.
+ */
+async function sweepAbandonedScratch(keep: string): Promise<void> {
+  const now = Date.now()
+  for (const entry of await readDir(SCRATCH_DIR, { baseDir: BaseDirectory.AppData })) {
+    if (!entry.isDirectory || entry.name === keep) continue
+    const stamp = /^run-([0-9a-z]+)-/u.exec(entry.name)?.[1]
+    if (stamp === undefined) continue
+    const made = Number.parseInt(stamp, 36)
+    if (!Number.isFinite(made) || now - made < ABANDONED_AFTER_MS) continue
+    await remove(`${SCRATCH_DIR}/${entry.name}`, {
+      baseDir: BaseDirectory.AppData,
+      recursive: true,
+    }).catch(() => {})
+  }
+}
+
 /** The engine, as `exportAudiobook` needs it. */
 export async function tauriAudiobook(): Promise<AudiobookPlatform> {
-  await mkdir(SCRATCH_DIR, { baseDir: BaseDirectory.AppData, recursive: true })
-  const root = await join(await appDataDir(), SCRATCH_DIR)
+  /**
+   * ⚠️ **ONE DIRECTORY PER EXPORT, AND IT USED TO BE ONE FOR ALL OF THEM.**
+   * `chapter-<index>.wav` under a shared root meant two exports running together
+   * wrote over each other's chapters, and each one's tidy-up deleted the other's
+   * files — a rejected second export could discard a chapter the first had
+   * already rendered. It also meant nothing OWNED a leftover, so a crash left
+   * files behind for ever with no rule for removing them.
+   *
+   * The run id carries the clock so `sweepAbandonedScratch` can judge age, and
+   * random suffix so two exports started in the same millisecond still differ.
+   */
+  const run = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const dir = `${SCRATCH_DIR}/${run}`
+  await mkdir(dir, { baseDir: BaseDirectory.AppData, recursive: true })
+  const root = await join(await appDataDir(), dir)
+  /* Abandoned runs go now rather than at boot: this is the only moment the app is
+     certainly about to use this directory, and a sweep at launch would cost every
+     reader who never exports anything. */
+  await sweepAbandonedScratch(run).catch(() => {})
 
   return {
     render: (job) => invoke('narrate_render', { ...job }),
@@ -158,7 +213,10 @@ export async function tauriAudiobook(): Promise<AudiobookPlatform> {
        * permission than the work did. */
       const name = path.slice(path.lastIndexOf('/') + 1)
       if (name === '') return
-      await remove(`${SCRATCH_DIR}/${name}`, { baseDir: BaseDirectory.AppData })
+      await remove(`${dir}/${name}`, { baseDir: BaseDirectory.AppData })
+    },
+    discardScratch: async () => {
+      await remove(dir, { baseDir: BaseDirectory.AppData, recursive: true })
     },
   }
 }

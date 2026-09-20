@@ -53,6 +53,7 @@ describe('planChapters', () => {
 function fake(overrides: Partial<AudiobookPlatform> = {}) {
   const rendered: string[] = []
   const discarded: string[] = []
+  const sweeps: string[] = []
   const platform: AudiobookPlatform = {
     render: vi.fn(async (job) => {
       rendered.push(job.path)
@@ -62,9 +63,12 @@ function fake(overrides: Partial<AudiobookPlatform> = {}) {
     discard: vi.fn(async (path) => {
       discarded.push(path)
     }),
+    discardScratch: vi.fn(async () => {
+      sweeps.push('swept')
+    }),
     ...overrides,
   }
-  return { platform, rendered, discarded }
+  return { platform, rendered, discarded, sweeps }
 }
 
 const request = (over: Partial<Parameters<typeof exportAudiobook>[1]> = {}) => ({
@@ -202,6 +206,36 @@ describe('exportAudiobook', () => {
       /no readable text/u,
     )
     expect(platform.package).not.toHaveBeenCalled()
+  })
+
+  it('removes its own scratch directory when it is done', async () => {
+    /* ⚠️ **SCRATCH USED TO BE SHARED BY EVERY EXPORT.** `chapter-<index>.wav` under
+       one directory meant two exports wrote over each other's chapters and each
+       tidy-up deleted the other's files, and a crash left them owned by nobody.
+       A directory per export is what makes both answerable. */
+    const { platform, sweeps } = fake()
+    await exportAudiobook(platform, request())
+    expect(sweeps).toEqual(['swept'])
+  })
+
+  it('removes it after a failure too, and after the chapters', async () => {
+    const { platform, discarded, sweeps } = fake({
+      package: vi.fn(async () => {
+        throw new Error('afconvert refused the audio')
+      }),
+    })
+    await expect(exportAudiobook(platform, request())).rejects.toThrow(/afconvert/u)
+    expect(discarded).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
+    expect(sweeps).toEqual(['swept'])
+  })
+
+  it('does not let a failed sweep hide the export either', async () => {
+    const { platform } = fake({
+      discardScratch: vi.fn(async () => {
+        throw new Error('the disk is gone')
+      }),
+    })
+    await expect(exportAudiobook(platform, request())).resolves.toMatchObject({ chapters: 2 })
   })
 
   it('does not let a failed tidy-up hide the export it belonged to', async () => {

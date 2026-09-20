@@ -97,6 +97,42 @@ describe('a book with no voice this app would choose', () => {
   })
 })
 
+describe('two calls before React has committed anything', () => {
+  /**
+   * ⚠️ **`running` IS A RENDER SNAPSHOT AND WAS USED AS A LOCK.** Two calls before
+   * `setRunning(true)` commits both read `false` and both start an export, sharing
+   * one `stop` flag so either cancels the other — and until each got its own
+   * scratch directory, deleting each other's chapters. A palette row and an
+   * accelerator firing together is enough to do it.
+   */
+  it('starts one export, not two', async () => {
+    const reads: number[] = []
+    let calls = 0
+    const { seen, say } = mount({
+      source: {
+        title: 'A Measured Book',
+        author: 'Paper',
+        lang: 'en-US',
+        toc: [],
+        sectionTexts: vi.fn(async () => {
+          calls += 1
+          reads.push(calls)
+          return { sections: [], complete: true }
+        }),
+      },
+    })
+    /* BOTH inside one act, so no render commits between them — which is exactly
+       the window a state flag cannot close. */
+    await act(async () => {
+      seen[0]?.run()
+      seen[0]?.run()
+    })
+    expect(calls).toBe(1)
+    /* The second call is a STOP, because the first is in flight. */
+    expect(say).toHaveBeenCalledWith(expect.stringContaining('Stopping the export'))
+  })
+})
+
 describe('a walk that did not finish', () => {
   /**
    * ⚠️ **A PARTIAL WALK USED TO BE EXPORTED AS A FINISHED BOOK.**
