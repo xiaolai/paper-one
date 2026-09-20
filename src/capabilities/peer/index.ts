@@ -130,7 +130,7 @@ export function peerPort(): PeerPort | null {
  *
  * ⚠️ **A PORT RATHER THAN A SECOND WIRE**, the way `companion` reaches
  * `inferencePort()`. These are the PEER plugin's commands, and
- * `no-tauri-api-outside-peer-wire` asks for one file per plugin *"so the set of
+ * `no-tauri-api-outside-plugin-wires` asks for one file per plugin *"so the set of
  * command names is auditable in one place"* — a wire of `circle`'s own calling
  * `plugin:peer|…` would leave that sentence false while the rule still passed.
  *

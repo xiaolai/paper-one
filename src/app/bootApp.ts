@@ -31,8 +31,10 @@
  * names `App`, and a barrel retains everything it names, so taking the wide
  * door here would put the entire desktop pane tree into the mobile bundle.
  * `.dependency-cruiser.cjs` refuses the shortcut
- * (`native-boot-not-desktop-ui-entry`; this said `mobile-root-…`, which is not a
- * rule that exists — the guard holds, the pointer to it did not).
+ * (`only-a-desktop-root-takes-the-desktop-ui-entry`). ⚠️ THIS POINTER HAS NOW
+ * BEEN WRONG TWICE: it said `mobile-root-…`, which was never a rule, and then
+ * `native-boot-not-desktop-ui-entry`, which the four-rules-one-per-entry
+ * rewrite replaced. The guard held both times; only the name here did not.
  */
 import {
   DIAGNOSTICS_FILE,

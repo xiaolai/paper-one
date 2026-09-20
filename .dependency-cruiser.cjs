@@ -48,35 +48,58 @@ const path = require('node:path')
  * both let a native root import the browser's and the browser root import the
  * Tauri-bound one.
  */
-const NATIVE_COMPOSITION_ROOTS = [
-  '^src/app/composition\\.(desktop|ios|android)\\.ts$',
-  '^src/main\\.tsx$',
-  /* The MOBILE shell's root. A third entry rather than a branch inside
-     `main.tsx`, for the reason the browser root is a fourth: the shells share
-     a launch sequence, not a component tree, and the desktop tree must not
-     enter a mobile bundle. */
-  '^src/main\\.mobile\\.tsx$',
-  /* THE SHARED LAUNCH SEQUENCE, which is part of the root rather than a module
-     the root calls. It reaches the kernel's public entry and its boot entry
-     exactly as a root does, and it exists only because BOTH native roots run
-     it — see the header of `src/app/bootApp.ts`. It is held to the narrow door
-     by `native-boot-not-desktop-ui-entry` below. */
-  '^src/app/bootApp\\.ts$',
-]
+const DESKTOP_COMPOSITION_ROOTS = ['^src/app/composition\\.desktop\\.ts$', '^src/main\\.tsx$']
+
+/* The MOBILE shell's roots. Separate from the desktop's rather than a branch
+   inside `main.tsx`, for the reason the browser's are separate again: the
+   shells share a launch sequence, not a component tree, and the desktop tree
+   must not enter a mobile bundle. */
+const MOBILE_COMPOSITION_ROOTS = ['^src/app/composition\\.(ios|android)\\.ts$', '^src/main\\.mobile\\.tsx$']
+
+/* THE SHARED LAUNCH SEQUENCE, which is part of the root rather than a module
+   the root calls. It reaches the kernel's public entry and its boot entry
+   exactly as a root does, and it exists only because BOTH native roots run
+   it — see the header of `src/app/bootApp.ts`. It belongs to no platform
+   group, which is what refuses it all three component entries below. */
+const LAUNCH_SEQUENCE = '^src/app/bootApp\\.ts$'
+
+/* The BROWSER client's roots (phase 18). Their own group rather than a branch
+   inside `main.tsx`: that file arms a shutdown handshake with the Rust shell,
+   tears down the sync journal and migrates a legacy library, and the imports
+   carrying those pull `@tauri-apps` into a bundle served to a phone.
+   `assert-bundle` refuses a web bundle that reaches one. */
 const WEB_COMPOSITION_ROOTS = ['^src/app/composition\\.web\\.ts$', '^src/main\\.web\\.tsx$']
 
-const COMPOSITION_ROOTS = [
-  '^src/app/composition\\.(desktop|ios|android|web)\\.ts$',
-  '^src/main\\.mobile\\.tsx$',
-  '^src/app/bootApp\\.ts$',
-  '^src/main\\.tsx$',
-  /* The BROWSER client's root (phase 18). A second root rather than a branch
-   * inside `main.tsx`: that file arms a shutdown handshake with the Rust
-   * shell, tears down the sync journal and migrates a legacy library, and the
-   * imports carrying those pull `@tauri-apps` into a bundle served to a
-   * phone. `assert-bundle` refuses a web bundle that reaches one. */
-  '^src/main\\.web\\.tsx$',
+/**
+ * Who may take which of the kernel's UI entries.
+ *
+ * ⚠️ **THE UNIONS ARE DERIVED, AND THEY WERE TYPED OUT THREE TIMES.**
+ * `NATIVE_COMPOSITION_ROOTS`, `COMPOSITION_ROOTS` and the `to` list of
+ * `no-capability-to-composition-root` each held the same roots written by
+ * hand, so adding or renaming one updated whichever the author was looking at
+ * and left the others describing a tree that no longer existed. Nothing could
+ * notice: each list was complete on its own. They are spreads now, so a root
+ * added to a platform group is a root everywhere, in one edit.
+ *
+ * The groups are what the four `only-…-takes-…` rules below are written
+ * against. A root in NO group is refused every component entry — the loud
+ * default: a new platform must say which door is its, rather than silently
+ * inheriting all of them.
+ */
+const NATIVE_COMPOSITION_ROOTS = [
+  ...DESKTOP_COMPOSITION_ROOTS,
+  ...MOBILE_COMPOSITION_ROOTS,
+  LAUNCH_SEQUENCE,
 ]
+
+const COMPOSITION_ROOTS = [...NATIVE_COMPOSITION_ROOTS, ...WEB_COMPOSITION_ROOTS]
+
+/* Who takes `src/kernel/ui/boot.ts` DIRECTLY. Not a platform group, because it
+   cuts across one: the launch sequence and the phone's root run it, and the
+   phone's two composition files — which list capabilities and launch nothing —
+   do not. Spelled out rather than widened to MOBILE_COMPOSITION_ROOTS so that
+   moving launch code into a composition file has to be a decision. */
+const BOOT_ENTRY_TAKERS = [LAUNCH_SEQUENCE, '^src/main\\.mobile\\.tsx$']
 
 /** The design system's stylesheets.
  *
@@ -282,14 +305,20 @@ const FS_ADAPTERS = [
  *  be the thing this rule exists to prevent; a second capability with its own
  *  plugin is not.
  *
- *  `inference/lib/plugin.ts` is the second entry (phase 15): it wraps
- *  `tauri-plugin-inference`, whose commands carry the bearer token, the model
- *  installer and the agent turn. Everything above it calls a function; nothing
- *  above it calls `invoke`. */
+ *  ⚠️ **AND IT HELD A THIRD ENTRY FOR A CAPABILITY THAT NO LONGER EXISTS.**
+ *  `inference/lib/plugin.ts` (phase 15) wrapped `tauri-plugin-inference`, and
+ *  the whole `inference` capability was deleted with the AI features on
+ *  2026-09-19 — plugin, crate and directory. The grant outlived it by every
+ *  commit since, because a permission naming a path that cannot exist matches
+ *  nothing and so can never fail: it is exactly the silent-staleness shape
+ *  AGENTS.md records for a hand-written capability id, wearing another hat. A
+ *  live allowlist is a statement about what is allowed TODAY, and an entry
+ *  nothing can satisfy makes that statement unreadable — the next reader cannot
+ *  tell a standing exception from a fossil. Found by reading, not by a gate;
+ *  `pnpm boundaries` was green throughout. */
 const PLUGIN_WIRES = [
   '^src/capabilities/peer/lib/wire\\.ts$',
-  '^src/capabilities/inference/lib/plugin\\.ts$',
-  /* The third (phase 18): `tauri-plugin-webhost`'s commands — the six-digit
+  /* The second (phase 18): `tauri-plugin-webhost`'s commands — the six-digit
    * code the shelf shows, the browsers holding a credential, and the frame pipe
    * to each. Admitted by the rule's own reasoning above: a second file in ONE
    * capability is what this list prevents, and a second capability with its own
@@ -378,55 +407,101 @@ module.exports = {
         're-exported from the production entry, where the boundary rules could not tell it apart ' +
         'from `createKernelServices`, because it came through the one door everything may use.',
       from: { pathNot: ['\\.test\\.(ts|tsx|mjs)$', '\\.testkit\\.(ts|tsx)$'] },
-      to: { path: '^src/kernel/testkit\\.ts$' },
+      /* THE CONSTANT, NOT THE LITERAL IT IS A COPY OF. Spelled out here, the
+         entry's protection and its allowance in `no-kernel-internals-outside`
+         could be renamed apart — and a testkit entry that two rules disagree
+         about is one nothing protects. */
+      to: { path: KERNEL_TESTKIT_ENTRY },
+    },
+    {
+      name: 'kernel-testkit-not-reached-through-a-testkit',
+      severity: 'error',
+      comment:
+        'And not through an intermediary. The rule above reads DIRECT imports only, and it exempts ' +
+        'every *.testkit.ts importer — so production code importing a helper testkit that itself ' +
+        'imports src/kernel/testkit.ts passed both halves: the production file did not name the ' +
+        'entry, and the file that did was exempt. `fakeFs` would then be in a shipped bundle, ' +
+        'deciding that a name containing a dot is a directory. This rule is transitive and has no ' +
+        'testkit exemption on the `from` side, so the chain is refused wherever it starts in ' +
+        'production; the direct rule stays for the clearer diagnostic it gives on the common case.',
+      from: { pathNot: ['\\.test\\.(ts|tsx|mjs)$', '\\.testkit\\.(ts|tsx)$'] },
+      to: { path: KERNEL_TESTKIT_ENTRY, reachable: true },
     },
     {
       name: 'composition-root-kernel-entries',
       severity: 'error',
       comment:
         'A composition root (src/app/composition.<platform>.ts, src/main.tsx, src/main.web.tsx) may ' +
-        'import the kernel through the public entry and ONE UI entry — never past either. Which UI ' +
-        'entry is its platform\'s, and the two rules below draw that line; this one refuses ' +
-        'everything else under src/kernel/.',
+        'import the kernel through the public entry and ONE UI entry — never past either. This rule ' +
+        'refuses everything else under src/kernel/; WHICH UI entry is its platform\'s is settled by ' +
+        'the four only-…-takes-… rules below, one per entry.',
       from: { path: COMPOSITION_ROOTS },
       to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_BOOT_ENTRY, KERNEL_MOBILE_ENTRY, KERNEL_BROWSER_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
     },
+    /**
+     * ⚠️ **ONE RULE PER ENTRY, BECAUSE THREE RULES PER *EXCEPTION* LEFT HALF THE
+     * GRID OPEN.** `composition-root-kernel-entries` allows every root all four
+     * UI entries, and three subtractive rules used to carve pieces back out:
+     * natives could not take the browser's, boot and mobile could not take the
+     * desktop's, web could not take the desktop's. That is four entries against
+     * four root groups — sixteen pairs — and only five were decided. The
+     * undecided ones were real: `composition.ios.ts` could import the DESKTOP
+     * barrel, `main.tsx` could import `ui/mobile.ts`, and the web root could
+     * import `ui/boot.ts` or `ui/mobile.ts`. Each contradicts the invariant the
+     * rule above states in its own comment, and no rule could notice, because a
+     * subtractive rule is silent about every pair it does not name.
+     *
+     * Written the other way round the grid closes itself: each entry names the
+     * group that owns it and refuses every other root. Sixteen pairs, four
+     * rules, no gap — and a root in NO group is refused all four, so a new
+     * platform fails closed rather than inheriting every door.
+     */
     {
-      name: 'native-root-not-browser-ui-entry',
+      name: 'only-a-desktop-root-takes-the-desktop-ui-entry',
       severity: 'error',
       comment:
-        'A NATIVE composition root may not import src/kernel/ui/browser.ts. That entry exists for ' +
-        'the browser client and grows one export at a time, in the change that mounts it — a ' +
-        "barrel's re-exports evaluate with the barrel, so a native root reaching for it would load " +
-        'and retain surfaces nothing on that platform renders. The two UI entries are two doors, ' +
-        'and the rule above could not tell them apart: it allowed both to every root.',
-      from: { path: NATIVE_COMPOSITION_ROOTS },
+        'src/kernel/ui/index.ts is the DESKTOP door. That barrel names App, and a barrel retains ' +
+        'everything it names — so a mobile or web root reaching it for loadShelf or openAppStorage ' +
+        'would load the entire desktop pane tree, titlebar and palette into a bundle that renders ' +
+        'none of them, and it re-exports modules that import @tauri-apps, which assert-bundle then ' +
+        'refuses for a reason that reads as unrelated. The shared launch sequence is refused it too, ' +
+        'and takes src/kernel/ui/boot.ts — the same list with no component in it, which index.ts ' +
+        're-exports so the desktop root still has one door.',
+      from: { path: COMPOSITION_ROOTS, pathNot: DESKTOP_COMPOSITION_ROOTS },
+      to: { path: KERNEL_UI_ENTRY },
+    },
+    {
+      name: 'only-a-mobile-root-takes-the-mobile-ui-entry',
+      severity: 'error',
+      comment:
+        'src/kernel/ui/mobile.ts is the PHONE door, and until this rule existed nothing said so: ' +
+        'every root could import it, so the desktop and browser bundles could each acquire the ' +
+        'mobile shell they never render.',
+      from: { path: COMPOSITION_ROOTS, pathNot: MOBILE_COMPOSITION_ROOTS },
+      to: { path: KERNEL_MOBILE_ENTRY },
+    },
+    {
+      name: 'only-a-web-root-takes-the-browser-ui-entry',
+      severity: 'error',
+      comment:
+        'src/kernel/ui/browser.ts exists for the browser client and grows one export at a time, in ' +
+        'the change that mounts it — a barrel\'s re-exports evaluate with the barrel, so a native ' +
+        'root reaching for it would load and retain surfaces nothing on that platform renders.',
+      from: { path: COMPOSITION_ROOTS, pathNot: WEB_COMPOSITION_ROOTS },
       to: { path: KERNEL_BROWSER_ENTRY },
     },
     {
-      name: 'native-boot-not-desktop-ui-entry',
+      name: 'only-the-launch-sequence-and-the-mobile-root-take-the-boot-entry',
       severity: 'error',
       comment:
-        'The shared launch sequence (src/app/bootApp.ts) and the MOBILE root (src/main.mobile.tsx) ' +
-        'may not import src/kernel/ui/index.ts. That barrel names App, and a barrel retains ' +
-        'everything it names — so reaching it for loadShelf or openAppStorage would load the entire ' +
-        'desktop pane tree, titlebar and palette into a bundle that renders none of them. They take ' +
-        'src/kernel/ui/boot.ts instead, which is the same list with no component in it and which ' +
-        'index.ts re-exports so the desktop root still has one door. src/main.tsx is deliberately ' +
-        'NOT in this rule: rendering App is exactly its job.',
-      from: { path: ['^src/app/bootApp\\.ts$', '^src/main\\.mobile\\.tsx$'] },
-      to: { path: KERNEL_UI_ENTRY },
-    },
-    {
-      name: 'web-root-not-native-ui-entry',
-      severity: 'error',
-      comment:
-        'The BROWSER composition root may not import src/kernel/ui/index.ts. That entry re-exports ' +
-        'modules which import @tauri-apps, and a barrel retains everything it names — which is why ' +
-        'src/kernel/ui/browser.ts exists at all. assert-bundle would refuse the resulting bundle, ' +
-        'but by then the reason reads as unrelated; this says it at the import.',
-      from: { path: WEB_COMPOSITION_ROOTS },
-      to: { path: KERNEL_UI_ENTRY },
+        'src/kernel/ui/boot.ts is the launch surface with no React component in it. The shared ' +
+        'sequence (src/app/bootApp.ts) and the mobile root take it directly; the desktop root takes ' +
+        'it through src/kernel/ui/index.ts, which re-exports it, so that root keeps ONE door rather ' +
+        'than two. A web root has no native launch sequence to run and is refused it here — which ' +
+        'nothing said before, so the browser bundle could pull in the shelf loader and the library ' +
+        'migration it can never perform.',
+      from: { path: COMPOSITION_ROOTS, pathNot: BOOT_ENTRY_TAKERS },
+      to: { path: KERNEL_BOOT_ENTRY },
     },
     {
       name: 'capability-only-via-index',
@@ -517,20 +592,14 @@ module.exports = {
        * composition through either entry, which is the same exposure by a
        * different path. `main.web.tsx` is the browser client's and carries the
        * same weight. */
-      to: {
-        path: [
-          '^src/app/composition\\.(desktop|ios|android|web)\\.ts$',
-          '^src/main\\.tsx$',
-          '^src/main\\.mobile\\.tsx$',
-          '^src/main\\.web\\.tsx$',
-          /* AND THE SHARED SEQUENCE, which imports every composed capability's
-             index through the virtual specifier exactly as a root does. Left
-             out, it would be the laundering intermediary this rule's comment
-             describes — reachable by anything under src/, and handing on the
-             whole composition. */
-          '^src/app/bootApp\\.ts$',
-        ],
-      },
+      /* EVERY root, derived — including the shared sequence, which imports each
+         composed capability's index through the virtual specifier exactly as a
+         root does. Left out, it would be the laundering intermediary this
+         rule's comment describes: reachable by anything under src/, and handing
+         on the whole composition. This list was typed out by hand and could
+         therefore fall behind `COMPOSITION_ROOTS` without either looking
+         wrong. */
+      to: { path: COMPOSITION_ROOTS },
     },
     {
       name: 'no-circular',
@@ -634,15 +703,17 @@ module.exports = {
       },
     },
     {
-      name: 'no-tauri-api-outside-peer-wire',
+      name: 'no-tauri-api-outside-plugin-wires',
       severity: 'error',
       comment:
         'A capability may not import @tauri-apps/* directly — the platform is reached through the ' +
         "kernel's primitives, or through a capability's own plugin wire. The exceptions are the " +
-        'wires themselves (see PLUGIN_WIRES): peer/lib/wire.ts and inference/lib/plugin.ts, which ' +
-        'are where invoke/listen for those two plugins live (mirroring the fs-plugin allow-list ' +
-        'above). One file per plugin, so the set of command names is auditable in one place. ' +
-        'Matched on the package name wherever it resolves, like the fs rule.',
+        'wires themselves (see PLUGIN_WIRES): peer/lib/wire.ts and webhost/lib/wire.ts, which are ' +
+        'where invoke/listen for those plugins live (mirroring the fs-plugin allow-list above). ' +
+        'One file per plugin, so the set of command names is auditable in one place. Matched on ' +
+        'the package name wherever it resolves, like the fs rule. ⚠️ THE NAME SAID "peer" AND THE ' +
+        'RULE HAS NEVER BEEN ABOUT PEER ALONE: it reads every wire in PLUGIN_WIRES, so a violation ' +
+        'in the webhost wire was reported under a name that misnames the abstraction governing it.',
       from: { path: '^src/capabilities/', pathNot: PLUGIN_WIRES },
       to: { path: '(^|/)@tauri-apps/' },
     },
@@ -654,19 +725,24 @@ module.exports = {
         'no Tauri in a browser: the import resolves at build time, ships, and fails at run time on ' +
         "the reader's phone — as `undefined is not a function`, three layers from the import that " +
         'caused it. The phase-18 plan names this as a gate and it did not exist: ' +
-        '`no-tauri-api-outside-peer-wire` is scoped to src/capabilities/, so src/app/web/ could ' +
+        '`no-tauri-api-outside-plugin-wires` is scoped to src/capabilities/, so src/app/web/ could ' +
         'import @tauri-apps/api/core with `pnpm boundaries` reporting 0 violations. Measured, not ' +
         'assumed. This rule matches ONE EDGE; a transitive reach is caught by assert-bundle, which ' +
-        'inspects what actually ships and so cannot be fooled by a type-only import that erases.',
-      from: { path: [WEB_CLIENT, '^src/main\\.web\\.tsx$'] },
+        'inspects what actually ships and so cannot be fooled by a type-only import that erases. ' +
+        '⚠️ AND ITS `from` NAMED TWO OF THE FOUR PLACES IT CLAIMED TO COVER: the comment said "and ' +
+        'its composition root", and src/app/composition.web.ts — the other web root — was not in ' +
+        'the list, nor was src/app/shell/, which the browser bundle includes. Both are derived now, ' +
+        'so a root added to WEB_COMPOSITION_ROOTS is covered by this rule in the same edit.',
+      from: { path: [WEB_CLIENT, SHARED_SHELL, ...WEB_COMPOSITION_ROOTS] },
       to: { path: '(^|/)@tauri-apps/' },
     },
     {
-      name: 'peer-wire-tauri-api-only',
+      name: 'plugin-wires-tauri-api-only',
       severity: 'error',
       comment:
         "A wire's exception is @tauri-apps/api and nothing wider: the fs plugin, the dialog " +
-        'plugin and every other @tauri-apps package stay out of capabilities entirely.',
+        'plugin and every other @tauri-apps package stay out of capabilities entirely. Named for ' +
+        'the wires rather than for peer, for the reason the rule above gives: it reads all of them.',
       from: { path: PLUGIN_WIRES.join('|') },
       to: { path: '(^|/)@tauri-apps/(?!api(/|$))' },
     },
