@@ -648,6 +648,13 @@ export class Speaker {
   }
 
   pause(): void {
+    /* ⚠️ **ONLY WHILE THIS SPEAKER HOLDS THE ENGINE — `stop()`'s rule, which
+     * these two did not follow.** `pause` and `resume` act on the one shared
+     * engine, so without this a speaker pauses or releases an utterance that is
+     * not its own: the lookup's pronunciation could hold the reading, and the
+     * reading could release a pronunciation mid-word. The argument is the same
+     * one written out at length in `stop()` and it applies to all three. */
+    if (engineHeldBy.get(this.#synth) !== this.#token) return
     if (this.#synth.speaking && !this.#synth.paused) {
       /* The grace timer measures SPEECH, not wall-clock. Left running, a pause
        * inside the first 2.5 s ran it out over silence and `onNoBoundaries`
@@ -661,6 +668,7 @@ export class Speaker {
   }
 
   resume(): void {
+    if (engineHeldBy.get(this.#synth) !== this.#token) return
     if (!this.#synth.paused) return
     this.#synth.resume()
     if (!this.#sawBoundary) {
@@ -691,7 +699,21 @@ export class Speaker {
      * there is nothing of its own left to cancel. `speak` claims the engine
      * BEFORE calling this, which is what keeps a new utterance replacing the old
      * one — including one this speaker queued for a previous section. */
-    if (engineHeldBy.get(this.#synth) === this.#token) this.#synth.cancel()
+    if (engineHeldBy.get(this.#synth) !== this.#token) return
+    this.#synth.cancel()
+    /**
+     * ⚠️ **`cancel()` IS NOT A RESET — IT EMPTIES THE QUEUE AND LEAVES THE PAUSE
+     * FLAG SET.** `paused` belongs to the ENGINE, not to an utterance, so a
+     * reading stopped while paused left the shared engine paused: the next
+     * `speak` — this reader pressing Listen again, or the lookup's
+     * pronunciation — was queued behind it and never spoken, with every control
+     * reporting active playback over silence. `speechSynth.testkit.ts` models
+     * the same thing, which is what made it provable without a browser.
+     *
+     * AFTER the cancel, never before: resuming first would let the paused
+     * utterance speak the instant it was released.
+     */
+    if (this.#synth.paused) this.#synth.resume()
   }
 
   #finish(generation: number, reason: DoneReason): void {

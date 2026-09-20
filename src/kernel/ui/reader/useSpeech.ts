@@ -200,6 +200,12 @@ export function useSpeech(
    * that changes — it reaches the committed one through this.
    */
   const advanceRef = useRef<(at: number) => boolean>(() => false)
+  /** `endReading`, committed — see `advanceRef` for why this is a ref. */
+  const endRef = useRef<() => void>(() => {})
+  /** `continueReading`, so `resume` can restart a walk `pause` suspended. */
+  const continueRef = useRef<() => void>(() => {})
+  /** A section walk `pause` took down, waiting for `resume` to start it again. */
+  const heldContinuation = useRef(false)
   /**
    * The silence between two sentences, while it is being waited out.
    *
@@ -261,14 +267,8 @@ export function useSpeech(
   const speaker = useMemo(() => {
     if (!available) return null
 
-    /** The reading is over: the controls go quiet and nothing is pending. */
-    const finish = () => {
-      readingRef.current = false
-      clearGap()
-      clearContinuation()
-      setSpeaking(false)
-      removeSpokenWord(docRef.current)
-    }
+    /** The reading is over — ONE transition, see `endReading`. */
+    const finish = () => endRef.current()
 
     /**
      * The section's text ran out and the reading has not: walk forward until
@@ -299,6 +299,10 @@ export function useSpeech(
       }
       tick()
     }
+
+    /* Published so `resume` can restart a walk `pause` suspended — the memo owns
+     * `continueReading`, and everything outside it reaches in through a ref. */
+    continueRef.current = continueReading
 
     return new Speaker({
       onWord: (index, length) => {
@@ -506,6 +510,7 @@ export function useSpeech(
    * through a ref rather than closing over a value that changes. */
   useLayoutEffect(() => {
     advanceRef.current = advance
+    endRef.current = endReading
   })
 
   const start = useCallback(() => {
@@ -522,8 +527,27 @@ export function useSpeech(
     setSpeaking(queued)
   }, [speaker, speakDocument, clearContinuation])
 
-  const stop = useCallback(() => {
+  /**
+   * The reading is over, however it ended.
+   *
+   * ⚠️ **FOUR PATHS USED TO DECIDE THIS INDEPENDENTLY AND THEY HAD DIVERGED.**
+   * `finish` cleared the gap, the continuation, `speaking` and the band but NOT
+   * `paused`, and never touched the engine; `stop` did all six; closing the book
+   * left `paused` set and the band in place; unmount left both flags. So an
+   * engine error, another speaker taking the engine, or the reader closing the
+   * book WHILE PAUSED left `{ speaking: false, paused: true }` — which the public
+   * type defines as "paused mid-sentence" and there was no sentence.
+   *
+   * ⚠️ **AND THE ENGINE IS STOPPED ON EVERY PATH, INCLUDING THE ONE WHERE THE
+   * UTTERANCE HAS ALREADY ENDED.** `Speaker.stop` is what normalises the shared
+   * engine's pause flag, which `cancel()` does not clear — so a terminal
+   * transition that skipped it left the engine paused for whoever spoke next.
+   * Where this speaker no longer holds the engine, `stop` returns without
+   * touching it, which is the `taken` case and is right.
+   */
+  const endReading = useCallback(() => {
     readingRef.current = false
+    heldContinuation.current = false
     clearGap()
     clearContinuation()
     speaker?.stop()
@@ -531,6 +555,8 @@ export function useSpeech(
     setPaused(false)
     removeSpokenWord(docRef.current)
   }, [speaker, clearGap, clearContinuation])
+
+  const stop = endReading
 
   /**
    * ⚠️ **PAUSING DURING A GAP HOLDS THE GAP, AND FORGETTING TO WOULD START THE
@@ -554,15 +580,40 @@ export function useSpeech(
       setPaused(true)
       return
     }
+    /**
+     * ⚠️ **A PAUSE BETWEEN SECTIONS USED TO CLAIM SUCCESS AND STOP NOTHING.**
+     * `continueReading` walks pages looking for the next section, and while it
+     * walks there is no live utterance — so `speaker.pause()` had nothing to
+     * pause and returned quietly, `setPaused(true)` said it had worked, and the
+     * timer went on turning pages under a reader who had asked for silence.
+     * Worse, the next document then began speaking and cleared `paused` itself,
+     * so the pause vanished without the reader touching anything.
+     *
+     * The walk is OURS, like the sentence gap, so pausing it means taking the
+     * timer down and remembering that it was up.
+     */
+    if (continuing.current !== null) {
+      clearContinuation()
+      heldContinuation.current = true
+      setPaused(true)
+      return
+    }
     speaker?.pause()
     setPaused(true)
-  }, [speaker])
+  }, [speaker, clearContinuation])
 
   /** Picks the held sentence up where the gap left it — see `pause`. */
   const resume = useCallback(() => {
     if (!readingRef.current) return
     const held = pendingNext.current
     setPaused(false)
+    /* The section walk, if that is what was paused — a fresh grace, because the
+       reader's pause is not evidence that the book has ended. */
+    if (heldContinuation.current) {
+      heldContinuation.current = false
+      continueRef.current()
+      return
+    }
     /* HELD IN A GAP: the engine was never paused (see `pause`), so there is
        nothing to release — the sentence just begins. */
     if (held !== null) {
@@ -657,14 +708,14 @@ export function useSpeech(
     clearGap()
     clearContinuation()
     if (!doc) {
-      readingRef.current = false
-      speaker?.stop()
-      setSpeaking(false)
+      /* The book closing is an END, and it used to leave `paused` set and the
+         band drawn in a document that was going away. */
+      endReading()
       return
     }
     const queued = speakDocument(doc)
     if (queued) setSpeaking(true)
-  }, [speaker, doc, speakDocument, clearGap, clearContinuation])
+  }, [speaker, doc, speakDocument, endReading, clearGap, clearContinuation])
 
   useEffect(() => {
     const leaving = doc
@@ -678,12 +729,9 @@ export function useSpeech(
    * outlives an unmount and would go on reading a book that has been closed. */
   useEffect(
     () => () => {
-      readingRef.current = false
-      clearGap()
-      clearContinuation()
-      speaker?.stop()
+      endReading()
     },
-    [speaker, clearGap, clearContinuation],
+    [endReading],
   )
 
   /* READ FROM THE PROP, not from `pagingRef`: this decides what is RENDERED, so

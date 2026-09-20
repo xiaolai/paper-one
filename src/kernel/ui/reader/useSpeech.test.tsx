@@ -840,3 +840,100 @@ describe('the silence between sentences and paragraphs', () => {
     a.remove()
   })
 })
+
+describe('a reading that ends while paused', () => {
+  /**
+   * ⚠️ **`cancel()` EMPTIES THE QUEUE AND LEAVES THE ENGINE'S PAUSE FLAG SET**, and
+   * `paused` belongs to the ENGINE rather than to an utterance — `FakeSynth`
+   * models both, which is what makes these provable without a browser. So every
+   * way a reading can end had to normalise it, and four paths had diverged:
+   * `finish` never touched `paused` or the engine, closing the book left both,
+   * and unmount left everything.
+   */
+  it('speaks again after pause then stop then start', () => {
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    act(() => speech().pause())
+    expect(synth.paused).toBe(true)
+
+    act(() => speech().stop())
+    /* THE WHOLE BUG: without this the engine stays paused, the next utterance is
+       queued behind it and never spoken, and every control reports playback. */
+    expect(synth.paused).toBe(false)
+
+    act(() => speech().start())
+    expect(spoken()).toEqual(['One here.', 'One here.'])
+    expect(speech().speaking).toBe(true)
+    expect(speech().paused).toBe(false)
+    a.remove()
+  })
+
+  it('clears paused when the engine fails mid-sentence', () => {
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    act(() => speech().pause())
+    act(() => {
+      synth.queued[0]?.dispatchEvent(new Event('error'))
+    })
+    /* `{ speaking: false, paused: true }` is a state the public type defines as
+       "paused mid-sentence", and there is no sentence. */
+    expect(speech().speaking).toBe(false)
+    expect(speech().paused).toBe(false)
+    expect(synth.paused).toBe(false)
+    a.remove()
+  })
+
+  it('clears paused when the book closes', () => {
+    const a = section('One here. Two there.')
+    const { speech, show } = mount(a.doc)
+    act(() => speech().start())
+    act(() => speech().pause())
+    show(null)
+    expect(speech().speaking).toBe(false)
+    expect(speech().paused).toBe(false)
+    expect(synth.paused).toBe(false)
+    a.remove()
+  })
+})
+
+describe('pausing between two sections', () => {
+  /**
+   * ⚠️ **THERE IS NO LIVE UTTERANCE WHILE THE WALK LOOKS FOR THE NEXT SECTION**, so
+   * `speaker.pause()` had nothing to pause and returned quietly while
+   * `setPaused(true)` said it had worked — and `continueReading`'s timer went on
+   * turning pages under a reader who had asked for silence.
+   */
+  it('stops the pages turning, and resume starts the walk again', () => {
+    const a = section('Only this.')
+    const { speech, next } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    expect(next).toHaveBeenCalledTimes(1)
+
+    act(() => speech().pause())
+    expect(speech().paused).toBe(true)
+    act(() => vi.advanceTimersByTime(CONTINUE_TICK_MS * 4))
+    expect(next).toHaveBeenCalledTimes(1)
+
+    act(() => speech().resume())
+    expect(speech().paused).toBe(false)
+    act(() => vi.advanceTimersByTime(CONTINUE_TICK_MS))
+    expect(next.mock.calls.length).toBeGreaterThan(1)
+    a.remove()
+  })
+
+  it('does not let the walk run out its grace while held', () => {
+    /* The grace is what ends a reading at the end of the book. Counted over a
+       pause it would end the reading on the reader's own hold. */
+    const a = section('Only this.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    act(() => vi.advanceTimersByTime(CONTINUE_GRACE_MS * 3))
+    expect(speech().speaking).toBe(true)
+    a.remove()
+  })
+})
