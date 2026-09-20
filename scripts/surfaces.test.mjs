@@ -80,11 +80,20 @@ describe('the registries it evaluates', () => {
   it('reads the counts this phase measured', () => {
     /* 18 when `kernel.lookUpLanguage` went with Look up and the rest of the AI
        features; 20 since read aloud stopped taking whatever voice the platform
-       handed it — `readingVoice` and `readingRate` (2026-09-20). */
-    expect(surfaces.kernelSettings).toHaveLength(20)
+       handed it — `readingVoice` and `readingRate` (2026-09-20); 22 since the
+       reader could set the silence after a sentence and after a paragraph —
+       `sentenceGapMs` and `paragraphGapMs` (2026-09-20).
+
+       ⚠️ **THE NAMES ARE ASSERTED BESIDE THE COUNT, BECAUSE A COUNT ALONE CANNOT
+       SAY WHICH.** Two preferences added and two removed leaves this number
+       unchanged, and the point of the row is that a change to the persisted
+       surface is a deliberate act with a note beside it. */
+    expect(surfaces.kernelSettings).toHaveLength(22)
     expect(surfaces.kernelSettings).not.toContain('lookUpLanguage')
     expect(surfaces.kernelSettings).toContain('readingVoice')
     expect(surfaces.kernelSettings).toContain('readingRate')
+    expect(surfaces.kernelSettings).toContain('sentenceGapMs')
+    expect(surfaces.kernelSettings).toContain('paragraphGapMs')
     expect(surfaces.services).toHaveLength(31)
     expect(surfaces.readingSteps).toHaveLength(14)
     expect(surfaces.spacingAxes).toEqual(['letter', 'word', 'line', 'paragraph'])
