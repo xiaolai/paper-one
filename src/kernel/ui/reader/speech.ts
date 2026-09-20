@@ -556,14 +556,6 @@ export class Speaker {
     this.#synth = synth
   }
 
-  get speaking(): boolean {
-    return this.#synth.speaking
-  }
-
-  get paused(): boolean {
-    return this.#synth.paused
-  }
-
   /**
    * Speak, and report whether anything was actually queued.
    *

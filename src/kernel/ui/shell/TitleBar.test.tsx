@@ -35,6 +35,7 @@ const speech: Speech = {
 function bar(platform: Platform) {
   return render(
     <TitleBar
+      screens={[]}
       state={initialState}
       dispatch={vi.fn()}
       platform={platform}
@@ -84,6 +85,7 @@ describe('the controls a contributed screen does not have', () => {
   it('draws no pane toggle on a capability’s screen', () => {
     render(
       <TitleBar
+        screens={[]}
         state={{ ...initialState, screen: 'circle:circle' }}
         dispatch={vi.fn()}
         platform="macos"
@@ -106,6 +108,7 @@ describe('the controls a contributed screen does not have', () => {
       cleanup()
       render(
         <TitleBar
+          screens={[]}
           state={{ ...initialState, screen: which, chromeOn: true }}
           dispatch={vi.fn()}
           platform="macos"

@@ -53,7 +53,9 @@ export function planChapters(sections: readonly SectionText[]): readonly Chapter
     const title = section.title?.trim()
     chapters.push({
       index: section.index,
-      title: title && title !== '' ? title : `Chapter ${chapters.length + 1}`,
+      /* `title &&` has already excluded the empty string, so `title !== ''` could
+         never be false here — one condition, not two saying the same thing. */
+      title: title ? title : `Chapter ${chapters.length + 1}`,
       text: section.text,
     })
   }

@@ -1478,3 +1478,57 @@ describe('the ⌘L command agrees with every other surface that offers it', () =
   }
 })
 
+
+describe('a contributed command that shadows a kernel one', () => {
+  /**
+   * ⚠️ **COMPOSITION VALIDATION CHECKS CONTRIBUTED IDS AGAINST EACH OTHER AND NEVER
+   * AGAINST THE KERNEL'S.** A capability legitimately named `book` contributing
+   * `book:open` produced two rows carrying one id — duplicate React keys, and
+   * identity-based keyboard selection resolving to whichever came first. The reader
+   * pressed the capability's row and got the kernel's action.
+   */
+  const shadow: Command = {
+    id: 'book:open',
+    group: 'Book',
+    label: 'Open something else',
+    run: () => {},
+  }
+  const mine: Command = { id: 'circle:share', group: 'Book', label: 'Share', run: () => {} }
+
+  it('keeps the kernel command and drops the contribution', () => {
+    const plain = buildCommands(context().ctx)
+    const kernel = find(plain, 'book:open')
+    expect(kernel).toBeDefined()
+
+    const withShadow = buildCommands({ ...context().ctx, contributed: () => [shadow] })
+    expect(withShadow.filter((c) => c.id === 'book:open')).toHaveLength(1)
+    expect(find(withShadow, 'book:open')?.label).toBe(kernel?.label)
+  })
+
+  it('says which id it dropped, rather than dropping it silently', () => {
+    const seen: string[] = []
+    buildCommands({
+      ...context().ctx,
+      contributed: () => [shadow],
+      onDuplicate: (id: string) => seen.push(id),
+    })
+    expect(seen).toEqual(['book:open'])
+  })
+
+  it('still admits a contribution whose id is its own', () => {
+    /* So the guard cannot pass by refusing every contribution. */
+    const commands = buildCommands({ ...context().ctx, contributed: () => [mine] })
+    expect(find(commands, 'circle:share')).toBeDefined()
+  })
+
+  it('refuses a second contribution repeating the first', () => {
+    const seen: string[] = []
+    const commands = buildCommands({
+      ...context().ctx,
+      contributed: () => [mine, { ...mine, label: 'Share again' }],
+      onDuplicate: (id: string) => seen.push(id),
+    })
+    expect(commands.filter((c) => c.id === 'circle:share')).toHaveLength(1)
+    expect(seen).toEqual(['circle:share'])
+  })
+})

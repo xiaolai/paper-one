@@ -1920,6 +1920,28 @@ export function App({
     [book],
   )
 
+  /**
+   * A capability naming a command the kernel already owns.
+   *
+   * ⚠️ **WIRED HERE BECAUSE A SURFACE WITH NO CALLER IS THE DEFECT THIS REPOSITORY
+   * KEEPS DELETING TWICE.** `buildCommands` drops the duplicate and keeps the
+   * kernel's, which is right for the reader and silent for whoever wrote the
+   * composition — so the fact goes where a release build can be asked for it, the
+   * same place a quiet circle is diagnosed from.
+   */
+  const onDuplicateCommand = useCallback(
+    (id: string) => {
+      diagnosticLog?.record({
+        at: Date.now(),
+        level: 'warn',
+        scope: 'commands',
+        event: 'duplicate.id',
+        fields: { id },
+      })
+    },
+    [diagnosticLog],
+  )
+
   const commands = useMemo(
     () =>
       buildCommands({
@@ -1934,6 +1956,7 @@ export function App({
            there, and the palette then omits the row rather than offering one
            that would be refused. */
         ...(audiobook ? { exportAudiobook: audiobook } : {}),
+        onDuplicate: onDuplicateCommand,
         importMarks: archives.importMarks,
         exportTags: archives.exportTags,
         importTags: archives.importTags,
@@ -2009,6 +2032,7 @@ export function App({
          first. Safe to depend on because `useAudiobook` memoises it — a fresh
          object per render is what kept it out. */
       audiobook,
+      onDuplicateCommand,
     ],
   )
 

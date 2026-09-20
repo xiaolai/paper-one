@@ -32,6 +32,15 @@ export type { Command } from '../core/capability'
  * below from the same state, so the two cannot disagree about what is true.
  */
 export interface KernelCommandContext {
+  /**
+   * A contributed command whose id a kernel command already holds — see below.
+   *
+   * Optional and reported rather than thrown: the kernel's own commands must keep
+   * working, so the duplicate is dropped and the fact is handed somewhere it can
+   * be seen. `App` routes it to the diagnostics log.
+   */
+  onDuplicate?: ((id: string) => void) | undefined
+
   state: AppState
   dispatch: AppDispatch
   /** False when the reader has no book open — book commands are then omitted. */
@@ -593,14 +602,40 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
 
   /* THE CAPABILITIES' COMMANDS, after the kernel's, from the same state. */
   if (ctx.contributed) {
-    commands.push(
-      ...ctx.contributed({
-        screen: state.screen,
-        pane: state.pane,
-        hasBook: ctx.hasBook,
-        openPane: (pane) => dispatch({ type: 'openPane', pane }),
-      }),
-    )
+    const contributed = ctx.contributed({
+      screen: state.screen,
+      pane: state.pane,
+      hasBook: ctx.hasBook,
+      openPane: (pane) => dispatch({ type: 'openPane', pane }),
+    })
+
+    /**
+     * ⚠️ **A CONTRIBUTED ID COULD SHADOW A KERNEL ONE, AND THE KEYBOARD WOULD RUN
+     * THE WRONG COMMAND.** Composition validation checks contributed ids against
+     * EACH OTHER and never against the kernel's — so a capability legitimately
+     * named `book` contributing `book:open` produced two rows with one id:
+     * duplicate React keys, and identity-based selection resolving to whichever
+     * came first, which is the kernel's. A reader pressing the palette's row for
+     * the capability got the kernel's action.
+     *
+     * The kernel's ids WIN, because they are the ones a reader cannot avoid and
+     * the ones the accelerators are bound to. The contribution is dropped rather
+     * than renamed: renaming it would put a row in the palette under an id its
+     * own capability does not know, so nothing could address it afterwards.
+     *
+     * Reported through `onDuplicate` rather than thrown. A composition is fixed
+     * by whoever wrote it, and a reader who cannot open their library because a
+     * capability chose a name is worse off than one missing a row.
+     */
+    const taken = new Set(commands.map((one) => one.id))
+    for (const one of contributed) {
+      if (taken.has(one.id)) {
+        ctx.onDuplicate?.(one.id)
+        continue
+      }
+      taken.add(one.id)
+      commands.push(one)
+    }
   }
 
   return commands

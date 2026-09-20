@@ -206,7 +206,6 @@ export interface ReadingStep {
   readonly size: number
   readonly line: number
   readonly measure: number
-  readonly note: string
 }
 
 /**
@@ -235,20 +234,20 @@ export interface ReadingStep {
  * a larger size on a longer line, which is the opposite of the intent.
  */
 export const READING_STEPS: readonly ReadingStep[] = [
-  { size: 15, line: 24, measure: 480, note: 'Minimum. 69 characters.' },
-  { size: 16, line: 26, measure: 510, note: '' },
-  { size: 17, line: 28, measure: 540, note: '' },
-  { size: 18, line: 29, measure: 570, note: '' },
-  { size: 19, line: 30, measure: 600, note: '' },
-  { size: 20, line: 32, measure: 630, note: '' },
-  { size: 21, line: LINE, measure: 660, note: 'Default. 68 characters.' },
-  { size: 22, line: 36, measure: 680, note: '' },
-  { size: 23, line: 38, measure: 700, note: '' },
-  { size: 24, line: 39, measure: 713, note: '' },
-  { size: 25, line: 40, measure: 727, note: '' },
-  { size: 26, line: 42, measure: 740, note: '' },
-  { size: 27, line: 44, measure: 760, note: '' },
-  { size: 28, line: 46, measure: 780, note: 'Maximum. 60 characters; beyond this the page is a large-print edition.' },
+  { size: 15, line: 24, measure: 480 }, /* Minimum. 69 characters. */
+  { size: 16, line: 26, measure: 510 },
+  { size: 17, line: 28, measure: 540 },
+  { size: 18, line: 29, measure: 570 },
+  { size: 19, line: 30, measure: 600 },
+  { size: 20, line: 32, measure: 630 },
+  { size: 21, line: LINE, measure: 660 }, /* Default. 68 characters. */
+  { size: 22, line: 36, measure: 680 },
+  { size: 23, line: 38, measure: 700 },
+  { size: 24, line: 39, measure: 713 },
+  { size: 25, line: 40, measure: 727 },
+  { size: 26, line: 42, measure: 740 },
+  { size: 27, line: 44, measure: 760 },
+  { size: 28, line: 46, measure: 780 }, /* Maximum. 60 characters; beyond this the page is a large-print edition. */
 ] as const
 
 /**

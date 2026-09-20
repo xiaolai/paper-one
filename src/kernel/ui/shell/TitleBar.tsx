@@ -80,7 +80,13 @@ export interface TitleBarProps {
    * would forget — leaving a reader in a room with no door. The kernel offers
    * the switch, so a screen cannot be entered without a way out of it.
    */
-  screens?: readonly {
+  /**
+   * ⚠️ **REQUIRED, AND IT WAS OPTIONAL TO SUIT A TEST.** The production caller
+   * always supplies `composition.screens`; the `?` meant a forgotten prop removed
+   * capability navigation SILENTLY instead of failing to compile. A caller with no
+   * contributed screens passes `[]`, which says so.
+   */
+  screens: readonly {
     readonly id: ContributedScreenId
     readonly label: string
     /** What to draw for it — see `CONTRIBUTION_ICONS`. */
@@ -245,7 +251,7 @@ export function TitleBar({
             >
               <LibraryIcon size={ICON.control} strokeWidth={ICON.stroke} />
             </button>
-            {screens?.map((one) => (
+            {screens.map((one) => (
               <button
                 key={one.id}
                 type="button"
