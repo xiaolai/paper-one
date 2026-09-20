@@ -1,4 +1,5 @@
 import type { TocItem } from 'foliate-js/view.js'
+import { flattenToc } from '../tocOrder'
 import styles from './SidePane.module.css'
 
 export interface ContentsProps {
@@ -7,21 +8,6 @@ export interface ContentsProps {
    *  "Epígrafe" — and matching on them marks every duplicate as current. */
   currentHref: string
   onGoTo?: (href: string) => void
-}
-
-interface FlatTocEntry {
-  /** Null for a grouping heading with no destination — see `TocItem.href`. */
-  readonly href: string | null
-  readonly label: string
-  readonly depth: number
-}
-
-/** The TOC is a tree; the pane renders it as an indented list. */
-function flattenToc(items: readonly TocItem[], depth = 0): FlatTocEntry[] {
-  return items.flatMap((item) => [
-    { label: item.label, href: item.href, depth: Math.min(depth, 2) },
-    ...(item.subitems ? flattenToc(item.subitems, depth + 1) : []),
-  ])
 }
 
 export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {

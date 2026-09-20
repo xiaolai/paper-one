@@ -68,6 +68,7 @@ import { TagEditor } from './screens/TagEditor'
 import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
+import { stepChapter } from './tocOrder'
 import { useSpeech } from './reader/useSpeech'
 import { documentLang } from './reader/speech'
 import { useVoices } from './hooks/useVoices'
@@ -266,7 +267,38 @@ export function App({
     () => ({ voices: state.readingVoice, rate: state.readingRate }),
     [state.readingVoice, state.readingRate],
   )
-  const speech = useSpeech(book.doc, book, speechPrefs)
+  /**
+   * The paging the reading needs, with a chapter step where the book can place
+   * the reader in its own contents.
+   *
+   * ⚠️ **`chapter` IS ABSENT, NOT A NO-OP, WHEN IT CANNOT WORK** — the transport
+   * reads its presence to decide whether to draw the buttons at all, and a
+   * control that navigates nowhere is worse than one that is not there. A reader
+   * can be in a spine item no contents entry points at, in which case
+   * `chapterHref` is not in the flattened TOC and there is genuinely no next
+   * chapter to name.
+   *
+   * ⚠️ **AT THE FIRST OR LAST CHAPTER ONE OF THE PAIR STILL DOES NOTHING**, which
+   * is the honest limit of a single presence flag: `stepChapter` answers null at
+   * either end and this asks nothing of the book. Narrowing that to a per-button
+   * disabled state needs the transport to know which directions exist, and is
+   * worth doing when a reader complains rather than on a guess about which of the
+   * two is more annoying.
+   */
+  const speechPaging = useMemo(() => {
+    const here = book.position.chapterHref
+    const placed = here !== '' && stepChapter(book.toc, here, 1) !== null
+    const before = here !== '' && stepChapter(book.toc, here, -1) !== null
+    if (!placed && !before) return { next: book.next }
+    return {
+      next: book.next,
+      chapter: (by: -1 | 1) => {
+        const href = stepChapter(book.toc, book.position.chapterHref, by)
+        if (href !== null) book.goTo(href)
+      },
+    }
+  }, [book.next, book.goTo, book.toc, book.position.chapterHref])
+  const speech = useSpeech(book.doc, speechPaging, speechPrefs)
   /* What the Voice group in Settings needs that app state cannot answer: the
      language of the book on screen, and what this machine can actually say.
      `documentLang` is the same fact the utterance is given, read from the same

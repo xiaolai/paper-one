@@ -2,18 +2,27 @@ import { paneAvailable, paneFits, screenJump } from '../state'
 import {
   AudioLines,
   BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   Library as LibraryIcon,
   ListTree,
   Minus,
   PanelLeft,
   PanelRight,
+  Pause,
+  Play,
   Search,
+  SkipBack,
+  SkipForward,
   Square,
   Type,
   X,
 } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { ICON } from '../../core/metrics'
+import { ICON, READING_RATE } from '../../core/metrics'
 import type { Platform } from '../../core/metrics'
 import { inTauri } from '../inTauri'
 import { PANE_TITLES, comboFor } from '../panes'
@@ -290,25 +299,31 @@ export function TitleBar({
             {/* Live where the engine can do it. §07 keeps the disabled state
                 for the case that remains real — a WebView built without Web
                 Speech — rather than for a feature that is simply unwritten. */}
-            <button
-              type="button"
-              className={styles.action}
-              title={
-                !speech.available
-                  ? 'Listen — this build has no speech engine'
-                  : speech.speaking
-                    ? 'Stop reading aloud'
+            {speech.speaking ? (
+              <ReadingTransport
+                speech={speech}
+                rate={state.readingRate}
+                onRate={(rate) => dispatch({ type: 'setReadingRate', rate })}
+              />
+            ) : (
+              <button
+                type="button"
+                className={styles.action}
+                title={
+                  !speech.available
+                    ? 'Listen — this build has no speech engine'
                     : 'Read this chapter aloud'
-              }
-              aria-label="Read aloud"
-              aria-pressed={speech.speaking}
-              data-on={speech.speaking}
-              disabled={!speech.available || !hasBook}
-              data-disabled={!speech.available || !hasBook}
-              onClick={() => (speech.speaking ? speech.stop() : speech.start())}
-            >
-              <AudioLines size={ICON.control} strokeWidth={ICON.stroke} />
-            </button>
+                }
+                aria-label="Read aloud"
+                aria-pressed={false}
+                data-on={false}
+                disabled={!speech.available || !hasBook}
+                data-disabled={!speech.available || !hasBook}
+                onClick={() => speech.start()}
+              >
+                <AudioLines size={ICON.control} strokeWidth={ICON.stroke} />
+              </button>
+            )}
             <button
               type="button"
               className={styles.action}
@@ -405,4 +420,104 @@ export function TitleBar({
       </div>
     </div>
   )
+}
+
+interface ReadingTransportProps {
+  speech: Speech
+  rate: number
+  onRate: (rate: number) => void
+}
+
+/**
+ * The reading's controls, drawn where the Listen toggle was.
+ *
+ * ⚠️ **IT REPLACES THE TOGGLE RATHER THAN FLOATING OVER THE PAGE**, which is the
+ * choice that keeps the book at full height and puts nothing over the text. The
+ * cost is width, and it is paid by the title chip, which shrinks — so every
+ * control here is `--control-xs`, the design system's "an icon and nothing
+ * else", rather than the titlebar size `.action` uses.
+ *
+ * ⚠️ **THE CHAPTER BUTTONS ARE ABSENT, NOT DISABLED, WHERE THE BOOK CANNOT STEP
+ * CHAPTERS.** `SpeechPaging.chapter` is optional because a reader can be in a
+ * spine item no contents entry points at, and there is genuinely no next chapter
+ * to go to. A disabled control says "not now"; an absent one says "not here",
+ * and the second is the true statement.
+ */
+function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps) {
+  const step = (label: string, Icon: LucideIcon, run: () => void) => (
+    <button
+      type="button"
+      className={`${styles.action} ${styles.transportButton}`}
+      title={label}
+      aria-label={label}
+      onClick={run}
+    >
+      <Icon size={ICON.window} strokeWidth={ICON.stroke} />
+    </button>
+  )
+
+  return (
+    <div className={styles.transport} role="group" aria-label="Reading aloud">
+      {speech.chapters ? step('Previous chapter', ChevronsLeft, () => speech.stepChapter(-1)) : null}
+      {step('Previous paragraph', SkipBack, () => speech.stepParagraph(-1))}
+      {step('Previous sentence', ChevronLeft, () => speech.stepSentence(-1))}
+      <button
+        type="button"
+        className={`${styles.action} ${styles.transportButton}`}
+        title={speech.paused ? 'Go on reading' : 'Pause'}
+        aria-label={speech.paused ? 'Go on reading' : 'Pause'}
+        aria-pressed={speech.paused}
+        onClick={() => (speech.paused ? speech.resume() : speech.pause())}
+      >
+        {speech.paused ? (
+          <Play size={ICON.window} strokeWidth={ICON.stroke} />
+        ) : (
+          <Pause size={ICON.window} strokeWidth={ICON.stroke} />
+        )}
+      </button>
+      {step('Next sentence', ChevronRight, () => speech.stepSentence(1))}
+      {step('Next paragraph', SkipForward, () => speech.stepParagraph(1))}
+      {speech.chapters ? step('Next chapter', ChevronsRight, () => speech.stepChapter(1)) : null}
+      <button
+        type="button"
+        className={`${styles.action} ${styles.transportButton} ${styles.rate}`}
+        /* ⚠️ **THE STEPS ARE `READING_RATE`'s, NOT A SECOND LIST.** Settings
+           offers the same ramp from the same constant, so the speed a reader
+           sets in one place is a speed the other can show. A literal here would
+           be a second answer to which speeds exist, and the two would drift the
+           first time the ramp changed. */
+        title={`Reading speed — ${formatRate(rate)}, tap for the next`}
+        aria-label={`Reading speed ${formatRate(rate)}`}
+        onClick={() => onRate(nextRate(rate))}
+      >
+        {formatRate(rate)}
+      </button>
+      {step('Stop reading aloud', Square, () => speech.stop())}
+    </div>
+  )
+}
+
+/**
+ * The next speed up the ramp, wrapping to the slowest at the top.
+ *
+ * WRAPS rather than stopping, because this is one button doing a stepper's job:
+ * stopping at 2.5× would leave a reader who overshot with no way back except the
+ * settings pane. The ramp is short enough that going round is quicker.
+ *
+ * The nearest step is found rather than the exact one, so a rate stored by a
+ * build with a different ramp still advances instead of pinning at the start —
+ * the same reasoning `READING_RATE_MIN` gives for clamping rather than rejecting.
+ */
+function nextRate(rate: number): number {
+  const steps = READING_RATE.steps
+  let nearest = 0
+  for (const [at, step] of steps.entries()) {
+    if (Math.abs(step - rate) < Math.abs((steps[nearest] ?? 1) - rate)) nearest = at
+  }
+  return steps[(nearest + 1) % steps.length] ?? 1
+}
+
+/** `1×`, `1.25×` — no trailing zero, because `1.00×` reads as a measurement. */
+function formatRate(rate: number): string {
+  return `${Number(rate.toFixed(2))}×`
 }

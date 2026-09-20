@@ -8,12 +8,28 @@ import { TitleBar } from './TitleBar'
 
 afterEach(cleanup)
 
+/**
+ * A reading that is not happening, spelled out in full.
+ *
+ * ⚠️ **NOT A CAST, AND THAT IS THE POINT.** `as unknown as Speech` would have
+ * type-checked while missing every new member, and the transport would then have
+ * read `undefined` at runtime — the exact defect the contribution-icon note
+ * records, where a double cast hid a required field from `tsc` in two test files
+ * and cost eight red suites. Adding a member to `Speech` should break this line.
+ */
 const speech: Speech = {
   available: false,
   speaking: false,
+  paused: false,
   followsWords: false,
+  chapters: false,
   start: () => {},
   stop: () => {},
+  pause: () => {},
+  resume: () => {},
+  stepSentence: () => {},
+  stepParagraph: () => {},
+  stepChapter: () => {},
 }
 
 function bar(platform: Platform) {

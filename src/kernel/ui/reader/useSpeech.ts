@@ -11,6 +11,13 @@ import {
   type SpokenText,
 } from './speech'
 import { placeSpokenWord, removeSpokenWord } from './rulerBand'
+import {
+  stepParagraph as paragraphStep,
+  stepSentence as sentenceStep,
+  type ReadingPlan,
+} from './readingCursor'
+import { resolveSegmenterLocale } from './wordSnap/classify'
+import { sentenceSpansOf } from './wordSnap/sentenceOf'
 
 /**
  * Reading the book aloud, with the spoken word followed on the page.
@@ -34,26 +41,65 @@ import { placeSpokenWord, removeSpokenWord } from './rulerBand'
 export interface Speech {
   readonly available: boolean
   readonly speaking: boolean
+  /** Paused mid-sentence, with the engine holding its place. */
+  readonly paused: boolean
   /** False once the engine has shown it does not report word boundaries. */
   readonly followsWords: boolean
   start: () => void
   stop: () => void
+  /**
+   * THE CONTROL THAT NOW HAS A CALLER — see the note this replaces.
+   *
+   * The hook used to publish `paused`/`pause`/`resume` that nothing consumed,
+   * and an audit removed them on the rule that a public surface grows in the
+   * change that mounts it (round 1, #845). This is that change: the transport in
+   * `TitleBar` is the caller, and `Speaker`'s engine-level pair — kept all along
+   * for exactly this — is what they reach.
+   */
+  pause: () => void
+  resume: () => void
+  /**
+   * One sentence, one paragraph or one chapter, in reading order.
+   *
+   * ⚠️ **THESE ARE WHY THE READING IS SENTENCE-AT-A-TIME AT ALL.** Web Speech
+   * cannot seek inside an utterance, so with a whole section queued as one
+   * utterance none of them could exist — the only way to move was to cancel and
+   * start the chapter again. A sentence-sized utterance makes every one of them a
+   * cursor move followed by an ordinary `speak`.
+   */
+  stepSentence: (by: -1 | 1) => void
+  stepParagraph: (by: -1 | 1) => void
+  stepChapter: (by: -1 | 1) => void
+  /**
+   * Whether `stepChapter` can actually go anywhere.
+   *
+   * ⚠️ **PUBLISHED SO THE TRANSPORT CAN LEAVE THE BUTTON OUT RATHER THAN DRAW A
+   * DEAD ONE.** Without it the control would have to guess, and the honest answer
+   * is known only here — see `SpeechPaging.chapter`, which a book that cannot
+   * place the reader in its own contents does not supply.
+   */
+  readonly chapters: boolean
 }
 
-/* NO pause HERE, deliberately (audit round 1, #845). The hook published
- * `paused`/`pause`/`resume` that no control consumed — state, callbacks and
- * re-renders behind a surface nothing reached — and this codebase grows a
- * public surface in the change that mounts it, not ahead of one. `Speaker`
- * keeps its engine-level pair for the control that will want them. */
-
 /**
- * What the reading needs from the reader: one page forward, in READING
- * order — `next`, not `goRight`, because the voice is always ahead of where
- * it was, and in a right-to-left book ahead is to the left. The session's own
- * `next` is exactly this and is what the arrow key runs.
+ * What the reading needs from the reader.
+ *
+ * `next` is one page forward in READING order — not `goRight`, because the voice
+ * is always ahead of where it was, and in a right-to-left book ahead is to the
+ * left. The session's own `next` is exactly this and is what the arrow key runs.
  */
 export interface SpeechPaging {
   next: () => void
+  /**
+   * A whole chapter away, or absent where the book cannot say.
+   *
+   * ⚠️ **OPTIONAL, AND THE TRANSPORT HIDES THE BUTTON RATHER THAN DRAWING A DEAD
+   * ONE.** It needs the TOC and the reader's place in it — `stepChapter` in
+   * `tocOrder.ts` over `position.chapterHref` — and a book whose current spine
+   * item no contents entry points at genuinely has no next chapter to offer. A
+   * control that navigates nowhere is worse than one that is not there.
+   */
+  chapter?: ((by: -1 | 1) => void) | undefined
 }
 
 /**
@@ -101,6 +147,7 @@ export function useSpeech(
   prefs: SpeakPrefs = NO_PREFS,
 ): Speech {
   const [speaking, setSpeaking] = useState(false)
+  const [paused, setPaused] = useState(false)
   const [followsWords, setFollowsWords] = useState(true)
 
   const docRef = useRef<Document | null>(doc)
@@ -119,7 +166,39 @@ export function useSpeech(
    * how the highlight ends up on an unrelated word. Pairing them makes that
    * state unrepresentable: the handler uses the document the text came from,
    * and does nothing once that is no longer the document on screen. */
-  const spokenRef = useRef<{ doc: Document; spoken: SpokenText } | null>(null)
+  const spokenRef = useRef<{
+    doc: Document
+    spoken: SpokenText
+    /** The sentences and paragraphs of `spoken.text` — see `ReadingPlan`. */
+    plan: ReadingPlan
+    /** `documentLang`'s answer, kept so each sentence is spoken in it. */
+    lang: string | null
+  } | null>(null)
+  /**
+   * Which sentence of the plan is being spoken.
+   *
+   * ⚠️ **THE WORD OFFSETS THE ENGINE REPORTS ARE RELATIVE TO THE UTTERANCE, AND
+   * THE UTTERANCE IS NOW ONE SENTENCE.** So a boundary at index 0 is the first
+   * word of THIS sentence, not of the section, and resolving it against the
+   * collected text without adding the sentence's own start puts the highlight at
+   * the top of the chapter for every sentence after the first. That is the same
+   * trap `narrate`'s `byteSampleOffset` records — offsets that restart per
+   * segment and read as absolute — and it is why this ref exists rather than the
+   * cursor living only in state.
+   *
+   * A ref because the boundary handler is created once per utterance and reads
+   * it as of now, exactly as `followsRef` and `readingRef` are.
+   */
+  const cursorRef = useRef(0)
+  /**
+   * Speaks sentence `at`, answering whether there was one to speak.
+   *
+   * Written in the layout effect below rather than here, for the reason the rest
+   * of these are (#505): the `Speaker` is memoised so that the engine is not
+   * rebuilt under a live utterance, so its `onDone` cannot close over a callback
+   * that changes — it reaches the committed one through this.
+   */
+  const speakSentenceRef = useRef<(at: number) => boolean>(() => false)
   /* Read inside the boundary handler, which is created once per utterance —
    * a captured `followsWords` would be the value at the time speech started. */
   const followsRef = useRef(true)
@@ -206,7 +285,13 @@ export function useSpeech(
         // longer exist on screen.
         if (current.doc !== docRef.current) return
         const target = current.doc
-        const range = rangeAt(current.spoken, target, index, length)
+        /* REBASED ONTO THE SENTENCE — see `cursorRef`. `index` counts from the
+         * start of the utterance, and the utterance is one sentence, so without
+         * its own offset every sentence after the first would highlight words at
+         * the top of the chapter. */
+        const sentence = current.plan.sentences[cursorRef.current]
+        if (!sentence) return
+        const range = rangeAt(current.spoken, target, sentence.start + index, length)
         if (!range) return
         const placed = placeOfRange(range, target)
         if (!placed) return
@@ -238,6 +323,16 @@ export function useSpeech(
           finish()
           return
         }
+        /* THE NEXT SENTENCE FIRST, AND THE NEXT SECTION ONLY WHEN THERE IS NONE.
+         *
+         * `speakSentenceRef` answers false for a cursor past the last sentence,
+         * which is exactly the condition that used to be the whole of this
+         * branch: before the reading was sentence-at-a-time, an utterance ending
+         * WAS the section ending. Now it usually is not, and the distinction is
+         * the one `continueReading` must not be asked to make — it walks pages
+         * hunting the next section, which mid-section would turn the page away
+         * from prose nobody had read. */
+        if (speakSentenceRef.current(cursorRef.current + 1)) return
         continueReading()
       },
       onNoBoundaries: () => {
@@ -259,16 +354,83 @@ export function useSpeech(
    * on the reader's own Listen it is the reading never having begun, which is
    * why `start` marks the reading as under way only once this has answered.
    */
-  const speakDocument = useCallback(
-    (target: Document): boolean => {
-      if (!speaker) return false
-      const spoken = collectText(target)
-      spokenRef.current = { doc: target, spoken }
+  /**
+   * Speak one sentence of the plan, and say whether there was one.
+   *
+   * FALSE IS A REAL ANSWER AND NOT A FAILURE: it means the cursor has run off
+   * the end of the section, which is how `onDone` tells "that sentence finished"
+   * from "this section finished" without either of them counting sentences.
+   *
+   * ⚠️ **`prefsRef` IS READ HERE, PER SENTENCE, AND THAT IS THE SPEED CONTROL.**
+   * Web Speech fixes an utterance's rate when it is created, so a rate change
+   * could never reach a section-long utterance — the old comment said as much,
+   * and promised the change would land "at the next section". A sentence-sized
+   * utterance means it lands at the next SENTENCE, a few seconds away, with no
+   * code to make it happen. Re-speaking the current sentence to apply it sooner
+   * was considered and rejected: the reader would hear the same words twice.
+   */
+  const speakSentence = useCallback(
+    (at: number): boolean => {
+      const current = spokenRef.current
+      if (!speaker || !current) return false
+      const sentence = current.plan.sentences[at]
+      if (!sentence) return false
+      cursorRef.current = at
       turnedAt.current = null
-      return speaker.speak(spoken.text, documentLang(target), prefsRef.current)
+      setPaused(false)
+      return speaker.speak(
+        current.spoken.text.slice(sentence.start, sentence.end),
+        current.lang,
+        prefsRef.current,
+      )
     },
     [speaker],
   )
+
+  const speakDocument = useCallback(
+    (target: Document, from = 0): boolean => {
+      if (!speaker) return false
+      const spoken = collectText(target)
+      const lang = documentLang(target)
+      /* THE LOCALE IS RESOLVED, NOT PASSED THROUGH. `sentenceSpansOf` constructs
+       * an `Intl.Segmenter` with it, and a book may declare anything at all in
+       * `dc:language` — `resolveSegmenterLocale` is the function that already
+       * answers which tags are safe to build one from, and `undefined` is its
+       * answer for a book that declares none, which the segmenter reads as "let
+       * each sentence speak for itself by script". */
+      const plan: ReadingPlan = {
+        sentences: sentenceSpansOf(spoken.text, resolveSegmenterLocale(lang)),
+        blocks: spoken.blocks,
+      }
+      spokenRef.current = { doc: target, spoken, plan, lang }
+      turnedAt.current = null
+
+      /* ⚠️ **A SECTION WITH NO SENTENCES GOES TO THE ENGINE ANYWAY, AND SKIPPING
+       * THAT STALLED THE READING ON EVERY PLATE.** `speakSentence` answers false
+       * without queueing anything, so a plate or a full-page image queued no
+       * utterance, `onDone('empty')` never fired, and the continuation that walks
+       * past such a section was never started — the voice simply stopped, with
+       * the Listen control still on. Caught by `reads through a section with
+       * nothing to read`, which is the case that existed for it.
+       *
+       * Handing the collected text to `speak` is what the reading did before it
+       * was sentence-at-a-time, so the empty section keeps its one tested path
+       * instead of gaining a second. */
+      if (plan.sentences.length === 0) {
+        cursorRef.current = 0
+        return speaker.speak(spoken.text, lang, prefsRef.current)
+      }
+      return speakSentence(from)
+    },
+    [speaker, speakSentence],
+  )
+
+  /* COMMITTED, like the refs above, and for the same reason: the `Speaker` is
+   * memoised so a live utterance is never orphaned, so its `onDone` reaches this
+   * through a ref rather than closing over a value that changes. */
+  useLayoutEffect(() => {
+    speakSentenceRef.current = speakSentence
+  })
 
   const start = useCallback(() => {
     const target = docRef.current
@@ -289,8 +451,82 @@ export function useSpeech(
     clearContinuation()
     speaker?.stop()
     setSpeaking(false)
+    setPaused(false)
     removeSpokenWord(docRef.current)
   }, [speaker, clearContinuation])
+
+  const pause = useCallback(() => {
+    if (!readingRef.current) return
+    speaker?.pause()
+    setPaused(true)
+  }, [speaker])
+
+  const resume = useCallback(() => {
+    if (!readingRef.current) return
+    speaker?.resume()
+    setPaused(false)
+  }, [speaker])
+
+  /**
+   * Move the cursor and speak from there.
+   *
+   * ⚠️ **FORWARD OFF THE END OF A SECTION DOES NOTHING, DELIBERATELY.** The
+   * sentence being spoken is still playing, and when it ends `onDone` finds no
+   * next sentence and hands over to `continueReading`, which is the machinery
+   * that crosses a section boundary correctly — walking pages until the next
+   * document arrives, with the grace that tells the end of a book from a slow
+   * turn. Duplicating that here would give two answers to one question, and
+   * calling `paging.next()` instead would turn the page out from under prose
+   * still being read.
+   *
+   * ⚠️ **BACKWARD OFF THE START RE-SPEAKS THE FIRST SENTENCE** rather than doing
+   * nothing, on the same reasoning as `stepParagraph`'s back button: a reader
+   * pressing back at the start of a chapter means "say that again".
+   */
+  const moveTo = useCallback(
+    (next: number | null) => {
+      if (!readingRef.current) return
+      if (next === null) return
+      clearContinuation()
+      speakSentence(next)
+      setSpeaking(true)
+    },
+    [speakSentence, clearContinuation],
+  )
+
+  const stepSentence = useCallback(
+    (by: -1 | 1) => {
+      const current = spokenRef.current
+      if (!current) return
+      const next = sentenceStep(current.plan, cursorRef.current, by)
+      moveTo(next ?? (by === -1 ? cursorRef.current : null))
+    },
+    [moveTo],
+  )
+
+  const stepParagraph = useCallback(
+    (by: -1 | 1) => {
+      const current = spokenRef.current
+      if (!current) return
+      const next = paragraphStep(current.plan, cursorRef.current, by)
+      moveTo(next ?? (by === -1 ? cursorRef.current : null))
+    },
+    [moveTo],
+  )
+
+  /**
+   * A whole chapter away.
+   *
+   * The reading is not restarted here and the cursor is not moved: navigating
+   * changes the spine document, and the document effect below is what speaks the
+   * new one — the same path a reader taking a chapter from the contents already
+   * goes down while listening. Nothing to do but ask.
+   */
+  const stepChapter = useCallback((by: -1 | 1) => {
+    if (!readingRef.current) return
+    clearContinuation()
+    pagingRef.current.chapter?.(by)
+  }, [clearContinuation])
 
   /* The spine document changing is a step INSIDE the reading, not its end.
    *
@@ -337,8 +573,39 @@ export function useSpeech(
     [speaker, clearContinuation],
   )
 
+  /* READ FROM THE PROP, not from `pagingRef`: this decides what is RENDERED, so
+   * it has to be a value the render sees change. The ref exists for callbacks
+   * that need the value as of now, which is the opposite problem. */
+  const chapters = paging.chapter !== undefined
+
   return useMemo<Speech>(
-    () => ({ available, speaking, followsWords, start, stop }),
-    [available, speaking, followsWords, start, stop],
+    () => ({
+      available,
+      speaking,
+      paused,
+      chapters,
+      followsWords,
+      start,
+      stop,
+      pause,
+      resume,
+      stepSentence,
+      stepParagraph,
+      stepChapter,
+    }),
+    [
+      available,
+      speaking,
+      paused,
+      chapters,
+      followsWords,
+      start,
+      stop,
+      pause,
+      resume,
+      stepSentence,
+      stepParagraph,
+      stepChapter,
+    ],
   )
 }

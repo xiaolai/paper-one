@@ -46,6 +46,24 @@ interface Segment {
 export interface SpokenText {
   readonly text: string
   readonly segments: readonly Segment[]
+  /**
+   * Where each block of prose begins in `text` — a paragraph, a heading, a
+   * verse line.
+   *
+   * ⚠️ **PARAGRAPH NAVIGATION CANNOT BE DERIVED FROM `text`, AND THAT IS WHY
+   * THIS EXISTS.** The gap this walk puts between two blocks is a single SPACE,
+   * chosen so that the voice does not weld `endBegin` and so that an inline
+   * element cannot split a word — see the separator comment below. The
+   * consequence is that a paragraph break and a word space are the same
+   * character, so "read the next paragraph" has nothing to look for. The block
+   * boundaries are known here, at the only moment they are known at all, so
+   * they are recorded rather than guessed at later.
+   *
+   * Ascending, and the first entry is 0 whenever there is any text: a reader
+   * stepping back from the first paragraph lands at the start of the section
+   * rather than nowhere.
+   */
+  readonly blocks: readonly number[]
 }
 
 /**
@@ -121,6 +139,7 @@ export function collectText(doc: Document): SpokenText {
   })
 
   const segments: Segment[] = []
+  const blocks: number[] = []
   let text = ''
   let previousBlock: Element | null = null
   let node = walker.nextNode()
@@ -157,18 +176,29 @@ export function collectText(doc: Document): SpokenText {
      * OUTSIDE the segment ranges on purpose, so an offset landing in it maps to
      * no node rather than to the wrong one. */
     const block = blockAncestor(node, view)
+    /* READ BEFORE `previousBlock` MOVES, because both the separator below and
+       the block index need the same answer and there is only one moment it is
+       available. */
+    const opensBlock = block !== previousBlock
     /* Not when the text already ends in one: a whitespace node between two
        blocks has already put the separator there, and stacking a second
        shifts every offset after it. */
-    if (text.length > 0 && block !== previousBlock && !text.endsWith(' ')) text += ' '
+    if (text.length > 0 && opensBlock && !text.endsWith(' ')) text += ' '
     previousBlock = block
 
     const start = text.length
+    /* AFTER the separator, so a block begins at its own first character rather
+       than at the space in front of it — a paragraph step must not land the
+       voice on a gap that belongs to no segment.
+       `blocks.length === 0` is the guard for a first node whose `blockAncestor`
+       is null: `null !== null` is false, so nothing would be recorded and the
+       section would have text in no paragraph at all. */
+    if (opensBlock || blocks.length === 0) blocks.push(start)
     text += value
     segments.push({ node: node as Text, start, end: start + value.length })
     node = walker.nextNode()
   }
-  return { text, segments }
+  return { text, segments, blocks }
 }
 
 /**

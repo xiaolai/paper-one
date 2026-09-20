@@ -209,3 +209,45 @@
   opacity: var(--opacity-disabled);
   pointer-events: none;
 }
+
+/* --- the reading transport ------------------------------------------- *
+ *
+ * The Listen toggle expands IN PLACE while a reading is under way: the row
+ * replaces the single button rather than floating over the page, so the book
+ * keeps its full height and nothing covers the text.
+ *
+ * It reads as ONE control rather than nine, because the reader is choosing
+ * within a single activity — hence the shared wash behind the group and a gap
+ * tighter than `.toggleGroup`'s, which separates toggles that have nothing to
+ * do with each other.
+ */
+.transport {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-inline: var(--space-4);
+  border-radius: var(--radius-chip);
+  background: var(--wash);
+}
+
+/* `--control-xs` is the design system's "an icon and nothing else", which is
+ * what each of these is. `.action`'s own `--control-titlebar` would make the
+ * row wide enough to push the book's title out of the bar. The HEIGHT stays
+ * the titlebar's, so the row lines up with the controls beside it. */
+.transportButton {
+  width: var(--control-xs);
+  height: var(--control-titlebar);
+}
+
+/* The speed is a VALUE, not an action, and is written as one.
+ *
+ * A fixed width so that cycling 0.75 → 1 → 1.25 does not shuffle the buttons
+ * beside it, and tabular figures so the digits do not shift inside that width
+ * either — a control that moves while you use it is one you stop trusting. */
+.rate {
+  width: var(--control-lg);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--track-snug);
+}
