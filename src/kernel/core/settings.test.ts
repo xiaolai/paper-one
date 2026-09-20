@@ -1131,11 +1131,27 @@ describe('what the store promises never to do', () => {
     expect(createSettingsStore({ storage }).get(setting)).toEqual({ plain: true })
   })
 
-  /* ⚠️ SERIALISING IS NOT THE STORAGE. `set` refuses an unsaveable value at the
-     door, so the envelope can fail to serialise only through a migration hook's
-     output — and that skips the write, says so, and leaves a healthy storage
-     marked healthy rather than refused. */
-  it('skips a write it cannot serialise, and leaves a healthy storage marked healthy', () => {
+  /* ⚠️ **THIS CASE USED TO ASSERT `persistent` STAYED TRUE, AND THAT WAS THE
+     DEFECT RATHER THAN THE CONTRACT.** The reasoning was that serialising is
+     not the storage, so a healthy storage should stay marked healthy — true
+     about the STORAGE, and `persistent` is not about the storage. Its own
+     declaration says what it means: whether the next launch will see any of
+     this. With a value in `values` that `JSON.stringify` refuses, the answer is
+     no, and it is no for every later write as well, because the offending value
+     stays in the record. So the panel drew "your settings are saved" over a
+     store that had silently stopped saving at the first preference the reader
+     changed — the exact shape of the twelve stores AGENTS.md has a section
+     about, one level up: not a blank page written over good data, but a good
+     page that is never written at all, reported as written.
+
+     What this gives up is stated rather than hidden: a later `set` that
+     replaced the offending key WOULD serialise, and `persistent` does not come
+     back, because `persist` returns early once it is false. That is accepted
+     because the value cannot arrive from a real file — every value in a parsed
+     envelope is serialisable by construction — so it only ever comes from a
+     migration hook that invented one, and a hook that does that goes on doing
+     it for the session. */
+  it('marks itself session-only when it cannot serialise, rather than claiming a save it will never make', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       let writes = 0
@@ -1153,10 +1169,98 @@ describe('what the store promises never to do', () => {
 
       expect(store.get(KERNEL_SETTINGS.theme), 'the session still sees what it chose').toBe('night')
       expect(writes, 'nothing reached the storage').toBe(0)
-      expect(store.persistent).toBe(true)
+      expect(store.persistent, 'and the store says so, instead of reporting a save it did not make').toBe(false)
       expect(error).toHaveBeenCalledWith(
-        'Paper: settings could not be serialised, so this change was not saved',
+        'Paper: settings could not be serialised, so they will not be saved on this device',
         expect.any(TypeError),
+      )
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  /* ⚠️ **A THROWING MIGRATION USED TO TAKE THE LAUNCH WITH IT.** `migrate` is
+     the caller's code running on whatever bytes were on disk, and it was the
+     one door in this file where damaged settings could be FATAL: every other
+     way of meeting them — unreadable bytes, a file from the future — already
+     degrades to a session store. A reader with a half-written file could not
+     start the app, so could not reach the panel that would have told them why. */
+  it('starts from the defaults when the migration throws, instead of failing to start', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      /* AN OLDER ENVELOPE, because a file already AT `SETTINGS_VERSION` is
+         taken verbatim and the hook is never called — which is what the first
+         version of this case got wrong, and the case caught. */
+      const stored = JSON.stringify({ version: 0, values: { 'kernel.theme': 'night' } })
+      const map = new Map<string, string>([[SETTINGS_STORAGE_KEY, stored]])
+      const storage = {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => void map.set(key, value),
+      }
+
+      const store = createSettingsStore({
+        storage,
+        migrate: () => {
+          throw new Error('this hook is broken')
+        },
+      })
+
+      expect(store.get(KERNEL_SETTINGS.theme), 'every setting answers its fallback').toBe(
+        KERNEL_SETTINGS.theme.fallback,
+      )
+      expect(store.persistent, 'and it is session-only, so nothing writes over the damaged file').toBe(false)
+      expect(map.get(SETTINGS_STORAGE_KEY), 'the bytes are left exactly where they are').toBe(stored)
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  /* The same door, the other half: the hook returns a record rather than
+     throwing, and a getter on it throws while the record is being frozen. */
+  it('starts from the defaults when the migration returns a record it cannot read', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const store = createSettingsStore({
+        storage: null,
+        migrate: () =>
+          Object.defineProperty({}, 'kernel.theme', {
+            enumerable: true,
+            get: () => {
+              throw new Error('hostile getter')
+            },
+          }) as Readonly<Record<string, unknown>>,
+      })
+
+      expect(store.get(KERNEL_SETTINGS.theme)).toBe(KERNEL_SETTINGS.theme.fallback)
+      expect(store.persistent).toBe(false)
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  /* ⚠️ **`JSON.stringify(NaN)` IS THE STRING `null`, SO A VALUE COULD BE STORED
+     THAT `get` COULD NEVER READ BACK.** `has` answered true for the key, `get`
+     ran the setting's parser over `null`, got `undefined`, and returned the
+     FALLBACK — so the panel showed one thing and the file held another, for
+     every launch after. Surviving `JSON.stringify` is not the same as surviving
+     the setting. */
+  it('refuses a value the setting’s own parser cannot read back', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const map = new Map<string, string>()
+      const storage = {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => void map.set(key, value),
+      }
+      const store = createSettingsStore({ storage })
+
+      store.set(KERNEL_SETTINGS.readingRate, Number.NaN)
+
+      expect(store.has(KERNEL_SETTINGS.readingRate), 'nothing was stored under the key').toBe(false)
+      expect(store.get(KERNEL_SETTINGS.readingRate)).toBe(KERNEL_SETTINGS.readingRate.fallback)
+      expect(map.size, 'and nothing reached the storage').toBe(0)
+      expect(error).toHaveBeenCalledWith(
+        `Paper: the setting ${KERNEL_SETTINGS.readingRate.key} was not changed, because its own parser cannot read that value back`,
       )
     } finally {
       error.mockRestore()

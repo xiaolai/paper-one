@@ -243,6 +243,35 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
    * understands, silently, on the first preference they changed. Found by
    * audit. */
   const fromTheFuture = found !== null && found.version > SETTINGS_VERSION
+  /**
+   * The migration hook's answer, or none — never a thrown exception.
+   *
+   * ⚠️ **A THROWING MIGRATION USED TO ABORT THE WHOLE STORE, AND THE STORE IS
+   * ON THE BOOT PATH.** `migrate` is supplied by the caller, it runs on
+   * whatever bytes were on disk, and it is the one piece of arbitrary code in
+   * this function — so a hook that threw on a hand-edited or half-written file
+   * took `createSettingsStore` down with it, and with it the launch. Every
+   * other way of meeting damaged settings in this file is deliberately
+   * nonfatal: unreadable bytes become a session store, a file from the future
+   * becomes a session store. This was the one door left where damage could
+   * stop the app from starting, which is the worst available answer to it —
+   * the reader cannot even reach the panel that would say what is wrong.
+   *
+   * It degrades the same way as the rest now: no values, session-only, the
+   * damaged bytes left exactly where they are so a later build can still read
+   * them. `get` answers every setting's fallback, which is what a reader with
+   * no settings file already sees.
+   */
+  let migrationFailed = false
+  const migrated = (stored: SettingsEnvelope | null): Readonly<Record<string, unknown>> => {
+    try {
+      return migrate(stored)
+    } catch (cause) {
+      migrationFailed = true
+      console.error('Paper: stored settings could not be migrated, so this session starts from the defaults', cause)
+      return {}
+    }
+  }
   let values: Readonly<Record<string, unknown>> =
     found && found.version === SETTINGS_VERSION
       ? found.values
@@ -253,11 +282,24 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
              and their type size rather than being reset. What must not happen
              is this build claiming the file. */
           (found.values as Readonly<Record<string, unknown>>)
-        : migrate(found)
+        : migrated(found)
   /* FROZEN, like everything `set` holds after it: `getSnapshot` hands this record
      out whole, and a reader who changed a value in it changed memory under the
-     disk, with no write and no notification (2026-09-13 verify). */
-  values = frozen(values)
+     disk, with no write and no notification (2026-09-13 verify).
+
+     ⚠️ **AND THE FREEZE IS PART OF THE LOADING PATH, SO IT IS GUARDED TOO.**
+     `frozen` walks what the migration returned, and the migration is the
+     caller's code — a getter on that record runs HERE, not above, so guarding
+     only the `migrate` call left the second half of the same door open. A hook
+     that returns a record whose getter throws would abort the store exactly as
+     a hook that threw outright did. Same degradation, one reason. */
+  try {
+    values = frozen(values)
+  } catch (cause) {
+    migrationFailed = true
+    console.error('Paper: stored settings could not be read, so this session starts from the defaults', cause)
+    values = frozen({})
+  }
   const listeners = new Set<() => void>()
 
   /* WHETHER THE NEXT LAUNCH WILL SEE ANY OF THIS. No storage at all is the
@@ -265,8 +307,9 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
    * file written by a NEWER build is the third: refusing to write it is the
    * only way to leave it intact, and "these settings are not being saved" is
    * already the sentence the panel draws for exactly this state. A file that
-   * would not READ is the fourth, for the same reason as the third. */
-  let persistent = storage !== null && !fromTheFuture && !unreadable
+   * would not READ is the fourth, for the same reason as the third. A
+   * migration that THREW is the fifth — see `migrated` above. */
+  let persistent = storage !== null && !fromTheFuture && !unreadable && !migrationFailed
 
   /**
    * Tell every subscriber, and let none of them stop the others.
@@ -325,13 +368,25 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
      * turned persistence off for the session — so one capability's unsaveable
      * value stopped every preference saving, and replacing it did not undo
      * that. `set` now refuses such a value before it is held, so the envelope
-     * can only fail here through a migration hook's output; that says so and
-     * skips this write, and leaves a healthy storage marked healthy. */
+     * can only fail here through a migration hook's output. */
     let text: string
     try {
       text = JSON.stringify(envelope)
     } catch (cause) {
-      console.error('Paper: settings could not be serialised, so this change was not saved', cause)
+      /* ⚠️ **AND THIS USED TO RETURN LEAVING `persistent` TRUE, ON THE GROUND
+       * THAT THE STORAGE WAS HEALTHY.** The storage is; the STORE is not, and
+       * this flag is the store's. Its own declaration above says what it
+       * means — *whether the next launch will see any of this* — and once the
+       * envelope holds a value `JSON.stringify` refuses, the answer is no, and
+       * stays no for every later write: the offending value sits in `values`
+       * and nothing a reader does removes it. So the panel drew "your settings
+       * are saved" over a store that had stopped saving at the first
+       * preference they changed. A store that cannot write is a SESSION store,
+       * exactly as in the storage branch below, and it is published for the
+       * same reason. */
+      persistent = false
+      console.error('Paper: settings could not be serialised, so they will not be saved on this device', cause)
+      notify()
       return
     }
     try {
@@ -417,6 +472,34 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
         held = JSON.parse(text)
       } catch (cause) {
         console.error(`Paper: the setting ${setting.key} was not changed, because its value cannot be saved`, cause)
+        return
+      }
+      /* ⚠️ **AND A VALUE THE SETTING'S OWN PARSER CANNOT READ BACK IS REFUSED
+       * WITH THEM.** Surviving `JSON.stringify` is not the same as surviving
+       * this setting: `JSON.stringify(NaN)` is the string `null`, so
+       * `set(readingRate, NaN)` stored a literal `null` under the key. `has`
+       * then answered TRUE, `get` ran `parse(null)`, got `undefined` and
+       * returned the FALLBACK — a key present on disk and unreadable through
+       * the only door that reads it, for every launch after, with the panel
+       * showing the fallback and the file disagreeing.
+       *
+       * Refused on the same ground as the line above: `set` already declines a
+       * value the STORAGE cannot hold, and a value the SETTING cannot hold is
+       * the same promise broken one level up. The parse is only a
+       * READABILITY test — `held` is what gets stored, not `readable` — so a
+       * parser that clamps still clamps on the way out and `set` does not
+       * quietly rewrite what the caller asked for. A parser that throws says
+       * what one returning `undefined` says, exactly as in `get`. */
+      let readable: unknown
+      try {
+        readable = setting.parse(held)
+      } catch {
+        /* Left undefined, which the refusal below already answers. */
+      }
+      if (readable === undefined) {
+        console.error(
+          `Paper: the setting ${setting.key} was not changed, because its own parser cannot read that value back`,
+        )
         return
       }
       const current = setting.key in values ? values[setting.key] : setting.fallback
