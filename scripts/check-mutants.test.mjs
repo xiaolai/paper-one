@@ -445,6 +445,11 @@ describe('which kind of timeout a report says a mutant met', () => {
       outcome: 'killed',
       measured: 'killed',
       repeated: [],
+      /* The same mutants as identities, for the merge-base comparison a repeat
+         has had since 2026-09-20 — empty here, as `repeated` is, and asserted
+         beside it so the two can never drift into disagreeing about what
+         repeated. */
+      repeats: [],
       unresolved: [
         '2:3 — there was no settle run, so nothing answered for it',
         '3:3 — there was no settle run, so nothing answered for it',

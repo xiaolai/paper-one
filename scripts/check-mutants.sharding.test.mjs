@@ -950,6 +950,13 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
     /* What the merge base could not run, by content — see `changedSinceBase`. */
     excluded: [],
     unseen: [],
+    /* The repeat pairing, which an evidence has carried since 2026-09-20 — a
+       wall-clock timeout that repeated is compared with the merge base like a
+       survivor, in its own pool. Nothing repeated here, so both are empty, and
+       they are asserted rather than ignored: a shape this reads past is a
+       field a record could stop carrying unseen. */
+    hangsAuthorised: 0,
+    hangsAdded: [],
     refusal: null,
     ...fields,
   })
@@ -976,6 +983,13 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
     /* One shape for every evidence, measured or refused — see `judgedAtBase`. */
     excluded: [],
     unseen: [],
+    /* The repeat pairing, which an evidence has carried since 2026-09-20 — a
+       wall-clock timeout that repeated is compared with the merge base like a
+       survivor, in its own pool. Nothing repeated here, so both are empty, and
+       they are asserted rather than ignored: a shape this reads past is a
+       field a record could stop carrying unseen. */
+    hangsAuthorised: 0,
+    hangsAdded: [],
     refusal,
   })
   /** Every subject is its own file at the merge base. */
@@ -1068,6 +1082,13 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
         /* This stand-in measured nothing it had to leave out — see `changedSinceBase`. */
         excluded: [],
         unseen: [],
+        /* The repeat pairing, which an evidence has carried since 2026-09-20 — a
+           wall-clock timeout that repeated is compared with the merge base like a
+           survivor, in its own pool. Nothing repeated here, so both are empty, and
+           they are asserted rather than ignored: a shape this reads past is a
+           field a record could stop carrying unseen. */
+        hangsAuthorised: 0,
+        hangsAdded: [],
         sha256: A_SHA,
         source: A_SOURCE,
         first: atBase,
@@ -2089,6 +2110,8 @@ describe('what the two runs of one subject add up to', () => {
          readings agree. */
       measured: 'did-not-run',
       repeated: [],
+      /* The same mutants as identities — see `settledVerdict`. */
+      repeats: [],
       /* Named as well as counted, and the name is what fails the file — see
          `noVerdictFor`. The place is empty because this fixture's mutant has no
          location, which is the point of the case above it. */

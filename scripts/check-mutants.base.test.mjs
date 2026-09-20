@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import {
   REPORT,
+  hangsUnanswered,
   matchedSurvivors,
   measureAtBase,
   mutantIdentitiesIn,
@@ -1471,6 +1472,93 @@ describe('what the merge base’s run amounts to', () => {
         expect(`${ended}: ${said}`).toBe(`${ended}: ${expected}`)
       })
     }
+  })
+
+  /**
+   * ## A wall-clock timeout that repeated, compared with the merge base
+   *
+   * ⚠️ **IT NEVER REACHED THE MERGE BASE AT ALL UNTIL 2026-09-20.** The
+   * comparison covered SURVIVORS; a repeat is not one — it is *whether a test
+   * kills it is unknown* — so it failed outright and nothing asked whether the
+   * base hung on it too. That is the file-wide penalty this whole design exists
+   * to remove, alive in the one channel the design did not reach:
+   * `Promise.race([])` is specified to stay pending for ever, so its
+   * `ArrayDeclaration` mutant can only ever be a wall-clock timeout, it repeats
+   * because it is not load, and whoever next touched the file paid for it.
+   */
+  describe('a repeated wall-clock timeout, against the merge base', () => {
+    /** A run that times out and settles the same way — a hang, on either side. */
+    const HANGS = [{ timedOut: [BIG], exit: true }, { timedOut: [BIG], exit: true }]
+    /** The same first run, settled by tests that killed it. */
+    const SETTLES = [{ timedOut: [BIG], exit: true }, { exit: true }]
+
+    const repeatsOf = async (root, plans, into) => {
+      const { record } = await measuring(root, 'src/a.ts', {
+        stryker: strykerReporting(...plans).stryker,
+        ...(into === undefined ? {} : { into: path.join(root, into) }),
+      })
+      return (await derived(root, record)).repeats
+    }
+
+    it('authorises a hang the merge base hung on too, and bills one it did not', async () => {
+      for (const [what, basePlans, expected] of [
+        ['the base hung on it too', HANGS, 'authorised'],
+        ['the base settled it to a kill', SETTLES, 'added'],
+      ]) {
+        await inScratch('mutants-base-', async (root) => {
+          repository(root)
+          const [here] = await repeatsOf(root, HANGS, 'head.json')
+          expect(here, what).not.toBeUndefined()
+          const match = matchedSurvivors(await repeatsOf(root, basePlans), [here])
+          const said = match.authorised.length === 1 ? 'authorised' : 'added'
+          expect(`${what}: ${said}`).toBe(`${what}: ${expected}`)
+        })
+      }
+    })
+
+    it('does not let a hang at the base authorise a SURVIVOR here — they are two pools', async () => {
+      await inScratch('mutants-base-', async (root) => {
+        repository(root)
+        /* The base hung on the mutant; here it is observed ALIVE. "We could not
+           tell" may never become "it was already there" — the conversion this
+           gate refuses everywhere else. */
+        const { record: alive } = await measuring(root, 'src/a.ts', {
+          stryker: strykerReporting({ survived: [BIG] }).stryker,
+          into: path.join(root, 'head.json'),
+        })
+        const [survivorHere] = (await derived(root, alive)).survivors
+        const { record: hung } = await measuring(root, 'src/a.ts', { stryker: strykerReporting(...HANGS).stryker })
+        const atBase = await derived(root, hung)
+
+        expect(atBase.repeats).toHaveLength(1)
+        expect(atBase.survivors).toEqual([])
+        const match = matchedSurvivors(atBase.survivors, [survivorHere], atBase.undecided)
+        expect(match.authorised).toEqual([])
+        expect(match.added).toHaveLength(1)
+      })
+    })
+  })
+
+  /**
+   * ⚠️ **AND A BASE THAT COULD NOT BE MEASURED AUTHORISES NO HANG EITHER.** An
+   * evidence carrying a refusal holds the EMPTY pairing — nothing matched,
+   * because nothing was measured — so reading it as "none was added" would make
+   * every failure to measure the broadest permission this gate can issue. `null`
+   * is the same: the base was never asked, or the file is new and owes
+   * everything.
+   */
+  describe('which hangs a verdict is billed for', () => {
+    const verdict = { repeated: ['9:1', '12:4'], repeats: [{ location: { start: { line: 9, column: 1 } } }, { location: { start: { line: 12, column: 4 } } }] }
+
+    it('bills every hang where the base was not asked, or refused', () => {
+      expect(hangsUnanswered(verdict, null)).toEqual(['9:1', '12:4'])
+      expect(hangsUnanswered(verdict, { refusal: { reason: 'untested-base' }, hangsAdded: [] })).toEqual(['9:1', '12:4'])
+    })
+
+    it('bills only what the base did not answer for, keeping the line a reader is shown', () => {
+      expect(hangsUnanswered(verdict, { refusal: null, hangsAdded: ['12:4'] })).toEqual(['12:4'])
+      expect(hangsUnanswered(verdict, { refusal: null, hangsAdded: [] })).toEqual([])
+    })
   })
 
   it('names a hit limit as the bound it is, in the merge base’s own voice', async () => {

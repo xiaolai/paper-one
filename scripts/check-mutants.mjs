@@ -2577,7 +2577,15 @@ async function strykerEach(
         /* What this file's own sweep cost, which is what a second wide pass over
            it would cost again — see `judgedAtBase`, which spends it or does not. */
         const spent = first.durationMs + (settle === null ? 0 : settle.durationMs)
-        const judged = verdict.outcome === 'survived' ? await base(subject, [first.report, settle === null ? null : settle.report], spent) : null
+        /* ⚠️ **ASKED FOR A REPEAT TOO, NOT ONLY FOR A SURVIVOR** (2026-09-20).
+           The base used to be consulted about a file whose run left a survivor
+           and about no other — so a file with a repeated wall-clock timeout and
+           nothing else failed without the merge base ever being asked whether it
+           hung there too. That is what billed a pre-existing hang to whoever
+           touched the file. A file with neither still costs nothing, which is
+           the reason a green tree pays nothing for any of this. */
+        const asking = verdict.outcome === 'survived' || verdict.repeated.length > 0
+        const judged = asking ? await base(subject, [first.report, settle === null ? null : settle.report], spent) : null
         evidence = judged === null ? null : judged.evidence
         if (judged !== null && judged.paired !== null) swept.paired.push(judged.paired)
         /* A repeat is named whatever else the file also is: a survivor outranks
@@ -2586,7 +2594,14 @@ async function strykerEach(
            with both is in both lists, and `timed-out` is the outcome of a file
            that has a repeat and nothing worse. The places come with the file:
            see `summarise`. */
-        if (verdict.repeated.length > 0) swept.timedOut.push([subject, verdict.repeated])
+        /* ⚠️ **AND ONLY THE ONES THE MERGE BASE DID NOT REPEAT.** A hang that
+           was there too is not a hang this change wrote; one the base answered
+           for, or that it never met, is. `hangsStand` says which — and a base
+           that could not be measured authorises nothing here either, exactly as
+           it authorises no survivor: "could not run" is never "it already
+           survived", and it is never "it already hung". */
+        const hangs = hangsUnanswered(verdict, evidence)
+        if (hangs.length > 0) swept.timedOut.push([subject, hangs])
         /* And an unresolved mutant the same way, on its own channel — see
            `unanswered`. It is NOT an outcome, because an outcome is one answer
            per file and a survivor outranks every other; a mutant with no score
@@ -3464,7 +3479,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
   if (origin === null) return null
   const here = survivorsFound(subject, named, origin.path, reports)
   // Stryker disable next-line ArrayDeclaration: a refusal carries no measurement, so nothing reads this list — it is here so every evidence has one shape
-  const empty = { origin, outcome: null, install: null, durationMs: 0, sha256: null, source: null, first: null, settle: null, authorised: 0, added: [], excluded: [], unseen: [] }
+  const empty = { origin, outcome: null, install: null, durationMs: 0, sha256: null, source: null, first: null, settle: null, authorised: 0, added: [], excluded: [], unseen: [], hangsAuthorised: 0, hangsAdded: [] }
   const refused = (reason, message) => ({ evidence: { ...empty, refusal: { reason, message } }, paired: null })
   let measured
   try {
@@ -3509,7 +3524,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
   /* Read back exactly as the aggregate will read it, and against the content the
      merge base itself holds — which the origin froze, and which is the whole of
      what stops a measurement of something else being carried as this one's. */
-  const { survivors, undecided, problem } = await survivorsAtBase(evidence, {
+  const { survivors, undecided, repeats, problem } = await survivorsAtBase(evidence, {
     at: path.join(world.root, origin.path),
     named: origin.path,
     frozen: origin.sha256,
@@ -3554,6 +3569,22 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
      costs a sweep, it is paid only by a file that would otherwise fail, and a
      file that was going to pass never pays it. A run that cannot be made leaves
      the narrow bill standing, because refusing to measure is never permission. */
+  /* ⚠️ **AND THE SAME COMPARISON FOR A REPEATED TIMEOUT, WHICH NEVER REACHED
+     THE MERGE BASE AT ALL UNTIL NOW** (2026-09-20). The base comparison covered
+     SURVIVORS. A wall-clock timeout that repeats is not one — it is "whether a
+     test kills it is unknown" — so it failed outright and nothing ever asked
+     whether the merge base hung on it too. That is the file-wide penalty this
+     whole design exists to remove, alive in the one channel the design did not
+     reach: `Promise.race([])` is specified to stay pending for ever, so its
+     `ArrayDeclaration` mutant can only ever be a wall-clock timeout, it repeats
+     because it is not load, and whoever next touched the file paid for it.
+
+     Its own pool, paired only against its own kind — see `repeatsFound` for why
+     a base repeat may never authorise a head SURVIVOR. `undecided` is not passed:
+     that list explains why a base mutant cannot authorise a survivor, and a
+     repeat here is answered by a repeat there or by nothing. */
+  const repeatsHere = repeatsFound(subject, named, origin.path, reports)
+  const hangs = matchedSurvivors(repeats ?? [], repeatsHere)
   const narrow = differenceAtBase(survivors, undecided, here)
   if (narrow.added.some((one) => one.class === 'added') && affordable(spent, origin.path, world.stdout)) {
     const wide = await killedWhenWidened(subject, named, origin, world)
@@ -3576,18 +3607,52 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
       const killed = new Set(wide.map((one) => JSON.stringify(one.identity)))
       const kept = here.filter((one) => !killed.has(JSON.stringify(one.identity)))
       return {
-        evidence: { ...evidence, ...differenceAtBase(survivors, undecided, kept), widened: true },
+        evidence: { ...evidence, ...differenceAtBase(survivors, undecided, kept), ...repeatsJudged(hangs), widened: true },
         paired: { at: subject, named, origin, here: kept, atBase: survivors, undecided },
       }
     }
   }
   return {
-    evidence: { ...evidence, ...narrow },
+    evidence: { ...evidence, ...narrow, ...repeatsJudged(hangs) },
     /* What the sweep's own pairing needs, and what no record carries: both sides'
        survivors and the mutants the merge base could not decide, derived. A result
        carries the evidence they were derived FROM. */
     paired: { at: subject, named, origin, here, atBase: survivors, undecided },
   }
+}
+
+/**
+ * Which of a file's repeated timeouts the merge base did NOT answer for — the
+ * ones this change is billed for, as the lines a reader is shown.
+ *
+ * ⚠️ **A REFUSAL AUTHORISES NOTHING HERE EITHER.** An evidence that carries a
+ * refusal has the empty pairing — no repeat matched, because none was measured —
+ * and reading that as "none was added" would make every failure to measure the
+ * broadest permission this gate can issue, which is the thing it refuses
+ * everywhere else. `null` is the same: the base was never asked, or the file is
+ * new and owes everything.
+ *
+ * `repeated` and `repeats` come from one pass over one list in `settledVerdict`,
+ * so they are the same mutants in the same order: the display line is kept, with
+ * its fail-closed note about a reason this gate does not know, and the identity
+ * beside it decides.
+ */
+export function hangsUnanswered(verdict, evidence) {
+  if (evidence === null || evidence.refusal !== null) return verdict.repeated
+  const added = new Set(evidence.hangsAdded)
+  return verdict.repeated.filter((_, at) => added.has(placeOf(verdict.repeats[at])))
+}
+
+/**
+ * A repeat pairing, as the two numbers an evidence carries: how many of this
+ * file's repeated timeouts the merge base repeated too, and which it did not.
+ *
+ * `hangsAdded` holds the mutant's PLACE, because that is what a reader acts on
+ * and what `sayTimeouts` already prints — the identity is in the evidence the
+ * pairing was derived from, and nothing downstream re-pairs on a name.
+ */
+function repeatsJudged({ authorised, added }) {
+  return { hangsAuthorised: authorised.length, hangsAdded: added.map(({ at }) => at) }
 }
 
 /**
@@ -3699,6 +3764,15 @@ export async function survivorsAtBase(evidence, { at, named, frozen }) {
   return {
     survivors: survivorsFound(at, named, named, [first.report, settle === null ? null : settle.report], spent),
     undecided: unknown.map(({ mutant, why }) => ({ ...survivorOf(mutant, named, named, parsed), why })),
+    /* ⚠️ **WHAT THE BASE COULD NOT DECIDE EITHER, AS ITS OWN POOL** (2026-09-20).
+       A wall-clock timeout that repeats is not a survivor — it is *whether a test
+       kills this is unknown* — so it travels in neither the survivor pool nor
+       anything a survivor may be authorised by. It is its own kind of evidence,
+       paired against head's repeats and nothing else: a repeat here that also
+       repeated at the merge base is a hang the change did not write, and the
+       file-wide penalty this whole design exists to remove was alive in exactly
+       this one channel until now. */
+    repeats: verdict.repeats.map((mutant) => survivorOf(mutant, named, named, parsed)),
   }
 }
 
@@ -6790,6 +6864,30 @@ function answersIn(entry) {
   return new Map(entry.mutants.filter(isRecord).map((mutant) => [keyOf(mutant), mutant]))
 }
 
+/**
+ * Every wall-clock timeout these reports met TWICE, as an identity — the same
+ * shape a survivor travels in, so one pairing serves both.
+ *
+ * ⚠️ **A REPEAT IS NOT A SURVIVOR AND MUST NOT BE POOLED WITH ONE.** A survivor
+ * is a mutant observed alive; a repeat is a mutant nothing could answer for.
+ * Letting a base repeat authorise a head SURVIVOR would turn "we do not know"
+ * into "it was already there", which is the one conversion this gate refuses
+ * everywhere else. So they are two pools, paired only against their own kind.
+ *
+ * Read from the reports rather than taken from a verdict, so that the side which
+ * has only the reports — `judgedAtBase`, and the aggregate re-deriving what a
+ * shard recorded — reaches the same answer as the side that ran them.
+ */
+function repeatsFound(subject, named, from, reports) {
+  const [first = null, settle = null] = reports
+  const entry = reportEntryOf(subject, first)
+  if (entry === null) return []
+  const parsed = parsedSource(entry.source, named)
+  return settledEach(timeoutsIn(entry).unsettled, answersIn(reportEntryOf(subject, settle)))
+    .filter(({ how }) => how === 'repeated')
+    .map(({ mutant }) => survivorOf(mutant, named, from, parsed))
+}
+
 /** A mutant's identity as one string, so two reports' mutants can be matched by it. */
 function keyOf(mutant) {
   return JSON.stringify(identityParts(mutant))
@@ -6873,12 +6971,18 @@ export function settledVerdict(subject, first, settle) {
        refused before it reaches here; that argument is about the roads known
        today, and naming them costs one map. */
     const none = unsettled.map((mutant) => `${placeOf(mutant)} — there was no settle run, so nothing answered for it`)
-    return { ...counted, outcome: ran, measured: ran, repeated: [], unresolved: none, answers: null }
+    return { ...counted, outcome: ran, measured: ran, repeated: [], repeats: [], unresolved: none, answers: null }
   }
   const answered = settledEach(unsettled, answersIn(reportEntryOf(subject, settle.report)))
   const tally = { killed: 0, survived: 0, repeated: 0, unresolved: 0 }
   for (const { how } of answered) tally[how] += 1
   const repeated = answered.filter(({ how }) => how === 'repeated').map(({ answer }) => unrecognised(answer))
+  /* ⚠️ **AND THE SAME MUTANTS AS IDENTITIES, BECAUSE A REPEAT IS NOW COMPARED
+     WITH THE MERGE BASE** (2026-09-20). `repeated` is what a reader is shown;
+     this is what the comparison pairs. The FIRST run's mutant is the one kept —
+     the settle run's answer says only that it timed out again, and an identity
+     must be the one the plan and the base both counted. */
+  const repeats = answered.filter(({ how }) => how === 'repeated').map(({ mutant }) => mutant)
   const unresolved = answered.filter(({ how }) => how === 'unresolved').map(({ mutant, answer }) => noVerdictFor(mutant, answer))
   const settled = outcomeOf(subject, settle.exitedCleanly, settle.report)
   const survived = ran === 'survived' || settled === 'survived'
@@ -6890,7 +6994,7 @@ export function settledVerdict(subject, first, settle) {
       : tally.unresolved > 0
         ? 'did-not-run'
         : settled
-  return { ...counted, outcome, measured, repeated, unresolved, answers: tally, durationMs: settle.durationMs }
+  return { ...counted, outcome, measured, repeated, repeats, unresolved, answers: tally, durationMs: settle.durationMs }
 }
 
 /**
