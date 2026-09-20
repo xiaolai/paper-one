@@ -226,7 +226,8 @@ export interface SentenceOptions {
 }
 
 /** Half-open, into the normalised text. */
-interface Span {
+/** A half-open range of character offsets. Exported for `sentenceSpansOf`. */
+export interface Span {
   readonly start: number
   readonly end: number
 }
@@ -238,6 +239,22 @@ interface Squeezed {
    *  paragraph and `indexOf` returns the wrong one for most words (§A2). */
   readonly termStart: number
   readonly termEnd: number
+  /**
+   * For each character of `text`, the offset in `raw` it was emitted from.
+   *
+   * ⚠️ **BUILT ALWAYS, NOT BEHIND A FLAG.** Only `sentenceSpansOf` reads it, and
+   * a parameter deciding whether to fill it would leave the selection path
+   * running code no test of that path exercises. One array of `text.length`
+   * numbers next to the string building it accompanies is not a cost worth a
+   * branch — this file's own history is full of branches that only one caller
+   * reached and that were therefore wrong.
+   *
+   * An OWED space maps to the offset of the character that forced it out, which
+   * is the first kept character after the whitespace run it stands for. That is
+   * the useful answer: a span starting at that space starts, in `raw`, at the
+   * run rather than inside it.
+   */
+  readonly map: readonly number[]
 }
 
 /**
@@ -360,6 +377,7 @@ export function sentenceOf(
  */
 function squeeze(raw: string, termStart: number, termEnd: number): Squeezed {
   let text = ''
+  const map: number[] = []
   let owedSpace = false
   let pendingStart = false
   let start: number | null = null
@@ -393,6 +411,7 @@ function squeeze(raw: string, termStart: number, termEnd: number): Squeezed {
     if (separator) owedSpace = false
     if (owedSpace) {
       text += ' '
+      map.push(at)
       owedSpace = false
     }
     if (pendingStart && !separator) {
@@ -400,11 +419,13 @@ function squeeze(raw: string, termStart: number, termEnd: number): Squeezed {
       pendingStart = false
     }
     text += character
+    map.push(at)
     if (!separator) contentEnd = text.length
   }
 
   return {
     text,
+    map,
     /* Still pending means the term began in whitespace or separators with
      * nothing kept after them, so it starts where the text ran out — which
      * makes it empty, which is the `no-term` answer rather than a silently
@@ -463,6 +484,72 @@ function breaksBetween(head: string, tail: string, locale: string | undefined): 
   const joint = SEPARATOR.test(head.slice(-1)) || SEPARATOR.test(tail.slice(0, 1)) ? '' : ' '
   const seam = head.length + joint.length + (tail.length - tail.replace(LEADING_SEPARATORS, '').length)
   return merged(`${head}${joint}${tail}`, locale).some((span) => span.start === seam)
+}
+
+/**
+ * Every sentence in `raw`, as contiguous ranges in `raw`'s OWN offsets.
+ *
+ * This is the reading path's entry — `sentenceOf` answers "which sentence holds
+ * this selection", and read-aloud needs "what are all of them, in order" so it
+ * can speak one at a time and move by one. Both go through the SAME `squeeze`
+ * and the same `merged`, deliberately: two answers to where a sentence ends is
+ * the drift this file has already paid for twice, and the corpus holds them
+ * together (`sentenceOf.reading.test.ts`).
+ *
+ * ⚠️ **IT SQUEEZES FOR THE REASON THIS FILE'S HEADER ALREADY GIVES** — "Normalise,
+ * then segment — and the order is the whole point" — so the reading inherits that
+ * rule rather than meeting it again. `Intl.Segmenter` treats a newline as a
+ * paragraph separator (UAX #29 SB4) and an EPUB's source is hard-wrapped, so
+ * segmenting `raw` splits mid-clause at every source line break; here that would
+ * be a wrong "next sentence" and a wrong highlight on most of a book. The corpus
+ * row `sentence-in-source` is the evidence and predates this function.
+ *
+ * ⚠️ **AND FLATTENING NEWLINES TO SPACES IS NOT A SHORTCUT TO IT**, which was
+ * measured rather than assumed: a same-length substitution preserves offsets and
+ * still breaks `He met Mr.\n    Smith`, because the merge reads a segment's TAIL
+ * and that tail is then five spaces, so `endsInAbbreviation` never fires.
+ * Collapsing is what makes the tail `Mr. ` again. Only the full squeeze does
+ * both jobs.
+ *
+ * ⚠️ **THE RANGES ARE CONTIGUOUS AND COVER `raw` WHOLE, WHICH IS THE POINT.**
+ * Only the STARTS are mapped back; each range ends where the next begins and the
+ * last ends at `raw.length`. So no character of a book can fall between two
+ * sentences and go unread — a gap here would be a silently skipped line, which
+ * is exactly the failure a reader could never diagnose. `covers` asserts it.
+ *
+ * An empty or whitespace-only `raw` answers `[]` rather than one empty range:
+ * nothing to say is not a sentence, and a caller speaking an empty string gets
+ * an utterance that ends immediately and looks like an engine fault.
+ */
+export function sentenceSpansOf(raw: string, locale: string | undefined): readonly Span[] {
+  const squeezed = squeeze(raw, 0, 0)
+  if (squeezed.text.trim() === '') return []
+
+  const starts: number[] = []
+  for (const span of merged(squeezed.text, locale)) {
+    /* CLAMPED THROUGH THE MAP, never past it: `merged` spans index `text`, so
+     * every start but a degenerate one has an entry. */
+    const at = squeezed.map[span.start]
+    starts.push(at === undefined ? raw.length : at)
+  }
+  if (starts.length === 0) return []
+
+  /* THE FIRST RANGE STARTS AT ZERO whatever the map says. Leading whitespace is
+   * squeezed away, so the first kept character can be some way in — and a first
+   * range beginning there would leave the run before it in no sentence at all,
+   * which is the coverage hole this function promises not to have. */
+  starts[0] = 0
+
+  const out: Span[] = []
+  for (const [at, start] of starts.entries()) {
+    const end = starts[at + 1] ?? raw.length
+    /* A range of nothing is dropped rather than spoken. Two `merged` spans can
+     * map to one raw offset when everything between them was collapsed — a run
+     * of separators standing alone is the case — and an empty utterance reads
+     * as an engine that refused. */
+    if (end > start) out.push({ start, end })
+  }
+  return out
 }
 
 /** The segments, with abbreviation runs — and a quotation's lowercase
