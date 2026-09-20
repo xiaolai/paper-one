@@ -86,26 +86,63 @@ const RUBY_ANNOTATION = new Set(['rt', 'rp'])
  * - `toc`, `landmarks`, `page-list` — the book's own navigation. A table of
  *   contents read aloud is a list of every chapter title in the book.
  */
-const NEVER_SPOKEN_TYPES = new Set([
-  'pagebreak',
-  'noteref',
-  'footnote',
-  'endnote',
-  'rearnote',
-  'note',
-  'toc',
-  'landmarks',
-  'page-list',
-])
+const NEVER_SPOKEN: readonly { readonly type: string; readonly role: string | null }[] = [
+  /* A PRINT page number, injected mid-sentence for citation. The voice says
+     "two hundred and forty-seven" between two clauses. */
+  { type: 'pagebreak', role: 'doc-pagebreak' },
+  /* The marker, not the note: a bare `3` in the middle of a sentence, which
+     tells a listener nothing and breaks the sentence in two. */
+  { type: 'noteref', role: 'doc-noteref' },
+  /* The note's BODY. Usually hidden and already dropped; a print-style note
+     block at the foot of a section is not, and arrives as a run of citations
+     mid-chapter with nothing to say it has happened. */
+  { type: 'footnote', role: 'doc-footnote' },
+  { type: 'endnote', role: 'doc-endnote' },
+  { type: 'rearnote', role: null },
+  { type: 'note', role: null },
+  /* The book's own navigation. A table of contents read aloud is a list of
+     every chapter title in the book. */
+  { type: 'toc', role: 'doc-toc' },
+  { type: 'landmarks', role: null },
+  { type: 'page-list', role: 'doc-pagelist' },
+]
 
-/** The DPUB-ARIA roles for the same structures — see `epubSemantics`. */
-const NEVER_SPOKEN_ROLES = new Set([
-  'doc-pagebreak',
-  'doc-noteref',
-  'doc-footnote',
-  'doc-endnote',
-  'doc-toc',
-])
+/**
+ * ⚠️ **ONE TABLE, BECAUSE TWO LISTS HAD ALREADY DRIFTED.** `page-list` was
+ * suppressed and its DPUB-ARIA equivalent `doc-pagelist` was not, so two books
+ * marking up the same structure the two permitted ways behaved differently — and
+ * nothing could notice, because each list looked complete on its own. The sets
+ * are derived from the pairs now, so an entry cannot exist in one spelling only.
+ *
+ * `role: null` is a deliberate value rather than an omission: `rearnote`,
+ * `note` and `landmarks` have no DPUB-ARIA role at all, and writing that down is
+ * what stops the next reader "fixing" the asymmetry by inventing one.
+ */
+const NEVER_SPOKEN_TYPES: ReadonlySet<string> = new Set(NEVER_SPOKEN.map((one) => one.type))
+const NEVER_SPOKEN_ROLES: ReadonlySet<string> = new Set(
+  NEVER_SPOKEN.flatMap((one) => (one.role === null ? [] : [one.role])),
+)
+
+/**
+ * The role that actually applies, out of a token list.
+ *
+ * ⚠️ **ARIA TAKES THE FIRST ROLE, NOT ANY OF THEM**, and this used to test every
+ * token — so `role="button doc-noteref"` was suppressed although the element is a
+ * BUTTON whose fallback happens to be a note reference. Fallback roles exist so
+ * an author can name a specific role and a generic one behind it; reading the
+ * list as a set inverts that.
+ *
+ * The first token is taken as effective. That is an approximation of the spec's
+ * "first RECOGNISED non-abstract role" — this module has no list of every ARIA
+ * role to recognise against — and it errs toward READING: an unrecognised first
+ * token means nothing here matches, so the text is spoken. Failing toward
+ * speaking content is the safe direction; failing toward silence loses a book's
+ * words with no way for a listener to know.
+ */
+function effectiveRole(el: Element): string | null {
+  for (const role of ariaRoles(el)) return role
+  return null
+}
 
 /**
  * Whether text inside `el` is spoken, and what it leaves behind if not.
@@ -129,9 +166,8 @@ export function speechSkip(el: Element | null): SpeechSkip {
     for (const type of epubTypes(node)) {
       if (NEVER_SPOKEN_TYPES.has(type)) return 'gap'
     }
-    for (const role of ariaRoles(node)) {
-      if (NEVER_SPOKEN_ROLES.has(role)) return 'gap'
-    }
+    const role = effectiveRole(node)
+    if (role !== null && NEVER_SPOKEN_ROLES.has(role)) return 'gap'
   }
   return 'read'
 }

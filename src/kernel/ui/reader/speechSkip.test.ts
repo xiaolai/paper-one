@@ -83,6 +83,57 @@ describe('what is never spoken', () => {
   })
 })
 
+describe('the two spellings of one policy', () => {
+  /**
+   * ⚠️ **`page-list` WAS SUPPRESSED AND `doc-pagelist` WAS NOT.** Two lists
+   * encoding one policy had drifted, and neither looked wrong on its own — so two
+   * books marking up the same structure the two permitted ways behaved
+   * differently. Both sets come from one table now.
+   */
+  it('suppresses a page list by its DPUB-ARIA role as well as its epub:type', () => {
+    expect(speechSkip(at(markup('<nav id="a" epub:type="page-list"><ol></ol></nav>'), 'a'))).toBe('gap')
+    expect(speechSkip(at(markup('<nav id="a" role="doc-pagelist"><ol></ol></nav>'), 'a'))).toBe('gap')
+  })
+
+  it('has a role for every type that has one, and says so where there is none', () => {
+    /* The table's `role: null` entries are a claim: DPUB-ARIA genuinely has no
+       equivalent. If one is ever added, this is where the omission shows. */
+    for (const [type, role] of [
+      ['pagebreak', 'doc-pagebreak'],
+      ['noteref', 'doc-noteref'],
+      ['footnote', 'doc-footnote'],
+      ['endnote', 'doc-endnote'],
+      ['toc', 'doc-toc'],
+      ['page-list', 'doc-pagelist'],
+    ] as const) {
+      expect(speechSkip(at(markup(`<p id="a" epub:type="${type}">x</p>`), 'a'))).toBe('gap')
+      expect(speechSkip(at(markup(`<p id="a" role="${role}">x</p>`), 'a'))).toBe('gap')
+    }
+  })
+})
+
+describe('a role list is not a set', () => {
+  /**
+   * ⚠️ **ARIA TAKES THE FIRST ROLE AND THIS TESTED EVERY TOKEN.** Fallback roles
+   * exist so an author can name a specific role with a generic one behind it;
+   * reading the list as a set inverts that and suppressed a BUTTON because its
+   * fallback happened to be a note reference.
+   */
+  it('reads an element whose first role is something else', () => {
+    expect(speechSkip(at(markup('<a id="a" role="button doc-noteref">3</a>'), 'a'))).toBe('read')
+  })
+
+  it('still suppresses it when the note reference is the first role', () => {
+    expect(speechSkip(at(markup('<a id="a" role="doc-noteref button">3</a>'), 'a'))).toBe('gap')
+  })
+
+  it('errs toward speaking when the first role is one it does not know', () => {
+    /* Failing toward speaking loses nothing; failing toward silence loses a
+       book's words with no way for a listener to notice. */
+    expect(speechSkip(at(markup('<a id="a" role="made-up doc-noteref">3</a>'), 'a'))).toBe('read')
+  })
+})
+
 describe('what is deliberately still spoken', () => {
   /**
    * ⚠️ **EPUB CALLS THESE SKIPPABLE AND THEY ARE NOT SKIPPED HERE.** Media
@@ -143,6 +194,26 @@ describe('what collectText does with them', () => {
     const text = spoken('<p>He left. <a epub:type="noteref" href="#n">1</a> Then she stayed.</p>')
     expect(text).toMatch(/^He left\.\s+Then she stayed\.$/u)
     expect(text).not.toContain('1')
+  })
+
+  it('leaves no separator for whitespace-only ruby, which would split the word', () => {
+    /* ⚠️ **THE WHITESPACE BRANCH RAN BEFORE THE SKIP CHECK**, so a space inside a
+       ruby annotation became a separator in the middle of the word it annotates —
+       `漢 字` — which is the one thing `silent` exists to prevent. */
+    expect(spoken('<p><ruby>漢<rt> </rt>字<rt> </rt></ruby></p>')).toBe('漢字')
+  })
+
+  it('KEEPS the separator for a whitespace-only element that wanted a gap', () => {
+    /* ⚠️ **AND THE FIRST FIX BROKE THIS.** Suppressing the separator for every
+       skipped element fused the words either side of a whitespace-only page
+       break: `a<span epub:type="pagebreak"> </span>b` became `ab`. Only `silent`
+       suppresses; `gap` still separates, in both branches. */
+    expect(spoken('<p>one<span epub:type="pagebreak"> </span>two</p>')).toBe('one two')
+  })
+
+  it('leaves no separator for whitespace inside a hidden element', () => {
+    const text = spoken('<p>Before</p><aside hidden>  <p>A note.</p>  </aside><p>After</p>')
+    expect(text).toBe('Before After')
   })
 
   it('drops a page number from the middle of a sentence', () => {

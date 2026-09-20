@@ -26,22 +26,58 @@ export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
 
   return (
     <div className={styles.tocList}>
-      {entries.map((entry, index) => (
-        <button
-          key={`${entry.href ?? 'heading'}-${index}`}
-          type="button"
-          className={styles.tocRow}
-          data-depth={entry.depth}
-          /* A heading with no href is not current and not clickable. It is a
-             label over the rows beneath it — "Part One" — and offering it as a
-             destination gives the reader a row that does nothing. */
-          data-current={entry.href !== null && entry.href === currentHref}
-          disabled={entry.href === null || !onGoTo}
-          onClick={() => entry.href && onGoTo?.(entry.href)}
-        >
-          <span className={styles.tocLabel}>{entry.label}</span>
-        </button>
-      ))}
+      {entries.map((entry, index) => {
+        /**
+         * ⚠️ **THE ENABLED TEST AND THE CLICK TEST DISAGREED ABOUT ONE VALUE.**
+         * `disabled={entry.href === null}` left a row with `href=""` ENABLED,
+         * while `entry.href && …` is falsy for the empty string — so that row
+         * looked like a destination, took a click, and did nothing. `string |
+         * null` does not exclude `''`, which is why the two spellings could
+         * drift. One predicate now, asked once.
+         */
+        const goesTo = entry.href !== null && entry.href !== '' ? entry.href : null
+        const isCurrent = goesTo !== null && goesTo === currentHref
+
+        /**
+         * ⚠️ **A HEADING IS NOT A DISABLED CONTROL, AND IT WAS RENDERED AS ONE.**
+         * `PART ONE` with no destination is a LABEL over the rows beneath it. A
+         * `<button disabled>` announces itself to a screen reader as a control
+         * that cannot be used right now — which is a different and false claim,
+         * and it also put every row in the tab order when `onGoTo` was absent.
+         */
+        if (goesTo === null) {
+          return (
+            <div
+              key={`heading-${index}`}
+              className={styles.tocRow}
+              data-depth={entry.depth}
+              data-heading
+            >
+              <span className={styles.tocLabel}>{entry.label}</span>
+            </div>
+          )
+        }
+
+        return (
+          <button
+            key={`${goesTo}-${index}`}
+            type="button"
+            className={styles.tocRow}
+            data-depth={entry.depth}
+            data-current={isCurrent}
+            /* ⚠️ **AND `aria-current` IS THE SEMANTIC HALF OF `data-current`.**
+               The attribute above is for the stylesheet; nothing carried the
+               same fact to a screen reader, so the row a listener is IN was
+               indistinguishable from every other row. `location` is the value
+               for "the current place in a set of pages". */
+            aria-current={isCurrent ? 'location' : undefined}
+            disabled={!onGoTo}
+            onClick={() => onGoTo?.(goesTo)}
+          >
+            <span className={styles.tocLabel}>{entry.label}</span>
+          </button>
+        )
+      })}
     </div>
   )
 }

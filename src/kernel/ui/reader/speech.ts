@@ -104,16 +104,6 @@ export function collectText(doc: Document): SpokenText {
       if (tag === 'script' || tag === 'style') {
         return NodeFilter.FILTER_REJECT
       }
-      /* WHITESPACE-ONLY NODES ARE ACCEPTED, and the loop below turns them into
-       * a separator rather than a segment. They used to be rejected here, and
-       * the words on either side fused: `<span>Hello</span> <span>world</span>`
-       * is three text nodes in ONE block, so the block separator below never
-       * fired and the voice said "Helloworld" — with every boundary offset
-       * after it off by the missing space (audit round 1, #500). Accepted
-       * before the style checks, because a separator needs no visibility
-       * answer and the style walk is the expensive half of this filter. */
-      if (!node.textContent?.trim()) return NodeFilter.FILTER_ACCEPT
-
       /* Actually hidden, not just hidden-looking by tag name.
        *
        * An EPUB's endnotes are routinely present in the spine item and hidden
@@ -122,8 +112,34 @@ export function collectText(doc: Document): SpokenText {
        * middle of a sentence, and there is no way for the listener to tell it
        * happened. `aria-hidden` is honoured for the same reason a screen
        * reader honours it: the author has said this text is not part of the
-       * reading. */
+       * reading.
+       *
+       * ⚠️ **AND IT STAYS AFTER THE WHITESPACE SHORTCUT, THOUGH AN AUDIT ASKED
+       * FOR THE OPPOSITE.** Moving it earlier so that a hidden element's
+       * whitespace is dropped too sounds right and is wrong for half the
+       * selector: `hidden` removes an element from the page, but
+       * `aria-hidden="true"` does NOT — it hides from assistive technology while
+       * the element still renders. Its whitespace is therefore a space the reader
+       * can SEE, and rejecting it fuses the words either side, turning
+       * `Hello World` into `HelloWorld`.
+       *
+       * The reorder was made and then reverted: no test could tell it apart
+       * (the `!text.endsWith(' ')` guard collapses the duplicate space in every
+       * case that could be constructed), and a change nothing can observe, made
+       * against an explicit performance rationale, is not a fix. What the audit
+       * was really pointing at is the RUBY case, which the loop handles. */
+
       if (parent.closest('[hidden], [aria-hidden="true"]')) return NodeFilter.FILTER_REJECT
+
+      /* WHITESPACE-ONLY NODES ARE ACCEPTED, and the loop below turns them into
+       * a separator rather than a segment. They used to be rejected here, and
+       * the words on either side fused: `<span>Hello</span> <span>world</span>`
+       * is three text nodes in ONE block, so the block separator below never
+       * fired and the voice said "Helloworld" — with every boundary offset
+       * after it off by the missing space (audit round 1, #500). Accepted
+       * before the STYLE checks, because a separator needs no visibility answer
+       * and the style walk is the expensive half of this filter. */
+      if (!node.textContent?.trim()) return NodeFilter.FILTER_ACCEPT
 
       /* The two properties need different treatment, and treating them alike is
        * wrong in both directions.
@@ -174,7 +190,21 @@ export function collectText(doc: Document): SpokenText {
      * a pretty-printed chapter must not become runs of pauses. It does not
      * move `previousBlock`, because it separates nothing by itself. */
     if (!value.trim()) {
-      if (text.length > 0 && !text.endsWith(' ')) text += ' '
+      /* ⚠️ **AND THE SKIP RULES ARE ASKED OF WHITESPACE TOO.** This branch used
+       * to `continue` before `speechSkip` ran, so the space inside a ruby
+       * annotation became a separator in the middle of the word it annotates —
+       * `漢 字` — which is the one thing `silent` exists to prevent.
+       *
+       * ⚠️ **ONLY `silent` SUPPRESSES IT, AND THE FIRST VERSION OF THIS LINE
+       * TESTED FOR `read`.** That fused the words either side of a whitespace-only
+       * SKIPPED element: `a<span epub:type="pagebreak"> </span>b` became `ab`,
+       * because the element left no gap of its own here and its own `gap` answer
+       * is decided on the path below, which a whitespace node never reaches. The
+       * three answers mean the same thing in both branches or they mean nothing.
+       * Found because a mutation of the first version failed no test. */
+      if (speechSkip(node.parentElement) !== 'silent' && text.length > 0 && !text.endsWith(' ')) {
+        text += ' '
+      }
       node = walker.nextNode()
       continue
     }

@@ -52,8 +52,22 @@ export function stepChapter(
   currentHref: string,
   by: -1 | 1,
 ): string | null {
-  const places = flattenToc(toc).filter((entry) => entry.href !== null)
-  const at = places.findIndex((entry) => entry.href === currentHref)
+  /**
+   * ⚠️ **DUPLICATE DESTINATIONS WERE COUNTED AS SEPARATE CHAPTERS.** A part
+   * divider and its first chapter may legally target the same href — so with
+   * `findIndex` taking the first occurrence, "next" from the parent returned the
+   * CURRENT href and did nothing, and "previous" from the child skipped a
+   * chapter. Deduplicated by destination first, because that is what a step
+   * actually moves between: two rows that go to the same place are one place.
+   */
+  const seen = new Set<string>()
+  const places: string[] = []
+  for (const entry of flattenToc(toc)) {
+    if (entry.href === null || seen.has(entry.href)) continue
+    seen.add(entry.href)
+    places.push(entry.href)
+  }
+  const at = places.indexOf(currentHref)
   if (at === -1) return null
-  return places[at + by]?.href ?? null
+  return places[at + by] ?? null
 }

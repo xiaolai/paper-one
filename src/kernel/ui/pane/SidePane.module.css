@@ -217,11 +217,28 @@
 
 /* A grouping heading — a nav entry with no destination. Not §07's disabled
  * treatment: it is not a control that has been switched off, it is a label,
- * and dimming it to 45% would hide the structure it exists to show. */
-.tocRow:disabled {
+ * and dimming it to 45% would hide the structure it exists to show.
+ *
+ * ⚠️ **THIS SELECTOR WAS `.tocRow:disabled`, AND THE COMMENT ABOVE IS WHY THAT
+ * WAS WRONG.** It said plainly that a heading is a label, while the markup
+ * rendered one as `<button disabled>` — which announces itself to a screen
+ * reader as a control that cannot be used right now, a different and false
+ * claim. A heading is a `div` now, and this styles it. */
+.tocRow[data-heading] {
   cursor: default;
   font-weight: var(--weight-semibold);
   color: var(--muted);
+}
+
+.tocRow[data-heading]:hover {
+  background: transparent;
+}
+
+/* A row that genuinely IS a switched-off control: the pane was given no way to
+ * navigate. §07's treatment applies here, because that is what it describes. */
+.tocRow:disabled {
+  cursor: default;
+  opacity: var(--opacity-disabled);
 }
 
 .tocRow:disabled:hover {
