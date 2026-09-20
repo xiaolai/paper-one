@@ -98,6 +98,24 @@ export interface VoiceFacts {
    * product decision and not this module's to make.
    */
   readonly localService?: boolean | undefined
+  /**
+   * Whether the engine calls this its own default for the app's language.
+   *
+   * ⚠️ **THIS IS THE ONLY QUALITY SIGNAL THAT EXISTS OFF APPLE'S PLATFORMS, AND
+   * THE FIRST VERSION OF THIS MODULE THREW IT AWAY.** `tierOf` answers `unknown`
+   * for every voice on Windows, Linux, Android and a browser on any of them —
+   * so every same-language voice there scores IDENTICALLY, and the tie went to
+   * whichever the engine happened to list first. That is not a choice, it is an
+   * array index; and before this module existed the platform's own default was
+   * what a reader got. Ranking by array order can therefore be WORSE than doing
+   * nothing, on exactly the platforms where the ranking knows least.
+   *
+   * It is a TIEBREAK and never a score, because the two signals answer
+   * different questions: the tier says how good a voice is, and this says which
+   * one the vendor points at. Where the tier is legible it should win — a
+   * downloaded premium voice beats the compact one macOS still calls default.
+   */
+  readonly default?: boolean | undefined
 }
 
 /**
@@ -290,24 +308,21 @@ function scoreOf(voice: VoiceFacts, lang: string): number {
  * is a book whose reader's own default voice is the best guess there is, and
  * choosing one on its behalf would be picking a language for it.
  *
- * Ties break toward the FIRST voice the engine listed, because only a strictly
- * better score replaces the incumbent. The engine's order is stable within a
- * session, so the same book gets the same voice twice — which matters more than
- * which of two equals wins.
+ * ⚠️ **IT IS `voiceOptions`' FIRST ROW NOW, NOT A SECOND SEARCH THAT AGREES WITH
+ * IT.** `scoreOf`'s comment warns that written out twice the picker's order and
+ * the automatic choice drift apart — and they were written out twice, so the
+ * drift arrived with the very first change to either: a tiebreak that reached
+ * one of them and not the other. One being the other's first element is the
+ * only arrangement in which they cannot disagree.
+ *
+ * Ties the tiebreak does not settle still go to the FIRST voice the engine
+ * listed, because `sort` is stable. The engine's order holds within a session,
+ * so the same book gets the same voice twice, which matters more than which of
+ * two equals wins.
  */
 export function bestVoice<T extends VoiceFacts>(voices: readonly T[], lang: string | null): T | null {
   if (lang === null || lang.trim() === '') return null
-
-  let best: T | null = null
-  let bestScore = 0
-  for (const voice of voices) {
-    const score = scoreOf(voice, lang)
-    if (score > bestScore) {
-      bestScore = score
-      best = voice
-    }
-  }
-  return best
+  return voiceOptions(voices, lang)[0] ?? null
 }
 
 /**
@@ -402,8 +417,22 @@ export function voiceOptions<T extends VoiceFacts>(voices: readonly T[], lang: s
   return voices
     .map((voice) => ({ voice, score: scoreOf(voice, language) }))
     .filter((row) => row.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => b.score - a.score || defaultRank(b.voice) - defaultRank(a.voice))
     .map((row) => row.voice)
+}
+
+/**
+ * The engine's own default, as a tiebreak between voices that scored equally.
+ *
+ * ⚠️ **IT DECIDES ALMOST NOTHING ON macOS AND ALMOST EVERYTHING OFF IT.** Where
+ * `voiceURI` names a tier, two voices rarely tie; where it does not — Windows,
+ * Linux, Android, any browser — EVERY same-language voice is `unknown`, so the
+ * tie is the normal case and this is the whole of the decision. Picking the one
+ * the vendor points at is strictly more information than picking index 0, which
+ * is what the first version of this module did.
+ */
+function defaultRank(voice: VoiceFacts): number {
+  return voice.default === true ? 1 : 0
 }
 
 /**

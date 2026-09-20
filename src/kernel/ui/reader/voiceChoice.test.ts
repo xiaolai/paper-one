@@ -360,6 +360,64 @@ describe('the picker cannot disagree with the choice', () => {
   })
 })
 
+/**
+ * ⚠️ **EVERY VOICE OFF APPLE'S PLATFORMS SCORES THE SAME, SO THE TIEBREAK IS
+ * THE WHOLE DECISION THERE.** `tierOf` answers `unknown` for a `voiceURI` it
+ * cannot parse, and only Apple spells them the way it parses — so on Windows,
+ * on Linux, on Android and in a browser on any of them, every same-language
+ * voice ties. The first version of this module gave that tie to whichever the
+ * engine listed first, which is an array index rather than a judgement, and
+ * before the module existed a reader got the platform's own default. Ranking by
+ * array order can therefore be WORSE than not ranking at all, on exactly the
+ * platforms the ranking understands least.
+ */
+describe('a platform whose voiceURIs say nothing about quality', () => {
+  const zira: VoiceFacts = { name: 'Microsoft Zira', lang: 'en-US', voiceURI: 'Microsoft Zira Desktop' }
+  const david: VoiceFacts = {
+    name: 'Microsoft David',
+    lang: 'en-US',
+    voiceURI: 'Microsoft David Desktop',
+    default: true,
+  }
+
+  it('reads them all as one tier, which is what makes the tie the normal case', () => {
+    expect(tierOf(zira.voiceURI)).toBe('unknown')
+    expect(tierOf(david.voiceURI)).toBe('unknown')
+  })
+
+  it('takes the engine own default over the one that merely came first', () => {
+    expect(bestVoice([zira, david], 'en-US')).toBe(david)
+  })
+
+  it('offers it first in the picker too, so the two still cannot disagree', () => {
+    const installed = [zira, david]
+    expect(voiceOptions(installed, 'en-US')[0]).toBe(bestVoice(installed, 'en-US'))
+  })
+
+  it('falls back to the engine order when nothing claims to be the default', () => {
+    /* STABILITY IS THE POINT: the same book must get the same voice twice, and
+       with no signal to prefer one, the engine's own order is that guarantee. */
+    expect(bestVoice([zira, { ...david, default: false }], 'en-US')).toBe(zira)
+  })
+
+  it('never lets the default outrank a legible tier', () => {
+    /* A downloaded Premium voice beats the compact one macOS still calls its
+       default. The tiebreak answers "which does the vendor point at", which is
+       a different question from "which is better" and loses to it. */
+    const defaultCompact = { ...SAMANTHA_COMPACT, default: true }
+    expect(bestVoice([defaultCompact, AVA_PREMIUM], 'en-US')).toBe(AVA_PREMIUM)
+  })
+
+  it('never lets the default outrank the language', () => {
+    const defaultEnglish = { ...SAMANTHA_COMPACT, default: true }
+    expect(bestVoice([defaultEnglish, TINGTING_COMPACT], 'zh-CN')).toBe(TINGTING_COMPACT)
+  })
+
+  it('still refuses a sound effect that the engine calls its default', () => {
+    expect(bestVoice([{ ...ZARVOX, default: true }], 'en-US')).toBeNull()
+  })
+})
+
 describe('a book that declares no language', () => {
   const installed = [SAMANTHA_SUPER, ZARVOX, SAMANTHA_COMPACT, TINGTING_COMPACT, REMOTE, ALEX]
 
