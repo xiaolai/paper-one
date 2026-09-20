@@ -25,6 +25,7 @@
  * the user agent would be wrong on the engines that do support it.
  */
 
+import { speechSkip } from './speechSkip'
 import {
   blockAncestor,
   frameBoxInHost,
@@ -153,6 +154,23 @@ export function collectText(doc: Document): SpokenText {
      * move `previousBlock`, because it separates nothing by itself. */
     if (!value.trim()) {
       if (text.length > 0 && !text.endsWith(' ')) text += ' '
+      node = walker.nextNode()
+      continue
+    }
+
+    /* ⚠️ **HERE AND NOT IN THE FILTER, BECAUSE A FILTER CANNOT SAY WHAT IT LEFT
+     * BEHIND.** `speechSkip` answers with three values, and the difference
+     * between two of them is audible: a note reference removed with no gap
+     * closes `He left.` up against `Then she stayed.`, and a ruby annotation
+     * removed WITH a gap splits `漢字` into two words. A `NodeFilter` can only
+     * reject, so the node has to reach this loop to be told apart.
+     *
+     * The separator is the whitespace branch's, character for character, so a
+     * skipped marker and a space between blocks leave exactly the same trace and
+     * no offset arithmetic changes. */
+    const skip = speechSkip(node.parentElement)
+    if (skip !== 'read') {
+      if (skip === 'gap' && text.length > 0 && !text.endsWith(' ')) text += ' '
       node = walker.nextNode()
       continue
     }
