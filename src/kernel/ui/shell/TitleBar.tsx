@@ -316,7 +316,6 @@ export function TitleBar({
                 }
                 aria-label="Read aloud"
                 aria-pressed={false}
-                data-on={false}
                 disabled={!speech.available || !hasBook}
                 data-disabled={!speech.available || !hasBook}
                 onClick={() => speech.start()}

@@ -7,16 +7,37 @@
  * ⚠️ **THIS SAID "NO NETWORK" AND THAT WAS NOT TRUE OF THE API.** It is true of
  * every voice macOS installs, and the specification allows a voice — INCLUDING
  * THE DEFAULT — to be synthesised on a server; Chrome's default voices are.
- * Paper reads whole sections aloud, so on such an engine that is a book's text
- * leaving the machine. `voiceChoice.ts` never CHOOSES a voice that reports
- * `localService: false`, which is as far as this layer can go: leaving
+ * Paper reads a book aloud section after section, so on such an engine that is a
+ * book's text leaving the machine. `voiceChoice.ts` never CHOOSES a voice that
+ * reports `localService: false`, which is as far as this layer can go: leaving
  * `utterance.voice` unset uses the platform's default, and on a machine whose
  * only voices are remote that default is remote. Refusing to read aloud at all
- * there is a product decision and is recorded as one, not taken quietly here. The work that is not free is
- * getting back from the utterance to the words on screen — `onboundary` reports
- * a character offset into the string that was spoken, and the highlight needs a
- * Range in the document. So the text is collected with an index that maps any
- * offset back to the text node it came from.
+ * there is a product decision and is recorded as one, not taken quietly here.
+ *
+ * ## One utterance is one SENTENCE, not one section
+ *
+ * ⚠️ **THIS FILE SAID "WHOLE SECTIONS" AND HAD SINCE `115575b`.** `useSpeech`
+ * queues a sentence at a time, because Web Speech can neither seek inside an
+ * utterance nor change its rate once it has started — so pause, speed, and the
+ * sentence and paragraph steps are all impossible while a section is one
+ * utterance. Two consequences belong here rather than in the hook:
+ *
+ * - `onboundary` reports a character offset into THE STRING THAT WAS SPOKEN,
+ *   which is now one sentence. The caller rebases it; see `cursorRef`.
+ * - `BOUNDARY_GRACE_MS` measures one utterance's speech, and a sentence can end
+ *   before 2.5 s of it. So on an engine that reports no boundaries at all, a
+ *   book of short sentences never reaches `onNoBoundaries`. That is deliberately
+ *   left alone: the callback's only effect is to stop drawing the band and
+ *   remove it, and an engine that reports nothing never drew one — so there is
+ *   nothing to stop and nothing to remove. Carrying the timer across utterances
+ *   would mean dropping its generation guard, which exists to stop a stale timer
+ *   blaming a reading that is no longer the same one.
+ * - What DOES cross utterances is the band itself, and that was a real defect:
+ *   see `speakSentence` in `useSpeech.ts`, which clears it before each sentence.
+ *
+ * The work that is not free is getting back from the utterance to the words on
+ * screen: the highlight needs a Range in the document, so the text is collected
+ * with an index that maps any offset back to the text node it came from.
  *
  * The handoff warns that boundary events are unreliable on WebKitGTK, which is
  * Linux. That is handled by feature detection rather than by a platform check

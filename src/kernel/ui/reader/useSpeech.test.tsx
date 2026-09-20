@@ -501,6 +501,43 @@ describe('the follow-along highlight across sentences', () => {
   })
 })
 
+describe('the band does not outlive its sentence', () => {
+  /**
+   * ⚠️ **A SENTENCE THAT REPORTS NO BOUNDARY USED TO INHERIT THE LAST ONE'S
+   * HIGHLIGHT.** The band only moves on a boundary event, and `BOUNDARY_GRACE_MS`
+   * measures 2.5 s of speech — most sentences are shorter, so nothing concludes
+   * the engine is silent and nothing clears it. The reader then sees the band
+   * sitting on the previous sentence's last word while a different sentence is
+   * read aloud: a highlight pointing confidently at the wrong place.
+   */
+  const bandIn = (doc: Document) => doc.getElementById('paper-spoken-word')
+
+  it('clears the previous sentence band when the next one begins', () => {
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    boundary(0, 3)
+    expect(bandIn(a.doc), 'a boundary should have drawn a band').not.toBeNull()
+
+    /* The next sentence reports NO boundary — the ordinary case for a short one. */
+    ends()
+    expect(spoken()).toEqual(['One here.', 'Two there.'])
+    expect(bandIn(a.doc)).toBeNull()
+    a.remove()
+  })
+
+  it('still draws one for the new sentence when a boundary does arrive', () => {
+    /* So the clear cannot pass by simply never drawing again. */
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    boundary(0, 3)
+    expect(bandIn(a.doc)).not.toBeNull()
+    a.remove()
+  })
+})
+
 describe('pause and resume', () => {
   it('holds the engine and reports it, then lets go', () => {
     const a = section('One here. Two there.')

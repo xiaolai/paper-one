@@ -369,15 +369,6 @@ export function useSpeech(
   }, [available, clearGap, clearContinuation])
 
   /**
-   * Speak one document, and say whether anything was queued.
-   *
-   * A section with no readable text — a plate, a full-page image — reports
-   * `onDone('empty')` SYNCHRONOUSLY from inside `speak`, before this returns.
-   * Mid-reading that is the continuation walking on past it, which is right;
-   * on the reader's own Listen it is the reading never having begun, which is
-   * why `start` marks the reading as under way only once this has answered.
-   */
-  /**
    * Speak one sentence of the plan, and say whether there was one.
    *
    * FALSE IS A REAL ANSWER AND NOT A FAILURE: it means the cursor has run off
@@ -401,6 +392,16 @@ export function useSpeech(
       cursorRef.current = at
       turnedAt.current = null
       setPaused(false)
+      /* ⚠️ **THE PREVIOUS SENTENCE'S BAND GOES BEFORE THIS ONE SPEAKS, AND IT USED
+       * TO STAY.** The follow-along is only moved by a boundary event, and an
+       * utterance can end without reporting one — `BOUNDARY_GRACE_MS` measures
+       * 2.5 s of speech and a sentence is often shorter, so nothing concludes the
+       * engine is silent and nothing clears the highlight. The band then sat on
+       * the last word of the sentence BEFORE while a different one was read: a
+       * highlight pointing confidently at the wrong place, which is worse than
+       * none. Removed here rather than in the boundary handler, because the case
+       * is a sentence that produces no boundary at all. */
+      removeSpokenWord(current.doc)
       return speaker.speak(
         current.spoken.text.slice(sentence.start, sentence.end),
         current.lang,
@@ -453,6 +454,15 @@ export function useSpeech(
     [speakSentence],
   )
 
+  /**
+   * Speak one document, and say whether anything was queued.
+   *
+   * A section with no readable text — a plate, a full-page image — reports
+   * `onDone('empty')` SYNCHRONOUSLY from inside `speak`, before this returns.
+   * Mid-reading that is the continuation walking on past it, which is right;
+   * on the reader's own Listen it is the reading never having begun, which is
+   * why `start` marks the reading as under way only once this has answered.
+   */
   const speakDocument = useCallback(
     (target: Document, from = 0): boolean => {
       if (!speaker) return false

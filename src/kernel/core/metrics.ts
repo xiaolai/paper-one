@@ -343,6 +343,13 @@ export const BRIGHTNESS: SpacingScale = {
  * clamp it validates against from the two ends, so the range a reader can
  * store and the range this offers cannot disagree.
  */
+
+export const READING_RATE: SpacingScale = {
+  steps: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5],
+  def: 2,
+  unit: 'x',
+}
+
 /**
  * The silence read aloud leaves at a sentence end and at a paragraph end.
  *
@@ -381,12 +388,6 @@ export const PARAGRAPH_GAP: SpacingScale = {
   steps: [0, 300, 600, 900, 1400, 2000],
   def: 2,
   unit: 'ms',
-}
-
-export const READING_RATE: SpacingScale = {
-  steps: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5],
-  def: 2,
-  unit: 'x',
 }
 
 /**
