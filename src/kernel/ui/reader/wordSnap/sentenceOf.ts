@@ -104,6 +104,15 @@ const SOFT_HYPHEN = '­'
  * sentence there, which is what the reader sees. `trim` takes them off the
  * chosen sentence's edges afterwards.
  */
+/**
+ * Every soft hyphen, for judging whether a range holds anything to say.
+ *
+ * `trim()` removes U+2028 and U+2029 — they are `\s` to JavaScript — but a soft
+ * hyphen is neither whitespace nor content: invisible, and a range holding only
+ * one has nothing for a voice to pronounce.
+ */
+const SOFT_HYPHEN_ALL = /\u00ad/gu
+
 const COLLAPSIBLE = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/
 
 /** U+2028 and U+2029 — see `COLLAPSIBLE`. */
@@ -540,13 +549,37 @@ export function sentenceSpansOf(raw: string, locale: string | undefined): readon
    * which is the coverage hole this function promises not to have. */
   starts[0] = 0
 
+  /**
+   * ⚠️ **A RANGE HOLDING ONLY A SEPARATOR WAS A SENTENCE, AND IT IS AN UTTERANCE OF
+   * NOTHING.** `end > start` drops only a range of ZERO length, and U+2028 is one
+   * character — so `\u2028Hello.` produced a first "sentence" containing just the
+   * separator. The reading hands that to the engine, and an utterance that ends
+   * immediately reads as a fault rather than a pause; a run of separators produced
+   * one each.
+   *
+   * MERGED INTO A NEIGHBOUR RATHER THAN DROPPED, because dropping opens exactly the
+   * coverage hole this function promises not to have. The ranges are defined by
+   * their starts alone, so removing a start IS the merge: the range before it
+   * extends to where the next one begins.
+   */
+  const silent = (start: number, end: number) =>
+    raw.slice(start, end).replace(SOFT_HYPHEN_ALL, '').trim() === ''
+
+  const kept = starts.filter((start, at) =>
+    at === 0 ? true : !silent(start, starts[at + 1] ?? raw.length),
+  )
+
+  /* ⚠️ **THE FIRST RANGE CANNOT MERGE BACKWARD, SO IT MERGES FORWARD.** `starts[0]`
+     is pinned at 0 to keep the tiling total, so a LEADING separator survived the
+     pass above — which is the very case this exists for. Dropping the start after
+     it extends range 0 over both; a loop, because a run of them leaves several. */
+  while (kept.length > 1 && silent(kept[0] as number, kept[1] as number)) kept.splice(1, 1)
+
   const out: Span[] = []
-  for (const [at, start] of starts.entries()) {
-    const end = starts[at + 1] ?? raw.length
+  for (const [at, start] of kept.entries()) {
+    const end = kept[at + 1] ?? raw.length
     /* A range of nothing is dropped rather than spoken. Two `merged` spans can
-     * map to one raw offset when everything between them was collapsed — a run
-     * of separators standing alone is the case — and an empty utterance reads
-     * as an engine that refused. */
+     * map to one raw offset when everything between them was collapsed. */
     if (end > start) out.push({ start, end })
   }
   return out

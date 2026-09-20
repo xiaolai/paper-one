@@ -51,6 +51,92 @@ describe('sentenceSpansOf covers the text it is given', () => {
   })
 })
 
+describe('a range with nothing in it to say', () => {
+  /**
+   * ⚠️ **A SEPARATOR ALONE WAS A SENTENCE.** `end > start` drops only a ZERO-length
+   * range, and U+2028 is one character — so a text beginning with one produced a
+   * first "sentence" holding just the separator. The reading hands that to the
+   * engine, and an utterance that ends immediately reads as a fault rather than a
+   * pause.
+   *
+   * Merged into the previous range rather than dropped, because dropping opens the
+   * coverage hole `covers` exists to refuse.
+   */
+  const LS = String.fromCharCode(0x2028)
+  const PS = String.fromCharCode(0x2029)
+
+  it('does not make a sentence out of a leading separator', () => {
+    const raw = `${LS}Hello there.`
+    const spans = sentenceSpansOf(raw, 'en')
+    expect(spans).toHaveLength(1)
+    expect(covers(raw, spans)).toBe(true)
+  })
+
+  it('does not make one out of each of a run of separators', () => {
+    const raw = `One here.${LS}${PS}${LS}Two there.`
+    const spans = sentenceSpansOf(raw, 'en')
+    expect(spans).toHaveLength(2)
+    expect(covers(raw, spans)).toBe(true)
+    for (const span of spans) expect(raw.slice(span.start, span.end).trim()).not.toBe('')
+  })
+
+  it('leaves every range with something a voice can pronounce', () => {
+    /* Over the whole corpus, not a chosen string: no range may be blank once the
+       separators and the soft hyphens are taken out. */
+    for (const row of SENTENCE_CORPUS) {
+      for (const span of sentenceSpansOf(row.raw, row.locale)) {
+        const body = row.raw.slice(span.start, span.end).replace(/\u00ad/gu, '').trim()
+        expect(body, `${row.id} produced a range with nothing to say`).not.toBe('')
+      }
+    }
+  })
+})
+
+describe('a book that quotes another script', () => {
+  /**
+   * ⚠️ **THE DECLARED LANGUAGE DECIDES, WHATEVER THE TEXT — AND THAT IS A RECORDED
+   * DECISION, NOT AN OVERSIGHT.** `sentenceOf.guards.test.ts` states it in as many
+   * words: *"A DECLARED LANGUAGE KEEPS THE LANGUAGE'S RULE, whatever the text: `en`
+   * merges a Cyrillic initial, and a tag meaning 'not a language' merges nothing."*
+   *
+   * The cost is real and the corpus records it: `latin-abbreviation-in-han-under-zh`
+   * carries the hand-written correct answer `他说 Mr. Smith 来了。` beside the
+   * `Smith 来了。` the implementation returns, marked UNCOVERED, with the note that
+   * deciding per script RUN is "a second feature".
+   *
+   * ⚠️ **I IMPLEMENTED THAT AND TOOK IT BACK OUT.** Reading each segment's own tail
+   * covers the CJK case and breaks the other direction: under `en` a Cyrillic `А.`
+   * stops being merged, and under `ru`, `und`, `mul` and `zxx` English text starts
+   * being merged — three tests that state their intent. Every variant I could
+   * construct trades one documented behaviour for another, and which orthography
+   * governs a mixed-script book is a judgement about books rather than a defect
+   * with a right answer. It is the owner's call, and the corpus is already the
+   * honest record of it.
+   *
+   * What is pinned here is the behaviour that HOLDS, so the next reader meets it as
+   * a fact rather than rediscovering it as a surprise.
+   */
+  it('does not repair a Latin abbreviation inside a book declaring Chinese', () => {
+    const raw = '他说 Mr. Smith 来了。她走了。'
+    const spans = sentenceSpansOf(raw, 'zh')
+    /* THREE, not two: the split after `Mr. ` is the shortfall the corpus names. */
+    expect(spans).toHaveLength(3)
+    expect(raw.slice(spans[0]?.start, spans[0]?.end).trim()).toBe('他说 Mr.')
+  })
+
+  it('does repair it when the book declares a Latin language', () => {
+    /* The same text under `en`: one sentence, because the declaration governs. */
+    const raw = '他说 Mr. Smith 来了。她走了。'
+    const spans = sentenceSpansOf(raw, 'en')
+    expect(spans.length).toBeLessThan(3)
+  })
+
+  it('still splits the Chinese sentences, which the shortfall does not touch', () => {
+    const raw = '他说。然后走了。'
+    expect(sentenceSpansOf(raw, 'zh')).toHaveLength(2)
+  })
+})
+
 describe('the reading and the selection agree on where a sentence ends', () => {
   /**
    * For every corpus row whose sentence `sentenceOf` actually names, the reading
