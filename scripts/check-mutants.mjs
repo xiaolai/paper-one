@@ -3608,7 +3608,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
       const kept = here.filter((one) => !killed.has(JSON.stringify(one.identity)))
       return {
         evidence: { ...evidence, ...differenceAtBase(survivors, undecided, kept), ...repeatsJudged(hangs), widened: true },
-        paired: { at: subject, named, origin, here: kept, atBase: survivors, undecided },
+        paired: { at: subject, named, origin, here: kept, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats ?? [] },
       }
     }
   }
@@ -3617,7 +3617,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
     /* What the sweep's own pairing needs, and what no record carries: both sides'
        survivors and the mutants the merge base could not decide, derived. A result
        carries the evidence they were derived FROM. */
-    paired: { at: subject, named, origin, here, atBase: survivors, undecided },
+    paired: { at: subject, named, origin, here, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats ?? [] },
   }
 }
 
@@ -3652,7 +3652,12 @@ export function hangsUnanswered(verdict, evidence) {
  * pairing was derived from, and nothing downstream re-pairs on a name.
  */
 function repeatsJudged({ authorised, added }) {
-  return { hangsAuthorised: authorised.length, hangsAdded: added.map(({ at }) => at) }
+  /* ⚠️ **`added` HOLDS `{ here, why, class }`, NOT THE MUTANT ITSELF** — see
+     `matchedSurvivors`, whose every other reader unwraps it. Read as `{ at }`
+     this answered a list of `undefined`, so nothing was ever billed and a hang
+     the merge base had KILLED passed. Caught by driving a whole sweep rather
+     than the pairing alone, which had been green throughout. */
+  return { hangsAuthorised: authorised.length, hangsAdded: added.map(({ here }) => here.at) }
 }
 
 /**
@@ -4041,11 +4046,23 @@ export function matchedAcross(entries) {
     ...entries.flatMap(({ undecided }) => undecided),
     ...contested,
   ])
-  const byFile = new Map(entries.map(({ named }) => [named, { authorised: 0, added: [] }]))
+  const byFile = new Map(entries.map(({ named }) => [named, { authorised: 0, added: [], hangsAuthorised: 0, hangsAdded: [] }]))
   for (const { here } of authorised) byFile.get(here.file).authorised += 1
   for (const { here, why, class: how } of added) {
     byFile.get(here.file).added.push({ file: here.file, at: here.at, identity: here.identity, why, class: how })
   }
+  /* ⚠️ **AND THE HANGS OVER THE WHOLE SWEEP, ON THE SAME TERMS.** A repeated
+     wall-clock timeout is compared with the merge base since 2026-09-20, and the
+     aggregate derives every difference again rather than taking a shard's word
+     for "authorised" — so this pairing is re-run here exactly as the survivors'
+     is, one pool per base file. Its own pool: a base hang may answer for a hang
+     here and for nothing else. */
+  const hung = matchedSurvivors(
+    entries.flatMap(({ baseHangs = [] }) => baseHangs),
+    entries.flatMap(({ hereHangs = [] }) => hereHangs),
+  )
+  for (const { here } of hung.authorised) byFile.get(here.file).hangsAuthorised += 1
+  for (const { here } of hung.added) byFile.get(here.file).hangsAdded.push(here.at)
   /* ⚠️ **AND THE DISAGREEMENTS THEMSELVES ARE REPORTED, NOT ONLY ACTED ON** (a
      second opinion's fifth round, 2026-09-17). A contested identity changes what
      a run SAYS only when a survivor here consumes it; where none does, two
@@ -5654,8 +5671,6 @@ async function aggregateSweep({ manifest, results }, world) {
          agree with the outcome the result carries. */
       const verdict = settledVerdict(at, record, record.settle)
       stdout.write(sayTimeouts(at, verdict))
-      /* Named in both lists where it is both, exactly as a plain sweep names it. */
-      if (verdict.repeated.length > 0) outcomes.timedOut.push([at, verdict.repeated])
       /* Derived here too, and not read off the shard's word, for the reason the
          comment above gives — and on its own channel, which no authorisation
          reaches. See `unanswered`. */
@@ -5666,6 +5681,15 @@ async function aggregateSweep({ manifest, results }, world) {
          the sweep's own pairing, so the shard's own word for "authorised" is
          nowhere in this. */
       const evidence = record.base === null ? null : { ...record.base, ...(byFile.get(subject.path) ?? {}) }
+      /* ⚠️ **AND A HANG THE MERGE BASE HUNG ON TOO STOPS BEING ONE, HERE AS
+         WELL.** This billed every repeat whatever the base said, so the one
+         channel the comparison did not reach stayed unreached in the mode that
+         decides a sharded sweep. It reads the pairing `matchedAcross` has just
+         re-derived — never the shard's own word — and a base that could not be
+         measured authorises nothing, exactly as it authorises no survivor.
+         Named in both lists where it is both, as a plain sweep names it. */
+      const hangs = hangsUnanswered(verdict, evidence)
+      if (hangs.length > 0) outcomes.timedOut.push([at, hangs])
       if (verdict.outcome !== 'timed-out' && (evidence === null || survivorsStand(evidence))) {
         outcomes[SWEPT_AS[verdict.outcome]].push(at)
       }

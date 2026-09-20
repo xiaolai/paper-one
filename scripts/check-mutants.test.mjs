@@ -4605,6 +4605,84 @@ describe('a survivor measured against the merge base', () => {
       return { ...result, subject: mutatedFile, root }
     })
 
+  /**
+   * ⚠️ **AND THE SAME FOR A HANG, WHICH NEVER REACHED THE MERGE BASE AT ALL
+   * UNTIL 2026-09-20.** A wall-clock timeout that repeats is not a survivor — it
+   * is *whether a test kills it is unknown* — so it failed outright and nothing
+   * asked whether the base hung on it too. Driven through a whole sweep rather
+   * than against the pairing alone: the pairing had cases from the day it was
+   * written, and the WIRING that reaches it is what was missing.
+   */
+  describe('a hang the merge base hung on too', () => {
+    /** A run that meets a wall-clock timeout, and a settle run that meets it again. */
+    const hanging = async (planted) => ({
+      report: await plantedReport(planted, { status: 'Timeout' }),
+      settled: await plantedReport(planted, { status: 'Timeout' }),
+    })
+
+    const sweepingAHang = (measure) =>
+      inScratch('mutants-hang-', async (root) => {
+        const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+        const planted = at['src/a.ts']
+        const { report, settled } = await hanging(planted)
+        const { stryker } = strykerStandIn(root, {
+          reports: { [planted]: report },
+          settled: { [planted]: settled },
+          exits: { [planted]: true },
+          settleExits: { [planted]: true },
+        })
+        const result = await sweep(root, {
+          subjects: ['src/a.ts'],
+          tree: ['src/a.ts', 'src/a.test.mjs'],
+          stryker,
+          mergeBase: () => BASE,
+          origins: itsOwn,
+          measure: (named, _commit, asked) => measure(asked.root, named),
+        })
+        return { ...result, subject: planted, root }
+      })
+
+    it('passes, where the base met the same wall-clock timeout twice', async () => {
+      const result = await sweepingAHang(async (root, named) => {
+        const { report, settled } = await hanging(path.join(root, named))
+        return measuredAt(root, named, {
+          outcome: 'killed',
+          first: { exitedCleanly: true, durationMs: 900, report },
+          settle: { exitedCleanly: true, durationMs: 400, report: settled },
+        })
+      })
+      expect(result.stderr).toBe('')
+      expect(result.code).toBe(0)
+      expect(result.stdout).not.toContain('came back a wall-clock timeout')
+    })
+
+    it('fails, where the base settled the same mutant to a kill', async () => {
+      const result = await sweepingAHang(killedAt)
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('came back a wall-clock timeout in 1 file(s)')
+    })
+
+    it('fails, where the merge base could not be measured at all', async () => {
+      /* "Could not run" is never "it already hung", exactly as it is never "it
+         already survived". */
+      const result = await sweepingAHang(async (root, named) => {
+        const { report, settled } = await hanging(path.join(root, named))
+        /* A measurement of content the merge base does not hold there, which is
+           refused for `content` — a real refusal through a real road, rather
+           than a thrown shape standing in for one. It hangs on the same mutant,
+           so anything that read past the refusal would authorise it. */
+        return measuredAt(root, named, {
+          outcome: 'killed',
+          sha256: 'a'.repeat(64),
+          first: { exitedCleanly: true, durationMs: 900, report },
+          settle: { exitedCleanly: true, durationMs: 400, report: settled },
+        })
+      })
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('came back a wall-clock timeout in 1 file(s)')
+    })
+  })
+
   it('passes a survivor the merge base owed too, and says how many, from where, and what measuring it cost', async () => {
     const result = await sweeping()
 
