@@ -67,8 +67,8 @@ export const LEGAL_TREE = {
   'src/kernel/testkit.ts': "export { fake } from './core/fake.testkit.ts'\n",
   'src/kernel/core/fake.testkit.ts': 'export const fake = () => null\n',
   'src/kernel/ui/index.ts': "export { App } from './App.ts'\n",
-  /* The BROWSER client's UI entry, beside the native one. Two doors, and the
-     rules below hold each root to its own — see `native-root-not-browser-ui-entry`. */
+  /* The BROWSER client's UI entry, beside the native one. Four doors now, and
+     the four `only-…-takes-…` rules below hold each root to its own. */
   'src/kernel/ui/browser.ts': "export { App } from './App.ts'\n",
   'src/kernel/ui/App.ts': "import { other } from '../core/other.ts'\nexport const App = () => other\n",
   'src/kernel/core/thing.ts': 'export const kernelThing = 1\nexport type KernelType = { n: number }\n',
@@ -141,8 +141,9 @@ export const LEGAL_TREE = {
    * the platform composition now, and it reaches the kernel through the public
    * entry and the NARROW boot door — never `ui/index.ts`, which names `App`
    * and would drag the desktop pane tree into a mobile bundle. Both edges are
-   * pinned here so that a `native-boot-not-desktop-ui-entry` which stops
-   * matching fails on the CLEAN tree rather than silently in the mobile build.
+   * pinned here so that an `only-a-desktop-root-takes-the-desktop-ui-entry`
+   * which stops matching fails on the CLEAN tree rather than silently in the
+   * mobile build.
    */
   'src/kernel/ui/boot.ts': 'export const loadShelf = () => []\n',
   'src/app/bootApp.ts':
@@ -334,11 +335,11 @@ export const CASES = [
     expect: ['no-direct-fs-plugin-outside-storage'],
   },
   {
-    name: '@tauri-apps/api imported by a capability file that is not the peer wire',
+    name: '@tauri-apps/api imported by a capability file that is not a plugin wire',
     files: { 'src/capabilities/alpha/lib/helper.ts': "import { invoke } from '@tauri-apps/api/core'\nexport const helper = invoke\n" },
     from: 'src/capabilities/alpha/lib/helper.ts',
     to: /(^|\/)@tauri-apps\/api(\/|$)/,
-    expect: ['no-tauri-api-outside-peer-wire'],
+    expect: ['no-tauri-api-outside-plugin-wires'],
   },
   {
     name: 'the peer wire imports an @tauri-apps package that is not the api',
@@ -348,13 +349,13 @@ export const CASES = [
     },
     from: 'src/capabilities/peer/lib/wire.ts',
     to: /(^|\/)@tauri-apps\/plugin-dialog(\/|$)/,
-    expect: ['peer-wire-tauri-api-only'],
+    expect: ['plugin-wires-tauri-api-only'],
   },
   /**
    * THE BROWSER CLIENT'S TWO RULES, neither of which had a case here.
    *
    * `no-tauri-in-the-web-client` did not exist at all until it was tested by
-   * hand: `no-tauri-api-outside-peer-wire` is scoped to `src/capabilities/`,
+   * hand: `no-tauri-api-outside-plugin-wires` is scoped to `src/capabilities/`,
    * so `src/app/web/` could import `@tauri-apps/api/core` and `pnpm
    * boundaries` reported 0 violations. There is no Tauri in a browser — the
    * import resolves at build time, ships, and fails on the reader's phone as
@@ -371,6 +372,37 @@ export const CASES = [
     name: '@tauri-apps imported by the browser composition root',
     files: { 'src/main.web.tsx': "import { invoke } from '@tauri-apps/api/core'\nvoid invoke\n" },
     from: 'src/main.web.tsx',
+    to: /(^|\/)@tauri-apps\/api(\/|$)/,
+    expect: ['no-tauri-in-the-web-client'],
+  },
+  /**
+   * ⚠️ **AND IT NAMED TWO OF THE FOUR PLACES IT CLAIMED.** The rule's comment
+   * said "the browser client and its composition root", and its `from` held
+   * `src/app/web/` and `src/main.web.tsx` — so `src/app/composition.web.ts`,
+   * the OTHER web root, and `src/app/shell/`, which the browser bundle
+   * includes, could each import `@tauri-apps/api/core` with `pnpm boundaries`
+   * reporting 0 violations. The shell is the worse of the two: one directory
+   * mounted by both clients, so a Tauri import there ships to a browser while
+   * working perfectly on the phone that was tested.
+   */
+  {
+    name: '@tauri-apps imported by the OTHER browser composition root',
+    files: {
+      'src/app/composition.web.ts':
+        "import { kernelThing } from '../kernel/index.ts'\n" +
+        "import { invoke } from '@tauri-apps/api/core'\n" +
+        'export const composition = { kernelThing, invoke }\n',
+    },
+    from: 'src/app/composition.web.ts',
+    to: /(^|\/)@tauri-apps\/api(\/|$)/,
+    expect: ['no-tauri-in-the-web-client'],
+  },
+  {
+    name: '@tauri-apps imported by the shared shell, which the browser bundle includes',
+    files: {
+      'src/app/shell/TabBar.ts': LEGAL_TREE['src/app/shell/TabBar.ts'] + "import { invoke } from '@tauri-apps/api/core'\nvoid invoke\n",
+    },
+    from: 'src/app/shell/TabBar.ts',
     to: /(^|\/)@tauri-apps\/api(\/|$)/,
     expect: ['no-tauri-in-the-web-client'],
   },
@@ -491,7 +523,7 @@ export const CASES = [
     },
     from: 'src/main.tsx',
     to: 'src/kernel/ui/browser.ts',
-    expect: ['native-root-not-browser-ui-entry'],
+    expect: ['only-a-web-root-takes-the-browser-ui-entry'],
   },
   /* THE MOBILE CLIENT TAKES ITS OWN DOOR AND NO OTHER. Three shells, three
      doors: `ui/index.ts` names `App` and the desktop pane tree, `ui/browser.ts`
@@ -581,7 +613,7 @@ export const CASES = [
     },
     from: 'src/app/bootApp.ts',
     to: 'src/kernel/ui/index.ts',
-    expect: ['native-boot-not-desktop-ui-entry'],
+    expect: ['only-a-desktop-root-takes-the-desktop-ui-entry'],
   },
   {
     name: 'the MOBILE composition root -> the DESKTOP ui entry',
@@ -591,7 +623,7 @@ export const CASES = [
     },
     from: 'src/main.mobile.tsx',
     to: 'src/kernel/ui/index.ts',
-    expect: ['native-boot-not-desktop-ui-entry'],
+    expect: ['only-a-desktop-root-takes-the-desktop-ui-entry'],
   },
   /* AND THE DESKTOP ROOT KEEPS IT, so the rule above is about which door a
      caller takes rather than about the door being shut. */
@@ -609,7 +641,7 @@ export const CASES = [
     },
     from: 'src/main.web.tsx',
     to: 'src/kernel/ui/index.ts',
-    expect: ['web-root-not-native-ui-entry'],
+    expect: ['only-a-desktop-root-takes-the-desktop-ui-entry'],
   },
   /* AND EACH ROOT KEEPS ITS OWN, so the two rules above are about crossing
      over rather than about the entries being unreachable. */
@@ -621,6 +653,121 @@ export const CASES = [
     from: 'src/main.web.tsx',
     to: 'src/kernel/ui/browser.ts',
     expect: [],
+  },
+  /**
+   * ⚠️ **THE PAIRS NOBODY HAD DECIDED.** Four UI entries against four root
+   * groups is sixteen pairs, and the three subtractive rules these replaced
+   * named five of them. The cases below are the gaps that left — every one a
+   * real edge the cruiser reported clean, and every one a bundle carrying a
+   * shell that platform never renders.
+   *
+   * They are cased rather than trusted to the rules' shape, because "the grid
+   * is closed now" is exactly the claim a selftest exists to check: a rule
+   * whose `pathNot` is wrong is still a rule that fires for somebody, and the
+   * clean tree would not notice.
+   */
+  {
+    name: 'a MOBILE composition file -> the DESKTOP ui entry',
+    files: {
+      'src/app/composition.ios.ts':
+        LEGAL_TREE['src/app/composition.desktop.ts'] + "import { App } from '../kernel/ui/index.ts'\nvoid App\n",
+    },
+    from: 'src/app/composition.ios.ts',
+    to: 'src/kernel/ui/index.ts',
+    expect: ['only-a-desktop-root-takes-the-desktop-ui-entry'],
+  },
+  {
+    name: 'the DESKTOP root -> the MOBILE ui entry',
+    files: {
+      'src/main.tsx': LEGAL_TREE['src/main.tsx'] + "import { Shelf } from './kernel/ui/mobile.ts'\nvoid Shelf\n",
+    },
+    from: 'src/main.tsx',
+    to: 'src/kernel/ui/mobile.ts',
+    expect: ['only-a-mobile-root-takes-the-mobile-ui-entry'],
+  },
+  {
+    name: 'the BROWSER root -> the MOBILE ui entry',
+    files: {
+      'src/main.web.tsx': LEGAL_TREE['src/main.web.tsx'] + "import { Shelf } from './kernel/ui/mobile.ts'\nvoid Shelf\n",
+    },
+    from: 'src/main.web.tsx',
+    to: 'src/kernel/ui/mobile.ts',
+    expect: ['only-a-mobile-root-takes-the-mobile-ui-entry'],
+  },
+  {
+    /* The browser has no native launch sequence to run, so the shelf loader
+       and the library migration behind this door are dead weight it cannot
+       even perform. */
+    name: 'the BROWSER root -> the NATIVE boot entry',
+    files: {
+      'src/main.web.tsx': LEGAL_TREE['src/main.web.tsx'] + "import { loadShelf } from './kernel/ui/boot.ts'\nvoid loadShelf\n",
+    },
+    from: 'src/main.web.tsx',
+    to: 'src/kernel/ui/boot.ts',
+    expect: ['only-the-launch-sequence-and-the-mobile-root-take-the-boot-entry'],
+  },
+  {
+    name: 'the DESKTOP root -> the NATIVE boot entry (it takes it through ui/index.ts instead)',
+    files: {
+      'src/main.tsx': LEGAL_TREE['src/main.tsx'] + "import { loadShelf } from './kernel/ui/boot.ts'\nvoid loadShelf\n",
+    },
+    from: 'src/main.tsx',
+    to: 'src/kernel/ui/boot.ts',
+    expect: ['only-the-launch-sequence-and-the-mobile-root-take-the-boot-entry'],
+  },
+  {
+    name: 'the shared launch sequence -> the BROWSER ui entry',
+    files: {
+      'src/app/bootApp.ts':
+        LEGAL_TREE['src/app/bootApp.ts'] + "import { App as B } from '../kernel/ui/browser.ts'\nvoid B\n",
+    },
+    from: 'src/app/bootApp.ts',
+    to: 'src/kernel/ui/browser.ts',
+    expect: ['only-a-web-root-takes-the-browser-ui-entry'],
+  },
+  {
+    name: 'the shared launch sequence -> the MOBILE ui entry',
+    files: {
+      'src/app/bootApp.ts':
+        LEGAL_TREE['src/app/bootApp.ts'] + "import { Shelf } from '../kernel/ui/mobile.ts'\nvoid Shelf\n",
+    },
+    from: 'src/app/bootApp.ts',
+    to: 'src/kernel/ui/mobile.ts',
+    expect: ['only-a-mobile-root-takes-the-mobile-ui-entry'],
+  },
+  /* AND THE MOBILE ROOT KEEPS ITS OWN TWO, so the four rules above are about
+     crossing over rather than about the doors being shut. */
+  {
+    name: 'the MOBILE root -> the MOBILE ui entry and the boot entry (allowed)',
+    files: {
+      'src/main.mobile.tsx':
+        LEGAL_TREE['src/main.mobile.tsx'] +
+        "import { Shelf } from './kernel/ui/mobile.ts'\n" +
+        "import { loadShelf } from './kernel/ui/boot.ts'\n" +
+        'void Shelf\nvoid loadShelf\n',
+    },
+    from: 'src/main.mobile.tsx',
+    to: 'src/kernel/ui/mobile.ts',
+    expect: [],
+  },
+  /**
+   * ⚠️ **AND THE TEST-ONLY ENTRY WAS REACHABLE THROUGH AN INTERMEDIARY.**
+   * `kernel-testkit-in-tests-only` reads DIRECT imports and exempts every
+   * `*.testkit.ts` importer, so this chain passed both halves of it: the
+   * production file does not name the entry, and the file that does is exempt.
+   * `fakeFs` would then be in a shipped bundle, deciding that a name containing
+   * a dot is a directory and that `exists` is a prefix match.
+   */
+  {
+    name: 'production code -> a helper testkit -> the kernel testkit entry',
+    files: {
+      'src/cli/helper.testkit.ts': "export { fake } from '../kernel/testkit.ts'\n",
+      'src/cli/paper.ts':
+        LEGAL_TREE['src/cli/paper.ts'] + "import { fake } from './helper.testkit.ts'\nvoid fake\n",
+    },
+    from: 'src/cli/paper.ts',
+    to: 'src/kernel/testkit.ts',
+    expect: ['kernel-testkit-not-reached-through-a-testkit'],
   },
   /**
    * A capability reaching an ENTRY is the same back door as one reaching a

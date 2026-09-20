@@ -30,7 +30,8 @@ import './kernel/ui/styles/capability.css'
  * `installFatalHandlers` comes through `ui/boot.ts` rather than `ui/index.ts`:
  * this root may not name the desktop barrel, which would bring the whole pane
  * tree, titlebar and palette into a bundle that draws none of them.
- * `.dependency-cruiser.cjs` refuses it (`native-boot-not-desktop-ui-entry`). */
+ * `.dependency-cruiser.cjs` refuses it
+ * (`only-a-desktop-root-takes-the-desktop-ui-entry`). */
 import { installFatalHandlers } from './kernel/ui/boot'
 import { applyMetrics } from './kernel/core/metrics'
 import { resolvePlatform } from './kernel/ui/mobile'

@@ -13,7 +13,7 @@ import { listen } from '@tauri-apps/api/event'
  * no plugin and no network.
  *
  * THIS FILE IS THE ONLY CAPABILITY MODULE ALLOWED TO IMPORT @tauri-apps/api
- * (`.dependency-cruiser.cjs`, `no-tauri-api-outside-peer-wire`; the selftest
+ * (`.dependency-cruiser.cjs`, `no-tauri-api-outside-plugin-wires`; the selftest
  * pins both directions). Everything the plugin cannot answer — books,
  * journals, merges — is somebody else's, reached through the kernel.
  */
@@ -251,7 +251,7 @@ export interface PeerWire {
   /* ── the person identity and the circle roster (WI-22.B1/B3) ──────────
    *
    * ⚠️ **HERE RATHER THAN IN A WIRE OF `circle`'S OWN, because these are the
-   * PEER plugin's commands.** `no-tauri-api-outside-peer-wire` says why in as
+   * PEER plugin's commands.** `no-tauri-api-outside-plugin-wires` says why in as
    * many words — *"One file per plugin, so the set of command names is
    * auditable in one place"* — and a second file invoking `plugin:peer|…`
    * would make that sentence false while the rule still passed on a

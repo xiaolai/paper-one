@@ -12,7 +12,7 @@
  * no component in it at all.
  *
  * The mobile shell needs the middle of those: React surfaces and the platform,
- * without the desktop chrome it does not draw. `native-root-not-browser-ui-entry`
+ * without the desktop chrome it does not draw. `only-a-web-root-takes-the-browser-ui-entry`
  * already refuses it the browser's door, and correctly — that entry lists what
  * a BROWSER mounts, and the two shells do not mount the same set.
  *
