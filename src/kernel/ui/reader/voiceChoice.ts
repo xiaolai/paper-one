@@ -134,6 +134,21 @@ const TIER_RANK: Record<Exclude<VoiceTier, 'novelty'>, number> = {
   'super-compact': 0,
 }
 
+/**
+ * How much one step of language match is worth, in tier ranks.
+ *
+ * ⚠️ **IT WAS A LITERAL `10`, WHICH ENCODED THE POLICY WITHOUT STATING IT.** The
+ * invariant is that LANGUAGE OUTRANKS TIER — a premium voice for the wrong script
+ * must never beat a compact one that can read the characters — and a literal
+ * leaves that true only while nobody adds a tier. Add a rank of 10 and the policy
+ * silently inverts, with no type error and no failing test until somebody notices
+ * a book being read in the wrong language.
+ *
+ * Derived from the table it has to exceed, so the invariant holds by construction
+ * rather than by the number happening to be big enough.
+ */
+const LANGUAGE_WEIGHT = Math.max(...Object.values(TIER_RANK)) + 1
+
 /** `TIER_RANK` for any tier, with the one that is never ranked answering lowest. */
 function rankOf(tier: VoiceTier): number {
   return tier === 'novelty' ? -1 : TIER_RANK[tier]
@@ -227,6 +242,32 @@ function normalize(lang: string): string {
 }
 
 /**
+ * The script a tag is written in — `Hans` for `zh-CN`, `Hant` for `zh-TW`.
+ *
+ * ⚠️ **SCRIPT IS WHAT DECIDES WHETHER A VOICE CAN READ THE TEXT AT ALL, AND
+ * `languageScore` WAS BLIND TO IT.** Every tag sharing a primary subtag scored
+ * the same, so a Traditional-Chinese voice was as good an answer as a Simplified
+ * one for a Simplified book — which this module's own header calls out as the
+ * wrong answer in as many words: *"a Traditional-Chinese voice reading a
+ * Simplified book is a worse answer than a smaller voice reading it correctly."*
+ * The intent was written down and the code did not implement it. The same
+ * blindness pairs `sr-Latn` with `sr-Cyrl`.
+ *
+ * `maximize()` is what supplies a script nobody wrote down: `zh-CN` carries no
+ * script subtag and means Hans. It THROWS on a tag it cannot parse, and a book's
+ * `dc:language` is whatever its author typed — so a malformed tag answers null
+ * and the caller falls back to comparing primary subtags, which is what this
+ * module did for every tag before.
+ */
+function scriptOf(lang: string): string | null {
+  try {
+    return new Intl.Locale(normalize(lang)).maximize().script ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
  * How well a voice's language answers the document's: 2 exact, 1 same
  * language, 0 no.
  *
@@ -237,9 +278,32 @@ function normalize(lang: string): string {
  * the two weights are for.
  */
 function languageScore(voice: string, wanted: string): number {
-  if (normalize(voice) === normalize(wanted)) return 2
+  if (normalize(voice) === normalize(wanted)) return 3
   const primary = primaryOf(wanted)
-  return primary !== '' && primaryOf(voice) === primary ? 1 : 0
+  if (primary === '' || primaryOf(voice) !== primary) return 0
+
+  /**
+   * ⚠️ **THE SCRIPT IS A MIDDLE RANK, NOT A GATE — AND MAKING IT A GATE WAS A
+   * REGRESSION I ALMOST SHIPPED.** Scoring a wrong-script voice 0 made
+   * `bestVoice` answer null for a Simplified book on a machine whose only Chinese
+   * voice is Traditional — and null means the PLATFORM's default, which on an
+   * English system is an English voice reading Chinese characters. Two existing
+   * cases caught it.
+   *
+   * A `zh-TW` voice reading Simplified text is a wrong ACCENT, not an inability:
+   * it says the words. This module's header calls a Traditional voice for a
+   * Simplified book "a worse answer than a smaller voice reading it correctly" —
+   * worse than the right script, which is what this ranks. It does not say worse
+   * than no voice at all, and that is the distinction the first version lost.
+   *
+   * Unknown script on either side ranks with the wrong one rather than below it:
+   * a tag this runtime cannot parse should be no worse off than before the script
+   * was consulted at all.
+   */
+  const wantedScript = scriptOf(wanted)
+  const voiceScript = scriptOf(voice)
+  if (wantedScript === null || voiceScript === null) return 1
+  return wantedScript === voiceScript ? 2 : 1
 }
 
 /**
@@ -293,10 +357,8 @@ function scoreOf(voice: VoiceFacts, lang: string): number {
   if (language === 0) return 0
   /* ⚠️ **THERE WAS A `+ 1` HERE AND ITS REASON WAS FALSE.** It claimed to keep
    * the worst selectable combination above zero; the worst is already
-   * `1 * 10 + 0`, so it never did anything. What keeps the scale honest is that
-   * the language multiplier exceeds the tier range — which a test asserts
-   * directly rather than a constant implying it. */
-  return language * 10 + TIER_RANK[tier]
+   * `1 * LANGUAGE_WEIGHT + 0`, so it never did anything. */
+  return language * LANGUAGE_WEIGHT + TIER_RANK[tier]
 }
 
 /**

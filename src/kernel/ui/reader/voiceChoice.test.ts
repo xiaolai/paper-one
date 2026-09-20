@@ -154,6 +154,67 @@ describe('bestVoice', () => {
   })
 })
 
+describe('the script a book is written in', () => {
+  /**
+   * ⚠️ **THIS MODULE'S HEADER SAID SCRIPT DECIDES AND THE CODE WAS BLIND TO IT.**
+   * *"A Traditional-Chinese voice reading a Simplified book is a worse answer than
+   * a smaller voice reading it correctly."* — and every tag sharing a primary
+   * subtag scored identically, so `zh-CN` and `zh-TW` were interchangeable. The
+   * same blindness pairs `sr-Latn` with `sr-Cyrl`.
+   */
+  const TINGTING = voice('Tingting', 'zh-CN', 'com.apple.voice.compact.zh-CN.Tingting')
+  const MEIJIA_PREMIUM = voice('Meijia', 'zh-TW', 'com.apple.voice.premium.zh-TW.Meijia')
+
+  it('prefers the right script over a higher tier', () => {
+    /* A PREMIUM voice in the wrong script against a COMPACT one in the right
+       script: the compact one wins, which is the header's claim made true. */
+    expect(bestVoice([MEIJIA_PREMIUM, TINGTING], 'zh-CN')).toBe(TINGTING)
+    expect(bestVoice([TINGTING, MEIJIA_PREMIUM], 'zh-TW')).toBe(MEIJIA_PREMIUM)
+  })
+
+  it('reads a region tag as its script, which nobody wrote down', () => {
+    /* `zh-CN` carries no script subtag and means Hans; `maximize()` supplies it. */
+    expect(bestVoice([MEIJIA_PREMIUM, TINGTING], 'zh-Hans')).toBe(TINGTING)
+    expect(bestVoice([TINGTING, MEIJIA_PREMIUM], 'zh-Hant')).toBe(MEIJIA_PREMIUM)
+  })
+
+  it('separates two scripts of one language beyond Chinese', () => {
+    const latin = voice('Nikola', 'sr-Latn', 'com.apple.voice.compact.sr-Latn.Nikola')
+    const cyrillic = voice('Sofija', 'sr-Cyrl', 'com.apple.voice.compact.sr-Cyrl.Sofija')
+    expect(bestVoice([latin, cyrillic], 'sr-Cyrl')).toBe(cyrillic)
+    expect(bestVoice([cyrillic, latin], 'sr-Latn')).toBe(latin)
+  })
+
+  it('still picks a wrong-script voice when it is the only one', () => {
+    /* ⚠️ **AND THIS IS WHY SCRIPT IS A RANK AND NOT A GATE.** Refusing the wrong
+       script leaves `utterance.voice` unset, which is the PLATFORM's default — an
+       English voice reading Chinese characters. A wrong accent is not an
+       inability to say the words. */
+    expect(bestVoice([MEIJIA_PREMIUM], 'zh-CN')).toBe(MEIJIA_PREMIUM)
+    expect(bestVoice([TINGTING], 'zh-TW')).toBe(TINGTING)
+  })
+
+  it('is not thrown by a tag no runtime can parse', () => {
+    /* A book's `dc:language` is whatever its author typed, and `Intl.Locale`
+       answers a malformed tag with a RangeError. */
+    expect(() => bestVoice([TINGTING], 'not a tag!!')).not.toThrow()
+    /* A VALID primary subtag with a remainder `Intl.Locale` refuses. The script
+       is unknown, so the voice ranks with a wrong-script one rather than below
+       it — no worse off than before the script was consulted at all.
+       (`zh!!!` is a different case: `primaryOf` reads no `zh` out of it, so no
+       voice matches the language and null is the correct answer.) */
+    expect(bestVoice([TINGTING], 'zh-Hans-!!!')).toBe(TINGTING)
+    expect(bestVoice([TINGTING], 'zh!!!')).toBeNull()
+  })
+
+  it('keeps language above every tier, by construction', () => {
+    /* The weight is derived from the tier table rather than written as `10`, so
+       adding a tier cannot silently invert the policy. */
+    const wrongLanguagePremium = voice('Ava', 'en-US', 'com.apple.voice.premium.en-US.Ava')
+    expect(bestVoice([wrongLanguagePremium, TINGTING], 'zh-CN')).toBe(TINGTING)
+  })
+})
+
 describe('chosenVoice', () => {
   const installed = [SAMANTHA_COMPACT, AVA_PREMIUM, TINGTING_COMPACT, MEIJIA_SUPER]
 
