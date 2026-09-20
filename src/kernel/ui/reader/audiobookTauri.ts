@@ -48,12 +48,31 @@ export async function chooseAudiobookPath(bookTitle: string): Promise<string | n
  * A book's title, made into something a filesystem will take.
  *
  * The separators go because a title with one in it would name a directory that
- * does not exist; everything else stays, because a reader's book is called what
- * it is called and a Chinese title is a perfectly good file name.
+ * does not exist; ordinary characters stay, because a reader's book is called
+ * what it is called and a Chinese title is a perfectly good file name.
+ *
+ * ⚠️ **IT HANDLED POSIX ONLY, WHILE ITS COMMENT CLAIMED "ANY PLATFORM THIS SHIPS
+ * TO".** Measured by running it: `CON`, `NUL`, `Why?`, `a*b`, `a|b`, `a"b` and
+ * `a<b>` all came back unchanged, and every one of them is a name Windows
+ * refuses. So did a trailing dot, which Windows silently strips — turning
+ * `Vol. 2.` into a suggestion that is not what the reader was shown.
+ *
+ * ⚠️ **AND IT IS UNREACHABLE ON WINDOWS TODAY, WHICH IS WHY IT SURVIVED.** The
+ * export is gated on macOS in `App.tsx`, so nothing here has ever run against a
+ * Windows filesystem. A latent defect behind a platform gate is still a defect
+ * the day the gate moves, and this function exists to be the thing that does
+ * not need revisiting then.
+ *
+ * ⚠️ **THIS IS A SUGGESTION, NOT A SANITISER.** The value is the save dialog's
+ * default, which the reader may edit and the system may reject; it is not a path
+ * anything writes to unchecked. `chooseAudiobookPath` says where the authority
+ * actually lives.
  */
 export function safeFileName(title: string): string {
-  return title
-    .replace(/[/\\:]/gu, ' ')
+  const cleaned = title
+    /* `< > : " / \ | ? *` is the set Windows forbids, and it CONTAINS the POSIX
+       one — so a single rule serves both rather than two that can disagree. */
+    .replace(/[<>:"/\\|?*]/gu, ' ')
     /* Control characters cannot appear in a name on any platform this ships to,
        and a leading dot would hide the file. Written as an explicit range rather
        than with a suppression comment: this repository runs no linter, so a
@@ -63,7 +82,22 @@ export function safeFileName(title: string): string {
     .replace(/^\.+/u, '')
     .trim()
     .slice(0, 120)
+    /* TRAILING DOTS AND SPACES GO LAST, after the slice: truncating a title can
+       CREATE one, so a trim done earlier would not see it. Windows drops them
+       silently, which makes the file's real name differ from the one the reader
+       was shown in the dialog. */
+    .replace(/[\s.]+$/u, '')
+  return RESERVED_ON_WINDOWS.test(cleaned) ? `${cleaned} (book)` : cleaned
 }
+
+/**
+ * The MS-DOS device names, which Windows still refuses at any extension.
+ *
+ * A book called `Con` or `Aux` is not far-fetched, and the failure is opaque:
+ * the dialog rejects the name with nothing that explains why. Suffixed rather
+ * than replaced, so the reader still sees their own title.
+ */
+const RESERVED_ON_WINDOWS = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/iu
 
 /** The engine, as `exportAudiobook` needs it. */
 export async function tauriAudiobook(): Promise<AudiobookPlatform> {

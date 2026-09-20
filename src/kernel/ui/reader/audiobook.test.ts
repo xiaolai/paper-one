@@ -114,17 +114,47 @@ describe('exportAudiobook', () => {
     expect(discarded).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
   })
 
-  it('does not name a scratch file a failed render never wrote', async () => {
-    /* Recorded before the render resolved, a throw would leave a path in the
-       list that holds nothing — and packaging would then fail on a file it was
-       told to expect, blaming the wrong step. */
+  it('tries to remove the chapter whose render failed, not only the ones that worked', async () => {
+    /* ⚠️ **THIS ASSERTED THE OPPOSITE UNTIL A REFUTATION PASS RAN IT.** It read
+       `['/tmp/ch-0.wav']` and was called "does not name a scratch file a failed
+       render never wrote" — but a render that throws HAVING ALREADY WRITTEN
+       BYTES is the ordinary failure, and nobody out here can tell that case
+       from one that wrote nothing. Discarding a path that holds nothing costs a
+       caught rejection; not discarding one that holds half a chapter costs the
+       reader tens of megabytes they cannot find. */
     const { platform, discarded } = fake({
       render: vi.fn(async (job) => {
         if (job.path.endsWith('ch-1.wav')) throw new Error('the engine went quiet')
       }),
     })
     await expect(exportAudiobook(platform, request())).rejects.toThrow(/went quiet/u)
+    expect(discarded).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
+  })
+
+  it('removes the first chapter when it is the one that failed', async () => {
+    /* The case that found this: with one list serving both packaging and the
+       tidy-up, a book whose FIRST render died left its part-written file behind
+       and the export reported nothing to remove at all. */
+    const { platform, discarded } = fake({
+      render: vi.fn(async () => {
+        throw new Error('the engine went quiet')
+      }),
+    })
+    await expect(exportAudiobook(platform, request())).rejects.toThrow(/went quiet/u)
     expect(discarded).toEqual(['/tmp/ch-0.wav'])
+  })
+
+  it('still hands packaging only the chapters that finished', async () => {
+    /* The other half, and the reason the two lists cannot be merged back: a
+       file a failed render never completed must never reach `package`, which
+       would fail on a file it was told to expect and blame the wrong step. */
+    const { platform } = fake({
+      render: vi.fn(async (job) => {
+        if (job.path.endsWith('ch-1.wav')) throw new Error('the engine went quiet')
+      }),
+    })
+    await expect(exportAudiobook(platform, request())).rejects.toThrow(/went quiet/u)
+    expect(platform.package).not.toHaveBeenCalled()
   })
 
   it('stops between chapters when the reader asks', async () => {

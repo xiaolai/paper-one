@@ -131,12 +131,30 @@ export async function exportAudiobook(
     throw new Error('this book has no readable text to export')
   }
 
+  /**
+   * TWO LISTS, BECAUSE THEY ANSWER TWO QUESTIONS.
+   *
+   * ⚠️ **ONE LIST SERVED BOTH AND COULD NOT.** `written` was pushed to AFTER the
+   * render resolved — correctly, since packaging must never be handed a file a
+   * failed render never finished — and the tidy-up then iterated the same list,
+   * so a render that threw HAVING ALREADY WRITTEN BYTES left them behind with
+   * nothing recorded. The two memberships are genuinely different: packaging
+   * wants what succeeded, removal wants everything attempted.
+   *
+   * Nothing leaks from this today, because `apple.rs` writes beside and renames,
+   * so a failed render leaves no file at that path at all. That is the BACKEND's
+   * discipline and not this contract's, and the contract is the thing a second
+   * backend would be written against — which is exactly when it would start
+   * costing a reader a part-written chapter of a book.
+   */
   const written: { title: string; path: string }[] = []
+  const attempted: string[] = []
   try {
     for (const [at, chapter] of request.chapters.entries()) {
       if (request.cancelled()) throw new ExportCancelled()
       request.onProgress(at, request.chapters.length, chapter.title)
       const path = platform.scratchFor(chapter.index)
+      attempted.push(path)
       await platform.render({
         text: chapter.text,
         voice: request.voice,
@@ -163,10 +181,10 @@ export async function exportAudiobook(
       chapters: packaged.chapters,
     }
   } finally {
-    for (const chapter of written) {
+    for (const path of attempted) {
       /* One failure to tidy up must not hide the export's own outcome, nor stop
        * the other scratch files being removed. */
-      await platform.discard(chapter.path).catch(() => {})
+      await platform.discard(path).catch(() => {})
     }
   }
 }
