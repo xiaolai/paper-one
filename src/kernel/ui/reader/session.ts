@@ -759,7 +759,30 @@ export interface SessionNavigator {
    * walk: this parses every section AND collects its text, so a long book is
    * seconds of work. It yields between sections and stops when the book closes.
    */
-  sectionTexts: (toc?: readonly TocItem[]) => Promise<readonly SectionText[]>
+  sectionTexts: (
+    toc?: readonly TocItem[],
+    shouldStop?: () => boolean,
+  ) => Promise<SectionTextWalk>
+}
+
+/**
+ * What a walk of the spine's text produced, and whether it finished.
+ *
+ * ⚠️ **`complete` EXISTS BECAUSE A PARTIAL WALK USED TO BE INDISTINGUISHABLE FROM
+ * A WHOLE ONE.** `sectionTexts` stops when the book closes, is replaced, or the
+ * caller asks — and it returned a bare array either way, so the audiobook export
+ * shipped a truncated book as a finished one. That is the same failure
+ * `narrate_render` records for an empty buffer mid-stream: a complete-looking file
+ * with a fraction of the book in it, and no error anywhere.
+ *
+ * `reanchorUnplaced` in this same class already answers this way, and its comment
+ * gives the rule: *"Nothing was looked at, so nothing has been established."* A
+ * walk that did not finish has established nothing about the sections it never
+ * reached.
+ */
+export interface SectionTextWalk {
+  readonly sections: readonly SectionText[]
+  readonly complete: boolean
 }
 
 export interface SessionDeps {
@@ -2344,11 +2367,14 @@ export class ReaderSession {
    */
   async sectionTexts(
     toc: readonly TocItem[] = [],
-  ): Promise<readonly { index: number; title: string | null; text: string }[]> {
+    shouldStop: () => boolean = () => false,
+  ): Promise<SectionTextWalk> {
     const view = this.#view
     const book = view?.book
     const sections = book?.sections
-    if (this.#disposed || !Array.isArray(sections)) return []
+    /* NOT `complete: true` — `reanchorUnplaced`'s rule, below: a walk that never
+       started has established nothing about a book it never opened. */
+    if (this.#disposed || !Array.isArray(sections)) return { sections: [], complete: false }
 
     /* ⚠️ **THE TITLES COME FROM `resolveHref`, NOT FROM COUNTING.** Matching the
      * table of contents to the spine positionally looks right on a tidy book and
@@ -2391,14 +2417,19 @@ export class ReaderSession {
     for (let index = 0; index < sections.length; index++) {
       /* Liveness read at each step rather than captured — closing the book
        * mid-export must stop it, not finish against a dead view. */
-      if (this.#disposed || this.#view !== view) break
+      /* THE READER'S OWN STOP, asked at the same moment as liveness. A long
+         book is seconds of parsing per section, so a stop that is only noticed
+         after the walk is a stop the reader watched do nothing. */
+      if (this.#disposed || this.#view !== view || shouldStop()) {
+        return { sections: out, complete: false }
+      }
       const section = sections[index] as { createDocument?: () => Promise<Document> } | null
       if (!section || typeof section.createDocument !== 'function') continue
       const doc = await section.createDocument()
       out.push({ index, title: titles.get(index) ?? null, text: collectText(doc).text })
       await BREATHE()
     }
-    return out
+    return { sections: out, complete: true }
   }
 
   /**

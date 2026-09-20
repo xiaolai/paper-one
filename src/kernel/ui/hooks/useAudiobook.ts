@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
-import { ExportCancelled, exportAudiobook, planChapters, type SectionText } from '../reader/audiobook'
+import { ExportCancelled, exportAudiobook, planChapters } from '../reader/audiobook'
+import type { SectionTextWalk } from '../reader/session'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
 import { voiceFor, type VoiceFacts } from '../reader/voiceChoice'
 
@@ -27,7 +28,10 @@ export interface AudiobookSource {
   readonly author: string
   readonly lang: string | null
   readonly toc: readonly TocItem[]
-  readonly sectionTexts: (toc?: readonly TocItem[]) => Promise<readonly SectionText[]>
+  readonly sectionTexts: (
+    toc?: readonly TocItem[],
+    shouldStop?: () => boolean,
+  ) => Promise<SectionTextWalk>
 }
 
 export interface AudiobookControl {
@@ -77,9 +81,22 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
         }
 
         say('Reading the book…')
-        const sections = await source.sectionTexts(source.toc)
+        /* THE STOP GOES IN, rather than being checked only on the way out. A long
+           book is seconds of parsing per section, so "Stopping…" used to sit on
+           screen through hundreds of them. */
+        const walk = await source.sectionTexts(source.toc, () => stop.current)
         if (stop.current) throw new ExportCancelled()
-        const chapters = planChapters(sections)
+        /* ⚠️ **AN INCOMPLETE WALK IS REFUSED, NOT EXPORTED.** `sectionTexts` stops
+         * when the book closes or is replaced, and it used to return a bare array
+         * — so a book closed mid-read was written out as a FINISHED audiobook
+         * missing everything after the section it got to. A short file is
+         * indistinguishable from a short book, which is the trap `narrate`
+         * records for an empty buffer mid-stream. */
+        if (!walk.complete) {
+          say('The book stopped being readable part way through — nothing was exported.')
+          return
+        }
+        const chapters = planChapters(walk.sections)
         if (chapters.length === 0) {
           say('This book has no text to read aloud.')
           return

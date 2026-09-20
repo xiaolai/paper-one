@@ -44,10 +44,38 @@ describe('safeFileName', () => {
   })
 
   it('drops a trailing dot the truncation itself created', () => {
-    /* ⚠️ **THE ORDER IS LOAD-BEARING.** Cutting at 120 characters can CREATE a
-       trailing dot, so a trim done before the slice would not see it. */
-    const title = `${'a'.repeat(119)}.tail`
-    expect(safeFileName(title)).toBe('a'.repeat(119))
+    /* ⚠️ **THE ORDER IS LOAD-BEARING.** Cutting to the byte budget can CREATE a
+       trailing dot, so a trim done before it would not see one. */
+    const budget = 255 - '.m4b'.length - ' (book)'.length
+    const title = `${'a'.repeat(budget - 1)}.tail`
+    expect(safeFileName(title)).toBe('a'.repeat(budget - 1))
+  })
+
+  it('strips a leading dot that leading whitespace was hiding', () => {
+    /* ⚠️ **THE DOTS USED TO GO FIRST**, so the space hid them from the dot rule
+       and the later trim exposed `.hidden` — a hidden file, which is the one thing
+       that rule exists to prevent. */
+    expect(safeFileName(' .hidden')).toBe('hidden')
+    expect(safeFileName('\t\n ..Vol 2')).toBe('Vol 2')
+  })
+
+  it('budgets in BYTES, not UTF-16 code units', () => {
+    /* ⚠️ **120 CJK CHARACTERS ARE 360 UTF-8 BYTES** — past what a path component
+       may hold, and most of the books this reader is for. The old `slice(0, 120)`
+       measured neither the filesystem's unit nor the reader's. */
+    const budget = 255 - '.m4b'.length - ' (book)'.length
+    const name = safeFileName('第'.repeat(200))
+    expect(new TextEncoder().encode(name).length).toBeLessThanOrEqual(budget)
+    expect(name.length).toBeGreaterThan(20)
+  })
+
+  it('never cuts a character in half', () => {
+    /* A lone surrogate is an invalid name and an unreadable one. Cut by grapheme,
+       so a family emoji and a combining accent survive whole too. */
+    const name = safeFileName('👨‍👩‍👧‍👦'.repeat(60))
+    expect(name).not.toMatch(/[\uD800-\uDFFF]/u)
+    for (const ch of name) expect(ch.codePointAt(0)).toBeDefined()
+    expect(new TextEncoder().encode(name).length).toBeLessThanOrEqual(244)
   })
 
   it('keeps a non-Latin title exactly as it is', () => {

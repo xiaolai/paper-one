@@ -79,15 +79,57 @@ export function safeFileName(title: string): string {
        disable line here would be a waiver for a rule nobody checks —
        `directives:check` refuses exactly that, and it is right to. */
     .replace(/[\u0000-\u001f]/gu, '')
-    .replace(/^\.+/u, '')
-    .trim()
-    .slice(0, 120)
-    /* TRAILING DOTS AND SPACES GO LAST, after the slice: truncating a title can
+    /* ⚠️ **LEADING WHITESPACE AND DOTS GO TOGETHER, AND THE DOTS USED TO GO
+       FIRST.** `" .hidden"` had its dot stripped while the space still hid it, so
+       the trim then exposed `.hidden` — a hidden file, which is exactly what the
+       dot rule exists to prevent. One class, one pass, so neither can re-create
+       what the other removed. */
+    .replace(/^[\s.]+/u, '')
+    .trimEnd()
+  const budgeted = withinBytes(cleaned)
+    /* TRAILING DOTS AND SPACES GO LAST, after the truncation: cutting a title can
        CREATE one, so a trim done earlier would not see it. Windows drops them
        silently, which makes the file's real name differ from the one the reader
        was shown in the dialog. */
     .replace(/[\s.]+$/u, '')
-  return RESERVED_ON_WINDOWS.test(cleaned) ? `${cleaned} (book)` : cleaned
+  return RESERVED_ON_WINDOWS.test(budgeted) ? `${budgeted} (book)` : budgeted
+}
+
+/**
+ * What a filesystem will hold, derived from the limit rather than guessed at.
+ *
+ * A path COMPONENT is capped at 255 bytes on APFS, ext4 and NTFS alike, and this
+ * value has to leave room for everything appended after it.
+ */
+const MAX_COMPONENT_BYTES = 255 - '.m4b'.length - ' (book)'.length
+
+/**
+ * `text`, cut to fit `MAX_COMPONENT_BYTES` without splitting a character.
+ *
+ * ⚠️ **`slice(0, 120)` WAS WRONG IN BOTH UNITS.** It counts UTF-16 code units, so
+ * it can cut an emoji in half and leave an unpaired surrogate; and 120 is not the
+ * filesystem's limit — 120 CJK characters are 360 UTF-8 bytes, well past what a
+ * component may hold, which is most of the books this reader is for. A budget
+ * measured in code units is neither the filesystem's unit nor the reader's.
+ *
+ * Cut by GRAPHEME rather than code point, so a flag, a family emoji or a
+ * combining accent is not split either — `Intl.Segmenter` is the same tool the
+ * reader's own sentence walk uses.
+ */
+function withinBytes(text: string): string {
+  const encoder = new TextEncoder()
+  if (encoder.encode(text).length <= MAX_COMPONENT_BYTES) return text
+
+  const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)
+  let out = ''
+  let used = 0
+  for (const { segment } of graphemes) {
+    const size = encoder.encode(segment).length
+    if (used + size > MAX_COMPONENT_BYTES) break
+    out += segment
+    used += size
+  }
+  return out
 }
 
 /**

@@ -659,29 +659,47 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       return { ...state, readingVoice: { ...rest, [action.lang]: action.voice } }
     }
 
-    case 'setReadingRate':
+    case 'setReadingRate': {
       /* CLAMPED HERE TOO, not only in the settings validator. The validator
          guards what arrives from disk; this guards what arrives from a control,
          and the two are different doors into the same value. */
-      return {
-        ...state,
-        readingRate: Math.max(READING_RATE_MIN, Math.min(READING_RATE_MAX, action.rate)),
-      }
+      const rate = bounded(action.rate, READING_RATE_MIN, READING_RATE_MAX)
+      return rate === null ? state : { ...state, readingRate: rate }
+    }
 
-    case 'setSentenceGap':
-      /* Clamped for `setReadingRate`'s reason — two doors, one value. */
-      return {
-        ...state,
-        sentenceGapMs: Math.max(SENTENCE_GAP_MIN, Math.min(SENTENCE_GAP_MAX, action.ms)),
-      }
+    case 'setSentenceGap': {
+      const ms = bounded(action.ms, SENTENCE_GAP_MIN, SENTENCE_GAP_MAX)
+      return ms === null ? state : { ...state, sentenceGapMs: ms }
+    }
 
-    case 'setParagraphGap':
-      return {
-        ...state,
-        paragraphGapMs: Math.max(PARAGRAPH_GAP_MIN, Math.min(PARAGRAPH_GAP_MAX, action.ms)),
-      }
+    case 'setParagraphGap': {
+      const ms = bounded(action.ms, PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX)
+      return ms === null ? state : { ...state, paragraphGapMs: ms }
+    }
 
   }
+}
+
+/**
+ * A number inside `[min, max]`, or null when it is not a number at all.
+ *
+ * ⚠️ **`Math.max(min, Math.min(max, NaN))` IS `NaN`**, and three reducer branches
+ * clamped that way — so `NaN` reached live state, serialised as `null`, and broke
+ * the session until a relaunch reset it. The settings validator beside them asks
+ * `Number.isFinite` first; the reducer is the OTHER door into the same value and
+ * did not, which is precisely the asymmetry `setReadingRate`'s own comment warns
+ * about.
+ *
+ * `null` for a refusal rather than a fallback: a control that sends a
+ * non-number has a defect, and silently substituting the minimum would hide it
+ * while changing the reader's setting. The caller returns the state unchanged.
+ *
+ * One helper for all three, because the duplication is what let two of them
+ * inherit the omission from the first.
+ */
+function bounded(value: number, min: number, max: number): number | null {
+  if (!Number.isFinite(value)) return null
+  return Math.max(min, Math.min(max, value))
 }
 
 export type AppDispatch = Dispatch<Action>

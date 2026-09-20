@@ -34,7 +34,7 @@ function mount(over: Partial<AudiobookDeps> = {}) {
       author: 'Paper',
       lang: 'en-US',
       toc: [],
-      sectionTexts: vi.fn(async () => []),
+      sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
     },
     voices: [VOICE],
     chosen: {},
@@ -94,6 +94,57 @@ describe('a book with no voice this app would choose', () => {
       seen[0]?.run()
     })
     expect(say).toHaveBeenCalledWith(expect.stringContaining('No installed voice'))
+  })
+})
+
+describe('a walk that did not finish', () => {
+  /**
+   * ⚠️ **A PARTIAL WALK USED TO BE EXPORTED AS A FINISHED BOOK.**
+   * `ReaderSession.sectionTexts` stops when the book closes or is replaced, and
+   * returned a bare array either way — so a book closed part way through was
+   * written out complete-looking, missing everything after the section it reached.
+   * A short file is indistinguishable from a short book, which is exactly the trap
+   * `narrate` records for an empty buffer arriving mid-stream.
+   */
+  it('refuses rather than exporting what it managed to read', async () => {
+    const { seen, say } = mount({
+      source: {
+        title: 'A Measured Book',
+        author: 'Paper',
+        lang: 'en-US',
+        toc: [],
+        sectionTexts: vi.fn(async () => ({
+          sections: [{ index: 0, title: 'One', text: 'Some real text.' }],
+          complete: false,
+        })),
+      },
+    })
+    await act(async () => {
+      seen[0]?.run()
+    })
+    expect(say).toHaveBeenCalledWith(expect.stringContaining('stopped being readable'))
+    /* And it must not have gone on to ask for a destination. */
+    expect(say).not.toHaveBeenCalledWith(expect.stringContaining('Exported'))
+  })
+
+  it('exports when the walk did finish', async () => {
+    /* So the refusal cannot pass by refusing everything. */
+    const { seen, say } = mount({
+      source: {
+        title: 'A Measured Book',
+        author: 'Paper',
+        lang: 'en-US',
+        toc: [],
+        sectionTexts: vi.fn(async () => ({
+          sections: [{ index: 0, title: 'One', text: 'Some real text.' }],
+          complete: true,
+        })),
+      },
+    })
+    await act(async () => {
+      seen[0]?.run()
+    })
+    expect(say).not.toHaveBeenCalledWith(expect.stringContaining('stopped being readable'))
   })
 })
 

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { BUNDLED_FACES, faceById } from '../core/typefaces'
 import { createSettingsStore, readKernelPreferences } from '../core/settings'
-import { bootState, contributionFits, defaultPaneFor, initialState, paneFits, preferencesOf, readerTakesInput, reducer, screenFor, type AppState } from './state'
+import { bootState, contributionFits, defaultPaneFor, initialState, paneFits, preferencesOf, readerTakesInput, reducer, screenFor, type Action, type AppState } from './state'
 import { paneOffered } from '../core/uiTypes'
 
 /**
@@ -729,6 +729,42 @@ describe('the hook starts from bootState', () => {
  * survive being unloaded by its OS. Only the preferences travel; the transient
  * state (screen, layers, query) is decided fresh, as it always was.
  */
+describe('a control that sends something that is not a number', () => {
+  /**
+   * ⚠️ **`Math.max(min, Math.min(max, NaN))` IS `NaN`**, and all three of these
+   * clamped that way — so `NaN` reached live state, serialised as `null`, and the
+   * setting stayed broken for the session. The settings validator beside them asks
+   * `Number.isFinite` first; the reducer is the other door into the same value and
+   * did not.
+   *
+   * The state is returned UNCHANGED rather than falling back to a bound: a control
+   * sending a non-number has a defect, and substituting the minimum would hide it
+   * while silently changing what the reader chose.
+   */
+  const table: readonly [string, (v: number) => Action, (s: AppState) => number][] = [
+    ['reading rate', (v) => ({ type: 'setReadingRate', rate: v }), (s) => s.readingRate],
+    ['sentence gap', (v) => ({ type: 'setSentenceGap', ms: v }), (s) => s.sentenceGapMs],
+    ['paragraph gap', (v) => ({ type: 'setParagraphGap', ms: v }), (s) => s.paragraphGapMs],
+  ]
+  for (const [what, action, read] of table) {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      it(`keeps the ${what} when handed ${bad}`, () => {
+        const before = initialState
+        const after = reducer(before, action(bad))
+        expect(read(after)).toBe(read(before))
+        expect(Number.isFinite(read(after))).toBe(true)
+      })
+    }
+
+    it(`still clamps a real ${what} that is out of range`, () => {
+      /* So the refusal cannot pass by refusing everything. */
+      const after = reducer(initialState, action(-9999))
+      expect(Number.isFinite(read(after))).toBe(true)
+      expect(read(after)).toBeGreaterThanOrEqual(0)
+    })
+  }
+})
+
 describe('bootState with remembered preferences', () => {
   it('starts from what was remembered, and from the defaults for the rest', () => {
     const boot = bootState('', { theme: 'night', themeFollowsOs: false, typeface: 'crimson-pro', textSize: 19 })
