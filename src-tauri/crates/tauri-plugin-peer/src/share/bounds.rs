@@ -263,6 +263,28 @@ impl ShareBounds {
         self.with_window(|window| window.bytes)
     }
 
+    /// The counter as it stands, WITHOUT rolling an expired window.
+    ///
+    /// ⚠️ **`charged_bytes` ROLLS, SO READING IT CAN ZERO WHAT IT REPORTS.** That
+    /// is right for enforcement — an expired window genuinely has a fresh
+    /// allowance — and wrong for a test that wants to know what the last charge
+    /// left behind. `a_window_rollover_does_not_erase_a_charge_made_into_the_new_one`
+    /// asserted `>= 1` on the reasoning that nothing ran after the final charge,
+    /// and the READER was what ran after it: with a one-millisecond window, eight
+    /// `join()`s and the read take longer than the window, so the count was
+    /// legitimately rolled to 0 and the case failed on a loaded machine.
+    ///
+    /// The lower bound is a real property — only a roll can zero the counter, and
+    /// no charge follows the last one — but only when observing does not roll.
+    #[cfg(test)]
+    fn peek_charged(&self) -> u64 {
+        self.spent
+            .window
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .bytes
+    }
+
     /// Charge bytes about to move, and say whether they may.
     ///
     /// ⚠️ **CHARGED BEFORE THE BYTES MOVE, NOT AFTER.** `importLimits.ts`
@@ -630,7 +652,14 @@ mod tests {
         interleaving could produce: at least one charge survived (the last one
         cannot have been rolled away by anybody, because nothing ran after
         it), and no more than everything charged. */
-        let held = bounds.charged_bytes();
+        /* PEEKED, NOT READ: `charged_bytes` rolls an expired window, so reading
+        it here reported 0 for a one-millisecond window that had ended while the
+        threads were being joined — the observation zeroing the thing observed.
+        The bound below is only a property of the code when the observation is
+        passive; through `charged_bytes` it was an assertion that the read
+        happened within a millisecond of the last charge, which is a statement
+        about the machine. */
+        let held = bounds.peek_charged();
         assert!(
             (1..=1600).contains(&held),
             "a rollover erased the charges made into the new window: {held}"
