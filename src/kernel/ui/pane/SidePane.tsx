@@ -33,6 +33,7 @@ import type { CopyOutcome } from '../clipboard'
 import { Settings, type SettingsProps } from './Settings'
 import styles from './SidePane.module.css'
 import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
+import type { VoiceFacts } from '../reader/voiceChoice'
 
 /**
  * The pane's tools, in rail order.
@@ -190,6 +191,18 @@ export interface SidePaneProps {
    * same panel and draws none.
    */
   markControls?: readonly MarkControl[] | undefined
+  /**
+   * What the Voice group needs from the HOST, as opposed to from app state.
+   *
+   * The reader's chosen voice and speed are `state`'s and are read here; the
+   * open book's language and the engine's voice list are facts about the
+   * machine and the book, which only the host can answer. Absent on a host with
+   * no reader — the group is not drawn, which is the same convention as
+   * `markControls` and the Page row's setters.
+   */
+  narration?:
+    | { readonly lang: string | null; readonly voices: readonly VoiceFacts[] }
+    | undefined
 }
 
 export function SidePane({
@@ -209,6 +222,7 @@ export function SidePane({
   settings,
   contributed,
   markControls,
+  narration,
   developer,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
@@ -364,6 +378,22 @@ export function SidePane({
                     onSetHidden: (target: string, hidden: boolean) =>
                       dispatch({ type: 'setPaneHidden', pane: target, hidden }),
                     recording: developer?.recording ?? false,
+                  },
+                }
+              : {})}
+            /* COMPOSED HERE, from the host's two facts and the reader's two
+               choices — the same shape as `developer` above, and for the same
+               reason: `state` and `dispatch` are here, the book's language and
+               the machine's voice list are not. */
+            {...(narration
+              ? {
+                  narration: {
+                    ...narration,
+                    chosen: state.readingVoice,
+                    rate: state.readingRate,
+                    onVoice: (lang: string, voice: string) =>
+                      dispatch({ type: 'setReadingVoice', lang, voice }),
+                    onRate: (rate: number) => dispatch({ type: 'setReadingRate', rate }),
                   },
                 }
               : {})}

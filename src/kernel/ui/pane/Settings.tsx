@@ -6,9 +6,12 @@ import {
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
+  READING_RATE,
   READING_STEPS,
   SPACING,
   readingStep,
+  stepAt,
+  stepIndexOf,
 } from '../../core/metrics'
 import { PANE_TITLES, THEMES } from '../panes'
 
@@ -53,6 +56,7 @@ import {
 } from '../../core/uiTypes'
 import { PaneBand } from './PaneBand'
 import { PaneGroup } from './PaneGroup'
+import { bestVoice, primaryOf, voiceGroups, type VoiceFacts, type VoiceTier } from '../reader/voiceChoice'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
 import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
@@ -95,6 +99,7 @@ const GROUP = {
   blocks: 'blocks',
   figures: 'figures',
   page: 'page',
+  voice: 'voice',
   /* ⚠️ **NO COLON, AND THESE WERE `developer:unfinished`.** A colon is the
      CONTRIBUTED-pane and contributed-section convention — `<capability>:<name>`
      — and these ids share one open/closed list with the sections a capability
@@ -195,6 +200,29 @@ export interface SettingsProps {
    * accusing a working store.
    */
   persistent?: boolean | undefined
+  /**
+   * Read aloud's voice and speed — ABSENT WHEN NO BOOK IS OPEN, and the whole
+   * group goes with it.
+   *
+   * The language a voice has to answer for is the BOOK's, not the interface's
+   * (`ui/reader/voiceChoice.ts` argues it), so with no book there is no question
+   * to ask: a picker offering every voice on the machine would be asking the
+   * reader to choose a voice for a language nothing has named. Same rule as the
+   * ruler row, which appears only in scrolled flow — shown where it means
+   * something rather than greyed out everywhere else.
+   */
+  narration?:
+    | {
+        /** The open book's declared language — `documentLang`. */
+        readonly lang: string | null
+        /** Everything the engine offers, unfiltered; the picker narrows it. */
+        readonly voices: readonly VoiceFacts[]
+        readonly chosen: Readonly<Record<string, string>>
+        readonly rate: number
+        readonly onVoice: (lang: string, voice: string) => void
+        readonly onRate: (rate: number) => void
+      }
+    | undefined
   onTheme: (theme: Theme) => void
   onFollowOs: (follows: boolean) => void
   /**
@@ -284,6 +312,27 @@ const STYLE_LABELS = {
  * take the shared components now, and what remains here is the only thing that
  * genuinely differed between them, which is what each state is CALLED.
  */
+/**
+ * What a reader is told each voice tier is.
+ *
+ * APPLE'S OWN WORDS WHERE IT HAS THEM — its Manage Voices sheet says Default,
+ * Enhanced and Premium — and the two it does not expose are named by what they
+ * are rather than by their identifiers. `super-compact` is the smallest voice
+ * shipped, so "Compact" is honest and "Standard" is what the ordinary one is;
+ * `unknown` is every non-Apple engine, where the tier genuinely is not known.
+ *
+ * TYPED OVER THE UNION, so a tier added to `VoiceTier` without a label here is
+ * a compile error rather than a blank heading — the rule `CONTRIBUTION_ICONS`
+ * states for its own map.
+ */
+const TIER_LABELS: Record<Exclude<VoiceTier, 'novelty'>, string> = {
+  premium: 'Premium',
+  enhanced: 'Enhanced',
+  compact: 'Standard',
+  'super-compact': 'Compact',
+  unknown: 'Other',
+}
+
 const FLOW_LABELS = { scrolled: 'Scrolled', paginated: 'Paged' } as const
 const SIDE_LABELS = { left: 'Left', right: 'Right' } as const
 const SHOWN_HIDDEN = { on: 'Shown', off: 'Hidden' } as const
@@ -324,6 +373,75 @@ function CycleRow<T extends string>({
       <span style={{ flex: 1 }}>{label}</span>
       <span className={styles.settingValue}>{labels[value]}</span>
     </button>
+  )
+}
+
+/**
+ * A row whose setting is one of MANY, chosen from a list.
+ *
+ * ⚠️ **A NATIVE `<select>`, WHERE `FacePicker` BUILDS ITS OWN MENU, AND THE
+ * DIFFERENCE IS THE SAMPLE.** A typeface list has to be drawn IN the typefaces
+ * — the sample is the description, which is the whole argument that component
+ * makes — and no stock control can do that. A voice list is proper nouns; there
+ * is nothing to render. What is left is a long, machine-dependent list that
+ * wants grouping, keyboard walking and type-ahead, all of which the platform
+ * control has and a hand-built menu would have to grow.
+ *
+ * `CycleRow` is wrong for the same reason in the other direction: it advances
+ * one state per press, which is fine for two flows and absurd for twenty
+ * voices.
+ *
+ * The idiom is already here — `DevPane` has the app's other `<select>`, and
+ * `global.css` styles `select:focus-visible` — so this introduces a control
+ * rather than a precedent.
+ */
+function SelectRow({
+  label,
+  value,
+  lead,
+  groups,
+  onChange,
+}: {
+  readonly label: string
+  readonly value: string
+  /**
+   * One option ABOVE the groups, for the choice that is not one of them.
+   *
+   * Ungrouped on purpose: "let the app decide" is not a member of any tier, and
+   * an `<optgroup>` holding one row states a category that does not exist.
+   */
+  readonly lead?: { readonly value: string; readonly label: string } | undefined
+  /** Rendered as `<optgroup>`s in order; a group with no rows is dropped. */
+  readonly groups: readonly { readonly label: string; readonly options: readonly { readonly value: string; readonly label: string }[] }[]
+  readonly onChange: (value: string) => void
+}) {
+  return (
+    <div className={`${styles.settingRow} ${styles.settingStatic}`}>
+      <span style={{ flex: 1 }}>{label}</span>
+      <select
+        className={styles.settingSelect}
+        value={value}
+        aria-label={label}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      >
+        {lead && (
+          <option key="lead" value={lead.value}>
+            {lead.label}
+          </option>
+        )}
+        {groups.map((group) =>
+          group.options.length === 0 ? null : (
+            <optgroup key={group.label} label={group.label}>
+              {group.options.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </optgroup>
+          ),
+        )}
+      </select>
+    </div>
   )
 }
 
@@ -378,6 +496,7 @@ export function Settings({
   offered,
   sections,
   missing,
+  narration,
   persistent = true,
   onTheme,
   onFollowOs,
@@ -407,7 +526,14 @@ export function Settings({
      measured its ends from the raw index — so Larger was dead and Smaller asked
      for a step that does not exist (#142). `StepRow` clamps for the same
      reason. */
-  const stepAt = READING_STEPS.indexOf(step)
+  /* ⚠️ **NAMED `stepAt` UNTIL 2026-09-20, WHICH SHADOWED THE FUNCTION OF THAT
+     NAME IN `core/metrics` — a number standing in front of a helper this file
+     imports.** It cost nothing for as long as nothing here called the real one,
+     and then the Voice group did: `stepAt(READING_RATE, idx)` resolved to the
+     number and `tsc` said "Type 'Number' has no call signatures", which names
+     the symptom and not the shadow. Renamed rather than the import aliased,
+     because an alias leaves the trap for the next caller. */
+  const sizeIdx = READING_STEPS.indexOf(step)
   /* WHETHER PAGE HAS A ROW TO SHOW (#141). Each of its rows is gated on a
      setter, and the ruler and the scrollbar on scrolled flow as well — so a
      phone or a browser, passing none of those setters, drew a "Page" heading
@@ -554,9 +680,9 @@ export function Settings({
           <button
             type="button"
             className={styles.stepperButton}
-            disabled={stepAt <= 0}
+            disabled={sizeIdx <= 0}
             aria-label="Smaller text"
-            onClick={() => onStepIdx(stepAt - 1)}
+            onClick={() => onStepIdx(sizeIdx - 1)}
           >
             <span className={styles.stepperSmall} aria-hidden="true">
               A
@@ -570,9 +696,9 @@ export function Settings({
           <button
             type="button"
             className={styles.stepperButton}
-            disabled={stepAt >= READING_STEPS.length - 1}
+            disabled={sizeIdx >= READING_STEPS.length - 1}
             aria-label="Larger text"
-            onClick={() => onStepIdx(stepAt + 1)}
+            onClick={() => onStepIdx(sizeIdx + 1)}
           >
             <span className={styles.stepperLarge} aria-hidden="true">
               A
@@ -878,6 +1004,49 @@ export function Settings({
       {onSide !== undefined && (
         <CycleRow label="Side pane position" states={SIDES} value={side} labels={SIDE_LABELS} onChange={onSide} />
       )}
+      </PaneGroup>
+      )}
+
+      {/* ⚠️ **ONLY WITH A BOOK OPEN, BECAUSE THE LANGUAGE IS THE BOOK'S.** A
+          voice has to answer for the language of what it is reading — see
+          `voiceChoice.ts` — so with nothing open there is no question to put to
+          the reader, and a picker listing every voice on the machine would be
+          asking them to choose one for a language nothing has named. The same
+          rule the ruler and scrollbar rows follow: shown where it means
+          something rather than greyed out everywhere. */}
+      {narration && narration.lang !== null && (
+      <PaneGroup
+        title="Voice"
+        open={groupOpen(GROUP.voice)}
+        onToggle={() => toggleGroup(GROUP.voice)}
+      >
+        <SelectRow
+          label="Voice"
+          value={narration.chosen[primaryOf(narration.lang)] ?? ''}
+          /* NAMES WHAT AUTOMATIC CURRENTLY MEANS, rather than saying
+             "Automatic" and leaving the reader to guess. It is the same answer
+             `Speaker` will use, because both go through `bestVoice` — and on a
+             machine with nothing suitable installed it says so, which is the
+             one case where the reader needs to be told to go and get a voice. */
+          lead={{
+            value: '',
+            label: (() => {
+              const best = bestVoice(narration.voices, narration.lang)
+              return best ? `Automatic (${best.name})` : 'Automatic (system default)'
+            })(),
+          }}
+          groups={voiceGroups(narration.voices, narration.lang).map((group) => ({
+            label: TIER_LABELS[group.tier],
+            options: group.voices.map((voice) => ({ value: voice.voiceURI, label: voice.name })),
+          }))}
+          onChange={(voice) => narration.onVoice(primaryOf(narration.lang ?? ''), voice)}
+        />
+        <StepRow
+          label="Speed"
+          scale={READING_RATE}
+          value={stepIndexOf(READING_RATE, narration.rate)}
+          onChange={(idx) => narration.onRate(stepAt(READING_RATE, idx))}
+        />
       </PaneGroup>
       )}
 

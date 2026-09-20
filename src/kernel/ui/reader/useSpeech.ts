@@ -7,6 +7,7 @@ import {
   rangeAt,
   speechAvailable,
   type DoneReason,
+  type SpeakPrefs,
   type SpokenText,
 } from './speech'
 import { placeSpokenWord, removeSpokenWord } from './rulerBand'
@@ -84,12 +85,31 @@ export const TURN_SETTLE_MS = 500
 export const CONTINUE_TICK_MS = 800
 export const CONTINUE_GRACE_MS = 4000
 
-export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
+/**
+ * The preferences an absent argument stands for.
+ *
+ * A MODULE CONSTANT rather than a `{}` default, so the identity is stable across
+ * renders. Nothing here puts it in a dependency array today — it is read through
+ * a ref, like the paging — but a fresh literal per render is a trap left lying
+ * for whoever does, and it costs one line not to leave it.
+ */
+const NO_PREFS: SpeakPrefs = {}
+
+export function useSpeech(
+  doc: Document | null,
+  paging: SpeechPaging,
+  prefs: SpeakPrefs = NO_PREFS,
+): Speech {
   const [speaking, setSpeaking] = useState(false)
   const [followsWords, setFollowsWords] = useState(true)
 
   const docRef = useRef<Document | null>(doc)
   const pagingRef = useRef(paging)
+  /* READ AT `speak` TIME, never captured — see `SpeakPrefs`. A reading walks
+   * many sections and each one is its own utterance, so a voice or rate the
+   * reader changes mid-chapter takes effect at the next section rather than
+   * needing the reading stopped and started again. */
+  const prefsRef = useRef(prefs)
   /* The collected text AND the document it was collected from, together.
    *
    * Kept as one value on purpose. Held apart, `docRef` is reassigned during
@@ -124,6 +144,7 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
   useLayoutEffect(() => {
     docRef.current = doc
     pagingRef.current = paging
+    prefsRef.current = prefs
     followsRef.current = followsWords
   })
 
@@ -244,7 +265,7 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
       const spoken = collectText(target)
       spokenRef.current = { doc: target, spoken }
       turnedAt.current = null
-      return speaker.speak(spoken.text, documentLang(target))
+      return speaker.speak(spoken.text, documentLang(target), prefsRef.current)
     },
     [speaker],
   )

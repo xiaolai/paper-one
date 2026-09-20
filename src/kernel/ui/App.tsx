@@ -69,6 +69,8 @@ import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
 import { useSpeech } from './reader/useSpeech'
+import { documentLang } from './reader/speech'
+import { useVoices } from './hooks/useVoices'
 
 /**
  * The desktop's jackets, bound once.
@@ -259,7 +261,21 @@ export function App({
   const library = useLibrary(services.library)
   /* Reading aloud follows the spine document and turns its pages: the session
    * is the paging — `next`, in reading order — and `doc` is what is read. */
-  const speech = useSpeech(book.doc, book)
+  const speechPrefs = useMemo(
+    () => ({ voices: state.readingVoice, rate: state.readingRate }),
+    [state.readingVoice, state.readingRate],
+  )
+  const speech = useSpeech(book.doc, book, speechPrefs)
+  /* What the Voice group in Settings needs that app state cannot answer: the
+     language of the book on screen, and what this machine can actually say.
+     `documentLang` is the same fact the utterance is given, read from the same
+     place, so the picker offers voices for the language the reading will ask
+     for rather than for the interface's. */
+  const voices = useVoices()
+  const narration = useMemo(
+    () => ({ lang: book.doc ? documentLang(book.doc) : null, voices }),
+    [book.doc, voices],
+  )
 
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than
@@ -2341,6 +2357,7 @@ export function App({
             markFocus={marking.focus}
             onMarkFocusDone={marking.clearFocus}
             markControls={composition.markControls}
+            narration={narration}
             books={library.books}
             /* GROUPED BY THE PANEL THEY SERVE — see `SidePaneProps`. Eight of
                these were flat props on a component that reads none of them. */

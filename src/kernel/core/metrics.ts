@@ -330,6 +330,26 @@ export const BRIGHTNESS: SpacingScale = {
 }
 
 /**
+ * How fast the book is read aloud, as a multiplier on the engine's own speed.
+ *
+ * A SCALE RATHER THAN A SLIDER, for the reason every other scale here gives: a
+ * value between two steps is not a decision anybody made. These particular
+ * numbers are the ones listeners already know from every audiobook player, which
+ * matters more than an even distribution — 1.25× and 1.5× are what somebody
+ * reaches for by name.
+ *
+ * 1 IS THE ENGINE'S OWN DEFAULT and is therefore the default here, and `def`
+ * is its INDEX, as on every scale in this file. `settings.ts` derives the
+ * clamp it validates against from the two ends, so the range a reader can
+ * store and the range this offers cannot disagree.
+ */
+export const READING_RATE: SpacingScale = {
+  steps: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5],
+  def: 2,
+  unit: 'x',
+}
+
+/**
  * THE THEME IS THE CEILING. Contrast runs from softest up to the theme exactly
  * as designed, and stops there — it used to run past it, pushing the ink toward
  * pure black on a light theme and pure white on a dark one, which is a reader
@@ -351,6 +371,29 @@ export const CONTRAST: SpacingScale = {
 export function stepAt(scale: SpacingScale, idx: number): number {
   const at = Math.min(scale.steps.length - 1, Math.max(0, Math.round(idx)))
   return scale.steps[at] ?? scale.steps[scale.def] ?? 0
+}
+
+/**
+ * `stepAt`'s inverse: the step nearest a stored VALUE.
+ *
+ * Needed because a setting that stores what the reader chose rather than where
+ * they chose it — `textSize`'s rule, and `readingRate` follows it — has to be
+ * shown on a stepper that works in indices. `stepIndexForSize` is the same
+ * function over `READING_STEPS`, whose steps are objects; this is the one for
+ * the plain-number scales, so neither has to be written twice.
+ *
+ * NEAREST RATHER THAN EXACT, for the reason the clamp exists: a value written
+ * by a build whose scale had different steps is a reader's real choice, and the
+ * closest thing this build offers honours it where `indexOf` would answer -1
+ * and silently reset them to the default.
+ */
+export function stepIndexOf(scale: SpacingScale, value: number): number {
+  if (!Number.isFinite(value)) return scale.def
+  let best = 0
+  for (let i = 1; i < scale.steps.length; i++) {
+    if (Math.abs(scale.steps[i]! - value) < Math.abs(scale.steps[best]! - value)) best = i
+  }
+  return best
 }
 
 /** A spacing value from an index, clamped — an index from anywhere may be stale. */

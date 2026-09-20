@@ -78,10 +78,13 @@ describe('the registries it evaluates', () => {
   })
 
   it('reads the counts this phase measured', () => {
-    /* 18 since `kernel.lookUpLanguage` went with Look up and the rest of the
-       AI features. */
-    expect(surfaces.kernelSettings).toHaveLength(18)
+    /* 18 when `kernel.lookUpLanguage` went with Look up and the rest of the AI
+       features; 20 since read aloud stopped taking whatever voice the platform
+       handed it — `readingVoice` and `readingRate` (2026-09-20). */
+    expect(surfaces.kernelSettings).toHaveLength(20)
     expect(surfaces.kernelSettings).not.toContain('lookUpLanguage')
+    expect(surfaces.kernelSettings).toContain('readingVoice')
+    expect(surfaces.kernelSettings).toContain('readingRate')
     expect(surfaces.services).toHaveLength(31)
     expect(surfaces.readingSteps).toHaveLength(14)
     expect(surfaces.spacingAxes).toEqual(['letter', 'word', 'line', 'paragraph'])

@@ -9,6 +9,7 @@ import {
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
+  READING_RATE,
   READING_STEPS,
   SPACING,
   type SpacingScale,
@@ -464,6 +465,61 @@ const stringList = (raw: unknown): readonly string[] | undefined =>
   Array.isArray(raw) ? raw.filter((one): one is string => typeof one === 'string') : undefined
 
 /**
+ * The ends of the rate scale, as the stored value's clamp.
+ *
+ * DERIVED FROM THE SCALE, never typed out again: the range a reader can store
+ * and the range the stepper offers are the same range, and two literals is how
+ * they stop being. See `READING_RATE` in `metrics.ts` for the steps themselves.
+ *
+ * CLAMPED, NOT REJECTED, for `textSize`'s reason one step along: a file written
+ * by a build offering a wider range is not corrupt, it is a reader who chose
+ * "as fast as it goes" on another build, and the nearest speed this build offers
+ * honours that where falling back to 1 would throw it away.
+ *
+ * A MULTIPLIER RATHER THAN AN INDEX, also for `textSize`'s reason: an index
+ * means nothing across a change to the ramp the UI offers, and this one is
+ * likely to change — 1 is the engine's default for ever, where `steps[4]` is
+ * whatever the fifth entry happens to be that month.
+ */
+export const READING_RATE_MIN = READING_RATE.steps[0] ?? 1
+export const READING_RATE_MAX = READING_RATE.steps[READING_RATE.steps.length - 1] ?? 1
+
+const rate = (raw: unknown): number | undefined =>
+  typeof raw === 'number' && Number.isFinite(raw)
+    ? Math.max(READING_RATE_MIN, Math.min(READING_RATE_MAX, raw))
+    : undefined
+
+/**
+ * The voice the reader chose, per primary language subtag — `{ en: '…', zh: '…' }`.
+ *
+ * ONE VOICE PER LANGUAGE, not one for the app: a single stored voice is the
+ * shape where a reader who picks an English voice they like then opens a Chinese
+ * book and hears it read in English. `voiceChoice.ts` holds the matching rule
+ * and the argument.
+ *
+ * A BAD ENTRY COSTS ITSELF, exactly as in `stringList`: a junk value for one
+ * language must not take the reader's other choices with it. A non-object is
+ * rejected, because that is a value of the wrong shape rather than a map with a
+ * bad member.
+ *
+ * ⚠️ **THE KEYS ARE NOT NORMALISED HERE, DELIBERATELY.** Folding `en-US` to `en`
+ * would need `primaryOf`, which lives with the reader — and `core` may not
+ * import from `ui`. It is not worth moving: the picker only ever writes a
+ * primary subtag, and a hand-written `en-US` key simply never matches, which
+ * falls through to the automatic pick. A key that does nothing is a safe
+ * outcome; a rule spelled out in two modules is not.
+ */
+const voiceChoices = (raw: unknown): Readonly<Record<string, string>> | undefined => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const row = raw as Record<string, unknown>
+  const kept: Record<string, string> = {}
+  for (const [lang, voice] of Object.entries(row)) {
+    if (typeof voice === 'string' && voice !== '') kept[lang] = voice
+  }
+  return kept
+}
+
+/**
  * An index into one of §09's scales, CLAMPED to it rather than rejected.
  *
  * These are positions on a ramp, and a file written by a build with a longer
@@ -628,6 +684,11 @@ export const KERNEL_SETTINGS = {
      as long as it took an audit to notice that `theme`, `stepIdx`, `spacing`
      and `align` are all in this list and these fifteen were not. */
   readingStyle: defineSetting<ReadingStyle>('kernel.readingStyle', DEFAULT_READING_STYLE, readingStyle),
+  /* Read aloud's two, and the reason they are preferences at all: the reading
+     used to take whatever voice the platform handed it, which on macOS is the
+     most compressed one installed. See `ui/reader/voiceChoice.ts`. */
+  readingVoice: defineSetting<Readonly<Record<string, string>>>('kernel.readingVoice', {}, voiceChoices),
+  readingRate: defineSetting<number>('kernel.readingRate', 1, rate),
 } as const satisfies Record<string, Setting<unknown>>
 
 export type KernelSettingName = keyof typeof KERNEL_SETTINGS
@@ -733,6 +794,8 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     markTint: store.get(KERNEL_SETTINGS.markTint),
     markStyle: store.get(KERNEL_SETTINGS.markStyle),
     readingStyle: store.get(KERNEL_SETTINGS.readingStyle),
+    readingVoice: store.get(KERNEL_SETTINGS.readingVoice),
+    readingRate: store.get(KERNEL_SETTINGS.readingRate),
   }
 }
 

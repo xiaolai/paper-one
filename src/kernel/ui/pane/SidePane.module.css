@@ -764,6 +764,26 @@
   cursor: default;
 }
 
+/* The picker in a setting row — see `SelectRow`, and `.devScope`, which is the
+   app's other select and the shape this follows.
+
+   `--ink` rather than the `--muted` the developer pane uses: this is a reader's
+   own choice being reported, not a diagnostic filter, so it carries the same
+   weight as the value on every other row. `max-width` keeps a long voice name
+   from pushing the label off the row in a 400px pane; the name truncates
+   instead, and the full list is one click away. */
+.settingSelect {
+  height: var(--control-sm);
+  max-width: 60%;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--text-small);
+  padding: 0 var(--space-8);
+}
+
 .settingStatic:hover {
   background: transparent;
 }

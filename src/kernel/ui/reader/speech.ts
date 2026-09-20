@@ -24,6 +24,7 @@ import {
 } from './coordinates'
 import { directionOf } from './direction'
 import type { SpokenBox } from './rulerBand'
+import { voiceFor } from './voiceChoice'
 
 /** One text node's span within the collected string. */
 interface Segment {
@@ -318,6 +319,28 @@ export function placeOfRange(
  */
 export type DoneReason = 'ended' | 'empty' | 'error' | 'taken'
 
+/**
+ * What the reader has decided about how the book should sound.
+ *
+ * PASSED PER UTTERANCE, not held on the `Speaker`. A reading walks many
+ * sections and a section is one utterance, so a preference read at `speak` time
+ * reaches the next section — a reader who changes the voice mid-chapter hears it
+ * at the next one rather than after a restart. Holding it on the speaker would
+ * mean either a stale copy or a second way to push updates into an object whose
+ * whole job is one utterance at a time.
+ *
+ * Both optional, and absent means *leave the platform's own*: an engine's
+ * default voice and rate are what the reader chose in their system settings, and
+ * overwriting them with a guess is how an app ends up sounding worse than the
+ * thing it replaced.
+ */
+export interface SpeakPrefs {
+  /** Chosen voice per primary language subtag — `{ en: '…Ava', zh: '…Tingting' }`. */
+  readonly voices?: Readonly<Record<string, string>>
+  /** A multiplier on the engine's own default; 1 is that default. */
+  readonly rate?: number
+}
+
 export interface SpeakerCallbacks {
   /**
    * A word began. Called only for boundaries the engine reports — an engine
@@ -416,7 +439,7 @@ export class Speaker {
    * flag afterwards would overwrite the done it has already been told about,
    * leaving the Listen control stuck on with nothing playing.
    */
-  speak(text: string, lang: string | null): boolean {
+  speak(text: string, lang: string | null, prefs: SpeakPrefs = {}): boolean {
     /* CLAIMED BEFORE THE CANCEL, not after it. `stop()` on the next line is
        what cancels the other speaker's utterance, and an engine free to deliver
        that utterance's `end` SYNCHRONOUSLY from inside `cancel()` would find the
@@ -436,6 +459,34 @@ export class Speaker {
      * see `documentLang` — and the platform's own default is the one the
      * reader chose in their system settings. */
     if (lang) utterance.lang = lang
+
+    /* THE VOICE, CHOSEN RATHER THAN INHERITED — and this is the whole of the
+     * audible change. Left unset, WebKit hands an English book
+     * `com.apple.voice.super-compact.en-US.Samantha`, the most compressed voice
+     * Apple ships, and a Chinese book whichever voice the system happens to
+     * default to. `voiceFor` reads the tier out of `voiceURI` and takes the best
+     * one that speaks the document's language — see `voiceChoice.ts` for the
+     * measured families and why a novelty voice is excluded rather than ranked
+     * last.
+     *
+     * ⚠️ **NULL IS A REAL ANSWER AND MUST NOT BE ASSIGNED.** `getVoices()` is
+     * empty until the engine has loaded its list, and a section that declares no
+     * language has no voice to ask for — in both cases the right outcome is the
+     * platform's own default, which is what leaving the property alone gives.
+     * Assigning `null` is not the same thing on every engine, exactly as
+     * `documentLang` records for an empty `lang`. */
+    const chosen = voiceFor(this.#synth.getVoices(), lang, prefs.voices ?? {})
+    if (chosen) utterance.voice = chosen
+
+    /* The rate is a multiplier on the engine's default, so 1 IS the default and
+     * assigning it changes nothing — which is why an absent preference and a
+     * preference of 1 may safely take the same branch. Guarded against a
+     * non-finite value all the same: `rate = NaN` throws on some engines, and
+     * the stored value arrives from a settings file a reader can hand-edit. */
+    if (prefs.rate !== undefined && Number.isFinite(prefs.rate) && prefs.rate > 0) {
+      utterance.rate = prefs.rate
+    }
+
     this.#sawBoundary = false
 
     utterance.addEventListener('boundary', (event) => {

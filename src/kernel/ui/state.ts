@@ -2,7 +2,13 @@ import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
 import { BRIGHTNESS, CONTRAST, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
-import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
+import {
+  READING_RATE_MAX,
+  READING_RATE_MIN,
+  readKernelPreferences,
+  writeKernelPreferences,
+  type KernelPreferences,
+} from '../core/settings'
 import type { PaneContribution } from '../core/capability'
 import { isContributedPaneId, isContributedScreenId, paneOffered, type Align, type PageLayout, type PaneId, type ReadingStyle, type ReadingStyleKey, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
 
@@ -187,6 +193,17 @@ export interface AppState {
   readonly markTint: MarkTint
   readonly markStyle: MarkStyle
   /**
+   * Read aloud's voice per language, and its speed.
+   *
+   * PER LANGUAGE because one voice for the app reads a Chinese book in English
+   * — see `ui/reader/voiceChoice.ts`. The value is a `voiceURI`, which is the
+   * only stable identity a `SpeechSynthesisVoice` has: `name` collides (this Mac
+   * offers two voices called Samantha and two called Tingting, differing only in
+   * tier) and the object itself does not survive a relaunch.
+   */
+  readonly readingVoice: Readonly<Record<string, string>>
+  readonly readingRate: number
+  /**
    * How the book is SET — WI-14.4's fifteen, the fidelity dial among them.
    *
    * ONE FIELD RATHER THAN FIFTEEN, exactly as `spacing` is one rather than
@@ -226,6 +243,12 @@ export const initialState: AppState = {
   screen: 'library',
   developer: false,
   hiddenPanes: [],
+  /* NO VOICE CHOSEN AND THE ENGINE'S OWN SPEED. Empty is not "no voice" — it is
+     "the app picks", which `voiceFor` answers with the best voice installed for
+     the book's language. A reader only lands in this map by disagreeing with
+     that choice. */
+  readingVoice: {},
+  readingRate: 1,
   theme: DEFAULT_THEME,
   themeFollowsOs: true,
   /* The screen's own panel — `paneFits('library', 'library')` holds, so the
@@ -294,6 +317,11 @@ export type Action =
   | { type: 'setPageLayout'; layout: PageLayout }
   | { type: 'setMarkTint'; tint: MarkTint }
   | { type: 'setMarkStyle'; style: MarkStyle }
+  /* The VOICE for one language, not the whole map: a picker changes the voice
+     for the book in hand, and an action carrying the map would let a stale
+     render overwrite a choice made for another language. */
+  | { type: 'setReadingVoice'; lang: string; voice: string }
+  | { type: 'setReadingRate'; rate: number }
   /**
    * One action for all fifteen — see `readingStyle`.
    *
@@ -604,6 +632,27 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
 
     case 'setMarkStyle':
       return { ...state, markStyle: action.style }
+
+    /* MERGED INTO THE MAP, never replacing it, so choosing a Chinese voice
+       leaves the English one alone. An empty voice REMOVES the entry rather
+       than storing `''`, which is how a reader goes back to letting the app
+       choose — `chosenVoice` treats an empty string as no choice, but leaving
+       one behind would mean the map grew a dead key per language visited. */
+    case 'setReadingVoice': {
+      const { [action.lang]: had, ...rest } = state.readingVoice
+      if (action.voice === '') return had === undefined ? state : { ...state, readingVoice: rest }
+      if (had === action.voice) return state
+      return { ...state, readingVoice: { ...rest, [action.lang]: action.voice } }
+    }
+
+    case 'setReadingRate':
+      /* CLAMPED HERE TOO, not only in the settings validator. The validator
+         guards what arrives from disk; this guards what arrives from a control,
+         and the two are different doors into the same value. */
+      return {
+        ...state,
+        readingRate: Math.max(READING_RATE_MIN, Math.min(READING_RATE_MAX, action.rate)),
+      }
 
   }
 }
@@ -988,6 +1037,11 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
        object when an index has not moved. The indices stay listed, which is
        harmless; the reason given was false (2026-09-13 audit). */
     prefs.readingStyle,
+    /* THE MAP BY IDENTITY, which is safe for the same reason `readingStyle`'s
+       object is: `setReadingVoice` returns the SAME state when the chosen voice
+       has not moved, so no page turn or keystroke produces a new one. */
+    prefs.readingVoice,
+    prefs.readingRate,
   ])
   return [state, dispatch]
 }
@@ -1017,6 +1071,8 @@ export function preferencesOf(state: AppState): KernelPreferences {
     markTint: state.markTint,
     markStyle: state.markStyle,
     readingStyle: state.readingStyle,
+    readingVoice: state.readingVoice,
+    readingRate: state.readingRate,
   }
 }
 

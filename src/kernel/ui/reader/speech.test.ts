@@ -54,6 +54,100 @@ describe('Speaker', () => {
     return { speaker, onDone, onNoBoundaries }
   }
 
+  /**
+   * ⚠️ **THE VOICE IS CHOSEN, AND FOR MONTHS IT WAS NOT.** `speak` set only
+   * `lang`, so WebKit answered with its own default — measured on macOS 27 as
+   * `com.apple.voice.super-compact.en-US.Samantha`, the most compressed voice
+   * Apple ships, for every book in every language. `voiceChoice.ts` holds the
+   * ranking; these cases hold that `Speaker` applies it, and — the half a
+   * ranking test cannot see — that it leaves the property ALONE when it has
+   * nothing to say.
+   */
+  describe('choosing a voice', () => {
+    const compact = { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }
+    const superCompact = {
+      name: 'Samantha',
+      lang: 'en-US',
+      voiceURI: 'com.apple.voice.super-compact.en-US.Samantha',
+    }
+    const tingting = { name: 'Tingting', lang: 'zh-CN', voiceURI: 'com.apple.voice.compact.zh-CN.Tingting' }
+
+    it('takes the best installed voice for the document language', () => {
+      synth.voices = [superCompact, compact, tingting]
+      const { speaker } = make()
+      speaker.speak('hello', 'en-US')
+      expect(synth.queued[0]?.voice).toBe(compact)
+    })
+
+    it('speaks a Chinese section in a Chinese voice', () => {
+      // The defect this prevents is the one the reader cannot diagnose: a
+      // Chinese book read aloud by an English voice.
+      synth.voices = [superCompact, compact, tingting]
+      const { speaker } = make()
+      speaker.speak('你好', 'zh-CN')
+      expect(synth.queued[0]?.voice).toBe(tingting)
+    })
+
+    it("honours the reader's own choice over the better voice", () => {
+      synth.voices = [superCompact, compact]
+      const { speaker } = make()
+      speaker.speak('hello', 'en-US', { voices: { en: superCompact.voiceURI } })
+      expect(synth.queued[0]?.voice).toBe(superCompact)
+    })
+
+    it('leaves the voice unset while the engine has no list yet', () => {
+      /* `getVoices()` is EMPTY until the engine has loaded it, which is the
+       * state at the start of a session. Assigning `null` there is not a no-op
+       * on every engine — the same measurement `documentLang` records for an
+       * empty `lang` — so the property must be untouched, and "untouched" is
+       * what `FakeUtterance` declares rather than initialises so this can be
+       * asked at all. */
+      synth.voices = []
+      const { speaker } = make()
+      speaker.speak('hello', 'en-US')
+      expect('voice' in (synth.queued[0] as object)).toBe(false)
+    })
+
+    it('leaves the voice unset for a section that declares no language', () => {
+      synth.voices = [compact]
+      const { speaker } = make()
+      speaker.speak('hello', null)
+      expect('voice' in (synth.queued[0] as object)).toBe(false)
+    })
+
+    it('leaves the voice unset when nothing installed speaks the language', () => {
+      synth.voices = [tingting]
+      const { speaker } = make()
+      speaker.speak('bonjour', 'fr-FR')
+      expect('voice' in (synth.queued[0] as object)).toBe(false)
+    })
+  })
+
+  describe('the reading rate', () => {
+    it('applies a rate the reader chose', () => {
+      const { speaker } = make()
+      speaker.speak('hello', null, { rate: 1.25 })
+      expect(synth.queued[0]?.rate).toBe(1.25)
+    })
+
+    it('leaves the rate alone when none was chosen', () => {
+      const { speaker } = make()
+      speaker.speak('hello', null)
+      expect('rate' in (synth.queued[0] as object)).toBe(false)
+    })
+
+    it('refuses a rate that would throw, rather than passing it on', () => {
+      /* The stored value arrives from a settings file a reader can hand-edit,
+       * and `rate = NaN` throws on some engines — which would take the whole
+       * reading down for a bad character in a preference. */
+      const { speaker } = make()
+      speaker.speak('hello', null, { rate: Number.NaN })
+      expect('rate' in (synth.queued[0] as object)).toBe(false)
+      speaker.speak('hello', null, { rate: 0 })
+      expect('rate' in (synth.queued[1] as object)).toBe(false)
+    })
+  })
+
   it('reports nothing was queued for a section with no readable text', () => {
     // A plate or a full-page image. `onDone` fires SYNCHRONOUSLY here, so a
     // caller that sets its own flag afterwards overwrites it — hence the

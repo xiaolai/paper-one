@@ -10,11 +10,27 @@
  * mounted over `window.speechSynthesis` and the two fakes had begun to differ
  * on what `cancel` does — which is the one behaviour both suites turn on.
  */
+
+import type { VoiceFacts } from './voiceChoice'
+
 export class FakeUtterance extends EventTarget {
   /** Unset until a caller sets it, exactly as on the platform object — so
    *  `declare`, not a field: a field is an own property holding `undefined`,
    *  and "the property is absent" is what one of the tests asserts. */
   declare lang?: string
+  /**
+   * The chosen voice and rate, absent until something chooses them — the same
+   * `declare` for the same reason as `lang`.
+   *
+   * ⚠️ **ABSENCE IS THE ASSERTION HERE.** `Speaker` leaves both alone when it
+   * has nothing to say about them, because the platform's own default is what
+   * the reader picked in their system settings. A field initialised to
+   * `undefined` would pass an `expect(...).toBeUndefined()` whether or not the
+   * code under test had decided anything, so the cases ask `'voice' in
+   * utterance` instead.
+   */
+  declare voice?: VoiceFacts
+  declare rate?: number
 
   constructor(readonly text: string) {
     super()
@@ -38,9 +54,9 @@ export class FakeSynth extends EventTarget {
    * answers before its list has loaded, and the case `canSay` treats as
    * unknown. A case that wants a known list assigns one.
    */
-  voices: { lang: string }[] = []
+  voices: VoiceFacts[] = []
 
-  getVoices(): { lang: string }[] {
+  getVoices(): VoiceFacts[] {
     return this.voices
   }
 

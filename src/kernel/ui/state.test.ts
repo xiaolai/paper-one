@@ -797,6 +797,11 @@ describe('bootState with remembered preferences', () => {
       },
       /* WI-17.5, and NOT the default `reader`, for the reason the fifteen above
          give. */
+      /* Read aloud's two, and NOT their defaults either — an empty map and a
+         rate of 1 are exactly what a dropped field looks like, so seeding the
+         defaults here would prove nothing. */
+      readingVoice: { en: 'com.apple.voice.premium.en-US.Ava' },
+      readingRate: 1.25,
     }
     expect(preferencesOf(bootState('', remembered))).toEqual(remembered)
   })
