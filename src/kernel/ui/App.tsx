@@ -264,8 +264,13 @@ export function App({
   /* Reading aloud follows the spine document and turns its pages: the session
    * is the paging — `next`, in reading order — and `doc` is what is read. */
   const speechPrefs = useMemo(
-    () => ({ voices: state.readingVoice, rate: state.readingRate }),
-    [state.readingVoice, state.readingRate],
+    () => ({
+      voices: state.readingVoice,
+      rate: state.readingRate,
+      sentenceGapMs: state.sentenceGapMs,
+      paragraphGapMs: state.paragraphGapMs,
+    }),
+    [state.readingVoice, state.readingRate, state.sentenceGapMs, state.paragraphGapMs],
   )
   /**
    * The paging the reading needs, with a chapter step where the book can place

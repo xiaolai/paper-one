@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
-import { BRIGHTNESS, CONTRAST, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
+import { BRIGHTNESS, CONTRAST, PARAGRAPH_GAP, SENTENCE_GAP, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
 import {
+  PARAGRAPH_GAP_MAX,
+  PARAGRAPH_GAP_MIN,
   READING_RATE_MAX,
   READING_RATE_MIN,
+  SENTENCE_GAP_MAX,
+  SENTENCE_GAP_MIN,
   readKernelPreferences,
   writeKernelPreferences,
   type KernelPreferences,
@@ -203,6 +207,12 @@ export interface AppState {
    */
   readonly readingVoice: Readonly<Record<string, string>>
   readonly readingRate: number
+  /** Silence after a sentence, in ms — see `SENTENCE_GAP` in `metrics.ts`. */
+  readonly sentenceGapMs: number
+  /** Silence after a paragraph, in ms. Used ALONE at a paragraph end, not added
+   *  to the sentence gap: the label says "between paragraphs", so a reader who
+   *  sets it to zero means no pause there. */
+  readonly paragraphGapMs: number
   /**
    * How the book is SET — WI-14.4's fifteen, the fidelity dial among them.
    *
@@ -249,6 +259,8 @@ export const initialState: AppState = {
      that choice. */
   readingVoice: {},
   readingRate: 1,
+  sentenceGapMs: SENTENCE_GAP.steps[SENTENCE_GAP.def] ?? 0,
+  paragraphGapMs: PARAGRAPH_GAP.steps[PARAGRAPH_GAP.def] ?? 0,
   theme: DEFAULT_THEME,
   themeFollowsOs: true,
   /* The screen's own panel — `paneFits('library', 'library')` holds, so the
@@ -322,6 +334,8 @@ export type Action =
      render overwrite a choice made for another language. */
   | { type: 'setReadingVoice'; lang: string; voice: string }
   | { type: 'setReadingRate'; rate: number }
+  | { type: 'setSentenceGap'; ms: number }
+  | { type: 'setParagraphGap'; ms: number }
   /**
    * One action for all fifteen — see `readingStyle`.
    *
@@ -652,6 +666,19 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       return {
         ...state,
         readingRate: Math.max(READING_RATE_MIN, Math.min(READING_RATE_MAX, action.rate)),
+      }
+
+    case 'setSentenceGap':
+      /* Clamped for `setReadingRate`'s reason — two doors, one value. */
+      return {
+        ...state,
+        sentenceGapMs: Math.max(SENTENCE_GAP_MIN, Math.min(SENTENCE_GAP_MAX, action.ms)),
+      }
+
+    case 'setParagraphGap':
+      return {
+        ...state,
+        paragraphGapMs: Math.max(PARAGRAPH_GAP_MIN, Math.min(PARAGRAPH_GAP_MAX, action.ms)),
       }
 
   }
@@ -1042,6 +1069,8 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
        has not moved, so no page turn or keystroke produces a new one. */
     prefs.readingVoice,
     prefs.readingRate,
+    prefs.sentenceGapMs,
+    prefs.paragraphGapMs,
   ])
   return [state, dispatch]
 }
@@ -1073,6 +1102,8 @@ export function preferencesOf(state: AppState): KernelPreferences {
     readingStyle: state.readingStyle,
     readingVoice: state.readingVoice,
     readingRate: state.readingRate,
+    sentenceGapMs: state.sentenceGapMs,
+    paragraphGapMs: state.paragraphGapMs,
   }
 }
 

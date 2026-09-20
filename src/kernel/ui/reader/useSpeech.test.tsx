@@ -3,7 +3,7 @@ import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
 import { CONTINUE_GRACE_MS, CONTINUE_TICK_MS, TURN_SETTLE_MS, useSpeech, type Speech } from './useSpeech'
-import { Speaker, collectText } from './speech'
+import { Speaker, collectText, type SpeakPrefs } from './speech'
 
 /**
  * The wiring: a section's document in, page turns and utterances out.
@@ -112,14 +112,17 @@ function ends(at = synth.queued.length - 1) {
   })
 }
 
-function mount(doc: Document | null, { chapters = false }: { chapters?: boolean } = {}) {
+function mount(
+  doc: Document | null,
+  { chapters = false, prefs }: { chapters?: boolean; prefs?: SpeakPrefs } = {},
+) {
   const next = vi.fn()
   const chapter = vi.fn()
   const api: { current: Speech | null } = { current: null }
   function Probe({ doc }: { doc: Document | null }) {
     /* ABSENT rather than a no-op when the book cannot step chapters — the
        transport reads its presence to decide whether to draw the buttons. */
-    api.current = useSpeech(doc, chapters ? { next, chapter } : { next })
+    api.current = useSpeech(doc, chapters ? { next, chapter } : { next }, prefs)
     return null
   }
   const view = render(<Probe doc={doc} />)
@@ -663,6 +666,140 @@ describe('stepping by chapter', () => {
     const { speech, chapter } = mount(a.doc, { chapters: true })
     act(() => speech().stepChapter(1))
     expect(chapter).not.toHaveBeenCalled()
+    a.remove()
+  })
+})
+
+describe('the silence between sentences and paragraphs', () => {
+  const TWO = ['One here. Two there.', 'Three everywhere.']
+
+  it('waits the sentence gap before the next sentence', () => {
+    const a = section(TWO)
+    const { speech } = mount(a.doc, { prefs: { sentenceGapMs: 300, paragraphGapMs: 900 } })
+    act(() => speech().start())
+    ends()
+    /* Nothing yet: the reading is in the pause. */
+    expect(spoken()).toEqual(['One here.'])
+    act(() => vi.advanceTimersByTime(299))
+    expect(spoken()).toEqual(['One here.'])
+    act(() => vi.advanceTimersByTime(1))
+    expect(spoken()).toEqual(['One here.', 'Two there.'])
+    a.remove()
+  })
+
+  it('waits the PARAGRAPH gap where the next sentence opens one', () => {
+    const a = section(TWO)
+    const { speech } = mount(a.doc, { prefs: { sentenceGapMs: 300, paragraphGapMs: 900 } })
+    act(() => speech().start())
+    ends()
+    act(() => vi.advanceTimersByTime(300))
+    expect(spoken()).toEqual(['One here.', 'Two there.'])
+    ends()
+    /* The sentence gap would have been enough; a paragraph boundary is not. */
+    act(() => vi.advanceTimersByTime(300))
+    expect(spoken()).toEqual(['One here.', 'Two there.'])
+    act(() => vi.advanceTimersByTime(600))
+    expect(spoken()).toEqual(['One here.', 'Two there.', 'Three everywhere.'])
+    a.remove()
+  })
+
+  it('uses the paragraph gap ALONE, not added to the sentence gap', () => {
+    /* A reader who sets the paragraph pause to zero means no pause there, which
+       adding the sentence gap underneath would make impossible to ask for. */
+    const a = section(TWO)
+    const { speech } = mount(a.doc, { prefs: { sentenceGapMs: 300, paragraphGapMs: 0 } })
+    act(() => speech().start())
+    ends()
+    act(() => vi.advanceTimersByTime(300))
+    ends()
+    expect(spoken()).toEqual(['One here.', 'Two there.', 'Three everywhere.'])
+    a.remove()
+  })
+
+  it('does not hesitate at all when the pause is zero', () => {
+    const a = section(TWO)
+    const { speech } = mount(a.doc, { prefs: { sentenceGapMs: 0, paragraphGapMs: 0 } })
+    act(() => speech().start())
+    ends()
+    /* No timer advanced: a `setTimeout(0)` would still yield, and a reader who
+       turned the pause off asked for the reading not to wait. */
+    expect(spoken()).toEqual(['One here.', 'Two there.'])
+    a.remove()
+  })
+
+  it('a stop during the pause stays stopped', () => {
+    const a = section(TWO)
+    const { speech } = mount(a.doc, { prefs: { sentenceGapMs: 300, paragraphGapMs: 900 } })
+    act(() => speech().start())
+    ends()
+    act(() => speech().stop())
+    act(() => vi.advanceTimersByTime(5000))
+    expect(spoken()).toEqual(['One here.'])
+    expect(speech().speaking).toBe(false)
+    a.remove()
+  })
+
+  it('a gap abandoned by a stop cannot fire into a LATER reading', () => {
+    /* ⚠️ **FOUND BY MUTATION, NOT BY DESIGN.** `clearGap()` in `stop` looked
+       defensive — the timer checks `readingRef` when it fires, so a stopped
+       reading stays silent and removing the clear failed nothing. But the timer
+       is still PENDING, and starting again makes `readingRef` true: the stale
+       gap then fires into the new reading and speaks the sentence it was going
+       to say, cutting off the one that had just begun. Clearing it is what makes
+       the two readings independent. */
+    const a = section(TWO)
+    const { speech } = mount(a.doc, { prefs: { sentenceGapMs: 300, paragraphGapMs: 900 } })
+    act(() => speech().start())
+    ends()
+    act(() => speech().stop())
+    act(() => speech().start())
+    expect(spoken()).toEqual(['One here.', 'One here.'])
+    act(() => vi.advanceTimersByTime(5000))
+    expect(spoken()).toEqual(['One here.', 'One here.'])
+    a.remove()
+  })
+
+  it('a pause during the gap holds it, and resume picks the sentence up', () => {
+    /* ⚠️ **AND THE ENGINE IS NOT TOUCHED WHILE IN A GAP.**
+       `speechSynthesis.pause()` sets a flag on the ENGINE, so pausing here and
+       then queueing the held sentence would queue it behind a paused engine and
+       it would never start. */
+    const a = section(TWO)
+    const { speech } = mount(a.doc, { prefs: { sentenceGapMs: 300, paragraphGapMs: 900 } })
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    expect(speech().paused).toBe(true)
+    expect(synth.paused).toBe(false)
+    act(() => vi.advanceTimersByTime(5000))
+    expect(spoken()).toEqual(['One here.'])
+
+    act(() => speech().resume())
+    expect(spoken()).toEqual(['One here.', 'Two there.'])
+    expect(speech().paused).toBe(false)
+    a.remove()
+  })
+
+  it('a step during the pause goes where the reader asked, not where the gap was going', () => {
+    const a = section(TWO)
+    const { speech } = mount(a.doc, { prefs: { sentenceGapMs: 300, paragraphGapMs: 900 } })
+    act(() => speech().start())
+    ends()
+    act(() => speech().stepParagraph(1))
+    expect(spoken()).toEqual(['One here.', 'Three everywhere.'])
+    /* The abandoned gap must not fire a second utterance behind it. */
+    act(() => vi.advanceTimersByTime(5000))
+    expect(spoken()).toEqual(['One here.', 'Three everywhere.'])
+    a.remove()
+  })
+
+  it('still crosses to the next section after the last sentence', () => {
+    const a = section('Only this.')
+    const { speech, next } = mount(a.doc, { prefs: { sentenceGapMs: 300, paragraphGapMs: 900 } })
+    act(() => speech().start())
+    ends()
+    /* No sentence to wait for, so the section-end walk starts without a gap. */
+    expect(next).toHaveBeenCalledTimes(1)
     a.remove()
   })
 })

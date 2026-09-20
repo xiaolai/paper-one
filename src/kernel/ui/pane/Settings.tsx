@@ -6,7 +6,9 @@ import {
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
+  PARAGRAPH_GAP,
   READING_RATE,
+  SENTENCE_GAP,
   READING_STEPS,
   SPACING,
   readingStep,
@@ -219,8 +221,13 @@ export interface SettingsProps {
         readonly voices: readonly VoiceFacts[]
         readonly chosen: Readonly<Record<string, string>>
         readonly rate: number
+        /** Silence after a sentence and after a paragraph, in ms. */
+        readonly sentenceGapMs: number
+        readonly paragraphGapMs: number
         readonly onVoice: (lang: string, voice: string) => void
         readonly onRate: (rate: number) => void
+        readonly onSentenceGap: (ms: number) => void
+        readonly onParagraphGap: (ms: number) => void
       }
     | undefined
   onTheme: (theme: Theme) => void
@@ -1056,6 +1063,22 @@ export function Settings({
           scale={READING_RATE}
           value={stepIndexOf(READING_RATE, narration.rate)}
           onChange={(idx) => narration.onRate(stepAt(READING_RATE, idx))}
+        />
+        {/* ⚠️ **THE PAUSES ARE ADDITIVE TO WHATEVER THE ENGINE ALREADY LEAVES**,
+            and how much that is has not been measured — see `SENTENCE_GAP`. So
+            the labels say what the reader is adding, not what they will hear in
+            total, which is the only claim that is true. */}
+        <StepRow
+          label="Pause between sentences"
+          scale={SENTENCE_GAP}
+          value={stepIndexOf(SENTENCE_GAP, narration.sentenceGapMs)}
+          onChange={(idx) => narration.onSentenceGap(stepAt(SENTENCE_GAP, idx))}
+        />
+        <StepRow
+          label="Pause between paragraphs"
+          scale={PARAGRAPH_GAP}
+          value={stepIndexOf(PARAGRAPH_GAP, narration.paragraphGapMs)}
+          onChange={(idx) => narration.onParagraphGap(stepAt(PARAGRAPH_GAP, idx))}
         />
       </PaneGroup>
       )}

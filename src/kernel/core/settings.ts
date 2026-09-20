@@ -9,7 +9,9 @@ import {
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
+  PARAGRAPH_GAP,
   READING_RATE,
+  SENTENCE_GAP,
   READING_STEPS,
   SPACING,
   type SpacingScale,
@@ -484,6 +486,30 @@ const stringList = (raw: unknown): readonly string[] | undefined =>
 export const READING_RATE_MIN = READING_RATE.steps[0] ?? 1
 export const READING_RATE_MAX = READING_RATE.steps[READING_RATE.steps.length - 1] ?? 1
 
+/**
+ * The ends of a gap scale, as the stored value's clamp — `READING_RATE_MIN`'s
+ * reasoning, one scale along, and derived for the same reason: the range a
+ * reader can store and the range the stepper offers must be one range.
+ */
+export const SENTENCE_GAP_MIN = SENTENCE_GAP.steps[0] ?? 0
+export const SENTENCE_GAP_MAX = SENTENCE_GAP.steps[SENTENCE_GAP.steps.length - 1] ?? 0
+export const PARAGRAPH_GAP_MIN = PARAGRAPH_GAP.steps[0] ?? 0
+export const PARAGRAPH_GAP_MAX = PARAGRAPH_GAP.steps[PARAGRAPH_GAP.steps.length - 1] ?? 0
+
+/**
+ * A stored gap, in milliseconds.
+ *
+ * CLAMPED RATHER THAN REJECTED, as every other scale here is: a file written by a
+ * build offering a longer pause is not corrupt, it is a reader who chose "as long
+ * as it goes", and the nearest this build offers honours that where falling back
+ * to the default would throw it away. Non-finite is refused, because `Infinity`
+ * as a timer duration is a reading that never continues.
+ */
+const gapMs = (min: number, max: number) => (raw: unknown): number | undefined =>
+  typeof raw === 'number' && Number.isFinite(raw)
+    ? Math.max(min, Math.min(max, raw))
+    : undefined
+
 const rate = (raw: unknown): number | undefined =>
   typeof raw === 'number' && Number.isFinite(raw)
     ? Math.max(READING_RATE_MIN, Math.min(READING_RATE_MAX, raw))
@@ -689,6 +715,18 @@ export const KERNEL_SETTINGS = {
      most compressed one installed. See `ui/reader/voiceChoice.ts`. */
   readingVoice: defineSetting<Readonly<Record<string, string>>>('kernel.readingVoice', {}, voiceChoices),
   readingRate: defineSetting<number>('kernel.readingRate', 1, rate),
+  /* THE SILENCE BETWEEN UNITS OF PROSE — see `SENTENCE_GAP` in `metrics.ts` for
+     why this is expressible at all and why it is not scaled by the rate. */
+  sentenceGapMs: defineSetting<number>(
+    'kernel.sentenceGapMs',
+    SENTENCE_GAP.steps[SENTENCE_GAP.def] ?? 0,
+    gapMs(SENTENCE_GAP_MIN, SENTENCE_GAP_MAX),
+  ),
+  paragraphGapMs: defineSetting<number>(
+    'kernel.paragraphGapMs',
+    PARAGRAPH_GAP.steps[PARAGRAPH_GAP.def] ?? 0,
+    gapMs(PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX),
+  ),
 } as const satisfies Record<string, Setting<unknown>>
 
 export type KernelSettingName = keyof typeof KERNEL_SETTINGS
@@ -796,6 +834,8 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     readingStyle: store.get(KERNEL_SETTINGS.readingStyle),
     readingVoice: store.get(KERNEL_SETTINGS.readingVoice),
     readingRate: store.get(KERNEL_SETTINGS.readingRate),
+    sentenceGapMs: store.get(KERNEL_SETTINGS.sentenceGapMs),
+    paragraphGapMs: store.get(KERNEL_SETTINGS.paragraphGapMs),
   }
 }
 

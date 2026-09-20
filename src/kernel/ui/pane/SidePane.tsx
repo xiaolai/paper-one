@@ -391,9 +391,13 @@ export function SidePane({
                     ...narration,
                     chosen: state.readingVoice,
                     rate: state.readingRate,
+                    sentenceGapMs: state.sentenceGapMs,
+                    paragraphGapMs: state.paragraphGapMs,
                     onVoice: (lang: string, voice: string) =>
                       dispatch({ type: 'setReadingVoice', lang, voice }),
                     onRate: (rate: number) => dispatch({ type: 'setReadingRate', rate }),
+                    onSentenceGap: (ms: number) => dispatch({ type: 'setSentenceGap', ms }),
+                    onParagraphGap: (ms: number) => dispatch({ type: 'setParagraphGap', ms }),
                   },
                 }
               : {})}

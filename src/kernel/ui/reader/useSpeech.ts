@@ -12,6 +12,7 @@ import {
 } from './speech'
 import { placeSpokenWord, removeSpokenWord } from './rulerBand'
 import {
+  blockIndexAt,
   stepParagraph as paragraphStep,
   stepSentence as sentenceStep,
   type ReadingPlan,
@@ -198,7 +199,19 @@ export function useSpeech(
    * rebuilt under a live utterance, so its `onDone` cannot close over a callback
    * that changes — it reaches the committed one through this.
    */
-  const speakSentenceRef = useRef<(at: number) => boolean>(() => false)
+  const advanceRef = useRef<(at: number) => boolean>(() => false)
+  /**
+   * The silence between two sentences, while it is being waited out.
+   *
+   * ⚠️ **A GAP IS A STATE THE READING CAN BE INTERRUPTED IN**, which is the whole
+   * difficulty: the reader can stop, pause, step or turn a chapter during it, and
+   * every one of those must cancel it rather than let a sentence begin afterwards.
+   * `pendingNext` is what the timer was going to speak, kept separately so that a
+   * PAUSE can hold the gap and `resume` can pick it up — clearing the timer alone
+   * would lose the reader's place at the one moment they asked not to lose it.
+   */
+  const gapTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingNext = useRef<number | null>(null)
   /* Read inside the boundary handler, which is created once per utterance —
    * a captured `followsWords` would be the value at the time speech started. */
   const followsRef = useRef(true)
@@ -229,6 +242,15 @@ export function useSpeech(
 
   const available = useMemo(() => speechAvailable(), [])
 
+  /** Abandon a pause that has not finished, and what it was going to say. */
+  const clearGap = useCallback(() => {
+    if (gapTimer.current !== null) {
+      clearTimeout(gapTimer.current)
+      gapTimer.current = null
+    }
+    pendingNext.current = null
+  }, [])
+
   const clearContinuation = useCallback(() => {
     if (continuing.current !== null) {
       clearTimeout(continuing.current)
@@ -242,6 +264,7 @@ export function useSpeech(
     /** The reading is over: the controls go quiet and nothing is pending. */
     const finish = () => {
       readingRef.current = false
+      clearGap()
       clearContinuation()
       setSpeaking(false)
       removeSpokenWord(docRef.current)
@@ -332,7 +355,7 @@ export function useSpeech(
          * the one `continueReading` must not be asked to make — it walks pages
          * hunting the next section, which mid-section would turn the page away
          * from prose nobody had read. */
-        if (speakSentenceRef.current(cursorRef.current + 1)) return
+        if (advanceRef.current(cursorRef.current + 1)) return
         continueReading()
       },
       onNoBoundaries: () => {
@@ -343,7 +366,7 @@ export function useSpeech(
         removeSpokenWord(docRef.current)
       },
     })
-  }, [available, clearContinuation])
+  }, [available, clearGap, clearContinuation])
 
   /**
    * Speak one document, and say whether anything was queued.
@@ -385,6 +408,49 @@ export function useSpeech(
       )
     },
     [speaker],
+  )
+
+  /**
+   * Move to sentence `at` after the silence that belongs before it.
+   *
+   * Answers whether there WAS a sentence there — false is how `onDone` tells a
+   * sentence ending from a section ending without either of them counting.
+   *
+   * A PARAGRAPH BOUNDARY USES THE PARAGRAPH GAP ALONE, not both added: the
+   * setting is labelled "between paragraphs", so a reader who sets it to zero
+   * means no pause there, and adding the sentence gap underneath would make zero
+   * impossible to ask for.
+   *
+   * A gap of zero speaks straight away rather than through a zero timer, because
+   * `setTimeout(0)` still yields and a reader who turned the pause off asked for
+   * the reading not to hesitate.
+   */
+  const advance = useCallback(
+    (at: number): boolean => {
+      const current = spokenRef.current
+      if (!current || !current.plan.sentences[at]) return false
+
+      const opensParagraph =
+        at > 0 && blockIndexAt(current.plan, at) !== blockIndexAt(current.plan, at - 1)
+      const prefs = prefsRef.current
+      const ms = opensParagraph ? (prefs.paragraphGapMs ?? 0) : (prefs.sentenceGapMs ?? 0)
+      if (ms <= 0) {
+        speakSentence(at)
+        return true
+      }
+
+      pendingNext.current = at
+      gapTimer.current = setTimeout(() => {
+        gapTimer.current = null
+        pendingNext.current = null
+        /* ASKED WHEN IT FIRES, not when it was set: a reading stopped during the
+         * pause must stay stopped, and the ref is what answers as of now. */
+        if (!readingRef.current) return
+        speakSentence(at)
+      }, ms)
+      return true
+    },
+    [speakSentence],
   )
 
   const speakDocument = useCallback(
@@ -429,7 +495,7 @@ export function useSpeech(
    * memoised so a live utterance is never orphaned, so its `onDone` reaches this
    * through a ref rather than closing over a value that changes. */
   useLayoutEffect(() => {
-    speakSentenceRef.current = speakSentence
+    advanceRef.current = advance
   })
 
   const start = useCallback(() => {
@@ -448,24 +514,57 @@ export function useSpeech(
 
   const stop = useCallback(() => {
     readingRef.current = false
+    clearGap()
     clearContinuation()
     speaker?.stop()
     setSpeaking(false)
     setPaused(false)
     removeSpokenWord(docRef.current)
-  }, [speaker, clearContinuation])
+  }, [speaker, clearGap, clearContinuation])
 
+  /**
+   * ⚠️ **PAUSING DURING A GAP HOLDS THE GAP, AND FORGETTING TO WOULD START THE
+   * NEXT SENTENCE OVER A READER WHO HAD JUST ASKED FOR SILENCE.** The engine has
+   * nothing to pause between two utterances, so the only thing holding the
+   * reading there is our own timer: it is cancelled, and what it was going to say
+   * is kept in `pendingNext` for `resume`.
+   */
   const pause = useCallback(() => {
     if (!readingRef.current) return
+    if (gapTimer.current !== null) {
+      /* ⚠️ **THE ENGINE IS NOT TOUCHED DURING A GAP, AND TOUCHING IT WAS A BUG.**
+       * Between two utterances nothing is being spoken, and
+       * `speechSynthesis.pause()` sets a flag on the ENGINE rather than on an
+       * utterance — so pausing here and then queueing the held sentence on
+       * `resume` would queue it behind a paused engine and it would never start.
+       * The only thing holding the reading in a gap is our own timer, so
+       * cancelling it is the whole of the pause. */
+      clearTimeout(gapTimer.current)
+      gapTimer.current = null
+      setPaused(true)
+      return
+    }
     speaker?.pause()
     setPaused(true)
   }, [speaker])
 
+  /** Picks the held sentence up where the gap left it — see `pause`. */
   const resume = useCallback(() => {
     if (!readingRef.current) return
-    speaker?.resume()
+    const held = pendingNext.current
     setPaused(false)
-  }, [speaker])
+    /* HELD IN A GAP: the engine was never paused (see `pause`), so there is
+       nothing to release — the sentence just begins. */
+    if (held !== null) {
+      /* SPOKEN NOW RATHER THAN AFTER THE REST OF THE GAP: the reader asked to go
+         on, and making them wait out a silence they interrupted is answering a
+         different question. */
+      pendingNext.current = null
+      speakSentence(held)
+      return
+    }
+    speaker?.resume()
+  }, [speaker, speakSentence])
 
   /**
    * Move the cursor and speak from there.
@@ -487,11 +586,12 @@ export function useSpeech(
     (next: number | null) => {
       if (!readingRef.current) return
       if (next === null) return
+      clearGap()
       clearContinuation()
       speakSentence(next)
       setSpeaking(true)
     },
-    [speakSentence, clearContinuation],
+    [speakSentence, clearGap, clearContinuation],
   )
 
   const stepSentence = useCallback(
@@ -524,9 +624,10 @@ export function useSpeech(
    */
   const stepChapter = useCallback((by: -1 | 1) => {
     if (!readingRef.current) return
+    clearGap()
     clearContinuation()
     pagingRef.current.chapter?.(by)
-  }, [clearContinuation])
+  }, [clearGap, clearContinuation])
 
   /* The spine document changing is a step INSIDE the reading, not its end.
    *
@@ -543,6 +644,7 @@ export function useSpeech(
    * to make every chapter break a silence. */
   useEffect(() => {
     if (!readingRef.current) return
+    clearGap()
     clearContinuation()
     if (!doc) {
       readingRef.current = false
@@ -552,7 +654,7 @@ export function useSpeech(
     }
     const queued = speakDocument(doc)
     if (queued) setSpeaking(true)
-  }, [speaker, doc, speakDocument, clearContinuation])
+  }, [speaker, doc, speakDocument, clearGap, clearContinuation])
 
   useEffect(() => {
     const leaving = doc
@@ -567,10 +669,11 @@ export function useSpeech(
   useEffect(
     () => () => {
       readingRef.current = false
+      clearGap()
       clearContinuation()
       speaker?.stop()
     },
-    [speaker, clearContinuation],
+    [speaker, clearGap, clearContinuation],
   )
 
   /* READ FROM THE PROP, not from `pagingRef`: this decides what is RENDERED, so

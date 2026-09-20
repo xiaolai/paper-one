@@ -397,6 +397,18 @@ export interface SpeakPrefs {
   readonly voices?: Readonly<Record<string, string>>
   /** A multiplier on the engine's own default; 1 is that default. */
   readonly rate?: number
+  /**
+   * Silence after a sentence and after a paragraph, in milliseconds.
+   *
+   * ⚠️ **NOT THE ENGINE'S TO HONOUR — `useSpeech` WAITS.** Web Speech has no
+   * break, no SSML and no `preUtteranceDelay`, so there is nothing to hand an
+   * utterance. They live on `SpeakPrefs` anyway because that is what the reading
+   * reads its preferences from, and the native engine WILL take them directly:
+   * `AVSpeechUtterance.preUtteranceDelay` and `postUtteranceDelay` exist and
+   * default to 0 (measured on macOS 27, 2026-09-20).
+   */
+  readonly sentenceGapMs?: number
+  readonly paragraphGapMs?: number
 }
 
 export interface SpeakerCallbacks {

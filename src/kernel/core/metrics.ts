@@ -279,7 +279,7 @@ export interface SpacingScale {
    * `StepRow` can report "1.15×" rather than "1.15", which reads as a length.
    * The rest are CSS units and are appended verbatim.
    */
-  readonly unit: 'em' | 'x' | '%' | 'vh' | 'px'
+  readonly unit: 'em' | 'x' | '%' | 'vh' | 'px' | 'ms'
 }
 
 // Stryker disable next-line ObjectLiteral: emptying this table leaves `DEFAULT_SPACING` below reading `.def` off four missing scales, at module scope — so the mutant throws while this module is being imported, every covering suite fails to LOAD, no test fails, and Stryker's vitest runner reports it Survived with nothing able to kill it (measured 2026-09-14)
@@ -343,6 +343,46 @@ export const BRIGHTNESS: SpacingScale = {
  * clamp it validates against from the two ends, so the range a reader can
  * store and the range this offers cannot disagree.
  */
+/**
+ * The silence read aloud leaves at a sentence end and at a paragraph end.
+ *
+ * ⚠️ **ONLY EXPRESSIBLE BECAUSE THE READING IS SENTENCE-AT-A-TIME.** With a whole
+ * section queued as one utterance there is nowhere to put a pause: Web Speech
+ * exposes no break, no SSML and no inter-utterance delay. One utterance per
+ * sentence turns it into a timer between two of them, and the block index
+ * `collectText` records is what tells the two boundaries apart.
+ *
+ * ⚠️ **IN MILLISECONDS, AND NOT SCALED BY THE READING RATE.** Scaling was the
+ * other candidate and the argument for it is real — at 2.5× the words are shorter
+ * so a fixed gap is proportionally more prominent, and the rhythm changes. It is
+ * not taken because a SETTING must mean what it says: a reader who asks for 300ms
+ * and hears 120ms at speed has been overruled by the app. The engine's own
+ * sentence-final prosody already shortens with rate, so part of the total pause
+ * scales anyway, and a reader who wants less at speed can ask for less.
+ *
+ * ⚠️ **THE DEFAULTS ARE ADDITIVE AND THE ENGINE'S OWN GAP IS UNMEASURED.** Web
+ * Speech inserts some silence of its own between two utterances, engine by
+ * engine, and nothing here knows how much — the app was not running when these
+ * were chosen. So these are a judgement, not a measurement: a breath at a
+ * sentence, a clear beat at a paragraph. Measure the engine's contribution in the
+ * running app before defending either number.
+ *
+ * A paragraph boundary uses the paragraph value ALONE, not both added: the label
+ * says "between paragraphs", and a reader setting it to zero means no pause there.
+ */
+export const SENTENCE_GAP: SpacingScale = {
+  steps: [0, 150, 300, 500, 750, 1000],
+  def: 1,
+  unit: 'ms',
+}
+
+/** The silence at a paragraph end — see `SENTENCE_GAP`. */
+export const PARAGRAPH_GAP: SpacingScale = {
+  steps: [0, 300, 600, 900, 1400, 2000],
+  def: 2,
+  unit: 'ms',
+}
+
 export const READING_RATE: SpacingScale = {
   steps: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5],
   def: 2,
