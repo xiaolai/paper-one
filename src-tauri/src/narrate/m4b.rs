@@ -156,6 +156,20 @@ pub fn parse_aac(bytes: &[u8]) -> Result<Aac, String> {
             Some(_) => {}
         }
 
+        /* ⚠️ **A FRAME MAY CARRY UP TO FOUR RAW BLOCKS**, and every sample here
+         * is counted as exactly 1024. `afconvert` emits one block a frame, so
+         * this has never fired — but a stream that did would get a duration and
+         * a sample table wrong by a factor of up to four, which is a book whose
+         * chapter marks drift further apart the longer it plays. */
+        let blocks = bytes[at + 6] & 0x03;
+        if blocks != 0 {
+            return Err(format!(
+                "the frame at byte {at} carries {} raw blocks; Paper writes one sample per frame \
+                 and cannot describe it",
+                blocks + 1
+            ));
+        }
+
         frames.push((at + header, at + length));
         at += length;
     }
@@ -168,6 +182,24 @@ pub fn parse_aac(bytes: &[u8]) -> Result<Aac, String> {
     }
     let (sample_rate, channels, profile, frequency_index) =
         format.ok_or_else(|| "the stream holds no AAC frames at all".to_owned())?;
+    /* ⚠️ **`channel_configuration` IS NOT ALWAYS A CHANNEL COUNT.** 0 means the
+     * count lives in a program configuration element this does not parse, and 7
+     * means eight channels rather than seven — so writing it straight into
+     * `mp4a` would describe the wrong track. Speech is mono; anything else is
+     * refused rather than guessed at. */
+    if channels != 1 && channels != 2 {
+        return Err(format!(
+            "the stream declares channel configuration {channels}, and Paper writes mono or \
+             stereo only"
+        ));
+    }
+    /* A rate above 65 535 cannot be stated in `mp4a`'s 16.16 field, so the
+     * track would contradict itself. The speech engine answers 22 050. */
+    if sample_rate > u32::from(u16::MAX) {
+        return Err(format!(
+            "the stream is {sample_rate}Hz, which an MP4 sound sample description cannot state"
+        ));
+    }
     Ok(Aac {
         frames,
         sample_rate,
@@ -344,8 +376,13 @@ fn text_sample_entry() -> Vec<u8> {
     body.extend_from_slice(&[0; 8]); // reserved
     body.extend_from_slice(&be16(0)); // font number
     body.extend_from_slice(&be16(0)); // font face
-    body.push(0); // reserved
-    body.push(0); // reserved
+    body.push(0); // reserved (8-bit)
+                  /* ⚠️ **16 BITS, AND THIS WAS ONE BYTE.** The entry came out a byte short, so
+                   * the foreground colour and the font name after it sat at the wrong offsets.
+                   * AVFoundation tolerated it and the chapters still read back — which is
+                   * exactly why it survived: a malformed box that one reader forgives is a
+                   * box the next reader rejects. */
+    body.extend_from_slice(&be16(0)); // reserved (16-bit)
     body.extend_from_slice(&[0; 6]); // foreground colour
     body.push(0); // font name: none
     bx(b"text", &body)
@@ -405,13 +442,25 @@ fn stbl(entry: Vec<u8>, sizes: &[u32], deltas: &[(u32, u32)], chunk_offset: u32)
 /// ⚠️ **THE `encd` IS NOT OPTIONAL** — see the module header for the two
 /// spellings that came back as mojibake without it, and for why ffprobe cannot
 /// be the judge of this.
-pub fn text_sample(title: &str) -> Vec<u8> {
+pub fn text_sample(title: &str) -> Result<Vec<u8>, String> {
     let utf8 = title.as_bytes();
+    /* ⚠️ **THE LENGTH IS 16 BITS AND THE TITLE COMES FROM THE BOOK.** A table of
+     * contents entry longer than 65 535 bytes wrapped the count and left the
+     * rest of the title to be read as extension atoms — a malformed file built
+     * from a stranger's EPUB. Refused by name; nothing truncates a title
+     * silently. */
+    if utf8.len() > usize::from(u16::MAX) {
+        return Err(format!(
+            "a chapter title is {} bytes long and the format allows {}",
+            utf8.len(),
+            u16::MAX
+        ));
+    }
     let mut out = Vec::with_capacity(utf8.len() + 14);
     out.extend_from_slice(&be16(utf8.len() as u16));
     out.extend_from_slice(utf8);
     out.extend_from_slice(&bx(b"encd", &be32(ENCODING_UTF8)));
-    out
+    Ok(out)
 }
 
 /// Each chapter's length in milliseconds: up to the next one, and the last up to
@@ -448,18 +497,38 @@ pub fn build(
         return Err("a book with no chapters has nothing to mark".to_owned());
     }
     let total_ms = aac.duration_ms();
+    /* ⚠️ **THE TEXT TRACK IS A RUN OF SAMPLES FROM ZERO, SO THE STARTS MUST BE
+     * TOO.** `stts` places the first sample at time zero and each one after it
+     * end to end — there is no start field. A first chapter at 500ms was
+     * therefore drawn at 0, and two chapters sharing a start became samples at
+     * 0ms and 1ms rather than two marks at the same moment. Both were accepted
+     * and silently mis-placed; both are refused now, and `chapter_starts`
+     * produces exactly what this requires. */
+    if chapters[0].start_ms != 0 {
+        return Err(format!(
+            "'{}' starts at {}ms and the first chapter has to start at the beginning of the audio",
+            chapters[0].title, chapters[0].start_ms
+        ));
+    }
     for pair in chapters.windows(2) {
-        if pair[1].start_ms < pair[0].start_ms {
+        if pair[1].start_ms <= pair[0].start_ms {
             return Err(format!(
-                "the chapters are out of order: '{}' starts at {}ms, after '{}' at {}ms",
+                "the chapters are out of order: '{}' starts at {}ms and '{}' at {}ms, and each \
+                 chapter has to begin after the one before it",
                 pair[0].title, pair[0].start_ms, pair[1].title, pair[1].start_ms
             ));
         }
     }
     if let Some(last) = chapters.last() {
-        if last.start_ms > total_ms {
+        /* ⚠️ **`>=`, AND IT WAS `>`.** A chapter starting exactly where the audio
+         * ends was accepted, its duration then forced from zero to one
+         * millisecond — so `stts` totalled a millisecond more than the track's
+         * declared duration, and the mark itself could never be reached. Found in
+         * verification, not by the first pass. */
+        if last.start_ms >= total_ms {
             return Err(format!(
-                "'{}' starts at {}ms, past the {}ms of audio there is",
+                "'{}' starts at {}ms and there are only {}ms of audio, so it could never be \
+                 reached",
                 last.title, last.start_ms, total_ms
             ));
         }
@@ -469,7 +538,10 @@ pub fn build(
     let audio_bytes: usize = audio_sizes.iter().map(|s| *s as usize).sum();
     let audio_duration = aac.frames.len() as u64 * u64::from(SAMPLES_PER_FRAME);
     let durations = chapter_durations(chapters, total_ms);
-    let text_blobs: Vec<Vec<u8>> = chapters.iter().map(|c| text_sample(&c.title)).collect();
+    let text_blobs: Vec<Vec<u8>> = chapters
+        .iter()
+        .map(|c| text_sample(&c.title))
+        .collect::<Result<Vec<_>, _>>()?;
     let text_sizes: Vec<u32> = text_blobs.iter().map(|b| b.len() as u32).collect();
 
     let moov_with = |audio_offset: u32, text_offset: u32| -> Vec<u8> {
@@ -600,10 +672,41 @@ pub fn write(
     out: &Path,
 ) -> Result<u64, String> {
     let aac = parse_aac(aac_bytes)?;
+    /* THE DURATION, NOT THE BYTE COUNT. The byte count had no caller, and
+     * `package` was parsing the same stream a second time to learn the
+     * duration — while the value it actually returned to the app was the file
+     * SIZE reported as milliseconds. The end-to-end test caught it: a 30 508
+     * byte book reported as a 30 508 ms one. */
+    let duration_ms = aac.duration_ms();
     let file = build(aac_bytes, &aac, chapters, meta)?;
-    std::fs::write(out, &file)
-        .map_err(|error| format!("cannot write {}: {error}", out.display()))?;
-    Ok(file.len() as u64)
+    /* ⚠️ **WRITTEN BESIDE AND RENAMED, NEVER STRAIGHT ONTO `out`.** `fs::write`
+     * truncates first, so an interrupted write — a full disk, a crash — left a
+     * reader's existing audiobook destroyed or half replaced. A rename within one
+     * directory is atomic: the destination is the old file or the whole new one.
+     * `package` stages its own copy too; this is here so the guarantee belongs to
+     * the writer rather than to whoever remembers to call it correctly. */
+    let parent = out
+        .parent()
+        .ok_or_else(|| format!("{} has no directory to write into", out.display()))?;
+    let scratch = parent.join(format!(
+        ".paper-m4b-{}-{}.part",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let written = std::fs::write(&scratch, &file)
+        .map_err(|error| format!("cannot write {}: {error}", scratch.display()))
+        .and_then(|()| {
+            std::fs::rename(&scratch, out)
+                .map_err(|error| format!("cannot move the finished book into place: {error}"))
+        });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&scratch);
+    }
+    written?;
+    Ok(duration_ms)
 }
 
 #[cfg(test)]
@@ -709,7 +812,7 @@ mod tests {
 
     #[test]
     fn a_chapter_title_carries_its_encoding() {
-        let sample = text_sample("第三章");
+        let sample = text_sample("第三章").expect("a short title is fine");
         let utf8 = "第三章".as_bytes();
         assert_eq!(&sample[0..2], &(utf8.len() as u16).to_be_bytes());
         assert_eq!(&sample[2..2 + utf8.len()], utf8);
@@ -809,6 +912,12 @@ mod tests {
         let bytes = stream(5);
         let aac = parse_aac(&bytes).unwrap();
         let chapters = vec![
+            /* Starting at zero, so this reaches the ORDER rule rather than the
+            first-chapter rule that now guards the timeline ahead of it. */
+            Chapter {
+                title: "First".into(),
+                start_ms: 0,
+            },
             Chapter {
                 title: "Later".into(),
                 start_ms: 200,
@@ -826,12 +935,68 @@ mod tests {
     fn it_refuses_a_chapter_past_the_end_of_the_audio() {
         let bytes = stream(5);
         let aac = parse_aac(&bytes).unwrap();
-        let chapters = vec![Chapter {
-            title: "Nowhere".into(),
-            start_ms: 60_000,
-        }];
+        let chapters = vec![
+            Chapter {
+                title: "First".into(),
+                start_ms: 0,
+            },
+            Chapter {
+                title: "Nowhere".into(),
+                start_ms: 60_000,
+            },
+        ];
         let error = build(&bytes, &aac, &chapters, &BookMeta::default()).expect_err("refuses");
-        assert!(error.contains("past the"), "{error}");
+        assert!(error.contains("could never be reached"), "{error}");
+    }
+
+    /// ⚠️ **EXACTLY AT THE END WAS ACCEPTED, AND THE CHECK WAS `>`.** The chapter's
+    /// duration was then forced from zero to one millisecond, so `stts` totalled a
+    /// millisecond more than the track's declared duration — and the mark could
+    /// never be reached anyway. Found in verification.
+    #[test]
+    fn a_chapter_starting_exactly_where_the_audio_ends_is_refused() {
+        let bytes = stream(40);
+        let aac = parse_aac(&bytes).unwrap();
+        let total = aac.duration_ms();
+        let chapters = vec![
+            Chapter {
+                title: "First".into(),
+                start_ms: 0,
+            },
+            Chapter {
+                title: "At the very end".into(),
+                start_ms: total,
+            },
+        ];
+        let error = build(&bytes, &aac, &chapters, &BookMeta::default()).expect_err("refuses");
+        assert!(error.contains("could never be reached"), "{error}");
+    }
+
+    #[test]
+    fn every_chapter_duration_sums_to_the_declared_track_length() {
+        /* The invariant the accepted-at-the-end case broke: `stts` must total
+        exactly what `mdhd` declares, or a player's last chapter runs past the
+        audio. */
+        let chapters = vec![
+            Chapter {
+                title: "One".into(),
+                start_ms: 0,
+            },
+            Chapter {
+                title: "Two".into(),
+                start_ms: 2500,
+            },
+            Chapter {
+                title: "Three".into(),
+                start_ms: 4800,
+            },
+        ];
+        let total = 6362u64;
+        let sum: u64 = chapter_durations(&chapters, total)
+            .iter()
+            .map(|d| u64::from(*d))
+            .sum();
+        assert_eq!(sum, total);
     }
 
     /// The end-to-end check, and the ONLY one that proves the container is valid.
@@ -903,16 +1068,21 @@ mod tests {
             title: "A Measured Book".into(),
             author: "Paper".into(),
         };
-        let size = write(&bytes, &chapters, &meta, &book).expect("writes the book");
+        let reported_ms = write(&bytes, &chapters, &meta, &book).expect("writes the book");
 
         assert!(book.is_file(), "no file at {}", book.display());
-        /* LARGER THAN THE AUDIO IT CARRIES, which is the cheapest check that the
-         * header was written at all — a truncated write is the failure a size of
-         * zero would hide. */
+        /* ⚠️ **`write` REPORTS THE DURATION, AND THIS ASSERTED ON IT AS A BYTE
+         * COUNT.** It read `size as usize > audio` and passed for as long as the
+         * two happened to be the same kind of number — which is the defect that
+         * shipped once already, as a 30 508 byte book reported as 30 508 ms. The
+         * file's size comes from the filesystem now, and the duration is checked
+         * as a duration. */
+        let size = std::fs::metadata(&book).expect("stat the book").len() as usize;
         let audio: usize = aac.frames.iter().map(|(s, e)| e - s).sum();
-        assert!(
-            size as usize > audio,
-            "the file is smaller than its own audio"
+        assert!(size > audio, "the file is smaller than its own audio");
+        assert_eq!(
+            reported_ms, total,
+            "the reported duration is not the audio's"
         );
         println!(
             "wrote {} ({size} bytes, {total}ms, 3 chapters)",

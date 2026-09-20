@@ -32,13 +32,52 @@ pub fn to_i16(sample: f32) -> i16 {
     (clamped * f32::from(i16::MAX)) as i16
 }
 
+/// The largest frame count a classic WAV can describe.
+///
+/// ⚠️ **THE SIZE FIELDS ARE 32 BITS, AND A LONG AUDIOBOOK REACHES THEM.** At
+/// 22 050 Hz mono 16-bit that is about 27 hours — not a hypothetical for a
+/// joined book. Past it the header silently wraps and the encoder is handed a
+/// file describing a fraction of itself.
+pub const MAX_FRAMES: u64 = (MAX_DATA_BYTES / 2) as u64;
+
+/// The most audio a classic WAV can describe, leaving room for the 36 bytes the
+/// RIFF size counts on top of it — and rounded DOWN to a whole 16-bit frame.
+///
+/// ⚠️ **`u32::MAX - 36` IS ODD.** Clamping to it produced a data length that is
+/// not a whole number of samples, which `read` then refuses as malformed — so the
+/// belt against an unchecked length wrote a header no reader would accept. Found
+/// in the third verification pass, after two rounds on this same arithmetic.
+const MAX_DATA_BYTES: u32 = (u32::MAX - 36) & !1;
+
+/// The highest sample rate whose byte rate still fits the header's 32-bit field.
+const MAX_SAMPLE_RATE: u32 = u32::MAX / 2;
+
+/// Refuse a length this format cannot state, by name.
+pub fn check_size(frames: u64) -> Result<(), String> {
+    if frames > MAX_FRAMES {
+        return Err(format!(
+            "this book is {frames} frames long and a WAV can describe {MAX_FRAMES}; it is too \
+             long to join in one file"
+        ));
+    }
+    Ok(())
+}
+
 /// A 44-byte canonical WAV header for mono 16-bit PCM.
 ///
 /// Written with the sizes it will have, which is why finalising a render has to
 /// seek back and rewrite it: the frame count is not known until the engine has
 /// finished.
 pub fn header(frames: u64, sample_rate: u32) -> [u8; HEADER_BYTES] {
-    let data_bytes = (frames * 2) as u32;
+    /* CLAMPED TO WHAT THE *WHOLE HEADER* CAN STATE, not to what the data field
+     * can hold. The first version saturated `frames * 2` at `u32::MAX`, which
+     * left `36 + data_bytes` to overflow one line down — so a length just past
+     * the limit produced a RIFF size smaller than the file. `check_size` is the
+     * refusal callers owe; this is the belt, and a belt that overflows is not
+     * one. */
+    let data_bytes = u32::try_from(frames.saturating_mul(2))
+        .unwrap_or(MAX_DATA_BYTES)
+        .min(MAX_DATA_BYTES);
     let mut h = [0u8; HEADER_BYTES];
     h[0..4].copy_from_slice(b"RIFF");
     h[4..8].copy_from_slice(&(36 + data_bytes).to_le_bytes());
@@ -47,8 +86,12 @@ pub fn header(frames: u64, sample_rate: u32) -> [u8; HEADER_BYTES] {
     h[16..20].copy_from_slice(&16u32.to_le_bytes());
     h[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
     h[22..24].copy_from_slice(&1u16.to_le_bytes()); // mono
-    h[24..28].copy_from_slice(&sample_rate.to_le_bytes());
-    h[28..32].copy_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+                                                    /* The byte rate is the rate times two, and a rate above half of `u32::MAX`
+                                                     * cannot state it. Written as the clamped pair so the two fields agree with
+                                                     * each other; `read` refuses such a rate outright. */
+    let rate = sample_rate.min(MAX_SAMPLE_RATE);
+    h[24..28].copy_from_slice(&rate.to_le_bytes());
+    h[28..32].copy_from_slice(&(rate * 2).to_le_bytes()); // byte rate
     h[32..34].copy_from_slice(&2u16.to_le_bytes()); // block align
     h[34..36].copy_from_slice(&16u16.to_le_bytes()); // bits per sample
     h[36..40].copy_from_slice(b"data");
@@ -110,12 +153,31 @@ pub fn read(bytes: &[u8]) -> Result<Facts, String> {
     if sample_rate == 0 {
         return Err("this WAV claims a sample rate of zero".to_owned());
     }
+    if sample_rate > MAX_SAMPLE_RATE {
+        return Err(format!(
+            "this WAV claims a sample rate of {sample_rate}Hz, whose byte rate the header cannot \
+             state"
+        ));
+    }
     let declared = u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]) as usize;
     let present = bytes.len() - HEADER_BYTES;
-    if declared > present {
+    /* ⚠️ **EQUALITY, NOT `<=`.** The check was one-sided: a header claiming MORE
+     * than the file holds was refused, but one claiming LESS was accepted and
+     * the extra audio silently dropped — which is exactly what a stale
+     * zero-length placeholder header looks like, and it would have packaged a
+     * chapter as silence. */
+    if declared != present {
         return Err(format!(
             "this WAV says it holds {declared} bytes of audio and holds {present}, so the render \
              that wrote it did not finish"
+        ));
+    }
+    /* An odd byte count cannot be whole 16-bit frames. Rounding it down loses a
+     * sample and hides the fact that the file is malformed. */
+    if !declared.is_multiple_of(2) {
+        return Err(format!(
+            "this WAV declares {declared} bytes of 16-bit audio, which is not a whole number of \
+             samples"
         ));
     }
     Ok(Facts {
@@ -180,6 +242,89 @@ mod tests {
         short.truncate(HEADER_BYTES + 500);
         let error = read(&short).expect_err("refuses");
         assert!(error.contains("did not finish"), "{error}");
+    }
+
+    /// ⚠️ **THE CHECK WAS ONE-SIDED AND THIS IS THE HALF IT MISSED.** A header
+    /// claiming LESS than the file holds is what a stale zero-length placeholder
+    /// looks like — a render that wrote its header, crashed, and left the audio
+    /// unaccounted for. It was accepted, and the audio silently dropped.
+    #[test]
+    fn a_header_that_understates_the_audio_is_refused() {
+        let mut stale = wav(1000, 22_050);
+        stale[40..44].copy_from_slice(&0u32.to_le_bytes());
+        let error = read(&stale).expect_err("refuses");
+        assert!(error.contains("did not finish"), "{error}");
+    }
+
+    #[test]
+    fn an_odd_byte_count_is_not_whole_samples() {
+        let mut odd = wav(1000, 22_050);
+        odd.push(0);
+        odd[40..44].copy_from_slice(&2001u32.to_le_bytes());
+        let error = read(&odd).expect_err("refuses");
+        assert!(error.contains("whole number of samples"), "{error}");
+    }
+
+    /// ⚠️ **A WAV STATES ITS LENGTH IN 32 BITS**, so a joined audiobook past
+    /// about 27 hours at 22 050Hz wraps the header and describes a fraction of
+    /// itself. Refused by name before anything is written.
+    #[test]
+    fn a_book_too_long_for_the_format_is_refused() {
+        assert!(check_size(MAX_FRAMES).is_ok());
+        let error = check_size(MAX_FRAMES + 1).expect_err("refuses");
+        assert!(error.contains("too long to join"), "{error}");
+        /* 27 hours is the scale, so the limit must be near it rather than near
+        an hour — a bound checked only against itself proves nothing. */
+        let hours = MAX_FRAMES / 22_050 / 3600;
+        assert!((26..=28).contains(&hours), "limit is {hours} hours");
+    }
+
+    /// ⚠️ **`header` HAD TO BE SOUND ON ITS OWN, AND THE FIRST FIX LEFT IT
+    /// OVERFLOWING.** Saturating the data field still let `36 + data_bytes` wrap
+    /// one line later, so a length past the limit produced a RIFF size SMALLER
+    /// than the file it described. The audit caught it in verification.
+    #[test]
+    fn the_header_stays_coherent_at_and_past_the_limit() {
+        for frames in [MAX_FRAMES, MAX_FRAMES + 1, u64::MAX] {
+            let h = header(frames, 22_050);
+            let data = u32::from_le_bytes(h[40..44].try_into().unwrap());
+            let riff = u32::from_le_bytes(h[4..8].try_into().unwrap());
+            assert_eq!(riff, 36 + data, "riff and data disagree at {frames} frames");
+            assert!(data <= MAX_DATA_BYTES);
+            /* WHOLE SAMPLES, which the clamp itself got wrong once: an odd
+             * length is one `read` refuses, so the belt must not write one. */
+            assert_eq!(data % 2, 0, "an odd data length at {frames} frames");
+            /* AND THE RATE PAIR STAYS CONSISTENT at an unrepresentable rate. */
+            let h = header(frames, u32::MAX);
+            let rate = u32::from_le_bytes(h[24..28].try_into().unwrap());
+            let byte_rate = u32::from_le_bytes(h[28..32].try_into().unwrap());
+            assert_eq!(byte_rate, rate * 2, "rate and byte rate disagree");
+        }
+    }
+
+    #[test]
+    fn a_rate_whose_byte_rate_cannot_be_stated_is_refused() {
+        let mut fast = wav(10, 22_050);
+        fast[24..28].copy_from_slice(&(MAX_SAMPLE_RATE + 1).to_le_bytes());
+        let error = read(&fast).expect_err("refuses");
+        assert!(error.contains("byte rate"), "{error}");
+    }
+
+    #[test]
+    fn a_render_that_produced_no_audio_reads_as_none() {
+        /* A header with a zero length and no audio after it is CONSISTENT — it is
+        what a render that wrote its header and produced nothing looks like.
+        `read` accepts it and reports zero frames; refusing an empty chapter is
+        `package`'s job, where the chapter's title can be named. */
+        let empty = wav(0, 22_050);
+        assert_eq!(
+            read(&empty).expect("reads"),
+            Facts {
+                sample_rate: 22_050,
+                frames: 0
+            }
+        );
+        assert!(samples(&empty).expect("no samples").is_empty());
     }
 
     #[test]

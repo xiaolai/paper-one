@@ -32,17 +32,25 @@ export function useVoices(): readonly VoiceFacts[] {
      * synchronously once anything has asked it, and by the time a reader opens
      * the settings panel something has — so waiting for an event that has
      * already fired would show an empty picker for ever. */
-    const read = () => {
+    /**
+     * ⚠️ **AN EMPTY LIST FROM THE EVENT IS AUTHORITATIVE; AN EMPTY FIRST READ IS
+     * NOT.** This used to discard every empty answer, on the ground that some
+     * engines report `[]` transiently and the picker should not flicker. That is
+     * true of the synchronous read before the engine has loaded anything — and
+     * false of the event, which is exactly how an engine reports that the last
+     * voice was REMOVED. Kept that way, the picker offered voices the machine no
+     * longer had.
+     *
+     * The distinction is which call it is, not what it answered.
+     */
+    const read = (authoritative: boolean) => {
       const got = engine.getVoices()
-      /* EMPTY IS NOT PUBLISHED OVER A LIST WE ALREADY HAVE. Some engines answer
-       * `[]` transiently while reloading their list, and replacing a good list
-       * with nothing makes the picker flicker to "no voices" and back. Nothing
-       * is lost by keeping the old one: the next event carries the new list. */
-      if (got.length > 0) setVoices(got)
+      if (got.length > 0 || authoritative) setVoices(got)
     }
-    read()
-    engine.addEventListener('voiceschanged', read)
-    return () => engine.removeEventListener('voiceschanged', read)
+    read(false)
+    const onChanged = () => read(true)
+    engine.addEventListener('voiceschanged', onChanged)
+    return () => engine.removeEventListener('voiceschanged', onChanged)
   }, [])
 
   return voices

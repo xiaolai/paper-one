@@ -27,6 +27,11 @@ const TINGTING_COMPACT = voice('Tingting', 'zh-CN', 'com.apple.voice.compact.zh-
 const MEIJIA_SUPER = voice('Meijia', 'zh-TW', 'com.apple.voice.super-compact.zh-TW.Meijia')
 const ZARVOX = voice('Zarvox', 'en-US', 'com.apple.speech.synthesis.voice.Zarvox')
 const BOING = voice('Boing', 'en-US', 'com.apple.speech.synthesis.voice.Boing')
+/** In the same family as the sound effects, and a real voice — see `tierOf`. */
+const ALEX = voice('Alex', 'en-US', 'com.apple.speech.synthesis.voice.Alex')
+const FRED = voice('Fred', 'en-US', 'com.apple.speech.synthesis.voice.Fred')
+/** What a voice the engine synthesises on a server looks like. */
+const REMOTE = { ...voice('Cloud', 'en-US', 'urn:remote:cloud'), localService: false }
 /** What a voice looks like anywhere but macOS and iOS. */
 const ESPEAK = voice('English', 'en-GB', 'urn:moz-tts:sapi:English?en-GB')
 
@@ -38,6 +43,19 @@ describe('tierOf', () => {
     expect(tierOf(SAMANTHA_SUPER.voiceURI)).toBe('super-compact')
   })
 
+  /**
+   * ⚠️ **THE WHOLE FAMILY USED TO COUNT AS NOVELTY, WHICH LOST ALEX.** The rule
+   * was the identifier PREFIX, argued for because it needs no list of names. The
+   * family is not homogeneous: Alex, Fred, Kathy, Albert, Junior and Ralph share
+   * it with Boing and Zarvox, and Alex is the voice many readers would pick over
+   * everything else installed.
+   */
+  it('calls the real voices in the legacy family legacy, not novelty', () => {
+    expect(tierOf(ALEX.voiceURI)).toBe('legacy')
+    expect(tierOf(FRED.voiceURI)).toBe('legacy')
+    expect(tierOf('com.apple.speech.synthesis.voice.Kathy')).toBe('legacy')
+  })
+
   it('calls the whole novelty family novelty, not unknown', () => {
     /* THE ORDER OF THE TWO CHECKS IN `tierOf` IS WHAT THIS MEASURES. Both
      * families begin `com.apple.`, and a novelty identifier contains no tier
@@ -45,7 +63,7 @@ describe('tierOf', () => {
      * SELECTABLE rank, and Boing reads the book. */
     expect(tierOf(ZARVOX.voiceURI)).toBe('novelty')
     expect(tierOf(BOING.voiceURI)).toBe('novelty')
-    expect(tierOf('com.apple.speech.synthesis.voice.Albert')).toBe('novelty')
+    expect(tierOf('com.apple.speech.synthesis.voice.Bahh')).toBe('novelty')
   })
 
   it('calls anything that is not Apple unknown', () => {
@@ -218,12 +236,20 @@ describe('voiceOptions', () => {
 describe('voiceGroups', () => {
   const installed = [SAMANTHA_SUPER, ZARVOX, SAMANTHA_COMPACT, AVA_PREMIUM, DANIEL_ENHANCED, TINGTING_COMPACT]
 
-  it('orders the groups best tier first', () => {
+  /**
+   * ⚠️ **THIS ASSERTED TIER ORDER AND TIER ORDER WAS THE BUG.** It expected
+   * premium, enhanced, compact, super-compact for an `en-US` document — but
+   * `DANIEL_ENHANCED` is `en-GB`, and language outranks tier, so putting its
+   * group second contradicted `bestVoice`. The groups follow the same score the
+   * pick does now, which puts every exact-language group ahead of the
+   * other-region one however good that one is.
+   */
+  it('orders the groups the way the voices are actually ranked', () => {
     expect(voiceGroups(installed, 'en-US').map((group) => group.tier)).toEqual([
       'premium',
-      'enhanced',
       'compact',
       'super-compact',
+      'enhanced',
     ])
   })
 
@@ -252,5 +278,71 @@ describe('voiceGroups', () => {
 
   it('offers nothing for a document that declares no language', () => {
     expect(voiceGroups(installed, null)).toEqual([])
+  })
+})
+
+describe('the legacy family, split', () => {
+  it('offers a classic voice rather than excluding it', () => {
+    expect(bestVoice([ALEX], 'en-US')).toBe(ALEX)
+    expect(voiceOptions([ALEX, ZARVOX], 'en-US')).toEqual([ALEX])
+  })
+
+  it('still prefers a modern voice to a classic one', () => {
+    /* Alex is offered, not promoted: the compact voices are generally better for
+       a whole book, and a reader who wants Alex can say so. */
+    expect(bestVoice([ALEX, SAMANTHA_COMPACT], 'en-US')).toBe(SAMANTHA_COMPACT)
+    expect(bestVoice([ALEX, SAMANTHA_SUPER], 'en-US')).toBe(ALEX)
+  })
+})
+
+describe('a voice the engine speaks on a server', () => {
+  it('is never chosen automatically', () => {
+    /* Web Speech permits a remote voice, and Paper reads whole sections aloud —
+       so choosing one would send a book off the machine. */
+    expect(bestVoice([REMOTE], 'en-US')).toBeNull()
+    expect(bestVoice([REMOTE, SAMANTHA_SUPER], 'en-US')).toBe(SAMANTHA_SUPER)
+  })
+
+  it('is not offered in the picker', () => {
+    expect(voiceOptions([REMOTE, SAMANTHA_COMPACT], 'en-US')).toEqual([SAMANTHA_COMPACT])
+  })
+
+  it('is refused even when the reader has stored it', () => {
+    expect(chosenVoice([REMOTE], 'en-US', { en: REMOTE.voiceURI })).toBeNull()
+  })
+
+  it('does not refuse a voice that simply did not say', () => {
+    /* Absent is unknown, not remote — a fixture and an older engine both land
+       there, and refusing on silence would take read-aloud off machines that
+       are fine. */
+    expect(bestVoice([SAMANTHA_COMPACT], 'en-US')).toBe(SAMANTHA_COMPACT)
+  })
+})
+
+describe('a sound effect the reader has stored', () => {
+  it('is refused, so the automatic pick answers instead', () => {
+    /* `bestVoice` and `voiceOptions` both promise never to choose one; a stored
+       preference walked past both, because a choice was only checked for
+       language. A hand-edited settings file is where such a value comes from. */
+    const installed = [ZARVOX, SAMANTHA_COMPACT]
+    expect(chosenVoice(installed, 'en-US', { en: ZARVOX.voiceURI })).toBeNull()
+    expect(voiceFor(installed, 'en-US', { en: ZARVOX.voiceURI })).toBe(SAMANTHA_COMPACT)
+  })
+})
+
+describe('the picker cannot disagree with the choice', () => {
+  /**
+   * ⚠️ **IT DID.** `voiceGroups` sorted its groups by tier alone, so with an
+   * `en-GB` Premium and an `en-US` Compact installed the first row was the
+   * Premium while `bestVoice` took the Compact — language outranks tier. The
+   * reader was shown a first row that was not the default.
+   */
+  it('puts the group holding the chosen voice first', () => {
+    const premiumElsewhere = voice('Ava', 'en-GB', 'com.apple.voice.premium.en-GB.Ava')
+    const compactHere = voice('Samantha', 'en-US', 'com.apple.voice.compact.en-US.Samantha')
+    const installed = [premiumElsewhere, compactHere]
+    const groups = voiceGroups(installed, 'en-US')
+    expect(groups[0]?.tier).toBe('compact')
+    expect(groups[0]?.voices[0]).toBe(bestVoice(installed, 'en-US'))
   })
 })

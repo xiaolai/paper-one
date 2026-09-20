@@ -49,9 +49,18 @@ use serde::Serialize;
 use tauri::{AppHandle, Runtime};
 
 /// The container — pure Rust, no framework, tested everywhere. See the module.
+///
+/// ⚠️ **GATED, BECAUSE `mod narrate` IS PRIVATE AND `pub` DOES NOT SAVE IT.**
+/// Nothing outside the Apple backend and these modules' own tests calls any of
+/// this, so on Linux and Windows every item below is unreachable from the
+/// crate's public API — which is `dead_code`, which `cargo clippy --all-targets
+/// -- -D warnings` turns into a failed build. The audit caught it; a Mac never
+/// could.
+#[cfg(any(target_os = "macos", test))]
 pub mod m4b;
 
 /// The WAV between the engine and the encoder, both directions. See the module.
+#[cfg(any(target_os = "macos", test))]
 pub mod wav;
 
 /// The Objective-C half. Everything above and below it is portable and tested
@@ -65,6 +74,7 @@ mod apple;
 /// TAKEN FROM `AVSpeechSynthesisVoiceQuality` HERE, not parsed out of the
 /// identifier: on this side the platform answers the question directly, and a
 /// string match would be a second implementation of something already given.
+#[cfg(any(target_os = "macos", test))]
 fn quality_name(raw: isize) -> &'static str {
     match raw {
         3 => "premium",
@@ -89,6 +99,7 @@ pub struct VoiceInfo {
 ///
 /// The raw values are `AVSpeechSynthesisMarkerMark`'s, whose order is declared
 /// in the SDK header: phoneme, word, sentence, paragraph, bookmark.
+#[cfg(any(target_os = "macos", test))]
 fn mark_name(raw: isize) -> &'static str {
     match raw {
         0 => "phoneme",
@@ -129,6 +140,7 @@ pub struct Rendered {
 /// Feed it what the callbacks report, in the order they report it: samples
 /// arrive, an empty buffer ends a segment, markers carry an offset that is
 /// relative to the segment they are in. It answers absolute positions.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Default)]
 struct Timeline {
     /// Frames emitted across every segment so far.
@@ -139,6 +151,7 @@ struct Timeline {
     bytes_per_frame: usize,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl Timeline {
     fn push_frames(&mut self, n: u64) {
         self.frames += n;
@@ -181,7 +194,7 @@ impl Timeline {
 /// is the part that matters — it is the one delivering the speech engine's
 /// callbacks.
 #[cfg(target_os = "macos")]
-async fn offload<T, F>(work: F) -> Result<T, String>
+async fn offload<T, F>(what: &str, work: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
     T: Send + 'static,
@@ -189,9 +202,10 @@ where
     match tauri::async_runtime::spawn_blocking(work).await {
         Ok(outcome) => outcome,
         /* A panic in the worker, which would otherwise surface as a silent hang.
-         * Named, because "the render stopped" is the one thing a caller must not
-         * have to guess at. */
-        Err(error) => Err(format!("the render did not finish: {error}")),
+         * NAMED BY OPERATION: this helper serves both commands, and a hardcoded
+         * "the render did not finish" reported a failed PACKAGE as a failed
+         * render — which sends whoever is diagnosing it to the wrong half. */
+        Err(error) => Err(format!("the {what} did not finish: {error}")),
     }
 }
 
@@ -219,6 +233,7 @@ pub struct Packaged {
 /// that needs no audio at all. The running total is in FRAMES and converted once,
 /// because summing rounded milliseconds drifts: forty chapters rounded down
 /// individually can put the last mark most of a second early.
+#[cfg(any(target_os = "macos", test))]
 pub fn chapter_starts(parts: &[wav::Facts]) -> Result<Vec<u64>, String> {
     let mut starts = Vec::with_capacity(parts.len());
     let mut frames = 0u64;
@@ -226,6 +241,13 @@ pub fn chapter_starts(parts: &[wav::Facts]) -> Result<Vec<u64>, String> {
         Some(first) => first.sample_rate,
         None => return Ok(starts),
     };
+    /* A ZERO RATE IS AN ERROR, NOT A PANIC. `wav::read` refuses one today, so
+     * this is unreachable through the only caller — but `Facts` has public
+     * fields and this function returns `Result`, so the one outcome it must not
+     * have is a division by zero in a release build. */
+    if rate == 0 {
+        return Err("the first chapter reports a sample rate of zero".to_owned());
+    }
     for (index, part) in parts.iter().enumerate() {
         /* ⚠️ **ONE RATE FOR THE WHOLE BOOK.** Chapters are rendered separately, so
          * two could in principle come back at different rates — and a single
@@ -287,7 +309,10 @@ pub async fn narrate_package(
 ) -> Result<Packaged, String> {
     #[cfg(target_os = "macos")]
     {
-        offload(move || apple::package(chapters, title, author, path)).await
+        offload("package", move || {
+            apple::package(chapters, title, author, path)
+        })
+        .await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -314,7 +339,10 @@ pub async fn narrate_render<R: Runtime>(
 ) -> Result<Rendered, String> {
     #[cfg(target_os = "macos")]
     {
-        offload(move || apple::render(&app, text, voice, rate, path)).await
+        offload("render", move || {
+            apple::render(&app, text, voice, rate, path)
+        })
+        .await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -331,6 +359,64 @@ mod tests {
     /// 154-second render of twelve repeated sentences gave 11 offset drops —
     /// `byteSampleOffset` restarts at every internal segment. Read as absolute,
     /// every word after the first segment lands in the first twelve seconds.
+    /// ⚠️ **THE DOC CLAIMED THIS TEST EXISTED AND IT DID NOT.** `chapter_starts`
+    /// says "PURE, so the arithmetic that decides where a chapter mark lands has
+    /// a test that needs no audio at all" — a guarantee written down and never
+    /// written. The audit found it.
+    #[test]
+    fn chapter_starts_accumulate_in_frames() {
+        let at = |frames| wav::Facts {
+            sample_rate: 22_050,
+            frames,
+        };
+        /* One second, then half a second, then the rest. */
+        let starts = chapter_starts(&[at(22_050), at(11_025), at(22_050)]).expect("starts");
+        assert_eq!(starts, vec![0, 1000, 1500]);
+    }
+
+    #[test]
+    fn chapter_starts_do_not_drift_over_many_chapters() {
+        /* THE REASON THE RUNNING TOTAL IS IN FRAMES. 1000 frames at 22 050Hz is
+         * 45.35ms; rounded down to 45 and summed, forty of them lose 14ms. */
+        let at = |frames| wav::Facts {
+            sample_rate: 22_050,
+            frames,
+        };
+        let parts: Vec<_> = std::iter::repeat_n(at(1000), 40).collect();
+        let starts = chapter_starts(&parts).expect("starts");
+        assert_eq!(starts[39], 39 * 1000 * 1000 / 22_050);
+        assert_ne!(starts[39], 39 * (1000 * 1000 / 22_050));
+    }
+
+    #[test]
+    fn chapter_starts_refuse_a_mixed_rate_book() {
+        let starts = chapter_starts(&[
+            wav::Facts {
+                sample_rate: 22_050,
+                frames: 100,
+            },
+            wav::Facts {
+                sample_rate: 44_100,
+                frames: 100,
+            },
+        ]);
+        assert!(starts.expect_err("refuses").contains("cannot be one file"));
+    }
+
+    #[test]
+    fn chapter_starts_refuse_a_zero_rate_rather_than_dividing_by_it() {
+        let starts = chapter_starts(&[wav::Facts {
+            sample_rate: 0,
+            frames: 100,
+        }]);
+        assert!(starts.expect_err("refuses").contains("sample rate of zero"));
+    }
+
+    #[test]
+    fn chapter_starts_of_nothing_is_nothing() {
+        assert_eq!(chapter_starts(&[]).expect("empty"), Vec::<u64>::new());
+    }
+
     #[test]
     fn a_marker_offset_is_relative_to_its_segment() {
         let mut timeline = Timeline {

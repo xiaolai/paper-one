@@ -30,6 +30,130 @@ use super::{
     Timeline, VoiceInfo,
 };
 
+/// Only one narration at a time, across both commands.
+///
+/// ⚠️ **`Live`'s DOC CLAIMED A SECOND RENDER WAS "REFUSED BY NAME" AND NOTHING
+/// REFUSED ANYTHING.** A second call replaced the slot, dropping the first
+/// render's retained synthesiser mid-flight and leaving its caller to wait out
+/// the stall watchdog. Two packages in one directory collided on scratch names
+/// besides. The audit found the guarantee in the prose and not in the code,
+/// which is the worst place for one to live.
+///
+/// ONE GATE FOR BOTH COMMANDS, not one per resource: the exporter is sequential
+/// and a queue nobody asked for is a queue that hides this contention instead of
+/// reporting it.
+static BUSY: Mutex<bool> = Mutex::new(false);
+
+/// Holds the gate for as long as it is alive, and releases it however the work
+/// ends — including a panic, which is what makes this a guard and not a pair of
+/// calls somebody has to remember to balance.
+struct Admission;
+
+impl Admission {
+    fn take(what: &str) -> Result<Self, String> {
+        let mut busy = BUSY
+            .lock()
+            .map_err(|_| "the narration gate was poisoned".to_owned())?;
+        if *busy {
+            return Err(format!(
+                "Paper is already rendering; wait for it to finish before starting a {what}"
+            ));
+        }
+        *busy = true;
+        Ok(Self)
+    }
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        if let Ok(mut busy) = BUSY.lock() {
+            *busy = false;
+        }
+    }
+}
+
+/// A file written beside its destination and moved into place only once whole.
+///
+/// ⚠️ **`File::create` ON THE DESTINATION TRUNCATES IT BEFORE ANY WORK HAPPENS.**
+/// `render` did that before it had even resolved the voice, so a bad voice
+/// identifier emptied whatever was at that path; `package` went further and
+/// REMOVED the destination on any failure, including ones that happened before
+/// it had written a byte. Either way a reader who exported over an existing
+/// audiobook lost it to a failure that had nothing to do with the file.
+///
+/// `create_new` refuses to follow or overwrite anything already at the scratch
+/// name, which also closes the predictable-path symlink the audit found: the
+/// old name was the process id alone, so a second call collided and a planted
+/// link was followed.
+struct Staged {
+    path: PathBuf,
+    done: bool,
+}
+
+impl Staged {
+    fn beside(target: &Path, what: &str) -> Result<(Self, File), String> {
+        let parent = target
+            .parent()
+            .ok_or_else(|| format!("{} has no directory to write into", target.display()))?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        for attempt in 0..8u32 {
+            let path = parent.join(format!(
+                ".paper-{what}-{}-{stamp}-{attempt}.part",
+                std::process::id()
+            ));
+            match File::options().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((Self { path, done: false }, file)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!("cannot write beside {}: {error}", target.display()))
+                }
+            }
+        }
+        Err(format!(
+            "cannot find an unused scratch name beside {}",
+            target.display()
+        ))
+    }
+
+    /// Move the finished file onto the destination. A rename within one
+    /// directory is atomic, so the destination is either the old file or the
+    /// whole new one — never half of either.
+    fn commit(mut self, target: &Path) -> Result<(), String> {
+        std::fs::rename(&self.path, target)
+            .map_err(|error| format!("cannot move the finished file into place: {error}"))?;
+        self.done = true;
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        /* ⚠️ **ONLY EVER THIS FILE.** The destination is never removed: it may
+         * be a book the reader already had, and no failure here is a reason to
+         * take it from them. */
+        if self.done {
+            return;
+        }
+        /* ⚠️ **A FAILED CLEANUP IS SAID OUT LOUD.** This was `let _ = remove_file`,
+         * which is how a successful export leaves a scratch file the size of the
+         * book behind and reports nothing — the failure nobody notices until a
+         * disk is full. A drop cannot return an error, so it logs: the process
+         * log is where this belongs, and the export's own result is not the place
+         * to report a tidy-up that did not matter to it. */
+        if let Err(error) = std::fs::remove_file(&self.path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "narrate: could not remove the scratch file {}: {error}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+}
+
 /// How long a render may go without a single callback before it is refused.
 ///
 /// A WATCHDOG ON SILENCE, not a budget for the whole render — which cannot be
@@ -152,6 +276,8 @@ pub(super) fn render<R: Runtime>(
     if text.trim().is_empty() {
         return Err("nothing to read: the text is empty".to_owned());
     }
+    let _admission = Admission::take("render")?;
+
     let target = PathBuf::from(&path);
     let parent = target
         .parent()
@@ -160,7 +286,9 @@ pub(super) fn render<R: Runtime>(
         return Err(format!("{} is not a directory", parent.display()));
     }
 
-    let file = File::create(&target).map_err(|error| format!("cannot write {path}: {error}"))?;
+    /* STAGED, NOT WRITTEN IN PLACE — see `Staged`. This used to truncate the
+     * destination before it had even resolved the voice. */
+    let (staged, file) = Staged::beside(&target, "render")?;
     let mut writer = BufWriter::new(file);
     /* A PLACEHOLDER HEADER, rewritten at the end: the frame count is not known
      * until the engine has finished, and a WAV states it twice up front. */
@@ -180,31 +308,95 @@ pub(super) fn render<R: Runtime>(
         woke: Condvar::new(),
     });
 
-    let started = start_on_main(app, shared.clone(), text, voice, rate);
-    if let Err(error) = started {
-        let _ = std::fs::remove_file(&target);
-        return Err(error);
-    }
+    start_on_main(app, shared.clone(), text, voice, rate)?;
 
     let outcome = wait_for(&shared);
 
-    /* THE FILE GOES WITH ANY REFUSAL. A partial WAV left on disk is a chapter
-     * that plays, ends early, and says nothing about it — the failure this
-     * whole module is most at risk of shipping. */
-    let finalized = match outcome {
-        Err(error) => {
-            let _ = std::fs::remove_file(&target);
-            return Err(error);
-        }
-        Ok(()) => finalize(&shared, &target),
-    };
-    match finalized {
-        Ok(rendered) => Ok(rendered),
-        Err(error) => {
-            let _ = std::fs::remove_file(&target);
-            Err(error)
+    /* ⚠️ **THE SYNTHESISER IS STOPPED ON EVERY EXIT, NOT ONLY A CLEAN ONE.** A
+     * timeout used to return while the engine kept running: its callbacks went
+     * on writing through a handle to a file that had just been unlinked, and a
+     * late main-thread start could begin after the caller had already failed. */
+    let stopped = stop_on_main(app);
+
+    /* THE PART-WRITTEN FILE GOES WITH ANY REFUSAL — but it is the STAGED file,
+     * never the destination. A partial WAV is a chapter that plays, ends early,
+     * and says nothing about it. */
+    /* ⚠️ **THE WRITER IS TAKEN AWAY BEFORE THE STAGED FILE CAN BE UNLINKED.**
+     * `stop_on_main` posts the stop and does not await it, so a callback can
+     * still arrive after this returns. On the success path `finalize` takes the
+     * writer out from under the mutex and the file is safe; on the FAILURE path
+     * it used to stay in place while `Staged::drop` unlinked the file, leaving a
+     * late callback writing into an unlinked inode. Harmless — the writes go
+     * nowhere and the space comes back — but "harmless" is not a thing to leave
+     * in a module whose whole job is refusing to write a wrong file. */
+    if outcome.is_err() {
+        if let Ok(mut progress) = shared.progress.lock() {
+            progress.writer = None;
         }
     }
+    outcome?;
+    /* ⚠️ **EVERY FAILURE IS DECIDED BEFORE THE DESTINATION IS TOUCHED.** The first
+     * version committed the staged file and only then checked whether the stop
+     * had been scheduled — so a failed stop reported failure having already
+     * replaced whatever the reader had at that path. Found in verification. The
+     * commit is now the LAST thing that can happen. */
+    stopped?;
+    let rendered = finalize(&shared, &target)?;
+    staged.commit(&target)?;
+    Ok(rendered)
+}
+
+/// Which render the main thread is allowed to install.
+///
+/// ⚠️ **A TIMED-OUT `start_on_main` RELEASES THE GATE WITH ITS CLOSURE STILL
+/// QUEUED.** The closure then ran later, built a synthesiser and put it in
+/// `LIVE` — over whatever render had been admitted since. The gate cannot help:
+/// by then its holder has returned. So each attempt carries a number, the main
+/// thread installs only if the number is still current, and abandoning an
+/// attempt is a matter of moving the number on. Found in verification.
+static GENERATION: Mutex<u64> = Mutex::new(0);
+
+/// Claim the next generation. Anything queued under an older one is abandoned.
+fn next_generation() -> u64 {
+    match GENERATION.lock() {
+        Ok(mut at) => {
+            *at += 1;
+            *at
+        }
+        /* A poisoned counter cannot be reasoned about, so nothing installs. */
+        Err(_) => u64::MAX,
+    }
+}
+
+fn is_current(generation: u64) -> bool {
+    GENERATION
+        .lock()
+        .map(|at| *at == generation)
+        .unwrap_or(false)
+}
+
+/// Stop whatever the synthesiser is doing and release the objects held for it.
+///
+/// Posted to the main thread and NOT waited on, deliberately: the caller is
+/// already returning, and blocking here would re-introduce the deadlock the
+/// async commands exist to avoid. Clearing `LIVE` drops the synthesiser, which
+/// is what actually ends the render.
+fn stop_on_main<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    /* Moving the generation on is what abandons any start still in the queue. */
+    let _ = next_generation();
+    app.run_on_main_thread(|| {
+        if let Ok(mut live) = LIVE.lock() {
+            if let Some(active) = live.as_ref() {
+                unsafe {
+                    active
+                        ._synth
+                        .stopSpeakingAtBoundary(objc2_avf_audio::AVSpeechBoundary::Immediate)
+                };
+            }
+            *live = None;
+        }
+    })
+    .map_err(|error| format!("cannot reach the main thread to stop the render: {error}"))
 }
 
 /// Wait until the delegate says the utterance finished, or nothing has happened
@@ -296,8 +488,16 @@ fn start_on_main<R: Runtime>(
     /* The identifier is resolved on the main thread too, so the refusal comes
      * back through the same channel every other failure does. */
     let (ready, answered) = std::sync::mpsc::channel::<Result<(), String>>();
+    let generation = next_generation();
     app.run_on_main_thread(move || {
         let outcome = (|| -> Result<(), String> {
+            /* ⚠️ **THE CALLER MAY HAVE GIVEN UP WHILE THIS SAT IN THE QUEUE.**
+             * Installing anyway put a synthesiser in `LIVE` over a render that
+             * had been admitted since — see `GENERATION`. Nothing is built at
+             * all in that case, which is also why this is the first line. */
+            if !is_current(generation) {
+                return Err("this render was abandoned before it started".to_owned());
+            }
             let ident = NSString::from_str(&voice);
             let found = unsafe { AVSpeechSynthesisVoice::voiceWithIdentifier(&ident) }
                 .ok_or_else(|| format!("this machine has no voice called {voice}"))?;
@@ -352,7 +552,19 @@ fn start_on_main<R: Runtime>(
 
             /* HELD PAST THE END OF THIS CLOSURE — see `Live`. Replacing the slot
              * drops the previous render's objects here, on the main thread. */
+            /* ⚠️ **CHECKED AND INSTALLED UNDER ONE LOCK.** Checking the
+             * generation and then installing left a window: a timeout landing
+             * between the two advanced the generation and the closure installed
+             * anyway. Holding `LIVE` across both closes it, because every other
+             * writer of the slot takes the same lock. Found in the third
+             * verification pass. */
             if let Ok(mut live) = LIVE.lock() {
+                if !is_current(generation) {
+                    unsafe {
+                        synth.stopSpeakingAtBoundary(objc2_avf_audio::AVSpeechBoundary::Immediate)
+                    };
+                    return Err("this render was abandoned while it was starting".to_owned());
+                }
                 *live = Some(Live {
                     _synth: synth,
                     _delegate: watcher,
@@ -368,9 +580,21 @@ fn start_on_main<R: Runtime>(
     })
     .map_err(|error| format!("cannot reach the main thread to start the render: {error}"))?;
 
-    answered
-        .recv_timeout(STALL)
-        .map_err(|_| "the main thread did not start the render".to_owned())?
+    match answered.recv_timeout(STALL) {
+        Ok(outcome) => outcome,
+        /* ⚠️ **AND THE TIMEOUT USED TO RETURN WITHOUT ABANDONING ANYTHING**, so
+         * the closure could still arrive and install a synthesiser nobody was
+         * waiting for. Moving the generation on is what makes it a no-op. */
+        Err(_) => {
+            /* ⚠️ **AND THE TIMEOUT STOPS WHAT IT ABANDONS.** Advancing the
+             * generation alone stopped a closure that had not run yet — it did
+             * nothing about one that had already installed a synthesiser and was
+             * about to report readiness to a caller that had gone. `stop_on_main`
+             * advances the generation AND clears the slot. */
+            let _ = stop_on_main(app);
+            Err("the main thread did not start the render".to_owned())
+        }
+    }
 }
 
 /// One buffer of samples, or the empty buffer that ends a segment.
@@ -491,89 +715,102 @@ pub(super) fn package(
     if chapters.is_empty() {
         return Err("there are no chapters to package".to_owned());
     }
+    let _admission = Admission::take("package")?;
 
-    /* READ EVERY CHAPTER FIRST, before writing anything. A book that fails on
-     * its last chapter should leave no half-written file behind, and finding out
-     * early costs one pass over files already on disk. */
-    let mut parts = Vec::with_capacity(chapters.len());
+    let target = PathBuf::from(&path);
+
+    /* ⚠️ **MEASURE EVERY CHAPTER FIRST, WITHOUT KEEPING ANY OF IT.** The first
+     * version read all of them into memory and then built a second, whole-book
+     * copy beside them: ten hours of 22.05 kHz mono is about 1.6 GB, so the peak
+     * passed 3 GB before the encoder had started, and an ordinary export could
+     * end the app. Each file is read, measured, and dropped here; the bytes are
+     * streamed once, below. */
+    let mut facts = Vec::with_capacity(chapters.len());
     for (index, chapter) in chapters.iter().enumerate() {
         let bytes = std::fs::read(&chapter.path)
             .map_err(|error| format!("cannot read chapter {}: {error}", index + 1))?;
-        let facts = wav::read(&bytes)
+        let measured = wav::read(&bytes)
             .map_err(|error| format!("chapter {} ({}): {error}", index + 1, chapter.title))?;
-        parts.push((bytes, facts));
+        if measured.frames == 0 {
+            /* A silent chapter would share the previous chapter's start, and two
+             * marks at one moment cannot both be reached. */
+            return Err(format!(
+                "chapter {} ({}) has no audio, so it has no place in the book",
+                index + 1,
+                chapter.title
+            ));
+        }
+        facts.push(measured);
     }
 
-    let facts: Vec<wav::Facts> = parts.iter().map(|(_, f)| *f).collect();
     let starts = chapter_starts(&facts)?;
     let rate = facts[0].sample_rate;
     let total_frames: u64 = facts.iter().map(|f| f.frames).sum();
-    if total_frames == 0 {
-        return Err("every chapter is empty, so there is no book to write".to_owned());
-    }
+    /* ⚠️ **A WAV STATES ITS LENGTH IN 32 BITS.** Past about 27 hours at 22.05 kHz
+     * the header wraps and `afconvert` is handed a file that describes a
+     * fraction of itself. Refused by name rather than silently truncated. */
+    wav::check_size(total_frames)?;
 
-    /* ONE WAV FOR THE WHOLE BOOK, beside the destination rather than in a shared
-     * temporary directory: it is as large as the book, and a reader who chose
-     * where the book goes has chosen somewhere with room for it. Removed
-     * whatever happens next. */
-    let target = std::path::PathBuf::from(&path);
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("{path} has no directory to write into"))?;
-    let joined = parent.join(format!(".paper-audiobook-{}.wav", std::process::id()));
-    let adts = joined.with_extension("adts");
-
-    let outcome = (|| -> Result<Packaged, String> {
-        let mut whole = Vec::with_capacity(wav::HEADER_BYTES + (total_frames * 2) as usize);
-        whole.extend_from_slice(&wav::header(total_frames, rate));
-        for (bytes, _) in &parts {
-            whole.extend_from_slice(wav::samples(bytes)?);
-        }
-        std::fs::write(&joined, &whole)
+    let (staged_audio, joined_file) = Staged::beside(&target, "join")?;
+    let mut joined = BufWriter::new(joined_file);
+    joined
+        .write_all(&wav::header(total_frames, rate))
+        .map_err(|error| format!("cannot write the joined audio: {error}"))?;
+    for (index, chapter) in chapters.iter().enumerate() {
+        let bytes = std::fs::read(&chapter.path)
+            .map_err(|error| format!("cannot read chapter {}: {error}", index + 1))?;
+        joined
+            .write_all(wav::samples(&bytes)?)
             .map_err(|error| format!("cannot write the joined audio: {error}"))?;
-        drop(whole);
-
-        let converted = std::process::Command::new("/usr/bin/afconvert")
-            .args(["-f", "adts", "-d", "aac", "-b", "64000"])
-            .arg(&joined)
-            .arg(&adts)
-            .output()
-            .map_err(|error| format!("cannot run afconvert: {error}"))?;
-        if !converted.status.success() {
-            return Err(format!(
-                "afconvert refused the audio: {}",
-                String::from_utf8_lossy(&converted.stderr).trim()
-            ));
-        }
-
-        let encoded = std::fs::read(&adts)
-            .map_err(|error| format!("cannot read the encoded audio: {error}"))?;
-        let marks: Vec<m4b::Chapter> = chapters
-            .iter()
-            .zip(&starts)
-            .map(|(chapter, start)| m4b::Chapter {
-                title: chapter.title.clone(),
-                start_ms: *start,
-            })
-            .collect();
-        let meta = m4b::BookMeta { title, author };
-        m4b::write(&encoded, &marks, &meta, &target)?;
-
-        let parsed = m4b::parse_aac(&encoded)?;
-        Ok(Packaged {
-            path: path.clone(),
-            duration_ms: parsed.duration_ms(),
-            chapters: marks.len(),
-        })
-    })();
-
-    /* THE SCRATCH FILES GO EITHER WAY. They are the size of the book. */
-    let _ = std::fs::remove_file(&joined);
-    let _ = std::fs::remove_file(&adts);
-    if outcome.is_err() {
-        let _ = std::fs::remove_file(&target);
+        /* Dropped before the next one is read, which is the whole point. */
+        drop(bytes);
     }
-    outcome
+    joined
+        .flush()
+        .map_err(|error| format!("cannot flush the joined audio: {error}"))?;
+    drop(joined);
+
+    let (staged_adts, _) = Staged::beside(&target, "aac")?;
+    let converted = std::process::Command::new("/usr/bin/afconvert")
+        .args(["-f", "adts", "-d", "aac", "-b", "64000"])
+        .arg(&staged_audio.path)
+        .arg(&staged_adts.path)
+        .output()
+        .map_err(|error| format!("cannot run afconvert: {error}"))?;
+    if !converted.status.success() {
+        return Err(format!(
+            "afconvert refused the audio: {}",
+            String::from_utf8_lossy(&converted.stderr).trim()
+        ));
+    }
+    drop(staged_audio);
+
+    let encoded = std::fs::read(&staged_adts.path)
+        .map_err(|error| format!("cannot read the encoded audio: {error}"))?;
+    let marks: Vec<m4b::Chapter> = chapters
+        .iter()
+        .zip(&starts)
+        .map(|(chapter, start)| m4b::Chapter {
+            title: chapter.title.clone(),
+            start_ms: *start,
+        })
+        .collect();
+    let meta = m4b::BookMeta { title, author };
+
+    /* STAGED, so a failure here cannot destroy a book already at the
+     * destination — and the duration comes back from the writer rather than
+     * from a second parse of the same bytes. */
+    let (staged_book, _) = Staged::beside(&target, "book")?;
+    let duration_ms = m4b::write(&encoded, &marks, &meta, &staged_book.path)?;
+    drop(encoded);
+    drop(staged_adts);
+    staged_book.commit(&target)?;
+
+    Ok(Packaged {
+        path,
+        duration_ms,
+        chapters: marks.len(),
+    })
 }
 
 #[cfg(test)]
@@ -652,14 +889,41 @@ mod tests {
         /* THE SCRATCH FILES ARE GONE. They are the size of the book, and leaving
          * one behind beside the reader's audiobook is the failure nobody notices
          * until a disk is full. */
-        for stray in std::fs::read_dir(dir).expect("list the directory") {
-            let name = stray.expect("entry").file_name();
-            let name = name.to_string_lossy();
-            assert!(
-                !name.starts_with(".paper-audiobook-"),
-                "a scratch file was left behind: {name}"
-            );
-        }
+        /* ⚠️ **THIS ASSERTED ON A PREFIX THAT NO LONGER EXISTS, SO IT COULD NEVER
+         * FAIL.** The scratch name was `.paper-audiobook-` when this was written;
+         * `Staged` renamed them to `.paper-join-`, `.paper-aac-` and
+         * `.paper-book-` and the assertion was left pointing at the old one — a
+         * check given a correct subject and asked a question that cannot come
+         * back wrong. Found by the third verification pass. It matches the one
+         * thing every scratch name has in common now, and asserts that at least
+         * one such name is REACHABLE so a future rename cannot make it vacuous
+         * again. */
+        let strays: Vec<String> = std::fs::read_dir(dir)
+            .expect("list the directory")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with(".paper-"))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "scratch files were left behind: {strays:?}"
+        );
+        assert!(
+            Staged::beside(&out, "probe")
+                .map(|(staged, _)| staged
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().starts_with(".paper-")))
+                .ok()
+                .flatten()
+                .unwrap_or(false),
+            "the scratch prefix this test looks for is not the one Staged writes"
+        );
         println!(
             "wrote {} ({}ms, 3 chapters)",
             out.display(),

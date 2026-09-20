@@ -53,7 +53,14 @@
  * the two spellings to disagree — see `tierOf`, which would then need a table
  * instead of the identifier's own word.
  */
-export type VoiceTier = 'premium' | 'enhanced' | 'compact' | 'super-compact' | 'novelty' | 'unknown'
+export type VoiceTier =
+  | 'premium'
+  | 'enhanced'
+  | 'compact'
+  | 'super-compact'
+  | 'legacy'
+  | 'novelty'
+  | 'unknown'
 
 /**
  * A voice, in the only terms choosing one needs.
@@ -68,6 +75,29 @@ export interface VoiceFacts {
   readonly name: string
   readonly lang: string
   readonly voiceURI: string
+  /**
+   * Whether the engine speaks this voice on THIS machine.
+   *
+   * ⚠️ **WEB SPEECH MAY SEND THE TEXT TO A SERVER, AND THIS FILE'S HEADER USED TO
+   * PROMISE IT DOES NOT.** `speech.ts` opens with "no network, no credentials" —
+   * true of every voice macOS installs, and not true of the API. The
+   * specification allows a voice, INCLUDING THE DEFAULT, to be synthesised
+   * remotely; Chrome's default voices are. Paper reads whole sections aloud, so
+   * that would be a book's text leaving the machine without anyone asking.
+   *
+   * `false` is therefore excluded from every automatic choice and from the
+   * picker, exactly as a sound effect is. Absent means the engine did not say,
+   * which is not the same as saying no — a fixture and an older engine both
+   * land there, and refusing on silence would take read-aloud away from
+   * machines that are fine.
+   *
+   * ⚠️ **THIS DOES NOT CLOSE THE HOLE, AND SAYING SO IS THE POINT.** Leaving
+   * `utterance.voice` unset uses the platform's default, which on a machine with
+   * only remote voices IS remote — so refusing to pick one does not stop the
+   * text going out. Closing it means refusing to speak at all there, which is a
+   * product decision and not this module's to make.
+   */
+  readonly localService?: boolean | undefined
 }
 
 /**
@@ -78,18 +108,60 @@ export interface VoiceFacts {
  * it left out.
  */
 const TIER_RANK: Record<Exclude<VoiceTier, 'novelty'>, number> = {
-  premium: 4,
-  enhanced: 3,
-  compact: 2,
-  unknown: 1,
+  premium: 5,
+  enhanced: 4,
+  compact: 3,
+  unknown: 2,
+  legacy: 1,
   'super-compact': 0,
 }
 
 /** The `com.apple.voice.<tier>.<lang>.<Name>` families, by the tier they name. */
 const APPLE_TIERS: readonly VoiceTier[] = ['premium', 'enhanced', 'compact', 'super-compact']
 
-/** Apple's novelty and legacy family — Bad News, Boing, Zarvox, Albert. */
-const NOVELTY_PREFIX = 'com.apple.speech.synthesis.'
+/** The family that holds both the sound effects and the oldest real voices. */
+const LEGACY_PREFIX = 'com.apple.speech.synthesis.'
+
+/**
+ * The SOUND EFFECTS, by IDENTIFIER.
+ *
+ * ⚠️ **THE WHOLE FAMILY USED TO COUNT AS NOVELTY, AND THAT LOST REAL VOICES.**
+ * This module argued the prefix was the boundary so no name list had to be kept.
+ * The family is not homogeneous: Fred, Junior, Kathy and Ralph share it with
+ * Boing and Zarvox, and excluding them took working voices out of both the
+ * automatic pick and the picker.
+ *
+ * ⚠️ **AND THE FIRST REPLACEMENT LIST WAS WRONG TWICE.** It was written from the
+ * names a reader sees, and `tierOf` reads the IDENTIFIER — where three of them
+ * differ: `Deranged` is shown as Wobble, `Hysterical` as Jester, `Princess` as
+ * Superstar. It also missed Albert and Princess, which are novelty. Both errors
+ * were found by the audit and then settled by MEASURING rather than by guessing
+ * again: `AVSpeechSynthesisVoice.voiceTraits.isNoveltyVoice` is the platform's
+ * own answer, and on macOS 27 it splits this family 15 / 4 exactly as below.
+ *
+ * ⚠️ **THE WEB SIDE CANNOT ASK FOR THAT TRAIT**, which is why the list exists at
+ * all. `narrate_voices` can — so the day the native list feeds the picker, this
+ * becomes a fallback rather than the rule. Until then a name not on it is a
+ * VOICE, which is the safe direction: the cost of missing one is a silly entry
+ * in a list, and the cost of the old rule was losing four.
+ */
+const SOUND_EFFECTS: ReadonlySet<string> = new Set([
+  'Albert',
+  'BadNews',
+  'Bahh',
+  'Bells',
+  'Boing',
+  'Bubbles',
+  'Cellos',
+  'Deranged',
+  'GoodNews',
+  'Hysterical',
+  'Organ',
+  'Princess',
+  'Trinoids',
+  'Whisper',
+  'Zarvox',
+])
 
 /**
  * The tier a `voiceURI` names, or `unknown` when it is not Apple's.
@@ -101,7 +173,10 @@ const NOVELTY_PREFIX = 'com.apple.speech.synthesis.'
  * only English voices were novelty ones.
  */
 export function tierOf(voiceURI: string): VoiceTier {
-  if (voiceURI.startsWith(NOVELTY_PREFIX)) return 'novelty'
+  if (voiceURI.startsWith(LEGACY_PREFIX)) {
+    const name = voiceURI.slice(voiceURI.lastIndexOf('.') + 1)
+    return SOUND_EFFECTS.has(name) ? 'novelty' : 'legacy'
+  }
   for (const tier of APPLE_TIERS) {
     if (voiceURI.startsWith(`com.apple.voice.${tier}.`)) return tier
   }
@@ -161,16 +236,19 @@ function languageScore(voice: string, wanted: string): number {
  * against each other rather than by inspection.
  */
 function scoreOf(voice: VoiceFacts, lang: string): number {
+  /* A voice the engine says it synthesises elsewhere is never chosen — see
+   * `VoiceFacts.localService`. */
+  if (voice.localService === false) return 0
   const tier = tierOf(voice.voiceURI)
   if (tier === 'novelty') return 0
   const language = languageScore(voice.lang, lang)
   if (language === 0) return 0
-  /* The `+ 1` keeps the WORST selectable combination above zero. Without it a
-   * `super-compact` voice whose language merely shares a primary subtag scores
-   * 1 * 10 + 0, which is fine — but the lowest tier at the lowest match must
-   * never be able to reach the value that means "excluded", and stating that
-   * here is cheaper than re-deriving it whenever a tier is added. */
-  return language * 10 + TIER_RANK[tier] + 1
+  /* ⚠️ **THERE WAS A `+ 1` HERE AND ITS REASON WAS FALSE.** It claimed to keep
+   * the worst selectable combination above zero; the worst is already
+   * `1 * 10 + 0`, so it never did anything. What keeps the scale honest is that
+   * the language multiplier exceeds the tier range — which a test asserts
+   * directly rather than a constant implying it. */
+  return language * 10 + TIER_RANK[tier]
 }
 
 /**
@@ -227,7 +305,21 @@ export function chosenVoice<T extends VoiceFacts>(
   if (lang === null || lang.trim() === '') return null
   const wanted = chosen[primaryOf(lang)]
   if (wanted === undefined || wanted === '') return null
-  return voices.find((voice) => voice.voiceURI === wanted && languageScore(voice.lang, lang) > 0) ?? null
+  /* ⚠️ **THE NOVELTY RULE APPLIES HERE TOO, AND IT DID NOT.** `bestVoice` and
+   * `voiceOptions` both promise never to choose a sound effect; a stored
+   * preference naming Boing walked straight past both of them, because a
+   * choice was only ever checked for language. A hand-edited settings file is
+   * exactly where such a value comes from. Falls through to the automatic
+   * pick, which is what an absent choice does. */
+  return (
+    voices.find(
+      (voice) =>
+        voice.voiceURI === wanted &&
+        languageScore(voice.lang, lang) > 0 &&
+        tierOf(voice.voiceURI) !== 'novelty' &&
+        voice.localService !== false,
+    ) ?? null
+  )
 }
 
 /**
@@ -288,11 +380,30 @@ export function voiceGroups<T extends VoiceFacts>(
   voices: readonly T[],
   lang: string | null,
 ): readonly { readonly tier: Exclude<VoiceTier, 'novelty'>; readonly voices: readonly T[] }[] {
+  /* ⚠️ **ORDERED BY WHAT IS IN THEM, NOT BY TIER — AND IT WAS BY TIER.** Sorting
+   * the groups by rank alone contradicted `bestVoice` exactly where the two most
+   * needed to agree: with an `en-GB` Premium and an `en-US` Compact installed,
+   * `bestVoice` takes the Compact one (language outranks tier) while the picker
+   * put Premium first. The reader was then shown a first row that was not the
+   * default, which is the drift `scoreOf` exists to prevent. Built in the order
+   * `voiceOptions` already sorted them into, so first-seen IS best-scoring. */
   const offered = voiceOptions(voices, lang)
-  const order = (Object.keys(TIER_RANK) as Exclude<VoiceTier, 'novelty'>[]).sort(
-    (a, b) => TIER_RANK[b] - TIER_RANK[a],
-  )
-  return order
-    .map((tier) => ({ tier, voices: offered.filter((voice) => tierOf(voice.voiceURI) === tier) }))
-    .filter((group) => group.voices.length > 0)
+  const groups: { tier: Exclude<VoiceTier, 'novelty'>; voices: T[] }[] = []
+  for (const voice of offered) {
+    const tier = tierOf(voice.voiceURI)
+    /* `voiceOptions` has already dropped both, so this is a narrowing for the
+     * type rather than a second filter. */
+    if (tier === 'novelty') continue
+    /* ⚠️ **ONLY THE RUN THAT IS STILL OPEN, NEVER AN EARLIER GROUP OF THE SAME
+     * TIER.** Merging by tier across the whole list looked right and quietly
+     * undid the ordering again: with an exact-language compact, an exact
+     * super-compact and an other-region compact, searching for an existing
+     * `compact` group pulled the other-region voice up past the exact
+     * super-compact one. The list arrives in score order, so the groups are its
+     * consecutive runs — and a tier that appears twice appears twice. */
+    const open = groups[groups.length - 1]
+    if (open && open.tier === tier) open.voices.push(voice)
+    else groups.push({ tier, voices: [voice] })
+  }
+  return groups
 }

@@ -1,8 +1,18 @@
 /**
  * Reading aloud.
  *
- * Web Speech, which is what a WebView gives us: no network, no credentials, and
- * the voices the reader already has installed. The work that is not free is
+ * Web Speech, which is what a WebView gives us: no credentials, and the voices
+ * the reader already has installed.
+ *
+ * ⚠️ **THIS SAID "NO NETWORK" AND THAT WAS NOT TRUE OF THE API.** It is true of
+ * every voice macOS installs, and the specification allows a voice — INCLUDING
+ * THE DEFAULT — to be synthesised on a server; Chrome's default voices are.
+ * Paper reads whole sections aloud, so on such an engine that is a book's text
+ * leaving the machine. `voiceChoice.ts` never CHOOSES a voice that reports
+ * `localService: false`, which is as far as this layer can go: leaving
+ * `utterance.voice` unset uses the platform's default, and on a machine whose
+ * only voices are remote that default is remote. Refusing to read aloud at all
+ * there is a product decision and is recorded as one, not taken quietly here. The work that is not free is
  * getting back from the utterance to the words on screen — `onboundary` reports
  * a character offset into the string that was spoken, and the highlight needs a
  * Range in the document. So the text is collected with an index that maps any
@@ -363,6 +373,14 @@ export interface SpeakerCallbacks {
 }
 
 /**
+ * The rate range Web Speech defines. Outside it the engine's behaviour is its
+ * own business, so a stored value beyond either end is left unset rather than
+ * passed on or clamped.
+ */
+const MIN_ENGINE_RATE = 0.1
+const MAX_ENGINE_RATE = 10
+
+/**
  * How long to wait for the first boundary event before concluding the engine
  * does not send them. Generous: the first word can be slow to start on a cold
  * voice, and a false negative costs the highlight for the whole chapter.
@@ -373,26 +391,30 @@ const BOUNDARY_GRACE_MS = 2500
  * Which `Speaker` last handed each engine an utterance.
  *
  * ⚠️ **`window.speechSynthesis` IS ONE ENGINE SERVING ONE UTTERANCE, AND THIS
- * APP NOW HAS TWO SPEAKERS OVER IT** — the reading (`useSpeech`) and the lookup
- * popup's pronunciation (`systemVoice.ts`). `speak` begins with `stop()`, so the
- * second one to speak CANCELS the first, and a cancelled utterance still
- * delivers its `end` — late, but with the first speaker's own generation still
- * current, so its `#finish` read that end as "the section finished". For a
- * reading that means `continueReading()`: the pages walk forward hunting the
- * next section while the reader is listening to one word being pronounced.
+ * MACHINERY IS WHAT MAKES A SECOND SPEAKER SAFE.** There is exactly ONE today —
+ * the reading (`useSpeech`). There were two: the lookup popup's pronunciation
+ * spoke through the same engine from `systemVoice.ts`, WHICH NO LONGER EXISTS,
+ * having gone with the AI features. The comment here described that arrangement
+ * in the present tense for long enough to mislead an audit, so what follows is
+ * the DEFECT it was built for rather than a roster of callers.
+ *
+ * `speak` begins with `stop()`, so a second speaker CANCELS the first — and a
+ * cancelled utterance still delivers its `end`, late, with the first speaker's
+ * own generation still current. Its `#finish` therefore read that end as "the
+ * section finished". For a reading that means `continueReading()`: pages walking
+ * forward hunting the next section while the reader listens to one word.
  *
  * So whoever speaks last HOLDS the engine, and a speaker that no longer holds it
- * reports `taken` rather than whatever its stale event said. That is the only
- * thing either caller needs to tell "my utterance ended" from "somebody took
- * the engine out from under it", and no amount of per-utterance guarding can
- * answer it: the event is indistinguishable from a real ending.
+ * reports `taken` rather than whatever its stale event said. No amount of
+ * per-utterance guarding can answer that: the event is indistinguishable from a
+ * real ending.
  *
  * PER ENGINE, and a `WeakMap` rather than one module-level holder, for a reason
  * that is about the tests as much as the app: every suite here drives a
  * `FakeSynth` of its own, and one shared holder would have a speaker over one
  * fake stealing the engine from a speaker over another — reporting `taken` for
- * utterances that were never cancelled by anything. Keyed on the engine, two
- * speakers coordinate exactly when they share one.
+ * utterances nothing had cancelled. Keyed on the engine, two speakers coordinate
+ * exactly when they share one.
  */
 const engineHeldBy = new WeakMap<SpeechSynthesis, object>()
 
@@ -480,10 +502,20 @@ export class Speaker {
 
     /* The rate is a multiplier on the engine's default, so 1 IS the default and
      * assigning it changes nothing — which is why an absent preference and a
-     * preference of 1 may safely take the same branch. Guarded against a
-     * non-finite value all the same: `rate = NaN` throws on some engines, and
-     * the stored value arrives from a settings file a reader can hand-edit. */
-    if (prefs.rate !== undefined && Number.isFinite(prefs.rate) && prefs.rate > 0) {
+     * preference of 1 may safely take the same branch.
+     *
+     * ⚠️ **THE BOUNDS ARE THE SPEC'S, AND THIS ONLY CHECKED FOR POSITIVE.** Web
+     * Speech defines the range as 0.1 to 10 and leaves anything outside it to
+     * the engine — so a hand-edited `0.01` or `100` passed a guard whose comment
+     * claimed it stopped unsafe values. Out of range is REFUSED rather than
+     * clamped: a reader who typed 100 into a settings file gets the engine's own
+     * speed, not a number Paper invented for them. */
+    if (
+      prefs.rate !== undefined &&
+      Number.isFinite(prefs.rate) &&
+      prefs.rate >= MIN_ENGINE_RATE &&
+      prefs.rate <= MAX_ENGINE_RATE
+    ) {
       utterance.rate = prefs.rate
     }
 

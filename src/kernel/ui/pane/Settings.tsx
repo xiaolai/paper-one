@@ -330,6 +330,11 @@ const TIER_LABELS: Record<Exclude<VoiceTier, 'novelty'>, string> = {
   enhanced: 'Enhanced',
   compact: 'Standard',
   'super-compact': 'Compact',
+  /* Apple's oldest voices — Alex, Fred, Kathy. Offered, because Alex is what
+     some readers would choose over everything else on the machine; ranked low,
+     because the modern voices are generally better for a whole book. The sound
+     effects in the same family are not offered at all. */
+  legacy: 'Classic',
   unknown: 'Other',
 }
 
