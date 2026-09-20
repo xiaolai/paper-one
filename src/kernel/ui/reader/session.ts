@@ -19,6 +19,8 @@ import { reanchorPass, type PassOutcome, type PendingMark } from './reanchorPass
 import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
 import { directionOf } from './direction'
+import { collectText } from './speech'
+import type { SectionText } from './audiobook'
 import { refuseBookScripts, stripScripts } from './bookScripts'
 
 /* Re-exported where it always lived — the rule itself moved to `direction.ts`
@@ -748,6 +750,16 @@ export interface SessionNavigator {
    * still not put it on a page turn — forty cold sections is ~139 ms.
    */
   reanchor: (pending: readonly PendingMark[]) => Promise<PassOutcome>
+  /**
+   * Every section's readable text, for an export. See
+   * `ReaderSession.sectionTexts` — including what it filters LESS of than the
+   * reading does, which is the one thing a caller has to know.
+   *
+   * ⚠️ **Not on the reading path either**, and further off it than the reanchor
+   * walk: this parses every section AND collects its text, so a long book is
+   * seconds of work. It yields between sections and stops when the book closes.
+   */
+  sectionTexts: (toc?: readonly TocItem[]) => Promise<readonly SectionText[]>
 }
 
 export interface SessionDeps {
@@ -1619,6 +1631,7 @@ export class ReaderSession {
          with an empty walk rather than parsing sections of a book nobody is
          reading. */
       reanchor: (pending) => this.reanchorUnplaced(pending),
+      sectionTexts: (toc) => this.sectionTexts(toc),
     })
 
     this.#cb.onFixedLayout(view.isFixedLayout)
@@ -2307,6 +2320,85 @@ export class ReaderSession {
       prefix: context.prefix,
       suffix: context.suffix,
     }
+  }
+
+  /**
+   * Every section's readable text, in spine order — what an export reads.
+   *
+   * ⚠️ **`section.createDocument()`, FOR THE REASON `reanchorUnplaced` GIVES.**
+   * That object is the one `refuseBookScripts` wrapped at open, so the text is
+   * the text the reader sees; opening the file again would get an unstripped
+   * document and could disagree.
+   *
+   * ⚠️ **AND `collectText` FILTERS LESS HERE THAN IT DOES ON SCREEN.** A
+   * document made this way has no browsing context, so `defaultView` is null and
+   * the COMPUTED-STYLE half of the filter is skipped: `hidden` and
+   * `aria-hidden` still hold, `display: none` does not. An EPUB that hides its
+   * endnotes with CSS rather than with the attribute will have them read into
+   * the export and not into the reading. Rendering every section off-screen to
+   * get computed styles is the fix, and it is a great deal slower; this is the
+   * trade, stated rather than discovered.
+   *
+   * YIELDS BETWEEN SECTIONS, like the reanchor walk, because a long book is
+   * hundreds of parses and the window must stay alive through them.
+   */
+  async sectionTexts(
+    toc: readonly TocItem[] = [],
+  ): Promise<readonly { index: number; title: string | null; text: string }[]> {
+    const view = this.#view
+    const book = view?.book
+    const sections = book?.sections
+    if (this.#disposed || !Array.isArray(sections)) return []
+
+    /* ⚠️ **THE TITLES COME FROM `resolveHref`, NOT FROM COUNTING.** Matching the
+     * table of contents to the spine positionally looks right on a tidy book and
+     * is wrong on every one with a cover, a colophon or a part divider — the
+     * labels then slide by one and every chapter in the export is named after
+     * the one before it. The book resolves its own hrefs; ask it.
+     *
+     * SHALLOWEST WINS: a nested entry resolving to a section its parent already
+     * named would otherwise replace the part title with a sub-heading. */
+    const titles = new Map<number, string>()
+    const walk = (items: readonly TocItem[]) => {
+      for (const item of items) {
+        const href = item?.href
+        if (typeof href === 'string' && href !== '') {
+          try {
+            /* NARROWED, not assumed — the same shape `sections` is read
+               through above. Upstream's types do not declare `resolveHref`
+               and its API is explicitly unstable, so a backend without it
+               names no section rather than failing the export. */
+            const resolver = book as unknown as {
+              resolveHref?: (href: string) => { index?: number } | undefined
+            }
+            const at = resolver.resolveHref?.(href)
+            const index = at?.index
+            const label = typeof item.label === 'string' ? item.label.trim() : ''
+            if (typeof index === 'number' && label !== '' && !titles.has(index)) {
+              titles.set(index, label)
+            }
+          } catch {
+            /* A malformed href in a stranger's book names no section, which is
+               a chapter with no title and not a failed export. */
+          }
+        }
+        if (Array.isArray(item?.subitems)) walk(item.subitems)
+      }
+    }
+    walk(toc)
+
+    const out: { index: number; title: string | null; text: string }[] = []
+    for (let index = 0; index < sections.length; index++) {
+      /* Liveness read at each step rather than captured — closing the book
+       * mid-export must stop it, not finish against a dead view. */
+      if (this.#disposed || this.#view !== view) break
+      const section = sections[index] as { createDocument?: () => Promise<Document> } | null
+      if (!section || typeof section.createDocument !== 'function') continue
+      const doc = await section.createDocument()
+      out.push({ index, title: titles.get(index) ?? null, text: collectText(doc).text })
+      await BREATHE()
+    }
+    return out
   }
 
   /**

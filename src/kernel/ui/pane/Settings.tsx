@@ -56,7 +56,7 @@ import {
 } from '../../core/uiTypes'
 import { PaneBand } from './PaneBand'
 import { PaneGroup } from './PaneGroup'
-import { bestVoice, primaryOf, voiceGroups, type VoiceFacts, type VoiceTier } from '../reader/voiceChoice'
+import { bestVoice, voiceGroups, voiceKey, type VoiceFacts, type VoiceTier } from '../reader/voiceChoice'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
 import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
@@ -1015,11 +1015,16 @@ export function Settings({
       {/* ⚠️ **ONLY WITH A BOOK OPEN, BECAUSE THE LANGUAGE IS THE BOOK'S.** A
           voice has to answer for the language of what it is reading — see
           `voiceChoice.ts` — so with nothing open there is no question to put to
-          the reader, and a picker listing every voice on the machine would be
-          asking them to choose one for a language nothing has named. The same
-          rule the ruler and scrollbar rows follow: shown where it means
-          something rather than greyed out everywhere. */}
-      {narration && narration.lang !== null && (
+          the reader — so `bestVoice` refuses to guess one and the app keeps the
+          platform's default.
+
+          ⚠️ **THE GROUP USED TO BE HIDDEN IN THAT CASE, WHICH LEFT THE READER
+          NOTHING TO SAY.** A book with no `dc:language` is exactly where the
+          automatic pick declines, so hiding the control meant the one situation
+          the reader most needed to correct was the one with no control in it.
+          The picker offers every selectable voice there instead, and the choice
+          is stored under `voiceKey`'s `''`. */}
+      {narration && (
       <PaneGroup
         title="Voice"
         open={groupOpen(GROUP.voice)}
@@ -1027,7 +1032,7 @@ export function Settings({
       >
         <SelectRow
           label="Voice"
-          value={narration.chosen[primaryOf(narration.lang)] ?? ''}
+          value={narration.chosen[voiceKey(narration.lang)] ?? ''}
           /* NAMES WHAT AUTOMATIC CURRENTLY MEANS, rather than saying
              "Automatic" and leaving the reader to guess. It is the same answer
              `Speaker` will use, because both go through `bestVoice` — and on a
@@ -1044,7 +1049,7 @@ export function Settings({
             label: TIER_LABELS[group.tier],
             options: group.voices.map((voice) => ({ value: voice.voiceURI, label: voice.name })),
           }))}
-          onChange={(voice) => narration.onVoice(primaryOf(narration.lang ?? ''), voice)}
+          onChange={(voice) => narration.onVoice(voiceKey(narration.lang), voice)}
         />
         <StepRow
           label="Speed"

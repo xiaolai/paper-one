@@ -103,7 +103,7 @@ export interface VoiceFacts {
 /**
  * How much better one tier is than another. Higher wins.
  *
- * `novelty` has no rank because it is never compared — `bestVoice` drops it
+ * `novelty` has no rank because it is never compared — every path drops it
  * before ranking anything. It is in `VoiceTier` so that a picker can say what
  * it left out.
  */
@@ -114,6 +114,11 @@ const TIER_RANK: Record<Exclude<VoiceTier, 'novelty'>, number> = {
   unknown: 2,
   legacy: 1,
   'super-compact': 0,
+}
+
+/** `TIER_RANK` for any tier, with the one that is never ranked answering lowest. */
+function rankOf(tier: VoiceTier): number {
+  return tier === 'novelty' ? -1 : TIER_RANK[tier]
 }
 
 /** The `com.apple.voice.<tier>.<lang>.<Name>` families, by the tier they name. */
@@ -220,6 +225,33 @@ function languageScore(voice: string, wanted: string): number {
 }
 
 /**
+ * Whether this voice may ever be chosen, before any question about language.
+ *
+ * ONE PREDICATE, because three callers ask it and two of them had drifted: a
+ * stored choice was once checked for language and not for novelty, and the
+ * no-language list would have been a third place to forget. A sound effect
+ * (see `SOUND_EFFECTS`) and a voice the engine synthesises on a server (see
+ * `VoiceFacts.localService`) are both refused everywhere, always.
+ */
+function selectable(voice: VoiceFacts): boolean {
+  return voice.localService !== false && tierOf(voice.voiceURI) !== 'novelty'
+}
+
+/**
+ * The key a reader's voice choice is stored under.
+ *
+ * `''` IS A REAL KEY AND MEANS "the book declares no language". It is not a
+ * missing value: such books exist, `bestVoice` deliberately refuses to guess a
+ * language for one, and without somewhere to record a choice the reader had no
+ * way to correct whatever the platform picked. `primaryOf('')` is also `''`, so
+ * a blank declaration and an absent one land in the same place, which is what
+ * they mean.
+ */
+export function voiceKey(lang: string | null): string {
+  return lang === null ? '' : primaryOf(lang)
+}
+
+/**
  * How good a voice is for a document in `lang`. Zero means *never this one*.
  *
  * ONE FORMULA, IN ONE PLACE, because two callers maximise it: `bestVoice` takes
@@ -236,9 +268,7 @@ function languageScore(voice: string, wanted: string): number {
  * against each other rather than by inspection.
  */
 function scoreOf(voice: VoiceFacts, lang: string): number {
-  /* A voice the engine says it synthesises elsewhere is never chosen — see
-   * `VoiceFacts.localService`. */
-  if (voice.localService === false) return 0
+  if (!selectable(voice)) return 0
   const tier = tierOf(voice.voiceURI)
   if (tier === 'novelty') return 0
   const language = languageScore(voice.lang, lang)
@@ -302,9 +332,15 @@ export function chosenVoice<T extends VoiceFacts>(
   lang: string | null,
   chosen: Readonly<Record<string, string>>,
 ): T | null {
-  if (lang === null || lang.trim() === '') return null
-  const wanted = chosen[primaryOf(lang)]
+  const wanted = chosen[voiceKey(lang)]
   if (wanted === undefined || wanted === '') return null
+  /* ⚠️ **A BOOK WITH NO DECLARED LANGUAGE HAS NO LANGUAGE TO CHECK, AND USED TO
+   * HAVE NO CHOICE EITHER.** `bestVoice` still refuses to guess one — that is
+   * the rule, not an omission — so without a stored choice the reader was left
+   * with whatever the platform picked and nothing to say about it. The choice
+   * is honoured here under the `''` key; only the language test is skipped,
+   * never `selectable`. */
+  const declared = lang !== null && lang.trim() !== ''
   /* ⚠️ **THE NOVELTY RULE APPLIES HERE TOO, AND IT DID NOT.** `bestVoice` and
    * `voiceOptions` both promise never to choose a sound effect; a stored
    * preference naming Boing walked straight past both of them, because a
@@ -315,9 +351,8 @@ export function chosenVoice<T extends VoiceFacts>(
     voices.find(
       (voice) =>
         voice.voiceURI === wanted &&
-        languageScore(voice.lang, lang) > 0 &&
-        tierOf(voice.voiceURI) !== 'novelty' &&
-        voice.localService !== false,
+        selectable(voice) &&
+        (!declared || languageScore(voice.lang, lang) > 0),
     ) ?? null
   )
 }
@@ -352,7 +387,17 @@ export function voiceFor<T extends VoiceFacts>(
  * default is a picker that makes the default look like a mistake.
  */
 export function voiceOptions<T extends VoiceFacts>(voices: readonly T[], lang: string | null): readonly T[] {
-  if (lang === null || lang.trim() === '') return []
+  if (lang === null || lang.trim() === '') {
+    /* EVERY SELECTABLE VOICE, BY TIER, because there is no language to rank
+     * against — and an empty list was what left a language-less book with no
+     * voice control at all. `sort` is stable, so voices of one tier keep the
+     * engine's own order, exactly as the language path relies on. */
+    return voices
+      .filter(selectable)
+      .map((voice) => ({ voice, tier: tierOf(voice.voiceURI) }))
+      .sort((a, b) => rankOf(b.tier) - rankOf(a.tier))
+      .map((row) => row.voice)
+  }
   const language = lang
   return voices
     .map((voice) => ({ voice, score: scoreOf(voice, language) }))

@@ -135,6 +135,35 @@ describe('buildCommands', () => {
     expect(find(scrolled, 'reading:ruler')).toBeDefined()
   })
 
+  /**
+   * ⚠️ **THE PALETTE IS THE WHOLE OF THE EXPORT'S SURFACE**, so this is the only
+   * place the feature can be found at all — see `KernelCommandContext`. The row
+   * is absent where the engine is (a browser, a phone), because a command that
+   * would be refused is worse than one that is not offered.
+   */
+  it('offers the audiobook export only where the engine is and a book is open', () => {
+    const { ctx } = context()
+    expect(find(buildCommands(ctx), 'book:audiobook')).toBeUndefined()
+
+    const able = { ...ctx, exportAudiobook: { running: false, run: () => {} } }
+    expect(find(buildCommands(able), 'book:audiobook')?.label).toBe('Export as audiobook…')
+
+    /* No book, nothing to export — the same rule every other Book row follows. */
+    const shut = { ...able, hasBook: false }
+    expect(find(buildCommands(shut), 'book:audiobook')).toBeUndefined()
+  })
+
+  it('turns the export row into a stop while one is running', () => {
+    /* One command, two states: the reader who started it looks in the same place
+       to stop it, rather than hunting for a second row that only sometimes
+       exists. */
+    const { ctx } = context()
+    const running = { ...ctx, exportAudiobook: { running: true, run: () => {} } }
+    const row = find(buildCommands(running), 'book:audiobook')
+    expect(row?.label).toBe('Stop exporting the audiobook')
+    expect(row?.on).toBe(true)
+  })
+
   it('offers marking only when something is selected', () => {
     const { ctx } = context()
     expect(find(buildCommands(ctx), 'book:mark')).toBeUndefined()

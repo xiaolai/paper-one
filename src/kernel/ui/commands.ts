@@ -45,6 +45,20 @@ export interface KernelCommandContext {
   /** Marks the current selection, when there is one. */
   markSelection: (() => void) | null
   /**
+   * Export the open book as an audiobook, and stop one that is running.
+   *
+   * ⚠️ **THE PALETTE IS THE WHOLE OF THIS FEATURE'S SURFACE, DELIBERATELY.**
+   * There is no button and no pane: the export works and has never been run by
+   * a reader, so a control in the rail would promise more settledness than it
+   * has. A palette entry is findable by somebody looking for it and invisible to
+   * everybody else, which is the right shape for that. When it has been used on
+   * real books it earns a control; until then this is honest about what it is.
+   *
+   * ABSENT when the platform cannot do it — a browser, a phone — so the command
+   * is not drawn rather than drawn and refused.
+   */
+  exportAudiobook?: { readonly running: boolean; readonly run: () => void } | undefined
+  /**
    * Keeps the place the reader is at, or gives it back. Null when no place can
    * be pinned down — see `Bookmarking.canBookmark`.
    */
@@ -348,6 +362,18 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     on: state.themeFollowsOs,
     run: () => dispatch({ type: 'setThemeFollowsOs', follows: !state.themeFollowsOs }),
   })
+
+  if (ctx.exportAudiobook && ctx.hasBook) {
+    const audiobook = ctx.exportAudiobook
+    commands.push({
+      id: 'book:audiobook',
+      label: audiobook.running ? 'Stop exporting the audiobook' : 'Export as audiobook…',
+      group: 'Book',
+      keywords: 'narrate speech m4b listen chapters read aloud file',
+      on: audiobook.running,
+      run: audiobook.run,
+    })
+  }
 
   if (ctx.markSelection) {
     const mark = ctx.markSelection

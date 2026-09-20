@@ -71,6 +71,7 @@ import { parseBook } from './reader/parseBook'
 import { useSpeech } from './reader/useSpeech'
 import { documentLang } from './reader/speech'
 import { useVoices } from './hooks/useVoices'
+import { useAudiobook } from './hooks/useAudiobook'
 
 /**
  * The desktop's jackets, bound once.
@@ -612,6 +613,32 @@ export function App({
     // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it — React compares the elements, and Stryker's filler is equal to itself on every render.
     [],
   )
+  /* The audiobook export, reachable from the command palette and nowhere else —
+     see `useAudiobook` for why that is the whole surface for now. */
+  const audiobookSource = useMemo(
+    () =>
+      book.bookId
+        ? {
+            title: book.meta?.title ?? 'Audiobook',
+            author: book.meta?.author ?? '',
+            lang: book.doc ? documentLang(book.doc) : null,
+            toc: book.toc,
+            sectionTexts: book.sectionTexts,
+          }
+        : null,
+    [book.bookId, book.meta, book.doc, book.toc, book.sectionTexts],
+  )
+  const audiobook = useAudiobook({
+    /* The engine is macOS-only and the commands refuse elsewhere by name, so the
+       palette entry follows the same platform the rest of the app reads. */
+    available: platform === 'macos',
+    source: audiobookSource,
+    voices,
+    chosen: state.readingVoice,
+    rate: state.readingRate,
+    say: setImportNotice,
+  })
+
   /* Standing, not transient: a quarantined store is not something the app
      did, it is something the reader has lost, and it stays until they say
      they have read it. */
@@ -1864,6 +1891,10 @@ export function App({
            rather than offering one that would refuse. `useArchives` decides,
            because it is what knows. */
         exportMarks: archives.exportMarks,
+        /* ABSENT OFF macOS and with no book open — `useAudiobook` answers null
+           there, and the palette then omits the row rather than offering one
+           that would be refused. */
+        ...(audiobook ? { exportAudiobook: audiobook } : {}),
         importMarks: archives.importMarks,
         exportTags: archives.exportTags,
         importTags: archives.importTags,

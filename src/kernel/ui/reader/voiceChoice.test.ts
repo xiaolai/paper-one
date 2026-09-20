@@ -7,6 +7,7 @@ import {
   tierOf,
   voiceFor,
   voiceOptions,
+  voiceKey,
   type VoiceFacts,
 } from './voiceChoice'
 
@@ -227,9 +228,17 @@ describe('voiceOptions', () => {
     }
   })
 
-  it('offers nothing for a document that declares no language', () => {
-    expect(voiceOptions(installed, null)).toEqual([])
-    expect(voiceOptions(installed, '')).toEqual([])
+  /* ⚠️ **THIS ASSERTED AN EMPTY LIST, WHICH WAS THE GAP RATHER THAN THE RULE.**
+     A book with no declared language is where `bestVoice` declines, so offering
+     nothing left the reader unable to correct the platform's own pick. See the
+     `a book that declares no language` suite for what it answers now. */
+  it('offers every selectable voice when the document declares no language', () => {
+    for (const nothing of [null, '', '   ']) {
+      const offered = voiceOptions(installed, nothing)
+      expect(offered.length).toBeGreaterThan(0)
+      expect(offered).not.toContain(ZARVOX)
+      expect(offered).not.toContain(BOING)
+    }
   })
 })
 
@@ -276,8 +285,12 @@ describe('voiceGroups', () => {
     expect(groups[0]?.voices[0]).toBe(bestVoice(installed, 'en-US'))
   })
 
-  it('offers nothing for a document that declares no language', () => {
-    expect(voiceGroups(installed, null)).toEqual([])
+  it('groups the whole list when the document declares no language', () => {
+    const groups = voiceGroups(installed, null)
+    expect(groups.length).toBeGreaterThan(0)
+    /* Still by tier, best first, and still no sound effects. */
+    expect(groups[0]?.tier).toBe('premium')
+    expect(groups.flatMap((group) => group.voices)).not.toContain(ZARVOX)
   })
 })
 
@@ -344,5 +357,68 @@ describe('the picker cannot disagree with the choice', () => {
     const groups = voiceGroups(installed, 'en-US')
     expect(groups[0]?.tier).toBe('compact')
     expect(groups[0]?.voices[0]).toBe(bestVoice(installed, 'en-US'))
+  })
+})
+
+describe('a book that declares no language', () => {
+  const installed = [SAMANTHA_SUPER, ZARVOX, SAMANTHA_COMPACT, TINGTING_COMPACT, REMOTE, ALEX]
+
+  /**
+   * ⚠️ **THE PICKER USED TO BE EMPTY HERE, AND THE GROUP WAS HIDDEN.** A book
+   * with no `dc:language` is exactly where `bestVoice` declines — so the one
+   * case the reader most needed to correct was the one with no control in it.
+   */
+  it('offers every selectable voice rather than nothing', () => {
+    const offered = voiceOptions(installed, null)
+    expect(offered).toContain(SAMANTHA_COMPACT)
+    expect(offered).toContain(TINGTING_COMPACT)
+    expect(offered).toContain(ALEX)
+    /* The two refusals still hold with no language to rank by. */
+    expect(offered).not.toContain(ZARVOX)
+    expect(offered).not.toContain(REMOTE)
+  })
+
+  it('orders that list by tier, best first', () => {
+    const offered = voiceOptions([SAMANTHA_SUPER, ALEX, SAMANTHA_COMPACT, AVA_PREMIUM], null)
+    expect(offered).toEqual([AVA_PREMIUM, SAMANTHA_COMPACT, ALEX, SAMANTHA_SUPER])
+  })
+
+  it('still refuses to guess a language automatically', () => {
+    /* The rule this module was built on, unchanged: choosing a voice for a book
+       that has not said what it is would be picking a language for it. */
+    expect(bestVoice(installed, null)).toBeNull()
+  })
+
+  it("honours the reader's choice, which is the whole point", () => {
+    expect(voiceFor(installed, null, { '': TINGTING_COMPACT.voiceURI })).toBe(TINGTING_COMPACT)
+  })
+
+  it('refuses a sound effect or a remote voice even when stored', () => {
+    expect(chosenVoice(installed, null, { '': ZARVOX.voiceURI })).toBeNull()
+    expect(chosenVoice(installed, null, { '': REMOTE.voiceURI })).toBeNull()
+  })
+
+  it('does not let a language-less choice answer for a book that names one', () => {
+    /* `''` is its own key, not a wildcard. A voice picked for an unlabelled book
+       must not start reading the Chinese one. */
+    expect(chosenVoice(installed, 'zh-CN', { '': SAMANTHA_COMPACT.voiceURI })).toBeNull()
+    expect(voiceFor(installed, 'zh-CN', { '': SAMANTHA_COMPACT.voiceURI })).toBe(TINGTING_COMPACT)
+  })
+
+  it('and a language choice does not answer for a book with none', () => {
+    expect(chosenVoice(installed, null, { en: SAMANTHA_COMPACT.voiceURI })).toBeNull()
+  })
+})
+
+describe('voiceKey', () => {
+  it('folds a declared language to its primary subtag', () => {
+    expect(voiceKey('zh-CN')).toBe('zh')
+    expect(voiceKey('EN-us')).toBe('en')
+  })
+
+  it("answers '' for a book that declares nothing, which is a real key", () => {
+    expect(voiceKey(null)).toBe('')
+    expect(voiceKey('')).toBe('')
+    expect(voiceKey('   ')).toBe('')
   })
 })

@@ -266,6 +266,14 @@ const FS_ADAPTERS = [
    * of those importers dragged the fs plugin in behind it, which is what put
    * the reader out of a browser's reach. The binding is `vaultFsTauri.ts`. */
   '^src/kernel/core/vaultFsTauri\\.ts$',
+  /* The audiobook export's scratch, and it belongs here for the same reason the
+   * two bindings above do rather than as an exemption from the rule. It is the
+   * KERNEL, not a capability — the thing this rule keeps the plugin away from —
+   * and it is a Tauri-only LEAF, split from `audiobook.ts` exactly as
+   * `vaultFsTauri.ts` was split from `bookVault.ts`, so nothing a browser
+   * reaches imports it. What it does with the plugin is what every other entry
+   * does: own a directory under `$APPDATA` and remove its own files from it. */
+  '^src/kernel/ui/reader/audiobookTauri\\.ts$',
   '^src/kernel/ui/appStorage\\.ts$',
   '^src/kernel/ui/tagFiles\\.ts$',
   '^src/kernel/ui/marksFiles\\.ts$',
