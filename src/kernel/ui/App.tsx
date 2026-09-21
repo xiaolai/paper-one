@@ -697,7 +697,11 @@ export function App({
      through here was a call no reader could tell from the one that did not
      clear — and the only caller that meant it is the Dismiss button, which has
      `setNotice` itself. */
-  const setImportNotice = useCallback((text: string) => raiseNotice({ text }), [raiseNotice])
+  const setImportNotice = useCallback(
+    (text: string) => raiseNotice({ text }),
+    // Stryker disable next-line ArrayDeclaration: `useOccasion`'s `raise` is built from an empty list, so this one and an empty one rebuild the callback equally often — never.
+    [raiseNotice],
+  )
   /* The audiobook export, reachable from the command palette and nowhere else —
      see `useAudiobook` for why that is the whole surface for now. */
   const audiobookSource = useMemo(
@@ -1759,7 +1763,11 @@ export function App({
      nonce cannot be forgotten by the third call site. The held value is exactly
      `ReturnHint`'s shape, `{ label, nonce }`. */
   const [returnTo, raiseReturn, setReturnTo] = useOccasion<{ readonly label: string }>()
-  const raiseReturnHint = useCallback((label: string) => raiseReturn({ label }), [raiseReturn])
+  const raiseReturnHint = useCallback(
+    (label: string) => raiseReturn({ label }),
+    // Stryker disable next-line ArrayDeclaration: as above — another `useOccasion` `raise`, built once.
+    [raiseReturn],
+  )
   /* DECLARED ABOVE `goToJump`, which clears it when a cross-book open fails.
      A refused jump and a jump whose book would not open are the same lie to
      the reader, and only the first was being caught. */
@@ -2122,6 +2130,7 @@ export function App({
    */
   const pages = useMemo(
     () => ({ next: book.next, prev: book.prev, goLeft: book.goLeft, goRight: book.goRight }),
+    // Stryker disable next-line ArrayDeclaration: all four are `useBook` callbacks built from empty lists over the navigator ref, so none of them ever moves.
     [book.next, book.prev, book.goLeft, book.goRight],
   )
   /* ⚠️ **THIS DIRECTIVE WAS ON THE KEYBOARD HANDLER'S `screenJump` LINE, AND
