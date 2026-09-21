@@ -7,6 +7,8 @@ import type { SpeechSkipPrefs } from '../reader/speechSkip'
 import type { SectionTextWalk } from '../reader/session'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
 import { NO_GOOD_VOICE, voiceFor, type VoiceFacts } from '../reader/voiceChoice'
+import { documentLang } from '../reader/speech'
+import type { Book } from './useBook'
 
 /**
  * Exporting the open book, from the command palette.
@@ -58,6 +60,44 @@ export interface AudiobookSource {
 export interface AudiobookControl {
   readonly running: boolean
   readonly run: () => void
+}
+
+/**
+ * The export's input, from the book on screen — or null while the walk has
+ * nothing it could run over.
+ *
+ * ⚠️ **READY MEANS A DOCUMENT, NOT AN ID.** The book's id resolves from the
+ * file's bytes BEFORE the book is parsed, so gating on it alone offered, for
+ * the first moments of every opening, an export whose walk had no navigator to
+ * ask — and it answered `complete: false`, which the export reports as "the book
+ * stopped being readable part way through". A reader who chose it quickly was
+ * told their book was broken. `doc` is published only after the session has
+ * handed over its navigator, so it is the fact that means the walk can run.
+ *
+ * ⚠️ **PULLED OUT OF `App.tsx` SO IT CAN BE ASKED DIRECTLY.** Built inline in a
+ * memo, its fallbacks — a title for a book that declares none, no author rather
+ * than a wrong one — could only be seen by driving an export through the whole
+ * app on the one platform that has the engine.
+ */
+export function audiobookSourceOf(
+  book: Pick<Book, 'bookId' | 'doc' | 'meta' | 'toc' | 'fixedLayout' | 'sectionTexts'>,
+  /** THE SAME VALUE THE VOICE READS, so the file holds what the reading would
+   *  have said. */
+  notesAloud: boolean,
+): AudiobookSource | null {
+  if (!book.bookId || !book.doc) return null
+  return {
+    title: book.meta?.title ?? 'Audiobook',
+    author: book.meta?.author ?? '',
+    lang: documentLang(book.doc),
+    toc: book.toc,
+    /* A PDF, or an EPUB of fixed pages: `run` refuses one, and says so. Read
+       from the view rather than guessed from the file's extension — see
+       `SessionCallbacks.onFixedLayout`. */
+    fixedLayout: book.fixedLayout,
+    sectionTexts: book.sectionTexts,
+    skip: { notes: notesAloud },
+  }
 }
 
 export interface AudiobookDeps {

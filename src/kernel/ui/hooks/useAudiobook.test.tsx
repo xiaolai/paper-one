@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useAudiobook, type AudiobookControl, type AudiobookDeps, type AudiobookSource } from './useAudiobook'
+import {
+  audiobookSourceOf,
+  useAudiobook,
+  type AudiobookControl,
+  type AudiobookDeps,
+  type AudiobookSource,
+} from './useAudiobook'
 import { NO_GOOD_VOICE } from '../reader/voiceChoice'
 import type { VoiceFacts } from '../reader/voiceChoice'
 import type { AudiobookPlatform } from '../reader/audiobook'
@@ -696,3 +702,60 @@ describe('a control held past the book it was for', () => {
     expect(harness.say).toHaveBeenCalledTimes(said)
   })
 })
+
+/**
+ * What the export is handed, from the book on screen.
+ *
+ * ⚠️ **EVERY FALLBACK HERE IS SOMETHING A READER SEES IN A FILE NAME OR A
+ * PLAYER.** A book that declares no title still has to be called something, and
+ * a book with no author must say nothing rather than something wrong — both
+ * end up in the `.m4b`'s metadata and in Apple Books' library.
+ */
+describe('the source an export is built from', () => {
+  const doc = () => {
+    const made = document.implementation.createHTMLDocument('')
+    made.documentElement.setAttribute('lang', 'fr')
+    return made
+  }
+  const walk = () => Promise.resolve({ sections: [], complete: true })
+  const book = (over: Partial<Parameters<typeof audiobookSourceOf>[0]> = {}) => ({
+    bookId: 'book:1',
+    doc: doc(),
+    meta: { title: 'Le Horla', author: 'Maupassant' } as Parameters<typeof audiobookSourceOf>[0]['meta'],
+    toc: [],
+    fixedLayout: false,
+    sectionTexts: walk,
+    ...over,
+  })
+
+  it('is nothing until the book has both an identity and a document', () => {
+    /* The id resolves from the bytes before the book is parsed, and a walk
+       started then has no navigator to ask. */
+    expect(audiobookSourceOf(book({ doc: null }), false), 'an id alone').toBeNull()
+    expect(audiobookSourceOf(book({ bookId: null }), false), 'a document alone').toBeNull()
+    expect(audiobookSourceOf(book(), false), 'both').not.toBeNull()
+  })
+
+  it('carries what the book declares, and the language of its document', () => {
+    const one = book()
+    expect(audiobookSourceOf(one, false)).toEqual({
+      title: 'Le Horla',
+      author: 'Maupassant',
+      lang: 'fr',
+      toc: one.toc,
+      fixedLayout: false,
+      sectionTexts: walk,
+      skip: { notes: false },
+    })
+  })
+
+  it('names a book that declares nothing, and credits nobody rather than somebody wrong', () => {
+    expect(audiobookSourceOf(book({ meta: null }), false)).toMatchObject({ title: 'Audiobook', author: '' })
+  })
+
+  it('skips the notes the reading skips, and reads the ones it reads', () => {
+    expect(audiobookSourceOf(book(), true)?.skip).toEqual({ notes: true })
+    expect(audiobookSourceOf(book(), false)?.skip).toEqual({ notes: false })
+  })
+})
+
