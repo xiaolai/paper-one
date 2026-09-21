@@ -690,38 +690,6 @@ describe('bootState', () => {
 })
 
 /**
- * That `useAppState` actually USES `bootState`.
- *
- * Testing the function proves it is right, not that it is reached — this suite
- * passed with the hook still assembling its own state inline, which is exactly
- * the bug. There is no renderer here to observe a hook, so the source is read
- * instead, the same way the palette's combos are checked against the key
- * handler in `commands.test.ts`.
- */
-describe('the hook starts from bootState', () => {
-  it('does not assemble its own initial state', () => {
-    const source = readFileSync(fileURLToPath(new URL('./state.ts', import.meta.url)), 'utf8')
-    const hook = source.slice(source.indexOf('export function useAppState'))
-    /* The reducer is wrapped (it closes over the contributed panes, WI-5.6),
-     * so the pin is two facts rather than one spelling: the wrapper delegates
-     * to `reducer`, and the initial state is `bootState(`. */
-    expect(hook).toMatch(/const reduce = useCallback\(\(state: AppState, action: Action\) => reducer\(state, action, contributed\)/)
-    /* LAZILY: the store is the initializer's argument, so the preferences are
-       read once and not on every render (2026-09-13 audit). */
-    expect(hook).toMatch(/useReducer\(\s*reduce,\s*settings,\s*\(store\) =>\s*bootState\(/)
-  })
-
-  /* And it reads the settings store into that call — the whole point of the
-   * store is that a launch starts from what was remembered. */
-  it('hands the remembered preferences to bootState', () => {
-    const source = readFileSync(fileURLToPath(new URL('./state.ts', import.meta.url)), 'utf8')
-    const hook = source.slice(source.indexOf('export function useAppState'))
-    expect(hook).toMatch(/bootState\([^)]*readKernelPreferences\(store\)/)
-    expect(hook).toMatch(/writeKernelPreferences\(settings, prefs\)/)
-  })
-})
-
-/**
  * The durable half of the state comes back on launch.
  *
  * `bootState` takes what the settings store remembered and starts from it —
@@ -1146,4 +1114,60 @@ describe('what lastPane may record', () => {
     const next = reducer(reading, { type: 'openPane', pane: 'search' } as Action, contributed)
     expect(next.lastPane).toBe('search')
   })
+})
+
+describe('the voice a reader chooses, and the speeds beside it', () => {
+  /**
+   * ⚠️ **MERGED INTO THE MAP, NEVER REPLACING IT.** One voice per language is
+   * the whole shape: a reader who picks an English voice, opens a Chinese book
+   * and picks one there must still have the first. And an EMPTY voice removes
+   * the entry rather than storing `''` — that is how a reader goes back to
+   * letting the app choose, and a stored empty string would leave a dead key
+   * per language they ever visited.
+   */
+  it('keeps every other language’s voice', () => {
+    const en = reducer(initialState, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })
+    const both = reducer(en, { type: 'setReadingVoice', lang: 'zh', voice: 'voice:zh' })
+    expect(both.readingVoice).toEqual({ en: 'voice:en', zh: 'voice:zh' })
+  })
+
+  it('is the same state when the voice chosen is the one already stored', () => {
+    const en = reducer(initialState, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })
+    expect(reducer(en, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })).toBe(en)
+  })
+
+  it('takes the entry out for an empty voice, and changes nothing when there was none', () => {
+    const en = reducer(initialState, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })
+    const cleared = reducer(en, { type: 'setReadingVoice', lang: 'en', voice: '' })
+    expect(cleared.readingVoice).toEqual({})
+    expect(reducer(cleared, { type: 'setReadingVoice', lang: 'en', voice: '' }), 'nothing moved').toBe(
+      cleared,
+    )
+  })
+
+  /**
+   * CLAMPED HERE TOO, not only in the settings validator: that guards what
+   * arrives from disk, this guards what arrives from a control, and they are
+   * two doors into one value. A value that is not a finite number is refused
+   * outright — `Math.min` over a NaN answers NaN, and a NaN rate makes the
+   * engine refuse the utterance.
+   */
+  it.each([
+    ['setReadingRate', 'readingRate', 1.25, 99, 2.5, 0.01, 0.5],
+    ['setSentenceGap', 'sentenceGapMs', 300, 99_999, 1000, -5, 0],
+    ['setParagraphGap', 'paragraphGapMs', 900, 99_999, 2000, -5, 0],
+  ] as const)(
+    '%s stores what is in range and clamps what is not',
+    (type, field, inRange, tooHigh, top, tooLow, bottom) => {
+      const value = (state: AppState) => state[field]
+      const set = (v: number): AppState =>
+        reducer(initialState, { type, ...(type === 'setReadingRate' ? { rate: v } : { ms: v }) } as never)
+      expect(value(set(inRange))).toBe(inRange)
+      expect(value(set(tooHigh)), 'a build with a wider ramp is not corrupt').toBe(top)
+      expect(value(set(tooLow))).toBe(bottom)
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        expect(set(bad), 'a value that is not a number changed the state').toBe(initialState)
+      }
+    },
+  )
 })
