@@ -434,3 +434,192 @@ describe('the traffic lights, in a browser', () => {
     expect(other.container.querySelectorAll('span[style*="background"]').length).toBe(0)
   })
 })
+
+describe('the Listen control, in each state it can be in', () => {
+  /**
+   * ⚠️ **§07 KEEPS THE DISABLED STATE FOR THE CASE THAT REMAINS REAL** — a
+   * WebView built without Web Speech — rather than for a feature that is
+   * unwritten. So there are three states and each says something different: no
+   * engine, no book, and ready. A title that lost its sentence, or a disabled
+   * flag that stopped following, is a control a reader presses and learns
+   * nothing from.
+   */
+  const listen = () => screen.getByRole('button', { name: 'Read aloud' })
+
+  it('says the build has no speech engine, and cannot be pressed', () => {
+    const started: number[] = []
+    draw({
+      state: { screen: 'reader', chromeOn: true },
+      speech: { ...speech, available: false, start: () => started.push(1) },
+      hasBook: true,
+    })
+    expect(listen().getAttribute('title')).toBe('Listen — this build has no speech engine')
+    expect(listen().hasAttribute('disabled')).toBe(true)
+    expect(listen().getAttribute('data-disabled')).toBe('true')
+    fireEvent.click(listen())
+    expect(started, 'a disabled control started a reading').toEqual([])
+  })
+
+  it('cannot be pressed with no book open, though the engine is there', () => {
+    draw({ state: { screen: 'reader', chromeOn: true }, speech: { ...speech, available: true }, hasBook: false })
+    expect(listen().hasAttribute('disabled')).toBe(true)
+    expect(listen().getAttribute('data-disabled')).toBe('true')
+  })
+
+  it('reads the chapter aloud when there is an engine and a book', () => {
+    const started: number[] = []
+    draw({
+      state: { screen: 'reader', chromeOn: true },
+      speech: { ...speech, available: true, start: () => started.push(1) },
+      hasBook: true,
+    })
+    expect(listen().getAttribute('title')).toBe('Read this chapter aloud')
+    expect(listen().hasAttribute('disabled')).toBe(false)
+    expect(listen().getAttribute('aria-pressed'), 'it is a verb, not a state').toBe('false')
+    fireEvent.click(listen())
+    expect(started).toEqual([1])
+  })
+})
+
+describe('what the chrome says without a word', () => {
+  it('marks the chip when it is naming the application rather than a book', () => {
+    /* ⚠️ NOT THE SWATCH THAT USED TO SIT HERE: that was derived from the open
+       book's id, and with no book it hashed the empty string and drew a spine
+       for a book that did not exist. The mark belongs to the application. */
+    const { container } = render(
+      <TitleBar
+        screens={[]}
+        state={{ ...initialState, chromeOn: true }}
+        dispatch={vi.fn()}
+        platform="macos"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={speech}
+        listenRefused={false}
+        hasBook={false}
+      />,
+    )
+    expect(container.querySelectorAll('[class*="chipMark"]').length, 'no mark with no book').toBe(1)
+    cleanup()
+
+    const open = render(
+      <TitleBar
+        screens={[]}
+        state={{ ...initialState, chromeOn: true }}
+        dispatch={vi.fn()}
+        platform="macos"
+        bookTitle="Moby-Dick"
+        bookSubtitle="Melville"
+        speech={speech}
+        listenRefused={false}
+        hasBook
+      />,
+    )
+    expect(open.container.querySelectorAll('[class*="chipMark"]').length, 'a mark over a book').toBe(0)
+  })
+
+  it('draws the pane control on the side the pane is on', () => {
+    /* The glyph is the only thing that says which edge the pane will come from,
+       and a reader who moved it to the left would otherwise be told the
+       opposite. */
+    const { container } = render(
+      <TitleBar
+        screens={[]}
+        state={{ ...initialState, chromeOn: true, side: 'left' }}
+        dispatch={vi.fn()}
+        platform="macos"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={speech}
+        listenRefused={false}
+        hasBook={false}
+      />,
+    )
+    expect(container.querySelector('.lucide-panel-left'), 'the left pane’s own glyph').toBeTruthy()
+    expect(container.querySelector('.lucide-panel-right')).toBeNull()
+  })
+
+  it('says the palette’s own shortcut in its title', () => {
+    draw({ state: { screen: 'library', chromeOn: true } })
+    expect(screen.getByRole('button', { name: 'Search or ask' }).getAttribute('title')).toBe(
+      'Search or ask · ⌘K',
+    )
+  })
+
+  it('says which way the pane control will go in its title too', () => {
+    draw({ state: { screen: 'library', chromeOn: true, pane: null } })
+    expect(screen.getByRole('button', { name: 'Open pane' }).getAttribute('title')).toBe('Open pane')
+    cleanup()
+    draw({ state: { screen: 'library', chromeOn: true, pane: 'toc' } })
+    expect(screen.getByRole('button', { name: 'Close pane' }).getAttribute('title')).toBe('Close pane')
+  })
+
+  it('offers only the panels this reader is offered', () => {
+    /* ⚠️ **THIS WAS THE ONE SURFACE NOT TO ASK `paneFits`**, and it drew the
+       deleted companion's button for every reader — a control that named one
+       destination and performed another, because `paneFor` redirected the
+       click. A panel the reader has HIDDEN is the same question: the rail must
+       not offer it. */
+    draw({ state: { screen: 'reader', chromeOn: true }, hasBook: true })
+    expect(screen.getByRole('button', { name: 'Contents' }), 'the panel a reader is offered').toBeTruthy()
+    /* And none of the panels the rail does not carry: the list is one entry, so
+       what this holds is that the rail draws THAT one and nothing else. */
+    for (const other of ['Marginalia', 'Search', 'Cards', 'Developer']) {
+      expect(screen.queryByRole('button', { name: other }), `${other} is not the rail's`).toBeNull()
+    }
+  })
+
+  it('draws the pane control on the right when the pane is on the right', () => {
+    /* The other half of the side glyph: with only one side tested, a control
+       that always drew the left one would pass. */
+    const { container } = render(
+      <TitleBar
+        screens={[]}
+        state={{ ...initialState, chromeOn: true, side: 'right' }}
+        dispatch={vi.fn()}
+        platform="macos"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={speech}
+        listenRefused={false}
+        hasBook={false}
+      />,
+    )
+    expect(container.querySelector('.lucide-panel-right')).toBeTruthy()
+    expect(container.querySelector('.lucide-panel-left')).toBeNull()
+  })
+
+  it('gives every control the shared action class, and the transport its own', () => {
+    /* §07's controls are one geometry and one hit area. A control that dropped
+       the shared class would sit at a different size from the ones beside it,
+       and the transport's own class is what makes its row narrower than the
+       chrome's. */
+    draw({ state: { screen: 'library', chromeOn: true, pane: null } })
+    expect(screen.getByRole('button', { name: 'Open pane' }).className).toMatch(/action/u)
+    expect(screen.getByRole('button', { name: 'Open pane' }).className).toMatch(/paneToggle/u)
+    cleanup()
+
+    listening()
+    for (const name of ['Previous sentence', 'Pause', 'Stop reading aloud']) {
+      const button = screen.getByRole('button', { name })
+      expect(button.className, `${name} is not an action`).toMatch(/action/u)
+      expect(button.className, `${name} is not a transport button`).toMatch(/transportButton/u)
+    }
+    expect(screen.getByRole('button', { name: /^Reading speed/u }).className).toMatch(/rate/u)
+  })
+
+  it('titles each transport step with the step it takes', () => {
+    listening()
+    for (const name of ['Previous sentence', 'Next sentence', 'Stop reading aloud']) {
+      expect(screen.getByRole('button', { name }).getAttribute('title'), name).toBe(name)
+    }
+  })
+
+  it('titles the pause control with what it will do', () => {
+    listening({ paused: false })
+    expect(screen.getByRole('button', { name: 'Pause' }).getAttribute('title')).toBe('Pause')
+    cleanup()
+    listening({ paused: true })
+    expect(screen.getByRole('button', { name: 'Go on reading' }).getAttribute('title')).toBe('Go on reading')
+  })
+})
