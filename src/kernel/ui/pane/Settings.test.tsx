@@ -1171,6 +1171,66 @@ describe('the voice the picker shows', () => {
     return screen.getByRole('combobox') as HTMLSelectElement
   }
 
+  /** The Voice group open, with every handler recorded. */
+  function voiceGroup(
+    voices: readonly (typeof installed)[] = [installed],
+    chosen: Readonly<Record<string, string>> = {},
+  ) {
+    const asked: [string, unknown][] = []
+    const { props } = full({
+      narration: {
+        lang: 'en-US',
+        voices,
+        chosen,
+        rate: 1,
+        sentenceGapMs: 150,
+        paragraphGapMs: 600,
+        notesAloud: false,
+        onVoice: (lang: string, voice: string) => asked.push(['voice', [lang, voice]]),
+        onRate: (rate: number) => asked.push(['rate', rate]),
+        onSentenceGap: (ms: number) => asked.push(['sentenceGap', ms]),
+        onParagraphGap: (ms: number) => asked.push(['paragraphGap', ms]),
+        onNotesAloud: (on: boolean) => asked.push(['notesAloud', on]),
+      },
+    })
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Voice' }))
+    return asked
+  }
+
+  it('writes the voice the reader picked, under the book’s own language', () => {
+    /* ⚠️ **PER LANGUAGE, NOT PER APP** — the whole reason the stored choice is a
+       map. A handler that dropped the language would put an English voice under
+       every book the reader opens. */
+    const asked = voiceGroup()
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: installed.voiceURI } })
+    expect(asked).toEqual([['voice', ['en', installed.voiceURI]]])
+  })
+
+  it('groups the voices it offers, and says which tier each group is', () => {
+    /* The tier is the only thing that separates a voice worth reading a book in
+       from one that is not, so the picker says it rather than listing names. */
+    voiceGroup()
+    const groups = [...(screen.getByRole('combobox') as HTMLSelectElement).querySelectorAll('optgroup')]
+    expect(groups.map((group) => group.label)).toEqual(['Enhanced'])
+  })
+
+  it('writes a speed, a sentence gap and a paragraph gap from their own steppers', () => {
+    /* Three scales, three handlers, each wired by hand: a stepper that called
+       the wrong setter would set the wrong silence with everything looking
+       right. The values are the NEXT STEP of each scale from where the fixture
+       stands — 1x, 150ms, 600ms — so 1.25x, 300ms and 900ms. */
+    const asked = voiceGroup()
+    for (const [control, expected] of [
+      ['More speed', ['rate', 1.25]],
+      ['More pause between sentences', ['sentenceGap', 300]],
+      ['More pause between paragraphs', ['paragraphGap', 900]],
+    ] as const) {
+      fireEvent.click(screen.getByRole('button', { name: control }))
+      expect(asked.at(-1), `${control} asked for the wrong thing`).toEqual(expected)
+    }
+  })
+
   it('shows Automatic, naming the voice it means, for a voice the machine no longer has', () => {
     const select = pickerFor({ en: 'com.apple.voice.premium.en-US.Gone' })
     expect(select.selectedOptions[0]?.textContent).toBe('Automatic (Zoe)')
