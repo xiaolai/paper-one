@@ -16,6 +16,9 @@ import {
   LINE,
   MINIMUM_SIZES,
   PANE_W,
+  PARAGRAPH_GAP,
+  READING_RATE,
+  SENTENCE_GAP,
   SPACING,
   TAG_LINE,
   cellHeightFor,
@@ -74,6 +77,16 @@ describe('the stepped scales', () => {
     ['figure width', FIGURE_WIDTHS, '%', 95],
     ['figure height', FIGURE_HEIGHTS, 'vh', 95],
     ['minimum size', MINIMUM_SIZES, 'px', 0],
+    /* ⚠️ **THESE THREE WERE MISSING, AND THEY ARE THE NEWEST SCALES IN THE
+       FILE.** The invariant this case holds — ordered, own unit, a default step
+       whose value is what a reader who never opens the pane gets — applied to
+       every scale the pane draws except read-aloud's, so `READING_RATE`'s
+       ordering, `SENTENCE_GAP`'s default and `PARAGRAPH_GAP`'s unit could each
+       regress with the suite green. A shared invariant that does not cover the
+       newest members is a guard that weakens every time the file grows. */
+    ['reading rate', READING_RATE, 'x', 1],
+    ['sentence gap', SENTENCE_GAP, 'ms', 150],
+    ['paragraph gap', PARAGRAPH_GAP, 'ms', 600],
   ])('%s runs in order, in its own unit, and starts where the app has always been', (_name, scale, unit, standing) => {
     expect(scale.unit).toBe(unit)
     expect(scale.steps.length).toBeGreaterThan(1)

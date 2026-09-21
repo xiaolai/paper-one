@@ -14,7 +14,7 @@ import {
   SENTENCE_GAP,
   READING_STEPS,
   SPACING,
-  type SpacingScale,
+  type SteppedScale,
 } from './metrics'
 import { defineSetting, frozen, type Setting, type SettingsStore } from './ports'
 import {
@@ -726,7 +726,7 @@ const readingStyle = (raw: unknown): ReadingStyle | undefined => {
   const row = raw as Record<string, unknown>
   const pick = <K extends StyleField<string>>(key: K, from: readonly ReadingStyle[K][]): ReadingStyle[K] =>
     oneOf(from)(row[key]) ?? DEFAULT_READING_STYLE[key]
-  const step = (key: StyleField<number>, scale: SpacingScale): number =>
+  const step = (key: StyleField<number>, scale: SteppedScale): number =>
     index(scale.steps.length)(row[key]) ?? DEFAULT_READING_STYLE[key]
   const flag = (key: StyleField<boolean>): boolean => boolean(row[key]) ?? DEFAULT_READING_STYLE[key]
   return {

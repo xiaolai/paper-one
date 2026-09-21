@@ -1,5 +1,5 @@
 import { Minus, Plus } from 'lucide-react'
-import { ICON, stepAt, type SpacingScale } from '../../core/metrics'
+import { ICON, stepAt, type SteppedScale } from '../../core/metrics'
 import styles from './SidePane.module.css'
 
 /**
@@ -20,7 +20,7 @@ import styles from './SidePane.module.css'
 export interface StepRowProps {
   readonly label: string
   /** The scale this row steps through — see `SPACING`, `BRIGHTNESS`, `CONTRAST`. */
-  readonly scale: SpacingScale
+  readonly scale: SteppedScale
   readonly value: number
   readonly onChange: (idx: number) => void
 }

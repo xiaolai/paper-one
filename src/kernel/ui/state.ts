@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
-import { BRIGHTNESS, CONTRAST, PARAGRAPH_GAP, SENTENCE_GAP, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
+import { BRIGHTNESS, CONTRAST, PARAGRAPH_GAP, SENTENCE_GAP, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SteppedScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
 import {
   PARAGRAPH_GAP_MAX,
@@ -378,7 +378,7 @@ type ScaledReadingStyleKey = { [K in ReadingStyleKey]: ReadingStyle[K] extends n
  * the trap the table exists to close. Keyed by `ScaledReadingStyleKey`, an
  * omission is a compile error.
  */
-const READING_STYLE_SCALES: Readonly<Record<ScaledReadingStyleKey, SpacingScale>> = {
+const READING_STYLE_SCALES: Readonly<Record<ScaledReadingStyleKey, SteppedScale>> = {
   figureWidth: FIGURE_WIDTHS,
   figureHeight: FIGURE_HEIGHTS,
   minimumSize: MINIMUM_SIZES,
@@ -400,7 +400,7 @@ function scaleIndex(idx: number, length: number): number | null {
  * survived every test (2026-09-15 mutation sweep). Named at the case, the
  * pairing is read off one line rather than decided by a branch.
  */
-function atIndex(state: AppState, key: 'brightness' | 'contrast', scale: SpacingScale, idx: number): AppState {
+function atIndex(state: AppState, key: 'brightness' | 'contrast', scale: SteppedScale, idx: number): AppState {
   const at = scaleIndex(idx, scale.steps.length)
   return at === null || state[key] === at ? state : { ...state, [key]: at }
 }
@@ -611,7 +611,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       /* Widened to every key for the lookup, by assignment rather than a cast:
          the table is complete for the scaled keys, and a key it does not name
          is one of the closed sets. */
-      const scales: Partial<Record<ReadingStyleKey, SpacingScale>> = READING_STYLE_SCALES
+      const scales: Partial<Record<ReadingStyleKey, SteppedScale>> = READING_STYLE_SCALES
       const scale = scales[action.key]
       const value =
         scale === undefined ? action.value : scaleIndex(action.value as number, scale.steps.length)
