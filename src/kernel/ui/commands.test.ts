@@ -154,6 +154,20 @@ describe('buildCommands', () => {
     expect(find(buildCommands(shut), 'book:audiobook')).toBeUndefined()
   })
 
+  it('files the export under Book, and can be found by the words a reader would type', () => {
+    /* ⚠️ **THE KEYWORDS ARE THE ONLY WAY IN.** The palette is the whole of this
+       feature's surface, and a reader looking for it types what they want —
+       "audiobook", "m4b", "read aloud" — not the label's own words. A row with
+       no keywords is a row only somebody who knows its name can reach, and the
+       group is what puts it beside the other things you do to a book. */
+    const { ctx } = context()
+    const row = find(buildCommands({ ...ctx, exportAudiobook: { running: false, run: () => {} } }), 'book:audiobook')
+    expect(row?.group).toBe('Book')
+    for (const word of ['narrate', 'speech', 'm4b', 'listen', 'chapters', 'read aloud', 'file']) {
+      expect(row?.keywords, `a reader typing ${word} would not find it`).toContain(word)
+    }
+  })
+
   it('turns the export row into a stop while one is running', () => {
     /* One command, two states: the reader who started it looks in the same place
        to stop it, rather than hunting for a second row that only sometimes

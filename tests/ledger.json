@@ -8024,6 +8024,7 @@
     "src/kernel/ui/commands.test.ts > buildCommands > carries §11 combos, so the palette shows what the handler binds",
     "src/kernel/ui/commands.test.ts > buildCommands > does not offer the unfinished panel until developer options are on",
     "src/kernel/ui/commands.test.ts > buildCommands > drops one that developer options hid",
+    "src/kernel/ui/commands.test.ts > buildCommands > files the export under Book, and can be found by the words a reader would type",
     "src/kernel/ui/commands.test.ts > buildCommands > names the action, not the thing — a pane that is open offers to close",
     "src/kernel/ui/commands.test.ts > buildCommands > names the direction the bookmark toggle would go",
     "src/kernel/ui/commands.test.ts > buildCommands > offers all of them in a book",
