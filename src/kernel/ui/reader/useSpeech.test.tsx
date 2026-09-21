@@ -117,8 +117,16 @@ function mount(
   {
     chapters = false,
     lands = true,
+    can,
     prefs,
-  }: { chapters?: boolean; lands?: boolean; prefs?: SpeakPrefs } = {},
+  }: {
+    chapters?: boolean
+    lands?: boolean
+    /** Asked per direction, and per render — the transport draws each button
+     *  from its own answer, and a book answers differently at either end. */
+    can?: (by: -1 | 1) => boolean
+    prefs?: SpeakPrefs
+  } = {},
 ) {
   const next = vi.fn()
   /* ⚠️ `lands` IS THE WHOLE POINT OF THE RETURN VALUE. A `chapter` that
@@ -131,7 +139,7 @@ function mount(
        transport reads its presence to decide whether to draw the buttons. */
     api.current = useSpeech(
       doc,
-      chapters ? { next, chapter: { can: () => lands, go: chapter } } : { next },
+      chapters ? { next, chapter: { can: can ?? (() => lands), go: chapter } } : { next },
       prefs,
     )
     return null
@@ -142,6 +150,9 @@ function mount(
     chapter,
     speech: () => api.current!,
     show: (doc: Document | null) => view.rerender(<Probe doc={doc} />),
+    /** The window outlives the component, so what an unmount does to a reading
+     *  in progress is a case rather than a detail. */
+    unmount: () => view.unmount(),
   }
 }
 
@@ -1030,6 +1041,280 @@ describe('pausing between two sections', () => {
     act(() => speech().pause())
     act(() => vi.advanceTimersByTime(CONTINUE_GRACE_MS * 3))
     expect(speech().speaking).toBe(true)
+    a.remove()
+  })
+})
+
+/**
+ * Which chapter steps the book offers, per direction.
+ *
+ * ⚠️ **NOTHING DREW THIS, AND IT IS WHAT THE TRANSPORT'S TWO BUTTONS ARE.** The
+ * pair used to be one boolean meaning "at least one direction exists", so the
+ * first chapter of every book drew a Previous control that went nowhere and the
+ * last drew a Next one — the exact defect at the two places a reader is most
+ * likely to be.
+ */
+describe('the chapter steps a book offers', () => {
+  it('answers for each direction on its own', () => {
+    const a = section('One.')
+    const { speech } = mount(a.doc, { chapters: true, can: (by) => by === -1 })
+    expect(speech().chapters).toEqual({ back: true, forward: false })
+    a.remove()
+  })
+
+  it('offers neither where the book cannot place the reader at all', () => {
+    /* No `chapter` — a book whose current spine item no contents entry points
+       at. The answer is two falses rather than an absence, because the control
+       reads booleans. */
+    const a = section('One.')
+    const { speech } = mount(a.doc)
+    expect(speech().chapters).toEqual({ back: false, forward: false })
+    a.remove()
+  })
+
+  it('follows the book when the answer changes under it', () => {
+    let first = true
+    const a = section('One.')
+    const { speech, show } = mount(a.doc, { chapters: true, can: (by) => (first ? by === 1 : true) })
+    expect(speech().chapters).toEqual({ back: false, forward: true })
+
+    first = false
+    act(() => show(a.doc))
+    expect(speech().chapters, 'a chapter in, both directions exist').toEqual({
+      back: true,
+      forward: true,
+    })
+    a.remove()
+  })
+})
+
+describe('the document it reads', () => {
+  it('is the one it was last given, not the one it opened with', () => {
+    /* The refs the engine's callbacks read are written in a layout effect, and
+       an effect that stopped writing them would leave every callback — and
+       `start` itself — reading the document the tree first showed. */
+    const a = section('First section.')
+    const b = section('Second section.')
+    const { speech, show } = mount(a.doc)
+    act(() => show(b.doc))
+    act(() => speech().start())
+    expect(spoken()).toEqual(['Second section.'])
+    a.remove()
+    b.remove()
+  })
+
+  it('drops a pending sentence gap when the section changes under it', () => {
+    /* ⚠️ A gap is a timer holding an INDEX into the plan of the section that
+       set it. Left running across a section change it speaks that index out of
+       the new section — the wrong words, in the right voice, with nothing to
+       say what happened. */
+    const a = section('One. Two.')
+    const b = section('Next one. And more.')
+    const { speech, show } = mount(a.doc, { prefs: { sentenceGapMs: 300 } })
+    act(() => speech().start())
+    ends()
+    expect(spoken(), 'the gap is holding the second sentence').toEqual(['One.'])
+
+    act(() => show(b.doc))
+    expect(spoken()).toEqual(['One.', 'Next one.'])
+    act(() => vi.advanceTimersByTime(2000))
+    expect(spoken(), 'and the abandoned gap says nothing at all').toEqual(['One.', 'Next one.'])
+    a.remove()
+    b.remove()
+  })
+
+  it('says nothing more when the reader stops during a gap', () => {
+    const a = section('One. Two.')
+    const { speech } = mount(a.doc, { prefs: { sentenceGapMs: 300 } })
+    act(() => speech().start())
+    ends()
+    act(() => speech().stop())
+    act(() => vi.advanceTimersByTime(2000))
+    expect(spoken()).toEqual(['One.'])
+    expect(speech().speaking).toBe(false)
+    a.remove()
+  })
+})
+
+/**
+ * The reader's note preference reaches the walk that collects the words.
+ *
+ * ⚠️ **ONE VALUE, NOT TWO DEFAULTS.** `collectText` decides what a note is; the
+ * hook decides whether this reader wants it read; and the audiobook export reads
+ * the same preference, so what is spoken and what is written are one answer.
+ */
+describe('notes in the reading', () => {
+  const withNote = 'He left.<span epub:type="footnote">A note.</span>Then she stayed.'
+
+  it('leaves a note body out unless the reader asked for it', () => {
+    const a = section(withNote)
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    expect(spoken().join(' ')).not.toContain('A note')
+    a.remove()
+  })
+
+  it('reads the note body when the reader did ask', () => {
+    const a = section(withNote)
+    const { speech } = mount(a.doc, { prefs: { notesAloud: true } })
+    act(() => speech().start())
+    expect(spoken().join(' ')).toContain('A note')
+    a.remove()
+  })
+
+  it('reads a book with no preferences at all', () => {
+    /* `prefs` is optional — a host that passes none must not be a crash, which
+       is what reading through the object rather than around it would be. */
+    const a = section('One.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    expect(spoken()).toEqual(['One.'])
+    a.remove()
+  })
+})
+
+describe('the controls with no engine behind them', () => {
+  /* ⚠️ **A BUILD WITH NO SPEECH ENGINE STILL RENDERS THE CONTROLS**, disabled —
+     and a disabled control is still a control somebody can reach by keyboard or
+     by a stale command. Every one of them has to be a no-op rather than a throw.
+  */
+  it('does nothing, and throws nothing, without one', () => {
+    delete (window as { speechSynthesis?: unknown }).speechSynthesis
+    const a = section('One.')
+    const { speech } = mount(a.doc)
+    expect(speech().available).toBe(false)
+    act(() => {
+      speech().start()
+      speech().pause()
+      speech().resume()
+      speech().stop()
+      speech().stepSentence(1)
+      speech().stepParagraph(-1)
+      speech().stepChapter(1)
+    })
+    expect(speech().speaking).toBe(false)
+    a.remove()
+  })
+})
+
+describe('the reading and the component it lives in', () => {
+  it('ends when the component goes away, because the engine does not', () => {
+    /* Speech is a property of the window: an utterance outlives an unmount and
+       would go on reading a book whose reader has closed it. */
+    const a = section('One. Two.')
+    const { speech, unmount } = mount(a.doc)
+    act(() => speech().start())
+    const cancelled = synth.cancelled
+    act(() => unmount())
+    expect(synth.cancelled, 'the engine was stopped on the way out').toBe(cancelled + 1)
+    a.remove()
+  })
+})
+
+/**
+ * `heldContinuation` says the reader paused a walk between sections rather than
+ * a sentence, and `resume` reads it to decide which one to pick up.
+ *
+ * ⚠️ **LEFT SET, IT SENDS THE NEXT RESUME DOWN THE WRONG ROAD.** The engine is
+ * never released, the reading stays silent, and the transport goes on showing a
+ * reading in progress — so both places that clear the flag are load-bearing.
+ */
+describe('the flag that says what was paused', () => {
+  it('is not carried from a reading that ended into the next one', () => {
+    const a = section('Only this.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    act(() => speech().stop())
+
+    act(() => speech().start())
+    act(() => speech().pause())
+    expect(synth.paused, 'the engine itself is what was paused this time').toBe(true)
+    act(() => speech().resume())
+    expect(synth.paused, 'so resuming has to release it').toBe(false)
+    a.remove()
+  })
+
+  it('is not carried from one held walk to the next pause', () => {
+    const a = section('Only this.')
+    const b = section('And this. With more.')
+    const { speech, show } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    act(() => speech().resume())
+
+    act(() => show(b.doc))
+    act(() => speech().pause())
+    expect(synth.paused).toBe(true)
+    act(() => speech().resume())
+    expect(synth.paused, 'the second pause was the engine, and is released').toBe(false)
+    a.remove()
+    b.remove()
+  })
+})
+
+describe('a section the segmenter finds no sentence in', () => {
+  /* Written from its code point: an escape typed into an edit arrives as the
+     character itself, and a soft hyphen in a source file is invisible. */
+  const SOFT = String.fromCodePoint(0xad)
+
+  it('is spoken whole, and a boundary in it places nothing', () => {
+    /* ⚠️ A soft hyphen is neither whitespace nor content, so the text is not
+       empty and the plan is. `speakDocument` hands the engine the collected text
+       so the section still reports done and the walk goes on — and a boundary on
+       THAT utterance has no sentence to rebase against. */
+    const a = section(SOFT)
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    expect(synth.queued.length, 'the section went to the engine').toBe(1)
+
+    /* ⚠️ **AND THE FOLLOW-ALONG STILL WORKS THERE.** The boundary's index is an
+       offset into what was spoken, which here is the whole text — so the band is
+       drawn from it like any other. It used to be dropped: the handler looked
+       the sentence up by cursor, found none, and returned, so such a section
+       read with no highlight at all and nothing said why. */
+    boundary(0, 1)
+    expect(a.doc.getElementById('paper-spoken-word'), 'the word is followed').not.toBeNull()
+    expect(speech().speaking).toBe(true)
+    a.remove()
+  })
+})
+
+describe('a step with nowhere to go', () => {
+  it('leaves the walk that crosses sections alone', () => {
+    /* ⚠️ Forward off the END of a section is not "do nothing to the reading" —
+       the continuation is what carries it into the next section, and the press
+       must not tear that down. It used to: the cursor answered null, the move
+       ran anyway, and a reader pressing forward at a section boundary stopped
+       the reading with `speaking` still true and no timer left to wake it. */
+    const a = section('Only this.')
+    const { speech, next } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    expect(next).toHaveBeenCalledTimes(1)
+
+    act(() => speech().stepSentence(1))
+    act(() => vi.advanceTimersByTime(CONTINUE_TICK_MS * 2))
+    expect(next.mock.calls.length, 'the walk is still walking').toBeGreaterThan(1)
+    expect(spoken(), 'and nothing was spoken twice').toEqual(['Only this.'])
+    a.remove()
+  })
+
+  it('says nothing when the reader steps after stopping', () => {
+    /* ⚠️ The plan OUTLIVES the reading — it is cleared when the document
+       changes, not when the reader stops — so a step that only checked for one
+       would find everything it needs and speak into a stopped reading. */
+    const a = section('One. Two.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    act(() => speech().stop())
+
+    act(() => speech().stepSentence(1))
+    act(() => speech().stepParagraph(1))
+    expect(spoken()).toEqual(['One.'])
+    expect(speech().speaking).toBe(false)
     a.remove()
   })
 })
