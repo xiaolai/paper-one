@@ -401,7 +401,15 @@ const HERE = 'epubcfi(/6/4!/4/2,/1:0,/1:9)'
 const THERE = 'epubcfi(/6/8!/4/2,/1:0,/1:9)'
 
 /** The accelerator is Ctrl off macOS, and jsdom's user agent is nobody's Mac. */
-const accel = (key: string) => fireEvent.keyDown(window, { key, ctrlKey: true })
+/** The accelerator the app was mounted to expect — ⌘ where the URL pinned
+ *  macOS, Ctrl everywhere else, which is what jsdom's user agent resolves to. */
+const accel = (key: string) =>
+  fireEvent.keyDown(window, {
+    key,
+    ...(new URLSearchParams(window.location.search).get('platform') === 'macos'
+      ? { metaKey: true }
+      : { ctrlKey: true }),
+  })
 const hint = () => screen.queryByRole('button', { name: /← Back to/u })
 
 async function mount(
@@ -1735,6 +1743,25 @@ describe('the reading transport over a real book', () => {
     expect(session.goTo, 'the step did not take the reader anywhere').toContain('chapter-2.xhtml')
   })
 
+  it('follows the reader into the next chapter, and offers the way back from there', async () => {
+    /* ⚠️ **THE STEP IS A MEMO OVER THE READER'S PLACE**, and one that never
+       recomputed would go on offering what was true where the reading began:
+       forward from the first chapter for ever, and never back. */
+    await reading([
+      { label: 'One', href: 'chapter-1.xhtml' },
+      { label: 'Two', href: 'chapter-2.xhtml' },
+    ])
+    expect(control('Previous chapter')).toBeNull()
+
+    reader.chapterHref = 'chapter-2.xhtml'
+    await act(async () => {
+      reader.live!.relocate('epubcfi(/6/6!/4/2)')
+    })
+    await settled()
+    expect(control('Previous chapter'), 'the step did not follow the reader').not.toBeNull()
+    expect(control('Next chapter'), 'there is no chapter after the last').toBeNull()
+  })
+
   it('offers no chapter step in a book whose contents names none', async () => {
     /* The transport is still there — sentences and paragraphs are the reader's
        whatever the contents says — and the chapter controls are absent rather
@@ -1796,3 +1823,48 @@ describe('the reading transport over a real book', () => {
     ).toBe('Reading speed 1.75×')
   })
 })
+
+/**
+ * The audiobook export, as the palette offers it.
+ *
+ * ⚠️ **TWO GATES, AND EACH HAD NO CASE.** The engine exists on macOS alone, so
+ * everywhere else the command must not be there at all — offered, it could only
+ * refuse. And a book is ready for it only once its document is: the id resolves
+ * from the bytes before the parse, and an export started in that gap reported
+ * the reader's book as unreadable.
+ */
+describe('the audiobook export', () => {
+  afterEach(() => {
+    window.history.replaceState(null, '', '/')
+  })
+
+  async function openBook(platform: 'macos' | 'linux') {
+    /* The platform is resolved once, at mount, from the URL override first. */
+    window.history.replaceState(null, '', `/?platform=${platform}`)
+    reader.prose = '<p>Call me Ishmael.</p>'
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    return () => open('Moby-Dick')
+  }
+
+  it('is offered for an open book on the platform with the engine', async () => {
+    const opening = await openBook('macos')
+    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'offered with no book open').toBe(false)
+    await opening()
+    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'the open book was not offered').toBe(true)
+  })
+
+  it('is not offered where there is no engine to write it', async () => {
+    const opening = await openBook('linux')
+    await opening()
+    expect(await paletteOffers('audiobook', 'Export as audiobook…')).toBe(false)
+  })
+
+  it('waits for the book’s document, which is what the walk runs over', async () => {
+    const opening = await openBook('macos')
+    reader.prose = null
+    await opening()
+    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'a book with no document yet').toBe(false)
+  })
+})
+

@@ -68,12 +68,12 @@ import { TagEditor } from './screens/TagEditor'
 import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
-import { stepChapter } from './tocOrder'
+import { chapterSteps } from './tocOrder'
 import { useSpeech } from './reader/useSpeech'
 import { documentLang } from './reader/speech'
 import { voiceFor } from './reader/voiceChoice'
 import { useVoices } from './hooks/useVoices'
-import { useAudiobook } from './hooks/useAudiobook'
+import { audiobookSourceOf, useAudiobook } from './hooks/useAudiobook'
 
 
 /**
@@ -319,44 +319,27 @@ export function App({
     ],
   )
   /**
-   * The paging the reading needs, with a chapter step where the book can place
-   * the reader in its own contents.
+   * The paging the reading needs, and a chapter step over the book's contents.
    *
-   * ⚠️ **`chapter` IS ABSENT, NOT A NO-OP, WHEN IT CANNOT WORK** — the transport
-   * reads its presence to decide whether to draw the buttons at all, and a
-   * control that navigates nowhere is worse than one that is not there. A reader
-   * can be in a spine item no contents entry points at, in which case
-   * `chapterHref` is not in the flattened TOC and there is genuinely no next
-   * chapter to name.
+   * ⚠️ **THE STEP ALWAYS COMES, AND ANSWERS FOR ITSELF.** This returned no
+   * `chapter` at all where neither direction went anywhere, on the ground that
+   * the transport read its PRESENCE — but the transport reads `can` per
+   * direction now, and a step whose `can` says no in both is the same answer as
+   * an absent one. The early return was a second statement of it, and no test
+   * could tell the two apart. `chapterSteps` holds the whole decision, with every
+   * branch reachable, including the step that declines.
    *
-   * ⚠️ **AT THE FIRST OR LAST CHAPTER ONE OF THE PAIR STILL DOES NOTHING**, which
-   * is the honest limit of a single presence flag: `stepChapter` answers null at
-   * either end and this asks nothing of the book. Narrowing that to a per-button
-   * disabled state needs the transport to know which directions exist, and is
-   * worth doing when a reader complains rather than on a guess about which of the
-   * two is more annoying.
+   * A reader can be in a spine item no contents entry points at: `chapterHref`
+   * is then `''`, which `stepChapter` finds in no list of places, so both
+   * directions answer no without a guard here saying so first.
    */
-  const speechPaging = useMemo(() => {
-    const here = book.position.chapterHref
-    /* ONE LOOKUP SERVING BOTH HALVES, so the answer the transport draws and the
-       answer the step takes cannot disagree. They were computed separately —
-       `placed`/`before` here, a fresh `stepChapter` inside the action — and the
-       two were only ever reconciled by both being correct. */
-    const to = (by: -1 | 1) => (here === '' ? null : stepChapter(book.toc, here, by))
-    if (to(1) === null && to(-1) === null) return { next: book.next }
-    return {
+  const speechPaging = useMemo(
+    () => ({
       next: book.next,
-      chapter: {
-        can: (by: -1 | 1) => to(by) !== null,
-        go: (by: -1 | 1) => {
-          const href = to(by)
-          if (href === null) return false
-          book.goTo(href)
-          return true
-        },
-      },
-    }
-  }, [book.next, book.goTo, book.toc, book.position.chapterHref])
+      chapter: chapterSteps(book.toc, book.position.chapterHref, book.goTo),
+    }),
+    [book.next, book.goTo, book.toc, book.position.chapterHref],
+  )
   const speech = useSpeech(book.doc, speechPaging, speechPrefs)
   /* What the Voice group in Settings needs that app state cannot answer: the
      language of the book on screen, and what this machine can actually say.
@@ -719,30 +702,17 @@ export function App({
      see `useAudiobook` for why that is the whole surface for now. */
   const audiobookSource = useMemo(
     () =>
-      /* ⚠️ **READY MEANS A DOCUMENT, NOT AN ID.** This was gated on `bookId`
-         alone, which resolves from the file's bytes before the book is parsed —
-         so for the first moments of every opening the palette offered an export
-         whose walk had no navigator to ask, and it answered `complete: false`,
-         which the export reports as "the book stopped being readable part way
-         through". A reader who chose it quickly was told their book was broken.
-         `doc` is published only after the session has handed over its
-         navigator, so it is the fact that means the walk can run. */
-      book.bookId && book.doc
-        ? {
-            title: book.meta?.title ?? 'Audiobook',
-            author: book.meta?.author ?? '',
-            lang: book.doc ? documentLang(book.doc) : null,
-            toc: book.toc,
-            /* A PDF, or an EPUB of fixed pages: `useAudiobook` refuses one, and
-               says so. Read from the view rather than guessed from the file's
-               extension — see `SessionCallbacks.onFixedLayout`. */
-            fixedLayout: book.fixedLayout,
-            sectionTexts: book.sectionTexts,
-            /* THE SAME VALUE THE VOICE READS, so the file holds what the
-               reading would have said. */
-            skip: { notes: state.readingNotesAloud },
-          }
-        : null,
+      audiobookSourceOf(
+        {
+          bookId: book.bookId,
+          doc: book.doc,
+          meta: book.meta,
+          toc: book.toc,
+          fixedLayout: book.fixedLayout,
+          sectionTexts: book.sectionTexts,
+        },
+        state.readingNotesAloud,
+      ),
     [
       book.bookId,
       book.meta,
