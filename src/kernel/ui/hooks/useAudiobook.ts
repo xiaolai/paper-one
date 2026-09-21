@@ -1,6 +1,8 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
 import { ExportCancelled, exportAudiobook, planChapters } from '../reader/audiobook'
+import { basename } from '../../core/bookFiles'
+import { messageOf } from '../../core/messageOf'
 import type { SpeechSkipPrefs } from '../reader/speechSkip'
 import type { SectionTextWalk } from '../reader/session'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
@@ -70,6 +72,29 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
 
   const { available, source, voices, chosen, rate, say } = deps
 
+  /**
+   * ⚠️ **ONE LONG FUNCTION, AND THAT IS THE DECISION RATHER THAN THE DEBT.** An
+   * audit asked for this to be split — locking, cancellation, validation,
+   * extraction, path selection, orchestration, progress and error presentation —
+   * and argued the concentration caused the lifecycle defects around it. Three of
+   * those defects were real and are fixed; the diagnosis is still worth
+   * answering, because the fix it proposes would make the next one harder to see.
+   *
+   * What this body IS, is one linear sequence with a refusal at each step and
+   * nothing that loops back: claim, pick a voice, read the book, plan, ask for a
+   * path, export, report. Every branch is an early return. The two pieces of
+   * state that matter — `inFlight.current` and `stop.current` — are claimed at
+   * the top and released in exactly one `finally`, and the whole of their
+   * lifetime is on one screen. Splitting it into `claim()`, `read()`,
+   * `choosePath()` and `orchestrate()` would spread that lifetime across four
+   * functions and a shared mutable ref, which is the shape the defects it names
+   * came from in the first place: `running` used as a lock was a lifecycle fact
+   * held in one place and read in another.
+   *
+   * So the length is accepted and the reason is written down. What would change
+   * it is a second caller for any step — none exists, and a function extracted
+   * for one caller is a name, not a boundary.
+   */
   const run = useCallback(() => {
     /**
      * ⚠️ **`running` IS A RENDER SNAPSHOT, NOT A LOCK, AND IT WAS USED AS ONE.**
@@ -149,11 +174,17 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
           cancelled: () => stop.current,
         })
         say(
-          `Exported ${result.chapters} chapters, ${Math.round(result.durationMs / 60_000)} minutes, to ${nameOf(result.path)}.`,
+          `Exported ${result.chapters} chapters, ${Math.round(result.durationMs / 60_000)} minutes, to ${nameOf(result.path)}.` +
+            leftBehindNote(result.leftBehind),
         )
       } catch (cause) {
         if (cause instanceof ExportCancelled) {
-          say('The export was stopped. Nothing was left behind.')
+          /* ⚠️ **THIS SAID "Nothing was left behind." UNCONDITIONALLY**, while
+             `exportAudiobook` swallowed every tidy-up failure — so the one
+             sentence a reader would act on was the one thing nobody had checked.
+             A chapter of a ten-hour book is tens of megabytes. It is counted now,
+             and the claim is only made when it is true. */
+          say(`The export was stopped.${leftBehindNote(cause.leftBehind) || ' Nothing was left behind.'}`)
           return
         }
         /* THE ENGINE'S OWN SENTENCE. Every refusal in `narrate` names what it
@@ -167,7 +198,10 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
         setRunning(false)
       }
     })()
-  }, [running, source, voices, chosen, rate, say])
+    /* NO `running` HERE. It is not read — the claim is `inFlight.current`, which
+       is the whole point of that ref — so listing it only changed this callback's
+       identity on every start and stop, for a value the body never looks at. */
+  }, [source, voices, chosen, rate, say])
 
   /**
    * ⚠️ **MEMOISED BECAUSE A CONSUMER HAS TO BE ABLE TO DEPEND ON IT.** A fresh
@@ -183,20 +217,48 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
    * identity is what lets the dependency be declared honestly.
    */
   const control = useMemo<AudiobookControl>(() => ({ running, run }), [running, run])
+  /**
+   * ⚠️ **AND A RUNNING EXPORT KEEPS ITS CONTROL EVEN WHEN THE BOOK GOES.**
+   * This was `if (!available || !source) return null`, so closing the book mid
+   * export took the only way to stop it off the palette while the operation
+   * carried on — reading, rendering and writing a file the reader could no longer
+   * reach, and with `source` gone they could not start another to get the row
+   * back either. The export captured everything it needs when it began; it does
+   * not read `source` again, which is exactly why it survives, and exactly why
+   * the control has to.
+   *
+   * `running` rather than `inFlight.current` on purpose: this decides what is
+   * RENDERED, and a ref does not re-render when it changes. The ref is the
+   * synchronous lock, the state is what the controls read — the same split the
+   * claim in `run` is built on.
+   */
+  if (running) return control
   if (!available || !source) return null
   return control
 }
 
-/** The file's own name, since the whole path is longer than a notice. */
+/**
+ * The file's own name, since the whole path is longer than a notice.
+ *
+ * ⚠️ **THE KERNEL'S `basename`, NOT A THIRD ONE.** This hand-rolled
+ * `lastIndexOf('/')` knew only the POSIX separator, which is the same defect
+ * `audiobookTauri`'s `discard` had beside it — two copies of one helper, both
+ * wrong on Windows, in the same feature.
+ */
 function nameOf(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1) || path
+  return basename(path) || path
 }
 
-function messageOf(cause: unknown): string {
-  if (cause instanceof Error) return cause.message
-  /* Tauri rejects an `invoke` with the SERIALISED Rust error, which is a plain
-   * value and never an `Error` — the same shape `peer/lib/port.ts` records
-   * losing a refusal's name to. A string is what `narrate`'s commands return. */
-  if (typeof cause === 'string') return cause
-  return 'no reason was given'
+/**
+ * What to add to a notice when the tidy-up could not finish.
+ *
+ * Empty when there is nothing to say, so the caller can use it as the test as
+ * well as the text — a reader is told about leftover files or told nothing, and
+ * never told a number that is zero.
+ */
+function leftBehindNote(count: number): string {
+  if (count <= 0) return ''
+  return count === 1
+    ? ' One temporary audio file could not be removed.'
+    : ` ${count} temporary audio files could not be removed.`
 }

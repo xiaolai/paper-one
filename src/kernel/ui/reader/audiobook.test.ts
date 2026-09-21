@@ -97,7 +97,66 @@ describe('exportAudiobook', () => {
       author: 'Paper',
       path: '/tmp/book.m4b',
     })
-    expect(result).toEqual({ path: '/tmp/book.m4b', durationMs: 1234, chapters: 2 })
+    expect(result).toEqual({ path: '/tmp/book.m4b', durationMs: 1234, chapters: 2, leftBehind: 0 })
+  })
+
+  /**
+   * ⚠️ **A STOP DURING THE JOIN WAS IGNORED, AND SUCCESS WAS REPORTED.**
+   * Cancellation was checked only on the way INTO packaging, so a stop pressed
+   * while the chapters were being joined and encoded — the longest single step
+   * there is, and the one the transport shows "Stopping…" over — produced a
+   * finished-looking `.m4b` and a notice saying the book had been exported.
+   *
+   * The join still cannot be cut short: it is one call into the engine, exactly
+   * as a chapter render is. What must be true is that the OUTCOME is honest and
+   * the file the reader stopped asking for is not left at the name they chose.
+   */
+  it('reports a stop asked for while the chapters are being joined', async () => {
+    let joining = false
+    const { platform, discarded } = fake({
+      package: vi.fn(async () => {
+        joining = true
+        return { durationMs: 1234, chapters: 2 }
+      }),
+    })
+
+    const run = exportAudiobook(platform, request({ cancelled: () => joining }))
+
+    await expect(run).rejects.toBeInstanceOf(ExportCancelled)
+    expect(platform.package, 'the join itself is not interruptible, so it ran').toHaveBeenCalledTimes(1)
+    expect(discarded, 'and the part-written book went with the scratch').toContain('/tmp/book.m4b')
+  })
+
+  /**
+   * ⚠️ **EVERY TIDY-UP FAILURE WAS SWALLOWED WHILE THE CALLER SAID "NOTHING WAS
+   * LEFT BEHIND".** `.catch(() => {})` is right that a failed removal must not
+   * mask the export's own outcome, and wrong to say nothing at all: a chapter of
+   * a ten-hour book is tens of megabytes, so a run of failures is real disk a
+   * reader cannot find. Counted, never thrown.
+   */
+  it('counts the scratch it could not remove, rather than swallowing it', async () => {
+    const { platform } = fake({
+      discard: vi.fn(async () => {
+        throw new Error('the file is busy')
+      }),
+    })
+    const result = await exportAudiobook(platform, request())
+    expect(result.chapters, 'the export still succeeded').toBe(2)
+    expect(result.leftBehind, 'both chapter files; the directory itself still went').toBe(2)
+  })
+
+  it('carries the same count out on a cancellation', async () => {
+    const { platform } = fake({
+      discardScratch: vi.fn(async () => {
+        throw new Error('the directory is busy')
+      }),
+    })
+    const cause = await exportAudiobook(platform, request({ cancelled: () => true })).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(cause).toBeInstanceOf(ExportCancelled)
+    expect((cause as ExportCancelled).leftBehind, 'the directory alone').toBe(1)
   })
 
   it('removes every scratch file it wrote', async () => {

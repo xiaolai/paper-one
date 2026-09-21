@@ -70,7 +70,7 @@ export interface AudiobookPlatform {
     readonly voice: string
     readonly rate: number
     readonly path: string
-  }) => Promise<unknown>
+  }) => Promise<void>
   /** Join the rendered chapters into one book. */
   package: (job: {
     readonly chapters: readonly { readonly title: string; readonly path: string }[]
@@ -111,10 +111,32 @@ export interface AudiobookResult {
   readonly path: string
   readonly durationMs: number
   readonly chapters: number
+  /**
+   * How many scratch files could not be removed.
+   *
+   * ⚠️ **THEY USED TO BE SWALLOWED, AND THE HOOK THEN TOLD THE READER "NOTHING
+   * WAS LEFT BEHIND".** `.catch(() => {})` is right about not letting a tidy-up
+   * failure mask the export's own outcome, and wrong about saying nothing: a
+   * chapter of a ten-hour book is tens of megabytes, so a run of failures is
+   * real disk a reader cannot find. Counted here, reported by the caller, and
+   * still never thrown.
+   */
+  readonly leftBehind: number
 }
 
 /** A stop the reader asked for — not a failure, and reported as neither. */
 export class ExportCancelled extends Error {
+  /**
+   * How many scratch files survived the tidy-up, for the same reason
+   * `AudiobookResult` carries it: the notice for a stopped export asserted that
+   * nothing was left behind, and nothing had checked.
+   *
+   * Assigned by `exportAudiobook`'s `finally`, which runs AFTER this is
+   * constructed — so it is mutable and starts at zero. A caller that reads it
+   * off an instance it caught reads the settled number.
+   */
+  leftBehind = 0
+
   constructor() {
     super('the export was stopped')
     this.name = 'ExportCancelled'
@@ -161,6 +183,40 @@ export async function exportAudiobook(
    */
   const written: { title: string; path: string }[] = []
   const attempted: string[] = []
+  let leftBehind = 0
+  /**
+   * Remove everything this export wrote on the way, counting what would not go.
+   *
+   * ⚠️ **CALLED ON BOTH ROADS OUT RATHER THAN FROM A `finally`, AND THAT IS NOT
+   * A STYLE CHOICE.** The tidy-up WAS a `finally` and the count it produced was
+   * always zero — because `return { …, leftBehind }` evaluates its object
+   * BEFORE the `finally` runs, so the success path captured the value as it was
+   * when nothing had been removed yet. A test asking for a failing `discard`
+   * found it; reading the code did not. A `finally` cannot contribute to a value
+   * the `return` beside it has already built.
+   *
+   * Calling it explicitly also puts the exception in the `catch`'s hand, which
+   * is what lets a cancellation carry the count without a mutable flag the
+   * compiler could not follow into a closure.
+   */
+  const tidy = async (): Promise<void> => {
+    for (const path of attempted) {
+      /* One failure to tidy up must not hide the export's own outcome, nor stop
+       * the other scratch files being removed — so it is COUNTED rather than
+       * thrown, and rather than swallowed. A chapter of a ten-hour book is tens
+       * of megabytes; "nothing was left behind" was asserted upstream with
+       * nothing checking it. */
+      await platform.discard(path).catch(() => {
+        leftBehind += 1
+      })
+    }
+    /* AFTER the files, and counted for the same reason: the directory is this
+       export's own, so removing it cannot affect another one. */
+    await platform.discardScratch().catch(() => {
+      leftBehind += 1
+    })
+  }
+
   try {
     for (const [at, chapter] of request.chapters.entries()) {
       if (request.cancelled()) throw new ExportCancelled()
@@ -187,19 +243,42 @@ export async function exportAudiobook(
       author: request.author,
       path: request.path,
     })
+    /**
+     * ⚠️ **AND AGAIN AFTER THE JOIN, BECAUSE THE JOIN CANNOT BE INTERRUPTED AND
+     * THE OLD CODE REPORTED SUCCESS FOR AN EXPORT THE READER HAD STOPPED.**
+     * Cancellation was checked only on the way in, so a stop pressed while the
+     * chapters were being joined and encoded — the longest single step there is,
+     * and the one the transport says "Stopping…" over — was ignored, and the
+     * reader was then told the book had been exported.
+     *
+     * The join itself still cannot be cut short: it is one call into the engine,
+     * which owns the encoder until it finishes, exactly as a chapter render does.
+     * What changes is that the OUTCOME is honest. The part-written book is
+     * removed on the way out, because a file the reader stopped asking for must
+     * not be left at the name they chose — a half-joined `.m4b` is
+     * indistinguishable from a whole one, which is the trap `narrate` records for
+     * a truncated render.
+     */
+    if (request.cancelled()) {
+      await platform.discard(request.path).catch(() => {
+        leftBehind += 1
+      })
+      throw new ExportCancelled()
+    }
+    await tidy()
     return {
       path: request.path,
       durationMs: packaged.durationMs,
       chapters: packaged.chapters,
+      leftBehind,
     }
-  } finally {
-    for (const path of attempted) {
-      /* One failure to tidy up must not hide the export's own outcome, nor stop
-       * the other scratch files being removed. */
-      await platform.discard(path).catch(() => {})
-    }
-    /* AFTER the files, and swallowed for the same reason: the directory is this
-       export's own, so removing it cannot affect another one. */
-    await platform.discardScratch().catch(() => {})
+  } catch (cause) {
+    await tidy()
+    /* The count belongs to the reader's own stop, which is the notice that used
+       to assert "nothing was left behind" with nothing checking it. A genuine
+       failure carries the engine's sentence instead and says nothing about
+       scratch — `narrate` names what it refused, and that is what to show. */
+    if (cause instanceof ExportCancelled) cause.leftBehind = leftBehind
+    throw cause
   }
 }

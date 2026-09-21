@@ -48,7 +48,18 @@ function mount(over: Partial<AudiobookDeps> = {}) {
     return null
   }
   const view = render(<Probe />)
-  return { seen, say, rerender: () => view.rerender(<Probe />) }
+  return {
+    seen,
+    say,
+    rerender: () => view.rerender(<Probe />),
+    /* CHANGES THE DEPS THE NEXT RENDER SEES. `deps` is the object the probe
+       closes over, so mutating it is how a test says "the reader closed the
+       book" — the same thing a new prop would do to the real component. */
+    change: (next: Partial<AudiobookDeps>) => {
+      Object.assign(deps, next)
+      view.rerender(<Probe />)
+    },
+  }
 }
 
 describe('the control a consumer may depend on', () => {
@@ -195,5 +206,62 @@ describe('a book with nothing to read', () => {
       seen[0]?.run()
     })
     expect(say).toHaveBeenCalledWith(expect.stringContaining('no text to read aloud'))
+  })
+})
+
+describe('the control while an export is under way', () => {
+  /**
+   * ⚠️ **CLOSING THE BOOK TOOK THE ONLY STOP AWAY AND LEFT THE EXPORT RUNNING.**
+   * The hook ended `if (!available || !source) return null`, so a book closed
+   * mid-export removed the palette row that stops it while the operation carried
+   * on — reading, rendering and writing a file the reader could no longer reach
+   * — and with `source` gone they could not start another to get the row back.
+   *
+   * The export captures everything it needs when it begins and never reads
+   * `source` again, which is exactly why it survives the book closing, and
+   * exactly why its control has to.
+   */
+  it('keeps the stop control when the book closes part way through', async () => {
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const harness = mount({
+      source: {
+        title: 'A Measured Book',
+        author: 'Paper',
+        lang: 'en-US',
+        toc: [],
+        skip: { notes: false },
+        sectionTexts: vi.fn(async () => {
+          await held
+          return { sections: [], complete: true }
+        }),
+      },
+    })
+
+    const latest = () => harness.seen[harness.seen.length - 1]
+    await act(async () => {
+      latest()?.run()
+    })
+    expect(latest()?.running, 'the export is under way').toBe(true)
+
+    await act(async () => {
+      harness.change({ source: null })
+    })
+    expect(latest(), 'and the control is still there to stop it').not.toBeNull()
+
+    await act(async () => {
+      release()
+      await held
+    })
+  })
+
+  it('is absent once it has finished and the book is gone', () => {
+    /* The survival above is for a RUNNING export and nothing wider: with nothing
+       under way there is no operation to stop, so absence is right again. */
+    const harness = mount()
+    act(() => harness.change({ source: null }))
+    expect(harness.seen[harness.seen.length - 1]).toBeNull()
   })
 })
