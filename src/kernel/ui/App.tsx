@@ -279,6 +279,7 @@ export function App({
    */
   const coverFor = useCallback(
     (bookId: string): Promise<string | null> => (fs ? coverIn(fs, bookId) : Promise.resolve(null)),
+    // Stryker disable next-line ArrayDeclaration: the one host that passes `fs` — `main.tsx` — renders this window once, from `bootApp`'s result, and never again, so `fs` cannot change under it and an empty list rebuilds this equally often.
     [fs],
   )
   /* Pins, colours, hidden subjects and saved views — the reader's decisions
