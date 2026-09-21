@@ -50,7 +50,6 @@ export async function* runSearch(
 
   try {
     for (;;) {
-      // Stryker disable next-line ArrayDeclaration: `Promise.race([])` never settles, so the mutant hangs a test instead of failing one and nothing can observe it; this line holds one array, the race's argument list
       const step = (await Promise.race([results.next(), stopped])) as IteratorResult<SearchYield, void>
       /* THE SIGNAL, NOT ONLY THE RACE. An abort can lose the race and still
        * have happened — a result that settled in the same turn wins it — and
