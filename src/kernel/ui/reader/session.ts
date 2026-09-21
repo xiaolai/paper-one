@@ -1,4 +1,5 @@
 import type {
+  Book,
   CreateOverlayDetail,
   DrawAnnotationDetail,
   ExternalLinkDetail,
@@ -41,6 +42,7 @@ import {
 } from './markPaint'
 import { runSearch, type SearchHit } from './bookSearch'
 import { readMeta } from './readMeta'
+import { flattenToc } from '../tocOrder'
 
 /**
  * The reader's lifecycle, as a plain object.
@@ -1559,42 +1561,7 @@ export class ReaderSession {
        started has established nothing about a book it never opened. */
     if (this.#disposed || !Array.isArray(sections)) return { sections: [], complete: false }
 
-    /* ⚠️ **THE TITLES COME FROM `resolveHref`, NOT FROM COUNTING.** Matching the
-     * table of contents to the spine positionally looks right on a tidy book and
-     * is wrong on every one with a cover, a colophon or a part divider — the
-     * labels then slide by one and every chapter in the export is named after
-     * the one before it. The book resolves its own hrefs; ask it.
-     *
-     * SHALLOWEST WINS: a nested entry resolving to a section its parent already
-     * named would otherwise replace the part title with a sub-heading. */
-    const titles = new Map<number, string>()
-    const walk = (items: readonly TocItem[]) => {
-      for (const item of items) {
-        const href = item?.href
-        if (typeof href === 'string' && href !== '') {
-          try {
-            /* NARROWED, not assumed — the same shape `sections` is read
-               through above. Upstream's types do not declare `resolveHref`
-               and its API is explicitly unstable, so a backend without it
-               names no section rather than failing the export. */
-            const resolver = book as unknown as {
-              resolveHref?: (href: string) => { index?: number } | undefined
-            }
-            const at = resolver.resolveHref?.(href)
-            const index = at?.index
-            const label = typeof item.label === 'string' ? item.label.trim() : ''
-            if (typeof index === 'number' && label !== '' && !titles.has(index)) {
-              titles.set(index, label)
-            }
-          } catch {
-            /* A malformed href in a stranger's book names no section, which is
-               a chapter with no title and not a failed export. */
-          }
-        }
-        if (Array.isArray(item?.subitems)) walk(item.subitems)
-      }
-    }
-    walk(toc)
+    const titles = await tocTitles(book as Book, toc)
 
     const out: { index: number; title: string | null; text: string }[] = []
     for (let index = 0; index < sections.length; index++) {
@@ -2381,6 +2348,78 @@ export class ReaderSession {
       quietly('host cleanup', () => this.#host.replaceChildren())
     }
   }
+}
+
+/**
+ * The table of contents' own label for each spine section it names.
+ *
+ * ⚠️ **THE TITLES COME FROM `resolveHref`, NOT FROM COUNTING.** Matching the
+ * table of contents to the spine positionally looks right on a tidy book and is
+ * wrong on every one with a cover, a colophon or a part divider — the labels
+ * then slide by one and every chapter in the export is named after the one
+ * before it. The book resolves its own hrefs; ask it.
+ *
+ * ⚠️ **AND THE ANSWER IS AWAITED, BECAUSE A PDF'S IS A PROMISE.** `makePdf`'s
+ * `resolveHref` is `async` — an outline destination is looked up through
+ * pdf.js — and this read `.index` straight off the call. A promise has no
+ * `index`, so EVERY chapter of every PDF was exported untitled and numbered,
+ * with nothing logged; and a destination the adapter REFUSES rejected outside
+ * the `try` that was written for exactly that case, as an unhandled rejection
+ * per broken outline entry. The EPUB backend answers synchronously, which is
+ * why nothing looked wrong. Awaiting takes both shapes.
+ *
+ * ⚠️ **ONE TRAVERSAL, `flattenToc`'s.** This walked the tree with a recursion of
+ * its own, which is how `tocOrder.ts` says the contents pane and the voice came
+ * to disagree about what "next chapter" means — a third reader of the same tree
+ * is the same risk for what an exported chapter is called.
+ *
+ * SHALLOWEST WINS, then the first in reading order: a nested entry resolving to
+ * a section a part title already names would otherwise replace it with a
+ * sub-heading. It was "first in reading order" alone, which is the same answer
+ * for a part and its own children and the wrong one when a sub-entry of an
+ * EARLIER part points into a chapter that has an entry of its own.
+ *
+ * NARROWED, not assumed: upstream's types do not declare `resolveHref` and its
+ * API is explicitly unstable, so a backend without it names no section rather
+ * than failing the export — and a malformed href in a stranger's book is a
+ * chapter with no title, not a failed export.
+ */
+async function tocTitles(book: Book, toc: readonly TocItem[]): Promise<ReadonlyMap<unknown, string>> {
+  const entries = flattenToc(toc)
+  const resolveHref = (book as { resolveHref?: unknown }).resolveHref
+  if (typeof resolveHref !== 'function') {
+    /* A BACKEND THAT LACKS THE METHOD SAYS SO — `#publish`'s rule for
+       `getCover`, and for the same reason: an untitled export is a legitimate
+       answer for a book with no contents, so it would look like one. */
+    if (entries.length > 0) {
+      console.warn('Paper: this book backend implements no resolveHref — its chapters will be exported untitled')
+    }
+    return new Map()
+  }
+  const named = await Promise.all(
+    entries.map(async ({ href, label, depth }) => {
+      const title = typeof label === 'string' ? label.trim() : ''
+      if (typeof href !== 'string' || href === '' || title === '') return null
+      try {
+        const at = (await resolveHref.call(book, href)) as { readonly index?: unknown }
+        /* NO ANSWER AT ALL throws on this read and is caught below, as a
+           rejection is: either way the entry names nothing. And the index is
+           NOT CHECKED FOR A NUMBER, deliberately — only a spine index is ever
+           looked up, so any other key is one nothing reads, and a check would
+           be a line no outcome depends on. */
+        return { index: at.index, title, depth }
+      } catch {
+        return null
+      }
+    }),
+  )
+  const chosen = new Map<unknown, { title: string; depth: number }>()
+  for (const entry of named) {
+    if (entry === null) continue
+    const held = chosen.get(entry.index)
+    if (held === undefined || entry.depth < held.depth) chosen.set(entry.index, entry)
+  }
+  return new Map([...chosen].map(([index, { title }]) => [index, title]))
 }
 
 /**

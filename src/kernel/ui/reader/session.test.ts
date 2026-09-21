@@ -3848,6 +3848,131 @@ describe('a foreign mark (WI-22.D2)', () => {
 })
 
 /**
+ * What an export calls each chapter — `tocTitles`, through the session's walk.
+ *
+ * ⚠️ **NOTHING TESTED THIS, AND EVERY PDF CAME OUT UNTITLED.** The navigator
+ * cases above mock the walk or give it no contents; the one path that turns a
+ * table of contents into chapter names had never run under a test, and it read
+ * `.index` straight off `resolveHref` — which on a PDF is a promise. Each
+ * resolver here is shaped like a real backend's: `makePdf`'s is async and
+ * REJECTS for a destination it cannot find, the EPUB backend's answers at once.
+ */
+describe('the section walk names each chapter from the contents', () => {
+  async function walkOver(book: Record<string, unknown>, count = 3) {
+    const view = fakeView()
+    Object.assign(view.book as object, {
+      /* A document with nothing in it: `refuseBookScripts` strips each one
+         the walk makes, which asks for its scripts and its elements, and no
+         body is no text, which `collectText` answers without a DOM. The
+         titles, which are what is under test, depend on neither. */
+      sections: Array.from({ length: count }, () => ({
+        createDocument: () =>
+          Promise.resolve({ body: null, getElementsByTagNameNS: () => [], querySelectorAll: () => [] }),
+      })),
+      ...book,
+    })
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    return async (toc: readonly unknown[]) =>
+      (await session.sectionTexts(toc as never)).sections.map((one) => one.title)
+  }
+
+  it("titles a PDF's chapters, whose resolver answers with a promise", async () => {
+    const titles = await walkOver({ resolveHref: async (href: string) => ({ index: Number(href) }) })
+    expect(
+      await titles([
+        { label: 'One', href: '0' },
+        { label: 'Three', href: '2' },
+      ]),
+    ).toEqual(['One', null, 'Three'])
+  })
+
+  it('names nothing for an entry the book refuses, and still names the rest', async () => {
+    /* `makePdf` rejects an outline destination it cannot find. That rejection
+       used to land outside the `try` written for it, as an unhandled one. */
+    const titles = await walkOver({
+      resolveHref: async (href: string) => {
+        if (href === 'gone') throw new Error('Paper: unresolvable PDF destination gone')
+        return { index: Number(href) }
+      },
+    })
+    expect(
+      await titles([
+        { label: 'Broken', href: 'gone' },
+        { label: 'Two', href: '1' },
+      ]),
+    ).toEqual([null, 'Two', null])
+  })
+
+  it('names nothing for a resolver that throws, or that answers with no section', async () => {
+    const throws = await walkOver({
+      resolveHref: () => {
+        throw new Error('malformed href')
+      },
+    })
+    expect(await throws([{ label: 'One', href: 'x' }])).toEqual([null, null, null])
+    const silent = await walkOver({ resolveHref: (href: string) => (href === 'none' ? undefined : {}) })
+    expect(
+      await silent([
+        { label: 'One', href: 'none' },
+        { label: 'Two', href: 'empty' },
+      ]),
+    ).toEqual([null, null, null])
+  })
+
+  it('lets the shallowest entry name a section, then the first in reading order', async () => {
+    /* A sub-entry of an EARLIER part pointing into a chapter that has an entry
+       of its own took the chapter's name when the first entry read won. */
+    const titles = await walkOver({ resolveHref: (href: string) => ({ index: Number(href) }) })
+    expect(
+      await titles([
+        { label: 'Part One', href: '0', subitems: [{ label: 'An aside', href: '1' }, { label: 'Part One again', href: '0' }] },
+        { label: 'Chapter Two', href: '1' },
+        { label: 'Chapter Two, again', href: '1' },
+      ]),
+    ).toEqual(['Part One', 'Chapter Two', null])
+  })
+
+  it('names nothing from a heading, an empty destination or a label with no words', async () => {
+    /* A resolver that answers section 0 for ANYTHING, so any one of these
+       getting through shows up as a title on the first chapter. */
+    const titles = await walkOver({ resolveHref: () => ({ index: 0 }) })
+    expect(
+      await titles([
+        { label: 'Book Two', href: null },
+        { label: 'Empty', href: '' },
+        { label: '   ', href: 'a.xhtml' },
+        { label: 42, href: 'b.xhtml' },
+      ]),
+    ).toEqual([null, null, null])
+  })
+
+  it('trims the label it keeps', async () => {
+    const titles = await walkOver({ resolveHref: () => ({ index: 1 }) })
+    expect(await titles([{ label: '  Chapter Two \n', href: 'b.xhtml' }])).toEqual([null, 'Chapter Two', null])
+  })
+
+  it('says so when the backend has no resolver at all, and only when there is a contents to resolve', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const said = 'Paper: this book backend implements no resolveHref — its chapters will be exported untitled'
+      const titles = await walkOver({ resolveHref: undefined })
+      expect(await titles([])).toEqual([null, null, null])
+      expect(warn).not.toHaveBeenCalledWith(said)
+      expect(await titles([{ label: 'One', href: 'a.xhtml' }])).toEqual([null, null, null])
+      expect(warn).toHaveBeenCalledWith(said)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('answers nothing, and not complete, before any book has opened', async () => {
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await expect(session.sectionTexts()).resolves.toEqual({ sections: [], complete: false })
+  })
+})
+
+/**
  * ⚠️ **THE NAVIGATOR DROPPED EVERY ARGUMENT AFTER THE FIRST, AND NO TEST WENT
  * THROUGH IT.** It was `sectionTexts: (toc) => this.sectionTexts(toc)`, so the two
  * arguments after `toc` never arrived: `shouldStop`, which is how the audiobook's
