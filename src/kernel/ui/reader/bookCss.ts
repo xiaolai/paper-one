@@ -1,5 +1,5 @@
 import type { MarkTint } from '../../core/marks'
-import type { MarkPalette } from './session'
+import type { MarkPalette } from './markPaint'
 import type { Align, ReadingStyle, SpacingIndices, Theme, Typeface } from '../state'
 import {
   CODE_PANEL_PAD,

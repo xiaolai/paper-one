@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { recordFromMeta } from '../../core/bookFolder'
-import { readMeta } from './session'
+import { readMeta } from './readMeta'
 import { refusalOf } from '../../../kernel/testkit'
 
 /**

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { overlayKey, readersAmong, type ForeignAnnotation } from '../../core/circle/foreign'
 import type { OverlayContribution, ResolvePort } from '../../core/circle/overlay'
-import type { ForeignAnchor } from '../reader/session'
+import type { ForeignAnchor } from '../reader/markPaint'
 
 /**
  * Ask every overlay contribution what to draw in this book — WI-22.D1.

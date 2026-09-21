@@ -73,7 +73,8 @@ export type { BookMeta } from '../core/bookMeta'
 /* A hit `SearchableBook.search` yields. */
 export type { SearchHit } from './hooks/useBook'
 /* What the reader reports when text is selected, and what it draws a mark from. */
-export type { MarkAnchor, SelectionSnapshot } from './reader/session'
+export type { SelectionSnapshot } from './reader/session'
+export type { MarkAnchor } from './reader/markPaint'
 
 /* NOTES — every mark on the shelf, browsable. Its `marks` prop was narrowed
  * from `MarksView` (fourteen members, a whole `MarkStorage` behind them) to the
@@ -110,7 +111,7 @@ export { Cards } from './pane/Cards'
  * says where, and it is the desktop's own: a second one would be a second set
  * of the four measurements its header spends a page getting right. */
 export { FootnotePopover } from './reader/FootnotePopover'
-export type { FootnoteRender } from './reader/session'
+export type { FootnoteRender } from './reader/footnotes'
 
 /* A jacket, or its tint. Takes its source as a prop — see the component. */
 export { BookCover } from './screens/BookCover'

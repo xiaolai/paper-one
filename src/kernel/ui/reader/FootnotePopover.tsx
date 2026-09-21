@@ -3,7 +3,7 @@ import { Check, Copy, X } from 'lucide-react'
 import { FOOTNOTE, ICON } from '../../core/metrics'
 import { PARK_OFFSET, SURFACE_EDGE, UNBOUNDED, place } from '../../core/placement'
 import { noteText } from './backlink'
-import type { FootnoteRender } from './session'
+import type { FootnoteRender } from './footnotes'
 import styles from './FootnotePopover.module.css'
 
 /**
