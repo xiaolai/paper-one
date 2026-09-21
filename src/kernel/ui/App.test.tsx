@@ -244,6 +244,9 @@ async function mount(
     readonly beforeWindowClose?: () => Promise<unknown>
     /** More screens than the one this file's window always has. */
     readonly screens?: readonly ScreenContribution[]
+    /** A second capability, for what the first cannot be — one whose id is a
+     *  kernel command's prefix, say. */
+    readonly capability?: Parameters<typeof composeCapabilities>[0][number]
   } = {},
 ) {
   const services = createKernelServices({ fs, storage: null, initialBooks: over.books ?? [] })
@@ -266,6 +269,7 @@ async function mount(
           ...(over.screens ?? []),
         ],
       },
+      ...(over.capability === undefined ? [] : [over.capability]),
     ],
     kernelApi(services),
     new AbortController().signal,
@@ -1188,6 +1192,47 @@ describe('the window’s own chrome', () => {
     document.documentElement.removeAttribute('style')
     await mount(null)
     expect(document.documentElement.style.getPropertyValue('--pane-track')).toBe(`${PANE_TRACK}px`)
+  })
+
+  it('records a capability command that takes a name the kernel already owns', async () => {
+    /* ⚠️ **THE PALETTE KEEPS THE KERNEL'S ROW AND DROPS THE CAPABILITY'S — right
+       for the reader, and silent for whoever wrote the composition.** So the
+       fact goes where a release build can be asked for it, and a warning with no
+       name in it would say only that SOMETHING collided. */
+    const log = createDiagnosticLog()
+    /* A capability's commands must carry its own id as their prefix, so the
+       collision is a capability whose id IS a kernel prefix. */
+    await mount(null, {
+      diagnosticLog: log,
+      capability: {
+        id: 'reading',
+        commands: () => [{ id: 'reading:progress', label: 'Mine', group: 'Reading', run: () => {} }],
+      },
+    })
+    /* Rebuilt again, as every page turn rebuilds it: the list depends on app
+       state, and a fact recorded per rebuild floods the ring. */
+    developerChord()
+    await settle()
+    expect(log.entries().filter((one) => one.event === 'duplicate.id'), 'once, however often').toEqual([
+      expect.objectContaining({
+        level: 'warn',
+        scope: 'commands',
+        event: 'duplicate.id',
+        fields: { id: 'reading:progress' },
+      }),
+    ])
+  })
+
+  it('keeps the kernel’s row, and runs, where there is no log to tell', async () => {
+    /* The log is optional — a window built without one must still drop the
+       duplicate rather than throw on the way to recording it. */
+    await mount(null, {
+      capability: {
+        id: 'reading',
+        commands: () => [{ id: 'reading:progress', label: 'Mine', group: 'Reading', run: () => {} }],
+      },
+    })
+    expect(document.body.textContent).not.toBe('')
   })
 
   it('hands the Developer panel this run’s diagnostics, and tells the spool when they are cleared', async () => {

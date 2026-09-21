@@ -2007,9 +2007,19 @@ export function App({
    * kernel's, which is right for the reader and silent for whoever wrote the
    * composition — so the fact goes where a release build can be asked for it, the
    * same place a quiet circle is diagnosed from.
+   *
+   * ⚠️ **ONCE PER ID FOR THE LIFE OF THE WINDOW, AND IT WAS ONCE PER REBUILD.**
+   * `buildCommands` runs whenever the palette's list is rebuilt, and that list
+   * depends on `state` and `book` — both of which change on every page turn. So
+   * one collision in a composition wrote a warning per page, into a ring of two
+   * thousand entries that is the only thing a release build can be asked: a long
+   * reading pushed every other diagnostic out of it with copies of one fact.
    */
+  const reportedDuplicates = useRef(new Set<string>())
   const onDuplicateCommand = useCallback(
     (id: string) => {
+      if (reportedDuplicates.current.has(id)) return
+      reportedDuplicates.current.add(id)
       diagnosticLog?.record({
         at: Date.now(),
         level: 'warn',
@@ -2018,6 +2028,7 @@ export function App({
         fields: { id },
       })
     },
+    // Stryker disable next-line ArrayDeclaration: the log is the composition root's, made once at boot and never replaced under a live window — and each collision is reported once per window — so a list that never updated would report into the same log.
     [diagnosticLog],
   )
 
