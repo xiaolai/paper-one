@@ -94,7 +94,12 @@ export function useOverlays(deps: OverlayDeps): readonly ForeignAnchor[] {
   const lastGood = useRef(new Map<string, readonly ForeignAnnotation[]>())
 
   useEffect(() => {
-    if (!parsed || !bookId || contributions.length === 0) {
+    /* NO `contributions.length === 0` HERE. `ask` publishes the empty answer
+       itself for a composition with nothing to ask (see its own note), so this
+       branch and that one agreed on every input — and with nothing to
+       subscribe to, the only thing the early return saved was a `lastGood`
+       clear that the line below repeats. */
+    if (!parsed || !bookId) {
       /* ⚠️ **CLEARED, NOT LEFT STANDING.** Between books — and between
        * compositions — the previous book's anchors would otherwise be drawn
        * over a book that has nothing to do with them. `app/web/Reader.tsx`
@@ -149,7 +154,11 @@ export function useOverlays(deps: OverlayDeps): readonly ForeignAnchor[] {
       const commit = () => {
         if (!live || request.current !== mine) return
         const collected = reconciled(answers.flat())
-        const next: Held = { openGeneration, bookId, anchors: collected.length === 0 ? NONE : collected }
+        /* THE ANSWER AS IT CAME, empty or not: `showsTheSame` below is what
+           keeps an unchanged answer from becoming a new state, so swapping an
+           empty answer for the shared constant saved no render and no test
+           could see the difference. */
+        const next: Held = { openGeneration, bookId, anchors: collected }
         /* ⚠️ **AN UNCHANGED ANSWER MUST NOT BE A NEW STATE.** Every `ask` used
          * to allocate, so re-rendering was unconditional — and a host that
          * composes its `contributions` array during render then hands the

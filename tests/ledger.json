@@ -8322,6 +8322,8 @@
     "src/kernel/ui/hooks/useOverlays.test.tsx > useOverlays > takes back the listeners it had already installed when one subscribe throws",
     "src/kernel/ui/hooks/useOverlays.test.tsx > useOverlays > unsubscribes when it goes away",
     "src/kernel/ui/hooks/useOverlays.test.tsx > whose marks these are > draws another book’s answer even when it is identical to the last book’s",
+    "src/kernel/ui/hooks/useOverlays.test.tsx > whose marks these are > draws the same answer again for a new open of the same book",
+    "src/kernel/ui/hooks/useOverlays.test.tsx > whose marks these are > shows nothing for another book until that book’s own answer lands",
     "src/kernel/ui/hooks/useOverlays.test.tsx > whose marks these are > shows nothing from the previous open of the same book",
     "src/kernel/ui/hooks/useOverlays.test.tsx > whose marks these are > shows nothing while the book is not parsed, in the render itself",
     "src/kernel/ui/hooks/useOverlays.test.tsx > whose marks these are > takes the anchors down when the composition loses its contributions",
