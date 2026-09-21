@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TocItem } from 'foliate-js/view.js'
-import { flattenToc, stepChapter } from './tocOrder'
+import { chapterSteps, flattenToc, stepChapter } from './tocOrder'
 
 /**
  * `tocOrder` had NO test file, which is how a duplicate destination stayed
@@ -79,6 +79,53 @@ describe('stepChapter', () => {
   it('skips a grouping heading, which is a row and not a place', () => {
     const withDivider = [item('One', '/1.html'), item('PART TWO', null), item('Two', '/2.html')]
     expect(stepChapter(withDivider, '/1.html', 1)).toBe('/2.html')
+  })
+
+  it('treats an EMPTY href as no destination either', () => {
+    /* ⚠️ A nav that writes `href=""` rather than omitting it is a heading all the
+       same. Counted as a place, it made `''` — the reader in a section the
+       contents never names — a position with neighbours, and stepped them
+       relative to a heading they were never at. */
+    const withBlank = [item('PART ONE', ''), item('One', '/1.html'), item('Two', '/2.html')]
+    expect(stepChapter(withBlank, '', 1), 'an unnamed place has no neighbours').toBeNull()
+    expect(stepChapter(withBlank, '/1.html', -1), 'and a heading is not one').toBeNull()
+    expect(stepChapter(withBlank, '/1.html', 1)).toBe('/2.html')
+  })
+})
+
+describe('chapterSteps', () => {
+  const toc = [item('One', '/1.html'), item('Two', '/2.html'), item('Three', '/3.html')]
+
+  it('answers for each direction from where the reader is', () => {
+    const first = chapterSteps(toc, '/1.html', () => {})
+    expect([first.can(-1), first.can(1)]).toEqual([false, true])
+    const last = chapterSteps(toc, '/3.html', () => {})
+    expect([last.can(-1), last.can(1)]).toEqual([true, false])
+  })
+
+  it('goes to the neighbour, and says that it moved', () => {
+    const went: string[] = []
+    const steps = chapterSteps(toc, '/2.html', (href) => went.push(href))
+    expect(steps.go(1)).toBe(true)
+    expect(steps.go(-1)).toBe(true)
+    expect(went).toEqual(['/3.html', '/1.html'])
+  })
+
+  it('declines a step with nowhere to go, and goes nowhere', () => {
+    /* ⚠️ **THE ANSWER `useSpeech` IS BUILT ON.** A step that declines must say
+       so, because the reading tears down a pending sentence gap only for a step
+       that actually moved — a `true` here for a step into nothing would leave
+       the voice silent with the transport still showing a reading. */
+    const went: string[] = []
+    const steps = chapterSteps(toc, '/3.html', (href) => went.push(href))
+    expect(steps.go(1)).toBe(false)
+    expect(went, 'nothing was navigated to').toEqual([])
+  })
+
+  it('offers nothing to a reader in a section the contents never names', () => {
+    const steps = chapterSteps(toc, '', () => {})
+    expect([steps.can(-1), steps.can(1)]).toEqual([false, false])
+    expect(steps.go(1)).toBe(false)
   })
 })
 

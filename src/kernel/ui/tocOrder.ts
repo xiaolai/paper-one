@@ -111,11 +111,46 @@ export function stepChapter(
   const seen = new Set<string>()
   const places: string[] = []
   for (const entry of flattenToc(toc)) {
-    if (entry.href === null || seen.has(entry.href)) continue
+    /* `!href`, not `=== null`: an EMPTY href is no more a destination than a
+       missing one — `Contents.tsx` already reads it that way — and counted as a
+       place it let a reader in a section the contents never names (`''`) step
+       relative to a heading. */
+    if (!entry.href || seen.has(entry.href)) continue
     seen.add(entry.href)
     places.push(entry.href)
   }
   const at = places.indexOf(currentHref)
   if (at === -1) return null
   return places[at + by] ?? null
+}
+
+/**
+ * A chapter step over the book's contents, for a reader at `here`: whether each
+ * direction goes anywhere, and the step itself.
+ *
+ * ⚠️ **ONE LOOKUP SERVES BOTH HALVES**, so what the transport DRAWS and what the
+ * step TAKES cannot disagree. They were computed separately once — a fresh
+ * `stepChapter` inside the action, another for the buttons — and reconciled only
+ * by both being correct.
+ *
+ * ⚠️ **PULLED OUT OF `App.tsx` SO EVERY BRANCH IS REACHABLE.** Inside the host,
+ * `go` is only ever pressed through a button `can` has already drawn, so its
+ * "nowhere to go" answer could not be reached by any test that drove the app —
+ * and that answer is the contract `useSpeech` relies on to keep a pending gap
+ * when a step declines. Here it is a function call.
+ */
+export function chapterSteps(
+  toc: readonly TocItem[],
+  here: string,
+  goTo: (href: string) => void,
+): { can: (by: -1 | 1) => boolean; go: (by: -1 | 1) => boolean } {
+  return {
+    can: (by) => stepChapter(toc, here, by) !== null,
+    go: (by) => {
+      const href = stepChapter(toc, here, by)
+      if (href === null) return false
+      goTo(href)
+      return true
+    },
+  }
 }
