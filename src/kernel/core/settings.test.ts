@@ -1343,3 +1343,71 @@ describe('the voice a reader chose, per language', () => {
     }
   })
 })
+
+describe('a migration that cannot finish', () => {
+  /**
+   * ⚠️ **THE MIGRATION IS THE CALLER'S CODE, AND THE STORE MAY NOT DIE WITH
+   * IT.** A hook that throws — or one that hands back a record whose GETTER
+   * throws, which runs inside the freeze rather than inside the call — used to
+   * abort `createSettingsStore` outright: no settings, and no app. The reader
+   * gets the defaults for this session instead, the damaged bytes are left
+   * where they are, and each half says which half it was.
+   */
+  const stored = (values: Record<string, unknown>) => {
+    const storage = fakeStorage()
+    /* VERSION 0, so the store has something to migrate: the hook runs only for
+       an envelope this build did not write. */
+    storage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ version: 0, values }))
+    return storage
+  }
+
+  it('says the migration failed, keeps the defaults, and saves nothing', () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const cause = new Error('the old file makes no sense')
+      const store = createSettingsStore({
+        storage: stored({ 'kernel.theme': 'night' }),
+        migrate: () => {
+          throw cause
+        },
+      })
+      expect(said).toHaveBeenCalledWith(
+        'Paper: stored settings could not be migrated, so this session starts from the defaults',
+        cause,
+      )
+      expect(store.get(KERNEL_SETTINGS.theme), 'a migration that failed still set a value').toBe(
+        DEFAULTS.theme,
+      )
+      expect(store.persistent, 'writes were left on over a file nobody could read').toBe(false)
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  it('says the settings could not be READ when the record itself will not be read', () => {
+    /* A getter on the migrated record runs while the store FREEZES it, which is
+       after the hook returned — so guarding only the call left the second half
+       of the same door open. The two sentences are different because the two
+       failures are. */
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const store = createSettingsStore({
+        storage: stored({ 'kernel.theme': 'night' }),
+        migrate: () =>
+          Object.defineProperty({}, 'kernel.theme', {
+            enumerable: true,
+            get: () => {
+              throw new Error('this record cannot be read')
+            },
+          }) as Readonly<Record<string, unknown>>,
+      })
+      expect(said.mock.calls[0]?.[0]).toBe(
+        'Paper: stored settings could not be read, so this session starts from the defaults',
+      )
+      expect(store.get(KERNEL_SETTINGS.theme)).toBe(DEFAULTS.theme)
+      expect(store.persistent).toBe(false)
+    } finally {
+      said.mockRestore()
+    }
+  })
+})

@@ -7583,6 +7583,8 @@
     "src/kernel/core/services/tag.test.ts > tag.rename > counts one rename per book when two run at once",
     "src/kernel/core/services/tag.test.ts > tag.rename > refuses a tag no book carries, without reading a record to find out",
     "src/kernel/core/services/tag.test.ts > tag.rename > reports the books the writer actually changed",
+    "src/kernel/core/settings.test.ts > a migration that cannot finish > says the migration failed, keeps the defaults, and saves nothing",
+    "src/kernel/core/settings.test.ts > a migration that cannot finish > says the settings could not be READ when the record itself will not be read",
     "src/kernel/core/settings.test.ts > a storage that will not take a write > attempts every field of a batch rather than stopping at the first refusal",
     "src/kernel/core/settings.test.ts > a storage that will not take a write > does not throw out of set",
     "src/kernel/core/settings.test.ts > a storage that will not take a write > is not persistent over no storage at all",
