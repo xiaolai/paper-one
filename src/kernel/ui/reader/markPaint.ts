@@ -212,8 +212,9 @@ export function paintAnnotation(
   /* From the EVENT, not rebuilt from the range. `startContainer` can be a
    * Document when a range spans a whole node, and `ownerDocument` on a
    * Document is null — so the reconstruction lost exactly the case it was
-   * meant to cover. */
-  const doc = detail.doc ?? detail.range?.startContainer?.ownerDocument ?? null
+   * meant to cover. A Range always has a start container, so only the range
+   * itself can be missing. */
+  const doc = detail.doc ?? detail.range?.startContainer.ownerDocument ?? null
   /* The element the marked words are in, so the band is measured against
    * the font they are actually drawn in rather than the book's default —
    * a mark in a heading or a code span is not body text. */
@@ -256,11 +257,16 @@ export function paintAnnotation(
    * for `bookmark`. Every mark this code draws sets `kind` (`annotationFor`
    * takes it from a required field), so nothing legitimate arrives without
    * one; foliate round-trips the object untyped, which is why the check
-   * has to hold for values the type system never saw. */
-  const kind = detail.annotation?.kind
-  if (typeof kind !== 'string' || !(PAINTABLE_KINDS as readonly string[]).includes(kind)) {
-    return false
-  }
+   * has to hold for values the type system never saw.
+   *
+   * `includes` IS THE WHOLE CHECK: over a list of strings it answers false for
+   * anything not in it, a non-string included, so a `typeof` beside it could
+   * change no outcome. */
+  const annotation = detail.annotation as Readonly<Record<string, unknown>> | undefined
+  const kind = annotation?.['kind']
+  if (!(PAINTABLE_KINDS as readonly unknown[]).includes(kind)) return false
+  /* Present from here: a paintable kind was read off it. */
+  const carried = annotation as Readonly<Record<string, unknown>>
   if (kind === FOREIGN_KIND || kind === PUBLIC_KIND) {
     /* ⚠️ **AN UNDERLINE, IN ONE HUE, WITH WEIGHT CARRYING MULTIPLICITY.**
      * The reader's three tints say what THEY meant by a passage; a
@@ -280,7 +286,11 @@ export function paintAnnotation(
      * the public layer is the one an attacker can fill. */
     detail.draw(painters.underline, {
       color: kind === PUBLIC_KIND ? palette.stranger : palette.foreign,
-      width: foreignWeight(readersOf(detail.annotation?.['readers'])),
+      /* `foreignWeight` reads anything that is not a finite count of at least
+         one as one reader's worth — which is exactly the guard the untyped
+         round-trip needs, so it takes the value as it came. A `readersOf`
+         beside it applied the same guard a second time. */
+      width: foreignWeight(carried['readers'] as number),
       writingMode,
     })
     /* ⚠️ **FALSE — A FOREIGN PASSAGE IS NOT ONE OF THE READER'S MARKS, so it
@@ -299,8 +309,8 @@ export function paintAnnotation(
    * foliate untyped, and an annotation from an older build — or one
    * foliate has round-tripped — has neither field. Falling back to the
    * same default `validMarks` uses keeps one answer for "an old mark". */
-  const tint = tintOf(detail.annotation?.['tint'])
-  const style = styleOf(detail.annotation?.['style'])
+  const tint = tintOf(carried['tint'])
+  const style = styleOf(carried['style'])
   /* THE FILL COLOUR FOR A BAND, THE RULE COLOUR FOR A LINE, which is the
    * whole reason each tint is a pair: a fill saturated enough to read as a
    * 2px line makes its own words unreadable, and a rule pale enough to sit
@@ -357,18 +367,6 @@ const PUBLIC_KIND = 'public'
  * would not.
  */
 const PAINTABLE_KINDS: readonly string[] = [...ANNOTATION_KINDS, FOREIGN_KIND, PUBLIC_KIND]
-
-/**
- * How many readers a foreign annotation claims, read defensively.
- *
- * foliate round-trips the annotation object untyped, so the value arriving at
- * the painter is not the value the type system saw — the same reason `tintOf`
- * and `styleOf` exist beside this. One reader is the honest floor: a mark is
- * on the page because at least one person put it there.
- */
-function readersOf(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? value : 1
-}
 
 /** One of the three tints, or yellow — the same default `validMarks` applies. */
 function tintOf(value: unknown): MarkTint {
@@ -434,19 +432,17 @@ export async function attachForeign(view: View, anchor: ForeignAnchor, remove = 
  *
  * `undefined` when the document cannot be reached, which is exactly what
  * omitting the option meant — so an unreachable document is the old behaviour
- * rather than a new failure.
+ * rather than a new failure. A document torn down between the event and this
+ * call is that case: it has no view to measure with, and the guard below is
+ * what answers for it. The rule is still worth drawing; only its side is not
+ * known. (A `try` around the measurement said the same thing a second time —
+ * with a view and an element, `getComputedStyle` has nothing to throw about.)
  */
 function writingModeAt(doc: Document | null, at: Element | null): string | undefined {
   const view = doc?.defaultView
   const target = at && at.ownerDocument === doc ? at : doc?.body
   if (!view || !target) return undefined
-  try {
-    return view.getComputedStyle(target).writingMode || undefined
-  } catch {
-    /* A document torn down between the event and this call has no view to
-       measure with. The rule is still worth drawing; only its side is. */
-    return undefined
-  }
+  return view.getComputedStyle(target).writingMode || undefined
 }
 
 /**
@@ -471,8 +467,7 @@ export function attachMark(view: View, anchor: MarkAnchor, options: AttachOption
     if (report) console.error(`Paper: could not ${remove ? 'erase' : 'draw'} a mark`, cause)
   }
   try {
-    const pending = view.addAnnotation(annotationFor(anchor), remove)
-    void pending?.catch?.(fail)
+    void view.addAnnotation(annotationFor(anchor), remove).catch(fail)
   } catch (cause) {
     // Threw synchronously — same case, same reasoning.
     fail(cause)

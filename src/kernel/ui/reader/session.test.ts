@@ -1660,7 +1660,9 @@ describe('ReaderSession marks', () => {
     const session = new ReaderSession(fakeHost(), cb)
     await session.start('book.epub', deps(view))
 
-    const range = { id: 'a-range' }
+    /* Every Range has a start container — the painter reads it for the element
+       the words are in — so a stand-in has one too. */
+    const range = { id: 'a-range', startContainer: { nodeType: 3, ownerDocument: null, parentElement: null } }
     view.emit('draw-annotation', {
       draw: () => {},
       annotation: { value: 'cfi/9', kind: 'highlight' },
@@ -3918,7 +3920,7 @@ describe('a foreign mark (WI-22.D2)', () => {
     view.emit('draw-annotation', {
       draw: () => {},
       annotation: { value: 'epubcfi(/6/4!/4/2)', kind: 'circle', readers: 1 },
-      range: { id: 'a-range' },
+      range: { id: 'a-range', startContainer: { nodeType: 3, ownerDocument: null, parentElement: null } },
     })
 
     expect(cb.calls['onMarkDrawn']).toBeUndefined()
