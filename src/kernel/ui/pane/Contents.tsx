@@ -35,7 +35,10 @@ export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
    * `stepChapter` settled on when it deduplicated: two rows that go to the same
    * place are one place, and the one a reader clicked through is the first.
    */
-  const currentAt = entries.findIndex((entry) => entry.href !== null && entry.href === currentHref)
+  /* MATCHED ON THE HREF ALONE. `currentHref` is a string, so an entry with no
+     destination can never equal it — an `entry.href !== null` guard in front of
+     this comparison was a condition no input could change. */
+  const currentAt = entries.findIndex((entry) => entry.href === currentHref)
 
   if (entries.length === 0) {
     return (
@@ -59,8 +62,7 @@ export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
          * null` does not exclude `''`, which is why the two spellings could
          * drift. One predicate now, asked once.
          */
-        const goesTo = entry.href !== null && entry.href !== '' ? entry.href : null
-        const isCurrent = goesTo !== null && index === currentAt
+        const goesTo = entry.href || null
 
         /**
          * ⚠️ **A HEADING IS NOT A DISABLED CONTROL, AND IT WAS RENDERED AS ONE.**
@@ -82,6 +84,12 @@ export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
           )
         }
 
+        /* AFTER THE HEADING BRANCH, because this is only ever read here — and a
+           row that reaches this point HAS a destination, so the
+           `goesTo !== null` that used to stand in front of the comparison could
+           not be false. */
+        const isCurrent = index === currentAt
+
         return (
           <button
             key={entry.path}
@@ -96,7 +104,12 @@ export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
                for "the current place in a set of pages". */
             aria-current={isCurrent ? 'location' : undefined}
             disabled={!onGoTo}
-            onClick={() => onGoTo?.(goesTo)}
+            /* ⚠️ **ASSERTED RATHER THAN OPTIONAL-CHAINED.** The row above is
+               `disabled` when there is no handler, and the DOM dispatches no
+               click to a disabled button — so `onGoTo?.()` carried a branch
+               nothing could reach, and dropping the `?.` changed no behaviour
+               any test could see. */
+            onClick={() => onGoTo!(goesTo)}
           >
             <span className={styles.tocLabel}>{entry.label}</span>
           </button>
