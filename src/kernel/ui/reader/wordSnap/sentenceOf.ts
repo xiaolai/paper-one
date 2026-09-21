@@ -596,7 +596,18 @@ export function sentenceSpansOf(raw: string, locale: string | undefined): readon
   for (const [at, start] of kept.entries()) {
     const end = kept[at + 1] ?? raw.length
     /* A range of nothing is dropped rather than spoken. Two `merged` spans can
-     * map to one raw offset when everything between them was collapsed. */
+     * map to one raw offset when everything between them was collapsed.
+     *
+     * ⚠️ **NO INPUT HAS EVER PRODUCED ONE**, which is why this carries a
+     * directive rather than a case. Fifteen candidates were tried against the
+     * real segmenter — runs of soft hyphens, line and paragraph separators,
+     * doubled stops, a lone quote, an ellipsis, a Chinese opening bracket, text
+     * ending in a separator — and every one tiled strictly. A start can repeat
+     * only through the `raw.length` fallback above, which needs a `merged` span
+     * beginning past the end of the squeezed text. Kept because the map is
+     * `squeeze`'s and this is the only thing standing between a collapsed run
+     * and a sentence with nothing in it. */
+    // Stryker disable next-line ConditionalExpression,EqualityOperator: see above — no input produces a range of nothing, so neither answer can be observed.
     if (end > start) out.push({ start, end })
   }
   return out

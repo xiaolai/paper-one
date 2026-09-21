@@ -298,6 +298,7 @@ describe('a rank or an office before a name', () => {
 
 describe('a range with nothing to say', () => {
   const SOFT = '\u00ad'
+  const LINE = '\u2028'
 
   /**
    * ⚠️ **A SOFT HYPHEN IS NEITHER WHITESPACE NOR CONTENT.** `trim()` does not
@@ -307,14 +308,20 @@ describe('a range with nothing to say', () => {
    * a range holding TWO is still a range with nothing to say.
    */
   it('merges a leading run of invisible characters into the first real sentence', () => {
-    const raw = `${SOFT}${SOFT} Hello there. Next one.`
+    /* ⚠️ **A LINE SEPARATOR IS WHAT MAKES THIS REACHABLE.** ICU attaches
+       ordinary punctuation to the sentence beside it, so a leading run of soft
+       hyphens alone is simply part of the first sentence — the merge loop is
+       only asked about a run that ICU DID cut off, which U+2028 does. Two soft
+       hyphens, not one, because the pattern that strips them is global: with a
+       single one, a pattern that stopped at the first would look correct. */
+    const raw = `${LINE} ${SOFT}${SOFT} ${LINE}Hello there. Next one.`
     const spans = sentenceSpansOf(raw, 'en')
     expect(spans[0]?.start, 'the tiling must still start at zero').toBe(0)
+    expect(spans, 'the invisible run was spoken as a sentence of its own').toHaveLength(2)
     expect(
-      raw.slice(spans[0]?.start ?? 0, spans[0]?.end ?? 0).replaceAll(SOFT, '').trim(),
-      'the invisible run was spoken as a sentence of its own',
+      raw.slice(spans[0]?.start ?? 0, spans[0]?.end ?? 0).replaceAll(SOFT, '').replaceAll(LINE, '').trim(),
+      'the first sentence is the first real one',
     ).toBe('Hello there.')
-    expect(spans).toHaveLength(2)
   })
 
   it('still splits where there is something to say on both sides', () => {
