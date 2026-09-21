@@ -11322,6 +11322,9 @@
     "src/kernel/ui/tocOrder.test.ts > stepChapter > answers null at either end",
     "src/kernel/ui/tocOrder.test.ts > stepChapter > answers null for a place the contents never names",
     "src/kernel/ui/tocOrder.test.ts > stepChapter > moves forward and back",
-    "src/kernel/ui/tocOrder.test.ts > stepChapter > skips a grouping heading, which is a row and not a place"
+    "src/kernel/ui/tocOrder.test.ts > stepChapter > skips a grouping heading, which is a row and not a place",
+    "src/main.mobile.test.tsx > the mobile root > draws the mobile shell with everything the launch produced — the store’s notice included",
+    "src/main.mobile.test.tsx > the mobile root > publishes a phone’s geometry before the shell draws — no titlebar on a phone",
+    "src/main.mobile.test.tsx > the mobile root > refuses to start without its root element, and names the page that should hold it"
   ]
 }
