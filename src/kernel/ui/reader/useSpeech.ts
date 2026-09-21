@@ -341,11 +341,15 @@ export function useSpeech(
    * is what the types need and the only thing left to get wrong — and getting it
    * wrong leaves a live timer, which the cases below do see.
    */
-  const clearGap = useCallback(() => {
-    clearTimeout(gapTimer.current ?? undefined)
-    gapTimer.current = null
-    pendingNext.current = null
-  }, [])
+  const clearGap = useCallback(
+    () => {
+      clearTimeout(gapTimer.current ?? undefined)
+      gapTimer.current = null
+      pendingNext.current = null
+    },
+    // Stryker disable next-line ArrayDeclaration: this reads only refs, so a constant list is a constant identity whatever is in it.
+    [],
+  )
 
   const clearContinuation = useCallback(() => {
     if (continuing.current !== null) {
@@ -795,9 +799,12 @@ export function useSpeech(
       if (next === null) return
       clearGap()
       clearContinuation()
+      /* NO `setSpeaking(true)` HERE, AND THERE WAS ONE. `moveTo` has already
+         returned unless a reading is under way, and the only writers of that
+         flag — `start` and `endReading` — set `speaking` in the same breath, so
+         it was already true: the call could not change anything, and neither
+         its removal nor its argument could be told apart by any test. */
       speakSentence(next)
-      // Stryker disable next-line BooleanLiteral: `moveTo` returns unless a reading is under way, and the only writers of that flag set `speaking` with it — so it is already true here.
-      setSpeaking(true)
     },
     // Stryker disable next-line ArrayDeclaration: `speakSentence` and the two clears never move — as above.
     [speakSentence, clearGap, clearContinuation],
