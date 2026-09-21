@@ -95,6 +95,14 @@ export interface SpokenText {
  * the obvious failure, and an EPUB's hidden notes are the less obvious one.
  */
 export function collectText(doc: Document, skip: SpeechSkipPrefs = DEFAULT_SPEECH_SKIP): SpokenText {
+  /* ⚠️ **A DOCUMENT WITH NO `<body>` THREW HERE, AND IT IS A REAL DOCUMENT.**
+     `doc.body` is null for an XML document that is not XHTML, and for a
+     malformed section whose parse produced no body element — and
+     `createTreeWalker(null, …)` throws. The audiobook walks every section, so one
+     such section ended an export as a crash rather than as a chapter with no
+     text, which `planChapters` already knows how to drop by name. No body is no
+     readable text, and that is the answer it gives now. */
+  if (!doc.body) return { text: '', segments: [], blocks: [] }
   const view = doc.defaultView
   const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
@@ -114,22 +122,30 @@ export function collectText(doc: Document, skip: SpeechSkipPrefs = DEFAULT_SPEEC
        * reader honours it: the author has said this text is not part of the
        * reading.
        *
-       * ⚠️ **AND IT STAYS AFTER THE WHITESPACE SHORTCUT, THOUGH AN AUDIT ASKED
-       * FOR THE OPPOSITE.** Moving it earlier so that a hidden element's
-       * whitespace is dropped too sounds right and is wrong for half the
-       * selector: `hidden` removes an element from the page, but
+       * ⚠️ **THE TWO HALVES OF THIS SELECTOR BELONG ON OPPOSITE SIDES OF THE
+       * WHITESPACE SHORTCUT, AND FOR ONE COMMIT THIS SAID OTHERWISE WHILE THE
+       * CODE DID A THIRD THING.** `hidden` removes an element from the page;
        * `aria-hidden="true"` does NOT — it hides from assistive technology while
-       * the element still renders. Its whitespace is therefore a space the reader
-       * can SEE, and rejecting it fuses the words either side, turning
-       * `Hello World` into `HelloWorld`.
+       * the element still renders. So an `aria-hidden` element's WHITESPACE is a
+       * space the reader can see, and rejecting it fuses the words either side.
        *
-       * The reorder was made and then reverted: no test could tell it apart
-       * (the `!text.endsWith(' ')` guard collapses the duplicate space in every
-       * case that could be constructed), and a change nothing can observe, made
-       * against an explicit performance rationale, is not a fix. What the audit
-       * was really pointing at is the RUBY case, which the loop handles. */
-
-      if (parent.closest('[hidden], [aria-hidden="true"]')) return NodeFilter.FILTER_REJECT
+       * `81f42c2` moved this whole check ahead of the shortcut and, in the same
+       * commit, wrote a comment saying the reorder had been "made and then
+       * reverted" and that "no test could tell it apart". Neither was true. It
+       * shipped, and it is easily told apart — measured on 2026-09-21:
+       *
+       * | markup | spoken | the page shows |
+       * |---|---|---|
+       * | `Hello<span aria-hidden="true"> </span>World` | `HelloWorld` (was) | Hello World |
+       * | `Hello<span hidden> </span>World` | `HelloWorld` | HelloWorld |
+       *
+       * So `hidden` is asked HERE, before the shortcut — its whitespace is not on
+       * the page — and `aria-hidden` is asked below it, after a whitespace node
+       * has already been accepted as the separator it visibly is. That is not a
+       * compromise between the two orders; it is the only order in which both
+       * rows come out right. `speechSkip.test.ts` holds both.
+       */
+      if (parent.closest('[hidden]')) return NodeFilter.FILTER_REJECT
 
       /* WHITESPACE-ONLY NODES ARE ACCEPTED, and the loop below turns them into
        * a separator rather than a segment. They used to be rejected here, and
@@ -138,8 +154,36 @@ export function collectText(doc: Document, skip: SpeechSkipPrefs = DEFAULT_SPEEC
        * fired and the voice said "Helloworld" — with every boundary offset
        * after it off by the missing space (audit round 1, #500). Accepted
        * before the STYLE checks, because a separator needs no visibility answer
-       * and the style walk is the expensive half of this filter. */
+       * and the style walk is the expensive half of this filter.
+       *
+       * ⚠️ **WHICH LEAVES ONE CASE SPOKEN THAT THE PAGE DOES NOT DRAW, AND IT
+       * IS LEFT ON PURPOSE.** A whitespace node inside CSS-hidden markup —
+       * `Hello<span style="display:none"> </span>World` — is accepted here, so
+       * the voice says "Hello World" over a page showing "HelloWorld" (measured
+       * 2026-09-21). Deciding it needs the ancestor `getComputedStyle` walk for
+       * every whitespace node, and a pretty-printed chapter has one between
+       * nearly every pair of elements: the cost lands on the reading path for
+       * every section, to correct a spacer-inside-a-hidden-span pattern that
+       * fuses two words on the page in the first place. A hidden BLOCK is the
+       * common case, and between blocks the block separator adds a space
+       * regardless. `hidden` and `aria-hidden` are decided, cheaply, above and
+       * below this line.
+       *
+       * ⚠️ **AND THIS FILTER IS ORDER-SENSITIVE IN A WAY SPLITTING IT WOULD NOT
+       * FIX.** An audit named `collectText` too long and predicted exactly the
+       * hidden-whitespace mistake above; the prediction was right, and the
+       * mistake was mine. But the order is the substance — whitespace has to be
+       * decided BETWEEN the `hidden` and `aria-hidden` checks — and extracting
+       * each check into a helper would keep that order in the caller, where it
+       * would be just as easy to get wrong. What stops it recurring is a test per
+       * row, in `speechSkip.test.ts`, each of which fails if two checks swap. */
       if (!node.textContent?.trim()) return NodeFilter.FILTER_ACCEPT
+
+      /* `aria-hidden` TEXT is not part of the reading — the author has said so,
+         and a screen reader honours it for the same reason. Its WHITESPACE was
+         accepted just above, because the element renders and the space is on the
+         page. See the table above the `[hidden]` check. */
+      if (parent.closest('[aria-hidden="true"]')) return NodeFilter.FILTER_REJECT
 
       /* The two properties need different treatment, and treating them alike is
        * wrong in both directions.
@@ -557,6 +601,22 @@ export class Speaker {
   #generation = 0
   #sawBoundary = false
   #graceTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Whether `onNoBoundaries` has already been called in this reading.
+   *
+   * ⚠️ **THE CONTRACT SAYS ONCE AND NOTHING KEPT COUNT.** After the grace ran out
+   * the first time, every pause and resume armed a fresh timer — and `resume`
+   * armed it WITHOUT clearing the one before, so two resumes left two timers
+   * running and each called back. The consumer's `setFollowsWords(false)` is
+   * idempotent, which is why it never showed; the leaked timers and a callback
+   * documented as once and delivered many times were real regardless.
+   *
+   * Reset in `stop()`, NOT held for the Speaker's life: `useSpeech` reuses one
+   * Speaker across readings and resets `followsWords` to true at each `start`,
+   * so a permanent flag would let the highlight come back in the next reading
+   * and park on its first word with nothing left to correct it.
+   */
+  #reportedNoBoundaries = false
   /** This speaker's claim on the one engine — see `engineHeldBy`. */
   readonly #token = {}
   readonly #synth: SpeechSynthesis
@@ -574,6 +634,13 @@ export class Speaker {
    * SYNCHRONOUSLY, before this returns. A caller that sets its own "speaking"
    * flag afterwards would overwrite the done it has already been told about,
    * leaving the Listen control stuck on with nothing playing.
+   *
+   * LONG, AND LEFT LONG: it is one utterance's setup, in the order the engine
+   * needs it — claim the engine, cancel what was there, build the utterance,
+   * choose its voice and rate, wire its four events, hand it over. The one part
+   * that WAS duplicated elsewhere, the boundary-grace timer, is `#armGrace` now,
+   * and it had drifted before it was pulled out; what remains is used once and
+   * reads top to bottom. A helper per step would be a name per line.
    */
   speak(text: string, lang: string | null, prefs: SpeakPrefs = {}): boolean {
     /* CLAIMED BEFORE THE CANCEL, not after it. `stop()` on the next line is
@@ -669,11 +736,7 @@ export class Speaker {
      * being actively disabled. */
     utterance.addEventListener('start', () => {
       if (generation !== this.#generation) return
-      this.#clearGrace()
-      this.#graceTimer = setTimeout(() => {
-        if (generation !== this.#generation) return
-        if (!this.#sawBoundary) this.#cb.onNoBoundaries()
-      }, BOUNDARY_GRACE_MS)
+      this.#armGrace(generation)
     })
 
     this.#synth.speak(utterance)
@@ -704,17 +767,14 @@ export class Speaker {
     if (engineHeldBy.get(this.#synth) !== this.#token) return
     if (!this.#synth.paused) return
     this.#synth.resume()
-    if (!this.#sawBoundary) {
-      const generation = this.#generation
-      this.#graceTimer = setTimeout(() => {
-        if (generation !== this.#generation) return
-        if (!this.#sawBoundary) this.#cb.onNoBoundaries()
-      }, BOUNDARY_GRACE_MS)
-    }
+    if (!this.#sawBoundary) this.#armGrace(this.#generation)
   }
 
   stop(): void {
     this.#clearGrace()
+    /* A reading ended, so the next one measures the engine afresh — see
+       `#reportedNoBoundaries`. */
+    this.#reportedNoBoundaries = false
     // Retires the current generation, so the cancelled utterance's late end
     // cannot report itself as the current one finishing.
     this.#generation += 1
@@ -772,6 +832,29 @@ export class Speaker {
       this.#graceTimer = null
     }
   }
+
+  /**
+   * Start measuring whether this engine reports word boundaries.
+   *
+   * ⚠️ **ONE PLACE, BECAUSE TWO COPIES HAD ALREADY DRIFTED.** The `start` handler
+   * cleared the old timer before arming a new one and `resume` did not, so the
+   * two paths into the same measurement disagreed about whether a timer could
+   * be doubled — the drift an audit predicted from the duplication, arriving
+   * before anybody looked. Both call this now, and it clears first, every time.
+   */
+  #armGrace(generation: number): void {
+    this.#clearGrace()
+    /* The engine has already answered in this reading; asking again would only
+       produce the answer again. */
+    if (this.#reportedNoBoundaries) return
+    this.#graceTimer = setTimeout(() => {
+      this.#graceTimer = null
+      if (generation !== this.#generation) return
+      if (this.#sawBoundary || this.#reportedNoBoundaries) return
+      this.#reportedNoBoundaries = true
+      this.#cb.onNoBoundaries()
+    }, BOUNDARY_GRACE_MS)
+  }
 }
 
 /**
@@ -806,5 +889,24 @@ export function wordLengthAt(text: string, index: number): number {
  * every session.
  */
 export function speechAvailable(): boolean {
-  return typeof window !== 'undefined' && 'speechSynthesis' in window
+  if (typeof window === 'undefined') return false
+  /* ⚠️ **A PROPERTY'S NAME IS NOT A WORKING ENGINE, AND THAT IS ALL THIS
+   * CHECKED.** `'speechSynthesis' in window` is true of a webview that declares
+   * the property and leaves it null, and of one with the engine but no
+   * `SpeechSynthesisUtterance` to hand it — so the Listen control was drawn,
+   * and the first press threw at construction or at `speak`, far from any
+   * reason a reader could act on. The three things `Speaker` actually calls are
+   * what is checked now: the utterance constructor, and `speak` and `cancel` on
+   * a real engine. It still does NOT read the voice list, for the reason above. */
+  const synth = (window as { speechSynthesis?: unknown }).speechSynthesis as
+    | { speak?: unknown; cancel?: unknown }
+    | null
+    | undefined
+  return (
+    typeof (window as { SpeechSynthesisUtterance?: unknown }).SpeechSynthesisUtterance === 'function' &&
+    typeof synth === 'object' &&
+    synth !== null &&
+    typeof synth.speak === 'function' &&
+    typeof synth.cancel === 'function'
+  )
 }

@@ -157,6 +157,22 @@ export const TURN_SETTLE_MS = 500
  * fallback is the slow case, and it is inside it too.
  */
 export const CONTINUE_TICK_MS = 800
+/**
+ * ⚠️ **A HEURISTIC, AND AN AUDIT SAID SO — THE FIX IS THE ONE `chapter.go` GOT,
+ * AND IT HAS NOWHERE TO LAND YET.** End of book is inferred from `next` moving
+ * nothing for this long, because `SpeechPaging.next` returns nothing: a section
+ * that takes longer than this to arrive reads as the book ending, and `next` is
+ * re-asked every tick without knowing whether the last one is still in flight.
+ *
+ * The chapter step had the same shape and was fixed by making `go` answer
+ * whether it moved. `next` cannot be fixed that way from here: it is the
+ * session's page turn over foliate's paginator, which does not report a
+ * position change, so a boolean returned by this layer would be a guess wearing
+ * a type. The number is sized against the slow case that was measured — a
+ * scanned PDF page decoding on pdf.js's JS fallback — which is why it is four
+ * seconds and not one. When the paginator reports whether a turn landed, this
+ * grace and the tick both go, and `next` becomes `(): boolean` beside `go`.
+ */
 export const CONTINUE_GRACE_MS = 4000
 
 /**
@@ -169,6 +185,32 @@ export const CONTINUE_GRACE_MS = 4000
  */
 const NO_PREFS: SpeakPrefs = {}
 
+/**
+ * ⚠️ **AN IMPLICIT STATE MACHINE, AND AN AUDIT ASKED FOR AN EXPLICIT ONE — THE
+ * ANSWER IS NOT YET, AND HERE IS WHY IT IS NOT "NO".**
+ *
+ * The finding is right about the shape: speaking, engine-paused, gap-paused,
+ * continuing and stopped are combinations of flags spread across state and a
+ * dozen refs, so a combination nothing intends is representable. Several of this
+ * branch's own fixes were exactly such a combination being reached — `paused`
+ * left set across a stop, a continuation surviving a pause, a gap destroyed by a
+ * chapter step that went nowhere.
+ *
+ * What a reducer alone would NOT fix is why the refs exist. The engine's
+ * callbacks, the gap timer and the continuation tick all fire OUTSIDE React's
+ * render, and each needs the value as of now — a reducer's state read from one
+ * of them is the value as of the last render, which is the stale-closure class
+ * this file documents again and again. So the real change is a reducer for the
+ * PHASE, with the refs reduced to mirrors of it, and every timer and engine
+ * callback dispatching a transition instead of writing flags. That is a rewrite
+ * of the reading's core with timing as the whole of its risk, and it is worth
+ * doing as its own change with its own measurement against a real engine — not
+ * folded into a cleanup where the tests it would be judged by are the ones it
+ * is rewriting.
+ *
+ * Until then each illegal combination found gets a test that names it, which is
+ * what the eight in `useSpeech.test.tsx` about pause, stop and stepping are.
+ */
 export function useSpeech(
   doc: Document | null,
   paging: SpeechPaging,
@@ -685,25 +727,27 @@ export function useSpeech(
     [speakSentence, clearGap, clearContinuation],
   )
 
-  const stepSentence = useCallback(
-    (by: -1 | 1) => {
+  /**
+   * A step through the plan, by whichever unit `cursor` counts in.
+   *
+   * ⚠️ **ONE BODY, AND IT WAS TWO THAT DIFFERED BY A NAME.** `stepSentence` and
+   * `stepParagraph` were copies whose only difference was which cursor function
+   * they called — and the part they shared is the part with the decision in it:
+   * falling off the START of the section replays the current sentence rather
+   * than doing nothing, while falling off the END hands over to the continuation.
+   * Two copies of that rule are two chances for one of them to be edited alone.
+   */
+  const stepBy = useCallback(
+    (cursor: (plan: ReadingPlan, at: number, by: -1 | 1) => number | null, by: -1 | 1) => {
       const current = spokenRef.current
       if (!current) return
-      const next = sentenceStep(current.plan, cursorRef.current, by)
+      const next = cursor(current.plan, cursorRef.current, by)
       moveTo(next ?? (by === -1 ? cursorRef.current : null))
     },
     [moveTo],
   )
-
-  const stepParagraph = useCallback(
-    (by: -1 | 1) => {
-      const current = spokenRef.current
-      if (!current) return
-      const next = paragraphStep(current.plan, cursorRef.current, by)
-      moveTo(next ?? (by === -1 ? cursorRef.current : null))
-    },
-    [moveTo],
-  )
+  const stepSentence = useCallback((by: -1 | 1) => stepBy(sentenceStep, by), [stepBy])
+  const stepParagraph = useCallback((by: -1 | 1) => stepBy(paragraphStep, by), [stepBy])
 
   /**
    * A whole chapter away.

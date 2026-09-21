@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Speaker, placeOf, wordLengthAt } from './speech'
+import { Speaker, collectText, placeOf, speechAvailable, wordLengthAt } from './speech'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
 import type { HostRect } from './coordinates'
 
@@ -386,6 +386,46 @@ describe('Speaker', () => {
     vi.advanceTimersByTime(2)
     expect(onNoBoundaries).toHaveBeenCalledTimes(1)
   })
+
+  /**
+   * ⚠️ **"CALLED ONCE" WAS THE CONTRACT AND NOTHING KEPT COUNT.** After the grace
+   * ran out the first time, every pause and resume armed a fresh timer, and
+   * `resume` armed it without clearing the one before — so the callback came
+   * back on every cycle, and two resumes left two timers running. The consumer's
+   * `setFollowsWords(false)` is idempotent, which is exactly why no test noticed.
+   */
+  it('reports a missing boundary once per reading, however often it is paused', () => {
+    const { speaker, onNoBoundaries } = make()
+    speaker.speak('first', null)
+    synth.queued[0]?.dispatchEvent(new Event('start'))
+    vi.advanceTimersByTime(10_000)
+    expect(onNoBoundaries).toHaveBeenCalledTimes(1)
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      speaker.pause()
+      speaker.resume()
+      speaker.resume()
+      vi.advanceTimersByTime(10_000)
+    }
+    expect(onNoBoundaries, 'still once, and no doubled timer either').toHaveBeenCalledTimes(1)
+  })
+
+  /* AND THE NEXT READING MEASURES AGAIN. One Speaker serves every reading and the
+     hook resets `followsWords` to true at each start — so a flag held for the
+     Speaker's life would let the highlight return and park on its first word with
+     nothing left to correct it. */
+  it('measures the engine afresh once a reading has stopped', () => {
+    const { speaker, onNoBoundaries } = make()
+    speaker.speak('first', null)
+    synth.queued[0]?.dispatchEvent(new Event('start'))
+    vi.advanceTimersByTime(10_000)
+    speaker.stop()
+
+    speaker.speak('second', null)
+    synth.queued[synth.queued.length - 1]?.dispatchEvent(new Event('start'))
+    vi.advanceTimersByTime(10_000)
+    expect(onNoBoundaries, 'once for each reading').toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('wordLengthAt', () => {
@@ -456,5 +496,63 @@ describe('placeOf', () => {
     expect(placeOf(box(100, 900, 60, 20), page, 'ltr')).toBe('ahead')
     expect(placeOf(box(100, 900, 60, 20), page, 'rtl')).toBe('ahead')
     expect(placeOf(box(100, -100, 60, 20), page, 'ltr')).toBe('behind')
+  })
+})
+
+/**
+ * ⚠️ **A PROPERTY'S NAME IS NOT A WORKING ENGINE.** `speechAvailable` answered
+ * `'speechSynthesis' in window`, so a webview that declared the property and
+ * left it null — or had the engine and no `SpeechSynthesisUtterance` — drew the
+ * Listen control, and the first press threw far from any reason a reader could
+ * act on. It checks what `Speaker` actually calls.
+ */
+describe('speechAvailable', () => {
+  const originalSynth = Object.getOwnPropertyDescriptor(globalThis, 'speechSynthesis')
+  const originalUtterance = Object.getOwnPropertyDescriptor(globalThis, 'SpeechSynthesisUtterance')
+
+  afterEach(() => {
+    for (const [name, original] of [
+      ['speechSynthesis', originalSynth],
+      ['SpeechSynthesisUtterance', originalUtterance],
+    ] as const) {
+      if (original) Object.defineProperty(globalThis, name, original)
+      else delete (globalThis as Record<string, unknown>)[name]
+    }
+  })
+
+  const install = (synth: unknown, utterance: unknown) => {
+    Object.defineProperty(globalThis, 'speechSynthesis', { value: synth, configurable: true, writable: true })
+    Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', {
+      value: utterance,
+      configurable: true,
+      writable: true,
+    })
+  }
+
+  it('answers yes for an engine it can actually drive', () => {
+    install(new FakeSynth(), FakeUtterance)
+    expect(speechAvailable()).toBe(true)
+  })
+
+  it.each([
+    ['the property is there and null', null, FakeUtterance],
+    ['the engine has no speak', { cancel: () => {} }, FakeUtterance],
+    ['the engine has no cancel', { speak: () => {} }, FakeUtterance],
+    ['there is no utterance constructor', { speak: () => {}, cancel: () => {} }, undefined],
+  ])('answers no when %s', (_name, synth, utterance) => {
+    install(synth, utterance)
+    expect(speechAvailable()).toBe(false)
+  })
+})
+
+/* A document with no `<body>` — an XML document that is not XHTML, a section
+   whose parse produced none — made `createTreeWalker(null, …)` throw, so one
+   such section ended an audiobook export as a crash instead of a chapter with
+   nothing in it. */
+describe('collectText without a body', () => {
+  it('answers no text, rather than throwing', () => {
+    const doc = document.implementation.createDocument(null, 'root', null)
+    expect(doc.body).toBeNull()
+    expect(collectText(doc)).toEqual({ text: '', segments: [], blocks: [] })
   })
 })

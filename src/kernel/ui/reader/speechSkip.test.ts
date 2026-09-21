@@ -221,6 +221,28 @@ describe('what collectText does with them', () => {
     return text
   }
 
+  /**
+   * ⚠️ **THE TEST THAT WAS SAID NOT TO BE POSSIBLE, AND WOULD HAVE CAUGHT THE
+   * REGRESSION.** `81f42c2` moved the hidden check ahead of the whitespace
+   * shortcut and recorded, beside it, that the reorder had been reverted and that
+   * no test could tell the two orders apart. It had not been reverted, and these
+   * two rows tell them apart in one line each: `aria-hidden` renders, so its
+   * space is on the page; `hidden` does not, so its space is not.
+   */
+  it('keeps the visible space inside an aria-hidden element', () => {
+    expect(spoken('<p>Hello<span aria-hidden="true"> </span>World</p>')).toBe('Hello World')
+  })
+
+  it('drops the space inside a hidden element, which the page does not draw', () => {
+    expect(spoken('<p>Hello<span hidden> </span>World</p>')).toBe('HelloWorld')
+  })
+
+  it('still drops the aria-hidden TEXT, which the author said is not the reading', () => {
+    /* ONE space in the source, outside the span, so the case asserts the text
+       going and nothing about how many spaces a fixture happened to carry. */
+    expect(spoken('<p>Hello<span aria-hidden="true">decoration</span> World</p>')).toBe('Hello World')
+  })
+
   it('says an annotated word once, not once and then spelled', () => {
     /* Read as written this is `漢字かんじ` — every annotated word said twice,
        which makes a book with furigana or pinyin throughout unlistenable. */

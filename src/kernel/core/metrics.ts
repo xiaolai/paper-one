@@ -10,6 +10,22 @@ import type { Align, ReadingStyle, Theme, Typeface } from './uiTypes'
  * Adding a magic number to a component instead of a name here is a bug: the
  * whole point of §03 is that these values are shared between the ruler, the
  * scroll snapping, the prose spacing and the chrome.
+ *
+ * ⚠️ **ONE LONG FILE, AND AN AUDIT CALLED IT A GOD MODULE.** It is 70 exported
+ * constants to 13 functions — a TABLE of design values, plus the one function
+ * that publishes them to CSS — and the proposal was to split it into platform,
+ * typography, layout, component and CSS modules behind a barrel. That would undo
+ * the sentence above. The values are cross-derived (`MEASURE` from
+ * `READING_STEPS`, the pill from `CONTROL`, every scale's readout unit from its
+ * own row) and `applyMetrics` reads all of them at once; spread across five
+ * files, each derivation becomes a cross-module import and each file a place a
+ * second copy of a number can quietly start. A barrel would not rescue it
+ * either: this repository has measured what a barrel costs — its re-exports
+ * evaluate with it, which is why `ui/browser.ts` grows one export at a time.
+ *
+ * The finding's own word was "contend", and data does not contend: nothing here
+ * mutates, and two edits to two different tables do not conflict. Length is not
+ * a defect in a table whose value is being one table.
  */
 
 /**
