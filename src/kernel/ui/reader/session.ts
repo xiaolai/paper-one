@@ -2551,7 +2551,8 @@ function closeQuietly(view: View): void {
      not swallowed like `close()` above, because that failure is expected and
      this one is not. */
   try {
-    view.remove?.()
+    /* `remove` is `Element`'s, so a view always has one. */
+    view.remove()
   } catch (cause) {
     console.error('Paper: a closed view would not detach', cause)
   }
