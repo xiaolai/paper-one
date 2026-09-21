@@ -34,6 +34,7 @@ function mount(over: Partial<AudiobookDeps> = {}) {
       author: 'Paper',
       lang: 'en-US',
       toc: [],
+      fixedLayout: false,
       skip: { notes: false },
       sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
     },
@@ -88,6 +89,53 @@ describe('the control a consumer may depend on', () => {
   })
 })
 
+describe('a book laid out in fixed pages', () => {
+  /**
+   * ⚠️ **NOT EXPORTED AT ALL — the owner's decision, 2026-09-21.** A chapter is
+   * a spine section and a PDF's sections are its pages, so the export wrote one
+   * chapter per page and numbered the unnamed ones: "Chapter 7" for page seven,
+   * which is the false claim `planChapters` says numbering must never make.
+   */
+  it('is refused, with the reason said, before anything is read', async () => {
+    const read = vi.fn(async () => ({ sections: [], complete: true }))
+    const { seen, say } = mount({
+      source: {
+        title: 'A Scanned Book',
+        author: 'Paper',
+        lang: 'en-US',
+        toc: [],
+        fixedLayout: true,
+        skip: { notes: false },
+        sectionTexts: read,
+      },
+    })
+    seen.at(-1)?.run()
+    await act(async () => {})
+    expect(say).toHaveBeenCalledWith(
+      'A book of fixed pages cannot be exported as an audiobook — its pages are not chapters.',
+    )
+    expect(read, 'the book was read before the refusal').not.toHaveBeenCalled()
+    expect(seen.at(-1)?.running, 'the refusal left an export running').toBe(false)
+  })
+
+  it('is still offered, so the reader can be told why', () => {
+    /* An absent row for the book in front of them is a question with no
+       answer — the control exists and refuses. */
+    const { seen } = mount({
+      source: {
+        title: 'A Scanned Book',
+        author: 'Paper',
+        lang: 'en-US',
+        toc: [],
+        fixedLayout: true,
+        skip: { notes: false },
+        sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
+      },
+    })
+    expect(seen.at(-1)).not.toBeNull()
+  })
+})
+
 describe('a book with no voice this app would choose', () => {
   it('refuses rather than exporting in whatever the platform has', async () => {
     /* Reading aloud may fall through to the platform default — a fair bargain for
@@ -126,6 +174,7 @@ describe('two calls before React has committed anything', () => {
         author: 'Paper',
         lang: 'en-US',
         toc: [],
+        fixedLayout: false,
         skip: { notes: false },
         sectionTexts: vi.fn(async () => {
           calls += 1
@@ -162,6 +211,7 @@ describe('a walk that did not finish', () => {
         author: 'Paper',
         lang: 'en-US',
         toc: [],
+        fixedLayout: false,
         skip: { notes: false },
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: 'One', text: 'Some real text.' }],
@@ -185,6 +235,7 @@ describe('a walk that did not finish', () => {
         author: 'Paper',
         lang: 'en-US',
         toc: [],
+        fixedLayout: false,
         skip: { notes: false },
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: 'One', text: 'Some real text.' }],
@@ -232,6 +283,7 @@ describe('the control while an export is under way', () => {
         author: 'Paper',
         lang: 'en-US',
         toc: [],
+        fixedLayout: false,
         skip: { notes: false },
         sectionTexts: vi.fn(async () => {
           await held

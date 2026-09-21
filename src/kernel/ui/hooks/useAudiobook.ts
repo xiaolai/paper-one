@@ -31,6 +31,15 @@ export interface AudiobookSource {
   readonly author: string
   readonly lang: string | null
   readonly toc: readonly TocItem[]
+  /**
+   * Whether the book is laid out in fixed pages — every PDF, and an EPUB that
+   * declares `pre-paginated`. See `run`, which refuses one.
+   *
+   * REQUIRED, so a caller has to say which it has. Defaulted to false it would
+   * read as "reflowable" for a caller that never considered the question, which
+   * is the shape of the defect this refuses.
+   */
+  readonly fixedLayout: boolean
   readonly sectionTexts: (
     toc?: readonly TocItem[],
     shouldStop?: () => boolean,
@@ -114,6 +123,26 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
       return
     }
     if (!source) return
+    /**
+     * ⚠️ **A BOOK OF FIXED PAGES IS NOT EXPORTED AT ALL — the owner's decision,
+     * 2026-09-21.**
+     *
+     * A chapter here is a spine section, and a PDF's sections are its PAGES. So
+     * the export wrote one chapter per page: page seven came out as "Chapter 7"
+     * wherever the contents did not name it, which is a claim about the book
+     * that is not true — the thing `planChapters` says numbering must never do.
+     * Folding unnamed sections into the one before them would make a PDF
+     * exportable, and it was offered; giving the format up is what was chosen,
+     * so this refuses rather than approximating a book of pages.
+     *
+     * Refused HERE, where the reader is told why, rather than by leaving the
+     * command out: an absent row for the book in front of them is a question
+     * with no answer. The same shape as the voice refusal below.
+     */
+    if (source.fixedLayout) {
+      say('A book of fixed pages cannot be exported as an audiobook — its pages are not chapters.')
+      return
+    }
 
     inFlight.current = true
     void (async () => {

@@ -725,13 +725,25 @@ export function App({
             author: book.meta?.author ?? '',
             lang: book.doc ? documentLang(book.doc) : null,
             toc: book.toc,
+            /* A PDF, or an EPUB of fixed pages: `useAudiobook` refuses one, and
+               says so. Read from the view rather than guessed from the file's
+               extension — see `SessionCallbacks.onFixedLayout`. */
+            fixedLayout: book.fixedLayout,
             sectionTexts: book.sectionTexts,
             /* THE SAME VALUE THE VOICE READS, so the file holds what the
                reading would have said. */
             skip: { notes: state.readingNotesAloud },
           }
         : null,
-    [book.bookId, book.meta, book.doc, book.toc, book.sectionTexts, state.readingNotesAloud],
+    [
+      book.bookId,
+      book.meta,
+      book.doc,
+      book.toc,
+      book.fixedLayout,
+      book.sectionTexts,
+      state.readingNotesAloud,
+    ],
   )
   const audiobook = useAudiobook({
     /* The engine is macOS-only and the commands refuse elsewhere by name, so the

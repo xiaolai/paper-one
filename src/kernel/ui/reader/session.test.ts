@@ -3945,8 +3945,10 @@ describe('a foreign mark (WI-22.D2)', () => {
  * cases above mock the walk or give it no contents; the one path that turns a
  * table of contents into chapter names had never run under a test, and it read
  * `.index` straight off `resolveHref` — which on a PDF is a promise. Each
- * resolver here is shaped like a real backend's: `makePdf`'s is async and
- * REJECTS for a destination it cannot find, the EPUB backend's answers at once.
+ * resolver here is shaped like a real backend's: `makePdf`'s was async and
+ * REJECTED for a destination it cannot find, the EPUB backend's answers at
+ * once. A PDF is no longer exported at all — see `useAudiobook` — so what the
+ * await defends now is any other backend that answers with a promise.
  */
 describe('the section walk names each chapter from the contents', () => {
   async function walkOver(book: Record<string, unknown>, count = 3) {
@@ -3968,7 +3970,7 @@ describe('the section walk names each chapter from the contents', () => {
       (await session.sectionTexts(toc as never)).sections.map((one) => one.title)
   }
 
-  it("titles a PDF's chapters, whose resolver answers with a promise", async () => {
+  it('titles chapters whose resolver answers with a promise, as a PDF\'s did', async () => {
     const titles = await walkOver({ resolveHref: async (href: string) => ({ index: Number(href) }) })
     expect(
       await titles([

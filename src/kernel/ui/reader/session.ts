@@ -2366,14 +2366,16 @@ export class ReaderSession {
  * then slide by one and every chapter in the export is named after the one
  * before it. The book resolves its own hrefs; ask it.
  *
- * ⚠️ **AND THE ANSWER IS AWAITED, BECAUSE A PDF'S IS A PROMISE.** `makePdf`'s
- * `resolveHref` is `async` — an outline destination is looked up through
- * pdf.js — and this read `.index` straight off the call. A promise has no
- * `index`, so EVERY chapter of every PDF was exported untitled and numbered,
- * with nothing logged; and a destination the adapter REFUSES rejected outside
- * the `try` that was written for exactly that case, as an unhandled rejection
- * per broken outline entry. The EPUB backend answers synchronously, which is
- * why nothing looked wrong. Awaiting takes both shapes.
+ * ⚠️ **AND THE ANSWER IS AWAITED, BECAUSE A BACKEND'S MAY BE A PROMISE.** This
+ * read `.index` straight off the call, and a promise has no `index`: every
+ * chapter came out untitled and numbered with nothing logged, and a destination
+ * the backend REFUSES rejected outside the `try` written for exactly that case,
+ * as an unhandled rejection per broken contents entry. `makePdf`'s resolver is
+ * the `async` one that found it — an outline destination is looked up through
+ * pdf.js — while the EPUB backend answers at once, which is why nothing looked
+ * wrong. Awaiting takes both shapes, and it is the only defence left for a
+ * third backend that answers slowly: PDFs no longer reach this at all, because
+ * a book of fixed pages is refused an audiobook (`useAudiobook`).
  *
  * ⚠️ **ONE TRAVERSAL, `flattenToc`'s.** This walked the tree with a recursion of
  * its own, which is how `tocOrder.ts` says the contents pane and the voice came
