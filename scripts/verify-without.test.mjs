@@ -385,6 +385,32 @@ describe('removableCapabilities', () => {
     expect(removableCapabilities().length).toBeGreaterThan(0)
   })
 
+  it('reads and normalises each source once, however many capabilities ask', () => {
+    /* ⚠️ **THE ASSERTION THE FIX LEAVES BEHIND, BECAUSE THE DEFECT WAS
+       INVISIBLE.** `importedOutside` used to read, strip and mask every source
+       file once PER CAPABILITY. Nothing failed: the answer was right and the
+       only symptom was time — which surfaced as `beforeAll` hitting Vitest's
+       10 s hook bound during `pnpm test:coverage`, where nine workers compete,
+       and not at all when the file ran alone. A timing test would be flaky on a
+       shared machine; the number of reads is deterministic, so that is what is
+       pinned.
+
+       The lower bound matters as much as the duplicate check: a memo that
+       accidentally returned early, or a scan that stopped finding sources, would
+       satisfy "no file read twice" by reading nothing at all. */
+    const reads = []
+    const counted = (file, encoding) => {
+      reads.push(file)
+      return readFileSync(file, encoding)
+    }
+    removableCapabilities(undefined, counted)
+
+    const seen = new Map()
+    for (const file of reads) seen.set(file, (seen.get(file) ?? 0) + 1)
+    expect([...seen].filter(([, n]) => n > 1)).toEqual([])
+    expect(reads.length).toBeGreaterThan(100)
+  })
+
   it('never offers one another capability requires', () => {
     const required = new Set(manifest().capabilities.flatMap((c) => c.requires ?? []))
     for (const id of removableCapabilities()) {

@@ -158,7 +158,7 @@ export function parseArgs(argv) {
  * proved is that deletion is an operation, not that any particular leaf is
  * still a leaf.
  */
-export function removableCapabilities(repo = REPO_ROOT) {
+export function removableCapabilities(repo = REPO_ROOT, read = readFileSync) {
   const manifest = JSON.parse(readFileSync(path.join(repo, 'capabilities.manifest.json'), 'utf8'))
   const src = path.join(repo, 'src')
   const sources = readdirSync(src, { recursive: true, encoding: 'utf8' }).filter((rel) => /\.tsx?$/.test(rel))
@@ -169,6 +169,35 @@ export function removableCapabilities(repo = REPO_ROOT) {
      capability removable. `compositionFile` is the same helper the checker
      resolves them with, so there is one answer to "which files are those". */
   const roots = new Set(PLATFORMS.map((platform) => compositionFile(platform).replace(/^src\//, '')))
+
+  /**
+   * Each source file read and normalised ONCE, however many capabilities ask.
+   *
+   * ⚠️ **`importedOutside` USED TO DO THIS PER CAPABILITY, AND THAT IS O(caps ×
+   * files) OF THE EXPENSIVE PART.** `.some()` short-circuits on a capability that
+   * IS imported outside — but every capability the proof actually runs on is one
+   * that is NOT, so those scan the whole tree, and `stripComments` and
+   * `maskTemplates` are whole-file regex passes rather than the cheap `test`
+   * that follows them. With five candidates over ~800 sources that is four
+   * thousand reads and four thousand normalisations to answer a question that
+   * needs eight hundred of each.
+   *
+   * What it cost was not the function's own runtime: `beforeAll` in
+   * `verify-without.test.mjs` timed out at Vitest's 10 s HOOK bound during
+   * `pnpm test:coverage`, where nine workers and coverage instrumentation
+   * compete for the same disk and cores. Alone the suite passes; in the full run
+   * it did not. Raising the bound would have left the redundant work in place —
+   * a hook timeout is a liveness bound, and the thing that was wrong here was
+   * the work, not the number.
+   */
+  const normalised = new Map()
+  const textOf = (rel) => {
+    const cached = normalised.get(rel)
+    if (cached !== undefined) return cached
+    const text = maskTemplates(stripComments(read(path.join(src, rel), 'utf8')))
+    normalised.set(rel, text)
+    return text
+  }
   return manifest.capabilities
     .filter((cap) => !manifest.capabilities.some((c) => (c.requires ?? []).includes(cap.id)))
     /* ⚠️ **PATHS ARE `ts`, DEPENDENCIES ARE `id`, AND THIS USED `id` FOR BOTH.**
@@ -177,7 +206,7 @@ export function removableCapabilities(repo = REPO_ROOT) {
        path that does not exist and reported removable on the strength of finding
        no importers of nothing. Every entry has `ts === id` today, which is
        exactly why it would have gone unnoticed. */
-    .filter((cap) => !importedOutside(src, sources, cap.ts ?? cap.id, roots))
+    .filter((cap) => !importedOutside(textOf, sources, cap.ts ?? cap.id, roots))
     .map((cap) => cap.id)
     .sort()
 }
@@ -203,7 +232,7 @@ export function removableCapabilities(repo = REPO_ROOT) {
  * '…/capabilities/x'` stops resolving exactly as a value import does. That is
  * why this does not simply call that helper.
  */
-function importedOutside(src, sources, dir, roots) {
+function importedOutside(textOf, sources, dir, roots) {
   const own = path.join('capabilities', dir) + path.sep
   /* Either quote, `import`/`export … from`, a bare `import '…'`, and
      `import(…)`; the specifier must end at the directory or continue with `/`. */
@@ -212,7 +241,7 @@ function importedOutside(src, sources, dir, roots) {
   )
   return sources
     .filter((rel) => !rel.startsWith(own) && !roots.has(rel.split(path.sep).join('/')))
-    .some((rel) => NAMES.test(maskTemplates(stripComments(readFileSync(path.join(src, rel), 'utf8')))))
+    .some((rel) => NAMES.test(textOf(rel)))
 }
 
 /**
