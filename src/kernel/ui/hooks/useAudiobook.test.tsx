@@ -1,9 +1,39 @@
 // @vitest-environment jsdom
 import { act, cleanup, render } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useAudiobook, type AudiobookControl, type AudiobookDeps } from './useAudiobook'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useAudiobook, type AudiobookControl, type AudiobookDeps, type AudiobookSource } from './useAudiobook'
 import { NO_GOOD_VOICE } from '../reader/voiceChoice'
 import type { VoiceFacts } from '../reader/voiceChoice'
+import type { AudiobookPlatform } from '../reader/audiobook'
+
+/* THE PLATFORM HALF IS THE ONLY THING REPLACED. `audiobookTauri` is the save
+   dialog and the engine, neither of which exists in a test; `exportAudiobook`
+   — the ordering, the cancellation, the tidy-up count — is the real one, so
+   what the reader is told is what the real export would make them hear. */
+const tauri = vi.hoisted(() => ({
+  path: null as string | null,
+  platform: null as AudiobookPlatform | null,
+  asked: [] as string[],
+  opened: 0,
+}))
+vi.mock('../reader/audiobookTauri', () => ({
+  chooseAudiobookPath: async (title: string) => {
+    tauri.asked.push(title)
+    return tauri.path
+  },
+  tauriAudiobook: async () => {
+    tauri.opened += 1
+    if (!tauri.platform) throw new Error('the test named no platform')
+    return tauri.platform
+  },
+}))
+
+beforeEach(() => {
+  tauri.path = null
+  tauri.platform = null
+  tauri.asked = []
+  tauri.opened = 0
+})
 
 /**
  * The hook had NO test, which is why a stale closure in its consumer was
@@ -278,6 +308,9 @@ describe('a walk that did not finish', () => {
       seen[0]?.run()
     })
     expect(say).not.toHaveBeenCalledWith(expect.stringContaining('stopped being readable'))
+    /* And it went on to ask where the book should go — the step a refusal
+       would never reach. */
+    expect(tauri.asked).toEqual(['A Measured Book'])
   })
 })
 
@@ -346,5 +379,320 @@ describe('the control while an export is under way', () => {
     const harness = mount()
     act(() => harness.change({ source: null }))
     expect(harness.seen[harness.seen.length - 1]).toBeNull()
+  })
+})
+
+/* TWO CHAPTERS, the second at spine index 2 — so a scratch path built from the
+   position in the list rather than the section's own index would show. */
+const SECTIONS = [
+  { index: 0, title: 'One', text: 'The first chapter.' },
+  { index: 2, title: 'Two', text: 'The second chapter.' },
+]
+const WHERE = '/books/A Measured Book.m4b'
+
+function book(over: Partial<AudiobookSource> = {}): AudiobookSource {
+  return {
+    title: 'A Measured Book',
+    author: 'A. Writer',
+    lang: 'en-US',
+    toc: [],
+    fixedLayout: false,
+    skip: { notes: false },
+    sectionTexts: vi.fn(async () => ({ sections: SECTIONS, complete: true })),
+    ...over,
+  }
+}
+
+/**
+ * An engine that does what it is told and writes down what it was told.
+ * `hold` makes a chapter's render wait for the test, which is how a test stands
+ * between two chapters — the only place a stop can land.
+ */
+function engine(over: Partial<AudiobookPlatform> = {}) {
+  const rendered: Parameters<AudiobookPlatform['render']>[0][] = []
+  const packaged: Parameters<AudiobookPlatform['package']>[0][] = []
+  const discarded: string[] = []
+  const platform: AudiobookPlatform = {
+    render: async (job) => {
+      rendered.push(job)
+    },
+    package: async (job) => {
+      packaged.push(job)
+      return { durationMs: 180_000, chapters: job.chapters.length }
+    },
+    scratchFor: (index) => `/scratch/chapter-${index}.wav`,
+    discard: async (path) => {
+      discarded.push(path)
+    },
+    discardScratch: async () => {},
+    ...over,
+  }
+  tauri.platform = platform
+  tauri.path = WHERE
+  return { rendered, packaged, discarded }
+}
+
+/** A promise the test resolves, and the function that resolves it. */
+function gate() {
+  let open = () => {}
+  const shut = new Promise<void>((resolve) => {
+    open = resolve
+  })
+  return { shut, open }
+}
+
+describe('an export that runs to the end', () => {
+  it('tells the reader each step, and names the file it wrote', async () => {
+    engine()
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    /* EXACTLY these, in this order: the progress line counts from one and
+       reports the chapter it is ABOUT to read, and the last step is named for
+       what it does rather than as a third chapter of two. */
+    expect(say.mock.calls.map(([line]) => line)).toEqual([
+      'Reading the book…',
+      'Reading One — 1 of 2…',
+      'Reading Two — 2 of 2…',
+      'Joining the chapters…',
+      'Exported 2 chapters, 3 minutes, to A Measured Book.m4b.',
+    ])
+  })
+
+  it('renders in the voice the reading would use, at the reader’s rate, into the book’s own name', async () => {
+    const { rendered, packaged } = engine()
+    const { seen } = mount({ source: book(), rate: 1.25 })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(rendered).toEqual([
+      { text: 'The first chapter.', voice: VOICE.voiceURI, rate: 1.25, path: '/scratch/chapter-0.wav' },
+      { text: 'The second chapter.', voice: VOICE.voiceURI, rate: 1.25, path: '/scratch/chapter-2.wav' },
+    ])
+    expect(packaged).toEqual([
+      {
+        chapters: [
+          { title: 'One', path: '/scratch/chapter-0.wav' },
+          { title: 'Two', path: '/scratch/chapter-2.wav' },
+        ],
+        title: 'A Measured Book',
+        author: 'A. Writer',
+        path: WHERE,
+      },
+    ])
+  })
+
+  it('reads the settings as they are when it starts, not as they were at the first render', async () => {
+    /* ⚠️ A callback that captured its first render's deps would render at the
+       rate the reader had BEFORE they changed it — and export the book in a
+       voice they had since moved away from. */
+    const { rendered } = engine()
+    const harness = mount({ source: book() })
+    act(() => harness.change({ rate: 1.5 }))
+    await act(async () => {
+      harness.seen.at(-1)?.run()
+    })
+    expect(rendered.map((job) => job.rate)).toEqual([1.5, 1.5])
+  })
+
+  it('is running while it works, and not once it has finished', async () => {
+    const held = gate()
+    engine({ render: () => held.shut })
+    const { seen } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(seen.at(-1)?.running).toBe(true)
+    await act(async () => {
+      held.open()
+    })
+    expect(seen.at(-1)?.running).toBe(false)
+  })
+
+  it('can be run again once it has finished, and the second run is an export, not a stop', async () => {
+    /* ⚠️ THE CLAIM AND THE STOP ARE RELEASED TOGETHER, in one `finally`. Left
+       claimed, the second run would be read as "stop the one in flight"; left
+       stopped, it would cancel itself at the first chapter. */
+    engine()
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(say.mock.calls.filter(([line]) => String(line).startsWith('Exported'))).toHaveLength(2)
+    expect(say).not.toHaveBeenCalledWith(expect.stringContaining('Stopping'))
+  })
+})
+
+describe('scratch the tidy-up could not remove', () => {
+  it('says one file, when one would not go', async () => {
+    engine({
+      discard: async (path) => {
+        if (path === '/scratch/chapter-0.wav') throw new Error('in use')
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(say).toHaveBeenLastCalledWith(
+      'Exported 2 chapters, 3 minutes, to A Measured Book.m4b. One temporary audio file could not be removed.',
+    )
+  })
+
+  it('says how many, when more than one would not go', async () => {
+    engine({
+      discard: async () => {
+        throw new Error('in use')
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(say).toHaveBeenLastCalledWith(
+      'Exported 2 chapters, 3 minutes, to A Measured Book.m4b. 2 temporary audio files could not be removed.',
+    )
+  })
+})
+
+describe('a stop the reader asks for', () => {
+  it('while the book is being read, stops before asking where to save it', async () => {
+    const held = gate()
+    let shouldStop: (() => boolean) | undefined
+    engine()
+    const { seen, say } = mount({
+      source: book({
+        sectionTexts: vi.fn(async (_toc, stopAsked) => {
+          shouldStop = stopAsked
+          await held.shut
+          return { sections: SECTIONS, complete: true }
+        }),
+      }),
+    })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(shouldStop?.(), 'the walk was told to stop before anything asked it to').toBe(false)
+
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(say).toHaveBeenLastCalledWith('Stopping the export after this chapter…')
+    /* THE STOP REACHES THE WALK, so a long book stops parsing rather than
+       reading every remaining section to be thrown away. */
+    expect(shouldStop?.(), 'the walk was never told').toBe(true)
+
+    await act(async () => {
+      held.open()
+    })
+    expect(say).toHaveBeenLastCalledWith('The export was stopped. Nothing was left behind.')
+    expect(tauri.asked, 'a stopped export still asked for a file name').toEqual([])
+    expect(seen.at(-1)?.running).toBe(false)
+  })
+
+  it('between chapters, renders no more of them and removes what it wrote', async () => {
+    const held = gate()
+    const rendered: string[] = []
+    const { discarded } = engine({
+      render: async (job) => {
+        rendered.push(job.path)
+        await held.shut
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    await act(async () => {
+      held.open()
+    })
+    expect(rendered).toEqual(['/scratch/chapter-0.wav'])
+    expect(discarded).toEqual(['/scratch/chapter-0.wav'])
+    expect(say).toHaveBeenLastCalledWith('The export was stopped. Nothing was left behind.')
+  })
+
+  it('says what it could not remove, rather than claiming nothing was left', async () => {
+    const held = gate()
+    engine({
+      render: () => held.shut,
+      discard: async () => {
+        throw new Error('in use')
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    await act(async () => {
+      held.open()
+    })
+    expect(say).toHaveBeenLastCalledWith(
+      'The export was stopped. One temporary audio file could not be removed.',
+    )
+  })
+})
+
+describe('an export the engine refuses', () => {
+  it('says the engine’s own sentence, and is no longer running', async () => {
+    engine({
+      render: async () => {
+        throw new Error('the voice stalled on chapter 1')
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(say).toHaveBeenLastCalledWith('The export failed: the voice stalled on chapter 1')
+    expect(seen.at(-1)?.running).toBe(false)
+  })
+})
+
+describe('a reader who closes the save dialog', () => {
+  it('starts nothing and says nothing more', async () => {
+    engine()
+    tauri.path = null
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(tauri.asked).toEqual(['A Measured Book'])
+    expect(tauri.opened, 'the engine was opened for an export nobody asked for').toBe(0)
+    expect(say.mock.calls.map(([line]) => line)).toEqual(['Reading the book…'])
+    expect(seen.at(-1)?.running).toBe(false)
+  })
+})
+
+describe('a control held past the book it was for', () => {
+  it('does nothing once its export has ended and the book is gone', async () => {
+    /* A consumer that kept the control — the palette's memo is one — holds a
+       `run` built while the book was closed and the export still running. Once
+       the export ends, that `run` is neither a stop nor a start: there is no book
+       to export. */
+    const held = gate()
+    engine({ render: () => held.shut })
+    const harness = mount({ source: book() })
+    await act(async () => {
+      harness.seen.at(-1)?.run()
+    })
+    act(() => harness.change({ source: null }))
+    const kept = harness.seen.at(-1)
+    expect(kept, 'the running export lost its control').not.toBeNull()
+    await act(async () => {
+      held.open()
+    })
+    const said = harness.say.mock.calls.length
+    expect(() => kept?.run()).not.toThrow()
+    expect(harness.say).toHaveBeenCalledTimes(said)
   })
 })

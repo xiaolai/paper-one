@@ -76,7 +76,12 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
   /** The synchronous claim — see `run`. `running` is what the controls render. */
   const inFlight = useRef(false)
   /* A REF, not state: it is read inside the export loop between chapters, and a
-   * captured `running` would be the value at the moment the export started. */
+   * captured `running` would be the value at the moment the export started.
+   *
+   * RESET IN ONE PLACE, the `finally` in `run`. It is only ever set while an
+   * export is in flight, and that `finally` clears it with the claim — so every
+   * export starts with it false, and a second reset at the start would be a line
+   * no test could tell from its absence. */
   const stop = useRef(false)
 
   const { available, source, voices, chosen, rate, say } = deps
@@ -146,7 +151,6 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
 
     inFlight.current = true
     void (async () => {
-      stop.current = false
       setRunning(true)
       try {
         const answer = voiceFor(voices, source.lang, chosen)
