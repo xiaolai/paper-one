@@ -181,3 +181,50 @@ describe('a section of one sentence', () => {
     expect(stepParagraph(p, 0, -1)).toBeNull()
   })
 })
+
+describe('the edges a step can meet', () => {
+  const p = plan(TWO_PARAGRAPHS, BLOCKS)
+
+  it('answers no block for a cursor no sentence answers to', () => {
+    /* A cursor left over from a plan that has since been replaced — a shorter
+       section, a book closed mid-reading — must not be read as a paragraph. */
+    expect(blockIndexAt(p, 99)).toBe(-1)
+    expect(blockIndexAt(p, -1)).toBe(-1)
+  })
+
+  it('answers no block for text no block was recorded for', () => {
+    expect(blockIndexAt({ sentences: sentenceSpansOf('A sentence.', 'en'), blocks: [] }, 0)).toBe(-1)
+  })
+
+  it('steps nowhere from a cursor past the section, in either direction', () => {
+    /* Rather than to the last sentence, which is where an offset lookup with
+       nothing to look up lands. */
+    expect(stepParagraph(p, 99, 1)).toBeNull()
+    expect(stepParagraph(p, 99, -1)).toBeNull()
+  })
+
+  it('stops at the last paragraph even with sentences left in it', () => {
+    /* Sentence 2 opens the last paragraph and sentence 3 follows it. "Next
+       paragraph" is the next SECTION, which only the hook can reach — not the
+       rest of this one. */
+    expect(stepParagraph(p, 2, 1)).toBeNull()
+  })
+
+  it('stops when the paragraph ahead begins inside the section’s last sentence', () => {
+    /* A heading with no full stop: one sentence spans both blocks. Forward
+       cannot advance into it without leaving the section, so it answers the
+       edge rather than a sentence that does not exist. */
+    const heading = 'Chapter One Call me Ishmael.'
+    const spanning = plan(heading, [0, 'Chapter One '.length])
+    expect(spanning.sentences).toHaveLength(1)
+    expect(stepParagraph(spanning, 0, 1)).toBeNull()
+  })
+
+  it('goes back to the paragraph’s start when a heading runs into it', () => {
+    /* The block boundary is inside sentence 0, so the paragraph that sentence 1
+       sits in begins in sentence 0 — and back from 1 restarts there. */
+    const raw = 'Chapter One Call me Ishmael. Some years ago.'
+    const p2 = plan(raw, [0, 'Chapter One '.length])
+    expect(stepParagraph(p2, 1, -1)).toBe(0)
+  })
+})

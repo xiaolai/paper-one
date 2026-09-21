@@ -72,15 +72,17 @@ export function stepSentence(plan: ReadingPlan, at: number, by: Step): number | 
 /**
  * The block `at`'s sentence begins in, as an index into `plan.blocks`.
  *
- * `-1` for a section with no blocks recorded, which is a section with no text.
+ * `-1` for a section with no blocks recorded, which is a section with no text —
+ * and for a cursor no sentence answers to, which is one left over from a plan
+ * that has since been replaced.
  */
 export function blockIndexAt(plan: ReadingPlan, at: number): number {
-  const start = plan.sentences[at]?.start
-  if (start === undefined) return -1
+  const sentence = plan.sentences[at]
+  if (sentence === undefined) return -1
   let found = -1
   for (const [index, block] of plan.blocks.entries()) {
-    if (block <= start) found = index
-    else break
+    if (block > sentence.start) break
+    found = index
   }
   return found
 }
@@ -99,8 +101,12 @@ export function blockIndexAt(plan: ReadingPlan, at: number): number {
  * paragraph" by "next paragraph".
  */
 export function stepParagraph(plan: ReadingPlan, at: number, by: Step): number | null {
+  /* `-1` NEEDS NO CASE OF ITS OWN, and had one that answered nothing it could
+     not already answer: forward, `here + 1` is the first block, which is the
+     next paragraph from anywhere before it; back, `blocks[-1]` is nothing. A
+     condition whose answer the lines below already give is one no test can
+     tell from its absence. */
   const here = blockIndexAt(plan, at)
-  if (here === -1) return null
 
   if (by === 1) {
     const nextBlock = plan.blocks[here + 1]
@@ -123,11 +129,17 @@ export function stepParagraph(plan: ReadingPlan, at: number, by: Step): number |
   }
 
   const blockStart = plan.blocks[here]
-  const sentenceStart = plan.sentences[at]?.start
-  /* Not already at the paragraph's first sentence: restart this paragraph. */
-  if (blockStart !== undefined && sentenceStart !== undefined && sentenceStart > blockStart) {
-    return sentenceIndexAt(plan, blockStart)
-  }
+  if (blockStart === undefined) return null
+  /* Not already at the paragraph's first sentence: restart this paragraph.
+   *
+   * COMPARED AS SENTENCES, NOT AS OFFSETS. It was `sentenceStart > blockStart`,
+   * which needed the sentence looked up a second time and both values checked
+   * for `undefined` — and `x > undefined` is already false, so those checks
+   * were conditions nothing could observe. The spans tile the section in order,
+   * so the paragraph's first sentence is before `at` exactly when `at` does not
+   * begin the paragraph. */
+  const first = sentenceIndexAt(plan, blockStart)
+  if (first < at) return first
   const previousBlock = plan.blocks[here - 1]
   if (previousBlock === undefined) return null
   return sentenceIndexAt(plan, previousBlock)
