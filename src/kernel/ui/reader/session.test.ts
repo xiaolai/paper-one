@@ -289,6 +289,31 @@ const deps = (view: View) => ({
 })
 
 describe('ReaderSession disposal', () => {
+  it('finishes teardown when the view will not detach', async () => {
+    /* `dispose` releases the book and clears the host AFTER closing the view,
+       and says nothing there may propagate — but detaching was the one step
+       left unguarded, so a view that threw on `remove` took the book's
+       resources and the host's contents with it, and threw out of `dispose`. */
+    const view = fakeView()
+    view.remove = () => {
+      throw new Error('already detached')
+    }
+    let destroyed = 0
+    Object.assign(view.book as object, { destroy: () => void (destroyed += 1) })
+    const host = fakeHost()
+    const session = new ReaderSession(host, callbacks())
+    await session.start('book.epub', deps(view))
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(() => session.dispose()).not.toThrow()
+      expect(destroyed, 'the book is still released').toBe(1)
+      expect((host as unknown as { children: unknown[] }).children, 'the host is still cleared').toEqual([])
+      expect(error).toHaveBeenCalledWith('Paper: a closed view would not detach', expect.any(Error))
+    } finally {
+      error.mockRestore()
+    }
+  })
+
   it('opens normally and publishes toc, metadata and a navigator', async () => {
     const view = fakeView()
     const cb = callbacks()

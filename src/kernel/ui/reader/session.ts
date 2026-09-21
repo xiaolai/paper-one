@@ -2536,7 +2536,17 @@ function closeQuietly(view: View): void {
   } catch {
     // close() throws when open() never got far enough to build a renderer.
   }
-  view.remove?.()
+  /* ⚠️ **AND DETACHING IS GUARDED, WHICH IT WAS NOT.** Both callers depend on
+     this returning: `dispose` releases the book and clears the host AFTER it,
+     and says of itself that nothing there may propagate; `#settle` is a step of
+     startup, where a throw becomes a rejected `start` nobody awaits. Reported,
+     not swallowed like `close()` above, because that failure is expected and
+     this one is not. */
+  try {
+    view.remove?.()
+  } catch (cause) {
+    console.error('Paper: a closed view would not detach', cause)
+  }
 }
 
 /**

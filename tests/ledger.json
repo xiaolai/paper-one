@@ -9447,6 +9447,7 @@
     "src/kernel/ui/reader/session.test.ts > ReaderSession disposal > closes a view that is created AFTER disposal",
     "src/kernel/ui/reader/session.test.ts > ReaderSession disposal > closes a view when disposal lands mid-init",
     "src/kernel/ui/reader/session.test.ts > ReaderSession disposal > closes a view when disposal lands mid-open",
+    "src/kernel/ui/reader/session.test.ts > ReaderSession disposal > finishes teardown when the view will not detach",
     "src/kernel/ui/reader/session.test.ts > ReaderSession disposal > flattens foliate's mixed search yields into plain hits",
     "src/kernel/ui/reader/session.test.ts > ReaderSession disposal > ignores load and relocate from a disposed view",
     "src/kernel/ui/reader/session.test.ts > ReaderSession disposal > never closes twice, however many times dispose is called",
