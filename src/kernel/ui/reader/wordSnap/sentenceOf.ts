@@ -540,16 +540,21 @@ function breaksBetween(head: string, tail: string, locale: string | undefined): 
  * once per section, not per gesture. */
 export function sentenceSpansOf(raw: string, locale: string | undefined): readonly Span[] {
   const squeezed = squeeze(raw, 0, 0)
-  if (squeezed.text.trim() === '') return []
+  /* `squeeze` collapses every run of whitespace AND drops it at both ends, so
+     its text is empty exactly when there is nothing to read. A `.trim()` here
+     asked the same question a second time, and no input could tell the two
+     answers apart. */
+  if (squeezed.text === '') return []
 
-  const starts: number[] = []
-  for (const span of merged(squeezed.text, locale)) {
-    /* CLAMPED THROUGH THE MAP, never past it: `merged` spans index `text`, so
-     * every start but a degenerate one has an entry. */
-    const at = squeezed.map[span.start]
-    starts.push(at === undefined ? raw.length : at)
-  }
-  if (starts.length === 0) return []
+  /* CLAMPED THROUGH THE MAP, never past it: `merged` spans index `text`, so
+   * every start but a degenerate one has an entry.
+   *
+   * AND NO `starts.length === 0` GUARD BELOW, because the check above has
+   * already answered it: `merged` yields at least one segment for text that is
+   * not empty. Were it ever to yield none, the pin on the first start covers
+   * the whole section as one sentence — which reads it — where an empty answer
+   * would silently drop a section that has words in it. */
+  const starts = merged(squeezed.text, locale).map((span) => squeezed.map[span.start] ?? raw.length)
 
   /* THE FIRST RANGE STARTS AT ZERO whatever the map says. Leading whitespace is
    * squeezed away, so the first kept character can be some way in — and a first
@@ -581,7 +586,11 @@ export function sentenceSpansOf(raw: string, locale: string | undefined): readon
      is pinned at 0 to keep the tiling total, so a LEADING separator survived the
      pass above — which is the very case this exists for. Dropping the start after
      it extends range 0 over both; a loop, because a run of them leaves several. */
-  while (kept.length > 1 && silent(kept[0] as number, kept[1] as number)) kept.splice(1, 1)
+  /* ONE CONDITION, and the end of the text stands in for the start that is not
+     there. A `kept.length > 1` beside this asked what the guard at the top of
+     the function has already answered — the whole text is not silent — so with
+     one start left the range runs to the end and the loop stops on its own. */
+  while (silent(kept[0] as number, kept[1] ?? raw.length)) kept.splice(1, 1)
 
   const out: Span[] = []
   for (const [at, start] of kept.entries()) {

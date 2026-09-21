@@ -10670,6 +10670,8 @@
     "src/kernel/ui/reader/wordSnap/sentenceOf.reading.test.ts > a range with nothing in it to say > does not make a sentence out of a leading separator",
     "src/kernel/ui/reader/wordSnap/sentenceOf.reading.test.ts > a range with nothing in it to say > does not make one out of each of a run of separators",
     "src/kernel/ui/reader/wordSnap/sentenceOf.reading.test.ts > a range with nothing in it to say > leaves every range with something a voice can pronounce",
+    "src/kernel/ui/reader/wordSnap/sentenceOf.reading.test.ts > a range with nothing to say > merges a leading run of invisible characters into the first real sentence",
+    "src/kernel/ui/reader/wordSnap/sentenceOf.reading.test.ts > a range with nothing to say > still splits where there is something to say on both sides",
     "src/kernel/ui/reader/wordSnap/sentenceOf.reading.test.ts > a rank or an office before a name > reads Capt. Smith as one sentence, not two",
     "src/kernel/ui/reader/wordSnap/sentenceOf.reading.test.ts > a rank or an office before a name > reads Col. Smith as one sentence, not two",
     "src/kernel/ui/reader/wordSnap/sentenceOf.reading.test.ts > a rank or an office before a name > reads Fr. Smith as one sentence, not two",

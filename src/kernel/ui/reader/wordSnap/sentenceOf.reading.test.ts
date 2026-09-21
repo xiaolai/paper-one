@@ -295,3 +295,30 @@ describe('a rank or an office before a name', () => {
     expect(sentences('We met at St. Paul today. Then we left.')).toEqual(['We met at St. Paul today.', 'Then we left.'])
   })
 })
+
+describe('a range with nothing to say', () => {
+  const SOFT = '\u00ad'
+
+  /**
+   * ⚠️ **A SOFT HYPHEN IS NEITHER WHITESPACE NOR CONTENT.** `trim()` does not
+   * remove it, so a range holding only soft hyphens looks non-empty to every
+   * check but the one written for it — and the voice would stop at a sentence
+   * with nothing in it. The pattern that strips them is global for that reason:
+   * a range holding TWO is still a range with nothing to say.
+   */
+  it('merges a leading run of invisible characters into the first real sentence', () => {
+    const raw = `${SOFT}${SOFT} Hello there. Next one.`
+    const spans = sentenceSpansOf(raw, 'en')
+    expect(spans[0]?.start, 'the tiling must still start at zero').toBe(0)
+    expect(
+      raw.slice(spans[0]?.start ?? 0, spans[0]?.end ?? 0).replaceAll(SOFT, '').trim(),
+      'the invisible run was spoken as a sentence of its own',
+    ).toBe('Hello there.')
+    expect(spans).toHaveLength(2)
+  })
+
+  it('still splits where there is something to say on both sides', () => {
+    /* So the merge cannot pass by merging everything. */
+    expect(sentenceSpansOf('Hello there. Next one.', 'en')).toHaveLength(2)
+  })
+})
