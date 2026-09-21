@@ -147,6 +147,33 @@ describe('readMeta', () => {
       expect(meta.description).toHaveLength(4000)
     })
 
+    /* Every astral character is two UTF-16 units, so a cut that lands between
+     * them stores half a character. Built from code points — writing them into
+     * this file would be the defect `no-invisible-characters` refuses. The
+     * three are the middle of the high-surrogate range and both of its ends. */
+    it('never cuts a character in two, backing off one unit instead', () => {
+      for (const codePoint of [0x1f600, 0x10000, 0x10ffff]) {
+        const astral = String.fromCodePoint(codePoint)
+        const meta = readMeta({ metadata: { title: 'x'.repeat(499) + astral + 'tail' } })
+        expect(meta.title, codePoint.toString(16)).toBe('x'.repeat(499))
+      }
+    })
+
+    it('cuts at the limit when the character there is whole', () => {
+      /* The pair occupies the last two units inside the limit, so the unit at
+         the cut is its LOW half and nothing is split. */
+      const astral = String.fromCodePoint(0x1f600)
+      const meta = readMeta({ metadata: { title: 'x'.repeat(498) + astral + 'tail' } })
+      expect(meta.title).toBe('x'.repeat(498) + astral)
+    })
+
+    it('never alters a value within the limit, even one ending in half a character', () => {
+      /* A lone half at the end of a short title is the book's own bytes, not a
+         cut this made, and a value that fits is stored as it came. */
+      const lone = 'x'.repeat(499) + String.fromCharCode(0xd83d)
+      expect(readMeta({ metadata: { title: lone } }).title).toBe(lone)
+    })
+
     it('caps a hostile list rather than storing every entry', () => {
       const many = Array.from({ length: 5_000 }, (_, i) => `tag-${i}`)
       expect(readMeta({ metadata: { subject: many } }).subjects).toHaveLength(32)

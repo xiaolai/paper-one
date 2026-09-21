@@ -80,8 +80,22 @@ const MAX_FIELD = 500
 const MAX_LONG = 4000
 const MAX_LIST = 32
 
+/**
+ * `value`, cut to at most `limit` UTF-16 units — never between the two halves
+ * of one character.
+ *
+ * ⚠️ **A CUT BETWEEN A SURROGATE PAIR STORES HALF A CHARACTER.** `slice` counts
+ * code units, and a character outside the Basic Multilingual Plane — an emoji,
+ * a rare CJK ideograph, much of a historical script — is two of them. Cut
+ * between them, the stored title ended in a lone high surrogate: shown as a
+ * replacement box, and written to disk as U+FFFD by any UTF-8 encoder, so the
+ * row no longer matched the book it was read from. One unit shorter keeps the
+ * whole character out rather than half of it in.
+ */
 function cap(value: string, limit = MAX_FIELD): string {
-  return value.length > limit ? value.slice(0, limit) : value
+  if (value.length <= limit) return value
+  const last = value.charCodeAt(limit - 1)
+  return value.slice(0, last >= 0xd800 && last <= 0xdbff ? limit - 1 : limit)
 }
 
 /** foliate hands back an object, an array of them, or nothing. */
