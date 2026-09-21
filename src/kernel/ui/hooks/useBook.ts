@@ -280,10 +280,19 @@ export function useBook(): Book {
       generationRef.current += 1
       setLoaded({ source: sourceOf(source), generation: generationRef.current })
     },
+    // Stryker disable next-line ArrayDeclaration: `reset` has no dependency of its own, so a constant list is a constant identity whatever is in it.
     [reset],
   )
-  const open = useCallback((next: File | string) => load(next), [load])
-  const close = useCallback(() => load(null), [load])
+  const open = useCallback(
+    (next: File | string) => load(next),
+    // Stryker disable next-line ArrayDeclaration: `load` follows only `reset`, which never moves, so this list and an empty one rebuild this callback equally often — never.
+    [load],
+  )
+  const close = useCallback(
+    () => load(null),
+    // Stryker disable next-line ArrayDeclaration: as above, for the same `load`.
+    [load],
+  )
 
   /* Resolve the identity of whatever is loaded. Guarded by generation rather
    * than by a local flag, so an id that arrives after the reader has moved on
@@ -380,6 +389,7 @@ export function useBook(): Book {
          the export always used the default. See the navigator in `session.ts`,
          which dropped two. */
       navigatorRef.current?.sectionTexts(...args) ?? Promise.resolve({ sections: [], complete: false }),
+    // Stryker disable next-line ArrayDeclaration: everything this reads is a ref, so the list is constant either way and the callback is built once.
     [],
   )
   const closeFootnote = useCallback(() => navigatorRef.current?.closeFootnote(), [])
@@ -422,21 +432,25 @@ export function useBook(): Book {
    * that was not, so a session being torn down could install ITS navigator over
    * the one belonging to the book that replaced it — and page turns then went to
    * a renderer for a book nobody was looking at. */
-  const setNavigator = useCallback((generation: number, navigator: BookNavigator | null) => {
-    if (!current(generation)) return
-    navigatorRef.current = navigator
-    /* The mount the host registered before this session existed. Every new
-       book gets a fresh navigator, so without this the popover would work
-       for exactly no books — see `setFootnoteMount`. */
-    if (navigator && footnoteMountRef.current)
-      navigator.setFootnoteMount(footnoteMountRef.current, footnoteSpaceRef.current)
+  const setNavigator = useCallback(
+    (generation: number, navigator: BookNavigator | null) => {
+      if (!current(generation)) return
+      navigatorRef.current = navigator
+      /* The mount the host registered before this session existed. Every new
+         book gets a fresh navigator, so without this the popover would work
+         for exactly no books — see `setFootnoteMount`. */
+      if (navigator && footnoteMountRef.current)
+        navigator.setFootnoteMount(footnoteMountRef.current, footnoteSpaceRef.current)
+    },
     /* `[current]` like every sibling setter, and this declared `[]` while calling
        it. Not observable today — `current` has no dependencies of its own, so its
        identity never moves — which is exactly what makes it a trap: the day
        `current` gains one, this is the only guarded setter that keeps the old
        one, and the symptom is a torn-down session installing its navigator over
        the book that replaced it. That is the defect the comment above describes. */
-  }, [current])
+    // Stryker disable next-line ArrayDeclaration: `current` has no dependency of its own — that is the paragraph above, stated where the gate reads it.
+    [current],
+  )
   /**
    * The renderer's setters, each dropping a value from a superseded session.
    *
@@ -469,7 +483,10 @@ export function useBook(): Book {
         setMeta: guard<BookMeta>(setMetaState),
         fail: guard<string>(setError),
       }
-    }, [current])
+    },
+    // Stryker disable next-line ArrayDeclaration: `current` never moves, so the memo is built once with this list and once with an empty one.
+    [current],
+    )
 
   /**
    * The book, as one value a consumer may depend on.

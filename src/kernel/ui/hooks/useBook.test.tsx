@@ -158,3 +158,147 @@ describe('the section walk the export asks for', () => {
     expect(received).toEqual([[toc, stop, { notes: true }]])
   })
 })
+
+describe('a book with no renderer behind it yet', () => {
+  /**
+   * ⚠️ **EVERY VERB READS THROUGH `navigatorRef`, AND THE REF IS NULL FOR REAL
+   * STRETCHES OF A SESSION** — before the first session publishes, and again
+   * from the moment `load` drops it until the next one does. A palette row, an
+   * accelerator or a command fired in that window must do nothing; without the
+   * optional call each is a TypeError in the middle of a reader that otherwise
+   * works. Held as a table so a verb added later is one line, not a case
+   * somebody has to remember to write.
+   */
+  const verbs: readonly [string, (book: Book) => unknown][] = [
+    ['goTo', (book) => book.goTo('a.xhtml')],
+    ['next', (book) => book.next()],
+    ['prev', (book) => book.prev()],
+    ['goLeft', (book) => book.goLeft()],
+    ['goRight', (book) => book.goRight()],
+    ['drawMark', (book) => book.drawMark({ cfi: 'epubcfi(/6/2!/4)', style: 'highlight' } as never)],
+    ['eraseMark', (book) => book.eraseMark({ cfi: 'epubcfi(/6/2!/4)', style: 'highlight' } as never)],
+    ['deselect', (book) => book.deselect()],
+    ['closeFootnote', (book) => book.closeFootnote()],
+    ['placeHere', (book) => book.placeHere()],
+  ]
+
+  it.each(verbs)('does nothing when %s is asked with no navigator installed', (_name, ask) => {
+    holdFetch()
+    const book = mount()
+    act(() => book().open('https://example.test/a.epub'))
+    expect(() => ask(book())).not.toThrow()
+  })
+
+  it('answers no place at all, rather than a made-up one', () => {
+    holdFetch()
+    const book = mount()
+    expect(book().placeHere()).toBeNull()
+  })
+
+  it('finds nothing when asked to search', async () => {
+    holdFetch()
+    const book = mount()
+    const hits = []
+    for await (const hit of book().search('anything', new AbortController().signal)) hits.push(hit)
+    expect(hits).toEqual([])
+  })
+
+  it('answers an INCOMPLETE empty walk for the export, not an empty book', async () => {
+    /* ⚠️ `complete: true` here would let the export write a nought-chapter
+       audiobook and report success — the distinction `reanchorUnplaced` draws
+       between "nothing is there" and "nothing has been established". */
+    holdFetch()
+    const book = mount()
+    await expect(book().sectionTexts()).resolves.toEqual({ sections: [], complete: false })
+  })
+})
+
+describe('a value arriving from a session already replaced', () => {
+  /**
+   * ⚠️ **EIGHT SETTERS SHARE ONE GUARD, AND THE GUARD IS THE WHOLE POINT.** A
+   * session being torn down still answers its outstanding work, so a table of
+   * contents, a position or a cover can arrive for the book the reader has
+   * already left. Applied, it would draw the previous book's chapters over the
+   * new one.
+   */
+  it('is dropped, and the book keeps what its own session said', () => {
+    holdFetch()
+    const book = mount()
+    act(() => book().open('https://example.test/first.epub'))
+    const stale = book().generation
+    act(() => book().setToc(stale, [{ label: 'First book', href: 'a.xhtml' }] as never))
+    expect(book().toc.map((entry) => entry.label), 'its own session was heard').toEqual(['First book'])
+
+    act(() => book().open('https://example.test/second.epub'))
+    act(() => book().setToc(stale, [{ label: 'Left behind', href: 'z.xhtml' }] as never))
+    expect(book().toc, 'the book the reader left spoke, and was not heard').toEqual([])
+  })
+})
+
+describe('a book that cannot be identified', () => {
+  /**
+   * The identity fetch is the only thing here that can fail in practice, and a
+   * failure has to be told apart from a book the reader simply left: one is
+   * something the app could not do, the other is something nobody asked for any
+   * more.
+   */
+  it('says so once, naming the cause', async () => {
+    const failure = new Error('the network refused')
+    globalThis.fetch = vi.fn(() => Promise.reject(failure)) as typeof fetch
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const book = mount()
+    await act(async () => {
+      book().open('https://example.test/gone.epub')
+    })
+    expect(said).toHaveBeenCalledWith('Paper: could not identify this book', failure)
+    expect(book().bookId, 'and no identity was recorded for it').toBeNull()
+    said.mockRestore()
+  })
+
+  it('says nothing about a book the reader left before the answer came', async () => {
+    /* A real `fetch` rejects with an abort error when its signal is aborted, so
+       the rejection for the abandoned book arrives AFTER the reader has moved
+       on. That is not a failure to identify a book; it is a question nobody is
+       asking any more. */
+    globalThis.fetch = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          })
+        }),
+    ) as typeof fetch
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const book = mount()
+    await act(async () => {
+      book().open('https://example.test/left.epub')
+    })
+    await act(async () => {
+      book().open('https://example.test/arrived.epub')
+    })
+    expect(said, 'the abandoned book was reported as a failure').not.toHaveBeenCalled()
+    said.mockRestore()
+  })
+})
+
+describe('where a book is before it has been anywhere', () => {
+  /**
+   * ⚠️ **`NOWHERE` IS NOT THE FIRST SECTION, and each of its fields says so.**
+   * `sectionIndex` is null rather than 0 — the constant's own name is the
+   * argument — and `sectionExact` is false: nothing has been rendered, so no
+   * section has been resolved exactly. A reader of this position that took
+   * either as a real place would resume a book at a page nobody had reached.
+   */
+  it('is nowhere, exactly, and says the section is not settled', () => {
+    holdFetch()
+    const book = mount()
+    expect(book().position).toEqual({
+      fraction: 0,
+      chapterLabel: '',
+      chapterHref: '',
+      cfi: null,
+      sectionIndex: null,
+      sectionExact: false,
+    })
+  })
+})
