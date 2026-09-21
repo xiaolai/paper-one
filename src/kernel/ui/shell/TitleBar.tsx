@@ -154,6 +154,18 @@ export function TitleBar({
    * and the hit-testing at once; `visibility` is what actually removes it from
    * the accessibility tree. Opacity stays because §08 wants a 180ms fade, and
    * `visibility` is transitionable in a way `display` is not. */
+  /* The rail's panels, as this reader is offered them.
+   *
+   * ⚠️ **THIS WAS THE ONE SURFACE NOT TO ASK `paneFits`**, and it drew the
+   * deleted companion's button for every reader — see `TITLEBAR_PANES`.
+   */
+  /* Stryker disable next-line MethodExpression: the list holds one entry today,
+     Contents, and it fits every screen this rail is drawn on — so no render can
+     show the filter working. It is kept for the next entry, which is the case
+     the list's own note records. */
+  const railPanes = TITLEBAR_PANES.filter(({ key }) =>
+    paneFits(state.screen, key, { developer: state.developer, hiddenPanes: state.hiddenPanes }),
+  )
   const chromeStyle = {
     opacity: chromeHidden ? 0 : 1,
     visibility: chromeHidden ? ('hidden' as const) : ('visible' as const),
@@ -259,7 +271,11 @@ export function TitleBar({
             reading. `Open the library` in the reader's own chrome is the way
             out of a book, and adding a second one here would be two controls
             for one intent. */}
-        {!isReader && (screens?.length ?? 0) > 0 && (
+        {/* `screens` is REQUIRED — see the prop, where the `?` was removed
+            deliberately — so there is nothing to guard against here. An
+            optional chain over a required array is a branch no caller can
+            reach. */}
+        {!isReader && screens.length > 0 && (
           <div className={styles.toggleGroup}>
             <button
               type="button"
@@ -298,9 +314,7 @@ export function TitleBar({
         {isReader && (
           <>
             <div className={styles.toggleGroup}>
-              {TITLEBAR_PANES.filter(({ key }) =>
-                paneFits(state.screen, key, { developer: state.developer, hiddenPanes: state.hiddenPanes }),
-              ).map(({ key, Icon }) => (
+              {railPanes.map(({ key, Icon }) => (
                 <button
                   key={key}
                   type="button"
