@@ -165,8 +165,12 @@ const NOTE_BODIES: readonly { readonly type: string; readonly role: string | nul
  */
 const typesOf = (table: readonly { readonly type: string }[]): ReadonlySet<string> =>
   new Set(table.map((one) => one.type))
-const rolesOf = (table: readonly { readonly role: string | null }[]): ReadonlySet<string> =>
-  new Set(table.flatMap((one) => (one.role === null ? [] : [one.role])))
+/* A set of `string | null` that never holds `null`, so a node with NO role can
+   be asked about directly and the answer is no. A `role !== null` guard in front
+   of the question used to say the same thing a second time — and with two
+   conditions agreeing, either could change without anything noticing. */
+const rolesOf = (table: readonly { readonly role: string | null }[]): ReadonlySet<string | null> =>
+  new Set(table.map((one) => one.role).filter((role) => role !== null))
 
 const NEVER_SPOKEN_TYPES = typesOf(NEVER_SPOKEN)
 const NEVER_SPOKEN_ROLES = rolesOf(NEVER_SPOKEN)
@@ -241,10 +245,8 @@ export function speechSkip(el: Element | null, prefs: SpeechSkipPrefs = DEFAULT_
       if (!prefs.notes && NOTE_BODY_TYPES.has(type)) return 'gap'
     }
     const role = effectiveRole(node)
-    if (role !== null) {
-      if (NEVER_SPOKEN_ROLES.has(role)) return 'gap'
-      if (!prefs.notes && NOTE_BODY_ROLES.has(role)) return 'gap'
-    }
+    if (NEVER_SPOKEN_ROLES.has(role)) return 'gap'
+    if (!prefs.notes && NOTE_BODY_ROLES.has(role)) return 'gap'
   }
   return 'read'
 }
