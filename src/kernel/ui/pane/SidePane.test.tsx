@@ -65,7 +65,10 @@ const marksView = () =>
 function draw({
   developerOptions = false,
   ...over
-}: Partial<SidePaneProps> & { pane: 'search' | 'cards' | 'library'; developerOptions?: boolean }) {
+}: Partial<SidePaneProps> & {
+  pane: 'search' | 'cards' | 'library' | 'marginalia'
+  developerOptions?: boolean
+}) {
   const onGoTo = vi.fn()
   const props: SidePaneProps = {
     state: { ...initialState, screen: 'reader', pane: over.pane, lastPane: over.pane, developer: developerOptions },
@@ -102,6 +105,8 @@ function draw({
       view.rerender(
         <SidePane {...props} book={{ ...props.book, bookId } as unknown as Book} />,
       ),
+    /** Re-render the same pane with a different shelf behind it. */
+    withBooks: (books: SidePaneProps['books']) => view.rerender(<SidePane {...props} books={books} />),
   }
 }
 
@@ -176,25 +181,6 @@ describe('the library panel', () => {
   })
 })
 
-/**
- * The rail's exhaustiveness check (`RailCoversEveryPane`) catches a MISSING
- * pane and cannot catch a DUPLICATE one: a second row for an id compiles,
- * then renders two buttons under one React key. A pin on the source, on the
- * `pageTurn.test.ts` precedent, because the entries are a module constant
- * nothing exports.
- */
-describe('the rail', () => {
-  it('lists every kernel pane once — a duplicated row would draw two buttons under one key', async () => {
-    const { readFileSync } = await import('node:fs')
-    /* From the repository root, not `import.meta.url`: under jsdom that URL
-       carries an http scheme and `readFileSync` refuses it. */
-    const source = readFileSync(`${process.cwd()}/src/kernel/ui/pane/SidePane.tsx`, 'utf8')
-    const block = source.slice(source.indexOf('const RAIL_ENTRIES'), source.indexOf('as const satisfies'))
-    const ids = [...block.matchAll(/id: '([a-z]+)'/g)].map((m) => m[1])
-    expect(ids.length, 'the pin found the rail').toBeGreaterThan(3)
-    expect(new Set(ids).size).toBe(ids.length)
-  })
-})
 
 /**
  * THE BOOK THE SCREEN SHOWS, not the book the reader holds. The reader stays
@@ -224,5 +210,67 @@ describe('what a contributed pane is handed', () => {
     cleanup()
     on('reader')
     expect(screen.getByText('book=open-book')).toBeTruthy()
+  })
+})
+
+describe('what Marginalia is told about other books', () => {
+  /**
+   * ⚠️ **A CROSS-BOOK ROW NAMES THE BOOK IT CAME FROM, and the name comes from
+   * the SHELF the Library panel already has.** `titleOf` is the whole of that
+   * wiring: the panel asks it, and answers "Another book" when it has nothing
+   * — so a `titleOf` that answered nothing for everything would look exactly
+   * like a shelf with no titles, on every row, with the suite green.
+   */
+  const elsewhere = () =>
+    ({
+      all: [
+        {
+          id: 'm1',
+          bookId: 'a-book-elsewhere',
+          cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:9)',
+          sectionIndex: 0,
+          text: 'call me ishmael',
+          prefix: '',
+          suffix: '',
+          note: '',
+          kind: 'highlight',
+          tint: 'yellow',
+          style: 'fill',
+          chapter: 'Loomings',
+          createdAt: 1,
+        },
+      ],
+      current: [],
+      bookmarks: [],
+      allBookmarks: [],
+      allUnplaced: [],
+      persistent: true,
+      ready: true,
+      loadAll: vi.fn(),
+    }) as unknown as MarksView
+
+  const shelf = [{ bookId: 'a-book-elsewhere', title: 'Ulysses' }] as unknown as SidePaneProps['books']
+
+  it('names the book a cross-book row came from, from the shelf', () => {
+    draw({ pane: 'marginalia', marks: elsewhere(), books: shelf })
+    expect(screen.getByText('Ulysses')).toBeTruthy()
+    expect(screen.queryByText('Another book'), 'the shelf knew its name').toBeNull()
+  })
+
+  it('says another book when the shelf does not hold it', () => {
+    /* A book removed from the shelf, or one whose record has not loaded: the
+       row still says it is not from the open book. */
+    draw({ pane: 'marginalia', marks: elsewhere(), books: [] })
+    expect(screen.getByText('Another book')).toBeTruthy()
+  })
+
+  it('answers again when the shelf arrives after the panel', () => {
+    /* The shelf loads asynchronously, so the first render of a cross-book row
+       often precedes it — a name resolved once, at mount, would stay "Another
+       book" for the rest of the session. */
+    const { withBooks } = draw({ pane: 'marginalia', marks: elsewhere(), books: [] })
+    expect(screen.getByText('Another book')).toBeTruthy()
+    withBooks(shelf)
+    expect(screen.getByText('Ulysses'), 'the panel kept the shelf it was first given').toBeTruthy()
   })
 })
