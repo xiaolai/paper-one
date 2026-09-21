@@ -1541,11 +1541,21 @@ describe('a jump into a book whose stored copy is gone', () => {
   })
 
   it('carries the jump through the origin as an ADDRESS when the file is not there', async () => {
+    /* ⚠️ **AND SAYS WHY THE PATH FAILED, BEFORE THE ADDRESS HAS A CHANCE TO.** If
+       the address fails too, that is the failure the reader sees — and the
+       reason the path failed, usually the useful one, was discarded by an empty
+       `catch`. The line exists only to keep that evidence. */
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
     disk.refuse.add(ORIGIN)
     await jumpingTo(ORIGIN)
     expect(disk.read).toEqual([ORIGIN])
     await landedWithTheJumpIntact()
     expect(reader.opened[1]!.source, 'the path was never tried as an address').toBe(ORIGIN)
+    expect(said).toHaveBeenCalledWith(
+      'Paper: could not read the book at its saved place, trying it as an address',
+      expect.anything(),
+    )
+    said.mockRestore()
   })
 
   /* BOTH HALVES OF THE FALLBACK ARE GUARDED, and each has its own late answer:
@@ -1821,6 +1831,16 @@ describe('the reading transport over a real book', () => {
       document.querySelector('button[aria-label^="Reading speed"]')?.getAttribute('aria-label'),
       'the speed control did not move',
     ).toBe('Reading speed 1.75×')
+
+    /* AND THE VOICE HEARS IT at the next sentence — the control moving is the
+       state; the engine being given it is the memo the reading reads from. */
+    await act(async () => {
+      synth.queued.at(-1)?.dispatchEvent(new Event('end'))
+    })
+    /* After the sentence gap, which is a real timer here. */
+    await waitFor(() => expect(synth.queued).toHaveLength(2))
+    expect(synth.queued.at(-1)?.text.trim()).toBe('Some years ago.')
+    expect(synth.queued.at(-1)?.rate, 'the next sentence was read at the old speed').toBe(1.75)
   })
 })
 
@@ -1867,4 +1887,3 @@ describe('the audiobook export', () => {
     expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'a book with no document yet').toBe(false)
   })
 })
-
