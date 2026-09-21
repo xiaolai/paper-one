@@ -40,10 +40,11 @@ import { PARK_OFFSET } from '../../core/placement'
  * anchor's document has gone, which is what a section re-render does.
  */
 function anchorRectInHost(a: Element, host: HTMLElement): HostRect | null {
-  const doc = a.ownerDocument
-  if (!doc) return null
   try {
-    const range = doc.createRange()
+    /* An anchor whose document has gone throws on this line, which is the same
+       answer as a document that will not give a range: no rect. A guard above
+       for the null said it twice. */
+    const range = (a.ownerDocument as Document).createRange()
     range.selectNode(a)
     return rangeBoxInHost(range, host)
   } catch {
@@ -441,7 +442,8 @@ export class Footnotes {
        * `before-render` will usually have released it already; this is the
        * request that was still current then and is not now. */
       if (request.seq !== this.#noteSeq) {
-        released = true
+        /* Nothing sets `released` here: a handler renders once, so this is the
+           last thing this request will ever do. */
         releaseNoteView(detail.view)
         return
       }
