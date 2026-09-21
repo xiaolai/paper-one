@@ -25,33 +25,37 @@ import type { VoiceFacts } from '../reader/voiceChoice'
 export function useVoices(): readonly VoiceFacts[] {
   const [voices, setVoices] = useState<readonly VoiceFacts[]>(EMPTY)
 
-  useEffect(() => {
-    if (!speechAvailable()) return
-    const engine = window.speechSynthesis
-    /* READ IMMEDIATELY AS WELL AS ON THE EVENT. WebKit answers a populated list
-     * synchronously once anything has asked it, and by the time a reader opens
-     * the settings panel something has — so waiting for an event that has
-     * already fired would show an empty picker for ever. */
-    /**
-     * ⚠️ **AN EMPTY LIST FROM THE EVENT IS AUTHORITATIVE; AN EMPTY FIRST READ IS
-     * NOT.** This used to discard every empty answer, on the ground that some
-     * engines report `[]` transiently and the picker should not flicker. That is
-     * true of the synchronous read before the engine has loaded anything — and
-     * false of the event, which is exactly how an engine reports that the last
-     * voice was REMOVED. Kept that way, the picker offered voices the machine no
-     * longer had.
-     *
-     * The distinction is which call it is, not what it answered.
-     */
-    const read = (authoritative: boolean) => {
-      const got = engine.getVoices()
-      if (got.length > 0 || authoritative) setVoices(got)
-    }
-    read(false)
-    const onChanged = () => read(true)
-    engine.addEventListener('voiceschanged', onChanged)
-    return () => engine.removeEventListener('voiceschanged', onChanged)
-  }, [])
+  useEffect(
+    () => {
+      if (!speechAvailable()) return
+      const engine = window.speechSynthesis
+      /* READ IMMEDIATELY AS WELL AS ON THE EVENT. WebKit answers a populated list
+       * synchronously once anything has asked it, and by the time a reader opens
+       * the settings panel something has — so waiting for an event that has
+       * already fired would show an empty picker for ever. */
+      /**
+       * ⚠️ **AN EMPTY LIST FROM THE EVENT IS AUTHORITATIVE; AN EMPTY FIRST READ IS
+       * NOT.** This used to discard every empty answer, on the ground that some
+       * engines report `[]` transiently and the picker should not flicker. That is
+       * true of the synchronous read before the engine has loaded anything — and
+       * false of the event, which is exactly how an engine reports that the last
+       * voice was REMOVED. Kept that way, the picker offered voices the machine no
+       * longer had.
+       *
+       * The distinction is which call it is, not what it answered.
+       */
+      const read = (authoritative: boolean) => {
+        const got = engine.getVoices()
+        if (got.length > 0 || authoritative) setVoices(got)
+      }
+      read(false)
+      const onChanged = () => read(true)
+      engine.addEventListener('voiceschanged', onChanged)
+      return () => engine.removeEventListener('voiceschanged', onChanged)
+    },
+    // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it — the subscription is made once, at mount, either way.
+    [],
+  )
 
   return voices
 }
