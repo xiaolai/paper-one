@@ -136,10 +136,23 @@ const ENTER_AT_FOOT_MS = 1500
  * task queue, so a walk that yields forty times is not forty trips behind every
  * pending timer. `setTimeout(0)` otherwise, which is throttled in a hidden tab
  * but does keep running, which is the property that matters here.
+ *
+ * ⚠️ **EMPTY THE EXECUTOR AND THIS PROMISE NEVER SETTLES, WHICH IS A HANG AND
+ * NOT A FAILURE.** `new Promise(() => undefined)` is specified to stay pending
+ * for ever, so the walk awaiting it stops there: no instructions run, Stryker's
+ * hit limit — the thing that makes an infinite LOOP a deterministic detection —
+ * is never reached, and the only possible answer is a wall-clock timeout that
+ * repeats however long the deadline is. The covering tests DO detect it; they
+ * hang with it, which is the one outcome a test cannot report.
+ *
+ * AGENTS.md records this whole class and the remedy it prescribes: verify by
+ * hand that it genuinely cannot settle, then disable it beside the code naming
+ * the column. Here that verification is the specification itself.
  */
 const BREATHE = (): Promise<void> => {
   const scheduler = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler
   if (typeof scheduler?.yield === 'function') return scheduler.yield()
+  /* Stryker disable next-line ArrowFunction: column 22 — an executor that resolves nothing leaves this promise pending for ever, so the walk hangs rather than failing */
   return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
