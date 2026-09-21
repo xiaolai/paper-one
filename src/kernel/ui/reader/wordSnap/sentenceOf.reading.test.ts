@@ -171,13 +171,13 @@ describe('the reading and the selection agree on where a sentence ends', () => {
    * The prose, with the whitespace and the soft hyphens the squeeze removes.
    *
    * ⚠️ **THE SOFT HYPHEN IS NOT COSMETIC HERE.** `squeeze` drops U+00AD, so
-   * `sentenceOf` answers `hyphenation` where the raw text holds `hy­phen­ation`.
+   * `sentenceOf` answers `hyphenation` where the raw text holds `hy\u00adphen\u00adation`.
    * Comparing without dropping it made this test fail over a character neither
    * path disagrees about, which is a test measuring itself.
    */
   const prose = (text: string) =>
     text
-      .replace(/­/gu, '')
+      .replace(/\u00ad/gu, '')
       .trim()
       .split(/\s+/u)
       .join(' ')
@@ -270,5 +270,28 @@ describe("what an EPUB's own line wrapping does to segmentation", () => {
     const spans = sentenceSpansOf(raw, undefined)
     expect(spans).toHaveLength(2)
     expect(raw.slice(spans[0]?.start, spans[0]?.end).trim()).toBe('He met Mr. Smith at noon.')
+  })
+})
+
+/**
+ * ⚠️ **`Capt. Smith` WAS CUT IN TWO.** The title list held the forms of address
+ * and nothing that precedes a rank or an office, and ICU splits after every one.
+ * Each title added is a word that in practice never ENDS a sentence, which is the
+ * only thing that makes merging across it safe.
+ */
+describe('a rank or an office before a name', () => {
+  const sentences = (raw: string) => sentenceSpansOf(raw, 'en').map((span) => raw.slice(span.start, span.end).trim())
+
+  it.each(['Capt.', 'Lt.', 'Col.', 'Gen.', 'Sgt.', 'Rev.', 'Gov.', 'Sen.', 'Fr.'])(
+    'reads %s Smith as one sentence, not two',
+    (title) => {
+      expect(sentences(`${title} Smith came in. Then he sat.`)).toEqual([`${title} Smith came in.`, 'Then he sat.'])
+    },
+  )
+
+  /* The ambiguity this pass accepts, pinned so it is a decision rather than a
+     surprise: `St.` merges because a title before a name is the commoner shape. */
+  it('still reads St. Paul as one sentence', () => {
+    expect(sentences('We met at St. Paul today. Then we left.')).toEqual(['We met at St. Paul today.', 'Then we left.'])
   })
 })

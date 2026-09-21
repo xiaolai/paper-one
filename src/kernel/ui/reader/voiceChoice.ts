@@ -231,8 +231,12 @@ export function tierOf(voiceURI: string): VoiceTier {
  * language for no reason a reader could ever diagnose.
  */
 export function primaryOf(lang: string): string {
-  const normalized = lang.trim().toLowerCase().replace(/_/gu, '-')
-  const [primary = ''] = normalized.split('-')
+  /* THROUGH `normalize`, not a copy of it. This repeated its trim, lower-case and
+     underscore rule inline, so a change to how a tag is normalised — a second
+     separator, a different case rule — would have reached one path and not the
+     other, and the key a choice is STORED under would stop matching the tag it
+     is LOOKED UP by. Function declarations hoist, so the order below is fine. */
+  const [primary = ''] = normalize(lang).split('-')
   return primary
 }
 
@@ -268,8 +272,15 @@ function scriptOf(lang: string): string | null {
 }
 
 /**
- * How well a voice's language answers the document's: 2 exact, 1 same
- * language, 0 no.
+ * How well a voice's language answers the document's: 3 exact, 2 same language
+ * in the same script, 1 same language in another or an unknown script, 0 a
+ * different language.
+ *
+ * ⚠️ **THIS SAID "2 exact, 1 same language, 0 no" FOR A FUNCTION THAT HAS FOUR
+ * ANSWERS.** The script level was added in `b8b5e02`, which is what stops a
+ * Simplified voice outranking a Traditional one for a Taiwanese book, and the
+ * sentence describing the scale was left describing the old one — so the only
+ * summary of what these numbers mean had one of them missing.
  *
  * A same-language match is kept rather than refused — an `en-GB` voice reading
  * an `en-US` book is a reader hearing the book in an accent, where refusing it
@@ -352,6 +363,12 @@ export function voiceKey(lang: string | null): string {
 function scoreOf(voice: VoiceFacts, lang: string): number {
   if (!selectable(voice)) return 0
   const tier = tierOf(voice.voiceURI)
+  /* A NARROWING FOR THE TYPE, NOT A SECOND FILTER — `selectable` has already
+     refused novelty, so this cannot be true at run time. It is here because
+     `TIER_RANK` is keyed without `'novelty'`, and indexing it needs the compiler
+     to know the tier is not one; `voiceGroups` says the same beside its own. An
+     audit read it as a duplicated check; the second `tierOf` is a prefix test on
+     a short string, and caching it would add state to save nothing measurable. */
   if (tier === 'novelty') return 0
   const language = languageScore(voice.lang, lang)
   if (language === 0) return 0
@@ -429,9 +446,54 @@ export function chosenVoice<T extends VoiceFacts>(
       (voice) =>
         voice.voiceURI === wanted &&
         selectable(voice) &&
-        (!declared || languageScore(voice.lang, lang) > 0),
+        (!declared || (languageScore(voice.lang, lang) > 0 && !otherScript(voice.lang, lang))),
     ) ?? null
   )
+}
+
+/**
+ * Whether a voice is for the same language in a DIFFERENT, KNOWN script.
+ *
+ * ⚠️ **A CHOICE IS STORED PER PRIMARY LANGUAGE, SO `zh-CN` AND `zh-TW` SHARE
+ * ONE — AND A SIMPLIFIED-CHINESE VOICE THEN READ TRADITIONAL BOOKS.** The key is
+ * deliberately coarse: a reader should not have to choose again for every
+ * regional variant of a language they read. But the automatic pick already
+ * refuses to cross a script (`languageScore`, since `b8b5e02`), and the stored
+ * choice walked straight past that rule, because `languageScore > 0` is true for
+ * a same-language voice in either script. So the check is tightened here instead
+ * of the key: a stored voice is not used where its script and the book's are
+ * both known and differ, and the automatic pick — which is script-aware — answers
+ * instead. Changing the KEY would have lost every Chinese reader's saved choice.
+ *
+ * An UNKNOWN script on either side is not a difference: most voices and most
+ * books do not say, and refusing on silence would discard ordinary choices.
+ */
+function otherScript(voiceLang: string, bookLang: string | null): boolean {
+  if (bookLang === null) return false
+  const voice = knownScriptOf(voiceLang)
+  const book = knownScriptOf(bookLang)
+  return voice !== null && book !== null && voice !== book
+}
+
+/**
+ * The script a tag SAYS, or implies through its region — never a guess.
+ *
+ * ⚠️ **NOT `scriptOf`, WHICH MAXIMIZES.** `Intl.Locale('zh').maximize()` answers
+ * Hans for a tag that names no script and no region, because Hans is the likelier
+ * one — which is right for RANKING, where a guess only reorders, and wrong for
+ * REFUSING, where it would throw away a voice the reader explicitly chose for a
+ * book that never said which script it is written in. So a script counts as known
+ * here only when the tag carries one (`zh-Hant`) or names a region that settles it
+ * (`zh-TW`); a bare language is unknown, and unknown is not a difference.
+ */
+function knownScriptOf(lang: string): string | null {
+  try {
+    const locale = new Intl.Locale(normalize(lang))
+    if (locale.script) return locale.script
+    return locale.region ? (locale.maximize().script ?? null) : null
+  } catch {
+    return null
+  }
 }
 
 /**

@@ -226,6 +226,25 @@ describe('chosenVoice', () => {
     expect(chosenVoice(installed, 'zh-TW', { zh: MEIJIA_SUPER.voiceURI })).toBe(MEIJIA_SUPER)
   })
 
+  /**
+   * ⚠️ **A SIMPLIFIED VOICE WAS USED FOR A TRADITIONAL BOOK.** The choice is
+   * stored under the primary language — `zh` for both — so Tingting, chosen for a
+   * mainland book, answered for a Taiwanese one, and `languageScore > 0` let it
+   * through because the language matched. The automatic pick has refused to cross
+   * a script since `b8b5e02`; the stored choice now refuses too, and the automatic
+   * pick answers instead.
+   */
+  it('does not read a Traditional book in a voice chosen in Simplified', () => {
+    expect(chosenVoice(installed, 'zh-TW', { zh: TINGTING_COMPACT.voiceURI })).toBeNull()
+  })
+
+  /* AND A BOOK THAT NEVER SAID WHICH SCRIPT KEEPS THE READER'S CHOICE. `zh` alone
+     maximizes to Hans, which is a guess — fine for ranking, wrong for refusing a
+     voice the reader explicitly picked. */
+  it('keeps the chosen voice for a book that names no script and no region', () => {
+    expect(chosenVoice(installed, 'zh', { zh: MEIJIA_SUPER.voiceURI })).toBe(MEIJIA_SUPER)
+  })
+
   it('ignores a choice made for another language', () => {
     /* The failure this prevents: a reader picks a voice they like for English,
      * opens a Chinese book, and hears it read in English. */

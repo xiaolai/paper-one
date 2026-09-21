@@ -123,7 +123,7 @@ function textFrom(flat: Flattened, index: number, offset: number): string {
  * copies of one sentence look like two different sentences.
  */
 function squeeze(text: string): string {
-  return text.replace(/­/g, '').replace(/\s+/g, ' ')
+  return text.replace(/\u00ad/g, '').replace(/\s+/g, ' ')
 }
 
 /** Whole code points, so a slice cannot leave half a surrogate pair behind. */

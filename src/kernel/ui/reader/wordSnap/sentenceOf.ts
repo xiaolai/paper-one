@@ -88,7 +88,13 @@
 
 /** SOFT HYPHEN. Invisible, inside words, and not the model's to read either —
  *  the same character `rangeText` strips out of stored text. */
-const SOFT_HYPHEN = '­'
+/* ⚠️ **SPELLED AS AN ESCAPE, AND IT WAS THE INVISIBLE CHARACTER ITSELF.** A
+   soft hyphen renders as nothing, so the literal looked like an empty string in
+   review and in every diff, and deleting or replacing it would not have shown.
+   Written with a tool this repository has already been bitten by: a backslash-u
+   escape typed into an edit can arrive as the raw character (see AGENTS.md), so
+   the bytes here were checked with `od` rather than trusted. */
+const SOFT_HYPHEN = '\u00ad'
 
 /**
  * What CSS collapses, and therefore what a source LF is.
@@ -111,7 +117,9 @@ const SOFT_HYPHEN = '­'
  * hyphen is neither whitespace nor content: invisible, and a range holding only
  * one has nothing for a voice to pronounce.
  */
-const SOFT_HYPHEN_ALL = /\u00ad/gu
+/* THE SAME CHARACTER, BUILT FROM ONE SOURCE, so the test for one soft hyphen and
+   the pattern that strips them all cannot come to name different things. */
+const SOFT_HYPHEN_ALL = new RegExp(SOFT_HYPHEN, 'gu')
 
 const COLLAPSIBLE = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/
 
@@ -530,6 +538,15 @@ function breaksBetween(head: string, tail: string, locale: string | undefined): 
  * nothing to say is not a sentence, and a caller speaking an empty string gets
  * an utterance that ends immediately and looks like an engine fault.
  */
+/* ⚠️ **NO WORK BOUND, UNLIKE `sentenceOf` — MEASURED AND LEFT, NOT OVERLOOKED.**
+ * An audit asked for `MAX_RUN_CHARS` here too. Measured on 2026-09-21 (load ~4.7):
+ * 100 000 characters in 3.7 ms, 1 000 000 in 34.7 ms, 4 000 000 in 165 ms —
+ * linear, and a real chapter is well under the first. The worst case is a whole
+ * novel in one spine item, which costs one pause of about a sixth of a second
+ * when that section starts reading. A bound would turn that into refusing to read
+ * the section at all, which is the worse outcome by a long way; `sentenceOf`'s
+ * bound exists because a SELECTION can be arbitrarily large, and this is called
+ * once per section, not per gesture. */
 export function sentenceSpansOf(raw: string, locale: string | undefined): readonly Span[] {
   const squeezed = squeeze(raw, 0, 0)
   if (squeezed.text.trim() === '') return []
@@ -660,7 +677,15 @@ function segmentsOf(text: string, locale: string | undefined): Span[] {
  *
  * The LEADING class stays `\s`: a separator before `Mr.` is a word boundary
  * like any other, and matching it there merges nothing. */
-const TITLE = /(?:^|[\s("'‘“])(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr)\. *$/
+/* ⚠️ **THE MILITARY AND CIVIC TITLES WERE MISSING, SO `Capt. Smith` WAS CUT IN
+ * TWO.** The list held the forms of address and nothing that precedes a rank or
+ * an office, and ICU splits after every one of them. Each added here is a word
+ * that in practice never ENDS a sentence — which is the only thing that makes a
+ * title safe to merge across — and none is a common word in its own right.
+ * `St.` stays for the reason given above; the false merge it causes and the one
+ * `INITIAL` causes (`option A. Next came B.`) are genuine ambiguities with no
+ * local disambiguator, and are the stated cost of this pass. */
+const TITLE = /(?:^|[\s("'‘“])(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|Capt|Lt|Col|Gen|Sgt|Cmdr|Adm|Rev|Hon|Gov|Sen|Rep|Fr|Mt)\. *$/
 /** `J.` in `Mr. J. R. Smith` — one capital and a stop, never a whole word. */
 const INITIAL = /(?:^|[\s("'‘“])\p{Lu}\. *$/u
 

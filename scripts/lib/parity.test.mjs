@@ -57,7 +57,7 @@ describe('rows escaped down to printable ASCII', () => {
    */
   it('escapes everything outside printable ASCII and still parses back to the rows it was given', () => {
     const rows = [
-      { id: 'soft', raw: 'co­operate' },
+      { id: 'soft', raw: 'co\u00adoperate' },
       { id: 'kana', raw: 'これは。' },
       { id: 'feed', raw: 'one\ntwo' },
     ]

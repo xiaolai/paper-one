@@ -185,7 +185,7 @@ const QUOTE_FOLD: Readonly<Record<string, string>> = {
 }
 
 /** Dropped outright — a hyphenation point is a fact about the line break. */
-const SOFT_HYPHEN = '­'
+const SOFT_HYPHEN = '\u00ad'
 
 /**
  * The canonical form of one source character, or `''` to drop it.

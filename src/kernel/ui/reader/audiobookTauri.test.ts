@@ -72,7 +72,7 @@ describe('safeFileName', () => {
   it('never cuts a character in half', () => {
     /* A lone surrogate is an invalid name and an unreadable one. Cut by grapheme,
        so a family emoji and a combining accent survive whole too. */
-    const name = safeFileName('👨‍👩‍👧‍👦'.repeat(60))
+    const name = safeFileName('👨\u200d👩\u200d👧\u200d👦'.repeat(60))
     expect(name).not.toMatch(/[\uD800-\uDFFF]/u)
     for (const ch of name) expect(ch.codePointAt(0)).toBeDefined()
     expect(new TextEncoder().encode(name).length).toBeLessThanOrEqual(244)

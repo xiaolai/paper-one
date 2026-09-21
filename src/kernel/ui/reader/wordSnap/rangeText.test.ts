@@ -125,12 +125,12 @@ describe('rangeText', () => {
   })
 
   it('strips a soft hyphen from what it says and never from the range', () => {
-    const data = 'hyphen­ation'
+    const data = 'hyphen\u00adation'
     const fixture = buildFixture(elem('p', { id: 'para' }, [txt(data)]))
     const range = new FakeRange(fixture.text(data), 0, fixture.text(data), data.length).asRange()
 
     expect(rangeText(range)).toBe('hyphenation')
     // Untouched: stripping it from the range would move the highlight.
-    expect(range.toString()).toContain('­')
+    expect(range.toString()).toContain('\u00ad')
   })
 })

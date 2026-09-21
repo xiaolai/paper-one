@@ -52,10 +52,10 @@ describe('isWordLike', () => {
     ['one space', ' '],
     ['two spaces', '  '],
     ['a newline', '\n'],
-    ['a lone soft hyphen U+00AD', '­'],
-    ['a lone word joiner U+2060', '⁠'],
+    ['a lone soft hyphen U+00AD', '\u00ad'],
+    ['a lone word joiner U+2060', '\u2060'],
     ['an emoji', '\u{1F600}'],
-    ['a ZWJ emoji sequence', '\u{1F469}‍\u{1F680}'],
+    ['a ZWJ emoji sequence', '\u{1F469}\u200d\u{1F680}'],
   ]
 
   it.each(notWordLike)('%s (%j) is not word-like', (_label, segment) => {

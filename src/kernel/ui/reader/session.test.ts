@@ -3151,7 +3151,7 @@ describe('ReaderSession publishes the selection', () => {
        * catches an implementation that mangled the range too: asserting only
        * the text would pass for one.
        */
-      const { selection } = overOneBlock('hyphen­ation here', 2, 8)
+      const { selection } = overOneBlock('hyphen\u00adation here', 2, 8)
       const scene = await sectionOver(selection)
 
       scene.drag()
@@ -3159,7 +3159,7 @@ describe('ReaderSession publishes the selection', () => {
 
       const snapshot = published(scene.cb)[0]
       expect(snapshot?.text).toBe('hyphenation')
-      expect(snapshot?.range.toString()).toContain('­')
+      expect(snapshot?.range.toString()).toContain('\u00ad')
       expect([snapshot?.range.startOffset, snapshot?.range.endOffset]).toEqual([0, 12])
     })
 
