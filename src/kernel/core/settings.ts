@@ -837,6 +837,12 @@ export const KERNEL_SETTINGS = {
      most compressed one installed. See `ui/reader/voiceChoice.ts`. */
   readingVoice: defineSetting<Readonly<Record<string, string>>>('kernel.readingVoice', {}, voiceChoices),
   readingRate: defineSetting<number>('kernel.readingRate', 1, rate),
+  /* WHETHER A NOTE'S BODY IS READ. Off, which is the quieter of the two: most
+     note bodies are hidden and never reach the voice, and the ones that are not
+     are a print-style block at the foot of a section — so on by default means a
+     run of citations arriving mid-chapter, unannounced. See `NOTE_BODIES` in
+     `ui/reader/speechSkip.ts` for why this is the reader's choice at all. */
+  readingNotesAloud: defineSetting<boolean>('kernel.readingNotesAloud', false, boolean),
   /* THE SILENCE BETWEEN UNITS OF PROSE — see `SENTENCE_GAP` in `metrics.ts` for
      why this is expressible at all and why it is not scaled by the rate. */
   sentenceGapMs: defineSetting<number>(
@@ -973,6 +979,7 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     readingStyle: store.get(KERNEL_SETTINGS.readingStyle),
     readingVoice: store.get(KERNEL_SETTINGS.readingVoice),
     readingRate: store.get(KERNEL_SETTINGS.readingRate),
+    readingNotesAloud: store.get(KERNEL_SETTINGS.readingNotesAloud),
     sentenceGapMs: store.get(KERNEL_SETTINGS.sentenceGapMs),
     paragraphGapMs: store.get(KERNEL_SETTINGS.paragraphGapMs),
   }

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
 import { ExportCancelled, exportAudiobook, planChapters } from '../reader/audiobook'
+import type { SpeechSkipPrefs } from '../reader/speechSkip'
 import type { SectionTextWalk } from '../reader/session'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
 import { voiceFor, type VoiceFacts } from '../reader/voiceChoice'
@@ -31,7 +32,16 @@ export interface AudiobookSource {
   readonly sectionTexts: (
     toc?: readonly TocItem[],
     shouldStop?: () => boolean,
+    skip?: SpeechSkipPrefs,
   ) => Promise<SectionTextWalk>
+  /**
+   * What the READING skips, so the export skips the same.
+   *
+   * ⚠️ **NOT DEFAULTED HERE.** `collectText` has a default and taking it would
+   * give the export its own opinion about whether a note body is spoken, so a
+   * reader who turned notes on would hear them and not find them in the file.
+   */
+  readonly skip: SpeechSkipPrefs
 }
 
 export interface AudiobookControl {
@@ -97,7 +107,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
         /* THE STOP GOES IN, rather than being checked only on the way out. A long
            book is seconds of parsing per section, so "Stopping…" used to sit on
            screen through hundreds of them. */
-        const walk = await source.sectionTexts(source.toc, () => stop.current)
+        const walk = await source.sectionTexts(source.toc, () => stop.current, source.skip)
         if (stop.current) throw new ExportCancelled()
         /* ⚠️ **AN INCOMPLETE WALK IS REFUSED, NOT EXPORTED.** `sectionTexts` stops
          * when the book closes or is replaced, and it used to return a bare array

@@ -207,6 +207,8 @@ export interface AppState {
    */
   readonly readingVoice: Readonly<Record<string, string>>
   readonly readingRate: number
+  /** Whether a note's BODY is read aloud — see `NOTE_BODIES` in `speechSkip.ts`. */
+  readonly readingNotesAloud: boolean
   /** Silence after a sentence, in ms — see `SENTENCE_GAP` in `metrics.ts`. */
   readonly sentenceGapMs: number
   /** Silence after a paragraph, in ms. Used ALONE at a paragraph end, not added
@@ -259,6 +261,7 @@ export const initialState: AppState = {
      that choice. */
   readingVoice: {},
   readingRate: 1,
+  readingNotesAloud: false,
   sentenceGapMs: SENTENCE_GAP.steps[SENTENCE_GAP.def] ?? 0,
   paragraphGapMs: PARAGRAPH_GAP.steps[PARAGRAPH_GAP.def] ?? 0,
   theme: DEFAULT_THEME,
@@ -316,6 +319,7 @@ export type Action =
   /** Esc dismisses the topmost layer only (§11 keyboard map). */
   | { type: 'dismissTop' }
   | { type: 'setChrome'; on: boolean }
+  | { type: 'toggleReadingNotes' }
   | { type: 'toggleRuler' }
   | { type: 'pinRuler' }
   | { type: 'setStepIdx'; idx: number }
@@ -555,6 +559,8 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
     case 'setChrome':
       return { ...state, chromeOn: action.on }
 
+    case 'toggleReadingNotes':
+      return { ...state, readingNotesAloud: !state.readingNotesAloud }
     case 'toggleRuler':
       /* §06: THE RULER IS SCROLLED-FLOW ONLY. The palette already omits the
        * command in paginated mode, but the reducer is the boundary every
@@ -1087,6 +1093,7 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
        has not moved, so no page turn or keystroke produces a new one. */
     prefs.readingVoice,
     prefs.readingRate,
+    prefs.readingNotesAloud,
     prefs.sentenceGapMs,
     prefs.paragraphGapMs,
   ])
@@ -1120,6 +1127,7 @@ export function preferencesOf(state: AppState): KernelPreferences {
     readingStyle: state.readingStyle,
     readingVoice: state.readingVoice,
     readingRate: state.readingRate,
+    readingNotesAloud: state.readingNotesAloud,
     sentenceGapMs: state.sentenceGapMs,
     paragraphGapMs: state.paragraphGapMs,
   }

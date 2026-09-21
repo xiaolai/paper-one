@@ -497,7 +497,10 @@ export function useSpeech(
   const speakDocument = useCallback(
     (target: Document, from = 0): boolean => {
       if (!speaker) return false
-      const spoken = collectText(target)
+      /* THE READER'S SKIP CHOICE, from the same prefs the voice and the gaps
+         come from — so the words the reading speaks and the words the export
+         writes are decided by one value rather than two defaults. */
+      const spoken = collectText(target, { notes: prefs?.notesAloud ?? false })
       const lang = documentLang(target)
       /* THE LOCALE IS RESOLVED, NOT PASSED THROUGH. `sentenceSpansOf` constructs
        * an `Intl.Segmenter` with it, and a book may declare anything at all in

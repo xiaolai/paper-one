@@ -20,6 +20,7 @@ import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
 import { directionOf } from './direction'
 import { collectText } from './speech'
+import { DEFAULT_SPEECH_SKIP, type SpeechSkipPrefs } from './speechSkip'
 import type { SectionText } from './audiobook'
 import { refuseBookScripts, stripScripts } from './bookScripts'
 
@@ -762,6 +763,12 @@ export interface SessionNavigator {
   sectionTexts: (
     toc?: readonly TocItem[],
     shouldStop?: () => boolean,
+    /* ⚠️ **THE READING'S OWN SKIP CHOICE, PASSED IN RATHER THAN DEFAULTED HERE.**
+       `collectText` has a default, and taking it here would give the export a
+       second opinion about whether a note body is spoken — so a reader who turned
+       notes on would hear them and then not find them in the `.m4b`, or the
+       reverse. One value, from `SpeakPrefs`, down both paths. */
+    skip?: SpeechSkipPrefs,
   ) => Promise<SectionTextWalk>
 }
 
@@ -2368,6 +2375,7 @@ export class ReaderSession {
   async sectionTexts(
     toc: readonly TocItem[] = [],
     shouldStop: () => boolean = () => false,
+    skip: SpeechSkipPrefs = DEFAULT_SPEECH_SKIP,
   ): Promise<SectionTextWalk> {
     const view = this.#view
     const book = view?.book
@@ -2426,7 +2434,7 @@ export class ReaderSession {
       const section = sections[index] as { createDocument?: () => Promise<Document> } | null
       if (!section || typeof section.createDocument !== 'function') continue
       const doc = await section.createDocument()
-      out.push({ index, title: titles.get(index) ?? null, text: collectText(doc).text })
+      out.push({ index, title: titles.get(index) ?? null, text: collectText(doc, skip).text })
       await BREATHE()
     }
     return { sections: out, complete: true }

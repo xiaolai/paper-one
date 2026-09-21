@@ -839,6 +839,10 @@ describe('bootState with remembered preferences', () => {
          defaults (150 and 600) for the same reason. */
       readingVoice: { en: 'com.apple.voice.premium.en-US.Ava' },
       readingRate: 1.25,
+      /* OFF ITS DEFAULT (false) for the same reason as the two pauses: a boolean
+         that happens to equal the default is exactly what a dropped field looks
+         like, so seeding it would prove nothing. */
+      readingNotesAloud: true,
       sentenceGapMs: 300,
       paragraphGapMs: 1400,
     }

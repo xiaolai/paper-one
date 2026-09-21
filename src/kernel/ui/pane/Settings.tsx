@@ -224,10 +224,13 @@ export interface SettingsProps {
         /** Silence after a sentence and after a paragraph, in ms. */
         readonly sentenceGapMs: number
         readonly paragraphGapMs: number
+        /** Whether a note's BODY is read — see `NOTE_BODIES` in `speechSkip.ts`. */
+        readonly notesAloud: boolean
         readonly onVoice: (lang: string, voice: string) => void
         readonly onRate: (rate: number) => void
         readonly onSentenceGap: (ms: number) => void
         readonly onParagraphGap: (ms: number) => void
+        readonly onNotesAloud: (on: boolean) => void
       }
     | undefined
   onTheme: (theme: Theme) => void
@@ -1079,6 +1082,18 @@ export function Settings({
           scale={PARAGRAPH_GAP}
           value={stepIndexOf(PARAGRAPH_GAP, narration.paragraphGapMs)}
           onChange={(idx) => narration.onParagraphGap(stepAt(PARAGRAPH_GAP, idx))}
+        />
+        {/* ⚠️ **OFF IS THE QUIETER DEFAULT, AND IT IS A CHOICE RATHER THAN A
+            POLICY.** EPUB calls a note body SKIPPABLE — content a reading system
+            offers to leave out — and this app used to drop it with no way to ask
+            for it. Most are hidden and never reach the voice; the ones that are
+            not are a print-style block at the foot of a section, so ON means a
+            run of citations arriving mid-chapter. The label names what is added,
+            like the pauses above. */}
+        <ToggleRow
+          label="Read footnotes"
+          on={narration.notesAloud}
+          onChange={narration.onNotesAloud}
         />
       </PaneGroup>
       )}

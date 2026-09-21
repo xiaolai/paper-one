@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { collectText } from './speech'
-import { speechSkip } from './speechSkip'
+import { DEFAULT_SPEECH_SKIP, speechSkip } from './speechSkip'
 
 /** The element holding `id`, in a document parsed the way foliate parses one. */
 function markup(html: string, type: DOMParserSupportedType = 'text/html'): Document {
@@ -58,6 +58,56 @@ describe('what is never spoken', () => {
     /* The note is an `<aside>`; the text is in a `<p>` inside it. */
     const doc = markup('<aside epub:type="footnote"><p id="a">A. D. is over 2,000 years.</p></aside>')
     expect(speechSkip(at(doc, 'a'))).toBe('gap')
+  })
+
+  /**
+   * ⚠️ **A NOTE'S BODY SAT IN `NEVER_SPOKEN`, WHICH IS NOT WHAT IT IS.** This
+   * file's header states the rule it is built on — only what is never speech in
+   * ANY reading is dropped outright — and the table then broke it for four
+   * entries. A footnote body is the author's prose, so dropping it with no way to
+   * ask for it is a reading of the book with words missing and nothing to say so.
+   *
+   * The default is still to skip, which is a deliberate deviation from what the
+   * audit asked for: most note bodies are hidden and never reach here, and the
+   * ones that do are a print-style block at the foot of a section, so ON by
+   * default means a run of citations arriving mid-chapter, unannounced. What was
+   * wrong was the absence of a CHOICE.
+   */
+  for (const [what, html] of [
+    ['a footnote', '<aside epub:type="footnote"><p id="a">The note.</p></aside>'],
+    ['an endnote', '<aside epub:type="endnote"><p id="a">The note.</p></aside>'],
+    ['a rearnote', '<aside epub:type="rearnote"><p id="a">The note.</p></aside>'],
+    ['a bare note', '<aside epub:type="note"><p id="a">The note.</p></aside>'],
+    ['a footnote by its role', '<aside role="doc-footnote"><p id="a">The note.</p></aside>'],
+    ['an endnote by its role', '<aside role="doc-endnote"><p id="a">The note.</p></aside>'],
+  ] as const) {
+    it(`reads ${what} when the reader asked for notes`, () => {
+      expect(speechSkip(at(markup(html), 'a'), { notes: true })).toBe('read')
+    })
+
+    it(`leaves ${what} out when they did not`, () => {
+      expect(speechSkip(at(markup(html), 'a'), { notes: false })).toBe('gap')
+    })
+  }
+
+  it('leaves a note out when nobody said, which is the shipping default', () => {
+    const html = '<aside epub:type="footnote"><p id="a">The note.</p></aside>'
+    expect(speechSkip(at(markup(html), 'a'))).toBe('gap')
+    expect(DEFAULT_SPEECH_SKIP.notes).toBe(false)
+  })
+
+  /* AND THE PREFERENCE REACHES NEITHER OF THE OTHER FIVE. A print page number, a
+     bare note marker and the book's own navigation are never speech in any
+     reading, so turning notes on must not turn them on too — that is the line
+     the two tables were split to draw. */
+  it.each([
+    ['a print page number', '<span id="a" epub:type="pagebreak">247</span>'],
+    ['a note marker', '<a id="a" epub:type="noteref" href="#n1">1</a>'],
+    ['the table of contents', '<nav epub:type="toc"><ol><li id="a">Chapter One</li></ol></nav>'],
+    ['the landmarks', '<nav id="a" epub:type="landmarks"><ol></ol></nav>'],
+    ['the page list', '<nav id="a" epub:type="page-list"><ol></ol></nav>'],
+  ])('still leaves out %s even with notes on', (_name, html) => {
+    expect(speechSkip(at(markup(html), 'a'), { notes: true })).toBe('gap')
   })
 
   it('reads epub:type as a TOKEN LIST, not as one string', () => {

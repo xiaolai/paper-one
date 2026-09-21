@@ -271,8 +271,15 @@ export function App({
       rate: state.readingRate,
       sentenceGapMs: state.sentenceGapMs,
       paragraphGapMs: state.paragraphGapMs,
+      notesAloud: state.readingNotesAloud,
     }),
-    [state.readingVoice, state.readingRate, state.sentenceGapMs, state.paragraphGapMs],
+    [
+      state.readingVoice,
+      state.readingRate,
+      state.sentenceGapMs,
+      state.paragraphGapMs,
+      state.readingNotesAloud,
+    ],
   )
   /**
    * The paging the reading needs, with a chapter step where the book can place
@@ -671,9 +678,12 @@ export function App({
             lang: book.doc ? documentLang(book.doc) : null,
             toc: book.toc,
             sectionTexts: book.sectionTexts,
+            /* THE SAME VALUE THE VOICE READS, so the file holds what the
+               reading would have said. */
+            skip: { notes: state.readingNotesAloud },
           }
         : null,
-    [book.bookId, book.meta, book.doc, book.toc, book.sectionTexts],
+    [book.bookId, book.meta, book.doc, book.toc, book.sectionTexts, state.readingNotesAloud],
   )
   const audiobook = useAudiobook({
     /* The engine is macOS-only and the commands refuse elsewhere by name, so the

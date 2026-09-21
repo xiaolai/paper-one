@@ -34,6 +34,7 @@ function mount(over: Partial<AudiobookDeps> = {}) {
       author: 'Paper',
       lang: 'en-US',
       toc: [],
+      skip: { notes: false },
       sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
     },
     voices: [VOICE],
@@ -114,6 +115,7 @@ describe('two calls before React has committed anything', () => {
         author: 'Paper',
         lang: 'en-US',
         toc: [],
+        skip: { notes: false },
         sectionTexts: vi.fn(async () => {
           calls += 1
           reads.push(calls)
@@ -149,6 +151,7 @@ describe('a walk that did not finish', () => {
         author: 'Paper',
         lang: 'en-US',
         toc: [],
+        skip: { notes: false },
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: 'One', text: 'Some real text.' }],
           complete: false,
@@ -171,6 +174,7 @@ describe('a walk that did not finish', () => {
         author: 'Paper',
         lang: 'en-US',
         toc: [],
+        skip: { notes: false },
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: 'One', text: 'Some real text.' }],
           complete: true,

@@ -66,6 +66,27 @@ export type SpeechSkip =
  * `<rp>` is the parenthesis a browser without ruby support shows instead. A
  * browser WITH support hides it, so it is usually caught as hidden already —
  * but that depends on the reader's stylesheet, and this does not.
+ *
+ * ⚠️ **AND THIS IS NOT A PREFERENCE, UNLIKE `NOTE_BODIES` BELOW — THE MARKUP
+ * CANNOT SAY WHICH KIND OF RUBY IT IS.** An audit asked for the choice, on the
+ * ground that W3C calls ruby TTS strategy context-dependent and that annotation
+ * can carry meaning the base text does not: semantic ruby, a gloss, a
+ * heteronym's reading. All true, and none of it decidable here. `<rt>` is one
+ * element for two unrelated jobs — the pronunciation of the base text (pinyin,
+ * furigana), and a separate gloss beside it — and HTML gives no attribute that
+ * distinguishes them. There is no `rt` a reading system can look at and say
+ * which it is.
+ *
+ * So the choice a preference would offer is not "phonetic or semantic" but "say
+ * every annotated word twice, or once", and reading a pinyin book twice over is
+ * not a setting anybody wants. A note body is different in exactly the way that
+ * matters: `epub:type="footnote"` SAYS what it is, so the reader's choice can be
+ * honoured precisely. Where the markup cannot express the distinction, a switch
+ * is a worse answer than the better default.
+ *
+ * What would change this is markup that carries the distinction — `rt` with a
+ * declared role, or Media Overlays marking the annotation — and then it belongs
+ * with `NOTE_BODIES` and not here.
  */
 const RUBY_ANNOTATION = new Set(['rt', 'rp'])
 
@@ -93,18 +114,42 @@ const NEVER_SPOKEN: readonly { readonly type: string; readonly role: string | nu
   /* The marker, not the note: a bare `3` in the middle of a sentence, which
      tells a listener nothing and breaks the sentence in two. */
   { type: 'noteref', role: 'doc-noteref' },
-  /* The note's BODY. Usually hidden and already dropped; a print-style note
-     block at the foot of a section is not, and arrives as a run of citations
-     mid-chapter with nothing to say it has happened. */
-  { type: 'footnote', role: 'doc-footnote' },
-  { type: 'endnote', role: 'doc-endnote' },
-  { type: 'rearnote', role: null },
-  { type: 'note', role: null },
   /* The book's own navigation. A table of contents read aloud is a list of
      every chapter title in the book. */
   { type: 'toc', role: 'doc-toc' },
   { type: 'landmarks', role: null },
   { type: 'page-list', role: 'doc-pagelist' },
+]
+
+/**
+ * A note's BODY — content, and therefore the reader's call.
+ *
+ * ⚠️ **THESE SAT IN `NEVER_SPOKEN` AND THEY ARE NOT NEVER-SPEECH.** The header
+ * above states the rule this file is built on — only what is never speech in any
+ * reading is dropped outright — and then the table broke it for four entries. A
+ * footnote body is the author's prose. Dropping it silently is a reading of the
+ * book with words missing and nothing to say so, which is the one failure
+ * direction `effectiveRole` is explicitly written to avoid.
+ *
+ * The other five above genuinely are never speech: a print page number, a bare
+ * note marker, and the book's own navigation lists have no reading in which they
+ * belong. That is the line, and it now runs between two tables rather than
+ * inside one.
+ *
+ * ⚠️ **AND THE DEFAULT IS STILL TO SKIP THEM, WHICH IS A DEVIATION FROM WHAT THE
+ * AUDIT ASKED FOR AND IS DELIBERATE.** The audit wanted meaningful content to
+ * default to `read`. For a note body that is the worse default: most are already
+ * hidden and never reach here, and the ones that do are a print-style block at
+ * the foot of a section — so turning them on by default means a run of
+ * citations arriving mid-chapter, unannounced, in the middle of the prose. What
+ * was wrong was that a listener could not CHOOSE; the choice now exists, and its
+ * default is the quieter of the two.
+ */
+const NOTE_BODIES: readonly { readonly type: string; readonly role: string | null }[] = [
+  { type: 'footnote', role: 'doc-footnote' },
+  { type: 'endnote', role: 'doc-endnote' },
+  { type: 'rearnote', role: null },
+  { type: 'note', role: null },
 ]
 
 /**
@@ -118,10 +163,38 @@ const NEVER_SPOKEN: readonly { readonly type: string; readonly role: string | nu
  * `note` and `landmarks` have no DPUB-ARIA role at all, and writing that down is
  * what stops the next reader "fixing" the asymmetry by inventing one.
  */
-const NEVER_SPOKEN_TYPES: ReadonlySet<string> = new Set(NEVER_SPOKEN.map((one) => one.type))
-const NEVER_SPOKEN_ROLES: ReadonlySet<string> = new Set(
-  NEVER_SPOKEN.flatMap((one) => (one.role === null ? [] : [one.role])),
-)
+const typesOf = (table: readonly { readonly type: string }[]): ReadonlySet<string> =>
+  new Set(table.map((one) => one.type))
+const rolesOf = (table: readonly { readonly role: string | null }[]): ReadonlySet<string> =>
+  new Set(table.flatMap((one) => (one.role === null ? [] : [one.role])))
+
+const NEVER_SPOKEN_TYPES = typesOf(NEVER_SPOKEN)
+const NEVER_SPOKEN_ROLES = rolesOf(NEVER_SPOKEN)
+const NOTE_BODY_TYPES = typesOf(NOTE_BODIES)
+const NOTE_BODY_ROLES = rolesOf(NOTE_BODIES)
+
+/**
+ * What a listener has chosen to hear, for the parts that are theirs to choose.
+ *
+ * ONE FIELD, because one entry in the skippability vocabulary is content this
+ * app currently suppresses. EPUB Media Overlays names a dozen more — `sidebar`,
+ * `marginalia`, `table`, `list` — and none of those is suppressed here at all,
+ * so there is nothing for a preference to govern yet. A field per spec entry
+ * would be twelve switches over one behaviour.
+ */
+export interface SpeechSkipPrefs {
+  /** Read a footnote or endnote BODY where the book leaves one on the page. */
+  readonly notes: boolean
+}
+
+/**
+ * What a reading does when nobody has said otherwise.
+ *
+ * Exported so the default is one value rather than a literal repeated at each
+ * caller — `collectText` takes it, the export path takes it, and a test that
+ * does not care about notes says nothing.
+ */
+export const DEFAULT_SPEECH_SKIP: SpeechSkipPrefs = { notes: false }
 
 /**
  * The role that actually applies, out of a token list.
@@ -159,15 +232,19 @@ function effectiveRole(el: Element): string | null {
  * rules are attributes and tag names, so they hold in both documents — the
  * export gets the same reading the reader hears.
  */
-export function speechSkip(el: Element | null): SpeechSkip {
+export function speechSkip(el: Element | null, prefs: SpeechSkipPrefs = DEFAULT_SPEECH_SKIP): SpeechSkip {
   for (let node = el; node; node = node.parentElement) {
     if (RUBY_ANNOTATION.has(node.tagName.toLowerCase())) return 'silent'
 
     for (const type of epubTypes(node)) {
       if (NEVER_SPOKEN_TYPES.has(type)) return 'gap'
+      if (!prefs.notes && NOTE_BODY_TYPES.has(type)) return 'gap'
     }
     const role = effectiveRole(node)
-    if (role !== null && NEVER_SPOKEN_ROLES.has(role)) return 'gap'
+    if (role !== null) {
+      if (NEVER_SPOKEN_ROLES.has(role)) return 'gap'
+      if (!prefs.notes && NOTE_BODY_ROLES.has(role)) return 'gap'
+    }
   }
   return 'read'
 }

@@ -46,7 +46,7 @@
  * the user agent would be wrong on the engines that do support it.
  */
 
-import { speechSkip } from './speechSkip'
+import { DEFAULT_SPEECH_SKIP, speechSkip, type SpeechSkipPrefs } from './speechSkip'
 import {
   blockAncestor,
   frameBoxInHost,
@@ -94,7 +94,7 @@ export interface SpokenText {
  * Script, style and hidden elements are skipped — reading a stylesheet aloud is
  * the obvious failure, and an EPUB's hidden notes are the less obvious one.
  */
-export function collectText(doc: Document): SpokenText {
+export function collectText(doc: Document, skip: SpeechSkipPrefs = DEFAULT_SPEECH_SKIP): SpokenText {
   const view = doc.defaultView
   const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
@@ -202,7 +202,7 @@ export function collectText(doc: Document): SpokenText {
        * is decided on the path below, which a whitespace node never reaches. The
        * three answers mean the same thing in both branches or they mean nothing.
        * Found because a mutation of the first version failed no test. */
-      if (speechSkip(node.parentElement) !== 'silent' && text.length > 0 && !text.endsWith(' ')) {
+      if (speechSkip(node.parentElement, skip) !== 'silent' && text.length > 0 && !text.endsWith(' ')) {
         text += ' '
       }
       node = walker.nextNode()
@@ -219,9 +219,9 @@ export function collectText(doc: Document): SpokenText {
      * The separator is the whitespace branch's, character for character, so a
      * skipped marker and a space between blocks leave exactly the same trace and
      * no offset arithmetic changes. */
-    const skip = speechSkip(node.parentElement)
-    if (skip !== 'read') {
-      if (skip === 'gap' && text.length > 0 && !text.endsWith(' ')) text += ' '
+    const say = speechSkip(node.parentElement, skip)
+    if (say !== 'read') {
+      if (say === 'gap' && text.length > 0 && !text.endsWith(' ')) text += ' '
       node = walker.nextNode()
       continue
     }
@@ -460,6 +460,17 @@ export interface SpeakPrefs {
    */
   readonly sentenceGapMs?: number
   readonly paragraphGapMs?: number
+  /**
+   * Read a note's BODY where the book leaves one on the page.
+   *
+   * ⚠️ **ON `SpeakPrefs` BECAUSE THE READING AND THE EXPORT MUST AGREE.** It is
+   * not the Speaker's — no utterance carries it — but this is the one value the
+   * reading reads its preferences from, and the audiobook walks the same text
+   * through the same `collectText`. Two defaults, one per path, is how a reader
+   * gets a book that speaks one thing and exports another. See `NOTE_BODIES` in
+   * `speechSkip.ts` for why it is a choice at all.
+   */
+  readonly notesAloud?: boolean
 }
 
 export interface SpeakerCallbacks {
