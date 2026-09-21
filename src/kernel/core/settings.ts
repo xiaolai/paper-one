@@ -639,7 +639,10 @@ export const PARAGRAPH_GAP_MAX = PARAGRAPH_GAP.steps.at(-1)!
 const withinRange =
   (min: number, max: number) =>
   (raw: unknown): number | undefined =>
-    typeof raw === 'number' && Number.isFinite(raw) ? Math.max(min, Math.min(max, raw)) : undefined
+    /* `Number.isFinite` IS THE WHOLE CHECK: it does not coerce, so it answers
+       false for a string, an object and a null as surely as for a NaN — and a
+       `typeof raw === 'number'` beside it could change no outcome. */
+    Number.isFinite(raw) ? Math.max(min, Math.min(max, raw as number)) : undefined
 
 const rate = withinRange(READING_RATE_MIN, READING_RATE_MAX)
 

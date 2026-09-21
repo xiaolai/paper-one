@@ -1411,3 +1411,50 @@ describe('a migration that cannot finish', () => {
     }
   })
 })
+
+describe('a stored value the parser is handed directly', () => {
+  /**
+   * ⚠️ **`get` PROMISES NEVER TO FAIL, WHICH HIDES A PARSER THAT WOULD.** The
+   * store catches a parser that throws and answers the fallback — the same
+   * answer a parser that REFUSES the value gives — so a refusal and a crash
+   * are indistinguishable from outside it. These call the parsers themselves,
+   * where the difference is visible.
+   */
+  it('refuses a voice map that is null, rather than throwing on it', () => {
+    /* `typeof null` is 'object', so the null check is what stands between
+       `Object.entries(null)` and a throw. */
+    expect(KERNEL_SETTINGS.readingVoice.parse(null)).toBeUndefined()
+    expect(KERNEL_SETTINGS.readingVoice.parse(['en'])).toBeUndefined()
+    expect(KERNEL_SETTINGS.readingVoice.parse('a voice')).toBeUndefined()
+    expect(KERNEL_SETTINGS.readingVoice.parse({ en: 'voice:en' })).toEqual({ en: 'voice:en' })
+  })
+
+  it('refuses a speed that is not a finite number, whatever kind of value it is', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '1.5', null, {}, []]) {
+      expect(KERNEL_SETTINGS.readingRate.parse(bad), `${String(bad)} was taken as a speed`).toBeUndefined()
+    }
+    expect(KERNEL_SETTINGS.readingRate.parse(99), 'and a number is clamped, not refused').toBe(
+      READING_RATE_MAX,
+    )
+  })
+})
+
+describe('an envelope written with a number JSON cannot hold', () => {
+  it('reads an infinite speed as no speed at all', () => {
+    /* `JSON.stringify(Infinity)` is `null`, so this can only arrive as source
+       text — `1e999` parses to Infinity. It is the one route by which a
+       non-finite number reaches the clamp, and the clamp must refuse it:
+       `Math.min` over an Infinity answers the bound, which would store a speed
+       the reader never chose. */
+    const map = new Map<string, string>([
+      [SETTINGS_STORAGE_KEY, `{"version":${SETTINGS_VERSION},"values":{"kernel.readingRate":1e999}}`],
+    ])
+    const store = createSettingsStore({
+      storage: {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => void map.set(key, value),
+      },
+    })
+    expect(readKernelPreferences(store).readingRate).toBe(DEFAULTS.readingRate)
+  })
+})
