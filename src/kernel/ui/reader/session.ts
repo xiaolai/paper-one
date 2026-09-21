@@ -714,9 +714,18 @@ export class ReaderSession {
       onExternalLink: (detail, event) => this.#cb.onExternalLink(detail, event),
       goTo: (href) => {
         const reader = this.#view
+        /* Stryker disable next-line LogicalOperator: the two operands answer
+           together everywhere this closure can be reached — `#view` is null only
+           before `start`, and the note whose link calls this cannot exist then,
+           so `&&` and `||` return for the same states. The whole-condition
+           mutants are killable and are not covered here. */
         if (this.#disposed || !reader) return
         void reader.goTo(href).catch(reportNavigation('goTo', href))
       },
+      /* Stryker disable next-line OptionalChaining: `SessionDeps.applyVars` is
+         REQUIRED and `start` assigns it before any note can render, so this is
+         null only before a session starts — a state no note document reaches.
+         The `?.` is what the field's `| null` type needs. */
       applyVars: (doc) => this.#applyVars?.(doc),
       styleNote: (view) => this.#styleNote?.(view),
     })
@@ -958,6 +967,10 @@ export class ReaderSession {
        * on the page. `paintAnnotation` answers true only from the branch that
        * actually painted one of the READER'S marks. */
       if (!paintAnnotation(detail, painters, this.#cb.getPalette())) return
+      /* Stryker disable next-line OptionalChaining: `paintAnnotation` answered
+         true just above, which it can only do by reading a paintable `kind` off
+         `detail.annotation` — so the annotation is present here. The `?.` holds
+         because foliate round-trips this object untyped. */
       if (detail.annotation?.value && detail.range) {
         this.#cb.onMarkDrawn(detail.annotation.value, detail.range)
       }
@@ -1558,7 +1571,10 @@ export class ReaderSession {
    */
   async sectionTexts(
     toc: readonly TocItem[] = [],
-    shouldStop: () => boolean = () => false,
+    /* NO DEFAULT, because a default of `() => false` could not be told from one
+       that answers `undefined`: both are falsy at the only place this is read.
+       Absent is absent, and `shouldStop?.()` says so. */
+    shouldStop?: () => boolean,
     skip: SpeechSkipPrefs = DEFAULT_SPEECH_SKIP,
   ): Promise<SectionTextWalk> {
     const view = this.#view
@@ -1571,16 +1587,21 @@ export class ReaderSession {
     const titles = await tocTitles(book as Book, toc)
 
     const out: { index: number; title: string | null; text: string }[] = []
-    for (let index = 0; index < sections.length; index++) {
+    /* BY `entries()`, so the walk has no index to fall off. A `for (let index =
+       0; index < sections.length; …)` beside the `!section` check below gave the
+       loop two conditions for one question: reading past the end lands on
+       `undefined`, which that check already skips, so the bound could be
+       changed and nothing would notice. */
+    for (const [index, entry] of sections.entries()) {
       /* Liveness read at each step rather than captured — closing the book
        * mid-export must stop it, not finish against a dead view. */
       /* THE READER'S OWN STOP, asked at the same moment as liveness. A long
          book is seconds of parsing per section, so a stop that is only noticed
          after the walk is a stop the reader watched do nothing. */
-      if (this.#disposed || this.#view !== view || shouldStop()) {
+      if (this.#disposed || this.#view !== view || shouldStop?.()) {
         return { sections: out, complete: false }
       }
-      const section = sections[index] as { createDocument?: () => Promise<Document> } | null
+      const section = entry as { createDocument?: () => Promise<Document> } | null
       if (!section || typeof section.createDocument !== 'function') continue
       const doc = await section.createDocument()
       out.push({ index, title: titles.get(index) ?? null, text: collectText(doc, skip).text })

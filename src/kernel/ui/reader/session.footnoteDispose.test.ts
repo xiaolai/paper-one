@@ -346,6 +346,42 @@ describe('closing a book with a note open', () => {
  * destroyed under a renderer still tearing down is a renderer reading revoked
  * URLs.
  */
+describe('a note that will not let go', () => {
+  /**
+   * ⚠️ **NOTHING IN TEARDOWN MAY PROPAGATE, AND EACH STEP SAYS WHICH ONE IT
+   * WAS.** `releaseNoteView` catches a `close` that throws and leaves `remove`
+   * to the caller, so a webview that refuses to detach reaches `dispose`'s own
+   * isolation — which reports it by the name of the step, and carries on to the
+   * view, the book and the host. A step reported under no name is a teardown
+   * failure nobody can place.
+   */
+  it('is reported by name, and the rest of the teardown still runs', async () => {
+    const order: string[] = []
+    const { session, book, calls } = await started(order)
+    const note = noteView(order)
+    const refuses = new Error('the note webview would not detach')
+    note.view.remove = () => {
+      order.push('note.remove')
+      throw refuses
+    }
+    showNote(book, note)
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    session.dispose()
+
+    expect(said).toHaveBeenCalledWith('Paper: footnote view threw during teardown', refuses)
+    expect(order, 'the book and its view were released anyway').toEqual([
+      'note.close',
+      'note.remove',
+      'view.close',
+      'view.remove',
+      'book.destroy',
+    ])
+    expect((calls['onFootnote'] ?? []).at(-1), 'and the host was told the note is gone').toEqual([null])
+    said.mockRestore()
+  })
+})
+
 describe('closing a book releases the book', () => {
   it('destroys the book exactly once, after the note view is released and the view closed', async () => {
     const order: string[] = []

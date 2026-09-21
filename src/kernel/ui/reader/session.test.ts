@@ -4122,3 +4122,156 @@ describe('the navigator hands the section walk every argument', () => {
     expect(walk).toHaveBeenCalledWith(toc, stop, { notes: true })
   })
 })
+
+describe('the section walk’s liveness, and what it can read', () => {
+  /** A document with nothing in it — `collectText` answers '' without a DOM. */
+  const emptyDoc = () =>
+    Promise.resolve({
+      body: null,
+      getElementsByTagNameNS: () => [],
+      querySelectorAll: () => [],
+    } as unknown as Document)
+
+  /** A session over the given spine, started and ready to walk. */
+  async function sessionOver(sections: readonly unknown[]) {
+    const view = fakeView()
+    Object.assign(view.book as object, { sections: [...sections] })
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    return { session, view }
+  }
+
+  it('finishes a readable book, and says the walk is complete', async () => {
+    const { session } = await sessionOver([
+      { createDocument: emptyDoc },
+      { createDocument: emptyDoc },
+    ])
+    const walk = await session.sectionTexts()
+    expect(walk.complete, 'a finished walk is what `complete` means').toBe(true)
+    expect(walk.sections.map((one) => one.index)).toEqual([0, 1])
+  })
+
+  it('walks with no contents, no stop and no preferences given', async () => {
+    /* The export passes all three; the CLI and a test need not, and the
+       defaults have to be the ones a reader would get.
+       ⚠️ AND NO CONTENTS MEANS THE BOOK IS NOT ASKED TO RESOLVE ANYTHING: a
+       default holding one entry would send the backend an href it never
+       declared, which `makePdf` answers by REJECTING an outline destination it
+       cannot find. */
+    const asked: unknown[] = []
+    const view = fakeView()
+    Object.assign(view.book as object, {
+      sections: [{ createDocument: emptyDoc }],
+      resolveHref: (href: unknown) => {
+        asked.push(href)
+        return { index: 0 }
+      },
+    })
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    const walk = await session.sectionTexts()
+    expect(walk).toEqual({ sections: [{ index: 0, title: null, text: '' }], complete: true })
+    expect(asked, 'the book was asked to resolve a contents entry nobody gave it').toEqual([])
+  })
+
+  it('skips a section the backend cannot make a document for, and finishes the rest', async () => {
+    /* ⚠️ A SPINE IS NOT ALL DOCUMENTS. foliate's backends put other entries in
+       it, and the object arriving here is untyped — so a missing section and one
+       with no `createDocument` are both ordinary, and neither may take the walk
+       down or end it early. */
+    const { session } = await sessionOver([
+      { createDocument: emptyDoc },
+      null,
+      { id: 'cover-image' },
+      { createDocument: emptyDoc },
+    ])
+    const walk = await session.sectionTexts()
+    expect(walk.sections.map((one) => one.index), 'the two readable ones, by spine index').toEqual([0, 3])
+    expect(walk.complete).toBe(true)
+  })
+
+  it('stops when the book is closed under it, and does not call the walk complete', async () => {
+    /* ⚠️ **A CLOSED BOOK'S WALK USED TO BE WRITTEN OUT AS A FINISHED
+       AUDIOBOOK.** Liveness is read at every step for that reason, and the
+       answer must be `complete: false` — a short file is indistinguishable from
+       a short book. */
+    let session!: ReaderSession
+    const harness = await sessionOver([
+      {
+        createDocument: async () => {
+          session.dispose()
+          return await emptyDoc()
+        },
+      },
+      { createDocument: emptyDoc },
+      { createDocument: emptyDoc },
+    ])
+    session = harness.session
+    const walk = await session.sectionTexts()
+    expect(walk.complete).toBe(false)
+    expect(walk.sections.length, 'it stopped at the section the close landed in').toBeLessThan(3)
+  })
+
+  it('stops when another book has taken the view', async () => {
+    /* The view a walk began against is the one it must finish against: a reader
+       who opens another book mid-export must not have the two spliced
+       together. */
+    const { session } = await sessionOver([
+      { createDocument: emptyDoc },
+      { createDocument: emptyDoc },
+      { createDocument: emptyDoc },
+    ])
+    const walking = session.sectionTexts()
+    const second = fakeView()
+    Object.assign(second.book as object, { sections: [{ createDocument: emptyDoc }] })
+    await session.start('other.epub', deps(second))
+    const walk = await walking
+    expect(walk.complete, 'the walk belonged to the book that has gone').toBe(false)
+    expect(walk.sections.length).toBeLessThan(3)
+  })
+})
+
+describe('a mark drawn with nothing to report', () => {
+  /**
+   * ⚠️ **`onMarkDrawn` FILLS THE MAP THE MARGIN MEASURES**, so reporting a mark
+   * with no anchor — or no range — would put an entry there for a passage with
+   * no control to place, which is the defect its own comment records for a
+   * friend's underline. Painting still happens: the mark is on the page either
+   * way.
+   */
+  it('paints it and reports nothing', async () => {
+    const view = fakeView()
+    const drawn: [string, Range][] = []
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      onMarkDrawn: (cfi: string, range: Range) => drawn.push([cfi, range]),
+    })
+    await session.start('book.epub', deps(view))
+    const painted: unknown[] = []
+    const range = { startContainer: { nodeType: 1, ownerDocument: null } } as unknown as Range
+
+    view.emit('draw-annotation', {
+      draw: (fn: unknown) => painted.push(fn),
+      /* A reader's highlight, with no `value` — the anchor foliate resolves. */
+      annotation: { kind: 'highlight', tint: 'butter', style: 'fill' },
+      range,
+    })
+    expect(painted.length, 'it was painted').toBe(1)
+    expect(drawn, 'a mark with no anchor was reported').toEqual([])
+
+    view.emit('draw-annotation', {
+      draw: (fn: unknown) => painted.push(fn),
+      annotation: { kind: 'highlight', tint: 'butter', style: 'fill', value: 'epubcfi(/6/2!/4)' },
+      range: null,
+    })
+    expect(drawn, 'a mark with no range was reported').toEqual([])
+
+    view.emit('draw-annotation', {
+      draw: (fn: unknown) => painted.push(fn),
+      annotation: { kind: 'highlight', tint: 'butter', style: 'fill', value: 'epubcfi(/6/2!/4)' },
+      range,
+    })
+    expect(drawn.map(([cfi]) => cfi), 'and one with both is reported').toEqual(['epubcfi(/6/2!/4)'])
+    session.dispose()
+  })
+})
