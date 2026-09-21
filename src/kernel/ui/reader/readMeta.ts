@@ -58,9 +58,15 @@ export function readMeta(book: { metadata?: unknown }): BookMeta {
   }
 }
 
-/** A whole number of pages, or 0 for a book that has none. */
+/**
+ * A whole number of pages, or 0 for a book that has none.
+ *
+ * `Number.isInteger` is the whole type test: it refuses a non-number without
+ * coercing, so `'12'` is not an integer to it. A `typeof` beside it was a
+ * condition no input could make matter.
+ */
 function pageCount(value: unknown): number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0
+  return Number.isInteger(value) ? Math.max(value as number, 0) : 0
 }
 
 /**
@@ -110,12 +116,16 @@ function finiteOrNull(value: unknown): number | null {
      to half-read (audit round 1, #838). The empty string is `NaN`d explicitly
      because `Number('')` is 0. */
   const n = typeof value === 'string' ? (value.trim() === '' ? NaN : Number(value)) : value
-  return typeof n === 'number' && Number.isFinite(n) ? n : null
+  /* `Number.isFinite`, not the global: it refuses a non-number rather than
+     coercing one, so it is the type test as well. */
+  return Number.isFinite(n) ? (n as number) : null
 }
 
 /** A bounded list of non-empty strings, deduplicated, order preserved. */
 function list(value: unknown, text: (v: unknown) => string): readonly string[] {
-  const raw = Array.isArray(value) ? value : value == null ? [] : [value]
+  /* Nothing declared is one entry that reads as nothing, and nothing is what
+     reaches the list — no separate case for it. */
+  const raw = Array.isArray(value) ? value : [value]
   const out: string[] = []
   for (const item of raw) {
     const one = cap(text(item))

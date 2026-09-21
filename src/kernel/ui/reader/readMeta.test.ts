@@ -61,6 +61,28 @@ describe('readMeta', () => {
     ).toBe('A, B')
   })
 
+  it("drops a list entry that reads as nothing, rather than leaving a gap in the join", () => {
+    expect(readMeta({ metadata: { author: ['A', {}, 'B'] } }).author).toBe('A, B')
+  })
+
+  it("reads a record's name from `name`, wherever it sits among the record's fields", () => {
+    /* The first field is only the fallback, for a language map. A creator
+       record whose role comes first is named by its `name`. */
+    expect(readMeta({ metadata: { author: { role: 'aut', name: 'Melville' } } }).author).toBe('Melville')
+  })
+
+  it('reads a language map only for a string, and anything else as nothing', () => {
+    expect(readMeta({ metadata: { title: { en: 42 } } }).title).toBe('')
+    /* A function carries a `name` of its own, which is exactly what a record's
+       reader would pick up if the object test let it through. */
+    function Moby() {}
+    expect(readMeta({ metadata: { title: Moby } }).title).toBe('')
+  })
+
+  it('reads the subtitle the book declares', () => {
+    expect(readMeta({ metadata: { subtitle: 'or, The Whale' } }).subtitle).toBe('or, The Whale')
+  })
+
   it('returns empty strings rather than undefined when metadata is absent', () => {
     expect(readMeta({})).toEqual(NO_META)
   })
@@ -94,6 +116,27 @@ describe('readMeta', () => {
     it('keeps a fractional series position', () => {
       const md = { belongsTo: { series: { name: 'S', position: 1.5 } } }
       expect(readMeta({ metadata: md }).seriesIndex).toBe(1.5)
+    })
+
+    it("reads a series name given as a language map, as a title's is", () => {
+      const md = { belongsTo: { series: { name: { en: 'Discworld' }, position: 5 } } }
+      expect(readMeta({ metadata: md })).toMatchObject({ series: 'Discworld', seriesIndex: 5 })
+    })
+
+    it('reads a series only from a record, which is where its position lives', () => {
+      const md = { belongsTo: { series: 'Discworld' } }
+      expect(readMeta({ metadata: md })).toMatchObject({ series: '', seriesIndex: null })
+    })
+
+    /* A position arrives as a string from an OPF's `group-position` refinement.
+     * `Number('')` and `Number('   ')` are both 0, which is a real position, so
+     * an empty one must be refused before it is converted. */
+    it('reads a series position given as a string, and refuses a blank one', () => {
+      const at = (position: string) =>
+        readMeta({ metadata: { belongsTo: { series: { name: 'S', position } } } }).seriesIndex
+      expect(at('1.5')).toBe(1.5)
+      expect(at('')).toBeNull()
+      expect(at('   ')).toBeNull()
     })
 
     it('takes the first when a book declares several series', () => {
