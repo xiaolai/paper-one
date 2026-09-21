@@ -3767,6 +3767,51 @@ describe('a foreign mark (WI-22.D2)', () => {
     expect(forKey.at(-1)).toEqual(expect.objectContaining({ remove: true }))
   })
 
+  it('keeps no record for a section torn down while its pass was still drawing', async () => {
+    /* The section's teardown drops what it painted, because the next overlay
+       never held any of it. A pass still in flight at that moment wrote the
+       record back when it landed — so the next overlay was asked to erase a
+       passage it had never been given. */
+    const pending: (() => void)[] = []
+    let overlays: readonly ForeignAnchor[] = [
+      foreign({ key: 'circle:alice:pub1', cfi: resolvedCfiForTesting('a') }),
+    ]
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      getOverlays: () => overlays,
+    })
+    await session.start('book.epub', deps(view))
+    const doc = fakeDocument().asDocument()
+    view.emit('load', { doc, index: 0 })
+
+    const real = view.addAnnotation.bind(view)
+    view.addAnnotation = (annotation: Parameters<typeof real>[0], remove = false) =>
+      new Promise<void>((resolve) => {
+        pending.push(() => {
+          real(annotation, remove)
+          resolve()
+        })
+      })
+    view.emit('create-overlay', { index: 0 })
+    await settled()
+
+    /* The same document loads again, which runs its teardown: the overlay
+       and everything painted into it are gone. Then the add lands. */
+    view.emit('load', { doc, index: 0 })
+    while (pending.length > 0) pending.shift()?.()
+    await settled()
+
+    /* A fresh overlay, and the passage has been withdrawn meanwhile. */
+    view.addAnnotation = real
+    view.annotations.length = 0
+    overlays = []
+    view.emit('create-overlay', { index: 0 })
+    await settled()
+
+    expect(view.annotations, 'nothing to erase on an overlay that never drew it').toEqual([])
+  })
+
   it('tries the erase again when it did not take', async () => {
     /* ⚠️ `attachForeign` swallows its failures by design — a PDF page that has
        not been painted has no CFI to resolve — so "asked to remove it" and

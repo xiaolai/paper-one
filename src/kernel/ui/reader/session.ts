@@ -1383,8 +1383,15 @@ export class ReaderSession {
        one round trip at a time. */
     await Promise.all([...now.values()].map((anchor) => attachForeign(view, anchor)))
     /* Written AFTER both halves have settled, so the record is what is on the
-       page rather than what was asked for. */
-    if (this.#disposed) return
+       page rather than what was asked for.
+
+       ⚠️ **AND ONLY WHILE THE SECTION IS STILL LIVE.** A section torn down
+       while this ran has lost its overlay and everything painted into it —
+       its teardown dropped the record for that reason. Writing one back here
+       would ask the section's NEXT overlay, which never held any of it, to
+       erase marks it does not have: the case that teardown exists to prevent,
+       reached by the road it could not see. */
+    if (this.#disposed || !this.#sections.has(index)) return
     if (held.size === 0) this.#foreignDrawn.delete(index)
     else this.#foreignDrawn.set(index, held)
   }

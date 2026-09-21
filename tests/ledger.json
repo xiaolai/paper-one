@@ -9600,6 +9600,7 @@
     "src/kernel/ui/reader/session.test.ts > a foreign mark (WI-22.D2) > is NOT reported as one of the reader’s own marks",
     "src/kernel/ui/reader/session.test.ts > a foreign mark (WI-22.D2) > is drawn AFTER the reader's own, so a rule is not buried under a band",
     "src/kernel/ui/reader/session.test.ts > a foreign mark (WI-22.D2) > is offered to the section it belongs to, and no other",
+    "src/kernel/ui/reader/session.test.ts > a foreign mark (WI-22.D2) > keeps no record for a section torn down while its pass was still drawing",
     "src/kernel/ui/reader/session.test.ts > a foreign mark (WI-22.D2) > never leaves a withdrawn passage painted by an add that landed late",
     "src/kernel/ui/reader/session.test.ts > a foreign mark (WI-22.D2) > stops retrying once the erase has taken",
     "src/kernel/ui/reader/session.test.ts > a foreign mark (WI-22.D2) > tries the erase again when it did not take",
