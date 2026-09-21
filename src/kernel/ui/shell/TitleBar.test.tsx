@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Platform } from '../../core/metrics'
 import type { Speech } from '../reader/useSpeech'
 import { initialState } from '../state'
+import { NO_GOOD_VOICE } from '../reader/voiceChoice'
 import { TitleBar } from './TitleBar'
 
 afterEach(cleanup)
@@ -42,6 +43,7 @@ function bar(platform: Platform) {
       bookTitle="Paper"
       bookSubtitle=""
       speech={speech}
+      listenRefused={false}
       hasBook={false}
     />,
   )
@@ -92,6 +94,7 @@ describe('the controls a contributed screen does not have', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={speech}
+        listenRefused={false}
         hasBook={false}
       />,
     )
@@ -115,6 +118,7 @@ describe('the controls a contributed screen does not have', () => {
           bookTitle="Paper"
           bookSubtitle=""
           speech={speech}
+          listenRefused={false}
           hasBook={false}
         />,
       )
@@ -141,6 +145,7 @@ describe('the reading speed button', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={{ ...speech, available: true, speaking: true }}
+        listenRefused={false}
         hasBook
       />,
     )
@@ -157,5 +162,44 @@ describe('the reading speed button', () => {
     [9, 0.5, 'above the ramp entirely, round to the slowest'],
   ])('from %s goes to %s: %s', (from, to) => {
     expect(tap(from)).toBe(to)
+  })
+})
+
+/**
+ * NO VOICE RATHER THAN A BAD ONE — the Listen control says so before the press.
+ *
+ * On a Mac nothing clears the floor (see `voiceChoice.ts`), so the reading would
+ * stop at its first sentence. The control is disabled instead, and its title
+ * carries the reason, the way it already does for a build with no speech engine.
+ */
+describe('the Listen control when no voice is good enough', () => {
+  function listen(listenRefused: boolean): HTMLElement {
+    render(
+      <TitleBar
+        screens={[]}
+        state={{ ...initialState, screen: 'reader', chromeOn: true }}
+        dispatch={vi.fn()}
+        platform="macos"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={{ ...speech, available: true }}
+        listenRefused={listenRefused}
+        hasBook
+      />,
+    )
+    return screen.getByRole('button', { name: 'Read aloud' })
+  }
+
+  it('is disabled and says why', () => {
+    const button = listen(true)
+    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('data-disabled')).toBe('true')
+    expect(button.getAttribute('title')).toBe(`Listen — ${NO_GOOD_VOICE}`)
+  })
+
+  it('reads the chapter when a voice is good enough', () => {
+    const button = listen(false)
+    expect(button).toHaveProperty('disabled', false)
+    expect(button.getAttribute('title')).toBe('Read this chapter aloud')
   })
 })

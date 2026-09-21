@@ -71,6 +71,7 @@ import { parseBook } from './reader/parseBook'
 import { stepChapter } from './tocOrder'
 import { useSpeech } from './reader/useSpeech'
 import { documentLang } from './reader/speech'
+import { voiceFor } from './reader/voiceChoice'
 import { useVoices } from './hooks/useVoices'
 import { useAudiobook } from './hooks/useAudiobook'
 
@@ -367,6 +368,13 @@ export function App({
     () => ({ lang: book.doc ? documentLang(book.doc) : null, voices }),
     [book.doc, voices],
   )
+  /* ⚠️ **THE SAME ANSWER THE SPEAKER WILL REACH, ASKED BEFORE THE PRESS.** The
+     floor refuses every voice a Mac's WebView offers (see `voiceChoice.ts`), so
+     the Listen control says so up front rather than starting a reading that
+     stops at its first sentence. Same function, same list, same language and
+     same stored choice as `Speaker.speak` — so the control cannot promise a
+     reading the speaker then refuses, or refuse one it would have read. */
+  const listenRefused = voiceFor(narration.voices, narration.lang, state.readingVoice).kind === 'none'
 
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than
@@ -2463,6 +2471,7 @@ export function App({
             bookTitle={title}
             bookSubtitle={subtitle}
             speech={speech}
+            listenRefused={listenRefused}
             hasBook={book.source !== null}
             screens={composition.screens}
           />

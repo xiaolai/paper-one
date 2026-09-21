@@ -30,6 +30,7 @@ import type { ScreenContribution } from '../../core/capability'
 import { CONTRIBUTION_ICONS } from '../contributionIcon'
 import type { AppDispatch, AppState, KernelPaneId } from '../state'
 import type { Speech } from '../reader/useSpeech'
+import { NO_GOOD_VOICE } from '../reader/voiceChoice'
 import styles from './TitleBar.module.css'
 
 /** Traffic-light fills, in AppKit's order. Preview only — see below. */
@@ -68,6 +69,12 @@ export interface TitleBarProps {
   bookSubtitle: string
   /** Reading aloud — the Listen control drives this directly. */
   speech: Speech
+  /**
+   * True when no voice good enough can read the book on screen — `voiceFor`
+   * answered `none`. The control is then disabled and says why, rather than
+   * starting a reading the speaker refuses at its first sentence.
+   */
+  listenRefused: boolean
   /** False with no book open: there is nothing to read aloud. */
   hasBook: boolean
   /**
@@ -127,6 +134,7 @@ export function TitleBar({
   bookTitle,
   bookSubtitle,
   speech,
+  listenRefused,
   hasBook,
   screens,
 }: TitleBarProps) {
@@ -331,12 +339,14 @@ export function TitleBar({
                 title={
                   !speech.available
                     ? 'Listen — this build has no speech engine'
-                    : 'Read this chapter aloud'
+                    : listenRefused
+                      ? `Listen — ${NO_GOOD_VOICE}`
+                      : 'Read this chapter aloud'
                 }
                 aria-label="Read aloud"
                 aria-pressed={false}
-                disabled={!speech.available || !hasBook}
-                data-disabled={!speech.available || !hasBook}
+                disabled={!speech.available || !hasBook || listenRefused}
+                data-disabled={!speech.available || !hasBook || listenRefused}
                 onClick={() => speech.start()}
               >
                 <AudioLines size={ICON.control} strokeWidth={ICON.stroke} />

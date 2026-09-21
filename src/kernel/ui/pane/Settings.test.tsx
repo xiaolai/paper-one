@@ -1134,16 +1134,26 @@ describe('the voice the picker shows', () => {
    * raw-string binding passes it too, because the two rendered alike.
    */
   const installed = {
+    name: 'Zoe',
+    lang: 'en-US',
+    voiceURI: 'com.apple.voice.enhanced.en-US.Zoe',
+    localService: true,
+  }
+  /* What a Mac's WebView offers — below the floor, see `voiceChoice.ts`. */
+  const compact = {
     name: 'Samantha',
     lang: 'en-US',
     voiceURI: 'com.apple.voice.compact.en-US.Samantha',
     localService: true,
   }
-  function pickerFor(chosen: Readonly<Record<string, string>>): HTMLSelectElement {
+  function pickerFor(
+    chosen: Readonly<Record<string, string>>,
+    voices: readonly (typeof installed)[] = [installed],
+  ): HTMLSelectElement {
     const { props } = full({
       narration: {
         lang: 'en-US',
-        voices: [installed],
+        voices,
         chosen,
         rate: 1,
         sentenceGapMs: 150,
@@ -1163,11 +1173,25 @@ describe('the voice the picker shows', () => {
 
   it('shows Automatic, naming the voice it means, for a voice the machine no longer has', () => {
     const select = pickerFor({ en: 'com.apple.voice.premium.en-US.Gone' })
-    expect(select.selectedOptions[0]?.textContent).toBe('Automatic (Samantha)')
+    expect(select.selectedOptions[0]?.textContent).toBe('Automatic (Zoe)')
   })
 
   it('shows the stored voice when it is one the reading will use', () => {
     const select = pickerFor({ en: installed.voiceURI })
     expect(select.value).toBe(installed.voiceURI)
+  })
+
+  /**
+   * ⚠️ **ON A MAC, NOTHING CLEARS THE FLOOR, AND THE PICKER SAYS SO.** It said
+   * "Automatic (system default)" — naming a voice the reading refuses to use.
+   * A stored compact choice from before the floor is refused the same way.
+   */
+  it('says no high-quality voice is available, and offers none below the floor', () => {
+    for (const chosen of [{}, { en: compact.voiceURI }]) {
+      const select = pickerFor(chosen, [compact])
+      expect(select.selectedOptions[0]?.textContent).toBe('None — no high-quality voice is available here')
+      expect([...select.options].map((option) => option.value)).toEqual([''])
+      cleanup()
+    }
   })
 })

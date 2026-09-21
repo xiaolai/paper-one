@@ -470,7 +470,7 @@ export function placeOfRange(
  * lookup's pronunciation treats it as `idle` rather than drawing "Paper
  * couldn't say that aloud" over a reader who has just pressed Listen.
  */
-export type DoneReason = 'ended' | 'empty' | 'error' | 'taken'
+export type DoneReason = 'ended' | 'empty' | 'error' | 'taken' | 'no-voice'
 
 /**
  * What the reader has decided about how the book should sound.
@@ -526,8 +526,10 @@ export interface SpeakerCallbacks {
   /**
    * Speech finished, and why. `ended` is the text running out — a section
    * read to its last word; `empty` is a section with nothing to read, reported
-   * synchronously from inside `speak`; `error` is the engine giving up. Not
-   * called for `stop()`, whose caller already knows.
+   * synchronously from inside `speak`; `error` is the engine giving up;
+   * `no-voice` is the floor refusing every voice this engine has for the text,
+   * also reported synchronously — see `voiceFor`. Not called for `stop()`,
+   * whose caller already knows.
    */
   onDone: (reason: DoneReason) => void
   /**
@@ -657,29 +659,33 @@ export class Speaker {
       return false
     }
 
+    /* THE VOICE, CHOSEN RATHER THAN INHERITED — and REFUSED when nothing is good
+     * enough, before an utterance exists. Left unset, WebKit hands an English
+     * book `com.apple.voice.super-compact.en-US.Samantha`, the most compressed
+     * voice Apple ships. `voiceFor` reads the tier out of `voiceURI` and takes
+     * the best one at or above the floor that speaks the document's language —
+     * see `voiceChoice.ts`.
+     *
+     * ⚠️ **`none` IS NOT SPOKEN AT ALL — the owner's rule: no voice rather than
+     * a bad one.** It used to be a null that left the property alone, which gave
+     * the platform's default, which on a Mac is the compact voice the floor had
+     * just refused. `platform` still leaves it alone: that is an engine that has
+     * listed nothing yet, or a book with no language among good voices, and
+     * there is nothing here to judge. Assigning `null` is not the same thing as
+     * leaving it on every engine, exactly as `documentLang` records for an
+     * empty `lang`. */
+    const answer = voiceFor(this.#synth.getVoices(), lang, prefs.voices ?? {})
+    if (answer.kind === 'none') {
+      this.#cb.onDone('no-voice')
+      return false
+    }
+
     const utterance = new SpeechSynthesisUtterance(text)
     /* Only when there is one. Assigning `''` is not a no-op on every engine —
      * see `documentLang` — and the platform's own default is the one the
      * reader chose in their system settings. */
     if (lang) utterance.lang = lang
-
-    /* THE VOICE, CHOSEN RATHER THAN INHERITED — and this is the whole of the
-     * audible change. Left unset, WebKit hands an English book
-     * `com.apple.voice.super-compact.en-US.Samantha`, the most compressed voice
-     * Apple ships, and a Chinese book whichever voice the system happens to
-     * default to. `voiceFor` reads the tier out of `voiceURI` and takes the best
-     * one that speaks the document's language — see `voiceChoice.ts` for the
-     * measured families and why a novelty voice is excluded rather than ranked
-     * last.
-     *
-     * ⚠️ **NULL IS A REAL ANSWER AND MUST NOT BE ASSIGNED.** `getVoices()` is
-     * empty until the engine has loaded its list, and a section that declares no
-     * language has no voice to ask for — in both cases the right outcome is the
-     * platform's own default, which is what leaving the property alone gives.
-     * Assigning `null` is not the same thing on every engine, exactly as
-     * `documentLang` records for an empty `lang`. */
-    const chosen = voiceFor(this.#synth.getVoices(), lang, prefs.voices ?? {})
-    if (chosen) utterance.voice = chosen
+    if (answer.kind === 'voice') utterance.voice = answer.voice
 
     /* The rate is a multiplier on the engine's default, so 1 IS the default and
      * assigning it changes nothing — which is why an absent preference and a

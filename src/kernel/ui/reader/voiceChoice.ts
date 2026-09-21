@@ -28,21 +28,28 @@
  * downloading a voice; this machine had none installed when that was measured,
  * which is the real reason read aloud sounded the way it did.
  *
- * ⚠️ **A NOVELTY VOICE IS EXCLUDED, NOT RANKED LAST.** Ranking it last still
- * selects it when it is the only match, and a book read by Zarvox is not a
- * degraded experience — it is a joke at the reader's expense. Excluded means
- * no voice is chosen, which leaves the utterance's own voice unset, and the
- * platform's default is never a novelty voice. The whole family goes, on the
- * strength of the table above: the boundary is Apple's own, so it needs no list
- * of names to be maintained as the set changes.
+ * ⚠️ **NO VOICE RATHER THAN A BAD ONE — the owner's rule, 2026-09-21.** Where
+ * the identifier names the tier, only `enhanced` and `premium` may read a book;
+ * `compact`, `super-compact` and the old `com.apple.speech.synthesis` family —
+ * Fred and Kathy as much as Boing and Zarvox — are below the floor, and are
+ * EXCLUDED rather than ranked low, because ranking low still selects them when
+ * they are all there is. When nothing passes, `voiceFor` answers `none` and the
+ * reading does not start, instead of handing the book to the platform default,
+ * which on a Mac is exactly the compact voice the floor refused.
  *
- * ⚠️ **AND `unknown` MUST STAY SELECTABLE.** Only Apple spells identifiers this
+ * ⚠️ **ON macOS THAT MEANS READ ALOUD IS OFF, AND IT WAS MEASURED, NOT
+ * ASSUMED.** On 2026-09-21 four good voices were installed on a macOS 27 machine
+ * that already had six Siri neural ones: the WebView went on offering the same
+ * 70 compact, super-compact and novelty voices, and a compact voice rendered
+ * byte-identically with or without its Enhanced asset installed. See AGENTS.md,
+ * "No good voice ever reaches the WebView". A good voice there needs the native
+ * engine, which is a separate decision.
+ *
+ * ⚠️ **AND `unknown` STAYS ABOVE THE FLOOR.** Only Apple spells identifiers this
  * way. On Linux, on Windows, and in a browser on either, every `voiceURI` is
- * something else — so a tier check that refused what it could not parse would
- * pick no voice anywhere but macOS and iOS, which is a regression dressed as a
- * feature. Unparseable ranks below `compact` and above `super-compact`: a voice
- * from an engine this module knows nothing about is still a real voice, where
- * `super-compact` is explicitly the most compressed thing Apple ships.
+ * something else — so a floor that refused what it could not read would take
+ * read aloud away everywhere but Apple's platforms, on no evidence about any of
+ * those voices. The rule is applied where the tier is legible, and only there.
  */
 
 /**
@@ -59,8 +66,16 @@ export type VoiceTier =
   | 'compact'
   | 'super-compact'
   | 'legacy'
-  | 'novelty'
   | 'unknown'
+
+/**
+ * The tiers at or above the floor — the only ones a book is read in.
+ *
+ * A TYPE OF ITS OWN, so every map over tiers a reader can meet — the ranking
+ * here, the labels in Settings — is typed over what can actually be offered,
+ * and a below-floor tier cannot be given a rank or a heading by mistake.
+ */
+export type ReadableTier = 'premium' | 'enhanced' | 'unknown'
 
 /**
  * A voice, in the only terms choosing one needs.
@@ -91,11 +106,12 @@ export interface VoiceFacts {
    * land there, and refusing on silence would take read-aloud away from
    * machines that are fine.
    *
-   * ⚠️ **THIS DOES NOT CLOSE THE HOLE, AND SAYING SO IS THE POINT.** Leaving
-   * `utterance.voice` unset uses the platform's default, which on a machine with
-   * only remote voices IS remote — so refusing to pick one does not stop the
-   * text going out. Closing it means refusing to speak at all there, which is a
-   * product decision and not this module's to make.
+   * ⚠️ **REFUSING TO PICK ONE DID NOT CLOSE THE HOLE; REFUSING TO SPEAK DOES.**
+   * Leaving `utterance.voice` unset used the platform's default, which on a
+   * machine with only remote voices IS remote, so the text went out anyway. That
+   * was a product decision this module could not make, and it has been made —
+   * no voice rather than a bad one — so a book whose language only a remote
+   * voice speaks is answered `none` by `voiceFor`, and is not read.
    */
   readonly localService?: boolean | undefined
   /**
@@ -119,19 +135,17 @@ export interface VoiceFacts {
 }
 
 /**
- * How much better one tier is than another. Higher wins.
+ * How much better one readable tier is than another. Higher wins.
  *
- * `novelty` has no rank because it is never compared — every path drops it
- * before ranking anything. It is in `VoiceTier` so that a picker can say what
- * it left out.
+ * Only the readable ones, because nothing below the floor is ever compared —
+ * every path refuses it before ranking anything. `unknown` ranks last: it is
+ * only ever beside another `unknown`, since no engine mixes Apple's identifiers
+ * with anyone else's, and there the engine's own default breaks the tie.
  */
-const TIER_RANK: Record<Exclude<VoiceTier, 'novelty'>, number> = {
-  premium: 5,
-  enhanced: 4,
-  compact: 3,
-  unknown: 2,
-  legacy: 1,
-  'super-compact': 0,
+const TIER_RANK: Record<ReadableTier, number> = {
+  premium: 2,
+  enhanced: 1,
+  unknown: 0,
 }
 
 /**
@@ -149,72 +163,32 @@ const TIER_RANK: Record<Exclude<VoiceTier, 'novelty'>, number> = {
  */
 const LANGUAGE_WEIGHT = Math.max(...Object.values(TIER_RANK)) + 1
 
-/** `TIER_RANK` for any tier, with the one that is never ranked answering lowest. */
-function rankOf(tier: VoiceTier): number {
-  return tier === 'novelty' ? -1 : TIER_RANK[tier]
-}
-
 /** The `com.apple.voice.<tier>.<lang>.<Name>` families, by the tier they name. */
 const APPLE_TIERS: readonly VoiceTier[] = ['premium', 'enhanced', 'compact', 'super-compact']
 
-/** The family that holds both the sound effects and the oldest real voices. */
-const LEGACY_PREFIX = 'com.apple.speech.synthesis.'
-
 /**
- * The SOUND EFFECTS, by IDENTIFIER.
+ * Apple's oldest family — Fred, Kathy, Ralph, Junior — and its sound effects.
  *
- * ⚠️ **THE WHOLE FAMILY USED TO COUNT AS NOVELTY, AND THAT LOST REAL VOICES.**
- * This module argued the prefix was the boundary so no name list had to be kept.
- * The family is not homogeneous: Fred, Junior, Kathy and Ralph share it with
- * Boing and Zarvox, and excluding them took working voices out of both the
- * automatic pick and the picker.
- *
- * ⚠️ **AND THE FIRST REPLACEMENT LIST WAS WRONG TWICE.** It was written from the
- * names a reader sees, and `tierOf` reads the IDENTIFIER — where three of them
- * differ: `Deranged` is shown as Wobble, `Hysterical` as Jester, `Princess` as
- * Superstar. It also missed Albert and Princess, which are novelty. Both errors
- * were found by the audit and then settled by MEASURING rather than by guessing
- * again: `AVSpeechSynthesisVoice.voiceTraits.isNoveltyVoice` is the platform's
- * own answer, and on macOS 27 it splits this family 15 / 4 exactly as below.
- *
- * ⚠️ **THE WEB SIDE CANNOT ASK FOR THAT TRAIT**, which is why the list exists at
- * all. `narrate_voices` can — so the day the native list feeds the picker, this
- * becomes a fallback rather than the rule. Until then a name not on it is a
- * VOICE, which is the safe direction: the cost of missing one is a silly entry
- * in a list, and the cost of the old rule was losing four.
+ * ⚠️ **ONE TIER NOW, AND THE LIST THAT SPLIT IT IS GONE.** This family used to
+ * be divided by a hand-kept list of fifteen sound effects (Boing, Zarvox…), so
+ * that Fred and Kathy stayed choosable while Boing did not. The floor takes the
+ * whole family, so the split decided nothing any more — and a denylist that
+ * fails open, letting any effect it did not name through as a voice, was an
+ * audit finding of its own. Below the floor, a new effect Apple adds is refused
+ * with the rest, whatever it is called.
  */
-const SOUND_EFFECTS: ReadonlySet<string> = new Set([
-  'Albert',
-  'BadNews',
-  'Bahh',
-  'Bells',
-  'Boing',
-  'Bubbles',
-  'Cellos',
-  'Deranged',
-  'GoodNews',
-  'Hysterical',
-  'Organ',
-  'Princess',
-  'Trinoids',
-  'Whisper',
-  'Zarvox',
-])
+const LEGACY_PREFIX = 'com.apple.speech.synthesis.'
 
 /**
  * The tier a `voiceURI` names, or `unknown` when it is not Apple's.
  *
- * The novelty family is checked FIRST, and the order matters: both families
- * begin `com.apple.`, and `com.apple.speech.synthesis.voice.Boing` contains no
- * tier word, so a tier scan that ran first would answer `unknown` for it —
- * which is a selectable rank. Boing would then read books on a machine whose
- * only English voices were novelty ones.
+ * The old family is checked FIRST, and the order matters: both families begin
+ * `com.apple.`, and `com.apple.speech.synthesis.voice.Boing` contains no tier
+ * word, so a tier scan that ran first would answer `unknown` for it — which is
+ * above the floor. Boing would then read books.
  */
 export function tierOf(voiceURI: string): VoiceTier {
-  if (voiceURI.startsWith(LEGACY_PREFIX)) {
-    const name = voiceURI.slice(voiceURI.lastIndexOf('.') + 1)
-    return SOUND_EFFECTS.has(name) ? 'novelty' : 'legacy'
-  }
+  if (voiceURI.startsWith(LEGACY_PREFIX)) return 'legacy'
   for (const tier of APPLE_TIERS) {
     if (voiceURI.startsWith(`com.apple.voice.${tier}.`)) return tier
   }
@@ -236,8 +210,9 @@ export function primaryOf(lang: string): string {
      separator, a different case rule — would have reached one path and not the
      other, and the key a choice is STORED under would stop matching the tag it
      is LOOKED UP by. Function declarations hoist, so the order below is fine. */
-  const [primary = ''] = normalize(lang).split('-')
-  return primary
+  const tag = normalize(lang)
+  const cut = tag.indexOf('-')
+  return cut === -1 ? tag : tag.slice(0, cut)
 }
 
 /** `lang`, folded so two spellings of one language compare equal. */
@@ -313,21 +288,31 @@ function languageScore(voice: string, wanted: string): number {
    */
   const wantedScript = scriptOf(wanted)
   const voiceScript = scriptOf(voice)
-  if (wantedScript === null || voiceScript === null) return 1
-  return wantedScript === voiceScript ? 2 : 1
+  /* ONE TEST, NOT A GUARD AND A COMPARISON. Two nulls would compare equal, so
+     an unknown book script has to be ruled out before the scripts are matched;
+     written as a separate early return for either side, half of it could never
+     change an answer, since a known script never equals an unknown one. */
+  return wantedScript !== null && wantedScript === voiceScript ? 2 : 1
 }
 
 /**
- * Whether this voice may ever be chosen, before any question about language.
+ * The tier this voice reads at, or null when it may never be chosen — before
+ * any question about language.
  *
  * ONE PREDICATE, because three callers ask it and two of them had drifted: a
  * stored choice was once checked for language and not for novelty, and the
- * no-language list would have been a third place to forget. A sound effect
- * (see `SOUND_EFFECTS`) and a voice the engine synthesises on a server (see
+ * no-language list would have been a third place to forget. A voice below the
+ * floor and a voice the engine synthesises on a server (see
  * `VoiceFacts.localService`) are both refused everywhere, always.
+ *
+ * ANSWERS THE TIER rather than a yes, so a caller that ranks what passed has
+ * nothing left to narrow: the type says a readable tier, and there is no second
+ * check to write that could never fail.
  */
-function selectable(voice: VoiceFacts): boolean {
-  return voice.localService !== false && tierOf(voice.voiceURI) !== 'novelty'
+function readableTier(voice: VoiceFacts): ReadableTier | null {
+  if (voice.localService === false) return null
+  const tier = tierOf(voice.voiceURI)
+  return tier === 'premium' || tier === 'enhanced' || tier === 'unknown' ? tier : null
 }
 
 /**
@@ -360,16 +345,10 @@ export function voiceKey(lang: string | null): string {
  * only has to exceed the tier range, and is checked by a test that pits the two
  * against each other rather than by inspection.
  */
-function scoreOf(voice: VoiceFacts, lang: string): number {
-  if (!selectable(voice)) return 0
-  const tier = tierOf(voice.voiceURI)
-  /* A NARROWING FOR THE TYPE, NOT A SECOND FILTER — `selectable` has already
-     refused novelty, so this cannot be true at run time. It is here because
-     `TIER_RANK` is keyed without `'novelty'`, and indexing it needs the compiler
-     to know the tier is not one; `voiceGroups` says the same beside its own. An
-     audit read it as a duplicated check; the second `tierOf` is a prefix test on
-     a short string, and caching it would add state to save nothing measurable. */
-  if (tier === 'novelty') return 0
+function scoreOf(voice: VoiceFacts, tier: ReadableTier, lang: string): number {
+  /* THE TIER IS PASSED IN, not asked again: `offered`, the only caller, has
+     already refused every voice below the floor, so a second `readableTier`
+     here had a null branch no voice could reach. */
   const language = languageScore(voice.lang, lang)
   if (language === 0) return 0
   /* ⚠️ **THERE WAS A `+ 1` HERE AND ITS REASON WAS FALSE.** It claimed to keep
@@ -427,26 +406,31 @@ export function chosenVoice<T extends VoiceFacts>(
   chosen: Readonly<Record<string, string>>,
 ): T | null {
   const wanted = chosen[voiceKey(lang)]
-  if (wanted === undefined || wanted === '') return null
+  /* ABSENT AND `''` ALIKE: `''` is what the picker's Automatic row stores, so it
+     must never match a voice — not even an engine's voice whose `voiceURI`
+     happens to be empty. */
+  if (!wanted) return null
   /* ⚠️ **A BOOK WITH NO DECLARED LANGUAGE HAS NO LANGUAGE TO CHECK, AND USED TO
    * HAVE NO CHOICE EITHER.** `bestVoice` still refuses to guess one — that is
    * the rule, not an omission — so without a stored choice the reader was left
    * with whatever the platform picked and nothing to say about it. The choice
    * is honoured here under the `''` key; only the language test is skipped,
-   * never `selectable`. */
-  const declared = lang !== null && lang.trim() !== ''
-  /* ⚠️ **THE NOVELTY RULE APPLIES HERE TOO, AND IT DID NOT.** `bestVoice` and
-   * `voiceOptions` both promise never to choose a sound effect; a stored
-   * preference naming Boing walked straight past both of them, because a
-   * choice was only ever checked for language. A hand-edited settings file is
-   * exactly where such a value comes from. Falls through to the automatic
-   * pick, which is what an absent choice does. */
+   * never the floor. */
+  const declared = lang !== null && lang.trim() !== '' ? lang : null
+  /* ⚠️ **THE FLOOR APPLIES HERE TOO.** `bestVoice` and `voiceOptions` both
+   * promise never to choose a voice below it; a stored preference naming Boing —
+   * or, since the floor, a compact voice chosen before there was one — would
+   * walk straight past both, because a choice was once only checked for
+   * language. A hand-edited or older settings file is exactly where such a value
+   * comes from. Falls through to the automatic pick, which is what an absent
+   * choice does. */
   return (
     voices.find(
       (voice) =>
         voice.voiceURI === wanted &&
-        selectable(voice) &&
-        (!declared || (languageScore(voice.lang, lang) > 0 && !otherScript(voice.lang, lang))),
+        readableTier(voice) !== null &&
+        (declared === null ||
+          (languageScore(voice.lang, declared) > 0 && !otherScript(voice.lang, declared))),
     ) ?? null
   )
 }
@@ -468,8 +452,7 @@ export function chosenVoice<T extends VoiceFacts>(
  * An UNKNOWN script on either side is not a difference: most voices and most
  * books do not say, and refusing on silence would discard ordinary choices.
  */
-function otherScript(voiceLang: string, bookLang: string | null): boolean {
-  if (bookLang === null) return false
+function otherScript(voiceLang: string, bookLang: string): boolean {
   const voice = knownScriptOf(voiceLang)
   const book = knownScriptOf(bookLang)
   return voice !== null && book !== null && voice !== book
@@ -497,20 +480,93 @@ function knownScriptOf(lang: string): string | null {
 }
 
 /**
- * The voice to speak a document in `lang` with: the reader's, else the best
- * one, else none.
+ * What the reader is told when no voice clears the floor — see `voiceFor`.
  *
- * The one function `Speaker` calls. Kept as a composition of the two halves
- * rather than one function with a branch in it, because each half has its own
- * rule worth testing on its own — that a stale choice falls through, and that
- * the automatic pick refuses novelty.
+ * NOT "install a voice", although that is the obvious advice: on a Mac it is
+ * false. Measured 2026-09-21, installed Enhanced and neural voices never reach
+ * the WebView this app speaks through, so a reader sent to System Settings
+ * would come back to the same refusal. It says what is true — nothing good
+ * enough is available HERE — and why the export stopped.
+ */
+export const NO_GOOD_VOICE = 'No high-quality voice can read this book here, so it is not read in a low-quality one.'
+
+/**
+ * What to speak a document in `lang` with — see `voiceFor`.
+ *
+ * - `voice`: this one.
+ * - `platform`: leave the utterance's voice unset, because there is nothing
+ *   here to judge — the engine has listed no voices yet, or the book declares
+ *   no language and good voices exist for the platform to choose among.
+ * - `none`: no voice good enough can read it, so it is not read.
+ */
+export type VoiceAnswer<T> =
+  | { readonly kind: 'voice'; readonly voice: T }
+  | { readonly kind: 'platform' }
+  | { readonly kind: 'none' }
+
+/**
+ * The voice to speak a document in `lang` with: the reader's, else the best
+ * one — else the platform's where nothing here can judge it, else none.
+ *
+ * The one function the reading and the audiobook export call. `chosenVoice` and
+ * `bestVoice` stay separate halves because each has its own rule worth testing
+ * on its own — that a stale choice falls through, and that the automatic pick
+ * holds the floor.
+ *
+ * ⚠️ **NULL USED TO MEAN "THE PLATFORM'S DEFAULT", AND THAT WAS THE HOLE.** A
+ * null from here left `utterance.voice` unset, so a book the floor refused every
+ * voice for was read anyway, in whatever the platform chose — on a Mac, compact
+ * Samantha, the exact voice refused. So `none` is its own answer now, and only
+ * the two cases where nothing can be judged fall to the platform:
+ *
+ * - AN EMPTY LIST is an engine that has not loaded its voices yet (`useVoices`),
+ *   or has none; refusing on it would refuse on silence. The window on a Mac is
+ *   the first moment after launch, before `voiceschanged`.
+ * - A BOOK WITH NO DECLARED LANGUAGE on a list that holds good voices: choosing
+ *   one would be choosing the book's language for it — `bestVoice`'s rule — so
+ *   the platform's own pick stands, and the reader can name one in Settings.
+ *   The platform's pick cannot be judged in advance: WebKit flags EVERY voice
+ *   `default`, measured 2026-09-21, so no flag says which it will take.
+ *
+ * A book that DECLARES a language and has no good voice for it is `none`: a
+ * voice for another language is not a worse reading of it, it is not a reading.
  */
 export function voiceFor<T extends VoiceFacts>(
   voices: readonly T[],
   lang: string | null,
   chosen: Readonly<Record<string, string>> = {},
-): T | null {
-  return chosenVoice(voices, lang, chosen) ?? bestVoice(voices, lang)
+): VoiceAnswer<T> {
+  const voice = chosenVoice(voices, lang, chosen) ?? bestVoice(voices, lang)
+  if (voice) return { kind: 'voice', voice }
+  if (voices.length === 0) return { kind: 'platform' }
+  if (lang !== null && lang.trim() !== '') return { kind: 'none' }
+  return offered(voices, null).length > 0 ? { kind: 'platform' } : { kind: 'none' }
+}
+
+/**
+ * The voices above the floor for a document in `lang`, best first, each with
+ * the tier it earned — `voiceOptions` and `voiceGroups` are this, seen two ways.
+ */
+function offered<T extends VoiceFacts>(
+  voices: readonly T[],
+  lang: string | null,
+): readonly { readonly voice: T; readonly tier: ReadableTier }[] {
+  const rows = voices.flatMap((voice) => {
+    const tier = readableTier(voice)
+    return tier === null ? [] : [{ voice, tier }]
+  })
+  if (lang === null || lang.trim() === '') {
+    /* EVERY READABLE VOICE, BY TIER, because there is no language to rank
+     * against — and an empty list was what left a language-less book with no
+     * voice control at all. `sort` is stable, so voices of one tier keep the
+     * engine's own order, exactly as the language path relies on. */
+    return [...rows].sort((a, b) => TIER_RANK[b.tier] - TIER_RANK[a.tier])
+  }
+  const language = lang
+  return rows
+    .map((row) => ({ ...row, score: scoreOf(row.voice, row.tier, language) }))
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score || defaultRank(b.voice) - defaultRank(a.voice))
 }
 
 /**
@@ -526,23 +582,7 @@ export function voiceFor<T extends VoiceFacts>(
  * default is a picker that makes the default look like a mistake.
  */
 export function voiceOptions<T extends VoiceFacts>(voices: readonly T[], lang: string | null): readonly T[] {
-  if (lang === null || lang.trim() === '') {
-    /* EVERY SELECTABLE VOICE, BY TIER, because there is no language to rank
-     * against — and an empty list was what left a language-less book with no
-     * voice control at all. `sort` is stable, so voices of one tier keep the
-     * engine's own order, exactly as the language path relies on. */
-    return voices
-      .filter(selectable)
-      .map((voice) => ({ voice, tier: tierOf(voice.voiceURI) }))
-      .sort((a, b) => rankOf(b.tier) - rankOf(a.tier))
-      .map((row) => row.voice)
-  }
-  const language = lang
-  return voices
-    .map((voice) => ({ voice, score: scoreOf(voice, language) }))
-    .filter((row) => row.score > 0)
-    .sort((a, b) => b.score - a.score || defaultRank(b.voice) - defaultRank(a.voice))
-    .map((row) => row.voice)
+  return offered(voices, lang).map((row) => row.voice)
 }
 
 /**
@@ -555,6 +595,8 @@ export function voiceOptions<T extends VoiceFacts>(voices: readonly T[], lang: s
  * the vendor points at is strictly more information than picking index 0, which
  * is what the first version of this module did.
  */
+/* ⚠️ **AND ON WebKit IT DECIDES NOTHING AT ALL:** every voice the WebView lists
+ * is flagged `default` — all 70 on a macOS 27 machine, measured 2026-09-21. */
 function defaultRank(voice: VoiceFacts): number {
   return voice.default === true ? 1 : 0
 }
@@ -577,7 +619,7 @@ function defaultRank(voice: VoiceFacts): number {
 export function voiceGroups<T extends VoiceFacts>(
   voices: readonly T[],
   lang: string | null,
-): readonly { readonly tier: Exclude<VoiceTier, 'novelty'>; readonly voices: readonly T[] }[] {
+): readonly { readonly tier: ReadableTier; readonly voices: readonly T[] }[] {
   /* ⚠️ **ORDERED BY WHAT IS IN THEM, NOT BY TIER — AND IT WAS BY TIER.** Sorting
    * the groups by rank alone contradicted `bestVoice` exactly where the two most
    * needed to agree: with an `en-GB` Premium and an `en-US` Compact installed,
@@ -585,14 +627,8 @@ export function voiceGroups<T extends VoiceFacts>(
    * put Premium first. The reader was then shown a first row that was not the
    * default, which is the drift `scoreOf` exists to prevent. Built in the order
    * `voiceOptions` already sorted them into, so first-seen IS best-scoring. */
-  const offered = voiceOptions(voices, lang)
-  const groups: { tier: Exclude<VoiceTier, 'novelty'>; voices: T[] }[] = []
-  for (const voice of offered) {
-    const tier = tierOf(voice.voiceURI)
-    /* `voiceOptions` has already dropped both, so this is a narrowing for the
-     * type rather than a second filter. */
-    if (tier === 'novelty') continue
-    /* ⚠️ **ONLY THE RUN THAT IS STILL OPEN, NEVER AN EARLIER GROUP OF THE SAME
+  const groups: { tier: ReadableTier; voices: T[] }[] = []
+  for (const { voice, tier } of offered(voices, lang)) {    /* ⚠️ **ONLY THE RUN THAT IS STILL OPEN, NEVER AN EARLIER GROUP OF THE SAME
      * TIER.** Merging by tier across the whole list looked right and quietly
      * undid the ordering again: with an exact-language compact, an exact
      * super-compact and an other-region compact, searching for an existing

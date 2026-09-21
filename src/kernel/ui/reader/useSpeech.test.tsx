@@ -212,6 +212,58 @@ describe('following the voice across pages', () => {
   })
 })
 
+/**
+ * NO VOICE RATHER THAN A BAD ONE — and a refusal must END the reading.
+ *
+ * Every reason the speaker reports but three means "that sentence finished, go
+ * on", so a refusal read that way walked the book: the next sentence, refused;
+ * then the next section, a page turn at a time, refused again. Nothing can be
+ * read until the voices change.
+ */
+describe('a reading no voice is good enough for', () => {
+  it('stops at once, speaks nothing and turns no page', () => {
+    /* What a Mac's WebView offers — all of it below the floor. */
+    synth.voices = [
+      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' },
+      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.super-compact.en-US.Samantha' },
+    ]
+    const a = section(['First sentence here.', 'Second sentence here.'], 'en-US')
+    const { speech, next } = mount(a.doc)
+    act(() => speech().start())
+    act(() => {
+      vi.advanceTimersByTime(CONTINUE_TICK_MS * 4)
+    })
+    expect(synth.queued).toEqual([])
+    expect(next, 'the refusal walked the book').not.toHaveBeenCalled()
+    expect(speech().speaking).toBe(false)
+    a.remove()
+  })
+
+  /* THE CASE THE GUARD IN `onDone` IS FOR. On the reader's own press the reading
+     is not yet marked under way, so a refusal there ends it by another road;
+     MID-reading it does not. A book that moves into a section in a language no
+     good voice speaks must stop there, not walk on through it. */
+  it('stops where the reading reaches a section no good voice can read', () => {
+    synth.voices = [{ name: 'Zoe', lang: 'en-US', voiceURI: 'com.apple.voice.enhanced.en-US.Zoe' }]
+    const a = section('An English chapter.', 'en-US')
+    const b = section(['Un chapitre.', 'Une autre phrase.'], 'fr-FR')
+    const { speech, next, show } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    expect(next).toHaveBeenCalledTimes(1)
+
+    show(b.doc)
+    act(() => {
+      vi.advanceTimersByTime(CONTINUE_TICK_MS * 4)
+    })
+    expect(spoken(), 'nothing French was read').toEqual(['An English chapter.'])
+    expect(next, 'the refusal walked on past the section').toHaveBeenCalledTimes(1)
+    expect(speech().speaking).toBe(false)
+    a.remove()
+    b.remove()
+  })
+})
+
 describe('the end of a section', () => {
   it('goes on into the next section instead of stopping', () => {
     const a = section('First chapter.')

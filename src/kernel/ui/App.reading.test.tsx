@@ -313,6 +313,8 @@ vi.mock('./reader/session', async (importActual) => {
 })
 
 import { App } from './App'
+import { FakeSynth, FakeUtterance } from './reader/speechSynth.testkit'
+import { NO_GOOD_VOICE } from './reader/voiceChoice'
 
 /* jsdom has no `scrollIntoView` (the palette's active row calls it) and no
    `ResizeObserver` (the reader measures its stage with one). */
@@ -1603,5 +1605,56 @@ describe('turning a page', () => {
     } finally {
       added.mockRestore()
     }
+  })
+})
+
+/**
+ * NO VOICE RATHER THAN A BAD ONE, THROUGH THE WHOLE APP.
+ *
+ * The rule lives in `voiceChoice.ts` and the button in `TitleBar`, and each is
+ * tested alone; what neither can see is the wire between them — `App` reading
+ * the engine's live list through `useVoices`, asking `voiceFor` about the book on
+ * screen, and handing the answer to the Listen control. A wire that went nowhere
+ * would leave the button enabled over a reading the speaker refuses.
+ */
+describe('the Listen control and the voices this machine has', () => {
+  afterEach(() => {
+    delete (window as { speechSynthesis?: unknown }).speechSynthesis
+    delete (window as { SpeechSynthesisUtterance?: unknown }).SpeechSynthesisUtterance
+  })
+
+  async function listenWith(voices: readonly { name: string; lang: string; voiceURI: string }[]) {
+    const synth = new FakeSynth()
+    synth.voices = [...voices]
+    Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true, writable: true })
+    window.SpeechSynthesisUtterance = FakeUtterance as unknown as typeof SpeechSynthesisUtterance
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await open('Moby-Dick')
+    /* BY ITS LABEL ATTRIBUTE, not by role and name: the reading chrome is faded
+       out until the pointer asks for it, which takes it out of the
+       accessibility tree, and an element there computes an empty accessible
+       name. What is under test is the control's state, not whether it shows. */
+    const button = document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')
+    expect(button, 'the Listen control is not in the title bar').not.toBeNull()
+    return button!
+  }
+
+  it('is disabled, and says why, when every voice is below the floor — a Mac', async () => {
+    const button = await listenWith([
+      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' },
+      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.super-compact.en-US.Samantha' },
+    ])
+    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('title')).toBe(`Listen — ${NO_GOOD_VOICE}`)
+  })
+
+  it('reads when a voice above the floor is there', async () => {
+    const button = await listenWith([
+      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' },
+      { name: 'Zoe', lang: 'en-US', voiceURI: 'com.apple.voice.enhanced.en-US.Zoe' },
+    ])
+    expect(button).toHaveProperty('disabled', false)
+    expect(button.getAttribute('title')).toBe('Read this chapter aloud')
   })
 })

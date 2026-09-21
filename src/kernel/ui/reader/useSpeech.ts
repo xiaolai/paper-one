@@ -415,7 +415,12 @@ export function useSpeech(
          * word being pronounced. `engineHeldBy` in `speech.ts` is what tells
          * the two apart now. Treated as an end rather than an error, because
          * nothing failed — the reader asked for something else. */
-        if (reason === 'error' || reason === 'taken' || !readingRef.current) {
+        /* ⚠️ **`no-voice` ENDS THE READING, AND WOULD NOT HAVE BY ITSELF.** Every
+           reason below this falls through to "that sentence finished, go on" —
+           so a refusal would have walked the book sentence by sentence, then
+           page by page, refusing each one. Nothing here can be read until the
+           voices change, and the Listen control says so. */
+        if (reason === 'error' || reason === 'taken' || reason === 'no-voice' || !readingRef.current) {
           finish()
           return
         }

@@ -58,7 +58,7 @@ import {
 } from '../../core/uiTypes'
 import { PaneBand } from './PaneBand'
 import { PaneGroup } from './PaneGroup'
-import { bestVoice, chosenVoice, voiceGroups, voiceKey, type VoiceFacts, type VoiceTier } from '../reader/voiceChoice'
+import { bestVoice, chosenVoice, voiceFor, voiceGroups, voiceKey, type ReadableTier, type VoiceFacts } from '../reader/voiceChoice'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
 import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
@@ -323,28 +323,21 @@ const STYLE_LABELS = {
  * genuinely differed between them, which is what each state is CALLED.
  */
 /**
- * What a reader is told each voice tier is.
+ * What a reader is told each offered voice tier is.
  *
- * APPLE'S OWN WORDS WHERE IT HAS THEM — its Manage Voices sheet says Default,
- * Enhanced and Premium — and the two it does not expose are named by what they
- * are rather than by their identifiers. `super-compact` is the smallest voice
- * shipped, so "Compact" is honest and "Standard" is what the ordinary one is;
+ * APPLE'S OWN WORDS — its Manage Voices sheet says Enhanced and Premium — and
  * `unknown` is every non-Apple engine, where the tier genuinely is not known.
  *
- * TYPED OVER THE UNION, so a tier added to `VoiceTier` without a label here is
- * a compile error rather than a blank heading — the rule `CONTRIBUTION_ICONS`
- * states for its own map.
+ * ONLY THE TIERS AT OR ABOVE THE FLOOR, because nothing below it is ever
+ * offered (see `voiceChoice.ts`): Standard, Compact and Classic had labels here,
+ * and a heading for a tier the picker can no longer show is a promise the list
+ * does not keep. TYPED OVER `ReadableTier`, so a tier that becomes offerable
+ * without a label is a compile error rather than a blank heading — the rule
+ * `CONTRIBUTION_ICONS` states for its own map.
  */
-const TIER_LABELS: Record<Exclude<VoiceTier, 'novelty'>, string> = {
+const TIER_LABELS: Record<ReadableTier, string> = {
   premium: 'Premium',
   enhanced: 'Enhanced',
-  compact: 'Standard',
-  'super-compact': 'Compact',
-  /* Apple's oldest voices — Alex, Fred, Kathy. Offered, because Alex is what
-     some readers would choose over everything else on the machine; ranked low,
-     because the modern voices are generally better for a whole book. The sound
-     effects in the same family are not offered at all. */
-  legacy: 'Classic',
   unknown: 'Other',
 }
 
@@ -1095,7 +1088,14 @@ export function Settings({
              one case where the reader needs to be told to go and get a voice. */
           lead={{
             value: '',
+            /* ⚠️ **AND WHEN NOTHING CLEARS THE FLOOR, IT SAYS THAT** — which on a
+               Mac is always, since the WebView offers no voice above compact.
+               "Automatic (system default)" there would name a voice the reading
+               refuses to use, so the row says what the reading will do. */
             label: (() => {
+              if (voiceFor(narration.voices, narration.lang, narration.chosen).kind === 'none') {
+                return 'None — no high-quality voice is available here'
+              }
               const best = bestVoice(narration.voices, narration.lang)
               return best ? `Automatic (${best.name})` : 'Automatic (system default)'
             })(),

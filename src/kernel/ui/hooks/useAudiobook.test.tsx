@@ -2,6 +2,7 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useAudiobook, type AudiobookControl, type AudiobookDeps } from './useAudiobook'
+import { NO_GOOD_VOICE } from '../reader/voiceChoice'
 import type { VoiceFacts } from '../reader/voiceChoice'
 
 /**
@@ -17,10 +18,12 @@ import type { VoiceFacts } from '../reader/voiceChoice'
 
 afterEach(cleanup)
 
+/* ABOVE THE FLOOR — see `voiceChoice.ts`. A compact voice, which is all a Mac's
+   WebView offers, is refused, and so is the export. */
 const VOICE: VoiceFacts = {
-  name: 'Samantha',
+  name: 'Zoe',
   lang: 'en-US',
-  voiceURI: 'com.apple.voice.compact.en-US.Samantha',
+  voiceURI: 'com.apple.voice.enhanced.en-US.Zoe',
   localService: true,
 }
 
@@ -137,15 +140,13 @@ describe('a book laid out in fixed pages', () => {
 })
 
 describe('a book with no voice this app would choose', () => {
-  it('refuses rather than exporting in whatever the platform has', async () => {
-    /* Reading aloud may fall through to the platform default — a fair bargain for
-       a few paragraphs somebody can stop. A long render in an unexpected voice is
-       not the same bargain. */
-    const { seen, say } = mount({ voices: [] })
+  it('refuses a book whose only voices are below the floor — the Mac, as measured', async () => {
+    const compact = { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }
+    const { seen, say } = mount({ voices: [compact] })
     await act(async () => {
       seen[0]?.run()
     })
-    expect(say).toHaveBeenCalledWith(expect.stringContaining('No installed voice'))
+    expect(say).toHaveBeenCalledWith(NO_GOOD_VOICE)
   })
 
   it('refuses a remote voice, which is the privacy half of the same rule', async () => {
@@ -153,7 +154,37 @@ describe('a book with no voice this app would choose', () => {
     await act(async () => {
       seen[0]?.run()
     })
-    expect(say).toHaveBeenCalledWith(expect.stringContaining('No installed voice'))
+    expect(say).toHaveBeenCalledWith(NO_GOOD_VOICE)
+  })
+
+  it('says the voices have not arrived, rather than sending the reader to Settings', async () => {
+    /* An engine that has listed nothing yet: a render needs a voice named, and
+       there is nothing in Settings to name. */
+    const { seen, say } = mount({ voices: [] })
+    await act(async () => {
+      seen[0]?.run()
+    })
+    expect(say).toHaveBeenCalledWith('No voices are available yet — try again in a moment.')
+  })
+
+  it('asks for a voice to be named for a book that declares no language', async () => {
+    const { seen, say } = mount({
+      source: {
+        title: 'An Unlabelled Book',
+        author: 'Paper',
+        lang: null,
+        toc: [],
+        fixedLayout: false,
+        skip: { notes: false },
+        sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
+      },
+    })
+    await act(async () => {
+      seen[0]?.run()
+    })
+    expect(say).toHaveBeenCalledWith(
+      'This book does not say what language it is in — choose a voice for it in Settings first.',
+    )
   })
 })
 

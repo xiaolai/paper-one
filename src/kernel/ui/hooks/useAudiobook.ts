@@ -6,7 +6,7 @@ import { messageOf } from '../../core/messageOf'
 import type { SpeechSkipPrefs } from '../reader/speechSkip'
 import type { SectionTextWalk } from '../reader/session'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
-import { voiceFor, type VoiceFacts } from '../reader/voiceChoice'
+import { NO_GOOD_VOICE, voiceFor, type VoiceFacts } from '../reader/voiceChoice'
 
 /**
  * Exporting the open book, from the command palette.
@@ -149,13 +149,27 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
       stop.current = false
       setRunning(true)
       try {
-        const voice = voiceFor(voices, source.lang, chosen)
-        if (!voice) {
-          /* The one refusal that is about the machine rather than the book: no
-             voice this app would choose speaks the language it declares. */
-          say('No installed voice can read this book — choose one in Settings first.')
+        const answer = voiceFor(voices, source.lang, chosen)
+        if (answer.kind !== 'voice') {
+          /* THE REFUSALS THAT ARE ABOUT THE MACHINE rather than the book, each
+             saying what is true. `none` is the floor: no voice good enough
+             speaks the book's language, and a book is not rendered in a
+             low-quality one — the reading's rule, so the file never says it in
+             a voice the reading would have refused. `platform` is a book the
+             reading would leave to the platform's own voice, which a render
+             cannot do — it needs a voice named — and it is one of two things: an
+             engine that has listed nothing yet, which the reader cannot fix in
+             Settings, or a book that declares no language, which they can. */
+          say(
+            answer.kind === 'none'
+              ? NO_GOOD_VOICE
+              : voices.length === 0
+                ? 'No voices are available yet — try again in a moment.'
+                : 'This book does not say what language it is in — choose a voice for it in Settings first.',
+          )
           return
         }
+        const voice = answer.voice
 
         say('Reading the book…')
         /* THE STOP GOES IN, rather than being checked only on the way out. A long

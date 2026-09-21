@@ -64,62 +64,88 @@ describe('Speaker', () => {
    * nothing to say.
    */
   describe('choosing a voice', () => {
+    const zoe = { name: 'Zoe', lang: 'en-US', voiceURI: 'com.apple.voice.enhanced.en-US.Zoe' }
+    const ava = { name: 'Ava', lang: 'en-US', voiceURI: 'com.apple.voice.premium.en-US.Ava' }
+    const tingting = { name: 'Tingting', lang: 'zh-CN', voiceURI: 'com.apple.voice.enhanced.zh-CN.Tingting' }
+    /* What a Mac's WebView actually offers — measured, see `voiceChoice.ts`. */
     const compact = { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }
     const superCompact = {
       name: 'Samantha',
       lang: 'en-US',
       voiceURI: 'com.apple.voice.super-compact.en-US.Samantha',
     }
-    const tingting = { name: 'Tingting', lang: 'zh-CN', voiceURI: 'com.apple.voice.compact.zh-CN.Tingting' }
 
     it('takes the best installed voice for the document language', () => {
-      synth.voices = [superCompact, compact, tingting]
+      synth.voices = [zoe, ava, tingting]
       const { speaker } = make()
       speaker.speak('hello', 'en-US')
-      expect(synth.queued[0]?.voice).toBe(compact)
+      expect(synth.queued[0]?.voice).toBe(ava)
     })
 
     it('speaks a Chinese section in a Chinese voice', () => {
       // The defect this prevents is the one the reader cannot diagnose: a
       // Chinese book read aloud by an English voice.
-      synth.voices = [superCompact, compact, tingting]
+      synth.voices = [zoe, ava, tingting]
       const { speaker } = make()
       speaker.speak('你好', 'zh-CN')
       expect(synth.queued[0]?.voice).toBe(tingting)
     })
 
     it("honours the reader's own choice over the better voice", () => {
-      synth.voices = [superCompact, compact]
+      synth.voices = [zoe, ava]
       const { speaker } = make()
-      speaker.speak('hello', 'en-US', { voices: { en: superCompact.voiceURI } })
-      expect(synth.queued[0]?.voice).toBe(superCompact)
+      speaker.speak('hello', 'en-US', { voices: { en: zoe.voiceURI } })
+      expect(synth.queued[0]?.voice).toBe(zoe)
     })
 
     it('leaves the voice unset while the engine has no list yet', () => {
       /* `getVoices()` is EMPTY until the engine has loaded it, which is the
-       * state at the start of a session. Assigning `null` there is not a no-op
-       * on every engine — the same measurement `documentLang` records for an
-       * empty `lang` — so the property must be untouched, and "untouched" is
-       * what `FakeUtterance` declares rather than initialises so this can be
-       * asked at all. */
+       * state at the start of a session — nothing to judge, so nothing is
+       * refused. Assigning `null` there is not a no-op on every engine — the
+       * same measurement `documentLang` records for an empty `lang` — so the
+       * property must be untouched, and "untouched" is what `FakeUtterance`
+       * declares rather than initialises so this can be asked at all. */
       synth.voices = []
       const { speaker } = make()
       speaker.speak('hello', 'en-US')
       expect('voice' in (synth.queued[0] as object)).toBe(false)
     })
 
-    it('leaves the voice unset for a section that declares no language', () => {
-      synth.voices = [compact]
+    it('leaves the voice unset for a section that declares no language, among good voices', () => {
+      synth.voices = [zoe]
       const { speaker } = make()
       speaker.speak('hello', null)
       expect('voice' in (synth.queued[0] as object)).toBe(false)
     })
 
-    it('leaves the voice unset when nothing installed speaks the language', () => {
+    /**
+     * ⚠️ **NO VOICE RATHER THAN A BAD ONE — AND IT USED TO READ THE BOOK
+     * ANYWAY.** With nothing above the floor, the utterance was queued with its
+     * voice unset, so the platform chose — on a Mac, compact Samantha, the voice
+     * the floor had just refused. Now nothing is queued and `onDone` says why,
+     * synchronously, the way `empty` does.
+     */
+    it('speaks nothing, and says why, when no voice above the floor speaks the language', () => {
+      synth.voices = [compact, superCompact]
+      const { speaker, onDone } = make()
+      expect(speaker.speak('hello', 'en-US')).toBe(false)
+      expect(synth.queued).toEqual([])
+      expect(onDone).toHaveBeenCalledWith('no-voice')
+    })
+
+    it('speaks nothing for a section in a language only other languages have good voices for', () => {
       synth.voices = [tingting]
-      const { speaker } = make()
-      speaker.speak('bonjour', 'fr-FR')
-      expect('voice' in (synth.queued[0] as object)).toBe(false)
+      const { speaker, onDone } = make()
+      expect(speaker.speak('bonjour', 'fr-FR')).toBe(false)
+      expect(synth.queued).toEqual([])
+      expect(onDone).toHaveBeenCalledWith('no-voice')
+    })
+
+    it('speaks nothing for a section with no language when every voice is below the floor', () => {
+      synth.voices = [compact, superCompact]
+      const { speaker, onDone } = make()
+      expect(speaker.speak('hello', null)).toBe(false)
+      expect(onDone).toHaveBeenCalledWith('no-voice')
     })
   })
 
