@@ -457,6 +457,24 @@ describe('useOverlays', () => {
     expect(subscribed.mock.calls.length).toBe(before + 1)
   })
 
+  /* ⚠️ **AN ANSWER THAT MOVED A MARK TO ANOTHER SECTION IS A NEW ANSWER.** The
+     comparison that keeps a re-ask from redrawing asks every field of every
+     anchor, and the section is the one that says WHICH DOCUMENT the mark is
+     painted into — the same passage and the same CFI in section 2 is a mark the
+     reader has not been shown. Nothing redelivered a mark that had only moved. */
+  it('draws a mark that moved to another section, though nothing else changed', async () => {
+    let section = 1
+    const one = contribution('a:x', () => Promise.resolve([{ ...annotation(), sectionIndex: section }]))
+    const { result } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [one] }),
+    })
+    await waitFor(() => expect(result.current[0]?.sectionIndex).toBe(1))
+
+    section = 2
+    one.fire()
+    await waitFor(() => expect(result.current[0]?.sectionIndex).toBe(2))
+  })
+
   it('takes back the listeners it had already installed when one subscribe throws', async () => {
     const off = vi.fn()
     const first: OverlayContribution = {

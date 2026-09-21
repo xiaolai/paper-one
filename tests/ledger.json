@@ -8314,6 +8314,7 @@
     "src/kernel/ui/hooks/useOverlays.test.tsx > useOverlays > costs a composition with no contributions nothing at all",
     "src/kernel/ui/hooks/useOverlays.test.tsx > useOverlays > counts one person once when two contributions both carry them — WI-26.6",
     "src/kernel/ui/hooks/useOverlays.test.tsx > useOverlays > does not resubscribe for an answer identical to the one it is showing",
+    "src/kernel/ui/hooks/useOverlays.test.tsx > useOverlays > draws a mark that moved to another section, though nothing else changed",
     "src/kernel/ui/hooks/useOverlays.test.tsx > useOverlays > draws a stranger as a stranger where no friend marked the passage",
     "src/kernel/ui/hooks/useOverlays.test.tsx > useOverlays > hands the resolver through to the contribution",
     "src/kernel/ui/hooks/useOverlays.test.tsx > useOverlays > keeps a slow contributor’s marks up while it answers a re-query",
