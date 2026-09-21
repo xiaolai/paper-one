@@ -8402,6 +8402,7 @@
     "src/kernel/ui/pane/Contents.test.tsx > a row that does go somewhere > tells assistive technology which entry the reader is in",
     "src/kernel/ui/pane/Contents.test.tsx > a row that goes nowhere > is not a control at all, rather than a disabled one",
     "src/kernel/ui/pane/Contents.test.tsx > a row that goes nowhere > treats an empty href as no destination, not as one",
+    "src/kernel/ui/pane/Contents.test.tsx > the tree > clamps a heading’s indent too, which is a different row",
     "src/kernel/ui/pane/Contents.test.tsx > the tree > clamps the indent it draws at the deepest token, without losing entries",
     "src/kernel/ui/pane/Contents.test.tsx > the tree > marks one row current when the contents repeats a destination",
     "src/kernel/ui/pane/Contents.test.tsx > the tree > renders nested entries in reading order",

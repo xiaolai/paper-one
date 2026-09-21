@@ -105,6 +105,22 @@ describe('the tree', () => {
     expect(depths, 'four rows, three indents').toEqual(['0', '1', '2', '2'])
   })
 
+  it('clamps a heading’s indent too, which is a different row', () => {
+    /* ⚠️ **THE CLAMP IS WRITTEN TWICE — a heading row and a button row — and only
+       the button was measured.** A part divider nested deep in a book is drawn
+       by the other branch, so a clamp lost there would indent it past every
+       token the design has. */
+    render(
+      <Contents
+        toc={[item('A', '/a', [item('B', '/b', [item('C', '/c', [item('PART TWO', null)])])])]}
+        currentHref=""
+        onGoTo={vi.fn()}
+      />,
+    )
+    const heading = screen.getByText('PART TWO').closest('[data-heading]')
+    expect(heading?.getAttribute('data-depth'), 'the fourth level, drawn at the third indent').toBe('2')
+  })
+
   /**
    * ⚠️ **"THE CURRENT ENTRY" IS SINGULAR AND MATCHING ON `href` MADE IT PLURAL.**
    * A part divider and its first chapter may legally target the same
