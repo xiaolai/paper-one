@@ -203,3 +203,234 @@ describe('the Listen control when no voice is good enough', () => {
     expect(button.getAttribute('title')).toBe('Read this chapter aloud')
   })
 })
+
+/** The titlebar, with whatever state, speech and screens a case needs. */
+function draw(
+  over: {
+    state?: Partial<typeof initialState>
+    speech?: Speech
+    screens?: React.ComponentProps<typeof TitleBar>['screens']
+    hasBook?: boolean
+  } = {},
+) {
+  const dispatch = vi.fn()
+  render(
+    <TitleBar
+      screens={over.screens ?? []}
+      state={{ ...initialState, ...over.state }}
+      dispatch={dispatch}
+      platform="macos"
+      bookTitle="Paper"
+      bookSubtitle=""
+      speech={over.speech ?? speech}
+      listenRefused={false}
+      hasBook={over.hasBook ?? false}
+    />,
+  )
+  return dispatch
+}
+
+/** A reading in progress that records what the transport asked it to do. */
+function listening(over: Partial<Speech> = {}) {
+  const asked: string[] = []
+  const reading: Speech = {
+    ...speech,
+    available: true,
+    speaking: true,
+    stop: () => asked.push('stop'),
+    pause: () => asked.push('pause'),
+    resume: () => asked.push('resume'),
+    stepSentence: (by) => asked.push(`sentence ${by}`),
+    stepParagraph: (by) => asked.push(`paragraph ${by}`),
+    stepChapter: (by) => asked.push(`chapter ${by}`),
+    ...over,
+  }
+  draw({ state: { screen: 'reader', chromeOn: true }, speech: reading, hasBook: true })
+  return asked
+}
+
+/**
+ * THE TRANSPORT, which is new on this branch and was drawn by no test.
+ *
+ * Every control here is a verb the reader presses while a book is being read
+ * aloud, and each one is a different verb: a label on the wrong button, or a
+ * step of the wrong size, is a control that does something other than what it
+ * says.
+ */
+describe('the reading transport', () => {
+  it.each([
+    ['Previous sentence', 'sentence -1'],
+    ['Next sentence', 'sentence 1'],
+    ['Previous paragraph', 'paragraph -1'],
+    ['Next paragraph', 'paragraph 1'],
+    ['Stop reading aloud', 'stop'],
+  ])('%s asks for %s', (name, expected) => {
+    const asked = listening()
+    fireEvent.click(screen.getByRole('button', { name }))
+    expect(asked).toEqual([expected])
+  })
+
+  it('offers a chapter step only where there is a chapter to step to', () => {
+    /* ⚠️ **ABSENT, NOT DISABLED.** A reader in a book whose contents does not
+       name the section they are in has genuinely no next chapter — "not here"
+       rather than "not now", which is what an absent control says. */
+    listening({ chapters: { back: false, forward: false } })
+    expect(screen.queryByRole('button', { name: 'Previous chapter' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Next chapter' })).toBeNull()
+
+    cleanup()
+    const asked = listening({ chapters: { back: true, forward: true } })
+    fireEvent.click(screen.getByRole('button', { name: 'Previous chapter' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Next chapter' }))
+    expect(asked).toEqual(['chapter -1', 'chapter 1'])
+  })
+
+  it('pauses a reading that is speaking', () => {
+    const asked = listening({ paused: false })
+    const button = screen.getByRole('button', { name: 'Pause' })
+    expect(button.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(button)
+    expect(asked).toEqual(['pause'])
+  })
+
+  it('goes on with one that is paused, and says so on the same control', () => {
+    const asked = listening({ paused: true })
+    expect(screen.queryByRole('button', { name: 'Pause' }), 'a paused reading offered Pause').toBeNull()
+    const button = screen.getByRole('button', { name: 'Go on reading' })
+    expect(button.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(button)
+    expect(asked).toEqual(['resume'])
+  })
+
+  it.each([
+    [1, '1×'],
+    [1.25, '1.25×'],
+    [1.5, '1.5×'],
+    [2, '2×'],
+  ])('reads %s back as %s — no trailing zero, which would read as a measurement', (rate, shown) => {
+    draw({
+      state: { screen: 'reader', chromeOn: true, readingRate: rate },
+      speech: { ...speech, available: true, speaking: true },
+      hasBook: true,
+    })
+    const button = screen.getByRole('button', { name: `Reading speed ${shown}` })
+    expect(button.textContent).toBe(shown)
+    expect(button.getAttribute('title')).toBe(`Reading speed — ${shown}, tap for the next`)
+  })
+
+  it('is not drawn at all when nothing is being read', () => {
+    draw({ state: { screen: 'reader', chromeOn: true }, speech: { ...speech, available: true }, hasBook: true })
+    expect(screen.queryByRole('group', { name: 'Reading aloud' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop reading aloud' })).toBeNull()
+  })
+})
+
+/**
+ * THE SWITCH BETWEEN THE SHELF AND A CAPABILITY'S SCREEN, which belongs where
+ * the reader is choosing what to look at — and not in the reader, where the
+ * book is the place they are in.
+ */
+describe('the screens a capability contributed', () => {
+  const screens = [{ id: 'circle:circle' as const, label: 'Circle', icon: 'people' as const }]
+
+  it('says which one the reader is on, and takes them to the other', () => {
+    const dispatch = draw({ state: { screen: 'library', chromeOn: true }, screens })
+    const library = screen.getByRole('button', { name: 'Library' })
+    const circle = screen.getByRole('button', { name: 'Circle' })
+    expect(library.getAttribute('aria-pressed'), 'the shelf is where the reader is').toBe('true')
+    expect(circle.getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(circle)
+    expect(dispatch).toHaveBeenCalledWith({ type: 'goScreen', screen: 'circle:circle' })
+  })
+
+  it('says the shelf is not where the reader is, once they are somewhere else', () => {
+    const dispatch = draw({ state: { screen: 'circle:circle', chromeOn: true }, screens })
+    const library = screen.getByRole('button', { name: 'Library' })
+    expect(library.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(library)
+    expect(dispatch).toHaveBeenCalledWith({ type: 'goScreen', screen: 'library' })
+  })
+
+  it('is absent in the reader, where the book is the place', () => {
+    /* A second way out of a book, beside `Open the library` in the reader's own
+       chrome, would be two controls for one intent. */
+    draw({ state: { screen: 'reader', chromeOn: true }, screens, hasBook: true })
+    expect(screen.queryByRole('button', { name: 'Circle' })).toBeNull()
+  })
+
+  it('is absent when nothing contributed a screen', () => {
+    draw({ state: { screen: 'library', chromeOn: true } })
+    expect(screen.queryByRole('button', { name: 'Library' })).toBeNull()
+  })
+})
+
+describe('the pane toggle, and the palette', () => {
+  it('says which way it will go, and asks for it', () => {
+    /* `initialState` opens on the library WITH its pane, so a closed pane is
+       the state a case has to ask for. */
+    const closed = draw({ state: { screen: 'library', chromeOn: true, pane: null } })
+    const open = screen.getByRole('button', { name: 'Open pane' })
+    expect(open.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(open)
+    expect(closed).toHaveBeenCalledWith({ type: 'togglePane' })
+
+    cleanup()
+    draw({ state: { screen: 'library', chromeOn: true, pane: 'toc' } })
+    const close = screen.getByRole('button', { name: 'Close pane' })
+    expect(close.getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('opens the palette, and says when it is open', () => {
+    const dispatch = draw({ state: { screen: 'library', chromeOn: true } })
+    const search = screen.getByRole('button', { name: 'Search or ask' })
+    expect(search.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(search)
+    expect(dispatch).toHaveBeenCalledWith({ type: 'toggleLayer', layer: 'paletteOpen' })
+
+    cleanup()
+    draw({ state: { screen: 'library', chromeOn: true, paletteOpen: true } })
+    expect(screen.getByRole('button', { name: 'Search or ask' }).getAttribute('aria-expanded')).toBe('true')
+  })
+})
+
+describe('the traffic lights, in a browser', () => {
+  /**
+   * Inside Tauri, AppKit paints the real ones over this zone; in a plain
+   * browser nothing does, and the design still has to be checkable there. So
+   * the lights are drawn for macOS outside Tauri — which is what a test
+   * environment is.
+   */
+  it('draws three of them on macOS, and none elsewhere', () => {
+    const { container } = render(
+      <TitleBar
+        screens={[]}
+        state={initialState}
+        dispatch={vi.fn()}
+        platform="macos"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={speech}
+        listenRefused={false}
+        hasBook={false}
+      />,
+    )
+    expect(container.querySelectorAll('span[style*="background"]').length).toBe(3)
+    cleanup()
+
+    const other = render(
+      <TitleBar
+        screens={[]}
+        state={initialState}
+        dispatch={vi.fn()}
+        platform="windows"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={speech}
+        listenRefused={false}
+        hasBook={false}
+      />,
+    )
+    expect(other.container.querySelectorAll('span[style*="background"]').length).toBe(0)
+  })
+})
