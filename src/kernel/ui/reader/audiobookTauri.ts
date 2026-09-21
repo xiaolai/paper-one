@@ -86,12 +86,15 @@ export function safeFileName(title: string): string {
        dot rule exists to prevent. One class, one pass, so neither can re-create
        what the other removed. */
     .replace(/^[\s.]+/u, '')
-    .trimEnd()
   const budgeted = withinBytes(cleaned)
     /* TRAILING DOTS AND SPACES GO LAST, after the truncation: cutting a title can
        CREATE one, so a trim done earlier would not see it. Windows drops them
        silently, which makes the file's real name differ from the one the reader
-       was shown in the dialog. */
+       was shown in the dialog.
+
+       THE ONLY TRAILING TRIM. A `trimEnd()` before the truncation used to sit
+       beside it, and `\s` is the same set of characters: whatever that removed,
+       this removes after the cut, so the two could not be told apart. */
     .replace(/[\s.]+$/u, '')
   return RESERVED_ON_WINDOWS.test(budgeted) ? `${budgeted} (book)` : budgeted
 }
@@ -119,9 +122,14 @@ const MAX_COMPONENT_BYTES = 255 - '.m4b'.length - ' (book)'.length
  */
 function withinBytes(text: string): string {
   const encoder = new TextEncoder()
-  if (encoder.encode(text).length <= MAX_COMPONENT_BYTES) return text
+  /* EVERY TITLE WALKS THE GRAPHEMES, with no early return for one that fits.
+     That return answered exactly what the walk answers — a title within the
+     budget is kept whole by it — so it was a second route to one result, and a
+     change to either could not be seen. Titles are short; the walk is cheap.
 
-  const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)
+     `new Intl.Segmenter()` with no options, because `grapheme` IS the default
+     granularity: spelled out, it was an option whose removal changed nothing. */
+  const graphemes = new Intl.Segmenter().segment(text)
   let out = ''
   let used = 0
   for (const { segment } of graphemes) {

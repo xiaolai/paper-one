@@ -94,3 +94,24 @@ describe('safeFileName', () => {
     expect(safeFileName('   ')).toBe('')
   })
 })
+
+describe('safeFileName, at the edges of its rules', () => {
+  it('leaves a title that merely ENDS with a device name alone', () => {
+    /* Only the whole name is reserved: `Falcon` is not `con`. */
+    expect(safeFileName('Falcon')).toBe('Falcon')
+    expect(safeFileName('Reconquista')).toBe('Reconquista')
+  })
+
+  it('suffixes a device name at any extension, however long', () => {
+    /* Windows refuses `nul.tar.gz` as it refuses `nul`. */
+    expect(safeFileName('nul.tar.gz')).toBe('nul.tar.gz (book)')
+  })
+
+  it('fills the byte budget exactly, keeping a character that lands on its last byte', () => {
+    /* 255 bytes for a component, less `.m4b` and ` (book)`: 244. A title one
+       byte longer loses its last character, and only that. */
+    const budget = 255 - '.m4b'.length - ' (book)'.length
+    expect(safeFileName(`${'a'.repeat(budget)}b`)).toBe('a'.repeat(budget))
+    expect(new TextEncoder().encode(safeFileName('a'.repeat(budget))).length).toBe(budget)
+  })
+})
