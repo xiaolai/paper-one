@@ -595,18 +595,24 @@ const stringList = (raw: unknown): readonly string[] | undefined =>
  * likely to change — 1 is the engine's default for ever, where `steps[4]` is
  * whatever the fifth entry happens to be that month.
  */
-export const READING_RATE_MIN = READING_RATE.steps[0] ?? 1
-export const READING_RATE_MAX = READING_RATE.steps[READING_RATE.steps.length - 1] ?? 1
+/* READ OFF THE ENDS, and ASSERTED rather than defaulted. `steps[0] ?? 1` and
+   `steps[length - 1] ?? 0` each carried a fallback for a scale with no steps —
+   which `metrics.test.ts` refuses for every scale in the file, so the fallback
+   is unreachable, and for a gap scale whose first step IS 0 it could not even
+   be told from the value it stood in for. `.at(-1)` says "the last one" without
+   arithmetic to get wrong. */
+export const READING_RATE_MIN = READING_RATE.steps.at(0)!
+export const READING_RATE_MAX = READING_RATE.steps.at(-1)!
 
 /**
  * The ends of a gap scale, as the stored value's clamp — `READING_RATE_MIN`'s
  * reasoning, one scale along, and derived for the same reason: the range a
  * reader can store and the range the stepper offers must be one range.
  */
-export const SENTENCE_GAP_MIN = SENTENCE_GAP.steps[0] ?? 0
-export const SENTENCE_GAP_MAX = SENTENCE_GAP.steps[SENTENCE_GAP.steps.length - 1] ?? 0
-export const PARAGRAPH_GAP_MIN = PARAGRAPH_GAP.steps[0] ?? 0
-export const PARAGRAPH_GAP_MAX = PARAGRAPH_GAP.steps[PARAGRAPH_GAP.steps.length - 1] ?? 0
+export const SENTENCE_GAP_MIN = SENTENCE_GAP.steps.at(0)!
+export const SENTENCE_GAP_MAX = SENTENCE_GAP.steps.at(-1)!
+export const PARAGRAPH_GAP_MIN = PARAGRAPH_GAP.steps.at(0)!
+export const PARAGRAPH_GAP_MAX = PARAGRAPH_GAP.steps.at(-1)!
 
 /**
  * A stored number on a continuous range — a gap in milliseconds, a speaking

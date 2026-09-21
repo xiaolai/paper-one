@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   BRIGHTNESS,
   CONTRAST,
+  PARAGRAPH_GAP,
+  READING_RATE,
+  SENTENCE_GAP,
   DEFAULT_READING_STYLE,
   LEGACY_READING_SIZES,
   MINIMUM_SIZES,
@@ -14,6 +17,12 @@ import { defineSetting } from './ports'
 import type { ReadingStyle } from './uiTypes'
 import {
   KERNEL_SETTINGS,
+  PARAGRAPH_GAP_MAX,
+  PARAGRAPH_GAP_MIN,
+  READING_RATE_MAX,
+  READING_RATE_MIN,
+  SENTENCE_GAP_MAX,
+  SENTENCE_GAP_MIN,
   SETTINGS_STORAGE_KEY,
   SETTINGS_VERSION,
   carryLegacySettings,
@@ -1264,6 +1273,73 @@ describe('what the store promises never to do', () => {
       )
     } finally {
       error.mockRestore()
+    }
+  })
+})
+
+describe('the range read aloud may be stored in', () => {
+  /**
+   * ⚠️ **THE RANGE A READER CAN STORE AND THE RANGE THE STEPPER OFFERS MUST BE
+   * ONE RANGE**, which is why these are derived from §09's scales rather than
+   * written down again. A clamp that disagreed with the stepper would refuse a
+   * value the pane had just produced.
+   */
+  it('is exactly the ends of the scale the pane steps through', () => {
+    expect([READING_RATE_MIN, READING_RATE_MAX]).toEqual([
+      READING_RATE.steps.at(0),
+      READING_RATE.steps.at(-1),
+    ])
+    expect([SENTENCE_GAP_MIN, SENTENCE_GAP_MAX]).toEqual([
+      SENTENCE_GAP.steps.at(0),
+      SENTENCE_GAP.steps.at(-1),
+    ])
+    expect([PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX]).toEqual([
+      PARAGRAPH_GAP.steps.at(0),
+      PARAGRAPH_GAP.steps.at(-1),
+    ])
+  })
+
+  it('clamps a stored speed to those ends rather than refusing it', () => {
+    /* A file written by a build with a wider ramp is not corrupt — it is
+       describing a speed this build offers less of. */
+    expect(readingBack(envelope({ 'kernel.readingRate': 99 })).readingRate).toBe(READING_RATE_MAX)
+    expect(readingBack(envelope({ 'kernel.readingRate': 0.01 })).readingRate).toBe(READING_RATE_MIN)
+    expect(readingBack(envelope({ 'kernel.sentenceGapMs': 99_999 })).sentenceGapMs).toBe(SENTENCE_GAP_MAX)
+    expect(readingBack(envelope({ 'kernel.paragraphGapMs': -20 })).paragraphGapMs).toBe(PARAGRAPH_GAP_MIN)
+  })
+
+  it('refuses a speed that is not a finite number, rather than clamping it', () => {
+    /* `Math.min` over a NaN answers NaN, and a NaN rate makes the engine refuse
+       the utterance — so this is rejected at the door and the default stands. */
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '1.5', null, {}]) {
+      expect(readingBack(envelope({ 'kernel.readingRate': bad })).readingRate).toBe(DEFAULTS.readingRate)
+    }
+  })
+})
+
+describe('the voice a reader chose, per language', () => {
+  /**
+   * ONE VOICE PER LANGUAGE, and a bad entry costs itself. A junk value for one
+   * language must not take the reader's other choices with it; a value of the
+   * wrong SHAPE — anything that is not a map — is refused whole, because that
+   * is not a map with a bad member.
+   */
+  it('keeps every language that names a voice', () => {
+    const stored = { en: 'com.apple.voice.enhanced.en-US.Zoe', zh: 'com.apple.voice.enhanced.zh-CN.Tingting' }
+    expect(readingBack(envelope({ 'kernel.readingVoice': stored })).readingVoice).toEqual(stored)
+  })
+
+  it('drops the entry that is not a voice, and keeps the rest', () => {
+    expect(
+      readingBack(
+        envelope({ 'kernel.readingVoice': { en: 'com.apple.voice.enhanced.en-US.Zoe', zh: '', fr: 7, de: null } }),
+      ).readingVoice,
+    ).toEqual({ en: 'com.apple.voice.enhanced.en-US.Zoe' })
+  })
+
+  it('refuses a value that is not a map of languages at all', () => {
+    for (const bad of ['com.apple.voice.enhanced.en-US.Zoe', 7, ['en'], null]) {
+      expect(readingBack(envelope({ 'kernel.readingVoice': bad })).readingVoice).toEqual(DEFAULTS.readingVoice)
     }
   })
 })
