@@ -4174,6 +4174,38 @@ describe('the section walk’s liveness, and what it can read', () => {
     expect(asked, 'the book was asked to resolve a contents entry nobody gave it').toEqual([])
   })
 
+  it('says nothing about a backend with no resolver when it was given no contents', async () => {
+    /* ⚠️ THE WARNING IS ABOUT AN UNTITLED EXPORT, so it belongs to a book that
+       HAS a contents and a backend that cannot resolve it. With no contents
+       there is nothing to title, and a warning there would send the reader
+       after a defect that is not one — which is also what makes the empty
+       default observable: a default holding an entry would warn. */
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const view = fakeView()
+      Object.assign(view.book as object, { sections: [{ createDocument: emptyDoc }] })
+      delete (view.book as { resolveHref?: unknown }).resolveHref
+      const session = new ReaderSession(fakeHost(), callbacks())
+      await session.start('book.epub', deps(view))
+      await session.sectionTexts()
+      /* The jacket warning belongs to `#publish` and fires at start — this is
+         about the RESOLVER, so it is asked for by name. */
+      expect(
+        warned.mock.calls.map(([line]) => line),
+        'a walk with no contents warned about titling it',
+      ).not.toContain('Paper: this book backend implements no resolveHref — its chapters will be exported untitled')
+
+      /* And with a contents it DOES say so, or the case above passes by
+         warning about nothing ever. */
+      await session.sectionTexts([{ label: 'One', href: 'a.xhtml' }] as never)
+      expect(warned).toHaveBeenCalledWith(
+        'Paper: this book backend implements no resolveHref — its chapters will be exported untitled',
+      )
+    } finally {
+      warned.mockRestore()
+    }
+  })
+
   it('skips a section the backend cannot make a document for, and finishes the rest', async () => {
     /* ⚠️ A SPINE IS NOT ALL DOCUMENTS. foliate's backends put other entries in
        it, and the object arriving here is untyped — so a missing section and one

@@ -9815,6 +9815,7 @@
     "src/kernel/ui/reader/session.test.ts > the section walk names each chapter from the contents > titles chapters whose resolver answers with a promise, as a PDF's did",
     "src/kernel/ui/reader/session.test.ts > the section walk names each chapter from the contents > trims the label it keeps",
     "src/kernel/ui/reader/session.test.ts > the section walk’s liveness, and what it can read > finishes a readable book, and says the walk is complete",
+    "src/kernel/ui/reader/session.test.ts > the section walk’s liveness, and what it can read > says nothing about a backend with no resolver when it was given no contents",
     "src/kernel/ui/reader/session.test.ts > the section walk’s liveness, and what it can read > skips a section the backend cannot make a document for, and finishes the rest",
     "src/kernel/ui/reader/session.test.ts > the section walk’s liveness, and what it can read > stops when another book has taken the view",
     "src/kernel/ui/reader/session.test.ts > the section walk’s liveness, and what it can read > stops when the book is closed under it, and does not call the walk complete",
