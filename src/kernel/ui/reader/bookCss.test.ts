@@ -5,9 +5,9 @@
 // a plain declaration. See dev-docs/hook-tests.md for the per-file opt-in.
 import { describe, expect, it } from 'vitest'
 import { ALIGNS, THEME_IDS, type Align, type ReadingStyle } from '../../core/uiTypes'
-import { BOOK_COLOURS, bookSheets, bookVars, resolveBookVars, resolvedBookCss } from './bookCss'
+import { BOOK_COLOURS, bookSheets, bookVars, resolveBookVars, resolvedBookCss, when } from './bookCss'
 import { contrastRatio, type Hex } from '../../core/palette'
-import { DEFAULT_STEP_IDX } from '../../core/metrics'
+import { DEFAULT_STEP_IDX, READING_RATIOS } from '../../core/metrics'
 import { faceById } from '../../core/typefaces'
 
 /**
@@ -409,5 +409,39 @@ describe('what the dark page does to a book’s own pictures', () => {
       expect(rule, `${marker} is not a ${property}`).toContain(`${property}:`)
       expect(rule, `${marker} is not derived from the book's ink`).toContain('var(--paper-ink)')
     }
+  })
+
+  /* ⚠️ **EVERY SELECTOR OF A LIST CARRIES THE GUARD, NOT ONLY THE FIRST — and
+     the cases above could only ever see the first.** They find a rule by its
+     opening selector, so a guard lost from the SECOND line of a list left that
+     element drawn whether or not the reader asked: an SVG plate with a hairline
+     nobody chose, an `h4` at a scale the reader switched off. Asked of every
+     line, by the whole guarded selector. */
+  it('guards every selector of a rule the reader switches, not only the first', () => {
+    const css = sheet()
+    for (const [marker, selectors] of [
+      ['--paper-heading-scale', ['h1 {', 'h2 {', 'h3 {', 'h4,', 'h5,', 'h6 {']],
+      ['--paper-figure-hairline', ['img[data-paper-figure],', 'svg[data-paper-figure] {']],
+      ['--paper-figure-shadow', ['img[data-paper-figure],', 'svg[data-paper-figure] {']],
+      ['--paper-figure-scale', ['img[data-paper-figure],', 'svg[data-paper-figure] {']],
+    ] as const) {
+      for (const selector of selectors) {
+        expect(css, `${marker} does not guard ${selector}`).toContain(`${when(marker)}${selector}`)
+      }
+    }
+  })
+
+  it('pads inline code by 0.3 of the PROSE em, stated in the code’s own', () => {
+    /* A code span is set smaller than the prose around it, so an `em` inside it
+       is the smaller one. The padding is meant as a fraction of the text the
+       reader is reading, which is why it is divided by the code's ratio — and
+       multiplying instead gives a panel that shrinks twice. */
+    /* By its padding, not by its selector: `code, kbd, samp` opens four rules
+       in this sheet, and the first is the typeface. */
+    const panel = /code, kbd, samp \{\s*padding-block: [0-9.]+em;\s*padding-inline: ([0-9.]+)em;/u.exec(sheet())
+    expect(panel, 'the inline code panel').not.toBeNull()
+    const inline = Number(panel![1])
+    expect(READING_RATIOS.code, 'a ratio of 1 would make this case unable to fail').not.toBe(1)
+    expect(inline * READING_RATIOS.code).toBeCloseTo(0.3, 4)
   })
 })
