@@ -7,6 +7,13 @@
  * argument `walkRoot`'s header already makes, and the reason `markContext`
  * lives in a directory named for word snapping too.
  *
+ * ⚠️ **NO CALLER TODAY, AND KEPT — the owner's decision, 2026-09-21.** Its only
+ * caller was the lookup, deleted with the AI features. This repository deletes
+ * kernel surface whose only defence is a comment saying something might want it
+ * again; this module is the stated exception, kept with its tests and corpus
+ * for the next caller, and no `sentence.walk` event is emitted until there is
+ * one. The history below is the lookup's, and is why it looks the way it does.
+ *
  * ## What it replaces, and why the old answer was wrong
  *
  * `useGloss.sentenceAround` reads `SelectionSnapshot.prefix`/`.suffix`, which
@@ -102,7 +109,7 @@
 import { flatten, walkRoot, type DomPosition, type FlatNode, type Flattened } from './flatten'
 import { connectedRange } from './rangeText'
 import { resolveSegmenterLocale } from './classify'
-import { sentenceOf, type SentenceGap, type SentenceResult } from './sentenceOf'
+import { sentenceOf, type SegmentGap, type SegmentResult } from './sentenceOf'
 import { ariaRoles, declaredLang, epubTypes } from '../epubSemantics'
 import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../../core/ports'
 
@@ -127,6 +134,28 @@ const HEADINGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6'])
  * than silent.
  */
 export const DEFAULT_SENTENCE_WINDOW = 4_000
+
+/**
+ * Why no sentence could be vouched for: the text's own reasons (`SegmentGap`),
+ * and the DOM walk's, which only this module can reach. Counted through
+ * `Diagnostics`; a closed set of enum words, never book text.
+ */
+export type SentenceGap =
+  | SegmentGap
+  /** A range boundary that is not a text node. */
+  | 'not-text'
+  /** The range has left the document since the selection was made. */
+  | 'detached'
+  /** The start boundary is in no tree. */
+  | 'no-tree'
+  /** The walk reached neither the start boundary nor any text. */
+  | 'no-window'
+  /** The end boundary is outside the start boundary's run (§A3). */
+  | 'span-blocks'
+  /** The walk threw. Never reaches the reader — see §E6. */
+  | 'threw'
+
+type SentenceResult = SegmentResult | { readonly ok: false; readonly gap: SentenceGap }
 
 /** The sentence, and the term as that sentence actually spells it. */
 export interface Sentence {
@@ -322,9 +351,19 @@ function causeOf(thrown: unknown): string {
  * where the feature works are otherwise indistinguishable from the outside,
  * which is the failure §C exists to prevent, one level up.
  */
+/**
+ * The diagnostic event this walk reports under.
+ *
+ * It was `gloss.sentence`, named for the lookup that was its caller — the
+ * "gloss" was the definition the sentence went beside. That feature is deleted,
+ * and an event named for it reads, in the diagnostics window, as a part of it
+ * still running. Named for what it counts now.
+ */
+const EVENT = 'sentence.walk'
+
 function record(diagnostics: Diagnostics, result: SentenceResult, cause: string | null): void {
   if (result.ok) {
-    diagnostics.info('gloss.sentence', { outcome: 'used' })
+    diagnostics.info(EVENT, { outcome: 'used' })
     return
   }
   if (cause !== null) {
@@ -339,10 +378,10 @@ function record(diagnostics: Diagnostics, result: SentenceResult, cause: string 
      * The flag is `cause !== null` and NOT `cause !== undefined`: `throw
      * undefined` is legal JavaScript, and reading absence off the value itself
      * filed that throw as an ordinary fallback with nothing to say about it. */
-    diagnostics.error('gloss.sentence', { outcome: 'fallback', gap: result.gap, cause })
+    diagnostics.error(EVENT, { outcome: 'fallback', gap: result.gap, cause })
     return
   }
-  diagnostics.info('gloss.sentence', { outcome: 'fallback', gap: result.gap })
+  diagnostics.info(EVENT, { outcome: 'fallback', gap: result.gap })
 }
 
 function gap(reason: SentenceGap): SentenceResult {

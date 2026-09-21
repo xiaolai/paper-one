@@ -37,10 +37,11 @@ import styles from './SidePane.module.css'
  * - **`sync.*`** — sessions, refused pushes, quarantined journals and marks.
  *   The ssh case above is this scope.
  * - **`peer.*`, `webhost.pump`** — roles and the transport under them.
- * - **`inference.*`, `gloss.sentence`** — the runtime, downloads, and whether
- *   the sentence walk is finding real sentences or falling back. That last one
- *   is a RATIO nothing else can show: a build where every lookup falls back and
- *   one where the feature works are otherwise indistinguishable from outside.
+ * - **`sentence.walk`** — whether the sentence walk is finding real sentences
+ *   or falling back, a RATIO nothing else can show. ⚠️ Nothing calls the walk
+ *   today (`sentenceAt.ts` says why it is kept), so this scope is silent until
+ *   something does. It was listed beside `inference.*`, which went with the AI
+ *   features, as the walk's old name `gloss.sentence` did.
  * - **`shutdown.*`** — what did not get to finish.
  *
  * ## What it deliberately does not do

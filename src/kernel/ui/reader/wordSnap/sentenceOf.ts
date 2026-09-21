@@ -77,7 +77,7 @@
  * inside the run: nothing from the far side of an edge is ever sent.
  *
  * The caller's fallback is what shipped before this existed, so declining is
- * never a regression — see `SentenceGap`, which is counted rather than shown.
+ * never a regression — see `SegmentGap`, which is counted rather than shown.
  *
  * ⚠️ **AND THE FALLBACK NOW COMES THROUGH HERE TOO**, with the gate off. It has
  * nowhere to decline TO, so the rule above is not available to it; what it
@@ -152,19 +152,20 @@ export const MAX_SENTENCE_CHARS = 1_000
  */
 export const MAX_RUN_CHARS = 64_000
 
-/** Why no sentence could be vouched for. Counted through `Diagnostics`; a
- *  closed set of enum words, never book text. */
-export type SentenceGap =
-  /** A range boundary that is not a text node. */
-  | 'not-text'
-  /** The range has left the document since the selection was made. */
-  | 'detached'
-  /** The start boundary is in no tree. */
-  | 'no-tree'
-  /** The walk reached neither the start boundary nor any text. */
-  | 'no-window'
-  /** The end boundary is outside the start boundary's run (§A3). */
-  | 'span-blocks'
+/**
+ * Why the TEXT held no sentence to vouch for — the reasons segmentation itself
+ * can reach. Counted through `Diagnostics`; a closed set of enum words, never
+ * book text.
+ *
+ * ⚠️ **ONLY WHAT THIS MODULE CAN PRODUCE.** This union used to hold the DOM
+ * walk's reasons as well — a boundary that is not text, a detached range, a
+ * walk that threw — and a caller's own reason for not asking at all, none of
+ * which a function over strings can reach. `sentenceAt` owns those now, as
+ * `SentenceGap`, and the fixed-layout reason went with the deleted lookup that
+ * gave it: a vocabulary that lists reasons nothing can produce is a list a
+ * reader of the counts goes looking for and never finds.
+ */
+export type SegmentGap =
   /** The run held no visible text once filtered and squeezed. */
   | 'empty'
   /** The term held no visible text once filtered and squeezed. */
@@ -175,20 +176,10 @@ export type SentenceGap =
   | 'run-end'
   /** The span the term covers is longer than a sentence. */
   | 'too-long'
-  /** The walk threw. Never reaches the reader — see §E6. */
-  | 'threw'
-  /**
-   * THE CALLER'S OWN, and the one member neither this module nor `sentenceAt`
-   * can produce: a fixed-layout book, where the sentence path is not attempted
-   * at all pending a measurement (WI-16.5). It lives in this union because the
-   * vocabulary is "why the lookup has no sentence", and a second enum for the
-   * one reason the caller knows would mean two lists to read a count out of.
-   */
-  | 'fixed-layout'
 
-export type SentenceResult =
+export type SegmentResult =
   | { readonly ok: true; readonly sentence: string; readonly term: string }
-  | { readonly ok: false; readonly gap: SentenceGap }
+  | { readonly ok: false; readonly gap: SegmentGap }
 
 export interface SentenceOptions {
   /** A tag already proven to construct a `Segmenter` — see
@@ -286,7 +277,7 @@ export function sentenceOf(
   termStart: number,
   termEnd: number,
   options: SentenceOptions = {},
-): SentenceResult {
+): SegmentResult {
   /* Before any work, not after it — see `MAX_RUN_CHARS`. What lies across the
    * edges counts: it is squeezed and segmented too. */
   if (raw.length + (options.before?.length ?? 0) + (options.after?.length ?? 0) > MAX_RUN_CHARS) {
