@@ -540,20 +540,23 @@ function breaksBetween(head: string, tail: string, locale: string | undefined): 
  * once per section, not per gesture. */
 export function sentenceSpansOf(raw: string, locale: string | undefined): readonly Span[] {
   const squeezed = squeeze(raw, 0, 0)
-  /* `squeeze` collapses every run of whitespace AND drops it at both ends, so
-     its text is empty exactly when there is nothing to read. A `.trim()` here
-     asked the same question a second time, and no input could tell the two
-     answers apart. */
-  if (squeezed.text === '') return []
 
-  /* CLAMPED THROUGH THE MAP, never past it: `merged` spans index `text`, so
-   * every start but a degenerate one has an entry.
+  /* ⚠️ **NO EARLY RETURN FOR TEXT WITH NOTHING TO READ, AND THERE WAS ONE.** An
+   * `if (squeezed.text === '') return []` stood here, and the merge loop below
+   * relied on it to stop: with it gone, a silent section left one start that
+   * could never be merged and the loop spun for ever. Harmless while the guard
+   * held — but a mutation of the guard HUNG rather than failed, on the wall
+   * clock every time, because the spin was fifty lines from the line that had
+   * changed and Stryker's hit limit counts only that line. Two statements whose
+   * correctness depended on each other, a screen apart.
    *
-   * AND NO `starts.length === 0` GUARD BELOW, because the check above has
-   * already answered it: `merged` yields at least one segment for text that is
-   * not empty. Were it ever to yield none, the pin on the first start covers
-   * the whole section as one sentence — which reads it — where an empty answer
-   * would silently drop a section that has words in it. */
+   * Now the loop bounds itself and the last step drops a range with nothing to
+   * say, so a silent section falls through to `[]` on its own — the same answer,
+   * with no line that has to be right for another one to terminate.
+   *
+   * CLAMPED THROUGH THE MAP, never past it: `merged` spans index `text`, so
+   * every start but a degenerate one has an entry. `merged` of an empty text is
+   * empty, and the pin on the first start below still gives that one range. */
   const starts = merged(squeezed.text, locale).map((span) => squeezed.map[span.start] ?? raw.length)
 
   /* THE FIRST RANGE STARTS AT ZERO whatever the map says. Leading whitespace is
@@ -586,29 +589,28 @@ export function sentenceSpansOf(raw: string, locale: string | undefined): readon
      is pinned at 0 to keep the tiling total, so a LEADING separator survived the
      pass above — which is the very case this exists for. Dropping the start after
      it extends range 0 over both; a loop, because a run of them leaves several. */
-  /* ONE CONDITION, and the end of the text stands in for the start that is not
-     there. A `kept.length > 1` beside this asked what the guard at the top of
-     the function has already answered — the whole text is not silent — so with
-     one start left the range runs to the end and the loop stops on its own. */
-  while (silent(kept[0] as number, kept[1] ?? raw.length)) kept.splice(1, 1)
+  /* BOUNDED BY ITS OWN LENGTH, so it stops whatever the text is: with one start
+     left there is nothing to merge into, and a section that is silent all the
+     way through is dropped whole by the last step instead. The bound is in the
+     loop's own condition, which is also what makes a mutation of it a
+     deterministic detection rather than a hang — see the note at the top. */
+  while (kept.length > 1 && silent(kept[0] as number, kept[1] as number)) kept.splice(1, 1)
 
   const out: Span[] = []
   for (const [at, start] of kept.entries()) {
     const end = kept[at + 1] ?? raw.length
-    /* A range of nothing is dropped rather than spoken. Two `merged` spans can
-     * map to one raw offset when everything between them was collapsed.
+    /* A range with nothing to say is dropped rather than spoken — which covers
+     * both a range of NO characters (two `merged` spans mapping to one raw
+     * offset) and a section that is silent from end to end, the case the
+     * removed early return used to answer.
      *
-     * ⚠️ **NO INPUT HAS EVER PRODUCED ONE**, which is why this carries a
-     * directive rather than a case. Fifteen candidates were tried against the
-     * real segmenter — runs of soft hyphens, line and paragraph separators,
-     * doubled stops, a lone quote, an ellipsis, a Chinese opening bracket, text
-     * ending in a separator — and every one tiled strictly. A start can repeat
-     * only through the `raw.length` fallback above, which needs a `merged` span
-     * beginning past the end of the squeezed text. Kept because the map is
-     * `squeeze`'s and this is the only thing standing between a collapsed run
-     * and a sentence with nothing in it. */
-    // Stryker disable next-line ConditionalExpression,EqualityOperator: see above — no input produces a range of nothing, so neither answer can be observed.
-    if (end > start) out.push({ start, end })
+     * ⚠️ **THIS CARRIED A DIRECTIVE, AND THE DIRECTIVE HID A LIVE MUTANT.** It
+     * read `end > start` under `disable ConditionalExpression`, on the ground
+     * that fifteen probed inputs never produced a range of nothing. True — but
+     * the directive disabled the `false` replacement too, which drops EVERY
+     * sentence and is killed by any case at all. A directive covers every
+     * mutant of its mutator on the line, not the one the argument was about. */
+    if (!silent(start, end)) out.push({ start, end })
   }
   return out
 }
