@@ -10,6 +10,7 @@ import { bookIdFor } from '../core/marks'
 import { fakeFs } from '../core/indexFsFake.testkit'
 import { composeCapabilities, kernelApi } from '../core/registry'
 import { createKernelServices } from '../core/services'
+import { SETTINGS_STORAGE_KEY, SETTINGS_VERSION } from '../core/settings'
 
 /**
  * `App` WITH A BOOK THAT ACTUALLY OPENS — the half of this window no test could
@@ -64,10 +65,16 @@ const reader = vi.hoisted(() => ({
   },
   /** The chapter every relocation reports itself in. */
   chapter: 'Loomings',
+  /** The contents href every relocation reports itself at — `''` for a section
+   *  the contents does not name, which is a real place to be. */
+  chapterHref: 'chapter-1.xhtml',
   /** The author every book declares. */
   author: 'Herman Melville',
   /** The contents every book publishes. */
   toc: [] as { label: string; href: string }[],
+  /** The prose the section on screen holds, or null for a book that publishes
+   *  no document — which is what read-aloud has nothing to say about. */
+  prose: null as string | null,
   /** A jacket, for the one effect that files it. */
   cover: null as Blob | null,
   /** How many of the next opens fail the way a book the reader cannot see fails. */
@@ -186,7 +193,7 @@ vi.mock('./reader/session', async (importActual) => {
       return {
         fraction: 0.25,
         chapterLabel: reader.chapter,
-        chapterHref: 'chapter-1.xhtml',
+        chapterHref: reader.chapterHref,
         cfi,
         sectionIndex: 0,
         sectionExact: true,
@@ -304,6 +311,14 @@ vi.mock('./reader/session', async (importActual) => {
       this.#callbacks.onDirection('ltr')
       this.#callbacks.onMeta(meta)
       if (reader.cover) this.#callbacks.onCover(reader.cover)
+      /* THE SECTION'S OWN DOCUMENT, which is what read-aloud reads: `useSpeech`
+         collects the text out of it, so a book that publishes none has nothing
+         to say and the transport never appears. */
+      if (reader.prose !== null) {
+        const doc = document.implementation.createHTMLDocument('section')
+        doc.body.innerHTML = reader.prose
+        this.#callbacks.onDocument(doc)
+      }
       this.#callbacks.onRelocate(this.#position(this.#cfi))
       reader.live = this.#surface
       this.own.published = true
@@ -337,6 +352,8 @@ afterEach(() => {
   reader.opened.length = 0
   reader.live = null
   reader.chapter = 'Loomings'
+  reader.chapterHref = 'chapter-1.xhtml'
+  reader.prose = null
   reader.author = 'Herman Melville'
   reader.toc = []
   reader.cover = null
@@ -1656,5 +1673,126 @@ describe('the Listen control and the voices this machine has', () => {
     ])
     expect(button).toHaveProperty('disabled', false)
     expect(button.getAttribute('title')).toBe('Read this chapter aloud')
+  })
+})
+
+describe('the reading transport over a real book', () => {
+  /**
+   * ⚠️ **ONE LOOKUP SERVES THE CONTROL AND THE STEP**, so what the transport
+   * DRAWS and what the step TAKES cannot disagree. They were computed
+   * separately once — a `stepChapter` here and another inside the action — and
+   * the two were reconciled only by both being correct.
+   *
+   * This is the host's half of read-aloud: the hook knows how to speak, and
+   * only the host knows what the next chapter is.
+   */
+  afterEach(() => {
+    delete (window as { speechSynthesis?: unknown }).speechSynthesis
+    delete (window as { SpeechSynthesisUtterance?: unknown }).SpeechSynthesisUtterance
+  })
+
+  /** A machine with one voice the floor accepts. */
+  function engine() {
+    const synth = new FakeSynth()
+    synth.voices = [
+      { name: 'Zoe', lang: 'en-US', voiceURI: 'com.apple.voice.enhanced.en-US.Zoe', localService: true },
+    ]
+    Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true, writable: true })
+    window.SpeechSynthesisUtterance = FakeUtterance as unknown as typeof SpeechSynthesisUtterance
+    return synth
+  }
+
+  /** A book open, read aloud, with the transport on screen. */
+  async function reading(toc: readonly { label: string; href: string }[]) {
+    const synth = engine()
+    reader.toc = [...toc]
+    reader.prose = '<p>Call me Ishmael. Some years ago.</p><p>It is a way I have.</p>'
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await open('Moby-Dick')
+    const listen = document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')
+    expect(listen, 'the Listen control is not in the title bar').not.toBeNull()
+    await act(async () => {
+      listen!.click()
+    })
+    await settled()
+    return { synth, session: reader.opened.at(-1)! }
+  }
+
+  const control = (label: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
+
+  it('offers the chapter ahead, and takes the reader there', async () => {
+    const { session } = await reading([
+      { label: 'One', href: 'chapter-1.xhtml' },
+      { label: 'Two', href: 'chapter-2.xhtml' },
+    ])
+    expect(control('Next chapter'), 'the chapter ahead was not offered').not.toBeNull()
+    expect(control('Previous chapter'), 'there is no chapter before the first').toBeNull()
+
+    await act(async () => {
+      control('Next chapter')!.click()
+    })
+    expect(session.goTo, 'the step did not take the reader anywhere').toContain('chapter-2.xhtml')
+  })
+
+  it('offers no chapter step in a book whose contents names none', async () => {
+    /* The transport is still there — sentences and paragraphs are the reader's
+       whatever the contents says — and the chapter controls are absent rather
+       than disabled, because there is genuinely nowhere to go. */
+    await reading([])
+    expect(control('Stop reading aloud'), 'the transport itself is missing').not.toBeNull()
+    expect(control('Next chapter')).toBeNull()
+    expect(control('Previous chapter')).toBeNull()
+  })
+
+  it('offers no chapter step from a section the contents does not name', async () => {
+    /* A reader can be in a spine item no contents entry points at, and guessing
+       a neighbour for it would move them somewhere they did not ask for. */
+    reader.chapterHref = ''
+    await reading([
+      { label: 'One', href: 'chapter-1.xhtml' },
+      { label: 'Two', href: 'chapter-2.xhtml' },
+    ])
+    expect(control('Next chapter')).toBeNull()
+    expect(control('Previous chapter')).toBeNull()
+  })
+
+  it('reads at the speed the reader has stored, and at the one they change it to', async () => {
+    /* ⚠️ **THE PREFERENCES ARE A MEMO OVER APP STATE**, and the engine reads
+       them per utterance: a memo that never recomputed would hold the speed the
+       session started at, so the transport's own speed control would move a
+       number nobody hears. */
+    const synth = engine()
+    reader.prose = '<p>Call me Ishmael. Some years ago.</p><p>It is a way I have.</p>'
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    const storage = new Map<string, string>([
+      [SETTINGS_STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, values: { 'kernel.readingRate': 1.5 } })],
+    ])
+    const services = createKernelServices({
+      fs: fakeFs(moby.files) as unknown as IndexFs,
+      storage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => void storage.set(key, value),
+      },
+      initialBooks: [moby.row],
+    })
+    const composition = await composeCapabilities([], kernelApi(services), new AbortController().signal)
+    render(<App services={services} fs={fakeFs(moby.files) as unknown as IndexFs} composition={composition} />)
+    await settle()
+    await open('Moby-Dick')
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')!.click()
+    })
+    await settled()
+    expect(synth.queued.at(0)?.rate, 'the stored speed did not reach the engine').toBe(1.5)
+
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('button[aria-label^="Reading speed"]')!.click()
+    })
+    await settled()
+    expect(
+      document.querySelector('button[aria-label^="Reading speed"]')?.getAttribute('aria-label'),
+      'the speed control did not move',
+    ).toBe('Reading speed 1.75×')
   })
 })
