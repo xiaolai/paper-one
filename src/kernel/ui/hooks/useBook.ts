@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
 import type { BookmarkPlace, MarkAnchor, SearchHit, SessionNavigator } from '../reader/session'
 import type { PassOutcome, PendingMark } from '../reader/reanchorPass'
-import type { SectionTextWalk } from '../reader/session'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { bookIdFor } from '../../core/marks'
 
@@ -103,10 +102,10 @@ export interface Book extends BookState {
    * so there is nothing to read. An export refuses that by name rather than
    * writing a file with no chapters in it.
    */
-  sectionTexts: (
-    toc?: readonly TocItem[],
-    shouldStop?: () => boolean,
-  ) => Promise<SectionTextWalk>
+  /* THE NAVIGATOR'S OWN TYPE, not a re-declared copy of its parameters — the copy
+     here named two of three, and a type that names fewer is exactly how the
+     third went missing without the compiler saying so. */
+  sectionTexts: BookNavigator['sectionTexts']
   /** Dismiss the footnote popover — the session holds its view. */
   closeFootnote: () => void
   /** Register the box notes render into — see the session. */
@@ -366,14 +365,19 @@ export function useBook(): Book {
       Promise.resolve({ found: [], missed: [], complete: false, walked: 0 }),
     [],
   )
-  const sectionTexts = useCallback(
-    (toc?: readonly TocItem[], shouldStop?: () => boolean): Promise<SectionTextWalk> =>
+  const sectionTexts = useCallback<BookNavigator['sectionTexts']>(
+    (...args) =>
       /* ⚠️ **`complete: false` FOR AN ABSENT NAVIGATOR, NOT AN EMPTY WALK.** No
          book is open, so nothing has been established about one — the same
          distinction `reanchorUnplaced` draws. Answering `complete: true` here
-         would let the export write a nought-chapter file and call it done. */
-      navigatorRef.current?.sectionTexts(toc, shouldStop) ??
-      Promise.resolve({ sections: [], complete: false }),
+         would let the export write a nought-chapter file and call it done.
+
+         ⚠️ **AND EVERY ARGUMENT GOES THROUGH.** This was
+         `(toc, shouldStop) => navigator.sectionTexts(toc, shouldStop)`, so the
+         reader's footnote choice — added as a third argument — stopped here and
+         the export always used the default. See the navigator in `session.ts`,
+         which dropped two. */
+      navigatorRef.current?.sectionTexts(...args) ?? Promise.resolve({ sections: [], complete: false }),
     [],
   )
   const closeFootnote = useCallback(() => navigatorRef.current?.closeFootnote(), [])

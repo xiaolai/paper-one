@@ -130,3 +130,31 @@ describe('the book a consumer depends on', () => {
     expect(book().fixedLayout).toBe(true)
   })
 })
+
+describe('the section walk the export asks for', () => {
+  /**
+   * ⚠️ **THIS HOP DROPPED THE READER'S FOOTNOTE CHOICE.** It was
+   * `(toc, shouldStop) => navigator.sectionTexts(toc, shouldStop)`, so the third
+   * argument — added so the export reads the same book the voice does — stopped
+   * here and the export always used the default. The navigator behind it dropped
+   * `shouldStop` too; see `session.test.ts`. Both forward everything now.
+   */
+  it('hands the navigator every argument it was given', () => {
+    holdFetch()
+    const book = mount()
+    act(() => book().open('https://example.test/a.epub'))
+    const received: unknown[][] = []
+    const navigator = {
+      sectionTexts: (...args: unknown[]) => {
+        received.push(args)
+        return Promise.resolve({ sections: [], complete: true })
+      },
+    } as unknown as Parameters<Book['setNavigator']>[1]
+    act(() => book().setNavigator(book().generation, navigator))
+
+    const toc = [{ label: 'One', href: 'a.xhtml' }] as never
+    const stop = () => false
+    void book().sectionTexts(toc, stop, { notes: true })
+    expect(received).toEqual([[toc, stop, { notes: true }]])
+  })
+})

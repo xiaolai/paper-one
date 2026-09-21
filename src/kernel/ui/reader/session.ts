@@ -1661,7 +1661,17 @@ export class ReaderSession {
          with an empty walk rather than parsing sections of a book nobody is
          reading. */
       reanchor: (pending) => this.reanchorUnplaced(pending),
-      sectionTexts: (toc) => this.sectionTexts(toc),
+      /* ⚠️ **EVERY ARGUMENT, PASSED THROUGH WHOLE — AND THIS FORWARDED ONLY
+         `toc`.** It was `(toc) => this.sectionTexts(toc)`, so the two arguments
+         after it never arrived: `shouldStop`, which is how the audiobook's Stop
+         reaches a walk of every section, and `skip`, which is how the reader's
+         choice about footnotes reaches the text it exports. Both were silently
+         their defaults. TypeScript said nothing, because a function taking fewer
+         parameters is assignable to a type that declares more, and the extra
+         arguments are simply dropped at run time. A forwarder that re-lists its
+         parameters drops the next one that is added; one that spreads them
+         cannot. */
+      sectionTexts: (...args) => this.sectionTexts(...args),
     })
 
     this.#cb.onFixedLayout(view.isFixedLayout)

@@ -1575,3 +1575,33 @@ describe('books a launch carried', () => {
     expect(record.origin, 'the path the launch carried was not kept').toBe('/Users/reader/Books/Moby-Dick.epub')
   })
 })
+
+/**
+ * ⚠️ **A PAGE TURN USED TO REINSTALL THE WHOLE KEYBOARD MAP.** The key handler's
+ * effect listed the entire `book`, and `book` takes a new identity whenever any
+ * of its values moves — its position among them — so every turn removed both
+ * global key listeners and added them again. The body reads four stable
+ * callbacks and whether a book is open; those are what it lists now. Counted
+ * across real relocations, because "it re-ran" is invisible in behaviour: the
+ * keys still worked, which is why nothing noticed.
+ */
+describe('turning a page', () => {
+  it('does not reinstall the keyboard listeners', async () => {
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await open('Moby-Dick')
+    await settle()
+
+    const added = vi.spyOn(window, 'addEventListener')
+    try {
+      for (const cfi of [THERE, HERE, THERE]) {
+        await act(async () => reader.live!.relocate(cfi))
+        await settle()
+      }
+      const keydowns = added.mock.calls.filter(([type]) => type === 'keydown')
+      expect(keydowns, 'no key listener was added for a page turn').toEqual([])
+    } finally {
+      added.mockRestore()
+    }
+  })
+})

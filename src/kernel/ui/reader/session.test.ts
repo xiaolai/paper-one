@@ -4239,3 +4239,61 @@ describe('a foreign mark (WI-22.D2)', () => {
     expect(view.annotations.map((a) => a.value)).toEqual(['only-mine'])
   })
 })
+
+/**
+ * ⚠️ **THE NAVIGATOR DROPPED EVERY ARGUMENT AFTER THE FIRST, AND NO TEST WENT
+ * THROUGH IT.** It was `sectionTexts: (toc) => this.sectionTexts(toc)`, so the two
+ * arguments after `toc` never arrived: `shouldStop`, which is how the audiobook's
+ * Stop reaches a walk of every section, and `skip`, which carries the reader's
+ * footnote choice into the text it exports. Both were silently their defaults.
+ * `sectionTexts` itself checks `shouldStop` before every section and honours
+ * `skip` — and was marked fixed on that evidence — while the only road to it threw
+ * both away. A function with fewer parameters is assignable to a type with more,
+ * so the compiler said nothing, and every other test used a mock `sectionTexts`.
+ * These go through the navigator the reader is handed.
+ */
+describe('the navigator hands the section walk every argument', () => {
+  async function navigatorOver(sections: string[]) {
+    const view = fakeView()
+    Object.assign(view.book as object, {
+      sections: sections.map((text) => ({ createDocument: () => Promise.resolve(text) })),
+    })
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    return cb.calls['onNavigator']?.[0]?.[0] as {
+      sectionTexts: (
+        toc?: readonly unknown[],
+        shouldStop?: () => boolean,
+        skip?: { notes: boolean },
+      ) => Promise<{ sections: { text: string }[]; complete: boolean }>
+    }
+  }
+
+  it('stops when the export asks it to', async () => {
+    const nav = await navigatorOver(['<p>One.</p>', '<p>Two.</p>'])
+    const walk = await nav.sectionTexts([], () => true)
+    expect(walk.complete, 'Stop reached the walk').toBe(false)
+    expect(walk.sections).toEqual([])
+  })
+
+  /* THE FORWARDING ITSELF, argument by argument. The walk's own handling of
+     `skip` needs a real Document and is `collectText`'s, tested beside it; what
+     broke here was the road, so the road is what is measured — the session's own
+     method, spied on, must receive exactly what the navigator was given. */
+  it('passes every argument through to the walk, the footnote choice included', async () => {
+    const view = fakeView()
+    Object.assign(view.book as object, { sections: [] })
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    const walk = vi.spyOn(session, 'sectionTexts')
+    const nav = cb.calls['onNavigator']?.[0]?.[0] as {
+      sectionTexts: (toc: readonly unknown[], stop: () => boolean, skip: { notes: boolean }) => Promise<unknown>
+    }
+    const toc = [{ label: 'One', href: 'a.xhtml' }]
+    const stop = () => false
+    await nav.sectionTexts(toc, stop, { notes: true })
+    expect(walk).toHaveBeenCalledWith(toc, stop, { notes: true })
+  })
+})
