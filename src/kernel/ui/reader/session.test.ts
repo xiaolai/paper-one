@@ -1154,16 +1154,6 @@ describe('ReaderSession places', () => {
 })
 
 /**
- * The book's own links, which foliate resolves and then ASKS ABOUT.
- *
- * `#handleLinks` puts one click listener on each section document, cancels the
- * DOM event itself, resolves the href against the section, and emits a
- * cancelable `link`. It navigates only if nothing cancelled it. That is the
- * hook a footnote popover hangs on and the hook a jump stack records from, and
- * neither is the session's business — it carries the event across and lets the
- * host decide.
- */
-/**
  * `getComputedStyle` AS A BARE GLOBAL, which this project runs without.
  *
  * `footnotes.js`'s superscript heuristic calls `getComputedStyle(el)` directly
@@ -1186,6 +1176,16 @@ afterEach(() => {
   globalThis.getComputedStyle = realComputedStyle
 })
 
+/**
+ * The book's own links, which foliate resolves and then ASKS ABOUT.
+ *
+ * `#handleLinks` puts one click listener on each section document, cancels the
+ * DOM event itself, resolves the href against the section, and emits a
+ * cancelable `link`. It navigates only if nothing cancelled it. That is the
+ * hook a footnote popover hangs on and the hook a jump stack records from, and
+ * neither is the session's business — it carries the event across and lets the
+ * host decide.
+ */
 describe('ReaderSession link events', () => {
   const linked = async () => {
     const view = fakeView()

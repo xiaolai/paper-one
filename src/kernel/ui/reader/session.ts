@@ -1909,32 +1909,6 @@ export class ReaderSession {
   }
 
   /**
-   * Does the platform have a real scroll to perform with this event?
-   *
-   * Asked of the renderer, not of the app: what a gesture MEANS is the host's
-   * question and is answered in `Reader`, but whether the event has a default
-   * worth suppressing is a fact about the renderer. It has to be settled here,
-   * because `preventDefault` counts only synchronously inside the listener.
-   *
-   * THE TWO RENDERERS ANSWER IT DIFFERENTLY, and asking only `flow` was the
-   * regression that killed swiping on PDFs. A fixed-layout book is drawn by
-   * `foliate-fxl`, whose `observedAttributes` is `['zoom']` — `flow` sits on it
-   * unread, so reading it back meant a reader who had ever chosen scrolled mode
-   * got a PDF that ignored every gesture, in a renderer that could not scroll
-   * either way.
-   *
-   *   paginator, `flow="scrolled"`  — its scrollport is inside a CLOSED shadow
-   *     root, so the host cannot even see it. Hands the event straight back.
-   *
-   *   fxl, `zoom="fit-width"`       — the scrollport IS the renderer element
-   *     (`:host { overflow: auto }`), so its position is readable from here and
-   *     the answer can be exact: hand the event back while the page has further
-   *     to go, and take it at the edge so the gesture turns the page instead.
-   *     That edge check is what makes a PDF read continuously — reaching the
-   *     bottom of one page carries on to the next, rather than stranding the
-   *     reader on page one with a dead trackpad.
-   */
-  /**
    * Land on the foot of a page the reader reached by scrolling up into it.
    *
    * Deferred by a frame, and that is the whole difficulty. The `load` event
@@ -1981,13 +1955,6 @@ export class ReaderSession {
   }
 
   /**
-   * A fixed-layout book scaled to the width — one page per section, scrolled.
-   *
-   * The shape a PDF takes in scroll mode. Named rather than inlined because two
-   * separate decisions turn on it: whether a wheel event is the platform's, and
-   * whether arriving at a new page backwards should open its foot.
-   */
-  /**
    * Whether more than one SECTION is on screen at once.
    *
    * The question `#sectionOf`'s last resort turns on, and there are exactly two
@@ -2019,11 +1986,44 @@ export class ReaderSession {
     return view.renderer?.getAttribute('flow') === 'scrolled' && this.#rendered.size > 1
   }
 
+  /**
+   * A fixed-layout book scaled to the width — one page per section, scrolled.
+   *
+   * The shape a PDF takes in scroll mode. Named rather than inlined because two
+   * separate decisions turn on it: whether a wheel event is the platform's, and
+   * whether arriving at a new page backwards should open its foot.
+   */
   #scrollsByPage(): boolean {
     const view = this.#view
     return view?.isFixedLayout === true && view.renderer?.getAttribute('zoom') === 'fit-width'
   }
 
+  /**
+   * Does the platform have a real scroll to perform with this event?
+   *
+   * Asked of the renderer, not of the app: what a gesture MEANS is the host's
+   * question and is answered in `Reader`, but whether the event has a default
+   * worth suppressing is a fact about the renderer. It has to be settled here,
+   * because `preventDefault` counts only synchronously inside the listener.
+   *
+   * THE TWO RENDERERS ANSWER IT DIFFERENTLY, and asking only `flow` was the
+   * regression that killed swiping on PDFs. A fixed-layout book is drawn by
+   * `foliate-fxl`, whose `observedAttributes` is `['zoom']` — `flow` sits on it
+   * unread, so reading it back meant a reader who had ever chosen scrolled mode
+   * got a PDF that ignored every gesture, in a renderer that could not scroll
+   * either way.
+   *
+   *   paginator, `flow="scrolled"`  — its scrollport is inside a CLOSED shadow
+   *     root, so the host cannot even see it. Hands the event straight back.
+   *
+   *   fxl, `zoom="fit-width"`       — the scrollport IS the renderer element
+   *     (`:host { overflow: auto }`), so its position is readable from here and
+   *     the answer can be exact: hand the event back while the page has further
+   *     to go, and take it at the edge so the gesture turns the page instead.
+   *     That edge check is what makes a PDF read continuously — reaching the
+   *     bottom of one page carries on to the next, rather than stranding the
+   *     reader on page one with a dead trackpad.
+   */
   #platformScrolls(event: WheelEvent): boolean {
     const view = this.#view
     const renderer = view?.renderer
@@ -2124,7 +2124,7 @@ export class ReaderSession {
        * book is read. A sideways swipe is a page turn, and a page turn lands at
        * the top like every other one. */
       this.#enterAtFootAt =
-      intent === 'prev' && this.#scrollsByPage() ? performance.now() : null
+        intent === 'prev' && this.#scrollsByPage() ? performance.now() : null
       this.#cb.onPageIntent(intent)
     }
     doc.addEventListener('wheel', onWheel, { passive: false })
@@ -2457,6 +2457,13 @@ function onBookControl(target: HTMLElement | null): boolean {
   return typeof target?.closest === 'function' && target.closest(IN_BOOK_CONTROL) !== null
 }
 
+/** A navigation that failed, logged with what was asked — see `#publish`. */
+function reportNavigation(what: string, target?: string): (cause: unknown) => void {
+  return (cause) => {
+    console.warn(`Paper: ${what}${target ? ` ${target}` : ''} failed`, cause)
+  }
+}
+
 /**
  * Release a prepared book, reporting a failure rather than hiding it.
  *
@@ -2465,12 +2472,6 @@ function onBookControl(target: HTMLElement | null): boolean {
  * URLs, and a silent failure to release them is a leak that grows one book at a
  * time with nothing on screen to suggest it.
  */
-function reportNavigation(what: string, target?: string): (cause: unknown) => void {
-  return (cause) => {
-    console.warn(`Paper: ${what}${target ? ` ${target}` : ''} failed`, cause)
-  }
-}
-
 function destroyQuietly(prepared: Destroyable): void {
   try {
     /* Not awaited: disposal is synchronous by contract and the session is
