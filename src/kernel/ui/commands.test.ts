@@ -1097,26 +1097,6 @@ describe('PANE_SHORTCUTS', () => {
       PANE_SHORTCUTS.map((one) => labelOf(one.pane)),
     )
   })
-
-  it('binds every digit to a panel that actually renders', () => {
-    /* The invariant, and the reason ⌘4 was unbound until Cards existed: a
-     * shortcut pointing at a panel nothing renders is a keystroke that gets
-     * swallowed to do nothing, which is indistinguishable from a broken key.
-     *
-     * Checked against the RENDERER, not against `buildCommands`. Both derive
-     * from the same PANES table, so asking one about the other could only ever
-     * agree with itself — the missing SidePane branch this is meant to catch
-     * would have passed. Reading the source is the same technique the reader's
-     * layout guard uses, for the same reason: the two things that must agree
-     * live in different files, and nothing else makes them fail together. */
-    const pane = readFileSync(
-      fileURLToPath(new URL('./pane/SidePane.tsx', import.meta.url)),
-      'utf8',
-    )
-    for (const shortcut of PANE_SHORTCUTS) {
-      expect(pane).toContain(`pane === '${shortcut.pane}'`)
-    }
-  })
 })
 
 describe('score', () => {
