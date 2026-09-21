@@ -46,6 +46,7 @@ import {
   proseGrid,
   readingStep,
   stepIndexForSize,
+  stepIndexOf,
 } from './metrics'
 
 /** Where the measure track's centre falls inside the whole prose grid. */
@@ -94,6 +95,40 @@ describe('the stepped scales', () => {
     expect(stepAt(scale, scale.def)).toBe(standing)
     // Ordered, low to high: a step is a direction, and the pane draws them in this order.
     expect([...scale.steps].sort((a, b) => a - b)).toEqual([...scale.steps])
+  })
+})
+
+describe('stepIndexOf', () => {
+  /**
+   * The other direction of a stepped scale: a stored VALUE back to the step a
+   * slider sits on. `Settings.tsx` asks it for read-aloud's three scales, and
+   * nothing asked it here — so its body could be emptied, and the function it
+   * hands the scan for reading a step's number could answer `undefined`, with
+   * the suite green. Both come back as index 0, which is why a case whose answer
+   * is not 0 is the one that matters.
+   */
+  it('answers the step a stored value sits on', () => {
+    expect(stepIndexOf(READING_RATE, 1.25)).toBe(3)
+    expect(stepIndexOf(READING_RATE, READING_RATE.steps[0]!)).toBe(0)
+  })
+
+  it('takes the nearest step for a value between two', () => {
+    /* A value the reader cannot have chosen through the pane — an older build's
+       step, or a hand-edited preference — still has to draw the slider
+       somewhere. */
+    expect(stepIndexOf(READING_RATE, 1.1)).toBe(2)
+    expect(stepIndexOf(READING_RATE, 1.4)).toBe(4)
+  })
+
+  it('keeps the lower step when a value falls exactly between two', () => {
+    /* STRICTLY NEARER, so a tie keeps the smaller — the conservative answer,
+       and a decision neither of the two copies of this scan used to state. */
+    expect(stepIndexOf(READING_RATE, 1.125)).toBe(2)
+  })
+
+  it('falls back to the scale’s own default for a value that is not a number', () => {
+    expect(stepIndexOf(SENTENCE_GAP, Number.NaN)).toBe(SENTENCE_GAP.def)
+    expect(stepIndexOf(SENTENCE_GAP, Number.POSITIVE_INFINITY)).toBe(SENTENCE_GAP.def)
   })
 })
 
