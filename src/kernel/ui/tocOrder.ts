@@ -58,17 +58,18 @@ export function flattenToc(items: readonly TocItem[]): FlatTocEntry[] {
   /* Pushed in reverse so the LAST sibling is popped last — depth-first in
      document order, which is the order a reader reads and clicks. */
   const pending: { item: TocItem; depth: number; path: string }[] = []
+  /* ONE CONDITION PER LOOP. Both used to carry a bound AND an `undefined` guard
+     — `at >= 0` beside `item === undefined`, `length > 0` beside `next ===
+     undefined` — and with two conditions saying the same thing, either could be
+     changed without anything noticing. Reading by `entries()` has no index to
+     fall off, and popping until nothing comes back has no length to misjudge. */
   const push = (list: readonly TocItem[], depth: number, prefix: string) => {
-    for (let at = list.length - 1; at >= 0; at -= 1) {
-      const item = list[at]
-      if (item === undefined) continue
+    for (const [at, item] of [...list.entries()].reverse()) {
       pending.push({ item, depth, path: prefix === '' ? String(at) : `${prefix}.${at}` })
     }
   }
   push(items, 0, '')
-  while (pending.length > 0) {
-    const next = pending.pop()
-    if (next === undefined) break
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
     const { item, depth, path } = next
     out.push({ label: item.label, href: item.href, depth, path })
     if (item.subitems) push(item.subitems, depth + 1, path)
