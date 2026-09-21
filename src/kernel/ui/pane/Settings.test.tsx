@@ -1231,6 +1231,36 @@ describe('the voice the picker shows', () => {
     }
   })
 
+  it('names each tier it groups by, whichever tiers are installed', () => {
+    /* Three tiers can be offered and each has its own word: the two Apple names
+       a `voiceURI` spells out, and `Other` for a machine whose identifiers say
+       nothing about quality — Windows, Linux, a browser on either — where the
+       floor cannot be applied and every voice is offered. */
+    const premium = { ...installed, name: 'Ava', voiceURI: 'com.apple.voice.premium.en-US.Ava' }
+    const plain = { ...installed, name: 'Microsoft Zira', voiceURI: 'Microsoft Zira - English (United States)' }
+    voiceGroup([premium, installed, plain])
+    const groups = [...(screen.getByRole('combobox') as HTMLSelectElement).querySelectorAll('optgroup')]
+    expect(groups.map((group) => group.label)).toEqual(['Premium', 'Enhanced', 'Other'])
+  })
+
+  it('says the platform will choose when the engine has listed nothing yet', () => {
+    /* ⚠️ NOT "None": an engine that has not answered is not an engine with
+       nothing good — the reader can do nothing about the first and something
+       about the second, so the two must not read alike. */
+    voiceGroup([])
+    expect((screen.getByRole('combobox') as HTMLSelectElement).selectedOptions[0]?.textContent).toBe(
+      'Automatic (system default)',
+    )
+  })
+
+  it('draws each row with the shared row class, so the band lines up', () => {
+    /* §07's rows are one geometry: a row that dropped the class would sit at a
+       different height from every row beside it. */
+    voiceGroup()
+    const row = screen.getByRole('combobox').closest('div')
+    expect(row?.className, 'the voice row is not a settings row').toMatch(/settingRow/u)
+  })
+
   it('shows Automatic, naming the voice it means, for a voice the machine no longer has', () => {
     const select = pickerFor({ en: 'com.apple.voice.premium.en-US.Gone' })
     expect(select.selectedOptions[0]?.textContent).toBe('Automatic (Zoe)')

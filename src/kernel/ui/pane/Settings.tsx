@@ -465,11 +465,19 @@ function SelectRow({
           </option>
         )}
         {groups.map((group, at) =>
+          /* Stryker disable next-line ConditionalExpression: `voiceGroups`
+             appends a voice as it opens each run, so it never emits an empty
+             group — this is the component's contract for a caller that would,
+             and nothing in the app is one. */
           group.options.length === 0 ? null : (
             /* KEYED BY POSITION AS WELL AS LABEL. `voiceGroups` deliberately
                emits non-contiguous groups from one tier — the same label twice —
                so a label alone gave two siblings one key, and React reconciled
                the second into the first whenever the installed voices changed. */
+            /* Stryker disable next-line StringLiteral: a React key is not in
+               the DOM, so no rendered output can tell one spelling from
+               another — what it prevents is a reconciliation, and the comment
+               above records the case. */
             <optgroup key={`${group.label}-${at}`} label={group.label}>
               {group.options.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -1080,6 +1088,9 @@ export function Settings({
              coincidence: it relied on Automatic being first. `chosenVoice` is
              the speech path's own answer, so the picker now shows what the
              reader will hear however the options are ordered. */
+          /* Stryker disable next-line StringLiteral: a `<select>` handed a value
+             no `<option>` carries reports the empty string anyway, so the
+             fallback and any other absent value render alike. */
           value={chosenVoice(narration.voices, narration.lang, narration.chosen)?.voiceURI ?? ''}
           /* NAMES WHAT AUTOMATIC CURRENTLY MEANS, rather than saying
              "Automatic" and leaving the reader to guess. It is the same answer
