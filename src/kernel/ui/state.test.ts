@@ -1090,3 +1090,60 @@ describe('the layers, and the one list that governs them', () => {
     }
   })
 })
+
+/**
+ * ⚠️ **A SETTER THAT CHANGES NOTHING MUST RETURN THE SAME STATE.** `useReducer`
+ * skips a re-render only for the SAME object, and eight setters spread a new one
+ * for a value already there — `setChrome` among them, which §06 dispatches on
+ * pointer-near, so moving the mouse near the edge re-rendered the whole shell on
+ * every move. Each is asked here with the value it already holds.
+ */
+describe('a setter that changes nothing', () => {
+  it.each([
+    ['setThemeFollowsOs', { type: 'setThemeFollowsOs', follows: initialState.themeFollowsOs }],
+    ['closePane', { type: 'closePane' }],
+    ['setSide', { type: 'setSide', side: initialState.side }],
+    ['closeLayer', { type: 'closeLayer', layer: 'paletteOpen' }],
+    ['setChrome', { type: 'setChrome', on: initialState.chromeOn }],
+    ['setTypeface', { type: 'setTypeface', typeface: initialState.typeface }],
+    ['setMarkTint', { type: 'setMarkTint', tint: initialState.markTint }],
+    ['setMarkStyle', { type: 'setMarkStyle', style: initialState.markStyle }],
+  ] as const)('%s returns the same state for the value it already has', (_name, action) => {
+    const state = { ...initialState, pane: null, paletteOpen: false }
+    expect(reducer(state, action as Action)).toBe(state)
+  })
+
+  it('still returns a new state when the value does move', () => {
+    const state = { ...initialState, chromeOn: false }
+    const next = reducer(state, { type: 'setChrome', on: true })
+    expect(next).not.toBe(state)
+    expect(next.chromeOn).toBe(true)
+  })
+})
+
+/**
+ * ⚠️ **A PANEL NOTHING CONTRIBUTES WAS REMEMBERED AS THE ONE LAST OPENED.**
+ * `paneOffered` knows only the kernel's panels, so any `capability:name` id
+ * passed — `ghost:pane` as readily as a real one. The pane SHOWN was right, but
+ * `lastPane` became a panel that does not exist and the reader's real one was
+ * lost: the next ⌘\ resolved the ghost to the default.
+ */
+describe('what lastPane may record', () => {
+  const contributed = [{ id: 'circle:book', screens: ['reader'] }] as const
+  const reading = { ...initialState, screen: 'reader' as const, pane: 'toc' as const, lastPane: 'toc' as const }
+
+  it('keeps the panel the reader had when they ask for one that does not exist', () => {
+    const next = reducer(reading, { type: 'openPane', pane: 'ghost:pane' } as Action, contributed)
+    expect(next.lastPane, 'not the ghost').toBe('toc')
+  })
+
+  it('remembers a contributed panel that does exist', () => {
+    const next = reducer(reading, { type: 'openPane', pane: 'circle:book' } as Action, contributed)
+    expect(next.lastPane).toBe('circle:book')
+  })
+
+  it('remembers a kernel panel as before', () => {
+    const next = reducer(reading, { type: 'openPane', pane: 'search' } as Action, contributed)
+    expect(next.lastPane).toBe('search')
+  })
+})

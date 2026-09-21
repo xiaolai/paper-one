@@ -410,6 +410,17 @@ function atIndex(state: AppState, key: 'brightness' | 'contrast', scale: Stepped
  * rule (`paneFits`) has to know which screens they belong on, and a reducer
  * cannot read a registry. Defaulted to none, which is the kernel alone.
  */
+/**
+ * THE ONE REDUCER, AND A LONG SWITCH ON PURPOSE. An audit asked for it to be split
+ * into subreducers — navigation, panes, layers, typography, speech. The cases do
+ * not divide that cleanly: opening a pane closes the palette, changing the screen
+ * re-resolves the pane, turning developer options off re-resolves both the pane
+ * and `lastPane`, a layer opening retires the others. Those are CROSS-SLICE
+ * invariants, and a reducer per slice would move each one into a coordinator that
+ * has to know every slice anyway. What the audit's other findings here pointed at
+ * was real and is fixed without the split: eight setters now return `state` when
+ * nothing moved (`put`), and `lastPane` consults the registry it is handed.
+ */
 export function reducer(state: AppState, action: Action, contributed: ContributedPanes = NO_CONTRIBUTED): AppState {
   switch (action.type) {
     case 'goScreen': {
@@ -460,7 +471,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
         : { ...state, theme: action.theme, themeFollowsOs: false }
 
     case 'setThemeFollowsOs':
-      return { ...state, themeFollowsOs: action.follows }
+      return put(state, 'themeFollowsOs', action.follows)
 
     case 'openPane':
       /* Asking for a panel this screen does not have is not an error to report,
@@ -485,7 +496,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
          * it does. An un-offered request leaves the memory untouched rather
          * than overwriting it — the reader asked for something they cannot
          * have, which is no reason to discard what they had. */
-        lastPane: paneOffered(action.pane, state.developer, state.hiddenPanes) ? action.pane : state.lastPane,
+        lastPane: remembers(action.pane, state, contributed) ? action.pane : state.lastPane,
         paletteOpen: false,
       }
 
@@ -502,7 +513,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
         : { ...state, pane: paneFor(state.screen, state.lastPane, audienceOf(state, contributed)) }
 
     case 'closePane':
-      return { ...state, pane: null }
+      return put(state, 'pane', null)
 
     /* ⚠️ **THE OPEN PANEL IS RE-RESOLVED, AND IT HAS TO BE.** Turning developer
      * options OFF takes the unfinished panels away — including, quite possibly,
@@ -531,7 +542,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       )
 
     case 'setSide':
-      return { ...state, side: action.side }
+      return put(state, 'side', action.side)
 
     case 'toggleLayer': {
       /* Closing needs no ceremony; opening retires the others. Every layer is
@@ -549,7 +560,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
     }
 
     case 'closeLayer':
-      return { ...state, [action.layer]: false }
+      return put(state, action.layer, false)
 
     case 'dismissTop': {
       const top = LAYER_ORDER.find((layer) => state[layer])
@@ -557,7 +568,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
     }
 
     case 'setChrome':
-      return { ...state, chromeOn: action.on }
+      return put(state, 'chromeOn', action.on)
 
     case 'toggleReadingNotes':
       return { ...state, readingNotesAloud: !state.readingNotesAloud }
@@ -629,7 +640,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       return state.align === action.align ? state : { ...state, align: action.align }
 
     case 'setTypeface':
-      return { ...state, typeface: action.typeface }
+      return put(state, 'typeface', action.typeface)
 
     case 'toggleScrollbar':
       return { ...state, scrollbarOn: !state.scrollbarOn }
@@ -648,10 +659,10 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
        them independently and a combined action would make every tint click
        restate the style — which is how a toggle silently resets. */
     case 'setMarkTint':
-      return { ...state, markTint: action.tint }
+      return put(state, 'markTint', action.tint)
 
     case 'setMarkStyle':
-      return { ...state, markStyle: action.style }
+      return put(state, 'markStyle', action.style)
 
     /* MERGED INTO THE MAP, never replacing it, so choosing a Chinese voice
        leaves the English one alone. An empty voice REMOVES the entry rather
@@ -703,6 +714,24 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
  * One helper for all three, because the duplication is what let two of them
  * inherit the omission from the first.
  */
+/**
+ * `state` with one field set — or `state` ITSELF when the field already holds it.
+ *
+ * ⚠️ **EIGHT SETTERS SPREAD A NEW STATE FOR A VALUE ALREADY THERE.** `useReducer`
+ * skips a re-render only when the reducer returns the SAME object, so each of
+ * them re-rendered every consumer of `AppState` for a change that changed
+ * nothing — and `setChrome` is on the hottest path there is: §06 dispatches it on
+ * pointer-near, so a reader moving the mouse near the edge re-rendered the whole
+ * shell on every move. `setSpacing`, `setAlign`, `setReadingStyle` and
+ * `setPaneHidden` already returned `state` when nothing moved; these eight were
+ * the inconsistent ones.
+ *
+ * `Object.is` rather than `===`, so a `NaN` never reads as a change to itself.
+ */
+function put<K extends keyof AppState>(state: AppState, key: K, value: AppState[K]): AppState {
+  return Object.is(state[key], value) ? state : { ...state, [key]: value }
+}
+
 function bounded(value: number, min: number, max: number): number | null {
   if (!Number.isFinite(value)) return null
   return Math.max(min, Math.min(max, value))
@@ -919,6 +948,23 @@ function afterVisibilityChange(next: AppState, contributed: ContributedPanes): A
 }
 
 /** The audience a state describes, so the reducer's four calls cannot differ. */
+/**
+ * Whether `lastPane` may record this request.
+ *
+ * ⚠️ **A CONTRIBUTED-LOOKING ID WAS REMEMBERED WHETHER OR NOT ANYTHING
+ * CONTRIBUTES IT.** `paneOffered` knows the kernel's own panels — the unfinished
+ * ones and the developer one — and answers yes for every other string, so
+ * `ghost:pane` passed as readily as `circle:book`. The pane shown was right
+ * (`paneFor` checks fit against the registry and falls back), but `lastPane`
+ * became a panel that does not exist, and the one the reader had open before was
+ * lost: the next ⌘\ resolved the ghost to the screen's default instead. The
+ * reducer is handed the registry — this is the one place that did not ask it.
+ */
+function remembers(pane: PaneId, state: AppState, contributed: ContributedPanes): boolean {
+  if (!paneOffered(pane, state.developer, state.hiddenPanes)) return false
+  return !isContributedPaneId(pane) || contributed.some((entry) => entry.id === pane)
+}
+
 function audienceOf(state: AppState, contributed: ContributedPanes): PaneAudience {
   return { contributed, developer: state.developer, hiddenPanes: state.hiddenPanes }
 }
@@ -1051,65 +1097,27 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
        * must not take the render down with it. */
       console.error('Paper: could not save a preference', cause)
     }
-    /* SPREAD FIELD BY FIELD, not `[settings, prefs]`: `preferencesOf` builds a
-     * fresh object every render, so depending on it would run this effect on
-     * every page turn and keystroke. `spacing`'s four indices are listed where
-     * the object itself would do as well — see the note at `readingStyle`. */
-  }, [
-    settings,
-    /* ⚠️ **OMITTED AT FIRST, EXACTLY AS THE FIFTEEN BELOW WERE.** This effect
-       lists every preference by name, so a new one that is not added here is a
-       setting the reader can change and never save — the defect `readingStyle`
-       records two paragraphs down, repeated on the day developer options landed.
-       It is the whole point of persisting the flag: without these two lines
-       ⌘⌃⌥D worked and did not survive a relaunch.
-
-       `hiddenPanes` is safe as an identity: `setPaneHidden` builds a new array
-       only when the list actually changes, so this cannot re-run on a page
-       turn. (That promise was false for a repeated hide or show until the
-       2026-09-13 audit, which also struck a comparison here to a
-       "freshly-built `spacing` wrapper" that does not exist.) */
-    prefs.developer,
-    prefs.hiddenPanes,
-    prefs.theme,
-    prefs.themeFollowsOs,
-    prefs.typeface,
-    prefs.textSize,
-    prefs.spacing.letter,
-    prefs.spacing.word,
-    prefs.spacing.line,
-    prefs.spacing.paragraph,
-    prefs.align,
-    prefs.brightness,
-    prefs.contrast,
-    prefs.pageLayout,
-    prefs.side,
-    prefs.rulerOn,
-    prefs.scrollbarOn,
-    prefs.progressLineOn,
-    prefs.markTint,
-    prefs.markStyle,
-    /* THE OBJECT, not its fifteen fields, and that is safe: `setReadingStyle`
-       returns the SAME object when a setting has not moved, so its identity is
-       stable across a page turn or a keystroke. Omitted entirely at first,
-       which meant fifteen settings a reader could move and never save — the
-       effect simply never re-ran.
-
-       `spacing` WOULD BE EXACTLY AS SAFE. This note said it is listed field by
-       field because `preferencesOf` builds a fresh wrapper each render — it
-       passes `state.spacing` through by reference, and `setSpacing` keeps the
-       object when an index has not moved. The indices stay listed, which is
-       harmless; the reason given was false (2026-09-13 audit). */
-    prefs.readingStyle,
-    /* THE MAP BY IDENTITY, which is safe for the same reason `readingStyle`'s
-       object is: `setReadingVoice` returns the SAME state when the chosen voice
-       has not moved, so no page turn or keystroke produces a new one. */
-    prefs.readingVoice,
-    prefs.readingRate,
-    prefs.readingNotesAloud,
-    prefs.sentenceGapMs,
-    prefs.paragraphGapMs,
-  ])
+    /* ⚠️ **DERIVED FROM `preferencesOf`, AND IT WAS A HAND-KEPT LIST OF EVERY
+     * PREFERENCE BY NAME — WHICH MISSED ONE ON TWO SEPARATE OCCASIONS.** Each
+     * time a setting was added and not listed here, the reader could change it
+     * and it never saved: the effect simply did not re-run. `developer` and
+     * `hiddenPanes` went that way when developer options landed, and fifteen
+     * reading settings before them. The fix each time was to add the name, and
+     * `state.persistence.test.tsx` was written to catch the next one.
+     *
+     * The values of `preferencesOf(state)` ARE the list, so it cannot miss one:
+     * a setting that reaches the file reaches this array, by construction.
+     *
+     * NOT `[settings, prefs]`, because `preferencesOf` builds a fresh object
+     * every render and depending on it would run this on every page turn and
+     * keystroke. Its VALUES are stable where nothing moved, which is what makes
+     * the spread safe: every field is either a primitive or passed through from
+     * `state` by reference, and each setter returns the SAME value when the
+     * reader's choice has not changed — `setSpacing`, `setReadingStyle`,
+     * `setPaneHidden` and `setReadingVoice` all say so beside themselves. The
+     * length is fixed by `KernelPreferences`' keys, which is the one thing React
+     * requires of a dependency array. */
+  }, [settings, ...Object.values(prefs)])
   return [state, dispatch]
 }
 

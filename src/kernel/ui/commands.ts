@@ -22,9 +22,13 @@ import type { AppDispatch, AppState, PaneId } from './state'
 
 /* `Command` is declared in `core/capability.ts` — a capability's commands are
  * the same shape as the kernel's, and the palette does not know which is
- * which. Re-exported here, so nothing that named it through this module has
- * moved. */
-export type { Command } from '../core/capability'
+ * which. It is imported from THERE by everything that names it.
+ *
+ * ⚠️ **IT WAS RE-EXPORTED FROM HERE "so nothing that named it through this
+ * module has moved"** — a compatibility shim for a move that had finished. Two
+ * files still imported it this way, so the palette depended on this module for
+ * a type this module does not own, and the declaration had two addresses. They
+ * import the one address now, and the shim is gone. */
 
 /**
  * What the kernel's own commands are built from. A capability's commands see
@@ -171,6 +175,21 @@ export interface KernelCommandContext {
   contributedPanes?: readonly Pick<PaneContribution, 'id' | 'label' | 'screens'>[]
 }
 
+/**
+ * Every kernel command for this moment, then the composition's.
+ *
+ * ONE LONG FUNCTION, KEPT AS ONE. An audit named it a god procedure — panels,
+ * reading, appearance, books, archives, navigation and contributions in 440
+ * lines — and said that ordering changes had already broken it. That half was
+ * true and is fixed where it lived: the order no longer decides the palette's
+ * grouping (`contiguous`), and the archive rows are a table. What remains is a
+ * sequence of independent `if (available) push(row)` blocks, each reading the
+ * same `ctx` and `state`, with nothing flowing from one to the next. Split into
+ * one builder per group, each would take the whole context and return its rows,
+ * and this would become the list of them in order — the same file, a function
+ * boundary per heading, and no invariant held by any of them that is not held
+ * here already.
+ */
 export function buildCommands(ctx: KernelCommandContext): Command[] {
   const { state, dispatch } = ctx
   const commands: Command[] = []
@@ -480,48 +499,48 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     })
   }
 
-  if (ctx.exportMarks) {
-    const run = ctx.exportMarks
-    commands.push({
+  /**
+   * The four archive rows, each offered only where the host can do it.
+   *
+   * ⚠️ **FOUR COPIES OF ONE SKELETON — `if (ctx.x) { const run = ctx.x;
+   * commands.push({ … group: 'Library', run }) }` — AND NOW ONE LOOP OVER A
+   * TABLE.** They differed in id, label and keywords only, so the parts that are
+   * a decision — which group they file under, and that an absent handler means
+   * an absent row — were written four times and could be edited in one. The
+   * per-row reasons stay beside the rows they explain.
+   */
+  const archive: readonly {
+    readonly handler: (() => void) | null | undefined
+    readonly id: string
+    readonly label: string
+    readonly keywords: string
+  }[] = [
+    {
+      handler: ctx.exportMarks,
       id: 'marks:export',
       /* NAMES BOTH THINGS IT WRITES, because a reader looking for a way out
          does not know whether Paper calls a card marginalia. */
       label: 'Export your marks and cards…',
-      group: 'Library',
       keywords: 'mark note card highlight annotation backup save export file json markdown archive',
-      run,
-    })
-  }
-
-  if (ctx.importMarks) {
-    const run = ctx.importMarks
-    commands.push({
+    },
+    {
+      handler: ctx.importMarks,
       id: 'marks:import',
       /* "Merge" in the label, exactly as the tag import says it, and it is the
          reassurance rather than the description: an import never removes a
          mark, so restoring an old file cannot silently undo a month of
          reading. */
       label: 'Import marks from a file… (merge)',
-      group: 'Library',
       keywords: 'mark note card highlight annotation restore load import merge file json archive backup',
-      run,
-    })
-  }
-
-  if (ctx.exportTags) {
-    const run = ctx.exportTags
-    commands.push({
+    },
+    {
+      handler: ctx.exportTags,
       id: 'tags:export',
       label: 'Export your tags…',
-      group: 'Library',
       keywords: 'tag backup save export file json archive',
-      run,
-    })
-  }
-
-  if (ctx.importTags) {
-    const run = ctx.importTags
-    commands.push({
+    },
+    {
+      handler: ctx.importTags,
       id: 'tags:import',
       /* "Merge" in the label, because that is what it does and the word is the
          reassurance: an import never removes a tag, so restoring an old file
@@ -533,10 +552,11 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
          written, and the test read the keywords. Added — and the test now reads
          the label — by the 2026-09-13 audit. */
       label: 'Import tags from a file… (merge)',
-      group: 'Library',
       keywords: 'tag restore load import merge file json archive backup',
-      run,
-    })
+    },
+  ]
+  for (const { handler, ...row } of archive) {
+    if (handler) commands.push({ ...row, group: 'Library', run: handler })
   }
 
   commands.push({
@@ -555,7 +575,13 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     // named once, beside `screenJump`, so the tooltip cannot keep an old one.
     combo: SCREEN_JUMP_COMBO,
     keywords: 'shelf books home library',
-    on: state.screen === 'library',
+    /* ⚠️ **NO `on`, AND THIS SAID `state.screen === 'library'`.** `on` means
+       "this command names a state that is currently on", and a jump always
+       names the OTHER screen — on the library its label is "Back to the book"
+       or "Open a book". So the palette drew a checkmark beside a destination the
+       reader was not at, on exactly the screen where they would look for it. The
+       titlebar's Library button is a toggle and IS pressed there; this row is a
+       jump, and a jump has no state to be on. */
     run: () =>
       dispatch({ type: 'goScreen', screen: screenJump(state.screen, ctx.hasBook).to }),
   })
@@ -639,7 +665,32 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     }
   }
 
-  return commands
+  return contiguous(commands)
+}
+
+/**
+ * The same commands with each group's rows together, in the order the groups
+ * first appear.
+ *
+ * ⚠️ **THE PALETTE DREW "Book" TWICE, AND SOURCE ORDER WAS THE ONLY GUARD.**
+ * It emits a heading whenever the group changes as it walks the list — rather
+ * than grouping first, so a search's ranking survives — and with an empty query
+ * the list is `buildCommands`' push order. The Library block sat between two
+ * runs of Book commands, so the reader saw Book, Library, Book: one group under
+ * two headings, the screen jump separated from the book actions it belongs with.
+ *
+ * Reordering the pushes would fix today's file and leave the rule where it was —
+ * in the discipline of whoever adds the next command. This makes groups
+ * contiguous whatever order they were pushed in. `Array.prototype.sort` is
+ * STABLE, so rows keep their order within a group and groups keep the order
+ * they first appeared in; only a group that had been split is joined.
+ */
+function contiguous(commands: readonly Command[]): Command[] {
+  const firstSeen = new Map<string, number>()
+  for (const [at, command] of commands.entries()) {
+    if (!firstSeen.has(command.group)) firstSeen.set(command.group, at)
+  }
+  return [...commands].sort((a, b) => (firstSeen.get(a.group) ?? 0) - (firstSeen.get(b.group) ?? 0))
 }
 
 /**

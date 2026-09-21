@@ -122,6 +122,16 @@ describe('the settings store is read once', () => {
  * non-vacuity case below is what said otherwise: a detector that finds nothing
  * and one that finds everything are the same bug wearing different faces.
  */
+/** The settings a HAND-WRITTEN dependency list does not name. */
+function missingFrom(deps: string): string[] {
+  return Object.keys(KERNEL_SETTINGS).filter((name) => {
+    /* `textSize` is `stepIdx` in state and `spacing` is listed field by field
+       — both are named in the array, which is all this asks. */
+    if (name === 'spacing') return !deps.includes('prefs.spacing.')
+    return !deps.includes(`prefs.${name}`)
+  })
+}
+
 function writeEffectDeps(source: string): string {
   const hook = source.slice(source.indexOf('export function useAppState'))
   const start = hook.indexOf('}, [')
@@ -139,14 +149,15 @@ describe('the write effect names every preference', () => {
     const source = readFileSync(resolve('src/kernel/ui/state.ts'), 'utf8')
     const deps = writeEffectDeps(source)
 
-    const missing = Object.keys(KERNEL_SETTINGS).filter((name) => {
-      /* `textSize` is `stepIdx` in state and `spacing` is listed field by field
-         — both are named in the array, which is all this asks. */
-      if (name === 'spacing') return !deps.includes('prefs.spacing.')
-      return !deps.includes(`prefs.${name}`)
-    })
+    /* ⚠️ **THE LIST IS DERIVED NOW, WHICH COVERS EVERY SETTING BY
+       CONSTRUCTION.** `...Object.values(prefs)` is `preferencesOf`'s values,
+       and `preferencesOf` returns every `KernelPreferences` field — so nothing a
+       reader can save can be left out of it. This case still exists for the day
+       somebody turns it back into a hand-written list: then the per-name check
+       below runs again, and a missing name fails here exactly as before. */
+    if (deps.includes('...Object.values(prefs)')) return
 
-    expect(missing, 'settings a reader can change and never save').toEqual([])
+    expect(missingFrom(deps), 'settings a reader can change and never save').toEqual([])
   })
 
   /* NON-VACUITY: the scan must be able to fail. A name no setting has must not
@@ -161,6 +172,22 @@ describe('the write effect names every preference', () => {
     const deps = writeEffectDeps(source)
 
     expect(deps).not.toContain('prefs.somethingNoSettingHas')
-    expect(deps, 'the parse found the dependency array at all').toContain('prefs.theme')
+    /* The derived spread is what proves the parse found the REAL array — the
+       first version of this parser returned an empty slice and reported every
+       setting missing, which looked like a finding. */
+    expect(deps, 'the parse found the dependency array at all').toContain('...Object.values(prefs)')
+  })
+
+  /* AND THE FALLBACK CAN STILL FAIL. The real source is derived, so the per-name
+     check above never runs against it — which would leave it unproven for the
+     day somebody writes the list out by hand again. A hand-written list missing
+     one setting must be caught, and a complete one must not. */
+  it('would catch a hand-written list that forgot a setting', () => {
+    const complete = Object.keys(KERNEL_SETTINGS)
+      .map((name) => (name === 'spacing' ? 'prefs.spacing.letter' : `prefs.${name}`))
+      .join(', ')
+    expect(missingFrom(complete), 'a complete hand list').toEqual([])
+    const forgot = complete.replace('prefs.readingNotesAloud', '')
+    expect(missingFrom(forgot), 'one setting left out').toEqual(['readingNotesAloud'])
   })
 })
