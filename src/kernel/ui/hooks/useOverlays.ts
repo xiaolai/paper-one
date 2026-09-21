@@ -104,7 +104,16 @@ export function useOverlays(deps: OverlayDeps): readonly ForeignAnchor[] {
        * compositions — the previous book's anchors would otherwise be drawn
        * over a book that has nothing to do with them. `app/web/Reader.tsx`
        * records the same defect for its own marks: *"A STORE THAT WENT AWAY
-       * TAKES ITS HIGHLIGHTS WITH IT."* */
+       * TAKES ITS HIGHLIGHTS WITH IT."*
+       *
+       * ⚠️ **AND SINCE THE HOLD CARRIES ITS OWN BOOK AND OPEN, THIS CLEAR IS NO
+       * LONGER WHAT KEEPS THEM OFF THE PAGE** — the render refuses a hold whose
+       * `bookId` or `openGeneration` is not the one on screen, so removing this
+       * line draws nothing different. What it still does is let go: without it
+       * the hook keeps one book's annotations in memory for as long as the app
+       * shows another. That is not something a test can see, which is why the
+       * mutation of it is disabled rather than left as a survivor. */
+      /* Stryker disable next-line CallExpression: the render already refuses a stale hold; this drops the reference */
       setHeld(null)
       lastGood.current.clear()
       return
