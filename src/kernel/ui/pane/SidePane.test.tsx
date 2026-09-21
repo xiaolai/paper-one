@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SidePane, type SidePaneProps } from './SidePane'
 import { initialState } from '../state'
 import type { Book } from '../hooks/useBook'
@@ -27,6 +27,19 @@ import type { TagPrefsStore } from '../hooks/useTagPrefs'
  * nothing said. Every panel's props here are required now, which is the
  * compile-time version of the same check.
  */
+
+beforeEach(() => {
+  /* jsdom has no `ResizeObserver`, and the Settings pane's typeface field
+     measures itself — the same stub the behaviour suite next door installs. */
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    },
+  )
+})
 
 afterEach(cleanup)
 
@@ -66,7 +79,7 @@ function draw({
   developerOptions = false,
   ...over
 }: Partial<SidePaneProps> & {
-  pane: 'search' | 'cards' | 'library' | 'marginalia'
+  pane: 'search' | 'cards' | 'library' | 'marginalia' | 'settings'
   developerOptions?: boolean
 }) {
   const onGoTo = vi.fn()
@@ -272,5 +285,72 @@ describe('what Marginalia is told about other books', () => {
     expect(screen.getByText('Another book')).toBeTruthy()
     withBooks(shelf)
     expect(screen.getByText('Ulysses'), 'the panel kept the shelf it was first given').toBeTruthy()
+  })
+})
+
+describe('what the Voice group is handed', () => {
+  /**
+   * ⚠️ **THE HOST ANSWERS TWO FACTS AND APP STATE ANSWERS FIVE, AND THIS IS
+   * WHERE THEY MEET.** The open book's language and the machine's voice list
+   * are the host's; the chosen voice, the speed and the two gaps are the
+   * reader's. Seventeen mutants lived in that composition because no test
+   * rendered the pane with a narration at all — every one of them a wire from a
+   * control to a reducer action, which is what this suite exists for.
+   */
+  const narration = { lang: 'en-US', voices: [] as const }
+
+  function voiceRows(over: Partial<SidePaneProps> = {}) {
+    const dispatch = vi.fn()
+    const props: Partial<SidePaneProps> = {
+      pane: 'settings',
+      narration,
+      dispatch,
+      ...over,
+    } as Partial<SidePaneProps> & { pane: 'settings' }
+    draw(props as Parameters<typeof draw>[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Voice' }))
+    return dispatch
+  }
+
+  it('reads the reader’s own choices out of state', () => {
+    voiceRows({
+      state: {
+        ...initialState,
+        screen: 'reader',
+        pane: 'settings',
+        lastPane: 'settings',
+        readingRate: 1.5,
+        sentenceGapMs: 500,
+        paragraphGapMs: 900,
+      },
+    })
+    /* Each stepper's own readout says where in its scale it stands, which is
+       the only observable proof the composed value arrived: 1.5x is the fifth
+       of eight speeds, and 500ms and 900ms are each the fourth of their own six
+       gaps. */
+    const steps = screen.getAllByRole('img').map((pips) => pips.getAttribute('aria-label'))
+    expect(steps).toEqual(expect.arrayContaining(['Step 5 of 8', 'Step 4 of 6']))
+    expect(steps.filter((label) => label === 'Step 4 of 6'), 'both gaps').toHaveLength(2)
+  })
+
+  it.each([
+    ['More speed', { type: 'setReadingRate', rate: 1.25 }],
+    ['More pause between sentences', { type: 'setSentenceGap', ms: 300 }],
+    ['More pause between paragraphs', { type: 'setParagraphGap', ms: 900 }],
+  ])('sends %s to the reducer', (control, action) => {
+    const dispatch = voiceRows()
+    fireEvent.click(screen.getByRole('button', { name: control }))
+    expect(dispatch).toHaveBeenCalledWith(action)
+  })
+
+  it('sends the note-reading switch to the reducer', () => {
+    const dispatch = voiceRows()
+    fireEvent.click(screen.getByRole('switch', { name: 'Read footnotes' }))
+    expect(dispatch).toHaveBeenCalledWith({ type: 'toggleReadingNotes' })
+  })
+
+  it('draws no Voice group at all on a host with no reader', () => {
+    draw({ pane: 'settings', narration: undefined })
+    expect(screen.queryByRole('button', { name: 'Voice' })).toBeNull()
   })
 })
