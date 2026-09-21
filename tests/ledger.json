@@ -11225,6 +11225,7 @@
     "src/kernel/ui/shell/TitleBar.test.tsx > what the chrome says without a word > draws the pane control on the right when the pane is on the right",
     "src/kernel/ui/shell/TitleBar.test.tsx > what the chrome says without a word > draws the pane control on the side the pane is on",
     "src/kernel/ui/shell/TitleBar.test.tsx > what the chrome says without a word > gives every control the shared action class, and the transport its own",
+    "src/kernel/ui/shell/TitleBar.test.tsx > what the chrome says without a word > lights the panel that is open, and closes it when pressed again",
     "src/kernel/ui/shell/TitleBar.test.tsx > what the chrome says without a word > marks the chip when it is naming the application rather than a book",
     "src/kernel/ui/shell/TitleBar.test.tsx > what the chrome says without a word > offers only the panels this reader is offered",
     "src/kernel/ui/shell/TitleBar.test.tsx > what the chrome says without a word > says the palette’s own shortcut in its title",

@@ -569,6 +569,29 @@ describe('what the chrome says without a word', () => {
     }
   })
 
+  /* ⚠️ **THE RAIL'S BUTTON IS A TOGGLE, AND EVERY PART OF THAT WAS UNDRAWN BY ANY
+     TEST.** `data-on` fills it and `aria-pressed` says it — §10's rule, since a
+     screen reader cannot see a fill — and the press has to CLOSE the panel it is
+     announcing as open. A rail that always dispatched `openPane` leaves a reader
+     pressing a lit button with nothing happening, and one that always dispatched
+     `closePane` never opens anything; both draw identically. */
+  it('lights the panel that is open, and closes it when pressed again', () => {
+    const onOpen = draw({ state: { screen: 'reader', chromeOn: true, pane: 'toc' }, hasBook: true })
+    const lit = screen.getByRole('button', { name: 'Contents' })
+    expect(lit.getAttribute('aria-pressed'), 'announced, not only drawn').toBe('true')
+    expect(lit.getAttribute('data-on')).toBe('true')
+    fireEvent.click(lit)
+    expect(onOpen).toHaveBeenCalledWith({ type: 'closePane' })
+    cleanup()
+
+    const onShut = draw({ state: { screen: 'reader', chromeOn: true, pane: null }, hasBook: true })
+    const dark = screen.getByRole('button', { name: 'Contents' })
+    expect(dark.getAttribute('aria-pressed')).toBe('false')
+    expect(dark.getAttribute('data-on')).toBe('false')
+    fireEvent.click(dark)
+    expect(onShut).toHaveBeenCalledWith({ type: 'openPane', pane: 'toc' })
+  })
+
   it('draws the pane control on the right when the pane is on the right', () => {
     /* The other half of the side glyph: with only one side tested, a control
        that always drew the left one would pass. */
