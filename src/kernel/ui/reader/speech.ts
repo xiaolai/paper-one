@@ -30,8 +30,9 @@
  *   left alone: the callback's only effect is to stop drawing the band and
  *   remove it, and an engine that reports nothing never drew one — so there is
  *   nothing to stop and nothing to remove. Carrying the timer across utterances
- *   would mean dropping its generation guard, which exists to stop a stale timer
- *   blaming a reading that is no longer the same one.
+ *   would mean keeping one alive across the `speak` that starts the next
+ *   sentence — and every path that retires a reading clears it precisely so a
+ *   stale timer cannot blame a reading that is no longer the same one.
  * - What DOES cross utterances is the band itself, and that was a real defect:
  *   see `speakSentence` in `useSpeech.ts`, which clears it before each sentence.
  *
@@ -617,7 +618,19 @@ export class Speaker {
    * Speaker across readings and resets `followsWords` to true at each `start`,
    * so a permanent flag would let the highlight come back in the next reading
    * and park on its first word with nothing left to correct it.
+   *
+   * ⚠️ **AND THAT RESET IS WHY THE VALUE HERE CANNOT BE OBSERVED.** The only
+   * reader is `#armGrace`'s timer, armed from handlers `speak` registers — and
+   * `speak`'s second statement is `stop()`, which writes `false` here. So this
+   * initialiser is answered before anything can ask, `true` would behave exactly
+   * as `false` does, and the mutation of it is disabled on that ground rather
+   * than left as a survivor nothing could kill.
+   *
+   * Delete the reset in `stop()` and the directive below stops being true — and
+   * that deletion fails a case of its own, `measures the engine afresh once a
+   * reading has stopped`, which is what keeps this argument checkable.
    */
+  /* Stryker disable next-line BooleanLiteral: `speak` calls `stop`, which writes this, before any reader exists */
   #reportedNoBoundaries = false
   /** This speaker's claim on the one engine — see `engineHeldBy`. */
   readonly #token = {}
@@ -689,21 +702,27 @@ export class Speaker {
 
     /* The rate is a multiplier on the engine's default, so 1 IS the default and
      * assigning it changes nothing — which is why an absent preference and a
-     * preference of 1 may safely take the same branch.
+     * preference of 1 may safely take the same branch, and why the coalesce
+     * below is not a speed Paper picked for anybody.
      *
      * ⚠️ **THE BOUNDS ARE THE SPEC'S, AND THIS ONLY CHECKED FOR POSITIVE.** Web
      * Speech defines the range as 0.1 to 10 and leaves anything outside it to
      * the engine — so a hand-edited `0.01` or `100` passed a guard whose comment
      * claimed it stopped unsafe values. Out of range is REFUSED rather than
      * clamped: a reader who typed 100 into a settings file gets the engine's own
-     * speed, not a number Paper invented for them. */
-    if (
-      prefs.rate !== undefined &&
-      Number.isFinite(prefs.rate) &&
-      prefs.rate >= MIN_ENGINE_RATE &&
-      prefs.rate <= MAX_ENGINE_RATE
-    ) {
-      utterance.rate = prefs.rate
+     * speed, not a number Paper invented for them.
+     *
+     * ⚠️ **AND THE TWO CHECKS IN FRONT OF THE RANGE COULD NOT CHANGE ITS
+     * ANSWER.** This read `prefs.rate !== undefined && Number.isFinite(prefs.rate)`
+     * ahead of the bounds, and every comparison against `undefined` or `NaN` is
+     * false while an infinity fails one bound — so both clauses were unobservable,
+     * and a mutation of either failed no test by construction rather than by
+     * accident. The absent case reaches the same assignment through `?? 1`, which
+     * is what keeps the types honest without a clause no test can reach.
+     * `speech.test.ts` holds both bounds at their exact values. */
+    const rate = prefs.rate ?? 1
+    if (rate >= MIN_ENGINE_RATE && rate <= MAX_ENGINE_RATE) {
+      utterance.rate = rate
     }
 
     this.#sawBoundary = false
@@ -742,7 +761,7 @@ export class Speaker {
      * being actively disabled. */
     utterance.addEventListener('start', () => {
       if (generation !== this.#generation) return
-      this.#armGrace(generation)
+      this.#armGrace()
     })
 
     this.#synth.speak(utterance)
@@ -773,7 +792,14 @@ export class Speaker {
     if (engineHeldBy.get(this.#synth) !== this.#token) return
     if (!this.#synth.paused) return
     this.#synth.resume()
-    if (!this.#sawBoundary) this.#armGrace(this.#generation)
+    /* RE-ARMED WHOLE, AND WITHOUT ASKING FIRST WHETHER A BOUNDARY HAS ALREADY
+       ARRIVED. This read `if (!this.#sawBoundary)`, which was unobservable: the
+       timer asks the same question when it fires, and the flag can only be
+       cleared by `speak`, which retires the generation a pending timer holds. So
+       the early exit saved a timer that could never report anything, and no test
+       could tell it apart from arming one. One question, asked where the answer
+       is used. */
+    this.#armGrace()
   }
 
   stop(): void {
@@ -847,15 +873,33 @@ export class Speaker {
    * two paths into the same measurement disagreed about whether a timer could
    * be doubled — the drift an audit predicted from the duplication, arriving
    * before anybody looked. Both call this now, and it clears first, every time.
+   *
+   * ⚠️ **AND THE TIMER NO LONGER ASKS WHICH READING IT BELONGS TO.** It used to
+   * capture the generation and compare it on firing, and that comparison could
+   * not come back false: a PENDING grace timer always belongs to the current
+   * reading, because all three writes to `#generation` — `speak`, `stop` and
+   * `#finish` — clear it within a line of the bump. Unreachable, so no test
+   * could kill it, and no `disable` could cover it without hiding the reachable
+   * half of the same line.
+   *
+   * The invariant it was guessing at is ASSERTED instead, once per path, in
+   * `speech.test.ts` — the three cases around 'does not blame the current
+   * utterance for a stale missing boundary'. A fourth bump that forgets the
+   * clear fails there, loudly, rather than being absorbed here in silence.
    */
-  #armGrace(generation: number): void {
+  #armGrace(): void {
+    /* CLEARED FIRST, EVERY TIME — so the measurement runs from the most recent
+       start rather than from the first one. An engine that says `start` twice
+       for one utterance would otherwise have its grace expire 2.5 s after the
+       first, over speech that had only just begun again. */
     this.#clearGrace()
-    /* The engine has already answered in this reading; asking again would only
-       produce the answer again. */
-    if (this.#reportedNoBoundaries) return
     this.#graceTimer = setTimeout(() => {
       this.#graceTimer = null
-      if (generation !== this.#generation) return
+      /* THE TWO WAYS THE ANSWER IS ALREADY IN: a boundary arrived, or this
+         engine has been reported once already. Both were ARM-time guards as
+         well, where neither could change anything — the arming paths are
+         reached only with the flags in the state that arms. Asked once, where
+         the answer is used. */
       if (this.#sawBoundary || this.#reportedNoBoundaries) return
       this.#reportedNoBoundaries = true
       this.#cb.onNoBoundaries()

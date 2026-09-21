@@ -50,6 +50,16 @@ export class FakeSynth extends EventTarget {
   paused = false
   cancelled = 0
   /**
+   * How many times `resume()` was called — COUNTED, because the spec makes it a
+   * no-op on an engine that is not paused and a flag could not tell the two
+   * apart.
+   *
+   * `stop()` resumes only the pause it set itself, and on an engine shared
+   * between speakers that restraint is the whole point; a `paused` flag alone
+   * reads the same whether the command was issued or not.
+   */
+  resumed = 0
+  /**
    * What `getVoices()` answers — EMPTY BY DEFAULT, which is what a real engine
    * answers before its list has loaded, and the case `canSay` treats as
    * unknown. A case that wants a known list assigns one.
@@ -75,6 +85,7 @@ export class FakeSynth extends EventTarget {
   }
 
   resume(): void {
+    this.resumed += 1
     this.paused = false
   }
 }
