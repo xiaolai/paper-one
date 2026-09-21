@@ -9583,6 +9583,8 @@
     "src/kernel/ui/reader/session.test.ts > ReaderSession — a book that cannot open says why > asks the check about the OPENED book, so it can read the archive the fork already parsed",
     "src/kernel/ui/reader/session.test.ts > ReaderSession — a book that cannot open says why > refuses a protected book by name, and never displays it",
     "src/kernel/ui/reader/session.test.ts > ReaderSession — a book that cannot open says why > says a zero-length file is empty, before anything tries to open it",
+    "src/kernel/ui/reader/session.test.ts > ReaderSession — a book that cannot open says why > says its own sentence for an error with no words, rather than a blank bar",
+    "src/kernel/ui/reader/session.test.ts > ReaderSession — a book that cannot open says why > still says the error's own words when it has some",
     "src/kernel/ui/reader/session.test.ts > ReaderSession — a pointer gesture always publishes > forwards repeat, location and isComposing — the fields the host keymap guards on",
     "src/kernel/ui/reader/session.test.ts > ReaderSession — a pointer gesture always publishes > leaves a key on a control inside the book with the control — neither forwarded nor cancelled",
     "src/kernel/ui/reader/session.test.ts > ReaderSession — a pointer gesture always publishes > publishes snapped when the selectionchange lands inside the gesture",

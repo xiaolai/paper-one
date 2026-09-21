@@ -3436,6 +3436,25 @@ describe('ReaderSession publishes the selection', () => {
  * refused book is never displayed.
  */
 describe('ReaderSession — a book that cannot open says why', () => {
+  it('says its own sentence for an error with no words, rather than a blank bar', async () => {
+    /* `new Error()` has an empty message, and the reader was shown exactly
+       that: an error bar with nothing in it. */
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', { ...deps(fakeView()), createView: () => Promise.reject(new Error()) })
+    expect(cb.calls['onError']).toEqual([['The reader failed to start.']])
+  })
+
+  it("still says the error's own words when it has some", async () => {
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', {
+      ...deps(fakeView()),
+      createView: () => Promise.reject(new Error('no custom elements here')),
+    })
+    expect(cb.calls['onError']).toEqual([['no custom elements here']])
+  })
+
   it('says a zero-length file is empty, before anything tries to open it', async () => {
     let opened = 0
     const view = fakeView({

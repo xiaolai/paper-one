@@ -2539,8 +2539,17 @@ function closeQuietly(view: View): void {
   view.remove?.()
 }
 
+/**
+ * What the reader is told when something failed: the error's own words, or the
+ * sentence this step supplies.
+ *
+ * ⚠️ **AN ERROR WITH NO WORDS FALLS BACK TOO.** This took any `Error`'s
+ * `message` as the answer, and `new Error()` has an empty one — so a backend
+ * that threw it put a blank error bar over the reader: something failed, and
+ * nothing said what or where.
+ */
 function message(cause: unknown, fallback: string): string {
-  return cause instanceof Error ? cause.message : fallback
+  return cause instanceof Error && cause.message !== '' ? cause.message : fallback
 }
 
 /** What a zero-length file is told it is — see `isEmptySource`. */
