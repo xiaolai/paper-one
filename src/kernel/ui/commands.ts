@@ -1,4 +1,4 @@
-import { paneAvailable, paneFits, screenJump } from './state'
+import { SCREEN_JUMP_COMBO, paneAvailable, paneFits, screenJump } from './state'
 import type { Command, CommandContext, PaneContribution } from '../core/capability'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { panesFor, THEMES } from './panes'
@@ -551,8 +551,9 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     label: screenJump(state.screen, ctx.hasBook).label,
     group: 'Book',
     // The key the titlebar button names and the handler binds. Three surfaces
-    // for one action, and the palette is where a reader learns the shortcut.
-    combo: '⌘L',
+    // for one action, and the palette is where a reader learns the shortcut —
+    // named once, beside `screenJump`, so the tooltip cannot keep an old one.
+    combo: SCREEN_JUMP_COMBO,
     keywords: 'shelf books home library',
     on: state.screen === 'library',
     run: () =>

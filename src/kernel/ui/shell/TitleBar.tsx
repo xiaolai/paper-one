@@ -1,4 +1,4 @@
-import { paneAvailable, paneFits, screenJump } from '../state'
+import { SCREEN_JUMP_COMBO, paneAvailable, paneFits, screenJump } from '../state'
 import {
   AudioLines,
   BookOpen,
@@ -26,8 +26,7 @@ import { ICON, READING_RATE } from '../../core/metrics'
 import type { Platform } from '../../core/metrics'
 import { inTauri } from '../inTauri'
 import { PANE_TITLES, comboFor } from '../panes'
-import type { ContributedScreenId } from '../../core/uiTypes'
-import type { ContributionIcon } from '../../core/capability'
+import type { ScreenContribution } from '../../core/capability'
 import { CONTRIBUTION_ICONS } from '../contributionIcon'
 import type { AppDispatch, AppState, KernelPaneId } from '../state'
 import type { Speech } from '../reader/useSpeech'
@@ -86,19 +85,33 @@ export interface TitleBarProps {
    * capability navigation SILENTLY instead of failing to compile. A caller with no
    * contributed screens passes `[]`, which says so.
    */
-  screens: readonly {
-    readonly id: ContributedScreenId
-    readonly label: string
-    /** What to draw for it — see `CONTRIBUTION_ICONS`. */
-    readonly icon: ContributionIcon
-  }[]
+  /* ⚠️ **A `Pick` OF THE CONTRACT, NOT A COPY OF ITS FIELDS.** This spelled out
+     `id`, `label` and `icon` by hand beside `ScreenContribution`, so a field
+     renamed or retyped there would have left this prop describing a screen the
+     composition no longer produces — and the caller passes the composition's
+     screens straight in, so the mismatch would have surfaced as a type error at
+     the one place least likely to be read as the cause. */
+  screens: readonly Pick<ScreenContribution, 'id' | 'label' | 'icon'>[]
 }
 
 /**
- * KNOWN DEBT: this component is about 200 lines and holds more than one job —
- * window IPC, the platform's own controls, the chrome fade, the reading
- * shortcuts, speech and the palette. An audit flagged it and it was left
- * deliberately.
+ * KNOWN DEBT: this component holds more than one job — window IPC, the
+ * platform's own controls, the chrome fade, the reading shortcuts, speech and the
+ * palette. An audit flagged it and it was left deliberately.
+ *
+ * ⚠️ **THIS SAID "about 200 lines" AND THE FILE IS 534**, with the component
+ * itself over 300 — so the one number offered to judge whether the debt had grown
+ * was wrong, and wrong in the direction that made it look smaller. No size is
+ * written here now: a count in a comment is a fact with a half-life, and `wc -l`
+ * is always current.
+ *
+ * AND THE BUTTONS ARE NOT ONE COMPONENT, THOUGH THEY SHARE A CLASS. A later audit
+ * asked for the icon-button skeleton to be extracted. The sites differ in their
+ * ARIA contract rather than in their markup: three are toggles (`aria-pressed`),
+ * the palette is a dialog trigger (`aria-haspopup` + `aria-expanded`), Listen is
+ * an action that can be disabled with its reason in the title, and the screen jump
+ * has three names. One component would take every one of those as a prop and
+ * render them back — the attribute surface moved, not reduced.
  *
  * The reason is that nothing here is WRONG, and the split is not obvious: the
  * window controls are genuinely separable, but the rest share `state`,
@@ -378,7 +391,7 @@ export function TitleBar({
           /* ⚠️ **THE NAME AND THE DESTINATION COME FROM ONE PLACE.** This
              computed its own and disagreed with the shortcut printed in its
              own tooltip on every screen that is neither of the kernel's. */
-          title={`${jump.label} · ${comboFor('⌘L', platform)}`}
+          title={`${jump.label} · ${comboFor(SCREEN_JUMP_COMBO, platform)}`}
           aria-label={jump.label}
           onClick={() => dispatch({ type: 'goScreen', screen: jump.to })}
         >
@@ -509,17 +522,23 @@ function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps) {
  * stopping at 2.5× would leave a reader who overshot with no way back except the
  * settings pane. The ramp is short enough that going round is quicker.
  *
- * The nearest step is found rather than the exact one, so a rate stored by a
- * build with a different ramp still advances instead of pinning at the start —
- * the same reasoning `READING_RATE_MIN` gives for clamping rather than rejecting.
+ * ⚠️ **THE FIRST STEP ABOVE THE CURRENT RATE, NOT ONE PAST THE NEAREST.** This
+ * found the nearest step and advanced from it, which is right on the ramp and
+ * wrong off it — and off it is exactly the case the nearest-match existed for: a
+ * rate stored by a build with a different ramp. Measured: `1.4` advanced to
+ * `1.75`, skipping `1.5`, because its nearest step is `1.5` and the one after
+ * that is `1.75`; and `2.4` WRAPPED to `0.5`, skipping `2.5` entirely, because
+ * its nearest step is the top one. "Faster" should never skip a speed the ramp
+ * offers, and it should never go slower while a faster one exists.
+ *
+ * So: the smallest step strictly greater than the rate, and the slowest only
+ * when nothing is. On the ramp the two rules give the same answer; off it, only
+ * this one is right.
  */
 function nextRate(rate: number): number {
   const steps = READING_RATE.steps
-  let nearest = 0
-  for (const [at, step] of steps.entries()) {
-    if (Math.abs(step - rate) < Math.abs((steps[nearest] ?? 1) - rate)) nearest = at
-  }
-  return steps[(nearest + 1) % steps.length] ?? 1
+  const faster = steps.find((step) => step > rate)
+  return faster ?? steps[0] ?? 1
 }
 
 /** `1×`, `1.25×` — no trailing zero, because `1.00×` reads as a measurement. */

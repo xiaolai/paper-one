@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Platform } from '../../core/metrics'
 import type { Speech } from '../reader/useSpeech'
@@ -120,5 +120,42 @@ describe('the controls a contributed screen does not have', () => {
       )
       expect(screen.getByRole('button', { name: /pane/iu })).toBeTruthy()
     }
+  })
+})
+
+describe('the reading speed button', () => {
+  /**
+   * ⚠️ **"FASTER" SKIPPED SPEEDS AND WENT SLOWER.** It advanced one step past the
+   * NEAREST step, which is right on the ramp and wrong off it — and off it is the
+   * case the nearest-match existed for, a rate stored by a build with another
+   * ramp. `1.4` went to `1.75` over `1.5`, and `2.4` wrapped to `0.5` over `2.5`.
+   */
+  function tap(rate: number): number | undefined {
+    const dispatch = vi.fn()
+    render(
+      <TitleBar
+        screens={[]}
+        state={{ ...initialState, screen: 'reader', chromeOn: true, readingRate: rate }}
+        dispatch={dispatch}
+        platform="macos"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={{ ...speech, available: true, speaking: true }}
+        hasBook
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^Reading speed/u }))
+    const action = dispatch.mock.calls.at(-1)?.[0] as { type: string; rate?: number } | undefined
+    return action?.type === 'setReadingRate' ? action.rate : undefined
+  }
+
+  it.each([
+    [1, 1.25, 'on the ramp, the next step'],
+    [1.4, 1.5, 'off the ramp, the first faster step — not one past the nearest'],
+    [2.4, 2.5, 'near the top, the top — not a wrap to the slowest'],
+    [2.5, 0.5, 'at the top, round to the slowest'],
+    [9, 0.5, 'above the ramp entirely, round to the slowest'],
+  ])('from %s goes to %s: %s', (from, to) => {
+    expect(tap(from)).toBe(to)
   })
 })

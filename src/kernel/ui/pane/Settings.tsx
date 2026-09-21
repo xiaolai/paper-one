@@ -58,7 +58,7 @@ import {
 } from '../../core/uiTypes'
 import { PaneBand } from './PaneBand'
 import { PaneGroup } from './PaneGroup'
-import { bestVoice, voiceGroups, voiceKey, type VoiceFacts, type VoiceTier } from '../reader/voiceChoice'
+import { bestVoice, chosenVoice, voiceGroups, voiceKey, type VoiceFacts, type VoiceTier } from '../reader/voiceChoice'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
 import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
@@ -352,9 +352,33 @@ const FLOW_LABELS = { scrolled: 'Scrolled', paginated: 'Paged' } as const
 const SIDE_LABELS = { left: 'Left', right: 'Right' } as const
 const SHOWN_HIDDEN = { on: 'Shown', off: 'Hidden' } as const
 
-/** The next state in a closed cycle, wrapping — the ALIGNS row's own idiom. */
-function next<T extends string>(states: readonly T[], current: T): T {
-  return states[(states.indexOf(current) + 1) % states.length] ?? (states[0] as T)
+/**
+ * The label half of a settings row takes the width the control does not, which is
+ * what puts the value at the row's end.
+ *
+ * ⚠️ **ONE DEFINITION, AND STILL INLINE — BOTH ON PURPOSE.** It was
+ * `style={{ flex: 1 }}` written out in three row components, so how a row divides
+ * its width lived in three places. It was then moved to a stylesheet class, and
+ * `Settings.test.tsx` failed: the test reads `style.flexGrow`, because an inline
+ * style is the only form jsdom can observe — a CSS-module class is invisible to
+ * it, so the move traded a guarantee the suite could SEE for tidiness. Named once
+ * here, it is still inline, still observable, and no longer written three times.
+ */
+const ROW_LABEL = { flex: 1 } as const
+
+/**
+ * The next state in a closed cycle, wrapping — the ALIGNS row's own idiom.
+ *
+ * ⚠️ **THE FALLBACK WAS `states[0] as T`, WHICH IS `undefined` FOR AN EMPTY
+ * CYCLE, CAST TO LOOK LIKE A STATE.** Both indexed reads miss on an empty array,
+ * so the function returned `undefined` under a signature promising `T`, and the
+ * cast was the only thing hiding it. The type now says what the cycle must be —
+ * at least one state — so an empty one is a compile error at the call rather
+ * than an `undefined` reaching a reducer. `current` itself is the honest answer
+ * when the lookup cannot land, since it is by construction a member.
+ */
+function next<T extends string>(states: readonly [T, ...T[]], current: T): T {
+  return states[(states.indexOf(current) + 1) % states.length] ?? current
 }
 
 /**
@@ -374,7 +398,10 @@ function CycleRow<T extends string>({
   onChange,
 }: {
   readonly label: string
-  readonly states: readonly T[]
+  /* NON-EMPTY BY TYPE — see `next`. Every caller passes an `as const` tuple from
+     `uiTypes.ts`, which already is one, so the requirement costs them nothing and
+     turns an empty cycle into a compile error instead of an `undefined` state. */
+  readonly states: readonly [T, ...T[]]
   readonly value: T
   readonly labels: Readonly<Record<T, string>>
   readonly onChange: (value: T) => void
@@ -385,7 +412,7 @@ function CycleRow<T extends string>({
       className={styles.settingRow}
       onClick={() => onChange(next(states, value))}
     >
-      <span style={{ flex: 1 }}>{label}</span>
+      <span style={ROW_LABEL}>{label}</span>
       <span className={styles.settingValue}>{labels[value]}</span>
     </button>
   )
@@ -432,7 +459,7 @@ function SelectRow({
 }) {
   return (
     <div className={`${styles.settingRow} ${styles.settingStatic}`}>
-      <span style={{ flex: 1 }}>{label}</span>
+      <span style={ROW_LABEL}>{label}</span>
       <select
         className={styles.settingSelect}
         value={value}
@@ -444,9 +471,13 @@ function SelectRow({
             {lead.label}
           </option>
         )}
-        {groups.map((group) =>
+        {groups.map((group, at) =>
           group.options.length === 0 ? null : (
-            <optgroup key={group.label} label={group.label}>
+            /* KEYED BY POSITION AS WELL AS LABEL. `voiceGroups` deliberately
+               emits non-contiguous groups from one tier — the same label twice —
+               so a label alone gave two siblings one key, and React reconciled
+               the second into the first whenever the installed voices changed. */
+            <optgroup key={`${group.label}-${at}`} label={group.label}>
               {group.options.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -489,7 +520,7 @@ function ToggleRow({
       className={styles.settingRow}
       onClick={() => onChange(!on)}
     >
-      <span style={{ flex: 1 }}>{label}</span>
+      <span style={ROW_LABEL}>{label}</span>
       <span className={styles.settingValue}>{on ? labels.on : labels.off}</span>
     </button>
   )
@@ -1042,7 +1073,21 @@ export function Settings({
       >
         <SelectRow
           label="Voice"
-          value={narration.chosen[voiceKey(narration.lang)] ?? ''}
+          /* THE VOICE THE READING WILL USE, SAID EXPLICITLY RATHER THAN LEFT
+             TO THE DOM. This was `chosen[voiceKey(lang)]`, and an audit said a
+             stored choice the machine no longer has would make the control draw
+             BLANK. Measured on 2026-09-21, it does not: a single `<select>` whose
+             value matches no option selects its FIRST option, and the first is
+             the Automatic lead — so the raw string and this rendered the same
+             row in every case. Nor can a listed voice be one the reading
+             refuses, because the options are `voiceOptions` and `chosenVoice`
+             applies the same two tests.
+
+             It is kept because the old binding was correct only by that
+             coincidence: it relied on Automatic being first. `chosenVoice` is
+             the speech path's own answer, so the picker now shows what the
+             reader will hear however the options are ordered. */
+          value={chosenVoice(narration.voices, narration.lang, narration.chosen)?.voiceURI ?? ''}
           /* NAMES WHAT AUTOMATIC CURRENTLY MEANS, rather than saying
              "Automatic" and leaving the reader to guess. It is the same answer
              `Speaker` will use, because both go through `bestVoice` — and on a

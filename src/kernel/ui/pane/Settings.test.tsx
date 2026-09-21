@@ -1122,3 +1122,52 @@ describe('a group heading', () => {
     expect(heading.querySelector('button[aria-expanded]')).not.toBeNull()
   })
 })
+
+describe('the voice the picker shows', () => {
+  /**
+   * WHAT A READER SEES FOR A STORED VOICE THIS MACHINE NO LONGER HAS.
+   *
+   * An audit said the control drew BLANK. Measured, it does not — a `<select>`
+   * whose value matches no option selects its first, and the first is the
+   * Automatic lead — so this pins the visible outcome rather than claiming to
+   * catch a defect that did not exist. It is honest about what it holds: the old
+   * raw-string binding passes it too, because the two rendered alike.
+   */
+  const installed = {
+    name: 'Samantha',
+    lang: 'en-US',
+    voiceURI: 'com.apple.voice.compact.en-US.Samantha',
+    localService: true,
+  }
+  function pickerFor(chosen: Readonly<Record<string, string>>): HTMLSelectElement {
+    const { props } = full({
+      narration: {
+        lang: 'en-US',
+        voices: [installed],
+        chosen,
+        rate: 1,
+        sentenceGapMs: 150,
+        paragraphGapMs: 600,
+        notesAloud: false,
+        onVoice: vi.fn(),
+        onRate: vi.fn(),
+        onSentenceGap: vi.fn(),
+        onParagraphGap: vi.fn(),
+        onNotesAloud: vi.fn(),
+      },
+    })
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Voice' }))
+    return screen.getByRole('combobox') as HTMLSelectElement
+  }
+
+  it('shows Automatic, naming the voice it means, for a voice the machine no longer has', () => {
+    const select = pickerFor({ en: 'com.apple.voice.premium.en-US.Gone' })
+    expect(select.selectedOptions[0]?.textContent).toBe('Automatic (Samantha)')
+  })
+
+  it('shows the stored voice when it is one the reading will use', () => {
+    const select = pickerFor({ en: installed.voiceURI })
+    expect(select.value).toBe(installed.voiceURI)
+  })
+})

@@ -972,6 +972,19 @@ export interface ScreenJump {
  * when there is no book. Saying "Open a book" rather than "Back to the book"
  * there is what keeps the name true.
  */
+/**
+ * The key the screen jump is bound to, as it is SHOWN.
+ *
+ * ⚠️ **IT WAS WRITTEN TWICE — THE PALETTE ROW AND THE TITLEBAR'S TOOLTIP — AND
+ * THE TITLEBAR'S COPY WAS NOT ONE ANY TEST COMPARED.** `commands.test.ts` holds
+ * the palette's combos to `accel.ts`'s bindings, so a rebind that forgot the
+ * palette fails there; the tooltip's `'⌘L'` was a literal in `TitleBar.tsx` that
+ * nothing looked at, and would have named the old key forever. Beside
+ * `screenJump` because that function is already the one source for this
+ * action's destination and its name; its key is the third fact about it.
+ */
+export const SCREEN_JUMP_COMBO = '⌘L'
+
 export function screenJump(screen: Screen, hasBook: boolean): ScreenJump {
   if (screen === 'reader') return { to: 'library', label: 'Library' }
   return { to: 'reader', label: hasBook ? 'Back to the book' : 'Open a book' }

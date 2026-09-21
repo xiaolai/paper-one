@@ -87,7 +87,17 @@
   order: 2;
   display: flex;
   justify-content: center;
-  transition: opacity var(--motion-chrome);
+  /* ⚠️ **VISIBILITY TRANSITIONS WITH OPACITY, OR THE FADE-OUT NEVER RENDERS.**
+     `TitleBar` sets both, and this rule listed only `opacity` — so on hide
+     `visibility: hidden` took effect at the first frame and the zone vanished
+     with no fade at all, while showing looked right, which is why it went
+     unnoticed. `visibility` is a discrete property with a defined rule for this:
+     transitioned, it stays `visible` for the whole duration when one end is
+     visible — so going hidden it waits out the fade, and going visible it
+     switches at once. Same token, both properties. */
+  transition:
+    opacity var(--motion-chrome),
+    visibility var(--motion-chrome);
 }
 
 
@@ -151,7 +161,10 @@
   display: flex;
   align-items: center;
   gap: var(--space-8);
-  transition: opacity var(--motion-chrome);
+  /* With `visibility`, for the reason given at `.chipZone`. */
+  transition:
+    opacity var(--motion-chrome),
+    visibility var(--motion-chrome);
 }
 
 .appZone[data-platform='macos'] {
