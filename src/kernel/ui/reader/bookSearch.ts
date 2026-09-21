@@ -6,7 +6,7 @@
  * search is here.
  */
 
-import type { View } from 'foliate-js/view.js'
+import type { SearchYield, View } from 'foliate-js/view.js'
 
 /** One hit, flattened from foliate's mixed yield shapes. */
 export interface SearchHit {
@@ -20,7 +20,7 @@ export interface SearchHit {
 /**
  * Flatten foliate's search stream into plain hits.
  *
- * It yields four different shapes — a progress number, a per-section group, a
+ * It yields four different shapes — a progress record, a per-section group, a
  * bare hit, and finally the string 'done' — so the shape has to be narrowed
  * before anything downstream can render it. Section labels arrive on the group
  * and are carried onto the hits inside it, which is what lets a result say
@@ -40,26 +40,30 @@ export async function* runSearch(
   if (signal.aborted) return
 
   const results = view.search({ query })
-  /* Closed on the way out, however we leave. A `for await` that returns early
-   * does call `results.return()`, but an abort arriving while we are parked on
-   * the next result is not observed until that result arrives — so the search
-   * runs on after cancellation. Racing the iterator against the abort lets the
-   * cancellation win immediately, and `finally` closes the generator foliate
-   * gave us rather than leaving it walking the book. */
-  const aborted = new Promise<'aborted'>((resolve) => {
-    if (signal.aborted) resolve('aborted')
-    else signal.addEventListener('abort', () => resolve('aborted'), { once: true })
-  })
+  /* Raced against the abort, because an abort arriving while this is parked on
+   * the next result would otherwise not be seen until that result arrived — so
+   * the loop ran on after cancellation. The race lets the loop stop at once.
+   * Closing foliate's generator, in the `finally`, still waits for the step it
+   * is on: an async generator's pending step is the one thing nothing outside
+   * it can interrupt. */
+  const stopped = new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()))
 
   try {
     for (;;) {
-      const step = await Promise.race([results.next(), aborted])
-      if (step === 'aborted' || step.done) return
+      // Stryker disable next-line ArrayDeclaration: `Promise.race([])` never settles, so the mutant hangs a test instead of failing one and nothing can observe it; this line holds one array, the race's argument list
+      const step = (await Promise.race([results.next(), stopped])) as IteratorResult<SearchYield, void>
+      /* THE SIGNAL, NOT ONLY THE RACE. An abort can lose the race and still
+       * have happened — a result that settled in the same turn wins it — and
+       * `stopped` settling is only ever an abort, so asking the signal covers
+       * both roads out. It is also what makes the cast sound: with the signal
+       * clear, `results.next()` is what won. */
+      if (signal.aborted || step.done) return
       const result = step.value
-      if (signal.aborted) return
-      if (result === 'done') return
+      /* Only an object can be asked `in`. Everything else foliate yields
+       * besides hits — `{ progress }`, and the closing `'done'` — has neither
+       * `subitems` nor `cfi`, so it falls through both tests below and needs no
+       * case of its own. */
       if (typeof result !== 'object' || result === null) continue
-      if ('progress' in result) continue
       if ('subitems' in result) {
         label = result.label ?? ''
         for (const hit of result.subitems) {
@@ -71,7 +75,7 @@ export async function* runSearch(
       if ('cfi' in result) yield toHit(result, label)
     }
   } finally {
-    await results.return?.(undefined)
+    await results.return(undefined)
   }
 }
 
