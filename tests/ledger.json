@@ -10394,6 +10394,7 @@
     "src/kernel/ui/reader/wordSnap/markContext.test.ts > markContext > returns an empty prefix at the start of the text",
     "src/kernel/ui/reader/wordSnap/markContext.test.ts > markContext > returns an empty suffix at the end of the text",
     "src/kernel/ui/reader/wordSnap/markContext.test.ts > markContext > stores thirty-two characters a side, which the gloss must not widen",
+    "src/kernel/ui/reader/wordSnap/rangeText.test.ts > rangeText > drops only the whitespace beside a break, and only what is beside it",
     "src/kernel/ui/reader/wordSnap/rangeText.test.ts > rangeText > falls back to the range`s own text when the window cannot reach both edges",
     "src/kernel/ui/reader/wordSnap/rangeText.test.ts > rangeText > falls back when a boundary is not in a text node at all",
     "src/kernel/ui/reader/wordSnap/rangeText.test.ts > rangeText > leaves a selection inside one block exactly as it was",
