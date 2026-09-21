@@ -177,10 +177,21 @@ async function sweepAbandonedScratch(keep: string): Promise<void> {
   const now = Date.now()
   for (const entry of await readDir(SCRATCH_DIR, { baseDir: BaseDirectory.AppData })) {
     if (!entry.isDirectory || entry.name === keep) continue
-    const stamp = /^run-([0-9a-z]+)-/u.exec(entry.name)?.[1]
-    if (stamp === undefined) continue
-    const made = Number.parseInt(stamp, 36)
-    if (!Number.isFinite(made) || now - made < ABANDONED_AFTER_MS) continue
+    const match = /^run-([0-9a-z]+)-/u.exec(entry.name)
+    if (match === null) continue
+    /* THE GROUP IS ASSERTED, NOT CHECKED: the pattern requires it, so it is
+       there whenever the match is. A check here was one no test could see —
+       `parseInt(undefined, 36)` reads the WORD "undefined" as base-36 digits,
+       a stamp in the year 4709, so a directory with no stamp came out young and
+       was kept by the age test below regardless. */
+    const made = Number.parseInt(match[1]!, 36)
+    /* NO FINITENESS CHECK, because nothing here can use one. The stamp is
+       base-36 digits, so `made` is a number or — for a name no clock could have
+       made — +Infinity, and `now - Infinity` is below any age: such a run is
+       left exactly as a young one is. An `isFinite` beside the age test only
+       repeated the `stamp` check above, which is what turns a name with no stamp
+       away, and neither could be told from the other. */
+    if (now - made < ABANDONED_AFTER_MS) continue
     await remove(`${SCRATCH_DIR}/${entry.name}`, {
       baseDir: BaseDirectory.AppData,
       recursive: true,
