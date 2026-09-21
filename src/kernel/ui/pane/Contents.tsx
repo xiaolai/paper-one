@@ -10,8 +10,32 @@ export interface ContentsProps {
   onGoTo?: (href: string) => void
 }
 
+/**
+ * How deep the pane can actually draw.
+ *
+ * ⚠️ **THIS LIVED INSIDE `flattenToc`, WHICH IS THE SHARED TRAVERSAL.** The
+ * number is a fact about §09's three indent tokens and about nothing in any
+ * book, so clamping there threw the real hierarchy away for every other caller —
+ * read-aloud's chapter step reads the same list and has no indents at all. The
+ * traversal answers what the book says; this clamps to what there is a token
+ * for.
+ */
+const DEEPEST_INDENT = 2
+
 export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
   const entries = flattenToc(toc)
+  /**
+   * ⚠️ **"THE CURRENT ENTRY" IS SINGULAR, AND MATCHING ON `href` ALONE MADE IT
+   * PLURAL.** A part divider and its first chapter may legally target the same
+   * destination, so every row sharing that href drew itself as current and
+   * carried `aria-current="location"` — a screen reader was told the reader is
+   * in two places, and the highlight appeared twice.
+   *
+   * The FIRST row with that destination is the place, which is the same answer
+   * `stepChapter` settled on when it deduplicated: two rows that go to the same
+   * place are one place, and the one a reader clicked through is the first.
+   */
+  const currentAt = entries.findIndex((entry) => entry.href !== null && entry.href === currentHref)
 
   if (entries.length === 0) {
     return (
@@ -36,7 +60,7 @@ export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
          * drift. One predicate now, asked once.
          */
         const goesTo = entry.href !== null && entry.href !== '' ? entry.href : null
-        const isCurrent = goesTo !== null && goesTo === currentHref
+        const isCurrent = goesTo !== null && index === currentAt
 
         /**
          * ⚠️ **A HEADING IS NOT A DISABLED CONTROL, AND IT WAS RENDERED AS ONE.**
@@ -48,9 +72,9 @@ export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
         if (goesTo === null) {
           return (
             <div
-              key={`heading-${index}`}
+              key={entry.path}
               className={styles.tocRow}
-              data-depth={entry.depth}
+              data-depth={Math.min(entry.depth, DEEPEST_INDENT)}
               data-heading
             >
               <span className={styles.tocLabel}>{entry.label}</span>
@@ -60,10 +84,10 @@ export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
 
         return (
           <button
-            key={`${goesTo}-${index}`}
+            key={entry.path}
             type="button"
             className={styles.tocRow}
-            data-depth={entry.depth}
+            data-depth={Math.min(entry.depth, DEEPEST_INDENT)}
             data-current={isCurrent}
             /* ⚠️ **AND `aria-current` IS THE SEMANTIC HALF OF `data-current`.**
                The attribute above is for the stylesheet; nothing carried the

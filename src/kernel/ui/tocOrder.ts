@@ -18,15 +18,62 @@ export interface FlatTocEntry {
   /** Null for a grouping heading with no destination — see `TocItem.href`. */
   readonly href: string | null
   readonly label: string
+  /**
+   * How deep in the tree, UNCLAMPED.
+   *
+   * ⚠️ **THIS USED TO BE `Math.min(depth, 2)`, INSIDE THE SHARED TRAVERSAL.** The
+   * 2 is a fact about the contents pane's indent tokens — §09 has three of them —
+   * and nothing about the book. Applied here it discarded the real hierarchy for
+   * every caller, including read-aloud's chapter step, which has no indents and
+   * no reason to care. A traversal that answers what the book says, and a
+   * renderer that clamps to what it can draw, are two jobs; `Contents.tsx` does
+   * the clamping now, where the tokens are.
+   */
   readonly depth: number
+  /**
+   * Where this row sits in the tree, as the child indices down to it: `0.2.1`.
+   *
+   * ⚠️ **A REACT KEY MAY NOT BE THE FLATTENED INDEX, AND MAY NOT BE THE HREF
+   * EITHER.** The index moves when anything above is inserted; the href is not
+   * unique, because a part divider and its first chapter may legally target the
+   * same destination — which is the same duplication `stepChapter` below has to
+   * dedupe for. The path is unique by construction and stable for as long as the
+   * book's own tree is.
+   */
+  readonly path: string
 }
 
-/** The TOC is a tree; a reader walks it as an indented list. */
-export function flattenToc(items: readonly TocItem[], depth = 0): FlatTocEntry[] {
-  return items.flatMap((item) => [
-    { label: item.label, href: item.href, depth: Math.min(depth, 2) },
-    ...(item.subitems ? flattenToc(item.subitems, depth + 1) : []),
-  ])
+/**
+ * The TOC is a tree; a reader walks it as an indented list.
+ *
+ * ⚠️ **ITERATIVE, AND IT WAS `flatMap` WITH A SPREAD PER LEVEL.** That copies
+ * every descendant array again at each level up the tree — quadratic in the
+ * number of entries for a deep one — and recurses once per level, so a
+ * pathologically nested TOC could exhaust the stack on a book's own data. An
+ * explicit stack has neither property. The order is unchanged: an entry, then
+ * its subtree, depth first.
+ */
+export function flattenToc(items: readonly TocItem[]): FlatTocEntry[] {
+  const out: FlatTocEntry[] = []
+  /* Pushed in reverse so the LAST sibling is popped last — depth-first in
+     document order, which is the order a reader reads and clicks. */
+  const pending: { item: TocItem; depth: number; path: string }[] = []
+  const push = (list: readonly TocItem[], depth: number, prefix: string) => {
+    for (let at = list.length - 1; at >= 0; at -= 1) {
+      const item = list[at]
+      if (item === undefined) continue
+      pending.push({ item, depth, path: prefix === '' ? String(at) : `${prefix}.${at}` })
+    }
+  }
+  push(items, 0, '')
+  while (pending.length > 0) {
+    const next = pending.pop()
+    if (next === undefined) break
+    const { item, depth, path } = next
+    out.push({ label: item.label, href: item.href, depth, path })
+    if (item.subitems) push(item.subitems, depth + 1, path)
+  }
+  return out
 }
 
 /**

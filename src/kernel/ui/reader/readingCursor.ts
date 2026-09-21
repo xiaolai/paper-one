@@ -38,7 +38,19 @@ export type Step = -1 | 1
  * reading, a jump from the contents — back into a cursor.
  */
 export function sentenceIndexAt(plan: ReadingPlan, offset: number): number {
-  if (plan.sentences.length === 0) return 0
+  /**
+   * ⚠️ **THERE IS NO `length === 0` GUARD, AND THE ONE THAT WAS HERE ANSWERED
+   * `0`.** Index 0 does not exist in a plan with no sentences, so that was a
+   * sentinel a caller could not tell from a real first sentence — and the return
+   * type says `number`, so nothing made them look. It was also unreachable from
+   * production: every call comes from `stepParagraph`, which asks `blockIndexAt`
+   * first and returns `null` on its `-1`.
+   *
+   * Removed rather than replaced, because the scan below already answers
+   * correctly without it: no sentences means no iterations, and
+   * `plan.sentences.length - 1` is `-1` — which is the same word `blockIndexAt`
+   * uses for "no such block", in the same file, for the same reason.
+   */
   /* A linear scan, deliberately. A section holds hundreds of sentences, not
    * millions, and this runs on a button press rather than per word — a binary
    * search here would be a second thing to get wrong for no measurable gain. */

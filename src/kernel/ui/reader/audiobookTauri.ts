@@ -20,6 +20,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { appDataDir, join } from '@tauri-apps/api/path'
 import { save } from '@tauri-apps/plugin-dialog'
 import { BaseDirectory, mkdir, readDir, remove } from '@tauri-apps/plugin-fs'
+import { basename } from '../../core/bookFiles'
 import type { AudiobookPlatform } from './audiobook'
 
 /** Under `$APPDATA`, so the fs grant already covers it. */
@@ -211,7 +212,14 @@ export async function tauriAudiobook(): Promise<AudiobookPlatform> {
        * engine was given: the fs plugin scopes by `$APPDATA`, and handing it an
        * absolute path from elsewhere is how a tidy-up starts needing a wider
        * permission than the work did. */
-      const name = path.slice(path.lastIndexOf('/') + 1)
+      /* ⚠️ **THE KERNEL'S OWN `basename`, NOT A SECOND ONE.** This was
+         `path.slice(path.lastIndexOf('/') + 1)`, which knows only `/` — so on
+         Windows a scratch path would come back whole, and `remove` would be
+         handed something that is not a name under the granted root. The helper
+         in `bookFiles.ts` takes the later of `/` and `\\`, and two basenames
+         that disagree about a separator is exactly the drift one of them exists
+         to prevent. */
+      const name = basename(path)
       if (name === '') return
       await remove(`${dir}/${name}`, { baseDir: BaseDirectory.AppData })
     },

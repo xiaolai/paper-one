@@ -60,8 +60,13 @@ describe('sentenceIndexAt', () => {
     expect(sentenceIndexAt(p, TWO_PARAGRAPHS.length + 50)).toBe(3)
   })
 
-  it('answers zero for a section with nothing in it', () => {
-    expect(sentenceIndexAt({ sentences: [], blocks: [] }, 7)).toBe(0)
+  /* ⚠️ **THIS PINNED `0`, WHICH IS A SENTENCE THAT DOES NOT EXIST.** A plan with
+     nothing in it has no index 0, so the old answer was a sentinel no caller
+     could distinguish from a real first sentence — and the case asserted it as
+     correct. `-1` is what `blockIndexAt` already answers for "no such block", so
+     the two agree and neither can be mistaken for a position. */
+  it('answers minus one for a section with nothing in it, not a sentence that is not there', () => {
+    expect(sentenceIndexAt({ sentences: [], blocks: [] }, 7)).toBe(-1)
   })
 })
 

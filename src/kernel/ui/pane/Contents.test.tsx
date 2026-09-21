@@ -88,4 +88,42 @@ describe('the tree', () => {
     const labels = screen.getAllByRole('button').map((b) => b.textContent)
     expect(labels).toEqual(['One', 'One.a', 'Two'])
   })
+
+  /* ⚠️ **THE CLAMP MOVED HERE FROM `flattenToc`, AND THIS IS WHERE IT BELONGS.**
+     The 2 is a fact about §09's three indent tokens, not about any book, so the
+     shared traversal reports the real depth and the pane clamps to what it can
+     draw. Held here so the move cannot quietly become a lost clamp. */
+  it('clamps the indent it draws at the deepest token, without losing entries', () => {
+    render(
+      <Contents
+        toc={[item('A', '/a', [item('B', '/b', [item('C', '/c', [item('D', '/d')])])])]}
+        currentHref=""
+        onGoTo={vi.fn()}
+      />,
+    )
+    const depths = screen.getAllByRole('button').map((b) => b.getAttribute('data-depth'))
+    expect(depths, 'four rows, three indents').toEqual(['0', '1', '2', '2'])
+  })
+
+  /**
+   * ⚠️ **"THE CURRENT ENTRY" IS SINGULAR AND MATCHING ON `href` MADE IT PLURAL.**
+   * A part divider and its first chapter may legally target the same
+   * destination, so every row sharing that href drew itself current and carried
+   * `aria-current="location"` — a screen reader told the reader they are in two
+   * places at once. The FIRST row with that destination is the place, which is
+   * the answer `stepChapter` already settled on when it deduplicated.
+   */
+  it('marks one row current when the contents repeats a destination', () => {
+    render(
+      <Contents
+        toc={[item('Part One', '/same.html', [item('Chapter One', '/same.html')])]}
+        currentHref="/same.html"
+        onGoTo={vi.fn()}
+      />,
+    )
+    const current = screen.getAllByRole('button').filter((b) => b.getAttribute('aria-current') === 'location')
+    expect(current.map((b) => b.textContent), 'the first row with that destination, and only it').toEqual([
+      'Part One',
+    ])
+  })
 })

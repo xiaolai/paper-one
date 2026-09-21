@@ -18,9 +18,42 @@ describe('flattenToc', () => {
     expect(flattenToc(toc).map((e) => e.href)).toEqual(['/1.html', '/1a.html', '/2.html'])
   })
 
-  it('clamps the rendered depth at two without losing the entries', () => {
+  /* ⚠️ **THIS PINNED A CLAMP AT 2, INSIDE THE SHARED TRAVERSAL.** The 2 is a
+     fact about the contents pane's three indent tokens and about nothing in any
+     book, so clamping here threw the real hierarchy away for every other caller
+     — read-aloud's chapter step reads this same list and has no indents at all.
+     The traversal reports what the book says; `Contents` clamps to what it can
+     draw, and `Contents.test.tsx` holds it to that. */
+  it('reports the real depth, however deep the book nests', () => {
     const deep = [item('A', '/a', [item('B', '/b', [item('C', '/c', [item('D', '/d')])])])]
-    expect(flattenToc(deep).map((e) => e.depth)).toEqual([0, 1, 2, 2])
+    expect(flattenToc(deep).map((e) => e.depth)).toEqual([0, 1, 2, 3])
+  })
+
+  /* ⚠️ **A REACT KEY MAY BE NEITHER THE FLATTENED INDEX NOR THE HREF.** The index
+     moves when anything above is inserted; the href is not unique, because a part
+     divider and its first chapter may legally share a destination — the same
+     duplication `stepChapter` has to dedupe for below. The tree path is unique by
+     construction. */
+  it('gives every entry a path unique to its place in the tree', () => {
+    const toc = [
+      item('One', '/dup.html', [item('One.a', '/dup.html')]),
+      item('Two', '/dup.html'),
+    ]
+    const paths = flattenToc(toc).map((e) => e.path)
+    expect(paths).toEqual(['0', '0.0', '1'])
+    expect(new Set(paths).size, 'unique even where every href is the same').toBe(paths.length)
+  })
+
+  /* A depth no recursive flatten would survive. The old one spread each
+     descendant array again at every level up the tree and recursed once per
+     level, so a book's own data could exhaust the stack. */
+  it('flattens a pathologically deep tree without recursing', () => {
+    let nest = item('leaf', '/leaf')
+    for (let at = 0; at < 20000; at += 1) nest = item(`n${at}`, `/n${at}`, [nest])
+    const flat = flattenToc([nest])
+    expect(flat.length).toBe(20001)
+    expect(flat[flat.length - 1]?.href).toBe('/leaf')
+    expect(flat[flat.length - 1]?.depth).toBe(20000)
   })
 })
 
