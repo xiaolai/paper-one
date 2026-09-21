@@ -8808,6 +8808,7 @@
     "src/kernel/ui/pane/SidePane.test.tsx > what the Voice group is handed > sends More pause between sentences to the reducer",
     "src/kernel/ui/pane/SidePane.test.tsx > what the Voice group is handed > sends More speed to the reducer",
     "src/kernel/ui/pane/SidePane.test.tsx > what the Voice group is handed > sends the note-reading switch to the reducer",
+    "src/kernel/ui/pane/SidePane.test.tsx > what the Voice group is handed > writes a picked voice under the book’s own language",
     "src/kernel/ui/panes.test.ts > THEMES > lists the five themes in order, each with its name",
     "src/kernel/ui/panes.test.ts > comboFor > asks the machine on the web, rather than the build target",
     "src/kernel/ui/panes.test.ts > comboFor > keeps the Command key on a native Mac and replaces it elsewhere",

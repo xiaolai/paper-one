@@ -297,7 +297,16 @@ describe('what the Voice group is handed', () => {
    * rendered the pane with a narration at all — every one of them a wire from a
    * control to a reducer action, which is what this suite exists for.
    */
-  const narration = { lang: 'en-US', voices: [] as const }
+  /* A voice the floor accepts, so the picker has something to offer — see
+     `voiceChoice.ts`: below the floor the group refuses every voice and there
+     is nothing to choose. */
+  const ZOE = {
+    name: 'Zoe',
+    lang: 'en-US',
+    voiceURI: 'com.apple.voice.enhanced.en-US.Zoe',
+    localService: true,
+  }
+  const narration = { lang: 'en-US', voices: [ZOE] }
 
   function voiceRows(over: Partial<SidePaneProps> = {}) {
     const dispatch = vi.fn()
@@ -331,6 +340,21 @@ describe('what the Voice group is handed', () => {
     const steps = screen.getAllByRole('img').map((pips) => pips.getAttribute('aria-label'))
     expect(steps).toEqual(expect.arrayContaining(['Step 5 of 8', 'Step 4 of 6']))
     expect(steps.filter((label) => label === 'Step 4 of 6'), 'both gaps').toHaveLength(2)
+  })
+
+  it('writes a picked voice under the book’s own language', () => {
+    /* ⚠️ **THE LANGUAGE IS HALF THE WIRE.** The stored choice is a map — one
+       voice per language — so a handler that dropped the language would put an
+       English voice under every book the reader opens. */
+    const dispatch = voiceRows()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Voice' }), {
+      target: { value: ZOE.voiceURI },
+    })
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'setReadingVoice',
+      lang: 'en',
+      voice: ZOE.voiceURI,
+    })
   })
 
   it.each([
