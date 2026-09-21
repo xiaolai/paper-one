@@ -241,11 +241,74 @@ describe('exportAudiobook', () => {
   })
 
   it('checks once more before packaging, which is the long step', async () => {
-    const { platform } = fake()
-    await expect(
-      exportAudiobook(platform, request({ cancelled: () => platform.package !== undefined }))
-    ).rejects.toBeInstanceOf(ExportCancelled)
-    expect(platform.render).not.toHaveBeenCalled()
+    /* ⚠️ THIS CASE USED TO STOP AT THE FIRST CHAPTER. Its `cancelled` answered
+       `platform.package !== undefined`, which is true from the start, so it
+       never reached the check it is named for and nothing measured that check
+       at all. The stop now lands while the LAST chapter renders — after every
+       between-chapters check has passed, and before the join. */
+    let stopped = false
+    const { platform, rendered, discarded } = fake({
+      render: vi.fn(async (job) => {
+        rendered.push(job.path)
+        if (job.path.endsWith('ch-1.wav')) stopped = true
+      }),
+    })
+    await expect(exportAudiobook(platform, request({ cancelled: () => stopped }))).rejects.toBeInstanceOf(
+      ExportCancelled,
+    )
+    expect(rendered, 'every chapter rendered before the stop was asked for').toEqual([
+      '/tmp/ch-0.wav',
+      '/tmp/ch-1.wav',
+    ])
+    expect(platform.package, 'the join began after the reader had stopped').not.toHaveBeenCalled()
+    expect(discarded).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
+  })
+
+  it('counts a part-joined book it could not remove after a stop during the join', async () => {
+    /* The book at the reader's chosen name is removed on the way out of a stop
+       during the join; when that removal fails, it is one more file left behind
+       — and the reader is told, rather than told nothing was. */
+    let joining = false
+    const { platform } = fake({
+      package: vi.fn(async () => {
+        joining = true
+        return { durationMs: 1234, chapters: 2 }
+      }),
+      discard: vi.fn(async (path) => {
+        if (path === '/tmp/book.m4b') throw new Error('the book is open elsewhere')
+      }),
+    })
+    const cause = await exportAudiobook(platform, request({ cancelled: () => joining })).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(cause).toBeInstanceOf(ExportCancelled)
+    expect((cause as ExportCancelled).leftBehind, 'the part-joined book, and nothing else').toBe(1)
+  })
+
+  it('passes a genuine failure out as the engine’s own error, carrying no count', async () => {
+    /* A failure is shown by its own sentence, and a stop by its count; turning
+       one into the other would tell the reader the wrong thing either way. */
+    const failure = new Error('afconvert refused the audio')
+    const { platform } = fake({
+      package: vi.fn(async () => {
+        throw failure
+      }),
+    })
+    const cause = await exportAudiobook(platform, request()).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(cause).toBe(failure)
+  })
+
+  it('names itself when a stop reaches a log', () => {
+    const stop = new ExportCancelled(3)
+    expect(stop).toBeInstanceOf(Error)
+    expect(stop.name).toBe('ExportCancelled')
+    expect(stop.message).toBe('the export was stopped')
+    expect(stop.leftBehind).toBe(3)
+    expect(new ExportCancelled().leftBehind, 'a stop with nothing counted left nothing').toBe(0)
   })
 
   it('reports progress per chapter and once for the join', async () => {

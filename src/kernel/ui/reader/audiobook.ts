@@ -127,17 +127,19 @@ export interface AudiobookResult {
 /** A stop the reader asked for — not a failure, and reported as neither. */
 export class ExportCancelled extends Error {
   /**
-   * How many scratch files survived the tidy-up, for the same reason
-   * `AudiobookResult` carries it: the notice for a stopped export asserted that
-   * nothing was left behind, and nothing had checked.
+   * @param leftBehind How many scratch files survived the tidy-up, for the same
+   * reason `AudiobookResult` carries it: the notice for a stopped export
+   * asserted that nothing was left behind, and nothing had checked.
    *
-   * Assigned by `exportAudiobook`'s `finally`, which runs AFTER this is
-   * constructed — so it is mutable and starts at zero. A caller that reads it
-   * off an instance it caught reads the settled number.
+   * ⚠️ **A CONSTRUCTOR ARGUMENT, NOT A FIELD ASSIGNED LATER.** The count is only
+   * known after the tidy-up, which runs after the stop was thrown, so it used to
+   * be written onto the caught instance behind an `instanceof` — a mutation
+   * whose guard nothing could observe, because an ordinary failure carrying a
+   * stray count is not something any caller reads. `exportAudiobook` throws a
+   * new one with the settled count instead, so every instance a caller catches
+   * was built with the number it holds.
    */
-  leftBehind = 0
-
-  constructor() {
+  constructor(readonly leftBehind = 0) {
     super('the export was stopped')
     this.name = 'ExportCancelled'
   }
@@ -278,7 +280,6 @@ export async function exportAudiobook(
        to assert "nothing was left behind" with nothing checking it. A genuine
        failure carries the engine's sentence instead and says nothing about
        scratch — `narrate` names what it refused, and that is what to show. */
-    if (cause instanceof ExportCancelled) cause.leftBehind = leftBehind
-    throw cause
+    throw cause instanceof ExportCancelled ? new ExportCancelled(leftBehind) : cause
   }
 }
