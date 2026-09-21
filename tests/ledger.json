@@ -6725,6 +6725,8 @@
     "src/kernel/core/marks.test.ts > placeMark > refuses an empty cfi and a section that is not a real index",
     "src/kernel/core/marks.test.ts > placeMark > returns its input BY IDENTITY when there is nothing to place",
     "src/kernel/core/marks.test.ts > placeMark > stamps the edit, so the placement travels to a peer",
+    "src/kernel/core/marks.test.ts > re-delivering rows that are already held > changes nothing, though every row arrives as a new object",
+    "src/kernel/core/marks.test.ts > re-delivering rows that are already held > still takes a row that differs, at the same stamp",
     "src/kernel/core/marks.test.ts > re-marking a passage keeps what was written about it > leaves a mark on a different anchor alone",
     "src/kernel/core/marks.test.ts > re-marking a passage keeps what was written about it > replaces a mark on the same anchor rather than stacking one",
     "src/kernel/core/marks.test.ts > the identity fields at the write door > refuses an id, a book id or an anchor past the record’s bound, and passes one at it",

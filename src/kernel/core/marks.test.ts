@@ -17,6 +17,7 @@ import {
   identityParts,
   liveMarks,
   marginMarks,
+  mergeMarks,
   parseMarks,
   placeMark,
   removeMark,
@@ -1123,5 +1124,35 @@ describe('a note is cut at the write', () => {
     /* The same long note again is no edit: the cut is what is compared. */
     const held = updateNote([mark({ id: 'm1' })], 'm1', 'x'.repeat(MAX_MARK_NOTE + 1_000))
     expect(updateNote(held, 'm1', 'x'.repeat(MAX_MARK_NOTE + 5))).toBe(held)
+  })
+})
+
+describe('re-delivering rows that are already held', () => {
+  /**
+   * ⚠️ **A NO-WRITE HAS TO BE DECIDED BY CONTENT, NOT BY OBJECT IDENTITY.** Sync
+   * hands these rows over PARSED, so every delivery is a fresh object graph —
+   * `mergeMarks(held, sameRowsAgain)` compares nothing that is `===` anything.
+   * The tie-break at the end of `laterMark` keeps the row already held for
+   * exactly that reason, and `mergeMarks` reads its answer by identity to
+   * decide whether anything changed: taking the incoming twin instead would
+   * report a change, write the store and redraw the book on every round of a
+   * sync that delivered nothing new.
+   */
+  it('changes nothing, though every row arrives as a new object', () => {
+    const held = [mark({ id: 'one' }), mark({ id: 'two', cfi: 'epubcfi(/6/4!/4/4,/1:0,/1:4)' })]
+    const again = held.map((row) => ({ ...row }))
+    expect(again[0], 'the fixture must not hand back the same objects').not.toBe(held[0])
+    expect(mergeMarks(held, again), 'a redelivery was reported as a change').toBe(held)
+  })
+
+  it('still takes a row that differs, at the same stamp', () => {
+    /* So the tie-break cannot pass by refusing everything: same id, same
+       stamp, different content — somebody has to win, and it is decided rather
+       than left to arrival order. */
+    const held = [mark({ id: 'one', note: '' })]
+    const differing = [mark({ id: 'one', note: 'a note added elsewhere' })]
+    const merged = mergeMarks(held, differing)
+    expect(merged, 'a real difference was dropped').not.toBe(held)
+    expect(merged.map((row) => row.note).sort()).toEqual(['a note added elsewhere'])
   })
 })
