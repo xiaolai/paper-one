@@ -195,6 +195,17 @@ describe('the canonical index', () => {
     expect(indexText(doc.body).text).toBe('done Start after')
   })
 
+  /* The other list, and the same reason to write it out: text in these is
+     never on the page, whatever a stylesheet says, so indexing it gives the map
+     characters no reader can see — and a quote that happens to match them. */
+  it.each(['SCRIPT', 'STYLE', 'TEMPLATE'])('reads no text out of a <%s>', (tag) => {
+    const doc = new DOMParser().parseFromString('<html><body></body></html>', 'text/html')
+    const hidden = doc.createElement(tag)
+    hidden.textContent = 'unseen'
+    doc.body.append(doc.createTextNode('done'), hidden, doc.createTextNode('after'))
+    expect(indexText(doc.body).text).not.toContain('unseen')
+  })
+
   it('and does not break at an inline one, which is what makes that a test', () => {
     /* The known negative. Every case above asserts a space appears; without
        this, a walk that broke at EVERY element would pass all thirty-seven of
