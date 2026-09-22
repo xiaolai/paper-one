@@ -210,6 +210,15 @@ where
 }
 
 /// One chapter of an export: a title, and the file a render left behind.
+///
+/// ⚠️ **macOS's OWN, BECAUSE ONLY macOS READS IT.** It is deserialised from the
+/// command's payload and then read by `apple::package` alone, so on any other
+/// platform its fields have no reader at all — and `-D warnings` makes that a
+/// build error. The Linux leg caught it on the 0.4.1 release commit; a Mac
+/// cannot, because there the reader is compiled in. An `allow(dead_code)` would
+/// have said these fields are unused of the two fields that ARE the wire
+/// contract, so the platform boundary is written as one instead.
+#[cfg(target_os = "macos")]
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChapterAudio {
@@ -287,10 +296,6 @@ pub fn narrate_voices() -> Vec<VoiceInfo> {
 
 /// Render `text` to a mono 16-bit WAV at `path`, and report where each word is.
 ///
-/// ⚠️ **REFUSED BY NAME OFF macOS, rather than silently writing nothing.** A
-/// command that answered an empty `Rendered` would hand the exporter a chapter
-/// of no audio and let it carry on to the next one; the whole export has to stop
-/// at the first platform that cannot do it.
 /// Turn a book's rendered chapters into one `.m4b`.
 ///
 /// ⚠️ **REFUSED OFF macOS**, like `narrate_render`: the encoder is the system's
@@ -300,6 +305,13 @@ pub fn narrate_voices() -> Vec<VoiceInfo> {
 /// ⚠️ **`async`, AND THAT IS NOT A STYLE CHOICE** — see `narrate_render`. A
 /// synchronous command runs on the main thread, and encoding a whole book there
 /// would freeze the window for the length of the export.
+/// ⚠️ **AND OFF macOS IT TAKES NOTHING.** It used to take the payload everywhere
+/// and drop it with a `let _ = (…)`, which consumes the values and reads none of
+/// their fields — see `ChapterAudio`. The command still EXISTS on every platform
+/// and still refuses by name, which is what stops an exporter carrying on past a
+/// platform that cannot do it: Tauri deserialises the arguments a command
+/// declares and ignores the rest of the payload.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn narrate_package(
     chapters: Vec<ChapterAudio>,
@@ -307,20 +319,25 @@ pub async fn narrate_package(
     author: String,
     path: String,
 ) -> Result<Packaged, String> {
-    #[cfg(target_os = "macos")]
-    {
-        offload("package", move || {
-            apple::package(chapters, title, author, path)
-        })
-        .await
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (chapters, title, author, path);
-        Err("Paper can only package an audiobook on macOS".to_owned())
-    }
+    offload("package", move || {
+        apple::package(chapters, title, author, path)
+    })
+    .await
 }
 
+/// Refused, with nothing to take: see the macOS form above.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub async fn narrate_package() -> Result<Packaged, String> {
+    Err("Paper can only package an audiobook on macOS".to_owned())
+}
+
+/// Render `text` to a mono 16-bit WAV at `path`, and report where each word is.
+///
+/// ⚠️ **REFUSED BY NAME OFF macOS, rather than silently writing nothing.** A
+/// command that answered an empty `Rendered` would hand the exporter a chapter
+/// of no audio and let it carry on to the next one; the whole export has to stop
+/// at the first platform that cannot do it.
 ///
 /// ⚠️ **`async`, AND A SYNCHRONOUS VERSION DEADLOCKED THE APP.** Tauri runs a
 /// synchronous command ON THE MAIN THREAD. This one posts the write to the main
