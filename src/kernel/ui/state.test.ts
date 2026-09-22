@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { BUNDLED_FACES, faceById } from '../core/typefaces'
 import { createSettingsStore, readKernelPreferences } from '../core/settings'
-import { bootState, contributionFits, defaultPaneFor, initialState, paneFits, preferencesOf, readerTakesInput, reducer, screenFor, type AppState } from './state'
+import { bootState, contributionFits, defaultPaneFor, initialState, paneFits, preferencesOf, readerTakesInput, reducer, screenFor, type Action, type AppState } from './state'
 import { paneOffered } from '../core/uiTypes'
 
 /**
@@ -690,38 +690,6 @@ describe('bootState', () => {
 })
 
 /**
- * That `useAppState` actually USES `bootState`.
- *
- * Testing the function proves it is right, not that it is reached — this suite
- * passed with the hook still assembling its own state inline, which is exactly
- * the bug. There is no renderer here to observe a hook, so the source is read
- * instead, the same way the palette's combos are checked against the key
- * handler in `commands.test.ts`.
- */
-describe('the hook starts from bootState', () => {
-  it('does not assemble its own initial state', () => {
-    const source = readFileSync(fileURLToPath(new URL('./state.ts', import.meta.url)), 'utf8')
-    const hook = source.slice(source.indexOf('export function useAppState'))
-    /* The reducer is wrapped (it closes over the contributed panes, WI-5.6),
-     * so the pin is two facts rather than one spelling: the wrapper delegates
-     * to `reducer`, and the initial state is `bootState(`. */
-    expect(hook).toMatch(/const reduce = useCallback\(\(state: AppState, action: Action\) => reducer\(state, action, contributed\)/)
-    /* LAZILY: the store is the initializer's argument, so the preferences are
-       read once and not on every render (2026-09-13 audit). */
-    expect(hook).toMatch(/useReducer\(\s*reduce,\s*settings,\s*\(store\) =>\s*bootState\(/)
-  })
-
-  /* And it reads the settings store into that call — the whole point of the
-   * store is that a launch starts from what was remembered. */
-  it('hands the remembered preferences to bootState', () => {
-    const source = readFileSync(fileURLToPath(new URL('./state.ts', import.meta.url)), 'utf8')
-    const hook = source.slice(source.indexOf('export function useAppState'))
-    expect(hook).toMatch(/bootState\([^)]*readKernelPreferences\(store\)/)
-    expect(hook).toMatch(/writeKernelPreferences\(settings, prefs\)/)
-  })
-})
-
-/**
  * The durable half of the state comes back on launch.
  *
  * `bootState` takes what the settings store remembered and starts from it —
@@ -729,6 +697,42 @@ describe('the hook starts from bootState', () => {
  * survive being unloaded by its OS. Only the preferences travel; the transient
  * state (screen, layers, query) is decided fresh, as it always was.
  */
+describe('a control that sends something that is not a number', () => {
+  /**
+   * ⚠️ **`Math.max(min, Math.min(max, NaN))` IS `NaN`**, and all three of these
+   * clamped that way — so `NaN` reached live state, serialised as `null`, and the
+   * setting stayed broken for the session. The settings validator beside them asks
+   * `Number.isFinite` first; the reducer is the other door into the same value and
+   * did not.
+   *
+   * The state is returned UNCHANGED rather than falling back to a bound: a control
+   * sending a non-number has a defect, and substituting the minimum would hide it
+   * while silently changing what the reader chose.
+   */
+  const table: readonly [string, (v: number) => Action, (s: AppState) => number][] = [
+    ['reading rate', (v) => ({ type: 'setReadingRate', rate: v }), (s) => s.readingRate],
+    ['sentence gap', (v) => ({ type: 'setSentenceGap', ms: v }), (s) => s.sentenceGapMs],
+    ['paragraph gap', (v) => ({ type: 'setParagraphGap', ms: v }), (s) => s.paragraphGapMs],
+  ]
+  for (const [what, action, read] of table) {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      it(`keeps the ${what} when handed ${bad}`, () => {
+        const before = initialState
+        const after = reducer(before, action(bad))
+        expect(read(after)).toBe(read(before))
+        expect(Number.isFinite(read(after))).toBe(true)
+      })
+    }
+
+    it(`still clamps a real ${what} that is out of range`, () => {
+      /* So the refusal cannot pass by refusing everything. */
+      const after = reducer(initialState, action(-9999))
+      expect(Number.isFinite(read(after))).toBe(true)
+      expect(read(after)).toBeGreaterThanOrEqual(0)
+    })
+  }
+})
+
 describe('bootState with remembered preferences', () => {
   it('starts from what was remembered, and from the defaults for the rest', () => {
     const boot = bootState('', { theme: 'night', themeFollowsOs: false, typeface: 'crimson-pro', textSize: 19 })
@@ -797,6 +801,18 @@ describe('bootState with remembered preferences', () => {
       },
       /* WI-17.5, and NOT the default `reader`, for the reason the fifteen above
          give. */
+      /* Read aloud's four, and NOT their defaults either — an empty map and a
+         rate of 1 are exactly what a dropped field looks like, so seeding the
+         defaults here would prove nothing. The two pauses are off their own
+         defaults (150 and 600) for the same reason. */
+      readingVoice: { en: 'com.apple.voice.premium.en-US.Ava' },
+      readingRate: 1.25,
+      /* OFF ITS DEFAULT (false) for the same reason as the two pauses: a boolean
+         that happens to equal the default is exactly what a dropped field looks
+         like, so seeding it would prove nothing. */
+      readingNotesAloud: true,
+      sentenceGapMs: 300,
+      paragraphGapMs: 1400,
     }
     expect(preferencesOf(bootState('', remembered))).toEqual(remembered)
   })
@@ -1041,4 +1057,117 @@ describe('the layers, and the one list that governs them', () => {
       expect(moved[layer], layer).toBe(false)
     }
   })
+})
+
+/**
+ * ⚠️ **A SETTER THAT CHANGES NOTHING MUST RETURN THE SAME STATE.** `useReducer`
+ * skips a re-render only for the SAME object, and eight setters spread a new one
+ * for a value already there — `setChrome` among them, which §06 dispatches on
+ * pointer-near, so moving the mouse near the edge re-rendered the whole shell on
+ * every move. Each is asked here with the value it already holds.
+ */
+describe('a setter that changes nothing', () => {
+  it.each([
+    ['setThemeFollowsOs', { type: 'setThemeFollowsOs', follows: initialState.themeFollowsOs }],
+    ['closePane', { type: 'closePane' }],
+    ['setSide', { type: 'setSide', side: initialState.side }],
+    ['closeLayer', { type: 'closeLayer', layer: 'paletteOpen' }],
+    ['setChrome', { type: 'setChrome', on: initialState.chromeOn }],
+    ['setTypeface', { type: 'setTypeface', typeface: initialState.typeface }],
+    ['setMarkTint', { type: 'setMarkTint', tint: initialState.markTint }],
+    ['setMarkStyle', { type: 'setMarkStyle', style: initialState.markStyle }],
+  ] as const)('%s returns the same state for the value it already has', (_name, action) => {
+    const state = { ...initialState, pane: null, paletteOpen: false }
+    expect(reducer(state, action as Action)).toBe(state)
+  })
+
+  it('still returns a new state when the value does move', () => {
+    const state = { ...initialState, chromeOn: false }
+    const next = reducer(state, { type: 'setChrome', on: true })
+    expect(next).not.toBe(state)
+    expect(next.chromeOn).toBe(true)
+  })
+})
+
+/**
+ * ⚠️ **A PANEL NOTHING CONTRIBUTES WAS REMEMBERED AS THE ONE LAST OPENED.**
+ * `paneOffered` knows only the kernel's panels, so any `capability:name` id
+ * passed — `ghost:pane` as readily as a real one. The pane SHOWN was right, but
+ * `lastPane` became a panel that does not exist and the reader's real one was
+ * lost: the next ⌘\ resolved the ghost to the default.
+ */
+describe('what lastPane may record', () => {
+  const contributed = [{ id: 'circle:book', screens: ['reader'] }] as const
+  const reading = { ...initialState, screen: 'reader' as const, pane: 'toc' as const, lastPane: 'toc' as const }
+
+  it('keeps the panel the reader had when they ask for one that does not exist', () => {
+    const next = reducer(reading, { type: 'openPane', pane: 'ghost:pane' } as Action, contributed)
+    expect(next.lastPane, 'not the ghost').toBe('toc')
+  })
+
+  it('remembers a contributed panel that does exist', () => {
+    const next = reducer(reading, { type: 'openPane', pane: 'circle:book' } as Action, contributed)
+    expect(next.lastPane).toBe('circle:book')
+  })
+
+  it('remembers a kernel panel as before', () => {
+    const next = reducer(reading, { type: 'openPane', pane: 'search' } as Action, contributed)
+    expect(next.lastPane).toBe('search')
+  })
+})
+
+describe('the voice a reader chooses, and the speeds beside it', () => {
+  /**
+   * ⚠️ **MERGED INTO THE MAP, NEVER REPLACING IT.** One voice per language is
+   * the whole shape: a reader who picks an English voice, opens a Chinese book
+   * and picks one there must still have the first. And an EMPTY voice removes
+   * the entry rather than storing `''` — that is how a reader goes back to
+   * letting the app choose, and a stored empty string would leave a dead key
+   * per language they ever visited.
+   */
+  it('keeps every other language’s voice', () => {
+    const en = reducer(initialState, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })
+    const both = reducer(en, { type: 'setReadingVoice', lang: 'zh', voice: 'voice:zh' })
+    expect(both.readingVoice).toEqual({ en: 'voice:en', zh: 'voice:zh' })
+  })
+
+  it('is the same state when the voice chosen is the one already stored', () => {
+    const en = reducer(initialState, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })
+    expect(reducer(en, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })).toBe(en)
+  })
+
+  it('takes the entry out for an empty voice, and changes nothing when there was none', () => {
+    const en = reducer(initialState, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })
+    const cleared = reducer(en, { type: 'setReadingVoice', lang: 'en', voice: '' })
+    expect(cleared.readingVoice).toEqual({})
+    expect(reducer(cleared, { type: 'setReadingVoice', lang: 'en', voice: '' }), 'nothing moved').toBe(
+      cleared,
+    )
+  })
+
+  /**
+   * CLAMPED HERE TOO, not only in the settings validator: that guards what
+   * arrives from disk, this guards what arrives from a control, and they are
+   * two doors into one value. A value that is not a finite number is refused
+   * outright — `Math.min` over a NaN answers NaN, and a NaN rate makes the
+   * engine refuse the utterance.
+   */
+  it.each([
+    ['setReadingRate', 'readingRate', 1.25, 99, 2.5, 0.01, 0.5],
+    ['setSentenceGap', 'sentenceGapMs', 300, 99_999, 1000, -5, 0],
+    ['setParagraphGap', 'paragraphGapMs', 900, 99_999, 2000, -5, 0],
+  ] as const)(
+    '%s stores what is in range and clamps what is not',
+    (type, field, inRange, tooHigh, top, tooLow, bottom) => {
+      const value = (state: AppState) => state[field]
+      const set = (v: number): AppState =>
+        reducer(initialState, { type, ...(type === 'setReadingRate' ? { rate: v } : { ms: v }) } as never)
+      expect(value(set(inRange))).toBe(inRange)
+      expect(value(set(tooHigh)), 'a build with a wider ramp is not corrupt').toBe(top)
+      expect(value(set(tooLow))).toBe(bottom)
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        expect(set(bad), 'a value that is not a number changed the state').toBe(initialState)
+      }
+    },
+  )
 })

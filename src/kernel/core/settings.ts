@@ -9,9 +9,12 @@ import {
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
+  PARAGRAPH_GAP,
+  READING_RATE,
+  SENTENCE_GAP,
   READING_STEPS,
   SPACING,
-  type SpacingScale,
+  type SteppedScale,
 } from './metrics'
 import { defineSetting, frozen, type Setting, type SettingsStore } from './ports'
 import {
@@ -225,6 +228,35 @@ function openStored(storage: MarkStorage | null): {
   }
 }
 
+/**
+ * ⚠️ **THIS STORE ASSUMES IT IS THE ONLY WRITER, AND THAT IS A DECISION.**
+ *
+ * It reads the envelope once at construction and writes that whole cached
+ * record back on every change, so a SECOND store over the same backing
+ * storage — two browser tabs of the shelf share one `localStorage` — can
+ * overwrite the other's newer values, including keys belonging to capabilities
+ * this build does not compose. An audit asked for revisions or a
+ * compare-and-set. Three reasons it is written down instead of built:
+ *
+ * - The fix is not local. `MarkStorage` is `getItem`/`setItem` over one key
+ *   and has no compare-and-set, no change notification and no transaction, so
+ *   a revision would have to be read-modify-write through the same racing
+ *   door it is meant to close. Doing it properly means a new port, and a
+ *   format bump on a file every reader already has.
+ * - The same absence is why `persistent` can lag a real failure by one write
+ *   (`fileStore.ts` reports a refused disk write on the NEXT `setItem`), and
+ *   why `writeKernelPreferences` cannot be atomic: N `set` calls are N writes,
+ *   and a storage that refuses half way leaves a prefix on disk. That prefix
+ *   is REPORTED — it turns the store session-only, which the panel draws — so
+ *   the failure is visible even though it is not prevented.
+ * - The native app is single-instance (`tauri_plugin_single_instance`), so the
+ *   racing pair is two browser tabs, and what is lost there is a preference,
+ *   not a book.
+ *
+ * So: a known limit with a named cost, not an oversight. Anything that gives
+ * `MarkStorage` a compare-and-set should close all three at once, and this
+ * comment is the list of what to check when it does.
+ */
 export function createSettingsStore({ storage, migrate = keepValues }: SettingsStoreOptions): SettingsStore {
   const { found, unreadable } = openStored(storage)
   /* Unknown keys are KEPT, not dropped: a value under `sync.interval` in a
@@ -240,6 +272,35 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
    * understands, silently, on the first preference they changed. Found by
    * audit. */
   const fromTheFuture = found !== null && found.version > SETTINGS_VERSION
+  /**
+   * The migration hook's answer, or none — never a thrown exception.
+   *
+   * ⚠️ **A THROWING MIGRATION USED TO ABORT THE WHOLE STORE, AND THE STORE IS
+   * ON THE BOOT PATH.** `migrate` is supplied by the caller, it runs on
+   * whatever bytes were on disk, and it is the one piece of arbitrary code in
+   * this function — so a hook that threw on a hand-edited or half-written file
+   * took `createSettingsStore` down with it, and with it the launch. Every
+   * other way of meeting damaged settings in this file is deliberately
+   * nonfatal: unreadable bytes become a session store, a file from the future
+   * becomes a session store. This was the one door left where damage could
+   * stop the app from starting, which is the worst available answer to it —
+   * the reader cannot even reach the panel that would say what is wrong.
+   *
+   * It degrades the same way as the rest now: no values, session-only, the
+   * damaged bytes left exactly where they are so a later build can still read
+   * them. `get` answers every setting's fallback, which is what a reader with
+   * no settings file already sees.
+   */
+  let migrationFailed = false
+  const migrated = (stored: SettingsEnvelope | null): Readonly<Record<string, unknown>> => {
+    try {
+      return migrate(stored)
+    } catch (cause) {
+      migrationFailed = true
+      console.error('Paper: stored settings could not be migrated, so this session starts from the defaults', cause)
+      return {}
+    }
+  }
   let values: Readonly<Record<string, unknown>> =
     found && found.version === SETTINGS_VERSION
       ? found.values
@@ -250,11 +311,24 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
              and their type size rather than being reset. What must not happen
              is this build claiming the file. */
           (found.values as Readonly<Record<string, unknown>>)
-        : migrate(found)
+        : migrated(found)
   /* FROZEN, like everything `set` holds after it: `getSnapshot` hands this record
      out whole, and a reader who changed a value in it changed memory under the
-     disk, with no write and no notification (2026-09-13 verify). */
-  values = frozen(values)
+     disk, with no write and no notification (2026-09-13 verify).
+
+     ⚠️ **AND THE FREEZE IS PART OF THE LOADING PATH, SO IT IS GUARDED TOO.**
+     `frozen` walks what the migration returned, and the migration is the
+     caller's code — a getter on that record runs HERE, not above, so guarding
+     only the `migrate` call left the second half of the same door open. A hook
+     that returns a record whose getter throws would abort the store exactly as
+     a hook that threw outright did. Same degradation, one reason. */
+  try {
+    values = frozen(values)
+  } catch (cause) {
+    migrationFailed = true
+    console.error('Paper: stored settings could not be read, so this session starts from the defaults', cause)
+    values = frozen({})
+  }
   const listeners = new Set<() => void>()
 
   /* WHETHER THE NEXT LAUNCH WILL SEE ANY OF THIS. No storage at all is the
@@ -262,8 +336,9 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
    * file written by a NEWER build is the third: refusing to write it is the
    * only way to leave it intact, and "these settings are not being saved" is
    * already the sentence the panel draws for exactly this state. A file that
-   * would not READ is the fourth, for the same reason as the third. */
-  let persistent = storage !== null && !fromTheFuture && !unreadable
+   * would not READ is the fourth, for the same reason as the third. A
+   * migration that THREW is the fifth — see `migrated` above. */
+  let persistent = storage !== null && !fromTheFuture && !unreadable && !migrationFailed
 
   /**
    * Tell every subscriber, and let none of them stop the others.
@@ -322,13 +397,25 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
      * turned persistence off for the session — so one capability's unsaveable
      * value stopped every preference saving, and replacing it did not undo
      * that. `set` now refuses such a value before it is held, so the envelope
-     * can only fail here through a migration hook's output; that says so and
-     * skips this write, and leaves a healthy storage marked healthy. */
+     * can only fail here through a migration hook's output. */
     let text: string
     try {
       text = JSON.stringify(envelope)
     } catch (cause) {
-      console.error('Paper: settings could not be serialised, so this change was not saved', cause)
+      /* ⚠️ **AND THIS USED TO RETURN LEAVING `persistent` TRUE, ON THE GROUND
+       * THAT THE STORAGE WAS HEALTHY.** The storage is; the STORE is not, and
+       * this flag is the store's. Its own declaration above says what it
+       * means — *whether the next launch will see any of this* — and once the
+       * envelope holds a value `JSON.stringify` refuses, the answer is no, and
+       * stays no for every later write: the offending value sits in `values`
+       * and nothing a reader does removes it. So the panel drew "your settings
+       * are saved" over a store that had stopped saving at the first
+       * preference they changed. A store that cannot write is a SESSION store,
+       * exactly as in the storage branch below, and it is published for the
+       * same reason. */
+      persistent = false
+      console.error('Paper: settings could not be serialised, so they will not be saved on this device', cause)
+      notify()
       return
     }
     try {
@@ -416,6 +503,34 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
         console.error(`Paper: the setting ${setting.key} was not changed, because its value cannot be saved`, cause)
         return
       }
+      /* ⚠️ **AND A VALUE THE SETTING'S OWN PARSER CANNOT READ BACK IS REFUSED
+       * WITH THEM.** Surviving `JSON.stringify` is not the same as surviving
+       * this setting: `JSON.stringify(NaN)` is the string `null`, so
+       * `set(readingRate, NaN)` stored a literal `null` under the key. `has`
+       * then answered TRUE, `get` ran `parse(null)`, got `undefined` and
+       * returned the FALLBACK — a key present on disk and unreadable through
+       * the only door that reads it, for every launch after, with the panel
+       * showing the fallback and the file disagreeing.
+       *
+       * Refused on the same ground as the line above: `set` already declines a
+       * value the STORAGE cannot hold, and a value the SETTING cannot hold is
+       * the same promise broken one level up. The parse is only a
+       * READABILITY test — `held` is what gets stored, not `readable` — so a
+       * parser that clamps still clamps on the way out and `set` does not
+       * quietly rewrite what the caller asked for. A parser that throws says
+       * what one returning `undefined` says, exactly as in `get`. */
+      let readable: unknown
+      try {
+        readable = setting.parse(held)
+      } catch {
+        /* Left undefined, which the refusal below already answers. */
+      }
+      if (readable === undefined) {
+        console.error(
+          `Paper: the setting ${setting.key} was not changed, because its own parser cannot read that value back`,
+        )
+        return
+      }
       const current = setting.key in values ? values[setting.key] : setting.fallback
       if (unchanged(current, held)) return
       values = frozen({ ...values, [setting.key]: held })
@@ -462,6 +577,104 @@ const boolean = (raw: unknown): boolean | undefined => (typeof raw === 'boolean'
  */
 const stringList = (raw: unknown): readonly string[] | undefined =>
   Array.isArray(raw) ? raw.filter((one): one is string => typeof one === 'string') : undefined
+
+/**
+ * The ends of the rate scale, as the stored value's clamp.
+ *
+ * DERIVED FROM THE SCALE, never typed out again: the range a reader can store
+ * and the range the stepper offers are the same range, and two literals is how
+ * they stop being. See `READING_RATE` in `metrics.ts` for the steps themselves.
+ *
+ * CLAMPED, NOT REJECTED, for `textSize`'s reason one step along: a file written
+ * by a build offering a wider range is not corrupt, it is a reader who chose
+ * "as fast as it goes" on another build, and the nearest speed this build offers
+ * honours that where falling back to 1 would throw it away.
+ *
+ * A MULTIPLIER RATHER THAN AN INDEX, also for `textSize`'s reason: an index
+ * means nothing across a change to the ramp the UI offers, and this one is
+ * likely to change — 1 is the engine's default for ever, where `steps[4]` is
+ * whatever the fifth entry happens to be that month.
+ */
+/* READ OFF THE ENDS, and ASSERTED rather than defaulted. `steps[0] ?? 1` and
+   `steps[length - 1] ?? 0` each carried a fallback for a scale with no steps —
+   which `metrics.test.ts` refuses for every scale in the file, so the fallback
+   is unreachable, and for a gap scale whose first step IS 0 it could not even
+   be told from the value it stood in for. `.at(-1)` says "the last one" without
+   arithmetic to get wrong. */
+export const READING_RATE_MIN = READING_RATE.steps.at(0)!
+export const READING_RATE_MAX = READING_RATE.steps.at(-1)!
+
+/**
+ * The ends of a gap scale, as the stored value's clamp — `READING_RATE_MIN`'s
+ * reasoning, one scale along, and derived for the same reason: the range a
+ * reader can store and the range the stepper offers must be one range.
+ */
+export const SENTENCE_GAP_MIN = SENTENCE_GAP.steps.at(0)!
+export const SENTENCE_GAP_MAX = SENTENCE_GAP.steps.at(-1)!
+export const PARAGRAPH_GAP_MIN = PARAGRAPH_GAP.steps.at(0)!
+export const PARAGRAPH_GAP_MAX = PARAGRAPH_GAP.steps.at(-1)!
+
+/**
+ * A stored number on a continuous range — a gap in milliseconds, a speaking
+ * rate — CLAMPED to it rather than rejected.
+ *
+ * As every other scale here is: a file written by a build offering a longer
+ * pause, or a faster voice, is not corrupt. It is a reader who chose "as far as
+ * it goes", and the nearest this build offers honours that where falling back
+ * to the default would throw it away. Non-finite is refused, because `Infinity`
+ * as a timer duration is a reading that never continues, and as a rate it is a
+ * voice that never speaks.
+ *
+ * ⚠️ **THIS WAS TWO FUNCTIONS WITH ONE BODY.** `withinRange(min, max)` and a separate
+ * `rate` differed only in where the bounds came from — the second had
+ * `READING_RATE_MIN`/`MAX` written into it instead of taking them — so the
+ * clamping rule for the reader's speaking rate could be changed without
+ * touching the rule for the pauses around it, and neither would look wrong.
+ *
+ * `index` below is deliberately NOT folded in with them, though it also clamps:
+ * its acceptance test is `Number.isInteger`, not `Number.isFinite`, because it
+ * addresses a position on a discrete ramp rather than a quantity. Two clamps
+ * that accept different things are two rules, and the comment there says why.
+ */
+const withinRange =
+  (min: number, max: number) =>
+  (raw: unknown): number | undefined =>
+    /* `Number.isFinite` IS THE WHOLE CHECK: it does not coerce, so it answers
+       false for a string, an object and a null as surely as for a NaN — and a
+       `typeof raw === 'number'` beside it could change no outcome. */
+    Number.isFinite(raw) ? Math.max(min, Math.min(max, raw as number)) : undefined
+
+const rate = withinRange(READING_RATE_MIN, READING_RATE_MAX)
+
+/**
+ * The voice the reader chose, per primary language subtag — `{ en: '…', zh: '…' }`.
+ *
+ * ONE VOICE PER LANGUAGE, not one for the app: a single stored voice is the
+ * shape where a reader who picks an English voice they like then opens a Chinese
+ * book and hears it read in English. `voiceChoice.ts` holds the matching rule
+ * and the argument.
+ *
+ * A BAD ENTRY COSTS ITSELF, exactly as in `stringList`: a junk value for one
+ * language must not take the reader's other choices with it. A non-object is
+ * rejected, because that is a value of the wrong shape rather than a map with a
+ * bad member.
+ *
+ * ⚠️ **THE KEYS ARE NOT NORMALISED HERE, DELIBERATELY.** Folding `en-US` to `en`
+ * would need `primaryOf`, which lives with the reader — and `core` may not
+ * import from `ui`. It is not worth moving: the picker only ever writes a
+ * primary subtag, and a hand-written `en-US` key simply never matches, which
+ * falls through to the automatic pick. A key that does nothing is a safe
+ * outcome; a rule spelled out in two modules is not.
+ */
+const voiceChoices = (raw: unknown): Readonly<Record<string, string>> | undefined => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const row = raw as Record<string, unknown>
+  const kept: Record<string, string> = {}
+  for (const [lang, voice] of Object.entries(row)) {
+    if (typeof voice === 'string' && voice !== '') kept[lang] = voice
+  }
+  return kept
+}
 
 /**
  * An index into one of §09's scales, CLAMPED to it rather than rejected.
@@ -522,7 +735,7 @@ const readingStyle = (raw: unknown): ReadingStyle | undefined => {
   const row = raw as Record<string, unknown>
   const pick = <K extends StyleField<string>>(key: K, from: readonly ReadingStyle[K][]): ReadingStyle[K] =>
     oneOf(from)(row[key]) ?? DEFAULT_READING_STYLE[key]
-  const step = (key: StyleField<number>, scale: SpacingScale): number =>
+  const step = (key: StyleField<number>, scale: SteppedScale): number =>
     index(scale.steps.length)(row[key]) ?? DEFAULT_READING_STYLE[key]
   const flag = (key: StyleField<boolean>): boolean => boolean(row[key]) ?? DEFAULT_READING_STYLE[key]
   return {
@@ -628,6 +841,29 @@ export const KERNEL_SETTINGS = {
      as long as it took an audit to notice that `theme`, `stepIdx`, `spacing`
      and `align` are all in this list and these fifteen were not. */
   readingStyle: defineSetting<ReadingStyle>('kernel.readingStyle', DEFAULT_READING_STYLE, readingStyle),
+  /* Read aloud's two, and the reason they are preferences at all: the reading
+     used to take whatever voice the platform handed it, which on macOS is the
+     most compressed one installed. See `ui/reader/voiceChoice.ts`. */
+  readingVoice: defineSetting<Readonly<Record<string, string>>>('kernel.readingVoice', {}, voiceChoices),
+  readingRate: defineSetting<number>('kernel.readingRate', 1, rate),
+  /* WHETHER A NOTE'S BODY IS READ. Off, which is the quieter of the two: most
+     note bodies are hidden and never reach the voice, and the ones that are not
+     are a print-style block at the foot of a section — so on by default means a
+     run of citations arriving mid-chapter, unannounced. See `NOTE_BODIES` in
+     `ui/reader/speechSkip.ts` for why this is the reader's choice at all. */
+  readingNotesAloud: defineSetting<boolean>('kernel.readingNotesAloud', false, boolean),
+  /* THE SILENCE BETWEEN UNITS OF PROSE — see `SENTENCE_GAP` in `metrics.ts` for
+     why this is expressible at all and why it is not scaled by the rate. */
+  sentenceGapMs: defineSetting<number>(
+    'kernel.sentenceGapMs',
+    SENTENCE_GAP.steps[SENTENCE_GAP.def] ?? 0,
+    withinRange(SENTENCE_GAP_MIN, SENTENCE_GAP_MAX),
+  ),
+  paragraphGapMs: defineSetting<number>(
+    'kernel.paragraphGapMs',
+    PARAGRAPH_GAP.steps[PARAGRAPH_GAP.def] ?? 0,
+    withinRange(PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX),
+  ),
 } as const satisfies Record<string, Setting<unknown>>
 
 export type KernelSettingName = keyof typeof KERNEL_SETTINGS
@@ -697,8 +933,25 @@ function readTextSize(store: SettingsStore): number {
    * the current one, and with nothing stored the current one is the FALLBACK —
    * so a reader choosing exactly the default size stored nothing, and the next
    * read came back here and answered with the legacy index instead. Writing it
-   * once makes every later read and write ordinary, and removes the ordering
-   * dependency altogether.
+   * once makes every later read and write ordinary.
+   *
+   * ⚠️ **AND THIS WRITE IS ITSELF SKIPPED WHEN `carried` IS THE FALLBACK,
+   * WHICH IS REACHABLE — SO IT DOES NOT "REMOVE THE ORDERING DEPENDENCY
+   * ALTOGETHER", AS THIS COMMENT CLAIMED.** `set` declines a value equal to the
+   * current one, and with nothing stored the current one IS the fallback, so
+   * the very case the paragraph above describes is the case this `set` cannot
+   * record. It is not hypothetical: `LEGACY_READING_SIZES[2]` is 21 and
+   * `READING_STEPS[DEFAULT_STEP_IDX].size` is 21, so a reader on legacy step 2
+   * takes this path on every launch for ever.
+   *
+   * It is nevertheless HARMLESS, which is why the write is left as it is rather
+   * than given a way around the dedup: in the skipped case `carried` and the
+   * fallback are the same number, so "absent" and "the legacy value" answer
+   * identically and no reader can observe a difference. What it costs is
+   * durability, not correctness — `LEGACY_STEP_IDX` can never be retired for
+   * those readers, because something still reads it. Said here rather than
+   * fixed with a second write path, because one caller is not a reason to give
+   * the store an unconditional `set` that every other caller could reach for.
    *
    * Today the app happens not to lose the choice — `useAppState`'s effect
    * writes every preference on mount, which materialises this before anything
@@ -733,6 +986,11 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     markTint: store.get(KERNEL_SETTINGS.markTint),
     markStyle: store.get(KERNEL_SETTINGS.markStyle),
     readingStyle: store.get(KERNEL_SETTINGS.readingStyle),
+    readingVoice: store.get(KERNEL_SETTINGS.readingVoice),
+    readingRate: store.get(KERNEL_SETTINGS.readingRate),
+    readingNotesAloud: store.get(KERNEL_SETTINGS.readingNotesAloud),
+    sentenceGapMs: store.get(KERNEL_SETTINGS.sentenceGapMs),
+    paragraphGapMs: store.get(KERNEL_SETTINGS.paragraphGapMs),
   }
 }
 
@@ -746,6 +1004,19 @@ export function writeKernelPreferences(store: SettingsStore, prefs: KernelPrefer
    * here is nothing at all, and the setting simply never persists. WI-14.4's
    * fifteen were shipped that way for exactly as long as it took an audit to
    * ask why the panel reset on every launch.
+   *
+   * ⚠️ **AND THE ASYMMETRY IS THE POINT, NOT A LEFTOVER** — an audit has since
+   * read it the other way and asked for the READER to be derived too. It must
+   * not be. The two halves fail differently and only one of them fails safely:
+   * omitting a field from `readKernelPreferences` is a COMPILE ERROR, measured
+   * rather than assumed by deleting `paragraphGapMs` from it and running the
+   * gate — `settings.ts(926,3): error TS2741: Property 'paragraphGapMs' is
+   * missing in type … but required in type 'KernelPreferences'`. So the reader
+   * is already held to the table by the type system, which is a stronger guard
+   * than a loop, and it is what lets `textSize` go through `readTextSize`
+   * instead of `store.get` without that exception costing the guarantee.
+   * Deriving it would buy symmetry and sell the one thing that makes a
+   * hand-written list safe.
    *
    * The cast is the one place the derivation cannot be expressed: `store.set`
    * is generic in the setting's own type, and iterating the table erases the

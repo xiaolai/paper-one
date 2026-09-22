@@ -1,7 +1,7 @@
 import { coverFrom } from '../../core/coverArt'
 import { isPdf } from '../../core/formats'
-import { readMeta } from './session'
-import type { BookMeta } from '../hooks/useBook'
+import { readMeta } from './readMeta'
+import type { BookMeta } from '../../core/bookMeta'
 
 /**
  * Read a book's own account of itself, WITHOUT rendering it.

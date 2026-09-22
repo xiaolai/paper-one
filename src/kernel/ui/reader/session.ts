@@ -1,4 +1,5 @@
 import type {
+  Book,
   CreateOverlayDetail,
   DrawAnnotationDetail,
   ExternalLinkDetail,
@@ -8,39 +9,19 @@ import type {
   TocItem,
   View,
 } from 'foliate-js/view.js'
-import {
-  FootnoteHandler,
-  type FootnoteRenderDetail,
-  type FootnoteType,
-} from 'foliate-js/footnotes.js'
-import type { ResolvedCfi } from './reanchor'
-import { foreignWeight, type OverlayAudience } from '../../core/circle/foreign'
 import { reanchorPass, type PassOutcome, type PendingMark } from './reanchorPass'
-import { rangeBoxInHost, type HostRect } from './coordinates'
-import { isBacklink } from './backlink'
 import { directionOf } from './direction'
+import { collectText } from './speech'
+import { DEFAULT_SPEECH_SKIP, type SpeechSkipPrefs } from './speechSkip'
+import type { SectionText } from './audiobook'
 import { refuseBookScripts, stripScripts } from './bookScripts'
-
-/* Re-exported where it always lived — the rule itself moved to `direction.ts`
- * so speech could import it without carrying a copy (audit round 1, #842). */
-export { directionOf } from './direction'
 import { suppressEmptyGeneratedContent } from './generatedContent'
 import { markFigures } from './markFigures'
 import { matteFigures } from './matteFigures'
 import { markProse } from './markProse'
 import { markSmallText } from './markSmallText'
-import {
-  ANNOTATION_KINDS,
-  MARK_STYLES,
-  MARK_TINTS,
-  type AnnotationKind,
-  type MarkStyle,
-  type MarkTint,
-} from '../../core/marks'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { isEmptySource, type BookSource } from '../../core/formats'
-import { FOOTNOTE } from '../../core/metrics'
-import { PARK_OFFSET } from '../../core/placement'
 import type { OpenedBook } from './protection'
 import { coverFrom } from '../../core/coverArt'
 import { deferSnap } from './wordSnap/deferredSnap'
@@ -49,6 +30,19 @@ import { createReflowGuard } from './wordSnap/invalidate'
 import { wheelPager, type PageIntent } from './wheelPaging'
 import { markContext } from './wordSnap/markContext'
 import { connectedRange, rangeText } from './wordSnap/rangeText'
+import { Footnotes, type FootnoteRender } from './footnotes'
+import {
+  attachForeign,
+  attachMark,
+  paintAnnotation,
+  type ForeignAnchor,
+  type MarkAnchor,
+  type MarkPainters,
+  type MarkPalette,
+} from './markPaint'
+import { runSearch, type SearchHit } from './bookSearch'
+import { readMeta } from './readMeta'
+import { flattenToc } from '../tocOrder'
 
 /**
  * The reader's lifecycle, as a plain object.
@@ -65,6 +59,14 @@ import { connectedRange, rangeText } from './wordSnap/rangeText'
  * before, during, or after startup; `settle()` hands every completed step back
  * to the latch, so whichever side finishes last performs the close. None of it
  * touches React, so all of it can be asserted directly.
+ *
+ * ⚠️ **WHAT READS NONE OF THE SESSION'S STATE LIVES BESIDE IT, NOT IN IT.**
+ * Painting a mark (`markPaint.ts`), a book's notes (`footnotes.ts`), search
+ * (`bookSearch.ts`) and metadata (`readMeta.ts`) were all in this file, which
+ * reached 3 710 lines. Each is handed what it needs rather than reaching into
+ * the class. What stays here shares the view, the latch, the callbacks and the
+ * per-document teardown — the parts that cannot be pulled apart without every
+ * piece holding a copy of the latch, which is the defect above.
  */
 
 /**
@@ -134,125 +136,24 @@ const ENTER_AT_FOOT_MS = 1500
  * task queue, so a walk that yields forty times is not forty trips behind every
  * pending timer. `setTimeout(0)` otherwise, which is throttled in a hidden tab
  * but does keep running, which is the property that matters here.
+ *
+ * ⚠️ **EMPTY THE EXECUTOR AND THIS PROMISE NEVER SETTLES, WHICH IS A HANG AND
+ * NOT A FAILURE.** `new Promise(() => undefined)` is specified to stay pending
+ * for ever, so the walk awaiting it stops there: no instructions run, Stryker's
+ * hit limit — the thing that makes an infinite LOOP a deterministic detection —
+ * is never reached, and the only possible answer is a wall-clock timeout that
+ * repeats however long the deadline is. The covering tests DO detect it; they
+ * hang with it, which is the one outcome a test cannot report.
+ *
+ * AGENTS.md records this whole class and the remedy it prescribes: verify by
+ * hand that it genuinely cannot settle, then disable it beside the code naming
+ * the column. Here that verification is the specification itself.
  */
 const BREATHE = (): Promise<void> => {
   const scheduler = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler
   if (typeof scheduler?.yield === 'function') return scheduler.yield()
+  /* Stryker disable next-line ArrowFunction: column 22 — an executor that resolves nothing leaves this promise pending for ever, so the walk hangs rather than failing */
   return new Promise((resolve) => setTimeout(resolve, 0))
-}
-
-/** One hit, flattened from foliate's mixed yield shapes. */
-export interface SearchHit {
-  readonly cfi: string
-  readonly label: string
-  readonly pre: string
-  readonly match: string
-  readonly post: string
-}
-
-/**
- * Enough of a mark to draw it.
- *
- * Deliberately not the stored `Mark`: the session has no business knowing what
- * a mark's note says or when it was made, and keeping the anchor narrow is what
- * lets the drawing be reasoned about without the store in view.
- */
-export interface MarkAnchor {
-  /**
-   * `ResolvedCfi`, NOT `string` — WI-22.A1, and the twin of the `kind`
-   * narrowing below.
-   *
-   * `kind` refuses a bookmark at this door; this refuses a passage with no
-   * anchor in the build now open. The only way to hold one is to have gone
-   * through `isPlaced`/`placedIn` (a checked narrowing) or `cfiFor` (the
-   * resolver's own mint, which takes a live `Range` as its evidence). A
-   * foreign passage arrives as three strings and can do neither, so the
-   * compiler stops it here rather than the painter drawing it on whatever the
-   * path happens to hit.
-   *
-   * `surfaces.md`: *"so the compiler refuses an unresolved one at the
-   * painter's door, the way `MarkAnchor` narrowing already refuses a bookmark
-   * there."*
-   */
-  readonly cfi: ResolvedCfi
-  readonly sectionIndex: number
-  /**
-   * `AnnotationKind`, NOT `MarkKind` — a bookmark cannot be drawn.
-   *
-   * The runtime split at `MarkSnapshot` already keeps one away from here, and
-   * that was the only thing doing so: this field took the whole union, so the
-   * guarantee rested on every caller reading from the right list. `drawMark`
-   * is public on the navigator. Narrowing it makes the compiler refuse a
-   * bookmark at the painter's door instead.
-   */
-  readonly kind: AnnotationKind
-  /* Carried on the anchor rather than looked up when the overlay draws: the
-     painter runs inside a `draw-annotation` handler that has the annotation and
-     nothing else, and giving it the store to search would be a second source of
-     truth for what a mark looks like, resolved at a different moment. */
-  readonly tint: MarkTint
-  readonly style: MarkStyle
-}
-
-/**
- * Another reader's passage, ready to draw — WI-22.D2.
- *
- * ⚠️ **NOT A `MarkAnchor`, AND THE DIFFERENCE IS THE FEATURE.** A `MarkAnchor`
- * carries `tint` and `style`, which are the READER'S OWN vocabulary —
- * *"agreements in green and questions in purple"* — and `surfaces.md` forbids
- * a friend's mark claiming it: *"A friend's highlight drawn in your tints is a
- * passage you will remember marking and did not."* So this type has neither
- * field, and the wire does not carry them either. There is nothing to ignore.
- *
- * The deleted companion's amber is the precedent and the mechanism: its mark
- * was an amber underline whatever the reader had chosen for their own, because
- * there too the colour was not a preference — it was what said whose mark it
- * was.
- */
-export interface ForeignAnchor {
-  /** `ResolvedCfi` — the compiler refuses an unanchored passage here (A1). */
-  readonly cfi: ResolvedCfi
-  readonly sectionIndex: number
-  /**
-   * The Overlayer key — `circle:<person>:<pub>`.
-   *
-   * ⚠️ **SEPARATE FROM THE CFI, WHICH IS THE WHOLE POINT.** `review.md`'s
-   * overlay blocker 1: `addAnnotation` keys the Overlayer on the annotation's
-   * VALUE, so several readers at one CFI collapse into one entry and the last
-   * writer wins — *"This breaks the feature's central case — '4 of 11 readers
-   * marked this.'"* `Overlayer.add(key, range, …)` already takes them
-   * separately; what does not is `addAnnotation`, and that is one line in our
-   * own fork (`annotation.key ?? annotation.value`).
-   *
-   * ⚠️ **UNTIL THE FORK MOVES, THIS IS CARRIED AND IGNORED.** Passing it costs
-   * nothing and changes nothing today; the day the fork lands, the collapse
-   * stops without another edit here.
-   */
-  readonly key: string
-  /**
-   * Whether this came from the reader's circle or from the public layer.
-   *
-   * ⚠️ **A STRANGER'S MARK WAS DRAWN EXACTLY AS A FRIEND'S.** The public
-   * capability said "stranger" by prefixing the person id it produced, which
-   * `useOverlays` then dropped — so `attachForeign` labelled every one of them
-   * with the circle's painter kind and the reader could not tell a passage
-   * somebody they admitted had marked from one anybody at all had. Provenance
-   * the reader is meant to SEE has to reach the painter. Found by audit.
-   */
-  readonly audience: OverlayAudience
-  /**
-   * How many readers marked this passage — see `foreignWeight`.
-   *
-   * Weight carries multiplicity because colour cannot WITHIN one audience:
-   * there is one neutral hue for every friend, so the only channel left is how
-   * heavy the rule is. That is what makes *"4 of 11 readers marked this"*
-   * legible without a click, which WI-22.D2's falsifier asks for.
-   *
-   * ⚠️ **A PUBLIC MARK CANNOT RAMP ON UNBOUND VOICES**, because keys are free
-   * — `readersAmong` floors at one and an unbound voice adds no identity, so a
-   * thousand of them still draw as one.
-   */
-  readonly readers: number
 }
 
 /** A live selection in the book, with its anchor already resolved. */
@@ -271,258 +172,6 @@ export interface SelectionSnapshot {
   readonly suffix: string
   /** In the BOOK document's coordinate space — translate before use. */
   readonly range: Range
-}
-
-/**
- * Concrete colours for the two mark provenances.
- *
- * Resolved by the caller at draw time rather than read from a custom property,
- * because the Overlayer sets `fill` as a presentation ATTRIBUTE, and `var()` is
- * not valid in one. Marks would silently draw black.
- */
-export interface MarkPalette {
-  /** The band drawn behind the words, per tint. */
-  readonly fill: Record<MarkTint, string>
-  /** The rule drawn under them, per tint — and the colour of the swatch that
-   *  offers it, which is why the saturated value lives here and not only in a
-   *  stylesheet. */
-  readonly rule: Record<MarkTint, string>
-  /**
-   * The hue every foreign mark is drawn in — one, for every reader.
-   *
-   * ⚠️ **ONE HUE AND NOT A PALETTE.** Giving each friend a colour would put
-   * them in competition with the reader's own three, and `MarkTint` is where
-   * the reader's meaning lives. A single neutral rule says *"somebody else"*;
-   * `readers` says how many, through weight.
-   *
-   * ⚠️ **THE DELETED COMPANION'S AMBER WAS THE PRECEDENT FOR THIS** — a hue
-   * that is not a preference but a statement of whose mark it is. The mark is
-   * gone and the argument is not.
-   */
-  readonly foreign: string
-  /**
-   * The hue a mark from OUTSIDE the circle is drawn in — one, for everybody.
-   *
-   * ⚠️ **QUIETER THAN `foreign`, AND THAT IS THE DECISION.** A friend had to
-   * be admitted; a stranger needs only a key, and keys are free. So the public
-   * layer is the one an attacker can fill, and a treatment that competed with
-   * the reader's own marks would make filling it worth doing. Same SHAPE as a
-   * friend's rule — hue is the channel, and one shape for everybody who is not
-   * the reader keeps it that way.
-   */
-  readonly stranger: string
-}
-
-/**
- * The Overlayer's draw functions, passed in so foliate stays lazily loaded.
- *
- * One per `MarkStyle`. Named for the STYLE rather than for the Overlayer
- * function behind it — `wave` is foliate's `squiggly`, and §15's word is the
- * one the interface uses.
- *
- * ⚠️ **`wave` HAS NO READER-FACING PRODUCER** — `READER_STYLES` does not offer
- * it and the store reads a stored one back as an underline. It stays because
- * `styleOf` reads what foliate hands back, untyped, and a value the type system
- * never saw must still land on a painter rather than on `undefined`.
- */
-export interface MarkPainters {
-  readonly fill: unknown
-  readonly underline: unknown
-  readonly wave: unknown
-}
-
-/**
- * A note, extracted and ready to show.
- *
- * THE ELEMENT, NOT ITS TEXT. `FootnoteHandler` renders the note into a real
- * `foliate-view`, so it arrives with the book's own markup, its own styles and
- * its links intact — a note carrying emphasis, a nested citation or a table
- * survives, where `textContent` would flatten all three. The host mounts it.
- *
- * `at` is where the REFERENCE was, in host coordinates, because that is what a
- * popover is placed against — not the note, which is somewhere else entirely.
- */
-/**
- * Where a reference sits, in the host's coordinates.
- *
- * A RANGE AROUND THE ELEMENT, because `coordinates` speaks ranges and a
- * superscript marker is usually one character — `getBoundingClientRect` on the
- * `<a>` would work and would be a second way of crossing the same iframe
- * boundary, which is how two answers to one question begin. Null when the
- * anchor's document has gone, which is what a section re-render does.
- */
-function anchorRectInHost(a: Element, host: HTMLElement): HostRect | null {
-  const doc = a.ownerDocument
-  if (!doc) return null
-  try {
-    const range = doc.createRange()
-    range.selectNode(a)
-    return rangeBoxInHost(range, host)
-  } catch {
-    return null
-  }
-}
-
-/**
- * Let go of a note's view — CLOSE IT BEFORE DETACHING IT.
- *
- * `remove()` alone throws, and the throw reaches the app's error boundary: the
- * paginator keeps a `ResizeObserver` on its container and the inner view keeps
- * one on `doc.body`, so detaching fires them with a size of zero, `render`
- * runs against a document that is no longer there, and `columnize` reads
- * `doc.documentElement` off null. **Closing a footnote took the book down.**
- *
- * `close()` is what unobserves — it calls `renderer.destroy()`, which does
- * `#observer.unobserve` on both. It does NOT destroy the book, which matters
- * because a note's view shares one with the reader: `Loader.destroy`, the call
- * that would revoke every shared object URL, is reachable only through
- * `Book.destroy`, and nothing here calls that.
- *
- * EXPORTED FOR THE ORDER. The order is the whole of the fix and it cannot be
- * checked from outside the class — these suites run without a DOM, so no real
- * view can be built. A stand-in through this seam can prove `close` precedes
- * `remove`, which is the thing that was wrong.
- *
- * Guarded, because a teardown that throws must not stop the popover closing:
- * the reader asked for it to go away, and that has to happen either way.
- */
-export function releaseNoteView(view: Pick<View, 'close' | 'remove'>): void {
-  try {
-    view.close()
-  } catch (cause) {
-    console.warn('Paper: a note view would not close cleanly', cause)
-  }
-  view.remove()
-}
-
-/**
- * The origin a note's anchor rect is measured from.
- *
- * THE BOX THE POPOVER SAYS IT IS POSITIONED IN — its own offset parent, which
- * is by definition the element its `left` and `top` resolve against, reported
- * through `setFootnoteMount`. So the number this produces and the number the
- * stylesheet consumes are in one space.
- *
- * REPORTED, NOT DERIVED. Working it out here as `mount.offsetParent` looks
- * equivalent and is not: the mount is a CHILD of the popover and the popover is
- * `position: absolute`, so that expression returns the popover — parked at
- * `left: -99999` while a note measures. Every anchor came out a hundred
- * thousand pixels away, `place` called every one of them `detached`, and the
- * popover stopped appearing at all.
- *
- * It was `#host`, the element foliate renders into, and that is a DIFFERENT
- * box: inside the stage's padding, inside the reading column's titlebar inset.
- * Every rect was correct and every note was drawn off by the sum of those —
- * the exact failure `placement.ts` names in its header, numerically valid and
- * wrong by a container's offset, with nothing able to tell. It is also the
- * space `proseColumn` reports the measure in, which is what lets the popover be
- * bounded by the words rather than by the whole grid.
- *
- * BY CAPABILITY, NOT BY `instanceof HTMLElement`. These suites run without a
- * DOM on purpose, so naming a DOM constructor at run time throws `HTMLElement
- * is not defined` in a session that is otherwise perfectly testable — it did,
- * in two tests, the moment this was written that way. What the caller needs is
- * a box, so a box is what is asked for.
- *
- * Falls back to the host when nothing was reported — before the popover has
- * mounted, and for a popover with no offset parent, which is what `display:
- * none` produces. The fallback is the behaviour this replaced, so a wiring
- * failure puts the note back where it used to be rather than nowhere.
- */
-export function noteSpace(within: HTMLElement | null, host: HTMLElement): HTMLElement {
-  return typeof within?.getBoundingClientRect === 'function' ? within : host
-}
-
-/** What a link inside a note needs, to move the reader instead of the note. */
-export interface NoteLinkHost {
-  /** Tell the host where the reader is leaving from, so `⌘[` can come back. */
-  readonly onLink: (detail: LinkDetail, event: Event) => void
-  /** A scheme that leaves the book. The host cancels and routes it. */
-  readonly onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
-  /** Take the note down. */
-  readonly close: () => void
-  /** Move the READER — the main view, not the note's. */
-  readonly goTo: (href: string) => void
-}
-
-/**
- * A link CLICKED INSIDE A NOTE moves the reader, not the note.
- *
- * A note is a whole `foliate-view`, so foliate wires its document up the same
- * way it wires the book's: unhandled, the note's own `link` event ends in
- * `noteView.goTo(href)` — and the note view navigates ITSELF. Clicking the `↩`
- * at the end of an endnote LOADED THE WHOLE CHAPTER INTO THE NOTE BOX,
- * measured at 90px tall, with the reader still on the page they started from.
- * That is the other half of "no back to reference anchor": the control is right
- * there in the note, and it did the opposite of what it says.
- *
- * So: cancel, take the note down, and send the reader there.
- *
- * EXPORTED FOR THE ORDER, as `releaseNoteView` is, and for the same reason —
- * the order is the whole of it and cannot be checked from outside the class.
- * `onLink` comes BEFORE `goTo` so the origin is recorded from where the reader
- * still is; `close` comes before both so the note is not sitting over the page
- * it is sending them to. These suites run without a DOM, so a stand-in through
- * this seam is the only way to prove any of that.
- *
- * PER NOTE VIEW, NOT ONCE. Unlike the footnote handler's own events, each note
- * is a new element and there is nowhere else to put this. The view is closed
- * and dropped when the note goes, so the listeners go with it.
- */
-export function watchNoteLinks(
-  noteView: Pick<View, 'addEventListener'>,
-  host: NoteLinkHost,
-): void {
-  noteView.addEventListener('link', (event) => {
-    /* The note view must not navigate itself. This is the fix; the rest is
-       where the reader goes instead. */
-    event.preventDefault()
-    const detail = (event as CustomEvent<LinkDetail>).detail
-    host.close()
-    host.onLink(detail, event)
-    host.goTo(detail.href)
-  })
-  noteView.addEventListener('external-link', (event) => {
-    /* THE HOST DECIDES, as it does for the book — it cancels and hands the href
-       to the platform's browser through a route Paper chose. Left alone,
-       foliate calls `globalThis.open` with the book's own string, and a note is
-       no more trustworthy than a page. */
-    host.onExternalLink((event as CustomEvent<ExternalLinkDetail>).detail, event)
-  })
-}
-
-export interface FootnoteRender {
-  readonly view: View
-  readonly href: string
-  readonly type: FootnoteType
-  readonly at: HostRect | null
-}
-
-/**
- * One click on a note reference: where its marker was, and which click it is.
- *
- * ⚠️ **A SHARED `FootnoteHandler` CANNOT SAY WHICH NOTE A VIEW BELONGS TO.**
- * It emits `before-render` carrying `{ view }` and nothing else, so a session
- * holding one handler had to pair views to clicks by ARRIVAL ORDER — a FIFO
- * queue — and neither `resolveHref` nor the note's own render settles in click
- * order. Two notes in flight could cross: the older one was shown, at the
- * newer one's anchor, and the note the reader actually clicked was released.
- *
- * The same queue could also come up EMPTY, when the reader closed the note
- * before it rendered, and the fallback then handed the arriving view the
- * current sequence — which passed the supersession check and reopened the note
- * they had just dismissed.
- *
- * So a request owns its own handler and its own two listeners (see
- * `#openFootnote`), and the pairing is an identity rather than a guess. A
- * handler holds only the `detectFootnotes` switch, left at its default, so a
- * fresh one per click is equivalent — and it becomes unreachable with its
- * listeners once its note is done, which is why "one per session, or a
- * listener leaks per note followed" no longer applies.
- */
-interface NoteRequest {
-  readonly at: HostRect | null
-  readonly seq: number
 }
 
 export interface SessionCallbacks {
@@ -748,6 +397,45 @@ export interface SessionNavigator {
    * still not put it on a page turn — forty cold sections is ~139 ms.
    */
   reanchor: (pending: readonly PendingMark[]) => Promise<PassOutcome>
+  /**
+   * Every section's readable text, for an export. See
+   * `ReaderSession.sectionTexts` — including what it filters LESS of than the
+   * reading does, which is the one thing a caller has to know.
+   *
+   * ⚠️ **Not on the reading path either**, and further off it than the reanchor
+   * walk: this parses every section AND collects its text, so a long book is
+   * seconds of work. It yields between sections and stops when the book closes.
+   */
+  sectionTexts: (
+    toc?: readonly TocItem[],
+    shouldStop?: () => boolean,
+    /* ⚠️ **THE READING'S OWN SKIP CHOICE, PASSED IN RATHER THAN DEFAULTED HERE.**
+       `collectText` has a default, and taking it here would give the export a
+       second opinion about whether a note body is spoken — so a reader who turned
+       notes on would hear them and then not find them in the `.m4b`, or the
+       reverse. One value, from `SpeakPrefs`, down both paths. */
+    skip?: SpeechSkipPrefs,
+  ) => Promise<SectionTextWalk>
+}
+
+/**
+ * What a walk of the spine's text produced, and whether it finished.
+ *
+ * ⚠️ **`complete` EXISTS BECAUSE A PARTIAL WALK USED TO BE INDISTINGUISHABLE FROM
+ * A WHOLE ONE.** `sectionTexts` stops when the book closes, is replaced, or the
+ * caller asks — and it returned a bare array either way, so the audiobook export
+ * shipped a truncated book as a finished one. That is the same failure
+ * `narrate_render` records for an empty buffer mid-stream: a complete-looking file
+ * with a fraction of the book in it, and no error anywhere.
+ *
+ * `reanchorUnplaced` in this same class already answers this way, and its comment
+ * gives the rule: *"Nothing was looked at, so nothing has been established."* A
+ * walk that did not finish has established nothing about the sections it never
+ * reached.
+ */
+export interface SectionTextWalk {
+  readonly sections: readonly SectionText[]
+  readonly complete: boolean
 }
 
 export interface SessionDeps {
@@ -835,15 +523,12 @@ export interface SessionDeps {
 }
 
 /**
- * `Node.ELEMENT_NODE`, spelled as its value.
+ * `Node.DOCUMENT_NODE`, spelled as its value.
  *
  * This module's tests run in plain node with no DOM — see `session.test.ts` —
  * so the `Node` global is not there to read the constant off. The suite caught
  * it immediately, which is the argument for keeping those tests DOM-free.
  */
-const ELEMENT_NODE = 1
-
-/** `Node.DOCUMENT_NODE`, spelled as its value, for the reason above. */
 const DOCUMENT_NODE = 9
 
 /**
@@ -1019,66 +704,44 @@ export class ReaderSession {
   readonly #selectors = new Map<number, (range: Range) => void>()
   /** A book this session synthesised, which `View.close()` will not release. */
   #prepared: Destroyable | null = null
-  /**
-   * The rendered note's view, so it can be released on dismiss.
-   *
-   * Typed as `View`, not `HTMLElement`: releasing it means calling `close()`
-   * to unobserve the paginator before detaching, and a bare element type hides
-   * that method — which is how it came to be detached without being closed.
-   */
-  #footnoteView: View | null = null
-  /**
-   * Which note the reader is waiting for.
-   *
-   * Every click takes the next number and carries it in its own `NoteRequest`;
-   * anything arriving under an older one is released rather than shown. That
-   * retires a note superseded by a newer click, and a note still rendering when
-   * the reader closed the flow — `closeFootnote`, `#noteFailed` and `dispose`
-   * all advance it, which is how "nothing is pending" is expressed.
-   *
-   * ⚠️ **THIS USED TO BE HALF OF A PAIRING SCHEME, and the other half was a
-   * FIFO queue.** The anchor was queued at the click and shifted off at
-   * `before-render`, which pairs by arrival rather than by identity — see
-   * `NoteRequest`. Two consequences, both real: two notes in flight could
-   * cross, and a `before-render` arriving with the queue EMPTY (the reader had
-   * closed the note) fell back to `{ at: null, seq: <current> }`, which then
-   * passed this very check and reopened the note they had just dismissed. A
-   * request that owns its own listeners has neither.
-   */
-  #noteSeq = 0
-  /**
-   * The box a note is rendered into, owned by the host.
-   *
-   * IT MAY NEVER MOVE. A `foliate-view` holds an iframe and re-parenting an
-   * iframe reloads it — which discarded the extracted note and restored the
-   * whole chapter, with nothing raised. So the host registers one container up
-   * front and every note is appended into it in place.
-   */
-  #footnoteMount: HTMLElement | null = null
-
-  /**
-   * The box the popover is POSITIONED IN — the origin its anchor rects use.
-   *
-   * NOT DERIVED FROM THE MOUNT, and that distinction cost the feature entirely.
-   * The mount is a child of the popover and the popover is `position:
-   * absolute`, so `mount.offsetParent` is the POPOVER — parked off-screen at
-   * `left: -99999` while a note measures, which made every anchor read as a
-   * hundred thousand pixels away, which `place` correctly called `detached`,
-   * which hid the note. The component knows which box its `left` and `top`
-   * resolve against; nothing else can work it out. See `noteSpace`.
-   */
-  #footnoteSpace: HTMLElement | null = null
-
   /** See `SessionDeps.styleNote`. Held from `start`, used on every note. */
   #styleNote: ((view: View) => void) | null = null
   /** See `SessionDeps.applyVars`. Held from `start`, used on every document. */
   #applyVars: ((doc: Document) => void) | null = null
   readonly #host: HTMLElement
   readonly #cb: SessionCallbacks
+  /** The note popover's flow — see `footnotes.ts`, and `NoteSession` for what it asks of this. */
+  readonly #notes: Footnotes
 
   constructor(host: HTMLElement, callbacks: SessionCallbacks) {
     this.#host = host
     this.#cb = callbacks
+    /* Every entry reads the session AT THE MOMENT IT IS ASKED — the latch, the
+       view, and the two styling deps `start` fills in later — so nothing here
+       is a copy that could go stale. */
+    this.#notes = new Footnotes({
+      host,
+      disposed: () => this.#disposed,
+      onFootnote: (note) => this.#cb.onFootnote(note),
+      onLink: (detail, event) => this.#cb.onLink(detail, event),
+      onExternalLink: (detail, event) => this.#cb.onExternalLink(detail, event),
+      goTo: (href) => {
+        const reader = this.#view
+        /* Stryker disable next-line LogicalOperator: the two operands answer
+           together everywhere this closure can be reached — `#view` is null only
+           before `start`, and the note whose link calls this cannot exist then,
+           so `&&` and `||` return for the same states. The whole-condition
+           mutants are killable and are not covered here. */
+        if (this.#disposed || !reader) return
+        void reader.goTo(href).catch(reportNavigation('goTo', href))
+      },
+      /* Stryker disable next-line OptionalChaining: `SessionDeps.applyVars` is
+         REQUIRED and `start` assigns it before any note can render, so this is
+         null only before a session starts — a state no note document reaches.
+         The `?.` is what the field's `| null` type needs. */
+      applyVars: (doc) => this.#applyVars?.(doc),
+      styleNote: (view) => this.#styleNote?.(view),
+    })
   }
 
   get disposed(): boolean {
@@ -1122,9 +785,9 @@ export class ReaderSession {
     if (!view) return
 
     this.#mount(view)
-    /* HELD, because notes are styled long after this returns. `#watchOneNote`
-       is wired at each click and fires whenever a reader opens a note, by which
-       time `deps` is three call frames gone. */
+    /* HELD, because notes are styled long after this returns. `Footnotes`
+       wires its listeners at each click and they fire whenever a reader opens a
+       note, by which time `deps` is three call frames gone. */
     this.#styleNote = deps.styleNote ?? null
     this.#applyVars = deps.applyVars
     this.#bind(view)
@@ -1281,7 +944,7 @@ export class ReaderSession {
     view.addEventListener('link', (event) => {
       if (this.#disposed) return
       const detail = (event as CustomEvent<LinkDetail>).detail
-      const taken = this.#openFootnote(view, detail, event)
+      const taken = this.#notes.open(view.book, detail, event)
       if (!taken) this.#cb.onLink(detail, event)
     })
 
@@ -1311,123 +974,19 @@ export class ReaderSession {
       const painters = this.#painters
       if (!painters) return
       /* REPORTED AFTER THE PAINT, not before it. This fired as soon as the
-       * event arrived, so a painter that threw — or a kind the whitelist below
+       * event arrived, so a painter that threw — or a kind the whitelist
        * refuses — still registered a live Range in the margin's cache. The
        * margin then measured and drew a control beside a highlight that is not
-       * on the page. `drawn` is called at the end of each branch that actually
-       * paints. */
-      const drawn = () => {
-        if (detail.annotation?.value && detail.range) {
-          this.#cb.onMarkDrawn(detail.annotation.value, detail.range)
-        }
+       * on the page. `paintAnnotation` answers true only from the branch that
+       * actually painted one of the READER'S marks. */
+      if (!paintAnnotation(detail, painters, this.#cb.getPalette())) return
+      /* Stryker disable next-line OptionalChaining: `paintAnnotation` answered
+         true just above, which it can only do by reading a paintable `kind` off
+         `detail.annotation` — so the annotation is present here. The `?.` holds
+         because foliate round-trips this object untyped. */
+      if (detail.annotation?.value && detail.range) {
+        this.#cb.onMarkDrawn(detail.annotation.value, detail.range)
       }
-      const palette = this.#cb.getPalette()
-      /* The book document travels with the draw options so the highlight
-       * painter can read the font the rects were measured in — see
-       * `balanceRects`. Taken from the range rather than added to the event
-       * type, because the range is already in hand and cannot disagree. */
-      /* From the EVENT, not rebuilt from the range. `startContainer` can be a
-       * Document when a range spans a whole node, and `ownerDocument` on a
-       * Document is null — so the reconstruction lost exactly the case it was
-       * meant to cover. */
-      const doc = detail.doc ?? detail.range?.startContainer?.ownerDocument ?? null
-      /* The element the marked words are in, so the band is measured against
-       * the font they are actually drawn in rather than the book's default —
-       * a mark in a heading or a code span is not body text. */
-      const container = detail.range?.startContainer ?? null
-      const at =
-        container && container.nodeType === ELEMENT_NODE
-          ? (container as Element)
-          : (container?.parentElement ?? null)
-      /* ⚠️ **EVERY RULE PAINTER READS THIS, AND NONE OF THEM WERE TOLD.**
-       * foliate's `underline`, `strikethrough` and `squiggly` each take
-       * `writingMode` and put the rule on the block's far edge — under the
-       * words horizontally, beside the column in a vertical book. Omitted, the
-       * default is horizontal, so in a `vertical-rl` book every rule Paper
-       * draws — the reader's own and a friend's — is struck across the text
-       * instead of alongside it. The fill painter is
-       * the only one that noticed vertical writing, and it noticed in order to
-       * bail (`balanceRects`); the three that could simply have been told were
-       * the ones left wrong. */
-      const writingMode = writingModeAt(doc, at)
-      /* The three values ride along on the annotation so the painter does not
-       * have to look the mark up again: `annotation` carries whatever
-       * `annotationFor` put on it, and reading the store from in here would be
-       * a second answer to "what does this mark look like", resolved at a
-       * different moment from the first. */
-      /* WHAT MAY BE DRAWN, ASKED AS A WHITELIST. The last branch treats
-       * everything it is handed as a reader's highlight, which would classify
-       * by exclusion without this — so a `bookmark` arriving here would be
-       * painted as a gold band over a passage the reader never marked. The
-       * compile-time split makes that unreachable today: `getMarks` hands over
-       * annotations and `MarkAnchor.kind` is `AnnotationKind`. This is the same
-       * defensiveness the comment below asks for, applied to the field that
-       * decides which painter runs rather than only to the ones that decide
-       * what colour it is — foliate round-trips this object untyped, so the
-       * value arriving here is not the value the type system saw. */
-      /* ⚠️ **A WHITELIST THAT ONLY REFUSED STRINGS IS NOT A WHITELIST.** The
-       * test was `typeof kind === 'string' && !includes(kind)`, so a `kind`
-       * that was absent, `null` or a number fell PAST it and was painted by
-       * the final branch as a yellow fill — a band over a passage the reader
-       * never marked, which is the exact defect the comment above describes
-       * for `bookmark`. Every mark this code draws sets `kind` (`annotationFor`
-       * takes it from a required field), so nothing legitimate arrives without
-       * one; foliate round-trips the object untyped, which is why the check
-       * has to hold for values the type system never saw. */
-      const kind = detail.annotation?.kind
-      if (typeof kind !== 'string' || !(PAINTABLE_KINDS as readonly string[]).includes(kind)) {
-        return
-      }
-      if (kind === FOREIGN_KIND || kind === PUBLIC_KIND) {
-        /* ⚠️ **AN UNDERLINE, IN ONE HUE, WITH WEIGHT CARRYING MULTIPLICITY.**
-         * The reader's three tints say what THEY meant by a passage; a
-         * friend's mark must not claim that vocabulary, so it gets none of
-         * them and the colour is not a preference — it is what says whose mark
-         * this is.
-         *
-         * A RULE and not a fill, because the central case is several people on
-         * one sentence and fills stack illegibly. Weight is then the only
-         * channel left, which is what makes "4 of 11 readers marked this"
-         * readable without a click. */
-        /* ⚠️ **AND A STRANGER'S IS QUIETER THAN A FRIEND'S, NOT LOUDER.**
-         * `palette.stranger` is the only channel that separates them — the
-         * shape is the same rule for both — and it is the more recessive of
-         * the two on every theme. A passage somebody you admitted marked is worth more
-         * of your attention than one anybody at all did, and free keys mean
-         * the public layer is the one an attacker can fill. */
-        detail.draw(painters.underline, {
-          color: kind === PUBLIC_KIND ? palette.stranger : palette.foreign,
-          width: foreignWeight(readersOf(detail.annotation?.['readers'])),
-          writingMode,
-        })
-        /* ⚠️ **NOT `drawn()` — A FOREIGN PASSAGE IS NOT ONE OF THE READER'S
-         * MARKS.** `onMarkDrawn` fills the map `useMarking` describes as
-         * *"ranges for the marks foliate has drawn"*, which the margin
-         * measures to place a control beside each one. Reporting a friend's
-         * underline put an entry there for a CFI the reader has no mark at,
-         * and nothing ever took it out again: `forgetRange` is called from
-         * `unmark`, and a foreign passage is never unmarked. So the map grew a
-         * Range per foreign mark per redraw, each retaining the DOM it points
-         * into, for as long as the book stayed open. */
-        return
-      }
-
-      /* Read defensively. `Annotation` carries arbitrary values through
-       * foliate untyped, and an annotation from an older build — or one
-       * foliate has round-tripped — has neither field. Falling back to the
-       * same default `validMarks` uses keeps one answer for "an old mark". */
-      const tint = tintOf(detail.annotation?.['tint'])
-      const style = styleOf(detail.annotation?.['style'])
-      /* THE FILL COLOUR FOR A BAND, THE RULE COLOUR FOR A LINE, which is the
-       * whole reason each tint is a pair: a fill saturated enough to read as a
-       * 2px line makes its own words unreadable, and a rule pale enough to sit
-       * behind text is not a line, it is a smudge. */
-      if (style === 'fill') {
-        detail.draw(painters.fill, { color: palette.fill[tint], doc, at })
-      } else {
-        detail.draw(painters[style], { color: palette.rule[tint], writingMode })
-      }
-      drawn()
     })
 
     /**
@@ -1619,6 +1178,17 @@ export class ReaderSession {
          with an empty walk rather than parsing sections of a book nobody is
          reading. */
       reanchor: (pending) => this.reanchorUnplaced(pending),
+      /* ⚠️ **EVERY ARGUMENT, PASSED THROUGH WHOLE — AND THIS FORWARDED ONLY
+         `toc`.** It was `(toc) => this.sectionTexts(toc)`, so the two arguments
+         after it never arrived: `shouldStop`, which is how the audiobook's Stop
+         reaches a walk of every section, and `skip`, which is how the reader's
+         choice about footnotes reaches the text it exports. Both were silently
+         their defaults. TypeScript said nothing, because a function taking fewer
+         parameters is assignable to a type that declares more, and the extra
+         arguments are simply dropped at run time. A forwarder that re-lists its
+         parameters drops the next one that is added; one that spreads them
+         cannot. */
+      sectionTexts: (...args) => this.sectionTexts(...args),
     })
 
     this.#cb.onFixedLayout(view.isFixedLayout)
@@ -1629,341 +1199,17 @@ export class ReaderSession {
   }
 
   /**
-   * Listen for what ONE request's handler renders.
-   *
-   * PER CLICK, WITH THE REQUEST IN THE CLOSURE — see `NoteRequest` for the
-   * pairing defect this removes. The handler is built for one `handle` call
-   * and nothing else refers to it, so these two listeners die with it.
+   * Where notes are rendered. Null puts them back on the host — see
+   * `Footnotes.setMount`, and `SessionNavigator.setFootnoteMount` for why it
+   * must be one element that never moves.
    */
-  #watchOneNote(handler: FootnoteHandler, request: NoteRequest): void {
-    /* This request's view has been let go, so `render` has nothing left to do
-       with it. A `render` for a view already closed would otherwise close it
-       twice — tolerated by `releaseNoteView`, and still a teardown running
-       over a torn-down renderer. */
-    let released = false
-    /**
-     * ATTACH THE VIEW BEFORE IT RENDERS. This is what `before-render` is for,
-     * and ignoring it is not a missing nicety — it is a crash.
-     *
-     * `#showFragment` builds a detached `<foliate-view>`, opens the book in it,
-     * emits this, and only then calls `goTo`. A detached element has no layout,
-     * so the paginator's `columnize` reads `doc.documentElement` off a document
-     * that is not there and throws `null is not an object` — which escapes the
-     * handler's own promise chain and reaches the app's error boundary. The
-     * reader loses the book because a footnote was clicked.
-     *
-     * Off-screen rather than hidden: `visibility: hidden` still lays out, and
-     * the paginator needs a real size to column into. It is moved into the
-     * popover when `render` says the note is ready.
-     */
-    handler.addEventListener('before-render', (event) => {
-      const { view } = (event as CustomEvent<{ view: View }>).detail
-      /* A session disposed between the click and this event still owns the
-       * detached view foliate just built — nothing else will ever see it, so
-       * bailing bare leaked its renderer and every blob it held (audit round
-       * 1, #106). Released the same way `dispose` releases a rendered one.
-       *
-       * AND A CANCELLED REQUEST IS THE SAME SITUATION. The reader closed the
-       * note, or clicked another one, while this was resolving: nothing will
-       * ever show this view, so it is released here rather than attached,
-       * styled and mounted on the way to being discarded at `render`. This is
-       * the case the FIFO queue could not tell from a fresh one — it handed
-       * the arriving view the CURRENT sequence, which then passed `render`'s
-       * supersession check and reopened the note the reader had dismissed. */
-      if (this.#disposed || request.seq !== this.#noteSeq) {
-        released = true
-        releaseNoteView(view)
-        return
-      }
-      this.#watchNoteLinks(view)
-      this.#cleanNoteDocument(view)
-      /* BEFORE `goTo`, like everything else in here. `setStyles` writes into
-         the style element foliate appends after the book's own sheet, and the
-         note has to be laid out with the reader's size rather than re-laid out
-         after it — the popover measures the note's height to size its box, and
-         measuring a note that is about to change size is measuring the wrong
-         note. */
-      this.#styleNote?.(view)
-      /**
-       * SCROLLED FLOW, NOT PAGINATED, and this is what lets the box fit the
-       * note.
-       *
-       * The popover's view is a paginator like the reader's, which COLUMNIZES
-       * into whatever box it is given — so a box sized to the note's content
-       * simply reflows the text into a second column that is off-view. Sizing
-       * the box was built against a paginated note and withdrawn for exactly
-       * that: the measurement was right (43px for a one-line footnote, box
-       * 420×115) and the note disappeared.
-       *
-       * A note is not a page and should never have been paginated. In scrolled
-       * flow the content is one continuous column, `body.scrollHeight` means
-       * what it says, and a long endnote scrolls inside the box instead of
-       * hiding in column two.
-       *
-       * SET BEFORE `goTo`, which is why `before-render` is the only place this
-       * can happen: `flow` is what triggers the paginator to re-render, and
-       * `applyLayout` records that anything set after it lands too late.
-       */
-      const noteRenderer = view.renderer
-      /* NO PAGE MARGIN. The main view gets one from `applyLayout`; this one
-         was given no layout at all, so it kept foliate's default — which put
-         the note's iframe 48px below the top of its container and made every
-         attempt to fit the box show that empty band instead of the note.
-         Set BEFORE `flow`, which is what triggers the re-render: `applyLayout`
-         records that anything after it lands too late. */
-      noteRenderer?.setAttribute('margin', '0px')
-      noteRenderer?.setAttribute('gap', '0px')
-      noteRenderer?.setAttribute('max-column-count', '1')
-      noteRenderer?.setAttribute('flow', 'scrolled')
-
-      /* THE STYLESHEET OWNS THE SIZE when there is a mount, and this sets none.
-         An inline `height: 100%` here beat `.body > *` and resolved to zero
-         against an auto-height parent, so the note rendered correctly into a
-         box nobody could see — extraction working, popover 72px tall.
-         Only the FALLBACK is sized here, because there is no stylesheet rule
-         for a view parked on the host and the paginator cannot columnize a box
-         with no dimensions. */
-      const mount = this.#footnoteMount
-      if (!mount) {
-        /* THE POPOVER'S OWN BOUNDS, not a second guess at them. This box stands
-           in for the popover the note would have been rendered into, so the
-           note has to columnize at the size the popover would have given it —
-           and it was written out as 400×320 beside a `FOOTNOTE` of 420×320.
-           The height agreed and the width was 20px adrift, which is the worst
-           kind of near-miss: a note measured in a box narrower than the one it
-           will be shown in comes out a line taller than it needs to be, and
-           nothing reports a box that is merely the wrong width.
-
-           There is no third number here for the same reason: `FOOTNOTE` is
-           already published to CSS as `--footnote-max-w` / `--footnote-max-h`,
-           which is what sizes the popover when there IS a mount. */
-        view.style.cssText = [
-          'position:absolute',
-          `left:${PARK_OFFSET}px`,
-          'top:0',
-          `width:${FOOTNOTE.maxWidth}px`,
-          `height:${FOOTNOTE.maxHeight}px`,
-        ].join(';')
-      }
-      ;(mount ?? this.#host).appendChild(view)
-      /* The one being replaced is CLOSED, not just detached — see
-         `#releaseFootnoteView`. Opening a second note while the first is up
-         would otherwise throw for exactly the reason dismissing one did.
-         Held after, so a note that never finishes rendering is still released:
-         `closeFootnote` and the next `render` both look here. */
-      this.#releaseFootnoteView()
-      this.#footnoteView = view
-    })
-
-    handler.addEventListener('render', (event) => {
-      if (this.#disposed || released) return
-      const detail = (event as CustomEvent<FootnoteRenderDetail>).detail
-      /* Superseded — a newer note was asked for, or the reader closed the
-       * flow, while this one rendered. Shown, it would replace the newer note
-       * and sit at the wrong anchor; released, the click that mattered wins.
-       * `before-render` will usually have released it already; this is the
-       * request that was still current then and is not now. */
-      if (request.seq !== this.#noteSeq) {
-        released = true
-        releaseNoteView(detail.view)
-        return
-      }
-      /* `before-render` already attached this one and released the last. */
-      this.#footnoteView = detail.view
-      this.#cb.onFootnote({
-        view: detail.view,
-        href: detail.href,
-        type: detail.type,
-        /* THIS REQUEST'S OWN ANCHOR, not whichever one came off a queue
-           first — the popover is positioned against the reference that was
-           clicked, and pairing by arrival could hand it another note's. */
-        at: request.at,
-      })
-    })
-  }
-
-  /**
-   * The note's own document gets the same treatment the page does.
-   *
-   * A note is rendered by `FootnoteHandler` into a view the session did not
-   * build, so NONE of what `#bind`'s `load` handler does to a page has ever
-   * reached it — the note has always been the book's raw CSS in a box. That is
-   * mostly right and deliberately left alone: a note should read as the book
-   * wrote it.
-   *
-   * This one is not a matter of taste. The book's dead tooltip drew its empty
-   * box inside the popover as readily as over the page, and a rule that is
-   * wrong on the page does not become right in a note.
-   */
-  #cleanNoteDocument(noteView: View): void {
-    noteView.addEventListener('load', (event) => {
-      if (this.#disposed) return
-      const { doc } = (event as CustomEvent<LoadDetail>).detail
-      /* A note is a document of the same book, loaded by the same loader. */
-      stripScripts(doc)
-      /* The note's document gets the contract too, and for the same reason the
-         page's does: the sheets it was handed at `before-render` are static and
-         read `var(--paper-*)` from the root. Without this the popover is the
-         11.2px note again, by a different route. */
-      this.#applyVars?.(doc)
-      /* AND THE SAME MEASUREMENT THE PAGE GETS. `applyVars` re-measures only
-         when the base MOVES, which on a freshly built note document it has
-         not — so without this call the accessibility floor was inert inside
-         every footnote popover, which is precisely where a book's smallest
-         text lives. */
-      markSmallText(doc)
-      suppressEmptyGeneratedContent(doc)
-    })
-  }
-
-  /** See `watchNoteLinks` — the order is the fix, and it is asserted there. */
-  #watchNoteLinks(noteView: View): void {
-    watchNoteLinks(noteView, {
-      onLink: (detail, event) => {
-        if (!this.#disposed) this.#cb.onLink(detail, event)
-      },
-      onExternalLink: (detail, event) => {
-        if (!this.#disposed) this.#cb.onExternalLink(detail, event)
-      },
-      close: () => this.closeFootnote(),
-      goTo: (href) => {
-        const reader = this.#view
-        if (this.#disposed || !reader) return
-        void reader.goTo(href).catch(reportNavigation('goTo', href))
-      },
-    })
-  }
-
-  /**
-   * Offer a link to the footnote handler; true when it took it.
-   *
-   * SYNCHRONOUS ANSWER, ASYNCHRONOUS NOTE. `handle` returns a promise when it
-   * took the link and `undefined` when it did not, and it has already called
-   * `preventDefault()` by then — so the caller knows immediately whether
-   * foliate will navigate, without waiting for the note to render.
-   */
-  #openFootnote(view: View, detail: LinkDetail, event: Event): boolean {
-    const book = view.book
-    if (!book) return false
-    /* A LINK OUT OF A NOTE IS NOT A LINK INTO ONE — see `isBacklink`, which
-       carries the whole rationale. Left to foliate, the `*` at the head of a
-       footnote opened a popover containing that same `*` and nothing else
-       (measured: 22px tall), and took away the only thing a backlink is for.
-       Declining hands it back to the ordinary link path, so it navigates to
-       the reference and `⌘[` comes back — which is what it should always have
-       done. */
-    if (isBacklink(detail.a)) return false
-    /* PDF IS NOT IN SCOPE and needs no branch to say so: `makePdf`'s adapter
-       has no `epub:type`, no ARIA role and no superscript, so the detection
-       declines it on its own rules. A format check here would be a second
-       answer to a question already answered. */
-    /* A SYNCHRONOUS THROW IS POSSIBLE, and it would land in foliate's own
-       event dispatch. `handle` calls `book.resolveHref(href)` BEFORE wrapping
-       it — `Promise.resolve(book.resolveHref(href))` evaluates the call first
-       — so a backend without that method throws rather than rejecting, and the
-       throw escapes into `#handleLinks`. Caught here and treated as a note
-       that would not open, which is the same outcome by a different route. */
-    /* THIS CLICK'S OWN HANDLER, AND ITS LISTENERS ARE ON BEFORE IT RUNS —
-       see `NoteRequest`. Registered first rather than after `handle` returns
-       because that ordering is then not something to reason about: a
-       `before-render` emitted anywhere in `handle`'s chain is already covered.
-       A handler that DECLINES the link emits nothing at all, so the listeners
-       simply go with it. */
-    const request: NoteRequest = {
-      at: anchorRectInHost(detail.a, this.#noteSpace()),
-      /* CLAIMED, NOT COMMITTED. A declined link must not supersede a note the
-         reader has open — following an ordinary link is not dismissing one —
-         so `#noteSeq` only advances once the handler has taken it. */
-      seq: this.#noteSeq + 1,
-    }
-    const handler = new FootnoteHandler()
-    this.#watchOneNote(handler, request)
-    let pending: Promise<void> | undefined
-    try {
-      pending = handler.handle(book, event)
-    } catch (cause) {
-      this.#noteFailed(view, 'that note could not be resolved', detail, event, cause)
-      return true
-    }
-    if (!pending) return false
-    this.#noteSeq = request.seq
-    void pending.catch((cause: unknown) => {
-      if (this.#disposed) return
-      /* ⚠️ **A STALE REJECTION USED TO CLOSE THE NOTE THAT REPLACED IT.**
-         `#noteFailed` dismisses the popover and navigates the reader to ITS
-         href — so an older request failing after a newer note had opened tore
-         down the newer note and sent the reader to the older note's target, a
-         place they had already moved on from. The same supersession the render
-         path applies, on the road that was missing it. */
-      if (request.seq !== this.#noteSeq) {
-        console.warn('Paper: a superseded note could not be shown in place', detail.href, cause)
-        return
-      }
-      this.#noteFailed(view, 'that note could not be shown in place', detail, event, cause)
-    })
-    return true
-  }
-
-  /**
-   * FALL BACK TO THE JUMP, DO NOT SWALLOW IT. A note that will not resolve or
-   * render in place is still a place in the book, and the reader asked to go
-   * there. `preventDefault` has already stopped foliate navigating, so this
-   * navigates instead — and tells the host first, so the origin is recorded
-   * from where the reader still is and `⌘[` brings them back. A control that
-   * silently does nothing is what WI-16 deleted.
-   *
-   * ONE HANDLER FOR BOTH FAILURE ROADS (audit round 1, #835): the synchronous
-   * throw and the rejected render had drifted — only one of them dismissed an
-   * open popover. Both now do: the flow is over, anything still in flight is
-   * superseded, and the popover a previous note left open closes before the
-   * jump.
-   */
-  #noteFailed(view: View, what: string, detail: LinkDetail, event: Event, cause: unknown): void {
-    console.warn(`Paper: ${what}`, detail.href, cause)
-    this.#noteSeq += 1
-    /* ⚠️ **THE MOUNTED VIEW WAS LEFT BEHIND ON THIS ROAD ALONE** (2026-09-19
-     * audit). `onFootnote(null)` tells the HOST to stop drawing the popover; it
-     * does not touch the view the SESSION mounted. A failure arriving after
-     * `before-render` had already attached one therefore hid the note and left
-     * its renderer — and every blob it held — live in the host, until the next
-     * note or `dispose` happened to release it.
-     *
-     * Every other way out of a note goes through here: `closeFootnote`,
-     * supersession at `render`, and `dispose`. This one did not, which is what
-     * made the ownership rule partial rather than total. Null-safe, so the
-     * common case — a failure before anything mounted — costs nothing.
-     *
-     * `view` is the READER's view, not the note's; it is what `goTo` navigates
-     * below. The note's view is only ever reachable through `#footnoteView`. */
-    this.#releaseFootnoteView()
-    this.#cb.onFootnote(null)
-    this.#cb.onLink(detail, event)
-    void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
-  }
-
-  /** See `noteSpace` — exported, because the choice is the whole of it. */
-  #noteSpace(): HTMLElement {
-    return noteSpace(this.#footnoteSpace, this.#host)
-  }
-
-  /** Where notes are rendered. Null puts them back on the host — see the field. */
   setFootnoteMount(mount: HTMLElement | null, within: HTMLElement | null = null): void {
-    this.#footnoteMount = mount
-    this.#footnoteSpace = within
+    this.#notes.setMount(mount, within)
   }
 
   /** Close whatever note is open, and let go of the view it was rendered in. */
-  /** See `releaseNoteView` — the order is the fix. */
-  #releaseFootnoteView(): void {
-    const view = this.#footnoteView
-    this.#footnoteView = null
-    if (view) releaseNoteView(view)
-  }
-
   closeFootnote(): void {
-    this.#releaseFootnoteView()
-    this.#noteSeq += 1
-    if (!this.#disposed) this.#cb.onFootnote(null)
+    this.#notes.close()
   }
 
   /**
@@ -2163,8 +1409,15 @@ export class ReaderSession {
        one round trip at a time. */
     await Promise.all([...now.values()].map((anchor) => attachForeign(view, anchor)))
     /* Written AFTER both halves have settled, so the record is what is on the
-       page rather than what was asked for. */
-    if (this.#disposed) return
+       page rather than what was asked for.
+
+       ⚠️ **AND ONLY WHILE THE SECTION IS STILL LIVE.** A section torn down
+       while this ran has lost its overlay and everything painted into it —
+       its teardown dropped the record for that reason. Writing one back here
+       would ask the section's NEXT overlay, which never held any of it, to
+       erase marks it does not have: the case that teardown exists to prevent,
+       reached by the road it could not see. */
+    if (this.#disposed || !this.#sections.has(index)) return
     if (held.size === 0) this.#foreignDrawn.delete(index)
     else this.#foreignDrawn.set(index, held)
   }
@@ -2307,6 +1560,67 @@ export class ReaderSession {
       prefix: context.prefix,
       suffix: context.suffix,
     }
+  }
+
+  /**
+   * Every section's readable text, in spine order — what an export reads.
+   *
+   * ⚠️ **`section.createDocument()`, FOR THE REASON `reanchorUnplaced` GIVES.**
+   * That object is the one `refuseBookScripts` wrapped at open, so the text is
+   * the text the reader sees; opening the file again would get an unstripped
+   * document and could disagree.
+   *
+   * ⚠️ **AND `collectText` FILTERS LESS HERE THAN IT DOES ON SCREEN.** A
+   * document made this way has no browsing context, so `defaultView` is null and
+   * the COMPUTED-STYLE half of the filter is skipped: `hidden` and
+   * `aria-hidden` still hold, `display: none` does not. An EPUB that hides its
+   * endnotes with CSS rather than with the attribute will have them read into
+   * the export and not into the reading. Rendering every section off-screen to
+   * get computed styles is the fix, and it is a great deal slower; this is the
+   * trade, stated rather than discovered.
+   *
+   * YIELDS BETWEEN SECTIONS, like the reanchor walk, because a long book is
+   * hundreds of parses and the window must stay alive through them.
+   */
+  async sectionTexts(
+    toc: readonly TocItem[] = [],
+    /* NO DEFAULT, because a default of `() => false` could not be told from one
+       that answers `undefined`: both are falsy at the only place this is read.
+       Absent is absent, and `shouldStop?.()` says so. */
+    shouldStop?: () => boolean,
+    skip: SpeechSkipPrefs = DEFAULT_SPEECH_SKIP,
+  ): Promise<SectionTextWalk> {
+    const view = this.#view
+    const book = view?.book
+    const sections = book?.sections
+    /* NOT `complete: true` — `reanchorUnplaced`'s rule, below: a walk that never
+       started has established nothing about a book it never opened. */
+    if (this.#disposed || !Array.isArray(sections)) return { sections: [], complete: false }
+
+    const titles = await tocTitles(book as Book, toc)
+
+    const out: { index: number; title: string | null; text: string }[] = []
+    /* BY `entries()`, so the walk has no index to fall off. A `for (let index =
+       0; index < sections.length; …)` beside the `!section` check below gave the
+       loop two conditions for one question: reading past the end lands on
+       `undefined`, which that check already skips, so the bound could be
+       changed and nothing would notice. */
+    for (const [index, entry] of sections.entries()) {
+      /* Liveness read at each step rather than captured — closing the book
+       * mid-export must stop it, not finish against a dead view. */
+      /* THE READER'S OWN STOP, asked at the same moment as liveness. A long
+         book is seconds of parsing per section, so a stop that is only noticed
+         after the walk is a stop the reader watched do nothing. */
+      if (this.#disposed || this.#view !== view || shouldStop?.()) {
+        return { sections: out, complete: false }
+      }
+      const section = entry as { createDocument?: () => Promise<Document> } | null
+      if (!section || typeof section.createDocument !== 'function') continue
+      const doc = await section.createDocument()
+      out.push({ index, title: titles.get(index) ?? null, text: collectText(doc, skip).text })
+      await BREATHE()
+    }
+    return { sections: out, complete: true }
   }
 
   /**
@@ -2629,32 +1943,6 @@ export class ReaderSession {
   }
 
   /**
-   * Does the platform have a real scroll to perform with this event?
-   *
-   * Asked of the renderer, not of the app: what a gesture MEANS is the host's
-   * question and is answered in `Reader`, but whether the event has a default
-   * worth suppressing is a fact about the renderer. It has to be settled here,
-   * because `preventDefault` counts only synchronously inside the listener.
-   *
-   * THE TWO RENDERERS ANSWER IT DIFFERENTLY, and asking only `flow` was the
-   * regression that killed swiping on PDFs. A fixed-layout book is drawn by
-   * `foliate-fxl`, whose `observedAttributes` is `['zoom']` — `flow` sits on it
-   * unread, so reading it back meant a reader who had ever chosen scrolled mode
-   * got a PDF that ignored every gesture, in a renderer that could not scroll
-   * either way.
-   *
-   *   paginator, `flow="scrolled"`  — its scrollport is inside a CLOSED shadow
-   *     root, so the host cannot even see it. Hands the event straight back.
-   *
-   *   fxl, `zoom="fit-width"`       — the scrollport IS the renderer element
-   *     (`:host { overflow: auto }`), so its position is readable from here and
-   *     the answer can be exact: hand the event back while the page has further
-   *     to go, and take it at the edge so the gesture turns the page instead.
-   *     That edge check is what makes a PDF read continuously — reaching the
-   *     bottom of one page carries on to the next, rather than stranding the
-   *     reader on page one with a dead trackpad.
-   */
-  /**
    * Land on the foot of a page the reader reached by scrolling up into it.
    *
    * Deferred by a frame, and that is the whole difficulty. The `load` event
@@ -2701,13 +1989,6 @@ export class ReaderSession {
   }
 
   /**
-   * A fixed-layout book scaled to the width — one page per section, scrolled.
-   *
-   * The shape a PDF takes in scroll mode. Named rather than inlined because two
-   * separate decisions turn on it: whether a wheel event is the platform's, and
-   * whether arriving at a new page backwards should open its foot.
-   */
-  /**
    * Whether more than one SECTION is on screen at once.
    *
    * The question `#sectionOf`'s last resort turns on, and there are exactly two
@@ -2739,11 +2020,44 @@ export class ReaderSession {
     return view.renderer?.getAttribute('flow') === 'scrolled' && this.#rendered.size > 1
   }
 
+  /**
+   * A fixed-layout book scaled to the width — one page per section, scrolled.
+   *
+   * The shape a PDF takes in scroll mode. Named rather than inlined because two
+   * separate decisions turn on it: whether a wheel event is the platform's, and
+   * whether arriving at a new page backwards should open its foot.
+   */
   #scrollsByPage(): boolean {
     const view = this.#view
     return view?.isFixedLayout === true && view.renderer?.getAttribute('zoom') === 'fit-width'
   }
 
+  /**
+   * Does the platform have a real scroll to perform with this event?
+   *
+   * Asked of the renderer, not of the app: what a gesture MEANS is the host's
+   * question and is answered in `Reader`, but whether the event has a default
+   * worth suppressing is a fact about the renderer. It has to be settled here,
+   * because `preventDefault` counts only synchronously inside the listener.
+   *
+   * THE TWO RENDERERS ANSWER IT DIFFERENTLY, and asking only `flow` was the
+   * regression that killed swiping on PDFs. A fixed-layout book is drawn by
+   * `foliate-fxl`, whose `observedAttributes` is `['zoom']` — `flow` sits on it
+   * unread, so reading it back meant a reader who had ever chosen scrolled mode
+   * got a PDF that ignored every gesture, in a renderer that could not scroll
+   * either way.
+   *
+   *   paginator, `flow="scrolled"`  — its scrollport is inside a CLOSED shadow
+   *     root, so the host cannot even see it. Hands the event straight back.
+   *
+   *   fxl, `zoom="fit-width"`       — the scrollport IS the renderer element
+   *     (`:host { overflow: auto }`), so its position is readable from here and
+   *     the answer can be exact: hand the event back while the page has further
+   *     to go, and take it at the edge so the gesture turns the page instead.
+   *     That edge check is what makes a PDF read continuously — reaching the
+   *     bottom of one page carries on to the next, rather than stranding the
+   *     reader on page one with a dead trackpad.
+   */
   #platformScrolls(event: WheelEvent): boolean {
     const view = this.#view
     const renderer = view?.renderer
@@ -2844,7 +2158,7 @@ export class ReaderSession {
        * book is read. A sideways swipe is a page turn, and a page turn lands at
        * the top like every other one. */
       this.#enterAtFootAt =
-      intent === 'prev' && this.#scrollsByPage() ? performance.now() : null
+        intent === 'prev' && this.#scrollsByPage() ? performance.now() : null
       this.#cb.onPageIntent(intent)
     }
     doc.addEventListener('wheel', onWheel, { passive: false })
@@ -3039,8 +2353,7 @@ export class ReaderSession {
        * not depend on where the note happened to be mounted, which is the
        * assumption that made this invisible.
        */
-      quietly('footnote view', () => this.#releaseFootnoteView())
-      this.#noteSeq += 1
+      quietly('footnote view', () => this.#notes.release())
       /* AND THE HOST IS TOLD. `#disposed` is already true, so `closeFootnote`
          would skip this — and a host left holding a `FootnoteRender` for a
          session that is gone draws a note nothing can close. */
@@ -3079,6 +2392,80 @@ export class ReaderSession {
 }
 
 /**
+ * The table of contents' own label for each spine section it names.
+ *
+ * ⚠️ **THE TITLES COME FROM `resolveHref`, NOT FROM COUNTING.** Matching the
+ * table of contents to the spine positionally looks right on a tidy book and is
+ * wrong on every one with a cover, a colophon or a part divider — the labels
+ * then slide by one and every chapter in the export is named after the one
+ * before it. The book resolves its own hrefs; ask it.
+ *
+ * ⚠️ **AND THE ANSWER IS AWAITED, BECAUSE A BACKEND'S MAY BE A PROMISE.** This
+ * read `.index` straight off the call, and a promise has no `index`: every
+ * chapter came out untitled and numbered with nothing logged, and a destination
+ * the backend REFUSES rejected outside the `try` written for exactly that case,
+ * as an unhandled rejection per broken contents entry. `makePdf`'s resolver is
+ * the `async` one that found it — an outline destination is looked up through
+ * pdf.js — while the EPUB backend answers at once, which is why nothing looked
+ * wrong. Awaiting takes both shapes, and it is the only defence left for a
+ * third backend that answers slowly: PDFs no longer reach this at all, because
+ * a book of fixed pages is refused an audiobook (`useAudiobook`).
+ *
+ * ⚠️ **ONE TRAVERSAL, `flattenToc`'s.** This walked the tree with a recursion of
+ * its own, which is how `tocOrder.ts` says the contents pane and the voice came
+ * to disagree about what "next chapter" means — a third reader of the same tree
+ * is the same risk for what an exported chapter is called.
+ *
+ * SHALLOWEST WINS, then the first in reading order: a nested entry resolving to
+ * a section a part title already names would otherwise replace it with a
+ * sub-heading. It was "first in reading order" alone, which is the same answer
+ * for a part and its own children and the wrong one when a sub-entry of an
+ * EARLIER part points into a chapter that has an entry of its own.
+ *
+ * NARROWED, not assumed: upstream's types do not declare `resolveHref` and its
+ * API is explicitly unstable, so a backend without it names no section rather
+ * than failing the export — and a malformed href in a stranger's book is a
+ * chapter with no title, not a failed export.
+ */
+async function tocTitles(book: Book, toc: readonly TocItem[]): Promise<ReadonlyMap<unknown, string>> {
+  const entries = flattenToc(toc)
+  const resolveHref = (book as { resolveHref?: unknown }).resolveHref
+  if (typeof resolveHref !== 'function') {
+    /* A BACKEND THAT LACKS THE METHOD SAYS SO — `#publish`'s rule for
+       `getCover`, and for the same reason: an untitled export is a legitimate
+       answer for a book with no contents, so it would look like one. */
+    if (entries.length > 0) {
+      console.warn('Paper: this book backend implements no resolveHref — its chapters will be exported untitled')
+    }
+    return new Map()
+  }
+  const named = await Promise.all(
+    entries.map(async ({ href, label, depth }) => {
+      const title = typeof label === 'string' ? label.trim() : ''
+      if (typeof href !== 'string' || href === '' || title === '') return null
+      try {
+        const at = (await resolveHref.call(book, href)) as { readonly index?: unknown }
+        /* NO ANSWER AT ALL throws on this read and is caught below, as a
+           rejection is: either way the entry names nothing. And the index is
+           NOT CHECKED FOR A NUMBER, deliberately — only a spine index is ever
+           looked up, so any other key is one nothing reads, and a check would
+           be a line no outcome depends on. */
+        return { index: at.index, title, depth }
+      } catch {
+        return null
+      }
+    }),
+  )
+  const chosen = new Map<unknown, { title: string; depth: number }>()
+  for (const entry of named) {
+    if (entry === null) continue
+    const held = chosen.get(entry.index)
+    if (held === undefined || entry.depth < held.depth) chosen.set(entry.index, entry)
+  }
+  return new Map([...chosen].map(([index, { title }]) => [index, title]))
+}
+
+/**
  * The first spine item a reader can turn to, or -1 for a spine with none.
  *
  * `linear === 'no'` marks an item the reading order skips — a cover page's
@@ -3106,6 +2493,13 @@ function onBookControl(target: HTMLElement | null): boolean {
   return typeof target?.closest === 'function' && target.closest(IN_BOOK_CONTROL) !== null
 }
 
+/** A navigation that failed, logged with what was asked — see `#publish`. */
+function reportNavigation(what: string, target?: string): (cause: unknown) => void {
+  return (cause) => {
+    console.warn(`Paper: ${what}${target ? ` ${target}` : ''} failed`, cause)
+  }
+}
+
 /**
  * Release a prepared book, reporting a failure rather than hiding it.
  *
@@ -3114,12 +2508,6 @@ function onBookControl(target: HTMLElement | null): boolean {
  * URLs, and a silent failure to release them is a leak that grows one book at a
  * time with nothing on screen to suggest it.
  */
-function reportNavigation(what: string, target?: string): (cause: unknown) => void {
-  return (cause) => {
-    console.warn(`Paper: ${what}${target ? ` ${target}` : ''} failed`, cause)
-  }
-}
-
 function destroyQuietly(prepared: Destroyable): void {
   try {
     /* Not awaited: disposal is synchronous by contract and the session is
@@ -3151,171 +2539,6 @@ function quietly(what: string, step: () => void): void {
     step()
   } catch (cause) {
     console.error(`Paper: ${what} threw during teardown`, cause)
-  }
-}
-
-/**
- * The object handed to foliate. `value` is the anchor it resolves; `kind` is
- * ours, carried through untouched and read back in `draw-annotation`.
- */
-function annotationFor(
-  anchor: MarkAnchor,
-): { value: string; kind: AnnotationKind; tint: MarkTint; style: MarkStyle } {
-  return { value: anchor.cfi, kind: anchor.kind, tint: anchor.tint, style: anchor.style }
-}
-
-/**
- * The `kind` a foreign mark carries through foliate.
- *
- * ⚠️ **NOT ADDED TO `ANNOTATION_KINDS`, and that is deliberate.** That list is
- * the STORED mark kinds — what `validMarks` accepts off disk and what
- * `Mark.kind` may be. A foreign passage is never a stored mark; putting it
- * there would make every reader of that constant have to remember the
- * exception. This is a painter kind, and `PAINTABLE_KINDS` is the whitelist
- * the draw handler checks.
- */
-const FOREIGN_KIND = 'circle'
-
-/**
- * The `kind` a PUBLIC mark carries through foliate.
- *
- * ⚠️ **A SECOND KIND RATHER THAN A FIELD ON THE FIRST**, because `kind` is
- * what the draw handler's whitelist is written over and what foliate
- * round-trips untyped. A treatment chosen from an extra property would have to
- * be read defensively at the painter — the reason `tintOf` and `styleOf` exist
- * — and a value that failed to round-trip would silently draw a stranger's
- * mark as a friend's, which is the defect this exists to fix.
- */
-const PUBLIC_KIND = 'public'
-
-/**
- * What the painter will draw, asked as a WHITELIST.
- *
- * ⚠️ The handler's own note explains why this is a whitelist rather than "not
- * a bookmark": classifying by exclusion means a `bookmark` arriving here is
- * painted as a band over a passage the reader never marked. Widening the
- * whitelist by one entry keeps that property; widening the *stored* kinds
- * would not.
- */
-const PAINTABLE_KINDS: readonly string[] = [...ANNOTATION_KINDS, FOREIGN_KIND, PUBLIC_KIND]
-
-/**
- * How many readers a foreign annotation claims, read defensively.
- *
- * foliate round-trips the annotation object untyped, so the value arriving at
- * the painter is not the value the type system saw — the same reason `tintOf`
- * and `styleOf` exist beside this. One reader is the honest floor: a mark is
- * on the page because at least one person put it there.
- */
-function readersOf(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? value : 1
-}
-
-/** One of the three tints, or yellow — the same default `validMarks` applies. */
-function tintOf(value: unknown): MarkTint {
-  return MARK_TINTS.includes(value as MarkTint) ? (value as MarkTint) : 'yellow'
-}
-
-/** One of the four styles, or a fill — again the default `validMarks` applies. */
-function styleOf(value: unknown): MarkStyle {
-  return MARK_STYLES.includes(value as MarkStyle) ? (value as MarkStyle) : 'fill'
-}
-
-/**
- * Attach or erase one mark, tolerating an anchor that does not resolve.
- *
- * Unlike the silent catches this file has had to remove, this failure is
- * expected and specific: a CFI addresses a position in a document, and a PDF
- * page has no text in it until it has been painted. Marks are offered when the
- * section's overlay is created — before that paint — and offered again once it
- * lands, which is when they take. Reporting the first attempt would log a line
- * per mark per page on every book that has any.
- *
- * Which is why `report` exists rather than the catch being unconditional. That
- * reasoning covers the speculative offer and NOTHING else: when the reader
- * marks a passage, or removes one, a failure means the mark they just made did
- * not appear, there is no retry coming, and swallowing it leaves them looking
- * at a page that quietly disagrees with the notes panel.
- */
-interface AttachOptions {
-  readonly remove?: boolean
-  readonly report?: boolean
-}
-
-/**
- * Attach or erase one FOREIGN mark.
- *
- * ⚠️ **`key` IS SENT AND IS IGNORED UNTIL THE FORK MOVES.** `addAnnotation`
- * currently keys the Overlayer on `value`, so several readers at one CFI still
- * collapse into one entry — `review.md`'s overlay blocker 1. `Overlayer.add`
- * already takes a key separately; the one line that connects them is
- * `annotation.key ?? annotation.value` in our own fork. Sending it now costs
- * nothing, changes nothing, and means the day the fork lands no edit is needed
- * here — which is the difference between a fix that is one commit away and one
- * that is one commit plus an archaeology session away.
- *
- * `report: false`, like the speculative offers `attachMark` makes: a foreign
- * mark is offered when the overlay is built and again when it lands, and
- * reporting the first attempt would log a line per mark per page.
- */
-async function attachForeign(view: View, anchor: ForeignAnchor, remove = false): Promise<boolean> {
-  try {
-    await view.addAnnotation(
-      {
-        value: anchor.cfi,
-        key: anchor.key,
-        kind: anchor.audience === 'public' ? PUBLIC_KIND : FOREIGN_KIND,
-        readers: anchor.readers,
-      },
-      remove,
-    )
-    return true
-  } catch {
-    /* Same expected failure as `attachMark`'s: a CFI addresses a position in a
-       document, and a PDF page has no text until it has been painted.
-       ⚠️ ANSWERED rather than only swallowed — `#drawSection` needs to know
-       whether an ERASE actually happened, because a withdrawal it cannot
-       retry is a mark that stays on the page for ever. Still not reported:
-       these are speculative offers made once per mark per page. */
-    return false
-  }
-}
-
-/**
- * Which way the marked text runs, as foliate's rule painters ask for it.
- *
- * Measured on the element the words are in rather than on `body`, for
- * `balanceRects`' reason: an EPUB is free to set `writing-mode` on a section,
- * a pull quote or a single element, so the book's default is not the answer.
- *
- * `undefined` when the document cannot be reached, which is exactly what
- * omitting the option meant — so an unreachable document is the old behaviour
- * rather than a new failure.
- */
-function writingModeAt(doc: Document | null, at: Element | null): string | undefined {
-  const view = doc?.defaultView
-  const target = at && at.ownerDocument === doc ? at : doc?.body
-  if (!view || !target) return undefined
-  try {
-    return view.getComputedStyle(target).writingMode || undefined
-  } catch {
-    /* A document torn down between the event and this call has no view to
-       measure with. The rule is still worth drawing; only its side is. */
-    return undefined
-  }
-}
-
-function attachMark(view: View, anchor: MarkAnchor, options: AttachOptions = {}): void {
-  const { remove = false, report = false } = options
-  const fail = (cause: unknown) => {
-    if (report) console.error(`Paper: could not ${remove ? 'erase' : 'draw'} a mark`, cause)
-  }
-  try {
-    const pending = view.addAnnotation(annotationFor(anchor), remove)
-    void pending?.catch?.(fail)
-  } catch (cause) {
-    // Threw synchronously — same case, same reasoning.
-    fail(cause)
   }
 }
 
@@ -3357,89 +2580,36 @@ function closeQuietly(view: View): void {
   } catch {
     // close() throws when open() never got far enough to build a renderer.
   }
-  view.remove?.()
+  /* ⚠️ **AND DETACHING IS GUARDED, WHICH IT WAS NOT.** Both callers depend on
+     this returning: `dispose` releases the book and clears the host AFTER it,
+     and says of itself that nothing there may propagate; `#settle` is a step of
+     startup, where a throw becomes a rejected `start` nobody awaits. Reported,
+     not swallowed like `close()` above, because that failure is expected and
+     this one is not. */
+  try {
+    /* `remove` is `Element`'s, so a view always has one. */
+    view.remove()
+  } catch (cause) {
+    console.error('Paper: a closed view would not detach', cause)
+  }
 }
 
 /**
- * Flatten foliate's search stream into plain hits.
+ * What the reader is told when something failed: the error's own words, or the
+ * sentence this step supplies.
  *
- * It yields four different shapes — a progress number, a per-section group, a
- * bare hit, and finally the string 'done' — so the shape has to be narrowed
- * before anything downstream can render it. Section labels arrive on the group
- * and are carried onto the hits inside it, which is what lets a result say
- * which chapter it came from.
+ * ⚠️ **AN ERROR WITH NO WORDS FALLS BACK TOO.** This took any `Error`'s
+ * `message` as the answer, and `new Error()` has an empty one — so a backend
+ * that threw it put a blank error bar over the reader: something failed, and
+ * nothing said what or where.
  */
-async function* runSearch(
-  view: View,
-  query: string,
-  signal: AbortSignal,
-): AsyncGenerator<SearchHit> {
-  let label = ''
-  /* Checked BEFORE the iterator exists. `view.search()` clears foliate's own
-   * results and starts walking the book, so entering it on an already-aborted
-   * signal threw away the results still on screen and began work whose every
-   * outcome is discarded. The caller aborts on each keystroke, so this is the
-   * common path, not the rare one. */
-  if (signal.aborted) return
-
-  const results = view.search({ query })
-  /* Closed on the way out, however we leave. A `for await` that returns early
-   * does call `results.return()`, but an abort arriving while we are parked on
-   * the next result is not observed until that result arrives — so the search
-   * runs on after cancellation. Racing the iterator against the abort lets the
-   * cancellation win immediately, and `finally` closes the generator foliate
-   * gave us rather than leaving it walking the book. */
-  const aborted = new Promise<'aborted'>((resolve) => {
-    if (signal.aborted) resolve('aborted')
-    else signal.addEventListener('abort', () => resolve('aborted'), { once: true })
-  })
-
-  try {
-    for (;;) {
-      const step = await Promise.race([results.next(), aborted])
-      if (step === 'aborted' || step.done) return
-      const result = step.value
-      if (signal.aborted) return
-      if (result === 'done') return
-      if (typeof result !== 'object' || result === null) continue
-      if ('progress' in result) continue
-      if ('subitems' in result) {
-        label = result.label ?? ''
-        for (const hit of result.subitems) {
-          if (signal.aborted) return
-          yield toHit(hit, label)
-        }
-        continue
-      }
-      if ('cfi' in result) yield toHit(result, label)
-    }
-  } finally {
-    await results.return?.(undefined)
-  }
-}
-
-function toHit(
-  raw: { cfi: string; excerpt: { pre: string; match: string; post: string } },
-  label: string,
-): SearchHit {
-  return {
-    cfi: raw.cfi,
-    label,
-    pre: raw.excerpt?.pre ?? '',
-    match: raw.excerpt?.match ?? '',
-    post: raw.excerpt?.post ?? '',
-  }
-}
-
 function message(cause: unknown, fallback: string): string {
-  return cause instanceof Error ? cause.message : fallback
+  return cause instanceof Error && cause.message !== '' ? cause.message : fallback
 }
 
 /** What a zero-length file is told it is — see `isEmptySource`. */
 const EMPTY_FILE = 'This file is empty.'
 
-/** foliate's metadata is loosely typed: title may be a language map, author a
- *  string, an object, or an array of either. */
 /**
  * Give a section document a language when it has not declared one.
  *
@@ -3466,104 +2636,4 @@ function ensureLang(doc: Document, view: { book?: { metadata?: unknown } }): voi
   const declared = readMeta(view.book ?? {}).languages[0]
   if (!declared) return
   html.setAttribute('lang', declared)
-}
-
-export function readMeta(book: { metadata?: unknown }): BookMeta {
-  const md = (book.metadata ?? {}) as Record<string, unknown>
-  const text = (value: unknown): string => {
-    if (typeof value === 'string') return value
-    if (Array.isArray(value)) return value.map(text).filter(Boolean).join(', ')
-    if (value && typeof value === 'object') {
-      const rec = value as Record<string, unknown>
-      const name = rec['name']
-      if (typeof name === 'string') return name
-      const first = Object.values(rec)[0]
-      if (typeof first === 'string') return first
-    }
-    return ''
-  }
-  const belongsTo = (md['belongsTo'] ?? {}) as Record<string, unknown>
-  const series = firstOf(belongsTo['series'])
-  return {
-    title: cap(text(md['title'])),
-    author: cap(text(md['author'])),
-    // Loosely typed like the rest: foliate resolves the OPF's unique-identifier
-    // and hands back a string, but a malformed package can put anything here.
-    identifier: cap(typeof md['identifier'] === 'string' ? md['identifier'] : ''),
-    sortAs: cap(text(md['sortAs'])),
-    series: cap(text(series?.['name'] ?? series)),
-    /* A position, not an index into anything: EPUB allows `1.5` for a novella
-     * between two books, so this is a float and NaN must not survive as one. */
-    seriesIndex: finiteOrNull(series?.['position']),
-    subjects: list(md['subject'], text),
-    publisher: cap(text(md['publisher'])),
-    /* Kept as the STRING the book declared, not parsed into a date. EPUB dates
-     * are only loosely specified — `2011`, `2011-03`, and a full timestamp are
-     * all legal — and `new Date('2011')` silently invents a January 1st in
-     * whatever timezone the reader happens to be in. Sorting can compare these
-     * lexically, which is correct for ISO-shaped values and no worse than a
-     * fabricated day for the rest. */
-    published: cap(text(md['published'])),
-    languages: list(md['language'], text),
-    description: cap(text(md['description']), MAX_LONG),
-    subtitle: cap(text(md['subtitle'])),
-    /* Set by `makePdf` and by nothing else, which is exactly the intent: a
-       book either has pages or it does not, and only one format here does. */
-    pageCount: pageCount(md['pageCount']),
-  }
-}
-
-/** A whole number of pages, or 0 for a book that has none. */
-function pageCount(value: unknown): number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0
-}
-
-/**
- * Caps on metadata, because a book is a file a stranger wrote.
- *
- * Every field below travels straight from an untrusted OPF into a store that is
- * read whole, parsed whole and rewritten whole on every position save. Without
- * a bound, a book declaring a megabyte-long description or forty thousand
- * subjects would bloat that store permanently — and it would still be there
- * after the book was removed from the shelf, because the row outlives the open.
- *
- * The numbers are chosen to be past anything real rather than to be tight. A
- * genuine title is not 500 characters and a genuine book is not in 32
- * languages; the point is only that there IS a ceiling.
- */
-const MAX_FIELD = 500
-const MAX_LONG = 4000
-const MAX_LIST = 32
-
-function cap(value: string, limit = MAX_FIELD): string {
-  return value.length > limit ? value.slice(0, limit) : value
-}
-
-/** foliate hands back an object, an array of them, or nothing. */
-function firstOf(value: unknown): Record<string, unknown> | null {
-  const one = Array.isArray(value) ? value[0] : value
-  return one && typeof one === 'object' ? (one as Record<string, unknown>) : null
-}
-
-function finiteOrNull(value: unknown): number | null {
-  /* `Number`, not `parseFloat`: the latter reads "1.5junk" as 1.5, and a
-     series position with trailing junk is malformed metadata to refuse, not
-     to half-read (audit round 1, #838). The empty string is `NaN`d explicitly
-     because `Number('')` is 0. */
-  const n = typeof value === 'string' ? (value.trim() === '' ? NaN : Number(value)) : value
-  return typeof n === 'number' && Number.isFinite(n) ? n : null
-}
-
-/** A bounded list of non-empty strings, deduplicated, order preserved. */
-function list(value: unknown, text: (v: unknown) => string): readonly string[] {
-  const raw = Array.isArray(value) ? value : value == null ? [] : [value]
-  const out: string[] = []
-  for (const item of raw) {
-    const one = cap(text(item))
-    // Deduplicated because an OPF may repeat a subject per language, and a tag
-    // shown twice on a row looks like a bug in the reader rather than the book.
-    if (one && !out.includes(one)) out.push(one)
-    if (out.length >= MAX_LIST) break
-  }
-  return out
 }

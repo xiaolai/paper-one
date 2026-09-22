@@ -87,7 +87,17 @@
   order: 2;
   display: flex;
   justify-content: center;
-  transition: opacity var(--motion-chrome);
+  /* ⚠️ **VISIBILITY TRANSITIONS WITH OPACITY, OR THE FADE-OUT NEVER RENDERS.**
+     `TitleBar` sets both, and this rule listed only `opacity` — so on hide
+     `visibility: hidden` took effect at the first frame and the zone vanished
+     with no fade at all, while showing looked right, which is why it went
+     unnoticed. `visibility` is a discrete property with a defined rule for this:
+     transitioned, it stays `visible` for the whole duration when one end is
+     visible — so going hidden it waits out the fade, and going visible it
+     switches at once. Same token, both properties. */
+  transition:
+    opacity var(--motion-chrome),
+    visibility var(--motion-chrome);
 }
 
 
@@ -151,7 +161,10 @@
   display: flex;
   align-items: center;
   gap: var(--space-8);
-  transition: opacity var(--motion-chrome);
+  /* With `visibility`, for the reason given at `.chipZone`. */
+  transition:
+    opacity var(--motion-chrome),
+    visibility var(--motion-chrome);
 }
 
 .appZone[data-platform='macos'] {
@@ -208,4 +221,46 @@
 .action[data-disabled='true'] {
   opacity: var(--opacity-disabled);
   pointer-events: none;
+}
+
+/* --- the reading transport ------------------------------------------- *
+ *
+ * The Listen toggle expands IN PLACE while a reading is under way: the row
+ * replaces the single button rather than floating over the page, so the book
+ * keeps its full height and nothing covers the text.
+ *
+ * It reads as ONE control rather than nine, because the reader is choosing
+ * within a single activity — hence the shared wash behind the group and a gap
+ * tighter than `.toggleGroup`'s, which separates toggles that have nothing to
+ * do with each other.
+ */
+.transport {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-inline: var(--space-4);
+  border-radius: var(--radius-chip);
+  background: var(--wash);
+}
+
+/* `--control-xs` is the design system's "an icon and nothing else", which is
+ * what each of these is. `.action`'s own `--control-titlebar` would make the
+ * row wide enough to push the book's title out of the bar. The HEIGHT stays
+ * the titlebar's, so the row lines up with the controls beside it. */
+.transportButton {
+  width: var(--control-xs);
+  height: var(--control-titlebar);
+}
+
+/* The speed is a VALUE, not an action, and is written as one.
+ *
+ * A fixed width so that cycling 0.75 → 1 → 1.25 does not shuffle the buttons
+ * beside it, and tabular figures so the digits do not shift inside that width
+ * either — a control that moves while you use it is one you stop trusting. */
+.rate {
+  width: var(--control-lg);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--track-snug);
 }

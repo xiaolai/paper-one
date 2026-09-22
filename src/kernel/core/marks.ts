@@ -304,7 +304,7 @@ export async function contentId(blob: Blob): Promise<string> {
   return `book:${hex.join('').slice(0, 32)}`
 }
 
-export async function bookIdFor(source: File | string): Promise<string> {
+export async function bookIdFor(source: File | string, signal?: AbortSignal): Promise<string> {
   if (typeof source !== 'string') return contentId(source)
 
   /* A URL is read rather than trusted. It costs one fetch, which the renderer
@@ -312,7 +312,10 @@ export async function bookIdFor(source: File | string): Promise<string> {
    * the same book opened two ways can be the same book. A failure here is
    * reported by the caller as "could not identify this book", which is the
    * honest outcome: a URL that cannot be fetched cannot be opened either. */
-  const response = await fetch(source)
+  /* THE SIGNAL GOES TO THE FETCH, because it is the part worth stopping: a
+     superseded book's download is the whole cost, and under Strict Mode the same
+     full download was issued twice. `useBook` aborts it when the book changes. */
+  const response = await fetch(source, signal ? { signal } : undefined)
   if (!response.ok) throw new Error(`could not read ${source}: ${response.status}`)
   return contentId(await response.blob())
 }

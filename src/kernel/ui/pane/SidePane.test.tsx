@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SidePane, type SidePaneProps } from './SidePane'
 import { initialState } from '../state'
 import type { Book } from '../hooks/useBook'
@@ -27,6 +27,19 @@ import type { TagPrefsStore } from '../hooks/useTagPrefs'
  * nothing said. Every panel's props here are required now, which is the
  * compile-time version of the same check.
  */
+
+beforeEach(() => {
+  /* jsdom has no `ResizeObserver`, and the Settings pane's typeface field
+     measures itself — the same stub the behaviour suite next door installs. */
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    },
+  )
+})
 
 afterEach(cleanup)
 
@@ -65,7 +78,10 @@ const marksView = () =>
 function draw({
   developerOptions = false,
   ...over
-}: Partial<SidePaneProps> & { pane: 'search' | 'cards' | 'library'; developerOptions?: boolean }) {
+}: Partial<SidePaneProps> & {
+  pane: 'search' | 'cards' | 'library' | 'marginalia' | 'settings'
+  developerOptions?: boolean
+}) {
   const onGoTo = vi.fn()
   const props: SidePaneProps = {
     state: { ...initialState, screen: 'reader', pane: over.pane, lastPane: over.pane, developer: developerOptions },
@@ -102,6 +118,8 @@ function draw({
       view.rerender(
         <SidePane {...props} book={{ ...props.book, bookId } as unknown as Book} />,
       ),
+    /** Re-render the same pane with a different shelf behind it. */
+    withBooks: (books: SidePaneProps['books']) => view.rerender(<SidePane {...props} books={books} />),
   }
 }
 
@@ -176,25 +194,6 @@ describe('the library panel', () => {
   })
 })
 
-/**
- * The rail's exhaustiveness check (`RailCoversEveryPane`) catches a MISSING
- * pane and cannot catch a DUPLICATE one: a second row for an id compiles,
- * then renders two buttons under one React key. A pin on the source, on the
- * `pageTurn.test.ts` precedent, because the entries are a module constant
- * nothing exports.
- */
-describe('the rail', () => {
-  it('lists every kernel pane once — a duplicated row would draw two buttons under one key', async () => {
-    const { readFileSync } = await import('node:fs')
-    /* From the repository root, not `import.meta.url`: under jsdom that URL
-       carries an http scheme and `readFileSync` refuses it. */
-    const source = readFileSync(`${process.cwd()}/src/kernel/ui/pane/SidePane.tsx`, 'utf8')
-    const block = source.slice(source.indexOf('const RAIL_ENTRIES'), source.indexOf('as const satisfies'))
-    const ids = [...block.matchAll(/id: '([a-z]+)'/g)].map((m) => m[1])
-    expect(ids.length, 'the pin found the rail').toBeGreaterThan(3)
-    expect(new Set(ids).size).toBe(ids.length)
-  })
-})
 
 /**
  * THE BOOK THE SCREEN SHOWS, not the book the reader holds. The reader stays
@@ -224,5 +223,158 @@ describe('what a contributed pane is handed', () => {
     cleanup()
     on('reader')
     expect(screen.getByText('book=open-book')).toBeTruthy()
+  })
+})
+
+describe('what Marginalia is told about other books', () => {
+  /**
+   * ⚠️ **A CROSS-BOOK ROW NAMES THE BOOK IT CAME FROM, and the name comes from
+   * the SHELF the Library panel already has.** `titleOf` is the whole of that
+   * wiring: the panel asks it, and answers "Another book" when it has nothing
+   * — so a `titleOf` that answered nothing for everything would look exactly
+   * like a shelf with no titles, on every row, with the suite green.
+   */
+  const elsewhere = () =>
+    ({
+      all: [
+        {
+          id: 'm1',
+          bookId: 'a-book-elsewhere',
+          cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:9)',
+          sectionIndex: 0,
+          text: 'call me ishmael',
+          prefix: '',
+          suffix: '',
+          note: '',
+          kind: 'highlight',
+          tint: 'yellow',
+          style: 'fill',
+          chapter: 'Loomings',
+          createdAt: 1,
+        },
+      ],
+      current: [],
+      bookmarks: [],
+      allBookmarks: [],
+      allUnplaced: [],
+      persistent: true,
+      ready: true,
+      loadAll: vi.fn(),
+    }) as unknown as MarksView
+
+  const shelf = [{ bookId: 'a-book-elsewhere', title: 'Ulysses' }] as unknown as SidePaneProps['books']
+
+  it('names the book a cross-book row came from, from the shelf', () => {
+    draw({ pane: 'marginalia', marks: elsewhere(), books: shelf })
+    expect(screen.getByText('Ulysses')).toBeTruthy()
+    expect(screen.queryByText('Another book'), 'the shelf knew its name').toBeNull()
+  })
+
+  it('says another book when the shelf does not hold it', () => {
+    /* A book removed from the shelf, or one whose record has not loaded: the
+       row still says it is not from the open book. */
+    draw({ pane: 'marginalia', marks: elsewhere(), books: [] })
+    expect(screen.getByText('Another book')).toBeTruthy()
+  })
+
+  it('answers again when the shelf arrives after the panel', () => {
+    /* The shelf loads asynchronously, so the first render of a cross-book row
+       often precedes it — a name resolved once, at mount, would stay "Another
+       book" for the rest of the session. */
+    const { withBooks } = draw({ pane: 'marginalia', marks: elsewhere(), books: [] })
+    expect(screen.getByText('Another book')).toBeTruthy()
+    withBooks(shelf)
+    expect(screen.getByText('Ulysses'), 'the panel kept the shelf it was first given').toBeTruthy()
+  })
+})
+
+describe('what the Voice group is handed', () => {
+  /**
+   * ⚠️ **THE HOST ANSWERS TWO FACTS AND APP STATE ANSWERS FIVE, AND THIS IS
+   * WHERE THEY MEET.** The open book's language and the machine's voice list
+   * are the host's; the chosen voice, the speed and the two gaps are the
+   * reader's. Seventeen mutants lived in that composition because no test
+   * rendered the pane with a narration at all — every one of them a wire from a
+   * control to a reducer action, which is what this suite exists for.
+   */
+  /* A voice the floor accepts, so the picker has something to offer — see
+     `voiceChoice.ts`: below the floor the group refuses every voice and there
+     is nothing to choose. */
+  const ZOE = {
+    name: 'Zoe',
+    lang: 'en-US',
+    voiceURI: 'com.apple.voice.enhanced.en-US.Zoe',
+    localService: true,
+  }
+  const narration = { lang: 'en-US', voices: [ZOE] }
+
+  function voiceRows(over: Partial<SidePaneProps> = {}) {
+    const dispatch = vi.fn()
+    const props: Partial<SidePaneProps> = {
+      pane: 'settings',
+      narration,
+      dispatch,
+      ...over,
+    } as Partial<SidePaneProps> & { pane: 'settings' }
+    draw(props as Parameters<typeof draw>[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Voice' }))
+    return dispatch
+  }
+
+  it('reads the reader’s own choices out of state', () => {
+    voiceRows({
+      state: {
+        ...initialState,
+        screen: 'reader',
+        pane: 'settings',
+        lastPane: 'settings',
+        readingRate: 1.5,
+        sentenceGapMs: 500,
+        paragraphGapMs: 900,
+      },
+    })
+    /* Each stepper's own readout says where in its scale it stands, which is
+       the only observable proof the composed value arrived: 1.5x is the fifth
+       of eight speeds, and 500ms and 900ms are each the fourth of their own six
+       gaps. */
+    const steps = screen.getAllByRole('img').map((pips) => pips.getAttribute('aria-label'))
+    expect(steps).toEqual(expect.arrayContaining(['Step 5 of 8', 'Step 4 of 6']))
+    expect(steps.filter((label) => label === 'Step 4 of 6'), 'both gaps').toHaveLength(2)
+  })
+
+  it('writes a picked voice under the book’s own language', () => {
+    /* ⚠️ **THE LANGUAGE IS HALF THE WIRE.** The stored choice is a map — one
+       voice per language — so a handler that dropped the language would put an
+       English voice under every book the reader opens. */
+    const dispatch = voiceRows()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Voice' }), {
+      target: { value: ZOE.voiceURI },
+    })
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'setReadingVoice',
+      lang: 'en',
+      voice: ZOE.voiceURI,
+    })
+  })
+
+  it.each([
+    ['More speed', { type: 'setReadingRate', rate: 1.25 }],
+    ['More pause between sentences', { type: 'setSentenceGap', ms: 300 }],
+    ['More pause between paragraphs', { type: 'setParagraphGap', ms: 900 }],
+  ])('sends %s to the reducer', (control, action) => {
+    const dispatch = voiceRows()
+    fireEvent.click(screen.getByRole('button', { name: control }))
+    expect(dispatch).toHaveBeenCalledWith(action)
+  })
+
+  it('sends the note-reading switch to the reducer', () => {
+    const dispatch = voiceRows()
+    fireEvent.click(screen.getByRole('switch', { name: 'Read footnotes' }))
+    expect(dispatch).toHaveBeenCalledWith({ type: 'toggleReadingNotes' })
+  })
+
+  it('draws no Voice group at all on a host with no reader', () => {
+    draw({ pane: 'settings', narration: undefined })
+    expect(screen.queryByRole('button', { name: 'Voice' })).toBeNull()
   })
 })

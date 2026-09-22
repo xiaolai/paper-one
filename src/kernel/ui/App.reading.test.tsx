@@ -10,6 +10,7 @@ import { bookIdFor } from '../core/marks'
 import { fakeFs } from '../core/indexFsFake.testkit'
 import { composeCapabilities, kernelApi } from '../core/registry'
 import { createKernelServices } from '../core/services'
+import { SETTINGS_STORAGE_KEY, SETTINGS_VERSION } from '../core/settings'
 
 /**
  * `App` WITH A BOOK THAT ACTUALLY OPENS — the half of this window no test could
@@ -64,10 +65,16 @@ const reader = vi.hoisted(() => ({
   },
   /** The chapter every relocation reports itself in. */
   chapter: 'Loomings',
+  /** The contents href every relocation reports itself at — `''` for a section
+   *  the contents does not name, which is a real place to be. */
+  chapterHref: 'chapter-1.xhtml',
   /** The author every book declares. */
   author: 'Herman Melville',
   /** The contents every book publishes. */
   toc: [] as { label: string; href: string }[],
+  /** The prose the section on screen holds, or null for a book that publishes
+   *  no document — which is what read-aloud has nothing to say about. */
+  prose: null as string | null,
   /** A jacket, for the one effect that files it. */
   cover: null as Blob | null,
   /** How many of the next opens fail the way a book the reader cannot see fails. */
@@ -186,7 +193,7 @@ vi.mock('./reader/session', async (importActual) => {
       return {
         fraction: 0.25,
         chapterLabel: reader.chapter,
-        chapterHref: 'chapter-1.xhtml',
+        chapterHref: reader.chapterHref,
         cfi,
         sectionIndex: 0,
         sectionExact: true,
@@ -304,6 +311,14 @@ vi.mock('./reader/session', async (importActual) => {
       this.#callbacks.onDirection('ltr')
       this.#callbacks.onMeta(meta)
       if (reader.cover) this.#callbacks.onCover(reader.cover)
+      /* THE SECTION'S OWN DOCUMENT, which is what read-aloud reads: `useSpeech`
+         collects the text out of it, so a book that publishes none has nothing
+         to say and the transport never appears. */
+      if (reader.prose !== null) {
+        const doc = document.implementation.createHTMLDocument('section')
+        doc.body.innerHTML = reader.prose
+        this.#callbacks.onDocument(doc)
+      }
       this.#callbacks.onRelocate(this.#position(this.#cfi))
       reader.live = this.#surface
       this.own.published = true
@@ -313,6 +328,8 @@ vi.mock('./reader/session', async (importActual) => {
 })
 
 import { App } from './App'
+import { FakeSynth, FakeUtterance } from './reader/speechSynth.testkit'
+import { NO_GOOD_VOICE } from './reader/voiceChoice'
 
 /* jsdom has no `scrollIntoView` (the palette's active row calls it) and no
    `ResizeObserver` (the reader measures its stage with one). */
@@ -335,6 +352,8 @@ afterEach(() => {
   reader.opened.length = 0
   reader.live = null
   reader.chapter = 'Loomings'
+  reader.chapterHref = 'chapter-1.xhtml'
+  reader.prose = null
   reader.author = 'Herman Melville'
   reader.toc = []
   reader.cover = null
@@ -382,7 +401,15 @@ const HERE = 'epubcfi(/6/4!/4/2,/1:0,/1:9)'
 const THERE = 'epubcfi(/6/8!/4/2,/1:0,/1:9)'
 
 /** The accelerator is Ctrl off macOS, and jsdom's user agent is nobody's Mac. */
-const accel = (key: string) => fireEvent.keyDown(window, { key, ctrlKey: true })
+/** The accelerator the app was mounted to expect — ⌘ where the URL pinned
+ *  macOS, Ctrl everywhere else, which is what jsdom's user agent resolves to. */
+const accel = (key: string) =>
+  fireEvent.keyDown(window, {
+    key,
+    ...(new URLSearchParams(window.location.search).get('platform') === 'macos'
+      ? { metaKey: true }
+      : { ctrlKey: true }),
+  })
 const hint = () => screen.queryByRole('button', { name: /← Back to/u })
 
 async function mount(
@@ -1514,11 +1541,21 @@ describe('a jump into a book whose stored copy is gone', () => {
   })
 
   it('carries the jump through the origin as an ADDRESS when the file is not there', async () => {
+    /* ⚠️ **AND SAYS WHY THE PATH FAILED, BEFORE THE ADDRESS HAS A CHANCE TO.** If
+       the address fails too, that is the failure the reader sees — and the
+       reason the path failed, usually the useful one, was discarded by an empty
+       `catch`. The line exists only to keep that evidence. */
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
     disk.refuse.add(ORIGIN)
     await jumpingTo(ORIGIN)
     expect(disk.read).toEqual([ORIGIN])
     await landedWithTheJumpIntact()
     expect(reader.opened[1]!.source, 'the path was never tried as an address').toBe(ORIGIN)
+    expect(said).toHaveBeenCalledWith(
+      'Paper: could not read the book at its saved place, trying it as an address',
+      expect.anything(),
+    )
+    said.mockRestore()
   })
 
   /* BOTH HALVES OF THE FALLBACK ARE GUARDED, and each has its own late answer:
@@ -1573,5 +1610,280 @@ describe('books a launch carried', () => {
     )
     const record = stored(fs, `${folderOf(bookId)}/book.json`) as { origin?: string }
     expect(record.origin, 'the path the launch carried was not kept').toBe('/Users/reader/Books/Moby-Dick.epub')
+  })
+})
+
+/**
+ * ⚠️ **A PAGE TURN USED TO REINSTALL THE WHOLE KEYBOARD MAP.** The key handler's
+ * effect listed the entire `book`, and `book` takes a new identity whenever any
+ * of its values moves — its position among them — so every turn removed both
+ * global key listeners and added them again. The body reads four stable
+ * callbacks and whether a book is open; those are what it lists now. Counted
+ * across real relocations, because "it re-ran" is invisible in behaviour: the
+ * keys still worked, which is why nothing noticed.
+ */
+describe('turning a page', () => {
+  it('does not reinstall the keyboard listeners', async () => {
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await open('Moby-Dick')
+    await settle()
+
+    const added = vi.spyOn(window, 'addEventListener')
+    try {
+      for (const cfi of [THERE, HERE, THERE]) {
+        await act(async () => reader.live!.relocate(cfi))
+        await settle()
+      }
+      const keydowns = added.mock.calls.filter(([type]) => type === 'keydown')
+      expect(keydowns, 'no key listener was added for a page turn').toEqual([])
+    } finally {
+      added.mockRestore()
+    }
+  })
+})
+
+/**
+ * NO VOICE RATHER THAN A BAD ONE, THROUGH THE WHOLE APP.
+ *
+ * The rule lives in `voiceChoice.ts` and the button in `TitleBar`, and each is
+ * tested alone; what neither can see is the wire between them — `App` reading
+ * the engine's live list through `useVoices`, asking `voiceFor` about the book on
+ * screen, and handing the answer to the Listen control. A wire that went nowhere
+ * would leave the button enabled over a reading the speaker refuses.
+ */
+describe('the Listen control and the voices this machine has', () => {
+  afterEach(() => {
+    delete (window as { speechSynthesis?: unknown }).speechSynthesis
+    delete (window as { SpeechSynthesisUtterance?: unknown }).SpeechSynthesisUtterance
+  })
+
+  async function listenWith(voices: readonly { name: string; lang: string; voiceURI: string }[]) {
+    const synth = new FakeSynth()
+    synth.voices = [...voices]
+    Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true, writable: true })
+    window.SpeechSynthesisUtterance = FakeUtterance as unknown as typeof SpeechSynthesisUtterance
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await open('Moby-Dick')
+    /* BY ITS LABEL ATTRIBUTE, not by role and name: the reading chrome is faded
+       out until the pointer asks for it, which takes it out of the
+       accessibility tree, and an element there computes an empty accessible
+       name. What is under test is the control's state, not whether it shows. */
+    const button = document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')
+    expect(button, 'the Listen control is not in the title bar').not.toBeNull()
+    return button!
+  }
+
+  it('is disabled, and says why, when every voice is below the floor — a Mac', async () => {
+    const button = await listenWith([
+      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' },
+      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.super-compact.en-US.Samantha' },
+    ])
+    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('title')).toBe(`Listen — ${NO_GOOD_VOICE}`)
+  })
+
+  it('reads when a voice above the floor is there', async () => {
+    const button = await listenWith([
+      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' },
+      { name: 'Zoe', lang: 'en-US', voiceURI: 'com.apple.voice.enhanced.en-US.Zoe' },
+    ])
+    expect(button).toHaveProperty('disabled', false)
+    expect(button.getAttribute('title')).toBe('Read this chapter aloud')
+  })
+})
+
+describe('the reading transport over a real book', () => {
+  /**
+   * ⚠️ **ONE LOOKUP SERVES THE CONTROL AND THE STEP**, so what the transport
+   * DRAWS and what the step TAKES cannot disagree. They were computed
+   * separately once — a `stepChapter` here and another inside the action — and
+   * the two were reconciled only by both being correct.
+   *
+   * This is the host's half of read-aloud: the hook knows how to speak, and
+   * only the host knows what the next chapter is.
+   */
+  afterEach(() => {
+    delete (window as { speechSynthesis?: unknown }).speechSynthesis
+    delete (window as { SpeechSynthesisUtterance?: unknown }).SpeechSynthesisUtterance
+  })
+
+  /** A machine with one voice the floor accepts. */
+  function engine() {
+    const synth = new FakeSynth()
+    synth.voices = [
+      { name: 'Zoe', lang: 'en-US', voiceURI: 'com.apple.voice.enhanced.en-US.Zoe', localService: true },
+    ]
+    Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true, writable: true })
+    window.SpeechSynthesisUtterance = FakeUtterance as unknown as typeof SpeechSynthesisUtterance
+    return synth
+  }
+
+  /** A book open, read aloud, with the transport on screen. */
+  async function reading(toc: readonly { label: string; href: string }[]) {
+    const synth = engine()
+    reader.toc = [...toc]
+    reader.prose = '<p>Call me Ishmael. Some years ago.</p><p>It is a way I have.</p>'
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await open('Moby-Dick')
+    const listen = document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')
+    expect(listen, 'the Listen control is not in the title bar').not.toBeNull()
+    await act(async () => {
+      listen!.click()
+    })
+    await settled()
+    return { synth, session: reader.opened.at(-1)! }
+  }
+
+  const control = (label: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
+
+  it('offers the chapter ahead, and takes the reader there', async () => {
+    const { session } = await reading([
+      { label: 'One', href: 'chapter-1.xhtml' },
+      { label: 'Two', href: 'chapter-2.xhtml' },
+    ])
+    expect(control('Next chapter'), 'the chapter ahead was not offered').not.toBeNull()
+    expect(control('Previous chapter'), 'there is no chapter before the first').toBeNull()
+
+    await act(async () => {
+      control('Next chapter')!.click()
+    })
+    expect(session.goTo, 'the step did not take the reader anywhere').toContain('chapter-2.xhtml')
+  })
+
+  it('follows the reader into the next chapter, and offers the way back from there', async () => {
+    /* ⚠️ **THE STEP IS A MEMO OVER THE READER'S PLACE**, and one that never
+       recomputed would go on offering what was true where the reading began:
+       forward from the first chapter for ever, and never back. */
+    await reading([
+      { label: 'One', href: 'chapter-1.xhtml' },
+      { label: 'Two', href: 'chapter-2.xhtml' },
+    ])
+    expect(control('Previous chapter')).toBeNull()
+
+    reader.chapterHref = 'chapter-2.xhtml'
+    await act(async () => {
+      reader.live!.relocate('epubcfi(/6/6!/4/2)')
+    })
+    await settled()
+    expect(control('Previous chapter'), 'the step did not follow the reader').not.toBeNull()
+    expect(control('Next chapter'), 'there is no chapter after the last').toBeNull()
+  })
+
+  it('offers no chapter step in a book whose contents names none', async () => {
+    /* The transport is still there — sentences and paragraphs are the reader's
+       whatever the contents says — and the chapter controls are absent rather
+       than disabled, because there is genuinely nowhere to go. */
+    await reading([])
+    expect(control('Stop reading aloud'), 'the transport itself is missing').not.toBeNull()
+    expect(control('Next chapter')).toBeNull()
+    expect(control('Previous chapter')).toBeNull()
+  })
+
+  it('offers no chapter step from a section the contents does not name', async () => {
+    /* A reader can be in a spine item no contents entry points at, and guessing
+       a neighbour for it would move them somewhere they did not ask for. */
+    reader.chapterHref = ''
+    await reading([
+      { label: 'One', href: 'chapter-1.xhtml' },
+      { label: 'Two', href: 'chapter-2.xhtml' },
+    ])
+    expect(control('Next chapter')).toBeNull()
+    expect(control('Previous chapter')).toBeNull()
+  })
+
+  it('reads at the speed the reader has stored, and at the one they change it to', async () => {
+    /* ⚠️ **THE PREFERENCES ARE A MEMO OVER APP STATE**, and the engine reads
+       them per utterance: a memo that never recomputed would hold the speed the
+       session started at, so the transport's own speed control would move a
+       number nobody hears. */
+    const synth = engine()
+    reader.prose = '<p>Call me Ishmael. Some years ago.</p><p>It is a way I have.</p>'
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    const storage = new Map<string, string>([
+      [SETTINGS_STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, values: { 'kernel.readingRate': 1.5 } })],
+    ])
+    const services = createKernelServices({
+      fs: fakeFs(moby.files) as unknown as IndexFs,
+      storage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => void storage.set(key, value),
+      },
+      initialBooks: [moby.row],
+    })
+    const composition = await composeCapabilities([], kernelApi(services), new AbortController().signal)
+    render(<App services={services} fs={fakeFs(moby.files) as unknown as IndexFs} composition={composition} />)
+    await settle()
+    await open('Moby-Dick')
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')!.click()
+    })
+    await settled()
+    expect(synth.queued.at(0)?.rate, 'the stored speed did not reach the engine').toBe(1.5)
+
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('button[aria-label^="Reading speed"]')!.click()
+    })
+    await settled()
+    expect(
+      document.querySelector('button[aria-label^="Reading speed"]')?.getAttribute('aria-label'),
+      'the speed control did not move',
+    ).toBe('Reading speed 1.75×')
+
+    /* AND THE VOICE HEARS IT at the next sentence — the control moving is the
+       state; the engine being given it is the memo the reading reads from. */
+    await act(async () => {
+      synth.queued.at(-1)?.dispatchEvent(new Event('end'))
+    })
+    /* After the sentence gap, which is a real timer here. */
+    await waitFor(() => expect(synth.queued).toHaveLength(2))
+    expect(synth.queued.at(-1)?.text.trim()).toBe('Some years ago.')
+    expect(synth.queued.at(-1)?.rate, 'the next sentence was read at the old speed').toBe(1.75)
+  })
+})
+
+/**
+ * The audiobook export, as the palette offers it.
+ *
+ * ⚠️ **TWO GATES, AND EACH HAD NO CASE.** The engine exists on macOS alone, so
+ * everywhere else the command must not be there at all — offered, it could only
+ * refuse. And a book is ready for it only once its document is: the id resolves
+ * from the bytes before the parse, and an export started in that gap reported
+ * the reader's book as unreadable.
+ */
+describe('the audiobook export', () => {
+  afterEach(() => {
+    window.history.replaceState(null, '', '/')
+  })
+
+  async function openBook(platform: 'macos' | 'linux') {
+    /* The platform is resolved once, at mount, from the URL override first. */
+    window.history.replaceState(null, '', `/?platform=${platform}`)
+    reader.prose = '<p>Call me Ishmael.</p>'
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    return () => open('Moby-Dick')
+  }
+
+  it('is offered for an open book on the platform with the engine', async () => {
+    const opening = await openBook('macos')
+    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'offered with no book open').toBe(false)
+    await opening()
+    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'the open book was not offered').toBe(true)
+  })
+
+  it('is not offered where there is no engine to write it', async () => {
+    const opening = await openBook('linux')
+    await opening()
+    expect(await paletteOffers('audiobook', 'Export as audiobook…')).toBe(false)
+  })
+
+  it('waits for the book’s document, which is what the walk runs over', async () => {
+    const opening = await openBook('macos')
+    reader.prose = null
+    await opening()
+    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'a book with no document yet').toBe(false)
   })
 })

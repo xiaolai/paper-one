@@ -3,7 +3,7 @@ import { Bookmark, ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react
 import type { ExternalLinkDetail, LinkDetail } from 'foliate-js/view.js'
 import { comboFor } from '../panes'
 import { FootnotePopover } from '../reader/FootnotePopover'
-import type { FootnoteRender } from '../reader/session'
+import type { FootnoteRender } from '../reader/footnotes'
 import type { Platform } from '../../core/metrics'
 import {
   ICON,
@@ -24,7 +24,7 @@ import { citation, type Source } from '../../core/citation'
 import { writeClipboard } from '../clipboard'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
-import type { ForeignAnchor } from '../reader/session'
+import type { ForeignAnchor } from '../reader/markPaint'
 import type { SaveFailureView } from '../hooks/useLibrary'
 import type { Marking } from '../hooks/useMarking'
 import type { Bookmarking } from '../hooks/useBookmarking'

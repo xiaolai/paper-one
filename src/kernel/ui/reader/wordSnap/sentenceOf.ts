@@ -77,7 +77,7 @@
  * inside the run: nothing from the far side of an edge is ever sent.
  *
  * The caller's fallback is what shipped before this existed, so declining is
- * never a regression — see `SentenceGap`, which is counted rather than shown.
+ * never a regression — see `SegmentGap`, which is counted rather than shown.
  *
  * ⚠️ **AND THE FALLBACK NOW COMES THROUGH HERE TOO**, with the gate off. It has
  * nowhere to decline TO, so the rule above is not available to it; what it
@@ -88,7 +88,13 @@
 
 /** SOFT HYPHEN. Invisible, inside words, and not the model's to read either —
  *  the same character `rangeText` strips out of stored text. */
-const SOFT_HYPHEN = '­'
+/* ⚠️ **SPELLED AS AN ESCAPE, AND IT WAS THE INVISIBLE CHARACTER ITSELF.** A
+   soft hyphen renders as nothing, so the literal looked like an empty string in
+   review and in every diff, and deleting or replacing it would not have shown.
+   Written with a tool this repository has already been bitten by: a backslash-u
+   escape typed into an edit can arrive as the raw character (see AGENTS.md), so
+   the bytes here were checked with `od` rather than trusted. */
+const SOFT_HYPHEN = '\u00ad'
 
 /**
  * What CSS collapses, and therefore what a source LF is.
@@ -104,6 +110,17 @@ const SOFT_HYPHEN = '­'
  * sentence there, which is what the reader sees. `trim` takes them off the
  * chosen sentence's edges afterwards.
  */
+/**
+ * Every soft hyphen, for judging whether a range holds anything to say.
+ *
+ * `trim()` removes U+2028 and U+2029 — they are `\s` to JavaScript — but a soft
+ * hyphen is neither whitespace nor content: invisible, and a range holding only
+ * one has nothing for a voice to pronounce.
+ */
+/* THE SAME CHARACTER, BUILT FROM ONE SOURCE, so the test for one soft hyphen and
+   the pattern that strips them all cannot come to name different things. */
+const SOFT_HYPHEN_ALL = new RegExp(SOFT_HYPHEN, 'gu')
+
 const COLLAPSIBLE = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/
 
 /** U+2028 and U+2029 — see `COLLAPSIBLE`. */
@@ -135,19 +152,20 @@ export const MAX_SENTENCE_CHARS = 1_000
  */
 export const MAX_RUN_CHARS = 64_000
 
-/** Why no sentence could be vouched for. Counted through `Diagnostics`; a
- *  closed set of enum words, never book text. */
-export type SentenceGap =
-  /** A range boundary that is not a text node. */
-  | 'not-text'
-  /** The range has left the document since the selection was made. */
-  | 'detached'
-  /** The start boundary is in no tree. */
-  | 'no-tree'
-  /** The walk reached neither the start boundary nor any text. */
-  | 'no-window'
-  /** The end boundary is outside the start boundary's run (§A3). */
-  | 'span-blocks'
+/**
+ * Why the TEXT held no sentence to vouch for — the reasons segmentation itself
+ * can reach. Counted through `Diagnostics`; a closed set of enum words, never
+ * book text.
+ *
+ * ⚠️ **ONLY WHAT THIS MODULE CAN PRODUCE.** This union used to hold the DOM
+ * walk's reasons as well — a boundary that is not text, a detached range, a
+ * walk that threw — and a caller's own reason for not asking at all, none of
+ * which a function over strings can reach. `sentenceAt` owns those now, as
+ * `SentenceGap`, and the fixed-layout reason went with the deleted lookup that
+ * gave it: a vocabulary that lists reasons nothing can produce is a list a
+ * reader of the counts goes looking for and never finds.
+ */
+export type SegmentGap =
   /** The run held no visible text once filtered and squeezed. */
   | 'empty'
   /** The term held no visible text once filtered and squeezed. */
@@ -158,20 +176,10 @@ export type SentenceGap =
   | 'run-end'
   /** The span the term covers is longer than a sentence. */
   | 'too-long'
-  /** The walk threw. Never reaches the reader — see §E6. */
-  | 'threw'
-  /**
-   * THE CALLER'S OWN, and the one member neither this module nor `sentenceAt`
-   * can produce: a fixed-layout book, where the sentence path is not attempted
-   * at all pending a measurement (WI-16.5). It lives in this union because the
-   * vocabulary is "why the lookup has no sentence", and a second enum for the
-   * one reason the caller knows would mean two lists to read a count out of.
-   */
-  | 'fixed-layout'
 
-export type SentenceResult =
+export type SegmentResult =
   | { readonly ok: true; readonly sentence: string; readonly term: string }
-  | { readonly ok: false; readonly gap: SentenceGap }
+  | { readonly ok: false; readonly gap: SegmentGap }
 
 export interface SentenceOptions {
   /** A tag already proven to construct a `Segmenter` — see
@@ -226,7 +234,8 @@ export interface SentenceOptions {
 }
 
 /** Half-open, into the normalised text. */
-interface Span {
+/** A half-open range of character offsets. Exported for `sentenceSpansOf`. */
+export interface Span {
   readonly start: number
   readonly end: number
 }
@@ -238,6 +247,22 @@ interface Squeezed {
    *  paragraph and `indexOf` returns the wrong one for most words (§A2). */
   readonly termStart: number
   readonly termEnd: number
+  /**
+   * For each character of `text`, the offset in `raw` it was emitted from.
+   *
+   * ⚠️ **BUILT ALWAYS, NOT BEHIND A FLAG.** Only `sentenceSpansOf` reads it, and
+   * a parameter deciding whether to fill it would leave the selection path
+   * running code no test of that path exercises. One array of `text.length`
+   * numbers next to the string building it accompanies is not a cost worth a
+   * branch — this file's own history is full of branches that only one caller
+   * reached and that were therefore wrong.
+   *
+   * An OWED space maps to the offset of the character that forced it out, which
+   * is the first kept character after the whitespace run it stands for. That is
+   * the useful answer: a span starting at that space starts, in `raw`, at the
+   * run rather than inside it.
+   */
+  readonly map: readonly number[]
 }
 
 /**
@@ -252,7 +277,7 @@ export function sentenceOf(
   termStart: number,
   termEnd: number,
   options: SentenceOptions = {},
-): SentenceResult {
+): SegmentResult {
   /* Before any work, not after it — see `MAX_RUN_CHARS`. What lies across the
    * edges counts: it is squeezed and segmented too. */
   if (raw.length + (options.before?.length ?? 0) + (options.after?.length ?? 0) > MAX_RUN_CHARS) {
@@ -360,6 +385,7 @@ export function sentenceOf(
  */
 function squeeze(raw: string, termStart: number, termEnd: number): Squeezed {
   let text = ''
+  const map: number[] = []
   let owedSpace = false
   let pendingStart = false
   let start: number | null = null
@@ -393,6 +419,7 @@ function squeeze(raw: string, termStart: number, termEnd: number): Squeezed {
     if (separator) owedSpace = false
     if (owedSpace) {
       text += ' '
+      map.push(at)
       owedSpace = false
     }
     if (pendingStart && !separator) {
@@ -400,11 +427,13 @@ function squeeze(raw: string, termStart: number, termEnd: number): Squeezed {
       pendingStart = false
     }
     text += character
+    map.push(at)
     if (!separator) contentEnd = text.length
   }
 
   return {
     text,
+    map,
     /* Still pending means the term began in whitespace or separators with
      * nothing kept after them, so it starts where the text ran out — which
      * makes it empty, which is the `no-term` answer rather than a silently
@@ -463,6 +492,127 @@ function breaksBetween(head: string, tail: string, locale: string | undefined): 
   const joint = SEPARATOR.test(head.slice(-1)) || SEPARATOR.test(tail.slice(0, 1)) ? '' : ' '
   const seam = head.length + joint.length + (tail.length - tail.replace(LEADING_SEPARATORS, '').length)
   return merged(`${head}${joint}${tail}`, locale).some((span) => span.start === seam)
+}
+
+/**
+ * Every sentence in `raw`, as contiguous ranges in `raw`'s OWN offsets.
+ *
+ * This is the reading path's entry — `sentenceOf` answers "which sentence holds
+ * this selection", and read-aloud needs "what are all of them, in order" so it
+ * can speak one at a time and move by one. Both go through the SAME `squeeze`
+ * and the same `merged`, deliberately: two answers to where a sentence ends is
+ * the drift this file has already paid for twice, and the corpus holds them
+ * together (`sentenceOf.reading.test.ts`).
+ *
+ * ⚠️ **IT SQUEEZES FOR THE REASON THIS FILE'S HEADER ALREADY GIVES** — "Normalise,
+ * then segment — and the order is the whole point" — so the reading inherits that
+ * rule rather than meeting it again. `Intl.Segmenter` treats a newline as a
+ * paragraph separator (UAX #29 SB4) and an EPUB's source is hard-wrapped, so
+ * segmenting `raw` splits mid-clause at every source line break; here that would
+ * be a wrong "next sentence" and a wrong highlight on most of a book. The corpus
+ * row `sentence-in-source` is the evidence and predates this function.
+ *
+ * ⚠️ **AND FLATTENING NEWLINES TO SPACES IS NOT A SHORTCUT TO IT**, which was
+ * measured rather than assumed: a same-length substitution preserves offsets and
+ * still breaks `He met Mr.\n    Smith`, because the merge reads a segment's TAIL
+ * and that tail is then five spaces, so `endsInAbbreviation` never fires.
+ * Collapsing is what makes the tail `Mr. ` again. Only the full squeeze does
+ * both jobs.
+ *
+ * ⚠️ **THE RANGES ARE CONTIGUOUS AND COVER `raw` WHOLE, WHICH IS THE POINT.**
+ * Only the STARTS are mapped back; each range ends where the next begins and the
+ * last ends at `raw.length`. So no character of a book can fall between two
+ * sentences and go unread — a gap here would be a silently skipped line, which
+ * is exactly the failure a reader could never diagnose. `covers` asserts it.
+ *
+ * An empty or whitespace-only `raw` answers `[]` rather than one empty range:
+ * nothing to say is not a sentence, and a caller speaking an empty string gets
+ * an utterance that ends immediately and looks like an engine fault.
+ */
+/* ⚠️ **NO WORK BOUND, UNLIKE `sentenceOf` — MEASURED AND LEFT, NOT OVERLOOKED.**
+ * An audit asked for `MAX_RUN_CHARS` here too. Measured on 2026-09-21 (load ~4.7):
+ * 100 000 characters in 3.7 ms, 1 000 000 in 34.7 ms, 4 000 000 in 165 ms —
+ * linear, and a real chapter is well under the first. The worst case is a whole
+ * novel in one spine item, which costs one pause of about a sixth of a second
+ * when that section starts reading. A bound would turn that into refusing to read
+ * the section at all, which is the worse outcome by a long way; `sentenceOf`'s
+ * bound exists because a SELECTION can be arbitrarily large, and this is called
+ * once per section, not per gesture. */
+export function sentenceSpansOf(raw: string, locale: string | undefined): readonly Span[] {
+  const squeezed = squeeze(raw, 0, 0)
+
+  /* ⚠️ **NO EARLY RETURN FOR TEXT WITH NOTHING TO READ, AND THERE WAS ONE.** An
+   * `if (squeezed.text === '') return []` stood here, and the merge loop below
+   * relied on it to stop: with it gone, a silent section left one start that
+   * could never be merged and the loop spun for ever. Harmless while the guard
+   * held — but a mutation of the guard HUNG rather than failed, on the wall
+   * clock every time, because the spin was fifty lines from the line that had
+   * changed and Stryker's hit limit counts only that line. Two statements whose
+   * correctness depended on each other, a screen apart.
+   *
+   * Now the loop bounds itself and the last step drops a range with nothing to
+   * say, so a silent section falls through to `[]` on its own — the same answer,
+   * with no line that has to be right for another one to terminate.
+   *
+   * CLAMPED THROUGH THE MAP, never past it: `merged` spans index `text`, so
+   * every start but a degenerate one has an entry. `merged` of an empty text is
+   * empty, and the pin on the first start below still gives that one range. */
+  const starts = merged(squeezed.text, locale).map((span) => squeezed.map[span.start] ?? raw.length)
+
+  /* THE FIRST RANGE STARTS AT ZERO whatever the map says. Leading whitespace is
+   * squeezed away, so the first kept character can be some way in — and a first
+   * range beginning there would leave the run before it in no sentence at all,
+   * which is the coverage hole this function promises not to have. */
+  starts[0] = 0
+
+  /**
+   * ⚠️ **A RANGE HOLDING ONLY A SEPARATOR WAS A SENTENCE, AND IT IS AN UTTERANCE OF
+   * NOTHING.** `end > start` drops only a range of ZERO length, and U+2028 is one
+   * character — so `\u2028Hello.` produced a first "sentence" containing just the
+   * separator. The reading hands that to the engine, and an utterance that ends
+   * immediately reads as a fault rather than a pause; a run of separators produced
+   * one each.
+   *
+   * MERGED INTO A NEIGHBOUR RATHER THAN DROPPED, because dropping opens exactly the
+   * coverage hole this function promises not to have. The ranges are defined by
+   * their starts alone, so removing a start IS the merge: the range before it
+   * extends to where the next one begins.
+   */
+  const silent = (start: number, end: number) =>
+    raw.slice(start, end).replace(SOFT_HYPHEN_ALL, '').trim() === ''
+
+  const kept = starts.filter((start, at) =>
+    at === 0 ? true : !silent(start, starts[at + 1] ?? raw.length),
+  )
+
+  /* ⚠️ **THE FIRST RANGE CANNOT MERGE BACKWARD, SO IT MERGES FORWARD.** `starts[0]`
+     is pinned at 0 to keep the tiling total, so a LEADING separator survived the
+     pass above — which is the very case this exists for. Dropping the start after
+     it extends range 0 over both; a loop, because a run of them leaves several. */
+  /* BOUNDED BY ITS OWN LENGTH, so it stops whatever the text is: with one start
+     left there is nothing to merge into, and a section that is silent all the
+     way through is dropped whole by the last step instead. The bound is in the
+     loop's own condition, which is also what makes a mutation of it a
+     deterministic detection rather than a hang — see the note at the top. */
+  while (kept.length > 1 && silent(kept[0] as number, kept[1] as number)) kept.splice(1, 1)
+
+  const out: Span[] = []
+  for (const [at, start] of kept.entries()) {
+    const end = kept[at + 1] ?? raw.length
+    /* A range with nothing to say is dropped rather than spoken — which covers
+     * both a range of NO characters (two `merged` spans mapping to one raw
+     * offset) and a section that is silent from end to end, the case the
+     * removed early return used to answer.
+     *
+     * ⚠️ **THIS CARRIED A DIRECTIVE, AND THE DIRECTIVE HID A LIVE MUTANT.** It
+     * read `end > start` under `disable ConditionalExpression`, on the ground
+     * that fifteen probed inputs never produced a range of nothing. True — but
+     * the directive disabled the `false` replacement too, which drops EVERY
+     * sentence and is killed by any case at all. A directive covers every
+     * mutant of its mutator on the line, not the one the argument was about. */
+    if (!silent(start, end)) out.push({ start, end })
+  }
+  return out
 }
 
 /** The segments, with abbreviation runs — and a quotation's lowercase
@@ -540,7 +690,15 @@ function segmentsOf(text: string, locale: string | undefined): Span[] {
  *
  * The LEADING class stays `\s`: a separator before `Mr.` is a word boundary
  * like any other, and matching it there merges nothing. */
-const TITLE = /(?:^|[\s("'‘“])(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr)\. *$/
+/* ⚠️ **THE MILITARY AND CIVIC TITLES WERE MISSING, SO `Capt. Smith` WAS CUT IN
+ * TWO.** The list held the forms of address and nothing that precedes a rank or
+ * an office, and ICU splits after every one of them. Each added here is a word
+ * that in practice never ENDS a sentence — which is the only thing that makes a
+ * title safe to merge across — and none is a common word in its own right.
+ * `St.` stays for the reason given above; the false merge it causes and the one
+ * `INITIAL` causes (`option A. Next came B.`) are genuine ambiguities with no
+ * local disambiguator, and are the stated cost of this pass. */
+const TITLE = /(?:^|[\s("'‘“])(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|Capt|Lt|Col|Gen|Sgt|Cmdr|Adm|Rev|Hon|Gov|Sen|Rep|Fr|Mt)\. *$/
 /** `J.` in `Mr. J. R. Smith` — one capital and a stop, never a whole word. */
 const INITIAL = /(?:^|[\s("'‘“])\p{Lu}\. *$/u
 

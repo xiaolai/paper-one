@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Search } from 'lucide-react'
-import { filterCommands, type Command } from '../commands'
+import type { Command } from '../../core/capability'
+import { filterCommands } from '../commands'
 import { comboFor } from '../panes'
 import { ICON, type Platform } from '../../core/metrics'
 import { OverlaySheet } from './OverlaySheet'

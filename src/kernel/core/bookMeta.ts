@@ -3,7 +3,8 @@
  * shapes the reader session publishes and the rest of the app reads.
  *
  * Here, in core, because they are DATA and not React: `useBook` publishes
- * them, `reader/session.ts` produces them, intake writes one onto the shelf.
+ * them, `reader/session.ts` produces them (the metadata through
+ * `reader/readMeta.ts`, which intake calls too), intake writes one onto the shelf.
  * When they lived in `useBook.ts` the session had to import its own consumer
  * for a type, which was the one cycle in the tree — type-only, so it ran, and
  * still the wrong direction.

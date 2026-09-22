@@ -7,13 +7,9 @@ import { useFontsReady } from '../fontProbe'
 import { isPdf, isRanged, type BookSource } from '../../core/formats'
 import { applyBookVars, bookSheets, markPalette, noteSheets } from './bookCss'
 import { balanceRects } from './markGeometry'
-import {
-  ReaderSession,
-  type FootnoteRender,
-  type ForeignAnchor,
-  type MarkAnchor,
-  type SelectionSnapshot,
-} from './session'
+import { ReaderSession, type SelectionSnapshot } from './session'
+import type { FootnoteRender } from './footnotes'
+import type { ForeignAnchor, MarkAnchor } from './markPaint'
 import type { PasswordReason } from './makePdf'
 import { protectionOf } from './protection'
 import { PasswordSheet } from '../overlays/PasswordSheet'

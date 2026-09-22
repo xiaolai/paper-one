@@ -33,6 +33,7 @@ import type { CopyOutcome } from '../clipboard'
 import { Settings, type SettingsProps } from './Settings'
 import styles from './SidePane.module.css'
 import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
+import type { VoiceFacts } from '../reader/voiceChoice'
 
 /**
  * The pane's tools, in rail order.
@@ -179,8 +180,15 @@ export interface SidePaneProps {
   /**
    * The panes the composed capabilities contributed. They take the rail
    * AFTER the kernel's, in the composition's order, on the screens each one
-   * says it fits; ⌘1…5 stay on the kernel's. One generic icon for all of
-   * them — a contribution carries a label, not an icon.
+   * says it fits; the digit accelerators stay on the kernel's — see
+   * `PANE_SHORTCUTS` for which, rather than a range written here. Each draws
+   * the glyph its contribution NAMES, resolved through `CONTRIBUTION_ICONS`.
+   *
+   * (This said "⌘1…5" and "one generic icon for all of them — a contribution
+   * carries a label, not an icon". Both stopped being true: the kernel binds
+   * ⌘1…4, and `PaneContribution.icon` has been REQUIRED since Circle and Publish
+   * sat side by side as two identical jigsaw pieces. A comment describing the
+   * design it replaced is how the next reader rebuilds the old one.)
    */
   contributed: readonly PaneContribution[]
   /**
@@ -190,6 +198,18 @@ export interface SidePaneProps {
    * same panel and draws none.
    */
   markControls?: readonly MarkControl[] | undefined
+  /**
+   * What the Voice group needs from the HOST, as opposed to from app state.
+   *
+   * The reader's chosen voice and speed are `state`'s and are read here; the
+   * open book's language and the engine's voice list are facts about the
+   * machine and the book, which only the host can answer. Absent on a host with
+   * no reader — the group is not drawn, which is the same convention as
+   * `markControls` and the Page row's setters.
+   */
+  narration?:
+    | { readonly lang: string | null; readonly voices: readonly VoiceFacts[] }
+    | undefined
 }
 
 export function SidePane({
@@ -209,6 +229,7 @@ export function SidePane({
   settings,
   contributed,
   markControls,
+  narration,
   developer,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
@@ -260,6 +281,16 @@ export function SidePane({
   /* Once, not five times: the exact-optional-property workaround for a host
    * with no jump stack, spelled at every panel that takes one. */
   const goToProps = onGoTo ? { onGoTo } : {}
+  /* ⚠️ **TWO FACTS EACH DERIVED TWICE, AND EACH PAIR IS ONE FACT.** The Developer
+     panel and Settings both report whether diagnostics are recording, and a
+     contribution's reset key and the context it renders with must name the same
+     book — a key reading one id and a context another would start a pane over
+     against state it was not given. Named once, so neither pair can drift. */
+  const recording = developer?.recording ?? false
+  /* Null off the reader: the reader stays loaded behind the library, so
+     `book.bookId` still names the last book there, and `PaneContext` promises
+     `null`. See the note at the contribution below. */
+  const contributionBookId = state.screen === 'reader' ? book.bookId : null
   /* THE RAIL, BUILT WHEN ITS INPUTS CHANGE and not per render — the
    * contributed half asked `paneFits` per entry, which rescans `contributed`,
    * so a rail of n contributed panes cost n² on every keystroke anywhere.
@@ -345,7 +376,7 @@ export function SidePane({
         {pane === 'dev' && (
           <DevPane
             log={developer?.log}
-            recording={developer?.recording ?? false}
+            recording={recording}
             {...(developer?.onCopy ? { onCopy: developer.onCopy } : {})}
             {...(developer?.onCleared ? { onCleared: developer.onCleared } : {})}
           />
@@ -363,7 +394,29 @@ export function SidePane({
                     hidden: state.hiddenPanes,
                     onSetHidden: (target: string, hidden: boolean) =>
                       dispatch({ type: 'setPaneHidden', pane: target, hidden }),
-                    recording: developer?.recording ?? false,
+                    recording,
+                  },
+                }
+              : {})}
+            /* COMPOSED HERE, from the host's two facts and the reader's two
+               choices — the same shape as `developer` above, and for the same
+               reason: `state` and `dispatch` are here, the book's language and
+               the machine's voice list are not. */
+            {...(narration
+              ? {
+                  narration: {
+                    ...narration,
+                    chosen: state.readingVoice,
+                    rate: state.readingRate,
+                    sentenceGapMs: state.sentenceGapMs,
+                    paragraphGapMs: state.paragraphGapMs,
+                    notesAloud: state.readingNotesAloud,
+                    onVoice: (lang: string, voice: string) =>
+                      dispatch({ type: 'setReadingVoice', lang, voice }),
+                    onRate: (rate: number) => dispatch({ type: 'setReadingRate', rate }),
+                    onSentenceGap: (ms: number) => dispatch({ type: 'setSentenceGap', ms }),
+                    onParagraphGap: (ms: number) => dispatch({ type: 'setParagraphGap', ms }),
+                    onNotesAloud: () => dispatch({ type: 'toggleReadingNotes' }),
                   },
                 }
               : {})}
@@ -422,12 +475,12 @@ export function SidePane({
           <ContributionBoundary
             label={shown.contribution.label}
             id={shown.contribution.id}
-            resetKey={`${shown.contribution.id}:${state.screen === 'reader' ? book.bookId : null}`}
+            resetKey={`${shown.contribution.id}:${contributionBookId}`}
           >
             <ContributionBody
               id={shown.contribution.id}
               render={shown.contribution.render}
-              context={{ bookId: state.screen === 'reader' ? book.bookId : null }}
+              context={{ bookId: contributionBookId }}
             />
           </ContributionBoundary>
         )}
@@ -444,8 +497,9 @@ export function SidePane({
             was told which kernel tab was lit and heard every contributed one as
             an ordinary button. Adding the attribute to the second copy fixes
             today's difference and leaves tomorrow's; one list cannot drift.
-            The ICON is all that genuinely differs — a capability's pane has no
-            icon of its own to give, so every one of them wears the same mark. */}
+            The ICON is all that genuinely differs: a kernel pane's is its own,
+            and a capability's is the one its contribution names — not a shared
+            mark, which is what this comment used to say every one of them wore. */}
         {rail.map(({ id, label, Icon }) => (
           <button
             key={id}

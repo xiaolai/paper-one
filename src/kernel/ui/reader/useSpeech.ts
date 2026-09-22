@@ -7,9 +7,18 @@ import {
   rangeAt,
   speechAvailable,
   type DoneReason,
+  type SpeakPrefs,
   type SpokenText,
 } from './speech'
 import { placeSpokenWord, removeSpokenWord } from './rulerBand'
+import {
+  blockIndexAt,
+  stepParagraph as paragraphStep,
+  stepSentence as sentenceStep,
+  type ReadingPlan,
+} from './readingCursor'
+import { resolveSegmenterLocale } from './wordSnap/classify'
+import { sentenceSpansOf } from './wordSnap/sentenceOf'
 
 /**
  * Reading the book aloud, with the spoken word followed on the page.
@@ -33,26 +42,92 @@ import { placeSpokenWord, removeSpokenWord } from './rulerBand'
 export interface Speech {
   readonly available: boolean
   readonly speaking: boolean
+  /** Paused mid-sentence, with the engine holding its place. */
+  readonly paused: boolean
   /** False once the engine has shown it does not report word boundaries. */
   readonly followsWords: boolean
   start: () => void
   stop: () => void
+  /**
+   * THE CONTROL THAT NOW HAS A CALLER — see the note this replaces.
+   *
+   * The hook used to publish `paused`/`pause`/`resume` that nothing consumed,
+   * and an audit removed them on the rule that a public surface grows in the
+   * change that mounts it (round 1, #845). This is that change: the transport in
+   * `TitleBar` is the caller, and `Speaker`'s engine-level pair — kept all along
+   * for exactly this — is what they reach.
+   */
+  pause: () => void
+  resume: () => void
+  /**
+   * One sentence, one paragraph or one chapter, in reading order.
+   *
+   * ⚠️ **THESE ARE WHY THE READING IS SENTENCE-AT-A-TIME AT ALL.** Web Speech
+   * cannot seek inside an utterance, so with a whole section queued as one
+   * utterance none of them could exist — the only way to move was to cancel and
+   * start the chapter again. A sentence-sized utterance makes every one of them a
+   * cursor move followed by an ordinary `speak`.
+   */
+  stepSentence: (by: -1 | 1) => void
+  stepParagraph: (by: -1 | 1) => void
+  stepChapter: (by: -1 | 1) => void
+  /**
+   * Which directions `stepChapter` can actually go.
+   *
+   * ⚠️ **PUBLISHED SO THE TRANSPORT CAN LEAVE THE BUTTON OUT RATHER THAN DRAW A
+   * DEAD ONE.** Without it the control would have to guess, and the honest answer
+   * is known only here — see `SpeechPaging.chapter`, which a book that cannot
+   * place the reader in its own contents does not supply.
+   *
+   * ⚠️ **AND IT WAS ONE BOOLEAN FOR BOTH DIRECTIONS, WHICH IS A DEAD BUTTON BY
+   * ANOTHER ROUTE.** True meant "at least one direction exists", so in the first
+   * chapter of every book the transport drew a Previous control that could not
+   * go anywhere, and in the last chapter a Next one — the exact thing the flag
+   * was added to prevent, at the two places a reader is most likely to be. The
+   * caller already knew both answers separately and threw one away.
+   */
+  readonly chapters: { readonly back: boolean; readonly forward: boolean }
 }
 
-/* NO pause HERE, deliberately (audit round 1, #845). The hook published
- * `paused`/`pause`/`resume` that no control consumed — state, callbacks and
- * re-renders behind a surface nothing reached — and this codebase grows a
- * public surface in the change that mounts it, not ahead of one. `Speaker`
- * keeps its engine-level pair for the control that will want them. */
-
 /**
- * What the reading needs from the reader: one page forward, in READING
- * order — `next`, not `goRight`, because the voice is always ahead of where
- * it was, and in a right-to-left book ahead is to the left. The session's own
- * `next` is exactly this and is what the arrow key runs.
+ * What the reading needs from the reader.
+ *
+ * `next` is one page forward in READING order — not `goRight`, because the voice
+ * is always ahead of where it was, and in a right-to-left book ahead is to the
+ * left. The session's own `next` is exactly this and is what the arrow key runs.
  */
 export interface SpeechPaging {
   next: () => void
+  /**
+   * A whole chapter away, or absent where the book cannot say.
+   *
+   * ⚠️ **OPTIONAL, AND THE TRANSPORT HIDES THE BUTTON RATHER THAN DRAWING A DEAD
+   * ONE.** It needs the TOC and the reader's place in it — `stepChapter` in
+   * `tocOrder.ts` over `position.chapterHref` — and a book whose current spine
+   * item no contents entry points at genuinely has no next chapter to offer. A
+   * control that navigates nowhere is worse than one that is not there.
+   *
+   * ⚠️ **`go` ANSWERS WHETHER IT MOVED, AND IT USED TO ANSWER NOTHING.**
+   * Returning `void`, it could not be distinguished from a no-op — so
+   * `stepChapter` tore down the pending sentence gap and the section
+   * continuation BEFORE asking, and a press at either end of the book destroyed
+   * the only future work the reading had while leaving `speaking` true. The
+   * voice stopped, the transport went on showing a reading in progress, and
+   * nothing could restart it but the reader pressing stop.
+   *
+   * `can` is the same question WITHOUT taking the step, which is what a render
+   * needs and what an action cannot give it: asking by navigating is not asking.
+   * Both live under one field so they cannot drift into disagreeing about the
+   * same book — a separate `chapters` flag beside a `chapter` function is two
+   * statements of one fact, and this file has just finished removing a set of
+   * those.
+   */
+  chapter?:
+    | {
+        readonly can: (by: -1 | 1) => boolean
+        readonly go: (by: -1 | 1) => boolean
+      }
+    | undefined
 }
 
 /**
@@ -82,14 +157,76 @@ export const TURN_SETTLE_MS = 500
  * fallback is the slow case, and it is inside it too.
  */
 export const CONTINUE_TICK_MS = 800
+/**
+ * ⚠️ **A HEURISTIC, AND AN AUDIT SAID SO — THE FIX IS THE ONE `chapter.go` GOT,
+ * AND IT HAS NOWHERE TO LAND YET.** End of book is inferred from `next` moving
+ * nothing for this long, because `SpeechPaging.next` returns nothing: a section
+ * that takes longer than this to arrive reads as the book ending, and `next` is
+ * re-asked every tick without knowing whether the last one is still in flight.
+ *
+ * The chapter step had the same shape and was fixed by making `go` answer
+ * whether it moved. `next` cannot be fixed that way from here: it is the
+ * session's page turn over foliate's paginator, which does not report a
+ * position change, so a boolean returned by this layer would be a guess wearing
+ * a type. The number is sized against the slow case that was measured — a
+ * scanned PDF page decoding on pdf.js's JS fallback — which is why it is four
+ * seconds and not one. When the paginator reports whether a turn landed, this
+ * grace and the tick both go, and `next` becomes `(): boolean` beside `go`.
+ */
 export const CONTINUE_GRACE_MS = 4000
 
-export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
+/**
+ * The preferences an absent argument stands for.
+ *
+ * A MODULE CONSTANT rather than a `{}` default, so the identity is stable across
+ * renders. Nothing here puts it in a dependency array today — it is read through
+ * a ref, like the paging — but a fresh literal per render is a trap left lying
+ * for whoever does, and it costs one line not to leave it.
+ */
+const NO_PREFS: SpeakPrefs = {}
+
+/**
+ * ⚠️ **AN IMPLICIT STATE MACHINE, AND AN AUDIT ASKED FOR AN EXPLICIT ONE — THE
+ * ANSWER IS NOT YET, AND HERE IS WHY IT IS NOT "NO".**
+ *
+ * The finding is right about the shape: speaking, engine-paused, gap-paused,
+ * continuing and stopped are combinations of flags spread across state and a
+ * dozen refs, so a combination nothing intends is representable. Several of this
+ * branch's own fixes were exactly such a combination being reached — `paused`
+ * left set across a stop, a continuation surviving a pause, a gap destroyed by a
+ * chapter step that went nowhere.
+ *
+ * What a reducer alone would NOT fix is why the refs exist. The engine's
+ * callbacks, the gap timer and the continuation tick all fire OUTSIDE React's
+ * render, and each needs the value as of now — a reducer's state read from one
+ * of them is the value as of the last render, which is the stale-closure class
+ * this file documents again and again. So the real change is a reducer for the
+ * PHASE, with the refs reduced to mirrors of it, and every timer and engine
+ * callback dispatching a transition instead of writing flags. That is a rewrite
+ * of the reading's core with timing as the whole of its risk, and it is worth
+ * doing as its own change with its own measurement against a real engine — not
+ * folded into a cleanup where the tests it would be judged by are the ones it
+ * is rewriting.
+ *
+ * Until then each illegal combination found gets a test that names it, which is
+ * what the eight in `useSpeech.test.tsx` about pause, stop and stepping are.
+ */
+export function useSpeech(
+  doc: Document | null,
+  paging: SpeechPaging,
+  prefs: SpeakPrefs = NO_PREFS,
+): Speech {
   const [speaking, setSpeaking] = useState(false)
+  const [paused, setPaused] = useState(false)
   const [followsWords, setFollowsWords] = useState(true)
 
   const docRef = useRef<Document | null>(doc)
   const pagingRef = useRef(paging)
+  /* READ AT `speak` TIME, never captured — see `SpeakPrefs`. A reading walks
+   * many sections and each one is its own utterance, so a voice or rate the
+   * reader changes mid-chapter takes effect at the next section rather than
+   * needing the reading stopped and started again. */
+  const prefsRef = useRef(prefs)
   /* The collected text AND the document it was collected from, together.
    *
    * Kept as one value on purpose. Held apart, `docRef` is reassigned during
@@ -99,7 +236,71 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
    * how the highlight ends up on an unrelated word. Pairing them makes that
    * state unrepresentable: the handler uses the document the text came from,
    * and does nothing once that is no longer the document on screen. */
-  const spokenRef = useRef<{ doc: Document; spoken: SpokenText } | null>(null)
+  const spokenRef = useRef<{
+    doc: Document
+    spoken: SpokenText
+    /** The sentences and paragraphs of `spoken.text` — see `ReadingPlan`. */
+    plan: ReadingPlan
+    /** `documentLang`'s answer, kept so each sentence is spoken in it. */
+    lang: string | null
+  } | null>(null)
+  /**
+   * Which sentence of the plan is being spoken.
+   *
+   * ⚠️ **THE WORD OFFSETS THE ENGINE REPORTS ARE RELATIVE TO THE UTTERANCE, AND
+   * THE UTTERANCE IS NOW ONE SENTENCE.** So a boundary at index 0 is the first
+   * word of THIS sentence, not of the section, and resolving it against the
+   * collected text without adding the sentence's own start puts the highlight at
+   * the top of the chapter for every sentence after the first. That is the same
+   * trap `narrate`'s `byteSampleOffset` records — offsets that restart per
+   * segment and read as absolute — and it is why this ref exists rather than the
+   * cursor living only in state.
+   *
+   * A ref because the boundary handler is created once per utterance and reads
+   * it as of now, exactly as `followsRef` and `readingRef` are.
+   */
+  const cursorRef = useRef(0)
+  /**
+   * Where the text of the CURRENT utterance begins in the section's text.
+   *
+   * ⚠️ **THE REBASE USED TO LOOK THE SENTENCE UP BY CURSOR, WHICH MEANT ASKING A
+   * QUESTION THAT SOMETIMES HAS NO ANSWER.** A section the segmenter finds no
+   * sentence in is spoken whole — see `speakDocument` — and the cursor then
+   * points at a sentence that does not exist, so the handler needed a guard, and
+   * the guard's only outcome was that such a section lost its follow-along
+   * entirely. An OFFSET is what the arithmetic actually needs: the sentence's
+   * start when there is one, and zero when the utterance is the whole text.
+   * Nothing to look up, nothing to be undefined, and the band follows either.
+   */
+  const baseRef = useRef(0)
+  /**
+   * Speaks sentence `at`, answering whether there was one to speak.
+   *
+   * Written in the layout effect below rather than here, for the reason the rest
+   * of these are (#505): the `Speaker` is memoised so that the engine is not
+   * rebuilt under a live utterance, so its `onDone` cannot close over a callback
+   * that changes — it reaches the committed one through this.
+   */
+  /* Stryker disable next-line ArrowFunction,BooleanLiteral: the layout effect below writes this on every commit, before anything can read it. */
+  const advanceRef = useRef<(at: number) => boolean>(() => false)
+  /** `endReading`, committed — see `advanceRef` for why this is a ref. */
+  const endRef = useRef<() => void>(() => {})
+  /** `continueReading`, so `resume` can restart a walk `pause` suspended. */
+  const continueRef = useRef<() => void>(() => {})
+  /** A section walk `pause` took down, waiting for `resume` to start it again. */
+  const heldContinuation = useRef(false)
+  /**
+   * The silence between two sentences, while it is being waited out.
+   *
+   * ⚠️ **A GAP IS A STATE THE READING CAN BE INTERRUPTED IN**, which is the whole
+   * difficulty: the reader can stop, pause, step or turn a chapter during it, and
+   * every one of those must cancel it rather than let a sentence begin afterwards.
+   * `pendingNext` is what the timer was going to speak, kept separately so that a
+   * PAUSE can hold the gap and `resume` can pick it up — clearing the timer alone
+   * would lose the reader's place at the one moment they asked not to lose it.
+   */
+  const gapTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingNext = useRef<number | null>(null)
   /* Read inside the boundary handler, which is created once per utterance —
    * a captured `followsWords` would be the value at the time speech started. */
   const followsRef = useRef(true)
@@ -124,10 +325,31 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
   useLayoutEffect(() => {
     docRef.current = doc
     pagingRef.current = paging
+    prefsRef.current = prefs
     followsRef.current = followsWords
   })
 
   const available = useMemo(() => speechAvailable(), [])
+
+  /**
+   * Abandon a pause that has not finished, and what it was going to say.
+   *
+   * ⚠️ **NO `!== null` IN FRONT OF THE `clearTimeout`.** It read that way, and
+   * the guard could not change the answer: clearing a handle that is not there
+   * is specified to do nothing, so the branch and the straight line behaved
+   * identically on every input and no test could tell them apart. The coalesce
+   * is what the types need and the only thing left to get wrong — and getting it
+   * wrong leaves a live timer, which the cases below do see.
+   */
+  const clearGap = useCallback(
+    () => {
+      clearTimeout(gapTimer.current ?? undefined)
+      gapTimer.current = null
+      pendingNext.current = null
+    },
+    // Stryker disable next-line ArrayDeclaration: this reads only refs, so a constant list is a constant identity whatever is in it.
+    [],
+  )
 
   const clearContinuation = useCallback(() => {
     if (continuing.current !== null) {
@@ -136,98 +358,231 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
     }
   }, [])
 
-  const speaker = useMemo(() => {
-    if (!available) return null
+  const speaker = useMemo(
+    () => {
+      if (!available) return null
 
-    /** The reading is over: the controls go quiet and nothing is pending. */
-    const finish = () => {
-      readingRef.current = false
-      clearContinuation()
-      setSpeaking(false)
-      removeSpokenWord(docRef.current)
-    }
+      /** The reading is over — ONE transition, see `endReading`. */
+      const finish = () => endRef.current()
 
-    /**
-     * The section's text ran out and the reading has not: walk forward until
-     * the next section arrives — its document effect speaks it and cancels this
-     * — or the grace runs out, which is the end of the book.
-     */
-    const continueReading = () => {
-      removeSpokenWord(docRef.current)
-      spokenRef.current = null
-      turnedAt.current = null
-      const from = docRef.current
-      const started = Date.now()
-      const tick = () => {
-        continuing.current = null
-        if (!readingRef.current) return
-        /* Already moved: the new document's effect is about to speak it, or
-         * has. Asking `next` again here would turn its first page away before
-         * a word of it was read. `docRef` commits in the layout effect above,
-         * which runs before that document effect, so this sees the arrival
-         * first. */
-        if (docRef.current !== from) return
-        if (Date.now() - started >= CONTINUE_GRACE_MS) {
-          finish()
-          return
-        }
-        pagingRef.current.next()
-        continuing.current = setTimeout(tick, CONTINUE_TICK_MS)
-      }
-      tick()
-    }
-
-    return new Speaker({
-      onWord: (index, length) => {
-        const current = spokenRef.current
-        if (!current || !followsRef.current) return
-        // The section changed under the utterance; the words being reported no
-        // longer exist on screen.
-        if (current.doc !== docRef.current) return
-        const target = current.doc
-        const range = rangeAt(current.spoken, target, index, length)
-        if (!range) return
-        const placed = placeOfRange(range, target)
-        if (!placed) return
-        // Viewport coordinates, unadjusted: `placeSpokenWord` converts into
-        // body's space, which is invariant under scrolling.
-        placeSpokenWord(target, placed.box)
-
-        if (placed.place === 'visible') {
-          turnedAt.current = null
-          return
-        }
-        if (placed.place !== 'ahead') return
-        const now = Date.now()
-        if (turnedAt.current !== null && now - turnedAt.current < TURN_SETTLE_MS) return
-        turnedAt.current = now
-        pagingRef.current.next()
-      },
-      onDone: (reason: DoneReason) => {
-        /* ⚠️ **`taken` MUST NOT CONTINUE, AND IT USED TO ARRIVE AS `ended`.**
-         * The lookup popup's pronunciation speaks through the same single
-         * engine, and `speak` cancels whatever is on it — so the reading's
-         * utterance ended, its `end` event fired, and this read it as "the
-         * section finished" and called `continueReading()`: pages walking
-         * forward hunting the next section while the reader listened to one
-         * word being pronounced. `engineHeldBy` in `speech.ts` is what tells
-         * the two apart now. Treated as an end rather than an error, because
-         * nothing failed — the reader asked for something else. */
-        if (reason === 'error' || reason === 'taken' || !readingRef.current) {
-          finish()
-          return
-        }
-        continueReading()
-      },
-      onNoBoundaries: () => {
-        // Reading continues; only the follow-along is dropped. Leaving the
-        // band parked on the first word for the rest of the chapter would be
-        // worse than not drawing one.
-        setFollowsWords(false)
+      /**
+       * The section's text ran out and the reading has not: walk forward until
+       * the next section arrives — its document effect speaks it and cancels this
+       * — or the grace runs out, which is the end of the book.
+       */
+      const continueReading = () => {
         removeSpokenWord(docRef.current)
-      },
-    })
-  }, [available, clearContinuation])
+        spokenRef.current = null
+        turnedAt.current = null
+        const from = docRef.current
+        const started = Date.now()
+        const tick = () => {
+          continuing.current = null
+          if (!readingRef.current) return
+          /* Already moved: the new document's effect is about to speak it, or
+           * has. Asking `next` again here would turn its first page away before
+           * a word of it was read. `docRef` commits in the layout effect above,
+           * which runs before that document effect, so this sees the arrival
+           * first. */
+          if (docRef.current !== from) return
+          if (Date.now() - started >= CONTINUE_GRACE_MS) {
+            finish()
+            return
+          }
+          pagingRef.current.next()
+          continuing.current = setTimeout(tick, CONTINUE_TICK_MS)
+        }
+        tick()
+      }
+
+      /* Published so `resume` can restart a walk `pause` suspended — the memo owns
+       * `continueReading`, and everything outside it reaches in through a ref. */
+      continueRef.current = continueReading
+
+      return new Speaker({
+        onWord: (index, length) => {
+          const current = spokenRef.current
+          if (!current || !followsRef.current) return
+          // The section changed under the utterance; the words being reported no
+          // longer exist on screen.
+          if (current.doc !== docRef.current) return
+          const target = current.doc
+          /* REBASED ONTO THE UTTERANCE — see `baseRef`. `index` counts from the
+           * start of what was spoken, which is one sentence, so without its own
+           * offset every sentence after the first would highlight words at the top
+           * of the chapter. */
+          const range = rangeAt(current.spoken, target, baseRef.current + index, length)
+          if (!range) return
+          const placed = placeOfRange(range, target)
+          if (!placed) return
+          // Viewport coordinates, unadjusted: `placeSpokenWord` converts into
+          // body's space, which is invariant under scrolling.
+          placeSpokenWord(target, placed.box)
+
+          if (placed.place === 'visible') {
+            turnedAt.current = null
+            return
+          }
+          if (placed.place !== 'ahead') return
+          const now = Date.now()
+          if (turnedAt.current !== null && now - turnedAt.current < TURN_SETTLE_MS) return
+          turnedAt.current = now
+          pagingRef.current.next()
+        },
+        onDone: (reason: DoneReason) => {
+          /* ⚠️ **`taken` MUST NOT CONTINUE, AND IT USED TO ARRIVE AS `ended`.**
+           * The lookup popup's pronunciation speaks through the same single
+           * engine, and `speak` cancels whatever is on it — so the reading's
+           * utterance ended, its `end` event fired, and this read it as "the
+           * section finished" and called `continueReading()`: pages walking
+           * forward hunting the next section while the reader listened to one
+           * word being pronounced. `engineHeldBy` in `speech.ts` is what tells
+           * the two apart now. Treated as an end rather than an error, because
+           * nothing failed — the reader asked for something else. */
+          /* ⚠️ **`no-voice` ENDS THE READING, AND WOULD NOT HAVE BY ITSELF.** Every
+             reason below this falls through to "that sentence finished, go on" —
+             so a refusal would have walked the book sentence by sentence, then
+             page by page, refusing each one. Nothing here can be read until the
+             voices change, and the Listen control says so. */
+          if (reason === 'error' || reason === 'taken' || reason === 'no-voice' || !readingRef.current) {
+            finish()
+            return
+          }
+          /* THE NEXT SENTENCE FIRST, AND THE NEXT SECTION ONLY WHEN THERE IS NONE.
+           *
+           * `speakSentenceRef` answers false for a cursor past the last sentence,
+           * which is exactly the condition that used to be the whole of this
+           * branch: before the reading was sentence-at-a-time, an utterance ending
+           * WAS the section ending. Now it usually is not, and the distinction is
+           * the one `continueReading` must not be asked to make — it walks pages
+           * hunting the next section, which mid-section would turn the page away
+           * from prose nobody had read. */
+          if (advanceRef.current(cursorRef.current + 1)) return
+          continueReading()
+        },
+        onNoBoundaries: () => {
+          // Reading continues; only the follow-along is dropped. Leaving the
+          // band parked on the first word for the rest of the chapter would be
+          // worse than not drawing one.
+          setFollowsWords(false)
+          removeSpokenWord(docRef.current)
+        },
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: all three are built once — `available` from an empty list, both clears from no dependency — so this list never moves.
+    [available, clearGap, clearContinuation],
+  )
+
+  /**
+   * Speak one sentence of the plan, and say whether there was one.
+   *
+   * FALSE IS A REAL ANSWER AND NOT A FAILURE: it means the cursor has run off
+   * the end of the section, which is how `onDone` tells "that sentence finished"
+   * from "this section finished" without either of them counting sentences.
+   *
+   * ⚠️ **`prefsRef` IS READ HERE, PER SENTENCE, AND THAT IS THE SPEED CONTROL.**
+   * Web Speech fixes an utterance's rate when it is created, so a rate change
+   * could never reach a section-long utterance — the old comment said as much,
+   * and promised the change would land "at the next section". A sentence-sized
+   * utterance means it lands at the next SENTENCE, a few seconds away, with no
+   * code to make it happen. Re-speaking the current sentence to apply it sooner
+   * was considered and rejected: the reader would hear the same words twice.
+   */
+  const speakSentence = useCallback(
+    (at: number): boolean => {
+      /* ⚠️ **ASSERTED RATHER THAN CHECKED, BECAUSE THE CHECKS COULD NOT ANSWER
+         NO.** Three guards stood here — no engine, no plan, no sentence at `at`
+         — and every caller had already settled all three: `start` refuses to
+         mark a reading under way without an engine, `speakDocument` sets the
+         plan before anything can ask for a sentence of it, and the three that
+         pass an index (`speakDocument`, `moveTo` via the cursor functions,
+         `resume` from a gap it set itself) each pass one the plan has. So they
+         were lines no test could reach, and the mutation of each failed nothing.
+         What they did instead was answer `false` — "there was nothing to speak"
+         — for a state that means the hook's own bookkeeping has broken, which is
+         the Listen control staying lit over silence. Wrong here now throws. */
+      const current = spokenRef.current!
+      const sentence = current.plan.sentences[at]!
+      cursorRef.current = at
+      baseRef.current = sentence.start
+      turnedAt.current = null
+      setPaused(false)
+      /* ⚠️ **THE PREVIOUS SENTENCE'S BAND GOES BEFORE THIS ONE SPEAKS, AND IT USED
+       * TO STAY.** The follow-along is only moved by a boundary event, and an
+       * utterance can end without reporting one — `BOUNDARY_GRACE_MS` measures
+       * 2.5 s of speech and a sentence is often shorter, so nothing concludes the
+       * engine is silent and nothing clears the highlight. The band then sat on
+       * the last word of the sentence BEFORE while a different one was read: a
+       * highlight pointing confidently at the wrong place, which is worse than
+       * none. Removed here rather than in the boundary handler, because the case
+       * is a sentence that produces no boundary at all. */
+      removeSpokenWord(current.doc)
+      return speaker!.speak(
+        current.spoken.text.slice(sentence.start, sentence.end),
+        current.lang,
+        prefsRef.current,
+      )
+    },
+    // Stryker disable next-line ArrayDeclaration: `speaker` is memoised on values that never move, so this list and an empty one rebuild this callback equally often — never.
+    [speaker],
+  )
+
+  /**
+   * Move to sentence `at` after the silence that belongs before it.
+   *
+   * Answers whether there WAS a sentence there — false is how `onDone` tells a
+   * sentence ending from a section ending without either of them counting.
+   *
+   * A PARAGRAPH BOUNDARY USES THE PARAGRAPH GAP ALONE, not both added: the
+   * setting is labelled "between paragraphs", so a reader who sets it to zero
+   * means no pause there, and adding the sentence gap underneath would make zero
+   * impossible to ask for.
+   *
+   * A gap of zero speaks straight away rather than through a zero timer, because
+   * `setTimeout(0)` still yields and a reader who turned the pause off asked for
+   * the reading not to hesitate.
+   */
+  const advance = useCallback(
+    (at: number): boolean => {
+      const current = spokenRef.current
+      if (!current || !current.plan.sentences[at]) return false
+
+      /* ⚠️ **NO `at > 0` IN FRONT OF THIS.** It read that way, and `advance` has
+         exactly one caller — the engine's own `onDone`, with
+         `cursorRef.current + 1` — so `at` is never 0 and the guard could not
+         change the answer for any reading. What it did do was hide the
+         comparison beside it from measurement: an equivalent operand on the same
+         line as a live one cannot be excused with a directive without excusing
+         both. The first sentence of a section is spoken by `speakDocument`,
+         which does not come through here. */
+      const opensParagraph =
+        blockIndexAt(current.plan, at) !== blockIndexAt(current.plan, at - 1)
+      const prefs = prefsRef.current
+      const ms = opensParagraph ? (prefs.paragraphGapMs ?? 0) : (prefs.sentenceGapMs ?? 0)
+      if (ms <= 0) {
+        speakSentence(at)
+        return true
+      }
+
+      pendingNext.current = at
+      gapTimer.current = setTimeout(() => {
+        gapTimer.current = null
+        pendingNext.current = null
+        /* ⚠️ **NO `readingRef` CHECK HERE, AND IT USED TO READ ONE.** A reading
+         * stopped during the pause must stay stopped — and what makes that true
+         * is that every path which clears the flag clears this timer in the same
+         * breath (`endReading` calls `clearGap`, and so do `moveTo`, the chapter
+         * step and the document effect). So the check could not answer no, and a
+         * mutation of it failed no test. The clear is the thing that must hold,
+         * and 'says nothing more when the reader stops during a gap' is what
+         * holds it. */
+        speakSentence(at)
+      }, ms)
+      return true
+    },
+    // Stryker disable next-line ArrayDeclaration: `speakSentence` follows only `speaker`, which never moves — as above.
+    [speakSentence],
+  )
 
   /**
    * Speak one document, and say whether anything was queued.
@@ -239,15 +594,57 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
    * why `start` marks the reading as under way only once this has answered.
    */
   const speakDocument = useCallback(
-    (target: Document): boolean => {
+    (target: Document, from = 0): boolean => {
       if (!speaker) return false
-      const spoken = collectText(target)
-      spokenRef.current = { doc: target, spoken }
+      /* THE READER'S SKIP CHOICE, from the same prefs the voice and the gaps
+         come from — so the words the reading speaks and the words the export
+         writes are decided by one value rather than two defaults. */
+      const spoken = collectText(target, { notes: prefs.notesAloud ?? false })
+      const lang = documentLang(target)
+      /* THE LOCALE IS RESOLVED, NOT PASSED THROUGH. `sentenceSpansOf` constructs
+       * an `Intl.Segmenter` with it, and a book may declare anything at all in
+       * `dc:language` — `resolveSegmenterLocale` is the function that already
+       * answers which tags are safe to build one from, and `undefined` is its
+       * answer for a book that declares none, which the segmenter reads as "let
+       * each sentence speak for itself by script". */
+      const plan: ReadingPlan = {
+        sentences: sentenceSpansOf(spoken.text, resolveSegmenterLocale(lang)),
+        blocks: spoken.blocks,
+      }
+      spokenRef.current = { doc: target, spoken, plan, lang }
       turnedAt.current = null
-      return speaker.speak(spoken.text, documentLang(target))
+
+      /* ⚠️ **A SECTION WITH NO SENTENCES GOES TO THE ENGINE ANYWAY, AND SKIPPING
+       * THAT STALLED THE READING ON EVERY PLATE.** `speakSentence` answers false
+       * without queueing anything, so a plate or a full-page image queued no
+       * utterance, `onDone('empty')` never fired, and the continuation that walks
+       * past such a section was never started — the voice simply stopped, with
+       * the Listen control still on. Caught by `reads through a section with
+       * nothing to read`, which is the case that existed for it.
+       *
+       * Handing the collected text to `speak` is what the reading did before it
+       * was sentence-at-a-time, so the empty section keeps its one tested path
+       * instead of gaining a second. */
+      if (plan.sentences.length === 0) {
+        cursorRef.current = 0
+        /* The whole text IS the utterance here, so a boundary's index is already
+           an offset into it. */
+        baseRef.current = 0
+        return speaker.speak(spoken.text, lang, prefsRef.current)
+      }
+      return speakSentence(from)
     },
-    [speaker],
+    // Stryker disable next-line ArrayDeclaration: both follow `speaker`, which never moves — as above.
+    [speaker, speakSentence],
   )
+
+  /* COMMITTED, like the refs above, and for the same reason: the `Speaker` is
+   * memoised so a live utterance is never orphaned, so its `onDone` reaches this
+   * through a ref rather than closing over a value that changes. */
+  useLayoutEffect(() => {
+    advanceRef.current = advance
+    endRef.current = endReading
+  })
 
   const start = useCallback(() => {
     const target = docRef.current
@@ -263,13 +660,206 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
     setSpeaking(queued)
   }, [speaker, speakDocument, clearContinuation])
 
-  const stop = useCallback(() => {
-    readingRef.current = false
-    clearContinuation()
-    speaker?.stop()
-    setSpeaking(false)
-    removeSpokenWord(docRef.current)
-  }, [speaker, clearContinuation])
+  /**
+   * The reading is over, however it ended.
+   *
+   * ⚠️ **FOUR PATHS USED TO DECIDE THIS INDEPENDENTLY AND THEY HAD DIVERGED.**
+   * `finish` cleared the gap, the continuation, `speaking` and the band but NOT
+   * `paused`, and never touched the engine; `stop` did all six; closing the book
+   * left `paused` set and the band in place; unmount left both flags. So an
+   * engine error, another speaker taking the engine, or the reader closing the
+   * book WHILE PAUSED left `{ speaking: false, paused: true }` — which the public
+   * type defines as "paused mid-sentence" and there was no sentence.
+   *
+   * ⚠️ **AND THE ENGINE IS STOPPED ON EVERY PATH, INCLUDING THE ONE WHERE THE
+   * UTTERANCE HAS ALREADY ENDED.** `Speaker.stop` is what normalises the shared
+   * engine's pause flag, which `cancel()` does not clear — so a terminal
+   * transition that skipped it left the engine paused for whoever spoke next.
+   * Where this speaker no longer holds the engine, `stop` returns without
+   * touching it, which is the `taken` case and is right.
+   */
+  const endReading = useCallback(
+    () => {
+      readingRef.current = false
+      heldContinuation.current = false
+      clearGap()
+      clearContinuation()
+      speaker?.stop()
+      setSpeaking(false)
+      setPaused(false)
+      removeSpokenWord(docRef.current)
+    },
+    // Stryker disable next-line ArrayDeclaration: `speaker` and the two clears are all built once — as above.
+    [speaker, clearGap, clearContinuation],
+  )
+
+  const stop = endReading
+
+  /**
+   * ⚠️ **PAUSING DURING A GAP HOLDS THE GAP, AND FORGETTING TO WOULD START THE
+   * NEXT SENTENCE OVER A READER WHO HAD JUST ASKED FOR SILENCE.** The engine has
+   * nothing to pause between two utterances, so the only thing holding the
+   * reading there is our own timer: it is cancelled, and what it was going to say
+   * is kept in `pendingNext` for `resume`.
+   */
+  const pause = useCallback(
+    () => {
+      if (!readingRef.current) return
+      if (gapTimer.current !== null) {
+        /* ⚠️ **THE ENGINE IS NOT TOUCHED DURING A GAP, AND TOUCHING IT WAS A BUG.**
+         * Between two utterances nothing is being spoken, and
+         * `speechSynthesis.pause()` sets a flag on the ENGINE rather than on an
+         * utterance — so pausing here and then queueing the held sentence on
+         * `resume` would queue it behind a paused engine and it would never start.
+         * The only thing holding the reading in a gap is our own timer, so
+         * cancelling it is the whole of the pause. */
+        clearTimeout(gapTimer.current)
+        gapTimer.current = null
+        setPaused(true)
+        return
+      }
+      /**
+       * ⚠️ **A PAUSE BETWEEN SECTIONS USED TO CLAIM SUCCESS AND STOP NOTHING.**
+       * `continueReading` walks pages looking for the next section, and while it
+       * walks there is no live utterance — so `speaker.pause()` had nothing to
+       * pause and returned quietly, `setPaused(true)` said it had worked, and the
+       * timer went on turning pages under a reader who had asked for silence.
+       * Worse, the next document then began speaking and cleared `paused` itself,
+       * so the pause vanished without the reader touching anything.
+       *
+       * The walk is OURS, like the sentence gap, so pausing it means taking the
+       * timer down and remembering that it was up.
+       */
+      if (continuing.current !== null) {
+        clearContinuation()
+        heldContinuation.current = true
+        setPaused(true)
+        return
+      }
+      /* `!` and not `?.`: `pause` has already returned unless a reading is under
+         way, and a reading cannot be under way without an engine — `start`
+         refuses to set the flag without one. An optional call here is a branch
+         no test can take. */
+      speaker!.pause()
+      setPaused(true)
+    },
+    // Stryker disable next-line ArrayDeclaration: as above, for `speaker` and a clear that has no dependency.
+    [speaker, clearContinuation],
+  )
+
+  /** Picks the held sentence up where the gap left it — see `pause`. */
+  const resume = useCallback(
+    () => {
+      if (!readingRef.current) return
+      const held = pendingNext.current
+      setPaused(false)
+      /* The section walk, if that is what was paused — a fresh grace, because the
+         reader's pause is not evidence that the book has ended. */
+      if (heldContinuation.current) {
+        heldContinuation.current = false
+        continueRef.current()
+        return
+      }
+      /* HELD IN A GAP: the engine was never paused (see `pause`), so there is
+         nothing to release — the sentence just begins. */
+      if (held !== null) {
+        /* SPOKEN NOW RATHER THAN AFTER THE REST OF THE GAP: the reader asked to go
+           on, and making them wait out a silence they interrupted is answering a
+           different question. */
+        pendingNext.current = null
+        speakSentence(held)
+        return
+      }
+      /* `!` as in `pause`, and for the same reason. */
+      speaker!.resume()
+    },
+    // Stryker disable next-line ArrayDeclaration: as above, for `speaker` and `speakSentence`.
+    [speaker, speakSentence],
+  )
+
+  /**
+   * Move the cursor and speak from there.
+   *
+   * ⚠️ **FORWARD OFF THE END OF A SECTION DOES NOTHING, DELIBERATELY.** The
+   * sentence being spoken is still playing, and when it ends `onDone` finds no
+   * next sentence and hands over to `continueReading`, which is the machinery
+   * that crosses a section boundary correctly — walking pages until the next
+   * document arrives, with the grace that tells the end of a book from a slow
+   * turn. Duplicating that here would give two answers to one question, and
+   * calling `paging.next()` instead would turn the page out from under prose
+   * still being read.
+   *
+   * ⚠️ **BACKWARD OFF THE START RE-SPEAKS THE FIRST SENTENCE** rather than doing
+   * nothing, on the same reasoning as `stepParagraph`'s back button: a reader
+   * pressing back at the start of a chapter means "say that again".
+   */
+  const moveTo = useCallback(
+    (next: number | null) => {
+      if (!readingRef.current) return
+      if (next === null) return
+      clearGap()
+      clearContinuation()
+      /* NO `setSpeaking(true)` HERE, AND THERE WAS ONE. `moveTo` has already
+         returned unless a reading is under way, and the only writers of that
+         flag — `start` and `endReading` — set `speaking` in the same breath, so
+         it was already true: the call could not change anything, and neither
+         its removal nor its argument could be told apart by any test. */
+      speakSentence(next)
+    },
+    // Stryker disable next-line ArrayDeclaration: `speakSentence` and the two clears never move — as above.
+    [speakSentence, clearGap, clearContinuation],
+  )
+
+  /**
+   * A step through the plan, by whichever unit `cursor` counts in.
+   *
+   * ⚠️ **ONE BODY, AND IT WAS TWO THAT DIFFERED BY A NAME.** `stepSentence` and
+   * `stepParagraph` were copies whose only difference was which cursor function
+   * they called — and the part they shared is the part with the decision in it:
+   * falling off the START of the section replays the current sentence rather
+   * than doing nothing, while falling off the END hands over to the continuation.
+   * Two copies of that rule are two chances for one of them to be edited alone.
+   */
+  const stepBy = useCallback(
+    (cursor: (plan: ReadingPlan, at: number, by: -1 | 1) => number | null, by: -1 | 1) => {
+      const current = spokenRef.current
+      if (!current) return
+      const next = cursor(current.plan, cursorRef.current, by)
+      moveTo(next ?? (by === -1 ? cursorRef.current : null))
+    },
+    // Stryker disable next-line ArrayDeclaration: `moveTo` follows only callbacks that never move — as above.
+    [moveTo],
+  )
+  // Stryker disable next-line ArrayDeclaration: `stepBy` follows only `moveTo`, which never moves — as above.
+  const stepSentence = useCallback((by: -1 | 1) => stepBy(sentenceStep, by), [stepBy])
+  // Stryker disable next-line ArrayDeclaration: as above, for the same `stepBy`.
+  const stepParagraph = useCallback((by: -1 | 1) => stepBy(paragraphStep, by), [stepBy])
+
+  /**
+   * A whole chapter away.
+   *
+   * The reading is not restarted here and the cursor is not moved: navigating
+   * changes the spine document, and the document effect below is what speaks the
+   * new one — the same path a reader taking a chapter from the contents already
+   * goes down while listening. Nothing to do but ask.
+   */
+  const stepChapter = useCallback(
+    (by: -1 | 1) => {
+      if (!readingRef.current) return
+      /* ASKED FIRST, TORN DOWN AFTER — and it used to be the other way round.
+         A `chapter` that declines is a legitimate answer at either end of a
+         book, and clearing ahead of it threw away the pending gap or the
+         section continuation for a navigation that never happened: the voice
+         went silent with `speaking` still true and no timer left to wake it.
+         Nothing is cleared unless the document is actually changing, in which
+         case the document effect below takes over the reading. */
+      if (pagingRef.current.chapter?.go(by) !== true) return
+      clearGap()
+      clearContinuation()
+    },
+    // Stryker disable next-line ArrayDeclaration: neither clear has a dependency, so this list is constant either way.
+    [clearGap, clearContinuation],
+  )
 
   /* The spine document changing is a step INSIDE the reading, not its end.
    *
@@ -286,16 +876,17 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
    * to make every chapter break a silence. */
   useEffect(() => {
     if (!readingRef.current) return
+    clearGap()
     clearContinuation()
     if (!doc) {
-      readingRef.current = false
-      speaker?.stop()
-      setSpeaking(false)
+      /* The book closing is an END, and it used to leave `paused` set and the
+         band drawn in a document that was going away. */
+      endReading()
       return
     }
     const queued = speakDocument(doc)
     if (queued) setSpeaking(true)
-  }, [speaker, doc, speakDocument, clearContinuation])
+  }, [speaker, doc, speakDocument, endReading, clearGap, clearContinuation])
 
   useEffect(() => {
     const leaving = doc
@@ -309,15 +900,52 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
    * outlives an unmount and would go on reading a book that has been closed. */
   useEffect(
     () => () => {
-      readingRef.current = false
-      clearContinuation()
-      speaker?.stop()
+      endReading()
     },
-    [speaker, clearContinuation],
+    // Stryker disable next-line ArrayDeclaration: `endReading` follows only values that never move — as above.
+    [endReading],
   )
 
+  /* READ FROM THE PROP, not from `pagingRef`: this decides what is RENDERED, so
+   * it has to be a value the render sees change. The ref exists for callbacks
+   * that need the value as of now, which is the opposite problem.
+   *
+   * MEMOISED ON THE TWO BOOLEANS rather than built inline, because `Speech` is
+   * itself a memo and an object literal here would be a fresh identity on every
+   * render — which would make every consumer of `Speech` re-render on every one
+   * of the reading's own state changes, several a second while the voice runs. */
+  const canBack = paging.chapter?.can(-1) ?? false
+  const canForward = paging.chapter?.can(1) ?? false
+  const chapters = useMemo(() => ({ back: canBack, forward: canForward }), [canBack, canForward])
+
   return useMemo<Speech>(
-    () => ({ available, speaking, followsWords, start, stop }),
-    [available, speaking, followsWords, start, stop],
+    () => ({
+      available,
+      speaking,
+      paused,
+      chapters,
+      followsWords,
+      start,
+      stop,
+      pause,
+      resume,
+      stepSentence,
+      stepParagraph,
+      stepChapter,
+    }),
+    [
+      available,
+      speaking,
+      paused,
+      chapters,
+      followsWords,
+      start,
+      stop,
+      pause,
+      resume,
+      stepSentence,
+      stepParagraph,
+      stepChapter,
+    ],
   )
 }

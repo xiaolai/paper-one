@@ -71,7 +71,7 @@ import {
 const TEXT_NODE = 3
 
 /** SOFT HYPHEN. Invisible, inside words, and not the reader's to see. */
-const SOFT_HYPHEN = /­/g
+const SOFT_HYPHEN = /\u00ad/g
 const LEADING_SPACE = /^\s+/
 const TRAILING_SPACE = /\s+$/
 

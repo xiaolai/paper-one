@@ -234,7 +234,7 @@ export const SENTENCE_CORPUS: readonly SentenceCorpusRow[] = [
   {
     id: 'soft-hyphen',
     tags: ['latin', 'invisible'],
-    raw: 'Alpha one. The hy­phen­ation here. Beta two.',
+    raw: 'Alpha one. The hy\u00adphen\u00adation here. Beta two.',
     termStart: 15,
     termEnd: 28,
     locale: 'en',

@@ -16,6 +16,9 @@ import {
   LINE,
   MINIMUM_SIZES,
   PANE_W,
+  PARAGRAPH_GAP,
+  READING_RATE,
+  SENTENCE_GAP,
   SPACING,
   TAG_LINE,
   cellHeightFor,
@@ -43,6 +46,7 @@ import {
   proseGrid,
   readingStep,
   stepIndexForSize,
+  stepIndexOf,
 } from './metrics'
 
 /** Where the measure track's centre falls inside the whole prose grid. */
@@ -74,6 +78,16 @@ describe('the stepped scales', () => {
     ['figure width', FIGURE_WIDTHS, '%', 95],
     ['figure height', FIGURE_HEIGHTS, 'vh', 95],
     ['minimum size', MINIMUM_SIZES, 'px', 0],
+    /* ⚠️ **THESE THREE WERE MISSING, AND THEY ARE THE NEWEST SCALES IN THE
+       FILE.** The invariant this case holds — ordered, own unit, a default step
+       whose value is what a reader who never opens the pane gets — applied to
+       every scale the pane draws except read-aloud's, so `READING_RATE`'s
+       ordering, `SENTENCE_GAP`'s default and `PARAGRAPH_GAP`'s unit could each
+       regress with the suite green. A shared invariant that does not cover the
+       newest members is a guard that weakens every time the file grows. */
+    ['reading rate', READING_RATE, 'x', 1],
+    ['sentence gap', SENTENCE_GAP, 'ms', 150],
+    ['paragraph gap', PARAGRAPH_GAP, 'ms', 600],
   ])('%s runs in order, in its own unit, and starts where the app has always been', (_name, scale, unit, standing) => {
     expect(scale.unit).toBe(unit)
     expect(scale.steps.length).toBeGreaterThan(1)
@@ -81,6 +95,40 @@ describe('the stepped scales', () => {
     expect(stepAt(scale, scale.def)).toBe(standing)
     // Ordered, low to high: a step is a direction, and the pane draws them in this order.
     expect([...scale.steps].sort((a, b) => a - b)).toEqual([...scale.steps])
+  })
+})
+
+describe('stepIndexOf', () => {
+  /**
+   * The other direction of a stepped scale: a stored VALUE back to the step a
+   * slider sits on. `Settings.tsx` asks it for read-aloud's three scales, and
+   * nothing asked it here — so its body could be emptied, and the function it
+   * hands the scan for reading a step's number could answer `undefined`, with
+   * the suite green. Both come back as index 0, which is why a case whose answer
+   * is not 0 is the one that matters.
+   */
+  it('answers the step a stored value sits on', () => {
+    expect(stepIndexOf(READING_RATE, 1.25)).toBe(3)
+    expect(stepIndexOf(READING_RATE, READING_RATE.steps[0]!)).toBe(0)
+  })
+
+  it('takes the nearest step for a value between two', () => {
+    /* A value the reader cannot have chosen through the pane — an older build's
+       step, or a hand-edited preference — still has to draw the slider
+       somewhere. */
+    expect(stepIndexOf(READING_RATE, 1.1)).toBe(2)
+    expect(stepIndexOf(READING_RATE, 1.4)).toBe(4)
+  })
+
+  it('keeps the lower step when a value falls exactly between two', () => {
+    /* STRICTLY NEARER, so a tie keeps the smaller — the conservative answer,
+       and a decision neither of the two copies of this scan used to state. */
+    expect(stepIndexOf(READING_RATE, 1.125)).toBe(2)
+  })
+
+  it('falls back to the scale’s own default for a value that is not a number', () => {
+    expect(stepIndexOf(SENTENCE_GAP, Number.NaN)).toBe(SENTENCE_GAP.def)
+    expect(stepIndexOf(SENTENCE_GAP, Number.POSITIVE_INFINITY)).toBe(SENTENCE_GAP.def)
   })
 })
 

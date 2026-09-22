@@ -454,7 +454,7 @@ describe('sentenceAt — what an audit found', () => {
       })
 
       expect(found).toBeNull()
-      expect(diagnostics.info).toHaveBeenCalledWith('gloss.sentence', {
+      expect(diagnostics.info).toHaveBeenCalledWith('sentence.walk', {
         outcome: 'fallback',
         gap: 'too-long',
       })
@@ -525,7 +525,7 @@ describe('sentenceAt — what an audit found', () => {
     expect(
       sentenceAt(rangeOf(fixture, ['One first. The whale ', 15], ['swam', 4]), { diagnostics: diagnostics as never }),
     ).toBeNull()
-    expect(diagnostics.info.mock.calls).toEqual([['gloss.sentence', { outcome: 'fallback', gap: 'span-blocks' }]])
+    expect(diagnostics.info.mock.calls).toEqual([['sentence.walk', { outcome: 'fallback', gap: 'span-blocks' }]])
   })
 })
 
@@ -566,8 +566,8 @@ describe('sentenceAt — what an audit found about a throw', () => {
       expect(() => sentenceAt(throwingRange(thrown), { diagnostics: diagnostics as never })).not.toThrow()
     }
     expect(diagnostics.error.mock.calls).toEqual([
-      ['gloss.sentence', { outcome: 'fallback', gap: 'threw', cause: 'object' }],
-      ['gloss.sentence', { outcome: 'fallback', gap: 'threw', cause: 'object' }],
+      ['sentence.walk', { outcome: 'fallback', gap: 'threw', cause: 'object' }],
+      ['sentence.walk', { outcome: 'fallback', gap: 'threw', cause: 'object' }],
     ])
   })
 
@@ -1063,9 +1063,9 @@ describe('sentenceAt — it declines rather than throwing', () => {
 
     expect(diagnostics.info).not.toHaveBeenCalled()
     expect(diagnostics.error.mock.calls).toEqual([
-      ['gloss.sentence', { outcome: 'fallback', gap: 'threw', cause: 'TypeError' }],
-      ['gloss.sentence', { outcome: 'fallback', gap: 'threw', cause: 'string' }],
-      ['gloss.sentence', { outcome: 'fallback', gap: 'threw', cause: 'undefined' }],
+      ['sentence.walk', { outcome: 'fallback', gap: 'threw', cause: 'TypeError' }],
+      ['sentence.walk', { outcome: 'fallback', gap: 'threw', cause: 'string' }],
+      ['sentence.walk', { outcome: 'fallback', gap: 'threw', cause: 'undefined' }],
     ])
     expect(JSON.stringify(diagnostics.error.mock.calls)).not.toContain('Ishmael')
   })
@@ -1094,7 +1094,7 @@ describe('sentenceAt — it declines rather than throwing', () => {
     }
 
     expect(diagnostics.error.mock.calls).toEqual(
-      Array.from({ length: 3 }, () => ['gloss.sentence', { outcome: 'fallback', gap: 'threw', cause: 'Error' }]),
+      Array.from({ length: 3 }, () => ['sentence.walk', { outcome: 'fallback', gap: 'threw', cause: 'Error' }]),
     )
   })
 })
@@ -1129,8 +1129,8 @@ describe('sentenceAt — whether the path fires at all', () => {
     sentenceAt(rangeOf(midSentence, [opening, 4], [opening, 6]), { diagnostics: diagnostics as never })
 
     expect(diagnostics.info.mock.calls).toEqual([
-      ['gloss.sentence', { outcome: 'used' }],
-      ['gloss.sentence', { outcome: 'fallback', gap: 'run-start' }],
+      ['sentence.walk', { outcome: 'used' }],
+      ['sentence.walk', { outcome: 'fallback', gap: 'run-start' }],
     ])
   })
 
@@ -1148,7 +1148,7 @@ describe('sentenceAt — whether the path fires at all', () => {
       { diagnostics: diagnostics as never },
     )
 
-    expect(diagnostics.info).toHaveBeenCalledWith('gloss.sentence', {
+    expect(diagnostics.info).toHaveBeenCalledWith('sentence.walk', {
       outcome: 'fallback',
       gap: 'span-blocks',
     })

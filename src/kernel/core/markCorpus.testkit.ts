@@ -324,7 +324,7 @@ export function plainText(xhtml: string): string {
     .replace(/&gt;/gu, '>')
     .replace(/&quot;/gu, '"')
     .replace(/&#39;/gu, "'")
-  return decoded.replace(/­/gu, '').replace(/\s+/gu, ' ').trim()
+  return decoded.replace(/\u00ad/gu, '').replace(/\s+/gu, ' ').trim()
 }
 
 /**

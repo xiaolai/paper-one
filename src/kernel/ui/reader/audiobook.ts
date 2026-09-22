@@ -1,0 +1,285 @@
+/**
+ * Turning an open book into an audiobook.
+ *
+ * THE ORCHESTRATION ONLY. Nothing here speaks, encodes or writes a container —
+ * the engine is `src-tauri/src/narrate/`, reached through the two functions
+ * this module is handed. That split is what makes the part with the decisions
+ * in it testable on a machine with no AVFoundation, which is every machine that
+ * is not a Mac and every CI runner.
+ *
+ * ⚠️ **ONE CHAPTER PER SPINE SECTION, AND THAT IS A CHOICE WITH A COST.** A
+ * table-of-contents entry can point into the MIDDLE of a section, and one entry
+ * can cover several — so a book whose parts and chapters disagree with its spine
+ * gets marks where its sections begin rather than where its chapters do. For an
+ * ordinary EPUB the two coincide and this is exactly right; for an anthology in
+ * one file it is one long chapter. Mapping a TOC onto section OFFSETS is the
+ * fix, and it needs the renderer to answer where a `#fragment` lands; stated
+ * here rather than discovered by somebody wondering why a book has one mark.
+ *
+ * ⚠️ **AND A SECTION WITH NO WORDS IS NOT A CHAPTER.** A cover, a plate, a
+ * half-title: rendering one produces no audio, which `narrate_package` refuses
+ * by name — correctly, since two chapters cannot share a start. They are dropped
+ * here instead, where the reason can be said.
+ */
+
+/** One section's readable text, as `ReaderSession.sectionTexts` answers it. */
+export interface SectionText {
+  readonly index: number
+  /** The table of contents' own label for this section, where it has one. */
+  readonly title: string | null
+  readonly text: string
+}
+
+/** A chapter to render: what to say, and what to call it. */
+export interface ChapterPlan {
+  readonly index: number
+  readonly title: string
+  readonly text: string
+}
+
+/**
+ * The chapters an export will produce, in order.
+ *
+ * TITLED FROM THE TABLE OF CONTENTS WHERE IT SAYS SO, and numbered where it does
+ * not — `Chapter 3` counts the chapters this export actually contains, not the
+ * spine position, because a reader who sees "Chapter 3" after two chapters and
+ * then a gap has been told something false about the book.
+ */
+export function planChapters(sections: readonly SectionText[]): readonly ChapterPlan[] {
+  const chapters: ChapterPlan[] = []
+  for (const section of sections) {
+    const text = section.text.trim()
+    if (text === '') continue
+    const title = section.title?.trim()
+    chapters.push({
+      index: section.index,
+      /* `title &&` has already excluded the empty string, so `title !== ''` could
+         never be false here — one condition, not two saying the same thing. */
+      title: title ? title : `Chapter ${chapters.length + 1}`,
+      text: section.text,
+    })
+  }
+  return chapters
+}
+
+/** What an export needs from the platform, so the rest of this file needs none. */
+export interface AudiobookPlatform {
+  /** Speak one chapter into a file, and answer where it went. */
+  render: (job: {
+    readonly text: string
+    readonly voice: string
+    readonly rate: number
+    readonly path: string
+  }) => Promise<void>
+  /** Join the rendered chapters into one book. */
+  package: (job: {
+    readonly chapters: readonly { readonly title: string; readonly path: string }[]
+    readonly title: string
+    readonly author: string
+    readonly path: string
+  }) => Promise<{ readonly durationMs: number; readonly chapters: number }>
+  /** Where a chapter's audio is written on the way. */
+  scratchFor: (index: number) => string
+  /** Remove one, whatever happened. */
+  discard: (path: string) => Promise<void>
+  /**
+   * Remove whatever is left of THIS export's scratch, once the chapters are gone.
+   *
+   * ⚠️ **PER-EXPORT, WHICH IS THE WHOLE POINT.** Scratch used to be
+   * `chapter-<index>.wav` under one shared directory, so two exports running at
+   * once wrote over each other's chapters and each tidy-up deleted the other's
+   * files — and a crash left them there for ever, because nothing owned them.
+   * Every export gets its own directory now, and this removes it.
+   */
+  discardScratch: () => Promise<void>
+}
+
+export interface AudiobookRequest {
+  readonly chapters: readonly ChapterPlan[]
+  readonly voice: string
+  readonly rate: number
+  readonly title: string
+  readonly author: string
+  /** Where the finished book goes. */
+  readonly path: string
+  readonly onProgress: (done: number, total: number, title: string) => void
+  /** Asked between chapters; true stops the export. */
+  readonly cancelled: () => boolean
+}
+
+export interface AudiobookResult {
+  readonly path: string
+  readonly durationMs: number
+  readonly chapters: number
+  /**
+   * How many scratch files could not be removed.
+   *
+   * ⚠️ **THEY USED TO BE SWALLOWED, AND THE HOOK THEN TOLD THE READER "NOTHING
+   * WAS LEFT BEHIND".** `.catch(() => {})` is right about not letting a tidy-up
+   * failure mask the export's own outcome, and wrong about saying nothing: a
+   * chapter of a ten-hour book is tens of megabytes, so a run of failures is
+   * real disk a reader cannot find. Counted here, reported by the caller, and
+   * still never thrown.
+   */
+  readonly leftBehind: number
+}
+
+/** A stop the reader asked for — not a failure, and reported as neither. */
+export class ExportCancelled extends Error {
+  /**
+   * @param leftBehind How many scratch files survived the tidy-up, for the same
+   * reason `AudiobookResult` carries it: the notice for a stopped export
+   * asserted that nothing was left behind, and nothing had checked.
+   *
+   * ⚠️ **A CONSTRUCTOR ARGUMENT, NOT A FIELD ASSIGNED LATER.** The count is only
+   * known after the tidy-up, which runs after the stop was thrown, so it used to
+   * be written onto the caught instance behind an `instanceof` — a mutation
+   * whose guard nothing could observe, because an ordinary failure carrying a
+   * stray count is not something any caller reads. `exportAudiobook` throws a
+   * new one with the settled count instead, so every instance a caller catches
+   * was built with the number it holds.
+   */
+  constructor(readonly leftBehind = 0) {
+    super('the export was stopped')
+    this.name = 'ExportCancelled'
+  }
+}
+
+/**
+ * Render every chapter, then package them.
+ *
+ * ⚠️ **THE SCRATCH FILES GO WHATEVER HAPPENS**, including when the reader stops
+ * it. A chapter of a ten-hour book is tens of megabytes; an export abandoned
+ * half way through must not leave half a book on the disk. They are removed in a
+ * `finally`, which is the only construct that survives both a throw and a
+ * cancellation.
+ *
+ * ⚠️ **CANCELLATION IS CHECKED BETWEEN CHAPTERS AND NOT INSIDE ONE.** A render
+ * has no way in: it is one call into the engine, which owns the synthesiser
+ * until it finishes. So the grain of "stop" is a chapter — a few seconds of
+ * waiting at 22× real time, and a bounded promise rather than an unbounded one.
+ */
+export async function exportAudiobook(
+  platform: AudiobookPlatform,
+  request: AudiobookRequest,
+): Promise<AudiobookResult> {
+  if (request.chapters.length === 0) {
+    throw new Error('this book has no readable text to export')
+  }
+
+  /**
+   * TWO LISTS, BECAUSE THEY ANSWER TWO QUESTIONS.
+   *
+   * ⚠️ **ONE LIST SERVED BOTH AND COULD NOT.** `written` was pushed to AFTER the
+   * render resolved — correctly, since packaging must never be handed a file a
+   * failed render never finished — and the tidy-up then iterated the same list,
+   * so a render that threw HAVING ALREADY WRITTEN BYTES left them behind with
+   * nothing recorded. The two memberships are genuinely different: packaging
+   * wants what succeeded, removal wants everything attempted.
+   *
+   * Nothing leaks from this today, because `apple.rs` writes beside and renames,
+   * so a failed render leaves no file at that path at all. That is the BACKEND's
+   * discipline and not this contract's, and the contract is the thing a second
+   * backend would be written against — which is exactly when it would start
+   * costing a reader a part-written chapter of a book.
+   */
+  const written: { title: string; path: string }[] = []
+  const attempted: string[] = []
+  let leftBehind = 0
+  /**
+   * Remove everything this export wrote on the way, counting what would not go.
+   *
+   * ⚠️ **CALLED ON BOTH ROADS OUT RATHER THAN FROM A `finally`, AND THAT IS NOT
+   * A STYLE CHOICE.** The tidy-up WAS a `finally` and the count it produced was
+   * always zero — because `return { …, leftBehind }` evaluates its object
+   * BEFORE the `finally` runs, so the success path captured the value as it was
+   * when nothing had been removed yet. A test asking for a failing `discard`
+   * found it; reading the code did not. A `finally` cannot contribute to a value
+   * the `return` beside it has already built.
+   *
+   * Calling it explicitly also puts the exception in the `catch`'s hand, which
+   * is what lets a cancellation carry the count without a mutable flag the
+   * compiler could not follow into a closure.
+   */
+  const tidy = async (): Promise<void> => {
+    for (const path of attempted) {
+      /* One failure to tidy up must not hide the export's own outcome, nor stop
+       * the other scratch files being removed — so it is COUNTED rather than
+       * thrown, and rather than swallowed. A chapter of a ten-hour book is tens
+       * of megabytes; "nothing was left behind" was asserted upstream with
+       * nothing checking it. */
+      await platform.discard(path).catch(() => {
+        leftBehind += 1
+      })
+    }
+    /* AFTER the files, and counted for the same reason: the directory is this
+       export's own, so removing it cannot affect another one. */
+    await platform.discardScratch().catch(() => {
+      leftBehind += 1
+    })
+  }
+
+  try {
+    for (const [at, chapter] of request.chapters.entries()) {
+      if (request.cancelled()) throw new ExportCancelled()
+      request.onProgress(at, request.chapters.length, chapter.title)
+      const path = platform.scratchFor(chapter.index)
+      attempted.push(path)
+      await platform.render({
+        text: chapter.text,
+        voice: request.voice,
+        rate: request.rate,
+        path,
+      })
+      /* PUSHED AFTER THE RENDER RESOLVES. Recorded before it, a render that
+       * threw would leave a path in the list that holds nothing, and packaging
+       * would fail on a file it was told to expect. */
+      written.push({ title: chapter.title, path })
+    }
+
+    if (request.cancelled()) throw new ExportCancelled()
+    request.onProgress(request.chapters.length, request.chapters.length, 'joining the chapters')
+    const packaged = await platform.package({
+      chapters: written,
+      title: request.title,
+      author: request.author,
+      path: request.path,
+    })
+    /**
+     * ⚠️ **AND AGAIN AFTER THE JOIN, BECAUSE THE JOIN CANNOT BE INTERRUPTED AND
+     * THE OLD CODE REPORTED SUCCESS FOR AN EXPORT THE READER HAD STOPPED.**
+     * Cancellation was checked only on the way in, so a stop pressed while the
+     * chapters were being joined and encoded — the longest single step there is,
+     * and the one the transport says "Stopping…" over — was ignored, and the
+     * reader was then told the book had been exported.
+     *
+     * The join itself still cannot be cut short: it is one call into the engine,
+     * which owns the encoder until it finishes, exactly as a chapter render does.
+     * What changes is that the OUTCOME is honest. The part-written book is
+     * removed on the way out, because a file the reader stopped asking for must
+     * not be left at the name they chose — a half-joined `.m4b` is
+     * indistinguishable from a whole one, which is the trap `narrate` records for
+     * a truncated render.
+     */
+    if (request.cancelled()) {
+      await platform.discard(request.path).catch(() => {
+        leftBehind += 1
+      })
+      throw new ExportCancelled()
+    }
+    await tidy()
+    return {
+      path: request.path,
+      durationMs: packaged.durationMs,
+      chapters: packaged.chapters,
+      leftBehind,
+    }
+  } catch (cause) {
+    await tidy()
+    /* The count belongs to the reader's own stop, which is the notice that used
+       to assert "nothing was left behind" with nothing checking it. A genuine
+       failure carries the engine's sentence instead and says nothing about
+       scratch — `narrate` names what it refused, and that is what to show. */
+    throw cause instanceof ExportCancelled ? new ExportCancelled(leftBehind) : cause
+  }
+}

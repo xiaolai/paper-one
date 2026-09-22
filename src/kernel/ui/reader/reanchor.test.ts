@@ -168,6 +168,88 @@ describe('the canonical index', () => {
     expect(index.text).toBe('done Start a b')
     expect(index.text).not.toContain('doneStart')
   })
+
+  /**
+   * ⚠️ **ONE CASE PER TAG, AND THE LIST IS WRITTEN OUT RATHER THAN READ.** The
+   * set is a list of literals in the module, so a test that imports it and loops
+   * agrees with whatever the module says — including with a tag somebody deleted.
+   * Written here it is a second statement of the same contract, and the two have
+   * to be edited together to change it.
+   *
+   * ⚠️ **AND THE DOM IS BUILT, NOT PARSED.** An HTML parser foster-parents a
+   * stray `<td>` out of the body and drops it, so half of these tags cannot be
+   * written as markup outside their own container — and a fixture that silently
+   * loses its element passes for the wrong reason. `createElement` is the same
+   * tree without the parser's opinion of it.
+   */
+  it.each([
+    'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'BR', 'CAPTION', 'DD', 'DIV', 'DL', 'DT',
+    'FIELDSET', 'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+    'HEADER', 'HR', 'LI', 'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE', 'TBODY', 'TD',
+    'TFOOT', 'TH', 'THEAD', 'TR', 'UL',
+  ])('breaks the text at a <%s> edge, on both sides of it', (tag) => {
+    const doc = new DOMParser().parseFromString('<html><body></body></html>', 'text/html')
+    const block = doc.createElement(tag)
+    block.textContent = 'Start'
+    doc.body.append(doc.createTextNode('done'), block, doc.createTextNode('after'))
+    expect(indexText(doc.body).text).toBe('done Start after')
+  })
+
+  /* The other list, and the same reason to write it out: text in these is
+     never on the page, whatever a stylesheet says, so indexing it gives the map
+     characters no reader can see — and a quote that happens to match them. */
+  it.each(['SCRIPT', 'STYLE', 'TEMPLATE'])('reads no text out of a <%s>', (tag) => {
+    const doc = new DOMParser().parseFromString('<html><body></body></html>', 'text/html')
+    const hidden = doc.createElement(tag)
+    hidden.textContent = 'unseen'
+    doc.body.append(doc.createTextNode('done'), hidden, doc.createTextNode('after'))
+    expect(indexText(doc.body).text).not.toContain('unseen')
+  })
+
+  it('and does not break at an inline one, which is what makes that a test', () => {
+    /* The known negative. Every case above asserts a space appears; without
+       this, a walk that broke at EVERY element would pass all thirty-seven of
+       them and split every word an `<em>` divides. */
+    const doc = new DOMParser().parseFromString('<html><body></body></html>', 'text/html')
+    const inline = doc.createElement('em')
+    inline.textContent = 'oper'
+    doc.body.append(doc.createTextNode('co'), inline, doc.createTextNode('ate'))
+    expect(indexText(doc.body).text).toBe('cooperate')
+  })
+
+  /**
+   * The fold table, one case per entry.
+   *
+   * ⚠️ **BUILT FROM CODE POINTS, NOT TYPED.** These characters are invisible to
+   * a reviewer as themselves — a right single quotation mark and an apostrophe
+   * are one pixel apart in most fonts — and this repository has already had an
+   * escape typed into an edit arrive as the character itself. A code point says
+   * which one it is and cannot be mistyped into its neighbour.
+   */
+  it.each([
+    [0x2018, "'"],
+    [0x2019, "'"],
+    [0x201a, "'"],
+    [0x201b, "'"],
+    [0x201c, '"'],
+    [0x201d, '"'],
+    [0x201e, '"'],
+    [0x201f, '"'],
+    [0x2013, String.fromCodePoint(0x2014)],
+    [0x2012, String.fromCodePoint(0x2014)],
+    [0x2015, String.fromCodePoint(0x2014)],
+  ] as const)('folds U+%s to its canonical form', (from, to) => {
+    expect(canonicalise(`a${String.fromCodePoint(from)}b`)).toBe(`a${to}b`)
+  })
+
+  it('leaves the character it folds TO alone, and everything outside the table', () => {
+    /* The other known negative: a fold table whose values were all empty would
+       pass nothing above, but one that mapped everything to the same character
+       would pass every case and destroy the text. */
+    for (const ch of ["'", '"', String.fromCodePoint(0x2014), 'a', ' ']) {
+      expect(canonicalise(`x${ch}y`)).toBe(`x${ch}y`)
+    }
+  })
 })
 
 describe('re-anchoring a foreign passage (WI-21.S, route B)', () => {

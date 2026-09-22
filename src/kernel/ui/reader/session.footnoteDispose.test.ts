@@ -70,8 +70,16 @@ type SessionCallbacks = import('./session').SessionCallbacks
  */
 function noteView(order: string[] = []) {
   const calls: string[] = []
+  const listeners: Record<string, ((event: Event) => void)[]> = {}
   return {
     calls,
+    listeners,
+    /** Fire one of the NOTE view's own events, the way foliate does. */
+    emit: (type: string, detail: unknown) => {
+      const event = new CustomEvent(type, { detail, cancelable: true })
+      for (const fn of listeners[type] ?? []) fn(event)
+      return event
+    },
     view: {
       close: () => {
         calls.push('close')
@@ -81,7 +89,9 @@ function noteView(order: string[] = []) {
         calls.push('remove')
         order.push('note.remove')
       },
-      addEventListener: () => {},
+      addEventListener: (type: string, fn: (event: Event) => void) => {
+        ;(listeners[type] ??= []).push(fn)
+      },
       style: { cssText: '' } as CSSStyleDeclaration,
       renderer: { setAttribute: () => {}, addEventListener: () => {} },
       goTo: async () => {},
@@ -206,11 +216,12 @@ const anchorEl = () =>
   }) as unknown as HTMLAnchorElement
 
 /** A started session, and the book view its link events go through. */
-async function started(order: string[] = []) {
+async function started(order: string[] = [], over: { styleNote?: (view: View) => void } = {}) {
   foliate.handlers.length = 0
   foliate.answers.length = 0
   const host = fakeHost()
   const { cb, calls } = callbacks()
+  const varsOn: Document[] = []
   const session = new ReaderSession(host, cb)
   const book = view(order)
   await session.start('book.epub', {
@@ -219,10 +230,11 @@ async function started(order: string[] = []) {
     /* THE PASS-THROUGH — `prepare` is required; see `SessionDeps.prepare`. */
     prepare: (source: unknown) => Promise.resolve(source),
     applySettings: () => {},
-    applyVars: () => {},
+    applyVars: (doc: Document) => void varsOn.push(doc),
+    ...over,
     protection: () => Promise.resolve(null),
   })
-  return { session, host, calls, book }
+  return { session, host, calls, book, varsOn }
 }
 
 /**
@@ -334,6 +346,42 @@ describe('closing a book with a note open', () => {
  * destroyed under a renderer still tearing down is a renderer reading revoked
  * URLs.
  */
+describe('a note that will not let go', () => {
+  /**
+   * ⚠️ **NOTHING IN TEARDOWN MAY PROPAGATE, AND EACH STEP SAYS WHICH ONE IT
+   * WAS.** `releaseNoteView` catches a `close` that throws and leaves `remove`
+   * to the caller, so a webview that refuses to detach reaches `dispose`'s own
+   * isolation — which reports it by the name of the step, and carries on to the
+   * view, the book and the host. A step reported under no name is a teardown
+   * failure nobody can place.
+   */
+  it('is reported by name, and the rest of the teardown still runs', async () => {
+    const order: string[] = []
+    const { session, book, calls } = await started(order)
+    const note = noteView(order)
+    const refuses = new Error('the note webview would not detach')
+    note.view.remove = () => {
+      order.push('note.remove')
+      throw refuses
+    }
+    showNote(book, note)
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    session.dispose()
+
+    expect(said).toHaveBeenCalledWith('Paper: footnote view threw during teardown', refuses)
+    expect(order, 'the book and its view were released anyway').toEqual([
+      'note.close',
+      'note.remove',
+      'view.close',
+      'view.remove',
+      'book.destroy',
+    ])
+    expect((calls['onFootnote'] ?? []).at(-1), 'and the host was told the note is gone').toEqual([null])
+    said.mockRestore()
+  })
+})
+
 describe('closing a book releases the book', () => {
   it('destroys the book exactly once, after the note view is released and the view closed', async () => {
     const order: string[] = []
@@ -524,5 +572,82 @@ describe('a note that fails after a newer one has opened', () => {
     expect(calls['onFootnote']?.at(-1)).toEqual([null])
     expect(note.calls, 'the mounted note view was left live after the failure').toEqual(['close', 'remove'])
     warn.mockRestore()
+  })
+})
+
+/**
+ * WHAT THE SESSION HANDS THE NOTE FLOW.
+ *
+ * `Footnotes` reads none of the session's fields: it is given the latch, the
+ * host's callbacks, a way to move the reader, and the two styling deps `start`
+ * holds. Each of those is one line of wiring in the constructor, and a wire
+ * that goes nowhere is invisible to every test of either side alone — the note
+ * suites above pass with the session's own `Footnotes`, and `footnotes.test.ts`
+ * passes with a stand-in for the session.
+ */
+describe('the wires between a session and its notes', () => {
+  /** A shown note, and the deps the session was started with. */
+  async function showing(over: { styleNote?: (view: View) => void } = {}) {
+    const started_ = await started([], over)
+    const note = noteView()
+    showNote(started_.book, note)
+    return { ...started_, note }
+  }
+
+  it("styles the note's view with the reader's typography", async () => {
+    const styled: View[] = []
+    const { note } = await showing({ styleNote: (view) => void styled.push(view) })
+    expect(styled).toEqual([note.view])
+  })
+
+  it("gives the note's own document the settings contract, and stops when the book closes", async () => {
+    const { session, note, varsOn } = await showing()
+    const doc = {
+      getElementsByTagNameNS: () => [],
+      querySelectorAll: () => [],
+      body: null,
+      documentElement: null,
+      defaultView: null,
+      styleSheets: [],
+      getElementById: () => null,
+    } as unknown as Document
+    note.emit('load', { doc })
+    expect(varsOn, "the note's document was never given the contract").toContain(doc)
+    session.dispose()
+    note.emit('load', { doc })
+    expect(varsOn.filter((one) => one === doc)).toHaveLength(1)
+  })
+
+  it("hands a note's external link to the host", async () => {
+    const { note, calls } = await showing()
+    note.emit('external-link', { href_: 'https://example.org/x' })
+    expect(calls['onExternalLink']).toHaveLength(1)
+  })
+
+  it("moves the reader for a link inside a note, and says which navigation failed", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { note, book } = await showing()
+    const cause = new Error('that destination does not resolve')
+    book.goTo = () => Promise.reject(cause)
+    note.emit('link', { href: 'ch07.xhtml#x' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(warn).toHaveBeenCalledWith('Paper: goTo ch07.xhtml#x failed', cause)
+    warn.mockRestore()
+  })
+
+  it('moves the reader nowhere for a note link followed after the book closed', async () => {
+    const { session, note, book } = await showing()
+    session.dispose()
+    note.emit('link', { href: 'ch07.xhtml#x' })
+    expect(book.went).toEqual([])
+  })
+
+  it('renders notes into the box the host registered', async () => {
+    const { session, book } = await started()
+    const mount = { appended: [] as unknown[], appendChild(node: unknown) { mount.appended.push(node); return node } }
+    session.setFootnoteMount(mount as unknown as HTMLElement, null)
+    const note = noteView()
+    showNote(book, note)
+    expect(mount.appended, 'the mount never reached the note flow').toEqual([note.view])
   })
 })

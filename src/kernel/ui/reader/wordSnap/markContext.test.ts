@@ -105,7 +105,7 @@ describe('markContext', () => {
   })
 
   it('drops soft hyphens, which are hyphenation and not text', () => {
-    const text = 'under­stand MARK after'
+    const text = 'under\u00adstand MARK after'
     const p = oneParagraph(text)
     // The soft hyphen is a CHARACTER and occupies an offset, so 'MARK' starts
     // at 12 rather than at 11 — which is exactly why it has to be stripped

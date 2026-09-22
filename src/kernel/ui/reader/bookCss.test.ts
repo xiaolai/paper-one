@@ -4,9 +4,10 @@
 // into the book, so it needs a document to read even when the assertion is about
 // a plain declaration. See dev-docs/hook-tests.md for the per-file opt-in.
 import { describe, expect, it } from 'vitest'
-import { ALIGNS, type Align, type ReadingStyle } from '../../core/uiTypes'
-import { bookSheets, bookVars, resolveBookVars, resolvedBookCss } from './bookCss'
-import { DEFAULT_STEP_IDX } from '../../core/metrics'
+import { ALIGNS, THEME_IDS, type Align, type ReadingStyle } from '../../core/uiTypes'
+import { BOOK_COLOURS, bookSheets, bookVars, resolveBookVars, resolvedBookCss, when } from './bookCss'
+import { contrastRatio, type Hex } from '../../core/palette'
+import { DEFAULT_STEP_IDX, READING_RATIOS } from '../../core/metrics'
 import { faceById } from '../../core/typefaces'
 
 /**
@@ -325,5 +326,122 @@ describe('the typeface reaches the prose', () => {
     const seen = computed('p.body { font-family: Georgia; } code { font-family: Menlo, monospace; }')
     expect(seen.p).toBe(family().replace(/["']/g, ''))
     expect(seen.code).toBe('Menlo, monospace')
+  })
+})
+
+describe('the colours a book is drawn in', () => {
+  /**
+   * ⚠️ **A STRANGER'S MARK IS QUIETER THAN A FRIEND'S, NOT LOUDER — and it is
+   * the only channel that separates them.** Both are drawn as the same rule
+   * under the words, so the colour is not a preference: it is what says whose
+   * mark this is. A passage somebody the reader admitted marked is worth more
+   * of their attention than one anybody at all did, and the public layer is the
+   * one an attacker can fill.
+   *
+   * Asserted as a RELATION against each theme's own page rather than as hexes
+   * typed in here: a copy of the values would agree with itself whatever they
+   * were changed to, which is the defect `palette.test.ts` records for itself.
+   */
+  it.each(THEME_IDS)('%s draws a stranger more quietly than a friend', (theme) => {
+    const { shared, stranger, surface } = BOOK_COLOURS[theme]
+    const friend = contrastRatio(shared as Hex, surface as Hex)
+    const anybody = contrastRatio(stranger as Hex, surface as Hex)
+    expect(friend, `${theme}: a friend's mark must be legible at all`).toBeGreaterThan(1.5)
+    expect(anybody, `${theme}: a stranger's mark must still be visible`).toBeGreaterThan(1.2)
+    expect(anybody, `${theme}: a stranger's mark is louder than a friend's`).toBeLessThan(friend)
+  })
+
+  it.each(THEME_IDS)('%s writes every colour as a colour', (theme) => {
+    /* Each of these reaches the book document as a custom property, where an
+       empty or malformed value is not an error — it is a rule the browser drops,
+       and a mark that simply does not appear. */
+    for (const [name, value] of Object.entries(BOOK_COLOURS[theme])) {
+      expect(value, `${theme}.${name}`).toMatch(/^#[0-9A-Fa-f]{6}$/u)
+    }
+  })
+})
+
+describe('what the dark page does to a book’s own pictures', () => {
+  /**
+   * ⚠️ **AN ORNAMENT DRAWN IN BLACK ON WHITE DISAPPEARS ON A DARK PAGE**, so a
+   * transparent image gets a matte — the page's own light tone behind it, with
+   * padding in proportion to the type it sits in rather than a fixed number of
+   * pixels.
+   */
+  const sheet = () => bookSheets().join('\n').replace(/\/\*[\s\S]*?\*\//gu, '')
+
+  it('mattes a transparent picture, and only on a dark page', () => {
+    const css = sheet()
+    const at = css.indexOf('img[data-paper-matte]')
+    expect(at, 'the matte rule is gone').toBeGreaterThan(-1)
+    const rule = css.slice(css.lastIndexOf('\n', at), css.indexOf('}', at))
+    expect(rule, 'the matte applied on a light page too').toContain('--paper-dark-page')
+    expect(rule).toContain('background: var(--paper-matte)')
+    expect(rule, 'the padding is in proportion to the type, not a pixel count').toContain('--paper-line')
+  })
+
+  it('scales the headings it offers to scale, in descending steps', () => {
+    /* Off by default — Paper has never set a heading's size, and an author's
+       own proportions resolve against the reader's base — so this is what a
+       reader who asks for one scale gets: four levels, each smaller than the
+       last, and the fourth barely above the prose. */
+    const css = sheet()
+    const sizes = ['h1', 'h2', 'h3', 'h6'].map((tag) => {
+      const at = css.indexOf(`--paper-heading-scale"]) ${tag}`)
+      const rule = at < 0 ? '' : css.slice(at, css.indexOf('}', at))
+      return Number(/font-size: ([0-9.]+)em/u.exec(rule)?.[1] ?? Number.NaN)
+    })
+    expect(sizes.every((size) => Number.isFinite(size)), `found ${JSON.stringify(sizes)}`).toBe(true)
+    expect([...sizes].sort((a, b) => b - a), 'the levels are not in descending order').toEqual(sizes)
+    expect(sizes.at(0), 'the first level is the classic double body').toBe(2)
+    expect(sizes.at(-1), 'the fourth level is barely above the prose').toBeLessThan(1.2)
+  })
+
+  it('offers a hairline and a shadow for a plate, each only when asked', () => {
+    const css = sheet()
+    for (const [property, marker] of [
+      ['border', '--paper-figure-hairline'],
+      ['box-shadow', '--paper-figure-shadow'],
+    ] as const) {
+      const at = css.indexOf(`${marker}"]) img[data-paper-figure]`)
+      expect(at, `${marker} draws nothing`).toBeGreaterThan(-1)
+      const rule = css.slice(at, css.indexOf('}', at))
+      expect(rule, `${marker} is not a ${property}`).toContain(`${property}:`)
+      expect(rule, `${marker} is not derived from the book's ink`).toContain('var(--paper-ink)')
+    }
+  })
+
+  /* ⚠️ **EVERY SELECTOR OF A LIST CARRIES THE GUARD, NOT ONLY THE FIRST — and
+     the cases above could only ever see the first.** They find a rule by its
+     opening selector, so a guard lost from the SECOND line of a list left that
+     element drawn whether or not the reader asked: an SVG plate with a hairline
+     nobody chose, an `h4` at a scale the reader switched off. Asked of every
+     line, by the whole guarded selector. */
+  it('guards every selector of a rule the reader switches, not only the first', () => {
+    const css = sheet()
+    for (const [marker, selectors] of [
+      ['--paper-heading-scale', ['h1 {', 'h2 {', 'h3 {', 'h4,', 'h5,', 'h6 {']],
+      ['--paper-figure-hairline', ['img[data-paper-figure],', 'svg[data-paper-figure] {']],
+      ['--paper-figure-shadow', ['img[data-paper-figure],', 'svg[data-paper-figure] {']],
+      ['--paper-figure-scale', ['img[data-paper-figure],', 'svg[data-paper-figure] {']],
+    ] as const) {
+      for (const selector of selectors) {
+        expect(css, `${marker} does not guard ${selector}`).toContain(`${when(marker)}${selector}`)
+      }
+    }
+  })
+
+  it('pads inline code by 0.3 of the PROSE em, stated in the code’s own', () => {
+    /* A code span is set smaller than the prose around it, so an `em` inside it
+       is the smaller one. The padding is meant as a fraction of the text the
+       reader is reading, which is why it is divided by the code's ratio — and
+       multiplying instead gives a panel that shrinks twice. */
+    /* By its padding, not by its selector: `code, kbd, samp` opens four rules
+       in this sheet, and the first is the typeface. */
+    const panel = /code, kbd, samp \{\s*padding-block: [0-9.]+em;\s*padding-inline: ([0-9.]+)em;/u.exec(sheet())
+    expect(panel, 'the inline code panel').not.toBeNull()
+    const inline = Number(panel![1])
+    expect(READING_RATIOS.code, 'a ratio of 1 would make this case unable to fail').not.toBe(1)
+    expect(inline * READING_RATIOS.code).toBeCloseTo(0.3, 4)
   })
 })

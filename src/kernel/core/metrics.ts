@@ -10,6 +10,22 @@ import type { Align, ReadingStyle, Theme, Typeface } from './uiTypes'
  * Adding a magic number to a component instead of a name here is a bug: the
  * whole point of §03 is that these values are shared between the ruler, the
  * scroll snapping, the prose spacing and the chrome.
+ *
+ * ⚠️ **ONE LONG FILE, AND AN AUDIT CALLED IT A GOD MODULE.** It is 70 exported
+ * constants to 13 functions — a TABLE of design values, plus the one function
+ * that publishes them to CSS — and the proposal was to split it into platform,
+ * typography, layout, component and CSS modules behind a barrel. That would undo
+ * the sentence above. The values are cross-derived (`MEASURE` from
+ * `READING_STEPS`, the pill from `CONTROL`, every scale's readout unit from its
+ * own row) and `applyMetrics` reads all of them at once; spread across five
+ * files, each derivation becomes a cross-module import and each file a place a
+ * second copy of a number can quietly start. A barrel would not rescue it
+ * either: this repository has measured what a barrel costs — its re-exports
+ * evaluate with it, which is why `ui/browser.ts` grows one export at a time.
+ *
+ * The finding's own word was "contend", and data does not contend: nothing here
+ * mutates, and two edits to two different tables do not conflict. Length is not
+ * a defect in a table whose value is being one table.
  */
 
 /**
@@ -206,7 +222,6 @@ export interface ReadingStep {
   readonly size: number
   readonly line: number
   readonly measure: number
-  readonly note: string
 }
 
 /**
@@ -235,29 +250,59 @@ export interface ReadingStep {
  * a larger size on a longer line, which is the opposite of the intent.
  */
 export const READING_STEPS: readonly ReadingStep[] = [
-  { size: 15, line: 24, measure: 480, note: 'Minimum. 69 characters.' },
-  { size: 16, line: 26, measure: 510, note: '' },
-  { size: 17, line: 28, measure: 540, note: '' },
-  { size: 18, line: 29, measure: 570, note: '' },
-  { size: 19, line: 30, measure: 600, note: '' },
-  { size: 20, line: 32, measure: 630, note: '' },
-  { size: 21, line: LINE, measure: 660, note: 'Default. 68 characters.' },
-  { size: 22, line: 36, measure: 680, note: '' },
-  { size: 23, line: 38, measure: 700, note: '' },
-  { size: 24, line: 39, measure: 713, note: '' },
-  { size: 25, line: 40, measure: 727, note: '' },
-  { size: 26, line: 42, measure: 740, note: '' },
-  { size: 27, line: 44, measure: 760, note: '' },
-  { size: 28, line: 46, measure: 780, note: 'Maximum. 60 characters; beyond this the page is a large-print edition.' },
+  { size: 15, line: 24, measure: 480 }, /* Minimum. 69 characters. */
+  { size: 16, line: 26, measure: 510 },
+  { size: 17, line: 28, measure: 540 },
+  { size: 18, line: 29, measure: 570 },
+  { size: 19, line: 30, measure: 600 },
+  { size: 20, line: 32, measure: 630 },
+  { size: 21, line: LINE, measure: 660 }, /* Default. 68 characters. */
+  { size: 22, line: 36, measure: 680 },
+  { size: 23, line: 38, measure: 700 },
+  { size: 24, line: 39, measure: 713 },
+  { size: 25, line: 40, measure: 727 },
+  { size: 26, line: 42, measure: 740 },
+  { size: 27, line: 44, measure: 760 },
+  { size: 28, line: 46, measure: 780 }, /* Maximum. 60 characters; beyond this the page is a large-print edition. */
 ] as const
 
 /**
- * The four spacings a reader can open up, each as a closed set of steps.
+ * A scale a reader steps through: the steps, which one is the default, and the
+ * unit its readout is written in.
+ *
+ * ⚠️ **THIS WAS CALLED `SteppedScale`, AND IT STOPPED BEING ABOUT SPACING A LONG
+ * WAY BACK.** The four spacings were the first users; it now also models
+ * brightness, contrast, the reading rate, two millisecond pauses, figure width
+ * and height, and the minimum-size floor — nine more scales, none of them a
+ * spacing. Worse, the doc block explaining "the four spacings a reader can open
+ * up" sat directly above it, so the file's own description of the type was about
+ * one of its twelve users. That prose has moved to `SPACING`, where it is true.
  *
  * STEPS, NOT SLIDERS, for the same reason `READING_STEPS` is: a value between
- * two of these is not a decision anybody made, and a slider invites hunting for
- * one. Each of these also has a floor and a ceiling that are typographic facts
- * rather than preferences, and a stepper is where those live.
+ * two steps is not a decision anybody made, and a slider invites hunting for
+ * one. Each scale also has a floor and a ceiling that are facts rather than
+ * preferences, and a stepper is where those live.
+ *
+ * `metrics.test.ts` holds every one of them to the same invariant — ordered, its
+ * own unit, and a default step whose value is what a reader who never opens the
+ * pane gets.
+ */
+export interface SteppedScale {
+  readonly steps: readonly number[]
+  readonly def: number
+  /**
+   * How the value is written into the book's CSS.
+   *
+   * `x` is a bare multiplier and has no unit at all — it is spelled here so
+   * `StepRow` can report "1.15×" rather than "1.15", which reads as a length.
+   * The rest are CSS units and are appended verbatim.
+   */
+  readonly unit: 'em' | 'x' | '%' | 'vh' | 'px' | 'ms'
+}
+
+// Stryker disable next-line ObjectLiteral: emptying this table leaves `DEFAULT_SPACING` below reading `.def` off four missing scales, at module scope — so the mutant throws while this module is being imported, every covering suite fails to LOAD, no test fails, and Stryker's vitest runner reports it Survived with nothing able to kill it (measured 2026-09-14)
+/**
+ * The four spacings a reader can open up, each as a closed set of steps.
  *
  * The defaults are all the current behaviour, so a reader who never opens this
  * gets exactly the book they have now.
@@ -268,22 +313,10 @@ export const READING_STEPS: readonly ReadingStep[] = [
  * the oldest reading preference there is. Nothing here changes the MEASURE:
  * that is set by the size step, and letting two controls move it would make the
  * line length depend on which one the reader touched last.
+ *
+ * (This block was above `SteppedScale` — see the note there.)
  */
-export interface SpacingScale {
-  readonly steps: readonly number[]
-  readonly def: number
-  /**
-   * How the value is written into the book's CSS.
-   *
-   * `x` is a bare multiplier and has no unit at all — it is spelled here so
-   * `StepRow` can report "1.15×" rather than "1.15", which reads as a length.
-   * The rest are CSS units and are appended verbatim.
-   */
-  readonly unit: 'em' | 'x' | '%' | 'vh' | 'px'
-}
-
-// Stryker disable next-line ObjectLiteral: emptying this table leaves `DEFAULT_SPACING` below reading `.def` off four missing scales, at module scope — so the mutant throws while this module is being imported, every covering suite fails to LOAD, no test fails, and Stryker's vitest runner reports it Survived with nothing able to kill it (measured 2026-09-14)
-export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SpacingScale> = {
+export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SteppedScale> = {
   /* Tracking, in em so it follows the size. Negative is offered because a face
    * set loose by its designer can be tightened, but only one step of it: past
    * that the letters touch. */
@@ -323,10 +356,87 @@ export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SpacingSc
  * `adjustPalette` — and everything it produces is clamped to 4.5:1, so the
  * soft end is a preference rather than a way to make the page unreadable.
  */
-export const BRIGHTNESS: SpacingScale = {
+export const BRIGHTNESS: SteppedScale = {
   steps: [0.75, 0.8125, 0.875, 0.9375, 1],
   def: 4,
   unit: 'x',
+}
+
+/**
+ * How fast the book is read aloud, as a multiplier on the engine's own speed.
+ *
+ * A SCALE RATHER THAN A SLIDER, for the reason every other scale here gives: a
+ * value between two steps is not a decision anybody made. These particular
+ * numbers are the ones listeners already know from every audiobook player, which
+ * matters more than an even distribution — 1.25× and 1.5× are what somebody
+ * reaches for by name.
+ *
+ * 1 IS THE ENGINE'S OWN DEFAULT and is therefore the default here, and `def`
+ * is its INDEX, as on every scale in this file. `settings.ts` derives the
+ * clamp it validates against from the two ends, so the range a reader can
+ * store and the range this offers cannot disagree.
+ */
+
+export const READING_RATE: SteppedScale = {
+  steps: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5],
+  def: 2,
+  unit: 'x',
+}
+
+/**
+ * The silence read aloud leaves at a sentence end and at a paragraph end.
+ *
+ * ⚠️ **ONLY EXPRESSIBLE BECAUSE THE READING IS SENTENCE-AT-A-TIME.** With a whole
+ * section queued as one utterance there is nowhere to put a pause: Web Speech
+ * exposes no break, no SSML and no inter-utterance delay. One utterance per
+ * sentence turns it into a timer between two of them, and the block index
+ * `collectText` records is what tells the two boundaries apart.
+ *
+ * ⚠️ **IN MILLISECONDS, AND NOT SCALED BY THE READING RATE.** Scaling was the
+ * other candidate and the argument for it is real — at 2.5× the words are shorter
+ * so a fixed gap is proportionally more prominent, and the rhythm changes. It is
+ * not taken because a SETTING must mean what it says: a reader who asks for 300ms
+ * and hears 120ms at speed has been overruled by the app. The engine's own
+ * sentence-final prosody already shortens with rate, so part of the total pause
+ * scales anyway, and a reader who wants less at speed can ask for less.
+ *
+ * ⚠️ **THE DEFAULTS ARE ADDITIVE AND THE ENGINE'S OWN GAP IS UNMEASURED.** Web
+ * Speech inserts some silence of its own between two utterances, engine by
+ * engine, and nothing here knows how much — the app was not running when these
+ * were chosen. So these are a judgement, not a measurement: a breath at a
+ * sentence, a clear beat at a paragraph. Measure the engine's contribution in the
+ * running app before defending either number.
+ *
+ * A paragraph boundary uses the paragraph value ALONE, not both added: the label
+ * says "between paragraphs", and a reader setting it to zero means no pause there.
+ */
+/**
+ * ⚠️ **THE DEFAULT IS UNMEASURED AGAINST THE ENGINE'S OWN PAUSE, AND ZERO IS NOT
+ * THE FIX.** An audit asked for neutral zero defaults, or for the feature to be
+ * marked experimental, because Web Speech engines add different intrinsic pauses
+ * and 150ms therefore sounds different on each. The premise is right and the
+ * remedy is not: what is unmeasured is the ENGINE's baseline, not this value, and
+ * zero would not make the rhythm consistent — it would leave whatever each
+ * engine already does, unchanged and equally unmeasured, while removing the one
+ * control a listener has over it.
+ *
+ * So the value stays and the CLAIM is narrow: every label says what the reader is
+ * ADDING, never what they will hear in total, which is the only sentence that is
+ * true on every platform. Measuring the baseline needs the app driven against
+ * each engine and is worth doing; until then a stepper that starts at a short
+ * pause is better than one that starts at none.
+ */
+export const SENTENCE_GAP: SteppedScale = {
+  steps: [0, 150, 300, 500, 750, 1000],
+  def: 1,
+  unit: 'ms',
+}
+
+/** The silence at a paragraph end — see `SENTENCE_GAP`. */
+export const PARAGRAPH_GAP: SteppedScale = {
+  steps: [0, 300, 600, 900, 1400, 2000],
+  def: 2,
+  unit: 'ms',
 }
 
 /**
@@ -341,16 +451,84 @@ export const BRIGHTNESS: SpacingScale = {
  * already was: both controls now start at "the theme untouched" and only take
  * away, which is one idea rather than two.
  */
-export const CONTRAST: SpacingScale = {
+export const CONTRAST: SteppedScale = {
   steps: [-0.35, -0.2625, -0.175, -0.0875, 0],
   def: 4,
   unit: 'x',
 }
 
-/** A value from either scale, clamped for the reason `spacingAt` gives. */
-export function stepAt(scale: SpacingScale, idx: number): number {
+/**
+ * A value from a stepped scale, clamped for the reason `spacingAt` gives.
+ *
+ * ⚠️ **IT ROUNDS, AND `readingStep` DOES NOT — THAT DIVERGENCE IS DELIBERATE AND
+ * WAS RAISED AS A DEFECT.** Handed 2.6 this lands on step 3; `readingStep(2.6)`
+ * answers the DEFAULT step instead. The two live in different domains and the
+ * domains want different answers:
+ *
+ * - Here the index may be STALE — written by a build whose scale had more or
+ *   fewer steps — and that is a reader's real choice arriving slightly wrong, so
+ *   the nearest step honours it where a reset would throw it away. Every comment
+ *   on these scales argues that, and `stepIndexOf` is the same argument inverted.
+ * - `readingStep`'s index addresses the reading RAMP, which the reducer clamps
+ *   and whose stored form `settings.ts` refuses unless it is an integer. A
+ *   fractional index there cannot be a stale preference; it is a caller passing
+ *   something it computed wrongly, and resolving it to a well-known step is the
+ *   answer that keeps the page laid out to a size that matches its column.
+ *
+ * `metrics.test.ts` pins both, `2.5` included. Unifying them would mean choosing
+ * one domain's rule for the other; the divergence is cheaper than that and is
+ * written down here so the next reader finds the reason rather than the
+ * asymmetry.
+ */
+export function stepAt(scale: SteppedScale, idx: number): number {
   const at = Math.min(scale.steps.length - 1, Math.max(0, Math.round(idx)))
   return scale.steps[at] ?? scale.steps[scale.def] ?? 0
+}
+
+/**
+ * `stepAt`'s inverse: the step nearest a stored VALUE.
+ *
+ * Needed because a setting that stores what the reader chose rather than where
+ * they chose it — `textSize`'s rule, and `readingRate` follows it — has to be
+ * shown on a stepper that works in indices. `stepIndexForSize` is the same
+ * function over `READING_STEPS`, whose steps are objects; this is the one for
+ * the plain-number scales, so neither has to be written twice.
+ *
+ * NEAREST RATHER THAN EXACT, for the reason the clamp exists: a value written
+ * by a build whose scale had different steps is a reader's real choice, and the
+ * closest thing this build offers honours it where `indexOf` would answer -1
+ * and silently reset them to the default.
+ */
+/**
+ * The index of the step nearest `value`, or `fallback` for a value that is not a
+ * number at all.
+ *
+ * ⚠️ **ONE LOOP, AND IT WAS WRITTEN TWICE.** `stepIndexOf` and
+ * `stepIndexForSize` were the same nearest-value scan differing only in how a
+ * step yields its number — a plain value on the spacing-style scales, `.size` on
+ * the reading ramp — and in which fallback they name. Two copies of a
+ * tie-breaking rule drift silently: `<` keeps the LOWER index on an exact tie,
+ * which is a decision neither comment stated and only one copy would have kept
+ * if either were edited.
+ */
+function nearestIndex<T>(
+  steps: readonly T[],
+  valueOf: (step: T) => number,
+  value: number,
+  fallback: number,
+): number {
+  if (!Number.isFinite(value)) return fallback
+  let best = 0
+  for (let at = 1; at < steps.length; at += 1) {
+    /* STRICTLY NEARER, so an exact tie keeps the lower index — the smaller of
+       two equally distant steps, which is the conservative answer for a size. */
+    if (Math.abs(valueOf(steps[at]!) - value) < Math.abs(valueOf(steps[best]!) - value)) best = at
+  }
+  return best
+}
+
+export function stepIndexOf(scale: SteppedScale, value: number): number {
+  return nearestIndex(scale.steps, (step) => step, value, scale.def)
 }
 
 /** A spacing value from an index, clamped — an index from anywhere may be stale. */
@@ -387,12 +565,7 @@ export const LEGACY_READING_SIZES: readonly number[] = [17, 19, 21, 23, 26, 28, 
  * That is the argument the `index` validator already makes for clamping.
  */
 export function stepIndexForSize(px: number): number {
-  if (!Number.isFinite(px)) return DEFAULT_STEP_IDX
-  let best = 0
-  for (let i = 1; i < READING_STEPS.length; i++) {
-    if (Math.abs(READING_STEPS[i]!.size - px) < Math.abs(READING_STEPS[best]!.size - px)) best = i
-  }
-  return best
+  return nearestIndex(READING_STEPS, (step) => step.size, px, DEFAULT_STEP_IDX)
 }
 
 /** §03 reading measure — DERIVED from the default reading step, not restated.
@@ -698,8 +871,14 @@ export const CONTROL = {
  * `CONTROL.md` under its older name, kept because the pill's SHAPE depends on
  * it: `--control-pill` is read as a width as well as a height to make a circle,
  * and renaming it would only move the coupling somewhere less obvious.
+ *
+ * ⚠️ **NOT EXPORTED, AND IT WAS.** `applyMetrics` below is its only reader —
+ * here, in this file — so exporting it put a second name for `CONTROL.md` in the
+ * module's public surface with no invariant of its own to carry. Anything
+ * outside should ask for `CONTROL.md`; the alias exists for the CSS custom
+ * property's name and nothing else.
  */
-export const CONTROL_PILL = CONTROL.md
+const CONTROL_PILL = CONTROL.md
 
 /**
  * Rows in a list, as opposed to controls in a row.
@@ -716,8 +895,10 @@ export const ROW = {
   book: 46,
 } as const
 
-/** `ROW.book` under its older name — see `CONTROL_PILL`. */
-export const ROW_BOOK = ROW.book
+/** `ROW.book` under its older name, and module-local for `CONTROL_PILL`'s reason:
+ *  `applyMetrics` is the only reader, and a second exported name for one value is
+ *  surface without an invariant. */
+const ROW_BOOK = ROW.book
 
 /**
  * A control in the TITLE BAR, which is not on the control ramp and cannot be.
@@ -1313,7 +1494,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
 /**
  * THE THREE SCALES WI-14.4 ADDS, and the one constant beside them.
  *
- * `SpacingScale` is the shape every other reader control here uses — a list of
+ * `SteppedScale` is the shape every other reader control here uses — a list of
  * steps and an index into it — and these take it so `StepRow` can draw them
  * without a second kind of row. Values, not indices, reach the stylesheet;
  * `stepAt` clamps, because an index can arrive from state a newer build wrote.
@@ -1333,7 +1514,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
  * points on the day it landed. The four named steps are all here; 95 is a fifth
  * between two of them and it is the default.
  */
-export const FIGURE_WIDTHS: SpacingScale = { steps: [70, 80, 90, 95, 100], def: 3, unit: '%' }
+export const FIGURE_WIDTHS: SteppedScale = { steps: [70, 80, 90, 95, 100], def: 3, unit: '%' }
 
 /**
  * How tall a figure may be, as a share of the page.
@@ -1343,16 +1524,27 @@ export const FIGURE_WIDTHS: SpacingScale = { steps: [70, 80, 90, 95, 100], def: 
  * steps are for a reader who would rather see a figure and the text around it
  * than a figure alone.
  */
-export const FIGURE_HEIGHTS: SpacingScale = { steps: [50, 70, 85, 95], def: 3, unit: 'vh' }
+export const FIGURE_HEIGHTS: SteppedScale = { steps: [50, 70, 85, 95], def: 3, unit: 'vh' }
 
 /**
  * A floor under the smallest text in the book — F5.
  *
  * THE MEASUREMENT BEHIND IT. The median book's smallest relative size is 0.70
- * of the base and the 5th percentile is 0.50, so at step 0 (17px) that is
- * 11.9px in the typical book and **8.5px in one book in twenty**. A reader who
- * chose the smallest step did not choose 8.5px; the book did, against a base
- * that has since moved under it.
+ * of the base and the 5th percentile is 0.50, so at step 0 — **15px**, which is
+ * `READING_STEPS[0].size` — that is **10.5px** in the typical book and **7.5px
+ * in one book in twenty**. A reader who chose the smallest step did not choose
+ * 7.5px; the book did, against a base that has since moved under it.
+ *
+ * ⚠️ **THIS PARAGRAPH SAID "step 0 (17px) … 11.9px … 8.5px" AND THE RAMP HAD
+ * MOVED UNDER IT.** 17px was step 0 on the old seven-step ramp; the current one
+ * opens at 15, so every number derived from it was stale — which matters more
+ * here than in most stale comments, because these three are the only stated
+ * justification for the floor's VALUES, and a reader checking whether 11 is
+ * still the right lowest step was checking it against the wrong base. The
+ * conclusion survives and gets stronger: the gap between what the book asks for
+ * and what is readable is wider at 15px than it was at 17, so the floor earns
+ * its place by more than it did. Recomputed rather than re-reasoned — the two
+ * ratios are the measurement, the base is read off the ramp.
  *
  * ZERO IS OFF, AND IT IS THE DEFAULT. A floor is a genuine override of the
  * author's proportions — it flattens a run of small caps into the size of the
@@ -1360,7 +1552,7 @@ export const FIGURE_HEIGHTS: SpacingScale = { steps: [50, 70, 85, 95], def: 3, u
  * three sizes below which a paragraph stops being readable at arm's length,
  * not a scale anybody should read a curve into.
  */
-export const MINIMUM_SIZES: SpacingScale = { steps: [0, 11, 12, 14], def: 0, unit: 'px' }
+export const MINIMUM_SIZES: SteppedScale = { steps: [0, 11, 12, 14], def: 0, unit: 'px' }
 
 /**
  * The first-line indent, when the reader asks for one.

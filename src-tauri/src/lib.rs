@@ -465,10 +465,19 @@ pub fn run() {
         gated by the capability file — an app command is reachable from the
         webview the moment it is registered here, which is why `open_external`
         validates its own argument rather than trusting the caller. */
+        /* ⚠️ **ONE LIST, AND `narrate` IS IN IT ON EVERY PLATFORM.** The two
+         * narration commands answer off macOS too — an empty voice list, and a
+         * refusal by name — because a `#[cfg]` here would mean two
+         * `generate_handler!` lists sharing three entries, which is the
+         * two-lists-that-must-agree shape `commands.rs` opens by warning about.
+         * The platform difference is inside the module instead. */
         .invoke_handler(tauri::generate_handler![
             open_external,
             atomic::write_atomic,
-            atomic::fsync_in_data_dir
+            atomic::fsync_in_data_dir,
+            narrate::narrate_voices,
+            narrate::narrate_render,
+            narrate::narrate_package
         ])
         // Scoped by `capabilities/default.json`, not by these registrations —
         // registering a plugin grants nothing on its own.
@@ -819,6 +828,15 @@ pub fn run() {
 
 /// The kernel's durable writes — see the module.
 mod atomic;
+
+/// Reading a book into a file, in the platform's own voice — see the module.
+///
+/// NOT gated, though its Apple half is: the commands exist everywhere so the
+/// handler needs only one list, and the arithmetic that places word markers is
+/// portable and tested on every platform. AVFoundation's speech synthesis is on
+/// iOS too and the same code would serve it — one `cfg` and a build nobody here
+/// can run, so it waits for somebody with a phone.
+mod narrate;
 
 /// The library lock — see the module.
 #[cfg(feature = "desktop")]

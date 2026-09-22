@@ -90,6 +90,37 @@ describe('rangeText', () => {
     expect(rangeText(range)).toBe('done\nStart')
   })
 
+  it('drops only the whitespace beside a break, and only what is beside it', () => {
+    /*
+     * ⚠️ **BOTH EDGE RULES ARE ANCHORED, AND AN UNANCHORED ONE READS THE SAME ON
+     * ORDINARY MARKUP.** `/\s+$/` off the joined text and `/^\s+/` off the
+     * arriving piece each remove the run AT one edge; without the anchor they
+     * remove the FIRST run anywhere, which on a piece that begins with a space
+     * is the same run — so nothing showed it. Without the `+` they remove one
+     * character of a run of two.
+     *
+     * The fixture therefore has an internal space on every side of a break, two
+     * spaces at the trailing edge, two at a leading edge, and a last block with
+     * no leading space at all. Each of the four is a different sentence.
+     */
+    const fixture = buildFixture(
+      elem('div', { id: 'page' }, [
+        elem('p', { id: 'first' }, [txt('one two  ')]),
+        txt('\n  '),
+        elem('p', { id: 'second' }, [txt('  three four')]),
+        elem('p', { id: 'third' }, [txt('five six')]),
+      ]),
+    )
+    const range = new FakeRange(
+      fixture.text('one two  '),
+      0,
+      fixture.text('five six'),
+      'five six'.length,
+    ).asRange()
+
+    expect(rangeText(range)).toBe('one two\nthree four\nfive six')
+  })
+
   it('falls back to the range`s own text when the window cannot reach both edges', () => {
     /*
      * A selection longer than the flattener's budget has no flat coordinate for
@@ -125,12 +156,12 @@ describe('rangeText', () => {
   })
 
   it('strips a soft hyphen from what it says and never from the range', () => {
-    const data = 'hyphen­ation'
+    const data = 'hyphen\u00adation'
     const fixture = buildFixture(elem('p', { id: 'para' }, [txt(data)]))
     const range = new FakeRange(fixture.text(data), 0, fixture.text(data), data.length).asRange()
 
     expect(rangeText(range)).toBe('hyphenation')
     // Untouched: stripping it from the range would move the highlight.
-    expect(range.toString()).toContain('­')
+    expect(range.toString()).toContain('\u00ad')
   })
 })

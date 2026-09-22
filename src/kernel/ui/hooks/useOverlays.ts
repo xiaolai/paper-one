@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { overlayKey, readersAmong, type ForeignAnnotation } from '../../core/circle/foreign'
 import type { OverlayContribution, ResolvePort } from '../../core/circle/overlay'
-import type { ForeignAnchor } from '../reader/session'
+import type { ForeignAnchor } from '../reader/markPaint'
 
 /**
  * Ask every overlay contribution what to draw in this book — WI-22.D1.
@@ -40,13 +40,27 @@ export interface OverlayDeps {
 const NONE: readonly ForeignAnchor[] = []
 const NO_ANNOTATIONS: readonly ForeignAnnotation[] = []
 
-/** Which book and which open a set of anchors belongs to. */
+/**
+ * Which book and which open a set of anchors belongs to.
+ *
+ * ⚠️ **TWO FIELDS, NOT ONE STRING.** This was a `stamp` of
+ * `${openGeneration}:${bookId}`, and encoding two facts in one made three of
+ * its own mutants unobservable: the `''` it took when no book was open is a
+ * value nothing can ever be compared equal to, so any other string did as well.
+ * Held as the pair it is, each half is compared on its own and each comparison
+ * is a sentence about the reader — this open, this book.
+ */
 interface Held {
-  readonly stamp: string
+  readonly openGeneration: number
+  readonly bookId: string
   readonly anchors: readonly ForeignAnchor[]
 }
 
-const NOTHING_HELD: Held = { stamp: '', anchors: NONE }
+/* NOTHING HELD IS `null`, NOT AN EMPTY RECORD. `{ stamp: '', anchors: NONE }`
+   carried two fields no reader could see: a stamp that does not match renders
+   as `NONE`, and the anchors it held were `NONE` already — so emptying the
+   record, or stamping it with any other string, changed nothing. Absence spelled
+   as absence has no fields to get wrong. */
 
 export function useOverlays(deps: OverlayDeps): readonly ForeignAnchor[] {
   const { contributions, bookId, openGeneration, parsed, resolve } = deps
@@ -58,16 +72,15 @@ export function useOverlays(deps: OverlayDeps): readonly ForeignAnchor[] {
    * nothing to do with — the defect this hook already guarded for a book
    * CLOSING and not for a book being replaced.
    *
-   * Comparing the stamp during render rather than clearing in an effect is
+   * Comparing what is held against the open DURING RENDER rather than clearing in an effect is
    * what makes the gap zero frames wide: an effect runs after paint, so a
    * cleared-in-effect version still shows one frame of the wrong book's marks.
    * The same reasoning `useMarking` gives for resetting its ranges during
    * render rather than in an effect.
    */
-  const [held, setHeld] = useState<Held>(NOTHING_HELD)
-  const stamp = parsed && bookId ? `${openGeneration}:${bookId}` : ''
+  const [held, setHeld] = useState<Held | null>(null)
 
-  /* Requests carry the stamp they were made under, so a slow answer for the
+  /* Requests carry the revision they were made under, so a slow answer for the
      previous book cannot land on this one. */
   const request = useRef(0)
   /**
@@ -81,13 +94,27 @@ export function useOverlays(deps: OverlayDeps): readonly ForeignAnchor[] {
   const lastGood = useRef(new Map<string, readonly ForeignAnnotation[]>())
 
   useEffect(() => {
-    if (!parsed || !bookId || contributions.length === 0) {
+    /* NO `contributions.length === 0` HERE. `ask` publishes the empty answer
+       itself for a composition with nothing to ask (see its own note), so this
+       branch and that one agreed on every input — and with nothing to
+       subscribe to, the only thing the early return saved was a `lastGood`
+       clear that the line below repeats. */
+    if (!parsed || !bookId) {
       /* ⚠️ **CLEARED, NOT LEFT STANDING.** Between books — and between
        * compositions — the previous book's anchors would otherwise be drawn
        * over a book that has nothing to do with them. `app/web/Reader.tsx`
        * records the same defect for its own marks: *"A STORE THAT WENT AWAY
-       * TAKES ITS HIGHLIGHTS WITH IT."* */
-      setHeld(NOTHING_HELD)
+       * TAKES ITS HIGHLIGHTS WITH IT."*
+       *
+       * ⚠️ **AND SINCE THE HOLD CARRIES ITS OWN BOOK AND OPEN, THIS CLEAR IS NO
+       * LONGER WHAT KEEPS THEM OFF THE PAGE** — the render refuses a hold whose
+       * `bookId` or `openGeneration` is not the one on screen, so removing this
+       * line draws nothing different. What it still does is let go: without it
+       * the hook keeps one book's annotations in memory for as long as the app
+       * shows another. That is not something a test can see, which is why the
+       * mutation of it is disabled rather than left as a survivor. */
+      /* Stryker disable next-line CallExpression: the render already refuses a stale hold; this drops the reference */
+      setHeld(null)
       lastGood.current.clear()
       return
     }
@@ -136,7 +163,11 @@ export function useOverlays(deps: OverlayDeps): readonly ForeignAnchor[] {
       const commit = () => {
         if (!live || request.current !== mine) return
         const collected = reconciled(answers.flat())
-        const next: Held = { stamp, anchors: collected.length === 0 ? NONE : collected }
+        /* THE ANSWER AS IT CAME, empty or not: `showsTheSame` below is what
+           keeps an unchanged answer from becoming a new state, so swapping an
+           empty answer for the shared constant saved no render and no test
+           could see the difference. */
+        const next: Held = { openGeneration, bookId, anchors: collected }
         /* ⚠️ **AN UNCHANGED ANSWER MUST NOT BE A NEW STATE.** Every `ask` used
          * to allocate, so re-rendering was unconditional — and a host that
          * composes its `contributions` array during render then hands the
@@ -198,27 +229,32 @@ export function useOverlays(deps: OverlayDeps): readonly ForeignAnchor[] {
       live = false
       for (const off of offs) safely(off)
     }
-  }, [contributions, bookId, openGeneration, parsed, resolve, stamp])
+  }, [contributions, bookId, openGeneration, parsed, resolve])
 
   /* DURING RENDER, not in an effect — see `held`. */
-  return held.stamp === stamp ? held.anchors : NONE
+  return parsed && held !== null && held.openGeneration === openGeneration && held.bookId === bookId
+    ? held.anchors
+    : NONE
 }
 
 /**
  * Whether committing `next` would change what the reader is shown.
  *
  * ⚠️ **THE COMPARISON IS AGAINST WHAT IS ON SCREEN, not against the record.**
- * `held` under a stale stamp already renders as nothing, so the first answer
+ * `held` from another open already renders as nothing, so the first answer
  * for a book nobody has shared from — by far the ordinary case — moves the
- * stamp and shows exactly what it showed before. Comparing the records would
+ * open and shows exactly what it showed before. Comparing the records would
  * commit it, and a commit costs a render, an effect re-run and a full
  * resubscribe.
  *
  * Order is the contributors' order, which is the composition's — stable by
  * construction, so a positional comparison is the whole question.
  */
-function showsTheSame(prev: Held, next: Held): boolean {
-  const shown = prev.stamp === next.stamp ? prev.anchors : NONE
+function showsTheSame(prev: Held | null, next: Held): boolean {
+  const shown =
+    prev !== null && prev.openGeneration === next.openGeneration && prev.bookId === next.bookId
+      ? prev.anchors
+      : NONE
   if (shown.length !== next.anchors.length) return false
   return shown.every((one, at) => {
     const other = next.anchors[at]

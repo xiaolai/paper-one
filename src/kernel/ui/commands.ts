@@ -1,4 +1,4 @@
-import { paneAvailable, paneFits, screenJump } from './state'
+import { SCREEN_JUMP_COMBO, paneAvailable, paneFits, screenJump } from './state'
 import type { Command, CommandContext, PaneContribution } from '../core/capability'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { panesFor, THEMES } from './panes'
@@ -22,9 +22,13 @@ import type { AppDispatch, AppState, PaneId } from './state'
 
 /* `Command` is declared in `core/capability.ts` — a capability's commands are
  * the same shape as the kernel's, and the palette does not know which is
- * which. Re-exported here, so nothing that named it through this module has
- * moved. */
-export type { Command } from '../core/capability'
+ * which. It is imported from THERE by everything that names it.
+ *
+ * ⚠️ **IT WAS RE-EXPORTED FROM HERE "so nothing that named it through this
+ * module has moved"** — a compatibility shim for a move that had finished. Two
+ * files still imported it this way, so the palette depended on this module for
+ * a type this module does not own, and the declaration had two addresses. They
+ * import the one address now, and the shim is gone. */
 
 /**
  * What the kernel's own commands are built from. A capability's commands see
@@ -32,6 +36,15 @@ export type { Command } from '../core/capability'
  * below from the same state, so the two cannot disagree about what is true.
  */
 export interface KernelCommandContext {
+  /**
+   * A contributed command whose id a kernel command already holds — see below.
+   *
+   * Optional and reported rather than thrown: the kernel's own commands must keep
+   * working, so the duplicate is dropped and the fact is handed somewhere it can
+   * be seen. `App` routes it to the diagnostics log.
+   */
+  onDuplicate?: ((id: string) => void) | undefined
+
   state: AppState
   dispatch: AppDispatch
   /** False when the reader has no book open — book commands are then omitted. */
@@ -44,6 +57,20 @@ export interface KernelCommandContext {
   faces?: readonly Face[]
   /** Marks the current selection, when there is one. */
   markSelection: (() => void) | null
+  /**
+   * Export the open book as an audiobook, and stop one that is running.
+   *
+   * ⚠️ **THE PALETTE IS THE WHOLE OF THIS FEATURE'S SURFACE, DELIBERATELY.**
+   * There is no button and no pane: the export works and has never been run by
+   * a reader, so a control in the rail would promise more settledness than it
+   * has. A palette entry is findable by somebody looking for it and invisible to
+   * everybody else, which is the right shape for that. When it has been used on
+   * real books it earns a control; until then this is honest about what it is.
+   *
+   * ABSENT when the platform cannot do it — a browser, a phone — so the command
+   * is not drawn rather than drawn and refused.
+   */
+  exportAudiobook?: { readonly running: boolean; readonly run: () => void } | undefined
   /**
    * Keeps the place the reader is at, or gives it back. Null when no place can
    * be pinned down — see `Bookmarking.canBookmark`.
@@ -148,6 +175,21 @@ export interface KernelCommandContext {
   contributedPanes?: readonly Pick<PaneContribution, 'id' | 'label' | 'screens'>[]
 }
 
+/**
+ * Every kernel command for this moment, then the composition's.
+ *
+ * ONE LONG FUNCTION, KEPT AS ONE. An audit named it a god procedure — panels,
+ * reading, appearance, books, archives, navigation and contributions in 440
+ * lines — and said that ordering changes had already broken it. That half was
+ * true and is fixed where it lived: the order no longer decides the palette's
+ * grouping (`contiguous`), and the archive rows are a table. What remains is a
+ * sequence of independent `if (available) push(row)` blocks, each reading the
+ * same `ctx` and `state`, with nothing flowing from one to the next. Split into
+ * one builder per group, each would take the whole context and return its rows,
+ * and this would become the list of them in order — the same file, a function
+ * boundary per heading, and no invariant held by any of them that is not held
+ * here already.
+ */
 export function buildCommands(ctx: KernelCommandContext): Command[] {
   const { state, dispatch } = ctx
   const commands: Command[] = []
@@ -349,6 +391,18 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     run: () => dispatch({ type: 'setThemeFollowsOs', follows: !state.themeFollowsOs }),
   })
 
+  if (ctx.exportAudiobook && ctx.hasBook) {
+    const audiobook = ctx.exportAudiobook
+    commands.push({
+      id: 'book:audiobook',
+      label: audiobook.running ? 'Stop exporting the audiobook' : 'Export as audiobook…',
+      group: 'Book',
+      keywords: 'narrate speech m4b listen chapters read aloud file',
+      on: audiobook.running,
+      run: audiobook.run,
+    })
+  }
+
   if (ctx.markSelection) {
     const mark = ctx.markSelection
     commands.push({
@@ -445,48 +499,48 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     })
   }
 
-  if (ctx.exportMarks) {
-    const run = ctx.exportMarks
-    commands.push({
+  /**
+   * The four archive rows, each offered only where the host can do it.
+   *
+   * ⚠️ **FOUR COPIES OF ONE SKELETON — `if (ctx.x) { const run = ctx.x;
+   * commands.push({ … group: 'Library', run }) }` — AND NOW ONE LOOP OVER A
+   * TABLE.** They differed in id, label and keywords only, so the parts that are
+   * a decision — which group they file under, and that an absent handler means
+   * an absent row — were written four times and could be edited in one. The
+   * per-row reasons stay beside the rows they explain.
+   */
+  const archive: readonly {
+    readonly handler: (() => void) | null | undefined
+    readonly id: string
+    readonly label: string
+    readonly keywords: string
+  }[] = [
+    {
+      handler: ctx.exportMarks,
       id: 'marks:export',
       /* NAMES BOTH THINGS IT WRITES, because a reader looking for a way out
          does not know whether Paper calls a card marginalia. */
       label: 'Export your marks and cards…',
-      group: 'Library',
       keywords: 'mark note card highlight annotation backup save export file json markdown archive',
-      run,
-    })
-  }
-
-  if (ctx.importMarks) {
-    const run = ctx.importMarks
-    commands.push({
+    },
+    {
+      handler: ctx.importMarks,
       id: 'marks:import',
       /* "Merge" in the label, exactly as the tag import says it, and it is the
          reassurance rather than the description: an import never removes a
          mark, so restoring an old file cannot silently undo a month of
          reading. */
       label: 'Import marks from a file… (merge)',
-      group: 'Library',
       keywords: 'mark note card highlight annotation restore load import merge file json archive backup',
-      run,
-    })
-  }
-
-  if (ctx.exportTags) {
-    const run = ctx.exportTags
-    commands.push({
+    },
+    {
+      handler: ctx.exportTags,
       id: 'tags:export',
       label: 'Export your tags…',
-      group: 'Library',
       keywords: 'tag backup save export file json archive',
-      run,
-    })
-  }
-
-  if (ctx.importTags) {
-    const run = ctx.importTags
-    commands.push({
+    },
+    {
+      handler: ctx.importTags,
       id: 'tags:import',
       /* "Merge" in the label, because that is what it does and the word is the
          reassurance: an import never removes a tag, so restoring an old file
@@ -498,10 +552,11 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
          written, and the test read the keywords. Added — and the test now reads
          the label — by the 2026-09-13 audit. */
       label: 'Import tags from a file… (merge)',
-      group: 'Library',
       keywords: 'tag restore load import merge file json archive backup',
-      run,
-    })
+    },
+  ]
+  for (const { handler, ...row } of archive) {
+    if (handler) commands.push({ ...row, group: 'Library', run: handler })
   }
 
   commands.push({
@@ -516,10 +571,17 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     label: screenJump(state.screen, ctx.hasBook).label,
     group: 'Book',
     // The key the titlebar button names and the handler binds. Three surfaces
-    // for one action, and the palette is where a reader learns the shortcut.
-    combo: '⌘L',
+    // for one action, and the palette is where a reader learns the shortcut —
+    // named once, beside `screenJump`, so the tooltip cannot keep an old one.
+    combo: SCREEN_JUMP_COMBO,
     keywords: 'shelf books home library',
-    on: state.screen === 'library',
+    /* ⚠️ **NO `on`, AND THIS SAID `state.screen === 'library'`.** `on` means
+       "this command names a state that is currently on", and a jump always
+       names the OTHER screen — on the library its label is "Back to the book"
+       or "Open a book". So the palette drew a checkmark beside a destination the
+       reader was not at, on exactly the screen where they would look for it. The
+       titlebar's Library button is a toggle and IS pressed there; this row is a
+       jump, and a jump has no state to be on. */
     run: () =>
       dispatch({ type: 'goScreen', screen: screenJump(state.screen, ctx.hasBook).to }),
   })
@@ -567,17 +629,68 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
 
   /* THE CAPABILITIES' COMMANDS, after the kernel's, from the same state. */
   if (ctx.contributed) {
-    commands.push(
-      ...ctx.contributed({
-        screen: state.screen,
-        pane: state.pane,
-        hasBook: ctx.hasBook,
-        openPane: (pane) => dispatch({ type: 'openPane', pane }),
-      }),
-    )
+    const contributed = ctx.contributed({
+      screen: state.screen,
+      pane: state.pane,
+      hasBook: ctx.hasBook,
+      openPane: (pane) => dispatch({ type: 'openPane', pane }),
+    })
+
+    /**
+     * ⚠️ **A CONTRIBUTED ID COULD SHADOW A KERNEL ONE, AND THE KEYBOARD WOULD RUN
+     * THE WRONG COMMAND.** Composition validation checks contributed ids against
+     * EACH OTHER and never against the kernel's — so a capability legitimately
+     * named `book` contributing `book:open` produced two rows with one id:
+     * duplicate React keys, and identity-based selection resolving to whichever
+     * came first, which is the kernel's. A reader pressing the palette's row for
+     * the capability got the kernel's action.
+     *
+     * The kernel's ids WIN, because they are the ones a reader cannot avoid and
+     * the ones the accelerators are bound to. The contribution is dropped rather
+     * than renamed: renaming it would put a row in the palette under an id its
+     * own capability does not know, so nothing could address it afterwards.
+     *
+     * Reported through `onDuplicate` rather than thrown. A composition is fixed
+     * by whoever wrote it, and a reader who cannot open their library because a
+     * capability chose a name is worse off than one missing a row.
+     */
+    const taken = new Set(commands.map((one) => one.id))
+    for (const one of contributed) {
+      if (taken.has(one.id)) {
+        ctx.onDuplicate?.(one.id)
+        continue
+      }
+      taken.add(one.id)
+      commands.push(one)
+    }
   }
 
-  return commands
+  return contiguous(commands)
+}
+
+/**
+ * The same commands with each group's rows together, in the order the groups
+ * first appear.
+ *
+ * ⚠️ **THE PALETTE DREW "Book" TWICE, AND SOURCE ORDER WAS THE ONLY GUARD.**
+ * It emits a heading whenever the group changes as it walks the list — rather
+ * than grouping first, so a search's ranking survives — and with an empty query
+ * the list is `buildCommands`' push order. The Library block sat between two
+ * runs of Book commands, so the reader saw Book, Library, Book: one group under
+ * two headings, the screen jump separated from the book actions it belongs with.
+ *
+ * Reordering the pushes would fix today's file and leave the rule where it was —
+ * in the discipline of whoever adds the next command. This makes groups
+ * contiguous whatever order they were pushed in. `Array.prototype.sort` is
+ * STABLE, so rows keep their order within a group and groups keep the order
+ * they first appeared in; only a group that had been split is joined.
+ */
+function contiguous(commands: readonly Command[]): Command[] {
+  const firstSeen = new Map<string, number>()
+  for (const [at, command] of commands.entries()) {
+    if (!firstSeen.has(command.group)) firstSeen.set(command.group, at)
+  }
+  return [...commands].sort((a, b) => (firstSeen.get(a.group) ?? 0) - (firstSeen.get(b.group) ?? 0))
 }
 
 /**

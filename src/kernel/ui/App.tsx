@@ -1,10 +1,10 @@
 import { messageOf } from '../core/messageOf'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useOccasion } from './hooks/useOccasion'
 import { buildCommands } from './commands'
 import { ContributedScreen } from './screens/ContributedScreen'
 import { isContributedScreenId } from '../core/uiTypes'
 import { coverIn } from '../core/coverArt'
-import { tauriVaultFs } from '../core/vaultFsTauri'
 import { offeredFaces } from '../core/typefaces'
 import { presentFaces } from './fontProbe'
 import { canKeepPlace, resolveAccel, resolvePageKey } from './accel'
@@ -42,7 +42,7 @@ import { useJumps, type JumpTarget } from './hooks/useJumps'
 import { useResumeAt } from './hooks/useResumeAt'
 import { locationToOpen, overrideSpent, type Place } from '../core/jumpStack'
 import type { ExternalLinkDetail } from 'foliate-js/view.js'
-import type { FootnoteRender } from './reader/session'
+import type { FootnoteRender } from './reader/footnotes'
 import { extensionFor, isMissingFile, readOwnedBook, storedBookName } from '../core/bookVault'
 import type { IndexedBook } from '../core/bookIndex'
 import type { IndexFs } from '../core/bookIndex'
@@ -63,22 +63,18 @@ import { TrashSheet } from './overlays/TrashSheet'
 import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
 import { Library } from './screens/Library'
-import { Reader, type ReturnHint } from './screens/Reader'
+import { Reader } from './screens/Reader'
 import { TagEditor } from './screens/TagEditor'
 import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
+import { chapterSteps } from './tocOrder'
 import { useSpeech } from './reader/useSpeech'
+import { documentLang } from './reader/speech'
+import { voiceFor } from './reader/voiceChoice'
+import { useVoices } from './hooks/useVoices'
+import { audiobookSourceOf, useAudiobook } from './hooks/useAudiobook'
 
-/**
- * The desktop's jackets, bound once.
- *
- * ⚠️ **MODULE SCOPE, NOT AN INLINE ARROW.** `BookCover` lists `coverFor` in its
- * effect's dependencies — it has to, or it captures the first one forever — so
- * a new identity per render would mean a refetch and a revoked object URL for
- * every one of 1 961 rows, every render.
- */
-const desktopCovers = (bookId: string) => coverIn(tauriVaultFs, bookId)
 
 /**
  * The tag sheet's books when no book is being read — which is never drawn: the
@@ -175,6 +171,29 @@ export interface AppProps {
  */
 const NOTICE_MS = 12_000
 
+/**
+ * The desktop shell — and at well over two thousand lines, the largest component
+ * in the tree. An audit called it a god component and proposed extracting
+ * `useBookOpening`, `useImportCommands`, `useTrashController` and `useAppKeyboard`.
+ *
+ * WHAT WAS WRONG IN IT IS FIXED IN PLACE, and it was not the size. The keyboard
+ * map was reinstalled on every page turn because five effects and callbacks
+ * depended on the whole `book` (see `pages`); jackets were read around the
+ * injected filesystem; the export was offered before the book could be walked; a
+ * failed path read threw away its cause; one predicate was restated three times;
+ * one notice mechanism was written twice. Each of those was a dependency or a
+ * duplicate, and each is local now.
+ *
+ * WHAT IS LEFT IS STRUCTURE, AND THE PROPOSED SEAMS DO NOT HOLD IT. The
+ * candidates share state they cannot own: opening a book reads the intake, the
+ * jump history, the rollback and the library; the keyboard reads the layers, the
+ * marks, the pane rules and the opener; the imports read the opener and the
+ * notice. Extracted, each hook takes most of this component's state as
+ * arguments and hands most of it back — the same coupling, spread across files
+ * that can each be read without the others and understood only with them. The
+ * seam worth cutting is the one a second shell needs, and none does yet: the
+ * phone and the browser mount their own roots.
+ */
 export function App({
   services,
   fs,
@@ -237,7 +256,32 @@ export function App({
    * DECLARED ONCE, because asking it a second time as `state.screen ===
    * 'reader'` is the defect the keyboard map's note records about its own
    * copy. */
+  /* Every overlay, as ONE value — see the keyboard effect's dependency list. */
+  const anyLayerOpen = hasOpenLayer(state)
   const onReader = state.screen === 'reader'
+  /**
+   * The shelf's jackets, read through the filesystem this App was GIVEN.
+   *
+   * ⚠️ **THIS WAS `coverIn(tauriVaultFs, …)`, BOUND AT MODULE SCOPE, AND IT
+   * IGNORED THE `fs` PROP.** On the desktop that prop is
+   * `countingFs(libraryFs)` — the wrapper every other read goes through so the
+   * app can account for its I/O — so the covers of 1 961 rows were read around
+   * the one instrument meant to see them, and a host that injected a different
+   * filesystem would have had its records read from one backend and its jackets
+   * from another. Off Tauri there is no `fs` and so no jackets, rather than a
+   * call into a plugin that is not there.
+   *
+   * ⚠️ **STILL ONE IDENTITY, WHICH IS WHY IT WAS AT MODULE SCOPE.** `BookCover`
+   * lists `coverFor` in its effect's dependencies — it has to, or it captures the
+   * first one forever — so a new function per render would refetch and revoke an
+   * object URL for every row, every render. `fs` is fixed at boot, so this is
+   * made once.
+   */
+  const coverFor = useCallback(
+    (bookId: string): Promise<string | null> => (fs ? coverIn(fs, bookId) : Promise.resolve(null)),
+    // Stryker disable next-line ArrayDeclaration: the one host that passes `fs` — `main.tsx` — renders this window once, from `bootApp`'s result, and never again, so `fs` cannot change under it and an empty list rebuilds this equally often.
+    [fs],
+  )
   /* Pins, colours, hidden subjects and saved views — the reader's decisions
      ABOUT their tags, as opposed to which books carry them. See `tagPrefs`. */
   const tagPrefs = useTagPrefs(services.storage)
@@ -259,7 +303,62 @@ export function App({
   const library = useLibrary(services.library)
   /* Reading aloud follows the spine document and turns its pages: the session
    * is the paging — `next`, in reading order — and `doc` is what is read. */
-  const speech = useSpeech(book.doc, book)
+  const speechPrefs = useMemo(
+    () => ({
+      voices: state.readingVoice,
+      rate: state.readingRate,
+      sentenceGapMs: state.sentenceGapMs,
+      paragraphGapMs: state.paragraphGapMs,
+      notesAloud: state.readingNotesAloud,
+    }),
+    [
+      state.readingVoice,
+      state.readingRate,
+      state.sentenceGapMs,
+      state.paragraphGapMs,
+      state.readingNotesAloud,
+    ],
+  )
+  /**
+   * The paging the reading needs, and a chapter step over the book's contents.
+   *
+   * ⚠️ **THE STEP ALWAYS COMES, AND ANSWERS FOR ITSELF.** This returned no
+   * `chapter` at all where neither direction went anywhere, on the ground that
+   * the transport read its PRESENCE — but the transport reads `can` per
+   * direction now, and a step whose `can` says no in both is the same answer as
+   * an absent one. The early return was a second statement of it, and no test
+   * could tell the two apart. `chapterSteps` holds the whole decision, with every
+   * branch reachable, including the step that declines.
+   *
+   * A reader can be in a spine item no contents entry points at: `chapterHref`
+   * is then `''`, which `stepChapter` finds in no list of places, so both
+   * directions answer no without a guard here saying so first.
+   */
+  const speechPaging = useMemo(
+    () => ({
+      next: book.next,
+      chapter: chapterSteps(book.toc, book.position.chapterHref, book.goTo),
+    }),
+    [book.next, book.goTo, book.toc, book.position.chapterHref],
+  )
+  const speech = useSpeech(book.doc, speechPaging, speechPrefs)
+  /* What the Voice group in Settings needs that app state cannot answer: the
+     language of the book on screen, and what this machine can actually say.
+     `documentLang` is the same fact the utterance is given, read from the same
+     place, so the picker offers voices for the language the reading will ask
+     for rather than for the interface's. */
+  const voices = useVoices()
+  const narration = useMemo(
+    () => ({ lang: book.doc ? documentLang(book.doc) : null, voices }),
+    [book.doc, voices],
+  )
+  /* ⚠️ **THE SAME ANSWER THE SPEAKER WILL REACH, ASKED BEFORE THE PRESS.** The
+     floor refuses every voice a Mac's WebView offers (see `voiceChoice.ts`), so
+     the Listen control says so up front rather than starting a reading that
+     stops at its first sentence. Same function, same list, same language and
+     same stored choice as `Speaker.speak` — so the control cannot promise a
+     reading the speaker then refuses, or refuse one it would have read. */
+  const listenRefused = voiceFor(narration.voices, narration.lang, state.readingVoice).kind === 'none'
 
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than
@@ -330,7 +429,9 @@ export function App({
       book.open(source)
     },
     // Stryker disable next-line ArrayDeclaration: everything this reads is stable for the window's life — `book.open` and `dispatch` are, and so is `intake.noteOpen` (asserted in `useBookIntake.stability.test.tsx`) — so the first closure and the latest are the same function.
-    [book, dispatch],
+    /* `book.open`, not `book`: the whole object changes on every page turn, and
+       this reads one stable callback of it. */
+    [book.open, dispatch],
   )
 
 
@@ -513,7 +614,17 @@ export function App({
               .then((file) => {
                 if (fresh()) openBook(file, original, undo ?? null)
               })
-              .catch(() => {
+              .catch((cause: unknown) => {
+                /* ⚠️ **THE CAUSE WAS DROPPED HERE, BEFORE THE SECOND TRY.** An
+                   origin that would not read as a path is tried as an address,
+                   and if THAT fails the reader sees the address failing — while
+                   the reason the path failed, which is usually the useful one
+                   (a moved folder, a permission, a disk that is not mounted),
+                   was discarded by an empty `catch`. It is said once here, where
+                   it is still known, and the fallback proceeds exactly as
+                   before; this does not decide anything, it only keeps the
+                   evidence. */
+                console.error('Paper: could not read the book at its saved place, trying it as an address', cause)
                 if (fresh()) openBook(original, null, undo ?? null)
               })
             return
@@ -579,8 +690,8 @@ export function App({
    * first one's timer ran out — did not restart the timer, and the repeat
    * vanished almost as it appeared (2026-09-13 audit). `ReturnHint` learned
    * this for the same reason. Every call is a new notice. */
-  const [notice, setNotice] = useState<{ readonly text: string; readonly nonce: number } | null>(null)
-  const notices = useRef(0)
+  /* The nonce is `useOccasion`'s — see there for why a repeat must be new. */
+  const [notice, raiseNotice, setNotice] = useOccasion<{ readonly text: string }>()
   const importNotice = notice?.text ?? null
   /* ⚠️ **IT SAYS SOMETHING, and it used to take `null` for "say nothing".** The
      two are not one operation: nothing reads a notice but its text, so clearing
@@ -588,14 +699,46 @@ export function App({
      clear — and the only caller that meant it is the Dismiss button, which has
      `setNotice` itself. */
   const setImportNotice = useCallback(
-    (text: string) => {
-      // Stryker disable next-line AssignmentOperator: the nonce is read for INEQUALITY and nothing else, so counting down is the same sequence backwards — every notice still differs from the one before it.
-      notices.current += 1
-      setNotice({ text, nonce: notices.current })
-    },
-    // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it — React compares the elements, and Stryker's filler is equal to itself on every render.
-    [],
+    (text: string) => raiseNotice({ text }),
+    // Stryker disable next-line ArrayDeclaration: `useOccasion`'s `raise` is built from an empty list, so this one and an empty one rebuild the callback equally often — never.
+    [raiseNotice],
   )
+  /* The audiobook export, reachable from the command palette and nowhere else —
+     see `useAudiobook` for why that is the whole surface for now. */
+  const audiobookSource = useMemo(
+    () =>
+      audiobookSourceOf(
+        {
+          bookId: book.bookId,
+          doc: book.doc,
+          meta: book.meta,
+          toc: book.toc,
+          fixedLayout: book.fixedLayout,
+          sectionTexts: book.sectionTexts,
+        },
+        state.readingNotesAloud,
+      ),
+    [
+      book.bookId,
+      book.meta,
+      book.doc,
+      book.toc,
+      book.fixedLayout,
+      book.sectionTexts,
+      state.readingNotesAloud,
+    ],
+  )
+  const audiobook = useAudiobook({
+    /* The engine is macOS-only and the commands refuse elsewhere by name, so the
+       palette entry follows the same platform the rest of the app reads. */
+    available: platform === 'macos',
+    source: audiobookSource,
+    voices,
+    chosen: state.readingVoice,
+    rate: state.readingRate,
+    say: setImportNotice,
+  })
+
   /* Standing, not transient: a quarantined store is not something the app
      did, it is something the reader has lost, and it stays until they say
      they have read it. */
@@ -615,7 +758,7 @@ export function App({
      * reader steps back to the shelf, and the shelf is exactly where they want
      * jackets appearing; gated on the open book, the pass would stop the first
      * time anything was read and never start again that session. */
-    reading: state.screen === 'reader',
+    reading: onReader,
     /* AND NOT WHILE BOOKS ARE STILL ARRIVING. The import shelves as it
      * copies, so rows reach this pass mid-import; taking them would put a
      * parse a second against a copy loop that wants the same thread seventy
@@ -1589,7 +1732,9 @@ export function App({
     const here = book.placeHere()
     const id = book.bookId
     return here && here.cfi && id ? { bookId: id, cfi: here.cfi } : null
-  }, [book])
+    /* Not `book` — see `pages`. `placeHere` asks the SESSION for its live
+       position, so a stable callback still answers where the reader is now. */
+  }, [book.placeHere, book.bookId])
 
   /**
    * "← Back to Loomings" — the line that tells a reader the key is worth
@@ -1615,19 +1760,14 @@ export function App({
    * and the reader's fade timer therefore never restarted — the second hint
    * ran out on the first one's clock. See `ReturnHint`.
    */
-  const [returnTo, setReturnTo] = useState<ReturnHint | null>(null)
-  /* MINTED IN ONE PLACE, so the nonce cannot be forgotten by the third call
-     site. A ref rather than `n + 1` off the current hint: the hint is cleared
-     to null between jumps, so its own count is not there to read. */
-  const returnHints = useRef(0)
+  /* MINTED IN ONE PLACE — `useOccasion`, which the import notice shares — so the
+     nonce cannot be forgotten by the third call site. The held value is exactly
+     `ReturnHint`'s shape, `{ label, nonce }`. */
+  const [returnTo, raiseReturn, setReturnTo] = useOccasion<{ readonly label: string }>()
   const raiseReturnHint = useCallback(
-    (label: string) => {
-      // Stryker disable next-line AssignmentOperator: the nonce is the OCCASION, compared only for inequality — see `useFadingHint` — so counting down restarts the fade exactly as counting up does.
-      returnHints.current += 1
-      setReturnTo({ label, nonce: returnHints.current })
-    },
-    // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it, and this reads only a ref and `useState`'s setter.
-    [],
+    (label: string) => raiseReturn({ label }),
+    // Stryker disable next-line ArrayDeclaration: as above — another `useOccasion` `raise`, built once.
+    [raiseReturn],
   )
   /* DECLARED ABOVE `goToJump`, which clears it when a cross-book open fails.
      A refused jump and a jump whose book would not open are the same lie to
@@ -1696,7 +1836,7 @@ export function App({
       setOpenAt(target)
       return true
     },
-    [book, library.books, openStored, setReturnTo, state.screen, dispatch],
+    [book.bookId, book.goTo, library.books, openStored, setReturnTo, state.screen, dispatch],
   )
 
   const jumps = useJumps({ placeHere, navigate: goToJump })
@@ -1835,7 +1975,40 @@ export function App({
       book.close()
     },
     // Stryker disable next-line ArrayDeclaration: `book.close` is a stable callback of `useBook`'s, so the first closure closes the book every later one would.
-    [book],
+    [book.close],
+  )
+
+  /**
+   * A capability naming a command the kernel already owns.
+   *
+   * ⚠️ **WIRED HERE BECAUSE A SURFACE WITH NO CALLER IS THE DEFECT THIS REPOSITORY
+   * KEEPS DELETING TWICE.** `buildCommands` drops the duplicate and keeps the
+   * kernel's, which is right for the reader and silent for whoever wrote the
+   * composition — so the fact goes where a release build can be asked for it, the
+   * same place a quiet circle is diagnosed from.
+   *
+   * ⚠️ **ONCE PER ID FOR THE LIFE OF THE WINDOW, AND IT WAS ONCE PER REBUILD.**
+   * `buildCommands` runs whenever the palette's list is rebuilt, and that list
+   * depends on `state` and `book` — both of which change on every page turn. So
+   * one collision in a composition wrote a warning per page, into a ring of two
+   * thousand entries that is the only thing a release build can be asked: a long
+   * reading pushed every other diagnostic out of it with copies of one fact.
+   */
+  const reportedDuplicates = useRef(new Set<string>())
+  const onDuplicateCommand = useCallback(
+    (id: string) => {
+      if (reportedDuplicates.current.has(id)) return
+      reportedDuplicates.current.add(id)
+      diagnosticLog?.record({
+        at: Date.now(),
+        level: 'warn',
+        scope: 'commands',
+        event: 'duplicate.id',
+        fields: { id },
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: the log is the composition root's, made once at boot and never replaced under a live window — and each collision is reported once per window — so a list that never updated would report into the same log.
+    [diagnosticLog],
   )
 
   const commands = useMemo(
@@ -1848,6 +2021,11 @@ export function App({
            rather than offering one that would refuse. `useArchives` decides,
            because it is what knows. */
         exportMarks: archives.exportMarks,
+        /* ABSENT OFF macOS and with no book open — `useAudiobook` answers null
+           there, and the palette then omits the row rather than offering one
+           that would be refused. */
+        ...(audiobook ? { exportAudiobook: audiobook } : {}),
+        onDuplicate: onDuplicateCommand,
         importMarks: archives.importMarks,
         exportTags: archives.exportTags,
         importTags: archives.importTags,
@@ -1917,6 +2095,13 @@ export function App({
       archives,
       markSelection,
       closeBook,
+      /* ⚠️ **READ AT LINE 1934 AND OMITTED HERE.** `running` and `run` both change
+         when an export starts, and without this the palette kept the first pair:
+         selecting the row again started a second export rather than stopping the
+         first. Safe to depend on because `useAudiobook` memoises it — a fresh
+         object per render is what kept it out. */
+      audiobook,
+      onDuplicateCommand,
     ],
   )
 
@@ -1931,6 +2116,32 @@ export function App({
    * here, where a re-subscribed handler can still read it.
    */
   const taken = useRef<string | null>(null)
+
+  /**
+   * The five things the keyboard handler reads from the book, and nothing else.
+   *
+   * ⚠️ **THE EFFECT BELOW LISTED THE WHOLE `book`, AND `book` CHANGES ON EVERY
+   * PAGE TURN** — its position is one of its values, and its identity follows its
+   * values. So every turn tore down both global key listeners and added them
+   * again, for a handler whose body reads four stable callbacks (through
+   * `book[verb]`, which a search for `book.` does not find) and whether a book is
+   * open. Named here, so the list says exactly what the body uses and a turn no
+   * longer re-runs it. The four verbs are `useCallback`s with no dependencies in
+   * `useBook`, so `pages` is made once for the book's life.
+   */
+  const pages = useMemo(
+    () => ({ next: book.next, prev: book.prev, goLeft: book.goLeft, goRight: book.goRight }),
+    // Stryker disable next-line ArrayDeclaration: all four are `useBook` callbacks built from empty lists over the navigator ref, so none of them ever moves.
+    [book.next, book.prev, book.goLeft, book.goRight],
+  )
+  /* ⚠️ **THIS DIRECTIVE WAS ON THE KEYBOARD HANDLER'S `screenJump` LINE, AND
+     MOVING THE EXPRESSION HERE LEFT IT COVERING NOTHING** — `pnpm
+     directives:check` refused it as inert. The mutants it names now live on this
+     line, and its reason is unchanged: the handler reads `screenJump(...).to`,
+     which is decided by the screen alone, so whether a book is open cannot move
+     it. */
+  // Stryker disable next-line ConditionalExpression,EqualityOperator: `screenJump` decides its LABEL from whether a book is open and its destination from the screen alone, and the one reader of this reads only the destination.
+  const bookIsOpen = book.source !== null
 
   /* §11's keyboard map. Every combo the design publishes is bound here, and
    * nothing is bound to a layer that does not exist — ⌘K used to be left
@@ -2051,7 +2262,7 @@ export function App({
         const verb = resolvePageKey(event)
         if (verb) {
           event.preventDefault()
-          book[verb]()
+          pages[verb]()
           return
         }
       }
@@ -2115,8 +2326,10 @@ export function App({
           /* `screenJump`, not a comparison of its own — see `state.ts`. The
              titlebar advertises this shortcut in its own tooltip, and the two
              disagreed on every screen that is neither of the kernel's. */
-          // Stryker disable next-line ConditionalExpression,EqualityOperator: `screenJump` decides its LABEL from whether a book is open and its destination from the screen alone, and this reads only the destination.
-          dispatch({ type: 'goScreen', screen: screenJump(state.screen, book.source !== null).to })
+          /* `bookIsOpen` decides only `screenJump`'s LABEL; the destination read
+             here comes from the screen alone. Its mutants are therefore covered
+             where it is computed — see `pages`. */
+          dispatch({ type: 'goScreen', screen: screenJump(state.screen, bookIsOpen).to })
           return
         case 'markSelection':
           // The tint and style the selection bar is showing — see `markSelection`.
@@ -2172,13 +2385,23 @@ export function App({
   }, [
     dispatch,
     marking,
-    book,
+    pages,
+    bookIsOpen,
     platform,
     state.screen,
     state.pane,
-    state.paletteOpen,
-    state.switcherOpen,
-    state.tagsOpen,
+    /* ⚠️ **THREE OF THE FOUR LAYERS WERE LISTED AND `trashOpen` WAS NOT**, so
+       closing the trash alone left the handler holding the previous layer state.
+       This array has already been bitten twice by the same shape — see the digits
+       note and the tint note below — so the fix is not a fourth entry.
+
+       The handler never reads an individual layer: they reach it only through
+       `hasOpenLayer(state)`, and through `readerTakesInput`, which calls the same
+       function. So the dependency IS that one boolean, which is exactly what is
+       read and nothing more. Adding a layer to `LAYER_ORDER` now cannot leave
+       this list stale, because there is no longer a list of layers to forget one
+       from. */
+    anyLayerOpen,
     state.stepIdx,
     /* ⚠️ THE DIGITS READ THESE, AND THEY WERE MISSING — the same defect the
        tint note below records, on the day developer options landed. The handler
@@ -2239,6 +2462,7 @@ export function App({
             bookTitle={title}
             bookSubtitle={subtitle}
             speech={speech}
+            listenRefused={listenRefused}
             hasBook={book.source !== null}
             screens={composition.screens}
           />
@@ -2341,6 +2565,7 @@ export function App({
             markFocus={marking.focus}
             onMarkFocusDone={marking.clearFocus}
             markControls={composition.markControls}
+            narration={narration}
             books={library.books}
             /* GROUPED BY THE PANEL THEY SERVE — see `SidePaneProps`. Eight of
                these were flat props on a component that reads none of them. */
@@ -2405,7 +2630,7 @@ export function App({
              unconditionally would put the same sentence in the tree twice —
              invisible behind the shelf, and read out loud by a screen reader.
              `Library` renders it for its own screen. */
-          importNotice={state.screen === 'reader' ? importNotice : null}
+          importNotice={onReader ? importNotice : null}
           onDismissImportNotice={() => setNotice(null)}
           shelfUnread={shelfUnread}
           onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
@@ -2488,7 +2713,7 @@ export function App({
 
         {state.screen === 'library' && (
           <Library
-            coverFor={desktopCovers}
+            coverFor={coverFor}
             books={library.books}
             platform={platform}
             libraryQuery={state.libraryQuery}

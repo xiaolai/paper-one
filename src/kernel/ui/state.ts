@@ -1,8 +1,18 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
-import { BRIGHTNESS, CONTRAST, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
+import { BRIGHTNESS, CONTRAST, PARAGRAPH_GAP, SENTENCE_GAP, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SteppedScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
-import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
+import {
+  PARAGRAPH_GAP_MAX,
+  PARAGRAPH_GAP_MIN,
+  READING_RATE_MAX,
+  READING_RATE_MIN,
+  SENTENCE_GAP_MAX,
+  SENTENCE_GAP_MIN,
+  readKernelPreferences,
+  writeKernelPreferences,
+  type KernelPreferences,
+} from '../core/settings'
 import type { PaneContribution } from '../core/capability'
 import { isContributedPaneId, isContributedScreenId, paneOffered, type Align, type PageLayout, type PaneId, type ReadingStyle, type ReadingStyleKey, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
 
@@ -187,6 +197,25 @@ export interface AppState {
   readonly markTint: MarkTint
   readonly markStyle: MarkStyle
   /**
+   * Read aloud's voice per language, and its speed.
+   *
+   * PER LANGUAGE because one voice for the app reads a Chinese book in English
+   * — see `ui/reader/voiceChoice.ts`. The value is a `voiceURI`, which is the
+   * only stable identity a `SpeechSynthesisVoice` has: `name` collides (this Mac
+   * offers two voices called Samantha and two called Tingting, differing only in
+   * tier) and the object itself does not survive a relaunch.
+   */
+  readonly readingVoice: Readonly<Record<string, string>>
+  readonly readingRate: number
+  /** Whether a note's BODY is read aloud — see `NOTE_BODIES` in `speechSkip.ts`. */
+  readonly readingNotesAloud: boolean
+  /** Silence after a sentence, in ms — see `SENTENCE_GAP` in `metrics.ts`. */
+  readonly sentenceGapMs: number
+  /** Silence after a paragraph, in ms. Used ALONE at a paragraph end, not added
+   *  to the sentence gap: the label says "between paragraphs", so a reader who
+   *  sets it to zero means no pause there. */
+  readonly paragraphGapMs: number
+  /**
    * How the book is SET — WI-14.4's fifteen, the fidelity dial among them.
    *
    * ONE FIELD RATHER THAN FIFTEEN, exactly as `spacing` is one rather than
@@ -226,6 +255,15 @@ export const initialState: AppState = {
   screen: 'library',
   developer: false,
   hiddenPanes: [],
+  /* NO VOICE CHOSEN AND THE ENGINE'S OWN SPEED. Empty is not "no voice" — it is
+     "the app picks", which `voiceFor` answers with the best voice installed for
+     the book's language. A reader only lands in this map by disagreeing with
+     that choice. */
+  readingVoice: {},
+  readingRate: 1,
+  readingNotesAloud: false,
+  sentenceGapMs: SENTENCE_GAP.steps[SENTENCE_GAP.def] ?? 0,
+  paragraphGapMs: PARAGRAPH_GAP.steps[PARAGRAPH_GAP.def] ?? 0,
   theme: DEFAULT_THEME,
   themeFollowsOs: true,
   /* The screen's own panel — `paneFits('library', 'library')` holds, so the
@@ -281,6 +319,7 @@ export type Action =
   /** Esc dismisses the topmost layer only (§11 keyboard map). */
   | { type: 'dismissTop' }
   | { type: 'setChrome'; on: boolean }
+  | { type: 'toggleReadingNotes' }
   | { type: 'toggleRuler' }
   | { type: 'pinRuler' }
   | { type: 'setStepIdx'; idx: number }
@@ -294,6 +333,13 @@ export type Action =
   | { type: 'setPageLayout'; layout: PageLayout }
   | { type: 'setMarkTint'; tint: MarkTint }
   | { type: 'setMarkStyle'; style: MarkStyle }
+  /* The VOICE for one language, not the whole map: a picker changes the voice
+     for the book in hand, and an action carrying the map would let a stale
+     render overwrite a choice made for another language. */
+  | { type: 'setReadingVoice'; lang: string; voice: string }
+  | { type: 'setReadingRate'; rate: number }
+  | { type: 'setSentenceGap'; ms: number }
+  | { type: 'setParagraphGap'; ms: number }
   /**
    * One action for all fifteen — see `readingStyle`.
    *
@@ -332,7 +378,7 @@ type ScaledReadingStyleKey = { [K in ReadingStyleKey]: ReadingStyle[K] extends n
  * the trap the table exists to close. Keyed by `ScaledReadingStyleKey`, an
  * omission is a compile error.
  */
-const READING_STYLE_SCALES: Readonly<Record<ScaledReadingStyleKey, SpacingScale>> = {
+const READING_STYLE_SCALES: Readonly<Record<ScaledReadingStyleKey, SteppedScale>> = {
   figureWidth: FIGURE_WIDTHS,
   figureHeight: FIGURE_HEIGHTS,
   minimumSize: MINIMUM_SIZES,
@@ -354,7 +400,7 @@ function scaleIndex(idx: number, length: number): number | null {
  * survived every test (2026-09-15 mutation sweep). Named at the case, the
  * pairing is read off one line rather than decided by a branch.
  */
-function atIndex(state: AppState, key: 'brightness' | 'contrast', scale: SpacingScale, idx: number): AppState {
+function atIndex(state: AppState, key: 'brightness' | 'contrast', scale: SteppedScale, idx: number): AppState {
   const at = scaleIndex(idx, scale.steps.length)
   return at === null || state[key] === at ? state : { ...state, [key]: at }
 }
@@ -363,6 +409,17 @@ function atIndex(state: AppState, key: 'brightness' | 'contrast', scale: Spacing
  * `contributed` is the panes the composition added — the reducer's fitting
  * rule (`paneFits`) has to know which screens they belong on, and a reducer
  * cannot read a registry. Defaulted to none, which is the kernel alone.
+ */
+/**
+ * THE ONE REDUCER, AND A LONG SWITCH ON PURPOSE. An audit asked for it to be split
+ * into subreducers — navigation, panes, layers, typography, speech. The cases do
+ * not divide that cleanly: opening a pane closes the palette, changing the screen
+ * re-resolves the pane, turning developer options off re-resolves both the pane
+ * and `lastPane`, a layer opening retires the others. Those are CROSS-SLICE
+ * invariants, and a reducer per slice would move each one into a coordinator that
+ * has to know every slice anyway. What the audit's other findings here pointed at
+ * was real and is fixed without the split: eight setters now return `state` when
+ * nothing moved (`put`), and `lastPane` consults the registry it is handed.
  */
 export function reducer(state: AppState, action: Action, contributed: ContributedPanes = NO_CONTRIBUTED): AppState {
   switch (action.type) {
@@ -414,7 +471,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
         : { ...state, theme: action.theme, themeFollowsOs: false }
 
     case 'setThemeFollowsOs':
-      return { ...state, themeFollowsOs: action.follows }
+      return put(state, 'themeFollowsOs', action.follows)
 
     case 'openPane':
       /* Asking for a panel this screen does not have is not an error to report,
@@ -439,7 +496,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
          * it does. An un-offered request leaves the memory untouched rather
          * than overwriting it — the reader asked for something they cannot
          * have, which is no reason to discard what they had. */
-        lastPane: paneOffered(action.pane, state.developer, state.hiddenPanes) ? action.pane : state.lastPane,
+        lastPane: remembers(action.pane, state, contributed) ? action.pane : state.lastPane,
         paletteOpen: false,
       }
 
@@ -456,7 +513,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
         : { ...state, pane: paneFor(state.screen, state.lastPane, audienceOf(state, contributed)) }
 
     case 'closePane':
-      return { ...state, pane: null }
+      return put(state, 'pane', null)
 
     /* ⚠️ **THE OPEN PANEL IS RE-RESOLVED, AND IT HAS TO BE.** Turning developer
      * options OFF takes the unfinished panels away — including, quite possibly,
@@ -485,7 +542,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       )
 
     case 'setSide':
-      return { ...state, side: action.side }
+      return put(state, 'side', action.side)
 
     case 'toggleLayer': {
       /* Closing needs no ceremony; opening retires the others. Every layer is
@@ -503,7 +560,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
     }
 
     case 'closeLayer':
-      return { ...state, [action.layer]: false }
+      return put(state, action.layer, false)
 
     case 'dismissTop': {
       const top = LAYER_ORDER.find((layer) => state[layer])
@@ -511,8 +568,10 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
     }
 
     case 'setChrome':
-      return { ...state, chromeOn: action.on }
+      return put(state, 'chromeOn', action.on)
 
+    case 'toggleReadingNotes':
+      return { ...state, readingNotesAloud: !state.readingNotesAloud }
     case 'toggleRuler':
       /* §06: THE RULER IS SCROLLED-FLOW ONLY. The palette already omits the
        * command in paginated mode, but the reducer is the boundary every
@@ -563,7 +622,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       /* Widened to every key for the lookup, by assignment rather than a cast:
          the table is complete for the scaled keys, and a key it does not name
          is one of the closed sets. */
-      const scales: Partial<Record<ReadingStyleKey, SpacingScale>> = READING_STYLE_SCALES
+      const scales: Partial<Record<ReadingStyleKey, SteppedScale>> = READING_STYLE_SCALES
       const scale = scales[action.key]
       const value =
         scale === undefined ? action.value : scaleIndex(action.value as number, scale.steps.length)
@@ -581,7 +640,7 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       return state.align === action.align ? state : { ...state, align: action.align }
 
     case 'setTypeface':
-      return { ...state, typeface: action.typeface }
+      return put(state, 'typeface', action.typeface)
 
     case 'toggleScrollbar':
       return { ...state, scrollbarOn: !state.scrollbarOn }
@@ -600,12 +659,82 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
        them independently and a combined action would make every tint click
        restate the style — which is how a toggle silently resets. */
     case 'setMarkTint':
-      return { ...state, markTint: action.tint }
+      return put(state, 'markTint', action.tint)
 
     case 'setMarkStyle':
-      return { ...state, markStyle: action.style }
+      return put(state, 'markStyle', action.style)
+
+    /* MERGED INTO THE MAP, never replacing it, so choosing a Chinese voice
+       leaves the English one alone. An empty voice REMOVES the entry rather
+       than storing `''`, which is how a reader goes back to letting the app
+       choose — `chosenVoice` treats an empty string as no choice, but leaving
+       one behind would mean the map grew a dead key per language visited. */
+    case 'setReadingVoice': {
+      const { [action.lang]: had, ...rest } = state.readingVoice
+      if (action.voice === '') return had === undefined ? state : { ...state, readingVoice: rest }
+      if (had === action.voice) return state
+      return { ...state, readingVoice: { ...rest, [action.lang]: action.voice } }
+    }
+
+    case 'setReadingRate': {
+      /* CLAMPED HERE TOO, not only in the settings validator. The validator
+         guards what arrives from disk; this guards what arrives from a control,
+         and the two are different doors into the same value. */
+      const rate = bounded(action.rate, READING_RATE_MIN, READING_RATE_MAX)
+      return rate === null ? state : { ...state, readingRate: rate }
+    }
+
+    case 'setSentenceGap': {
+      const ms = bounded(action.ms, SENTENCE_GAP_MIN, SENTENCE_GAP_MAX)
+      return ms === null ? state : { ...state, sentenceGapMs: ms }
+    }
+
+    case 'setParagraphGap': {
+      const ms = bounded(action.ms, PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX)
+      return ms === null ? state : { ...state, paragraphGapMs: ms }
+    }
 
   }
+}
+
+/**
+ * A number inside `[min, max]`, or null when it is not a number at all.
+ *
+ * ⚠️ **`Math.max(min, Math.min(max, NaN))` IS `NaN`**, and three reducer branches
+ * clamped that way — so `NaN` reached live state, serialised as `null`, and broke
+ * the session until a relaunch reset it. The settings validator beside them asks
+ * `Number.isFinite` first; the reducer is the OTHER door into the same value and
+ * did not, which is precisely the asymmetry `setReadingRate`'s own comment warns
+ * about.
+ *
+ * `null` for a refusal rather than a fallback: a control that sends a
+ * non-number has a defect, and silently substituting the minimum would hide it
+ * while changing the reader's setting. The caller returns the state unchanged.
+ *
+ * One helper for all three, because the duplication is what let two of them
+ * inherit the omission from the first.
+ */
+/**
+ * `state` with one field set — or `state` ITSELF when the field already holds it.
+ *
+ * ⚠️ **EIGHT SETTERS SPREAD A NEW STATE FOR A VALUE ALREADY THERE.** `useReducer`
+ * skips a re-render only when the reducer returns the SAME object, so each of
+ * them re-rendered every consumer of `AppState` for a change that changed
+ * nothing — and `setChrome` is on the hottest path there is: §06 dispatches it on
+ * pointer-near, so a reader moving the mouse near the edge re-rendered the whole
+ * shell on every move. `setSpacing`, `setAlign`, `setReadingStyle` and
+ * `setPaneHidden` already returned `state` when nothing moved; these eight were
+ * the inconsistent ones.
+ *
+ * `Object.is` rather than `===`, so a `NaN` never reads as a change to itself.
+ */
+function put<K extends keyof AppState>(state: AppState, key: K, value: AppState[K]): AppState {
+  return Object.is(state[key], value) ? state : { ...state, [key]: value }
+}
+
+function bounded(value: number, min: number, max: number): number | null {
+  if (!Number.isFinite(value)) return null
+  return Math.max(min, Math.min(max, value))
 }
 
 export type AppDispatch = Dispatch<Action>
@@ -819,6 +948,23 @@ function afterVisibilityChange(next: AppState, contributed: ContributedPanes): A
 }
 
 /** The audience a state describes, so the reducer's four calls cannot differ. */
+/**
+ * Whether `lastPane` may record this request.
+ *
+ * ⚠️ **A CONTRIBUTED-LOOKING ID WAS REMEMBERED WHETHER OR NOT ANYTHING
+ * CONTRIBUTES IT.** `paneOffered` knows the kernel's own panels — the unfinished
+ * ones and the developer one — and answers yes for every other string, so
+ * `ghost:pane` passed as readily as `circle:book`. The pane shown was right
+ * (`paneFor` checks fit against the registry and falls back), but `lastPane`
+ * became a panel that does not exist, and the one the reader had open before was
+ * lost: the next ⌘\ resolved the ghost to the screen's default instead. The
+ * reducer is handed the registry — this is the one place that did not ask it.
+ */
+function remembers(pane: PaneId, state: AppState, contributed: ContributedPanes): boolean {
+  if (!paneOffered(pane, state.developer, state.hiddenPanes)) return false
+  return !isContributedPaneId(pane) || contributed.some((entry) => entry.id === pane)
+}
+
 function audienceOf(state: AppState, contributed: ContributedPanes): PaneAudience {
   return { contributed, developer: state.developer, hiddenPanes: state.hiddenPanes }
 }
@@ -872,6 +1018,19 @@ export interface ScreenJump {
  * when there is no book. Saying "Open a book" rather than "Back to the book"
  * there is what keeps the name true.
  */
+/**
+ * The key the screen jump is bound to, as it is SHOWN.
+ *
+ * ⚠️ **IT WAS WRITTEN TWICE — THE PALETTE ROW AND THE TITLEBAR'S TOOLTIP — AND
+ * THE TITLEBAR'S COPY WAS NOT ONE ANY TEST COMPARED.** `commands.test.ts` holds
+ * the palette's combos to `accel.ts`'s bindings, so a rebind that forgot the
+ * palette fails there; the tooltip's `'⌘L'` was a literal in `TitleBar.tsx` that
+ * nothing looked at, and would have named the old key forever. Beside
+ * `screenJump` because that function is already the one source for this
+ * action's destination and its name; its key is the third fact about it.
+ */
+export const SCREEN_JUMP_COMBO = '⌘L'
+
 export function screenJump(screen: Screen, hasBook: boolean): ScreenJump {
   if (screen === 'reader') return { to: 'library', label: 'Library' }
   return { to: 'reader', label: hasBook ? 'Back to the book' : 'Open a book' }
@@ -938,57 +1097,27 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
        * must not take the render down with it. */
       console.error('Paper: could not save a preference', cause)
     }
-    /* SPREAD FIELD BY FIELD, not `[settings, prefs]`: `preferencesOf` builds a
-     * fresh object every render, so depending on it would run this effect on
-     * every page turn and keystroke. `spacing`'s four indices are listed where
-     * the object itself would do as well — see the note at `readingStyle`. */
-  }, [
-    settings,
-    /* ⚠️ **OMITTED AT FIRST, EXACTLY AS THE FIFTEEN BELOW WERE.** This effect
-       lists every preference by name, so a new one that is not added here is a
-       setting the reader can change and never save — the defect `readingStyle`
-       records two paragraphs down, repeated on the day developer options landed.
-       It is the whole point of persisting the flag: without these two lines
-       ⌘⌃⌥D worked and did not survive a relaunch.
-
-       `hiddenPanes` is safe as an identity: `setPaneHidden` builds a new array
-       only when the list actually changes, so this cannot re-run on a page
-       turn. (That promise was false for a repeated hide or show until the
-       2026-09-13 audit, which also struck a comparison here to a
-       "freshly-built `spacing` wrapper" that does not exist.) */
-    prefs.developer,
-    prefs.hiddenPanes,
-    prefs.theme,
-    prefs.themeFollowsOs,
-    prefs.typeface,
-    prefs.textSize,
-    prefs.spacing.letter,
-    prefs.spacing.word,
-    prefs.spacing.line,
-    prefs.spacing.paragraph,
-    prefs.align,
-    prefs.brightness,
-    prefs.contrast,
-    prefs.pageLayout,
-    prefs.side,
-    prefs.rulerOn,
-    prefs.scrollbarOn,
-    prefs.progressLineOn,
-    prefs.markTint,
-    prefs.markStyle,
-    /* THE OBJECT, not its fifteen fields, and that is safe: `setReadingStyle`
-       returns the SAME object when a setting has not moved, so its identity is
-       stable across a page turn or a keystroke. Omitted entirely at first,
-       which meant fifteen settings a reader could move and never save — the
-       effect simply never re-ran.
-
-       `spacing` WOULD BE EXACTLY AS SAFE. This note said it is listed field by
-       field because `preferencesOf` builds a fresh wrapper each render — it
-       passes `state.spacing` through by reference, and `setSpacing` keeps the
-       object when an index has not moved. The indices stay listed, which is
-       harmless; the reason given was false (2026-09-13 audit). */
-    prefs.readingStyle,
-  ])
+    /* ⚠️ **DERIVED FROM `preferencesOf`, AND IT WAS A HAND-KEPT LIST OF EVERY
+     * PREFERENCE BY NAME — WHICH MISSED ONE ON TWO SEPARATE OCCASIONS.** Each
+     * time a setting was added and not listed here, the reader could change it
+     * and it never saved: the effect simply did not re-run. `developer` and
+     * `hiddenPanes` went that way when developer options landed, and fifteen
+     * reading settings before them. The fix each time was to add the name, and
+     * `state.persistence.test.tsx` was written to catch the next one.
+     *
+     * The values of `preferencesOf(state)` ARE the list, so it cannot miss one:
+     * a setting that reaches the file reaches this array, by construction.
+     *
+     * NOT `[settings, prefs]`, because `preferencesOf` builds a fresh object
+     * every render and depending on it would run this on every page turn and
+     * keystroke. Its VALUES are stable where nothing moved, which is what makes
+     * the spread safe: every field is either a primitive or passed through from
+     * `state` by reference, and each setter returns the SAME value when the
+     * reader's choice has not changed — `setSpacing`, `setReadingStyle`,
+     * `setPaneHidden` and `setReadingVoice` all say so beside themselves. The
+     * length is fixed by `KernelPreferences`' keys, which is the one thing React
+     * requires of a dependency array. */
+  }, [settings, ...Object.values(prefs)])
   return [state, dispatch]
 }
 
@@ -1017,6 +1146,11 @@ export function preferencesOf(state: AppState): KernelPreferences {
     markTint: state.markTint,
     markStyle: state.markStyle,
     readingStyle: state.readingStyle,
+    readingVoice: state.readingVoice,
+    readingRate: state.readingRate,
+    readingNotesAloud: state.readingNotesAloud,
+    sentenceGapMs: state.sentenceGapMs,
+    paragraphGapMs: state.paragraphGapMs,
   }
 }
 

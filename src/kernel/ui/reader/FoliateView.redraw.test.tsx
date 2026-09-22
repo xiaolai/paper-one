@@ -2,7 +2,7 @@
 import { cleanup, render, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_READING_STYLE, DEFAULT_SPACING } from '../../core/metrics'
-import type { ForeignAnchor, MarkAnchor } from './session'
+import type { ForeignAnchor, MarkAnchor } from './markPaint'
 
 /**
  * WHEN THE READER REPAINTS — WI-22.D1's last inch.

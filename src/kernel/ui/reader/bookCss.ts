@@ -1,5 +1,5 @@
 import type { MarkTint } from '../../core/marks'
-import type { MarkPalette } from './session'
+import type { MarkPalette } from './markPaint'
 import type { Align, ReadingStyle, SpacingIndices, Theme, Typeface } from '../state'
 import {
   CODE_PANEL_PAD,
@@ -1079,6 +1079,10 @@ ${when('--paper-cjk-space')}body {
  *
  * THE READER'S CONTROLS LIVE HERE AND NOWHERE ELSE, because a control that an
  * inline style can defeat is not a control, and only `!important` beats one.
+ *
+ * Not trimmed, and it was: a newline at either end of a stylesheet changes
+ * nothing a browser draws, so the `.trim()` was a call no test could tell from
+ * its absence — and the only sheet in this file that made one.
  */
 const AFTER_BODY = `
 html {
@@ -1457,7 +1461,7 @@ a[epub|type~="noteref"] {
   font-size: ${READING_RATIOS.footnote}em;
   border-bottom: none;
 }
-`.trim()
+`
 
 /**
  * The two sheets to hand `renderer.setStyles`.

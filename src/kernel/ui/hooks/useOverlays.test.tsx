@@ -457,6 +457,24 @@ describe('useOverlays', () => {
     expect(subscribed.mock.calls.length).toBe(before + 1)
   })
 
+  /* ⚠️ **AN ANSWER THAT MOVED A MARK TO ANOTHER SECTION IS A NEW ANSWER.** The
+     comparison that keeps a re-ask from redrawing asks every field of every
+     anchor, and the section is the one that says WHICH DOCUMENT the mark is
+     painted into — the same passage and the same CFI in section 2 is a mark the
+     reader has not been shown. Nothing redelivered a mark that had only moved. */
+  it('draws a mark that moved to another section, though nothing else changed', async () => {
+    let section = 1
+    const one = contribution('a:x', () => Promise.resolve([{ ...annotation(), sectionIndex: section }]))
+    const { result } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [one] }),
+    })
+    await waitFor(() => expect(result.current[0]?.sectionIndex).toBe(1))
+
+    section = 2
+    one.fire()
+    await waitFor(() => expect(result.current[0]?.sectionIndex).toBe(2))
+  })
+
   it('takes back the listeners it had already installed when one subscribe throws', async () => {
     const off = vi.fn()
     const first: OverlayContribution = {
@@ -514,5 +532,110 @@ describe('useOverlays', () => {
     renderHook(() => useOverlays(deps({ contributions: [spy], resolve })))
     await waitFor(() => expect(seen).toHaveLength(1))
     expect(seen[0]).toBe(resolve)
+  })
+})
+
+describe('whose marks these are', () => {
+  /**
+   * ⚠️ **THE ANCHORS ARE HELD WITH THE OPEN THEY BELONG TO**, and each half of
+   * that pair answers a different way of being wrong: another book's marks, and
+   * the SAME book's marks from an open the reader has left. Both would draw a
+   * stranger's underline over a passage they never marked.
+   */
+  const anchorsOf = (result: { current: readonly unknown[] }) => result.current.length
+
+  it('takes the anchors down when the composition loses its contributions', async () => {
+    /* A composition with nothing to contribute is not a composition with
+       nothing to say: the marks the last one drew must go. */
+    const one = contribution('circle', () => Promise.resolve([annotation()]))
+    const { result, rerender } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [one] }),
+    })
+    await waitFor(() => expect(anchorsOf(result)).toBe(1))
+
+    await act(async () => {
+      rerender(deps({ contributions: [] }))
+    })
+    expect(anchorsOf(result), 'the previous composition’s marks were left standing').toBe(0)
+  })
+
+  it('shows nothing from the previous open of the same book', async () => {
+    /* Re-opening a book is a new open: the anchors resolved against the old
+       renderer are not the ones this one drew. */
+    const one = contribution('circle', () => Promise.resolve([annotation()]))
+    const { result, rerender } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [one], openGeneration: 1 }),
+    })
+    await waitFor(() => expect(anchorsOf(result)).toBe(1))
+
+    const silent = contribution('circle', () => new Promise<readonly ForeignAnnotation[]>(() => {}))
+    await act(async () => {
+      rerender(deps({ contributions: [silent], openGeneration: 2 }))
+    })
+    expect(anchorsOf(result), 'the last open’s anchors survived into this one').toBe(0)
+  })
+
+  it('shows nothing while the book is not parsed, in the render itself', async () => {
+    /* An effect runs after paint, so clearing there would leave one frame of
+       the wrong book's marks — which is why this is compared during render. */
+    const one = contribution('circle', () => Promise.resolve([annotation()]))
+    const { result, rerender } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [one] }),
+    })
+    await waitFor(() => expect(anchorsOf(result)).toBe(1))
+
+    rerender(deps({ contributions: [one], parsed: false }))
+    expect(anchorsOf(result), 'a book that is not parsed still showed marks').toBe(0)
+  })
+
+  it('draws another book’s answer even when it is identical to the last book’s', async () => {
+    /* ⚠️ THE COMPARISON IS AGAINST WHAT IS ON SCREEN, which is nothing for a
+       new open — so an answer identical to the previous book's is still a
+       commit, and skipping it would leave the new book showing nothing at all
+       while its own answer had already arrived. */
+    const same = () => Promise.resolve([annotation()])
+    const { result, rerender } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [contribution('circle', same)] }),
+    })
+    await waitFor(() => expect(anchorsOf(result)).toBe(1))
+
+    await act(async () => {
+      rerender(deps({ contributions: [contribution('circle', same)], bookId: 'book:two' }))
+    })
+    await waitFor(() => expect(anchorsOf(result), 'the new book’s own marks never arrived').toBe(1))
+  })
+
+  it('shows nothing for another book until that book’s own answer lands', async () => {
+    /* The held anchors belong to a book, and a book the reader has moved to has
+       not answered yet — so what is drawn is nothing, not the last book's
+       marks against a book they have nothing to do with. */
+    const one = contribution('circle', () => Promise.resolve([annotation()]))
+    const { result, rerender } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [one] }),
+    })
+    await waitFor(() => expect(result.current.length).toBe(1))
+
+    const silent = contribution('circle', () => new Promise<readonly ForeignAnnotation[]>(() => {}))
+    await act(async () => {
+      rerender(deps({ contributions: [silent], bookId: 'book:two' }))
+    })
+    expect(result.current.length, 'the last book’s marks were drawn over this one').toBe(0)
+  })
+
+  it('draws the same answer again for a new open of the same book', async () => {
+    /* ⚠️ THE COMPARISON IS AGAINST WHAT IS ON SCREEN, and for a new open that
+       is nothing — so an answer identical to the last open's is still a commit.
+       Read as "unchanged", the re-opened book would show nothing at all while
+       its own answer had already arrived. */
+    const same = () => Promise.resolve([annotation()])
+    const { result, rerender } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [contribution('circle', same)] }),
+    })
+    await waitFor(() => expect(result.current.length).toBe(1))
+
+    await act(async () => {
+      rerender(deps({ contributions: [contribution('circle', same)], openGeneration: 2 }))
+    })
+    await waitFor(() => expect(result.current.length, 'the re-opened book showed nothing').toBe(1))
   })
 })

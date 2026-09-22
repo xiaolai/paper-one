@@ -1122,3 +1122,166 @@ describe('a group heading', () => {
     expect(heading.querySelector('button[aria-expanded]')).not.toBeNull()
   })
 })
+
+describe('the voice the picker shows', () => {
+  /**
+   * WHAT A READER SEES FOR A STORED VOICE THIS MACHINE NO LONGER HAS.
+   *
+   * An audit said the control drew BLANK. Measured, it does not — a `<select>`
+   * whose value matches no option selects its first, and the first is the
+   * Automatic lead — so this pins the visible outcome rather than claiming to
+   * catch a defect that did not exist. It is honest about what it holds: the old
+   * raw-string binding passes it too, because the two rendered alike.
+   */
+  const installed = {
+    name: 'Zoe',
+    lang: 'en-US',
+    voiceURI: 'com.apple.voice.enhanced.en-US.Zoe',
+    localService: true,
+  }
+  /* What a Mac's WebView offers — below the floor, see `voiceChoice.ts`. */
+  const compact = {
+    name: 'Samantha',
+    lang: 'en-US',
+    voiceURI: 'com.apple.voice.compact.en-US.Samantha',
+    localService: true,
+  }
+  function pickerFor(
+    chosen: Readonly<Record<string, string>>,
+    voices: readonly (typeof installed)[] = [installed],
+  ): HTMLSelectElement {
+    const { props } = full({
+      narration: {
+        lang: 'en-US',
+        voices,
+        chosen,
+        rate: 1,
+        sentenceGapMs: 150,
+        paragraphGapMs: 600,
+        notesAloud: false,
+        onVoice: vi.fn(),
+        onRate: vi.fn(),
+        onSentenceGap: vi.fn(),
+        onParagraphGap: vi.fn(),
+        onNotesAloud: vi.fn(),
+      },
+    })
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Voice' }))
+    return screen.getByRole('combobox') as HTMLSelectElement
+  }
+
+  /** The Voice group open, with every handler recorded. */
+  function voiceGroup(
+    voices: readonly (typeof installed)[] = [installed],
+    chosen: Readonly<Record<string, string>> = {},
+  ) {
+    const asked: [string, unknown][] = []
+    const { props } = full({
+      narration: {
+        lang: 'en-US',
+        voices,
+        chosen,
+        rate: 1,
+        sentenceGapMs: 150,
+        paragraphGapMs: 600,
+        notesAloud: false,
+        onVoice: (lang: string, voice: string) => asked.push(['voice', [lang, voice]]),
+        onRate: (rate: number) => asked.push(['rate', rate]),
+        onSentenceGap: (ms: number) => asked.push(['sentenceGap', ms]),
+        onParagraphGap: (ms: number) => asked.push(['paragraphGap', ms]),
+        onNotesAloud: (on: boolean) => asked.push(['notesAloud', on]),
+      },
+    })
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Voice' }))
+    return asked
+  }
+
+  it('writes the voice the reader picked, under the book’s own language', () => {
+    /* ⚠️ **PER LANGUAGE, NOT PER APP** — the whole reason the stored choice is a
+       map. A handler that dropped the language would put an English voice under
+       every book the reader opens. */
+    const asked = voiceGroup()
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: installed.voiceURI } })
+    expect(asked).toEqual([['voice', ['en', installed.voiceURI]]])
+  })
+
+  it('groups the voices it offers, and says which tier each group is', () => {
+    /* The tier is the only thing that separates a voice worth reading a book in
+       from one that is not, so the picker says it rather than listing names. */
+    voiceGroup()
+    const groups = [...(screen.getByRole('combobox') as HTMLSelectElement).querySelectorAll('optgroup')]
+    expect(groups.map((group) => group.label)).toEqual(['Enhanced'])
+  })
+
+  it('writes a speed, a sentence gap and a paragraph gap from their own steppers', () => {
+    /* Three scales, three handlers, each wired by hand: a stepper that called
+       the wrong setter would set the wrong silence with everything looking
+       right. The values are the NEXT STEP of each scale from where the fixture
+       stands — 1x, 150ms, 600ms — so 1.25x, 300ms and 900ms. */
+    const asked = voiceGroup()
+    for (const [control, expected] of [
+      ['More speed', ['rate', 1.25]],
+      ['More pause between sentences', ['sentenceGap', 300]],
+      ['More pause between paragraphs', ['paragraphGap', 900]],
+    ] as const) {
+      fireEvent.click(screen.getByRole('button', { name: control }))
+      expect(asked.at(-1), `${control} asked for the wrong thing`).toEqual(expected)
+    }
+  })
+
+  it('names each tier it groups by, whichever tiers are installed', () => {
+    /* Three tiers can be offered and each has its own word: the two Apple names
+       a `voiceURI` spells out, and `Other` for a machine whose identifiers say
+       nothing about quality — Windows, Linux, a browser on either — where the
+       floor cannot be applied and every voice is offered. */
+    const premium = { ...installed, name: 'Ava', voiceURI: 'com.apple.voice.premium.en-US.Ava' }
+    const plain = { ...installed, name: 'Microsoft Zira', voiceURI: 'Microsoft Zira - English (United States)' }
+    voiceGroup([premium, installed, plain])
+    const groups = [...(screen.getByRole('combobox') as HTMLSelectElement).querySelectorAll('optgroup')]
+    expect(groups.map((group) => group.label)).toEqual(['Premium', 'Enhanced', 'Other'])
+  })
+
+  it('says the platform will choose when the engine has listed nothing yet', () => {
+    /* ⚠️ NOT "None": an engine that has not answered is not an engine with
+       nothing good — the reader can do nothing about the first and something
+       about the second, so the two must not read alike. */
+    voiceGroup([])
+    expect((screen.getByRole('combobox') as HTMLSelectElement).selectedOptions[0]?.textContent).toBe(
+      'Automatic (system default)',
+    )
+  })
+
+  it('draws each row with the shared row class, so the band lines up', () => {
+    /* §07's rows are one geometry: a row that dropped the class would sit at a
+       different height from every row beside it. */
+    voiceGroup()
+    const row = screen.getByRole('combobox').closest('div')
+    expect(row?.className, 'the voice row is not a settings row').toMatch(/settingRow/u)
+  })
+
+  it('shows Automatic, naming the voice it means, for a voice the machine no longer has', () => {
+    const select = pickerFor({ en: 'com.apple.voice.premium.en-US.Gone' })
+    expect(select.selectedOptions[0]?.textContent).toBe('Automatic (Zoe)')
+  })
+
+  it('shows the stored voice when it is one the reading will use', () => {
+    const select = pickerFor({ en: installed.voiceURI })
+    expect(select.value).toBe(installed.voiceURI)
+  })
+
+  /**
+   * ⚠️ **ON A MAC, NOTHING CLEARS THE FLOOR, AND THE PICKER SAYS SO.** It said
+   * "Automatic (system default)" — naming a voice the reading refuses to use.
+   * A stored compact choice from before the floor is refused the same way.
+   */
+  it('says no high-quality voice is available, and offers none below the floor', () => {
+    for (const chosen of [{}, { en: compact.voiceURI }]) {
+      const select = pickerFor(chosen, [compact])
+      expect(select.selectedOptions[0]?.textContent).toBe('None — no high-quality voice is available here')
+      expect([...select.options].map((option) => option.value)).toEqual([''])
+      cleanup()
+    }
+  })
+})

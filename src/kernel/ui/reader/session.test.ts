@@ -1,20 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { View } from 'foliate-js/view.js'
-import {
-  ReaderSession,
-  directionOf,
-  noteSpace,
-  readMeta,
-  releaseNoteView,
-  watchNoteLinks,
-} from './session'
-import type {
-  ForeignAnchor,
-  MarkAnchor,
-  MarkPalette,
-  SelectionSnapshot,
-  SessionCallbacks,
-} from './session'
+import { ReaderSession } from './session'
+import type { SelectionSnapshot, SessionCallbacks } from './session'
+import type { ForeignAnchor, MarkAnchor, MarkPalette } from './markPaint'
 import type { BookSource } from '../../core/formats'
 import { resolvedCfiForTesting } from '../../core/resolvedCfi.testkit'
 import { buildFixture, elem, txt } from './wordSnap/domFake.testkit'
@@ -301,6 +289,31 @@ const deps = (view: View) => ({
 })
 
 describe('ReaderSession disposal', () => {
+  it('finishes teardown when the view will not detach', async () => {
+    /* `dispose` releases the book and clears the host AFTER closing the view,
+       and says nothing there may propagate — but detaching was the one step
+       left unguarded, so a view that threw on `remove` took the book's
+       resources and the host's contents with it, and threw out of `dispose`. */
+    const view = fakeView()
+    view.remove = () => {
+      throw new Error('already detached')
+    }
+    let destroyed = 0
+    Object.assign(view.book as object, { destroy: () => void (destroyed += 1) })
+    const host = fakeHost()
+    const session = new ReaderSession(host, callbacks())
+    await session.start('book.epub', deps(view))
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(() => session.dispose()).not.toThrow()
+      expect(destroyed, 'the book is still released').toBe(1)
+      expect((host as unknown as { children: unknown[] }).children, 'the host is still cleared').toEqual([])
+      expect(error).toHaveBeenCalledWith('Paper: a closed view would not detach', expect.any(Error))
+    } finally {
+      error.mockRestore()
+    }
+  })
+
   it('opens normally and publishes toc, metadata and a navigator', async () => {
     const view = fakeView()
     const cb = callbacks()
@@ -967,7 +980,7 @@ describe('ReaderSession places', () => {
 
   /* THE CALLBACK FIRES for every section that loads, which is what keeps the
      ribbon's direction in step with a book whose sections disagree. What each
-     answer should BE is `directionOf`'s own test, below. */
+     answer should BE is `directionOf`'s own test, in `direction.test.ts`. */
   it('reports the rendered direction of each section', async () => {
     const { view, cb, doc } = await reading()
     view.emit('load', { doc, index: 0 })
@@ -1141,16 +1154,6 @@ describe('ReaderSession places', () => {
 })
 
 /**
- * The book's own links, which foliate resolves and then ASKS ABOUT.
- *
- * `#handleLinks` puts one click listener on each section document, cancels the
- * DOM event itself, resolves the href against the section, and emits a
- * cancelable `link`. It navigates only if nothing cancelled it. That is the
- * hook a footnote popover hangs on and the hook a jump stack records from, and
- * neither is the session's business — it carries the event across and lets the
- * host decide.
- */
-/**
  * `getComputedStyle` AS A BARE GLOBAL, which this project runs without.
  *
  * `footnotes.js`'s superscript heuristic calls `getComputedStyle(el)` directly
@@ -1174,144 +1177,15 @@ afterEach(() => {
 })
 
 /**
- * Letting go of a note's view.
+ * The book's own links, which foliate resolves and then ASKS ABOUT.
  *
- * The order is the whole of it: `remove()` without `close()` leaves the
- * paginator's ResizeObserver on a container that has just gone to zero, and
- * the re-render it triggers reads `documentElement` off a document that is no
- * longer there. Closing a footnote took the book down with it.
+ * `#handleLinks` puts one click listener on each section document, cancels the
+ * DOM event itself, resolves the href against the section, and emits a
+ * cancelable `link`. It navigates only if nothing cancelled it. That is the
+ * hook a footnote popover hangs on and the hook a jump stack records from, and
+ * neither is the session's business — it carries the event across and lets the
+ * host decide.
  */
-describe('releaseNoteView', () => {
-  it('closes before it detaches', () => {
-    const order: string[] = []
-    releaseNoteView({
-      close: () => order.push('close'),
-      remove: () => order.push('remove'),
-    } as never)
-    expect(order).toEqual(['close', 'remove'])
-  })
-
-  it('still detaches when closing throws', () => {
-    /* A teardown that fails must not leave the note on screen. The reader
-       asked for it to go away, and that has to happen either way. */
-    const order: string[] = []
-    releaseNoteView({
-      close: () => {
-        order.push('close')
-        throw new Error('renderer already gone')
-      },
-      remove: () => order.push('remove'),
-    } as never)
-    expect(order).toEqual(['close', 'remove'])
-  })
-})
-
-/**
- * A link inside a NOTE moves the reader, not the note.
- *
- * Unhandled, foliate ends the note's own `link` event in `noteView.goTo(href)`
- * — so the `↩` at the end of an endnote loaded the whole chapter into a 90px
- * box while the reader stayed where they were. Measured in the app before the
- * fix, against *What's Our Problem?*.
- */
-/**
- * Which box a note's anchor rect is measured from.
- *
- * `at` is consumed as the `left` and `top` of an absolutely positioned box, so
- * it has to be measured from the element those resolve against. Taken from the
- * element foliate renders into, as it was, every rect is valid and every note
- * is drawn off by the stage's padding plus the column's titlebar inset — a
- * whole class of wrongness that no type and no rendering test can see, because
- * every number involved is correct.
- */
-describe('noteSpace', () => {
-  const boxed = (name: string) => ({ name, getBoundingClientRect: () => ({}) })
-  const host = boxed('host') as unknown as HTMLElement
-
-  it('takes the box the popover reported, which is the space `left` resolves in', () => {
-    const within = boxed('stage') as unknown as HTMLElement
-    expect(noteSpace(within, host)).toBe(within)
-  })
-
-  it('falls back to the host before the popover has mounted', () => {
-    /* And the fallback is the OLD behaviour, deliberately: a wiring failure
-       should put the note back where it used to be, not nowhere. */
-    expect(noteSpace(null, host)).toBe(host)
-  })
-
-  it('falls back to the host for something that cannot be measured', () => {
-    /* The capability, not the constructor — naming `HTMLElement` here throws
-       in these suites, which have no DOM. */
-    const within = { nodeName: 'DIV' } as unknown as HTMLElement
-    expect(noteSpace(within, host)).toBe(host)
-  })
-
-  it('never reads `offsetParent`, which is the mistake it exists to prevent', () => {
-    /* Derived as `mount.offsetParent`, this returned the POPOVER — parked at
-       `left: -99999` — and every note was `detached` and invisible. If this
-       ever consults it again, the getter says so. */
-    let asked = 0
-    const within = {
-      getBoundingClientRect: () => ({}),
-      get offsetParent() {
-        asked += 1
-        return null
-      },
-    } as unknown as HTMLElement
-    expect(noteSpace(within, host)).toBe(within)
-    expect(asked).toBe(0)
-  })
-})
-
-describe('watchNoteLinks', () => {
-  /** A note view that hands its listeners straight back, with no DOM. */
-  const noteView = () => {
-    const on: Record<string, (event: Event) => void> = {}
-    return {
-      view: {
-        addEventListener: (name: string, fn: (event: Event) => void) => {
-          on[name] = fn
-        },
-      },
-      fire: (name: string, detail: unknown) => {
-        const event = { preventDefault: () => order.push('preventDefault'), detail } as never
-        on[name]?.(event)
-        return event
-      },
-    }
-  }
-  let order: string[] = []
-  beforeEach(() => {
-    order = []
-  })
-
-  const host = () => ({
-    onLink: () => order.push('onLink'),
-    onExternalLink: () => order.push('onExternalLink'),
-    close: () => order.push('close'),
-    goTo: (href: string) => order.push(`goTo:${href}`),
-  })
-
-  it('cancels the note view, closes the note, then moves the reader', () => {
-    const note = noteView()
-    watchNoteLinks(note.view, host())
-    note.fire('link', { href: 'ch01.xhtml#ref' })
-    /* `preventDefault` first, or the note navigates itself; `onLink` before
-       `goTo`, or the origin is recorded from where the reader has already
-       arrived and ⌘[ leads nowhere. */
-    expect(order).toEqual(['preventDefault', 'close', 'onLink', 'goTo:ch01.xhtml#ref'])
-  })
-
-  it('hands an external link to the host, and does not navigate the book', () => {
-    const note = noteView()
-    watchNoteLinks(note.view, host())
-    note.fire('external-link', { href_: 'https://example.org/x' })
-    /* NOT cancelled here — the host cancels, as it does for the book, and
-       decides where the href goes. Nothing moves the reader. */
-    expect(order).toEqual(['onExternalLink'])
-  })
-})
-
 describe('ReaderSession link events', () => {
   const linked = async () => {
     const view = fakeView()
@@ -1786,7 +1660,9 @@ describe('ReaderSession marks', () => {
     const session = new ReaderSession(fakeHost(), cb)
     await session.start('book.epub', deps(view))
 
-    const range = { id: 'a-range' }
+    /* Every Range has a start container — the painter reads it for the element
+       the words are in — so a stand-in has one too. */
+    const range = { id: 'a-range', startContainer: { nodeType: 3, ownerDocument: null, parentElement: null } }
     view.emit('draw-annotation', {
       draw: () => {},
       annotation: { value: 'cfi/9', kind: 'highlight' },
@@ -3151,7 +3027,7 @@ describe('ReaderSession publishes the selection', () => {
        * catches an implementation that mangled the range too: asserting only
        * the text would pass for one.
        */
-      const { selection } = overOneBlock('hyphen­ation here', 2, 8)
+      const { selection } = overOneBlock('hyphen\u00adation here', 2, 8)
       const scene = await sectionOver(selection)
 
       scene.drag()
@@ -3159,7 +3035,7 @@ describe('ReaderSession publishes the selection', () => {
 
       const snapshot = published(scene.cb)[0]
       expect(snapshot?.text).toBe('hyphenation')
-      expect(snapshot?.range.toString()).toContain('­')
+      expect(snapshot?.range.toString()).toContain('\u00ad')
       expect([snapshot?.range.startOffset, snapshot?.range.endOffset]).toEqual([0, 12])
     })
 
@@ -3577,248 +3453,6 @@ describe('ReaderSession publishes the selection', () => {
 })
 
 /**
- * Every metadata field a book declared nothing for.
- *
- * Spread into the three cases below so each one states only what it is about.
- * Before this, each restated the entire `BookMeta` shape, so widening that type
- * failed three tests that had no opinion about the new fields — a shape assertion
- * pretending to be a behaviour assertion.
- */
-const NO_META = {
-  title: '',
-  author: '',
-  identifier: '',
-  sortAs: '',
-  series: '',
-  seriesIndex: null,
-  subjects: [],
-  publisher: '',
-  published: '',
-  languages: [],
-  description: '',
-  subtitle: '',
-  pageCount: 0,
-}
-
-describe('readMeta', () => {
-  it('reads a page count, which only a PDF has', () => {
-    /* `makePdf` is the only backend that sets it. Non-zero is what tells a
-       citation the book can be cited by page at all — reflowable text has no
-       page, because there the page is a property of the window. */
-    expect(readMeta({ metadata: { pageCount: 412 } }).pageCount).toBe(412)
-    expect(readMeta({ metadata: {} }).pageCount).toBe(0)
-  })
-
-  it('refuses a page count that is not a whole positive number', () => {
-    // Storage and a book's own metadata are both untrusted; 0 means "no pages".
-    for (const bad of [0, -3, 1.5, Number.NaN, Infinity, '12', null]) {
-      expect(readMeta({ metadata: { pageCount: bad } }).pageCount).toBe(0)
-    }
-  })
-
-  it('reads plain strings', () => {
-    expect(readMeta({ metadata: { title: 'Moby-Dick', author: 'Melville' } })).toEqual({
-      ...NO_META,
-      title: 'Moby-Dick',
-      author: 'Melville',
-      identifier: '',
-    })
-  })
-
-  it('reads a language map for the title', () => {
-    expect(readMeta({ metadata: { title: { en: 'Whale' } } }).title).toBe('Whale')
-  })
-
-  it('reads an author object and a list of authors', () => {
-    expect(readMeta({ metadata: { author: { name: 'Melville' } } }).author).toBe('Melville')
-    expect(
-      readMeta({ metadata: { author: [{ name: 'A' }, { name: 'B' }] } }).author,
-    ).toBe('A, B')
-  })
-
-  it('returns empty strings rather than undefined when metadata is absent', () => {
-    expect(readMeta({})).toEqual(NO_META)
-  })
-
-  /* The work's own identifier, which foliate parses out of the OPF and this
-   * function used to throw away. It is what sharing between two READERS has to
-   * be keyed on — `bookId` is the bytes, and two people never hold the same
-   * bytes — so losing it here lost it everywhere. */
-  it('keeps the work identifier the book declares', () => {
-    expect(
-      readMeta({ metadata: { title: 'T', identifier: 'urn:uuid:9f2a' } }).identifier,
-    ).toBe('urn:uuid:9f2a')
-  })
-
-  /**
-   * The fields foliate has been parsing all along while Paper discarded them.
-   *
-   * Every one of these comes out of an OPF a stranger wrote, so the cases below
-   * are half "does it read the field" and half "what happens when the field is
-   * hostile". The second half is the one that matters for a store which is read
-   * whole and rewritten on every position save.
-   */
-  describe('the fields a library is built out of', () => {
-    it('reads a series and its position', () => {
-      const md = { belongsTo: { series: { name: 'Discworld', position: 5 } } }
-      expect(readMeta({ metadata: md })).toMatchObject({ series: 'Discworld', seriesIndex: 5 })
-    })
-
-    /* EPUB allows a fractional position for a novella between two books, so
-     * this is a float rather than an index into anything. */
-    it('keeps a fractional series position', () => {
-      const md = { belongsTo: { series: { name: 'S', position: 1.5 } } }
-      expect(readMeta({ metadata: md }).seriesIndex).toBe(1.5)
-    })
-
-    it('takes the first when a book declares several series', () => {
-      const md = { belongsTo: { series: [{ name: 'First' }, { name: 'Second' }] } }
-      expect(readMeta({ metadata: md }).series).toBe('First')
-    })
-
-    /* A position that is not a number must not survive as NaN: it would
-     * serialise to `null` through JSON and compare false against itself. */
-    it('refuses a non-numeric series position', () => {
-      const md = { belongsTo: { series: { name: 'S', position: 'later' } } }
-      expect(readMeta({ metadata: md }).seriesIndex).toBeNull()
-    })
-
-    it('reads subjects, publisher, languages and the sort title', () => {
-      const md = {
-        subject: ['Philosophy', 'Ethics'],
-        publisher: 'Penguin',
-        language: ['en'],
-        sortAs: 'Hobbit, The',
-      }
-      expect(readMeta({ metadata: md })).toMatchObject({
-        subjects: ['Philosophy', 'Ethics'],
-        publisher: 'Penguin',
-        languages: ['en'],
-        sortAs: 'Hobbit, The',
-      })
-    })
-
-    /* An OPF may repeat a subject once per language. Shown twice on a row that
-     * reads as a bug in the reader rather than in the book. */
-    it('deduplicates repeated subjects', () => {
-      expect(readMeta({ metadata: { subject: ['Ethics', 'Ethics'] } }).subjects).toEqual(['Ethics'])
-    })
-
-    it('accepts a single subject that is not in a list', () => {
-      expect(readMeta({ metadata: { subject: 'Ethics' } }).subjects).toEqual(['Ethics'])
-    })
-
-    /* The date is kept as the string the book declared. EPUB dates are loosely
-     * specified — `2011`, `2011-03`, and a full timestamp are all legal — and
-     * parsing invents a January 1st in the reader's own timezone. */
-    it('does not parse the published date into a date', () => {
-      expect(readMeta({ metadata: { published: '2011' } }).published).toBe('2011')
-    })
-
-    it('caps a hostile field rather than storing it whole', () => {
-      const huge = 'x'.repeat(50_000)
-      const meta = readMeta({ metadata: { title: huge, description: huge } })
-      expect(meta.title).toHaveLength(500)
-      expect(meta.description).toHaveLength(4000)
-    })
-
-    it('caps a hostile list rather than storing every entry', () => {
-      const many = Array.from({ length: 5_000 }, (_, i) => `tag-${i}`)
-      expect(readMeta({ metadata: { subject: many } }).subjects).toHaveLength(32)
-    })
-
-    it('survives a book that declares none of them', () => {
-      expect(readMeta({ metadata: { title: 'T' } })).toMatchObject({
-        series: '',
-        seriesIndex: null,
-        subjects: [],
-        languages: [],
-      })
-    })
-  })
-
-  it('treats a malformed identifier as no identifier', () => {
-    // A package can put anything here; the rest of this function is defensive
-    // about exactly that and this field is no different.
-    for (const bad of [42, null, {}, ['a'], undefined]) {
-      expect(readMeta({ metadata: { identifier: bad } }).identifier).toBe('')
-    }
-  })
-})
-
-/**
- * Which way a section's text runs.
- *
- * THREE SOURCES AND AN ORDER between them, which is the whole of it. The
- * ribbon positions itself against the PAGE rather than the window — its CSS is
- * written with `inset-inline-end` — so an RTL book reported as LTR puts it at
- * the wrong corner of the page it marks, with the arithmetic that finds the
- * page's edge mirrored along with it.
- *
- * Shaped objects rather than a jsdom document: what is under test is which of
- * the three is believed, and each case here is one of them contradicting
- * another. A real document would have to be coaxed into these states through
- * the very cascade this is deciding how to read.
- */
-describe('directionOf', () => {
-  const asDoc = (over: {
-    computed?: string
-    bodyComputed?: string
-    htmlDir?: string | null
-    bodyDir?: string | null
-    root?: boolean
-  }): Document => {
-    const html =
-      over.root === false
-        ? null
-        : ({ getAttribute: () => over.htmlDir ?? null } as unknown as HTMLElement)
-    const body =
-      over.bodyDir === undefined && over.bodyComputed === undefined
-        ? null
-        : ({ getAttribute: () => over.bodyDir ?? null } as unknown as HTMLElement)
-    return {
-      documentElement: html,
-      body,
-      defaultView:
-        over.computed || over.bodyComputed
-          ? {
-              getComputedStyle: (el: unknown) => ({
-                direction: el === body ? (over.bodyComputed ?? over.computed) : over.computed,
-              }),
-            }
-          : null,
-    } as unknown as Document
-  }
-
-  it('believes what the page COMPUTED to, over what it declared', () => {
-    /* The author's stylesheet has had its say by the time a section renders,
-       and it can overrule the attribute in either direction. */
-    expect(directionOf(asDoc({ computed: 'rtl', htmlDir: 'ltr' }))).toBe('rtl')
-    expect(directionOf(asDoc({ computed: 'ltr', htmlDir: 'rtl' }))).toBe('ltr')
-  })
-
-  it("believes the BODY's computed direction when the root computes ltr", () => {
-    /* `dir` does not propagate upward: `<body dir="rtl">` leaves `html`'s
-       computed direction at `ltr` in every real engine, so reading the root
-       alone answered `ltr` for every such book and the arrows ran backwards
-       (audit round 1, #499). */
-    expect(directionOf(asDoc({ computed: 'ltr', bodyComputed: 'rtl' }))).toBe('rtl')
-    expect(directionOf(asDoc({ computed: 'ltr', bodyComputed: 'ltr', bodyDir: 'rtl' }))).toBe('ltr')
-  })
-
-  it('falls back to the declared direction with no view to compute against', () => {
-    // A section that failed to parse hands back a document with no window.
-    expect(directionOf(asDoc({ htmlDir: 'rtl' }))).toBe('rtl')
-    expect(directionOf(asDoc({ bodyDir: 'rtl' }))).toBe('rtl')
-  })
-
-  it('answers ltr for a document that says nothing, and for one with no root', () => {
-    expect(directionOf(asDoc({}))).toBe('ltr')
-    expect(directionOf(asDoc({ root: false }))).toBe('ltr')
-  })
-})
-
-/**
  * WI-20.13 — the book that cannot open says why.
  *
  * Three outcomes were silent: a zero-length file said "File not found" (the
@@ -3829,6 +3463,25 @@ describe('directionOf', () => {
  * refused book is never displayed.
  */
 describe('ReaderSession — a book that cannot open says why', () => {
+  it('says its own sentence for an error with no words, rather than a blank bar', async () => {
+    /* `new Error()` has an empty message, and the reader was shown exactly
+       that: an error bar with nothing in it. */
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', { ...deps(fakeView()), createView: () => Promise.reject(new Error()) })
+    expect(cb.calls['onError']).toEqual([['The reader failed to start.']])
+  })
+
+  it("still says the error's own words when it has some", async () => {
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', {
+      ...deps(fakeView()),
+      createView: () => Promise.reject(new Error('no custom elements here')),
+    })
+    expect(cb.calls['onError']).toEqual([['no custom elements here']])
+  })
+
   it('says a zero-length file is empty, before anything tries to open it', async () => {
     let opened = 0
     const view = fakeView({
@@ -4116,6 +3769,51 @@ describe('a foreign mark (WI-22.D2)', () => {
     expect(forKey.at(-1)).toEqual(expect.objectContaining({ remove: true }))
   })
 
+  it('keeps no record for a section torn down while its pass was still drawing', async () => {
+    /* The section's teardown drops what it painted, because the next overlay
+       never held any of it. A pass still in flight at that moment wrote the
+       record back when it landed — so the next overlay was asked to erase a
+       passage it had never been given. */
+    const pending: (() => void)[] = []
+    let overlays: readonly ForeignAnchor[] = [
+      foreign({ key: 'circle:alice:pub1', cfi: resolvedCfiForTesting('a') }),
+    ]
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      getOverlays: () => overlays,
+    })
+    await session.start('book.epub', deps(view))
+    const doc = fakeDocument().asDocument()
+    view.emit('load', { doc, index: 0 })
+
+    const real = view.addAnnotation.bind(view)
+    view.addAnnotation = (annotation: Parameters<typeof real>[0], remove = false) =>
+      new Promise<void>((resolve) => {
+        pending.push(() => {
+          real(annotation, remove)
+          resolve()
+        })
+      })
+    view.emit('create-overlay', { index: 0 })
+    await settled()
+
+    /* The same document loads again, which runs its teardown: the overlay
+       and everything painted into it are gone. Then the add lands. */
+    view.emit('load', { doc, index: 0 })
+    while (pending.length > 0) pending.shift()?.()
+    await settled()
+
+    /* A fresh overlay, and the passage has been withdrawn meanwhile. */
+    view.addAnnotation = real
+    view.annotations.length = 0
+    overlays = []
+    view.emit('create-overlay', { index: 0 })
+    await settled()
+
+    expect(view.annotations, 'nothing to erase on an overlay that never drew it').toEqual([])
+  })
+
   it('tries the erase again when it did not take', async () => {
     /* ⚠️ `attachForeign` swallows its failures by design — a PDF page that has
        not been painted has no CFI to resolve — so "asked to remove it" and
@@ -4222,7 +3920,7 @@ describe('a foreign mark (WI-22.D2)', () => {
     view.emit('draw-annotation', {
       draw: () => {},
       annotation: { value: 'epubcfi(/6/4!/4/2)', kind: 'circle', readers: 1 },
-      range: { id: 'a-range' },
+      range: { id: 'a-range', startContainer: { nodeType: 3, ownerDocument: null, parentElement: null } },
     })
 
     expect(cb.calls['onMarkDrawn']).toBeUndefined()
@@ -4237,5 +3935,375 @@ describe('a foreign mark (WI-22.D2)', () => {
     view.emit('create-overlay', { index: 0 })
 
     expect(view.annotations.map((a) => a.value)).toEqual(['only-mine'])
+  })
+})
+
+/**
+ * What an export calls each chapter — `tocTitles`, through the session's walk.
+ *
+ * ⚠️ **NOTHING TESTED THIS, AND EVERY PDF CAME OUT UNTITLED.** The navigator
+ * cases above mock the walk or give it no contents; the one path that turns a
+ * table of contents into chapter names had never run under a test, and it read
+ * `.index` straight off `resolveHref` — which on a PDF is a promise. Each
+ * resolver here is shaped like a real backend's: `makePdf`'s was async and
+ * REJECTED for a destination it cannot find, the EPUB backend's answers at
+ * once. A PDF is no longer exported at all — see `useAudiobook` — so what the
+ * await defends now is any other backend that answers with a promise.
+ */
+describe('the section walk names each chapter from the contents', () => {
+  async function walkOver(book: Record<string, unknown>, count = 3) {
+    const view = fakeView()
+    Object.assign(view.book as object, {
+      /* A document with nothing in it: `refuseBookScripts` strips each one
+         the walk makes, which asks for its scripts and its elements, and no
+         body is no text, which `collectText` answers without a DOM. The
+         titles, which are what is under test, depend on neither. */
+      sections: Array.from({ length: count }, () => ({
+        createDocument: () =>
+          Promise.resolve({ body: null, getElementsByTagNameNS: () => [], querySelectorAll: () => [] }),
+      })),
+      ...book,
+    })
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    return async (toc: readonly unknown[]) =>
+      (await session.sectionTexts(toc as never)).sections.map((one) => one.title)
+  }
+
+  it('titles chapters whose resolver answers with a promise, as a PDF\'s did', async () => {
+    const titles = await walkOver({ resolveHref: async (href: string) => ({ index: Number(href) }) })
+    expect(
+      await titles([
+        { label: 'One', href: '0' },
+        { label: 'Three', href: '2' },
+      ]),
+    ).toEqual(['One', null, 'Three'])
+  })
+
+  it('names nothing for an entry the book refuses, and still names the rest', async () => {
+    /* `makePdf` rejects an outline destination it cannot find. That rejection
+       used to land outside the `try` written for it, as an unhandled one. */
+    const titles = await walkOver({
+      resolveHref: async (href: string) => {
+        if (href === 'gone') throw new Error('Paper: unresolvable PDF destination gone')
+        return { index: Number(href) }
+      },
+    })
+    expect(
+      await titles([
+        { label: 'Broken', href: 'gone' },
+        { label: 'Two', href: '1' },
+      ]),
+    ).toEqual([null, 'Two', null])
+  })
+
+  it('names nothing for a resolver that throws, or that answers with no section', async () => {
+    const throws = await walkOver({
+      resolveHref: () => {
+        throw new Error('malformed href')
+      },
+    })
+    expect(await throws([{ label: 'One', href: 'x' }])).toEqual([null, null, null])
+    const silent = await walkOver({ resolveHref: (href: string) => (href === 'none' ? undefined : {}) })
+    expect(
+      await silent([
+        { label: 'One', href: 'none' },
+        { label: 'Two', href: 'empty' },
+      ]),
+    ).toEqual([null, null, null])
+  })
+
+  it('lets the shallowest entry name a section, then the first in reading order', async () => {
+    /* A sub-entry of an EARLIER part pointing into a chapter that has an entry
+       of its own took the chapter's name when the first entry read won. */
+    const titles = await walkOver({ resolveHref: (href: string) => ({ index: Number(href) }) })
+    expect(
+      await titles([
+        { label: 'Part One', href: '0', subitems: [{ label: 'An aside', href: '1' }, { label: 'Part One again', href: '0' }] },
+        { label: 'Chapter Two', href: '1' },
+        { label: 'Chapter Two, again', href: '1' },
+      ]),
+    ).toEqual(['Part One', 'Chapter Two', null])
+  })
+
+  it('names nothing from a heading, an empty destination or a label with no words', async () => {
+    /* A resolver that answers section 0 for ANYTHING, so any one of these
+       getting through shows up as a title on the first chapter. */
+    const titles = await walkOver({ resolveHref: () => ({ index: 0 }) })
+    expect(
+      await titles([
+        { label: 'Book Two', href: null },
+        { label: 'Empty', href: '' },
+        { label: '   ', href: 'a.xhtml' },
+        { label: 42, href: 'b.xhtml' },
+      ]),
+    ).toEqual([null, null, null])
+  })
+
+  it('trims the label it keeps', async () => {
+    const titles = await walkOver({ resolveHref: () => ({ index: 1 }) })
+    expect(await titles([{ label: '  Chapter Two \n', href: 'b.xhtml' }])).toEqual([null, 'Chapter Two', null])
+  })
+
+  it('says so when the backend has no resolver at all, and only when there is a contents to resolve', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const said = 'Paper: this book backend implements no resolveHref — its chapters will be exported untitled'
+      const titles = await walkOver({ resolveHref: undefined })
+      expect(await titles([])).toEqual([null, null, null])
+      expect(warn).not.toHaveBeenCalledWith(said)
+      expect(await titles([{ label: 'One', href: 'a.xhtml' }])).toEqual([null, null, null])
+      expect(warn).toHaveBeenCalledWith(said)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('answers nothing, and not complete, before any book has opened', async () => {
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await expect(session.sectionTexts()).resolves.toEqual({ sections: [], complete: false })
+  })
+})
+
+/**
+ * ⚠️ **THE NAVIGATOR DROPPED EVERY ARGUMENT AFTER THE FIRST, AND NO TEST WENT
+ * THROUGH IT.** It was `sectionTexts: (toc) => this.sectionTexts(toc)`, so the two
+ * arguments after `toc` never arrived: `shouldStop`, which is how the audiobook's
+ * Stop reaches a walk of every section, and `skip`, which carries the reader's
+ * footnote choice into the text it exports. Both were silently their defaults.
+ * `sectionTexts` itself checks `shouldStop` before every section and honours
+ * `skip` — and was marked fixed on that evidence — while the only road to it threw
+ * both away. A function with fewer parameters is assignable to a type with more,
+ * so the compiler said nothing, and every other test used a mock `sectionTexts`.
+ * These go through the navigator the reader is handed.
+ */
+describe('the navigator hands the section walk every argument', () => {
+  async function navigatorOver(sections: string[]) {
+    const view = fakeView()
+    Object.assign(view.book as object, {
+      sections: sections.map((text) => ({ createDocument: () => Promise.resolve(text) })),
+    })
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    return cb.calls['onNavigator']?.[0]?.[0] as {
+      sectionTexts: (
+        toc?: readonly unknown[],
+        shouldStop?: () => boolean,
+        skip?: { notes: boolean },
+      ) => Promise<{ sections: { text: string }[]; complete: boolean }>
+    }
+  }
+
+  it('stops when the export asks it to', async () => {
+    const nav = await navigatorOver(['<p>One.</p>', '<p>Two.</p>'])
+    const walk = await nav.sectionTexts([], () => true)
+    expect(walk.complete, 'Stop reached the walk').toBe(false)
+    expect(walk.sections).toEqual([])
+  })
+
+  /* THE FORWARDING ITSELF, argument by argument. The walk's own handling of
+     `skip` needs a real Document and is `collectText`'s, tested beside it; what
+     broke here was the road, so the road is what is measured — the session's own
+     method, spied on, must receive exactly what the navigator was given. */
+  it('passes every argument through to the walk, the footnote choice included', async () => {
+    const view = fakeView()
+    Object.assign(view.book as object, { sections: [] })
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    const walk = vi.spyOn(session, 'sectionTexts')
+    const nav = cb.calls['onNavigator']?.[0]?.[0] as {
+      sectionTexts: (toc: readonly unknown[], stop: () => boolean, skip: { notes: boolean }) => Promise<unknown>
+    }
+    const toc = [{ label: 'One', href: 'a.xhtml' }]
+    const stop = () => false
+    await nav.sectionTexts(toc, stop, { notes: true })
+    expect(walk).toHaveBeenCalledWith(toc, stop, { notes: true })
+  })
+})
+
+describe('the section walk’s liveness, and what it can read', () => {
+  /** A document with nothing in it — `collectText` answers '' without a DOM. */
+  const emptyDoc = () =>
+    Promise.resolve({
+      body: null,
+      getElementsByTagNameNS: () => [],
+      querySelectorAll: () => [],
+    } as unknown as Document)
+
+  /** A session over the given spine, started and ready to walk. */
+  async function sessionOver(sections: readonly unknown[]) {
+    const view = fakeView()
+    Object.assign(view.book as object, { sections: [...sections] })
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    return { session, view }
+  }
+
+  it('finishes a readable book, and says the walk is complete', async () => {
+    const { session } = await sessionOver([
+      { createDocument: emptyDoc },
+      { createDocument: emptyDoc },
+    ])
+    const walk = await session.sectionTexts()
+    expect(walk.complete, 'a finished walk is what `complete` means').toBe(true)
+    expect(walk.sections.map((one) => one.index)).toEqual([0, 1])
+  })
+
+  it('walks with no contents, no stop and no preferences given', async () => {
+    /* The export passes all three; the CLI and a test need not, and the
+       defaults have to be the ones a reader would get.
+       ⚠️ AND NO CONTENTS MEANS THE BOOK IS NOT ASKED TO RESOLVE ANYTHING: a
+       default holding one entry would send the backend an href it never
+       declared, which `makePdf` answers by REJECTING an outline destination it
+       cannot find. */
+    const asked: unknown[] = []
+    const view = fakeView()
+    Object.assign(view.book as object, {
+      sections: [{ createDocument: emptyDoc }],
+      resolveHref: (href: unknown) => {
+        asked.push(href)
+        return { index: 0 }
+      },
+    })
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    const walk = await session.sectionTexts()
+    expect(walk).toEqual({ sections: [{ index: 0, title: null, text: '' }], complete: true })
+    expect(asked, 'the book was asked to resolve a contents entry nobody gave it').toEqual([])
+  })
+
+  it('says nothing about a backend with no resolver when it was given no contents', async () => {
+    /* ⚠️ THE WARNING IS ABOUT AN UNTITLED EXPORT, so it belongs to a book that
+       HAS a contents and a backend that cannot resolve it. With no contents
+       there is nothing to title, and a warning there would send the reader
+       after a defect that is not one — which is also what makes the empty
+       default observable: a default holding an entry would warn. */
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const view = fakeView()
+      Object.assign(view.book as object, { sections: [{ createDocument: emptyDoc }] })
+      delete (view.book as { resolveHref?: unknown }).resolveHref
+      const session = new ReaderSession(fakeHost(), callbacks())
+      await session.start('book.epub', deps(view))
+      await session.sectionTexts()
+      /* The jacket warning belongs to `#publish` and fires at start — this is
+         about the RESOLVER, so it is asked for by name. */
+      expect(
+        warned.mock.calls.map(([line]) => line),
+        'a walk with no contents warned about titling it',
+      ).not.toContain('Paper: this book backend implements no resolveHref — its chapters will be exported untitled')
+
+      /* And with a contents it DOES say so, or the case above passes by
+         warning about nothing ever. */
+      await session.sectionTexts([{ label: 'One', href: 'a.xhtml' }] as never)
+      expect(warned).toHaveBeenCalledWith(
+        'Paper: this book backend implements no resolveHref — its chapters will be exported untitled',
+      )
+    } finally {
+      warned.mockRestore()
+    }
+  })
+
+  it('skips a section the backend cannot make a document for, and finishes the rest', async () => {
+    /* ⚠️ A SPINE IS NOT ALL DOCUMENTS. foliate's backends put other entries in
+       it, and the object arriving here is untyped — so a missing section and one
+       with no `createDocument` are both ordinary, and neither may take the walk
+       down or end it early. */
+    const { session } = await sessionOver([
+      { createDocument: emptyDoc },
+      null,
+      { id: 'cover-image' },
+      { createDocument: emptyDoc },
+    ])
+    const walk = await session.sectionTexts()
+    expect(walk.sections.map((one) => one.index), 'the two readable ones, by spine index').toEqual([0, 3])
+    expect(walk.complete).toBe(true)
+  })
+
+  it('stops when the book is closed under it, and does not call the walk complete', async () => {
+    /* ⚠️ **A CLOSED BOOK'S WALK USED TO BE WRITTEN OUT AS A FINISHED
+       AUDIOBOOK.** Liveness is read at every step for that reason, and the
+       answer must be `complete: false` — a short file is indistinguishable from
+       a short book. */
+    let session!: ReaderSession
+    const harness = await sessionOver([
+      {
+        createDocument: async () => {
+          session.dispose()
+          return await emptyDoc()
+        },
+      },
+      { createDocument: emptyDoc },
+      { createDocument: emptyDoc },
+    ])
+    session = harness.session
+    const walk = await session.sectionTexts()
+    expect(walk.complete).toBe(false)
+    expect(walk.sections.length, 'it stopped at the section the close landed in').toBeLessThan(3)
+  })
+
+  it('stops when another book has taken the view', async () => {
+    /* The view a walk began against is the one it must finish against: a reader
+       who opens another book mid-export must not have the two spliced
+       together. */
+    const { session } = await sessionOver([
+      { createDocument: emptyDoc },
+      { createDocument: emptyDoc },
+      { createDocument: emptyDoc },
+    ])
+    const walking = session.sectionTexts()
+    const second = fakeView()
+    Object.assign(second.book as object, { sections: [{ createDocument: emptyDoc }] })
+    await session.start('other.epub', deps(second))
+    const walk = await walking
+    expect(walk.complete, 'the walk belonged to the book that has gone').toBe(false)
+    expect(walk.sections.length).toBeLessThan(3)
+  })
+})
+
+describe('a mark drawn with nothing to report', () => {
+  /**
+   * ⚠️ **`onMarkDrawn` FILLS THE MAP THE MARGIN MEASURES**, so reporting a mark
+   * with no anchor — or no range — would put an entry there for a passage with
+   * no control to place, which is the defect its own comment records for a
+   * friend's underline. Painting still happens: the mark is on the page either
+   * way.
+   */
+  it('paints it and reports nothing', async () => {
+    const view = fakeView()
+    const drawn: [string, Range][] = []
+    const session = new ReaderSession(fakeHost(), {
+      ...callbacks(),
+      onMarkDrawn: (cfi: string, range: Range) => drawn.push([cfi, range]),
+    })
+    await session.start('book.epub', deps(view))
+    const painted: unknown[] = []
+    const range = { startContainer: { nodeType: 1, ownerDocument: null } } as unknown as Range
+
+    view.emit('draw-annotation', {
+      draw: (fn: unknown) => painted.push(fn),
+      /* A reader's highlight, with no `value` — the anchor foliate resolves. */
+      annotation: { kind: 'highlight', tint: 'butter', style: 'fill' },
+      range,
+    })
+    expect(painted.length, 'it was painted').toBe(1)
+    expect(drawn, 'a mark with no anchor was reported').toEqual([])
+
+    view.emit('draw-annotation', {
+      draw: (fn: unknown) => painted.push(fn),
+      annotation: { kind: 'highlight', tint: 'butter', style: 'fill', value: 'epubcfi(/6/2!/4)' },
+      range: null,
+    })
+    expect(drawn, 'a mark with no range was reported').toEqual([])
+
+    view.emit('draw-annotation', {
+      draw: (fn: unknown) => painted.push(fn),
+      annotation: { kind: 'highlight', tint: 'butter', style: 'fill', value: 'epubcfi(/6/2!/4)' },
+      range,
+    })
+    expect(drawn.map(([cfi]) => cfi), 'and one with both is reported').toEqual(['epubcfi(/6/2!/4)'])
+    session.dispose()
   })
 })

@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   BRIGHTNESS,
   CONTRAST,
+  PARAGRAPH_GAP,
+  READING_RATE,
+  SENTENCE_GAP,
   DEFAULT_READING_STYLE,
   LEGACY_READING_SIZES,
   MINIMUM_SIZES,
@@ -14,6 +17,12 @@ import { defineSetting } from './ports'
 import type { ReadingStyle } from './uiTypes'
 import {
   KERNEL_SETTINGS,
+  PARAGRAPH_GAP_MAX,
+  PARAGRAPH_GAP_MIN,
+  READING_RATE_MAX,
+  READING_RATE_MIN,
+  SENTENCE_GAP_MAX,
+  SENTENCE_GAP_MIN,
   SETTINGS_STORAGE_KEY,
   SETTINGS_VERSION,
   carryLegacySettings,
@@ -1131,11 +1140,27 @@ describe('what the store promises never to do', () => {
     expect(createSettingsStore({ storage }).get(setting)).toEqual({ plain: true })
   })
 
-  /* ⚠️ SERIALISING IS NOT THE STORAGE. `set` refuses an unsaveable value at the
-     door, so the envelope can fail to serialise only through a migration hook's
-     output — and that skips the write, says so, and leaves a healthy storage
-     marked healthy rather than refused. */
-  it('skips a write it cannot serialise, and leaves a healthy storage marked healthy', () => {
+  /* ⚠️ **THIS CASE USED TO ASSERT `persistent` STAYED TRUE, AND THAT WAS THE
+     DEFECT RATHER THAN THE CONTRACT.** The reasoning was that serialising is
+     not the storage, so a healthy storage should stay marked healthy — true
+     about the STORAGE, and `persistent` is not about the storage. Its own
+     declaration says what it means: whether the next launch will see any of
+     this. With a value in `values` that `JSON.stringify` refuses, the answer is
+     no, and it is no for every later write as well, because the offending value
+     stays in the record. So the panel drew "your settings are saved" over a
+     store that had silently stopped saving at the first preference the reader
+     changed — the exact shape of the twelve stores AGENTS.md has a section
+     about, one level up: not a blank page written over good data, but a good
+     page that is never written at all, reported as written.
+
+     What this gives up is stated rather than hidden: a later `set` that
+     replaced the offending key WOULD serialise, and `persistent` does not come
+     back, because `persist` returns early once it is false. That is accepted
+     because the value cannot arrive from a real file — every value in a parsed
+     envelope is serialisable by construction — so it only ever comes from a
+     migration hook that invented one, and a hook that does that goes on doing
+     it for the session. */
+  it('marks itself session-only when it cannot serialise, rather than claiming a save it will never make', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       let writes = 0
@@ -1153,13 +1178,283 @@ describe('what the store promises never to do', () => {
 
       expect(store.get(KERNEL_SETTINGS.theme), 'the session still sees what it chose').toBe('night')
       expect(writes, 'nothing reached the storage').toBe(0)
-      expect(store.persistent).toBe(true)
+      expect(store.persistent, 'and the store says so, instead of reporting a save it did not make').toBe(false)
       expect(error).toHaveBeenCalledWith(
-        'Paper: settings could not be serialised, so this change was not saved',
+        'Paper: settings could not be serialised, so they will not be saved on this device',
         expect.any(TypeError),
       )
     } finally {
       error.mockRestore()
     }
+  })
+
+  /* ⚠️ **A THROWING MIGRATION USED TO TAKE THE LAUNCH WITH IT.** `migrate` is
+     the caller's code running on whatever bytes were on disk, and it was the
+     one door in this file where damaged settings could be FATAL: every other
+     way of meeting them — unreadable bytes, a file from the future — already
+     degrades to a session store. A reader with a half-written file could not
+     start the app, so could not reach the panel that would have told them why. */
+  it('starts from the defaults when the migration throws, instead of failing to start', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      /* AN OLDER ENVELOPE, because a file already AT `SETTINGS_VERSION` is
+         taken verbatim and the hook is never called — which is what the first
+         version of this case got wrong, and the case caught. */
+      const stored = JSON.stringify({ version: 0, values: { 'kernel.theme': 'night' } })
+      const map = new Map<string, string>([[SETTINGS_STORAGE_KEY, stored]])
+      const storage = {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => void map.set(key, value),
+      }
+
+      const store = createSettingsStore({
+        storage,
+        migrate: () => {
+          throw new Error('this hook is broken')
+        },
+      })
+
+      expect(store.get(KERNEL_SETTINGS.theme), 'every setting answers its fallback').toBe(
+        KERNEL_SETTINGS.theme.fallback,
+      )
+      expect(store.persistent, 'and it is session-only, so nothing writes over the damaged file').toBe(false)
+      expect(map.get(SETTINGS_STORAGE_KEY), 'the bytes are left exactly where they are').toBe(stored)
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  /* The same door, the other half: the hook returns a record rather than
+     throwing, and a getter on it throws while the record is being frozen. */
+  it('starts from the defaults when the migration returns a record it cannot read', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const store = createSettingsStore({
+        storage: null,
+        migrate: () =>
+          Object.defineProperty({}, 'kernel.theme', {
+            enumerable: true,
+            get: () => {
+              throw new Error('hostile getter')
+            },
+          }) as Readonly<Record<string, unknown>>,
+      })
+
+      expect(store.get(KERNEL_SETTINGS.theme)).toBe(KERNEL_SETTINGS.theme.fallback)
+      expect(store.persistent).toBe(false)
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  /* ⚠️ **`JSON.stringify(NaN)` IS THE STRING `null`, SO A VALUE COULD BE STORED
+     THAT `get` COULD NEVER READ BACK.** `has` answered true for the key, `get`
+     ran the setting's parser over `null`, got `undefined`, and returned the
+     FALLBACK — so the panel showed one thing and the file held another, for
+     every launch after. Surviving `JSON.stringify` is not the same as surviving
+     the setting. */
+  it('refuses a value the setting’s own parser cannot read back', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const map = new Map<string, string>()
+      const storage = {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => void map.set(key, value),
+      }
+      const store = createSettingsStore({ storage })
+
+      store.set(KERNEL_SETTINGS.readingRate, Number.NaN)
+
+      expect(store.has(KERNEL_SETTINGS.readingRate), 'nothing was stored under the key').toBe(false)
+      expect(store.get(KERNEL_SETTINGS.readingRate)).toBe(KERNEL_SETTINGS.readingRate.fallback)
+      expect(map.size, 'and nothing reached the storage').toBe(0)
+      expect(error).toHaveBeenCalledWith(
+        `Paper: the setting ${KERNEL_SETTINGS.readingRate.key} was not changed, because its own parser cannot read that value back`,
+      )
+    } finally {
+      error.mockRestore()
+    }
+  })
+})
+
+describe('the range read aloud may be stored in', () => {
+  /**
+   * ⚠️ **THE RANGE A READER CAN STORE AND THE RANGE THE STEPPER OFFERS MUST BE
+   * ONE RANGE**, which is why these are derived from §09's scales rather than
+   * written down again. A clamp that disagreed with the stepper would refuse a
+   * value the pane had just produced.
+   */
+  it('is exactly the ends of the scale the pane steps through', () => {
+    expect([READING_RATE_MIN, READING_RATE_MAX]).toEqual([
+      READING_RATE.steps.at(0),
+      READING_RATE.steps.at(-1),
+    ])
+    expect([SENTENCE_GAP_MIN, SENTENCE_GAP_MAX]).toEqual([
+      SENTENCE_GAP.steps.at(0),
+      SENTENCE_GAP.steps.at(-1),
+    ])
+    expect([PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX]).toEqual([
+      PARAGRAPH_GAP.steps.at(0),
+      PARAGRAPH_GAP.steps.at(-1),
+    ])
+  })
+
+  it('clamps a stored speed to those ends rather than refusing it', () => {
+    /* A file written by a build with a wider ramp is not corrupt — it is
+       describing a speed this build offers less of. */
+    expect(readingBack(envelope({ 'kernel.readingRate': 99 })).readingRate).toBe(READING_RATE_MAX)
+    expect(readingBack(envelope({ 'kernel.readingRate': 0.01 })).readingRate).toBe(READING_RATE_MIN)
+    expect(readingBack(envelope({ 'kernel.sentenceGapMs': 99_999 })).sentenceGapMs).toBe(SENTENCE_GAP_MAX)
+    expect(readingBack(envelope({ 'kernel.paragraphGapMs': -20 })).paragraphGapMs).toBe(PARAGRAPH_GAP_MIN)
+  })
+
+  it('refuses a speed that is not a finite number, rather than clamping it', () => {
+    /* `Math.min` over a NaN answers NaN, and a NaN rate makes the engine refuse
+       the utterance — so this is rejected at the door and the default stands. */
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '1.5', null, {}]) {
+      expect(readingBack(envelope({ 'kernel.readingRate': bad })).readingRate).toBe(DEFAULTS.readingRate)
+    }
+  })
+})
+
+describe('the voice a reader chose, per language', () => {
+  /**
+   * ONE VOICE PER LANGUAGE, and a bad entry costs itself. A junk value for one
+   * language must not take the reader's other choices with it; a value of the
+   * wrong SHAPE — anything that is not a map — is refused whole, because that
+   * is not a map with a bad member.
+   */
+  it('keeps every language that names a voice', () => {
+    const stored = { en: 'com.apple.voice.enhanced.en-US.Zoe', zh: 'com.apple.voice.enhanced.zh-CN.Tingting' }
+    expect(readingBack(envelope({ 'kernel.readingVoice': stored })).readingVoice).toEqual(stored)
+  })
+
+  it('drops the entry that is not a voice, and keeps the rest', () => {
+    expect(
+      readingBack(
+        envelope({ 'kernel.readingVoice': { en: 'com.apple.voice.enhanced.en-US.Zoe', zh: '', fr: 7, de: null } }),
+      ).readingVoice,
+    ).toEqual({ en: 'com.apple.voice.enhanced.en-US.Zoe' })
+  })
+
+  it('refuses a value that is not a map of languages at all', () => {
+    for (const bad of ['com.apple.voice.enhanced.en-US.Zoe', 7, ['en'], null]) {
+      expect(readingBack(envelope({ 'kernel.readingVoice': bad })).readingVoice).toEqual(DEFAULTS.readingVoice)
+    }
+  })
+})
+
+describe('a migration that cannot finish', () => {
+  /**
+   * ⚠️ **THE MIGRATION IS THE CALLER'S CODE, AND THE STORE MAY NOT DIE WITH
+   * IT.** A hook that throws — or one that hands back a record whose GETTER
+   * throws, which runs inside the freeze rather than inside the call — used to
+   * abort `createSettingsStore` outright: no settings, and no app. The reader
+   * gets the defaults for this session instead, the damaged bytes are left
+   * where they are, and each half says which half it was.
+   */
+  const stored = (values: Record<string, unknown>) => {
+    const storage = fakeStorage()
+    /* VERSION 0, so the store has something to migrate: the hook runs only for
+       an envelope this build did not write. */
+    storage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ version: 0, values }))
+    return storage
+  }
+
+  it('says the migration failed, keeps the defaults, and saves nothing', () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const cause = new Error('the old file makes no sense')
+      const store = createSettingsStore({
+        storage: stored({ 'kernel.theme': 'night' }),
+        migrate: () => {
+          throw cause
+        },
+      })
+      expect(said).toHaveBeenCalledWith(
+        'Paper: stored settings could not be migrated, so this session starts from the defaults',
+        cause,
+      )
+      expect(store.get(KERNEL_SETTINGS.theme), 'a migration that failed still set a value').toBe(
+        DEFAULTS.theme,
+      )
+      expect(store.persistent, 'writes were left on over a file nobody could read').toBe(false)
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  it('says the settings could not be READ when the record itself will not be read', () => {
+    /* A getter on the migrated record runs while the store FREEZES it, which is
+       after the hook returned — so guarding only the call left the second half
+       of the same door open. The two sentences are different because the two
+       failures are. */
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const store = createSettingsStore({
+        storage: stored({ 'kernel.theme': 'night' }),
+        migrate: () =>
+          Object.defineProperty({}, 'kernel.theme', {
+            enumerable: true,
+            get: () => {
+              throw new Error('this record cannot be read')
+            },
+          }) as Readonly<Record<string, unknown>>,
+      })
+      expect(said.mock.calls[0]?.[0]).toBe(
+        'Paper: stored settings could not be read, so this session starts from the defaults',
+      )
+      expect(store.get(KERNEL_SETTINGS.theme)).toBe(DEFAULTS.theme)
+      expect(store.persistent).toBe(false)
+    } finally {
+      said.mockRestore()
+    }
+  })
+})
+
+describe('a stored value the parser is handed directly', () => {
+  /**
+   * ⚠️ **`get` PROMISES NEVER TO FAIL, WHICH HIDES A PARSER THAT WOULD.** The
+   * store catches a parser that throws and answers the fallback — the same
+   * answer a parser that REFUSES the value gives — so a refusal and a crash
+   * are indistinguishable from outside it. These call the parsers themselves,
+   * where the difference is visible.
+   */
+  it('refuses a voice map that is null, rather than throwing on it', () => {
+    /* `typeof null` is 'object', so the null check is what stands between
+       `Object.entries(null)` and a throw. */
+    expect(KERNEL_SETTINGS.readingVoice.parse(null)).toBeUndefined()
+    expect(KERNEL_SETTINGS.readingVoice.parse(['en'])).toBeUndefined()
+    expect(KERNEL_SETTINGS.readingVoice.parse('a voice')).toBeUndefined()
+    expect(KERNEL_SETTINGS.readingVoice.parse({ en: 'voice:en' })).toEqual({ en: 'voice:en' })
+  })
+
+  it('refuses a speed that is not a finite number, whatever kind of value it is', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '1.5', null, {}, []]) {
+      expect(KERNEL_SETTINGS.readingRate.parse(bad), `${String(bad)} was taken as a speed`).toBeUndefined()
+    }
+    expect(KERNEL_SETTINGS.readingRate.parse(99), 'and a number is clamped, not refused').toBe(
+      READING_RATE_MAX,
+    )
+  })
+})
+
+describe('an envelope written with a number JSON cannot hold', () => {
+  it('reads an infinite speed as no speed at all', () => {
+    /* `JSON.stringify(Infinity)` is `null`, so this can only arrive as source
+       text — `1e999` parses to Infinity. It is the one route by which a
+       non-finite number reaches the clamp, and the clamp must refuse it:
+       `Math.min` over an Infinity answers the bound, which would store a speed
+       the reader never chose. */
+    const map = new Map<string, string>([
+      [SETTINGS_STORAGE_KEY, `{"version":${SETTINGS_VERSION},"values":{"kernel.readingRate":1e999}}`],
+    ])
+    const store = createSettingsStore({
+      storage: {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => void map.set(key, value),
+      },
+    })
+    expect(readKernelPreferences(store).readingRate).toBe(DEFAULTS.readingRate)
   })
 })

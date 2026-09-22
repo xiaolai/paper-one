@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { buildCommands, filterCommands, score, type Command } from './commands'
+import type { Command } from '../core/capability'
+import { buildCommands, filterCommands, score } from './commands'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
 import { PANES, PANE_SHORTCUTS, panesFor } from './panes'
 import { resolveAccel, resolvePageKey } from './accel'
@@ -133,6 +134,49 @@ describe('buildCommands', () => {
 
     const scrolled = buildCommands(context({ pageLayout: 'scrolled' }).ctx)
     expect(find(scrolled, 'reading:ruler')).toBeDefined()
+  })
+
+  /**
+   * ⚠️ **THE PALETTE IS THE WHOLE OF THE EXPORT'S SURFACE**, so this is the only
+   * place the feature can be found at all — see `KernelCommandContext`. The row
+   * is absent where the engine is (a browser, a phone), because a command that
+   * would be refused is worse than one that is not offered.
+   */
+  it('offers the audiobook export only where the engine is and a book is open', () => {
+    const { ctx } = context()
+    expect(find(buildCommands(ctx), 'book:audiobook')).toBeUndefined()
+
+    const able = { ...ctx, exportAudiobook: { running: false, run: () => {} } }
+    expect(find(buildCommands(able), 'book:audiobook')?.label).toBe('Export as audiobook…')
+
+    /* No book, nothing to export — the same rule every other Book row follows. */
+    const shut = { ...able, hasBook: false }
+    expect(find(buildCommands(shut), 'book:audiobook')).toBeUndefined()
+  })
+
+  it('files the export under Book, and can be found by the words a reader would type', () => {
+    /* ⚠️ **THE KEYWORDS ARE THE ONLY WAY IN.** The palette is the whole of this
+       feature's surface, and a reader looking for it types what they want —
+       "audiobook", "m4b", "read aloud" — not the label's own words. A row with
+       no keywords is a row only somebody who knows its name can reach, and the
+       group is what puts it beside the other things you do to a book. */
+    const { ctx } = context()
+    const row = find(buildCommands({ ...ctx, exportAudiobook: { running: false, run: () => {} } }), 'book:audiobook')
+    expect(row?.group).toBe('Book')
+    for (const word of ['narrate', 'speech', 'm4b', 'listen', 'chapters', 'read aloud', 'file']) {
+      expect(row?.keywords, `a reader typing ${word} would not find it`).toContain(word)
+    }
+  })
+
+  it('turns the export row into a stop while one is running', () => {
+    /* One command, two states: the reader who started it looks in the same place
+       to stop it, rather than hunting for a second row that only sometimes
+       exists. */
+    const { ctx } = context()
+    const running = { ...ctx, exportAudiobook: { running: true, run: () => {} } }
+    const row = find(buildCommands(running), 'book:audiobook')
+    expect(row?.label).toBe('Stop exporting the audiobook')
+    expect(row?.on).toBe(true)
   })
 
   it('offers marking only when something is selected', () => {
@@ -319,15 +363,20 @@ describe('every row the palette prints', () => {
       { id: 'book:tags', label: 'Tags for this book…', group: 'Book', combo: '⌘T', keywords: 'tag label subject shelve', ran: ['editTags'] },
       { id: 'jump:back', label: 'Back to where you were', group: 'Book', combo: '⌘[', keywords: 'back return jump history previous where was undo navigate', ran: ['jumpBack'] },
       { id: 'jump:forward', label: 'Forward again', group: 'Book', combo: '⌘]', keywords: 'forward jump history next redo navigate', ran: ['jumpForward'] },
-      { id: 'marks:export', label: 'Export your marks and cards…', group: 'Library', keywords: 'mark note card highlight annotation backup save export file json markdown archive', ran: ['exportMarks'] },
-      { id: 'marks:import', label: 'Import marks from a file… (merge)', group: 'Library', keywords: 'mark note card highlight annotation restore load import merge file json archive backup', ran: ['importMarks'] },
-      { id: 'tags:export', label: 'Export your tags…', group: 'Library', keywords: 'tag backup save export file json archive', ran: ['exportTags'] },
-      { id: 'tags:import', label: 'Import tags from a file… (merge)', group: 'Library', keywords: 'tag restore load import merge file json archive backup', ran: ['importTags'] },
-      { id: 'screen:library', label: 'Library', group: 'Book', combo: '⌘L', keywords: 'shelf books home library', on: false, ran: [{ type: 'goScreen', screen: 'library' }] },
+      /* No `on`: a jump always names the other screen, so it has no state to be on. */
+      { id: 'screen:library', label: 'Library', group: 'Book', combo: '⌘L', keywords: 'shelf books home library', ran: [{ type: 'goScreen', screen: 'library' }] },
       { id: 'book:open', label: 'Add books…', group: 'Book', keywords: 'import file epub open', ran: ['openBookPicker'] },
       { id: 'book:import-folder', label: 'Import a folder…', group: 'Book', keywords: 'add folder bulk collection recursive many', ran: ['importFolder'] },
       { id: 'book:switch', label: 'Switch book…', group: 'Book', keywords: 'library recent', ran: ['openSwitcher'] },
       { id: 'book:close', label: 'Close the book', group: 'Book', ran: ['closeBook'] },
+      /* ⚠️ **LIBRARY AFTER BOOK, AND THIS TABLE USED TO PIN BOOK, LIBRARY, BOOK.**
+         The palette draws a heading whenever the group changes, so that order
+         put "Book" on screen twice; `contiguous` joins a split group now, and
+         the table says the order the reader sees. */
+      { id: 'marks:export', label: 'Export your marks and cards…', group: 'Library', keywords: 'mark note card highlight annotation backup save export file json markdown archive', ran: ['exportMarks'] },
+      { id: 'marks:import', label: 'Import marks from a file… (merge)', group: 'Library', keywords: 'mark note card highlight annotation restore load import merge file json archive backup', ran: ['importMarks'] },
+      { id: 'tags:export', label: 'Export your tags…', group: 'Library', keywords: 'tag backup save export file json archive', ran: ['exportTags'] },
+      { id: 'tags:import', label: 'Import tags from a file… (merge)', group: 'Library', keywords: 'tag restore load import merge file json archive backup', ran: ['importTags'] },
     ])
   })
 
@@ -343,10 +392,34 @@ describe('every row the palette prints', () => {
       { over: { progressLineOn: false }, id: 'reading:progress', label: 'Show the progress rule', on: false, ran: [{ type: 'toggleProgressLine' }] },
       { over: { pageLayout: 'paginated' }, id: 'reading:flow', label: 'Switch to scrolling', ran: [{ type: 'setPageLayout', layout: 'scrolled' }] },
       { over: { themeFollowsOs: true }, id: 'theme:follow', label: 'Stop following the system appearance', on: true, ran: [{ type: 'setThemeFollowsOs', follows: false }] },
-      { over: { screen: 'library' }, id: 'screen:library', label: 'Back to the book', on: true, ran: [{ type: 'goScreen', screen: 'reader' }] },
+      { over: { screen: 'library' }, id: 'screen:library', label: 'Back to the book', ran: [{ type: 'goScreen', screen: 'reader' }] },
     ] as const
     for (const { over, id, ...expected } of FLIPPED) {
       expect(rowsOf(offering(over)).find((row) => row.id === id), id).toMatchObject(expected)
+    }
+  })
+
+  /* ⚠️ **A JUMP IS NEVER "ON", AND THIS ROW USED TO SAY IT WAS.** `on` means a
+     command names a state that is currently on; the screen jump always names the
+     OTHER screen, so on the library — labelled "Back to the book" — it drew a
+     checkmark beside a place the reader was not. The case above pinned that as
+     correct. Asked of both screens, because both are where somebody looks. */
+  it('never marks the screen jump as on, whichever screen the reader is on', () => {
+    for (const screen of ['reader', 'library'] as const) {
+      const jump = rowsOf(offering({ screen })).find((row) => row.id === 'screen:library')
+      expect(jump, screen).toBeDefined()
+      expect(jump && 'on' in jump ? jump.on : undefined, screen).toBeUndefined()
+    }
+  })
+
+  /* AND EACH GROUP IS ONE HEADING. The palette draws one whenever the group
+     changes as it walks the list, so a group whose rows are not together is
+     drawn twice — which "Book" was, around the Library rows. */
+  it('keeps every group together, so none is drawn under two headings', () => {
+    for (const screen of ['reader', 'library'] as const) {
+      const groups = rowsOf(offering({ screen })).map((row) => row.group)
+      const runs = groups.filter((group, at) => group !== groups[at - 1])
+      expect(new Set(runs).size, `${screen}: ${runs.join(', ')}`).toBe(runs.length)
     }
   })
 
@@ -1429,3 +1502,57 @@ describe('the ⌘L command agrees with every other surface that offers it', () =
   }
 })
 
+
+describe('a contributed command that shadows a kernel one', () => {
+  /**
+   * ⚠️ **COMPOSITION VALIDATION CHECKS CONTRIBUTED IDS AGAINST EACH OTHER AND NEVER
+   * AGAINST THE KERNEL'S.** A capability legitimately named `book` contributing
+   * `book:open` produced two rows carrying one id — duplicate React keys, and
+   * identity-based keyboard selection resolving to whichever came first. The reader
+   * pressed the capability's row and got the kernel's action.
+   */
+  const shadow: Command = {
+    id: 'book:open',
+    group: 'Book',
+    label: 'Open something else',
+    run: () => {},
+  }
+  const mine: Command = { id: 'circle:share', group: 'Book', label: 'Share', run: () => {} }
+
+  it('keeps the kernel command and drops the contribution', () => {
+    const plain = buildCommands(context().ctx)
+    const kernel = find(plain, 'book:open')
+    expect(kernel).toBeDefined()
+
+    const withShadow = buildCommands({ ...context().ctx, contributed: () => [shadow] })
+    expect(withShadow.filter((c) => c.id === 'book:open')).toHaveLength(1)
+    expect(find(withShadow, 'book:open')?.label).toBe(kernel?.label)
+  })
+
+  it('says which id it dropped, rather than dropping it silently', () => {
+    const seen: string[] = []
+    buildCommands({
+      ...context().ctx,
+      contributed: () => [shadow],
+      onDuplicate: (id: string) => seen.push(id),
+    })
+    expect(seen).toEqual(['book:open'])
+  })
+
+  it('still admits a contribution whose id is its own', () => {
+    /* So the guard cannot pass by refusing every contribution. */
+    const commands = buildCommands({ ...context().ctx, contributed: () => [mine] })
+    expect(find(commands, 'circle:share')).toBeDefined()
+  })
+
+  it('refuses a second contribution repeating the first', () => {
+    const seen: string[] = []
+    const commands = buildCommands({
+      ...context().ctx,
+      contributed: () => [mine, { ...mine, label: 'Share again' }],
+      onDuplicate: (id: string) => seen.push(id),
+    })
+    expect(commands.filter((c) => c.id === 'circle:share')).toHaveLength(1)
+    expect(seen).toEqual(['circle:share'])
+  })
+})
