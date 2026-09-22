@@ -144,16 +144,34 @@ async function settled(turns = 30): Promise<void> {
   for (let turn = 0; turn < turns; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve))
 }
 
-/** Retry `check` across event-loop turns — `vi.waitFor` would advance the fake clock under it. */
-async function until(check: () => unknown, turns = 600): Promise<void> {
+/**
+ * Retry `check` across event-loop turns — `vi.waitFor` would advance the fake
+ * clock under it.
+ *
+ * ⚠️ **BOUNDED BY REAL TIME, AND IT WAS BOUNDED BY A COUNT OF TURNS.** A turn
+ * count is no bound on work that is not on the event loop: this shelf's hashing
+ * goes to the thread pool, and on a loaded runner six hundred turns pass in a
+ * few milliseconds while a contended digest has not come back — so `until` gave
+ * up on work that was merely slow and reported it as work that never happened.
+ * That is the shape of the Linux leg's `4 of 5` failure on 2026-09-21, which
+ * passed on a re-run and could not be reproduced on either machine here.
+ *
+ * `performance.now()` rather than `Date.now()`: this file fakes `Date`, so a
+ * budget read from it would never advance. The budget is a LIVENESS bound — it
+ * says the work arrives at all, not how fast — and a failing `check` now costs
+ * it in full, which is a price paid only on a failure.
+ */
+async function until(check: () => unknown, ms = 10_000): Promise<void> {
+  const deadline = performance.now() + ms
   let last: unknown = null
-  for (let turn = 0; turn < turns; turn += 1) {
+  for (;;) {
     try {
       await check()
       return
     } catch (cause) {
       last = cause
     }
+    if (performance.now() >= deadline) break
     await new Promise<void>((resolve) => setImmediate(resolve))
   }
   throw last
@@ -165,6 +183,23 @@ async function elapse(ms: number, step = 25): Promise<void> {
     await vi.advanceTimersByTimeAsync(step)
     await settled(3)
   }
+}
+
+/**
+ * Move the clock on until `check` holds, or give up saying so.
+ *
+ * For a pass whose next wait is armed only once the batch before it has fully
+ * returned: there is no moment at which the clock can be advanced once and be
+ * sure of waking the next step, so it is advanced in steps until the effect
+ * appears. The bound is generous and is a liveness bound, not a rate claim —
+ * what it asserts is that the pass carries on at all.
+ */
+async function elapseUntil(check: () => boolean, ms = 30_000, step = 250): Promise<void> {
+  for (let passed = 0; passed < ms; passed += step) {
+    if (check()) return
+    await elapse(step, step)
+  }
+  if (!check()) throw new Error(`nothing happened in ${ms}ms of the fake clock`)
 }
 
 /** A promise and the hand that settles it. */
@@ -956,14 +991,27 @@ describe('the contentHash backfill', () => {
     await settled()
     expect(done()).toHaveLength(4)
 
-    await breathe()
-    await until(() => expect(done()).toHaveLength(5))
+    /* ⚠️ **THE NEXT BATCH'S WAIT IS ARMED AFTER THIS ONE RETURNS, NOT WHEN ITS
+       LAST FILE LANDS — SO THE CLOCK IS MOVED IN STEPS RATHER THAN ONCE.** The
+       check above sees a book's own `book.json`; `library.update` resolves later
+       still, having written the index and told the journal, and only then does
+       the pass arm its next rest. A single `advanceTimersByTimeAsync` after a
+       fixed number of turns therefore raced that tail: on a loaded CI runner the
+       clock moved past a timer that did not exist yet, nothing woke, and the
+       case failed at four of five (Linux leg, 2026-09-21). Stepping cannot race
+       it — a wait armed while the clock is moving is reached by a later step —
+       and it needs no claim about which of the tail's writes is the slow one. */
+    await elapseUntil(() => done().length === 5)
     for (const id of ['a', 'b', 'c', 'd', 'e']) {
       expect(hashed(shelf, `book:${id}`), id).toBe(await fakeBlobHash(new TextEncoder().encode(`bytes of ${id}`)))
     }
     expect(hashed(shelf, 'book:f')).toBeUndefined()
 
-    await breathe()
+    /* And then nothing: the last batch stamped something, so it armed one more
+       rest, and the clock is moved well past it — in steps, so that rest is
+       reached however late it was armed. A pass that kept waking would still
+       hold a timer at the end of this, which is what the count says. */
+    await elapse(10_000)
     await settled()
     expect(vi.getTimerCount(), 'the backfill kept waking with nothing left to do').toBe(0)
   })
