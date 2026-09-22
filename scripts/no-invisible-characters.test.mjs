@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { extname, resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 /**
  * No character that renders as nothing may be written RAW in source.
@@ -52,7 +52,33 @@ export function invisibleIn(text) {
   return found
 }
 
+/** `verify:without` sets this to the id it cut, and nothing else does. */
+const DELETED_ENV = 'PAPER_VERIFY_WITHOUT'
+
 describe('source holds no invisible character written raw', () => {
+  /* ⚠️ **NOT INSIDE THE DELETION PROOF'S COPY, WHICH HAS NO `.git`.** `pnpm
+     verify:without <id>` copies the tree without it, so `git ls-files` there
+     does not answer "nothing" — it THROWS, and the case failed on the macOS leg
+     of CI for a tree that was fine. What source a repository tracks is a
+     property of the repository, which cutting a capability does not change, and
+     the real tree's `pnpm verify` runs this. Only under the proof's own marker
+     and only when git itself finds no work tree, so a checkout git cannot read
+     anywhere else still fails loudly — `check-build-artifacts.test.mjs` states
+     the same rule for the same reason.
+
+     The case below it is PURE and never skips: the scan's own proof that it can
+     see what it looks for runs everywhere, so this skips a walk and never the
+     detector. */
+  beforeEach((context) => {
+    const inside = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
+      cwd: resolve(import.meta.dirname, '..'),
+      encoding: 'utf8',
+    }).stdout.trim()
+    if (context.task.name.startsWith('finds none') && process.env[DELETED_ENV] !== undefined && inside !== 'true') {
+      context.skip("the deletion proof's copy has no .git, so git cannot say what this repository tracks; the real tree's pnpm verify runs this")
+    }
+  })
+
   it('finds none in any tracked source file', () => {
     const root = resolve(import.meta.dirname, '..')
     const tracked = execFileSync('git', ['ls-files', '-z', 'src', 'scripts'], { cwd: root })
