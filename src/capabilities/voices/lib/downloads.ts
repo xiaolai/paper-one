@@ -104,7 +104,6 @@ export function makeDownloads(): Downloads {
         },
         controller.signal,
       )
-      running.set(packId, { controller, work })
       const done = work.then(
         () => {
           running.delete(packId)
@@ -116,8 +115,12 @@ export function makeDownloads(): Downloads {
           throw cause
         },
       )
-      /* The caller gets the settled promise; the registry keeps the raw one so
-         a second `begin` joins the same work rather than a second handler. */
+      /* ⚠️ **ONE `set`, AND THERE WERE TWO.** The first stored the raw promise
+         and was overwritten by this line in the same synchronous run — nothing
+         between them can observe it, so it was a write no test could ever
+         reach. What the registry keeps is the SETTLED promise, so a second
+         `begin` joins this work and sees its outcome rather than attaching a
+         second pair of handlers to the raw one. */
       running.set(packId, { controller, work: done })
       return done
     },

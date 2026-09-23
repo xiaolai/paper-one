@@ -61,7 +61,11 @@ describe('what the app is offered', () => {
        the element's prop is the only seam: the port is a closure's. */
     const first = voices.settings![0]!.render(DRAWN) as { props: { port: unknown } }
     const second = voices.settings![0]!.render(DRAWN) as { props: { port: unknown } }
-    expect(first.props.port, 'the pane is given a port').toBeDefined()
+    /* ⚠️ `toBeDefined` PASSED FOR `null`, which is what `pane &&= …` leaves —
+       the memo never filling is the failure this case is about, so it has to
+       assert the port is a PORT and not merely that something was passed. */
+    expect(first.props.port, 'the pane is given a port').not.toBeNull()
+    expect(typeof (first.props.port as { catalogue?: unknown }).catalogue).toBe('function')
     expect(second.props.port, 'and the same one every time').toBe(first.props.port)
   })
 })

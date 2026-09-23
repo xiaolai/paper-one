@@ -93,6 +93,21 @@ describe('routing a reading', () => {
     expect(platform.calls[0]).toBe('stop')
   })
 
+  it('stops BOTH when the reading stops, not only the one that was reading', () => {
+    /* The same reason as the case above, on the other road: the reader presses
+       Stop once, and a speaker left unasked goes on reading the passage it had
+       already queued. */
+    const engine = fake()
+    const platform = fake()
+    const speaker = routedSpeaker(engine, platform, () => [pack()])
+    speaker.speak('hello', 'en')
+    engine.calls.length = 0
+    platform.calls.length = 0
+    speaker.stop()
+    expect(engine.calls).toEqual(['stop'])
+    expect(platform.calls).toEqual(['stop'])
+  })
+
   it('routes pause and resume to the one that is reading', () => {
     const engine = fake()
     const platform = fake()

@@ -3,6 +3,8 @@ import {
   engineVoiceFor,
   installedPacksFor,
   missingPackNotice,
+  packArrived,
+  packSize,
   packVoiceOf,
   packsFor,
   qualify,
@@ -81,6 +83,34 @@ describe('writing a choice down', () => {
 })
 
 describe('which packs can read a language', () => {
+  it('refuses a family carrying any of the three shapes a platform name has', () => {
+    /* ⚠️ ONE AT A TIME, because three clauses joined by `or` are three
+       decisions: a case carrying two of them cannot say which one refused. */
+    expect(unqualify('com.apple:af_heart'), 'a dot').toBeNull()
+    expect(unqualify('a/b:af_heart'), 'a slash').toBeNull()
+    expect(unqualify('Microsoft David:af_heart'), 'a space').toBeNull()
+    expect(unqualify('kokoro:af_heart'), 'and none of them').toEqual({
+      family: 'kokoro',
+      voiceId: 'af_heart',
+    })
+  })
+
+  it('reads a language with space around it, rather than answering none for it', () => {
+    /* A book's `xml:lang` is metadata somebody typed. Trimmed only before the
+       empty test, `" en "` passed the guard and then matched no pack — a book
+       with a perfectly good language reported as one no pack reads. */
+    expect(packsFor([pack()], ' en ')).toEqual([pack()])
+    expect(packsFor([pack()], '   '), 'and nothing but space is no language').toEqual([])
+    expect(packsFor([pack()], ''), 'nor is nothing at all').toEqual([])
+  })
+
+  it('matches a pack that reads several languages on ANY of them', () => {
+    // `some`, not `every`: a pack reading English and French reads both books.
+    const both = pack({ languages: ['en', 'fr'] })
+    expect(packsFor([both], 'fr')).toEqual([both])
+    expect(packsFor([both], 'en')).toEqual([both])
+  })
+
   it('matches on the primary subtag', () => {
     const all = [pack(), CHINESE]
     expect(packsFor(all, 'en-GB').map((p) => p.id)).toEqual(['english-kokoro'])
@@ -147,6 +177,45 @@ describe('the voice that reads this book', () => {
     })
   })
 
+  it('answers none for a book with no language rather than failing on it', () => {
+    /* ⚠️ `primaryOf(null)` is what this stops: with no installed pack the
+       lookup of the stored choice is still reached, so a book that declares no
+       language has to be an answer rather than a throw. */
+    expect(() => engineVoiceFor([pack()], null, { en: qualify('kokoro', 'af_heart') })).not.toThrow()
+    expect(engineVoiceFor([pack()], null, { en: qualify('kokoro', 'af_heart') })).toBeNull()
+    expect(engineVoiceFor([], null)).toBeNull()
+    expect(engineVoiceFor([], 'en')).toBeNull()
+  })
+
+  it('takes the family as the thing that chooses, where two packs name a voice alike', () => {
+    /* Two engines may each ship a voice called `Heart`; the family is what
+       says whose. Matching on the voice id alone would read a Chinese book in
+       the English pack's voice of the same name, which is not an error
+       anywhere — just the wrong voice. */
+    const english = pack({ languages: ['en', 'zh'], voices: [{ id: 'Heart', name: 'Heart', language: 'en-US', note: '' }] })
+    const chinese = pack({
+      id: 'chinese-qwen',
+      family: 'qwen',
+      languages: ['zh'],
+      voices: [{ id: 'Heart', name: '心', language: 'zh-CN', note: '' }],
+    })
+    expect(engineVoiceFor([english, chinese], 'zh', { zh: qualify('qwen', 'Heart') })).toEqual({
+      packId: 'chinese-qwen',
+      voiceId: 'Heart',
+    })
+  })
+
+  it('passes over an installed pack that ships no voice at all', () => {
+    /* A pack whose manifest lists none is a row the catalogue can carry — and
+       taking its first voice regardless is a read of `undefined.id`. */
+    const empty = pack({ id: 'english-empty', voices: [] })
+    expect(engineVoiceFor([empty, pack()], 'en')).toEqual({
+      packId: 'english-kokoro',
+      voiceId: 'af_heart',
+    })
+    expect(engineVoiceFor([empty], 'en')).toBeNull()
+  })
+
   it('matches the choice by family and not by pack id', () => {
     // The same voice from a re-cut pack is the same voice.
     const recut = pack({ id: 'english-kokoro-v2' })
@@ -206,5 +275,44 @@ describe('naming a chosen voice back to a reader', () => {
     // drawing it: the row falls back rather than naming something that is gone.
     expect(packVoiceOf([pack()], { packId: 'chinese-qwen', voiceId: 'Vivian' })).toBeNull()
     expect(packVoiceOf([pack()], { packId: 'english-kokoro', voiceId: 'nobody' })).toBeNull()
+  })
+
+  it('finds the pack the voice names, not whichever pack is first', () => {
+    const found = packVoiceOf([pack(), CHINESE], { packId: 'chinese-qwen', voiceId: 'Vivian' })
+    expect(found?.pack.name).toBe('Chinese')
+    expect(found?.voice.name).toBe('Vivian')
+  })
+})
+
+describe('spelling a size to a reader', () => {
+  it('refuses a size that is not one, rather than drawing it', () => {
+    /* Each of these reaches the screen as its own wrong sentence: `NaN MB`,
+       `Infinity GB`, `-0 MB`. The clause is named one at a time because three
+       joined by `or` are three decisions. */
+    expect(packSize(Number.NaN)).toBe('unknown size')
+    expect(packSize(Number.POSITIVE_INFINITY)).toBe('unknown size')
+    expect(packSize(-1)).toBe('unknown size')
+    expect(packSize(0), 'a pack of no bytes is a row with no size').toBe('unknown size')
+    expect(packSize(336_822_660)).toBe('321 MB')
+  })
+
+  it('turns to gigabytes exactly at one, not past it', () => {
+    // 1 023.6 MiB said `1.0 GB` in one place and `1024 MB` in another, because
+    // the two rounded in different orders. One formatter, one boundary.
+    expect(packSize(1_073_741_824)).toBe('1.0 GB')
+    expect(packSize(1_073_741_823)).toBe('1024 MB')
+  })
+
+  it('counts nothing arrived as nothing, where a SIZE of nothing is unknown', () => {
+    /* ⚠️ Measured in the running app: pressing Download on the 2.3 GB Chinese
+       pack drew "Downloading · unknown size of 2.3 GB" on its first frame,
+       because the count of bytes received went through the function that
+       refuses zero. A count starts at zero every time. */
+    expect(packArrived(0)).toBe('0 MB')
+    expect(packArrived(1_048_576)).toBe('1 MB')
+    expect(packArrived(2_498_416_818)).toBe('2.3 GB')
+    expect(packArrived(-1), 'and a count below zero is still not one').toBe('unknown size')
+    expect(packArrived(Number.NaN)).toBe('unknown size')
+    expect(packArrived(Number.POSITIVE_INFINITY)).toBe('unknown size')
   })
 })

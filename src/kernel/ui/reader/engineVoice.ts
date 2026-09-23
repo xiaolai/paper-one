@@ -66,8 +66,13 @@ export function unqualify(stored: string): { family: string; voiceId: string } |
 
 /** The packs that can read a language, installed or not. */
 export function packsFor(packs: readonly VoicePack[], lang: string | null): readonly VoicePack[] {
-  if (lang === null || lang.trim() === '') return []
-  const primary = primaryOf(lang)
+  /* ⚠️ **TRIMMED BEFORE IT IS READ, NOT ONLY BEFORE IT IS TESTED FOR EMPTY.**
+     The trim was in the guard alone, so `" en "` — which an EPUB's own
+     `xml:lang` can be — passed the guard and then matched no pack at all:
+     a book with a perfectly good language answered as a book no pack reads. */
+  const named = (lang ?? '').trim()
+  if (named === '') return []
+  const primary = primaryOf(named)
   return packs.filter((pack) => pack.languages.some((l) => primaryOf(l) === primary))
 }
 
@@ -109,8 +114,10 @@ export function engineVoiceFor(
   chosen: Readonly<Record<string, string>> = {},
 ): EngineVoice | null {
   const usable = installedPacksFor(packs, lang)
-  if (usable.length === 0) return null
-
+  /* No `if (usable.length === 0) return null` in front of this: with no usable
+     pack neither loop below runs and the answer is already `null`, so the
+     guard could only ever repeat it — and it hid the case where `lang` is
+     null, which is the one that has to reach the line below. */
   const stored = lang === null ? undefined : chosen[primaryOf(lang)]
   const named = stored === undefined ? null : unqualify(stored)
   if (named) {

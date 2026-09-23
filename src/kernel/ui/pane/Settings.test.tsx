@@ -1362,6 +1362,32 @@ describe('the voice the picker shows', () => {
     expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['Enhanced'])
   })
 
+  it('reads a stored choice through the pack its FAMILY names, not the first pack listed', () => {
+    /* ⚠️ Two packs can each ship a voice, and the family is what says whose.
+       Matching any pack would look the Chinese voice up in the English pack,
+       find nothing, and quietly draw the row as Automatic — a reader's own
+       choice silently not shown while the reading uses it. */
+    const chinese: VoicePack = {
+      ...englishPack,
+      id: 'chinese-qwen',
+      name: 'Chinese',
+      family: 'qwen',
+      voices: [{ id: 'Vivian', name: 'Vivian', language: 'zh-CN', note: '' }],
+    }
+    expect(pickerFor({ en: 'qwen:Vivian' }, [compact], [englishPack, chinese]).value).toBe('qwen:Vivian')
+  })
+
+  it('falls through for a stored voice the pack no longer ships', () => {
+    /* A pack re-cut without a voice is the same case as a pack removed: the
+       row must show what the reading will actually do, and selecting an option
+       that is not in the list leaves a reader with a blank row. */
+    const select = pickerFor({ en: 'kokoro:af_nobody' }, [compact], [englishPack])
+    expect(select.selectedOptions[0]?.textContent).toBe('Automatic (Heart)')
+    cleanup()
+    const other = pickerFor({ en: 'qwen:Vivian' }, [compact], [englishPack])
+    expect(other.selectedOptions[0]?.textContent, 'nor a family no pack has').toBe('Automatic (Heart)')
+  })
+
   it('shows a stored pack voice, and falls through to Automatic once the pack has gone', () => {
     /* Same rule as a platform voice that has been uninstalled: a preference
        naming something that is no longer here must not leave the reader with a

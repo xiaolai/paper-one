@@ -417,3 +417,294 @@ describe('rendering the next sentence ahead of time', () => {
     expect(asked).toEqual([])
   })
 })
+
+describe('the states one reading leaves the next', () => {
+  /* Neither word begins at zero: a timer of zero milliseconds fires on the
+     first turn of the loop, which hides the difference between a word that was
+     scheduled and one that was reported before anything could pause it. */
+  const WORDS = [
+    { start: 0, length: 5, startMs: 100, endMs: 300 },
+    { start: 6, length: 3, startMs: 400, endMs: 800 },
+  ]
+
+  it('begins unpaused, and a reading that ended leaves the next one unpaused too', async () => {
+    /* ⚠️ A speaker born paused, or left paused by the reading before, holds
+       every later render at its first sample: the control says it is reading
+       and no sound ever comes. */
+    const { speaker, cb, host } = speakerOver(async () => audio({ words: WORDS }))
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.sources, 'it played at once').toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(cb.onWord).toHaveBeenCalledTimes(2)
+    host.latest.end()
+    expect(cb.onDone).toHaveBeenCalledWith('ended')
+
+    speaker.speak('second one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.sources, 'and so did the next').toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(cb.onWord).toHaveBeenCalledTimes(4)
+  })
+
+  it('stops the reading it is replacing, rather than speaking over it', async () => {
+    const { speaker, host } = speakerOver(async () => audio({ words: WORDS }))
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    const first = host.latest
+    speaker.speak('second one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(first.stops, 'the first source was taken down').toBe(1)
+    expect(host.sources).toHaveLength(2)
+  })
+
+  it('reports each word once, whatever order the transport is asked in', async () => {
+    /* A `resume` with nothing paused used to rebuild the word timers beside
+       the ones already running, so every remaining word was reported twice —
+       and the reading's own highlight jumped back and forth. */
+    const { speaker, cb } = speakerOver(async () => audio({ words: WORDS }))
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.resume()
+    speaker.resume()
+    await vi.advanceTimersByTimeAsync(500)
+    expect(cb.onWord).toHaveBeenCalledTimes(2)
+  })
+
+  it('resumes once, however many times it is asked', async () => {
+    const { speaker, cb } = speakerOver(async () => audio({ words: WORDS }))
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.pause()
+    speaker.resume()
+    speaker.resume()
+    await vi.advanceTimersByTimeAsync(500)
+    expect(cb.onWord).toHaveBeenCalledTimes(2)
+  })
+
+  it('says nothing more once a reading has been stopped or paused', async () => {
+    /* One case per road that clears the timers — `pause`, `stop` and an
+       ending — because with no staleness check inside the timer itself, the
+       clearing IS the invariant. A road that forgets one fails here. */
+    for (const road of ['pause', 'stop'] as const) {
+      const { speaker, cb } = speakerOver(async () => audio({ words: WORDS }))
+      speaker.speak('first one', 'en')
+      await vi.advanceTimersByTimeAsync(0)
+      speaker[road]()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(cb.onWord, road).not.toHaveBeenCalled()
+    }
+    const { speaker, cb, host } = speakerOver(async () => audio({ words: WORDS }))
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    host.latest.end()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(cb.onWord, 'an ending').not.toHaveBeenCalled()
+  })
+
+  it('leaves no render deadline behind once the render has landed', async () => {
+    /* The deadline is two minutes. Left unclear, every sentence a reader
+       listens to leaves one pending until long after the chapter is over. */
+    const { speaker } = speakerOver(async () => audio({ words: WORDS }))
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(vi.getTimerCount(), 'one timer per word, and nothing else').toBe(WORDS.length)
+  })
+
+  it('says what went wrong with a render, rather than only that something did', async () => {
+    /* `onDone('error')` is all the reading needs and all the reader gets, so
+       the plugin's own words reached nobody at all — including the two-minute
+       deadline's, which is the one failure nothing else explains. */
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { speaker, cb } = speakerOver(() => new Promise<SpokenAudio>(() => {}))
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(RENDER_TIMEOUT_MS + 10)
+    expect(cb.onDone).toHaveBeenCalledWith('error')
+    expect(errors).toHaveBeenCalledWith(
+      expect.stringContaining('could not be rendered'),
+      expect.objectContaining({ message: 'the voice did not answer' }),
+    )
+    errors.mockRestore()
+  })
+
+  it('reports nothing for a render that failed after the reader moved on', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let refuse: (cause: unknown) => void = () => {}
+    const { speaker, cb } = speakerOver(
+      () =>
+        new Promise<SpokenAudio>((_resolve, reject) => {
+          refuse = reject
+        }),
+    )
+    speaker.speak('first one', 'en')
+    speaker.stop()
+    refuse(new Error('the plugin refused'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onDone).not.toHaveBeenCalled()
+    expect(errors, 'nor is it worth a line about a sentence nobody is waiting for').not.toHaveBeenCalled()
+    errors.mockRestore()
+  })
+
+  it('refuses a render with nowhere to play it, and says so once', async () => {
+    const cb = callbacks()
+    const speaker = new EngineSpeaker(cb, {
+      render: async () => audio({ words: WORDS }),
+      host: () => null,
+      choose: () => ({ packId: 'english-kokoro', voiceId: 'af_heart' }),
+    })
+    expect(speaker.speak('first one', 'en')).toBe(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onDone).toHaveBeenCalledTimes(1)
+    expect(cb.onDone).toHaveBeenCalledWith('error')
+  })
+
+  it('says an engine reports no words even when the reader paused before the render landed', async () => {
+    /* Qwen answers no timings. Paused at its first sample, the reading would
+       otherwise wait for a band that is never coming, with nothing saying so. */
+    let settle: (value: SpokenAudio) => void = () => {}
+    const { speaker, cb } = speakerOver(
+      () =>
+        new Promise<SpokenAudio>((resolve) => {
+          settle = resolve
+        }),
+    )
+    speaker.speak('first one', 'en')
+    speaker.pause()
+    settle(audio({ words: [] }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onNoBoundaries).toHaveBeenCalledTimes(1)
+    expect(cb.onWord).not.toHaveBeenCalled()
+  })
+
+  it('does not say it where the engine DOES report words', async () => {
+    let settle: (value: SpokenAudio) => void = () => {}
+    const { speaker, cb } = speakerOver(
+      () =>
+        new Promise<SpokenAudio>((resolve) => {
+          settle = resolve
+        }),
+    )
+    speaker.speak('first one', 'en')
+    speaker.pause()
+    settle(audio({ words: WORDS }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onNoBoundaries).not.toHaveBeenCalled()
+  })
+})
+
+describe('what makes two renders the same render', () => {
+  const REQUESTS: { packId: string; voiceId: string; text: string; rate?: number }[] = []
+
+  function counting() {
+    REQUESTS.length = 0
+    const cb = callbacks()
+    const speaker = new EngineSpeaker(cb, {
+      render: async (request) => {
+        REQUESTS.push({ ...request })
+        return audio()
+      },
+      host: () => new FakeAudioHost(),
+      choose: () => ({ packId: 'english-kokoro', voiceId: 'af_heart' }),
+    })
+    return { speaker, cb }
+  }
+
+  it('sends the reader’s rate, and sends no rate at all where they chose none', async () => {
+    /* A `rate: undefined` on the request is not the same as no rate: it
+       changes what the key is made of, so a prepared render and the spoken one
+       stop matching and the look-ahead silently saves nothing. */
+    const { speaker } = counting()
+    speaker.speak('first one', 'en', { rate: 1.25 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(REQUESTS[0]).toEqual({ packId: 'english-kokoro', voiceId: 'af_heart', text: 'first one', rate: 1.25 })
+    speaker.speak('second one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(REQUESTS[1]).not.toHaveProperty('rate')
+    expect(REQUESTS[1]).toEqual({ packId: 'english-kokoro', voiceId: 'af_heart', text: 'second one' })
+  })
+
+  it('takes no rate and a rate of one as the same reading', async () => {
+    // One is the default, so a look-ahead prepared without a rate is exactly
+    // the render a `speak` at rate 1 wants — and rendering it twice is the
+    // slowest thing this class can do, since the engine serialises renders.
+    const { speaker } = counting()
+    speaker.prepare('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.speak('first one', 'en', { rate: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(REQUESTS).toHaveLength(1)
+  })
+
+  it('takes two different rates as two different readings', async () => {
+    const { speaker } = counting()
+    speaker.prepare('first one', 'en', { rate: 2 })
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.speak('first one', 'en', { rate: 3 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(REQUESTS).toHaveLength(2)
+  })
+
+  it('keeps a look-ahead only while it is still the one in flight', async () => {
+    /* ⚠️ Two `prepare`s in a row: the first render must not be stored as
+       "ready" when it lands, because the sentence it belongs to is no longer
+       the one being looked ahead to — handing it out later would read the
+       wrong sentence aloud. */
+    const settles: ((value: SpokenAudio) => void)[] = []
+    const texts: string[] = []
+    const cb = callbacks()
+    const speaker = new EngineSpeaker(cb, {
+      render: (request) =>
+        new Promise<SpokenAudio>((resolve) => {
+          texts.push(request.text)
+          settles.push(resolve)
+        }),
+      host: () => new FakeAudioHost(),
+      choose: () => ({ packId: 'english-kokoro', voiceId: 'af_heart' }),
+    })
+    speaker.prepare('first one', 'en')
+    speaker.prepare('second one', 'en')
+    settles[0]?.(audio())
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(texts, 'the abandoned look-ahead was not handed back').toEqual([
+      'first one',
+      'second one',
+      'first one',
+    ])
+  })
+
+  it('does not ask twice for a look-ahead it is already waiting on', async () => {
+    const { speaker } = counting()
+    speaker.prepare('first one', 'en')
+    speaker.prepare('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.prepare('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(REQUESTS).toHaveLength(1)
+  })
+
+  it('forgets a look-ahead that failed, so the sentence is rendered again when asked for', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const settles: ((cause: unknown) => void)[] = []
+    const texts: string[] = []
+    const cb = callbacks()
+    const speaker = new EngineSpeaker(cb, {
+      render: (request) =>
+        new Promise<SpokenAudio>((_resolve, reject) => {
+          texts.push(request.text)
+          settles.push(reject)
+        }),
+      host: () => new FakeAudioHost(),
+      choose: () => ({ packId: 'english-kokoro', voiceId: 'af_heart' }),
+    })
+    speaker.prepare('first one', 'en')
+    settles[0]?.(new Error('the plugin refused'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onDone, 'a look-ahead nobody asked for says nothing').not.toHaveBeenCalled()
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(texts).toEqual(['first one', 'first one'])
+    errors.mockRestore()
+  })
+})

@@ -244,6 +244,59 @@ describe('a book with no voice this app would choose', () => {
     )
   })
 
+  it('takes a language of nothing but spaces as no language at all', async () => {
+    /* ⚠️ `lang` comes out of the book's own metadata, so `"  "` is a real row
+       and not a fixture's invention. Untrimmed it is not the empty string, so
+       the refusal that reaches the reader is about no PACK reading their
+       language — which names a language they were never told about. */
+    const { seen, say } = mount({
+      source: { ...book(), lang: '  ' },
+      packs: [{ ...ENGLISH_PACK, installed: true }],
+    })
+    await act(async () => {
+      await seen[0]?.run()
+    })
+    expect(say).toHaveBeenCalledWith(
+      'This book does not say what language it is in, so no voice can be chosen for it.',
+    )
+  })
+
+  it('renders on the pack that HOLDS the voice, not on whichever pack is first', async () => {
+    /* ⚠️ The stored choice carries a FAMILY and the render command wants the
+       pack that holds the voice. With two packs installed, resolving "any
+       pack" renders a Chinese book through the English pack — not an error
+       anywhere, just the wrong voice reading the book. */
+    const chinese: VoicePack = {
+      ...ENGLISH_PACK,
+      id: 'chinese-qwen',
+      name: 'Chinese',
+      family: 'qwen',
+      languages: ['zh'],
+      voices: [{ id: 'Vivian', name: 'Vivian', language: 'zh-CN', note: '' }],
+      installed: true,
+    }
+    const { rendered } = engine()
+    const { seen } = mount({
+      packs: [{ ...ENGLISH_PACK, installed: true }, chinese],
+      source: {
+        title: 'A Measured Book',
+        author: 'Paper',
+        lang: 'zh-CN',
+        toc: [],
+        fixedLayout: false,
+        skip: { notes: false },
+        sectionTexts: vi.fn(async () => ({
+          sections: [{ index: 0, title: '第一章', text: '春天来了。' }],
+          complete: true,
+        })),
+      },
+    })
+    await act(async () => {
+      await seen[0]?.run()
+    })
+    expect(rendered.map((job) => job.voice)).toEqual(['qwen:Vivian'])
+  })
+
   it('renders nothing at all when it refuses', async () => {
     const { rendered } = engine()
     const { seen } = mount({ source: book(), packs: [ENGLISH_PACK] })

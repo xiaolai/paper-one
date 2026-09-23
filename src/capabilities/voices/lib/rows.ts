@@ -39,7 +39,13 @@ export type ProgressEvent =
  * for download, and a fractional byte count is not a count of bytes.
  */
 function counted(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+  /* ⚠️ **A `typeof value === 'number'` IN FRONT OF THIS DECIDED NOTHING**, and
+     it was here. `Number.isInteger` answers false for every value that is not a
+     number, so that clause could never be the one that refused — an unkillable
+     mutant, which this repository removes rather than disables. The cast is
+     what `tsc` needs for the comparison below, and it is sound precisely
+     because `Number.isInteger` has already answered. */
+  return Number.isInteger(value) && (value as number) >= 0
 }
 
 /**
@@ -82,8 +88,11 @@ export function packOf(raw: unknown): VoicePack | null {
     if (typeof row[key] !== 'string' || row[key] === '') return null
   }
   if (!counted(row.bytes)) return null
-  if (typeof row.minimumMemoryGb !== 'number' || !Number.isFinite(row.minimumMemoryGb)) return null
-  if (row.minimumMemoryGb < 0) return null
+  /* The same shape as `counted` above, for the same reason: `Number.isFinite`
+     is false for every value that is not a number, so a narrowing test in
+     front of it refuses nothing it would not refuse anyway. A floor of zero is
+     a real floor — a pack that asks for no memory at all. */
+  if (!Number.isFinite(row.minimumMemoryGb) || (row.minimumMemoryGb as number) < 0) return null
   if (typeof row.installed !== 'boolean') return null
   if (!Array.isArray(row.languages) || !row.languages.every((l) => typeof l === 'string')) return null
   if (!Array.isArray(row.voices)) return null
@@ -109,7 +118,7 @@ export function packOf(raw: unknown): VoicePack | null {
     family: row.family as string,
     languages: row.languages as readonly string[],
     bytes: row.bytes,
-    minimumMemoryGb: row.minimumMemoryGb,
+    minimumMemoryGb: row.minimumMemoryGb as number,
     voices: voices as readonly { id: string; name: string; language: string; note: string }[],
     installed: row.installed,
   }
@@ -131,7 +140,7 @@ export function packOf(raw: unknown): VoicePack | null {
 export function spokenOf(row: unknown): SpokenAudio {
   if (typeof row !== 'object' || row === null) throw new Error('the render answered with no passage')
   const raw = row as Record<string, unknown>
-  if (!Array.isArray(raw.pcm) || !raw.pcm.every((b) => typeof b === 'number' && Number.isInteger(b) && b >= 0 && b <= 255)) {
+  if (!Array.isArray(raw.pcm) || !raw.pcm.every((b) => counted(b) && b <= 255)) {
     throw new Error('the render answered with samples that are not bytes')
   }
   if (raw.pcm.length % 2 !== 0) {
@@ -139,7 +148,11 @@ export function spokenOf(row: unknown): SpokenAudio {
        refusal `narrate/wav.rs` makes of a malformed WAV, for the same reason. */
     throw new Error('the render answered with half a sample')
   }
-  if (typeof raw.sampleRate !== 'number' || !Number.isInteger(raw.sampleRate) || raw.sampleRate <= 0) {
+  /* `counted` already refuses a rate that is not a whole, non-negative number,
+     so the only rate left to refuse is zero — which divides to `Infinity` in
+     every duration this feeds. Written as `<= 0` the lower bound would be a
+     comparison nothing could ever make true. */
+  if (!counted(raw.sampleRate) || raw.sampleRate === 0) {
     throw new Error('the render answered with no sample rate')
   }
   if (!Array.isArray(raw.words) || !raw.words.every(isTiming)) {

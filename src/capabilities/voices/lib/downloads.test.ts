@@ -111,6 +111,52 @@ describe('a download that outlives the pane', () => {
     expect(downloads.states()['chinese-qwen'], 'a running download is not forgotten').toBeDefined()
   })
 
+  it('keeps every pack’s state, not only the one that changed last', () => {
+    /* The registry is one object rebuilt on each change, so the rebuild has to
+       carry what it is not changing: without that, starting a second download
+       empties the first one's row while it is still running. */
+    const downloads = makeDownloads()
+    void downloads.begin('english-kokoro', 10, () => new Promise(() => {}))
+    void downloads.begin('chinese-qwen', 20, () => new Promise(() => {}))
+    expect(Object.keys(downloads.states()).sort()).toEqual(['chinese-qwen', 'english-kokoro'])
+    expect(downloads.states()['english-kokoro']?.progress).toEqual({ kind: 'downloading', received: 0, total: 10 })
+  })
+
+  it('lets a pack be downloaded again once it has finished, or failed', async () => {
+    /* The registry has to FORGET a download that ended, on both roads out.
+       Holding on to it makes the next press hand back the run that already
+       ended — a retry that fetches nothing and a row that never moves. */
+    const downloads = makeDownloads()
+    const ok = vi.fn(async () => {})
+    await downloads.begin('english-kokoro', 1, ok)
+    await downloads.begin('english-kokoro', 1, ok)
+    expect(ok).toHaveBeenCalledTimes(2)
+
+    const bad = vi.fn(async () => {
+      throw new Error("the file's digest does not match the catalogue")
+    })
+    await refusalOf(downloads.begin('chinese-qwen', 1, bad))
+    await refusalOf(downloads.begin('chinese-qwen', 1, bad))
+    expect(bad).toHaveBeenCalledTimes(2)
+  })
+
+  it('names the subscription when a watcher throws, and tells the rest anyway', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const downloads = makeDownloads()
+    const second = vi.fn()
+    downloads.watch(() => {
+      throw new Error('a pane that unmounted')
+    })
+    downloads.watch(second)
+    void downloads.begin('english-kokoro', 1, () => new Promise(() => {}))
+    expect(second, 'one throwing subscriber does not silence the next').toHaveBeenCalled()
+    expect(errors).toHaveBeenCalledWith(
+      expect.stringContaining('voice download'),
+      expect.objectContaining({ message: 'a pane that unmounted' }),
+    )
+    errors.mockRestore()
+  })
+
   it('stops nothing for a pack that is not downloading', () => {
     const downloads = makeDownloads()
     expect(() => downloads.stop('english-kokoro')).not.toThrow()

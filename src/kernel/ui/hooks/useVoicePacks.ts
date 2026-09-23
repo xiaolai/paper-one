@@ -51,10 +51,19 @@ export function useVoicePacks(services: KernelServices): VoicesState {
       try {
         const rows = await bound.catalogue()
         if (alive) setPacks(rows)
-      } catch {
+      } catch (cause: unknown) {
         /* A catalogue that will not read leaves the list as it was rather than
          * emptying it: an empty list means "no pack can read this book", which
-         * would take a working voice away on one failed poll. */
+         * would take a working voice away on one failed poll.
+         *
+         * ⚠️ **AND IT IS SAID, WHERE IT USED TO BE SWALLOWED.** A silent
+         * catch made this road indistinguishable from the one above it — a
+         * build with no engine at all — so the guard in front of it was a
+         * branch no test could reach, which is how an unkillable mutant is
+         * spelled. They are different events and only one of them is a fault:
+         * a poll failing every four seconds is worth a line, and this is the
+         * only place that knows it happened. */
+        console.error('Paper: the voices catalogue would not read', cause)
       }
     }
     void read()

@@ -18,7 +18,8 @@ import { STOPPED, theDownloads, type Downloads } from '../lib/downloads'
  */
 
 /** How often the catalogue is re-read while the pane is open. */
-const POLL_MS = 5000
+/** How often the catalogue is re-read while the pane is open. */
+export const POLL_MS = 5000
 
 /* ⚠️ **THE KERNEL'S, NOT A SECOND PAIR.** These lived here and `engineVoice.ts`
    had its own copy for the Listen control's notice; the two rounded in
@@ -36,7 +37,10 @@ export function progressLine(progress: InstallProgress): string {
 }
 
 /** The languages a pack reads, spelled for a person. */
-export function languagesOf(pack: VoicePack, names = new Intl.DisplayNames(['en'], { type: 'language' })): string {
+/* The app's own language, not the machine's: a list written in one locale and
+   the rest of the pane in another is the `Intl` trap this repository already
+   records for sentence segmentation, wearing a second hat. */
+export function languagesOf(pack: VoicePack, names = new Intl.DisplayNames('en', { type: 'language' })): string {
   const spelled = pack.languages.map((tag) => {
     /* `of` throws on a tag it cannot parse, and a catalogue is data — a row
      * with a malformed tag must not take the whole pane down. */
@@ -67,16 +71,23 @@ export function VoicesPane({
   /** Which packs are being removed, and what a removal said if it refused. */
   const [removing, setRemoving] = useState<Readonly<Record<string, boolean>>>({})
   const [failedRemoval, setFailedRemoval] = useState<Readonly<Record<string, string | null>>>({})
-  /* So a poll that lands after the pane closes does not set state on an
-   * unmounted tree — the same reason every other polling pane holds one. */
-  const alive = useRef(true)
   /* ⚠️ **TWO READS CAN BE IN FLIGHT, AND THE OLDER ONE USED TO WIN.** The timer
    * polls while `install` and `remove` each ask for a fresh read of their own,
    * so the answers arrive in whatever order the plugin finishes them — and a
    * stale one landing last put `installed: false` back on a pack that had just
-   * finished installing. `alive` cannot see this: both reads belong to a live
-   * pane. Only the newest answer is applied. */
-  const asked = useRef(0)
+   * finished installing. Only the newest answer is applied.
+   *
+   * ⚠️ **AN IDENTITY, NOT A COUNTER.** A number counted up, and counting down
+   * would have discriminated exactly as well — an arithmetic nothing could
+   * observe. A fresh object is the read, and cannot be any other read.
+   *
+   * ⚠️ **AND AN `alive` REF STOOD BESIDE IT AND DECIDED NOTHING.** It guarded
+   * every `set…` against an unmounted tree, which React 18 makes a no-op — so
+   * a pane that had closed applied its answer to nothing whether or not the
+   * guard ran, and the guard was a branch no test could reach. What actually
+   * protects the rows is this token: both reads belong to a live pane, which
+   * is the case `alive` could never see. */
+  const asked = useRef<object>({})
   /* ⚠️ **THE DOWNLOADS ARE NOT THIS PANE'S**, and they were. Each lived in a
    * `useRef` map of `AbortController`s beside React state, so closing Settings
    * — or a hot reload, which is how this was first seen — threw away the
@@ -87,14 +98,14 @@ export function VoicesPane({
   useEffect(() => downloads.watch(() => setRunning(downloads.states())), [downloads])
 
   const refresh = useCallback(async () => {
-    const mine = ++asked.current
+    const mine = (asked.current = {})
     try {
       const rows = await port.catalogue()
-      if (!alive.current || mine !== asked.current) return
+      if (mine !== asked.current) return
       setPacks(rows)
       setFailed(null)
     } catch (cause) {
-      if (!alive.current || mine !== asked.current) return
+      if (mine !== asked.current) return
       /* The catalogue is embedded in the binary, so a failure here is the
        * plugin not answering rather than a network problem — said plainly
        * instead of leaving an empty pane that reads as "no voices exist". */
@@ -103,13 +114,9 @@ export function VoicesPane({
   }, [port])
 
   useEffect(() => {
-    alive.current = true
     void refresh()
     const timer = setInterval(() => void refresh(), POLL_MS)
-    return () => {
-      alive.current = false
-      clearInterval(timer)
-    }
+    return () => clearInterval(timer)
   }, [refresh])
 
   const install = useCallback(
@@ -138,9 +145,9 @@ export function VoicesPane({
       try {
         await port.remove(pack.id)
       } catch (cause) {
-        if (alive.current) setFailedRemoval((was) => ({ ...was, [pack.id]: messageOf(cause) }))
+        setFailedRemoval((was) => ({ ...was, [pack.id]: messageOf(cause) }))
       }
-      if (alive.current) setRemoving((was) => ({ ...was, [pack.id]: false }))
+      setRemoving((was) => ({ ...was, [pack.id]: false }))
       void refresh()
     },
     [downloads, port, refresh, removing],
@@ -185,7 +192,11 @@ export function VoicesPane({
       {failed !== null ? <p className={ui.hint}>The voices could not be listed: {failed}</p> : null}
       {packs.map((pack) => {
         const state = running[pack.id]
-        const busy = state?.progress != null
+        /* ONE reading of it. `busy && state?.progress` asked the same question
+           twice — `busy` IS "there is progress" — so neither half could be the
+           one that decided. */
+        const progress = state?.progress ?? null
+        const busy = progress !== null
         const error = state?.error ?? failedRemoval[pack.id] ?? null
         return (
           /* ⚠️ **THE FACTS GO UNDER THE ROW, NOT INSIDE IT** — measured in the

@@ -64,10 +64,45 @@ export const RENDER_TIMEOUT_MS = 120_000
 export class EngineSpeaker {
   #cb: SpeakerCallbacks
   #deps: EngineSpeakerDeps
-  /** Which utterance is current. Every async continuation checks it. */
-  #generation = 0
-  #playing: Playing | null = null
-  #timers: ReturnType<typeof setTimeout>[] = []
+  /**
+   * Which utterance is current. Every async continuation checks it.
+   *
+   * ⚠️ **AN IDENTITY, NOT A COUNTER.** It was a number, incremented on every
+   * `speak`, `stop` and ending — and whether two of those steps could ever
+   * bring it back to a value some continuation still held was an argument
+   * rather than a fact. A fresh object cannot collide with anything, ever, so
+   * the question does not arise; it also leaves no arithmetic for a mutation
+   * to change without changing the answer.
+   */
+  #current: object = {}
+  /**
+   * The reading in progress: the sound, the words it is made of, and how many
+   * of them have been reported.
+   *
+   * ⚠️ **ONE VALUE, WHERE THERE WERE THREE.** A `#playing`, a `#words` and a
+   * `#said` were cleared separately on each of the two roads out, and only the
+   * first of the three decided anything — so the other two were assignments no
+   * test could tell from not making them. They belong to one reading and they
+   * go together.
+   *
+   * ⚠️ **`said` IS A COUNT, NOT A COMPARISON AGAINST THE CLOCK.** The rebuild
+   * after a pause first skipped every word at or before the player's position,
+   * which assumes such a word was already reported — and one at `startMs` 0, on
+   * a render held at its first sample by a pause that arrived before it landed,
+   * never had been. It was dropped silently. Counting what was said leaves
+   * nothing to assume.
+   */
+  #reading: { readonly playing: Playing; readonly words: SpokenAudio['words']; said: number } | null = null
+  /**
+   * The word timers in flight.
+   *
+   * ⚠️ **NEVER REPLACED, ONLY EMPTIED.** Assigning a fresh `[]` on each clear
+   * carried a mutant nothing could kill: the list's only reader hands each
+   * entry to `clearTimeout`, which ignores a value that is not a handle, so an
+   * emptiness no code reads is an emptiness no test can assert.
+   */
+  // Stryker disable next-line ArrayDeclaration: the list's only reader hands each entry to clearTimeout, which ignores anything that is not a handle — so what is in it at the start cannot be observed.
+  readonly #timers: ReturnType<typeof setTimeout>[] = []
   #reportedNoBoundaries = false
   /**
    * Paused, whether or not there is anything playing YET.
@@ -81,18 +116,6 @@ export class EngineSpeaker {
    * where it lands once there is one.
    */
   #paused = false
-  /** The words of the passage being read, for rescheduling across a pause. */
-  #words: SpokenAudio['words'] = []
-  /**
-   * How many of them have been reported.
-   *
-   * ⚠️ **A COUNT, NOT A COMPARISON AGAINST THE CLOCK.** The rebuild first
-   * skipped every word at or before the player's position, which assumes such
-   * a word was already reported — and one at `startMs` 0, on a render held at
-   * its first sample by a pause that arrived before it landed, never had been.
-   * It was dropped silently. Counting what was said leaves nothing to assume.
-   */
-  #said = 0
   /** A render done ahead of time, by `prepare`. */
   #ready: { key: string; audio: SpokenAudio } | null = null
   /**
@@ -119,7 +142,7 @@ export class EngineSpeaker {
    */
   speak(text: string, lang: string | null, prefs: SpeakPrefs = {}): boolean {
     this.stop()
-    const generation = ++this.#generation
+    const token = (this.#current = {})
     if (!text.trim()) {
       this.#cb.onDone('empty')
       return false
@@ -132,14 +155,13 @@ export class EngineSpeaker {
       this.#cb.onDone('no-voice')
       return false
     }
-
     const request = requestFor(voice, text, prefs)
     const rendering = this.#renderOrJoin(request)
 
     void rendering
       .then(
-        (audio) => this.#play(generation, audio),
-        () => this.#endIfCurrent(generation, 'error'),
+        (audio) => this.#play(token, audio),
+        (cause: unknown) => this.#failed(token, cause),
       )
       /* ⚠️ **A HANDLER PASSED TO `then` DOES NOT CATCH THE OTHER HANDLER'S
        * THROW.** `#play` builds an audio buffer and a source node, and a host
@@ -147,7 +169,7 @@ export class EngineSpeaker {
        * the rejection handler beside it cannot see it. The reading then sat
        * lit for ever with an unhandled rejection in the console and no
        * `onDone` anywhere. */
-      .catch(() => this.#endIfCurrent(generation, 'error'))
+      .catch((cause: unknown) => this.#failed(token, cause))
     return true
   }
 
@@ -173,6 +195,10 @@ export class EngineSpeaker {
     this.#preparing = { key, work }
     void work.then(
       (audio) => {
+        /* Only if this is still the look-ahead in flight. A `speak` for the
+         * same sentence takes the promise over, and a `prepare` for a later
+         * one replaces it — in both cases this render has an owner already,
+         * and storing it as ready would hand it out a second time. */
         if (this.#preparing?.key === key) {
           this.#preparing = null
           this.#ready = { key, audio }
@@ -189,7 +215,7 @@ export class EngineSpeaker {
 
   pause(): void {
     this.#paused = true
-    this.#playing?.pause()
+    this.#reading?.playing.pause()
     /* ⚠️ **THE WORD TIMERS ARE THE OTHER HALF, AND THEY RAN ON.** They were
      * scheduled once, at `word.startMs` from the moment the audio started, so a
      * pause stopped the SOUND and left the highlight walking through the
@@ -202,24 +228,27 @@ export class EngineSpeaker {
   resume(): void {
     if (!this.#paused) return
     this.#paused = false
-    const playing = this.#playing
-    if (!playing) return
-    playing.resume()
-    this.#scheduleRemainingWords(this.#generation, playing)
+    const reading = this.#reading
+    if (!reading) return
+    reading.playing.resume()
+    /* Against the PLAYER's position rather than the wall clock, so a pause of
+     * any length lands the next word where the sound does — and so does a
+     * reading at a speed other than 1, which `positionMs` already accounts for
+     * and a wall clock never could. From the first word NOT YET SAID, so
+     * nothing is repeated and nothing is skipped. */
+    this.#scheduleFrom(reading.said, reading.playing.positionMs())
   }
 
   /** End the reading. `onDone` is NOT called: the caller already knows. */
   stop(): void {
-    /* The generation moves FIRST, so a render already in flight cannot play
-     * when it lands. Stopping the player alone would leave that render to
-     * start a sound nobody asked for, seconds later. */
-    this.#generation += 1
+    /* The token moves FIRST, so a render already in flight cannot play when it
+     * lands. Stopping the player alone would leave that render to start a
+     * sound nobody asked for, seconds later. */
+    this.#current = {}
     this.#paused = false
-    this.#words = []
-    this.#said = 0
     this.#clearTimers()
-    this.#playing?.stop()
-    this.#playing = null
+    this.#reading?.playing.stop()
+    this.#reading = null
   }
 
   /**
@@ -255,16 +284,35 @@ export class EngineSpeaker {
     try {
       return await Promise.race([this.#deps.render(request), limit])
     } finally {
-      if (timer !== undefined) clearTimeout(timer)
+      /* No `timer !== undefined` in front of this: the executor above runs
+         synchronously, so by here it always has one — and `clearTimeout` takes
+         `undefined` without complaint anyway. Left unclear, a two-minute timer
+         outlives every sentence that renders normally. */
+      clearTimeout(timer)
     }
   }
 
+  /**
+   * A render that did not arrive.
+   *
+   * ⚠️ **THE REASON IS SAID, WHERE IT USED TO BE DROPPED.** `onDone('error')`
+   * is all the reading needs, and it is all the READER gets — so the timeout's
+   * own words, and whatever the plugin refused with, reached nobody at all. A
+   * chapter that stops part way with no reason anywhere is the shape this
+   * repository keeps having to debug from the outside.
+   */
+  #failed(token: object, cause: unknown): void {
+    if (token !== this.#current) return
+    console.error('Paper: the reading could not be rendered', cause)
+    this.#endIfCurrent(token, 'error')
+  }
+
   /** Play a render, if it is still the one the reader is waiting for. */
-  #play(generation: number, audio: SpokenAudio): void {
-    if (generation !== this.#generation) return
+  #play(token: object, audio: SpokenAudio): void {
+    if (token !== this.#current) return
     const host = this.#deps.host()
     if (!host) {
-      this.#endIfCurrent(generation, 'error')
+      this.#endIfCurrent(token, 'error')
       return
     }
     /* ⚠️ SILENCE OF THE RIGHT LENGTH IS THE FAILURE NOBODY HEARS UNTIL THEY
@@ -273,56 +321,60 @@ export class EngineSpeaker {
      * arrives with correct-looking timings. Reported as an error rather than
      * played, so the reader is told instead of sitting through nothing. */
     if (!audible(audio.pcm)) {
-      this.#endIfCurrent(generation, 'error')
+      this.#endIfCurrent(token, 'error')
       return
     }
 
     const playing = playPcm(host, audio.pcm, audio.sampleRate, () => {
-      this.#endIfCurrent(generation, 'ended')
+      this.#endIfCurrent(token, 'ended')
     })
-    this.#playing = playing
-    this.#words = audio.words
-    this.#said = 0
+    this.#reading = { playing, words: audio.words, said: 0 }
     /* ⚠️ **A RENDER THAT LANDS DURING A PAUSE MUST NOT SPEAK.** The reader
      * pressed Pause while this was still rendering; there was no player then to
      * take it, and there is one now. Paused at its first sample rather than
      * never started, so `resume` is the ordinary path and not a special case. */
     if (this.#paused) {
       playing.pause()
-      /* No timers either — `resume` builds them from the player's position. */
+      /* No timers either — `resume` builds them from the player's position.
+         The engine still has to say it reports no words, though: a reader who
+         paused during the very first render would otherwise be left with a
+         band that never arrives and nothing saying it is not coming. */
       if (audio.words.length === 0) this.#noWordBoundaries()
       return
     }
-    this.#scheduleWords(generation, audio)
-  }
-
-  /**
-   * Fire `onWord` for each word at the moment it is spoken.
-   *
-   * The timings are known before a sound is made, so these are SCHEDULED
-   * rather than polled: a timer per word costs nothing and lands where the
-   * engine said the word does, while polling lands wherever the frame did.
-   */
-  #scheduleWords(generation: number, audio: SpokenAudio): void {
     if (audio.words.length === 0) {
       this.#noWordBoundaries()
       return
     }
-    this.#scheduleFrom(generation, 0, 0)
+    this.#scheduleFrom(0, 0)
   }
 
   /**
-   * Schedule the words from `first` onwards, offset by where the audio is.
+   * Fire `onWord` for each word from `first` onwards, offset by where the
+   * audio has got to.
+   *
+   * The timings are known before a sound is made, so these are SCHEDULED
+   * rather than polled: a timer per word costs nothing and lands where the
+   * engine said the word does, while polling lands wherever the frame did.
    *
    * One routine for the first schedule and for every rebuild after a pause, so
    * the two cannot report a different set.
+   *
+   * ⚠️ **NO STALENESS CHECK INSIDE THE TIMER, AND THAT IS THE INVARIANT RATHER
+   * THAN AN OVERSIGHT.** Every road that ends or interrupts a reading —
+   * `pause`, `stop`, `#endIfCurrent` — clears these timers before anything
+   * else can happen, so a timer that fires belongs to the reading that
+   * scheduled it. A check as well would be a branch no test could reach; the
+   * cases below prove the clearing instead, one per road, which is what fails
+   * loudly if a fourth road forgets.
    */
-  #scheduleFrom(generation: number, first: number, positionMs: number): void {
-    for (let index = first; index < this.#words.length; index += 1) {
-      const word = this.#words[index]!
+  #scheduleFrom(first: number, positionMs: number): void {
+    const reading = this.#reading
+    if (!reading) return
+    for (let index = first; index < reading.words.length; index += 1) {
+      const word = reading.words[index]!
       const at = setTimeout(() => {
-        if (generation !== this.#generation) return
-        this.#said = index + 1
+        reading.said = index + 1
         this.#cb.onWord(word.start, word.length)
       }, Math.max(0, word.startMs - positionMs))
       this.#timers.push(at)
@@ -353,36 +405,21 @@ export class EngineSpeaker {
     this.#cb.onNoBoundaries()
   }
 
-  /**
-   * Rebuild the word timers from where the audio actually is.
-   *
-   * Against the PLAYER's position rather than the wall clock, so a pause of
-   * any length lands the next word where the sound does — and so does a
-   * reading at a speed other than 1, which `positionMs` already accounts for
-   * and a wall clock never could. Resumes at the first word NOT YET SAID, so
-   * nothing is repeated and nothing is skipped.
-   */
-  #scheduleRemainingWords(generation: number, playing: Playing): void {
-    this.#scheduleFrom(generation, this.#said, playing.positionMs())
-  }
-
   #clearTimers(): void {
     for (const timer of this.#timers) clearTimeout(timer)
-    this.#timers = []
+    this.#timers.length = 0
   }
 
   /** Report an ending, once, and only for the utterance that is current. */
-  #endIfCurrent(generation: number, reason: DoneReason): void {
-    if (generation !== this.#generation) return
+  #endIfCurrent(token: object, reason: DoneReason): void {
+    if (token !== this.#current) return
     /* Moved on before reporting, so a second ending — a late `onended` beside
      * a timeout, say — cannot report twice. `Speaker` does the same thing for
      * the same reason. */
-    this.#generation += 1
+    this.#current = {}
     this.#paused = false
-    this.#words = []
-    this.#said = 0
     this.#clearTimers()
-    this.#playing = null
+    this.#reading = null
     this.#cb.onDone(reason)
   }
 }

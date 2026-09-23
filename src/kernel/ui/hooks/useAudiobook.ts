@@ -6,7 +6,7 @@ import { messageOf } from '../../core/messageOf'
 import type { SpeechSkipPrefs } from '../reader/speechSkip'
 import type { SectionTextWalk } from '../reader/session'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
-import { engineVoiceFor, missingPackNotice, qualify } from '../reader/engineVoice'
+import { engineVoiceFor, missingPackNotice, packVoiceOf, qualify } from '../reader/engineVoice'
 import type { VoicePack } from '../../core/ports'
 import { documentLang } from '../reader/speech'
 import type { Book } from './useBook'
@@ -211,9 +211,14 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
          * the WebView's list can be empty or the book language-less and a
          * render needs a voice NAMED. */
         const downloaded = engineVoiceFor(packs, source.lang, chosen)
-        const engineVoice = downloaded
-          ? qualify(packs.find((pack) => pack.id === downloaded.packId)?.family ?? '', downloaded.voiceId)
-          : null
+        /* ⚠️ **`packVoiceOf`, NOT A SECOND `find` OF ITS OWN.** This looked the
+         * pack up inline, with a `?.family ?? ''` for a row that cannot be
+         * missing — `engineVoiceFor` draws the id it answers with FROM these
+         * packs — so the fallback was a value no test could ever see and the
+         * lookup was the same rule written twice. One lookup, beside the
+         * chooser, is what `engineVoice.ts` keeps `packVoiceOf` for. */
+        const named = downloaded && packVoiceOf(packs, downloaded)
+        const engineVoice = named ? qualify(named.pack.family, named.voice.id) : null
         /* ⚠️ **A DOWNLOADED VOICE IS THE ONLY ONE THAT CAN RENDER NOW.**
          * `narrate_render` over AVSpeechSynthesizer was deleted in phase 30:
          * every voice it reached on a Mac is below the floor the reading

@@ -155,3 +155,94 @@ describe('the buffer it builds', () => {
     expect(host.buffers[0]?.length).toBe(1)
   })
 })
+
+describe('the wiring, and the states this player cannot be in', () => {
+  it('wires the source to the output, or the reading runs in silence', () => {
+    /* Nothing throws and nothing reports an error when a source is never
+       connected: the chapter plays to the end and the reader hears nothing. */
+    const host = new FakeAudioHost()
+    playPcm(host, ONE_SECOND, 24_000, () => {})
+    expect(host.latest.connections).toEqual([host.destination])
+  })
+
+  it('is not done while it is playing', () => {
+    const host = new FakeAudioHost()
+    const playing = playPcm(host, ONE_SECOND, 24_000, () => {})
+    expect(playing.done).toBe(false)
+    host.advance(400)
+    expect(playing.done).toBe(false)
+  })
+
+  it('reports the whole sound played once it has ended', () => {
+    // In MILLISECONDS, like every other position here: a duration in seconds
+    // puts the last words of the sentence a thousandth of the way in.
+    const host = new FakeAudioHost()
+    const playing = playPcm(host, ONE_SECOND, 24_000, () => {})
+    host.advance(1000)
+    host.latest.end()
+    expect(playing.positionMs()).toBe(1000)
+  })
+
+  it('takes a source right down on a pause, and on a stop', () => {
+    /* ⚠️ THREE THINGS, and the first is what makes the rest of this file
+       simple: clearing `onended` is why no stale source can report an ending.
+       A source left connected also holds an output node for the whole
+       reading. One case per road, because a road that forgets is exactly what
+       this replaced a guard with. */
+    for (const road of ['pause', 'stop'] as const) {
+      const host = new FakeAudioHost()
+      const ended = vi.fn()
+      const playing = playPcm(host, ONE_SECOND, 24_000, ended)
+      const node = host.latest
+      host.advance(400)
+      playing[road]()
+      expect(node.stops, road).toBe(1)
+      expect(node.disconnects, road).toBe(1)
+      node.end()
+      expect(ended, road).not.toHaveBeenCalled()
+    }
+  })
+
+  it('does nothing at all for a pause or a stop that has nothing sounding', () => {
+    const host = new FakeAudioHost()
+    const playing = playPcm(host, ONE_SECOND, 24_000, () => {})
+    host.advance(400)
+    playing.pause()
+    const at = playing.positionMs()
+    host.advance(5000)
+    playing.pause()
+    expect(playing.positionMs(), 'a second pause counts no time').toBe(at)
+    playing.stop()
+    host.advance(5000)
+    playing.stop()
+    expect(playing.positionMs(), 'and neither does a second stop').toBe(at)
+    expect(host.latest.stops, 'the source is taken down once').toBe(1)
+  })
+
+  it('stops a reading that was paused, rather than leaving it paused for ever', () => {
+    const host = new FakeAudioHost()
+    const playing = playPcm(host, ONE_SECOND, 24_000, () => {})
+    host.advance(400)
+    playing.pause()
+    playing.stop()
+    expect(playing.done).toBe(true)
+    expect(playing.paused).toBe(false)
+  })
+
+  it('ends at exactly the end, rather than starting a source of no length', () => {
+    /* The bound is `>=`: paused on the last sample, there is nothing left to
+       play, and a source started at the buffer's own duration is silence in
+       some engines and a refusal in others. */
+    const host = new FakeAudioHost()
+    const ended = vi.fn()
+    const playing = playPcm(host, ONE_SECOND, 24_000, ended)
+    host.advance(1000)
+    playing.pause()
+    expect(playing.positionMs()).toBe(1000)
+    const sources = host.sources.length
+    playing.resume()
+    expect(ended).toHaveBeenCalledTimes(1)
+    expect(playing.done, 'and it is finished, not waiting').toBe(true)
+    expect(host.sources.length, 'no new source was started').toBe(sources)
+  })
+})

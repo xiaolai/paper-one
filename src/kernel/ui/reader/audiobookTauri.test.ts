@@ -221,12 +221,12 @@ describe('the engine an export runs on', () => {
        other's chapters and deleted each other's files. The name carries the
        clock, for the sweep, and six random characters, for two exports in one
        millisecond. */
-    await tauriAudiobook()
+    await tauriAudiobook([])
     expect(tauri.made).toEqual([[RUN_DIR, { baseDir: tauri.APP_DATA, recursive: true }]])
   })
 
   it('writes each chapter in that directory, by absolute path, for the engine', async () => {
-    const engine = await tauriAudiobook()
+    const engine = await tauriAudiobook([])
     expect(engine.scratchFor(3)).toBe(`/data/one.paper.reader/${RUN_DIR}/chapter-3.wav`)
   })
 
@@ -261,6 +261,34 @@ describe('the engine an export runs on', () => {
     ])
   })
 
+  it('falls back to the family as the pack when no installed pack holds the voice', async () => {
+    /* ⚠️ **THE `find` MUST BE THE ONE THAT DECIDES, AND IT MUST BE ALLOWED TO
+     * FAIL.** A pack list that holds a DIFFERENT family is the case that
+     * separates a real match from any match: matching anything would render
+     * the Chinese voice through the English pack, and reading the `id` of a
+     * match that is not there throws in the middle of an export. The family is
+     * a usable pack id for a plugin that knows it, so it is the honest
+     * fallback rather than a refusal. */
+    const pack = {
+      id: 'english-kokoro',
+      name: 'English',
+      summary: '',
+      family: 'kokoro',
+      languages: ['en'],
+      bytes: 1,
+      minimumMemoryGb: 4,
+      voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+      installed: true,
+    }
+    const engine = await tauriAudiobook([pack])
+    await expect(
+      engine.render({ text: '春天', voice: 'qwen:Vivian', rate: 1, path: '/x.wav' }),
+    ).resolves.toBeUndefined()
+    expect(tauri.invoked).toEqual([
+      ['plugin:voices|voices_render_file', { pack: 'qwen', voice: 'Vivian', text: '春天', rate: 1, path: '/x.wav' }],
+    ])
+  })
+
   it('refuses a platform voice rather than rendering in one', async () => {
     /* ⚠️ THERE IS NOWHERE TO SEND IT. `narrate_render` over AVSpeechSynthesizer
      * was deleted in phase 30 — every voice it reached on a Mac is below the
@@ -273,7 +301,7 @@ describe('the engine an export runs on', () => {
   })
 
   it('removes a chapter by its name under the granted root, whatever separator its path used', async () => {
-    const engine = await tauriAudiobook()
+    const engine = await tauriAudiobook([])
     await engine.discard(`/data/one.paper.reader/${RUN_DIR}/chapter-3.wav`)
     await engine.discard('C:\\scratch\\chapter-4.wav')
     expect(tauri.removed).toEqual([
@@ -284,13 +312,13 @@ describe('the engine an export runs on', () => {
 
   it('removes nothing for a path that names no file', async () => {
     /* A name of '' would be the run directory itself. */
-    const engine = await tauriAudiobook()
+    const engine = await tauriAudiobook([])
     await engine.discard('/data/one.paper.reader/')
     expect(tauri.removed).toEqual([])
   })
 
   it('removes its own directory, and everything in it, when the export is done', async () => {
-    const engine = await tauriAudiobook()
+    const engine = await tauriAudiobook([])
     await engine.discardScratch()
     expect(tauri.removed).toEqual([[RUN_DIR, { baseDir: tauri.APP_DATA, recursive: true }]])
   })
@@ -305,7 +333,7 @@ describe('the sweep of runs no export can still own', () => {
       { name: runMade(6 * HOUR - 1), isDirectory: true },
       { name: runMade(HOUR), isDirectory: true },
     ]
-    await tauriAudiobook()
+    await tauriAudiobook([])
     expect(tauri.listed).toEqual([['audiobook', { baseDir: tauri.APP_DATA }]])
     /* SIX HOURS TO THE MILLISECOND, and a millisecond short of it is left: a
        ten-hour book at 22x is under half an hour, so anything younger may be a
@@ -323,7 +351,7 @@ describe('the sweep of runs no export can still own', () => {
       .mockReturnValue(NOW)
     const own = `run-${(NOW - 7 * HOUR).toString(36)}-4fzzzx`
     tauri.listing = [{ name: own, isDirectory: true }]
-    await tauriAudiobook()
+    await tauriAudiobook([])
     expect(tauri.made).toEqual([[`audiobook/${own}`, { baseDir: tauri.APP_DATA, recursive: true }]])
     expect(tauri.removed).toEqual([])
   })
@@ -340,7 +368,7 @@ describe('the sweep of runs no export can still own', () => {
       { name: `x-${stale}`, isDirectory: true },
       { name: stale, isDirectory: true },
     ]
-    await tauriAudiobook()
+    await tauriAudiobook([])
     expect(tauri.removed, 'a file, a stranger and a run no clock could have made are all left').toEqual([
       [`audiobook/${stale}`, { baseDir: tauri.APP_DATA, recursive: true }],
     ])
@@ -348,7 +376,7 @@ describe('the sweep of runs no export can still own', () => {
 
   it('leaves a file even when its name reads as an old run', async () => {
     tauri.listing = [{ name: runMade(9 * HOUR), isDirectory: false }]
-    await tauriAudiobook()
+    await tauriAudiobook([])
     expect(tauri.removed).toEqual([])
   })
 
@@ -360,10 +388,10 @@ describe('the sweep of runs no export can still own', () => {
       { name: second, isDirectory: true },
     ]
     tauri.refuse = new Set([`audiobook/${first}`])
-    await tauriAudiobook()
+    await tauriAudiobook([])
     expect(tauri.removed.map(([path]) => path)).toEqual([`audiobook/${first}`, `audiobook/${second}`])
 
     tauri.listing = new Error('the directory is gone')
-    await expect(tauriAudiobook(), 'a sweep that fails must not stop the export').resolves.toBeDefined()
+    await expect(tauriAudiobook([]), 'a sweep that fails must not stop the export').resolves.toBeDefined()
   })
 })

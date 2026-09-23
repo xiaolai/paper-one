@@ -85,9 +85,18 @@ export function playPcm(
 
   /* Milliseconds already played, before the current run. */
   let playedMs = 0
-  /* The context clock when the current run started, or null while paused. */
-  let startedAt: number | null = null
-  let source: SourceLike | null = null
+  /**
+   * The source that is sounding and the clock reading it started on — or null
+   * while paused, stopped or finished.
+   *
+   * ⚠️ **ONE VALUE, WHERE THERE WERE TWO.** A `source` and a `startedAt`
+   * were separate nullables, so the type said four states and the player only
+   * ever has two: a source always has a start time and a start time always has
+   * a source. Every place that read one then checked the other for `null`
+   * carried a branch that could not come back false — five of them, each an
+   * unkillable mutant standing over a state this player cannot be in.
+   */
+  let live: { readonly node: SourceLike; readonly startedAt: number } | null = null
   let stopped = false
   let finished = false
   /* A speed of 1 means the buffer's own; anything else scales the clock too,
@@ -95,27 +104,50 @@ export function playPcm(
   const speed = Number.isFinite(rate) && rate > 0 ? rate : 1
 
   const positionMs = (): number => {
-    if (startedAt === null) return playedMs
-    return playedMs + (host.currentTime - startedAt) * 1000 * speed
+    const sounding = live
+    if (sounding === null) return playedMs
+    return playedMs + (host.currentTime - sounding.startedAt) * 1000 * speed
+  }
+
+  /**
+   * Take a source down.
+   *
+   * ⚠️ **THE HANDLER GOES FIRST.** A stopped `AudioBufferSourceNode` still
+   * delivers its `onended`, late — and reading that as an ending reports a
+   * sentence finished that the reader cancelled. Clearing it here is the
+   * invariant that lets `onended` below test `finished` alone: no source this
+   * player has let go can call back at all.
+   */
+  const release = (node: SourceLike) => {
+    node.onended = null
+    node.stop()
+    node.disconnect()
+  }
+
+  /** Take the time spent sounding into the running total, and let the source go. */
+  const settle = (sounding: { readonly node: SourceLike; readonly startedAt: number }) => {
+    playedMs += (host.currentTime - sounding.startedAt) * 1000 * speed
+    live = null
+    release(sounding.node)
   }
 
   const begin = (offsetMs: number) => {
     const node = host.createBufferSource()
     node.buffer = buffer
     node.playbackRate.value = speed
+    /* Without this the sound is rendered and reaches no output at all — a
+       reading that runs to the end of the chapter in silence. */
     node.connect(host.destination)
     node.onended = () => {
-      /* Only the source that is still current, and only when it ran out. A
-       * stopped source delivers this too, late, and reading it as an ending
-       * reports a sentence finished that the reader cancelled. */
-      if (stopped || node !== source || finished) return
+      /* Only once. A source is only ever reached here having run OUT: every
+         other road out of this player clears the handler first (`release`). */
+      if (finished) return
       finished = true
-      startedAt = null
+      live = null
       playedMs = buffer.duration * 1000
       onEnded()
     }
-    source = node
-    startedAt = host.currentTime
+    live = { node, startedAt: host.currentTime }
     node.start(0, offsetMs / 1000)
   }
 
@@ -124,25 +156,18 @@ export function playPcm(
   return {
     positionMs,
     get paused() {
-      return startedAt === null && !stopped && !finished
+      return live === null && !stopped && !finished
     },
     get done() {
       return finished || stopped
     },
     pause() {
-      if (startedAt === null || stopped || finished) return
-      playedMs = positionMs()
-      startedAt = null
-      const node = source
-      source = null
-      if (node) {
-        node.onended = null
-        node.stop()
-        node.disconnect()
-      }
+      const sounding = live
+      if (sounding === null) return
+      settle(sounding)
     },
     resume() {
-      if (startedAt !== null || stopped || finished) return
+      if (live !== null || stopped || finished) return
       /* Past the end already — resuming would start a source beyond the
        * buffer, which some engines play as silence and others refuse. */
       if (playedMs >= buffer.duration * 1000) {
@@ -153,17 +178,12 @@ export function playPcm(
       begin(playedMs)
     },
     stop() {
-      if (stopped) return
+      /* Marked before the early answer below, so a stop while paused is still
+         a stop — and a second stop has nothing left to take down. */
       stopped = true
-      playedMs = positionMs()
-      startedAt = null
-      const node = source
-      source = null
-      if (node) {
-        node.onended = null
-        node.stop()
-        node.disconnect()
-      }
+      const sounding = live
+      if (sounding === null) return
+      settle(sounding)
     },
   }
 }

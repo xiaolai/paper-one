@@ -171,6 +171,59 @@ describe('installing a pack', () => {
     expect((cause as Error).message).toMatch(/could not be stopped/u)
   })
 
+  it('lets the install’s own refusal through, when no stop was ever asked for', async () => {
+    /* The refusal is HELD rather than rethrown, so the stop can be asked about
+       on both roads out — and a hold with nothing that re-throws it is an
+       install that fails and reports success. */
+    const port = voicesPortOver(
+      wireOver({
+        install: async () => {
+          throw new Error("the file's digest does not match the catalogue")
+        },
+      }),
+    )
+    const cause = await refusalOf(port.install('english-kokoro', () => {}))
+    expect(cause).toBeInstanceOf(Error)
+    expect(cause).not.toBeInstanceOf(StopFailed)
+    expect((cause as Error).message).toMatch(/digest does not match/u)
+  })
+
+  it('does not report a stop that WORKED as one that failed', async () => {
+    /* The other half of the case above it. A stop that the plugin honoured
+       leaves the install aborted and nothing else to say — reporting it as a
+       failed stop would put "the download could not be stopped" in front of
+       every reader who pressed Stop and was obeyed. */
+    const control = new AbortController()
+    const stop = vi.fn(async () => {})
+    const port = voicesPortOver(
+      wireOver({
+        stop,
+        install: async () =>
+          new Promise((_resolve, reject) => {
+            control.signal.addEventListener('abort', () => reject(new Error('the fetch was interrupted')), { once: true })
+            control.abort()
+          }),
+      }),
+    )
+    const cause = await refusalOf(port.install('english-kokoro', () => {}, control.signal))
+    expect(stop).toHaveBeenCalledWith('english-kokoro')
+    expect(cause).not.toBeInstanceOf(StopFailed)
+    expect((cause as Error).message).toMatch(/fetch was interrupted/u)
+  })
+
+  it('stops listening to the signal once the install is over', async () => {
+    /* A listener left on the signal turns a reader's later Stop — on the NEXT
+       download, or on a pane being closed — into a `voices_stop` for a pack
+       that finished minutes ago. */
+    const control = new AbortController()
+    const stop = vi.fn(async () => {})
+    const port = voicesPortOver(wireOver({ stop }))
+    await port.install('english-kokoro', () => {}, control.signal)
+    control.abort()
+    await Promise.resolve()
+    expect(stop).not.toHaveBeenCalled()
+  })
+
   it('reports a failed stop even when the install refuses too', async () => {
     /* ⚠️ **THE COMPOUND CASE, AND IT WAS SILENT.** The stop was only asked
        about when the install RESOLVED, so a stop that failed beside an install
@@ -248,6 +301,18 @@ describe('a rendered passage', () => {
 })
 
 describe('the rest of the port', () => {
+  it('asks for the reader’s rate, and for none when they have chosen none', async () => {
+    /* `?? null` and `&& null` differ on exactly this: a chosen rate arrives as
+       `null`, which the plugin reads as the pack's own default — a reading at
+       a speed nobody asked for, with nothing anywhere saying so. */
+    const render = vi.fn(async () => SPOKEN)
+    const port = voicesPortOver(wireOver({ render }))
+    await port.render({ packId: 'english-kokoro', voiceId: 'af_heart', text: 'A.', rate: 1.25 })
+    expect(render).toHaveBeenLastCalledWith('english-kokoro', 'af_heart', 'A.', 1.25)
+    await port.render({ packId: 'english-kokoro', voiceId: 'af_heart', text: 'A.' })
+    expect(render).toHaveBeenLastCalledWith('english-kokoro', 'af_heart', 'A.', null)
+  })
+
   it('passes a removal and a release straight through', async () => {
     const remove = vi.fn(async () => {})
     const release = vi.fn(async () => {})

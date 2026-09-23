@@ -205,16 +205,20 @@ async function sweepAbandonedScratch(keep: string): Promise<void> {
 export async function tauriAudiobook(
   /**
    * The installed packs, so an engine-qualified voice can be resolved to the
-   * pack that holds it. Empty in a build with no voices capability, where
-   * empty in a build with no voices capability, where an export has no voice
-   * to render on at all and refuses.
+   * pack that holds it. A build with no voices capability passes an empty
+   * list, where an export has no voice to render on at all and refuses.
    *
    * ⚠️ **THE STORED NAME CARRIES THE FAMILY, AND THE COMMAND WANTS THE PACK
    * ID.** They differ deliberately: a family outlives a re-cut pack, which is
    * why a reader's choice is written that way. The resolution has to happen
    * somewhere, and here is where both are in hand.
+   *
+   * ⚠️ **REQUIRED, AND IT USED TO DEFAULT TO `[]`.** A default no caller in
+   * the app ever took is a value only a test can choose, and no test can tell
+   * one empty list from another — so the default was an unkillable mutant
+   * standing in front of a decision worth making at the call site.
    */
-  packs: readonly VoicePack[] = [],
+  packs: readonly VoicePack[],
 ): Promise<AudiobookPlatform> {
   /**
    * ⚠️ **ONE DIRECTORY PER EXPORT, AND IT USED TO BE ONE FOR ALL OF THEM.**

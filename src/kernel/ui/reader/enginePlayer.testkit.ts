@@ -12,6 +12,8 @@ export interface FakeSource extends SourceLike {
   readonly started: { when: number | undefined; offset: number | undefined }[]
   readonly stops: number
   readonly disconnects: number
+  /** What it was wired to. A source that reaches no destination makes no sound. */
+  readonly connections: unknown[]
   /** Deliver `onended`, as a real source does when it runs out — and, late, when it is stopped. */
   end(): void
 }
@@ -46,7 +48,10 @@ export class FakeAudioHost implements AudioHost {
       started,
       stops: 0,
       disconnects: 0,
-      connect: () => {},
+      connections: [],
+      connect(destination: unknown) {
+        ;(this as { connections: unknown[] }).connections.push(destination)
+      },
       disconnect() {
         ;(this as { disconnects: number }).disconnects += 1
       },

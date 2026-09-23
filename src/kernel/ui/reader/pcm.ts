@@ -68,7 +68,10 @@ export function toFloats(pcm: Uint8Array): Float32Array {
  */
 export function audible(pcm: Uint8Array, threshold = 32): boolean {
   const count = sampleCount(pcm)
-  if (count === 0) return false
+  /* No early answer for an empty render: a `DataView` of length zero is valid
+     and the loop below never runs, so a guard here could only ever repeat the
+     answer the walk already gives — the shape this repository records as an
+     unkillable mutant. */
   const view = new DataView(pcm.buffer, pcm.byteOffset, count * 2)
   for (let i = 0; i < count; i += 1) {
     if (Math.abs(view.getInt16(i * 2, true)) > threshold) return true

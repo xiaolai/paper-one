@@ -34,7 +34,12 @@ export function speakerFor(
   lang: string | null,
   prefs: SpeakPrefs,
 ): 'engine' | 'platform' {
-  return engineVoiceFor(packs, lang, prefs.voices ?? {}) ? 'engine' : 'platform'
+  /* `prefs.voices` straight through, with no `?? {}` in front of it:
+     `engineVoiceFor` already takes an absent choice as none, and a stored
+     choice it cannot match FALLS THROUGH to the first installed pack — so
+     substituting an empty map here could never change the answer, only hide
+     that it could not. */
+  return engineVoiceFor(packs, lang, prefs.voices) ? 'engine' : 'platform'
 }
 
 /**

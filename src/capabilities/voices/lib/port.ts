@@ -25,10 +25,13 @@ import { voicesWire, type VoicesWire } from './wire'
  * ordinary case and exactly wrong here, where the stop was refused and the
  * download ran on to completion. Matching on the message would work until
  * somebody edited it; the same reason `BlobFetchError` carries a `kind`.
+ *
+ * ⚠️ **AND IT CARRIED A `stopFailed = true` FIELD THAT NOTHING READ.** Every
+ * caller asks `instanceof`, which is what "a type rather than a message" means
+ * — so the field was a second answer to a question already answered, and no
+ * test could tell its value apart from any other. Removed 2026-09-24.
  */
-export class StopFailed extends Error {
-  readonly stopFailed = true
-}
+export class StopFailed extends Error {}
 
 /** The port over a wire. */
 export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePort {
@@ -86,16 +89,26 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
       /* A HOLDER, not a `let`: TypeScript narrows a `let` assigned inside a
          callback back to `null` wherever it is read, and working round that
          with a cast would be hiding a real question behind an assertion. */
-      const asked: { stopping: Promise<void> | null } = { stopping: null }
+      const asked: { stopping?: Promise<unknown> } = {}
       const abort = () => {
         /* Stopping is the plugin's to do: it holds the token the fetch loop
-         * waits on, and it is what leaves nothing half-installed. */
-        const stopping = wire.stop(packId)
-        /* Read below; this only keeps it from being unhandled in between. */
-        stopping.catch(() => {})
-        asked.stopping = stopping
+         * waits on, and it is what leaves nothing half-installed.
+         *
+         * ⚠️ **SETTLED HERE RATHER THAN HELD RAW.** The read below may be a
+         * whole round trip away, and a rejected promise nobody is waiting on
+         * yet is an unhandled rejection. This held the raw promise and a
+         * `.catch(() => {})` beside it to cover the gap — a line whose only
+         * effect was on a warning, which no test could reach. Turning the
+         * refusal into a VALUE closes the gap and leaves nothing unmeasurable. */
+        asked.stopping = wire.stop(packId).then(
+          () => null,
+          (cause: unknown) => cause,
+        )
       }
-      signal?.addEventListener('abort', abort, { once: true })
+      /* No `{ once: true }`: an `AbortSignal` fires `abort` at most once, and
+         the `finally` below takes the listener off on every road out — so the
+         option could never be the thing that decided anything. */
+      signal?.addEventListener('abort', abort)
       /* HELD RATHER THAN RETHROWN, so the stop below is asked about on BOTH
        * roads out of the install. Rethrowing here meant a stop that failed
        * beside an install that also failed was never looked at, and the reader
@@ -117,10 +130,7 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
        * left half-installed"* would be false. */
       const stopping = asked.stopping
       if (stopping) {
-        const failed = await stopping.then(
-          () => null,
-          (cause: unknown) => cause,
-        )
+        const failed = await stopping
         if (failed !== null) {
           throw new StopFailed(`the download could not be stopped: ${errorText(failed)}`)
         }

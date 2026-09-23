@@ -92,6 +92,16 @@ describe('whether it is audible at all', () => {
     expect(audible(bytes(...new Array(1000).fill(-4)))).toBe(false)
   })
 
+  it('takes the threshold as a floor to clear, not one to reach', () => {
+    /* `>` and `>=` differ on exactly this sample, and the direction matters:
+       the default is the loudest thing a SILENT render contains, so a block
+       that only reaches it is still silence. */
+    expect(audible(bytes(32, -32)), 'exactly the threshold is not sound').toBe(false)
+    expect(audible(bytes(33)), 'one step past it is').toBe(true)
+    expect(audible(bytes(-33))).toBe(true)
+    expect(audible(bytes(8, -8), 4), 'and a threshold the caller chose').toBe(true)
+  })
+
   it('finds speech that starts late in a long block', () => {
     // Sampled rather than scanned, so this is the case that would be missed by
     // a naive stride: a lead-in of silence and one loud passage near the end.

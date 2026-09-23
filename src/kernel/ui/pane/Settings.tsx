@@ -399,14 +399,19 @@ function voicePickerGroups(narration: Narration): readonly SelectGroup[] {
  */
 function voicePickerValue(narration: Narration): string {
   /* ABSENT AND `''` ALIKE, which is the rule `chosenVoice` states for its own
-     side: `''` is what the Automatic row stores, and `unqualify` refuses it. */
-  const stored = narration.chosen[voiceKey(narration.lang)] ?? ''
-  const named = unqualify(stored)
-  if (named) {
-    const pack = installedPacksFor(narration.packs, narration.lang).find(
-      (candidate) => candidate.family === named.family,
-    )
-    if (pack?.voices.some((voice) => voice.id === named.voiceId)) return stored
+     side: `''` is what the Automatic row stores, and `unqualify` refuses it.
+     Asked as "is there one", rather than with a `?? ''` in front of it: the
+     two are the same answer here, so substituting one for the other was a
+     value no test could tell from any other. */
+  const stored = narration.chosen[voiceKey(narration.lang)]
+  if (stored !== undefined) {
+    const named = unqualify(stored)
+    if (named) {
+      const pack = installedPacksFor(narration.packs, narration.lang).find(
+        (candidate) => candidate.family === named.family,
+      )
+      if (pack?.voices.some((voice) => voice.id === named.voiceId)) return stored
+    }
   }
   /* Stryker disable next-line StringLiteral: a `<select>` handed a value
      no `<option>` carries reports the empty string anyway, so the

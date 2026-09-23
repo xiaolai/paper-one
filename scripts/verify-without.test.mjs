@@ -528,6 +528,31 @@ describe('removableCapabilities', () => {
     })
   })
 
+  /* ⚠️ **SORTED, BECAUSE `main` TAKES THE FIRST AND A RUN HAS TO BE
+     REPRODUCIBLE.** Left in the manifest's own order the choice would move
+     whenever somebody added a row above another — so a failure seen in CI
+     could be about a different capability from the one reproduced by hand,
+     with nothing saying the subject had changed. The fixture lists them
+     backwards for exactly that reason: a manifest already in order cannot
+     tell a sort from no sort. */
+  it('answers in a fixed order, whatever order the manifest lists them in', () => {
+    inScratch('picker-sorted-', (root) => {
+      const cap = (id) => ({ id, ts: id, requires: [] })
+      writeFileSync(
+        path.join(root, 'capabilities.manifest.json'),
+        JSON.stringify({ capabilities: ['zulu', 'mike', 'alpha'].map(cap) }),
+      )
+      const src = path.join(root, 'src')
+      for (const dir of ['zulu', 'mike', 'alpha']) {
+        mkdirSync(path.join(src, 'capabilities', dir), { recursive: true })
+        writeFileSync(path.join(src, 'capabilities', dir, 'index.ts'), 'export const x = 1\n')
+      }
+      mkdirSync(path.join(src, 'host'), { recursive: true })
+      writeFileSync(path.join(src, 'host/a.ts'), 'export const y = 1\n')
+      expect(removableCapabilities(root)).toEqual(['alpha', 'mike', 'zulu'])
+    })
+  })
+
   /* AND A TYPE-ONLY IMPORT IS STILL AN IMPORTER. `capability:remove` deletes the
      DIRECTORY, so `import type` stops resolving exactly as a value import does —
      which is why the picker does not simply call `parseCompositionImports`, the
