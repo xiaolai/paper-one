@@ -6926,6 +6926,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tauri",
+ "tauri-plugin",
  "thiserror 2.0.20",
  "tokio",
 ]

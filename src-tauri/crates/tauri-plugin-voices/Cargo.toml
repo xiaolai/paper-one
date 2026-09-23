@@ -7,6 +7,9 @@ license = "MIT"
 edition = "2021"
 rust-version = "1.91"
 publish = false
+# `tauri-plugin` requires this to equal the package name: it is how the
+# permission generator finds the crate whose commands it is writing grants for.
+links = "tauri-plugin-voices"
 # Not a crates.io crate: a workspace member of the app, reached by path.
 
 [dependencies]
@@ -27,6 +30,13 @@ reqwest = { version = "0.12", default-features = false, features = ["stream", "r
 # at build time — was tried first and cannot load the model: it refuses the
 # vocoder's STFT node. See `kokoro.rs`.
 ort = "2.0.0-rc.13"
+# The plugin surface. `default-features = false` for the same reason the peer
+# plugin does it: the app's own crate picks the Tauri features, and a plugin
+# that turned them on would decide for every host that links it.
+tauri = { version = "2.11.3", default-features = false }
+
+[build-dependencies]
+tauri-plugin = { version = "2.6", features = ["build"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

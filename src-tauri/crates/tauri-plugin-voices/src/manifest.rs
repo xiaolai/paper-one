@@ -48,6 +48,23 @@ pub enum Family {
     Qwen,
 }
 
+impl Family {
+    /// The name the interface stores a voice under.
+    ///
+    /// A reader's chosen voice is kept engine-qualified (`kokoro:af_heart`),
+    /// because two packs may ship a voice of the same name and a bare id would
+    /// silently resolve to whichever was listed first. These strings are that
+    /// prefix, so they are part of a stored preference and may not be renamed
+    /// without reading old values.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Kokoro => "kokoro",
+            Self::Qwen => "qwen",
+        }
+    }
+}
+
 /// Where a pack is OFFERED. A build elsewhere does not list it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
