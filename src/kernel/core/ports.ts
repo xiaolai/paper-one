@@ -308,8 +308,25 @@ export interface SpeechEnginePort {
   install(packId: string, onProgress: (progress: InstallProgress) => void, signal?: AbortSignal): Promise<void>
   /** Remove an installed pack and its files. */
   remove(packId: string): Promise<void>
-  /** Read some text aloud into samples. */
-  render(request: SpeechRequest, signal?: AbortSignal): Promise<SpokenAudio>
+  /**
+   * Read some text aloud into samples.
+   *
+   * ⚠️ **NO `AbortSignal`, AND ITS ABSENCE IS THE HONEST SHAPE.** This declared
+   * one until 2026-09-23 and nothing in the stack could keep it: the plugin's
+   * `voices_stop` cancels a DOWNLOAD — it holds the fetch loop's token and
+   * nothing else — no caller ever passed a signal, and the wrapper in
+   * `useVoicePacks` dropped the parameter on the floor, which TypeScript
+   * permits. A port that declares a capability nothing implements is the shape
+   * `paper/share-notes/1` had when it went a whole phase with no client.
+   *
+   * What the reading does instead is `Promise.race` against its own deadline
+   * (`EngineSpeaker`), and what a reader presses Stop for is the PLAYBACK,
+   * which stops at once. A render that is already running finishes into a
+   * buffer nobody plays. Giving this a real signal means a cancellation token
+   * through the plugin to the engine loop, which is a change to make when
+   * something needs it rather than a parameter to leave lying here.
+   */
+  render(request: SpeechRequest): Promise<SpokenAudio>
   /**
    * Let a loaded model go.
    *

@@ -10,32 +10,36 @@
  * auditable in one place).
  */
 
-import type { InstallProgress, VoicePack } from '../../../kernel'
+import type { InstallProgress, SpokenAudio, VoicePack } from '../../../kernel'
 
-/** A pack as the plugin serialises it. */
-export interface PackRow {
-  readonly id: string
-  readonly name: string
-  readonly summary: string
-  readonly family: string
-  readonly languages: readonly string[]
-  readonly bytes: number
-  readonly minimumMemoryGb: number
-  readonly voices: readonly {
-    readonly id: string
-    readonly name: string
-    readonly language: string
-    readonly note: string
-  }[]
-  readonly installed: boolean
-}
+/**
+ * A download's progress, as the plugin emits it.
+ *
+ * ⚠️ **A UNION, BECAUSE THE COUNTS BELONG TO ONE KIND AND NOT THE OTHERS.** It
+ * was one shape with `received?` and `total?`, which made `asProgress` carry a
+ * `?? 0` for a case `progressOf` had already made impossible — an unreachable
+ * default, which is the shape this repository records as an unkillable mutant.
+ * Making it unrepresentable is the fix; a fallback for it was never one.
+ */
+export type ProgressEvent =
+  | {
+      readonly pack: string
+      readonly kind: 'downloading'
+      readonly received: number
+      readonly total: number
+    }
+  | { readonly pack: string; readonly kind: 'verifying' | 'installed' }
 
-/** A download's progress, as the plugin emits it. */
-export interface ProgressEvent {
-  readonly pack: string
-  readonly kind: 'downloading' | 'verifying' | 'installed'
-  readonly received?: number
-  readonly total?: number
+/**
+ * A count of bytes: whole, and not negative.
+ *
+ * ⚠️ **`Number.isFinite` ALONE LET `-1` AND `1.5` THROUGH**, and this file
+ * exists to refuse what crosses from Rust rather than render it: a negative
+ * size reaches the reader as *"unknown size"* on a row that is still offered
+ * for download, and a fractional byte count is not a count of bytes.
+ */
+function counted(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
 }
 
 /**
@@ -52,15 +56,14 @@ export function progressOf(raw: unknown): ProgressEvent | null {
   const kind = row.kind
   if (kind === 'verifying' || kind === 'installed') return { pack: row.pack, kind }
   if (kind !== 'downloading') return null
-  if (typeof row.received !== 'number' || typeof row.total !== 'number') return null
-  if (!Number.isFinite(row.received) || !Number.isFinite(row.total)) return null
+  if (!counted(row.received) || !counted(row.total)) return null
   return { pack: row.pack, kind, received: row.received, total: row.total }
 }
 
 /** Turn a progress event into what the kernel's port promises. */
 export function asProgress(event: ProgressEvent): InstallProgress {
   if (event.kind === 'downloading') {
-    return { kind: 'downloading', received: event.received ?? 0, total: event.total ?? 0 }
+    return { kind: 'downloading', received: event.received, total: event.total }
   }
   return { kind: event.kind }
 }
@@ -78,8 +81,9 @@ export function packOf(raw: unknown): VoicePack | null {
   for (const key of strings) {
     if (typeof row[key] !== 'string' || row[key] === '') return null
   }
-  if (typeof row.bytes !== 'number' || !Number.isFinite(row.bytes)) return null
+  if (!counted(row.bytes)) return null
   if (typeof row.minimumMemoryGb !== 'number' || !Number.isFinite(row.minimumMemoryGb)) return null
+  if (row.minimumMemoryGb < 0) return null
   if (typeof row.installed !== 'boolean') return null
   if (!Array.isArray(row.languages) || !row.languages.every((l) => typeof l === 'string')) return null
   if (!Array.isArray(row.voices)) return null
@@ -89,7 +93,13 @@ export function packOf(raw: unknown): VoicePack | null {
     if (typeof voice.id !== 'string' || voice.id === '') return null
     if (typeof voice.name !== 'string') return null
     if (typeof voice.language !== 'string') return null
-    return { id: voice.id, name: voice.name, language: voice.language, note: String(voice.note ?? '') }
+    /* ⚠️ **CHECKED, NOT COERCED.** It was `String(voice.note ?? '')`, which is
+       the one field in this row that was converted rather than validated — and
+       `String` THROWS on an object with a non-callable `toString`, which is
+       valid JSON. That throw leaves `packOf`, leaves `catalogue`, and takes the
+       whole pane to its error state over one row. */
+    if (voice.note !== undefined && typeof voice.note !== 'string') return null
+    return { id: voice.id, name: voice.name, language: voice.language, note: voice.note ?? '' }
   })
   if (voices.some((v) => v === null)) return null
   return {
@@ -103,4 +113,57 @@ export function packOf(raw: unknown): VoicePack | null {
     voices: voices as readonly { id: string; name: string; language: string; note: string }[],
     installed: row.installed,
   }
+}
+
+/**
+ * Read a rendered passage, refusing one that is not what it claims.
+ *
+ * ⚠️ **THIS SIDE OF THE WIRE WAS THE ONE PLACE THAT DID NOT CHECK**, and the
+ * reason is instructive: `Uint8Array.from` never fails. Handed `[256, -1, 1.5]`
+ * it answers `[0, 255, 1]` — three wrong samples, silently, which is a click or
+ * a burst of noise in the middle of a sentence with nothing anywhere saying a
+ * byte was wrong. A sample rate of zero divides to `Infinity` in every duration
+ * this feeds. Same rule as `packOf` and `progressOf`: what crosses from Rust is
+ * CHECKED, because the alternative is not an error, it is a wrong reading.
+ *
+ * @throws when the row is not a rendered passage.
+ */
+export function spokenOf(row: unknown): SpokenAudio {
+  if (typeof row !== 'object' || row === null) throw new Error('the render answered with no passage')
+  const raw = row as Record<string, unknown>
+  if (!Array.isArray(raw.pcm) || !raw.pcm.every((b) => typeof b === 'number' && Number.isInteger(b) && b >= 0 && b <= 255)) {
+    throw new Error('the render answered with samples that are not bytes')
+  }
+  if (raw.pcm.length % 2 !== 0) {
+    /* An odd byte count is not a whole number of 16-bit samples — the same
+       refusal `narrate/wav.rs` makes of a malformed WAV, for the same reason. */
+    throw new Error('the render answered with half a sample')
+  }
+  if (typeof raw.sampleRate !== 'number' || !Number.isInteger(raw.sampleRate) || raw.sampleRate <= 0) {
+    throw new Error('the render answered with no sample rate')
+  }
+  if (!Array.isArray(raw.words) || !raw.words.every(isTiming)) {
+    throw new Error('the render answered with word timings that are not timings')
+  }
+  if (!Array.isArray(raw.skipped) || !raw.skipped.every(isSkip)) {
+    throw new Error('the render answered with a skip list that is not one')
+  }
+  return {
+    pcm: Uint8Array.from(raw.pcm),
+    sampleRate: raw.sampleRate,
+    words: raw.words as SpokenAudio['words'],
+    skipped: raw.skipped as SpokenAudio['skipped'],
+  }
+}
+
+function isTiming(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const row = value as Record<string, unknown>
+  return counted(row.start) && counted(row.length) && counted(row.startMs) && counted(row.endMs)
+}
+
+function isSkip(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const row = value as Record<string, unknown>
+  return typeof row.text === 'string' && typeof row.why === 'string'
 }

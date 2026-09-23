@@ -13,7 +13,7 @@ import type {
   SpokenAudio,
   VoicePack,
 } from '../../../kernel'
-import { asProgress, packOf, progressOf } from './rows'
+import { asProgress, packOf, progressOf, spokenOf } from './rows'
 import { voicesWire, type VoicesWire } from './wire'
 
 /** The port over a wire. */
@@ -21,8 +21,17 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
   return {
     async catalogue(): Promise<readonly VoicePack[]> {
       const rows = await wire.catalogue()
+      /* ⚠️ **A LIST THAT IS NOT ONE IS REFUSED, NOT READ AS EMPTY.** This was
+       * `Array.isArray(rows) ? rows : []`, which is the defect this repository
+       * has already fixed in eighteen stores: *present and wrong* answered as
+       * *absent*, so a plugin that returned a malformed reply looked exactly
+       * like a device with no voices, and the pane said so. One bad ROW is
+       * still dropped alone, which is the other half of that same rule. */
+      if (!Array.isArray(rows)) {
+        throw new Error('the voices plugin answered with something that is not a list of packs')
+      }
       const packs: VoicePack[] = []
-      for (const raw of Array.isArray(rows) ? rows : []) {
+      for (const raw of rows) {
         const pack = packOf(raw)
         /* A row this version cannot read is LEFT OUT rather than shown half
          * built: the catalogue is embedded in the binary, so a row that will
@@ -38,6 +47,11 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
       onProgress: (progress: InstallProgress) => void,
       signal?: AbortSignal,
     ): Promise<void> {
+      /* ⚠️ **AN ALREADY-ABORTED SIGNAL FIRES NOTHING**, so a listener is not a
+       * cancellation check. `addEventListener('abort', …)` on a signal that has
+       * already aborted never runs — the event was dispatched before anybody
+       * was listening — and the download would have started regardless. */
+      signal?.throwIfAborted()
       /* Subscribed BEFORE the call, so the first bytes are not missed: a
        * 2.5 GB download reports early and often, and a listener attached after
        * the call loses however much arrived first. */
@@ -45,10 +59,23 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
         const progress = progressOf(payload)
         if (progress && progress.pack === packId) onProgress(asProgress(progress))
       })
+      /* ⚠️ **AND ASKED AGAIN AFTER THE AWAIT**, which is the window the first
+       * check cannot cover: subscribing is a round trip to the plugin, and a
+       * reader who presses Stop during it would otherwise be heard by nobody. */
+      if (signal?.aborted) {
+        stop()
+        signal.throwIfAborted()
+      }
+      /* A failed stop is READ, not dropped. `void`-ing this promise left an
+       * unhandled rejection and, worse, let a download the reader stopped run
+       * on to "Installed" with nothing saying the stop had failed. */
+      let stopping: Promise<void> | null = null
       const abort = () => {
         /* Stopping is the plugin's to do: it holds the token the fetch loop
          * waits on, and it is what leaves nothing half-installed. */
-        void wire.stop(packId)
+        stopping = wire.stop(packId)
+        /* Read below; this only keeps it from being unhandled in between. */
+        stopping.catch(() => {})
       }
       signal?.addEventListener('abort', abort, { once: true })
       try {
@@ -57,6 +84,11 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
         signal?.removeEventListener('abort', abort)
         stop()
       }
+      /* Reached only when the install RESOLVED — the ordinary stop makes it
+       * reject, and the reader has already been told. So this is the case
+       * where the stop failed and the download finished anyway: awaiting it
+       * turns that into this call's own rejection, naming the real cause. */
+      if (stopping) await stopping
     },
 
     async remove(packId: string): Promise<void> {
@@ -70,12 +102,7 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
         request.text,
         request.rate ?? null,
       )
-      return {
-        pcm: Uint8Array.from(row.pcm ?? []),
-        sampleRate: row.sampleRate,
-        words: row.words ?? [],
-        skipped: row.skipped ?? [],
-      }
+      return spokenOf(row)
     },
 
     async release(): Promise<void> {

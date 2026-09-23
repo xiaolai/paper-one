@@ -44,6 +44,28 @@ describe('reading what the plugin answers', () => {
     expect(packOf('chinese-qwen')).toBeNull()
     expect(packOf([])).toBeNull()
   })
+
+  it('refuses a size that is negative or fractional', () => {
+    /* ⚠️ `Number.isFinite` alone let both through. A negative size reaches the
+       reader as "unknown size" on a row that is still offered for download, and
+       a fractional byte count is not a count of bytes. */
+    expect(packOf({ ...ROW, bytes: -1 })).toBeNull()
+    expect(packOf({ ...ROW, bytes: 1.5 })).toBeNull()
+    expect(packOf({ ...ROW, minimumMemoryGb: -8 })).toBeNull()
+    expect(packOf({ ...ROW, bytes: 0 })?.bytes, 'zero is a real size — unknown').toBe(0)
+  })
+
+  it('refuses a note that is not a string, instead of coercing it', () => {
+    /* ⚠️ It was `String(voice.note ?? '')`, the one field converted rather than
+       checked — and `String` THROWS on an object with a non-callable
+       `toString`, which is valid JSON. That throw left `packOf`, left
+       `catalogue`, and took the whole pane to its error state over one row. */
+    const withNote = (note: unknown) => packOf({ ...ROW, voices: [{ ...ROW.voices[0], note }] })
+    expect(() => withNote({ toString: 1 })).not.toThrow()
+    expect(withNote({ toString: 1 })).toBeNull()
+    expect(withNote(7)).toBeNull()
+    expect(withNote(undefined)?.voices[0]?.note, 'absent is an empty note').toBe('')
+  })
 })
 
 describe('reading a download’s progress', () => {
