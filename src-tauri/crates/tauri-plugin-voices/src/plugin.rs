@@ -29,6 +29,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::voices_stop,
             commands::voices_remove,
             commands::voices_render,
+            commands::voices_render_file,
             commands::voices_release,
         ])
         .setup(|app, _api| {

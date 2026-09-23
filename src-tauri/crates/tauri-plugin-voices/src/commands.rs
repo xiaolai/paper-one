@@ -470,6 +470,46 @@ fn read_with_qwen(
     })
 }
 
+/// Speak a chapter into a WAV file, for the audiobook export.
+///
+/// ⚠️ **A FILE RATHER THAN BYTES, AND NOT FOR CONVENIENCE.** A ten-hour book
+/// is gigabytes of PCM; handing a chapter across the IPC as a JSON array would
+/// widen every sample to a decimal number and hold the whole of it in the
+/// webview's heap. `narrate_render` already writes files for the same reason,
+/// and `narrate_package` — the muxer, `afconvert`, the chapter track, both
+/// readers' checks — reads them and is untouched by this.
+///
+/// # Errors
+/// When the pack is unknown or not installed, when the engine refuses, when
+/// the chapter is longer than a WAV header can state, or when the file cannot
+/// be written. Never a partial file: a short WAV is indistinguishable from a
+/// short chapter, so a failed write removes what it wrote.
+#[tauri::command]
+pub async fn voices_render_file(
+    state: State<'_, VoicesState>,
+    pack: String,
+    voice: String,
+    text: String,
+    rate: Option<f32>,
+    path: String,
+) -> Result<u32, String> {
+    let row = voices_render(state, pack, voice, text, rate).await?;
+    let samples: Vec<i16> = row
+        .pcm
+        .chunks_exact(2)
+        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let bytes = crate::wav::bytes(&samples, row.sample_rate)?;
+    let target = PathBuf::from(&path);
+    tokio::fs::write(&target, &bytes).await.map_err(|e| {
+        /* A half-written chapter reads as a short one, and the packer would
+         * join it without complaint. Removed rather than left. */
+        let _ = std::fs::remove_file(&target);
+        format!("{path} could not be written: {e}")
+    })?;
+    Ok(row.sample_rate)
+}
+
 /// 16-bit samples as little-endian bytes, which is what crosses the IPC.
 fn pcm_bytes(samples: &[i16]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(samples.len() * 2);

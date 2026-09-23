@@ -17,6 +17,7 @@ pub mod manifest;
 pub mod paths;
 pub mod plugin;
 pub mod qwen;
+pub mod wav;
 
 pub use error::{Error, Result};
 pub use plugin::init;

@@ -22,6 +22,8 @@ import { save } from '@tauri-apps/plugin-dialog'
 import { BaseDirectory, mkdir, readDir, remove } from '@tauri-apps/plugin-fs'
 import { basename } from '../../core/bookFiles'
 import type { AudiobookPlatform } from './audiobook'
+import { unqualify } from './engineVoice'
+import type { VoicePack } from '../../core/ports'
 
 /** Under `$APPDATA`, so the fs grant already covers it. */
 const SCRATCH_DIR = 'audiobook'
@@ -200,7 +202,19 @@ async function sweepAbandonedScratch(keep: string): Promise<void> {
 }
 
 /** The engine, as `exportAudiobook` needs it. */
-export async function tauriAudiobook(): Promise<AudiobookPlatform> {
+export async function tauriAudiobook(
+  /**
+   * The installed packs, so an engine-qualified voice can be resolved to the
+   * pack that holds it. Empty in a build with no voices capability, where
+   * every render goes to `narrate_render` as it always did.
+   *
+   * ⚠️ **THE STORED NAME CARRIES THE FAMILY, AND THE COMMAND WANTS THE PACK
+   * ID.** They differ deliberately: a family outlives a re-cut pack, which is
+   * why a reader's choice is written that way. The resolution has to happen
+   * somewhere, and here is where both are in hand.
+   */
+  packs: readonly VoicePack[] = [],
+): Promise<AudiobookPlatform> {
   /**
    * ⚠️ **ONE DIRECTORY PER EXPORT, AND IT USED TO BE ONE FOR ALL OF THEM.**
    * `chapter-<index>.wav` under a shared root meant two exports running together
@@ -222,7 +236,31 @@ export async function tauriAudiobook(): Promise<AudiobookPlatform> {
   await sweepAbandonedScratch(run).catch(() => {})
 
   return {
-    render: (job) => invoke('narrate_render', { ...job }),
+    /**
+     * ⚠️ **THE VOICE'S OWN SHAPE IS WHAT ROUTES THIS**, and it is the same
+     * string the reading stores, so one choice serves both. An
+     * engine-qualified name (`kokoro:af_heart`) is a downloaded pack; anything
+     * else is a Web Speech identifier and goes to `narrate_render` over
+     * AVSpeechSynthesizer, which is unchanged.
+     *
+     * Either way the file is the one WAV shape `narrate/wav.rs` accepts, and
+     * `narrate_package` — the muxer, `afconvert`, the chapter track and both
+     * readers' checks — reads it without knowing which engine wrote it.
+     */
+    render: async (job) => {
+      const named = unqualify(job.voice)
+      if (!named) {
+        await invoke('narrate_render', { ...job })
+        return
+      }
+      await invoke('plugin:voices|voices_render_file', {
+        pack: packs.find((pack) => pack.family === named.family)?.id ?? named.family,
+        voice: named.voiceId,
+        text: job.text,
+        rate: job.rate,
+        path: job.path,
+      })
+    },
     package: (job) =>
       invoke<{ durationMs: number; chapters: number }>('narrate_package', { ...job }),
     scratchFor: (index) => `${root}/chapter-${index}.wav`,

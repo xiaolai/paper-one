@@ -22,6 +22,7 @@ webview cannot reach.
 - `allow-voices-stop`
 - `allow-voices-remove`
 - `allow-voices-render`
+- `allow-voices-render-file`
 - `allow-voices-release`
 
 ## Permission Table
@@ -159,6 +160,32 @@ Enables the voices_render command without any pre-configured scope.
 <td>
 
 Denies the voices_render command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`voices:allow-voices-render-file`
+
+</td>
+<td>
+
+Enables the voices_render_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`voices:deny-voices-render-file`
+
+</td>
+<td>
+
+Denies the voices_render_file command without any pre-configured scope.
 
 </td>
 </tr>

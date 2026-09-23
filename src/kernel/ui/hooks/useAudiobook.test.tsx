@@ -11,6 +11,7 @@ import {
 import { NO_GOOD_VOICE } from '../reader/voiceChoice'
 import type { VoiceFacts } from '../reader/voiceChoice'
 import type { AudiobookPlatform } from '../reader/audiobook'
+import type { VoicePack } from '../../core/ports'
 
 /* THE PLATFORM HALF IS THE ONLY THING REPLACED. `audiobookTauri` is the save
    dialog and the engine, neither of which exists in a test; `exportAudiobook`
@@ -21,14 +22,17 @@ const tauri = vi.hoisted(() => ({
   platform: null as AudiobookPlatform | null,
   asked: [] as string[],
   opened: 0,
+  /** The packs `tauriAudiobook` was given, so routing can be asserted. */
+  packs: [] as readonly unknown[],
 }))
 vi.mock('../reader/audiobookTauri', () => ({
   chooseAudiobookPath: async (title: string) => {
     tauri.asked.push(title)
     return tauri.path
   },
-  tauriAudiobook: async () => {
+  tauriAudiobook: async (packs: readonly unknown[] = []) => {
     tauri.opened += 1
+    tauri.packs = packs
     if (!tauri.platform) throw new Error('the test named no platform')
     return tauri.platform
   },
@@ -39,6 +43,7 @@ beforeEach(() => {
   tauri.platform = null
   tauri.asked = []
   tauri.opened = 0
+  tauri.packs = []
 })
 
 /**
@@ -68,6 +73,9 @@ function mount(over: Partial<AudiobookDeps> = {}) {
   const say = vi.fn()
   const deps: AudiobookDeps = {
     available: true,
+    /* No pack, so every existing case still measures the platform voice and
+     * the floor exactly as it did. The pack cases below supply their own. */
+    packs: [],
     source: {
       title: 'A Measured Book',
       author: 'Paper',
@@ -756,5 +764,67 @@ describe('the source an export is built from', () => {
   it('skips the notes the reading skips, and reads the ones it reads', () => {
     expect(audiobookSourceOf(book(), true)?.skip).toEqual({ notes: true })
     expect(audiobookSourceOf(book(), false)?.skip).toEqual({ notes: false })
+  })
+})
+
+describe('exporting on a downloaded voice', () => {
+  const ENGLISH: VoicePack = {
+    id: 'english-kokoro',
+    name: 'English',
+    summary: '',
+    family: 'kokoro',
+    languages: ['en'],
+    bytes: 336_822_660,
+    minimumMemoryGb: 4,
+    voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+    installed: true,
+  }
+
+  it('renders through the pack, naming the voice the way the reading stores it', async () => {
+    /* ⚠️ THE STRING IS THE ROUTING. `audiobookTauri` reads its shape and sends
+     * an engine-qualified name to the plugin and anything else to
+     * `narrate_render`, so one stored choice serves the reading and the
+     * export alike. */
+    const { rendered } = engine()
+    const { seen } = mount({ source: book(), packs: [ENGLISH] })
+    await act(async () => {
+      await seen[0]?.run()
+    })
+    expect(rendered.length).toBeGreaterThan(0)
+    expect(new Set(rendered.map((job) => job.voice))).toEqual(new Set(['kokoro:af_heart']))
+    expect(tauri.packs).toEqual([ENGLISH])
+  })
+
+  it('exports a book the platform floor would have refused outright', async () => {
+    /* ⚠️ THE CASE THAT MAKES THIS FEATURE EXIST. Before a pack, every voice on
+     * a Mac is below the floor and the export is simply off. */
+    const compact = { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }
+    const { rendered } = engine()
+    const { seen, say } = mount({ source: book(), voices: [compact], packs: [ENGLISH] })
+    await act(async () => {
+      await seen[0]?.run()
+    })
+    expect(say).not.toHaveBeenCalledWith(NO_GOOD_VOICE)
+    expect(rendered.length).toBeGreaterThan(0)
+  })
+
+  it('still uses the platform voice where no pack reads the language', async () => {
+    const { rendered } = engine()
+    const { seen } = mount({ source: book(), packs: [{ ...ENGLISH, languages: ['zh'] }] })
+    await act(async () => {
+      await seen[0]?.run()
+    })
+    expect(rendered.length).toBeGreaterThan(0)
+    expect(new Set(rendered.map((job) => job.voice))).toEqual(new Set([VOICE.voiceURI]))
+  })
+
+  it('names the pack that would give a refused book a voice', async () => {
+    // Advice a reader can act on, where `NO_GOOD_VOICE` alone is a dead end.
+    const compact = { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }
+    const { seen, say } = mount({ source: book(), voices: [compact], packs: [{ ...ENGLISH, installed: false }] })
+    await act(async () => {
+      await seen[0]?.run()
+    })
+    expect(say).toHaveBeenCalledWith(expect.stringContaining('321 MB'))
   })
 })

@@ -32,6 +32,7 @@ const COMMANDS: &[&str] = &[
     "voices_stop",
     "voices_remove",
     "voices_render",
+    "voices_render_file",
     "voices_release",
 ];
 

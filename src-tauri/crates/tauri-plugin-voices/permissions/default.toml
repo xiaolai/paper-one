@@ -23,5 +23,6 @@ permissions = [
   "allow-voices-stop",
   "allow-voices-remove",
   "allow-voices-render",
+  "allow-voices-render-file",
   "allow-voices-release",
 ]

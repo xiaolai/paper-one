@@ -355,6 +355,18 @@
           "markdownDescription": "Denies the voices_render command without any pre-configured scope."
         },
         {
+          "description": "Enables the voices_render_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voices-render-file",
+          "markdownDescription": "Enables the voices_render_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voices_render_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voices-render-file",
+          "markdownDescription": "Denies the voices_render_file command without any pre-configured scope."
+        },
+        {
           "description": "Enables the voices_stop command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voices-stop",
@@ -367,10 +379,10 @@
           "markdownDescription": "Denies the voices_stop command without any pre-configured scope."
         },
         {
-          "description": "The commands a Paper webview needs from the voices plugin: the catalogue of\ndownloadable voice packs and which are installed; fetching one, stopping a\nfetch, and removing one; reading text aloud through an installed pack; and\nletting a loaded model go.\n\n⚠️ FETCHING A PACK IS A NETWORK REQUEST AND A LARGE ONE — up to 2.5 GB from the\nhosts the embedded manifest pins by revision. It is never started by anything\nbut a reader pressing Download, every byte is checked against the manifest's\ndigest before it is promoted, and a stopped fetch leaves nothing half-installed.\nNothing here can reach a URL the manifest does not name.\n\nRendering holds a model — about 2.5 GB resident for the Chinese pack — until\n`voices_release`, which is why releasing is a command rather than a timer the\nwebview cannot reach.\n\n#### This default permission set includes:\n\n- `allow-voices-catalogue`\n- `allow-voices-install`\n- `allow-voices-stop`\n- `allow-voices-remove`\n- `allow-voices-render`\n- `allow-voices-release`",
+          "description": "The commands a Paper webview needs from the voices plugin: the catalogue of\ndownloadable voice packs and which are installed; fetching one, stopping a\nfetch, and removing one; reading text aloud through an installed pack; and\nletting a loaded model go.\n\n⚠️ FETCHING A PACK IS A NETWORK REQUEST AND A LARGE ONE — up to 2.5 GB from the\nhosts the embedded manifest pins by revision. It is never started by anything\nbut a reader pressing Download, every byte is checked against the manifest's\ndigest before it is promoted, and a stopped fetch leaves nothing half-installed.\nNothing here can reach a URL the manifest does not name.\n\nRendering holds a model — about 2.5 GB resident for the Chinese pack — until\n`voices_release`, which is why releasing is a command rather than a timer the\nwebview cannot reach.\n\n#### This default permission set includes:\n\n- `allow-voices-catalogue`\n- `allow-voices-install`\n- `allow-voices-stop`\n- `allow-voices-remove`\n- `allow-voices-render`\n- `allow-voices-render-file`\n- `allow-voices-release`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "The commands a Paper webview needs from the voices plugin: the catalogue of\ndownloadable voice packs and which are installed; fetching one, stopping a\nfetch, and removing one; reading text aloud through an installed pack; and\nletting a loaded model go.\n\n⚠️ FETCHING A PACK IS A NETWORK REQUEST AND A LARGE ONE — up to 2.5 GB from the\nhosts the embedded manifest pins by revision. It is never started by anything\nbut a reader pressing Download, every byte is checked against the manifest's\ndigest before it is promoted, and a stopped fetch leaves nothing half-installed.\nNothing here can reach a URL the manifest does not name.\n\nRendering holds a model — about 2.5 GB resident for the Chinese pack — until\n`voices_release`, which is why releasing is a command rather than a timer the\nwebview cannot reach.\n\n#### This default permission set includes:\n\n- `allow-voices-catalogue`\n- `allow-voices-install`\n- `allow-voices-stop`\n- `allow-voices-remove`\n- `allow-voices-render`\n- `allow-voices-release`"
+          "markdownDescription": "The commands a Paper webview needs from the voices plugin: the catalogue of\ndownloadable voice packs and which are installed; fetching one, stopping a\nfetch, and removing one; reading text aloud through an installed pack; and\nletting a loaded model go.\n\n⚠️ FETCHING A PACK IS A NETWORK REQUEST AND A LARGE ONE — up to 2.5 GB from the\nhosts the embedded manifest pins by revision. It is never started by anything\nbut a reader pressing Download, every byte is checked against the manifest's\ndigest before it is promoted, and a stopped fetch leaves nothing half-installed.\nNothing here can reach a URL the manifest does not name.\n\nRendering holds a model — about 2.5 GB resident for the Chinese pack — until\n`voices_release`, which is why releasing is a command rather than a timer the\nwebview cannot reach.\n\n#### This default permission set includes:\n\n- `allow-voices-catalogue`\n- `allow-voices-install`\n- `allow-voices-stop`\n- `allow-voices-remove`\n- `allow-voices-render`\n- `allow-voices-render-file`\n- `allow-voices-release`"
         }
       ]
     }

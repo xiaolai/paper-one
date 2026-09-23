@@ -7,6 +7,8 @@ import type { SpeechSkipPrefs } from '../reader/speechSkip'
 import type { SectionTextWalk } from '../reader/session'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
 import { NO_GOOD_VOICE, voiceFor, type VoiceFacts } from '../reader/voiceChoice'
+import { engineVoiceFor, missingPackNotice, qualify } from '../reader/engineVoice'
+import type { VoicePack } from '../../core/ports'
 import { documentLang } from '../reader/speech'
 import type { Book } from './useBook'
 
@@ -105,6 +107,8 @@ export interface AudiobookDeps {
   readonly available: boolean
   readonly source: AudiobookSource | null
   readonly voices: readonly VoiceFacts[]
+  /** The downloaded packs, which are asked before the platform's voices. */
+  readonly packs: readonly VoicePack[]
   readonly chosen: Readonly<Record<string, string>>
   readonly rate: number
   /** One line to the reader. The same surface an import reports through. */
@@ -124,7 +128,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
    * no test could tell from its absence. */
   const stop = useRef(false)
 
-  const { available, source, voices, chosen, rate, say } = deps
+  const { available, source, voices, packs, chosen, rate, say } = deps
 
   /**
    * ⚠️ **ONE LONG FUNCTION, AND THAT IS THE DECISION RATHER THAN THE DEBT.** An
@@ -193,8 +197,19 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
     void (async () => {
       setRunning(true)
       try {
-        const answer = voiceFor(voices, source.lang, chosen)
-        if (answer.kind !== 'voice') {
+        /* ⚠️ **A DOWNLOADED VOICE IS ASKED FOR FIRST, AND IT SETTLES BOTH
+         * REFUSALS BELOW.** The floor refuses every platform voice below
+         * Enhanced, which on a Mac is all of them — so before this the export
+         * was simply off there. A pack is not subject to that rule, and it
+         * also has no `platform` case: it names a voice or it does not, where
+         * the WebView's list can be empty or the book language-less and a
+         * render needs a voice NAMED. */
+        const downloaded = engineVoiceFor(packs, source.lang, chosen)
+        const engineVoice = downloaded
+          ? qualify(packs.find((pack) => pack.id === downloaded.packId)?.family ?? '', downloaded.voiceId)
+          : null
+        const answer = engineVoice ? null : voiceFor(voices, source.lang, chosen)
+        if (answer !== null && answer.kind !== 'voice') {
           /* THE REFUSALS THAT ARE ABOUT THE MACHINE rather than the book, each
              saying what is true. `none` is the floor: no voice good enough
              speaks the book's language, and a book is not rendered in a
@@ -206,14 +221,17 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
              Settings, or a book that declares no language, which they can. */
           say(
             answer.kind === 'none'
-              ? NO_GOOD_VOICE
+              ? (missingPackNotice(packs, source.lang) ?? NO_GOOD_VOICE)
               : voices.length === 0
                 ? 'No voices are available yet — try again in a moment.'
                 : 'This book does not say what language it is in — choose a voice for it in Settings first.',
           )
           return
         }
-        const voice = answer.voice
+        /* The engine-qualified name, or the platform voice's own identifier.
+         * `audiobookTauri` reads the shape and routes the render — the same
+         * string the reading stores, so one choice serves both. */
+        const voice = engineVoice ?? answer!.voice.voiceURI
 
         say('Reading the book…')
         /* THE STOP GOES IN, rather than being checked only on the way out. A long
@@ -243,10 +261,10 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
          * read has been made to do work for an answer that was already known. */
         if (!path) return
 
-        const platform = await tauriAudiobook()
+        const platform = await tauriAudiobook(packs)
         const result = await exportAudiobook(platform, {
           chapters,
-          voice: voice.voiceURI,
+          voice,
           rate,
           title: source.title,
           author: source.author,
