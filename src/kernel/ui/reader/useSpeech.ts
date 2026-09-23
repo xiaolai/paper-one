@@ -512,11 +512,20 @@ export function useSpeech(
         new EngineSpeaker(callbacks, {
           render: (request) => downloaded.render(request),
           host: () => downloaded.host(),
-          choose: (lang, speakPrefs) =>
-            engineVoiceFor(downloaded.packs(), lang, speakPrefs.voices ?? {}),
+          /* ⚠️ **`?? {}` WAS HERE AND IT IS `engineVoiceFor`'s OWN DEFAULT**, so
+           * the two spellings answered alike and no test could tell them
+           * apart — the shape this repository records as an option that is the
+           * default. Passing the value through is the one instruction. */
+          choose: (lang, speakPrefs) => engineVoiceFor(downloaded.packs(), lang, speakPrefs.voices),
         }),
         platform,
-        () => engineRef.current?.packs() ?? [],
+        /* ⚠️ **THE ENGINE IS READ ONE WAY HERE, AND IT WAS READ TWO.** This was
+         * `engineRef.current?.packs() ?? []` beside a `downloaded` the guard
+         * above has already proved non-null — two readings of one fact, so the
+         * optional chain and the fallback were both unobservable. `packs()` is
+         * still a CALL, which is what keeps the catalogue live for a reader who
+         * downloads a pack mid-chapter. */
+        () => downloaded.packs(),
       )
     },
     // Stryker disable next-line ArrayDeclaration: all three are built once — `available` from an empty list, both clears from no dependency — so this list never moves.
@@ -582,18 +591,23 @@ export function useSpeech(
        *
        * After `speak`, never before: `speak` stops both speakers and takes the
        * prepared render for THIS sentence out of the cache, so preparing first
-       * would hand it the passage it is about to discard. And only when a
-       * reading actually began — a refusal means there is no next sentence to
-       * get ready for. */
-      if (began) {
-        const next = current.plan.sentences[at + 1]
-        if (next) {
-          speaker!.prepare?.(
-            current.spoken.text.slice(next.start, next.end),
-            current.lang,
-            prefsRef.current,
-          )
-        }
+       * would hand it the passage it is about to discard.
+       *
+       * ⚠️ **AND THERE WAS AN `if (began)` IN FRONT OF THIS THAT NOTHING COULD
+       * OBSERVE.** A refusal means the reading is over, so there is no next
+       * sentence to get ready for — but the two speakers agree about which one
+       * reads a passage, so the engine never refuses a passage it was chosen
+       * for, and `routedSpeaker.prepare` asks the same question again and
+       * declines for the platform. The guard could only ever repeat an answer
+       * something else had already given, which is the shape this repository
+       * removes rather than disables. */
+      const next = current.plan.sentences[at + 1]
+      if (next) {
+        speaker!.prepare?.(
+          current.spoken.text.slice(next.start, next.end),
+          current.lang,
+          prefsRef.current,
+        )
       }
       return began
     },

@@ -141,13 +141,80 @@ describe('copyTree', () => {
     expect(lstatSync(path.join(dest, 'node_modules')).isSymbolicLink()).toBe(true)
     expect(readFileSync(path.join(dest, 'node_modules/pkg/index.js'), 'utf8')).toBe('module.exports = 1\n')
     expect(dest.startsWith(realpathSync(tmpdir()))).toBe(true) // realpath'd, so Vite's module ids and the root agree
-    expect(COPY_EXCLUDE).toContain('node_modules')
-    expect(COPY_EXCLUDE).toContain('target')
-    /* ⚠️ SwiftPM's build directory, missing for a phase. The copy carried
-       yyjson's UTF-16 test fixture into `no-binary-source.test.mjs`, which
-       imports this list and walks with it because the copy has no `.git` to
-       ask. Cargo is `target`; the next toolchain's goes here too. */
-    expect(COPY_EXCLUDE).toContain('.build')
+  })
+
+  /**
+   * The list ITSELF, entry by entry, in order.
+   *
+   * ⚠️ **IT WAS THREE `toContain`s, AND THE MUTATION GATE FOUND WHAT THAT
+   * MISSES.** Every other entry could be replaced with the empty string and
+   * nothing failed — so `.codex`, `.agents`, `.cc-suite` and `.DS_Store` were
+   * decisions with no reader. This list is not an implementation detail: it is
+   * what the deletion proof's copy leaves behind, and `no-binary-source.test.mjs`
+   * WALKS with it because the copy has no `.git` to ask. An entry that quietly
+   * stopped working there carries build output into a check that then fails on
+   * somebody else's test fixture.
+   *
+   * Written out rather than derived, because a derived assertion would agree
+   * with whatever the list says. Adding a toolchain means editing both, which
+   * is the cost of saying the list is a decision.
+   */
+  it('excludes exactly what it says, and nothing else', () => {
+    expect([...COPY_EXCLUDE]).toEqual([
+      'node_modules',
+      '.git',
+      'dist',
+      '.types',
+      'coverage',
+      'target', // Cargo
+      '.build', // SwiftPM
+      '.claude',
+      '.codex',
+      '.agents',
+      '.cc-suite',
+      '.DS_Store',
+    ])
+  })
+
+  /**
+   * And the steps the copy runs, in order, with the command each takes.
+   *
+   * ⚠️ **THE SAME GAP**: every step name and every argument array could be
+   * emptied without a test noticing, and a step that runs `pnpm` with no
+   * arguments proves nothing while still reporting a pass. The ORDER is part
+   * of it — the cheap checks come before the builds, so a tree that will not
+   * typecheck says so in seconds rather than after three bundles.
+   */
+  /**
+   * The marker's NAME, as a literal.
+   *
+   * ⚠️ **EVERY TEST THAT READS IT READS `process.env` DIRECTLY, AND EVERY TEST
+   * THAT ASSERTS IT WENT THROUGH THE CONSTANT** — so renaming the constant
+   * changed both sides at once and nothing failed, which the mutation gate
+   * found by emptying the string. `check-third-party-notices`,
+   * `no-invisible-characters` and `kernel-entry` each skip on the literal
+   * `PAPER_VERIFY_WITHOUT`; a rename that missed one of them would leave a
+   * hard assertion running in a copy that cannot satisfy it, and the deletion
+   * proof would fail for a reason that is not about the deletion.
+   */
+  it('names the two markers the copy’s own tests read', () => {
+    expect(DELETED_ENV).toBe('PAPER_VERIFY_WITHOUT')
+    expect(DELETED_DIRS_ENV).toBe('PAPER_VERIFY_WITHOUT_DIRS')
+  })
+
+  it('runs exactly these steps, in this order, with these arguments', () => {
+    expect(COPY_STEPS.map((step) => [step.name, step.cmd, [...step.args]])).toEqual([
+      ['typecheck', 'pnpm', ['typecheck']],
+      ['boundaries', 'pnpm', ['boundaries']],
+      ['architecture:check', 'pnpm', ['architecture:check']],
+      ['compositions:check', 'pnpm', ['compositions:check']],
+      ['test', 'pnpm', ['test']],
+      ['build', 'pnpm', ['build']],
+      ['build:ios', 'pnpm', ['build:ios']],
+      ['build:android', 'pnpm', ['build:android']],
+      ['build:web', 'pnpm', ['build:web']],
+      ['build:cli', 'pnpm', ['build:cli']],
+    ])
   })
 
   it('does not link node_modules when the source has none', () => {
