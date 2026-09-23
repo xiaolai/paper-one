@@ -95,6 +95,19 @@ describe('the pane', () => {
     expect(row.textContent).toContain('4 GB of memory')
   })
 
+  it('keeps the size and the memory out of the truncating container', async () => {
+    /* ⚠️ **MEASURED IN THE RUNNING APP, 2026-09-23.** These facts were inside a
+     * `paper-cap-grow`, whose own CSS comment says it "takes the slack and
+     * truncates": 585 px of text was clipped into 271 px and everything from
+     * the size onwards was INVISIBLE — the one thing this pane exists to say
+     * before a reader taps Download. Nothing failed; the text was in the DOM.
+     * Only looking at it found this, so this case is what stops it returning. */
+    await show(portOver([pack()]))
+    const facts = screen.getByText(/Kokoro 82M/)
+    expect(facts.className).toContain('hint')
+    expect(facts.closest('.paper-cap-grow')).toBeNull()
+  })
+
   it('names whose models these are', async () => {
     await show(portOver([pack()]))
     expect(screen.getByText(/Apache-2.0/).textContent).toContain('CMUdict')

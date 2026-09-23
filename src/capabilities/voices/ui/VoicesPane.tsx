@@ -171,37 +171,45 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
         const state = states[pack.id]
         const busy = state?.progress != null
         return (
-          <div className={ui.row} key={pack.id}>
-            <div className={ui.grow}>
-              <div className={ui.value}>{pack.name}</div>
-              <div className={ui.hint}>
-                {pack.summary} · {languagesOf(pack)} · {sizeOf(pack.bytes)} · needs {pack.minimumMemoryGb} GB of memory
+          /* ⚠️ **THE FACTS GO UNDER THE ROW, NOT INSIDE IT** — measured in the
+           * running app on 2026-09-23. They were in a `paper-cap-grow`, whose
+           * own comment says it "takes the slack and truncates" so a long name
+           * pushes the value off the row: 585 px of text was clipped into
+           * 271 px, and everything from the size onwards was INVISIBLE. That
+           * is the one thing this pane exists to say before a reader taps
+           * Download. `paper-cap-hint` is the class for a sentence under a
+           * row — it is a block, it wraps, and it carries the margin. */
+          <div key={pack.id}>
+            <div className={ui.row}>
+              <div className={ui.grow}>
+                <div className={ui.value}>{pack.name}</div>
               </div>
-              <div className={ui.hint}>
-                {pack.voices.map((voice) => voice.name).join(', ')}
+              <div className={ui.actions}>
+                {pack.installed ? (
+                  <button type="button" className={`${ui.button} ${ui.buttonDanger}`} onClick={() => void remove(pack)}>
+                    Remove
+                  </button>
+                ) : busy ? (
+                  <button
+                    type="button"
+                    className={ui.button}
+                    onClick={() => stopping.current.get(pack.id)?.abort()}
+                  >
+                    Stop
+                  </button>
+                ) : (
+                  <button type="button" className={`${ui.button} ${ui.buttonPrimary}`} onClick={() => void install(pack)}>
+                    Download
+                  </button>
+                )}
               </div>
-              {busy && state?.progress ? <div className={ui.hint}>{progressLine(state.progress)}</div> : null}
-              {state?.error != null ? <div className={ui.hint}>{state.error}</div> : null}
             </div>
-            <div className={ui.actions}>
-              {pack.installed ? (
-                <button type="button" className={`${ui.button} ${ui.buttonDanger}`} onClick={() => void remove(pack)}>
-                  Remove
-                </button>
-              ) : busy ? (
-                <button
-                  type="button"
-                  className={ui.button}
-                  onClick={() => stopping.current.get(pack.id)?.abort()}
-                >
-                  Stop
-                </button>
-              ) : (
-                <button type="button" className={`${ui.button} ${ui.buttonPrimary}`} onClick={() => void install(pack)}>
-                  Download
-                </button>
-              )}
+            <div className={ui.hint}>
+              {pack.summary} · {languagesOf(pack)} · {sizeOf(pack.bytes)} · needs {pack.minimumMemoryGb} GB of memory
             </div>
+            <div className={ui.hint}>{pack.voices.map((voice) => voice.name).join(', ')}</div>
+            {busy && state?.progress ? <div className={ui.hint}>{progressLine(state.progress)}</div> : null}
+            {state?.error != null ? <div className={ui.hint}>{state.error}</div> : null}
           </div>
         )
       })}
