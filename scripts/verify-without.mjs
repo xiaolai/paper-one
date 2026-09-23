@@ -176,8 +176,19 @@ export function parseArgs(argv) {
  * still a leaf.
  */
 export function removableCapabilities(repo = REPO_ROOT, read = readFileSync) {
-  const manifest = JSON.parse(readFileSync(path.join(repo, 'capabilities.manifest.json'), 'utf8'))
+  const manifestPath = path.join(repo, 'capabilities.manifest.json')
+  /* Stryker disable next-line StringLiteral: measured 2026-09-23 — Node reads an
+     EMPTY encoding as none given, so `''` and `'utf8'` differ only in that the
+     first answers a Buffer, which `JSON.parse` coerces to the same string. The
+     encoding is kept because a Buffer here is one `path.join` away from
+     throwing, and the mutation cannot be observed. It is on its own line so the
+     directive cannot also cover the FILENAME beside it, which is killable. */
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   const src = path.join(repo, 'src')
+  /* Stryker disable next-line StringLiteral: the same measurement as the read
+     above — an empty encoding is read as none given, so the two spellings answer
+     alike. The anchor in the regex beside it is a different mutator and is
+     measured by `looks in TypeScript and nowhere else`. */
   const sources = readdirSync(src, { recursive: true, encoding: 'utf8' }).filter((rel) => /\.tsx?$/.test(rel))
   /* THE COMPOSITION ROOTS, BY NAME — the four files `capability:remove` already
      edits. ⚠️ It was `/^app[\\/]composition\./`, which also exempted any
@@ -185,7 +196,13 @@ export function removableCapabilities(repo = REPO_ROOT, read = readFileSync) {
      hold an import the remover never touches while this still called the
      capability removable. `compositionFile` is the same helper the checker
      resolves them with, so there is one answer to "which files are those". */
-  const roots = new Set(PLATFORMS.map((platform) => compositionFile(platform).replace(/^src\//, '')))
+  /* ⚠️ **THE FULL PATHS, NOT PATHS WITH `src/` STRIPPED OFF.** It was
+     `.replace(/^src\//, '')`, and the anchor could be dropped without any
+     answer changing — `compositionFile` only ever returns one shape, so there
+     is no path where a later `src/` differs from the leading one, and no test
+     could tell the two apart. The set holds what the helper says and the
+     comparison adds the prefix instead, which leaves nothing to anchor. */
+  const roots = new Set(PLATFORMS.map((platform) => compositionFile(platform)))
 
   /**
    * Each source file read and normalised ONCE, however many capabilities ask.
@@ -257,7 +274,7 @@ function importedOutside(textOf, sources, dir, roots) {
     String.raw`(?:from|import)\s*\(?\s*['"][^'"]*capabilities/${dir}(?:/[^'"]*)?['"]`,
   )
   return sources
-    .filter((rel) => !rel.startsWith(own) && !roots.has(rel.split(path.sep).join('/')))
+    .filter((rel) => !rel.startsWith(own) && !roots.has(`src/${rel.split(path.sep).join('/')}`))
     .some((rel) => NAMES.test(textOf(rel)))
 }
 
@@ -469,6 +486,7 @@ export function main(argv, { prove = verifyWithout, out = (l) => process.stdout.
   return 0
 }
 
+// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — every decision is in `main`, which is measured in-process
 if (isProcessEntry(import.meta)) {
   process.exitCode = main(process.argv.slice(2))
 }

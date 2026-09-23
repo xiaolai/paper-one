@@ -855,3 +855,163 @@ describe('the workflow names a capability that can actually be removed', () => {
     }
   })
 })
+
+/**
+ * The three conditions, driven over a FIXTURE tree rather than this repository.
+ *
+ * ⚠️ **ELEVEN MUTANTS SURVIVED IN `removableCapabilities` AND `importedOutside`
+ * TOGETHER, AND EVERY ONE WAS REAL** — hand-applied on 2026-09-23, each with
+ * the whole of this file still green. The cases above ask the real manifest
+ * what it answers, which is a fact about this tree and not about the rule: with
+ * `.some` turned into `.every`, with the composition roots' anchor dropped,
+ * with `startsWith` turned into `endsWith`, this repository's answer happens not
+ * to change. A fixture where each condition is the only thing that differs is
+ * the only way to ask the rule itself.
+ */
+describe('removableCapabilities, over a tree built to test one thing at a time', () => {
+  /** A repository with the capabilities named, and the sources given. */
+  function repoWith(capabilities, sources = {}) {
+    const root = mkdtempSync(path.join(tmpdir(), 'removable-'))
+    roots.push(root)
+    writeFileSync(path.join(root, 'capabilities.manifest.json'), JSON.stringify({ capabilities }))
+    for (const [rel, text] of Object.entries(sources)) {
+      const full = path.join(root, 'src', rel)
+      mkdirSync(path.dirname(full), { recursive: true })
+      writeFileSync(full, text)
+    }
+    /* The four composition roots always exist: `removableCapabilities` builds
+       its exempt set from `PLATFORMS`, and a root that is not on disk is simply
+       never scanned, which would hide the anchor this asserts. */
+    for (const platform of ['desktop', 'ios', 'android', 'web']) {
+      const full = path.join(root, 'src/app', `composition.${platform}.ts`)
+      mkdirSync(path.dirname(full), { recursive: true })
+      if (!existsSync(full)) writeFileSync(full, sources[`app/composition.${platform}.ts`] ?? '')
+    }
+    return root
+  }
+
+  const leaf = (id, over = {}) => ({ id, requires: [], ...over })
+
+  it('offers a leaf nothing requires and nothing imports', () => {
+    expect(removableCapabilities(repoWith([leaf('alone')]))).toEqual(['alone'])
+  })
+
+  it('refuses one another capability requires — and asks whether ANY does, not whether all do', () => {
+    /* ⚠️ `.some` → `.every` survived: with two capabilities where exactly one is
+       required, `every` answers false for both and offers the required one. */
+    const repo = repoWith([leaf('engine'), leaf('user', { requires: ['engine'] })])
+    expect(removableCapabilities(repo)).toEqual(['user'])
+  })
+
+  it('treats a capability that declares no requires as requiring nothing', () => {
+    /* ⚠️ `c.requires ?? []` → `c.requires && []` survived: for a capability with
+       no `requires` field the second answers `undefined`, and `.includes` on it
+       throws — which only shows where a manifest entry omits the field. */
+    const repo = repoWith([{ id: 'bare' }, leaf('other')])
+    expect(removableCapabilities(repo)).toEqual(['bare', 'other'])
+  })
+
+  it('refuses one a host file imports, and does not mind the capability importing itself', () => {
+    /* ⚠️ `!rel.startsWith(own)` → `!rel.endsWith(own)` survived: a capability's
+       OWN files stop being exempt, so every capability that imports itself looks
+       imported from outside. */
+    const repo = repoWith([leaf('used'), leaf('quiet')], {
+      'capabilities/used/index.ts': "export const a = 1\n",
+      'capabilities/used/lib/inner.ts': "import { a } from '../../used/index'\n",
+      'capabilities/quiet/index.ts': "export const b = 2\n",
+      'kernel/host.ts': "import { a } from '../capabilities/used'\n",
+    })
+    expect(removableCapabilities(repo)).toEqual(['quiet'])
+  })
+
+  it('does not count an import made by a composition root', () => {
+    /* ⚠️ The exempt set is built by stripping `^src/` from each root's path, and
+       `/src\//` without the anchor survived — it strips the first `src/`
+       anywhere, which for these paths is the same place. A root whose own path
+       does not begin with `src/` is what would tell them apart, and there is no
+       such root, so the case asserts what the set is FOR instead: a composition
+       root may import a capability and it stays removable. */
+    const repo = repoWith([leaf('composed')], {
+      'capabilities/composed/index.ts': "export const c = 3\n",
+      'app/composition.desktop.ts': "import { composed } from '../capabilities/composed'\n",
+    })
+    expect(removableCapabilities(repo)).toEqual(['composed'])
+  })
+
+  it('looks in TypeScript and nowhere else', () => {
+    /* ⚠️ `/\.tsx?$/` → `/\.tsx?/` survived: without the anchor a name that
+       merely CONTAINS `.ts` is scanned, so a generated `x.ts.map` or a
+       `y.tsx.bak` beside the source would be read as if it were source. */
+    const repo = repoWith([leaf('js')], {
+      'capabilities/js/index.ts': "export const d = 4\n",
+      'kernel/host.ts.map': "import '../capabilities/js'\n",
+      'kernel/other.tsx.bak': "import '../capabilities/js'\n",
+    })
+    expect(removableCapabilities(repo), 'only .ts and .tsx are source').toEqual(['js'])
+  })
+
+  it('matches a capability directory by its whole name, not by a prefix of one', () => {
+    /* ⚠️ `path.join('capabilities', dir) + path.sep` lost either the separator
+       or the word and survived both. Without the separator, `capabilities/pub`
+       prefixes `capabilities/public`, so the longer one's files count as the
+       shorter one's own and its imports stop being seen. */
+    const repo = repoWith([leaf('pub'), leaf('public')], {
+      'capabilities/pub/index.ts': "export const e = 5\n",
+      'capabilities/public/index.ts': "import '../../kernel/host'\n",
+      'kernel/host.ts': "import '../capabilities/public'\n",
+    })
+    expect(removableCapabilities(repo), 'public is imported from the kernel').toEqual(['pub'])
+  })
+
+  it('does not read a capability’s own file as evidence against it', () => {
+    /* ⚠️ `own` decides which files are the capability's OWN, and two of its
+       three mutants lived here: dropping the word `capabilities` makes the
+       prefix `pub/`, which no path starts with, and `startsWith` turned into
+       `endsWith` matches nothing at all. Either way every file is scanned, and
+       a capability that names itself by a full path — which a deep file's
+       import of its own index is — becomes a capability imported from outside
+       itself. */
+    const repo = repoWith([leaf('pub')], {
+      'capabilities/pub/index.ts': "export const g = 7\n",
+      'capabilities/pub/lib/deep.ts': "import { g } from '../../../capabilities/pub/index'\n",
+    })
+    expect(removableCapabilities(repo), 'nothing outside pub imports it').toEqual(['pub'])
+  })
+
+  it('matches a capability directory by its whole name, separator and all', () => {
+    /* ⚠️ The third of `own`'s mutants: without the trailing separator,
+       `capabilities/pub` is a prefix of `capabilities/public`, so the longer
+       capability's files are read as the shorter one's own — and the import
+       that should have refused `pub` is never seen. */
+    const repo = repoWith([leaf('pub'), leaf('public')], {
+      'capabilities/pub/index.ts': "export const h = 8\n",
+      'capabilities/public/index.ts': "import '../../../capabilities/pub/index'\n",
+    })
+    expect(removableCapabilities(repo), 'public imports pub, from outside pub').toEqual(['public'])
+  })
+
+  it('reads the manifest and the tree as TEXT', () => {
+    /* ⚠️ Both `'utf8'` arguments survived being emptied, because a Buffer
+       coerces to a string in `JSON.parse` and in a regex test — so the answer
+       is right and every later `path.join` is one Buffer away from throwing.
+       Asserted by the only thing that can see it: a capability whose removal
+       depends on reading a source file's CONTENTS. */
+    const repo = repoWith([leaf('read')], {
+      'capabilities/read/index.ts': "export const f = 6\n",
+      'kernel/host.ts': "import '../capabilities/read'\n",
+    })
+    expect(removableCapabilities(repo), 'the import in host.ts must be read').toEqual([])
+  })
+})
+
+describe('the command line', () => {
+  it('names itself and its arguments when it refuses one', () => {
+    /* ⚠️ `USAGE` survived being emptied: nothing asserted the one sentence a
+       person sees when they get the arguments wrong. */
+    const said = []
+    const code = main(['--nonsense'], { prove: () => 0, out: () => {}, err: (line) => said.push(line) })
+    expect(code).toBe(2)
+    expect(said.join('')).toContain('usage: node scripts/verify-without.mjs [id] [--keep]')
+    expect(said.join('')).toContain('unknown argument')
+  })
+})

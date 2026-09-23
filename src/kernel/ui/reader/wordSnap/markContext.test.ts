@@ -26,6 +26,24 @@ function oneParagraph(text: string) {
   }
 }
 
+/**
+ * The empty answer, as a LITERAL.
+ *
+ * ⚠️ **EVERY CASE ABOUT IT ASSERTED `toEqual(NO_CONTEXT)`, WHICH IS THE VALUE
+ * AGREEING WITH ITSELF.** The mutation gate found all three of its mutants
+ * alive: the object could be emptied and both strings blanked, and every one
+ * of those cases still passed because the expectation moved with the subject.
+ * A quote's context is what makes it findable again in another build of the
+ * same book — `reanchorPass` matches on it — so "no context" has to be two
+ * empty strings and not a missing field.
+ */
+describe('the empty context', () => {
+  it('is two empty strings, and not an object with neither', () => {
+    expect(NO_CONTEXT).toEqual({ prefix: '', suffix: '' })
+    expect(Object.keys(NO_CONTEXT).sort()).toEqual(['prefix', 'suffix'])
+  })
+})
+
 describe('markContext', () => {
   it('reads the text on each side of the mark', () => {
     const p = oneParagraph('Call me Ishmael. Some years ago')

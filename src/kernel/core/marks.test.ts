@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  MARK_STYLES,
+  READER_STYLES,
   BOOKMARK_TEXT_MAX,
   MAX_MARK_TEXT,
   annotationsIn,
@@ -571,6 +573,26 @@ describe('parseMarks', () => {
   it('rejects a record missing its section index', () => {
     const { sectionIndex: _omitted, ...withoutSection } = mark()
     expect(parseMarks(JSON.stringify([withoutSection]))).toEqual([])
+  })
+})
+
+describe('the two style lists, which are decisions rather than data', () => {
+  /**
+   * ⚠️ **BOTH ARRAYS COULD BE EMPTIED AND NOTHING FAILED.** The mutation gate
+   * found it: every case about the wave asserts what the STORE does with one,
+   * and none asserts what the lists SAY — so `MARK_STYLES` could have lost the
+   * wave, or `READER_STYLES` gained it, with every one of those cases still
+   * green. The difference between the two lists is the whole decision, and it
+   * is one edit from disappearing.
+   */
+  it('admits three styles from the disk and offers the reader two', () => {
+    /* `wave` is in the persisted union so an older row, or one from a peer,
+       still PARSES — and out of the reader's own list because a squiggle under
+       prose is every spell checker's "something is wrong here". */
+    expect([...MARK_STYLES]).toEqual(['fill', 'underline', 'wave'])
+    expect([...READER_STYLES]).toEqual(['fill', 'underline'])
+    expect(MARK_STYLES).toContain('wave')
+    expect(READER_STYLES).not.toContain('wave')
   })
 })
 
