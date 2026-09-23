@@ -166,11 +166,14 @@ ignored = "1"
        reason the runtime started the list. The fourth was the audit-fix round
        REMOVING the app's vestigial direct `axum`: app code never referenced
        it, and the server crate under the webhost plugin declares it with the
-       identical feature set. */
+       identical feature set. The fifth is phase 30's `tauri-plugin-voices`,
+       desktop-only because it links ONNX Runtime for the English engine and
+       MLX for the Chinese one, neither of which compiles for a phone. */
     const pinned = new Set([
       'tauri-plugin-mcp-bridge',
       'tauri-plugin-persisted-scope',
       'tauri-plugin-single-instance',
+      'tauri-plugin-voices',
       'tauri-plugin-webhost',
       'tauri-plugin-window-state',
       'tauri',

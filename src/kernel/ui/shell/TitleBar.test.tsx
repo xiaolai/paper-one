@@ -43,7 +43,7 @@ function bar(platform: Platform) {
       bookTitle="Paper"
       bookSubtitle=""
       speech={speech}
-      listenRefused={false}
+      listenRefusal={null}
       hasBook={false}
     />,
   )
@@ -94,7 +94,7 @@ describe('the controls a contributed screen does not have', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={speech}
-        listenRefused={false}
+        listenRefusal={null}
         hasBook={false}
       />,
     )
@@ -118,7 +118,7 @@ describe('the controls a contributed screen does not have', () => {
           bookTitle="Paper"
           bookSubtitle=""
           speech={speech}
-          listenRefused={false}
+          listenRefusal={null}
           hasBook={false}
         />,
       )
@@ -145,7 +145,7 @@ describe('the reading speed button', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={{ ...speech, available: true, speaking: true }}
-        listenRefused={false}
+        listenRefusal={null}
         hasBook
       />,
     )
@@ -173,7 +173,7 @@ describe('the reading speed button', () => {
  * carries the reason, the way it already does for a build with no speech engine.
  */
 describe('the Listen control when no voice is good enough', () => {
-  function listen(listenRefused: boolean): HTMLElement {
+  function listen(listenRefusal: string | null): HTMLElement {
     render(
       <TitleBar
         screens={[]}
@@ -183,7 +183,7 @@ describe('the Listen control when no voice is good enough', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={{ ...speech, available: true }}
-        listenRefused={listenRefused}
+        listenRefusal={listenRefusal}
         hasBook
       />,
     )
@@ -191,14 +191,24 @@ describe('the Listen control when no voice is good enough', () => {
   }
 
   it('is disabled and says why', () => {
-    const button = listen(true)
+    const button = listen(NO_GOOD_VOICE)
     expect(button).toHaveProperty('disabled', true)
     expect(button.getAttribute('data-disabled')).toBe('true')
     expect(button.getAttribute('title')).toBe(`Listen — ${NO_GOOD_VOICE}`)
   })
 
+  it('carries whatever reason it was given, not one of its own', () => {
+    /* ⚠️ THE REASON AND THE REFUSAL ARE ONE VALUE, so a control cannot be
+     * disabled with nothing to say. What would fix it differs — a pack that
+     * can be downloaded names itself and its size — and this component is not
+     * where that is decided. */
+    const button = listen('Download the English voice (321 MB) in Settings → Voices')
+    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('title')).toContain('321 MB')
+  })
+
   it('reads the chapter when a voice is good enough', () => {
-    const button = listen(false)
+    const button = listen(null)
     expect(button).toHaveProperty('disabled', false)
     expect(button.getAttribute('title')).toBe('Read this chapter aloud')
   })
@@ -223,7 +233,7 @@ function draw(
       bookTitle="Paper"
       bookSubtitle=""
       speech={over.speech ?? speech}
-      listenRefused={false}
+      listenRefusal={null}
       hasBook={over.hasBook ?? false}
     />,
   )
@@ -411,7 +421,7 @@ describe('the traffic lights, in a browser', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={speech}
-        listenRefused={false}
+        listenRefusal={null}
         hasBook={false}
       />,
     )
@@ -427,7 +437,7 @@ describe('the traffic lights, in a browser', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={speech}
-        listenRefused={false}
+        listenRefusal={null}
         hasBook={false}
       />,
     )
@@ -495,7 +505,7 @@ describe('what the chrome says without a word', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={speech}
-        listenRefused={false}
+        listenRefusal={null}
         hasBook={false}
       />,
     )
@@ -511,7 +521,7 @@ describe('what the chrome says without a word', () => {
         bookTitle="Moby-Dick"
         bookSubtitle="Melville"
         speech={speech}
-        listenRefused={false}
+        listenRefusal={null}
         hasBook
       />,
     )
@@ -531,7 +541,7 @@ describe('what the chrome says without a word', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={speech}
-        listenRefused={false}
+        listenRefusal={null}
         hasBook={false}
       />,
     )
@@ -604,7 +614,7 @@ describe('what the chrome says without a word', () => {
         bookTitle="Paper"
         bookSubtitle=""
         speech={speech}
-        listenRefused={false}
+        listenRefusal={null}
         hasBook={false}
       />,
     )

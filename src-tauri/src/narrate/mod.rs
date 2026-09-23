@@ -1,52 +1,36 @@
-//! Reading a book into a file, in the platform's own voice.
+//! Joining a book's rendered chapters into one `.m4b`.
 //!
-//! Read aloud goes through `window.speechSynthesis`, which is the right engine
-//! for reading and useless for EXPORTING: there is no audio-capture API in Web
-//! Speech at all. So an audiobook cannot be built on what the reader hears, and
-//! this is the other road to the same voices —
-//! `AVSpeechSynthesizer.writeUtterance:toBufferCallback:toMarkerCallback:`,
-//! which hands back PCM and word markers instead of playing.
+//! ⚠️ **THIS MODULE NO LONGER RENDERS ANYTHING, AND ITS HEADER DESCRIBED A
+//! RENDERER UNTIL PHASE 30.** `narrate_render` and `narrate_voices` went
+//! through `AVSpeechSynthesizer.writeUtterance:…`, which reached voices the
+//! WebView cannot see — and the 2026-09-22 measurement settled that none of
+//! them are reachable by a caller Apple did not sign either. Every voice it
+//! could actually use was below the floor the reading refuses, so the export
+//! could not produce a file anybody would want, and the whole of it was
+//! deleted (owner's decision, 2026-09-23).
 //!
-//! It also reaches voices the WEBVIEW CANNOT SEE. Measured on macOS 27 on
-//! 2026-09-20: `AVSpeechSynthesisVoice.speechVoices()` answered 192 voices
-//! where `speechSynthesis.getVoices()` in a `WKWebView` answered 73, and the
-//! three Enhanced ones were in the first list and not the second. A reader who
-//! downloads a Premium voice may therefore be able to EXPORT in it before they
-//! can read in it, which is why `narrate_voices` exists beside the web list.
+//! **Chapters are rendered by `tauri-plugin-voices` now** — Kokoro or Qwen,
+//! on weights the reader downloaded — and arrive here as the WAV shape
+//! `wav::read` accepts. What is left is the part that was always portable and
+//! always worth keeping: the join, `afconvert`, and the container.
 //!
-//! ## Three things measured the hard way, each of which had a wrong obvious answer
+//! ## What survives, and why each piece is the way it is
 //!
-//! ⚠️ **AN EMPTY BUFFER IS NOT THE END.** Twelve empty buffers arrived mid-way
-//! through a 154-second render of twelve repeated sentences — one per internal
-//! segment. Treating the first as the end truncates the book to 8 % and reports
-//! success, which is the worst failure available here: a complete-looking file
-//! with a twelfth of the book in it. The end is the DELEGATE's
-//! `didFinishSpeechUtterance` and nothing else.
+//! ⚠️ **`afconvert`'s OWN WAV PUTS `FLLR` WHERE `data` BELONGS** — a size field
+//! of 4 044 with 278 398 bytes of audio after it. A tolerant reader would hand
+//! the encoder 4 044 bytes of padding and call it a chapter: a book of silence
+//! with no error anywhere. `wav::read` therefore accepts **only** the one shape
+//! the engines write and refuses everything else by name.
 //!
-//! ⚠️ **`byteSampleOffset` RESTARTS AT EVERY SEGMENT.** The same render gave 11
-//! offset drops for 12 segments — `1068760 -> 0`, each at exactly one sentence's
-//! worth of characters. Read as absolute, every word after the first segment
-//! lands in the first twelve seconds, and the sync file looks plausible while
-//! being wrong for 92 % of the book. `Timeline` below is the arithmetic that
-//! fixes it, and it is pure so the trap has a test.
+//! ⚠️ **`chapter_starts` ACCUMULATES IN FRAMES AND CONVERTS ONCE.** Summing
+//! rounded milliseconds drifts: forty chapters each rounded down can put the
+//! last mark most of a second early.
 //!
-//! ⚠️ **NOTHING ARRIVES ON A WORKER THREAD.** Started from a spawned thread
-//! pumping its own `NSRunLoop`, the same render delivered 0 buffers, 0 markers
-//! and no completion in 25 seconds. The write must be STARTED on the main
-//! thread, and the app's own run loop is what then delivers the callbacks — so
-//! this never waits on the main thread, it only posts work to it and waits on a
-//! worker.
-//!
-//! ## What it costs
-//!
-//! 154 s of audio in 8.2 s — about 19× real time for a compact voice, so a
-//! ten-hour book is roughly half an hour. ⚠️ **THAT NUMBER IS A COMPACT VOICE'S
-//! AND IS AN UPPER BOUND.** Enhanced and Premium voices are larger models and
-//! none was installed on the machine where this was measured; re-measure before
-//! promising anything about them.
+//! ⚠️ **AND THE CONTAINER IS WRITTEN BY HAND, IN PURE RUST** — see `m4b`. Two
+//! readers must agree about it, and ffmpeg and AVFoundation disagreed on three
+//! separate defects; a green ffprobe means nothing on its own.
 
 use serde::Serialize;
-use tauri::{AppHandle, Runtime};
 
 /// The container — pure Rust, no framework, tested everywhere. See the module.
 ///
@@ -67,123 +51,6 @@ pub mod wav;
 /// on every platform; only this is Apple's.
 #[cfg(target_os = "macos")]
 mod apple;
-
-/// What a voice's identifier says about its quality — see `ui/reader/voiceChoice.ts`,
-/// which reads the same fact out of `voiceURI` on the web side.
-///
-/// TAKEN FROM `AVSpeechSynthesisVoiceQuality` HERE, not parsed out of the
-/// identifier: on this side the platform answers the question directly, and a
-/// string match would be a second implementation of something already given.
-#[cfg(any(target_os = "macos", test))]
-fn quality_name(raw: isize) -> &'static str {
-    match raw {
-        3 => "premium",
-        2 => "enhanced",
-        _ => "default",
-    }
-}
-
-/// A voice this machine can read with.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceInfo {
-    /// `com.apple.voice.premium.en-US.Ava` — the same string `voiceURI` carries.
-    pub identifier: String,
-    pub name: String,
-    /// BCP 47, as the platform spells it: `en-US`, `zh-CN`.
-    pub language: String,
-    pub quality: &'static str,
-}
-
-/// Which kind of thing a marker marks.
-///
-/// The raw values are `AVSpeechSynthesisMarkerMark`'s, whose order is declared
-/// in the SDK header: phoneme, word, sentence, paragraph, bookmark.
-#[cfg(any(target_os = "macos", test))]
-fn mark_name(raw: isize) -> &'static str {
-    match raw {
-        0 => "phoneme",
-        1 => "word",
-        2 => "sentence",
-        3 => "paragraph",
-        4 => "bookmark",
-        _ => "other",
-    }
-}
-
-/// One marker, placed on the whole render's timeline.
-#[derive(Serialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Marker {
-    pub kind: &'static str,
-    /// Where in the TEXT this marker is — UTF-16 code units, which is what
-    /// `NSRange` counts and what a JavaScript string index is.
-    pub start: usize,
-    pub len: usize,
-    /// Milliseconds from the start of the render.
-    pub at_ms: u64,
-}
-
-/// What a finished render produced.
-#[derive(Serialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Rendered {
-    pub path: String,
-    pub sample_rate: f64,
-    pub frames: u64,
-    pub duration_ms: u64,
-    pub markers: Vec<Marker>,
-}
-
-/// The segment arithmetic, kept pure so the measured trap has a test.
-///
-/// Feed it what the callbacks report, in the order they report it: samples
-/// arrive, an empty buffer ends a segment, markers carry an offset that is
-/// relative to the segment they are in. It answers absolute positions.
-#[cfg(any(target_os = "macos", test))]
-#[derive(Debug, Default)]
-struct Timeline {
-    /// Frames emitted across every segment so far.
-    frames: u64,
-    /// Frames emitted before the CURRENT segment began.
-    segment_base: u64,
-    sample_rate: f64,
-    bytes_per_frame: usize,
-}
-
-#[cfg(any(target_os = "macos", test))]
-impl Timeline {
-    fn push_frames(&mut self, n: u64) {
-        self.frames += n;
-    }
-
-    /// An empty buffer: the segment ended, so the next marker's zero means here.
-    fn end_segment(&mut self) {
-        self.segment_base = self.frames;
-    }
-
-    /// Where a marker sits on the whole render's timeline, in milliseconds.
-    ///
-    /// `None` while the format is still unknown — no buffer has arrived, so
-    /// there is no sample rate to divide by and no frame size to divide with. A
-    /// marker before the first buffer would otherwise be placed at zero, which
-    /// is a real time and a wrong one.
-    fn place(&self, byte_offset: usize) -> Option<u64> {
-        if self.sample_rate <= 0.0 || self.bytes_per_frame == 0 {
-            return None;
-        }
-        let within = (byte_offset / self.bytes_per_frame) as u64;
-        let frames = self.segment_base + within;
-        Some(((frames as f64 / self.sample_rate) * 1000.0).round() as u64)
-    }
-
-    fn duration_ms(&self) -> u64 {
-        if self.sample_rate <= 0.0 {
-            return 0;
-        }
-        ((self.frames as f64 / self.sample_rate) * 1000.0).round() as u64
-    }
-}
 
 /// Run blocking work off both the main thread and the async runtime's own
 /// threads.
@@ -276,26 +143,6 @@ pub fn chapter_starts(parts: &[wav::Facts]) -> Result<Vec<u64>, String> {
     Ok(starts)
 }
 
-/// Every voice this machine can read with, including any the webview hides.
-///
-/// EMPTY, NEVER AN ERROR, on a platform with no engine: an empty list is what
-/// the caller already has to handle — `getVoices()` answers `[]` until the
-/// engine has loaded — and inventing a refusal here would give the picker a
-/// second failure shape to draw for the same situation.
-#[tauri::command]
-pub fn narrate_voices() -> Vec<VoiceInfo> {
-    #[cfg(target_os = "macos")]
-    {
-        apple::voices()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Vec::new()
-    }
-}
-
-/// Render `text` to a mono 16-bit WAV at `path`, and report where each word is.
-///
 /// Turn a book's rendered chapters into one `.m4b`.
 ///
 /// ⚠️ **REFUSED OFF macOS**, like `narrate_render`: the encoder is the system's
@@ -330,42 +177,6 @@ pub async fn narrate_package(
 #[tauri::command]
 pub async fn narrate_package() -> Result<Packaged, String> {
     Err("Paper can only package an audiobook on macOS".to_owned())
-}
-
-/// Render `text` to a mono 16-bit WAV at `path`, and report where each word is.
-///
-/// ⚠️ **REFUSED BY NAME OFF macOS, rather than silently writing nothing.** A
-/// command that answered an empty `Rendered` would hand the exporter a chapter
-/// of no audio and let it carry on to the next one; the whole export has to stop
-/// at the first platform that cannot do it.
-///
-/// ⚠️ **`async`, AND A SYNCHRONOUS VERSION DEADLOCKED THE APP.** Tauri runs a
-/// synchronous command ON THE MAIN THREAD. This one posts the write to the main
-/// thread and then waits for the callbacks that only the main thread's run loop
-/// delivers — so run there itself, it blocked the thread it was waiting for.
-/// Measured in the running app: a zero-byte file, an idle process at 0.1 % CPU,
-/// and a bridge call that never returned. `narrate_voices` is synchronous and
-/// fine, because it asks the main thread for nothing.
-#[tauri::command]
-pub async fn narrate_render<R: Runtime>(
-    app: AppHandle<R>,
-    text: String,
-    voice: String,
-    rate: f32,
-    path: String,
-) -> Result<Rendered, String> {
-    #[cfg(target_os = "macos")]
-    {
-        offload("render", move || {
-            apple::render(&app, text, voice, rate, path)
-        })
-        .await
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, text, voice, rate, path);
-        Err("Paper can only render audio on macOS".to_owned())
-    }
 }
 
 #[cfg(test)]
@@ -432,95 +243,5 @@ mod tests {
     #[test]
     fn chapter_starts_of_nothing_is_nothing() {
         assert_eq!(chapter_starts(&[]).expect("empty"), Vec::<u64>::new());
-    }
-
-    #[test]
-    fn a_marker_offset_is_relative_to_its_segment() {
-        let mut timeline = Timeline {
-            sample_rate: 22_050.0,
-            bytes_per_frame: 4,
-            ..Timeline::default()
-        };
-        // One second of audio, then a segment boundary.
-        timeline.push_frames(22_050);
-        timeline.end_segment();
-        // A marker at the very start of the SECOND segment is at one second,
-        // not at zero — which is what an absolute reading would answer.
-        assert_eq!(timeline.place(0), Some(1000));
-        // And half a second into it, at one and a half.
-        assert_eq!(timeline.place(22_050 / 2 * 4), Some(1500));
-    }
-
-    #[test]
-    fn without_a_segment_boundary_an_offset_is_absolute() {
-        let mut timeline = Timeline {
-            sample_rate: 22_050.0,
-            bytes_per_frame: 4,
-            ..Timeline::default()
-        };
-        timeline.push_frames(22_050);
-        assert_eq!(timeline.place(0), Some(0));
-    }
-
-    #[test]
-    fn a_marker_before_the_first_buffer_has_no_time_rather_than_zero() {
-        let timeline = Timeline::default();
-        assert_eq!(timeline.place(0), None);
-        // A sample rate without a frame size is just as unusable.
-        let half = Timeline {
-            sample_rate: 22_050.0,
-            ..Timeline::default()
-        };
-        assert_eq!(half.place(64), None);
-    }
-
-    #[test]
-    fn the_frame_size_is_read_and_not_assumed() {
-        /* The same byte offset means a different time at a different frame size,
-         * which is why `bytes_per_frame` comes off the format. */
-        let float32 = Timeline {
-            sample_rate: 1000.0,
-            bytes_per_frame: 4,
-            ..Timeline::default()
-        };
-        let int16 = Timeline {
-            sample_rate: 1000.0,
-            bytes_per_frame: 2,
-            ..Timeline::default()
-        };
-        assert_eq!(float32.place(4000), Some(1000));
-        assert_eq!(int16.place(4000), Some(2000));
-    }
-
-    #[test]
-    fn duration_comes_from_the_frames_actually_written() {
-        let mut timeline = Timeline {
-            sample_rate: 22_050.0,
-            bytes_per_frame: 4,
-            ..Timeline::default()
-        };
-        assert_eq!(timeline.duration_ms(), 0);
-        timeline.push_frames(11_025);
-        assert_eq!(timeline.duration_ms(), 500);
-        timeline.end_segment();
-        timeline.push_frames(11_025);
-        /* ACROSS SEGMENTS: the boundary moves the base and must not reset the
-         * total, which is the same confusion from the other side. */
-        assert_eq!(timeline.duration_ms(), 1000);
-    }
-
-    #[test]
-    fn quality_and_mark_names_cover_what_the_sdk_declares() {
-        assert_eq!(quality_name(3), "premium");
-        assert_eq!(quality_name(2), "enhanced");
-        assert_eq!(quality_name(1), "default");
-        /* A tier this build has never heard of reads as `default` rather than
-         * panicking: the enum gains members between releases. */
-        assert_eq!(quality_name(99), "default");
-
-        assert_eq!(mark_name(1), "word");
-        assert_eq!(mark_name(2), "sentence");
-        assert_eq!(mark_name(3), "paragraph");
-        assert_eq!(mark_name(99), "other");
     }
 }

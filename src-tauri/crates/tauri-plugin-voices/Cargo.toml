@@ -1,0 +1,42 @@
+[package]
+name = "tauri-plugin-voices"
+version = "0.1.0"
+description = "Paper's downloadable voices: the catalogue, the installer, and the engines that read a book aloud"
+authors = ["Paper"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.91"
+publish = false
+# `tauri-plugin` requires this to equal the package name: it is how the
+# permission generator finds the crate whose commands it is writing grants for.
+links = "tauri-plugin-voices"
+# Not a crates.io crate: a workspace member of the app, reached by path.
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
+# The digest a pack is checked against is SHA-256 because that is what the model
+# hosts publish; `digest.rs` says why it is not BLAKE3, which is already here.
+sha2 = "0.10"
+data-encoding = "2"
+# `fs` and `io-util` for the streamed download and the streamed hash, `sync` for
+# the stop token the fetch loop waits on, `macros` for `select!` in that loop.
+tokio = { version = "1", features = ["rt", "fs", "sync", "io-util", "macros"] }
+futures-util = { version = "0.3", default-features = false }
+# `stream` is what makes a 2 GB download arrive in chunks rather than in memory.
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "http2"] }
+# ONNX Runtime, which is what runs Kokoro. `tract` — pure Rust, nothing fetched
+# at build time — was tried first and cannot load the model: it refuses the
+# vocoder's STFT node. See `kokoro.rs`.
+ort = "2.0.0-rc.13"
+# The plugin surface. `default-features = false` for the same reason the peer
+# plugin does it: the app's own crate picks the Tauri features, and a plugin
+# that turned them on would decide for every host that links it.
+tauri = { version = "2.11.3", default-features = false }
+
+[build-dependencies]
+tauri-plugin = { version = "2.6", features = ["build"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

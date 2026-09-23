@@ -138,3 +138,7 @@ CLAUDE.md
 .codex/
 .mcp.json
 # <<< cc-suite <<<
+
+# The Qwen engine's Swift package builds here, and `Package.resolved` pins its
+# dependencies -- that one IS tracked, so a build is reproducible.
+src-tauri/crates/tauri-plugin-voices/swift/*/.build/

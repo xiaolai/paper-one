@@ -75,6 +75,10 @@ export type { BookPatch, Library, LibraryOptions, RekeyOutcome, RemoteRow } from
 export { notifyAll } from './core/notify'
 export { isMissingFile } from './core/bookVault'
 export { messageOf } from './core/messageOf'
+/* How a voice pack's size is spelled for a reader. ONE formatter: the
+   Listen control's notice and the Voices pane both say a pack's size, and
+   their two copies had already drifted apart at 1 023.6 MiB. */
+export { packArrived, packSize } from './ui/reader/engineVoice'
 export { createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
 export type { UnplacedMark } from './core/marks'
@@ -160,7 +164,22 @@ export type {
  * to `serveServices`, and what an in-process caller runs directly — one set
  * of handlers, three ways of reaching them. */
 export { buildReadServices, buildServices, handlerFor } from './core/services/handlers'
-export type { DevicePort, DeviceRow, HashPort, ServiceEnvironment, ShelfFacts, ShelfPort, SizePort } from './core/services/environment'
+export type {
+  DevicePort,
+  DeviceRow,
+  HashPort,
+  InstallProgress,
+  ServiceEnvironment,
+  ShelfFacts,
+  ShelfPort,
+  SizePort,
+  SpeechEnginePort,
+  SpeechRequest,
+  SpokenAudio,
+  SpokenWordTiming,
+  VoiceChoice,
+  VoicePack,
+} from './core/services/environment'
 export { SERVICE_ERRORS, isRefusal, refuse } from './core/services/refusals'
 export type { Refusal, ServiceErrorCode } from './core/services/refusals'
 export { PAGE_BYTES, PAGE_ROWS, pages } from './core/services/paging'

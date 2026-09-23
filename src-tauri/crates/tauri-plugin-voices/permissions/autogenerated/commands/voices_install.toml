@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-voices-install"
+description = "Enables the voices_install command without any pre-configured scope."
+commands.allow = ["voices_install"]
+
+[[permission]]
+identifier = "deny-voices-install"
+description = "Denies the voices_install command without any pre-configured scope."
+commands.deny = ["voices_install"]

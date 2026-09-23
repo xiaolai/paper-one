@@ -22,6 +22,8 @@ import { save } from '@tauri-apps/plugin-dialog'
 import { BaseDirectory, mkdir, readDir, remove } from '@tauri-apps/plugin-fs'
 import { basename } from '../../core/bookFiles'
 import type { AudiobookPlatform } from './audiobook'
+import { unqualify } from './engineVoice'
+import type { VoicePack } from '../../core/ports'
 
 /** Under `$APPDATA`, so the fs grant already covers it. */
 const SCRATCH_DIR = 'audiobook'
@@ -200,7 +202,20 @@ async function sweepAbandonedScratch(keep: string): Promise<void> {
 }
 
 /** The engine, as `exportAudiobook` needs it. */
-export async function tauriAudiobook(): Promise<AudiobookPlatform> {
+export async function tauriAudiobook(
+  /**
+   * The installed packs, so an engine-qualified voice can be resolved to the
+   * pack that holds it. Empty in a build with no voices capability, where
+   * empty in a build with no voices capability, where an export has no voice
+   * to render on at all and refuses.
+   *
+   * ⚠️ **THE STORED NAME CARRIES THE FAMILY, AND THE COMMAND WANTS THE PACK
+   * ID.** They differ deliberately: a family outlives a re-cut pack, which is
+   * why a reader's choice is written that way. The resolution has to happen
+   * somewhere, and here is where both are in hand.
+   */
+  packs: readonly VoicePack[] = [],
+): Promise<AudiobookPlatform> {
   /**
    * ⚠️ **ONE DIRECTORY PER EXPORT, AND IT USED TO BE ONE FOR ALL OF THEM.**
    * `chapter-<index>.wav` under a shared root meant two exports running together
@@ -222,7 +237,37 @@ export async function tauriAudiobook(): Promise<AudiobookPlatform> {
   await sweepAbandonedScratch(run).catch(() => {})
 
   return {
-    render: (job) => invoke('narrate_render', { ...job }),
+    /**
+     * ⚠️ **ONLY A DOWNLOADED VOICE CAN RENDER A BOOK.** `narrate_render` over
+     * AVSpeechSynthesizer was deleted in phase 30: every voice it reached on a
+     * Mac is below the floor the reading refuses, so it could not produce a
+     * file anybody would want. The voice's own shape is what says whether this
+     * is one — the same string the reading stores, so one choice serves both.
+     *
+     * The file is the one WAV shape `narrate/wav.rs` accepts, and
+     * `narrate_package` — the muxer, `afconvert`, the chapter track and both
+     * readers' checks — reads it unchanged.
+     */
+    render: async (job) => {
+      const named = unqualify(job.voice)
+      if (!named) {
+        /* ⚠️ THERE IS NO LONGER ANYWHERE ELSE TO SEND IT. `narrate_render`
+         * over AVSpeechSynthesizer was deleted in phase 30: every voice it
+         * could reach on a Mac is below the floor the reading refuses, so it
+         * could not produce a file anybody would want. A job that arrives with
+         * a platform identifier is a caller that has not asked the packs, and
+         * it is refused by name rather than rendered in a voice the reading
+         * would not use. */
+        throw new Error(`${job.voice} is not a downloaded voice, and an audiobook is rendered on one`)
+      }
+      await invoke('plugin:voices|voices_render_file', {
+        pack: packs.find((pack) => pack.family === named.family)?.id ?? named.family,
+        voice: named.voiceId,
+        text: job.text,
+        rate: job.rate,
+        path: job.path,
+      })
+    },
     package: (job) =>
       invoke<{ durationMs: number; chapters: number }>('narrate_package', { ...job }),
     scratchFor: (index) => `${root}/chapter-${index}.wav`,

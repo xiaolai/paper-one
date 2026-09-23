@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-voices-render-file"
+description = "Enables the voices_render_file command without any pre-configured scope."
+commands.allow = ["voices_render_file"]
+
+[[permission]]
+identifier = "deny-voices-render-file"
+description = "Denies the voices_render_file command without any pre-configured scope."
+commands.deny = ["voices_render_file"]

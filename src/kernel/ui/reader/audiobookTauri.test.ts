@@ -230,17 +230,46 @@ describe('the engine an export runs on', () => {
     expect(engine.scratchFor(3)).toBe(`/data/one.paper.reader/${RUN_DIR}/chapter-3.wav`)
   })
 
-  it('renders and packages through the narrate commands, with the job as it was given', async () => {
-    const engine = await tauriAudiobook()
-    const job = { text: 'Call me Ishmael.', voice: 'com.apple.voice.enhanced.en-US.Zoe', rate: 1, path: '/x.wav' }
+  it('renders through the pack that holds the voice, and packages through narrate', async () => {
+    /* ⚠️ **THE VOICE'S SHAPE IS THE ROUTING, AND THE FAMILY IS NOT THE PACK
+     * ID.** A reader's choice is stored by FAMILY, because that outlives a
+     * re-cut pack; the command wants the id. Resolving the one to the other is
+     * this function's job, and it is the only place both are in hand. */
+    const pack = {
+      id: 'english-kokoro',
+      name: 'English',
+      summary: '',
+      family: 'kokoro',
+      languages: ['en'],
+      bytes: 1,
+      minimumMemoryGb: 4,
+      voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+      installed: true,
+    }
+    const engine = await tauriAudiobook([pack])
+    const job = { text: 'Call me Ishmael.', voice: 'kokoro:af_heart', rate: 1, path: '/x.wav' }
     await engine.render(job)
     tauri.invokeAnswer = { durationMs: 60_000, chapters: 1 }
     const packaged = { chapters: [{ title: 'One', path: '/x.wav' }], title: 'Moby-Dick', author: 'Melville', path: '/m.m4b' }
     await expect(engine.package(packaged)).resolves.toEqual({ durationMs: 60_000, chapters: 1 })
     expect(tauri.invoked).toEqual([
-      ['narrate_render', job],
+      [
+        'plugin:voices|voices_render_file',
+        { pack: 'english-kokoro', voice: 'af_heart', text: 'Call me Ishmael.', rate: 1, path: '/x.wav' },
+      ],
       ['narrate_package', packaged],
     ])
+  })
+
+  it('refuses a platform voice rather than rendering in one', async () => {
+    /* ⚠️ THERE IS NOWHERE TO SEND IT. `narrate_render` over AVSpeechSynthesizer
+     * was deleted in phase 30 — every voice it reached on a Mac is below the
+     * floor the reading refuses — so a job carrying a Web Speech identifier is
+     * a caller that has not asked the packs. */
+    const engine = await tauriAudiobook([])
+    const job = { text: 'Call me Ishmael.', voice: 'com.apple.voice.enhanced.en-US.Zoe', rate: 1, path: '/x.wav' }
+    await expect(engine.render(job)).rejects.toThrow(/not a downloaded voice/)
+    expect(tauri.invoked).toEqual([])
   })
 
   it('removes a chapter by its name under the granted root, whatever separator its path used', async () => {

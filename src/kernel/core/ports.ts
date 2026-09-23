@@ -213,6 +213,130 @@ export interface SizePort {
  * the size port; absent on a host with no peer, and every reader of it
  * answers "unmeasured" then rather than failing.
  */
+/**
+ * A voice pack the catalogue offers, as the interface needs to know it.
+ *
+ * Every field is what a reader decides with — how big it is, what it can read,
+ * what it needs from the machine, and who may license it. The engine's name is
+ * here rather than inferred from the id because `readingVoice` is stored
+ * engine-qualified (`kokoro:af_heart`) and the interface must be able to build
+ * that string without knowing which family a pack belongs to.
+ */
+export interface VoicePack {
+  readonly id: string
+  readonly name: string
+  readonly summary: string
+  /** `kokoro`, `qwen` — which engine reads it. */
+  readonly family: string
+  /** Primary language subtags this pack can read: `['zh']`. */
+  readonly languages: readonly string[]
+  /** Every byte of it, so the download can be named before it starts. */
+  readonly bytes: number
+  /** The memory this Mac must have. A machine under it is not offered the pack. */
+  readonly minimumMemoryGb: number
+  readonly voices: readonly VoiceChoice[]
+  /** Whether every artifact is present and verified on this device. */
+  readonly installed: boolean
+}
+
+/** One voice inside a pack. */
+export interface VoiceChoice {
+  readonly id: string
+  readonly name: string
+  /** A full tag — `zh-CN` — because two voices of one pack can differ by region. */
+  readonly language: string
+  readonly note: string
+}
+
+/** How far a pack's download has got. */
+export type InstallProgress =
+  | { readonly kind: 'downloading'; readonly received: number; readonly total: number }
+  | { readonly kind: 'verifying' }
+  | { readonly kind: 'installed' }
+
+/** What to read, in which voice. */
+export interface SpeechRequest {
+  readonly packId: string
+  readonly voiceId: string
+  readonly text: string
+  /** A multiplier on the engine's own speed; 1 is its default. */
+  readonly rate?: number
+}
+
+/** A word, and when it is spoken. Absent for an engine that cannot say. */
+export interface SpokenWordTiming {
+  /** Where the word sits in the requested text, in UTF-16 code units. */
+  readonly start: number
+  readonly length: number
+  readonly startMs: number
+  readonly endMs: number
+}
+
+/**
+ * Audio, and what is known about where the words fall in it.
+ *
+ * `words` is EMPTY rather than absent for an engine that does not report
+ * boundaries, and `sentences` carries what that engine does know. The
+ * distinction is what lets the reading fall back to a sentence highlight
+ * instead of dropping the follow-along entirely — see `EngineSpeaker`.
+ */
+export interface SpokenAudio {
+  /** 16-bit mono PCM, little-endian, at `sampleRate`. */
+  readonly pcm: Uint8Array
+  readonly sampleRate: number
+  readonly words: readonly SpokenWordTiming[]
+  /** Sentences the engine refused, with the reason, so they can be named. */
+  readonly skipped: readonly { readonly text: string; readonly why: string }[]
+}
+
+/**
+ * The downloadable voices: what may be had, getting one, and reading with it.
+ *
+ * ⚠️ **BOUND BY A CAPABILITY, ABSENT ON A HOST WITHOUT ONE**, like the size and
+ * hash ports above — a browser client and a phone have no engine, and every
+ * reader of this answers "no voice" then rather than failing. The floor rule
+ * from phase 29 is unchanged by its presence: a pack's voices are admitted, and
+ * the platform's own are still refused where their tier can be read.
+ */
+export interface SpeechEnginePort {
+  /** What the catalogue offers this device, and what is already here. */
+  catalogue(): Promise<readonly VoicePack[]>
+  /**
+   * Fetch a pack. Resolves when every byte has been checked against the
+   * manifest; rejects, having left nothing half-installed, otherwise.
+   */
+  install(packId: string, onProgress: (progress: InstallProgress) => void, signal?: AbortSignal): Promise<void>
+  /** Remove an installed pack and its files. */
+  remove(packId: string): Promise<void>
+  /**
+   * Read some text aloud into samples.
+   *
+   * ⚠️ **NO `AbortSignal`, AND ITS ABSENCE IS THE HONEST SHAPE.** This declared
+   * one until 2026-09-23 and nothing in the stack could keep it: the plugin's
+   * `voices_stop` cancels a DOWNLOAD — it holds the fetch loop's token and
+   * nothing else — no caller ever passed a signal, and the wrapper in
+   * `useVoicePacks` dropped the parameter on the floor, which TypeScript
+   * permits. A port that declares a capability nothing implements is the shape
+   * `paper/share-notes/1` had when it went a whole phase with no client.
+   *
+   * What the reading does instead is `Promise.race` against its own deadline
+   * (`EngineSpeaker`), and what a reader presses Stop for is the PLAYBACK,
+   * which stops at once. A render that is already running finishes into a
+   * buffer nobody plays. Giving this a real signal means a cancellation token
+   * through the plugin to the engine loop, which is a change to make when
+   * something needs it rather than a parameter to leave lying here.
+   */
+  render(request: SpeechRequest): Promise<SpokenAudio>
+  /**
+   * Let a loaded model go.
+   *
+   * Published because it is the reader's memory: Qwen holds about 2.5 GB while
+   * it is loaded, and a model that is merely idle is indistinguishable to the
+   * machine from one that is reading.
+   */
+  release(): Promise<void>
+}
+
 export interface HashPort {
   /** BLAKE3, hex, and the byte count of `books/<folder>/<name>`; rejects when there is no such file. */
   hashFile(folder: string, name: string): Promise<{ readonly blake3: string; readonly size: number }>

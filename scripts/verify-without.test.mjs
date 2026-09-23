@@ -143,6 +143,11 @@ describe('copyTree', () => {
     expect(dest.startsWith(realpathSync(tmpdir()))).toBe(true) // realpath'd, so Vite's module ids and the root agree
     expect(COPY_EXCLUDE).toContain('node_modules')
     expect(COPY_EXCLUDE).toContain('target')
+    /* ⚠️ SwiftPM's build directory, missing for a phase. The copy carried
+       yyjson's UTF-16 test fixture into `no-binary-source.test.mjs`, which
+       imports this list and walks with it because the copy has no `.git` to
+       ask. Cargo is `target`; the next toolchain's goes here too. */
+    expect(COPY_EXCLUDE).toContain('.build')
   })
 
   it('does not link node_modules when the source has none', () => {

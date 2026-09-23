@@ -442,6 +442,41 @@ const REVIEWED_FOOTPRINT = [
 
   /* -- sync/ui/storageModel.ts -- the downloads ledger, under sync/. */
   'sync/ui/storageModel.ts atomicWrite(fs, DOWNLOADS_INDEX_PATH)',
+
+  /* -- voices -- removing a downloaded voice pack.
+   *
+   * ⚠️ **THE REVIEW, and the first entry here that touches NO KERNEL
+   * FILESYSTEM AT ALL.** The scan matches on the call's SHAPE — a name of
+   * `remove`-kind with an argument — and `wire.remove(packId)` is a plugin
+   * command, not an `fs` call: `services.fs` is never reached, no path is
+   * built in TypeScript, and the string that crosses is a pack id. Listed
+   * rather than exempted, because the scan being shape-based is what makes it
+   * hard to slip a real write past, and an entry with its reasoning is cheaper
+   * than teaching it to tell a wire from a filesystem.
+   *
+   * What it reaches, and why that is narrow enough to allow:
+   *
+   *  - **The id is checked against the EMBEDDED catalogue before any path is
+   *    built from it** (`pack_of` in `commands.rs`), so the only ids that can
+   *    reach the filesystem are ones the manifest compiled into the binary
+   *    names. A string the webview invents is refused before a path exists.
+   *  - **Every component goes through `safe_component`** in `paths.rs`, the
+   *    same closed-alphabet check the installer's promotion uses, so no id can
+   *    escape the voices root even if the catalogue were wrong.
+   *  - **It is confined to `voices/`**, a sibling of `books/` and `peer/`: a
+   *    pack is not a book, and removing one can never name a reader's library.
+   */
+  'voices/lib/port.ts wire.remove(packId)',
+
+  /* -- voices/ui/VoicesPane.tsx -- the Remove button.
+   *
+   * The same call one layer up, and listed for the same reason: the scan
+   * matches a `remove`-shaped call, and this one goes through the kernel PORT
+   * — `services.fs` is never reached and no path is built in TypeScript. What
+   * it can name is bounded by the entry the reader pressed, and every id in
+   * that list came from the embedded catalogue. The review of what the call
+   * beneath it reaches is on the entry above. */
+  'voices/ui/VoicesPane.tsx port.remove(pack.id)',
 ].sort()
 
 /** Path constants the footprint above leans on: each must resolve under the

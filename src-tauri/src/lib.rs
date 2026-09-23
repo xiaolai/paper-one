@@ -475,8 +475,6 @@ pub fn run() {
             open_external,
             atomic::write_atomic,
             atomic::fsync_in_data_dir,
-            narrate::narrate_voices,
-            narrate::narrate_render,
             narrate::narrate_package
         ])
         // Scoped by `capabilities/default.json`, not by these registrations —
@@ -546,6 +544,15 @@ pub fn run() {
     #[cfg(feature = "desktop")]
     {
         builder = builder.plugin(tauri_plugin_webhost::init());
+    }
+
+    /* The downloadable voices. DESKTOP ONLY, and nothing it needs ships in the
+     * bundle: a reader who wants a book read aloud fetches a pack, which is
+     * checked byte for byte against a catalogue embedded in this binary. Its
+     * commands are granted by `voices:default` in capabilities/default.json. */
+    #[cfg(feature = "desktop")]
+    {
+        builder = builder.plugin(tauri_plugin_voices::init());
     }
 
     builder = builder

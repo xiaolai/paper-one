@@ -1,0 +1,8 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "resources": {
+      "crates/tauri-plugin-voices/swift/QwenKit/.build/release/mlx-swift_Cmlx.bundle": "mlx-swift_Cmlx.bundle"
+    }
+  }
+}

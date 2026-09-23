@@ -1,0 +1,252 @@
+{
+  "$schema": "./voices.manifest.schema.json",
+  "version": 1,
+  "packs": [
+    {
+      "id": "english-kokoro",
+      "family": "kokoro",
+      "name": "English",
+      "summary": "Kokoro 82M, read on this device. Reports each word as it is spoken.",
+      "languages": [
+        "en"
+      ],
+      "platforms": [
+        "macos"
+      ],
+      "minimumMemoryGb": 4,
+      "voices": [
+        {
+          "id": "af_heart",
+          "name": "Heart",
+          "language": "en-US",
+          "note": "American. Graded A by Kokoro's authors."
+        },
+        {
+          "id": "af_bella",
+          "name": "Bella",
+          "language": "en-US",
+          "note": "American. Graded A− by Kokoro's authors."
+        },
+        {
+          "id": "bf_emma",
+          "name": "Emma",
+          "language": "en-GB",
+          "note": "British. Graded B− by Kokoro's authors."
+        }
+      ],
+      "artifacts": [
+        {
+          "path": "model.onnx",
+          "url": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped/resolve/dd4401a9add81ac692d20e240d22ec9dda82cc29/onnx/model.onnx",
+          "bytes": 325532171,
+          "sha256": "651ea8291843a92276a4a003581a215cb07d15e47dde6fcfb1b768f9a1682054",
+          "licence": "Apache-2.0",
+          "role": "model"
+        },
+        {
+          "path": "config.json",
+          "url": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped/resolve/dd4401a9add81ac692d20e240d22ec9dda82cc29/config.json",
+          "bytes": 44,
+          "sha256": "df34b4f930b23447cd4dc410fabfb42eb3f24e803e6c3f97d618fb359380a36f",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "tokenizer.json",
+          "url": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped/resolve/dd4401a9add81ac692d20e240d22ec9dda82cc29/tokenizer.json",
+          "bytes": 3497,
+          "sha256": "77a02c8e164413299b4b4c403b14f8e0e1c1b727db4d46a09d6327b861060a34",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "voices/af_heart.bin",
+          "url": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped/resolve/dd4401a9add81ac692d20e240d22ec9dda82cc29/voices/af_heart.bin",
+          "bytes": 522240,
+          "sha256": "d583ccff3cdca2f7fae535cb998ac07e9fcb90f09737b9a41fa2734ec44a8f0b",
+          "licence": "Apache-2.0",
+          "role": "voice"
+        },
+        {
+          "path": "voices/af_bella.bin",
+          "url": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped/resolve/dd4401a9add81ac692d20e240d22ec9dda82cc29/voices/af_bella.bin",
+          "bytes": 522240,
+          "sha256": "f69d836209b78eb8c66e75e3cda491e26ea838a3674257e9d4e5703cbaf55c8b",
+          "licence": "Apache-2.0",
+          "role": "voice"
+        },
+        {
+          "path": "voices/bf_emma.bin",
+          "url": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped/resolve/dd4401a9add81ac692d20e240d22ec9dda82cc29/voices/bf_emma.bin",
+          "bytes": 522240,
+          "sha256": "669fe0647f9dd04fcab92f1439a40eeb4c8b4ab1f82e4996fe3d918ce4a63b73",
+          "licence": "Apache-2.0",
+          "role": "voice"
+        },
+        {
+          "path": "lexicon/us_gold.json",
+          "url": "https://raw.githubusercontent.com/hexgrad/misaki/fba1236595f2d2bf21d414ba6e57d25256afada3/misaki/data/us_gold.json",
+          "bytes": 3000469,
+          "sha256": "dc414872a49a28ae6c141463d502fd945f3b2fde040484fdc47d00cc4612686f",
+          "licence": "Apache-2.0",
+          "role": "lexicon"
+        },
+        {
+          "path": "lexicon/us_silver.json",
+          "url": "https://raw.githubusercontent.com/hexgrad/misaki/fba1236595f2d2bf21d414ba6e57d25256afada3/misaki/data/us_silver.json",
+          "bytes": 3099517,
+          "sha256": "de8f67be911bb6c659187b4a65fd966b6a30e56350e0f790d763210b053ac475",
+          "licence": "Apache-2.0",
+          "role": "lexicon"
+        },
+        {
+          "path": "lexicon/cmudict.dict",
+          "url": "https://raw.githubusercontent.com/cmusphinx/cmudict/74790861f652b15e4ac49015a90074ad62a27690/cmudict.dict",
+          "bytes": 3618488,
+          "sha256": "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22",
+          "licence": "BSD-2-Clause",
+          "role": "lexicon"
+        },
+        {
+          "path": "lexicon/cmudict.LICENSE",
+          "url": "https://raw.githubusercontent.com/cmusphinx/cmudict/74790861f652b15e4ac49015a90074ad62a27690/LICENSE",
+          "bytes": 1754,
+          "sha256": "bd4ce8e44170a5f9f481310ca85c51de3c4f851a65e679b40e603b143bd3542a",
+          "licence": "BSD-2-Clause",
+          "role": "licence"
+        }
+      ]
+    },
+    {
+      "id": "chinese-qwen",
+      "family": "qwen",
+      "name": "Chinese",
+      "summary": "Qwen3-TTS 0.6B, read on this device. Reads mixed Chinese and English text.",
+      "languages": [
+        "zh"
+      ],
+      "platforms": [
+        "macos"
+      ],
+      "minimumMemoryGb": 8,
+      "voices": [
+        {
+          "id": "Vivian",
+          "name": "Vivian",
+          "language": "zh-CN",
+          "note": "Bright young woman."
+        },
+        {
+          "id": "Serena",
+          "name": "Serena",
+          "language": "zh-CN",
+          "note": "Warm, gentle young woman."
+        },
+        {
+          "id": "Uncle_Fu",
+          "name": "Uncle Fu",
+          "language": "zh-CN",
+          "note": "Older man, low and mellow."
+        }
+      ],
+      "artifacts": [
+        {
+          "path": "model.safetensors",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/model.safetensors",
+          "bytes": 1811626550,
+          "sha256": "e6eb20e645c5a28ee66bf8434edb5b67a5f151530dab63afe22787d71bcf5382",
+          "licence": "Apache-2.0",
+          "role": "model"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/model.safetensors.index.json",
+          "bytes": 32289,
+          "sha256": "1b1e10fb201a65a1b24991cf8f6800d785441ad9ca0ad83828d6bf00f6d5e8ec",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "config.json",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/config.json",
+          "bytes": 5853,
+          "sha256": "69c1b78421a5e408b5e91a74a9995213546613ffe2a1d87a00c7743900ead6ee",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "generation_config.json",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/generation_config.json",
+          "bytes": 245,
+          "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "merges.txt",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/merges.txt",
+          "bytes": 1671839,
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "vocab.json",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/vocab.json",
+          "bytes": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/preprocessor_config.json",
+          "bytes": 127,
+          "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/tokenizer_config.json",
+          "bytes": 7344,
+          "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "speech_tokenizer/model.safetensors",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/speech_tokenizer/model.safetensors",
+          "bytes": 682293092,
+          "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+          "licence": "Apache-2.0",
+          "role": "model"
+        },
+        {
+          "path": "speech_tokenizer/config.json",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/speech_tokenizer/config.json",
+          "bytes": 2336,
+          "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "speech_tokenizer/configuration.json",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/speech_tokenizer/configuration.json",
+          "bytes": 76,
+          "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
+          "licence": "Apache-2.0",
+          "role": "config"
+        },
+        {
+          "path": "speech_tokenizer/preprocessor_config.json",
+          "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16/resolve/6415d95f88be018ff9e46813119dc3bc12261328/speech_tokenizer/preprocessor_config.json",
+          "bytes": 234,
+          "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
+          "licence": "Apache-2.0",
+          "role": "config"
+        }
+      ]
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import {
   SPACING,
 } from '../../core/metrics'
 import { offeredFaces } from '../../core/typefaces'
+import type { VoicePack } from '../../core/ports'
 import styles from './SidePane.module.css'
 
 /**
@@ -1146,14 +1147,32 @@ describe('the voice the picker shows', () => {
     voiceURI: 'com.apple.voice.compact.en-US.Samantha',
     localService: true,
   }
+  /** The English pack, as the catalogue reports it once it is here. */
+  const englishPack: VoicePack = {
+    id: 'english-kokoro',
+    name: 'English',
+    summary: 'Kokoro 82M, read on this device.',
+    family: 'kokoro',
+    languages: ['en'],
+    bytes: 336_822_660,
+    minimumMemoryGb: 4,
+    voices: [
+      { id: 'af_heart', name: 'Heart', language: 'en-US', note: '' },
+      { id: 'af_bella', name: 'Bella', language: 'en-US', note: '' },
+    ],
+    installed: true,
+  }
+
   function pickerFor(
     chosen: Readonly<Record<string, string>>,
     voices: readonly (typeof installed)[] = [installed],
+    packs: readonly VoicePack[] = [],
   ): HTMLSelectElement {
     const { props } = full({
       narration: {
         lang: 'en-US',
         voices,
+        packs,
         chosen,
         rate: 1,
         sentenceGapMs: 150,
@@ -1175,12 +1194,14 @@ describe('the voice the picker shows', () => {
   function voiceGroup(
     voices: readonly (typeof installed)[] = [installed],
     chosen: Readonly<Record<string, string>> = {},
+    packs: readonly VoicePack[] = [],
   ) {
     const asked: [string, unknown][] = []
     const { props } = full({
       narration: {
         lang: 'en-US',
         voices,
+        packs,
         chosen,
         rate: 1,
         sentenceGapMs: 150,
@@ -1283,5 +1304,71 @@ describe('the voice the picker shows', () => {
       expect([...select.options].map((option) => option.value)).toEqual([''])
       cleanup()
     }
+  })
+
+  /**
+   * ⚠️ **MEASURED IN THE RUNNING APP, 2026-09-23 — THE ROW CONTRADICTED THE
+   * READING.** With the English pack installed on `mbp16`, `engineVoiceFor` had
+   * resolved Heart and the book was being read in it, while this row said
+   * *"None — no high-quality voice is available here"*. The picker asked only
+   * `voiceFor`, which refuses every voice a Mac's WebView offers — so on a Mac
+   * it answered `none` however many packs had been downloaded. The four cases
+   * below are the ones the app itself was in.
+   */
+  it('names the downloaded voice Automatic means, where the platform has none', () => {
+    const select = pickerFor({}, [compact], [englishPack])
+    expect(select.selectedOptions[0]?.textContent).toBe('Automatic (Heart)')
+  })
+
+  it('offers a pack’s voices under the pack’s own name', () => {
+    /* The pack is the group heading because it is what a reader is choosing
+       between: two packs can ship a voice of one name, and the tier headings
+       say nothing about where a downloaded voice came from. */
+    const select = pickerFor({}, [compact], [englishPack])
+    const groups = [...select.querySelectorAll('optgroup')]
+    expect(groups.map((group) => group.label)).toEqual(['English'])
+    expect([...groups[0]!.querySelectorAll('option')].map((option) => [option.value, option.textContent])).toEqual([
+      ['kokoro:af_heart', 'Heart'],
+      ['kokoro:af_bella', 'Bella'],
+    ])
+  })
+
+  it('offers the packs above the platform’s own voices, the order the reading asks in', () => {
+    /* ⚠️ `engineVoiceFor` runs in FRONT of `voiceFor`, so a list that put the
+       platform's tiers first would name a second-choice voice in its first row
+       — the drift `voiceGroups` records for the tiers, one level up. */
+    const select = pickerFor({}, [installed], [englishPack])
+    expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['English', 'Enhanced'])
+  })
+
+  it('says what Automatic means, not what the reader already chose', () => {
+    /* ⚠️ Selecting the Automatic row stores `''`, so the label has to name what
+       the reading would pick with NOTHING stored. Asked with the choice in
+       hand, `engineVoiceFor` honours it and the row said "Automatic (Bella)" to
+       a reader who had chosen Bella — promising the wrong voice to anybody who
+       then selected it. `bestVoice`, the platform's side, was never asked the
+       other way. */
+    const select = pickerFor({ en: 'kokoro:af_bella' }, [compact], [englishPack])
+    expect(select.options[0]?.textContent).toBe('Automatic (Heart)')
+    expect(select.value).toBe('kokoro:af_bella')
+  })
+
+  it('draws no heading for a pack with no voices in it', () => {
+    /* ⚠️ A heading with nothing under it. The empty-group guard in `SelectRow`
+       carried a directive saying no caller could emit one, which stopped being
+       true when the picker began offering packs: `VoicePack.voices` is data
+       from a manifest, not something this file constructs. */
+    const select = pickerFor({}, [installed], [{ ...englishPack, voices: [] }])
+    expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['Enhanced'])
+  })
+
+  it('shows a stored pack voice, and falls through to Automatic once the pack has gone', () => {
+    /* Same rule as a platform voice that has been uninstalled: a preference
+       naming something that is no longer here must not leave the reader with a
+       blank row or a book that has stopped being readable. */
+    expect(pickerFor({ en: 'kokoro:af_bella' }, [compact], [englishPack]).value).toBe('kokoro:af_bella')
+    cleanup()
+    const gone = pickerFor({ en: 'kokoro:af_bella' }, [compact], [{ ...englishPack, installed: false }])
+    expect(gone.selectedOptions[0]?.textContent).toBe('None — no high-quality voice is available here')
   })
 })

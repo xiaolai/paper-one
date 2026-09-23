@@ -306,7 +306,7 @@ describe('what the Voice group is handed', () => {
     voiceURI: 'com.apple.voice.enhanced.en-US.Zoe',
     localService: true,
   }
-  const narration = { lang: 'en-US', voices: [ZOE] }
+  const narration = { lang: 'en-US', voices: [ZOE], packs: [] }
 
   function voiceRows(over: Partial<SidePaneProps> = {}) {
     const dispatch = vi.fn()
