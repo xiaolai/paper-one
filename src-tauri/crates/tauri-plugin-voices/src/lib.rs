@@ -7,6 +7,7 @@
 //! makes a stopped download leave nothing half-installed.
 
 pub mod cancel;
+pub mod commands;
 pub mod digest;
 pub mod english;
 pub mod error;
@@ -14,6 +15,8 @@ pub mod install;
 pub mod kokoro;
 pub mod manifest;
 pub mod paths;
+pub mod plugin;
 pub mod qwen;
 
 pub use error::{Error, Result};
+pub use plugin::init;

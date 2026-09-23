@@ -20,7 +20,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let (Some(id), Some(root)) = (args.next(), args.next()) else {
         eprintln!("usage: get <pack id> <directory>");
-        eprintln!("packs: {}", manifest::embedded().packs.iter().map(|p| p.id.clone()).collect::<Vec<_>>().join(", "));
+        eprintln!(
+            "packs: {}",
+            manifest::embedded()
+                .packs
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         std::process::exit(2);
     };
 
@@ -41,7 +49,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total as f64 / 1_048_576.0
     );
     if installed(&layout, pack)? {
-        println!("already installed at {}", layout.pack_dir(&pack.id)?.display());
+        println!(
+            "already installed at {}",
+            layout.pack_dir(&pack.id)?.display()
+        );
         return Ok(());
     }
 
@@ -54,8 +65,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // A line per 25 MB: enough to see it moving, few enough to read.
             if received - last > 26_214_400 {
                 last = received;
-                let share = if total > 0 { received as f64 / total as f64 * 100.0 } else { 0.0 };
-                println!("  {:.0} MB of {:.0} MB ({share:.0}%)", received as f64 / 1_048_576.0, total as f64 / 1_048_576.0);
+                let share = if total > 0 {
+                    received as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "  {:.0} MB of {:.0} MB ({share:.0}%)",
+                    received as f64 / 1_048_576.0,
+                    total as f64 / 1_048_576.0
+                );
             }
         }
         Progress::Verifying => println!("  checking every byte against the manifest"),

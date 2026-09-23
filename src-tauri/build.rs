@@ -20,5 +20,16 @@ fn main() {
     println!("cargo:rerun-if-changed=Info.plist");
     println!("cargo:rerun-if-changed=tauri.conf.json");
 
+    /* The Swift runtime's rpath, published by `tauri-plugin-voices` under its
+     * `links` key. Needed HERE because `cargo:rustc-link-arg` reaches only the
+     * crate that emits it: the voices crate links its Swift archive, and this
+     * binary links the voices crate, and without the rpath this binary dies at
+     * launch with "Library not loaded ... no LC_RPATH's found" — before a
+     * single test runs. Absent when the desktop feature is off, so a phone
+     * build adds nothing. */
+    if let Ok(runtime) = std::env::var("DEP_TAURI_PLUGIN_VOICES_SWIFT_RUNTIME") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{runtime}");
+    }
+
     tauri_build::build()
 }

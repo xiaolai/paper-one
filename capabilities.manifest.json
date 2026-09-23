@@ -51,6 +51,19 @@
       ]
     },
     {
+      "id": "voices",
+      "requires": [],
+      "ts": "voices",
+      "platforms": [
+        "desktop"
+      ],
+      "crate": "tauri-plugin-voices",
+      "plugin": "voices",
+      "permissions": [
+        "voices:default"
+      ]
+    },
+    {
       "id": "webhost",
       "requires": [],
       "ts": "webhost",

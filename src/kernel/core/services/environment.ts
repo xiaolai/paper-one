@@ -33,7 +33,21 @@ export interface ServiceEnvironment {
 
 /* The port shapes live in `../ports`, with the kernel's other four. Re-exported
  * here so a reader of the handlers finds them where the handlers name them. */
-export type { DevicePort, DeviceRow, HashPort, ShelfFacts, ShelfPort, SizePort } from '../ports'
+export type {
+  DevicePort,
+  DeviceRow,
+  HashPort,
+  InstallProgress,
+  ShelfFacts,
+  ShelfPort,
+  SizePort,
+  SpeechEnginePort,
+  SpeechRequest,
+  SpokenAudio,
+  SpokenWordTiming,
+  VoiceChoice,
+  VoicePack,
+} from '../ports'
 
 /**
  * The book with this id, or a `not-found` refusal naming it.

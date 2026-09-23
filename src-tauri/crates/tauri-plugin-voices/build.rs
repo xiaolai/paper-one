@@ -35,6 +35,10 @@ const COMMANDS: &[&str] = &[
     "voices_release",
 ];
 
+/// Where macOS keeps the Swift runtime dylibs a Swift archive asks for by
+/// `@rpath`. A system path, so it is correct inside a shipped bundle.
+const SWIFT_RUNTIME: &str = "/usr/lib/swift";
+
 fn main() {
     tauri_plugin::Builder::new(COMMANDS).build();
 
@@ -85,17 +89,26 @@ fn main() {
 /// `swift-rs` at all: no Swift types cross the boundary, only pointers and
 /// integers.
 fn link_qwenkit() {
-    let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let manifest =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let package = manifest.join("swift/QwenKit");
     // Matched to the Rust profile, so a release build links a release archive.
-    let profile = if std::env::var("PROFILE").as_deref() == Ok("release") { "release" } else { "debug" };
+    let profile = if std::env::var("PROFILE").as_deref() == Ok("release") {
+        "release"
+    } else {
+        "debug"
+    };
 
     let built = std::process::Command::new("swift")
         .args(["build", "-c", profile, "--package-path"])
         .arg(&package)
         .status()
         .expect("swift build could not be started — is Xcode's toolchain installed?");
-    assert!(built.success(), "swift build failed for {}", package.display());
+    assert!(
+        built.success(),
+        "swift build failed for {}",
+        package.display()
+    );
 
     // ⚠️ THE ARCHIVE IS LOOKED FOR, NEVER ASSUMED. `swift build` can exit 0
     // having written nothing where this expects it — which is exactly how the
@@ -104,7 +117,14 @@ fn link_qwenkit() {
     // which one a machine writes depends on its Swift version.
     let candidates = [
         package.join(format!(".build/{profile}")),
-        package.join(format!(".build/out/Products/{}", if profile == "release" { "Release" } else { "Debug" })),
+        package.join(format!(
+            ".build/out/Products/{}",
+            if profile == "release" {
+                "Release"
+            } else {
+                "Debug"
+            }
+        )),
         package.join(format!(".build/arm64-apple-macosx/{profile}")),
     ];
     let found = candidates
@@ -113,7 +133,11 @@ fn link_qwenkit() {
         .unwrap_or_else(|| {
             panic!(
                 "swift build exited 0 but wrote no libQwenKit.a; looked in {}",
-                candidates.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+                candidates
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         });
 
@@ -129,7 +153,16 @@ fn link_qwenkit() {
     // at launch with "Library not loaded ... no LC_RPATH's found". `/usr/lib/swift`
     // is where macOS keeps them, so this is a system path rather than a path
     // into somebody's Xcode, and it is correct in a shipped bundle too.
-    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{SWIFT_RUNTIME}");
+    // ⚠️ AND A LINK ARG REACHES THIS CRATE ONLY. Anything that LINKS this one
+    // — the app, and its test binary — needs the same rpath and does not
+    // inherit it: `cargo:rustc-link-arg` is not propagated to dependents, only
+    // `link-lib` and `link-search` are. Measured: `cargo test --workspace`
+    // died before a single test ran. So the path is published as metadata
+    // under this crate's `links` key, and the app's own `build.rs` reads
+    // `DEP_TAURI_PLUGIN_VOICES_SWIFT_RUNTIME` — which is absent when the
+    // desktop feature is off, so a build without this plugin adds nothing.
+    println!("cargo:swift-runtime={SWIFT_RUNTIME}");
     if let Some(toolchain) = swift_runtime_dir() {
         println!("cargo:rustc-link-search=native={toolchain}");
     }
@@ -155,7 +188,10 @@ fn link_qwenkit() {
 
 /// Where the toolchain keeps its Swift runtime dylibs.
 fn swift_runtime_dir() -> Option<String> {
-    let out = std::process::Command::new("xcrun").args(["--find", "swift"]).output().ok()?;
+    let out = std::process::Command::new("xcrun")
+        .args(["--find", "swift"])
+        .output()
+        .ok()?;
     let swift = std::path::PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
     // .../usr/bin/swift -> .../usr/lib/swift/macosx
     let lib = swift.parent()?.parent()?.join("lib/swift/macosx");

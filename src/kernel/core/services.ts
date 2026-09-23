@@ -22,6 +22,7 @@ import {
   type ShelfPort,
   type HashPort,
   type SizePort,
+  type SpeechEnginePort,
 } from './ports'
 import { carryLegacySettings, createSettingsStore, type SettingsMigration } from './settings'
 import { writeQueue, type WriteQueue } from './writeQueue'
@@ -199,6 +200,14 @@ export interface KernelServices {
    */
   bindSizePort(port: SizePort): Disposable
   sizes(): SizePort | null
+  /**
+   * Bind the SPEECH ENGINE port — the downloadable voices, by the `voices`
+   * capability. The same slot rule again: a host without one leaves it null,
+   * and every reader answers "no voice" rather than failing, which is what a
+   * browser client and a phone get.
+   */
+  bindSpeechEngines(port: SpeechEnginePort): Disposable
+  speechEngines(): SpeechEnginePort | null
   /** Bind the HASH port — BLAKE3 in Rust, by the peer capability. The same slot rule as the size port. */
   bindHashPort(port: HashPort): Disposable
   hashes(): HashPort | null
@@ -752,6 +761,7 @@ export function createKernelServices({
   const shelfSlot = exclusiveSlot<ShelfPort | null>('bindShelfPort: the shelf port is already bound', null)
   const sizeSlot = exclusiveSlot<SizePort | null>('bindSizePort: the size port is already bound', null)
   const hashSlot = exclusiveSlot<HashPort | null>('bindHashPort: the hash port is already bound', null)
+  const speechSlot = exclusiveSlot<SpeechEnginePort | null>('bindSpeechEngines: the speech engine port is already bound', null)
 
   const writes = writeQueue()
   const library = createLibrary({ fs, queue: writes, initial: initialBooks, recorder: recorderPort, clock: clockPort, hashes: () => hashSlot.get() })
@@ -867,6 +877,8 @@ export function createKernelServices({
     bindShelfPort: (next) => shelfSlot.bind(next),
     shelf: () => shelfSlot.get(),
     bindSizePort: (next) => sizeSlot.bind(next),
+    bindSpeechEngines: (next) => speechSlot.bind(next),
+    speechEngines: () => speechSlot.get(),
     sizes: () => sizeSlot.get(),
     bindHashPort: (next) => hashSlot.bind(next),
     hashes: () => hashSlot.get(),

@@ -1,0 +1,27 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """
+The commands a Paper webview needs from the voices plugin: the catalogue of
+downloadable voice packs and which are installed; fetching one, stopping a
+fetch, and removing one; reading text aloud through an installed pack; and
+letting a loaded model go.
+
+⚠️ FETCHING A PACK IS A NETWORK REQUEST AND A LARGE ONE — up to 2.5 GB from the
+hosts the embedded manifest pins by revision. It is never started by anything
+but a reader pressing Download, every byte is checked against the manifest's
+digest before it is promoted, and a stopped fetch leaves nothing half-installed.
+Nothing here can reach a URL the manifest does not name.
+
+Rendering holds a model — about 2.5 GB resident for the Chinese pack — until
+`voices_release`, which is why releasing is a command rather than a timer the
+webview cannot reach.
+"""
+permissions = [
+  "allow-voices-catalogue",
+  "allow-voices-install",
+  "allow-voices-stop",
+  "allow-voices-remove",
+  "allow-voices-render",
+  "allow-voices-release",
+]

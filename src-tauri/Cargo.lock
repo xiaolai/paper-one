@@ -146,6 +146,7 @@ dependencies = [
  "tauri-plugin-peer",
  "tauri-plugin-persisted-scope",
  "tauri-plugin-single-instance",
+ "tauri-plugin-voices",
  "tauri-plugin-webhost",
  "tauri-plugin-window-state",
 ]

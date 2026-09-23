@@ -160,7 +160,22 @@ export type {
  * to `serveServices`, and what an in-process caller runs directly — one set
  * of handlers, three ways of reaching them. */
 export { buildReadServices, buildServices, handlerFor } from './core/services/handlers'
-export type { DevicePort, DeviceRow, HashPort, ServiceEnvironment, ShelfFacts, ShelfPort, SizePort } from './core/services/environment'
+export type {
+  DevicePort,
+  DeviceRow,
+  HashPort,
+  InstallProgress,
+  ServiceEnvironment,
+  ShelfFacts,
+  ShelfPort,
+  SizePort,
+  SpeechEnginePort,
+  SpeechRequest,
+  SpokenAudio,
+  SpokenWordTiming,
+  VoiceChoice,
+  VoicePack,
+} from './core/services/environment'
 export { SERVICE_ERRORS, isRefusal, refuse } from './core/services/refusals'
 export type { Refusal, ServiceErrorCode } from './core/services/refusals'
 export { PAGE_BYTES, PAGE_ROWS, pages } from './core/services/paging'

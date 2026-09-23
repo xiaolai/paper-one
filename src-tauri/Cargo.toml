@@ -104,6 +104,12 @@ paper-process = { path = "crates/paper-process" }
 # never references it, so a direct dependency here was a name for nothing.
 tauri-plugin-webhost = { path = "crates/tauri-plugin-webhost", optional = true }
 
+# The downloadable voices (crates/tauri-plugin-voices). DESKTOP ONLY: it links
+# ONNX Runtime for the English engine and MLX for the Chinese one, neither of
+# which compiles for a phone — the same reason the tray and the webhost are
+# behind this feature rather than skipped at run time.
+tauri-plugin-voices = { path = "crates/tauri-plugin-voices", optional = true }
+
 # One feature per platform, and the platform set is closed: `desktop` (the
 # default), `ios`, `android`. A mobile check runs with `--no-default-features
 # --features ios`, which is what keeps the tray, the automation bridge and the
@@ -196,6 +202,7 @@ desktop = [
     "dep:tauri-plugin-single-instance",
     "dep:tauri-plugin-window-state",
     "dep:tauri-plugin-webhost",
+    "dep:tauri-plugin-voices",
     "tauri/tray-icon",
 ]
 ios = ["tauri-plugin-peer/ios"]
