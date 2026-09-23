@@ -84,16 +84,15 @@ export function installedPacksFor(packs: readonly VoicePack[], lang: string | nu
   return packsFor(packs, lang).filter((pack) => pack.installed)
 }
 
-/**
- * Whether this Mac may be offered a pack at all.
- *
- * A machine under the pack's floor is not offered it, rather than allowed to
- * download 2.5 GB and then be killed by the system on the first sentence.
- */
-export function withinMemory(pack: VoicePack, machineMemoryGb: number): boolean {
-  if (!Number.isFinite(machineMemoryGb) || machineMemoryGb <= 0) return true
-  return machineMemoryGb >= pack.minimumMemoryGb
-}
+/* ⚠️ **`withinMemory` WAS HERE AND IT WAS A SECOND COPY OF A RULE NOBODY RAN.**
+ * It answered "may this machine be offered this pack" and had no caller at all
+ * — while `manifest::offered` in the plugin answered the same question, with a
+ * test, and was itself never called by `voices_catalogue`. So the floor was
+ * written twice and applied nowhere, and every pack was offered to every
+ * machine. The rule now lives in ONE place, the only place that can read the
+ * machine's memory: the plugin filters the catalogue before it is sent, so
+ * what arrives here is already what this device may have. Found by the
+ * 2026-09-23 audit. */
 
 /**
  * The downloaded voice that reads this book, or `null` for none.

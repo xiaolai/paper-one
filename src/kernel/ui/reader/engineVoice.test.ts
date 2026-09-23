@@ -7,7 +7,6 @@ import {
   packsFor,
   qualify,
   unqualify,
-  withinMemory,
 } from './engineVoice'
 import type { VoicePack } from '../../core/ports'
 
@@ -94,23 +93,6 @@ describe('which packs can read a language', () => {
     // rule `bestVoice` already follows for platform voices.
     expect(packsFor([pack(), CHINESE], null)).toEqual([])
     expect(packsFor([pack(), CHINESE], '  ')).toEqual([])
-  })
-})
-
-describe('what this Mac may be offered', () => {
-  it('refuses a pack the machine has too little memory for', () => {
-    expect(withinMemory(CHINESE, 16)).toBe(true)
-    expect(withinMemory(CHINESE, 8)).toBe(true)
-    expect(withinMemory(CHINESE, 4)).toBe(false)
-  })
-
-  it('offers everything where the memory cannot be read', () => {
-    // A machine that will not say how much it has is not a machine to refuse
-    // a download on: the guess would be wrong in the direction that takes a
-    // working feature away.
-    expect(withinMemory(CHINESE, 0)).toBe(true)
-    expect(withinMemory(CHINESE, Number.NaN)).toBe(true)
-    expect(withinMemory(CHINESE, -1)).toBe(true)
   })
 })
 

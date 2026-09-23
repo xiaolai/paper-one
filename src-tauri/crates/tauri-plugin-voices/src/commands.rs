@@ -25,7 +25,8 @@ use crate::cancel::{Cancel, Stopper};
 use crate::english::FrontEnd;
 use crate::install::{install, installed, remove, Progress};
 use crate::kokoro::Kokoro;
-use crate::manifest::{self, Family, Manifest, Pack};
+use crate::machine;
+use crate::manifest::{self, Family, Manifest, Pack, Platform};
 use crate::paths::Layout;
 use crate::qwen;
 
@@ -156,6 +157,16 @@ fn pack_of<'a>(catalogue: &'a Manifest, id: &str) -> Result<&'a Pack, String> {
 
 /// Every pack this device could have, and whether it has it.
 ///
+/// ⚠️ **THIS IS WHAT `manifest::offered` IS FOR, AND IT WENT UNCALLED.** The
+/// filter — the right platform, and enough memory — was written in WI-30.1 with
+/// a test of its own, and this walked `catalogue.packs` directly instead. So a
+/// macOS-only pack was listed on Windows and Linux, and a 2.3 GB pack declaring
+/// an 8 GB floor was offered to every machine whatever it had, which is the
+/// thing the floor exists to prevent: 2.3 GB downloaded and then killed by the
+/// system on the first sentence. Found by the 2026-09-23 audit, which reported
+/// the TypeScript half (`withinMemory`) as dead code — the same rule, written
+/// twice and applied nowhere.
+///
 /// # Errors
 /// When the embedded catalogue will not parse, which is a build defect rather
 /// than anything a reader did.
@@ -166,8 +177,9 @@ pub async fn voices_catalogue<R: Runtime>(
 ) -> Result<Vec<PackRow>, String> {
     let catalogue = catalogue();
     let layout = state.layout()?;
-    let mut rows = Vec::with_capacity(catalogue.packs.len());
-    for pack in &catalogue.packs {
+    let offered = manifest::offered(&catalogue, Platform::current(), machine::memory_gb());
+    let mut rows = Vec::with_capacity(offered.len());
+    for pack in offered {
         rows.push(PackRow {
             id: pack.id.clone(),
             name: pack.name.clone(),

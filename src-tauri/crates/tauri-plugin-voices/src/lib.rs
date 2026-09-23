@@ -13,6 +13,7 @@ pub mod english;
 pub mod error;
 pub mod install;
 pub mod kokoro;
+pub mod machine;
 pub mod manifest;
 pub mod paths;
 pub mod plugin;
