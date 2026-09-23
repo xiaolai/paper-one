@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { STOPPED, VoicesPane, languagesOf, progressLine, sizeOf } from './VoicesPane'
+import { STOPPED, VoicesPane, arrivedOf, languagesOf, progressLine, sizeOf } from './VoicesPane'
 import type { InstallProgress, SpeechEnginePort, SpokenAudio, VoicePack } from '../../../kernel'
 
 afterEach(cleanup)
@@ -69,6 +69,24 @@ describe('what a download says it is doing', () => {
 
   it('leaves the total out where it is not known yet', () => {
     expect(progressLine({ kind: 'downloading', received: 1_048_576, total: 0 })).toBe('Downloading · 1 MB')
+  })
+
+  it('counts nothing as nothing, not as an unknown size', () => {
+    /* ⚠️ **MEASURED IN THE RUNNING APP, 2026-09-23.** Pressing Download on the
+       2.3 GB Chinese pack drew *"Downloading · unknown size of 2.3 GB"* — the
+       received count went through `sizeOf`, which refuses zero so a catalogue
+       row with no size is never offered as `NaN MB`. A count of bytes received
+       starts at zero every time, so it needs the other function. */
+    expect(arrivedOf(0)).toBe('0 MB')
+    expect(progressLine({ kind: 'downloading', received: 0, total: 2_498_416_818 })).toBe(
+      'Downloading · 0 MB of 2.3 GB',
+    )
+  })
+
+  it('still refuses a received count that is not a count', () => {
+    // Negative and non-finite are nonsense on either side of the sentence.
+    expect(arrivedOf(-1)).toBe('unknown size')
+    expect(arrivedOf(Number.NaN)).toBe('unknown size')
   })
 })
 

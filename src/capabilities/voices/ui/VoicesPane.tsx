@@ -19,11 +19,32 @@ import type { SpeechEnginePort } from '../../../kernel'
 /** How often the catalogue is re-read while the pane is open. */
 const POLL_MS = 5000
 
-/** A size a person can read, from bytes. */
-export function sizeOf(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return 'unknown size'
+/** Bytes in the unit a person reads them in. */
+function inUnits(bytes: number): string {
   const mb = bytes / 1_048_576
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`
+}
+
+/** A pack's SIZE, where a missing one is refused rather than drawn. */
+export function sizeOf(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return 'unknown size'
+  return inUnits(bytes)
+}
+
+/**
+ * How much has ARRIVED — where zero is a real answer and not a missing one.
+ *
+ * ⚠️ **`sizeOf` SAID "unknown size" FOR IT, AND A READER SAW THAT SENTENCE.**
+ * Measured in the running app on 2026-09-23, pressing Download on the 2.3 GB
+ * Chinese pack: the first line was *"Downloading · unknown size of 2.3 GB"*,
+ * which reads as though the app has lost track of the download it has just
+ * begun. `sizeOf` refuses zero deliberately — a catalogue row with no size
+ * must not be offered as `NaN MB` — but a COUNT of bytes received starts at
+ * zero every time, so it is the wrong function for this side of the sentence.
+ */
+export function arrivedOf(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return 'unknown size'
+  return inUnits(bytes)
 }
 
 /** What a download has got to, as a sentence. */
@@ -31,7 +52,7 @@ export function progressLine(progress: InstallProgress): string {
   if (progress.kind === 'verifying') return 'Checking every byte'
   if (progress.kind === 'installed') return 'Installed'
   const total = progress.total > 0 ? ` of ${sizeOf(progress.total)}` : ''
-  return `Downloading · ${sizeOf(progress.received)}${total}`
+  return `Downloading · ${arrivedOf(progress.received)}${total}`
 }
 
 /** The languages a pack reads, spelled for a person. */
