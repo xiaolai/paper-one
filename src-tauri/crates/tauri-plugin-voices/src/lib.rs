@@ -14,5 +14,6 @@ pub mod install;
 pub mod kokoro;
 pub mod manifest;
 pub mod paths;
+pub mod qwen;
 
 pub use error::{Error, Result};
