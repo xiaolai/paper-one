@@ -7,7 +7,6 @@ use tauri::{Manager, Runtime};
 
 use crate::commands::{self, VoicesState};
 
-
 /// The plugin.
 ///
 /// ⚠️ **THE COMMAND INVENTORY IS IN THREE PLACES** — this handler list,
