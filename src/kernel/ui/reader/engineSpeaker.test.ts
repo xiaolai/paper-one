@@ -168,15 +168,20 @@ describe('following the words', () => {
     expect(cb.onWord).not.toHaveBeenCalled()
   })
 
-  it('highlights the whole sentence for an engine that reports no words', async () => {
-    // ⚠️ Qwen answers no timings. `Speaker` drops the follow-along entirely,
-    // which is right for a platform voice that cannot say — but here the
-    // sentence IS known, so the honest unit is the sentence.
+  it('reports no boundaries, and draws nothing, for an engine that reports no words', async () => {
+    /* ⚠️ **THIS CASE PINNED THE DEFECT AND CALLED IT THE FEATURE.** It used to
+       assert BOTH `onWord(0, text.length)` and `onNoBoundaries()` — under a
+       comment saying the sentence is highlighted whole — and read through the
+       integration that is the opposite of what happened: `useSpeech`'s
+       `onNoBoundaries` removes the spoken-word band and sets `followsWords`
+       false, so the band was drawn and wiped in the same tick and every later
+       one was ignored. A unit test green over two callbacks nobody had traced
+       together is how that survived. */
     const { speaker, cb } = speakerOver(async () => audio({ words: [] }))
     speaker.speak('a whole sentence', 'zh')
     await vi.advanceTimersByTimeAsync(0)
-    expect(cb.onWord).toHaveBeenCalledWith(0, 'a whole sentence'.length)
     expect(cb.onNoBoundaries).toHaveBeenCalledTimes(1)
+    expect(cb.onWord, 'a band that is about to be revoked must not be drawn').not.toHaveBeenCalled()
   })
 
   it('says it has no boundaries once, not once a sentence', async () => {
@@ -208,6 +213,102 @@ describe('pausing and resuming', () => {
       speaker.pause()
       speaker.resume()
     }).not.toThrow()
+  })
+
+  it('holds a render that lands while paused, instead of speaking over the reader', async () => {
+    /* ⚠️ **THE DEFECT: `pause()` WAS `this.#playing?.pause()`, AND A RENDER IS
+       NOT A PLAYER.** Between `speak` and the first sample there is no player
+       at all — 450 ms for English, about five seconds for Chinese, longer on
+       the sentence that loads the model — so a reader who pressed Pause in that
+       window was not heard, the render landed, and the voice began speaking
+       while the control said paused. */
+    let land: (audio: SpokenAudio) => void = () => {}
+    const { speaker, host } = speakerOver(() => new Promise<SpokenAudio>((resolve) => { land = resolve }))
+    speaker.speak('hello', 'en')
+    speaker.pause()
+    land(audio())
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.sources[0]?.stops, 'the render is held at its first sample').toBe(1)
+    speaker.resume()
+    expect(host.sources, 'and speaks only once the reader says so').toHaveLength(2)
+  })
+
+  it('stops the word timers while paused, and rebuilds them from where the sound is', async () => {
+    /* ⚠️ The timers were scheduled once, at `startMs` from the moment the audio
+       began, so a pause stopped the SOUND and left the highlight walking
+       through the sentence — and off the page, which turns it. */
+    const words = [
+      { start: 0, length: 5, startMs: 100, endMs: 200 },
+      { start: 6, length: 5, startMs: 400, endMs: 500 },
+    ]
+    const { speaker, cb, host } = speakerOver(async () => audio({ words }))
+    speaker.speak('hello world', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(150)
+    host.advance(150)
+    expect(cb.onWord).toHaveBeenCalledTimes(1)
+    speaker.pause()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(cb.onWord, 'no word may be reported while the sound is stopped').toHaveBeenCalledTimes(1)
+    speaker.resume()
+    await vi.advanceTimersByTimeAsync(249)
+    expect(cb.onWord, 'the remaining word lands where the audio does').toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(cb.onWord).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports no word twice when a pause and resume straddle it', async () => {
+    // A word already spoken is not respoken on resume: the rebuild skips
+    // everything at or before the player's position.
+    const words = [{ start: 0, length: 5, startMs: 100, endMs: 200 }]
+    const { speaker, cb, host } = speakerOver(async () => audio({ words }))
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(150)
+    host.advance(150)
+    speaker.pause()
+    speaker.resume()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(cb.onWord).toHaveBeenCalledTimes(1)
+  })
+
+  it('forgets it was paused when the reading is stopped', async () => {
+    // Otherwise the next `speak` would render, land, and hold at its first
+    // sample for a pause the reader had already ended.
+    const { speaker, host } = speakerOver(async () => audio())
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.pause()
+    speaker.stop()
+    speaker.speak('again', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.sources.at(-1)?.stops, 'the new reading is not held').toBe(0)
+  })
+
+  it('ignores a resume nobody paused', async () => {
+    const { speaker, host } = speakerOver(async () => audio())
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.resume()
+    expect(host.sources, 'no second source is begun').toHaveLength(1)
+  })
+})
+
+describe('when the host refuses to play', () => {
+  it('reports an error rather than leaving an unhandled rejection', async () => {
+    /* ⚠️ **A HANDLER PASSED TO `then` DOES NOT CATCH THE OTHER HANDLER'S
+       THROW.** `#play` builds a buffer and a source node; a host that refuses
+       either throws inside the fulfilled branch, where the rejection handler
+       beside it cannot see it. The reading then sat lit for ever, with an
+       unhandled rejection in the console and no `onDone` anywhere. */
+    const host = new FakeAudioHost()
+    host.createBufferSource = () => {
+      throw new Error('this host has no sources left')
+    }
+    const { speaker, cb } = speakerOver(async () => audio(), host)
+    expect(speaker.speak('hello', 'en')).toBe(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onDone).toHaveBeenCalledWith('error')
   })
 })
 
